@@ -39,6 +39,21 @@ atexit.register(shutil.rmtree, NO_REGISTRY, True)
 NO_SECRETS = tempfile.mkdtemp(prefix="wk-test-no-secrets-")
 atexit.register(shutil.rmtree, NO_SECRETS, True)
 
+# The credential rules (lib/credcheck.py) ask GitHub what a token can do, so
+# without a default of its own a test that stores one would spend a request
+# against the real API. Port 1 refuses at once, which is the same answer a
+# machine with no network gives and the branch that reports a credential
+# unverified. A test that wants answers points this at a stub of its own.
+NO_GITHUB = "http://127.0.0.1:1"
+os.environ["WK_GITHUB_API"] = NO_GITHUB
+os.environ["WK_TAILNET_API"] = NO_GITHUB
+
+# The tailnet keys are the two credentials whose paths are not under
+# wk_secrets_dir (lib/common.sh reads them from ~/.config/wk), so without these
+# a test would read the maintainer's real ones and put them to the tailnet.
+os.environ["WK_TS_AUTHKEY"] = os.path.join(NO_SECRETS, "tailscale-authkey")
+os.environ["WK_TS_API_SECRET"] = os.path.join(NO_SECRETS, "tailscale-api-key")
+
 
 def dispatch_vars():
     """The variables the dispatcher exports for the one command it runs, read
@@ -97,6 +112,10 @@ def _clean_env(extra=None, wk_root=False):
     env.pop("WK_STORE", None)
     env["WK_TARGET_REGISTRY"] = NO_REGISTRY
     env["WK_HOST_SECRETS"] = NO_SECRETS
+    env["WK_GITHUB_API"] = NO_GITHUB
+    env["WK_TAILNET_API"] = NO_GITHUB
+    env["WK_TS_AUTHKEY"] = os.environ["WK_TS_AUTHKEY"]
+    env["WK_TS_API_SECRET"] = os.environ["WK_TS_API_SECRET"]
     if wk_root:
         env["WK_ROOT"] = str(REPO)
     if extra:
@@ -159,18 +178,27 @@ def rand_suffix(n=6):
     return "".join(random.choices(string.ascii_lowercase + string.digits, k=n))
 
 
+def repo_files():
+    """Every tracked file, as absolute paths.
+
+    `git ls-files`, not a directory walk: an audit that counts how many times
+    something is defined "in the tree" must not count a build directory, a
+    scratch file, or an agent's git worktree -- Claude Code puts one under
+    .claude/worktrees, which doubles every file in the repository and fails
+    six of these audits at once."""
+    out = subprocess.run(["git", "-C", str(REPO), "ls-files", "-z"],
+                         capture_output=True, text=True, check=True).stdout
+    return [REPO / name for name in out.split("\0")
+            if name and (REPO / name).is_file()]
+
+
 def shell_files():
     """Every shell file in the tree, by shebang or `.sh` suffix -- the same
     rule cmd/selftest's shell_files() uses, and for the same reason: most of
     what bash loads here (lib/, boot/, targets/, image/) is sourced and has
     no shebang."""
     out = []
-    for p in REPO.rglob("*"):
-        if not p.is_file():
-            continue
-        parts = p.parts
-        if ".git" in parts or "__pycache__" in parts:
-            continue
+    for p in repo_files():
         if p.suffix == ".sh":
             out.append(p)
             continue

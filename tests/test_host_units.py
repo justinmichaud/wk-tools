@@ -20,7 +20,7 @@ import os
 import unittest
 from pathlib import Path
 
-from tests.support import REPO, WkTest, bash, func_body
+from tests.support import REPO, repo_files, WkTest, bash, func_body
 
 UNIT_DIR = REPO / "host" / "units"
 UNITS = ("wk-proxy.service", "wk-ssh-agent.service", "wk-github-inject.service",
@@ -56,10 +56,8 @@ class TestOneBodyPerService(unittest.TestCase):
             self.assertEqual(1, len(exec_start), f"{name} has {len(exec_start)} ExecStart lines")
             # The ExecStart *line* itself, placeholders and all, is what must
             # be unique -- the program path alone is named by prose too.
-            hits = [p for p in REPO.rglob("*")
-                    if p.is_file() and ".git" not in p.parts
-                    and "__pycache__" not in p.parts
-                    and p.name != Path(__file__).name
+            hits = [p for p in repo_files()
+                    if p.name != Path(__file__).name
                     and exec_start[0] in p.read_text(errors="replace")]
             self.assertEqual([UNIT_DIR / name], hits,
                              f"{name}'s ExecStart is written in more than one place: {hits}")
@@ -149,9 +147,8 @@ class TestReadinessIsWhatSystemdIsAskedFor(unittest.TestCase):
         self.assertLess(body.index(ask), body.index(start))
 
     def test_one_sd_notify_in_the_tree(self):
-        defs = [p for p in REPO.rglob("*.py")
-                if "__pycache__" not in p.parts
-                and p.name != Path(__file__).name
+        defs = [p for p in repo_files()
+                if p.suffix == ".py" and p.name != Path(__file__).name
                 and "def sd_notify(" in p.read_text(errors="replace")]
         self.assertEqual([REPO / "lib" / "wknotify.py"], defs)
 

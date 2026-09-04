@@ -80,14 +80,10 @@ class TestRetire(unittest.TestCase):
     def _run(self, *args, key=None):
         env = dict(os.environ)
         env["WK_TS_API_SECRET_FILE"] = str(self.key if key is None else key)
-        # The stub speaks plain HTTP on loopback; the module's one constant is
-        # patched through the environment the test controls, not by editing it.
-        src = TAILNET_PY.read_text().replace(
-            'API = "https://api.tailscale.com/api/v2"',
-            f'API = "http://127.0.0.1:{self.port}/api/v2"')
-        prog = self.tmp / "tailnet.py"
-        prog.write_text(src)
-        return subprocess.run(["python3", str(prog), *args],
+        # The stub speaks plain HTTP on loopback, named through the same
+        # variable lib/credcheck.py points at it with.
+        env["WK_TAILNET_API"] = f"http://127.0.0.1:{self.port}/api/v2"
+        return subprocess.run(["python3", str(TAILNET_PY), *args],
                               capture_output=True, text=True, env=env)
 
     def test_an_offline_leftover_is_retired(self):
@@ -170,8 +166,9 @@ class TestWiring(unittest.TestCase):
     def test_the_api_token_is_refused_where_an_auth_key_is_wanted(self):
         """it administers the whole tailnet and is copied nowhere: a card must
         never carry it."""
+        rules = (REPO / "lib" / "credcheck.py").read_text()
+        self.assertIn('key.startswith("tskey-api-")', rules)
         common = (REPO / "lib" / "common.sh").read_text()
-        self.assertIn("tskey-api-*)", common)
         self.assertIn("wk_tailscale_api_reject", common)
 
     def test_doctor_declares_it_machine_local(self):

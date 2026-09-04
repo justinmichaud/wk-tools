@@ -360,7 +360,12 @@ class TestNothingElseLearnedTheShape(unittest.TestCase):
     KEY = (REPO / "cmd" / "key").read_text()
 
     def test_the_check_is_in_one_function(self):
-        self.assertEqual(1, self.KEY.count("_claude_login_check() {"))
+        """What a usable login is, is one row of lib/credcheck.py -- the same
+        table every other credential's rule is in -- and cmd/key knows only
+        where the platform keeps one."""
+        rules = (REPO / "lib" / "credcheck.py").read_text()
+        self.assertEqual(1, rules.count("def _claude_login("))
+        self.assertNotIn("claudeAiOauth", self.KEY)
         self.assertEqual(1, self.KEY.count("_claude_login_read() {"))
         self.assertEqual(1, self.KEY.count("_claude_login_refuse_relocated_store() {"))
 

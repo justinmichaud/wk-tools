@@ -204,6 +204,103 @@ echo "prebuilt=${_base_prebuilt:-none}"
         self.assertNotIn("if ", tail, tail)
 
 
+class TestDeletingAVMReapsWhatRanIt(WkTest):
+    """`tart delete` frees the disk and leaves the `tart run` process, which
+    goes on holding one of macOS's few Virtualization framework slots. Two of
+    those, left by interrupted builds, made a base build die in base.run.log
+    with "The number of VMs exceeds the system limit" (measured 2026-09-04)."""
+
+    def _run(self, script, leak=True):
+        d = self.tmp
+        (d / "bin").mkdir(exist_ok=True)
+        # A stand-in for the runner: it matches `_vm_runners`' pattern and
+        # sleeps until killed, so the reap is measured rather than asserted.
+        runner = d / "bin" / "tart"
+        # `sleep`, not `exec sleep`: exec replaces the command line the
+        # reaper matches on, which is the thing under test.
+        runner.write_text('#!/bin/sh\ncase "$1" in run) sleep 20 ;; '
+                          'list) echo \'[]\' ;; *) exit 0 ;; esac\n')
+        runner.chmod(0o755)
+        pre = ""
+        if leak:
+            # >/dev/null 2>&1: a background process holding the captured pipe
+            # keeps this bash's own reader open, and the test waits on it.
+            pre = (f'"{runner}" run --no-graphics wk-demo >/dev/null 2>&1 & disown\n'
+                   'sleep 0.3\n')
+        return bash(f'{DRIVER}\n_tart_bin() {{ printf %s "{runner}"; }}\n'
+                    f'{pre}{script}')
+
+    def test_the_runner_is_reaped_with_the_vm(self):
+        cp = self._run('before=$(_vm_runners wk-demo | wc -l | tr -d " ")\n'
+                       '_vm_delete wk-demo >/dev/null 2>&1\n'
+                       'after=$(_vm_runners wk-demo | wc -l | tr -d " ")\n'
+                       'echo "before=$before after=$after"')
+        self.assertIn("before=1 after=0", cp.stdout, cp.stdout + cp.stderr)
+
+    def test_a_runner_for_another_vm_is_left_alone(self):
+        """`wk-demo` must not match `wk-demo2`: the pattern anchors on the
+        whole final argument."""
+        cp = self._run('_vm_delete wk-demo2 >/dev/null 2>&1\n'
+                       'echo "still=$(_vm_runners wk-demo | wc -l | tr -d " ")"')
+        self.assertIn("still=1", cp.stdout, cp.stdout + cp.stderr)
+
+    def test_no_runner_is_not_an_error(self):
+        cp = self._run('_vm_delete wk-demo >/dev/null 2>&1; echo "rc=$?"',
+                       leak=False)
+        self.assertIn("rc=0", cp.stdout, cp.stdout + cp.stderr)
+
+    def test_every_delete_in_the_tree_goes_through_it(self):
+        """One implementation, or a path that leaks a runner survives."""
+        for f in (VM, REPO / "cmd" / "vm"):
+            with self.subTest(file=f.name):
+                bare = [l for l in f.read_text().splitlines()
+                        if "_tart delete" in l and "_vm_delete" not in l]
+                self.assertEqual(1 if f is VM else 0, len(bare), bare)
+
+
+class TestProvisioningOutlivesItsConnection(WkTest):
+    """The base's first act is cloning all of WebKit, which is over an hour.
+    Run in the foreground it dies with the ssh session (measured 2026-09-04:
+    "Read from remote host: Connection reset by peer" took the clone with it),
+    so it is detached and polled -- the shape _prebuild_base already uses."""
+
+    def test_provisioning_is_detached_and_waited_for(self):
+        body = func_body(VM.read_text(), "_provision_base")
+        self.assertIn("detach_remote _base_ssh", body)
+        self.assertIn("detach_wait_remote _base_ssh", body)
+        self.assertNotIn('_ssh "$ip" "env WK_VM_DISPLAY', body,
+                         "provisioning is back on a foreground ssh")
+
+    def test_its_log_is_fetched_and_named_in_the_failure(self):
+        body = func_body(VM.read_text(), "_provision_base")
+        self.assertIn("base-provision.log", body)
+        self.assertIn("wk vm base --refresh", body)
+
+    def test_both_long_jobs_share_one_ssh_fn(self):
+        text = VM.read_text()
+        self.assertIn("_base_ssh() {", text)
+        self.assertNotIn("_prebuild_ssh", text)
+
+
+class TestAnIdlePodmanMachineIsNotAReasonToRefuse(WkTest):
+    """It holds the whole envelope whether or not anything runs in it, and a
+    stop costs nothing a workspace notices. Anything actually running in there
+    is named instead -- stopping a machine underneath a build is the mistake
+    this guards."""
+
+    def test_the_check_stops_it_only_when_nothing_runs_in_it(self):
+        body = func_body(VM.read_text(), "_check_memory_budget")
+        self.assertIn("_podman_containers_running", body)
+        self.assertLess(body.index("_podman_containers_running"),
+                        body.index("podman machine stop"),
+                        "the machine is stopped before anything asks what is in it")
+
+    def test_an_unreadable_answer_counts_as_busy(self):
+        """A machine that will not say what it holds is not one to stop."""
+        body = func_body(VM.read_text(), "_podman_containers_running")
+        self.assertIn("|| echo 1", body)
+
+
 class TestADirtyTreeIsRefusedBeforeTheBaseIsDestroyed(WkTest):
     """A base is given a commit (tools_committed, lib/tools.sh), so a dirty
     tree cannot provision one. Asked before the delete: measured, refusing
@@ -215,7 +312,7 @@ class TestADirtyTreeIsRefusedBeforeTheBaseIsDestroyed(WkTest):
     def test_the_refusal_precedes_every_destructive_step(self):
         arm = self.CMD.read_text().split("--rebuild)", 1)[1].split("--rm)", 1)[0]
         self.assertIn("tools_committed", arm)
-        self.assertLess(arm.index("tools_committed"), arm.index("tart delete"),
+        self.assertLess(arm.index("tools_committed"), arm.index("_vm_delete"),
                         "the base is deleted before the tree is checked")
         self.assertLess(arm.index("tools_committed"), arm.index("confirm "),
                         "the prompt comes before the check it would waste")
@@ -461,7 +558,7 @@ class TestTheGuestCarriesAMirror(unittest.TestCase):
         text = PROVISION.read_text()
         self.assertIn("WK_VM_MIRROR:?", text,
                       "the guest script invents a mirror path when given none")
-        self.assertIn("WK_VM_MIRROR=$(sh_quote \"$(t_mirror_dir",
+        self.assertIn('WK_VM_MIRROR="$(t_mirror_dir "$WK_VM_BASE")"',
                       VM.read_text(),
                       "targets/vm.sh no longer hands the mirror path over")
 

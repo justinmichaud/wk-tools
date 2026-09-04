@@ -382,41 +382,24 @@ prompt_secret() {  # $1 = path to store at, $2 = human description, $3 = optiona
     printf '%s' "$path"
 }
 
-# The tailscale auth key: one key for the whole fleet. What it has to be:
-#   tagged tag:wk    the tag *is* the permission; untagged goes dark after
-#                    180 days, which for a name-is-the-address board reads
-#                    as dead hardware.
-#   reusable         one key provisions every device.
-#   NOT ephemeral    an ephemeral node is removed when it goes offline, and
-#                    these boards reboot between host and bench mode constantly.
-#   longest expiry   only bounds enrolling *new* devices.
+# One key for the whole fleet; what it has to be is the tailnet rule's own text
+# (lib/credcheck.py), since none of it can be read from the key.
 wk_tailscale_authkey_path() { printf '%s' "${WK_TS_AUTHKEY:-$HOME/.config/wk/tailscale-authkey}"; }
 
-# Why this value is not the credential wk wants, or nothing when it is. The
-# prefix is all that can be checked here, and worth checking because tailscale
-# spells three very different powers the same way: an auth key enrolls a node,
-# an API access token administers the tailnet, an OAuth client secret mints
-# tokens of its own, and all three start `tskey-`. Tagged, reusable, ephemeral
-# and expiry cannot be read from the key, so those are reported as unverified.
+# Why this value is not the credential wk wants, or nothing when it is; the rule
+# is one row of lib/credcheck.py.
 wk_tailscale_key_reject() { # <key>
-    case "${1:-}" in
-        tskey-auth-?*) return 0 ;;
-        tskey-api-*)
-            printf '%s' "that is an API access token (tskey-api-...), not an auth key.
-    It administers the whole tailnet -- it can add and delete devices, rewrite
-    the ACLs and mint further keys -- and this one is copied onto every card
-    written from here. An auth key can only enroll a node." ;;
-        tskey-client-*|tskey-oauth-*)
-            printf '%s' "that is an OAuth client secret, not an auth key.
-    It mints auth keys and API tokens of its own, so a board holding it holds
-    everything they can do. An auth key can only enroll a node." ;;
-        tskey-*)
-            printf '%s' "that starts 'tskey-' but is not an auth key: an auth key is
-    'tskey-auth-<id>-<secret>'." ;;
-        "") printf '%s' "there is nothing there." ;;
-        *)  printf '%s' "that does not look like a tailscale key at all (they start 'tskey-auth-')." ;;
+    wk_cred_reject tailnet "${1:-}"
+}
+
+# Exit 0 when the named rule accepts the value, otherwise print why and exit 1.
+wk_cred_reject() { # <rule name> <value>
+    local line
+    line=$(printf '%s' "$2" | python3 "$WK_ROOT/lib/credcheck.py" check "$1")
+    case "$line" in
+        bad*) printf '%s' "${line#*$'\t'}"; return 1 ;;
     esac
-    return 1
+    return 0
 }
 
 # No prompting, no side effects -- safe for `wk doctor`. Shape checked, since an
@@ -437,19 +420,7 @@ wk_tailscale_api_path() { printf '%s' "${WK_TS_API_SECRET:-$HOME/.config/wk/tail
 
 # The mirror of wk_tailscale_key_reject: here an *auth* key is the wrong one.
 wk_tailscale_api_reject() { # <key>
-    case "${1:-}" in
-        tskey-api-?*) return 0 ;;
-        tskey-auth-*)
-            printf '%s' "that is a node auth key (tskey-auth-...), not an API access token.
-    An auth key enrolls a node and can do nothing else; retiring a node is an
-    administrative act on the tailnet." ;;
-        tskey-client-*|tskey-oauth-*)
-            printf '%s' "that is an OAuth client secret, not an API access token. It mints
-    tokens rather than being one; this asks for the token (tskey-api-...)." ;;
-        "") printf '%s' "there is nothing there." ;;
-        *)  printf '%s' "that is not a tailscale API access token (they start 'tskey-api-')." ;;
-    esac
-    return 1
+    wk_cred_reject tailnet-api "${1:-}"
 }
 
 # Safe for `wk doctor`. Presence is not usability: whether the tailnet still

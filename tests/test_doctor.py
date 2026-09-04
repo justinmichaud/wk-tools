@@ -356,6 +356,70 @@ report_store {_sq(blob)} {_sq(gitremedy)}
         self.assertNotIn("git user.name", out)
 
 
+class TestTheCredentialsSection(unittest.TestCase):
+    """`wk doctor` reports what each credential can do from an answer taken at
+    that moment, so the block is lifted and run rather than read. Every arm of
+    it is one verdict from lib/credcheck.py's rules, driven here by what is in
+    a scratch store."""
+
+    START = "# --- what each credential can still do"
+    END = "# --- root costs a password"
+
+    def block(self):
+        text = CMD_DOCTOR.read_text()
+        return text[text.index(self.START):text.index(self.END)]
+
+    def run_block(self, secrets):
+        tmp = Path(tempfile.mkdtemp(prefix="wk-test-doctor-cred-"))
+        self.addCleanup(shutil.rmtree, tmp, True)
+        for rel, value in secrets.items():
+            path = tmp / rel
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(value + "\n")
+        harness = (_lift_one_liners(CMD_DOCTOR, ("ok", "miss", "unk", "section"))
+                   + "\nmissing=0\n")
+        cp = bash('set -euo pipefail\n'
+                  f'. "{REPO}/lib/common.sh"\n. "{REPO}/lib/store.sh"\n'
+                  + harness + self.block(),
+                  env={"WK_HOST_SECRETS": str(tmp / "secrets"),
+                       "WK_TS_AUTHKEY": str(tmp / "tailscale-authkey"),
+                       "WK_TS_API_SECRET": str(tmp / "tailscale-api-key"),
+                       "WK_GITHUB_API": "http://127.0.0.1:1",
+                       "WK_TAILNET_API": "http://127.0.0.1:1"})
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        return cp.stdout + cp.stderr
+
+    def test_nothing_stored_is_reported_and_is_not_a_fault(self):
+        out = self.run_block({})
+        self.assertIn("credentials", out)
+        for name in ("github-pat", "claude", "litellm", "claude-login",
+                     "tailnet", "tailnet-api"):
+            self.assertIn(name, out)
+        self.assertIn("nothing stored", out)
+        self.assertNotIn("\033[31m", out)
+
+    def test_a_credential_that_breaks_its_rule_is_a_finding_with_the_remedy(self):
+        out = self.run_block({"tailscale-authkey": "tskey-api-k1-abc"})
+        self.assertIn("administers the whole tailnet", out)
+        self.assertIn("login.tailscale.com", out)
+
+    def test_a_credential_that_could_not_be_judged_is_reported_unverified(self):
+        """No network: the token is there, nothing about it was established,
+        and the next run asks again."""
+        out = self.run_block({"push-keys/github-pat": "github_pat_11ABC_x"})
+        self.assertIn("github-pat", out)
+        self.assertIn("could not reach", out)
+
+    def test_an_acceptable_credential_reports_what_it_can_do(self):
+        out = self.run_block({"secrets/claude-token": "sk-ant-oat01-abc"})
+        self.assertIn("inference-only", out)
+
+    def test_nothing_stored_is_ever_printed(self):
+        secret = "sk-ant-oat01-do-not-print-this"
+        out = self.run_block({"secrets/claude-token": secret})
+        self.assertNotIn(secret, out)
+
+
 class TestSyntax(unittest.TestCase):
     def test_cmd_doctor_parses(self):
         cp = subprocess.run(["bash", "-n", str(CMD_DOCTOR)], capture_output=True, text=True)

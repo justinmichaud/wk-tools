@@ -21,7 +21,8 @@ would be the more expensive accident.
 The credential is machine-local and gitignored (`wk key tailnet-api`), read
 from the file named by WK_TS_API_SECRET_FILE. Exit codes are the contract:
 0 done, 2 no such node, 3 the node is online, 4 no usable credential, 5 the
-tailnet refused us.
+tailnet refused us, 6 the tailnet could not be reached -- 5 and 6 apart
+because a refused credential is a fault and an unreachable one is a state.
 """
 import json
 import os
@@ -29,7 +30,7 @@ import sys
 import urllib.error
 import urllib.request
 
-API = "https://api.tailscale.com/api/v2"
+API = os.environ.get("WK_TAILNET_API", "https://api.tailscale.com/api/v2")
 
 
 def fail(code, msg):
@@ -66,7 +67,7 @@ def call(method, path, key):
                  % e.code)
         fail(5, "the tailnet API said HTTP %d for %s %s: %s" % (e.code, method, path, detail[:200]))
     except Exception as e:                                  # network, DNS, timeout
-        fail(5, "could not reach the tailnet API: %s" % e)
+        fail(6, "could not reach the tailnet API: %s" % e)
 
 
 def devices(key):

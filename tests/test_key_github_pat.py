@@ -16,11 +16,29 @@ import pty
 import re
 import select
 import subprocess
+import termios
+import threading
+import time
 import unittest
+from http.server import HTTPServer
 
 from tests.support import REPO, WkTest, stub_path
+from tests.test_credcheck import CLASSIC, FINE, FakeGitHub
 
 KEY = REPO / "cmd" / "key"
+
+
+def _wait_for_echo_off(fd, timeout=5.0):
+    """The prompt is printed before `read -rs` turns the terminal's echo off,
+    so a paste written the instant it appears is echoed by the tty itself --
+    which is the very thing these tests assert against. Wait for the flag the
+    command sets rather than for a length of time."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if not termios.tcgetattr(fd)[3] & termios.ECHO:
+            return
+        time.sleep(0.005)
+    raise AssertionError("`read -rs` never turned the terminal's echo off")
 PODMAN_TRAP = '#!/bin/sh\necho "podman was called" >&2\nexit 1\n'
 TOKEN = "ghp_thisisnotarealtoken0123456789"
 
@@ -83,6 +101,7 @@ class _PatRun(WkTest):
                     break
                 out += chunk
                 if not sent and b"paste it" in out:
+                    _wait_for_echo_off(master)
                     os.write(master, (paste + "\n").encode())
                     sent = True
             os.close(master)
@@ -236,6 +255,87 @@ class TestTheStandingReadTokenReachesTheMachine(_PatRun):
         self.assertEqual(TOKEN, self.pat().read_text().strip())
         self.assertIn("did not take the read token", out)
         self.assertIn("./setup", out)
+
+
+class TestWhatTheTokenCanDoDecidesWhetherItIsKept(_PatRun):
+    """The whole point of asking: a token that cannot open a pull request is
+    refused here rather than discovered hours later by `git-webkit pr`, and one
+    that reaches further than wk spends it is kept with that reach named.
+
+    The same stub GitHub tests/test_credcheck.py drives the rule with, driven
+    here through the real command and its terminal.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.server = HTTPServer(("127.0.0.1", 0), FakeGitHub)
+        self.addCleanup(self.server.server_close)
+        self.addCleanup(self.server.shutdown)
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        FakeGitHub.user_status = 200
+        FakeGitHub.scopes = ""
+        FakeGitHub.expiry = ""
+        FakeGitHub.pulls = {}
+        FakeGitHub.seen = []
+        self.extra_env = {
+            "WK_GITHUB_API": "http://127.0.0.1:%d" % self.server.server_port}
+
+    def test_a_token_that_can_open_a_pull_request_is_stored(self):
+        rc, out = self.key_tty("set", "github-pat", paste=FINE)
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(FINE, self.pat().read_text().strip())
+        self.assertIn("can open a pull request on justinmichaud/WebKit", out)
+
+    def test_a_token_without_pull_request_write_stores_nothing(self):
+        FakeGitHub.pulls = {"justinmichaud/WebKit": 403}
+        rc, out = self.key_tty("set", "github-pat", paste=FINE)
+        self.assertNotEqual(rc, 0, out)
+        self.assertFalse(self.pat().exists(),
+                         "a token GitHub refuses was stored anyway")
+        self.assertIn("Pull requests: write", out)
+        self.assertIn("personal-access-tokens/new", out)
+
+    def test_a_token_that_could_delete_a_repository_stores_nothing(self):
+        FakeGitHub.scopes = "repo, delete_repo"
+        rc, out = self.key_tty("set", "github-pat", paste=CLASSIC)
+        self.assertNotEqual(rc, 0, out)
+        self.assertFalse(self.pat().exists())
+        self.assertIn("delete_repo", out)
+
+    def test_a_classic_token_is_kept_and_its_reach_named(self):
+        FakeGitHub.scopes = "repo"
+        rc, out = self.key_tty("set", "github-pat", paste=CLASSIC)
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(CLASSIC, self.pat().read_text().strip())
+        self.assertIn("reaches further than wk spends it", out)
+
+    def test_an_unreachable_api_stores_it_and_says_it_is_unverified(self):
+        """Offline is a state: refusing here would leave the machine with no
+        token at all, and every reader asks again."""
+        self.extra_env = {"WK_GITHUB_API": "http://127.0.0.1:1"}
+        rc, out = self.key_tty("set", "github-pat", paste=FINE)
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(FINE, self.pat().read_text().strip())
+        self.assertIn("unverified", out)
+
+    def test_a_stored_token_is_reported_from_a_fresh_answer(self):
+        """Never from a record: the token was fine when it was stored and the
+        report says what GitHub says now."""
+        self.pat().write_text(FINE + "\n")
+        self.pat().chmod(0o600)
+        FakeGitHub.pulls = {"justinmichaud/WebKit": 403}
+        cp = self.key("set", "github-pat")
+        self.assertEqual(1, cp.returncode, cp.stdout + cp.stderr)
+        self.assertIn("Pull requests: write", cp.stderr)
+
+    def test_the_token_is_never_printed_by_any_of_it(self):
+        for scopes, pulls in (("", {}), ("repo, delete_repo", {}),
+                              ("", {"justinmichaud/WebKit": 403})):
+            with self.subTest(scopes=scopes):
+                FakeGitHub.scopes = scopes
+                FakeGitHub.pulls = pulls
+                _rc, out = self.key_tty("set", "github-pat", paste=FINE)
+                self.assertNotIn(FINE, out)
 
 
 if __name__ == "__main__":

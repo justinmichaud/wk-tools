@@ -990,16 +990,10 @@ wk_agent_secret_path() { # <name>
 }
 
 # Its first line: a value credential is one line. A file row is not a value and
-# is read with wk_agent_secret_bytes.
+# is read whole, with wk_cred_read.
 wk_agent_secret() { # <name>
     local p; p=$(wk_agent_secret_path "$1") || return 0
     _wk_secret_read "$p" | sed -n '1p'
-}
-
-# Every byte, for a file row: truncating a JSON credentials file halves it.
-wk_agent_secret_bytes() { # <name>
-    local p; p=$(wk_agent_secret_path "$1") || return 0
-    _wk_secret_read "$p"
 }
 
 wk_agent_secret_present() { # <name>
@@ -1018,3 +1012,51 @@ wk_agent_secret_clear() { # <name>
     local p; p=$(wk_agent_secret_path "$1") || return 1
     rm -f "$p"
 }
+
+# --- what a credential is allowed to be ---------------------------------------
+# lib/credcheck.py holds every rule; these four are the only way to ask it, and
+# every reader asks at the moment it reports, so no verdict is written down.
+
+# Where this machine keeps each credential the rules name.
+wk_cred_path() { # <name>
+    case "$1" in
+        github-pat)  wk_github_pat_path ;;
+        tailnet)     wk_tailscale_authkey_path ;;
+        tailnet-api) wk_tailscale_api_path ;;
+        *)           wk_agent_secret_path "$1" ;;
+    esac
+}
+
+wk_cred_names() { python3 "$WK_ROOT/lib/credcheck.py" names; }
+
+# Every byte of a stored credential, and the one way any of them is read: a link
+# left in the writable directory would otherwise turn a read of the login into a
+# read of the token beside the deploy keys. Nothing for one that is not there.
+wk_cred_read() { # <name>
+    _wk_secret_read "$(wk_cred_path "$1")"
+}
+
+# `<absent|ok|wide|bad|unverified><TAB><detail>`, always -- a path this cannot
+# read is a verdict too, not a crash. `--stored` judges what this machine
+# holds; without it the value comes on stdin, which is how one is judged before
+# anything writes it.
+wk_cred_check() { # <name> [--stored] [<credcheck args>...]
+    local name="$1" repos value; shift
+    repos=$(wk_push_forks | awk 'NF {printf "%s ", $2}')
+    if [ "${1:-}" != --stored ]; then
+        python3 "$WK_ROOT/lib/credcheck.py" check "$name" --repos "$repos" "$@"
+        return
+    fi
+    shift
+    if ! value=$(wk_cred_read "$name"); then
+        printf 'bad\tthe file at %s could not be read; the refusal above says why\n' \
+            "$(wk_cred_path "$name")"
+        return 0
+    fi
+    printf '%s' "$value" \
+        | python3 "$WK_ROOT/lib/credcheck.py" check "$name" \
+              --repos "$repos" --path "$(wk_cred_path "$name")" "$@"
+}
+
+wk_cred_verdict() { printf '%s' "${1%%$'\t'*}"; }
+wk_cred_detail()  { printf '%s' "${1#*$'\t'}"; }

@@ -25,7 +25,7 @@ import os
 import platform
 import unittest
 
-from tests.support import (REPO, WkTest, assert_guest_start_converges, bash,
+from tests.support import (REPO, repo_files, WkTest, assert_guest_start_converges, bash,
                            func_body, run, stub_path)
 
 DESKTOP = REPO / "vm" / "desktop.sh"
@@ -39,9 +39,8 @@ def _src(*parts):
 def _defines(func):
     """Every shell file in the tree that defines `func`: what a
     one-implementation claim is checked against."""
-    return [f for f in sorted(REPO.rglob("*"))
-            if f.is_file() and ".git" not in f.parts
-            and "__pycache__" not in f.parts and f.suffix not in (".py", ".pyc")
+    return [f for f in sorted(repo_files())
+            if f.suffix not in (".py", ".pyc")
             and f"{func}() {{" in f.read_text(errors="replace")]
 
 SETTLED = """console_user=admin

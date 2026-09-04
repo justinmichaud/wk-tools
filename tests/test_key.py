@@ -125,6 +125,43 @@ class TestEnsureIsOneImplementation(WkTest):
         self.assertEqual(1, text.count("ssh-keygen -t ed25519"))
 
 
+class TestCheckAsksAboutEveryCredential(_KeyRun):
+    """`wk key check` is the one report over all of them, and every line of it
+    comes from an answer taken at that moment: the deploy keys through the same
+    rule table as the rest (lib/credcheck.py's deploy-key row), and one line per
+    credential this machine can hold."""
+
+    def test_a_machine_with_no_keys_names_the_remedy_for_each_fork(self):
+        cp, _secrets = self.key("check")
+        self.assertNotEqual(0, cp.returncode, cp.stdout + cp.stderr)
+        for fork in ("WebKit", "WPEWebKit"):
+            self.assertIn(fork, cp.stdout)
+        self.assertIn("wk key register", cp.stdout)
+
+    def test_every_credential_is_reported_and_absence_is_not_a_fault(self):
+        cp, _secrets = self.key("check")
+        self.assertIn("credentials:", cp.stdout)
+        for name in ("github-pat", "claude", "litellm", "claude-login",
+                     "tailnet", "tailnet-api"):
+            with self.subTest(name=name):
+                self.assertIn(name, cp.stdout)
+        self.assertIn("nothing stored", cp.stdout)
+
+    def test_a_stored_credential_that_breaks_its_rule_fails_the_check(self):
+        cp, secrets = self.key("ensure")
+        (secrets.parent / "push-keys" / "github-pat").write_text("hunter2\n")
+        cp, _ = self.key("check")
+        self.assertNotEqual(0, cp.returncode, cp.stdout)
+        self.assertIn("does not start like a GitHub personal access token",
+                      cp.stdout)
+
+    def test_the_switch_is_not_mistaken_for_where_the_private_half_is(self):
+        """A private half is always in the directory nothing mounts, so its
+        path says nothing about `wk push`; a guard on that path would make
+        every key report the switch instead of GitHub's answer."""
+        self.assertNotIn("push is off", KEY.read_text())
+
+
 class TestTheTailnetKeyScope(WkTest):
     """wk_tailscale_key_reject (lib/common.sh): tailscale spells three very
     different powers with one prefix. An auth key enrolls a node; an API access

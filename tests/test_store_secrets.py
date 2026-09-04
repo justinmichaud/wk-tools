@@ -241,8 +241,8 @@ class TestNothingButAFileIsReadOrWrittenThroughAgentRw(_Here):
         """One shell line per reader and writer of one of these paths, each
         run on its own so a refusal in one cannot be mistaken for another's."""
         return {
-            "wk_agent_secret_bytes":
-                f'wk_agent_secret_bytes {self.NAME}',
+            "wk_cred_read":
+                f'wk_cred_read {self.NAME}',
             "wk_agent_secret":
                 f'wk_agent_secret {self.NAME}',
             "wk_agent_secret_present":
@@ -269,7 +269,7 @@ class TestNothingButAFileIsReadOrWrittenThroughAgentRw(_Here):
 
     def test_an_absolute_symlink_is_refused_the_same_way(self):
         self.cred.symlink_to(str(self.token))
-        cp = self.sh(self.entry_points()["wk_agent_secret_bytes"])
+        cp = self.sh(self.entry_points()["wk_cred_read"])
         self.assertNotEqual(cp.returncode, 0, cp.stdout)
         self.assertNotIn(self.REAL, cp.stdout)
 
@@ -298,7 +298,7 @@ class TestNothingButAFileIsReadOrWrittenThroughAgentRw(_Here):
         doc = "{-a-: 1}"
         cp = self.sh(f'printf "%s" "{doc}" | wk_agent_secret_store {self.NAME}\n'
                      f'if wk_agent_secret_present {self.NAME}; then echo present; fi\n'
-                     f'printf "bytes=[%s]\\n" "$(wk_agent_secret_bytes {self.NAME})"')
+                     f'printf "bytes=[%s]\\n" "$(wk_cred_read {self.NAME})"')
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
         self.assertIn("present", cp.stdout)
         self.assertIn(f"bytes=[{doc}]", cp.stdout)
@@ -306,7 +306,7 @@ class TestNothingButAFileIsReadOrWrittenThroughAgentRw(_Here):
 
     def test_a_missing_one_is_absent_and_not_a_refusal(self):
         cp = self.sh(f'if wk_agent_secret_present {self.NAME}; then echo yes; else echo no; fi\n'
-                     f'printf "bytes=[%s]\\n" "$(wk_agent_secret_bytes {self.NAME})"')
+                     f'printf "bytes=[%s]\\n" "$(wk_cred_read {self.NAME})"')
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
         self.assertIn("no", cp.stdout)
         self.assertIn("bytes=[]", cp.stdout)
@@ -322,7 +322,7 @@ class TestNothingButAFileIsReadOrWrittenThroughAgentRw(_Here):
         body = body[:body.index("\n}\n")]
         self.assertIn("wk_agent_secret_present", body)
         self.assertIn('[ "$here" -lt 2 ] || return 1', body)
-        self.assertNotIn("wk_agent_secret_bytes", body)
+        self.assertNotIn("wk_cred_read", body)
 
 
 class TestNoForwardingIsLeftInTheSource(unittest.TestCase):

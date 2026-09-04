@@ -21,7 +21,7 @@ import os
 import platform
 import unittest
 
-from tests.support import (REPO, WkTest, bash, rand_suffix, run, scratch_dir,
+from tests.support import (REPO, repo_files, WkTest, bash, rand_suffix, run, scratch_dir,
                            stub_path)
 
 # A base that exists and is stopped, and every other verb succeeding: what
@@ -303,9 +303,8 @@ class TestTheWriteSideRecordsIt(unittest.TestCase):
         for func, owner in (("_base_inputs_hash", REPO / "targets" / "vm.sh"),
                             ("remote_provision_inputs_hash",
                              REPO / "targets" / "remote.sh")):
-            defs = [f for f in REPO.rglob("*")
-                    if f.is_file() and ".git" not in f.parts
-                    and f.suffix not in (".py",)
+            defs = [f for f in repo_files()
+                    if f.suffix not in (".py",)
                     and f"{func}() {{" in f.read_text(errors="replace")]
             self.assertEqual(defs, [owner], f"{func}: {defs}")
 

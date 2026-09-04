@@ -160,6 +160,7 @@ wk key set claude              # every workspace this machine makes starts authe
 claude auth login              # then the next line reads what it stored -- nothing to paste
 wk key set claude-login        # the account login; Claude Code Remote Control needs it
 wk key set litellm             # the API key `wk ai pi` reaches your endpoint with
+wk key check                   # what each credential can do and how far it reaches, now
 wk sync                        # clones WebKit into the mirror, publishes a snapshot
 eval "$(wk completion bash)"   # shell/bashrc does this for you; zsh: wk completion zsh
 ```
@@ -654,6 +655,35 @@ and reaches a model through an OpenAI-compatible endpoint: `wk key set litellm`
 stores the API key for every workspace this machine makes, and pi's own
 `~/.pi/agent/models.json` names the endpoint URL and the models it serves --
 `wk ai pi` prints the file to write when a workspace has none.
+
+**Every credential is put to a rule before it is stored.** `lib/credcheck.py`
+holds one rule per credential -- what it must be able to do, and what it must
+not be able to do -- and it is the only place either question is decided.
+`wk key set`, `wk key check` and `wk doctor` all ask it, and none of them
+remembers an answer: a verdict is a request, not a record.
+
+The two directions cost the same day when they are wrong. A token that cannot
+do its job is discovered hours later at the moment it is needed -- a
+`git-webkit pr` answered `403 Resource not accessible by personal access
+token` -- so the rule asks GitHub whether a pull request can actually be opened
+on each fork, with a `POST /repos/<fork>/pulls` carrying an empty body: 422 is
+"authorised, validation failed, nothing created" and 403 is "no `Pull requests:
+write` here". A credential that reaches *further* than wk ever spends it turns
+any escape from the boundary into the blast radius of a whole account, so a
+classic token's scope list (`x-oauth-scopes` on any answer) is read too: one
+carrying `delete_repo` or an `admin:` scope is refused outright, and a plain
+`repo` classic token is stored with its reach named, because it is the token a
+person most likely already has working elsewhere and refusing it would refuse
+the credential that works. GitHub answers nothing about a fine-grained token's
+permission set -- there is no endpoint that enumerates one -- so its narrowness
+is established by construction: it reaches only the repositories selected for
+it, and a fork that is not one of them answers 404.
+
+A refusal names the credential, what it can do, what it must do and the exact
+page to reissue it at, and it stores nothing. A machine that cannot reach
+GitHub or the tailnet stores the credential and reports it *unverified*: being
+offline is a state, and refusing there would leave the machine with nothing at
+all. Nothing degrades silently -- the next `wk doctor` asks again.
 
 **`wk key set`: what a workspace is already logged in to**
 

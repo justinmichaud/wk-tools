@@ -18,10 +18,11 @@ drive real driver code against a fake of the thing it talks to.
 Run: python3 -m unittest tests.test_peer -v
 """
 import os
+import re
 import subprocess
 import unittest
 
-from tests.support import REPO, WkTest, bash, stub_path
+from tests.support import REPO, repo_files, WkTest, bash, stub_path
 
 # Runs locally what `ssh <opts> <host> <command>` would have run over there.
 # Every option is dropped, then the destination, and what is left is the
@@ -286,10 +287,12 @@ load_target peerbox
         not missing from the other (CLAUDE.md, "one implementation per rule")"""
         for path in (REPO / "wk", REPO / "targets" / "remote.sh"):
             self.assertIn("wk_forwarded_env", path.read_text(), path)
-        offenders = subprocess.run(
-            ["grep", "-rln", "--exclude-dir=tests", "--exclude-dir=.git",
-             r"WK_FORCE:+\|WK_QUIET:+\|WK_YES:+\|WK_DEBUG:+", str(REPO)],
-            capture_output=True, text=True).stdout.split()
+        # The tracked tree, not a directory walk: an agent's git worktree
+        # under .claude/worktrees is a second copy of every file.
+        offenders = [str(f) for f in repo_files()
+                     if f.parts[len(REPO.parts)] != "tests"
+                     and re.search(r"WK_(FORCE|QUIET|YES|DEBUG):\+",
+                                   f.read_text(errors="replace"))]
         self.assertEqual(offenders, [str(REPO / "lib" / "common.sh")], offenders)
 
 

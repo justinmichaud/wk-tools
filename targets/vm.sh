@@ -131,6 +131,33 @@ _tart() {
 
 _vm() { echo "wk-$1"; }
 
+# Delete a VM and reap what ran it. `tart delete` removes the disk and leaves
+# the `tart run` process alive, and a runner for a VM that no longer exists
+# goes on holding one of macOS's few Virtualization framework slots: two of
+# them, left by interrupted builds, made the next base build die in
+# base.run.log with "The number of VMs exceeds the system limit" (measured
+# 2026-09-04). Every delete goes through here so no path can leak one.
+_vm_delete() { # <vm name>
+    local v="$1" rc=0 pids
+    _tart stop "$v" >/dev/null 2>&1 || true
+    _tart delete "$v" || rc=$?
+    pids=$(_vm_runners "$v")
+    if [ -n "$pids" ]; then
+        # shellcheck disable=SC2086 -- one signal for the whole list.
+        kill $pids 2>/dev/null || true
+        pids=$(_vm_runners "$v")
+        [ -z "$pids" ] || warn "a 'tart run' for '$v' is still alive (pid $pids) and holds a
+    VM slot the next guest needs:  kill -9 $pids"
+    fi
+    return "$rc"
+}
+
+# The pids running <vm name>, by exact final argument: `wk-demo` must not match
+# `wk-demo2`.
+_vm_runners() { # <vm name>
+    pgrep -f "tart run .*[[:space:]]$1\$" 2>/dev/null || true
+}
+
 # `tart list` mixes local VMs and cached OCI images, spelling Source "local"
 # case-folded. No tart means an empty list, not a state t_info would read.
 _vm_json() {
@@ -1022,8 +1049,7 @@ t_destroy() {
     [ "$v" != "$WK_VM_BASE" ] || die "refusing to delete the golden base (wk vm base --rebuild)"
 
     if [ "$(_vm_state "$v")" != absent ]; then
-        _tart stop "$v" 2>/dev/null || true
-        _tart delete "$v"
+        _vm_delete "$v"
         info "deleted VM $v"
     fi
 
@@ -1078,14 +1104,14 @@ _prebuild_base() {
     # takes over an hour, and any blip on the connection kills it.
     command -v detach_remote >/dev/null 2>&1 || . "$WK_ROOT/lib/detach.sh"
     local rlog="/tmp/wk-base-build.log" rrc="/tmp/wk-base-build.rc"
-    detach_remote _prebuild_ssh "$rlog" "$rrc" -- bash -lc "$cmd" || {
+    detach_remote _base_ssh "$rlog" "$rrc" -- bash -lc "$cmd" || {
         warn "could not start the base prebuild -- the base is still usable,
   but every workspace will pay for a cold build."
         return 0
     }
 
     local t0; t0=$(date +%s)
-    local rc; rc=$(detach_wait_remote _prebuild_ssh "$rlog" "$rrc")
+    local rc; rc=$(detach_wait_remote _base_ssh "$rlog" "$rrc")
     # shellcheck disable=SC2046 -- deliberate word splitting of the option list.
     scp -q $(_ssh_opts) "$WK_VM_USER@$ip:$rlog" "$WK_VM_DIR/base-build.log" 2>/dev/null || true
 
@@ -1122,9 +1148,10 @@ _ssh() {
     ssh $(_ssh_opts) "$WK_VM_USER@$ip" "$@"
 }
 
-# The ssh-fn detach_remote/detach_wait_remote (lib/detach.sh) want. `ip` is
-# `_prebuild_base`'s own local, in scope through bash's dynamic scoping.
-_prebuild_ssh() { _ssh "$ip" "$@"; }
+# The ssh-fn detach_remote/detach_wait_remote (lib/detach.sh) want, for both
+# long jobs in the base. `ip` is the caller's own local, in scope through
+# bash's dynamic scoping.
+_base_ssh() { _ssh "$ip" "$@"; }
 
 _ip() {
     local v; v=$(_vm "$1")
@@ -1185,6 +1212,15 @@ _podman_running() {
     [ "$(podman machine inspect "${WK_MACHINE:-wk}" --format '{{.State}}' 2>/dev/null)" = running ]
 }
 
+# How many containers are running in it, asked of the machine. A stopped or
+# absent machine has none, and an unreadable answer counts as busy: stopping a
+# machine underneath something is the mistake this guards.
+_podman_containers_running() {
+    _podman_running || { echo 0; return 0; }
+    podman machine ssh "${WK_MACHINE:-wk}" -- 'podman ps -q | grep -c . || true' \
+        </dev/null 2>/dev/null | tr -dc '0-9' | grep . || echo 1
+}
+
 _vm_cpus()   { echo "${WK_VM_CPUS:-$(envelope_cores)}"; }
 _vm_mem_mb() { echo "${WK_VM_MEM_MB:-$(envelope_mem_mb)}"; }
 
@@ -1231,6 +1267,22 @@ _check_memory_budget() {
     total=$(( mine + podman_mb + guests ))
     budget=$(envelope_mem_mb)
 
+    [ "$total" -le "$budget" ] && return 0
+
+    # An idle podman machine is not a reason to refuse a guest: it holds the
+    # whole envelope whether or not anything runs in it, workspaces and their
+    # state survive a stop, and `wk` starts it again on the next container
+    # command. Anything actually running in there is a different matter and is
+    # named below rather than stopped underneath.
+    if [ "$podman_mb" -gt 0 ] && [ "$(_podman_containers_running)" = 0 ] \
+       && [ $(( mine + guests )) -le "$budget" ]; then
+        info "stopping the idle podman machine to free ${podman_mb}MB for '$name'"
+        podman machine stop "${WK_MACHINE:-wk}" >/dev/null 2>&1 || true
+        _podman_running || return 0
+        warn "the podman machine did not stop; '$name' may not fit"
+    fi
+    _podman_running && podman_mb=$(_podman_mem_mb) || podman_mb=0
+    total=$(( mine + podman_mb + guests ))
     [ "$total" -le "$budget" ] && return 0
 
     if [ -n "${WK_VM_SHARE:-}" ]; then
@@ -1372,7 +1424,7 @@ _ensure_base() {
         warn "'$WK_VM_BASE' exists but was never finished (no completion marker)"
         log  "  destroying it and starting again -- an unprovisioned base is rubble,"
         log  "  and every workspace cloned from one inherits whatever it is missing."
-        _tart delete "$WK_VM_BASE" 2>/dev/null || true
+        _vm_delete "$WK_VM_BASE" 2>/dev/null || true
     fi
     rm -f "$(_base_marker)"
 
@@ -1460,9 +1512,26 @@ _provision_base() {
     # No proxy address: the base boots unfiltered. A clone's is written at
     # start, by _set_guest_egress.
     vm_login_note
+    # Detached and polled, for the reason _prebuild_base gives: this clones all
+    # of WebKit, which is over an hour, and a foreground ssh takes the work
+    # down with the connection (measured 2026-09-04: "Read from remote host:
+    # Connection reset by peer" an hour in, and the clone died with it).
     # WK_VM_MIRROR: t_mirror_dir is the one place that path is decided.
-    _ssh "$ip" "env WK_VM_DISPLAY=$(sh_quote "$WK_VM_DISPLAY") WK_VM_USER=$(sh_quote "$WK_VM_USER") WK_VM_PASSWORD=$(sh_quote "$WK_VM_PASSWORD") WK_VM_IMAGE_PASSWORD=$(sh_quote "$WK_VM_IMAGE_PASSWORD") WK_VM_MIRROR=$(sh_quote "$(t_mirror_dir "$WK_VM_BASE")") bash $(t_tools "$WK_VM_BASE")/vm/provision-base.sh" \
-        || die "base provisioning failed"
+    command -v detach_remote >/dev/null 2>&1 || . "$WK_ROOT/lib/detach.sh"
+    local plog="/tmp/wk-base-provision.log" prc="/tmp/wk-base-provision.rc"
+    detach_remote _base_ssh "$plog" "$prc" -- \
+        env WK_VM_DISPLAY="$WK_VM_DISPLAY" WK_VM_USER="$WK_VM_USER" \
+            WK_VM_PASSWORD="$WK_VM_PASSWORD" \
+            WK_VM_IMAGE_PASSWORD="$WK_VM_IMAGE_PASSWORD" \
+            WK_VM_MIRROR="$(t_mirror_dir "$WK_VM_BASE")" \
+            bash "$(t_tools "$WK_VM_BASE")/vm/provision-base.sh" \
+        || die "could not start base provisioning in '$WK_VM_BASE'"
+    local prov_rc; prov_rc=$(detach_wait_remote _base_ssh "$plog" "$prc")
+    # shellcheck disable=SC2046 -- deliberate word splitting of the option list.
+    scp -q $(_ssh_opts) "$WK_VM_USER@$ip:$plog" "$WK_VM_DIR/base-provision.log" 2>/dev/null || true
+    [ "$prov_rc" = 0 ] || die "base provisioning failed (rc=$prov_rc).
+    What it printed is in $WK_VM_DIR/base-provision.log; the base is rubble
+    until this finishes, and a re-run starts it again:  wk vm base --refresh"
 
     # Never fatal: leaving a usable base unmarked would have the next run
     # delete every hour of this.

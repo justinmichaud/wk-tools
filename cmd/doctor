@@ -152,16 +152,28 @@ if have gh; then
     # account whose token has expired.
     check "gh authenticated" "gh auth login   (then: wk key register)" gh_authenticated
 fi
-# Not a backup question: its absence is what a freshly written card spends to
-# join the tailnet -- `wk sysimage write` refuses without it.
-check "tailnet auth key" "wk key tailnet" wk_tailscale_authkey_present
-# Optional: only a write whose name is held by a stale fleet node needs it.
-# Presence only -- a doctor run must not spend a request on every invocation.
-if wk_tailscale_api_present; then
-    ok "tailnet API token (retires a stale fleet node)"
-else
-    unk "no tailnet API token -- a write whose name a stale fleet node holds stops without it" "wk key tailnet-api"
-fi
+
+# --- what each credential can still do ------------------------------------------
+# One line per credential this machine can hold, from lib/credcheck.py's rules:
+# whether it can still do what wk spends it on, and how much further it reaches.
+# Asked of GitHub and of the tailnet as this prints, never read back from a
+# record; a machine that cannot reach either reports the credential unverified.
+section "credentials"
+for _cname in $(wk_cred_names); do
+    if [ "$_cname" != deploy-key ]; then
+        _line=$(wk_cred_check "$_cname" --stored)
+        _why=$(wk_cred_detail "$_line" | sed -n '1p')
+        _fix=$(wk_cred_detail "$_line" | sed -n 's/^    fix: //p')
+        case "$(wk_cred_verdict "$_line")" in
+            ok)     ok   "$_cname -- $_why" ;;
+            wide)   unk  "$_cname reaches further than wk spends it" "$_why" ;;
+            bad)    miss "$_cname: $_why" "${_fix:-wk key check}" ;;
+            absent) unk  "$_cname: $_why" "wk key check" ;;
+            *)      unk  "$_cname: $_why" "wk key check" ;;
+        esac
+    fi
+done
+unset _cname _line _why _fix
 
 # --- root costs a password ------------------------------------------------------
 # Reported on every run rather than remembered: a site sudoers update, a

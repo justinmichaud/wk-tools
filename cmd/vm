@@ -162,7 +162,7 @@ base)
         tools_committed || die "the golden base is given a commit, so it cannot be built from
     this tree (see above). Nothing has been deleted."
         confirm "delete and rebuild the golden base VM '$WK_VM_BASE'?" || die "aborted"
-        _tart delete "$WK_VM_BASE" 2>/dev/null || true
+        _vm_delete "$WK_VM_BASE" 2>/dev/null || true
         rm -f "$(_base_marker)"
         _ensure_base
         ;;
@@ -177,7 +177,7 @@ base)
         sz=$(du -sh "${TART_HOME:-$HOME/.tart}/vms/$WK_VM_BASE" 2>/dev/null | cut -f1 | tr -d ' ' || echo '?')
         confirm "delete the golden base VM '$WK_VM_BASE' ($sz)? rebuilding it is hours" \
             || die "aborted -- nothing was changed"
-        _tart delete "$WK_VM_BASE"
+        _vm_delete "$WK_VM_BASE"
         rm -f "$(_base_marker)"
         info "deleted '$WK_VM_BASE' -- existing vm workspaces are unaffected"
         log  "  'wk vm base' builds it again; until then 'wk vm new' has nothing to clone"

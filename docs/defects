@@ -121,6 +121,12 @@ STILL OPEN
   across container/remote/vm, which is the owed item in
   docs/HANDOFF-architecture-review.md.
 
+- The macOS VM limit is reachable from here and nothing says so: three VMs
+  (the podman machine and two guests) is one too many, and the guest that
+  loses answers only in its run log, `The number of VMs exceeds the system
+  limit`. `_check_guest_limit` counts guests; it does not count the podman
+  machine, and no check reads that log. Measured 2026-09-04.
+
 - Report to git: `git fetch <remote>` in a **bare** repository overwrites the
   local HEAD with that remote's default branch, even when HEAD names an
   existing local branch and even with `fetch.followRemoteHEAD=never` (measured

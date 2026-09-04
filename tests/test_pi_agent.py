@@ -31,6 +31,11 @@ RC = REPO / "shell" / "bashrc"
 
 PLACEHOLDER = "placeholder-value-for-this-test"
 
+# The claude row's credential rule (lib/credcheck.py) refuses anything that is
+# not shaped like a `claude setup-token` credential, so a test that stores one
+# to look at it stores that shape. Still not a token.
+CLAUDE_SHAPED = "sk-ant-oat01-" + PLACEHOLDER
+
 TOUCHED = ("cmd/ai", "cmd/key", "lib/store.sh", "container/firstrun.sh",
            "shell/bashrc")
 
@@ -134,7 +139,7 @@ WK_STORE={store}
         store = self._store()
         for row in TABLE:
             name = row[0]
-            reader = "wk_agent_secret_bytes" if row[4] == "file" else "wk_agent_secret"
+            reader = "wk_cred_read" if row[4] == "file" else "wk_agent_secret"
             with self.subTest(name=name):
                 cp = self._sh(
                     f'printf "%s\\n" {name}-{PLACEHOLDER} | wk_agent_secret_store {name}\n'
@@ -164,7 +169,7 @@ WK_STORE={store}
         row = FILE_ROWS[0]
         cp = self._sh(
             f'printf "one\\ntwo\\n" | wk_agent_secret_store {row[0]}\n'
-            f'printf "bytes=[%s]\\n" "$(wk_agent_secret_bytes {row[0]})"', store)
+            f'printf "bytes=[%s]\\n" "$(wk_cred_read {row[0]})"', store)
         self.assertIn("bytes=[one\ntwo]", cp.stdout, cp.stdout + cp.stderr)
 
     def test_the_writable_directory_is_beside_the_secrets_one_never_inside(self):
@@ -261,12 +266,22 @@ class TestWkKeySet(WkTest):
         self.assertNotIn(PLACEHOLDER, cp.stdout)
 
     def test_wk_key_claude_is_the_same_arm(self):
-        store = self._store(claude=PLACEHOLDER)
+        store = self._store(claude=CLAUDE_SHAPED)
         cp = self._key("claude", store=store)
         self.assertEqual(0, cp.returncode, cp.stdout)
         self.assertIn("CLAUDE_CODE_OAUTH_TOKEN", cp.stdout)
         self.assertNotIn(PLACEHOLDER, cp.stdout)
         self.assertIn("set|claude)", KEY)
+
+    def test_a_stored_credential_that_breaks_its_rule_is_reported_non_zero(self):
+        """A report that a credential cannot do its job is a failure, not a
+        line of prose: the Console API key pasted where a setup token belongs
+        would bill the organization from every workspace."""
+        store = self._store(claude="sk-ant-api03-" + PLACEHOLDER)
+        cp = self._key("claude", store=store)
+        self.assertEqual(1, cp.returncode, cp.stdout)
+        self.assertIn("Console API key", cp.stdout)
+        self.assertNotIn(PLACEHOLDER, cp.stdout)
 
     def test_a_bad_flag_is_refused(self):
         cp = self._key("set", "litellm", "--wat")

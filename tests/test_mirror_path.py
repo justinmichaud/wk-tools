@@ -23,7 +23,7 @@ import os
 import subprocess
 import unittest
 
-from tests.support import REPO, WkTest, bash, fake_workspace, stub_path
+from tests.support import REPO, repo_files, WkTest, bash, fake_workspace, stub_path
 
 DRIVERS = ("container", "vm", "remote", "local")
 
@@ -346,9 +346,8 @@ class TestTheCommandsAskTheDriver(unittest.TestCase):
 
     def test_only_a_driver_names_a_path(self):
         named = sorted(
-            f.relative_to(REPO).as_posix() for f in REPO.rglob("*")
-            if f.is_file() and ".git" not in f.parts
-            and "__pycache__" not in f.parts and f.suffix not in (".py", ".pyc")
+            f.relative_to(REPO).as_posix() for f in repo_files()
+            if f.suffix not in (".py", ".pyc")
             and "t_mirror_dir() {" in f.read_text(errors="replace"))
         self.assertEqual(named, ["lib/target.sh", "targets/container.sh",
                                  "targets/local.sh", "targets/remote.sh",
