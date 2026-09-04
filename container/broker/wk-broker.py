@@ -94,6 +94,13 @@ import subprocess
 import sys
 import time
 
+# The one sd_notify in the tree. systemd (and launchd, on the macOS host)
+# starts this by absolute path, so the import path is derived from this file's
+# own rather than assumed.
+sys.path.insert(0, os.path.join(
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "lib"))
+from wknotify import sd_notify  # noqa: E402
+
 WK_ROOT = os.environ.get(
     "WK_ROOT", os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 )
@@ -947,20 +954,6 @@ async def publish_into_machine(machine, local_sock):
 
 
 # --- startup -----------------------------------------------------------------
-
-
-def sd_notify(state):
-    """Type=notify, for the same reason the proxy is: `wk doctor` treats "the
-    service is active" as "the door is open", and a Type=simple service is
-    active before the socket exists."""
-    addr = os.environ.get("NOTIFY_SOCKET")
-    if not addr:
-        return
-    if addr.startswith("@"):
-        addr = "\0" + addr[1:]
-    with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM) as sock:
-        sock.connect(addr)
-        sock.sendall(state.encode())
 
 
 def socket_path():

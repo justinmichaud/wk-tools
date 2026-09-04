@@ -14,12 +14,6 @@
 # kernel to re-read it. Still a one-shot: the image disarms itself on first
 # boot (b_self_disarm_sh), so any later reboot falls through to the rescue.
 #
-# The failure modes, all of which end somewhere reachable:
-#   medium not armed         -> no FAT on it, firmware skips it, the rescue boots
-#   image kernel missing     -> refused after the write, on the card and before
-#                               anything arms it (disk_check_boot_files)
-#   image cannot find root   -> panic=10, reboot, and it disarmed itself, so the rescue
-#   image hangs after boot   -> the self-return watchdog reboots it, and again the rescue
 
 BOOT_ARMING=medium
 
@@ -36,9 +30,9 @@ PIMBR_TYPE_OFFSET=450
 PIMBR_TYPE_ARMED=0c
 PIMBR_TYPE_DISARMED=83
 
-# Not `$NODE_DEVICE`, a kernel name: "the SD card" survives another card
-# taking the name (disk_resolve_own, boot/disk.sh). Resolved once per
-# process, so a read-back cannot confirm a byte on a disk nobody wrote to.
+# Not `$NODE_DEVICE`, a kernel name: "the SD card" survives another card taking
+# the name (disk_resolve_own, boot/disk.sh). Resolved once per process, so a
+# read-back cannot confirm a byte on a disk nobody wrote to.
 _PIMBR_DEV=""
 pimbr_dev() {
     [ -n "$_PIMBR_DEV" ] || _PIMBR_DEV=$(disk_own_or_declared)
@@ -59,9 +53,8 @@ _pimbr_word() {
 }
 pimbr_rescue_disk() { disk_of_part "$NODE_ROOT"; }
 
-# The bench system's boot partition is on the medium as the board has it now,
-# not as the conf names it: an empty enclosure enumerating first makes the
-# stick sdb, and wk-image.id is read from wherever the marker says it is.
+# The medium as the board has it now, not as the conf names it: an empty
+# enclosure enumerating first makes the stick sdb.
 b_boot_part() { disk_part "$(pimbr_dev)" 1; }
 
 _pimbr_type() {
@@ -86,8 +79,8 @@ _pimbr_set_type() {
     The board has not been rebooted; it is still in whatever role it was in."
 }
 
-# Armed, disarmed, or neither -- from the medium, not a record. "neither" is
-# real: the medium holds something this driver did not put there.
+# Armed, disarmed, or neither -- from the medium, not a record. "neither" means
+# the medium holds something this driver did not put there.
 pimbr_state() {
     case "$(_pimbr_type)" in
         "$PIMBR_TYPE_ARMED")    echo armed ;;
@@ -119,7 +112,6 @@ b_arm() {
     esac
 }
 
-# Safe at any time, including a medium already disarmed -- the common case.
 b_disarm() {
     local state
     state=$(pimbr_state) || return 0
@@ -133,14 +125,13 @@ b_disarm_note() {
     log "  boot filesystem there and $NODE_NAME boots its rescue on $(pimbr_rescue_disk). 'wk boot $NODE_NAME' puts it back."
 }
 
-# The half that runs *inside* the image on its first boot, before the
-# benchmark starts: as a systemd unit on a yocto image and as a BusyBox init
-# script on a buildroot one (stage_units, cmd/sysimage), from this one string.
+# Runs inside the image on its first boot, as a systemd unit on a yocto image
+# and a BusyBox init script on a buildroot one (stage_units, cmd/sysimage).
 #
 # POSIX sh against /proc and /sys only -- a BusyBox image has neither findmnt
-# nor lsblk. The disk this runs from is derived at run time: the image is not
-# told which device it was written to. **No single quote may appear in what
-# this returns** (it lands inside a `sh -c '...'`); wk selftest asserts it.
+# nor lsblk -- and the disk is derived at run time, the image not being told
+# which device it was written to. **No single quote may appear in what this
+# returns** (it lands inside a `sh -c '...'`); wk selftest asserts it.
 b_self_disarm_sh() {
     printf "%s" "while read -r id parent mm root mp rest; do [ \"\$mp\" = / ] && break; done < /proc/self/mountinfo; \
 p=\$(readlink -f /sys/dev/block/\$mm) && \
@@ -162,13 +153,12 @@ b_evidence() {
     printf 'bench_medium=%s\n' "${state:-unreadable}"
 }
 
-# The wk-managed media, one line, for `wk status`'s fleet block.
 b_media() {
     local id state bench rescue
     bench=$(_pimbr_word "$NODE_DEVICE"); rescue=$(_pimbr_word "$(pimbr_rescue_disk)")
     case "${MODE:-}" in
         bench*) printf 'booted from its %s (system %s); the %s is the rescue' "$bench" "${MODE#bench }" "$rescue"; return 0 ;;
-        # Reachable on its rescue: report the bench medium too, rather than looking unreachable.
+        # Reachable on its rescue: report the bench medium too.
         base*)  id=$(b_device_image 2>/dev/null || true)
                 state=$(pimbr_state 2>/dev/null) || true
                 printf 'booted its rescue on the %s (%s); %s %s holds %s, %s' \

@@ -435,7 +435,9 @@ class TestGitWebkitPrThroughTheInjector(unittest.TestCase):
             # connection is redirected by address below rather than by name.
             client_ctx = ssl.create_default_context(cafile=str(d / "ca.pem"))
             m.INJECT_PORT = port
-            injector = m.Injector(str(pat), client_ctx)
+            # No standing read token here: this drives the write half, whose
+            # only credential is the switch's.
+            injector = m.Injector(str(pat), str(d / "read-pat"), client_ctx)
 
             srv_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
             srv_ctx.load_cert_chain(chain, str(d / "certs" / "leaf.key"))

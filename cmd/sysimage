@@ -6,60 +6,43 @@
 # wk: readonly ls,disks,--list
 #
 # An image is a whole machine, built from a spec in this repo, that a machine
-# can be put into for one boot and taken out of again. It exists because four
-# later steps all need the same thing -- a machine with no sandbox, whose
-# kernel knobs are ours to set (docs/HANDOFF-boot.md).
+# can be put into for one boot and taken out of again.
 #
 # There is no image store (`wk help`): a build leaves its bytes wherever its
-# builder put them -- a workspace, a build host -- and `wk sysimage write
-# --from` streams those bytes onto a card in one pass. The card takes the
-# image's own bytes; every edit an image needs is made afterwards, on the
-# card, by the machine holding the reader (admin/wk-card-priv) -- so this
-# machine needs no tooling that can read a Linux filesystem.
+# builder put them, and `wk sysimage write --from` streams those bytes onto a
+# card in one pass. Every edit an image needs is made afterwards, on the card,
+# by the machine holding the reader (admin/wk-card-priv) -- so this machine
+# needs no tooling that can read a Linux filesystem.
 #
 #   build <profile> [--dry-run]  build from the spec in this repo. A yocto
 #                                profile also takes --workspace, --detach,
 #                                --stop, --keep-work, --chromium,
 #                                --local-layer|--no-local-layer,
-#                                --tailnet|--no-tailnet and
-#                                --stage <layers|fetch|image|toolchain|webkit>
-#                                (default image); a buildroot profile takes
-#                                --workspace, --detach, --stop; a pmos profile
-#                                takes --detach and --resume and builds on a
-#                                Linux aarch64 machine over ssh; the fetch
-#                                builder takes only --dry-run
+#                                --tailnet|--no-tailnet and --stage
+#                                <layers|fetch|image|toolchain|webkit> (default
+#                                image); buildroot takes --workspace, --detach,
+#                                --stop; pmos takes --detach and --resume and
+#                                builds on a Linux aarch64 machine over ssh;
+#                                fetch takes only --dry-run
 #   webkit <profile> --commit <sha> --slot <name> [--detach] [--dry-run]
 #                                build one WebKit commit into a named slot
 #                                beside the image, the way its builder builds
-#                                WebKit: buildroot's own wpewebkit package, or
-#                                WebKit's build-webkit --cross-target on a
-#                                yocto image's toolchain.
-#                                A board running the image carries any number
-#                                of slots and 'wk pi bench --ab' alternates
-#                                two of them with no reflash and no reboot
-#   ls | list                   every image a workspace here has built, its
-#                                slots, and
-#                                where it is -- there is no store; the
-#                                workspace that built an image is its name
-#                                (wk help)
+#                                WebKit. A board carries any number of slots and
+#                                'wk pi bench --ab' alternates two of them with
+#                                no reflash and no reboot
+#   ls | list                    every image a workspace here has built, its
+#                                slots, and where it is
 #   disks <machine>             removable disks attached to that machine
 #   write --from <path> --disk <machine>:<device>[@second|@third]
-#                                write that image to that disk, and make it a
-#                                fleet system on the card;
-#                                --from takes a path 'wk sysimage ls' printed
-#                                (or vm:<path>, inside this machine's podman
-#                                VM). Never touches a machine's own system
-#                                disk -- only a removable disk plugged into
-#                                it -- and writing it does not make anything
-#                                boot it ('wk boot' does).
-#                                <device>@second / <device>@third write the
-#                                image in beside the system on partitions 1-2,
-#                                from a reader or from that system itself. A
-#                                medium shared with a rescue (the rpi3's card)
-#                                carries two such systems; a dedicated bench
-#                                medium (the rpi4's stick) carries one
-#                                (@second). The card helper resolves which
-#                                partitions each name is.
+#                                write that image to that disk and make it a
+#                                fleet system on the card. --from takes a path
+#                                'wk sysimage ls' printed (or vm:<path>, inside
+#                                this machine's podman VM). Never touches a
+#                                machine's own system disk, and writing does not
+#                                make anything boot it ('wk boot' does).
+#                                @second / @third write the image in beside the
+#                                system on partitions 1-2; the card helper
+#                                resolves which partitions each name is.
 #       --profile <name>         which configuration this image is, when the
 #                                path does not already say (a yocto path does)
 #       --machine <name>         the fleet machine (boot/machines/<name>.conf)
@@ -92,30 +75,24 @@ wkslot() { python3 "$WK_ROOT/lib/wkslot.py" "$@"; }
 . "$WK_ROOT/image/pmos.sh"
 . "$WK_ROOT/image/fetch.sh"
 
-# Acts on physical machines -- a boot device, a firmware register, a disk
-# image -- and the sandbox cannot reach any of it. `wk`'s is_host_only list
-# covers the dispatcher path; this covers cmd/sysimage run directly.
+# Acts on physical machines -- a boot device, a firmware register, a disk image.
+# `wk`'s is_host_only list covers the dispatcher path; this covers a direct run.
 if in_workspace; then
     die "'wk $(basename "$0")' acts on a host and its hardware, and this is
     workspace '$(wk_self)'. Run it on the workstation instead."
 fi
 
-# Where the units are composed before they are handed to the card as one
-# archive (disk_install_units): scratch, removed either way the process ends.
+# Scratch, removed either way the process ends.
 _seed_cleanup() { [ -n "${SEED:-}" ] && rm -rf "$SEED"; SEED=""; return 0; }
 
-# Where the streamed write leaves the byte count and hash of what went past
-# (disk_write_source, boot/disk.sh): the image itself is never materialized
-# here, but the read-back verify needs something to compare against.
+# The image is never materialized here, but the read-back verify needs the byte
+# count and hash of what went past to compare against.
 _disk_cleanup() { [ -n "${WRITE_META:-}" ] && rm -f "$WRITE_META"; WRITE_META=""; return 0; }
 
-# --- what a written system is called, and whose key it takes -------------------
 
-# The name a written system is known by: the profile it was built from (or,
-# with no profile, the source file's own name), and the first 12 hex of the
-# sha256 of the bytes that went onto the card. One expression, so the dry run
-# and the write cannot name a system differently -- before the write there is
-# no hash to name it by, and it says so.
+# The profile it was built from (or the source file's own name) and the first 12
+# hex of the sha256 of the bytes written. One expression, so the dry run and the
+# write agree.
 _image_id() { # <name> <sha256 of the written bytes, empty before the write>
     if [ -n "${2:-}" ]; then
         printf '%s-%.12s' "$1" "$2"
@@ -124,10 +101,8 @@ _image_id() { # <name> <sha256 of the written bytes, empty before the write>
     fi
 }
 
-# The public key the image will accept (WK_IMAGE_KEY, default
-# ~/.ssh/id_ed25519.pub). Reaching the board over Tailscale SSH needs no
-# key at all, so a working session is not evidence the image has the right
-# one -- it has to be named here.
+# WK_IMAGE_KEY, default ~/.ssh/id_ed25519.pub. Reaching the board over Tailscale
+# SSH needs no key at all, so a working session is not evidence of the right one.
 driving_key() {
     local k="${WK_IMAGE_KEY:-$HOME/.ssh/id_ed25519.pub}"
     [ -r "$k" ] || die "no public key at $k
@@ -137,33 +112,22 @@ driving_key() {
 }
 
 # --- what a fleet system carries -----------------------------------------------
-#
-# The bodies below are composed here, where the profile's values are
-# (IMG_WATCHDOG, the machine's driver, the spec's own append files), and land
-# on the card through a card-helper verb (boot/disk.sh): nothing on this
-# machine opens a filesystem inside an image.
+# Composed here, where the profile's values are, and landed on the card through a
+# card-helper verb: nothing on this machine opens a filesystem inside an image.
 
-# One unit, staged for `disk_install_units`, under the name systemd will know
-# it by. `systemctl enable` never runs against a card, so the unit's own
-# WantedBy= is what decides which <target>.wants it is symlinked into -- the
-# same fact systemd reads, stated once, in the unit.
+# `systemctl enable` never runs against a card, so the unit's own WantedBy= is
+# what decides which <target>.wants it is symlinked into.
 stage_unit() { # <staging dir> <name> <body>
     printf '%s' "$3" > "$1/systemd/$2"
 }
 
-# A file for /etc/sysctl.d on the card, same staging, same one verb.
 stage_sysctl() { # <staging dir> <name> <body>
     printf '%s' "$3" > "$1/sysctl.d/$2"
 }
 
-# What an image runs to park its own arming, from the driver of the machine
-# the *image* is for: a board that arms a medium (pi-mbr) has one, a board
-# whose card swap is hands-on has none, and neither is an error.
-#
-# In a subshell, like _tailnet_name_for and for the same reason: NODE_* names
-# the machine holding the card reader, which is what every card edit is
-# addressed to, and loading another machine here sends the rest of the write
-# to the wrong board.
+# What an image runs to park its own arming. In a subshell: NODE_* names the
+# machine holding the card reader, and loading another here would send the rest
+# of the write to the wrong board.
 _self_disarm_for() { # <machine>
     [ -n "${1:-}" ] || return 0
     ( machine_load "$1" >/dev/null 2>&1 || exit 0
@@ -173,22 +137,16 @@ _self_disarm_for() { # <machine>
       b_self_disarm_sh ) || true
 }
 
-# A BusyBox init's script for one of those jobs: /etc/init.d/S<nn><name>,
-# run with `start` by rcS, in name order. Gated on the rescue marker like
-# the units are.
+# A BusyBox init script: /etc/init.d/S<nn><name>, run with `start` by rcS, in
+# name order. Gated on the rescue marker like the units are.
 stage_init() { # <staging dir> <name> <body -- runs on start, as root>
     printf '#!/bin/sh\n# %s -- staged onto the card by wk sysimage write.\ncase "$1" in start) ;; *) exit 0 ;; esac\n[ -f /etc/wk/rescue ] && exit 0\n%s\n' \
         "$2" "$3" > "$1/init.d/$2"
 }
 
-# Does the machine this image is *for* choose between two systems on one medium
-# with the firmware's own selector? Only then does its medium get an
-# autoboot.txt, because on a board that selects some other way the same file
-# changes which system a flag boots (boot/rpi5-usb.sh states why).
-#
-# In a subshell, like _self_disarm_for and for the same reason: NODE_* names the
-# machine holding the medium being written, and loading another one here sends
-# the rest of the write to the wrong board.
+# Only a machine that chooses between two systems with the firmware's own
+# selector gets an autoboot.txt: on a board that selects some other way the same
+# file changes which system a flag boots (boot/rpi5-usb.sh).
 _medium_autoboot_for() { # <machine>
     [ -n "${1:-}" ] || return 1
     ( machine_load "$1" >/dev/null 2>&1 || exit 1
@@ -198,36 +156,20 @@ _medium_autoboot_for() { # <machine>
       b_medium_selects_by_partition )
 }
 
-# Everything a rootfs needs to be a *fleet* system rather than merely a
-# bootable one: no self-return watchdog means a medium-armed stick stays armed
-# forever. Staged at write time, not baked in per builder, and for both inits
-# a fleet image runs: systemd units and BusyBox init.d scripts for the same
-# two jobs, the card helper installing whichever set the image's init reads
-# (disk_install_units).
-#
-# Everything here goes into every image; the two that hand a machine *back*
-# are gated at runtime on /etc/wk/rescue (a marker `wk sysimage write
-# --rescue` leaves), which is what makes one built artifact serve both roles.
-# Ungated, the watchdog would reboot the helper every IMG_WATCHDOG seconds
-# mid-write, and self-disarm would park a medium the image isn't on.
+# Everything a rootfs needs to be a *fleet* system rather than merely a bootable
+# one: no self-return watchdog means a medium-armed stick stays armed forever.
+# Staged at write time for both inits a fleet image runs. The two that hand a
+# machine *back* are gated at runtime on /etc/wk/rescue, which makes one built
+# artifact serve both roles.
 stage_units() { # <staging dir> <self-disarm command, empty when nothing to park>
     local seed="$1" disarm="${2:-}"
 
     # A timer and a service that returns at once, rather than one unit that
-    # sleeps: the wait belongs to systemd, which has a thing for waiting.
-    #
-    # A `Type=oneshot` whose ExecStart sleeps is not *active* until it returns,
-    # so it holds a `start running` job for the whole watchdog -- and
-    # `multi-user.target`, which wants it, stays inactive with a `start
-    # waiting` job for those seconds, on every boot of every bench system.
-    # A sleeping `Type=oneshot` can leave multi-user.target inactive for the
-    # whole sleep, with systemd-update-utmp-runlevel.service queued behind it
-    # and the start job under `TimeoutStartSec=infinity`, so nothing bounds
-    # it. Reboots issued into that window are how a board goes away and does
-    # not come back.
-    #
-    # Skipped rather than written empty when a profile names no watchdog: a
-    # timer with no OnBootSec would fire immediately and reboot the board.
+    # sleeps: a sleeping `Type=oneshot` is not *active* until it returns, so it
+    # holds a `start running` job for the whole watchdog and leaves
+    # multi-user.target inactive under `TimeoutStartSec=infinity`. Skipped rather
+    # than written empty when a profile names no watchdog: a timer with no
+    # OnBootSec fires immediately.
     if [ -z "${IMG_WATCHDOG:-}" ]; then
         warn "$IMG_PROFILE sets no IMG_WATCHDOG, so this image will not hand its machine back"
     else
@@ -242,8 +184,8 @@ AccuracySec=1s
 [Install]
 WantedBy=timers.target
 "
-    # No [Install]: the timer starts this, and a WantedBy= as well would run it
-    # once at boot -- which would reboot the board the moment it came up.
+    # No [Install]: the timer starts this, and a WantedBy= as well would reboot
+    # the board the moment it came up.
     stage_unit "$seed" wk-self-return.service "[Unit]
 Description=Hand the machine back to host mode unless claimed
 ConditionPathExists=!/etc/wk/rescue
@@ -251,20 +193,17 @@ ConditionPathExists=!/etc/wk/rescue
 Type=oneshot
 ExecStart=/bin/sh -c '[ -f /run/wk-keep-running ] || systemctl reboot'
 "
-    # Last in rcS, so the network and the browser are up when the clock
-    # starts; backgrounded, so init does not wait the watchdog out.
+    # Last in rcS, so the network and the browser are up when the clock starts;
+    # backgrounded, so init does not wait the watchdog out.
     stage_init "$seed" S99wk-self-return \
         "( sleep $IMG_WATCHDOG; [ -f /run/wk-keep-running ] || reboot ) </dev/null >/dev/null 2>&1 &"
     fi
 
-    # A medium-armed machine's image disarms itself: the medium stops being
-    # bootable the moment the image is up, so every later reboot falls
-    # through to the rescue (b_self_disarm_sh, the machine's driver). `$` is
-    # doubled for systemd, which would otherwise expand the script's own
-    # variables before sh saw them. Ordered before sysinit, not at multi-user, to keep the
-    # "image came up and then wedged" window as small as possible;
-    # DefaultDependencies=no with After=local-fs.target is safe because a
-    # rename on an already-mounted filesystem cannot block on systemd.
+    # The medium stops being bootable the moment the image is up. `$` is doubled
+    # for systemd, which would otherwise expand the script's own variables.
+    # Ordered before sysinit to keep the "came up and then wedged" window small;
+    # DefaultDependencies=no with After=local-fs.target is safe because a rename
+    # on a mounted filesystem cannot block on systemd.
     if [ -n "$disarm" ]; then
         info "staging the self-disarm (the medium stops booting once this image is up)"
         stage_unit "$seed" wk-self-disarm.service "[Unit]
@@ -282,21 +221,17 @@ ExecStart=/bin/sh -c '$(printf '%s' "$disarm" | sed 's/[$]/$$/g')'
 [Install]
 WantedBy=sysinit.target
 "
-        # Right after udev (S10udev) has made the /dev/disk links the
-        # command finds its medium by, and before anything else.
+        # Right after udev (S10udev) has made the /dev/disk links.
         stage_init "$seed" S11wk-self-disarm "$disarm"
     fi
 
-    # The profiling knobs this image exists for, in the rootfs so
-    # systemd-sysctl reads them on the boot that matters.
+    # In the rootfs, so systemd-sysctl reads them on the boot that matters.
     stage_sysctl "$seed" 90-wk-perf.conf "kernel.perf_event_paranoid = -1
 kernel.kptr_restrict = 0
 "
 
-    # The other half of the profile's firmware clock pin (force_turbo in
-    # config.txt.append): with `ondemand` still selected, the kernel can ask
-    # for a lower operating point regardless. Best-effort -- a kernel with no
-    # cpufreq driver for this board has nothing to set.
+    # The other half of the profile's firmware clock pin (force_turbo): with
+    # `ondemand` still selected the kernel can ask for a lower operating point.
     stage_unit "$seed" wk-cpu-governor.service "[Unit]
 Description=Pin every CPU to the performance governor for the duration
 After=local-fs.target
@@ -309,9 +244,7 @@ ExecStart=/bin/sh -c 'for g in /sys/devices/system/cpu/cpu*/cpufreq/scaling_gove
 WantedBy=multi-user.target
 "
 
-    # A run that swaps is a run whose number means nothing. A guard, not a
-    # change (the base ships none): swap added later by a package or a stray
-    # dphys-swapfile would otherwise be invisible variance.
+    # A run that swaps is a run whose number means nothing.
     stage_unit "$seed" wk-no-swap.service "[Unit]
 Description=Refuse to carry swap, so a benchmark cannot page
 After=local-fs.target
@@ -323,9 +256,7 @@ ExecStart=/sbin/swapoff -a
 WantedBy=multi-user.target
 "
 
-    # Written where the driving machine can read it offline, by mounting the
-    # boot device from the machine's other role -- the channel that still
-    # works when the network is what failed.
+    # Readable offline by mounting the boot device from the machine's other role.
     stage_unit "$seed" wk-diag.service "[Unit]
 Description=Dump boot and network state where it can be read offline
 After=network.target cloud-init.service
@@ -347,29 +278,23 @@ WantedBy=multi-user.target
 "
 }
 
-# Kernel command-line additions this profile declares, as one line: the
-# sibling of `config.txt.append`, one layer up -- that tells the firmware,
-# this tells the kernel (e.g. forcing a KMS output on a headless board for a
-# gpu-class benchmark). The file is in this repo, so it is read here; the
-# card is where it is appended, idempotently (disk_cmdline_append).
+# The sibling of `config.txt.append` one layer up -- that tells the firmware,
+# this the kernel. Appended on the card (disk_cmdline_append).
 cmdline_append_text() {
     local f="${IMG_SPEC_DIR:-}/cmdline.txt.append"
     [ -f "$f" ] || return 0
     grep -vE '^\s*(#|$)' "$f" | tr '\n' ' ' | sed 's/ *$//' || true
 }
 
-# Firmware settings this profile declares, as the block they are appended as.
 # Clock pinning matters: a board that idles low and ramps on demand turns DVFS
-# ramping into measurement variance. The block carries its own
-# `# --- wk sysimage: <profile> ---` first line, which is what makes appending
-# it twice a no-op.
+# into measurement variance. The block's own first line makes appending it twice
+# a no-op.
 config_append_text() {
     local f="${IMG_SPEC_DIR:-}/config.txt.append"
     [ -f "$f" ] || return 0
     cat "$f"
 }
 
-# --- build -------------------------------------------------------------------
 
 cmd_build() {
     local profile="${1:-}"
@@ -380,9 +305,7 @@ cmd_build() {
     every image a workspace here has already built."
     shift
 
-    # A configuration that declares what it is missing (CFG_NEEDS: a
-    # defconfig nobody has written) is refused here, in the first second,
-    # rather than hours into the build.
+    # CFG_NEEDS is refused in the first second rather than hours into the build.
     [ -z "${CFG_NEEDS:-}" ] || die "'$profile' cannot be built yet:
 
     $CFG_NEEDS
@@ -390,17 +313,13 @@ cmd_build() {
     The configuration is declared in $(image_config_file "$profile"), which is
     where the missing piece goes once it exists."
 
-    # Dispatched on the profile, not a flag: which mechanism makes an image
-    # is a property of the image. No default: a profile that names no
-    # builder is refused by name.
+    # Dispatched on the profile, not a flag: which mechanism makes an image is a
+    # property of the image.
     case "${IMG_BUILDER:-}" in
-        # Downloaded rather than built: no workspace, no source, pinned by content.
         fetch)     fetch_build "$profile" "$@"; return $? ;;
-        # A phone, built by pmbootstrap on a Linux machine over ssh; the
-        # build host holds the output.
         pmos)      pmos_build  "$profile" "$@"; return $? ;;
-        # Both need a workspace target resolved first, so the builder can
-        # refuse a remote or VM one.
+        # Both need a workspace target resolved first, so the builder can refuse
+        # a remote or VM one.
         buildroot) load_target "${WK_TARGET:-$(default_target)}"; buildroot_build "$profile" "$@"; return $? ;;
         yocto)     load_target "${WK_TARGET:-$(default_target)}"; yocto_build     "$profile" "$@"; return $? ;;
         '')  die "profile '$profile' names no builder.
@@ -411,16 +330,10 @@ cmd_build() {
     esac
 }
 
-# --- the rest ----------------------------------------------------------------
 
-# What a workspace's build is doing right now, from the pid the detached build
-# recorded. Evidence, not a claim: `yocto.status` says `state=running` for ever
-# on a detached build, so it is not asked.
-# A slot is a builder's concern the way an image is: dispatched on
-# IMG_BUILDER. buildroot builds the image's own wpewebkit package from the
-# commit (image/buildroot-webkit.sh); yocto runs WebKit's own build-webkit
-# --cross-target against the image's toolchain, its `webkit` stage
-# (image/yocto-build.sh). Both land under image_slot_dir (lib/image.sh).
+# A slot is a builder's concern the way an image is: buildroot builds the image's
+# own wpewebkit package; yocto runs build-webkit --cross-target against the
+# image's toolchain.
 cmd_webkit() {
     local profile="${1:-}"
     [ -n "$profile" ] || die "usage: wk sysimage webkit <profile> --commit <sha> --slot <name> [--detach] [--dry-run]; see wk sysimage -h"
@@ -434,9 +347,6 @@ cmd_webkit() {
     esac
 }
 
-# The profile a workspace was made for, derivable from its name
-# (`yocto-<profile>`, `buildroot-<profile>`) rather than a second record.
-# `_profile_from_path` derives the same thing from a full path.
 _ws_profile() {
     case "$1" in
         yocto-*)     printf '%s' "${1#yocto-}" ;;
@@ -445,12 +355,11 @@ _ws_profile() {
     esac
 }
 
-# Either builder's detached stage (yocto-image.pid, buildroot-*.pid), alive in
-# the workspace's own pid namespace: ws_busy_reason (lib/target.sh) asks the
-# workspace, which is the only place the pid means anything.
+# ws_busy_reason asks the workspace, the only place the detached build's pid
+# means anything.
 _ws_building() { # <workspace>
-    # stdin closed: this runs inside cmd_ls's `while read` loop, and the
-    # podman exec underneath would otherwise eat the remaining rows.
+    # stdin closed: this runs inside cmd_ls's `while read` loop, and the podman
+    # exec underneath would otherwise eat the remaining rows.
     ( load_target "$(ws_target "$1" 2>/dev/null)" >/dev/null 2>&1 && ws_busy_reason "$1" >/dev/null ) </dev/null
 }
 
@@ -463,16 +372,12 @@ cmd_ls() {
     while IFS="$(printf '\t')" read -r builder ws path bytes mtime; do
         [ -n "${builder:-}" ] || continue
         n=$((n + 1))
-        # On the first row, not before the loop: with nothing to list the
-        # answer is the paragraph below, and a header over an empty table reads
-        # as a listing that failed.
+        # On the first row, not before the loop: a header over an empty table
+        # reads as a listing that failed.
         [ "$n" -eq 1 ] && printf '%-40s %-10s %-8s %-9s %-8s %s\n' \
             WORKSPACE MACHINE BUILDER STATE SIZE BUILT
 
-        # The state is a column, not a footnote: an image being built right now
-        # is the one a person is most likely to be looking for, and reading it
-        # off the size column ("-") is guessing. `building` is the workspace's
-        # own live answer (_ws_building), so it is never a stale record.
+        # `building` is the workspace's own live answer, not a record.
         if _ws_building "$ws"; then state=building
         elif [ "$path" = - ];  then state=none
         else                        state=ready
@@ -481,17 +386,14 @@ cmd_ls() {
         prof=$(_ws_profile "$ws" || printf '')
         machine=""; note=""
         if [ -n "$prof" ]; then
-            # In a subshell: loading a profile sets a screenful of globals, and
-            # this is a listing, not a command acting on one image.
             machine=$( image_profile_load "$prof" >/dev/null 2>&1 \
                        && printf '%s' "${IMG_MACHINE:-}" ) || true
             [ -n "$machine" ] || note="this checkout does not define '$prof'"
         fi
 
         if [ "$path" = - ]; then
-            # An image workspace with no image: a yocto image stage removes the
-            # last one as it rebuilds, and a workspace that vanishes from the
-            # listing for the hours that takes is a workspace nobody can find.
+            # A yocto image stage removes the last image as it rebuilds, and a
+            # workspace that vanishes for those hours is one nobody can find.
             printf '%-40s %-10s %-8s %-9s %-8s %s\n' \
                 "$ws" "${machine:-?}" "$builder" "$state" "-" "-"
             printf '    %s\n' "no image here yet"
@@ -501,11 +403,9 @@ cmd_ls() {
         else
             printf '%-40s %-10s %-8s %-9s %-8s %s\n' \
                 "$ws" "${machine:-?}" "$builder" "$state" "$(human_bytes "$bytes")" "$mtime"
-            # This path is the image; nothing copied it anywhere.
             printf '    %s\n' "$path"
             [ "$state" = building ] && printf "    a build is running here -- these bytes are the previous image; 'wk logs %s' follows it\n" "$ws"
         fi
-        # The image's WebKit slots, from their own manifests (wk sysimage webkit).
         local sj
         for sj in $( [ -n "$prof" ] && ( image_profile_load "$prof" >/dev/null 2>&1 && dirname "$(image_slot_dir "$prof" x)" ) )/*/slot.json; do
             [ -f "$sj" ] || continue
@@ -543,7 +443,6 @@ cmd_rm() {
     'wk sysimage ls' names the workspace beside each image it lists."
 }
 
-# --- write -------------------------------------------------------------------
 
 cmd_disks() {
     local machine="${1:-}"
@@ -564,28 +463,16 @@ $(machine_list | sed 's/^/      /')"
     log "  a machine's own system disk is never listed and never writable."
 }
 
-# wk sysimage write <image> --disk <machine>:<device>
-#
-# One verb, whether the disk is the one the machine is configured to boot
-# from or any other removable disk plugged into it: same verification, same
-# unmount, same refusals, and the stricter device policy is right for both.
+# One verb, whether the disk is the machine's configured boot device or any
+# other removable disk plugged into it.
 
-# `--from` is the whole write model: a workspace built an image, the bytes
-# are wherever it put them, and this moves them onto a card and edits it.
-# Two spellings of where the bytes are:
-#
-#   --from /path                a file this machine can read
-#   --from vm:/path             a file inside this machine's podman VM, which
-#                               is where a container workspace's build output
-#                               lives and a macOS driver cannot open directly.
+# `--from` is the whole write model: the bytes are wherever the workspace that
+# built them put them. `--from vm:/path` is a file inside this machine's podman VM.
 
-# The decompressor a path needs, by what it is, or `cat`: a yocto build
-# leaves its image as `<recipe>.wic.xz`, and writing that compressed stream
-# straight to a disk produces a card that is not bootable, silently. It runs
-# on the card machine, ahead of the writer (disk_write_stream). Named
-# extensions rather than sniffed content -- what the builders here produce
-# is known (yocto: .wic.xz; buildroot: an uncompressed .img) -- and anything
-# unrecognised passes through unchanged, caught by the refusal below.
+# The decompressor a path needs, or `cat`: a yocto build leaves its image as
+# `<recipe>.wic.xz`, and writing that compressed stream straight to a disk
+# produces a card that is not bootable, silently. Named extensions rather than
+# sniffed content; anything unrecognised falls to the refusal below.
 _from_filter() { # <path> -- prints the command that turns those bytes into an image
     case "$1" in
         *.xz)  printf 'xz -dc'  ;;
@@ -595,18 +482,11 @@ _from_filter() { # <path> -- prints the command that turns those bytes into an i
     esac
 }
 
-# The device to write, when the caller named a machine but no device.
-# Resolved from the *image's own* target machine (disk_for_machine,
-# boot/disk.sh): a serial is a property of the hardware, matched against
-# what is plugged in, where `/dev/sdb` is a property of enumeration order.
-# Silent when it can't answer: the caller gets the listing instead.
+# Resolved from the image's own target machine by serial, a property of the
+# hardware, where `/dev/sdb` is one of enumeration order.
 
-# The tailnet key, asked for *before* anything is erased: the worst place to
-# discover it is missing is after the card is already erased and half
-# provisioned, with no terminal to answer a prompt. Unconditional, no
-# --force: a card with no tailnet identity is reachable only over whatever
-# LAN it lands on. This preflight decides it; disk_seed_tailnet
-# (boot/disk.sh) assumes it and only writes.
+# Asked *before* anything is erased. No --force: a card with no tailnet identity
+# is reachable only over whatever LAN it lands on.
 _tailnet_key_preflight() { # <IMG_MACHINE> <role>
     local name; name=$(_tailnet_name_for "${1:-}" "${2:-bench}")
     [ -n "$name" ] || die "this image joins the tailnet on first boot, and nothing here
@@ -623,12 +503,8 @@ _tailnet_key_preflight() { # <IMG_MACHINE> <role>
     Set one first:  wk key tailnet"
 }
 
-# $DISK_MACHINE's own WiFi connection, asked for before anything is erased --
-# same reason as _tailnet_key_preflight, and like it a `die` no --force
-# crosses. There is no credential file to check: the card takes its
-# credential from the machine holding the reader, not from IMG_MACHINE (the
-# board being imaged), so this asks $DISK_MACHINE (already loaded by
-# cmd_write_from) rather than reading anything local.
+# The card takes its WiFi credential from the machine holding the reader, not
+# from IMG_MACHINE, so this asks $DISK_MACHINE rather than a local file.
 _wifi_creds_preflight() { # <IMG_MACHINE>
     local out
     _image_wants_wifi "${1:-}" || return 0
@@ -648,16 +524,13 @@ $(printf '%s\n' "$out" | sed 's/^/    /')
     credential from that machine's own connection."
 }
 
-# <name> already on the tailnet, online or offline -- exact, or as the
-# collision suffix tailscale itself would rename a repeat join to
-# (<name>-1, <name>-2, ...). Over the TSV wk_tailscale_peers (lib/reach.sh)
-# produces, on stdin, so a test can feed it synthetic peer lines.
+# <name> already on the tailnet, exact or as the collision suffix tailscale
+# would rename a repeat join to. Over wk_tailscale_peers' TSV on stdin.
 _tailnet_name_collides() { # <name> -- peer TSV (name<TAB>ip<TAB>state) on stdin
     local name="${1:-}"
     [ -n "$name" ] || return 1
-    # Names this checks against are hostnames (NODE_SSH), always plain --
-    # checked against what they are allowed to be, per admin/wk-card-priv's
-    # own rule, rather than escaped into an awk regex.
+    # Names are hostnames (NODE_SSH), checked against admin/wk-card-priv's own
+    # rule rather than escaped into an awk regex.
     case "$name" in
         [a-zA-Z0-9]*) ;;
         *) return 1 ;;
@@ -675,14 +548,10 @@ _tailnet_name_collides() { # <name> -- peer TSV (name<TAB>ip<TAB>state) on stdin
     '
 }
 
-# A name already on the tailnet blocks the write, before anything is
-# erased: Tailscale silently renames a colliding join to "$name-1", and
-# everything here reaches a board by its tailnet name. Cannot be skipped --
-# a failure to ask is not evidence the name is free. The one barrier: a
-# rescue written onto a board's other medium from the rescue it replaces,
-# where the name is held by the very system doing the writing (NODE_* is the
-# card machine, IMG_MACHINE the image's board). --force crosses it and is
-# recorded; the old node still has to go before the new card's first boot.
+# A name already on the tailnet blocks the write, before anything is erased:
+# Tailscale silently renames a colliding join to "$name-1". The one barrier: a
+# rescue written onto a board's other medium from the rescue it replaces, where
+# the name is held by the very system doing the writing.
 _tailnet_name_preflight() { # <name> <bench|rescue>
     local name="${1:-}" role="${2:-bench}" peers hit=""
     [ -n "$name" ] || return 0
@@ -706,13 +575,9 @@ _tailnet_name_preflight() { # <name> <bench|rescue>
     and nothing here can find it."
         return 0
     fi
-    # The name is one this fleet declares (it was derived from the machine's
-    # own conf, _tailnet_name_for), and a node holding it that this board is
-    # not running is a leftover of the card being replaced. Retiring it is
-    # this command's to do: the alternative is a person at the admin console
-    # in the middle of a lane whose whole point is that it repeats. Narrow by
-    # construction -- lib/tailnet.py matches the name exactly and refuses a
-    # node that is online, which is a live board rather than a leftover.
+    # A node holding a name this fleet declares that the board is not running is
+    # a leftover of the card being replaced. Narrow by construction --
+    # lib/tailnet.py matches exactly and refuses a node that is online.
     local out
     if ! wk_tailscale_api_present; then
         die "'$name' is already on the tailnet (${hit#*:}), online or offline.
@@ -746,10 +611,8 @@ _resolve_disk_dev() { # <image machine>
     DISK_DEV="$dev"
 }
 
-# The source's own bytes, untouched: whatever compression they carry crosses
-# the network as it is and is undone on the card machine (disk_write_stream,
-# boot/disk.sh), which is the only machine here that has to own the tool for
-# it -- and moves the image once instead of twice.
+# The source's own bytes, untouched: whatever compression they carry is undone
+# on the card machine, the only one here that has to own the tool for it.
 _from_reader() { # <spec> -- prints a command that emits the source bytes on stdout
     case "$1" in
         vm:*) is_macos || die "--from vm:<path> is for reading a container workspace's
@@ -764,9 +627,8 @@ _from_reader() { # <spec> -- prints a command that emits the source bytes on std
     esac
 }
 
-# The profile a path implies: the image sits under `$WK_STORE/ws/<workspace>/
-# ...`, so the path already carries what `_ws_profile` derives from a bare
-# workspace name. Only used when --profile was not given.
+# The image sits under `$WK_STORE/ws/<workspace>/`, so the path carries what
+# `_ws_profile` derives from a bare workspace name.
 _profile_from_path() { # <path>
     _ws_profile "$(printf '%s' "$1" | sed -n 's|.*/ws/\([^/]*\)/.*|\1|p')"
 }
@@ -778,16 +640,14 @@ cmd_write_from() { # <from-spec> <disk-spec> <dry> <grow> <profile> <role> <mach
     reader=$(_from_reader "$from")
     filter=$(_from_filter "${from#vm:}")
 
-    # Derived before the profile is used for anything, so the machine the
-    # image is for -- which decides the tailnet name the card is seeded with --
-    # is known on a write that named only a path.
+    # Derived before the profile is used, so the machine the image is for --
+    # which decides the tailnet name -- is known on a write that named only a path.
     if [ -z "$profile" ]; then
         profile=$(_profile_from_path "${from#vm:}" || true)
         [ -z "$profile" ] || debug "profile '$profile' derived from the path"
     fi
     # Probed in a subshell: image_profile_load *dies* on a name it does not
-    # define, and `die` exits in a way `|| warn` cannot catch. The subshell
-    # turns that exit into a status, and its message is worth showing.
+    # define, and `die` exits in a way `|| warn` cannot catch.
     if [ -n "$profile" ]; then
         local _perr
         if _perr=$( image_profile_load "$profile" 2>&1 >/dev/null ); then
@@ -799,8 +659,7 @@ cmd_write_from() { # <from-spec> <disk-spec> <dry> <grow> <profile> <role> <mach
             [ -z "$_perr" ] || printf '%s\n' "$_perr" | sed 's/^/    /' >&2
         fi
     fi
-    # --machine wins over whatever the profile said (or failed to say): the
-    # remedy the write preflight names for an unresolved machine.
+    # --machine wins over whatever the profile said.
     [ -z "$mach" ] || IMG_MACHINE="$mach"
 
     disk_parse "$spec"
@@ -815,43 +674,35 @@ $(machine_list | sed 's/^/      /')"
         die "say which one: --disk $DISK_MACHINE:<device>"; }
 
     # A fleet board built by this repo (yocto, buildroot) gets the whole
-    # integration on the card once the image is on it: systemd units, a root
-    # retargeted to survive a different device than the recipe assumed, the
-    # profile's cmdline and firmware additions, and the firmware check. An
-    # image this repo did not build -- Jumpdrive (fetch), a phone (pmos) --
-    # gets the identity marker and the driving key, which every wk-written
-    # disk carries, and nothing else.
+    # integration on the card: systemd units, a root retargeted to survive a
+    # different device than the recipe assumed, the profile's cmdline and
+    # firmware additions, and the firmware check. Anything else gets the identity
+    # marker and the driving key.
     case "${IMG_BUILDER:-}" in yocto|buildroot) fleet_edit=1 ;; esac
 
     # The profile's own files, read here because they are in this checkout;
-    # they are applied on the card (disk_cmdline_append, disk_config_append).
+    # they are applied on the card.
     if [ -n "$fleet_edit" ]; then
         cmdline_add=$(cmdline_append_text)
         config_add=$(config_append_text)
     fi
 
-    # The name this system will be known by, once its bytes have been through
-    # (the hash is of the bytes actually written): the profile when there is
-    # one, otherwise the source file's own name with the compression suffix
-    # taken off.
+    # The name this system will be known by once its bytes have been through:
+    # the profile when there is one, else the source file's own name.
     base=$(basename "${from#vm:}")
     base=${base%.xz}; base=${base%.zst}; base=${base%.gz}
     base=${base%.wic}; base=${base%.img}
 
-    # May this device be written at all -- asked before anything is erased,
-    # and the last question this end can answer about the disk on its own.
+    # Asked before anything is erased, and the last question this end can answer
+    # about the disk on its own.
     disk_refuse_unless_safe "$DISK_DEV"
 
-    # A bench system being rewritten keeps its tailnet node
-    # (disk_tailnet_save): the name it already holds on the tailnet is then
-    # its own, not a collision -- and the board remembers the identity on its
-    # rescue, so a *fresh* medium rejoins as that node too. This is what keeps
-    # writing a card from needing something that can retire the leftover.
-    # Every bench write, not only a second system: a dedicated bench medium
-    # (the rpi4's stick) is rewritten whole, and its node is no less the
-    # board's for that. Never for a rescue -- a rescue's own identity is on
-    # the medium being replaced, and the barrier below is where that is
-    # decided.
+    # A bench system being rewritten keeps its tailnet node (disk_tailnet_save):
+    # the name it already holds is then its own, not a collision -- and the board
+    # remembers the identity on its rescue, so a *fresh* medium rejoins as that
+    # node too. Every bench write, not only a second system: a dedicated bench
+    # medium is rewritten whole and its node is no less the board's. Never for a
+    # rescue, whose identity is on the medium being replaced.
     local kept=no
     if [ "$role" != rescue ] && [ -n "$fleet_edit" ] \
        && { disk_is_second "$DISK_DEV" || [ "${DISK_DEV%@*}" = "${NODE_DEVICE:-}" ]; }; then
@@ -880,8 +731,7 @@ would write
 EOF
         [ "$DISK_DEV" = "${NODE_DEVICE:-}" ] && log "  note      $DISK_MACHINE is configured to boot from this disk (wk boot $DISK_MACHINE)"
         log "then, in order:"
-        # The steps report themselves from here down (disk_would,
-        # boot/disk.sh) rather than being described a second time.
+        # The steps report themselves from here down (disk_would, boot/disk.sh).
         DISK_DRY=1
     else
         _tailnet_key_preflight "${IMG_MACHINE:-}" "$role"
@@ -912,9 +762,8 @@ EOF
     fi
 
     # Before anything else touches the card: every step after this reads the
-    # partition table the image was supposed to bring, so a bad write shows up
-    # as a confusing failure in whichever of them runs first. WK_NO_VERIFY=1
-    # skips the read-back, for a device the verify path cannot stream from.
+    # partition table the image was supposed to bring. WK_NO_VERIFY=1 skips the
+    # read-back, for a device the verify path cannot stream from.
     [ -n "${WK_NO_VERIFY:-}" ] || disk_verify_stream "$DISK_DEV" "$WRITE_META"
     _disk_cleanup
     disk_parts_present "$DISK_DEV"
@@ -948,11 +797,10 @@ source=$from"
         disk_install_units "$DISK_DEV" "$SEED"
         _seed_cleanup
 
-        # Two checks, in the order the board will hit them, and against the
-        # card as the edits above left it: can the firmware reach a kernel,
-        # then can that kernel reach its root. The first is only worth asking
-        # when the image is *for* this machine -- the wrong question about a
-        # card that is about to be carried elsewhere.
+        # Two checks, in the order the board will hit them, and against the card
+        # as the edits above left it: can the firmware reach a kernel, then can
+        # that kernel reach its root. The first is only worth asking when the
+        # image is *for* this machine.
         local img_machine="${IMG_MACHINE:-}"
         if [ -n "$img_machine" ] && [ "$img_machine" = "$DISK_MACHINE" ]; then
             disk_check_boot_files "$DISK_DEV" "$DISK_MACHINE" "$(image_dtb_for "$DISK_MACHINE")"
@@ -966,8 +814,7 @@ source=$from"
 
     disk_seed_role "$DISK_DEV" "$role"
     # Every system carries the helper: a rescue writes bench media with it, and
-    # a bench system arms the next one with it where the arming is an edit to
-    # the card (pi-sd). One less reason for a lane to need two boots per leg.
+    # a bench system arms the next one with it where the arming is a card edit.
     disk_install_helper "$DISK_DEV"
 
     # ...and a medium whose two systems the *firmware* chooses between gets the
@@ -978,9 +825,8 @@ source=$from"
     disk_seed_tailnet "$DISK_DEV" "$(_tailnet_name_for "${IMG_MACHINE:-}" "$role")"
     disk_seed_wifi "$DISK_DEV" "${IMG_MACHINE:-}"
 
-    # Growing is opt-in: a card grown to fill has no room for a second
-    # system, and a board with one system has no rescue -- it cannot install
-    # anything without a person in the room.
+    # Growing is opt-in: a card grown to fill has no room for a second system,
+    # and a board with one system has no rescue.
     if [ "$grow" = 1 ]; then
         disk_grow "$DISK_DEV"
     else
@@ -997,11 +843,9 @@ source=$from"
 
     if [ "${DISK_DEV%@*}" = "${NODE_DEVICE:-}" ]; then
         # "Writing did not arm anything" is false of a medium-armed machine
-        # unless this makes it true: its arming is the presence of
-        # second-stage firmware on the boot partition, which the image being
-        # written brings its own copy of. Left alone, the board would boot
-        # the new image on its next reboot with nobody having asked -- the
-        # surprise `wk boot` exists to make deliberate.
+        # unless this makes it true: its arming is the presence of second-stage
+        # firmware on the boot partition, which the image brings its own copy of.
+        # Left alone, the board would boot the new image on its next reboot.
         if load_driver "${NODE_DRIVER:-}" 2>/dev/null \
            && [ "${BOOT_ARMING:-one-shot}" = medium ] \
            && command -v b_disarm >/dev/null 2>&1; then
@@ -1022,13 +866,11 @@ source=$from"
     fi
 }
 
-# The name a system written for a machine joins the tailnet as, by role: a
-# bench system as NODE_BENCH_SSH (`<board>-bench`), a rescue as NODE_SSH --
-# the board's host mode, which on a bench device is the rescue itself
-# (`<board>-rescue`), and on a workstation is its own install, which is never
-# written. Two names because each written system joins as its own node, and
-# a second join under an existing name comes up renamed. In a subshell: the
-# NODE_* of the machine holding the card reader stay loaded.
+# The name a system written for a machine joins the tailnet as, by role: a bench
+# system as NODE_BENCH_SSH, a rescue as NODE_SSH -- the board's host mode, which
+# on a bench device is the rescue itself. Two names because each written system
+# joins as its own node, and a second join under an existing name comes up
+# renamed. In a subshell: the NODE_* of the card reader's machine stay loaded.
 _tailnet_name_for() { # <machine> <bench|rescue>
     [ -n "${1:-}" ] || return 0
     ( machine_load "$1" >/dev/null 2>&1 || exit 0
@@ -1061,9 +903,8 @@ cmd_write() {
     path to pass." ;;
         esac
     done
-    # Validated here, before anything is read or erased: the tailnet name a
-    # card is seeded with (_tailnet_name_for) comes from
-    # boot/machines/<name>.conf.
+    # Validated before anything is read or erased: the tailnet name a card is
+    # seeded with comes from boot/machines/<name>.conf.
     [ -z "$mach" ] || machine_load "$mach" >/dev/null 2>&1 || die "unknown machine '$mach' for --machine
     machines:
 $(machine_list | sed 's/^/      /')"
@@ -1077,10 +918,9 @@ $(machine_list | sed 's/^/      /')"
     'wk sysimage disks <machine>' lists what is attached where."
 
     # Leave the rest of the card alone by default, so there is room for the
-    # second system that makes the board able to provision itself. The
-    # second system itself is the last thing on the card, so it takes the
-    # rest by default: a bench system's slots are what the space is for.
-    # Explicit --grow / --no-grow still win.
+    # second system that makes the board able to provision itself. The second
+    # system itself is last on the card, so it takes the rest: a bench system's
+    # slots are what the space is for.
     if [ -z "$grow_set" ]; then
         if disk_is_second "${spec#*:}"; then grow=1; else grow=0; fi
     fi
@@ -1110,11 +950,9 @@ cmd_flash() {
 
 
 case "${1:-}" in
-    # Every configuration there is -- not what has been built, which is `ls`:
-    # an image is bytes in a workspace, so a configuration can be buildable
-    # and never yet built. At the top level rather than under `build`, because
-    # `wk sysimage -h` prints it from here (values=--list, `wk`'s declaration)
-    # and one spelling is all there is room for.
+    # Every configuration there is -- not what has been built, which is `ls`.
+    # At the top level rather than under `build`, because `wk sysimage -h`
+    # prints it from here (values=--list).
     --list) [ -z "${2:-}" ] || die "usage: wk sysimage --list; unexpected argument: $2"
             image_profile_list; exit 0 ;;
     build) shift; cmd_build "$@" ;;

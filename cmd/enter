@@ -35,9 +35,6 @@ done
 TARGET="$(ws_target "$NAME")"
 load_target "$TARGET"
 
-# One implementation of "open this in Zed", in cmd/zed: same readiness gate,
-# transport, alias and launch whether the ask came from here, `wk new
-# --zed`, or `wk zed`.
 if [ -n "$ZED" ]; then
     exec "$WK_ROOT/cmd/zed" "$NAME"
 fi
@@ -51,8 +48,8 @@ if [ $# -gt 0 ]; then
     exit $?
 fi
 
-# What matters is whether a session is running here, not whether this
-# particular shell has one, which it never does over ssh.
+# Whether a session is running here, not whether this shell has one -- it never
+# does over ssh.
 if is_linux && [ ! -S "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/wk/display/wayland-0" ]; then
     warn "no benchmark session running; GPU-accelerated tests fall back to software rendering"
     log  "  start one with:  wk session on"

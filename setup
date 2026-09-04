@@ -29,17 +29,8 @@ while [ $# -gt 0 ]; do
     esac
 done
 
-# Stages are independent, so one failing must not skip the rest.
-#
-# Not sourced directly: `set -e` inside a stage would then abort
-# the whole script -- and the stages that need a password (packages, the group
-# membership, the privileged helper) are the last three. A machine could come
-# back from ./setup with no quiesce helper and no indication that a stage had
-# been skipped rather than run.
-#
-# Each stage runs in a subshell so a failure is contained, and the failures are
-# collected and reported together at the end. The change count survives via an
-# EXIT trap, so it is right even for a stage that died partway.
+# Each stage runs in a subshell rather than sourced: `set -e` inside a stage would
+# abort the whole script, and the stages that need a password are the last three.
 WK_FAILED_STAGES=""
 
 run_stage() {
@@ -56,14 +47,8 @@ run_stage() {
 
     set +e
     # shellcheck disable=SC1090
-    # `set -e` is re-enabled inside: the subshell inherits the parent's state,
-    # and the `set +e` above would otherwise let a stage run on past its own
-    # failure -- turning a contained failure into a stage that does half its
-    # work and reports success.
-    # The path is expanded now, the count when the trap fires: a local of this
-    # function is not reliably still in scope by the time an errexit-killed
-    # subshell runs its EXIT trap, and "tmp: unbound variable" at that point is
-    # a confusing way to learn it.
+    # `set -e` re-enabled inside: the subshell inherits the `set +e` above. $tmp is
+    # expanded now, not in the trap, where this function's locals may be out of scope.
     ( set -e; trap "echo \$WK_CHANGES > $tmp" EXIT; . "$script" )
     rc=$?
     set -e
@@ -82,26 +67,7 @@ run_stage() {
 OS="$(wk_os)"
 info "wk-tools setup on $OS ($(describe_cores), $(host_mem_mb) MB)"
 
-# --- one password, once -------------------------------------------------------
-#
-# Several stages need root: the packages, the group membership, and the two
-# privileged helpers. `wk sudo` deliberately holds the authentication for only
-# 30 seconds (cmd/sudo says why it is neither 0 nor sudo's five minutes), and
-# that window is sized for *one command's own privileged sequence*. This is one
-# command -- but its privileged steps are minutes apart, because `apt-get
-# install` sits between them, so the window closes in the gaps and every stage
-# that follows asks again.
-#
-# So the authentication happens once, here, and a refresher holds it open for
-# exactly as long as setup runs. That is not a weakening of the policy: the
-# window stays 30 seconds and it is closed the moment this exits, which is the
-# property the short timeout exists for. What it removes is the prompt arriving
-# four times at unpredictable moments -- the thing that makes a person go
-# looking for the switch that turns the whole mechanism off.
-#
-# Skipped when there is nothing to hold open: with no terminal there is nothing
-# to prompt on (each stage already reports what it could not do), and where
-# sudo needs no password at all there is no timestamp to keep warm.
+# `wk sudo`'s 30-second window closes in the gaps between setup's privileged steps.
 _sudo_keepalive_pid=""
 _sudo_keepalive_stop() {
     [ -n "$_sudo_keepalive_pid" ] || return 0
@@ -120,16 +86,8 @@ sudo_prime() {
     log  "  the window is held open only while setup runs, and closes when it ends"
     sudo -v || { warn "not authenticated -- the stages that need root will say so"; return 0; }
 
-    # Half the window, so a refresh is never racing its own expiry. `sudo -n -v`
-    # so a refresher that somehow outlives the timestamp fails silently instead
-    # of prompting from the background, where nobody could answer it.
-    #
-    # Bounded by this process, and that is the load-bearing part rather than a
-    # tidiness one. `wk_atexit` traps EXIT only, so a setup that is killed does
-    # not necessarily run it -- and an orphaned refresher would go on renewing
-    # root authentication for ever, which is precisely what a 30-second window
-    # exists to make impossible. Checking the parent each pass caps the leak at
-    # one sleep interval, whatever kills setup and whether or not the trap runs.
+    # Half the window, so a refresh never races its own expiry; `sudo -n -v` so a
+    # background refresher fails rather than prompts, and the parent check bounds it.
     _setup_pid=$$
     ( while kill -0 "$_setup_pid" 2>/dev/null; do
           sleep 15
@@ -153,9 +111,8 @@ run_stage machine  "$HOST_DIR/machine.sh"
 run_stage vmtools  "$HOST_DIR/vmtools.sh"
 run_stage softnet  "$HOST_DIR/softnet.sh"
 run_stage sdk      "$HOST_DIR/sdk.sh"
-# The fleet-request broker, after the SDK and the VM tooling: on macOS it
-# publishes its socket into the podman machine, so the machine has to exist
-# first, and on Linux it binds next to the proxy the sdk stage just started.
+# After sdk and vmtools: the broker publishes its socket into the podman machine
+# on macOS, and binds beside the proxy the sdk stage started on Linux.
 run_stage broker   "$HOST_DIR/broker.sh"
 run_stage benchkey "$HOST_DIR/benchkey.sh"
 run_stage quiesce  "$WK_ROOT/admin/install.sh"
@@ -174,8 +131,6 @@ else
 fi
 log "wk doctor shows what is provisioned and what still needs a manual step"
 
-# macOS: say plainly what is still missing, rather than leaving it to be
-# discovered when a command refuses to run.
 if is_macos && [ "$STAGE" = all ]; then
     _todo=""
     if ! have tart && [ ! -x "$HOME/.local/bin/tart" ]; then
@@ -191,18 +146,12 @@ if is_macos && [ "$STAGE" = all ]; then
     unset _todo
 fi
 
-# Linux: say plainly what is still missing, rather than leaving it to be
-# discovered when a benchmark refuses to run.
 if is_linux && [ "$STAGE" = all ]; then
     _todo=""
     have cage || _todo="$_todo\n  - cage is not installed; 'wk session on' cannot start a compositor"
     [ -x /usr/local/libexec/wk-quiesce-priv ] \
         || _todo="$_todo\n  - the privileged helper is missing; 'wk quiesce' and 'wk session' will not work"
-    # Two different questions: is the account configured, and does *this*
-    # shell have the group yet. Group membership only reaches a process at
-    # login, so reporting "not in the render group" right after adding it is
-    # true of the shell and false of the machine, which reads as setup having
-    # failed when it succeeded.
+    # Group membership only reaches a process at login: configured is not yet active.
     case " $(id -nG "$(id -un)") " in
         *" render "*)
             case " $(id -nG) " in

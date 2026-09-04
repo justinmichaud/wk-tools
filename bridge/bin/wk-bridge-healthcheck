@@ -75,10 +75,9 @@ if ip -o link show "$iface" >/dev/null 2>&1; then
     fi
 else
     bad "$iface missing -- nothing on the segment"
-    # Which of three faults this is, said out loud, because they have three
-    # different fixes. Naming only the first sends the diagnosis at USB host
-    # mode on a phone whose port is already in host mode, has a partner
-    # attached, and has enumerated a hub.
+    # Which of three faults this is, because they have three different fixes:
+    # naming only the first points at USB host mode on a phone whose port is
+    # already in host mode with a partner attached and a hub enumerated.
     role=$(cat /sys/class/typec/port0/data_role 2>/dev/null)
     # Everything on the bus that is not a root hub. `usbN` are the controllers'
     # own root hubs and are always there; a `N-M` directory with an idVendor is
@@ -89,12 +88,9 @@ else
         downstream="$downstream $(cat "$d/idVendor"):$(cat "$d/idProduct") $(cat "$d/product" 2>/dev/null)"
     done
     # A network interface on USB that is neither WiFi nor the gadget: the
-    # adapter is *present and working*, it is simply not called $iface. Asked
-    # first, and separately from the bus scan, because it is the one case where
-    # nothing is wrong with the hardware at all -- and reporting it as a missing
-    # adapter is how an afternoon gets spent on a dock that is fine: cdc_ether
-    # has claimed it as eth0 while the check is still describing what USB3 docks
-    # cannot do.
+    # adapter is present and working, simply not called $iface -- cdc_ether has
+    # claimed it as eth0. Asked first, and separately from the bus scan, since
+    # nothing is wrong with the hardware in this case.
     found=""
     for n in /sys/class/net/*; do
         nn=$(basename "$n")
@@ -160,15 +156,11 @@ else
 fi
 note "typec data_role: $(cat /sys/class/typec/port0/data_role 2>/dev/null)"
 
-# The lease file shows *who took which address*, and the failure it exists to
-# make visible is a different device holding the address you meant -- which is
-# what an infinite lease on a one-address pool guarantees if the cable is in
-# the wrong socket.
-#
-# It is not evidence about the present: these leases never expire, so a client
-# that already has one re-uses it via ARP after a carrier drop and never asks
-# again. Reserved addresses are pinned by MAC (`dhcp-host`), so nothing is lost
-# either way. The reachability check below is what can actually fail.
+# The lease file shows who took which address, which makes visible a different
+# device holding the address you meant -- what an infinite lease on a
+# one-address pool guarantees if the cable is in the wrong socket. It is not
+# evidence about the present: these leases never expire, so a client re-uses
+# one via ARP after a carrier drop and never asks again.
 if [ -s "$leasefile" ]; then
     ok "DHCP leases:"
     sed 's/^/          /' "$leasefile"
@@ -242,9 +234,8 @@ case "$egress" in
     *) ok "egress: none (nothing behind this bridge reaches the internet)" ;;
 esac
 
-# Both invisible in every other check: a bridge with no DNS and a bridge at
-# 1970 both look like "no internet" while ping and routing are perfect, and
-# both stop `tailscale up` dead.
+# A bridge with no DNS and a bridge at 1970 both look like "no internet" while
+# ping and routing are perfect, and both stop `tailscale up` dead.
 hdr "Name resolution and time"
 if [ -f /etc/resolv.conf ]; then
     ns=$(grep -c '^nameserver' /etc/resolv.conf 2>/dev/null)
@@ -285,11 +276,9 @@ if [ -e /dev/watchdog ]; then
     fi
 else
     bad "no /dev/watchdog -- a kernel hang needs a person at the phone"
-    # Whether that is the hardware's fault or the kernel's, because the two
-    # have completely different answers, and "on this device" implies the
-    # first. The A64 *does* carry a watchdog and the device tree declares it --
-    # what is missing is the driver, so this is a packaging gap and not a
-    # property of the phone.
+    # Whether that is the hardware's fault or the kernel's: the A64 carries a
+    # watchdog and the device tree declares it, so a missing driver is a
+    # packaging gap and not a property of the phone.
     wdt=$(ls -d /proc/device-tree/*/watchdog@* 2>/dev/null | head -1)
     if [ -n "$wdt" ]; then
         note "the hardware is there and the device tree declares it:"
@@ -308,11 +297,9 @@ else
         note "  to drive: recovery is the netwatch ladder and a person."
     fi
 fi
-# Swap on eMMC wears out the only storage the phone has, and a bridge that
-# swapped its way through a memory spike is a bridge whose flash died early.
-# /proc/swaps, not `swapon --show`: the flag is util-linux's and busybox's
-# swapon does not have it, which would report "no swap" on a phone that is
-# quietly wearing out its eMMC.
+# Swap on eMMC wears out the only storage the phone has. /proc/swaps, not
+# `swapon --show`: the flag is util-linux's and busybox's swapon does not have
+# it, so it would report "no swap" on a phone that is swapping.
 nonzram=$(awk 'NR > 1 && $1 !~ /zram/ { c++ } END { print c + 0 }' /proc/swaps 2>/dev/null)
 if [ "${nonzram:-0}" -eq 0 ]; then ok "swap is zram only"; else bad "swap on a non-zram device (eMMC wear)"; fi
 
@@ -332,19 +319,12 @@ if [ "$camera" != off ]; then
 fi
 
 hdr "System"
-# Crashed services, minus the ones whose "crash" is how they are built.
-#
-# OpenRC marks a service crashed when its process is gone while the service is
-# marked started -- which is the normal end state of a one-shot. pmOS ships two
-# that do exactly that, and reporting them as faults every single run trains
-# whoever reads this to skip the crashed line, which is the one line here that
-# must never be skipped.
-#
-#   kill-pbsplash        "Stop the splash animation": runs once, exits
-#   postmarketos-tweakd  settings daemon; short-lived on a headless-ish boot,
-#                        and nothing in this role depends on it
-#
-# Anything else crashing is reported.
+# Crashed services, minus the ones whose "crash" is how they are built: OpenRC
+# marks a service crashed when its process is gone while the service is marked
+# started, which is the normal end state of a one-shot. pmOS ships two --
+# kill-pbsplash (stops the splash animation, then exits) and
+# postmarketos-tweakd (short-lived on a headless-ish boot, and nothing in this
+# role depends on it). Anything else crashing is reported.
 crashed=$(rc-status --crashed 2>/dev/null | sed '/^$/d' \
           | grep -vxE 'kill-pbsplash|postmarketos-tweakd')
 if [ -z "$crashed" ]; then

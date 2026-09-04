@@ -2,13 +2,11 @@
 #
 # Join this node to the tailnet, once, on first boot.
 #
-# The same built image is written to more than one card, so it cannot carry a
-# tailnet identity itself -- a baked-in auth key would be a credential nothing
-# revokes. The key arrives with the card instead: `wk sysimage write` seeds
-# /etc/wk/tailscale-authkey and /etc/wk/tailnet.conf (disk_seed_tailnet,
-# boot/disk.sh); this runs once against them and deletes the key. Exits 0
-# whenever the failure isn't this node's own -- a card with no key leaves the
-# board reachable the old way, not broken. POSIX sh, no jq: this Yocto image's shell.
+# The same built image is written to more than one card, so it carries no
+# tailnet identity: `wk sysimage write` seeds /etc/wk/tailscale-authkey and
+# /etc/wk/tailnet.conf (disk_seed_tailnet, boot/disk.sh), and this runs once
+# against them and deletes the key. Exits 0 whenever the failure isn't this
+# node's own. POSIX sh, no jq: this Yocto image's shell.
 
 set -u
 

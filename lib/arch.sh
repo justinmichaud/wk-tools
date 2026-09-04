@@ -1,22 +1,13 @@
-# The architecture a workspace *is*, and the flags that follow from it.
-#   arch      the workspace's own userland (`wk new --arch armhf`): native,
-#             no sysroot, no emulation, no target triple.
-#   sysroot   a *cross* build linking against another architecture's
-#             libraries. Reserved, not implemented (docs/Nice to have/HANDOFF-cross-compile.md).
-#   target    another machine entirely (`wk new --target`, not --arch).
+# The architecture a workspace *is*: `native` (the host's own, whatever that is)
+# or `armhf`. A cross build against another architecture's sysroot is reserved,
+# not implemented (docs/Nice to have/HANDOFF-cross-compile.md).
 
-# `native` means "same architecture as the host", not a synonym for aarch64.
 WK_ARCHES="native armhf"
 
-# Pinned: `wkdev-create --arch` would otherwise resolve to the aarch64
-# image and hand podman that with --arch=arm. 24.04_arm32_arm64 is not a
-# substitute despite the name -- arm64 with armhf as a foreign multiarch arch.
-# Not an override point: nothing in this tree or its tests ever wants a
-# different armhf image, and a stray env var silently changing which SDK a
-# workspace gets is worse than one pinned constant.
+# Pinned: `wkdev-create --arch` otherwise resolves to the aarch64 image and hands
+# podman that with --arch=arm. 24.04_arm32_arm64 is arm64 with armhf multiarch.
 WK_IMAGE_ARMHF="ghcr.io/igalia/wkdev-sdk:24.04_arm32"
 
-# arch_canon <word> -- the canonical name; aliases like "32" are never stored.
 arch_canon() {
     case "${1:-}" in
         ''|native|host|arm64|aarch64|64) echo native ;;
@@ -41,7 +32,6 @@ arch_podman() {  # podman calls 32-bit ARM "arm"; ours is armhf since "arm" is a
     esac
 }
 
-# Empty for native: leaves the SDK's own version resolution alone.
 arch_image() {
     case "$1" in
         armhf) echo "$WK_IMAGE_ARMHF" ;;
@@ -50,8 +40,6 @@ arch_image() {
 }
 
 arch_has_gpu() { [ "${1:-native}" != armhf ]; }  # NVIDIA userspace is aarch64-only (host/linux/gpu.sh)
-
-# --- build flags: reach the build through WK_ARCH_*, not CFG_ARGS -----------
 
 # linux32 is load-bearing: an armhf container's kernel is the host's aarch64
 # kernel, so `uname -m` reports aarch64 (armv8l under linux32), and CMake
@@ -63,10 +51,9 @@ arch_wrapper() {
     esac
 }
 
-# Prepended, never replacing. Pins an FPU (JSC's ARMv7 JIT requires VFP)
-# and Thumb-2. -Wno-pass-failed: WTF's vectorize pragmas fail on ARMv7
-# regardless of -mfpu. No -mno-unaligned-access: JSC crashes regardless
-# (a WebKit bug, not a flag to compensate for). See docs/HANDOFF-linux-arm32.md.
+# Pins an FPU (JSC's ARMv7 JIT requires VFP) and Thumb-2. -Wno-pass-failed:
+# WTF's vectorize pragmas fail on ARMv7 regardless of -mfpu. -mno-unaligned-access
+# is absent because JSC crashes regardless (a WebKit bug). docs/HANDOFF-linux-arm32.md.
 arch_cflags() {
     case "$1" in
         armhf) echo "-mthumb -march=armv7-a+fp -Wno-pass-failed" ;;
@@ -83,11 +70,9 @@ arch_ldflags() {
     esac
 }
 
-# arch_cmake <arch> [port] -- port distinguishes WPE/GTK-only USE_VULKAN
-# from a JSCOnly build, where naming it would warn unused. USE_LD_LLD=OFF:
-# WebKit probes for lld and appends its own -fuse-ld=lld, and the last
-# flag wins over -fuse-ld=gold above. No attempt to force the JIT on:
-# trunk has no ARMv7 assembler. See docs/HANDOFF-linux-arm32.md.
+# USE_LD_LLD=OFF: WebKit probes for lld and appends its own -fuse-ld=lld, and the
+# last flag wins over -fuse-ld=gold above. port is omitted for JSCOnly, where
+# naming USE_VULKAN would warn unused. No JIT: trunk has no ARMv7 assembler.
 arch_cmake() {
     local flags=""
     case "$1" in
@@ -102,7 +87,6 @@ arch_cmake() {
     echo "$flags"
 }
 
-# Native says nothing; callers print this with a leading separator.
 arch_label() {
     case "${1:-native}" in
         native) echo "" ;;

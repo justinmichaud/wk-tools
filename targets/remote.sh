@@ -1,78 +1,41 @@
 # Target driver: a shared, multi-user build machine.
 #
-# No containers: these are other people's build machines. A workspace is a
-# plain checkout under your own home directory -- isolation is gone as a
-# result, so `wk ai claude` and `wk verify` refuse to run against a remote target.
+# No containers: these are other people's build machines. A workspace is a plain
+# checkout under your own home directory, so `wk ai claude` and `wk verify` refuse
+# to run against a remote target. WK_REMOTE_PEER marks the one machine that is not
+# a build box: another workstation, which owns its own workspaces and is asked,
+# not driven -- creation and destruction are refused there.
 #
-# Every build is sized from the *remote* machine's load and free memory,
-# niced to the floor, and serialised against other wk builds by the same user.
-#
-# The only target you can have several of, so one is named after the machine:
-#
-#   wk new bug-238 --target devbox-arm64-2
-#
-# with targets/hosts/devbox-arm64-2.conf holding whatever differs from the
-# defaults below (target_registry_dir, lib/target.sh):
-#
-#   WK_REMOTE_HOST=devbox-arm64-2  # ssh destination; defaults to the target name
-#   WK_REMOTE_ROOT=/home/you/wk    # defaults to ~/wk on the box
-#   WK_TARGET_CMAKE=-DFOO=ON       # extra CMake flags for builds on this machine
-#   WK_TARGET_LIBCXX=0             # 0 where the machine has no libc++; 1 or
-#                                   # unset builds with -stdlib=libc++
-#   WK_REMOTE_REFERENCE=/var/...   # a shared checkout to clone from; see below
-#   WK_REMOTE_LOCAL=1              # this *is* the machine; run without ssh
-#   WK_REMOTE_PEER=1               # a workstation of its own, not a build box
-#   WK_REMOTE_TOOLS=Development/…  # its wk-tools, if not $root/tools
-#   WK_TARGET_WPE=1                # this machine builds WPE; also install
-#                                   # Tools/wpe's dependencies, not just gtk's
-#
-# --- peers -------------------------------------------------------------------
-#
-# WK_REMOTE_PEER marks the one case that is not a build box: another
-# workstation, which owns its own workspaces. A peer is *asked*, not driven:
-# t_has_wk is true without the marker, so `wk status`/`wk ls` delegate to
-# its own wk; no tooling is pushed, and creation/destruction are refused --
-# its workspaces are containers and guests, which this driver would replace
-# with a plain checkout. `wk remote setup <target>` needs no root.
+# targets/hosts/<name>.conf (target_registry_dir, lib/target.sh) holds whatever
+# differs: WK_REMOTE_HOST (ssh destination, default the target name), WK_REMOTE_ROOT
+# (~/wk there), WK_REMOTE_REFERENCE (a shared checkout to clone from), WK_REMOTE_LOCAL,
+# WK_REMOTE_PEER, WK_REMOTE_TOOLS, WK_TARGET_CMAKE, WK_TARGET_LIBCXX, WK_TARGET_WPE.
 
-# Defaults to the target's own name: a reachable machine already has an
-# ~/.ssh/config entry. `remote` is excluded: it names the driver, not a host.
+# A reachable machine already has an ~/.ssh/config entry; `remote` names the driver.
 if [ -z "${WK_REMOTE_HOST:-}" ] && [ "${WK_TARGET:-remote}" != remote ]; then
     WK_REMOTE_HOST="$WK_TARGET"
 fi
 WK_REMOTE_HOST="${WK_REMOTE_HOST:-}"
 
-# Left empty: the default is $HOME/wk on the remote box, unknown here until
-# _remote_probe resolves it.
+# The default is $HOME/wk on the box, unknown here until _remote_probe resolves it.
 WK_REMOTE_ROOT="${WK_REMOTE_ROOT:-}"
 
-# --- am I the machine this target names? -------------------------------------
-#
-# Computed from ~/.wk-remote (`wk remote setup`): if it names this target,
-# this process is running *on* the machine, so drop the ssh step and take
-# the root from the marker rather than a second conf file that could drift.
+# Computed from ~/.wk-remote (`wk remote setup`): if it names this target, this
+# process runs *on* the machine, so drop the ssh step and take the root from it.
 if [ -z "${WK_REMOTE_LOCAL:-}" ] && in_remote_host \
    && [ "$(wk_remote_field target)" = "${WK_TARGET:-remote}" ]; then
     WK_REMOTE_LOCAL=1
     [ -n "$WK_REMOTE_ROOT" ] || WK_REMOTE_ROOT="$(wk_remote_field root)"
 fi
 
-# No fixed job ceiling: derived per build from what the machine has free
-# (_remote_probe). WK_MAX_JOBS still overrides.
-
-# $WK_STORE defaults to /var/lib/wk, wrong here, and is per target since two
-# remote machines can each have a workspace of the same name. Only the build
-# log and status live here -- checkout, build tree and ccache are on the far end.
-# WK_REMOTE_STORE overrides that per-target default; tests/test_remote.py
-# points it at a scratch directory so a test never writes under a real $HOME.
+# Per target: two remote machines can each have a workspace of the same name.
 if [ -n "${WK_REMOTE_LOCAL:-}" ] && [ -n "${WK_REMOTE_ROOT:-}" ]; then
+    # WK_REMOTE_STORE overrides the per-target default.
     WK_STORE="${WK_REMOTE_STORE:-$WK_REMOTE_ROOT}"
 else
     WK_STORE="${WK_REMOTE_STORE:-$(wk_state_dir)/remote/${WK_TARGET:-remote}}"
 fi
 
-# One code path drives the same workspaces from the workstation over ssh or
-# from a shell on the box with no ssh, so the two can never answer differently.
 _remote_is_local() { [ -n "${WK_REMOTE_LOCAL:-}" ]; }
 
 _remote_peer() { [ -n "${WK_REMOTE_PEER:-}" ]; }
@@ -85,10 +48,7 @@ _remote_require() {
         wk new <name> --target devbox-arm64-2"
 }
 
-# Multiplexed and never interactive: `t_info`/`t_src`/`t_tools`/the capacity
-# probe reach this several times per command, each a handshake through a
-# jump host without a shared connection. ConnectTimeout/BatchMode are
-# _ssh_opts_base (lib/target.sh); this adds ControlMaster muxing.
+# Multiplexed and never interactive: several round trips per command, each a handshake.
 _ssh_opts() {
     local d; d="$(wk_state_dir)/ssh"
     mkdir -p "$d" 2>/dev/null || true
@@ -97,7 +57,6 @@ _ssh_opts() {
 
 _rsh() {
     _remote_require
-    # On the machine itself there is nothing to connect to; same shell, same script text.
     if _remote_is_local; then
         bash -c "$*"
         return $?
@@ -106,10 +65,7 @@ _rsh() {
     ssh $(_ssh_opts) "$WK_REMOTE_HOST" "$@"
 }
 
-# ssh for *questions*, not work: `-n`, since these run inside command
-# substitutions that inherit stdin, and ssh would otherwise drink it.
-# t_exec/t_exec_tty/t_wk/t_status_put don't use it -- a backgrounded build
-# reaching for the terminal earns a SIGTTIN.
+# ssh for *questions*: `-n`, since these run in command substitutions whose stdin ssh drinks.
 _rsh_q() {
     _remote_require
     if _remote_is_local; then
@@ -120,14 +76,8 @@ _rsh_q() {
     ssh -n $(_ssh_opts) "$WK_REMOTE_HOST" "$@"
 }
 
-# One round trip, cached for the process: the remote home, core count, load
-# and memory free -- everything that sizes a build, not lib/resources.sh,
-# which measures the wrong machine here. `wk status` must never die over an
-# unreachable machine, so the answer (or lack of one) is cached too.
-#
-# Raw form (nproc/loadavg/meminfo on Linux, sysctl/vm_stat on Darwin), parsed
-# back here by _remote_probe_parse rather than an inline remote awk, which
-# could not be unit-tested on a captured sample.
+# One round trip, memoised: lib/resources.sh measures the wrong machine here. The raw
+# form is parsed here, so a captured sample exercises what a live probe parses.
 _remote_probe_cmd() {
     printf '%s' '
         echo "$HOME"
@@ -148,12 +98,9 @@ _remote_probe_cmd() {
         command -v ionice >/dev/null 2>&1 && echo yes || echo no'
 }
 
-# No ssh involved, so a captured sample exercises exactly what a live probe
-# parses. `sysctl -n vm.loadavg`'s second field is the load average where
-# /proc/loadavg has it first; `vm_stat` reports pages where /proc/meminfo
-# has MemAvailable in kB directly. `uname -s` is reported on as well as
-# branched on: it is what t_os answers with, and a build box's platform
-# decides the build system a config uses (build/configs.sh).
+# `sysctl -n vm.loadavg`'s second field is the load average where /proc/loadavg has
+# it first; `vm_stat` reports pages where /proc/meminfo has MemAvailable in kB.
+# `uname -s` is reported on as well as branched on: it is what t_os answers with.
 _remote_probe_parse() {
     local uname cores section=head load_raw="" mem_raw="" ionice=no line
     { read -r uname; read -r cores; } || return 1
@@ -168,8 +115,7 @@ _remote_probe_parse() {
 " ;;
             mem)    mem_raw="$mem_raw$line
 " ;;
-            # A trailing blank line (a here-string's own) must not overwrite
-            # the real answer that came before it.
+            # A trailing blank line (a here-string's own) must not overwrite the real answer.
             ionice) [ -n "$line" ] && ionice="$line" ;;
         esac
     done
@@ -194,15 +140,13 @@ _remote_probe_parse() {
     printf '%s\n%s\n%s\n%s\n%s\n' "${cores:-1}" "${load:-0}" "${mem:-0}" "$ionice" "$os"
 }
 
-# A file, not a variable: the prefetch (prefetch_targets, lib/target.sh)
-# runs in a subshell per target, which cannot hand a value to its parent.
+# A file, not a variable: the prefetch runs in a subshell per target (lib/target.sh).
 _remote_probe_file() {
     [ -n "${WK_PREFETCH_DIR:-}" ] || return 0
     printf '%s/%s.probe' "$WK_PREFETCH_DIR" "${WK_TARGET:-remote}"
 }
 
-# An *empty* file means asked-and-did-not-answer, the ten-second answer
-# worth prefetching.
+# An *empty* file means asked-and-did-not-answer.
 t_prefetch() {
     local f out
     f=$(_remote_probe_file) || return 0
@@ -218,7 +162,6 @@ _remote_probe_try() {
     [ -n "${_WK_REMOTE_DOWN:-}" ] && return 1
     _remote_require
     local out f parsed
-    # A prefetched answer if one was taken for this command, ssh otherwise.
     f=$(_remote_probe_file) || f=""
     if [ -n "$f" ] && [ -f "$f" ]; then
         out=$(cat "$f")
@@ -250,10 +193,8 @@ _remote_probe() {
     Try:  ssh -o BatchMode=yes $WK_REMOTE_HOST true"
 }
 
-# A shared WebKit repository, to clone workspaces from -- advertised in the
-# MOTD, or WK_REMOTE_REFERENCE for one that does not announce it. A local
-# clone hardlinks `.git/objects`, costing almost nothing next to a 13 GB
-# mirror of our own. Verified before use: a MOTD can outlive the repo it names.
+# A shared WebKit repository to clone from, named by the MOTD or WK_REMOTE_REFERENCE.
+# Verified before use: a MOTD can outlive the repo it names.
 _remote_reference() {
     [ -n "${_WK_REMOTE_REF_PROBED:-}" ] && { printf '%s' "$WK_REMOTE_REFERENCE"; return 0; }
     _WK_REMOTE_REF_PROBED=1
@@ -263,8 +204,7 @@ _remote_reference() {
         return 0
     fi
 
-    # Static MOTD files only: running somebody else's scripts to read a hint
-    # is not a trade worth making.
+    # Static MOTD files only: running somebody else's scripts to read a hint is no trade.
     WK_REMOTE_REFERENCE=$(_rsh_q '
         cat /etc/motd /etc/motd.d/* /run/motd.dynamic 2>/dev/null \
         | grep -oE "/[A-Za-z0-9._/-]*[Ww]eb[Kk]it(\.git)?" | sort -u \
@@ -276,20 +216,13 @@ _remote_reference() {
     printf '%s' "$WK_REMOTE_REFERENCE"
 }
 
-# The mirror this driver keeps when the machine has no shared repository:
-# `t_create` clones from it, `t_sync` refreshes it. What it carries, and how
-# it is wired, is mirror_refresh_script's (lib/store.sh) -- every mirror in
-# the fleet is made by that one snippet, so a workspace here fetches from the
-# same layout a container's mirror has, forks included. Carrying them costs
-# nothing next to holding them per workspace: every checkout on the box is a
-# `--shared` clone of this repository (t_create).
+# The mirror this driver keeps when the machine has no shared repository, made by
+# mirror_refresh_script (lib/store.sh); every checkout there is a `--shared` clone.
 _remote_mirror_update() {
     local root="$1"
     info "updating the WebKit mirror on $WK_REMOTE_HOST (first run clones it)"
     command -v mirror_refresh_script >/dev/null 2>&1 || . "$WK_ROOT/lib/store.sh"
-    # One `mirror-fetch <remote> ok|FAILED` line per upstream comes back on
-    # stdout; relayed as the report, since an unreachable fork is not a
-    # failure of the mirror (mirror_refresh_script).
+    # An unreachable fork is not a failure of the mirror; its line comes back on stdout.
     _rsh_q "set -e
         mkdir -p $(sh_quote "$root/ws") $(sh_quote "$root/cache/ccache")
         $(mirror_refresh_script "$(t_mirror_dir)")" \
@@ -300,21 +233,14 @@ _remote_mirror_update() {
         || die "could not update the WebKit mirror on $WK_REMOTE_HOST"
 }
 
-# Every path function goes through this, not the variable: the default is
-# only known after the probe.
+# Every path function goes through this: the default is only known after the probe.
 _remote_root() { _remote_probe; printf '%s' "$WK_REMOTE_ROOT"; }
 
 _remote_ws()   { echo "$(_remote_root)/ws/$1"; }
 
-# --- peers -------------------------------------------------------------------
-# A peer owns its workspaces: they are its containers and its guests, in its
-# own store, and nothing on this side has a path to one. So every question
-# about them is asked of its own `wk`, and every command about one is handed
-# over whole (`wk`'s delegation, which t_delegates below decides).
+# A peer owns its workspaces: every question is asked of its own `wk` (t_delegates).
 
-# Its listing, as "<name>\t<state>" lines. One round trip per process,
-# memoised the way the capacity probe is; `wk ls --json` because a document
-# is the off-the-shelf machine-readable answer and a table is not.
+# One round trip per process, memoised; `wk ls --json` is the machine-readable form.
 _peer_fetch() {
     local json
     json=$(WK_NO_DELEGATE=1 t_wk ls --json </dev/null 2>/dev/null) || return 1
@@ -337,11 +263,7 @@ _peer_list() {
     [ -z "$_WK_PEER_ROWS" ] || printf '%s\n' "$_WK_PEER_ROWS"
 }
 
-# What it takes to reach a workspace the peer owns, from the only machine
-# that can say: which account, which checkout, and what to run *there* to
-# speak ssh to a container that has no address of its own. The same round
-# trip installs that workspace's sshd and authorises this machine's key over
-# there (WK_ZED_PUBKEY), so an editor here needs nothing further.
+# The same round trip installs that workspace's sshd and authorises this machine's key.
 _peer_route() { # <name>
     local name="$1" out
     [ "${_WK_PEER_ROUTE_NAME:-}" = "$name" ] && return 0
@@ -357,32 +279,22 @@ _peer_route() { # <name>
     _WK_PEER_ROUTE_NAME="$name"
 }
 
-# --- contract ----------------------------------------------------------------
-
-# A peer's checkout is inside the workspace, not under the remote root, so
-# only the peer can say where -- and it says so as part of the route, which
-# `wk zed` has already asked for by the time this is called.
+# A peer's checkout is inside the workspace, so only the peer can say where.
 t_src() {
     _remote_peer && [ -n "${1:-}" ] \
         && { _peer_route "$1"; printf '%s' "$_WK_PEER_ROUTE_SRC"; return 0; }
     echo "$(_remote_ws "$1")/WebKit"
 }
 
-# The remote's own ccache, under the remote root -- not a shared one on the
-# box: a cache you do not administer is one you can poison for other people.
+# Not a shared ccache on the box: one you do not administer is one you can poison.
 t_ccache_dir() { echo "$(_remote_root)/cache/ccache"; }
 
-# The bare mirror this driver keeps on the box, under the remote root: every
-# workspace there is a `--shared` clone of it (t_create), so it holds the
-# objects once for all of them, and a fetch in one of them is local.
-# _remote_mirror_update is what puts it there and keeps it current.
+# The bare mirror on the box: every workspace there is a `--shared` clone of it.
 t_mirror_dir() { echo "$(_remote_root)/mirror"; }
 
 _remote_home() { _remote_probe; printf '%s' "$_WK_REMOTE_HOME"; }
 
-# Pushed to the remote root, not per workspace: same tree for all of them.
-# WK_REMOTE_TOOLS overrides for a peer's own git checkout; a relative path
-# is relative to the *remote* home, since the conf is sourced on this side.
+# A relative WK_REMOTE_TOOLS is relative to the *remote* home: the conf is sourced here.
 t_tools() {
     case "${WK_REMOTE_TOOLS:-}" in
         "") echo "$(_remote_root)/tools" ;;
@@ -394,14 +306,8 @@ t_tools() {
 # No base snapshots here: the equivalent is the git mirror, which t_create maintains.
 t_needs_base() { return 1; }
 
-# The ssh destination already configured, not a generated alias (which could
-# not carry the real entry's ProxyJump). On the machine itself there is no
-# route and never will be -- that would be an ssh loop back to the host you are typing on.
-#
-# A peer's *workspace* is the exception: it is not on the peer's filesystem
-# at all, so it is reached through the alias t_ssh_prepare writes here. The
-# machine itself -- the empty name, which is what `wk zed --tools` asks about
-# -- still answers as itself.
+# The ssh destination already configured, not a generated alias (which could not carry
+# the ProxyJump). A peer's *workspace* goes through the alias t_ssh_prepare writes.
 t_ssh_host() {
     _remote_is_local && return 1
     _remote_require
@@ -409,9 +315,7 @@ t_ssh_host() {
     echo "$WK_REMOTE_HOST"
 }
 
-# One hop more than the peer needs itself: its own transport, run over ssh to
-# it, is a complete transport from here -- the container still has no network
-# interface and nothing new listens anywhere.
+# Its own transport, run over ssh to it, is a complete transport from here.
 t_ssh_prepare() {
     local name="${1:-}"
     { _remote_peer && [ -n "$name" ]; } || return 0
@@ -431,29 +335,21 @@ t_store_init() {
 
 t_list() {
     _remote_peer && { _peer_list; return 0; }
-    # `|| true`: no ws directory yet is not an error, and pipefail in the
-    # caller would fail the whole listing on a non-zero ls.
+    # `|| true`: no ws directory yet is not an error, and pipefail would fail the listing.
     { _rsh_q "ls -1 $(sh_quote "$(_remote_root)/ws") 2>/dev/null" 2>/dev/null || true; } \
         | while read -r n; do [ -n "$n" ] && printf '%s\tpresent\n' "$n"; done
 }
 
 # One round trip, since every extra one is a handshake through a jump host:
-#
 #   no workspace directory          absent
 #   directory, no `.wk-ready`       creating -- clone unfinished or ssh cut mid-way
 #   `.wk-ready`                     present
 #   the machine did not answer      unreachable, never absent
-#
-# Without the marker a half-cloned workspace reads as present, `wk new`
-# refuses it as "already exists", and `wk build` builds the rubble.
 t_info() {
     local ws out
     _remote_probe_try || { echo unreachable; return 0; }
 
-    # A peer's own word for a workspace it owns. Only the four words above
-    # survive the trip: everything else its listing can say (running, exited,
-    # broken) means the same thing from here -- it is there, and the peer is
-    # what reports on it, since every command about it is handed over.
+    # A peer's own word for it. Only the four words above survive the trip.
     if _remote_peer; then
         out=$(_peer_list | awk -F'\t' -v n="$1" '$1 == n { print $2; exit }')
         case "$out" in
@@ -483,9 +379,8 @@ t_create() {
     root=$(_remote_root)
     ws=$(_remote_ws "$name")
 
-    # A half-made workspace is not refused: `wk new` already destroyed it
-    # before getting here (rule 3, wipe over repair), so anything but absent
-    # here means the record and the machine disagree.
+    # `wk new` already destroyed a half-made workspace, so anything but absent here means
+    # the record and the machine disagree.
     case "$(t_info "$name")" in
         absent) ;;
         creating) die "'$name' on $WK_REMOTE_HOST is a checkout that never finished being
@@ -498,8 +393,7 @@ t_create() {
     ref=$(_remote_reference)
 
     if [ -n "$ref" ]; then
-        # A plain local clone (hardlinks) rather than --shared, so the
-        # workspace does not depend on a repository the sysadmins repack.
+        # A plain local clone (hardlinks), not --shared: the sysadmins repack that repository.
         info "cloning from $ref (this machine's shared WebKit, hardlinked)"
         _rsh_q "set -e
             mkdir -p $(sh_quote "$root/ws") $(sh_quote "$root/cache/ccache")
@@ -508,8 +402,6 @@ t_create() {
         _remote_wire "$ws/WebKit"
     else
         # No shared repository: keep one of our own and clone --shared.
-        # _remote_mirror_update is both the keeping and the fetching;
-        # `t_sync` is its other caller.
         _remote_mirror_update "$root"
         _rsh_q "git clone --quiet --shared -b main $(sh_quote "$root/mirror") \
                           $(sh_quote "$ws/WebKit")" \
@@ -525,8 +417,7 @@ t_create() {
 
     ensure_dir "$(wk_ws_dir "$name")"
 
-    # Last, on the far side, so it survives this end going away: an ssh cut
-    # mid-clone leaves no marker, and the workspace reads `creating`.
+    # Last, on the far side: an ssh cut mid-clone leaves no marker, and it reads creating.
     _rsh_q "touch $(sh_quote "$ws/$WK_READY_MARKER")" \
         || die "could not mark '$name' ready on $WK_REMOTE_HOST -- treat it as half-made
     and re-run 'wk new $name --target ${WK_TARGET:-remote}'"
@@ -557,9 +448,6 @@ t_pull_dir() {
         "$WK_REMOTE_HOST:$src/" "$dest/"
 }
 
-# The same scp and rsync inbound. On the machine itself there is nothing to
-# connect to, so both are the plain local copy -- the same split every other
-# function here makes.
 t_push() {
     local name="$1" src="$2" dest="$3"
     if _remote_is_local; then cp -f "$src" "$dest"; return; fi
@@ -577,8 +465,6 @@ t_push_dir() {
     rsync -a --delete -e "ssh $(_ssh_opts)" "$src/" "$WK_REMOTE_HOST:$dest/"
 }
 
-# `_rsh_q`, not `_rsh`: this is a question, and it runs inside a command
-# substitution whose stdin ssh would otherwise drink.
 t_path_kind() {
     local name="$1" p="$2"
     _rsh_q "if [ -d $(sh_quote "$p") ]; then echo dir
@@ -586,11 +472,8 @@ t_path_kind() {
          else echo absent; fi" 2>/dev/null | tr -d '\r'
 }
 
-# Only the build is serialised: locking t_exec instead would block every
-# one-line probe behind an hour-long build. The lock is taken on the machine
-# that builds, by lib/lockrun.sh -- not here, since a detached build
-# outlives the ssh session by hours. Not `flock`: its descriptor is
-# inherited, so anything the build leaves running would hold it (lib/common.sh).
+# Only the build is serialised: locking t_exec would block every one-line probe behind an
+# hour-long build. Not `flock`: its descriptor is inherited by whatever the build leaves.
 t_exec_build() {
     local name="$1"; shift
     local log tee_to
@@ -620,27 +503,22 @@ t_status_put() {
         cat > "$ws/build.status"
         return 0
     fi
-    # Stdin closed before the pipeline: the lookup can itself reach the
-    # machine, and an ssh in a command substitution reads inherited stdin.
+    # Stdin closed before the pipeline: the lookup can itself reach the machine.
     ws=$(_remote_ws "$name" </dev/null)
-    # log= is rewritten to the machine's own log path, or `wk status` loses
-    # its liveness check. No `|| true`: a silent failure leaves `wk status`
-    # reporting stale state forever, so warn instead.
+    # log= is rewritten to the machine's own log path, or `wk status` loses its liveness check.
     sed "s|^log=.*|log=$ws/build.log|" \
         | _rsh "cat > $(sh_quote "$ws/build.status")" \
         || warn "could not record '$name's build state on $WK_REMOTE_HOST -- 'wk status $name'
     may show stale information until it answers again"
 }
 
-# `wk`, run on the machine itself: it answers with its own store, where the
-# canonical build state lives. Refused unless provisioned (`wk remote setup`).
+# `wk` on the machine itself answers with its own store. Refused unless provisioned.
 t_has_wk() {
     _remote_is_local && return 1
-    # Before resolving the remote root: on a machine that is off, that dies
-    # inside a command substitution with a connection error mid-listing.
+    # Before resolving the remote root: on a machine that is off, that dies mid-listing.
     _remote_probe_try || return 1
-    # A peer has no marker and must not be given one: it is what makes a
-    # machine refuse the host-only commands on itself, which a peer needs.
+    # A peer has no marker and must not be given one: it is what makes a machine refuse the
+    # host-only commands on itself.
     if _remote_peer; then
         _rsh_q "test -x $(sh_quote "$(t_tools '')/wk")" 2>/dev/null
         return $?
@@ -648,27 +526,15 @@ t_has_wk() {
     _rsh_q "test -f \$HOME/.wk-remote && test -x $(sh_quote "$(t_tools '')/wk")" 2>/dev/null
 }
 
-# --- was this machine provisioned from what this tree now says? --------------
-# The same question `wk vm ls` asks about the golden base, and the same answer
-# shape: `wk remote setup` records the hash of the inputs that provisioned the
-# machine in ~/.wk-remote (remote/provision.sh writes the marker, cmd/remote
-# hands it the value), and this recomputes the hash now and compares. A record
-# of what produced an artifact, never a cached verdict -- nothing here reads the
-# marker to decide the machine is current.
-#
-# Computed on this side only, so the two ends cannot hash differently: a build
-# box is provisioned from the checkout this command pushes, so the inputs are
-# always this tree's files.
+# `wk remote setup` records the hash of the inputs that provisioned the machine in
+# ~/.wk-remote; this recomputes it here, so the two ends cannot hash differently.
 remote_provision_inputs_hash() {
     cat "$WK_ROOT/remote/provision.sh" "$WK_ROOT/remote/deps.sh" \
         | python3 -c 'import hashlib,sys
 print(hashlib.sha256(sys.stdin.buffer.read()).hexdigest()[:16])'
 }
 
-# Why the machine's provisioning does not match those inputs, or nothing when it
-# does: prints the reason and succeeds when it is stale, so a caller reads
-# `if why=$(remote_provision_stale); then`. Read-only -- one ssh through this
-# driver's own question form, no lock, and nothing provisioned or started.
+# Prints the reason and succeeds when stale: `if why=$(remote_provision_stale); then`.
 remote_provision_stale() {
     local marker rec
     marker=$(_rsh_q "cat \"\$HOME/.wk-remote\" 2>/dev/null" 2>/dev/null) || true
@@ -686,11 +552,8 @@ remote_provision_stale() {
     return 0
 }
 
-# A peer's workspaces are its own and no path here reaches them, answered
-# or not -- so a peer delegates whether or not it is up, and t_far_side (in
-# `wk`) is what turns a peer that is down into an honest refusal rather than
-# a command quietly acting on the wrong thing. A build box delegates once it
-# has a `wk` of its own: the machine doing the building drives the build.
+# A peer delegates whether or not it is up -- no path here reaches its workspaces. A
+# build box delegates once it has a `wk` of its own.
 t_delegates() {
     _remote_is_local && return 1
     _remote_peer && return 0
@@ -705,12 +568,8 @@ t_far_side() {
     fi
 }
 
-# What the far side is asked to run, built in one place so a pty changes the
-# transport and nothing else -- a delegated command that loses --force over
-# the hop is a barrier the user already crossed, refusing again over there.
-# The dispatcher's global flags and the driver's own three travel as
-# environment, not arguments: an unknown argument is fatal on an old copy (a
-# peer's own git checkout), an unknown variable is silently ignored.
+# Built in one place so a pty changes the transport and nothing else. The flags travel as
+# environment, not arguments: an unknown argument is fatal on an old copy.
 _remote_wk_cmd() {
     printf 'cd $HOME && %s%s%s%s%s %s' \
         "$(wk_forwarded_env)" \
@@ -724,8 +583,7 @@ t_wk() {
     _rsh "$(_remote_wk_cmd "$@")"
 }
 
-# The same, with a pty: `wk sudo setup` over there prompts for a password,
-# and sudo refuses to read one without a terminal.
+# With a pty: `wk sudo setup` prompts, and sudo refuses to read a password without one.
 t_wk_tty() {
     if _remote_is_local; then
         t_wk "$@"
@@ -735,8 +593,7 @@ t_wk_tty() {
     ssh -t $(_ssh_opts) "$WK_REMOTE_HOST" "$(_remote_wk_cmd "$@")"
 }
 
-# A pty, for anything with a full-screen UI: `wk run --lldb` without one is
-# a debugger prompt that prints, accepts nothing, and dies on the first ctrl-c.
+# A pty: `wk run --lldb` without one accepts nothing and dies on the first ctrl-c.
 t_exec_tty() {
     local name="$1"; shift
     if _remote_is_local; then
@@ -759,16 +616,13 @@ t_enter() {
 
 command -v tools_push >/dev/null 2>&1 || . "$WK_ROOT/lib/tools.sh"
 
-# The copy over there is a checkout of this tree's HEAD, pushed as a git
-# bundle over this driver's own ssh (tools_push, lib/tools.sh): a machine
-# holds a commit that exists, which is what `wk status` compares by sha. An
-# uncommitted tree is refused there, not copied.
+# A git bundle of this tree's HEAD (tools_push, lib/tools.sh): a machine holds a commit
+# that exists, which is what `wk status` compares by sha.
 t_sync_tools() {
     local name="$1" dest
     dest=$(t_tools "$name")
 
-    # A peer keeps its own checkout, with its own uncommitted work in it: it
-    # pulls (t_sync), and nothing here writes over that.
+    # A peer keeps its own checkout, with its own uncommitted work in it: it pulls.
     if _remote_peer; then
         debug "not pushing wk-tools to $WK_REMOTE_HOST: it is a workstation with its own checkout"
         return 0
@@ -782,9 +636,8 @@ t_sync_tools() {
     tools_push "$dest" _rsh
 }
 
-# See t_wiring_args (lib/target.sh): the shared WebKit or our mirror, plus
-# the ssh config under the wk root -- makes fork push URLs resolve on a box
-# whose ~/.ssh is not ours to edit.
+# The shared WebKit or our mirror, plus the ssh config under the wk root, so fork push
+# URLs resolve where ~/.ssh is not ours to edit.
 _remote_wire() {
     local src="$1" n u c
     { read -r n; read -r u; read -r c; } <<EOF
@@ -805,10 +658,7 @@ t_wiring_args() {
     fi
 }
 
-# Why a peer's `git pull` could not reach this machine's tree: the answer is
-# always on this side -- a peer pulls from the shared upstream, so anything
-# this machine hasn't published is invisible to it. Named precisely, because
-# the three cases have three different fixes.
+# The answer is always on this side; named precisely, since the three cases differ.
 _peer_why_behind() {
     local dirty="" ahead="" branch="" up=""
     git -C "$WK_ROOT" rev-parse --git-dir >/dev/null 2>&1 || {
@@ -830,19 +680,14 @@ _peer_why_behind() {
     fi
 }
 
-# This target's furniture (`wk sync --tools`): its copy of wk-tools, and the
-# WebKit objects its workspaces clone from. A bare `wk sync` is refused on
-# the machine itself (is_host_only), so this is how either is refreshed.
+# This target's furniture: its copy of wk-tools, and the objects its workspaces clone from.
 t_sync() {
     local ref rc=0 mine_ver theirs_ver mine_sha mine_dirty theirs_sha theirs_dirty tools
     _remote_probe
     tools=$(t_tools "")
 
-    # A peer is a workstation running its own checkout under git: rsyncing
-    # over it would throw away uncommitted work, so it pulls instead
-    # (--ff-only: a merge on somebody else's machine is not this command's to
-    # make). Then checked, because a dirty tree there lets the pull succeed
-    # while converging nothing.
+    # A peer runs its own checkout under git: rsyncing over it would throw away uncommitted
+    # work, so it pulls (--ff-only). Then checked: a dirty tree there converges nothing.
     if _remote_peer; then
         _rsh_q "cd $(sh_quote "$tools") && git pull --ff-only" >&2 \
             || { printf '  %-24s %s\n' "$WK_TARGET" "git pull --ff-only failed there" >&2; return 1; }
@@ -850,25 +695,16 @@ t_sync() {
         theirs_ver=$(_rsh_q "$(sh_quote "$tools")/cmd/version" 2>/dev/null || true)
         mine_sha=$(kv_get sha <<<"$mine_ver");     mine_dirty=$(kv_get dirty <<<"$mine_ver")
         theirs_sha=$(kv_get sha <<<"$theirs_ver"); theirs_dirty=$(kv_get dirty <<<"$theirs_ver")
-        # Identity is the commit plus dirtiness of tracked files, compared as
-        # a pair: an untracked .DS_Store or __pycache__ never makes this
-        # differ, a tracked edit on either side does.
+        # The commit plus dirtiness of tracked files: an untracked .DS_Store never differs.
         if [ -z "$mine_sha" ] || [ "$mine_sha" != "$theirs_sha" ] \
             || [ "$mine_dirty" != "$theirs_dirty" ]; then
             printf '  %-24s %s\n' "$WK_TARGET" "pulled, still DIFFERS ($(printf '%s' "$theirs_sha" | cut -c1-12)$([ "$theirs_dirty" = yes ] && printf '+dirty'), this machine has $(printf '%s' "$mine_sha" | cut -c1-12)$([ "$mine_dirty" = yes ] && printf '+dirty'))" >&2
             printf '  %-24s %s\n' "" "$(_peer_why_behind)" >&2
-            # Nothing more is asked of a copy that is not this one: what a
-            # scope word means is that copy's to decide, and an older one
-            # spells them differently -- which is how a command naming one
-            # machine reaches machines it never named. Its mirror and its
-            # snapshot wait for the pull to converge.
             return 1
         fi
         printf '  %-24s pulled, in sync\n' "$WK_TARGET" >&2
 
-        # Its mirror and its snapshot are its own: publishing one on somebody
-        # else's workstation happens only when this run named it
-        # (WK_SYNC_NAMED), never as part of a sweep over every target.
+        # Only when this run named it (WK_SYNC_NAMED), never as part of a sweep over targets.
         if [ -z "${WK_SYNC_NAMED:-}" ]; then
             info "$WK_REMOTE_HOST keeps a store of its own -- its mirror and snapshot untouched"
             log  "  name it for those:  wk sync --tools $WK_TARGET"
@@ -879,9 +715,7 @@ t_sync() {
         return "$rc"
     fi
 
-    # A refused or failed push is this command's verdict, and the mirror is
-    # still fetched: the two are separate furniture, and the tooling refusal
-    # (an uncommitted tree here) is fixed here rather than over there.
+    # A refused push is this command's verdict, and the mirror is still fetched.
     if t_sync_tools ""; then printf '  %-24s pushed %s\n' "$WK_TARGET" "$(tools_head)" >&2
     else rc=1; fi
     ref=$(_remote_reference)
@@ -904,9 +738,7 @@ t_destroy() {
     info "removed remote workspace '$name' from $WK_REMOTE_HOST"
 }
 
-# --- capacity ----------------------------------------------------------------
-# All three answer for the remote machine: lib/resources.sh's job-count
-# calculation needs the far end's numbers, not this one's.
+# All three answer for the remote machine: the job count needs the far end's numbers.
 
 t_cores()  { _remote_probe; echo "${_WK_REMOTE_CORES:-1}"; }
 t_os()     { _remote_probe; echo "${_WK_REMOTE_OS:-linux}"; }

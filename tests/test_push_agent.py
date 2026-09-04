@@ -88,6 +88,7 @@ class _Agent(WkTest):
             "WK_TEST_EXEC_LOG": str(self.log),
             "WK_PUSH_AGENT_SOCK": str(self.sock),
             "WK_PUSH_PAT_FILE": str(self.tmp / "pat"),
+            "WK_PUSH_READ_PAT_FILE": str(self.tmp / "read-pat"),
             "WK_MACHINE": "wk-no-such-machine",
             "XDG_STATE_HOME": str(self.tmp / "state"),
         }
@@ -205,6 +206,138 @@ class TestTheApiToken(_Agent):
         cp = self.sh(f'push_agent_pat_write _fake_exec "{pat}"')
         self.assertNotEqual(cp.returncode, 0)
         self.assertFalse(pat.exists())
+
+
+class TestTheStandingReadToken(_Agent):
+    """The read token is not the switch's: reading GitHub is open whatever
+    position `wk push` is in, so the machine keeps a standing copy of this
+    device's token and every converging call writes or removes it."""
+
+    def read_pat(self):
+        return self.tmp / "read-pat"
+
+    def test_it_is_written_from_the_token_this_device_holds(self):
+        (self.held / "github-pat").write_text("ghp-not-a-real-token\n")
+        cp = self.sh(f'push_agent_pat_sync _fake_exec "{self.read_pat()}"')
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertEqual("ghp-not-a-real-token\n", self.read_pat().read_text())
+        self.assertEqual(0o600, self.read_pat().stat().st_mode & 0o777)
+
+    def test_a_token_withdrawn_here_is_removed_there_by_the_same_call(self):
+        """Write-or-clear, not write-only: a `wk key set github-pat --replace`
+        that stored nothing must not leave the old token on the machine."""
+        self.read_pat().write_text("ghp-the-old-one\n")
+        cp = self.sh(f'push_agent_pat_sync _fake_exec "{self.read_pat()}"')
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertFalse(self.read_pat().exists())
+
+    def test_it_is_never_an_argument_either(self):
+        (self.held / "github-pat").write_text("ghp-not-a-real-token\n")
+        self.sh(f'push_agent_pat_sync _fake_exec "{self.read_pat()}"')
+        self.assertNotIn("ghp-not-a-real-token", self.exec_log())
+
+    def test_a_far_side_that_refuses_is_reported_not_swallowed(self):
+        """The caller warns on this: the machine is stopped, and a workspace
+        reads nothing until the next converging call."""
+        (self.held / "github-pat").write_text("ghp-not-a-real-token\n")
+        cp = self.sh('_no_exec() { return 1; }\n'
+                     f'push_agent_pat_sync _no_exec "{self.read_pat()}" && echo YES || echo NO')
+        self.assertIn("NO", cp.stdout, cp.stdout + cp.stderr)
+
+    def test_its_path_is_beside_the_switchs_and_carries_no_quotes(self):
+        """It reaches `wk doctor` as user-facing text, and the far side's
+        quoting is push_agent_pat_*'s job (TestAPathWithASpaceInIt)."""
+        store = self.tmp / "store"
+        cp = bash('. "$WK_ROOT/lib/common.sh"\n. "$WK_ROOT/lib/store.sh"\n'
+                  'printf "[%s]\\n" "$(push_agent_machine_read_pat)"',
+                  env={**self.env(), "WK_STORE": str(store),
+                       "WK_PUSH_READ_PAT_FILE": ""})
+        self.assertEqual(f"[{store}/read-github-pat]", cp.stdout.strip())
+        self.assertNotIn("$", cp.stdout)
+
+    def test_the_switch_does_not_touch_it(self):
+        """`wk push on|off` is over writing. A read that stopped working when
+        the switch was thrown would be the split not existing."""
+        (self.held / "github-pat").write_text("ghp-not-a-real-token\n")
+        self.read_pat().write_text("ghp-standing\n")
+        for action in ("on", "off"):
+            with self.subTest(action=action):
+                self.run_wk("push", action, env=self.env())
+                self.assertEqual("ghp-standing\n", self.read_pat().read_text())
+
+    def test_both_host_stages_deliver_it_beside_the_injector_unit(self):
+        """./setup is the other convergence point, and the one a machine made
+        from scratch depends on: the unit is installed and the standing token
+        goes in beside it, in that order, or a workspace reads nothing."""
+        for f in ("host/macos/vmtools.sh", "host/linux/sdk.sh"):
+            with self.subTest(host=f):
+                text = (REPO / f).read_text()
+                self.assertIn('push_agent_pat_sync push_agent_exec '
+                              '"$(push_agent_machine_read_pat)"', text)
+                self.assertLess(text.index("unit_start wk-github-inject.service"),
+                                text.index("push_agent_pat_sync"))
+
+    def test_the_switch_writes_and_removes_only_the_write_token(self):
+        (self.held / "github-pat").write_text("ghp-not-a-real-token\n")
+        self.run_wk("push", "on", env=self.env())
+        self.assertTrue((self.tmp / "pat").exists())
+        self.assertFalse(self.read_pat().exists(),
+                         "'wk push on' delivered the standing read token, which is "
+                         "./setup's and 'wk key set github-pat's to deliver")
+        self.run_wk("push", "off", env=self.env())
+        self.assertFalse((self.tmp / "pat").exists())
+
+
+class TestDoctorNamesTheReadToken(WkTest):
+    """New machine-local state is a line in `wk doctor`'s machine-local section
+    or it is a bug: that section is the checklist a reinstall works from.
+    `regenerable`, because both ./setup and `wk key set github-pat` write it
+    again from the token this device holds -- losing it costs nothing."""
+
+    DOCTOR = (REPO / "cmd" / "doctor").read_text()
+    ROW = 'local_state "$(push_agent_machine_read_pat)"'
+
+    def row(self):
+        for line in self.DOCTOR.splitlines():
+            if line.startswith(self.ROW):
+                return line
+        raise AssertionError("the machine-local section does not name the read token")
+
+    def test_it_is_regenerable_and_the_line_names_what_writes_it(self):
+        line = self.row()
+        self.assertIn("regenerable", line)
+        self.assertIn("./setup", line)
+        self.assertIn("wk key set github-pat", line)
+
+    def test_it_is_reported_from_the_machine_and_absent_is_not_a_fault(self):
+        """Driven: the real `local_state` and the real row against a scratch
+        store. WK_IN_VM=1 for the reason tests/test_pi_agent.py gives -- on a
+        macOS host that function forwards a store path into the podman machine,
+        and doctor never starts one."""
+        store = self.tmp / "store"
+        store.mkdir()
+        fn = self.DOCTOR[self.DOCTOR.index("local_state() { # <path> <kind>"):]
+        fn = fn[:fn.index("\n}\n") + 3]
+        script = ('. "$WK_ROOT/lib/common.sh"\n'
+                  f'WK_STORE={store}\n'
+                  '. "$WK_ROOT/lib/store.sh"\n'
+                  "ok()   { printf 'ok %s\\n' \"$*\"; }\n"
+                  "miss() { printf 'miss %s -> %s\\n' \"$1\" \"$2\"; }\n"
+                  "unk()  { printf 'unk %s -> %s\\n' \"$1\" \"$2\"; }\n"
+                  + fn + self.row() + "\n")
+
+        cp = bash(script, env={"WK_IN_VM": "1"})
+        self.assertEqual(0, cp.returncode, cp.stdout + cp.stderr)
+        out = cp.stdout + cp.stderr
+        self.assertTrue(out.startswith("unk "), out)
+        self.assertIn("read-github-pat", out)
+
+        (store / "read-github-pat").write_text("ghp-not-a-real-token\n")
+        cp = bash(script, env={"WK_IN_VM": "1"})
+        out = cp.stdout + cp.stderr
+        self.assertTrue(out.startswith("ok "), out)
+        self.assertIn("regenerable", out)
+        self.assertNotIn("ghp-not-a-real-token", out)
 
 
 class TestAPathWithASpaceInIt(_Agent):
@@ -438,10 +571,10 @@ class TestTheSourceHasNoMoveLeft(unittest.TestCase):
         bind-mounts."""
         for f in ("host/macos/vmtools.sh", "host/linux/sdk.sh"):
             with self.subTest(host=f):
-                self.assertIn("unit_install wk-ssh-agent.service ",
+                self.assertIn("unit_start wk-ssh-agent.service ",
                               (REPO / f).read_text())
         body = (REPO / "host" / "units" / "wk-ssh-agent.service").read_text()
-        self.assertIn("ssh-agent -D -a %t/wk/ssh-agent.sock", body)
+        self.assertIn("ssh-agent -a %t/wk/ssh-agent.sock", body)
 
 
 def _machine(cmd, timeout=60):

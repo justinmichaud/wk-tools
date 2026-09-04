@@ -8,10 +8,6 @@
       "Read(//tmp/**)",
       "Read(//private/tmp/**)"
     ],
-    "additionalDirectories": [
-      "/tmp",
-      "/private/tmp"
-    ],
     "deny": [
       "Bash(ninja *)",
       "Bash(*/ninja *)",
@@ -31,9 +27,12 @@
       "Bash(*/run-webkit-tests *)",
       "Bash(run-benchmark *)",
       "Bash(*/run-benchmark *)"
+    ],
+    "additionalDirectories": [
+      "/tmp",
+      "/private/tmp"
     ]
   },
-  "model": "claude-fable-5-1[1m]",
   "hooks": {
     "PreToolUse": [
       {

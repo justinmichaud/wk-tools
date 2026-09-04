@@ -1,17 +1,11 @@
 #!/bin/sh
-# wk-tools/bashrc — shared rc, sourced by BOTH bash and zsh.
-#
-# Must stay POSIX-clean at the top level; shell-specific code goes inside the
-# $BASH_VERSION / $ZSH_VERSION guards below.
-#
-# Escape hatches:
-#   NO_ZSH=1 bash     -> stay in bash
-#   HISTFILE=...      -> override history location (set before sourcing)
+# wk-tools/bashrc — shared rc, sourced by BOTH bash and zsh. POSIX-clean at the
+# top level; shell-specific code goes inside the $BASH_VERSION / $ZSH_VERSION
+# guards. NO_ZSH=1 stays in bash; HISTFILE, set before sourcing, wins.
 
 # --- 0. Interactive-only guard -----------------------------------------------
-# ~/.bashrc is sourced non-interactively sometimes (ssh with
-# SSH_SOURCE_BASHRC, scp/rsync); bail early rather than corrupt those sessions.
-# No bare `return`: it errors under zsh when the file isn't sourced.
+# ~/.bashrc is sourced non-interactively by ssh with SSH_SOURCE_BASHRC and by
+# scp/rsync. No bare `return`: it errors under zsh when the file is not sourced.
 case $- in
   *i*) _WK_INTERACTIVE=1 ;;
   *)   _WK_INTERACTIVE=  ;;
@@ -20,22 +14,16 @@ esac
 if [ -n "$_WK_INTERACTIVE" ]; then
 
 # --- 0b. Unknown TERM fallback (kitty and friends, over ssh) -----------------
-# kitty/wezterm/alacritty set TERM to their own name; ssh forwards it as-is,
-# and unless the remote has that terminfo installed (`kitten ssh` does this
-# automatically, plain `ssh` never does), any program that asks terminfo for
-# an escape sequence -- zsh's line editor included -- gets nothing back: the
-# "Backspace prints ^H", "Delete does nothing" family of complaints.
-#
-# xterm-256color ships everywhere and is close enough (these terminals still
-# speak classic xterm sequences) to fix all of it at once.
+# kitty/wezterm/alacritty set TERM to their own name and ssh forwards it as-is;
+# unless the remote has that terminfo (`kitten ssh` installs it, plain `ssh`
+# never does), terminfo answers nothing. xterm-256color ships everywhere.
 if ! infocmp "$TERM" >/dev/null 2>&1; then
   export TERM=xterm-256color
 fi
 
 # --- 1. Switch bash -> zsh ---------------------------------------------------
-# Skipped under zsh (no $BASH_VERSION, so `shopt` doesn't blow up when
-# ~/.zshrc sources this file) and for TERM=dumb / Emacs subshells, where zsh's
-# line editor and prompt escapes break shell-mode / tramp.
+# Skipped under zsh, so `shopt` never runs when ~/.zshrc sources this file, and
+# for TERM=dumb / Emacs subshells, where zsh's prompt escapes break tramp.
 
 if [ -n "$BASH_VERSION" ] \
    && [ -z "$BASH_TO_ZSH_GUARD" ] \
@@ -44,8 +32,7 @@ if [ -n "$BASH_VERSION" ] \
    && [ -z "$INSIDE_EMACS" ] \
    && [ -t 0 ]
 then
-  # command -v first (Nix, ~/.local, source builds, asdf); Homebrew is often
-  # missing from PATH under a stripped SSH environment before ~/.zprofile runs.
+  # Homebrew is often missing from PATH under a stripped ssh environment.
   _wk_zsh=""
   for _wk_c in \
     "$(command -v zsh 2>/dev/null)" \
@@ -63,10 +50,7 @@ then
     export SHELL="$_wk_zsh"
 
     # macOS: every Terminal.app/iTerm2 tab is a login shell, so `exec zsh -l`
-    # would re-run path_helper via /etc/zprofile, rebuilding PATH with system
-    # paths first and shoving wk-tools and any local JSC build behind
-    # /usr/bin. So: login semantics on Linux, plain exec on Darwin (~/.zshrc
-    # owns PATH there).
+    # re-runs path_helper via /etc/zprofile, putting system paths first.
     if [ "$(uname -s)" = "Darwin" ]; then
       exec "$_wk_zsh"
     elif shopt -q login_shell; then
@@ -75,15 +59,15 @@ then
       exec "$_wk_zsh"
     fi
 
-    # Only reached if exec failed: stay in bash, don't leave a broken guard.
+    # Only reached if exec failed.
     unset BASH_TO_ZSH_GUARD
   fi
   unset _wk_zsh
 fi
 
 # --- 2. History — shared settings --------------------------------------------
-# HISTFILE stays on local disk: inside a synced wk-tools (git, Dropbox,
-# iCloud) it would get clobbered by concurrent writes from two machines.
+# HISTFILE stays on local disk: a synced directory would be clobbered by two
+# machines writing at once.
 : "${HISTFILE:=$HOME/.${_WK_SHELL_NAME:-sh}_history}"
 
 if [ -n "$ZSH_VERSION" ]; then
@@ -95,13 +79,12 @@ fi
 # --- 3. History — zsh --------------------------------------------------------
 if [ -n "$ZSH_VERSION" ]; then
 
-  # HISTSIZE (in-memory) must be >= SAVEHIST (on-disk) or the file truncates
-  # to the smaller value on every write; kept larger for headroom.
+  # HISTSIZE (memory) >= SAVEHIST (disk), or the file truncates on every write.
   HISTSIZE=1200000
   SAVEHIST=1000000
 
-  # macOS's /etc/zshrc sets small history limits first; these win only
-  # because ~/.zshrc sources this file after.
+  # macOS's /etc/zshrc sets small limits first; these win because ~/.zshrc
+  # sources this file after.
 
   setopt EXTENDED_HISTORY        # write timestamp + duration per entry
   setopt APPEND_HISTORY          # append at exit, never truncate the file
@@ -114,35 +97,24 @@ if [ -n "$ZSH_VERSION" ]; then
   setopt HIST_IGNORE_SPACE       # leading space = deliberate omission (secrets)
   setopt HIST_FIND_NO_DUPS       # dedupe search results only, not the file
 
-  # Explicitly off: each of these deletes entries, contradicting the goal.
+  # Explicitly off: each of these deletes entries.
   unsetopt HIST_IGNORE_ALL_DUPS
   unsetopt HIST_SAVE_NO_DUPS
   unsetopt HIST_EXPIRE_DUPS_FIRST
   unsetopt HIST_IGNORE_DUPS
 
-  # SHARE_HISTORY is the live-import alternative to INC_APPEND_HISTORY_TIME
-  # (up-arrow in one terminal sees another's commands). To switch:
-  #     unsetopt INC_APPEND_HISTORY_TIME; setopt SHARE_HISTORY
   unsetopt SHARE_HISTORY
 
   # --- 3b. Keymap and keys ---------------------------------------------------
-  # The keymap is chosen *before* any key is bound, and nothing after this
-  # chooses again: `bindkey -e` links a fresh emacs keymap over `main`, so a
-  # binding made while `main` was viins is discarded by it. That is machine-
-  # dependent -- zsh picks vi mode when $EDITOR/$VISUAL contains "vi", so a
-  # host without helix starts in viins and a host with it starts in emacs --
-  # which is how Home worked on one machine and not the next. WK_ZSH_VI=1
-  # asks for vi mode; then the bindings below land in viins instead.
+  # The keymap is chosen before any key is bound: `bindkey -e` links a fresh
+  # emacs keymap over `main`, discarding bindings made while it was viins. zsh
+  # picks vi mode when $EDITOR/$VISUAL contains "vi"; WK_ZSH_VI=1 asks for it.
   if [ -z "${WK_ZSH_VI:-}" ]; then bindkey -e; else bindkey -v; fi
 
-  # Bound explicitly rather than left to zle's terminfo defaults: the TERM
-  # fallback above covers "no entry"; this covers "entry present but wrong"
-  # (e.g. `kbs` still ^H while kitty sends ^?).
-  #
-  # Home and End arrive in two encodings and both are bound, because which one
-  # a terminal sends is not ours to choose: zle turns on application cursor
-  # mode (terminfo `smkx`) for the duration of a prompt, and a terminal in that
-  # mode sends ^[OH / ^[OF where it otherwise sends ^[[H / ^[[F.
+  # Bound explicitly: zle's terminfo defaults cover "no entry" but not "entry
+  # present but wrong" (`kbs` still ^H while kitty sends ^?). zle turns on
+  # application cursor mode (`smkx`) for a prompt, where a terminal sends
+  # ^[OH / ^[OF instead of ^[[H / ^[[F, so both encodings are bound.
   bindkey "^?"    backward-delete-char  # Backspace
   bindkey "^H"    backward-delete-char  # Backspace, terminals/ttys still on kbs=^H
   bindkey "^[[3~" delete-char           # Delete
@@ -158,7 +130,7 @@ if [ -n "$ZSH_VERSION" ]; then
 fi
 
 # --- 4. History — bash -------------------------------------------------------
-# Reached on hosts with no zsh installed, or under NO_ZSH=1.
+# Reached on hosts with no zsh, or under NO_ZSH=1.
 if [ -n "$BASH_VERSION" ]; then
 
   shopt -s histappend   # append, don't overwrite — without this the last shell
@@ -166,8 +138,7 @@ if [ -n "$BASH_VERSION" ]; then
   shopt -s cmdhist      # multi-line command -> one history entry
   shopt -s lithist      # ...preserving real newlines instead of semicolons
 
-  # bash 4.3+ understands HISTSIZE=-1 (unlimited); macOS's system bash 3.2
-  # doesn't, so fall back to a large finite value there.
+  # bash 4.3+ understands HISTSIZE=-1; macOS's system bash 3.2 does not.
   if [ "${BASH_VERSINFO[0]}" -gt 4 ] 2>/dev/null || \
      { [ "${BASH_VERSINFO[0]}" -eq 4 ] && [ "${BASH_VERSINFO[1]}" -ge 3 ]; } 2>/dev/null
   then
@@ -181,27 +152,24 @@ if [ -n "$BASH_VERSION" ]; then
   HISTCONTROL=ignorespace          # not ignoredups: that discards entries
   HISTTIMEFORMAT='%F %T '          # also makes bash write timestamps to file
 
-  # Flush after every command; append to any existing PROMPT_COMMAND rather than replacing it.
+  # Append to any existing PROMPT_COMMAND rather than replacing it.
   case "$PROMPT_COMMAND" in
     *history\ -a*) : ;;
     "")            PROMPT_COMMAND='history -a' ;;
     *)             PROMPT_COMMAND="${PROMPT_COMMAND%;}; history -a" ;;
   esac
-  # Live cross-terminal sharing: 'history -a; history -c; history -r' instead.
 
 fi
 
 # --- 5. History backup -------------------------------------------------------
-# Append-only settings protect against clobbering, not truncation or
-# corruption (full disk, interrupted write, a stray `>` redirect). One dated
-# snapshot per day, 30 kept; costs nothing after the first shell of the day.
+# Append-only protects against clobbering, not truncation or corruption.
 _wk_hb_dir="${HISTBACKUP_DIR:-$HOME/.history-backups}"
 if [ -s "$HISTFILE" ]; then
   _wk_hb_file="$_wk_hb_dir/$(basename "$HISTFILE").$(date +%Y%m%d)"
   if [ ! -f "$_wk_hb_file" ]; then
     if mkdir -p "$_wk_hb_dir" 2>/dev/null; then
       cp -p "$HISTFILE" "$_wk_hb_file" 2>/dev/null
-      # Prune to the 30 newest; -t is supported by both BSD and GNU ls.
+      # -t is supported by both BSD and GNU ls.
       ls -1t "$_wk_hb_dir"/ 2>/dev/null | tail -n +31 | while IFS= read -r _wk_f; do
         rm -f "$_wk_hb_dir/$_wk_f"
       done
@@ -212,20 +180,14 @@ fi
 unset _wk_hb_dir _wk_f
 
 # --- 5b. Prompt --------------------------------------------------------------
-# Shows which machine, what it currently *is* (workstation / bench system /
-# shared build box / workspace), where you are, and what git thinks -- none of
-# it is in zsh's default prompt, and mixing any of them up costs real time.
-#
-# Runs before every command, so: nothing that forks unless it must
-# (machine/role/workspace read once at source time; git branch from
-# .git/HEAD, not `git`), and nothing that can block (no ssh, no podman, above
-# all no `wk status`, which walks the fleet over the network).
+# Runs before every command, so nothing forks unless it must and nothing may
+# block -- no ssh, no podman, no `wk status`.
 #
 # What this machine is, from local evidence only, most-specific marker first:
 #   ~/.wk-workspace   this machine *is* a workspace, and names it (lib/target.sh)
 #   ~/.wk-remote      the far end of a remote target: a shared build box
-#   /etc/wk-image     a system wk built and booted for measuring -- the same
-#                     marker `wk boot --status` reads, so the prompt agrees with it
+#   /etc/wk-image     a system wk built and booted for measuring, the same
+#                     marker `wk boot --status` reads
 _wk_ps_role=host
 _wk_ps_name=$( { hostname -s 2>/dev/null || echo '?'; } | tr '[:upper:]' '[:lower:]' )
 _wk_ps_ws=""
@@ -240,20 +202,18 @@ elif [ -f /etc/wk-image ]; then
   _wk_ps_role=bench
 fi
 
-# targets/local.sh keeps its build record in XDG state (the host's isn't
-# visible from in here); only a workspace has one, read as one small file.
+# targets/local.sh keeps its build record in XDG state; only a workspace has one.
 _wk_ps_build=""
 [ "$_wk_ps_role" = ws ] && \
   _wk_ps_build="${XDG_STATE_HOME:-$HOME/.local/state}/wk/ws/$_wk_ps_ws/build.status"
 
 if [ -n "$ZSH_VERSION" ]; then
   setopt PROMPT_SUBST
-  # zstat, so the index size below costs no process. Must survive being absent too.
+  # zstat, so the index size below costs no process.
   zmodload zsh/stat 2>/dev/null || true
 
-  # Fish-style path: every component but the last cut to its first letter,
-  # only once the whole thing crowds the line -- a wrap is worse than an
-  # abbreviation, and the last component is what's being worked in.
+  # Fish-style path: every component but the last cut to its first letter, once
+  # the whole thing crowds the line.
   _wk_ps_cwd() {
     local p=${PWD/#$HOME/'~'}
     if (( ${#p} <= 38 )); then print -rn -- "$p"; return; fi
@@ -267,14 +227,9 @@ if [ -n "$ZSH_VERSION" ]; then
     print -rn -- "$out"
   }
 
-  # Branch read from .git/HEAD rather than asked of `git rev-parse` (two
-  # processes and a lock). Walks up since a prompt is often several
-  # directories inside the checkout; follows `gitdir:` for a worktree/submodule.
-  #
-  # Dirtiness is the expensive half, spelled honestly: `*` means git was asked
-  # and said yes, `?` means the index was too big to check before every
-  # prompt -- as in a WebKit checkout (~50 MB index; `git diff` there is
-  # seconds, not milliseconds). Never a blank where a `*` might belong.
+  # .git/HEAD rather than `git rev-parse` (two processes and a lock); follows
+  # `gitdir:` for a worktree or submodule. `*` means git was asked and said yes,
+  # `?` that the index was too big -- a WebKit checkout's is ~50 MB.
   _wk_ps_git() {
     local d=$PWD g="" head br dirty="" l
     while [[ -n $d ]]; do
@@ -304,8 +259,7 @@ if [ -n "$ZSH_VERSION" ]; then
     print -rn -- " %F{magenta}${br}${dirty}%f"
   }
 
-  # `running` in the build-status file is a claim, not a fact -- lib/detach.sh
-  # adjudicates it; this just echoes the file's own word, `wk status` verifies it.
+  # `running` in the build-status file is a claim; `wk status` verifies it.
   _wk_ps_buildmark() {
     [[ -n $_wk_ps_build && -r $_wk_ps_build ]] || return 0
     local state="" config="" l
@@ -319,8 +273,7 @@ if [ -n "$ZSH_VERSION" ]; then
     print -rn -- " %F{yellow}building ${config}%f"
   }
 
-  # host green, bench red, shared/workspace blue: the two that are someone
-  # else's machine or sandbox match, and "this reboot is a measurement" stands out.
+  # host green, bench red, shared/workspace blue.
   case $_wk_ps_role in
     bench)  _wk_ps_hue=red ;;
     ws)     _wk_ps_hue=blue ;;
@@ -328,14 +281,13 @@ if [ -n "$ZSH_VERSION" ]; then
     *)      _wk_ps_hue=green ;;
   esac
 
-  # %(?..) is zsh's own last-exit-code test; a green arrow over a failed command would lie.
+  # %(?..) is zsh's own last-exit-code test.
   PROMPT='%F{cyan}${_wk_ps_name}%f:%F{${_wk_ps_hue}}${_wk_ps_role}%f $(_wk_ps_cwd)$(_wk_ps_git)$(_wk_ps_buildmark)%(?.. %F{red}exit %?%f) %(!.#.❯) '
 fi
 
 if [ -n "$BASH_VERSION" ]; then
-  # Fallback for a machine with no zsh (this rc execs zsh when it finds one,
-  # so this is boards and stripped images). bash can't run this without a
-  # subshell per prompt, so only the branch is worth the fork.
+  # For boards and stripped images with no zsh. bash needs a subshell per
+  # prompt, so only the branch is worth the fork.
   _wk_ps_bash_git() {
     local d=$PWD g="" head
     while [ -n "$d" ]; do
@@ -358,13 +310,8 @@ fi  # _WK_INTERACTIVE
 unset _WK_INTERACTIVE
 
 # --- 6. Editor and PATH ------------------------------------------------------
-# Deliberately minimal. This file sets up history and shell behaviour and
-# nothing else -- build configuration, job counts and toolchain paths belong to
-# `wk` and to the workspace, not to every interactive shell on the host.
-
-# A machine that already exports one keeps it: on a shared build box this rc is
-# sourced into somebody's existing login environment, and overwriting what their
-# own profile set is not this file's business. Only the default is ours.
+# A machine that already exports one keeps it: on a shared build box this rc
+# lands in somebody's existing login environment.
 if [ -z "${EDITOR:-}" ]; then
   if command -v hx >/dev/null 2>&1; then
     EDITOR=hx
@@ -378,13 +325,11 @@ export EDITOR
 : "${VISUAL:=$EDITOR}"
 export VISUAL
 
-# lazygit sits beside helix (container/firstrun.sh) with no home inside it:
-# helix's `:sh`/`:!` capture output rather than attaching a terminal, so `lg`
-# means suspend or switch to a second terminal instead. See container/helix/README.md.
+# helix's `:sh`/`:!` capture output rather than attaching a terminal, so lazygit
+# gets an alias of its own instead.
 command -v lazygit >/dev/null 2>&1 && alias lg=lazygit
 
-# What goes on PATH is shell/path.sh's decision, not this file's: a container
-# exec reads no rc file and needs the same answer (container/proxy/ensure-bridge.sh).
+# What goes on PATH is shell/path.sh's decision: a container exec reads no rc.
 WK_TOOLS_DIR="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]:-$0}")/.." 2>/dev/null && pwd)"
 [ -z "$WK_TOOLS_DIR" ] || . "$WK_TOOLS_DIR/shell/path.sh"
 unset WK_TOOLS_DIR
@@ -394,22 +339,12 @@ alias clear="clear && printf '\033[3J'"
 
 # --- 6b. The agents' credentials ---------------------------------------------
 # A workspace the host has given a credential starts able to use it: no /login,
-# no browser, and no login Keychain -- which a macOS guest reached over ssh, or
-# through an editor's remote server, does not have unlocked anyway. `wk key set
-# <name>` stores one; each target driver puts it here, and this is its only
-# reader.
-#
-# Each file holds the raw value and nothing else, so a container can make it a
-# symlink onto the read-only /secrets mount and pick up a rotation without being
-# rebuilt. A dangling symlink is simply "not set", and so is no file: a
-# workspace without the Claude token asks the person to /login, which still
-# works, and one without the LiteLLM key has a pi that cannot reach that
-# endpoint.
-#
-# The pairs are spelled out here rather than read from wk_agent_secrets
-# (lib/store.sh): this rc is sourced by every shell on every machine in the
-# fleet, including ones with no store to read and no wk library sourced, and it
-# forks nothing -- tests/test_pi_agent.py holds the two lists to each other.
+# no browser, and no login Keychain -- which a macOS guest reached over ssh does
+# not have unlocked anyway. Each file holds the raw value and nothing else, so a
+# container can point it at the read-only /secrets mount and pick up a rotation
+# without being rebuilt. The pairs are spelled out rather than read from
+# wk_agent_secrets, since this rc runs on machines with no store and no wk
+# library; tests/test_pi_agent.py holds the two lists to each other.
 for _wk_sec in .wk-agent-token:CLAUDE_CODE_OAUTH_TOKEN .wk-litellm-key:LITELLM_API_KEY; do
   _wk_sec_file="$HOME/${_wk_sec%%:*}"
   _wk_sec_var="${_wk_sec#*:}"
@@ -423,26 +358,19 @@ for _wk_sec in .wk-agent-token:CLAUDE_CODE_OAUTH_TOKEN .wk-litellm-key:LITELLM_A
 done
 unset _wk_sec _wk_sec_file _wk_sec_var _wk_sec_val
 
-# The claude.ai login credential is a file the Claude CLI rewrites in place,
-# not a value (README.md, "wk key set"), so it is not exported: the CLI is
-# pointed at the one directory every container on this machine shares
-# (wk_agent_rw_dir, lib/store.sh), which is also where its own
-# `.storage-write` lock goes. The directory and not a symlink into it: the CLI
-# writes through a temp file and a rename, which would replace the symlink
-# with a private copy on the first refresh.
-#
-# Set only where a mount put one: this rc is read on every machine in the
-# fleet, and naming a directory on a workstation would send the person's own
-# `claude` looking for a Keychain item under a name nothing wrote.
+# The claude.ai login credential is a file the CLI rewrites in place, so it is
+# not exported: the CLI is pointed at the directory every container on this
+# machine shares (wk_agent_rw_dir), which also holds its `.storage-write` lock.
+# A directory, not a symlink into it: the CLI writes through a temp file and a
+# rename. Set only where a mount put one, or a workstation's own `claude` would
+# look for a Keychain item under a name nothing wrote.
 if [ -d /agent-rw ]; then
   export CLAUDE_SECURESTORAGE_CONFIG_DIR=/agent-rw
 fi
 
 # --- 7. Completion -----------------------------------------------------------
-# After PATH (section 6) so `command -v wk` sees it; interactive only, like
-# history/prompt above (re-checked since section 5b already unset $_WK_INTERACTIVE).
-# One command generates both shells' scripts (`wk completion bash`/`zsh`);
-# this just picks which to ask for and evals it.
+# After PATH so `command -v wk` sees it; interactive re-checked, since section
+# 5b already unset $_WK_INTERACTIVE.
 case $- in
   *i*)
     if command -v wk >/dev/null 2>&1; then

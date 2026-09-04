@@ -7,39 +7,28 @@
 # (buildroot_webkit) via t_spawn from /opt/wk-tools, the same host/worker
 # split as buildroot-build.sh. Runs detached: nothing here may fail silently.
 #
-# Everything is buildroot's own developer workflow, nothing of it re-done
-# here (buildroot manual, "Using Buildroot during development"):
+# Built with buildroot's own developer workflow (buildroot manual, "Using
+# Buildroot during development"): local.mk's WPEWEBKIT_OVERRIDE_SRCDIR points
+# the wpewebkit package at the workspace checkout, `make wpewebkit-rebuild`
+# rebuilds it, `make target-finalize` strips and drops development files, and
+# packages-file-list.txt records which files the package installed -- the slot
+# is those files.
 #
-#   local.mk        WPEWEBKIT_OVERRIDE_SRCDIR points the wpewebkit package at
-#                   the workspace checkout, moved to the commit; buildroot
-#                   rsyncs the source into its build directory and configures,
-#                   builds and installs it exactly as it did the image's own
-#   make wpewebkit-rebuild
-#                   the package, again, from that source -- incremental
-#   make target-finalize
-#                   what buildroot does to the root filesystem before an
-#                   image: strip, drop development files
-#   packages-file-list.txt
-#                   buildroot's own record of which files the package
-#                   installed (step_pkg_size); the slot is those files
-#
-# What that leaves behind: output/target holds the slot's WebKit until the
-# next image build, which drops local.mk and rebuilds the package from the
-# pinned tarball first (image/buildroot-build.sh), so an image never ships
-# the last slot built. The identifier a slot is told apart by is the
-# build-id its linker wrote (BR2_TARGET_LDFLAGS, set by the image build).
+# output/target keeps the slot's WebKit until the next image build, which drops
+# local.mk and rebuilds from the pinned tarball first, so an image never ships
+# the last slot built. A slot is told apart by the build-id its linker wrote
+# (BR2_TARGET_LDFLAGS, set by the image build).
 
 set -euo pipefail
 
-# This is wk's own build: the build wall (container/bin/wk-build-wall) lets
-# ninja/cmake/make through for it and refuses them to an agent's shell.
+# The build wall (container/bin/wk-build-wall) lets ninja/cmake/make through
+# for wk's own builds and refuses them to an agent's shell.
 export WK_BUILD=1
 
 SRC=/src/WebKit
-# t_spawn (targets/container.sh) execs this directly with no WK_ROOT and no
-# lib/target.sh sourced, so there is no t_mirror_dir to ask; it always runs
-# already inside a container, at the fixed bind mount that driver names
-# (t_mirror_dir there, tests/test_mirror_path.py's named exception).
+# t_spawn (targets/container.sh) execs this with no WK_ROOT and no
+# lib/target.sh sourced, so there is no t_mirror_dir to ask: this is the fixed
+# bind mount that driver names (tests/test_mirror_path.py's named exception).
 MIRROR=/mirror/WebKit.git
 NAME=""; COMMIT=""; SLOT=""; JOBS=""
 
@@ -88,8 +77,7 @@ BR_EXT=""
     && BR_EXT="BR2_EXTERNAL=/opt/wk-tools/image/buildroot/external"
 
 # --- the source ------------------------------------------------------------------
-# The workspace's own checkout, moved to the commit. Refused dirty: a slot
-# must be reproducible from its sha alone.
+# Refused dirty: a slot must be reproducible from its sha alone.
 dirty=$(git -C "$SRC" status --porcelain 2>/dev/null | wc -l | tr -d ' ')
 [ "$dirty" = 0 ] || fail "$SRC has $dirty uncommitted change(s); a slot is built from a
     commit and nothing else. Commit or discard them in the workspace first."
@@ -108,9 +96,8 @@ say "jobs        -j$JOBS"
 
 # --- the override ----------------------------------------------------------------
 # BR2_PACKAGE_OVERRIDE_FILE is $(CONFIG_DIR)/local.mk on this tree. The rsync
-# exclusions keep buildroot's copy of the checkout to what a build reads:
-# WebKitBuild is this very tree, LayoutTests is a gigabyte of nothing a
-# compiler opens.
+# exclusions keep buildroot's copy to what a build reads: WebKitBuild is this
+# very tree, LayoutTests is a gigabyte no compiler opens.
 cat > "$WORKDIR/local.mk" <<EOF
 # Written by wk (image/buildroot-webkit.sh) for slot '$SLOT'; dropped by the
 # next image build. Points the wpewebkit package at the workspace checkout.
@@ -119,15 +106,14 @@ WPEWEBKIT_OVERRIDE_SRCDIR_RSYNC_EXCLUSIONS = --exclude WebKitBuild --exclude Lay
 EOF
 
 # --- the build -------------------------------------------------------------------
-# Under the guard every heavy step in a target runs under (build/guard.sh).
 . /opt/wk-tools/build/guard.sh
 build_start=$(date +%s)
 say "building (make wpewebkit-rebuild; the output below is the whole account of it)"
 # shellcheck disable=SC2086
 # BR2_JLEVEL on make's command line, not in the environment: it is a kconfig
-# symbol buildroot reads from .config, and an environment value loses to that
-# include. It is what buildroot's ninja packages (wpewebkit) size themselves
-# by, and its default is nproc+1 -- five times the guard's 2 GB/job budget.
+# symbol read from .config, and an environment value loses to that include. It
+# is what buildroot's ninja packages size themselves by, and its default is
+# nproc+1 -- five times the guard's 2 GB/job budget.
 WK_MB_PER_JOB=2048 guard_run "$JOBS" -- env FORCE_UNSAFE_CONFIGURE=1 \
     make -C "$WORKDIR" $BR_EXT BR2_JLEVEL="$JOBS" wpewebkit-rebuild \
     || fail "the WebKit build failed. The last lines above are the failing step."
@@ -138,9 +124,8 @@ make -C "$WORKDIR" $BR_EXT target-finalize >/dev/null || fail "target-finalize f
 
 # --- the slot --------------------------------------------------------------------
 # The files buildroot recorded installing for wpewebkit, as they are in
-# output/target after target-finalize (the development files it removed are
-# not there to copy). A fresh root every time: an install over a previous one
-# keeps files the new commit no longer produces.
+# output/target after target-finalize. A fresh root every time: an install over
+# a previous one keeps files the new commit no longer produces.
 rm -rf "$ROOT"; mkdir -p "$ROOT"
 sed -n 's/^wpewebkit,//p' "$OUT/build/packages-file-list.txt" > "$SLOTDIR/files.txt"
 [ -s "$SLOTDIR/files.txt" ] || fail "packages-file-list.txt records nothing for wpewebkit"

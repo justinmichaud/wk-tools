@@ -1,10 +1,9 @@
 #!/usr/bin/env bash
 #
-# Runs on a shared build machine, over ssh from `wk remote setup`.
-#
-# Nothing here needs root: these are other people's machines. Everything lives
-# under $HOME with prerequisites checked, never installed. Non-interactive:
-# cleanup is a decision left to `wk remote setup`, which has a terminal.
+# Runs on a shared build machine, over ssh from `wk remote setup`. Nothing here
+# needs root -- these are other people's machines -- so everything lives under
+# $HOME and prerequisites are checked, never installed. Non-interactive:
+# cleanup is a decision for `wk remote setup`, which has a terminal.
 
 set -euo pipefail
 
@@ -19,8 +18,7 @@ ROOT="${WK_REMOTE_ROOT:-$HOME/wk}"
 
 info "provisioning $(hostname) for target '$TARGET'"
 
-# --- prerequisites -----------------------------------------------------------
-# git is load-bearing (checkout, serialisation between builds); anything else fails with its own error.
+# git is load-bearing (the checkout, and the lock that serialises builds).
 _missing=""
 for _t in git; do
     have "$_t" || _missing="$_missing $_t"
@@ -29,20 +27,15 @@ done
     Installing needs root, and this never asks for it. Ask the machine's
     administrators, or use a target that has them."
 
-# ccache's absence is silent otherwise: builds would just stay cold forever.
 have ccache || warn "no ccache on this machine -- every build starts cold"
 
-# --- the markers -------------------------------------------------------------
 ensure_dir "$ROOT"
 ensure_dir "$ROOT/ws"
 ensure_dir "$ROOT/cache/ccache"
 
-# inputs= is what provisioned this machine: the hash of remote/provision.sh and
-# remote/deps.sh, computed on the driving side and handed over
-# (remote_provision_inputs_hash, targets/remote.sh) so both ends cannot hash
-# differently. A record of what produced this state, not a verdict about it:
-# `wk doctor --all` recomputes the hash and compares, which is how a machine
-# provisioned before a change to either file says so instead of looking current.
+# inputs= is the hash of this file and remote/deps.sh, computed on the driving
+# side (remote_provision_inputs_hash, targets/remote.sh) so both ends cannot
+# hash differently; `wk doctor --all` recomputes it and compares.
 write_file "$HOME/.wk-remote" 0644 <<EOF
 # wk: this machine hosts wk remote workspaces. Written by remote/provision.sh.
 #
@@ -55,21 +48,13 @@ root=$ROOT
 inputs=${WK_REMOTE_INPUTS:-}
 EOF
 
-# No second conf: targets/remote.sh recomputes WK_TARGET_KIND, WK_REMOTE_LOCAL
-# and WK_REMOTE_ROOT from this marker.
-# --- the push keys, and how ssh finds them -----------------------------------
-# ~/.ssh/config is often shared over NFS with several machines, so ssh is
-# pointed at the key per checkout (`core.sshCommand`) instead. `wk key ensure`
-# generates it, into `push-keys` beside the secrets directory: that is where a
-# private half lives on every machine (wk_push_held_dir, lib/store.sh).
-#
-# The private half itself, and no agent -- unlike a container or a guest, which
-# name a public half and an ssh-agent socket. This is a plain checkout on a
-# shared machine with no container around it, so an agent here would keep the
-# key from nothing: the key file and the process that would use it are in one
-# filesystem. `wk ai claude` refuses this target for the same reason
-# (cmd/verify), and `wk push` on this machine says so rather than throwing a
-# switch it cannot throw (docs/HANDOFF-sandboxing.md).
+# No second conf: targets/remote.sh recomputes WK_TARGET_KIND and the rest.
+
+# ~/.ssh/config is often shared over NFS between machines, so ssh is pointed at
+# the key per checkout (`core.sshCommand`); `wk key ensure` generates it into
+# `push-keys` (wk_push_held_dir, lib/store.sh). The private half, and no agent:
+# the key and the process that would use it are in one filesystem here, which is
+# why `wk ai claude` refuses this target too (cmd/verify).
 ensure_dir "$ROOT/secrets" 0700
 ensure_dir "$ROOT/push-keys" 0700
 write_file "$ROOT/ssh/config" 0600 <<EOF
@@ -82,27 +67,18 @@ write_file "$ROOT/ssh/config" 0600 <<EOF
 $(WK_ROOT="$TOOLS" bash -c '. "$1/lib/common.sh"; . "$1/lib/store.sh"; wk_ssh_alias_blocks "$2"' _ "$TOOLS" "$ROOT/push-keys")
 EOF
 
-# --- git: identity, and how fast git is here ---------------------------------
-# An include, so the identity is declared once for every machine (dotfiles/
-# gitconfig) rather than copied per box -- and so the settings that decide
-# whether `git status` in a WebKit checkout answers in milliseconds
-# (fsmonitor, untrackedCache, manyFiles) reach a build box too. An editor
-# driving this machine over ssh asks git that question on every keystroke.
-#
-# --replace-all, so a re-run after the checkout moves does not leave the old
-# path behind: git reads every include.path it finds.
+# An include, so the identity is declared once for every machine
+# (dotfiles/gitconfig) and the settings that keep `git status` in a WebKit
+# checkout fast reach a build box too -- an editor over ssh asks on every
+# keystroke. --replace-all: git reads every include.path it finds.
 git config --global --replace-all include.path "$TOOLS/dotfiles/gitconfig"
 changed "gitconfig includes $TOOLS/dotfiles/gitconfig"
 [ -f "$HOME/.gitignore" ] || printf '.DS_Store\n.cache\ncompile_commands.json\n' > "$HOME/.gitignore"
 
 # The include is not the last word: git takes a key's last value, so a [user]
 # section below it in ~/.gitconfig wins and every commit from this box carries
-# it -- silently, until the commit is pushed. One of these machines had
-# `user.name = no`, an answer to a prompt long ago.
-#
-# So the shadowing value in *this account's* ~/.gitconfig is removed and the
-# include allowed to answer. Only that file: a value from /etc/gitconfig belongs
-# to the machine and is reported instead.
+# it -- one machine here had `user.name = no`. Only *this account's* file is
+# touched; /etc/gitconfig is reported instead.
 for _id in name email; do
     _want=$(git config --file "$TOOLS/dotfiles/gitconfig" --get "user.$_id" || true)
     [ -n "$_want" ] || continue
@@ -123,10 +99,8 @@ for _id in name email; do
 done
 unset _id _want _have _now
 
-# --- shell -------------------------------------------------------------------
-# `chsh` wants a password and is often refused under LDAP; on these boxes
-# $HOME (and its login shell) is shared between machines. shell/bashrc execs
-# zsh from bash instead: per-session, reversible with NO_ZSH=1.
+# `chsh` wants a password and is often refused under LDAP, and $HOME is shared
+# between these machines; shell/bashrc execs zsh from bash instead (NO_ZSH=1).
 if have zsh; then
     info "zsh: $(command -v zsh) -- interactive bash sessions will move to it"
 else

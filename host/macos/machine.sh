@@ -1,50 +1,14 @@
-# The podman machine that hosts every workspace.
-#
-# Three properties matter, and each is verified rather than assumed:
-#
-#   exactly three mounts, and only one writable
-#                     podman machine mounts /Users, /private and /var/folders
-#                     by default. Workspaces need none of them. What the
-#                     machine needs is this checkout at /opt/wk-tools, so a
-#                     container runs the tree being edited rather than a copy
-#                     of it; this device's secrets directory at
-#                     $WK_STORE/secrets, so `wk key set` and `wk push` write
-#                     the keys with no VM running and every container reads
-#                     the same bytes live; and the agent-writable directory at
-#                     $WK_STORE/agent-rw, the only read-write mount in the
-#                     design, holding one thing -- the claude.ai login
-#                     credential the Claude CLI rotates in place
-#                     (wk_agent_rw_dir, lib/store.sh; README.md, "wk key set").
-#                     Any other mount -- /Users above all -- is host filesystem
-#                     access a workspace must not have, and is the recreate
-#                     condition below.
-#
-#   rootful           the machine's podman service runs as root, which is the
-#                     socket `podman -c wk` on this host connects to. A
-#                     workspace itself is rootless in the VM (targets/
-#                     container.sh's WK_SANDBOX).
-#                     TODO: nothing here is known to need root. Measure a
-#                     machine created without --rootful -- `wk new`, `wk
-#                     build`, `wk status` and `wk enter` from this host --
-#                     before dropping it.
-#
-#   bounded resources the VM must not be able to starve the desktop.
-#
-# The mounts are why moving or renaming this checkout breaks the machine: the
-# fix is `./setup`, which recreates it around the new path.
-
-# For $WK_STORE (the machine's own path for the store) and wk_secrets_dir
-# (this host's path for the secrets directory it mounts): the two ends of one
-# of the mounts below.
+# The podman machine that hosts every workspace: exactly three mounts (only one
+# writable), rootful, and bounded resources, each verified rather than assumed
+# (README.md, "Recovery"). Renaming this checkout breaks the mounts; `./setup`.
+# TODO: nothing here is known to need root. Measure a machine created without
+# --rootful -- `wk new`, `wk build`, `wk status`, `wk enter` -- before dropping it.
 . "$WK_ROOT/lib/store.sh"
 
 WK_MACHINE="${WK_MACHINE:-wk}"
 
-# --- retire other machines ---------------------------------------------------
-# applehv permits exactly one running VM, so a leftover machine is not merely
-# wasted disk: it blocks `wk` from starting with "only one VM can be active at
-# a time". Machine storage is per-machine, so nothing here is shared with the
-# wk machine and removing it loses only that machine's own images.
+# applehv permits exactly one running VM, so a leftover machine blocks `wk` from
+# starting with "only one VM can be active at a time".
 _others=$(podman machine list --format json 2>/dev/null \
     | python3 -c "
 import json,sys
@@ -72,42 +36,33 @@ unset _others _m _img _sz
 
 _cores=$(envelope_cores)
 _mem=$(envelope_mem_mb)
-# WK_DISK_GB overrides the machine's virtual disk size, set only at creation
-# (podman machine cannot resize one afterwards).
+# Set only at creation: podman machine cannot resize a disk afterwards.
 _disk="${WK_DISK_GB:-200}"
 
-# The mounts, as `source:target:mode` triples -- one list, read by the init
-# below and by the verify that follows it, so the machine cannot be created
-# with a set the check then refuses. The source directories exist first:
-# podman refuses to init against a mount source that is not there.
+# The mounts, as `source:target:mode` triples -- one list, read by the init and
+# by the verify that follows. The source directories exist first: podman refuses
+# to init against a mount source that is not there. Every target is under /var
+# because the machine OS is an ostree one (README.md, "Recovery").
+# TODO: upstream -- podman should canonicalise a --volume target against the
+# machine OS at init, or refuse one it knows systemd will not mount.
 ensure_dir "$(wk_secrets_dir)" 0700
 ensure_dir "$(wk_agent_rw_dir)" 0700
 _secrets_mount="$(wk_secrets_dir):$WK_STORE/secrets:ro"
-_tools_mount="$WK_ROOT:/opt/wk-tools:ro"
+_tools_mount="$WK_ROOT:/var/opt/wk-tools:ro"
 _agent_rw_mount="$(wk_agent_rw_dir):$WK_STORE/agent-rw:rw"
 
-# Read from the machine's config file, not `podman machine inspect`: inspect
-# does not expose Mounts at all (podman 5.4), so a --format query silently
-# yields nothing and the check would pass by accident -- which is worse than no
-# check, because it reports a guarantee it never verified.
+# `podman machine inspect` does not expose Mounts at all (podman 5.4), so a
+# --format query yields nothing and the check would pass by accident.
 _cfg="$HOME/.config/containers/podman/machine/applehv/$WK_MACHINE.json"
 
 # One of `ok`, `notro`, `differs` or `unknown` on the first line, then one
 # `source:target ro|rw` line per mount the machine actually has.
-#
-# The set of source:target pairs and their modes are two different verdicts on
-# purpose: a machine with a *different set* is recreated, while one with the
-# right set mounted the wrong way round is refused. Recreating that second one
-# would ask podman for exactly the same modes again and loop.
 _mount_state() {
     python3 - "$_cfg" "$_secrets_mount" "$_tools_mount" "$_agent_rw_mount" <<'PY'
 import json, os, sys
 
-# Both sides through realpath, because the two spellings of one directory are
-# not the same string: a symlinked WK_ROOT, macOS's /var -> /private/var, a
-# trailing slash. A comparison by string reads `differs` on a machine this run
-# has just created with these very paths, and `differs` is the verdict that
-# destroys a store.
+# Both sides through realpath: one directory has two spellings (a symlinked
+# WK_ROOT, macOS's /var -> /private/var), and `differs` destroys a store.
 def key(source, target):
     return "%s:%s" % (os.path.realpath(source), target.rstrip("/") or "/")
 
@@ -131,10 +86,6 @@ elif have != want:
 else:
     print("ok")
 
-# The rows are the machine's own spelling, not the canonical one: a person
-# reading a refusal is looking for what is in the config file. The canonical
-# form is what the verdict above was decided on, and it appears beside the raw
-# one only where the two differ.
 for m in sorted(mounts, key=lambda m: (m["Source"], m["Target"])):
     raw = "%s:%s" % (m["Source"], m["Target"])
     canon = key(m["Source"], m["Target"])
@@ -143,14 +94,9 @@ for m in sorted(mounts, key=lambda m: (m["Source"], m["Target"])):
 PY
 }
 
-# What a recreate destroys, read off the machine at the moment of asking: the
-# workspaces by name and the store's own directories. Everything here is
-# regenerable except bench/, which holds measurements that cannot be taken
-# again -- so it is named separately and the remedy for it is printed.
+# All a recreate destroys is regenerable but bench/, which holds measurements.
 _report_losses() {
     if [ "$(podman machine inspect "$WK_MACHINE" --format '{{.State}}')" != running ]; then
-        # A stopped machine cannot be read, and a dry run must not start one:
-        # then the honest answer is that the list is unknown.
         if [ -n "${WK_DRY_RUN:-}" ]; then
             log "    (not read: '$WK_MACHINE' is stopped and a dry run does not start it)"
             return 0
@@ -167,34 +113,55 @@ _report_losses() {
     ' </dev/null 2>/dev/null | sed 's/^/    /' >&2
 }
 
-# The verdict and the mount list, from one read: `_mounts` is every line and
-# `_verdict` its first. Read into variables rather than piped into `head`,
-# which under `pipefail` makes a python killed by SIGPIPE the caller's failure.
+# The targets the machine asks for and has not got: a .mount unit that fails at
+# boot leaves the machine running without the mount while the config goes on
+# naming it. A stopped machine is not started to ask; this is reached from a read.
+_absent_targets() {
+    [ "$(podman machine inspect "$WK_MACHINE" --format '{{.State}}' 2>/dev/null)" = running ] \
+        || return 0
+    local spec target
+    for spec in "$_secrets_mount" "$_tools_mount" "$_agent_rw_mount"; do
+        target=${spec%:*}; target=${target##*:}
+        podman machine ssh "$WK_MACHINE" -- \
+            "findmnt -no TARGET $(sh_quote "$target")" </dev/null >/dev/null 2>&1 \
+            || printf '%s\n' "$target"
+    done
+}
+
+# Read into variables rather than piped into `head`, which under `pipefail` makes
+# a python killed by SIGPIPE the caller's failure.
 _mounts=""
 _verdict=""
+_absent=""
 _read_mounts() {
     _mounts=$(_mount_state)
-    # $'\n' and not "$(printf '\n')": command substitution strips the trailing
+    # $'\n', not "$(printf '\n')": command substitution strips the trailing
     # newline, leaving `%%*`, which strips the whole string.
     _verdict=${_mounts%%$'\n'*}
+    _absent=""
+    if [ "$_verdict" = ok ]; then
+        _absent=$(_absent_targets)
+        [ -z "$_absent" ] || _verdict=absent
+    fi
 }
-# Every mount but the verdict line -- and nothing at all for a machine with
-# none, where `tail` alone would print one blank row.
 _mount_rows() { printf '%s\n' "$_mounts" | tail -n +2 | sed '/^[[:space:]]*$/d'; }
 
-# The one gate, called before the recreate decision and again after it: `ok` or
-# a refusal that names what to do. Only a *different set* of mounts is a
-# recreate, and that decision is the caller's below -- a mount that is there but
-# read-write, or a config this cannot read, is refused instead: recreating would
-# ask podman for exactly the same thing again and destroy a store for nothing.
-#
-# <after-init> is set on the call that follows this run's own `podman machine
-# init`. A `differs` there is not the user's machine being wrong -- the init
-# was handed these exact triples a moment ago -- so it is this file and podman
-# disagreeing about how a path is spelled, and advising `./setup` would send
-# the next run round the same destroy-and-recreate loop for ever.
+# The one gate, called before the recreate decision and again after it.
+# <after-init> is set on the call following this run's own `podman machine init`,
+# where a failure is podman and this file disagreeing about a path's spelling, so
+# advising `./setup` would loop for ever.
 _check_mounts() { # [after-init]
     _read_mounts
+    if [ "$_verdict" = absent ] && [ -n "${1:-}" ]; then
+        die "internal error: podman machine '$WK_MACHINE' was just created asking for
+$(printf '%s\n' "$_absent" | sed 's/^/    /')
+    and came up without it. podman writes one systemd .mount unit per --volume;
+        podman machine ssh $WK_MACHINE -- systemctl --failed
+    names the unit and the reason. A target that is not a canonical path in the
+    machine OS is the usual one. Do NOT re-run ./setup: it would destroy and
+    recreate the machine to reach exactly this state again. Fix the mount
+    triples in host/macos/machine.sh."
+    fi
     if [ "$_verdict" = differs ] && [ -n "${1:-}" ]; then
         die "internal error: podman machine '$WK_MACHINE' was just created with
 $(printf '    asks %s\n    asks %s\n    asks %s' \
@@ -232,14 +199,22 @@ $(_mount_rows | sed 's/^/    has /')
 
 _read_mounts
 if podman machine inspect "$WK_MACHINE" >/dev/null 2>&1; then
-    if [ "$_verdict" != differs ]; then
+    if [ "$_verdict" != differs ] && [ "$_verdict" != absent ]; then
         _check_mounts
     else
-        warn "podman machine '$WK_MACHINE' does not have this design's mounts:"
-        _mount_rows | sed 's/^/    has /' >&2
-        log  "    wants $_secrets_mount"
-        log  "    wants $_tools_mount"
-        log  "    wants $_agent_rw_mount"
+        if [ "$_verdict" = absent ]; then
+            warn "podman machine '$WK_MACHINE' asks for this design's mounts and has not got them:"
+            printf '%s\n' "$_absent" | sed 's/^/    absent /' >&2
+            log  "  podman writes one systemd .mount unit per --volume, and a unit that"
+            log  "  fails at boot leaves the config file naming a mount the machine"
+            log  "  never got:  podman machine ssh $WK_MACHINE -- systemctl --failed"
+        else
+            warn "podman machine '$WK_MACHINE' does not have this design's mounts:"
+            _mount_rows | sed 's/^/    has /' >&2
+            log  "    wants $_secrets_mount"
+            log  "    wants $_tools_mount"
+            log  "    wants $_agent_rw_mount"
+        fi
         log  "  a mount is set only at creation (podman machine has no way to add"
         log  "  one), so the machine is destroyed and made again. That loses:"
         _report_losses
@@ -250,14 +225,12 @@ if podman machine inspect "$WK_MACHINE" >/dev/null 2>&1; then
         log  "  The deploy keys and agent tokens are not in this list: they are"
         log  "  already on this host ('wk key register' and 'wk key set claude'"
         log  "  put them back if this machine still holds the only copies)."
-        # A dry run reports and stops: everything after this point destroys a
-        # store, and `./setup --dry-run` says what would change.
         if [ -n "${WK_DRY_RUN:-}" ]; then
             warn "dry run: '$WK_MACHINE' would be destroyed and recreated; nothing was touched"
             return 0 2>/dev/null || exit 0
         fi
         confirm "  destroy podman machine '$WK_MACHINE' and everything above, and recreate it?" \
-            || die "keeping '$WK_MACHINE'. Nothing that needs /opt/wk-tools or the
+            || die "keeping '$WK_MACHINE'. Nothing that needs /var/opt/wk-tools or the
     keys works with these mounts, so ./setup stops here."
         podman machine stop "$WK_MACHINE" >/dev/null 2>&1 || true
         podman machine rm -f "$WK_MACHINE" >/dev/null
@@ -266,8 +239,6 @@ if podman machine inspect "$WK_MACHINE" >/dev/null 2>&1; then
 fi
 
 if ! podman machine inspect "$WK_MACHINE" >/dev/null 2>&1; then
-    # A dry run reports and stops here too: creating the machine downloads an
-    # image and takes a disk, and `./setup --dry-run` says what would change.
     if [ -n "${WK_DRY_RUN:-}" ]; then
         warn "dry run: podman machine '$WK_MACHINE' would be created (${_cores} cpus,
     ${_mem} MiB, ${_disk} GiB) with these mounts and no others:"
@@ -279,12 +250,10 @@ if ! podman machine inspect "$WK_MACHINE" >/dev/null 2>&1; then
     info "creating podman machine '$WK_MACHINE' (${_cores} cpus, ${_mem} MiB, ${_disk} GiB)"
     log  "this downloads a Fedora CoreOS image and takes a few minutes"
 
-    # These --volume flags and nothing else: naming any overrides podman's
-    # default mount list (/Users, /private, /var/folders). Verified below,
-    # because a silent fallback to the defaults would quietly hand every
-    # workspace read-write access to the entire home directory. The mode is
-    # part of each triple, so what is asked for here is what the verify holds
-    # the machine to.
+    # Naming any --volume overrides podman's defaults (/Users, /private,
+    # /var/folders). No --playbook, though podman takes one: it runs at first
+    # boot from a generated `ConditionFirstBoot=yes` unit whose recap nothing
+    # reads, so a failed task is silent; vmtools.sh runs it over ssh instead.
     podman machine init "$WK_MACHINE" \
         --cpus "$_cores" \
         --memory "$_mem" \
@@ -292,22 +261,19 @@ if ! podman machine inspect "$WK_MACHINE" >/dev/null 2>&1; then
         --rootful \
         --volume "$_secrets_mount" \
         --volume "$_tools_mount" \
-        --volume "$_agent_rw_mount" \
-        --playbook "$WK_ROOT/host/macos/playbook.yaml"
+        --volume "$_agent_rw_mount"
 
     changed "created podman machine '$WK_MACHINE'"
+
+    # The mounts are only readable from a running machine.
+    podman machine start "$WK_MACHINE" >/dev/null
 fi
 
-# --- verify the mounts -------------------------------------------------------
-# Refuse to continue if the VM can see anything else of this host's, or can
-# write to what it does see. This is the single most important invariant in the
-# design, so it is checked on every setup run rather than trusted from creation
-# time -- including straight after an init, whose own flags it holds to.
+# Checked on every setup run rather than trusted from creation time, including
+# straight after an init, whose own flags it holds to.
 _check_mounts after-init
 
-# --- resources ---------------------------------------------------------------
-# Re-apply the envelope if the host changed (or the machine predates this
-# policy). `podman machine set` requires the machine to be stopped.
+# `podman machine set` requires the machine to be stopped.
 _cur_cpus=$(podman machine inspect "$WK_MACHINE" --format '{{.Resources.CPUs}}' 2>/dev/null || echo "")
 _cur_mem=$(podman machine inspect "$WK_MACHINE" --format '{{.Resources.Memory}}' 2>/dev/null || echo "")
 
@@ -322,6 +288,6 @@ else
     [ -n "$_was_running" ] && podman machine start "$WK_MACHINE" >/dev/null
 fi
 
-unset _cores _mem _disk _mounts _verdict _cfg _secrets_mount _tools_mount _agent_rw_mount \
-      _cur_cpus _cur_mem _was_running
-unset -f _mount_state _read_mounts _mount_rows _check_mounts _report_losses
+unset _cores _mem _disk _mounts _verdict _absent _cfg _secrets_mount _tools_mount \
+      _agent_rw_mount _cur_cpus _cur_mem _was_running
+unset -f _mount_state _absent_targets _read_mounts _mount_rows _check_mounts _report_losses

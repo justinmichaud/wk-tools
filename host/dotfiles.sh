@@ -1,33 +1,23 @@
-# Deploy host dotfiles. Shared by macOS and Linux.
-#
-# The set is deliberately tiny: helix is installed inside workspaces, and Zed is
-# the only editor config the host needs.
-#
-# Symlinked, not copied, so repo edits take effect immediately and `git status`
-# shows drift. Anything already present and not a symlink moves to
-# <name>.wk-backup exactly once, never clobbered.
+# Deploy host dotfiles, shared by macOS and Linux. Symlinked, not copied, so
+# anything already present and not a symlink moves to <name>.wk-backup once.
 
 link_config "$WK_ROOT/dotfiles/zed"     "$HOME/.config/zed"
 link_config "$WK_ROOT/dotfiles/lldbinit" "$HOME/.lldbinit"
 
-# ssh: an Include, and nothing but an Include. config.d/wk-tools is this repo,
-# config.d/wk is `wk new`, config.d/local is the machine; ~/.ssh/config owns nothing.
+# ssh: config.d/wk-tools is this repo, config.d/wk is `wk new`, config.d/local
+# is the machine; ~/.ssh/config is an Include and owns nothing.
 ensure_dir "$HOME/.ssh" 0700
 ensure_dir "$HOME/.ssh/config.d" 0700
 link_config "$WK_ROOT/dotfiles/ssh/config" "$HOME/.ssh/config.d/wk-tools"
 
-# A hand-written stanza reusing a fleet name (boot/machines.sh) would shadow
-# the fleet's own definition and silently redirect wk verbs that take an ssh
-# destination -- including `wk sysimage write`, which aims at a disk. Those
-# stanzas are dropped, not migrated; everything else, plus any duplicate of
-# a stanza dotfiles/ssh/config already carries, moves to config.d/local.
-# After the first run ~/.ssh/config is one line and all of this is a no-op.
+# A hand-written stanza reusing a fleet name (boot/machines.sh) would shadow the
+# fleet's own and silently redirect wk verbs that take an ssh destination, `wk
+# sysimage write` included, so those are dropped; the rest moves to config.d/local.
 _ssh_conf="$HOME/.ssh/config"
 _ssh_local="$HOME/.ssh/config.d/local"
 _ssh_include='Include config.d/*'
 
-# grep -vxF (not sed): matches only the exact line this script writes, so a
-# person's own Include is content to migrate, not syntax to strip.
+# grep -vxF, not sed: a person's own Include is content to migrate, not syntax.
 _ssh_body() { grep -vxF "$_ssh_include" "$_ssh_conf" 2>/dev/null | grep -vE '^[[:space:]]*(#|$)' || true; }
 
 if [ -f "$_ssh_conf" ] && grep -qxF "$_ssh_include" "$_ssh_conf" && [ -z "$(_ssh_body)" ]; then
@@ -39,17 +29,15 @@ else
 
         [ -e "$_ssh_conf.wk-backup" ] || cp -p "$_ssh_conf" "$_ssh_conf.wk-backup"
 
-        # Migrated stanzas go first and any older copy of the same name is
-        # dropped, not kept below: ssh takes a keyword's first value, so a
-        # stale copy left in place would shadow every future edit to it.
+        # ssh takes a keyword's first value, so an older copy of a migrated
+        # stanza is dropped rather than kept below it.
         _ssh_new=$(mktemp)
         grep -vxF "$_ssh_include" "$_ssh_conf" | awk -v fleet="$_ssh_fleet" '
                 BEGIN {
                     n = split(fleet, f, "\n")
                     for (i = 1; i <= n; i++) if (f[i] != "") is_fleet[f[i]] = 1
                 }
-                # A stanza runs from its Host line to the next one, so dropping
-                # a name means suppressing every line until the next Host.
+                # A stanza runs from its Host line to the next one.
                 tolower($1) == "host" {
                     drop = 0
                     for (i = 2; i <= NF; i++) if ($i in is_fleet) drop = 1
@@ -64,7 +52,6 @@ else
             printf '# and edit it *here*, not in ~/.ssh/config, which is only an Include and\n'
             printf '# is read after this file.\n\n'
             cat "$_ssh_new"
-            # Previous contents, minus this header and any stanza just redefined above.
             if [ -f "$_ssh_local" ]; then
                 awk -v newfile="$_ssh_new" '
                     BEGIN {
@@ -89,10 +76,8 @@ else
         } | write_file "$_ssh_local" 0600
         rm -f "$_ssh_new"; unset _ssh_new
 
-        # Shadowing is reported, not removed: config.d/local reads before
-        # config.d/wk-tools, so a hand-written stanza sharing a repo name wins,
-        # and some of those are deliberate (`moose` resolving to localhost *on*
-        # moose, which the repo's stanza can't know) -- so the choice is left to a person.
+        # Reported, not removed: config.d/local reads first, and some of those
+        # are deliberate (`moose` resolving to localhost *on* moose).
         _ssh_owned=$(awk 'tolower($1) == "host" { for (i = 2; i <= NF; i++) print $i }' \
                         "$WK_ROOT/dotfiles/ssh/config" 2>/dev/null)
         awk -v owned="$_ssh_owned" '
@@ -123,13 +108,8 @@ else
 fi
 
 # An include is not the last word: git takes a key's *last* value, so a [user]
-# section written into ~/.gitconfig after the include wins over it, and every
-# commit from then on carries whatever that says. It is invisible until a commit
-# is already made and pushed, so the identity is checked against the file that
-# declares it and the override is removed rather than reported.
-#
-# The repo's value is the identity; a machine that wants another one changes
-# dotfiles/gitconfig, where every machine sees it.
+# section written after it wins, invisibly, until a commit is already pushed --
+# hence removed, not reported. Another identity means editing dotfiles/gitconfig.
 for _id in name email; do
     _want=$(git config --file "$WK_ROOT/dotfiles/gitconfig" --get "user.$_id" || true)
     [ -n "$_want" ] || continue
@@ -153,7 +133,6 @@ for _id in name email; do
 done
 unset _id _want _have _now
 
-# The global gitignore referenced by dotfiles/gitconfig.
 write_file "$HOME/.gitignore" 0644 <<'EOF'
 .DS_Store
 .idea
@@ -161,19 +140,15 @@ write_file "$HOME/.gitignore" 0644 <<'EOF'
 compile_commands.json
 EOF
 
-# .bash_profile is included along with .bashrc/.zshrc because it's what a
-# login shell (what ssh starts) reads -- a stale reference here means every
-# ssh session lands in bash and never reaches the bash -> zsh switch below.
+# .bash_profile too: it is what a login shell (what ssh starts) reads.
 _rc_line=". \"$WK_ROOT/shell/bashrc\""
 for _rc in "$HOME/.zshrc" "$HOME/.bashrc" "$HOME/.bash_profile"; do
     [ -f "$_rc" ] || touch "$_rc"
 
-    # Drop stale references to a moved wk-tools/bashrc and to
-    # register-sdk-on-host.sh: the SDK runs in the VM, not the host.
+    # register-sdk-on-host.sh is stale: the SDK runs in the VM, not the host.
     if grep -qE 'wk-tools/bashrc|register-sdk-on-host\.sh' "$_rc"; then
         _tmp="$(mktemp)"
-        # || true: an all-stale file makes grep match nothing and exit 1,
-        # which under set -e would abort here instead of emptying the file.
+        # || true: an all-stale file makes grep exit 1, aborting under set -e.
         grep -vE '(^|[[:space:]])(source|\.)[[:space:]]+.*(wk-tools/bashrc|register-sdk-on-host\.sh)' "$_rc" > "$_tmp" || true
         mv "$_tmp" "$_rc"
         changed "removed stale source lines from $_rc"

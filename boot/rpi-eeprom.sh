@@ -4,33 +4,22 @@
 # deletes itself. Staging those three files is done from the machine driving
 # this, over ssh, so the board needs no eeprom tooling of its own.
 #
-# Two consequences, both surfaced at the confirm prompt:
-#
-# - **The whole EEPROM image is replaced, not just its config section.**
-#   There is no way to read the running image back without the tooling the
-#   board lacks, so the bootloader is upgraded to the pinned release below
-#   and the board's existing configuration is carried across on top of it.
-# - **It takes effect on the next boot, not now.** recovery.bin only runs
-#   from the ROM.
+# Two consequences, both surfaced at the confirm prompt: the whole EEPROM image
+# is replaced rather than just its config section (the running image cannot be
+# read back without tooling the board lacks, so the bootloader is upgraded to
+# the pinned release below with the board's configuration carried across), and
+# it takes effect on the next boot, since recovery.bin only runs from the ROM.
 #
 # recovery.bin verifies pieeprom.upd's SHA-256 against pieeprom.sig before
 # writing anything, so a corrupt transfer flashes nothing.
 #
-# Sourced by cmd/pi, using that command's `rsh` and `$HOST`: the ssh
-# destination is resolved and refused there, so this has no second opinion
-# about how to reach the board.
+# Sourced by cmd/pi, using that command's `rsh` and `$HOST`.
 
-# The pinned upstream artefacts: three files fetched by commit-addressed raw
-# URL and pinned by sha256, the same contract as `image_fetch_base` in
-# lib/image.sh -- cheaper than cloning the 106 MB tree for 660 KB of files.
-#
-# firmware-2711 is the BCM2711 (Pi 4 / CM4 / Pi 400) tree and the only one
-# fetched; eeprom_check_soc refuses any other SoC.
-#
-# `default` is the channel `rpi-eeprom-update` installs when nothing is
-# asked for, so it has the most boards behind it. Bump all three pins
-# together -- the image filename carries its own date, so a stale pair
-# fails the checksum instead of mixing releases.
+# Three files fetched by commit-addressed raw URL and pinned by sha256, rather
+# than cloning the 106 MB tree for 660 KB of files. firmware-2711 is the
+# BCM2711 (Pi 4 / CM4 / Pi 400) tree; eeprom_check_soc refuses any other SoC.
+# `default` is the channel `rpi-eeprom-update` installs when nothing is asked
+# for. Bump all three pins together.
 EEPROM_COMMIT=86759b04b22173e10186139ac3ae4debcd0d7252
 EEPROM_IMAGE=pieeprom-2026-05-17.bin
 
@@ -88,22 +77,16 @@ $(printf '%s\n' "$compat" | sed 's/^/      /')
     esac
 }
 
-# Read the running configuration without rpi-eeprom-config.
-#
 # `vcgencmd bootloader_config` asks the firmware for the config section it
-# actually booted with, which is the same text rpi-eeprom-config prints and is
-# available on any Pi with the VideoCore tools. It is a read, so it is the half
-# of the job that was never the problem.
+# booted with -- the same text rpi-eeprom-config prints, available on any Pi
+# with the VideoCore tools.
 eeprom_read_config() {
     local out
-    # r_sudo, not `vcgencmd || sudo vcgencmd`: a bench-device is driven as root
-    # already and a BusyBox bench system has no sudo at all, so the second half
-    # of that pair reports `sh: sudo: not found` where the first half already
-    # found no vcgencmd. One way to be privileged.
+    # r_sudo, not `vcgencmd || sudo vcgencmd`: a BusyBox bench system has no
+    # sudo at all, so that pair reports `sudo: not found` where the real fault
+    # is a missing vcgencmd.
     out=$(r_sudo "vcgencmd bootloader_config" 2>/dev/null | tr -d '\r')
     if [ -z "$out" ]; then
-        # Absent tooling and an unreadable /dev/vcio are different problems with
-        # different remedies, so they are not reported as one guess.
         if ! r_ssh "command -v vcgencmd >/dev/null 2>&1"; then
             die "$NODE_NAME is running a system with no vcgencmd, so its EEPROM cannot be
     read from here at all -- the buildroot bench images carry no VideoCore
@@ -118,13 +101,10 @@ eeprom_read_config() {
     printf '%s\n' "$out"
 }
 
-# Where the firmware reads files from, on the board.
-#
-# Not hardcoded: it is /boot on the Yocto image and /boot/firmware on Ubuntu's,
-# and getting it wrong means staging an update the ROM never looks at. Asked of
-# /proc/mounts rather than findmnt, which buildroot images do not all have, and
-# confirmed by the presence of the Pi 4 second-stage firmware so that some
-# unrelated FAT volume cannot win.
+# Where the firmware reads files from: /boot on the Yocto image, /boot/firmware
+# on Ubuntu's. Asked of /proc/mounts rather than findmnt, which buildroot images
+# do not all have, and confirmed by the presence of the Pi 4 second-stage
+# firmware so that some unrelated FAT volume cannot win.
 eeprom_bootfs() {
     local d found=""
     for d in $(rsh 'awk "\$3 == \"vfat\" { print \$2 }" /proc/mounts' | tr -d '\r'); do
@@ -136,11 +116,9 @@ eeprom_bootfs() {
     echo "$found"
 }
 
-# Removes a consumed update: recovery.bin renames itself to RECOVERY.000 but
-# leaves pieeprom.upd/pieeprom.sig behind, and a staged update that has
-# already been applied looks identical to one still pending. Called only
-# once the running firmware reports what was asked for -- the one moment
-# that is certain.
+# recovery.bin renames itself to RECOVERY.000 but leaves pieeprom.upd and
+# pieeprom.sig behind, and an applied update then looks identical to a pending
+# one. Called only once the running firmware reports what was asked for.
 eeprom_clear_staged() {
     local bootfs
     bootfs=$(eeprom_bootfs 2>/dev/null) || return 0
@@ -161,10 +139,9 @@ eeprom_stage_recovery() {
         --config "$work/boot.conf" --out "$work/pieeprom.upd" "$dir/$EEPROM_IMAGE" \
         || die "rpi-eeprom-config could not apply that configuration to $EEPROM_IMAGE"
 
-    # pieeprom.sig is what makes a half-written transfer harmless: recovery.bin
-    # hashes the image and refuses it on a mismatch. Written here rather than
-    # via the upstream rpi-eeprom-digest script, which needs a fourth pinned
-    # file for this.
+    # recovery.bin hashes the image against this and refuses it on a mismatch.
+    # Written here rather than via upstream's rpi-eeprom-digest, which would be
+    # a fourth pinned file.
     {
         sha256sum "$work/pieeprom.upd" | cut -d' ' -f1
         echo "ts: $(date -u +%s)"
@@ -174,10 +151,9 @@ eeprom_stage_recovery() {
     bootfs=$(eeprom_bootfs)
     info "staging the EEPROM update in $bootfs on $HOST"
 
-    # recovery.bin last, deliberately. It is the trigger: the ROM runs whatever
-    # recovery.bin it finds, so it must not be findable before the image and
-    # the signature it will look for are both already there. A power cut
-    # partway through then leaves a board that boots normally.
+    # recovery.bin last: it is the trigger, and the ROM runs whatever
+    # recovery.bin it finds, so a power cut partway through must leave a board
+    # that still boots normally.
     # shellcheck disable=SC2046
     scp -q -o BatchMode=yes $(_unpinned_host_key_opts) "$work/pieeprom.upd" "$work/pieeprom.sig" "$(rsh_dest):$bootfs/" \
         || die "could not copy the EEPROM update to $HOST:$bootfs"

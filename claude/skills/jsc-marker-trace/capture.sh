@@ -16,10 +16,9 @@ if [ -z "$ROOT" ] || [ ! -d "$ROOT/Source/JavaScriptCore" ]; then
     echo "Set WEBKIT_ROOT to your WebKit checkout (or run from inside one)." >&2
     exit 1
 fi
-# samply comes from the workspace (or PATH), never from somebody's home
-# directory: a hardcoded host path is exactly what a sandboxed run cannot reach.
-# `wk profile --mode samply` composes the whole invocation and refuses by name
-# when the tool is missing, which is the shorter road than this script.
+# samply comes from the workspace or PATH, never a hardcoded host path a
+# sandboxed run cannot reach. `wk profile --mode samply` composes the whole
+# invocation and is the shorter road than this script.
 SAMPLY="${SAMPLY:-$(command -v samply || echo samply)}"
 command -v "$SAMPLY" >/dev/null 2>&1 || SAMPLY=samply
 
@@ -33,8 +32,8 @@ AUX="${TRACE_AUX:-/tmp/jsc-trace-aux}"
 mkdir -p "$AUX" "$(dirname "$OUT")"
 rm -f "$AUX"/marker-*.txt "$AUX"/jit-*.dump
 
-# JSC options: periodic full GC only, emit coarse GC-section markers to a fixed dir
-# (so the file names are deterministic and samply can read them).
+# Periodic full GC only, with coarse GC-section markers in a fixed directory, so
+# the file names are deterministic and samply can read them.
 JSC_OPTS=(
     "useFixedIntervalGCOnly=1"
     "fixedIntervalGCPeriodMS=$PERIOD_MS"
@@ -42,11 +41,10 @@ JSC_OPTS=(
     "textMarkersDirectory=$AUX"
 )
 
-# JIT dump gives JS/JIT frame symbols. On Linux/GTK, JSC_useJITDump=1 makes the web
-# process exit within ~2s under samply (its perf jitdump mmap collides with samply's
-# own perf session), taking the whole capture with it, so it is off by default there.
-# GC sections run in C++ and need no JIT symbols. macOS keeps it on (validated, and
-# its JIT symbolication path differs). Force with JITDUMP=1 / disable with JITDUMP=0.
+# JIT dump gives JS/JIT frame symbols. On Linux/GTK, JSC_useJITDump=1 makes the
+# web process exit within ~2s under samply -- its perf jitdump mmap collides with
+# samply's own perf session -- so it is off there; GC sections run in C++ and need
+# no JIT symbols. macOS keeps it on. Force with JITDUMP=1, disable with JITDUMP=0.
 if [ -z "${JITDUMP:-}" ]; then
     [ "$OS" = "Darwin" ] && JITDUMP=1 || JITDUMP=0
 fi
@@ -59,14 +57,12 @@ if [ "$OS" = "Darwin" ]; then
     MB="$DIR/MiniBrowser.app/Contents/MacOS/MiniBrowser"
     export DYLD_FRAMEWORK_PATH="$DIR" __XPC_DYLD_FRAMEWORK_PATH="$DIR"
     export DYLD_LIBRARY_PATH="$DIR" __XPC_DYLD_LIBRARY_PATH="$DIR"
-    # WebContent is an XPC service; libxpc only forwards __XPC_-prefixed env to it,
-    # and samply forwards its own preload/bootstrap the same way.
+    # WebContent is an XPC service, and libxpc only forwards __XPC_-prefixed env.
     for o in "${JSC_OPTS[@]}"; do export "JSC_$o"; export "__XPC_JSC_$o"; done
     WEBPROCS=("com.apple.WebKit.WebContent" "com.apple.WebKit.GPU" "com.apple.WebKit.Networking")
 else
-    # Linux/GTK: WebKitWebProcess is a normal child. Disabling the sandbox lets it
-    # inherit the JSC_* env and write the marker/jitdump files; samply picks those
-    # up from the perf mmap events (ProfilerSupport/PerfLog mmap them on Linux).
+    # Linux/GTK: WebKitWebProcess is a normal child, and disabling the sandbox
+    # lets it inherit the JSC_* env and write the marker/jitdump files.
     DIR="${WEBKIT_BUILD:-$ROOT/WebKitBuild/GTK/Release}"
     MB="$DIR/bin/MiniBrowser"
     export LD_LIBRARY_PATH="$DIR/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"

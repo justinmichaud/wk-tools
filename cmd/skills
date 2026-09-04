@@ -4,7 +4,7 @@
 # wk: where=host name=none group=sources needs rsync
 #
 # Every workspace mounts the same writable /skills, so an edit benefits every
-# workspace but risks silent drift: it may never reach the repo for review.
+# workspace but may never reach the repo for review.
 #
 #   wk skills status   what differs between the shared copy and the repo
 #   wk skills diff     the actual diff
@@ -21,7 +21,7 @@ WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 SHARED="$WK_STORE/skills"
 REPO="$WK_ROOT/claude/skills"
 
-# The shared copy lives in the VM on macOS; this must run from there.
+# The shared copy lives in the VM on macOS.
 if is_macos && [ -z "${WK_IN_VM:-}" ]; then
     die "run this inside the VM: wk skills $* (the shared copy lives there)"
 fi
@@ -63,11 +63,10 @@ pull)
         fi
     else
         # No git here (the rsynced copy in the VM): nothing makes this pull
-        # reversible, so it always asks.
+        # reversible.
         confirm "no git repo at $WK_ROOT -- pull cannot be undone; continue?" || die "aborted"
     fi
-    # --delete so a skill deleted in a workspace is deleted in the repo too;
-    # otherwise the repo slowly fills with skills nothing uses any more.
+    # --delete so a skill deleted in a workspace is deleted in the repo too.
     rsync -a --delete "$SHARED/" "$REPO/"
     changed "pulled shared skills into $REPO"
     log "review with: git -C $WK_ROOT diff claude/skills"

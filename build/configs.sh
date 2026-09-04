@@ -1,46 +1,19 @@
-# Named build configurations. One place; `config_load <name> <os> <kind>` sets:
+# Named build configurations. One place; `config_load <name> <os> <kind>` sets
+# CFG_PORT, CFG_TYPE, CFG_ARGS, CFG_CMAKE, CFG_CC/CXX, CFG_BUILDSYS
+# (cmake | xcode), CFG_SCRIPT (the Tools/Scripts entry point) and CFG_JSC_ONLY.
+# Every CMake config also starts with _CFG_DEFAULT_ARGS and _CFG_DEFAULT_CMAKE
+# below, plus USE_LIBBACKTRACE (from <kind>) and the libc++ flags unless the
+# target's conf says otherwise. <os> is the *target's* (t_os, lib/target.sh).
 #
-#   CFG_PORT      the WebKit port  (jsc-only, gtk, wpe, or empty for Apple)
-#   CFG_TYPE      Debug | Release
-#   CFG_ARGS      extra arguments to CFG_SCRIPT
-#   CFG_CMAKE     extra -D flags
-#   CFG_CC/CXX    compiler
-#   CFG_BUILDSYS  cmake | xcode
-#   CFG_SCRIPT    the Tools/Scripts entry point that drives the build
-#   CFG_JSC_ONLY  set when the config builds JavaScriptCore and nothing else
-#
-# Every CMake config also starts with the flags in _CFG_DEFAULT_ARGS and
-# _CFG_DEFAULT_CMAKE below, plus USE_LIBBACKTRACE (derived from <kind>) and
-# the libc++ flags (unless the target's conf says WK_TARGET_LIBCXX=0), and a
-# machine may add its own on top -- see config_target_var for the per-config
-# half of that.
-#
-# <kind> is WK_TARGET_KIND (lib/target.sh, set by load_target) when the third
-# argument is omitted -- every caller but a test can leave it out once
-# load_target has run.
-#
-# CFG_BUILDSYS matters: CMake ports take -jN via --makeargs, but xcodebuild
-# wants -jobs N and ignores --makeargs -- get it wrong and the build runs at
-# xcodebuild's own core-count default. clang, not GCC: GCC fails on aarch64
-# in JSObject::crashDueToEmptyValueAtValidOffset. Apple configs leave CC/CXX
-# unset -- Xcode's toolchain is the only option on macOS.
-#
-# --- <os>, and why a config cannot pick its own build system ------------------
-# `linux` or `macos`, and it is the *target's* (t_os, lib/target.sh), not this
-# machine's -- so load_target runs before config_load, everywhere.
-#
-# On macOS, Xcode is the only build system: build-webkit's CMake path needs a
-# generator that supports Swift, and the only two that do are Ninja and Xcode's
-# own. So the JSCOnly port cannot be built in a macOS guest, and the three
-# jsc-* configs mean the Apple port's JavaScriptCore there instead --
-# Tools/Scripts/build-jsc, which is Xcode's "Everything up to JavaScriptCore"
-# scheme: bmalloc, WTF and JavaScriptCore, no WebCore and no WebKit. Same
-# products directory as mac-debug/mac-release of the same configuration,
-# because it is the same configuration, built to a smaller depth.
+# clang, not GCC: GCC fails on aarch64 in
+# JSObject::crashDueToEmptyValueAtValidOffset. The Apple configs leave CC/CXX
+# unset: Xcode's toolchain is the only option on macOS, and so is Xcode itself,
+# build-webkit's CMake path needing a generator that supports Swift. So there is
+# no JSCOnly port in a macOS guest, and the three jsc-* configs mean
+# Tools/Scripts/build-jsc there: Xcode's "Everything up to JavaScriptCore"
+# scheme, in the same products directory as mac-debug/mac-release.
 
-# What each config means on Linux. `wk build --list` names no workspace, so it
-# cannot know the platform: the three jsc-* lines say JSCOnly, and the note
-# under them is how a reader learns what they mean in a macOS guest.
+# `wk build --list` names no workspace, so it cannot know the platform.
 config_list() {
     cat <<'EOF'
 jsc-debug          JSCOnly, Debug, assertions on
@@ -60,23 +33,17 @@ JavaScriptCore with Xcode instead: there is no JSCOnly port there.
 EOF
 }
 
-# Override with WK_CC / WK_CXX if a config needs something specific. clang
-# everywhere, including armhf's own native armhf clang -- architecture flags
-# live in lib/arch.sh instead, so a config's meaning stays fixed everywhere.
+# clang everywhere; architecture flags live in lib/arch.sh, not in a config.
+# WK_CC / WK_CXX override the compiler a config asks for.
 WK_CC="${WK_CC:-clang}"
 WK_CXX="${WK_CXX:-clang++}"
 
 # Loaded on demand: not every caller of this file has sourced lib/arch.sh.
 command -v arch_canon >/dev/null 2>&1 || . "$WK_ROOT/lib/arch.sh"
-# Same, for the one thing a refusal here needs from it: the path of the conf
-# file that carries a machine's build fields (_cfg_libcxx below).
 command -v target_registry_conf >/dev/null 2>&1 || . "$WK_ROOT/lib/target.sh"
 
-# Where a config's build tree lands, one directory per port. The `-asan`
-# suffix is ours: without it mac-release and mac-release-asan share one
-# Release/ tree, half instrumented after building each.
+# The `-asan` suffix is ours: the two mac-release configs would share one tree.
 
-# What a config contributes to --cmakeargs, for an error message.
 config_cmake_summary() {
     local c="${CFG_CMAKE:-}"
     [ -n "$c" ] || { echo "the flags it sets"; return 0; }
@@ -86,8 +53,8 @@ config_cmake_summary() {
 config_build_dir() {
     local root="${1:-/src/WebKit}"
     local variant=""
-    # Both spellings of "instrumented": build-webkit takes --asan, build-jsc
-    # takes ASAN=YES (config_load). Either one is a separate tree.
+    # Both spellings of "instrumented": build-webkit takes --asan, build-jsc takes
+    # ASAN=YES. Either is a separate tree.
     case "$CFG_BUILDSYS:$CFG_ARGS" in
         xcode:*--asan*|xcode:*ASAN=YES*) variant="-asan" ;;
     esac
@@ -102,50 +69,30 @@ config_build_dir() {
     esac
 }
 
-# "Release, with debug info" on the CMake ports. DEBUG_FISSION
-# (-gsplit-dwarf) keeps debug info in .dwo files beside the objects, making
-# "release with -g" affordable. Flags are pinned because CMake's own
-# RelWithDebInfo is -O2 where Release is -O3 -- adopting the build type alone
-# would drop every release build, including the two -asan configs, by an
-# optimization level.
+# "Release, with debug info" on the CMake ports; DEBUG_FISSION (-gsplit-dwarf)
+# keeps it in .dwo files beside the objects. The flags are pinned because
+# CMake's RelWithDebInfo is -O2 where Release is -O3, so adopting the build type
+# alone would drop every release build by an optimization level.
 _CFG_RELWITHDEBINFO='-DCMAKE_BUILD_TYPE=RelWithDebInfo'
 _CFG_RELWITHDEBINFO="$_CFG_RELWITHDEBINFO -DCMAKE_C_FLAGS_RELWITHDEBINFO=\"-O3 -g -DNDEBUG\""
 _CFG_RELWITHDEBINFO="$_CFG_RELWITHDEBINFO -DCMAKE_CXX_FLAGS_RELWITHDEBINFO=\"-O3 -g -DNDEBUG\""
 
-# --- what every CMake config starts with -------------------------------------
-# One place for the flags that are not a property of any one config but of how
-# this repository builds WebKit at all. A config's own CFG_ARGS/CFG_CMAKE is
-# appended *after* these, so a config that wants the opposite states it and
-# wins -- cmake takes the last repeated -D.
-#
-#   --no-fatal-warnings   every config here builds with DEVELOPER_MODE=ON,
-#                         which makes a compiler warning stop the build. A
-#                         warning in WebKit's tree from a newer clang than the
-#                         one it was written against is nobody's fault and not
-#                         ours to fix on the way to a measurement.
-#   DEVELOPER_MODE=ON     the assertions, test targets and tools every workflow
-#                         in this repo uses.
-#   USE_VULKAN=OFF        }  neither is built or measured here, and both pull
-#   ENABLE_THUNDER=OFF    }  in dependencies a build machine may not have.
-#
-# USE_LIBBACKTRACE is not here: it is derived from the target's kind
-# (_cfg_use_libbacktrace below), not fixed for every config.
-#
-# CMake ports only: xcodebuild takes no -D flags, and build-webkit's Apple path
-# does not offer --no-fatal-warnings.
+# One place for the flags that are a property not of any one config but of how
+# this repository builds WebKit at all; a config's own flags are appended after,
+# and cmake takes the last repeated -D. CMake ports only: xcodebuild takes no -D
+# flags, and build-webkit's Apple path has no --no-fatal-warnings.
+#   --no-fatal-warnings   DEVELOPER_MODE=ON makes a compiler warning stop the
+#                         build, and a warning from a clang newer than the tree
+#                         was written against is not ours to fix.
+#   USE_VULKAN/THUNDER    neither is measured here, and both pull in
+#                         dependencies a build machine may not have.
 _CFG_DEFAULT_ARGS='--no-fatal-warnings'
 _CFG_DEFAULT_CMAKE='-DDEVELOPER_MODE=ON -DUSE_VULKAN=OFF -DENABLE_THUNDER=OFF'
 
-# Whether the machine that builds a config actually has libbacktrace: the
-# sandboxes and guests this repo creates always carry it, but a remote target
-# is someone else's machine, and finding it absent partway through a build is
-# a configure failure, not a missing feature (measured on buildbox4: no
-# libbacktrace package, and the configure step fails without USE_LIBBACKTRACE
-# turned off there).
-#
-# Answers in a variable rather than on stdout: an unknown kind dies, and a die
-# inside a command substitution kills only the subshell -- the build would go
-# on with an empty -DUSE_LIBBACKTRACE=.
+# Whether the machine that builds actually has libbacktrace: the sandboxes and
+# guests this repo creates carry it, a remote target is someone else's machine
+# (measured on buildbox4: no package, and configure fails without it off). In a
+# variable, not on stdout: a die in a substitution kills only the subshell.
 _cfg_use_libbacktrace() { # <kind: container|vm|local|remote> -> _CFG_LIBBACKTRACE
     case "$1" in
         container|vm|local) _CFG_LIBBACKTRACE=ON ;;
@@ -154,22 +101,14 @@ _cfg_use_libbacktrace() { # <kind: container|vm|local|remote> -> _CFG_LIBBACKTRA
     esac
 }
 
-# libc++ over the system libstdc++, the default for every Linux CMake config
-# built with clang. CMAKE_CXX_FLAGS is not folded into _CFG_DEFAULT_CMAKE:
-# cmake's own -D takes the last repeated value, so a host that sets its own
-# CMAKE_CXX_FLAGS (WK_TARGET_CMAKE, e.g. -Wno-invalid-constexpr on buildbox4)
-# would silently drop this one -- config_build_env's _config_merge_cxx_flags
-# merges every CMAKE_CXX_FLAGS= it sees into one instead. The three linker
-# variables are separate cmake variables (cmake keeps them apart, and the
-# driver needs -stdlib=libc++ at link time too), and no host conf sets them,
-# so they need no such merge.
+# libc++ over the system libstdc++ for every Linux CMake config. Not folded into
+# _CFG_DEFAULT_CMAKE: -D takes the last repeated value, so a host setting its
+# own CMAKE_CXX_FLAGS (buildbox4's -Wno-invalid-constexpr) would drop this one
+# -- _config_merge_cxx_flags merges them instead.
 _CFG_LIBCXX_CMAKE='-DCMAKE_CXX_FLAGS=-stdlib=libc++ -DCMAKE_EXE_LINKER_FLAGS=-stdlib=libc++ -DCMAKE_SHARED_LINKER_FLAGS=-stdlib=libc++ -DCMAKE_MODULE_LINKER_FLAGS=-stdlib=libc++'
 
-# Whether those flags go on, from the target's WK_TARGET_LIBCXX: `1` on, `0`
-# off, unset on -- every machine this repo knows has libc++ except the one
-# whose conf says so. The value is read rather than compared against 0, so a
-# typo in a conf (`WK_TARGET_LIBCXX=yes`) is named instead of silently meaning
-# the default. In a variable for the same reason as _cfg_use_libbacktrace.
+# `1` on, `0` off, unset on. Read rather than compared against 0, so a typo
+# (`WK_TARGET_LIBCXX=yes`) is named instead of silently meaning the default.
 _cfg_libcxx() { # <WK_TARGET_LIBCXX> -> _CFG_LIBCXX
     case "$1" in
         1|"") _CFG_LIBCXX=ON ;;
@@ -180,15 +119,13 @@ _cfg_libcxx() { # <WK_TARGET_LIBCXX> -> _CFG_LIBCXX
     esac
 }
 
-# DEBUG_FISSION is stated rather than left to its default: WebKitCommon.cmake
-# computes that default before Options${PORT} sets ENABLE_DEVELOPER_MODE, so
-# no WPE or GTK build ever turns fission on by itself.
+# Stated rather than left to its default: WebKitCommon.cmake computes that
+# before Options${PORT} sets ENABLE_DEVELOPER_MODE, so no WPE or GTK build
+# turns fission on by itself.
 _CFG_RELWITHDEBINFO="$_CFG_RELWITHDEBINFO -DDEBUG_FISSION=ON"
 
-# What a jsc-* config is on macOS, stated once for the three of them: the
-# Apple port (no port flag -- --jsc-only would send build-jsc down the CMake
-# path), built by the scheme that stops at JavaScriptCore, with Xcode's own
-# toolchain (a CC= here would override it).
+# The Apple port (no port flag -- --jsc-only sends build-jsc down the CMake
+# path), by the scheme that stops at JavaScriptCore, with Xcode's own toolchain.
 _cfg_apple_jsc() {
     CFG_BUILDSYS=xcode
     CFG_SCRIPT=Tools/Scripts/build-jsc
@@ -201,8 +138,6 @@ config_load() { # <name> <os: linux|macos> [kind: container|vm|local|remote]
     [ -n "$CFG_OS" ] || die "config_load '$1': no platform given. It is the
     target's t_os, so load_target has to run first -- on macOS a config does
     not choose its own build system (build/configs.sh)."
-    # Falls back to WK_TARGET_KIND (load_target, lib/target.sh): every caller
-    # but a test leaves the third argument out once load_target has run.
     CFG_KIND="${3:-${WK_TARGET_KIND:-}}"
     [ -n "$CFG_KIND" ] || die "config_load '$1': no target kind given. It is
     WK_TARGET_KIND, so load_target has to run first (build/configs.sh)."
@@ -213,11 +148,8 @@ config_load() { # <name> <os: linux|macos> [kind: container|vm|local|remote]
     CFG_CC="$WK_CC"; CFG_CXX="$WK_CXX"
 
     case "$1" in
-        # --- JavaScriptCore alone ---------------------------------------------
-        # Two readings, one meaning: the JSCOnly CMake port where there is one,
-        # and Xcode's "Everything up to JavaScriptCore" on macOS, where there
-        # is not. The CMake -D flags have no Xcode counterpart and are simply
-        # absent there -- WK_BUILD_CMAKE reaches no xcodebuild.
+        # The CMake -D flags have no Xcode counterpart: WK_BUILD_CMAKE reaches no
+        # xcodebuild, and is simply absent on macOS.
         jsc-debug)
             CFG_TYPE=Debug; CFG_JSC_ONLY=1
             CFG_ARGS="--debug"
@@ -242,10 +174,8 @@ config_load() { # <name> <os: linux|macos> [kind: container|vm|local|remote]
             CFG_TYPE=Release; CFG_JSC_ONLY=1
             if [ "$CFG_OS" = macos ]; then
                 _cfg_apple_jsc
-                # ASAN=YES, not --asan: build-jsc has no --asan of its own, and
-                # what it does have is a passthrough to the project Makefile,
-                # which turns ASAN=YES into set-webkit-configuration --asan
-                # (Makefile.shared). config_build_dir reads it the same way.
+                # ASAN=YES, not --asan: build-jsc has no --asan, and its passthrough hands
+                # ASAN=YES to the project Makefile as set-webkit-configuration --asan.
                 CFG_ARGS="--release ASAN=YES"
             else
                 CFG_PORT="--jsc-only"
@@ -272,10 +202,8 @@ config_load() { # <name> <os: linux|macos> [kind: container|vm|local|remote]
             CFG_ARGS="--release"
             CFG_CMAKE="$_CFG_RELWITHDEBINFO -DENABLE_WPE_PLATFORM=ON"
             ;;
-        # --- Apple ports ------------------------------------------------------
-        # No port flag: build-webkit defaults to Apple Cocoa on Darwin and
-        # there is no --mac to pass. Empty CFG_PORT is the port selection.
-        # Refused off macOS below, where there is no Xcode to run them with.
+        # No port flag: build-webkit defaults to Apple Cocoa on Darwin, and empty
+        # CFG_PORT is the port selection.
         mac-debug)
             CFG_TYPE=Debug; CFG_BUILDSYS=xcode
             CFG_ARGS="--debug"
@@ -301,17 +229,12 @@ config_load() { # <name> <os: linux|macos> [kind: container|vm|local|remote]
             ;;
     esac
 
-    # An Xcode config on a machine with no Xcode. Stated here rather than left
-    # to xcodebuild's own "command not found" forty lines into a perl script,
-    # and named as the platform mismatch it is.
     if [ "$CFG_BUILDSYS" = xcode ] && [ "$CFG_OS" != macos ]; then
         die "'$1' is an Apple-port config and builds with Xcode, which this
     workspace has no way to run (it is $CFG_OS). The configs that build here
     are the CMake ports:  wk build --list"
     fi
 
-    # The all-config defaults go in front of what the config asked for, so the
-    # config's own flags are the ones that win where the two disagree.
     if [ "$CFG_BUILDSYS" = cmake ]; then
         CFG_ARGS="$_CFG_DEFAULT_ARGS${CFG_ARGS:+ $CFG_ARGS}"
         _cfg_use_libbacktrace "$CFG_KIND"
@@ -321,19 +244,17 @@ config_load() { # <name> <os: linux|macos> [kind: container|vm|local|remote]
         CFG_CMAKE="$_cfg_def${CFG_CMAKE:+ $CFG_CMAKE}"
     fi
 
-    # Decided here so the job count, the watchdog's budget and the value
-    # carried into the target all agree; an explicit WK_MB_PER_JOB wins.
+    # Decided here so the job count, the watchdog's budget and the value carried
+    # into the target agree; an explicit WK_MB_PER_JOB wins.
     [ -n "${WK_MB_PER_JOB_EXPLICIT:-}" ] || WK_MB_PER_JOB=$(config_mb_per_job)
     return 0
 }
 
-# The environment a build runs with, assembled into CFG_ENV. config_load
-# must have run first. Architecture is passed in rather than read here: this
-# is also used by the golden-base prebuild, which has no current workspace.
+# Assembled into CFG_ENV; config_load first. Architecture is passed in rather
+# than read here: the golden-base prebuild uses this and has no workspace.
 
-# How much memory one compile job is worth. 1536 MB fits the CMake ports
-# (WebKit TUs peak near 1-1.5 GB); the Apple build's peak is dominated by
-# one step, the big link, and wants ~17 GB regardless of job count.
+# 1536 MB fits the CMake ports (WebKit TUs peak near 1-1.5 GB); the Apple
+# build's peak is one step, the big link, wanting ~17 GB whatever the job count.
 config_mb_per_job() {
     case "$CFG_BUILDSYS" in
         xcode) echo 3072 ;;
@@ -342,23 +263,14 @@ config_mb_per_job() {
 }
 
 # A machine's flags for *one* config: targets/hosts/<name>.conf may set
-# WK_TARGET_CMAKE_<config> or WK_BUILD_ARGS_<config> beside the machine-wide
-# pair, with the config's dashes written as underscores --
-# WK_TARGET_CMAKE_wpe_release. For a quirk that is a property of one config on
-# one machine, where the machine-wide variable would reach builds it is wrong
-# for. Empty when the conf says nothing, which is the normal case.
-#
-# ${!name} rather than eval: bash 3.2 has indirect expansion and it cannot run
-# what a conf file's value happens to look like.
+# WK_TARGET_CMAKE_<config> or WK_BUILD_ARGS_<config>, the config's dashes as
+# underscores. ${!name} rather than eval: bash 3.2 has indirect expansion.
 config_target_var() { # <variable stem>
     local n="$1_$(printf '%s' "${CFG_NAME:-}" | tr -- - _)"
     printf '%s' "${!n:-}"
 }
 
-# Re-adds quotes around a -D flag's value if it has embedded spaces (the
-# RelWithDebInfo flags, _CFG_RELWITHDEBINFO above) -- the pairing helper for
-# the eval/set-based split in _config_merge_cxx_flags below, which strips
-# them getting there.
+# Re-adds the quotes around a -D value with spaces, which the split below strips.
 _config_requote() { # <one -D flag, quotes already stripped>
     case "$1" in
         *' '*) printf '%s="%s"' "${1%%=*}" "${1#*=}" ;;
@@ -366,16 +278,11 @@ _config_requote() { # <one -D flag, quotes already stripped>
     esac
 }
 
-# Every -DCMAKE_CXX_FLAGS= a config's flags carry (the libc++ default,
-# _CFG_LIBCXX_CMAKE, plus a target's own WK_TARGET_CMAKE -- buildbox4's
-# -Wno-invalid-constexpr is exactly this) collapse into one, kept last so it
-# is the value cmake actually uses: -D takes the last repeated flag, and a
-# host that states its own -DCMAKE_CXX_FLAGS= is stating what to *add* to the
-# build, not what replaces every other one.
+# Every -DCMAKE_CXX_FLAGS= (the libc++ default plus a target's own) collapses
+# into one, kept last: a host stating its own is stating what to *add*.
 _config_merge_cxx_flags() { # <cmake flags string>
-    # Strings, not arrays: bash 3.2 (macOS's own) errors on "${arr[@]}" for
-    # an empty array under `set -u`, and this runs on the host driving the
-    # build, which may be a macOS workstation (build-in-target.sh).
+    # Strings, not arrays: bash 3.2 errors on "${arr[@]}" for an empty array under
+    # `set -u`, and this runs on the host, which may be a macOS workstation.
     local a cxx="" out=""
     eval "set -- $1"
     for a in "$@"; do
@@ -391,21 +298,15 @@ _config_merge_cxx_flags() { # <cmake flags string>
 config_build_env() {
     local src="$1" jobs="$2" nice="$3" arch="${4:-native}"
 
-    # --- Apple ports: pin where the output and the caches go -----------------
-    # Xcode's default DerivedData is one machine-wide directory per *user*,
-    # shared by every workspace on the macOS remote target. Paths below
-    # derive from $src instead, so they're per workspace; only what is *not*
-    # content-addressed is separated per config, via WEBKIT_OUTPUTDIR.
+    # Xcode's default DerivedData is one directory per *user*, shared by every
+    # workspace on the macOS remote target; the paths below derive from $src.
     local out=""
     if [ "$CFG_BUILDSYS" = xcode ]; then
         out=$(config_build_dir "$src")
     fi
 
-    # Appended in order (architecture, machine conf, that machine's flags for
-    # *this* config, `wk build --cmake`, which arrives here as WK_EXTRA_CMAKE
-    # -- cmd/build's own name for it, exported ahead of this call), so each
-    # wins where it overlaps -- cmake takes the last repeated -D. Narrowest
-    # last, so a machine's per-config flag beats its machine-wide one.
+    # Appended narrowest last (architecture, machine conf, that machine's flags for
+    # *this* config, then `wk build --cmake` as WK_EXTRA_CMAKE).
     local cmakeargs="$CFG_CMAKE"
     local archcmake; archcmake=$(arch_cmake "$arch" "$CFG_PORT")
     [ -n "$archcmake" ] && cmakeargs="$cmakeargs $archcmake"
@@ -416,12 +317,9 @@ config_build_env() {
     [ -n "${WK_EXTRA_CMAKE:-}" ] && cmakeargs="$cmakeargs $WK_EXTRA_CMAKE"
     cmakeargs="$(_config_merge_cxx_flags "$cmakeargs")"
 
-    # WK_CCACHE_DIR: set by cmd/build (t_ccache_dir) before this runs; the
-    # /ccache default only matters to a caller that skips that step
-    # (targets/vm.sh's base-image prebuild), and there it agrees with
-    # t_ccache_dir's own container answer. See t_ccache_dir for other
-    # targets. Sloppiness desensitises __TIMESTAMP__ and the glib ports'
-    # regenerated BuildRevision.h.
+    # WK_CCACHE_DIR: set by cmd/build (t_ccache_dir) before this runs; the /ccache
+    # default only matters to a caller that skips that step (targets/vm.sh's
+    # base-image prebuild). Sloppiness desensitises __TIMESTAMP__ and BuildRevision.h.
     CFG_ENV=(
         "CCACHE_DIR=${WK_CCACHE_DIR:-/ccache}"
         "CCACHE_BASEDIR=$src"
@@ -434,24 +332,20 @@ config_build_env() {
         "WK_SRC=$src"
         "WK_BUILDSYS=$CFG_BUILDSYS"
         "WK_BUILD_SCRIPT=$CFG_SCRIPT"
-        # WK_TARGET_BUILD_ARGS is targets/hosts/<name>.conf's WK_BUILD_ARGS,
-        # named differently so folding it in doesn't overwrite these flags.
+        # targets/hosts/<name>.conf's WK_BUILD_ARGS, named apart so it cannot overwrite.
         "WK_BUILD_ARGS=$CFG_PORT $CFG_ARGS${WK_TARGET_BUILD_ARGS:+ $WK_TARGET_BUILD_ARGS}${cfgargs:+ $cfgargs}"
         "WK_BUILD_CMAKE=$cmakeargs"
         "WK_BUILD_DIR=$(config_build_dir "$src")"
         "WK_MB_PER_JOB=$WK_MB_PER_JOB"
     )
-    # `env CC= ` is not the same as not setting CC: the Apple configs leave
-    # these empty on purpose, so only set when the config asks for it.
+    # `env CC= ` is not the same as not setting CC, and the Apple configs want unset.
     [ -n "$CFG_CC" ] && CFG_ENV+=("CC=$CFG_CC" "CXX=$CFG_CXX")
 
-    # Stated rather than left implicit: WebKitCCache.cmake reads this to wire
-    # ccache in, so leaving it off is one `--no-use-ccache` away from every
-    # JSC build going cold with no message.
+    # WebKitCCache.cmake reads this to wire ccache in, so leaving it off is one
+    # `--no-use-ccache` away from every JSC build going cold with no message.
     [ "$CFG_PORT" = --jsc-only ] && CFG_ENV+=("WK_USE_CCACHE=YES")
 
-    # Only for non-native: part of every ccache hash; empty ones would
-    # invalidate a cache native builds already share.
+    # Part of every ccache hash: empty ones would invalidate what native builds share.
     if ! arch_is_native "$arch"; then
         CFG_ENV+=(
             "WK_ARCH=$arch"
@@ -460,14 +354,14 @@ config_build_env() {
             "WK_ARCH_LDFLAGS=$(arch_ldflags "$arch")"
         )
     fi
-    # Xcode only: WEBKIT_OUTPUTDIR on a CMake port collapses every per-port
-    # layout. Separate variables, not WK_BUILD_ARGS, which is word-split.
+    # Xcode only: WEBKIT_OUTPUTDIR on a CMake port collapses every per-port layout.
+    # Separate variables, not WK_BUILD_ARGS, which is word-split.
     if [ -n "$out" ]; then
         CFG_ENV+=("WEBKIT_OUTPUTDIR=$out" "WK_DERIVED_DATA=$src/WebKitBuild/DerivedData")
     fi
-    # Carried through only when set: empty isn't unset for build-in-target.sh.
+    # Carried through only when set: empty is not unset for build-in-target.sh.
     # WK_MEM_BUDGET_MB/WK_MEM_FLOOR_MB come from --mem-budget/--mem-floor;
-    # WK_MEM_INTERVAL (default 30s, wk build -h) has no flag of its own.
+    # WK_NO_COMPILATION_CACHE and WK_NO_COMPILE_COMMANDS opt out of those two.
     [ -n "${WK_MEM_BUDGET_MB:-}" ] && CFG_ENV+=("WK_MEM_BUDGET_MB=$WK_MEM_BUDGET_MB")
     [ -n "${WK_MEM_FLOOR_MB:-}" ]  && CFG_ENV+=("WK_MEM_FLOOR_MB=$WK_MEM_FLOOR_MB")
     [ -n "${WK_MEM_INTERVAL:-}" ]  && CFG_ENV+=("WK_MEM_INTERVAL=$WK_MEM_INTERVAL")
@@ -475,11 +369,9 @@ config_build_env() {
     [ -n "${WK_NO_COMPILE_COMMANDS:-}" ] && CFG_ENV+=("WK_NO_COMPILE_COMMANDS=1")
     [ -n "${WK_NO_COMPILATION_CACHE:-}" ] && CFG_ENV+=("WK_NO_COMPILATION_CACHE=1")
 
-    # `wk build … --env CC=gcc-14`, last: `env` applies left to right, so
-    # this overrides the config's own. Arrives here as WK_EXTRA_ENV --
-    # cmd/build's own name for it, exported ahead of this call. Newline-,
-    # not space-separated: an environment value may legitimately contain a
-    # space (CFLAGS).
+    # `wk build ... --env CC=gcc-14`, last: `env` applies left to right. Newline-
+    # separated, because an environment value may contain a space (CFLAGS).
+    # WK_EXTRA_ENV: --env from the command line, over the config's own.
     if [ -n "${WK_EXTRA_ENV:-}" ]; then
         while IFS= read -r _e; do
             [ -n "$_e" ] || continue
@@ -491,8 +383,6 @@ EOF
     return 0
 }
 
-# --- where the products land: bin/+lib/ on CMake ports, no bin/ (frameworks)
-# on Xcode. config_load must have run first. ------------------------------
 
 config_jsc_path() {
     local d; d=$(config_build_dir "$1")
@@ -519,12 +409,9 @@ config_run_dir() {
     esac
 }
 
-# --- the browser, and the processes it spawns --------------------------------
-# MiniBrowser is one binary on the CMake ports and an app bundle on the Apple
-# ports; the path below is the binary inside it, not the bundle, so the
-# browser stays a child of the launching shell and ctrl-c/a debugger reach
-# it. Its page is `--url <URL>` (AppDelegate.m:47,265); a bare positional URL
-# is silently ignored.
+# MiniBrowser is a binary on the CMake ports and an app bundle on the Apple
+# ports; below is the binary inside it, so the browser stays a child of the
+# launching shell. Its page is `--url <URL>` (AppDelegate.m:47,265).
 
 config_browser_path() {
     local d; d=$(config_build_dir "$1")
@@ -534,7 +421,6 @@ config_browser_path() {
     esac
 }
 
-# One port takes a positional URL; the other ignores it.
 config_browser_url_flag() {
     case "$CFG_BUILDSYS" in
         xcode) echo "--url" ;;
@@ -543,9 +429,8 @@ config_browser_url_flag() {
 }
 
 # The environment a WebKit app needs to find its own frameworks. Apple only.
-# The __XPC_ duplicates are load-bearing: launchd turns __XPC_FOO into FOO
-# for the XPC child services (WebContent, GPU, Networking), so without them
-# those children run against the system WebKit instead of the build tree.
+# The __XPC_ duplicates are load-bearing: launchd turns __XPC_FOO into FOO for
+# the XPC children, which would otherwise run against the system WebKit.
 config_browser_env() {
     local d; d=$(config_build_dir "$1")
     case "$CFG_BUILDSYS" in
@@ -554,10 +439,8 @@ config_browser_env() {
     esac
 }
 
-# A JSC-only config builds no browser, no web process and no test runner --
-# neither the JSCOnly CMake port nor Xcode's "Everything up to JavaScriptCore"
-# has one. The four name functions below answer nothing for them rather than
-# naming a binary that was never built.
+# A JSC-only config builds no browser and no test runner, so these answer
+# nothing rather than naming an unbuilt binary.
 config_jsc_only() { [ -n "${CFG_JSC_ONLY:-}" ]; }
 
 # What the web process is called, for `lldb --attach-name ... --waitfor`. A
@@ -572,8 +455,7 @@ config_web_process_name() {
     esac
 }
 
-# The network and GPU process names, same shape as config_web_process_name
-# and the same use: naming a process to attach to. CMake ports only --
+# Same use, naming a process to attach to. CMake ports only --
 # Source/WebKit/Platform{WPE,GTK}.cmake:17-18.
 config_network_process_name() {
     config_jsc_only && { echo ""; return 0; }
@@ -606,8 +488,7 @@ config_test_runner_name() {
 
 # Makes the web process sleep after launch so a waiting debugger beats
 # `--waitfor`'s race with dyld start-up. Spelled twice: the Apple ports need
-# __XPC_FOO (launchd turns it into FOO); the GLib ports fork directly and
-# inherit the plain name. Both readers require ENABLE(DEVELOPER_MODE).
+# __XPC_FOO, the GLib ports the plain name; both require ENABLE(DEVELOPER_MODE).
 config_web_process_pause_env() {
     case "$CFG_BUILDSYS" in
         xcode) echo "__XPC_WEBKIT_PAUSE_WEB_PROCESS_ON_LAUNCH=1" ;;

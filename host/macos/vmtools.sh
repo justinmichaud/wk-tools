@@ -1,18 +1,6 @@
-# Install what depends on wk-tools inside the VM.
-#
-# The tooling itself is not copied: the machine mounts this checkout read-only
-# at /opt/wk-tools (host/macos/machine.sh), so the VM runs the working tree and
-# an edit here is testable in a workspace with no step in between. What is left
-# is everything that has to be *installed* around it -- the egress proxy, the
-# SDK, the machine's own packages -- and the three mounts are verified first,
-# since every one of those steps names a path in one of them.
-#
-# Runs after the machine stage. Safe to re-run.
-
-# For $WK_STORE and wk_secrets_dir: the two ends of the secrets mount this
-# verifies below, from the one file that answers where each of them is.
+# Install what depends on wk-tools inside the VM: the SDK and the egress proxy.
+# Provisioning goes first: it is what holds the mounts read-only.
 . "$WK_ROOT/lib/store.sh"
-# The three unit bodies and the one installer, shared with host/linux/sdk.sh.
 . "$WK_ROOT/host/units.sh"
 
 WK_MACHINE="${WK_MACHINE:-wk}"
@@ -31,10 +19,8 @@ _ssh_port=$(podman machine inspect "$WK_MACHINE" --format '{{.SSHConfig.Port}}')
 _ssh_key=$(podman machine inspect "$WK_MACHINE" --format '{{.SSHConfig.IdentityPath}}')
 _ssh_user=$(podman machine inspect "$WK_MACHINE" --format '{{.SSHConfig.RemoteUsername}}')
 
-# _unpinned_host_key_opts (lib/reach.sh) fits here too: a podman machine is
-# recreated by ./setup, not upgraded in place, so its host key is as
-# disposable as a board's bench image. -p/-i/BatchMode/ConnectTimeout are
-# discovered fresh from `podman machine inspect` every run.
+# A podman machine is recreated by ./setup, not upgraded, so its host key is
+# disposable (_unpinned_host_key_opts, lib/reach.sh).
 command -v _unpinned_host_key_opts >/dev/null 2>&1 || . "$WK_ROOT/lib/reach.sh"
 
 _rsh() {
@@ -44,15 +30,52 @@ _rsh() {
         "$_ssh_user@localhost" "$@"
 }
 
-# --- the three mounts, from inside -------------------------------------------
-# Every step below names a path in one of them, and so does every container
-# this machine will ever create. A machine missing one fails one step at a
-# time, each with a different message; this fails once and names the remedy.
-#
-# From inside, and not from the config file host/macos/machine.sh reads: what
-# is asked for at creation and what the machine actually has are two different
-# questions, and only the second one is answerable here. A function so a test
-# can drive each verdict against a fake _rsh (tests/test_vmtools_mounts.py).
+# A playbook that dies at its third task also reports changed=0.
+debug "re-applying machine provisioning"
+scp -q -P "$_ssh_port" -i "$_ssh_key" \
+    -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+    "$WK_ROOT/host/macos/playbook.yaml" "$_ssh_user@localhost:/home/core/playbook.yaml"
+
+# `<verdict> <changed-count>` first, then the failing tasks. ansible-core 2.16
+# ships no machine-readable callback, so the recap line is what there is to read.
+_playbook_verdict() {
+    python3 -c '
+import re, sys
+
+text = sys.stdin.read()
+recap = re.search(r"^\S+\s+:\s+(ok=\d+.*)$", text, re.M)
+if not recap:
+    print("norecap 0")
+    raise SystemExit(0)
+counts = {k: int(v) for k, v in re.findall(r"(\w+)=(\d+)", recap.group(1))}
+bad = counts.get("failed", 0) + counts.get("unreachable", 0)
+print("failed" if bad else "ok", counts.get("changed", 0))
+
+for line in text.splitlines():
+    if line.startswith(("fatal:", "failed:")):
+        print(line[:600])
+'
+}
+
+# `|| true` so the recap decides, not ssh's exit status under `set -e`.
+_pb=$({ _rsh 'ansible-playbook /home/core/playbook.yaml 2>&1' || true; } | _playbook_verdict)
+read -r _pb_state _pb_changed <<<"${_pb%%$'\n'*}"
+case "$_pb_state" in
+    ok) if [ "$_pb_changed" -eq 0 ]; then
+            unchanged "machine provisioning"
+        else
+            changed "machine provisioning (changed=$_pb_changed)"
+        fi ;;
+    failed)
+        die "provisioning the machine failed, so everything below the failing task
+    was skipped and this machine is not provisioned:
+$(printf '%s\n' "$_pb" | tail -n +2 | sed 's/^/    /')" ;;
+    *)  die "the provisioning playbook printed no recap, so nothing here knows what
+    it did. Re-run it and read the output:
+        podman machine ssh $WK_MACHINE -- ansible-playbook /home/core/playbook.yaml" ;;
+esac
+
+# From inside: what is asked for at creation and what the machine has differ.
 _verify_mounts() {
     if _rsh 'test -x /opt/wk-tools/wk'; then
         unchanged "this checkout is mounted at /opt/wk-tools"
@@ -62,9 +85,6 @@ _verify_mounts() {
     is created:  ./setup --stage machine"
     fi
 
-    # The mount, not the directory: an empty directory of the VM's own at the
-    # same path would leave `wk key set` writing on this host and every
-    # container reading nothing.
     if _rsh "findmnt -no TARGET $(sh_quote "$WK_STORE/secrets")" >/dev/null 2>&1; then
         unchanged "the secrets directory is mounted at $WK_STORE/secrets"
     else
@@ -73,10 +93,7 @@ _verify_mounts() {
     there when it is created:  ./setup --stage machine"
     fi
 
-    # The one writable mount: the Claude CLI rewrites the login credential in
-    # place when it spends the refresh token, so a read-only mount here logs
-    # every workspace out the first time one refreshes. Writability is asked of
-    # the kernel over there, where the mode actually applies.
+    # The Claude CLI rewrites the credential in place when it spends the token.
     if ! _rsh "findmnt -no TARGET $(sh_quote "$WK_STORE/agent-rw")" >/dev/null 2>&1; then
         die "$WK_STORE/agent-rw is not a mount inside '$WK_MACHINE', so the claude.ai
     login this host holds ($(wk_agent_rw_dir)) reaches no workspace. The machine
@@ -89,34 +106,23 @@ _verify_mounts() {
     out the first time it refreshes. The machine mounts it read-write when it
     is created:  ./setup --stage machine"
     fi
+
+    # podman takes `--volume src:target:ro` and mounts it read-write anyway.
+    local target
+    for target in /opt/wk-tools "$WK_STORE/secrets"; do
+        if _rsh "findmnt -no TARGET -O ro $(sh_quote "$target")" >/dev/null 2>&1; then
+            unchanged "$target is mounted read-only"
+        else
+            die "$target is writable inside '$WK_MACHINE', so a workspace can rewrite
+    this checkout and the deploy keys it pushes with. podman drops the
+    read-only mode it is given and the machine's provisioning puts it back
+    (host/macos/playbook.yaml); this says that provisioning did not run."
+        fi
+    done
 }
 _verify_mounts
 
-# The proxy runs the policy file straight off the mount, so an edit here is
-# live in the VM the moment it is saved -- but only for a proxy that restarts
-# to read it. Restarted only when the policy changed: an unconditional restart
-# drops every workspace's egress for a moment, and this file is meant to be
-# runnable while a build is fetching something.
-_proxy_policy_hash() { cksum < "$WK_ROOT/container/proxy/wk-proxy.py" | awk '{print $1}'; }
-
-# Only when it is already running: starting it is the install step further
-# down, and a never-set-up machine should not report a failure to start
-# something nothing has installed yet.
-_proxy_policy_reload() {
-    local want; want=$(_proxy_policy_hash)
-    _rsh 'systemctl --user is-active --quiet wk-proxy.service' || return 1
-    if [ "$(_rsh 'cat /var/lib/wk/.proxy-policy 2>/dev/null' || true)" = "$want" ]; then
-        unchanged "wk-proxy running"
-        return 0
-    fi
-    _rsh "systemctl --user restart wk-proxy.service && echo $want > /var/lib/wk/.proxy-policy"
-    changed "restarted wk-proxy (policy changed)"
-}
-
-# --- shared mutable skills ---------------------------------------------------
-# Seeded from the repo once, then left alone: workspaces share this
-# directory read-write, so re-syncing on every run would destroy their
-# edits. `wk skills pull` is how edits come back.
+# Workspaces share this read-write, so re-syncing every run destroys their edits.
 if _rsh 'test -d /var/lib/wk/skills && test -n "$(ls -A /var/lib/wk/skills 2>/dev/null)"'; then
     unchanged "shared skills present (not overwritten)"
     _rsh 'diff -rq /opt/wk-tools/claude/skills /var/lib/wk/skills >/dev/null 2>&1' \
@@ -127,10 +133,6 @@ else
     changed "seeded /var/lib/wk/skills"
 fi
 
-# --- build key ---------------------------------------------------------------
-# One deploy key per fork, generated here so a fresh machine is ready to go; it
-# still has to be registered on GitHub once (`wk key register`). Run on this
-# host, where the keys live: the VM only reads them.
 "$WK_ROOT/cmd/key" ensure 2>&1 | sed 's/^/  /' || true
 if [ -f "$(wk_secrets_dir)/build_key_fork.pub" ]; then
     unchanged "build key present"
@@ -138,39 +140,13 @@ else
     warn "no build key; workspaces will not be able to push"
 fi
 
-# --- machine configuration is regenerated, never accumulated -----------------
-# Everything below is derived wholly from this repo and reapplied on every
-# run, so a change made by hand inside the VM does not survive `./setup`:
-# the VM is reproducible from the repo, and drift there is invisible and
-# hard to debug.
-#
-# Regenerated: the SDK checkout and its patches, the egress proxy, the
-# machine's own layered packages. NOT touched, since it is data rather than
-# configuration:
+# Everything below is reapplied every run; these are data, and are left alone:
 #   /var/lib/wk/git      the mirror        /var/lib/wk/ws       workspaces
 #   /var/lib/wk/base     snapshots         /var/lib/wk/cache    ccache et al
 #   /var/lib/wk/skills   mutable skills
-# /opt/wk-tools and /var/lib/wk/secrets are neither: they are this host's own
-# directories, mounted read-only.
 
-# Reported from ansible's own changed-count: regenerating to an identical
-# result is not a change, and saying it is destroys the signal of "no changes".
-debug "re-applying machine provisioning"
-scp -q -P "$_ssh_port" -i "$_ssh_key" \
-    -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-    "$WK_ROOT/host/macos/playbook.yaml" "$_ssh_user@localhost:/home/core/playbook.yaml"
-_pb=$(_rsh 'ansible-playbook /home/core/playbook.yaml 2>&1 | grep -oE "changed=[0-9]+" | head -1' || echo "changed=?")
-case "$_pb" in
-    changed=0) unchanged "machine provisioning" ;;
-    changed=\?) warn "provisioning playbook reported errors; re-run with WK_DEBUG=1" ;;
-    *)         changed "machine provisioning ($_pb)" ;;
-esac
-
-# --- the SDK -----------------------------------------------------------------
-# Cloned inside the VM, then patched. The patches make a sandboxed workspace
-# possible at all: without --additional-flags there is no way to attach the
-# overlay mount, and without a selectable --network the container shares
-# the host namespace and cannot be firewalled.
+# Without --additional-flags the overlay mount cannot be attached, and without a
+# selectable --network the container shares the host namespace.
 if _rsh 'test -d /opt/webkit-container-sdk/.git'; then
     unchanged "webkit-container-sdk present"
 else
@@ -180,11 +156,7 @@ else
     changed "cloned webkit-container-sdk"
 fi
 
-# Hard reset before patching: without it an edit made inside the VM would
-# survive forever, since the idempotent patcher sees its own markers already
-# present and leaves a tampered file as found. The reset means the patcher
-# always has work to do, so what's reported is whether the *result* differs,
-# hashed either side; the patcher's own chatter is debug-level.
+# Without the reset the idempotent patcher leaves a tampered file as found.
 debug "resetting and re-patching the SDK"
 _sdk_hash() {
     _rsh 'cat /opt/webkit-container-sdk/scripts/host-only/wkdev-create \
@@ -208,80 +180,37 @@ else
     changed "SDK patches re-applied (result differs from before)"
 fi
 
-# --- the egress proxy --------------------------------------------------------
-# The boundary, the same one Linux uses: a systemd --user service owned by
-# `core`, so nothing in the daily path needs a privilege and nothing inside
-# a workspace can modify it. In place of nftables, which requires rootful
-# podman -- and under rootful podman a container escape is a root escape --
-# the proxy needs no privilege and expresses policy in hostnames rather
-# than hand-refreshed CIDR lists. Lingering is already on for `core`, so
-# the service survives with nobody logged in.
+# In place of nftables, which requires rootful podman, the proxy needs no
+# privilege and expresses policy in hostnames.
 debug "installing the egress proxy in the machine"
 
-# The machine spells this checkout /opt/wk-tools (its virtiofs mount of it) and
-# its store /var/lib/wk, and _rsh is how a command reaches it -- the three
-# arguments host/units.sh needs. %t in a unit body expands to the user runtime
-# directory over there: /run/user/501, since the machine's `core` is uid 501.
+# %t in a unit body expands to /run/user/501: the machine's `core` is uid 501.
 _unit_root=/opt/wk-tools
-unit_install wk-proxy.service "$_unit_root" /var/lib/wk _rsh
+_unit_store=/var/lib/wk
+_unit_journal="podman machine ssh $WK_MACHINE -- "
 
-_proxy_policy_reload || true
-if ! _rsh 'systemctl --user is-active --quiet wk-proxy.service'; then
-    _rsh 'systemctl --user enable --now wk-proxy.service' >/dev/null 2>&1 \
-        || warn "could not start wk-proxy.service -- workspaces will have no egress"
-    if _rsh 'systemctl --user is-active --quiet wk-proxy.service'; then
-        _rsh "echo $(_proxy_policy_hash) > /var/lib/wk/.proxy-policy"
-        changed "started wk-proxy.service in the machine"
-    fi
-fi
+unit_start wk-proxy.service "$_unit_root" "$_unit_store" \
+    "workspaces will have no egress" "$_unit_journal" _rsh
 
-# --- the deploy keys' ssh-agent ----------------------------------------------
-# The one thing on this machine that holds a private deploy key. Its socket is
-# in %t/wk, the directory every container bind-mounts at /run/wk, so a
-# workspace can *use* a key it can never read -- an agent has no protocol for
-# handing one back. `wk push on|off` is what loads and empties it
-# (push_agent_*, lib/store.sh); this only makes sure it is there to be filled.
-#
-# -D keeps it in the foreground so systemd's pid is the agent's. It starts
-# empty and stays empty across a restart, which is the safe direction: the
-# switch has to be thrown again, and `wk push status` says so rather than
-# claiming a key that is gone.
-unit_install wk-ssh-agent.service "$_unit_root" /var/lib/wk _rsh
+# Its socket is in %t/wk, which every container bind-mounts at /run/wk, so a
+# workspace uses a key it never reads. `wk push on|off` fills and empties it.
+unit_start wk-ssh-agent.service "$_unit_root" "$_unit_store" \
+    "no workspace here can push" "$_unit_journal" _rsh
 
-if ! _rsh 'systemctl --user is-active --quiet wk-ssh-agent.service'; then
-    _rsh 'systemctl --user enable --now wk-ssh-agent.service' >/dev/null 2>&1 \
-        || warn "could not start wk-ssh-agent.service -- no workspace here can push"
-    _rsh 'systemctl --user is-active --quiet wk-ssh-agent.service' \
-        && changed "started wk-ssh-agent.service in the machine"
-fi
+# Terminates TLS for api.github.com and puts the real token in the Authorization
+# header. Its socket is under the store, not %t/wk: reached through the policy.
+unit_start wk-github-inject.service "$_unit_root" "$_unit_store" \
+    "'git-webkit pr' in a workspace will fail" "$_unit_journal" _rsh
 
-# --- the GitHub API credential injector --------------------------------------
-# The other half of the same switch: it terminates TLS for api.github.com and
-# puts the real token in the Authorization header, so `git-webkit pr` works in
-# a workspace that never holds the token (container/proxy/github-inject.py).
-# Its socket is under the store and *not* in %t/wk: a workspace must reach it
-# through the egress policy, not around it.
-unit_install wk-github-inject.service "$_unit_root" /var/lib/wk _rsh
-
-# Restarted on a policy change for the same reason wk-proxy is: the program
-# runs straight off the mount, so an edit here is only live for a service that
-# re-execs to read it.
-_inject_hash() { cksum < "$WK_ROOT/container/proxy/github-inject.py" | awk '{print $1}'; }
-if _rsh 'systemctl --user is-active --quiet wk-github-inject.service'; then
-    if [ "$(_rsh 'cat /var/lib/wk/.inject-policy 2>/dev/null' || true)" = "$(_inject_hash)" ]; then
-        unchanged "wk-github-inject running"
-    else
-        _rsh "systemctl --user restart wk-github-inject.service && echo $(_inject_hash) > /var/lib/wk/.inject-policy"
-        changed "restarted wk-github-inject (program changed)"
-    fi
+# The standing read token goes in beside it: reading is open whatever position
+# `wk push` is in, so this file is delivered here and by `wk key set github-pat`
+# -- and removed again when this device no longer holds a token.
+if push_agent_pat_sync push_agent_exec "$(push_agent_machine_read_pat)"; then
+    debug "GitHub read token converged on the machine"
 else
-    _rsh 'systemctl --user enable --now wk-github-inject.service' >/dev/null 2>&1 \
-        || warn "could not start wk-github-inject.service -- 'git-webkit pr' in a workspace will fail"
-    if _rsh 'systemctl --user is-active --quiet wk-github-inject.service'; then
-        _rsh "echo $(_inject_hash) > /var/lib/wk/.inject-policy"
-        changed "started wk-github-inject.service in the machine"
-    fi
+    warn "could not converge the GitHub read token on '$WK_MACHINE', so a read
+  from a workspace answers 401 ('wk key set github-pat' stores one)"
 fi
 
-unset _ssh_port _ssh_key _ssh_user _unit_root
-unset -f _verify_mounts
+unset _ssh_port _ssh_key _ssh_user _unit_root _unit_store _unit_journal _pb _pb_state _pb_changed
+unset -f _verify_mounts _playbook_verdict

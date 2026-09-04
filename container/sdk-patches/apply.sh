@@ -1,22 +1,14 @@
 #!/usr/bin/env bash
 #
 # Patch the webkit-container-sdk fork so wkdev-create can produce a sandboxed
-# workspace. Idempotent: safe to re-run, and it verifies rather than assumes.
+# workspace. Idempotent, and it verifies rather than assumes. An applier rather
+# than a .patch file, because these edits must survive rebasing the fork onto
+# upstream.
 #
-# An applier rather than a .patch file: these edits need to survive rebasing
-# the fork onto upstream, and patch fuzz on a moving target is worse than a
-# script that checks what it is editing.
-#
-# Fourteen numbered sections, each independently upstreamable. The
-# load-bearing ones for the sandbox: 2 (--network selectable), 3
-# (SYS_ADMIN/NET_RAW/seccomp opt-in), 6 (no host podman socket), 11
-# (--isolated: no session D-Bus, keyring, host home or runtime dir). The rest
-# are plumbing (flags, user creation, offline apt, resolv.conf, log noise).
-#
-# Every security-relevant section has a token in the verify list at the
-# bottom: an anchor that drifts upstream silently no-ops the patch, and an
-# unverified hardening patch that no-ops is a sandbox hole that looks exactly
-# like a clean run.
+# Fourteen numbered sections, each independently upstreamable. Load-bearing for
+# the sandbox: 2, 3, 6 and 11. Each has a token in the verify list at the bottom:
+# an anchor that drifts upstream silently no-ops the patch, and an unverified
+# hardening patch that no-ops is a sandbox hole that looks like a clean run.
 
 set -euo pipefail
 
@@ -128,11 +120,9 @@ if "additional_flags" not in src and anchor in src:
 PYEOF
 
 # --- 5: run as the container user, not the invoking user ---------------------
-# wkdev-enter derives the exec user from `id` on the host, right for
-# upstream's rootless keep-id where host and container uids match. Here the
-# SDK runs under sudo (rootful podman is the only way the workspace firewall
-# applies), so `id -u` is 0 and every command would run as root inside the
-# container, leaving root-owned files all over the overlay.
+# wkdev-enter derives the exec user from `id` on the host, right for upstream's
+# rootless keep-id. Here the SDK runs under sudo -- rootful podman is the only
+# way the workspace firewall applies -- so `id -u` is 0.
 if [ -f "$ENTER" ]; then
 py "$ENTER" <<'PYEOF'
 import sys
@@ -160,10 +150,8 @@ PYEOF
 fi
 
 # --- 4a: let .wkdev-init accept a user it is about to create ------------------
-# type:username validates --user against the *container's* /etc/passwd at
-# parse time, before any task runs. The image deliberately userdel's uid
-# 1000, so the account does not exist yet and init aborts before it can
-# create it. Dropping the type check lets try_ensure_user_exists (below) run.
+# type:username validates --user against the container's /etc/passwd at parse
+# time, and the image userdel's uid 1000.
 if [ -f "$INIT" ]; then
 py "$INIT" <<'PYEOF'
 import re, sys
@@ -222,9 +210,8 @@ PYEOF
 fi
 
 # --- 6: do not hand the container the host podman socket ---------------------
-# wkdev-create mounts the host's podman socket so podman-in-podman works.
-# Under rootful podman that is a complete sandbox escape: anything holding
-# that socket can start a privileged container and own the machine.
+# wkdev-create mounts the host's podman socket for podman-in-podman. Under
+# rootful podman that is a complete sandbox escape.
 py "$CREATE" <<'PYEOF'
 import sys
 path = sys.argv[1]
@@ -239,12 +226,9 @@ if old in src and "sandbox escape under rootful" not in src:
 PYEOF
 
 # --- 7: let init skip apt when egress is restricted --------------------------
-# .wkdev-init runs `apt-get update`. The workspace egress policy allows only
-# the Anthropic API, GitHub and the Pi test devices, so every Ubuntu mirror
-# is unreachable and those tasks stall until apt times out on each repo in
-# turn. Widening the firewall for a CDN-hosted, shifting address space isn't
-# a good trade for packages the SDK image already contains, so the apt tasks
-# become opt-in via WKDEV_OFFLINE, which wk sets.
+# The workspace egress policy leaves every Ubuntu mirror unreachable, so
+# `apt-get update` stalls until it times out on each repo in turn. Opt-in via
+# WKDEV_OFFLINE, which wk sets.
 py "$INIT" <<'PYEOF'
 import sys
 path = sys.argv[1]
@@ -263,12 +247,11 @@ PYEOF
 
 # --- 8: let podman manage resolv.conf on a bridge network --------------------
 # wkdev-create bind-mounts the host's /etc/resolv.conf, right for upstream's
-# --network host (same namespace, same resolver) but wrong on a bridge: the
-# container inherits the host's nameserver, reachable only through the
-# forward chain where the egress policy drops it -- hostname lookups fail
-# while raw IPs still work. Without the mount, podman points the container
-# at aardvark-dns on the bridge gateway, which is input traffic, not
-# forward, so DNS works without opening port 53 to the world.
+# --network host but wrong on a bridge: the container inherits the host's
+# nameserver, reachable only through the forward chain where the egress policy
+# drops it. Without the mount, podman points the container at aardvark-dns on
+# the bridge gateway, which is input traffic, so DNS works without opening
+# port 53 to the world.
 py "$CREATE" <<'PYEOF'
 import sys
 path = sys.argv[1]
@@ -290,11 +273,8 @@ if old in src and not already:
 PYEOF
 
 # --- 9: quieten flatpak runtime-state syncing --------------------------------
-# .wkdev-sync-runtime-state runs on every wkdev-enter and unconditionally
-# symlinks flatpak instance directories from /host/run, which never exist
-# here, so every `wk run`/`build`/`enter` prints bare "ln: No such file"
-# lines that train you to ignore errors from this script -- exactly wrong
-# for when a genuinely broken mount shows up here later.
+# It symlinks flatpak instance directories from /host/run, which never exist
+# here, so every `wk run`/`build`/`enter` prints bare "ln: No such file" lines.
 if [ -f "$SYNC" ]; then
 py "$SYNC" <<'PYEOF'
 import sys
@@ -318,11 +298,8 @@ PYEOF
 fi
 
 # --- 10: XDG_RUNTIME_DIR must match the container user -----------------------
-# wkdev-create derives it from `id --user --real` on the invoking side,
-# right for upstream's rootless keep-id but not here: the SDK runs under
-# sudo, so the invoking uid is 0 and every container gets
-# XDG_RUNTIME_DIR=/run/user/0, a directory that doesn't exist -- breaking
-# anything that writes runtime state (dbus, wayland, pipewire) there.
+# wkdev-create derives it from `id --user --real`, which is 0 under sudo, so
+# every container gets XDG_RUNTIME_DIR=/run/user/0, which does not exist.
 py "$CREATE" <<'PYEOF'
 import sys
 path = sys.argv[1]
@@ -338,18 +315,13 @@ if old in src:
 PYEOF
 
 # --- 11: --isolated, for a workspace that is not a desktop session ----------
-# wkdev's premise is tight integration: the session and system D-Bus
-# sockets, the keyring, dconf, X11, PulseAudio, the journal, and
-# ${XDG_RUNTIME_DIR} at /host/run. Right for a desktop tool, wrong for an
-# unattended agent: the session bus alone is a full host escape
-# (org.freedesktop.systemd1's StartTransientUnit runs any command outside
-# the container, whatever the network policy says), and mounting ${HOME} at
-# /host/home hands over the home directory the design claims a workspace
-# cannot see -- neither is a network problem, so no firewall addresses it.
-#
-# --isolated turns the whole group off. Display integration is deliberately
-# NOT in it -- benchmarks need the GPU and a compositor socket, which wk
-# passes itself, one socket at a time.
+# wkdev integrates tightly with the desktop session: D-Bus sockets, the keyring,
+# dconf, X11, PulseAudio, the journal, ${XDG_RUNTIME_DIR} at /host/run. The
+# session bus alone is a full host escape -- org.freedesktop.systemd1's
+# StartTransientUnit runs any command outside the container -- and ${HOME} at
+# /host/home hands over the home directory a workspace is not supposed to see.
+# --isolated turns the whole group off. Display integration is not in it: wk
+# passes the GPU and compositor socket itself, one socket at a time.
 py "$CREATE" <<'PYEOF'
 import sys
 path = sys.argv[1]
@@ -416,15 +388,12 @@ print("gated host-session integration behind --isolated", file=sys.stderr)
 PYEOF
 
 # --- 12: pin the image explicitly -------------------------------------------
-# wkdev-create resolves the image from the SDK version and, with --arch,
-# falls back to a `_${arch}` tag *only if the unsuffixed tag is missing
-# locally*. On a machine that already has the current aarch64 image (every
-# machine that has ever created a workspace), the fallback never fires, so
-# `--arch arm` hands podman an arm64 image and asks for a 32-bit container
-# from it -- podman then refuses, or matches a multiarch manifest and
-# produces something nobody meant. --image says which image, inferring
-# nothing; this is also what keeps the native-armhf and cross-sysroot
-# images apart, since they differ only by a tag suffix.
+# wkdev-create resolves the image from the SDK version and, with --arch, falls
+# back to a `_${arch}` tag only if the unsuffixed tag is missing locally -- so
+# on a machine that already has the aarch64 image, `--arch arm` hands podman an
+# arm64 image and asks for a 32-bit container from it. --image says which image,
+# inferring nothing, which is also what keeps the native-armhf and cross-sysroot
+# images apart: they differ only by a tag suffix.
 py "$CREATE" <<'PYSECTION12'
 import sys
 path = sys.argv[1]
@@ -457,19 +426,12 @@ PYSECTION12
 
 # --- 13: let a non-SDK container be initialised ------------------------------
 # `.wkdev-init` refuses to run outside a wkdev-sdk container
-# (`is_running_in_container && [ -f /usr/bin/podman-host ]`, that file being
-# something the SDK image ships), a right guard against running it on a
-# host. But the Yocto builder needs a workspace whose image is *not* the
-# SDK: Yocto scarthgap's supported hosts stop at Ubuntu 24.04, the SDK
-# image is 26.04, so `wk sysimage build <yocto>` creates its workspace from
-# a plain 24.04 image, and `.wkdev-init` aborts.
-#
-# The fix is a second discriminator, not a fake `/usr/bin/podman-host`
-# (that file is a real podman wrapper the SDK image ships, and faking it
-# would be a lie): our image writes `/etc/wk-container`, accepted too.
-# Additive and host-safe by construction -- another `-f` test on a path
-# that doesn't exist outside such a container, so the host and a real SDK
-# container get the same answer as before.
+# (`is_running_in_container && [ -f /usr/bin/podman-host ]`). The Yocto builder
+# needs a workspace whose image is not the SDK: scarthgap's supported hosts stop
+# at Ubuntu 24.04 and the SDK image is 26.04, so `wk sysimage build <yocto>`
+# builds from a plain 24.04 image. Our image writes `/etc/wk-container`,
+# accepted as a second discriminator -- another `-f` test on a path that does
+# not exist outside such a container, so the host's answer is unchanged.
 SETTINGS="$SDK/utilities/settings.sh"
 if [ -f "$SETTINGS" ]; then
     py "$SETTINGS" <<'PYSECTION13'
@@ -492,17 +454,10 @@ PYSECTION13
 fi
 
 # --- 14: ask podman.sh's question, not the general one -----------------------
-# `utilities/podman.sh` selects the podman binary with
-# `is_running_in_wkdev_sdk_container`, then unconditionally requires
-# `systemctl` and a working podman -- but its own comment says it actually
-# only needs "/usr/bin/podman-host in the container image". Section 13 made
-# that gap visible: teaching the general guard about `/etc/wk-container`
-# made a Yocto build workspace claim podman-host integration it doesn't
-# have, and `.wkdev-init` died on a missing `systemctl`.
-#
-# So this asks the narrower question directly: a container with no
-# podman-host has no podman to reach, so the requirement is skipped rather
-# than aborted on. Host and real-SDK-container behaviour are unchanged.
+# `utilities/podman.sh` requires `systemctl` and a working podman, but its own
+# comment says it only needs "/usr/bin/podman-host in the container image".
+# Asking that narrower question leaves host and real-SDK-container behaviour
+# unchanged and skips the requirement where there is no podman-host to reach.
 PODMANSH="$SDK/utilities/podman.sh"
 if [ -f "$PODMANSH" ]; then
     py "$PODMANSH" <<'PYSECTION14'
@@ -553,9 +508,7 @@ PYSECTION14
 fi
 
 # --- verify ------------------------------------------------------------------
-# One token per section that matters, matching text the section *writes*, so
-# a silent no-op (upstream reformatted its anchor) fails here rather than
-# shipping an unhardened script that looks patched.
+# One token per section that matters, matching text the section writes.
 fail=0
 for token in \
     "additional-flags" \

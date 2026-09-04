@@ -1,28 +1,10 @@
-# The fleet-request broker, as a per-user LaunchAgent.
-#
-# The macOS counterpart of host/linux/broker.sh, and it has one more job than
-# that file does, because on this platform the workspace and the workstation
-# are not the same machine.
-#
-# Container workspaces live inside the podman machine, a Fedora CoreOS guest,
-# and they bind-mount *its* runtime directory at /run/wk -- which is why the
-# egress proxy is installed in there (host/macos/vmtools.sh) rather than out
-# here. The broker cannot follow it in. Everything it does is on this Mac: the
-# tailnet identity, the ssh config that reaches the rpi4 through its bridge,
-# `wk boot`'s and `wk sysimage`'s drivers. A copy in the guest would have none
-# of it and no route to any of it.
-#
-# So the process runs here and the *socket* is published in there, by the
-# broker itself, over ssh with a remote unix-socket forward (see
-# publish_into_machine in container/broker/wk-broker.py for why that direction
-# and not a TCP listener). This stage installs the agent; the agent starts the
-# broker; the broker holds the door open and re-establishes it if the guest
-# restarts.
-#
-# Survives a reboot the way the proxy does -- differently spelled, same
-# property. The proxy is a systemd --user service with lingering inside a guest
-# that podman brings back up; this is RunAtLoad plus KeepAlive in the user's
-# own LaunchAgents directory, which is what launchd offers for the same thing.
+# The fleet-request broker, as a per-user LaunchAgent. On macOS the workspace
+# and the workstation are not the same machine: workspaces live in the podman
+# guest and bind-mount *its* /run/wk, while everything the broker needs -- the
+# tailnet identity, the ssh config, `wk boot`'s drivers -- is on this Mac. So
+# the process runs here and the socket is published into the guest by the broker
+# itself, over an ssh remote unix-socket forward (publish_into_machine,
+# container/broker/wk-broker.py). RunAtLoad plus KeepAlive is launchd's lingering.
 
 . "$WK_ROOT/lib/store.sh"
 
@@ -80,18 +62,16 @@ else
     changed "installed $_label.plist"
 fi
 
-# Restarted when the plist changed or the vocabulary did, and otherwise left
-# alone -- `./setup` must be runnable while a request is in flight, and a
-# bootout takes the request with it.
+# Otherwise left alone: `./setup` must be runnable while a request is in flight,
+# and a bootout takes the request with it.
 _policy_stamp="$(wk_state_dir)/.broker-policy"
 _policy_hash=$(cksum < "$WK_ROOT/container/broker/wk-broker.py" | awk '{print $1}')
 [ "$(cat "$_policy_stamp" 2>/dev/null)" = "$_policy_hash" ] || _reload=1
 
 _svc="gui/$(id -u)/$_label"
 if [ -n "$_reload" ]; then
-    # bootout then bootstrap, rather than kickstart -k: the plist may have
-    # changed, and launchd only re-reads it on bootstrap. A bootout of a label
-    # that is not loaded exits non-zero and that is not a failure.
+    # bootout then bootstrap, not kickstart -k: launchd re-reads the plist only
+    # on bootstrap, and a bootout of an unloaded label exits non-zero.
     launchctl bootout "$_svc" >/dev/null 2>&1 || true
     if launchctl bootstrap "gui/$(id -u)" "$_plist" >/dev/null 2>&1; then
         printf '%s\n' "$_policy_hash" > "$_policy_stamp"

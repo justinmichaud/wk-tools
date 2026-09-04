@@ -1,9 +1,6 @@
-# How quiet is this machine, measured rather than assumed. Sourced by
-# `wk quiesce` and `wk bench staged`, which refuses a number taken on a
-# machine that was busy. `quiesce on` turns off persistent sources and
-# stops any running backup; this *measures* the result instead of trusting
-# either half, and also covers what quiesce doesn't touch: a Time Machine
-# destination and thermal state.
+# How quiet is this machine, measured rather than assumed. Sourced by `wk quiesce`
+# and `wk bench staged`, which refuses a number taken on a busy machine. It covers
+# what quiesce does not touch too: a Time Machine destination and thermal state.
 macos_noise() {
     local bad=0 v
 
@@ -20,17 +17,15 @@ macos_noise() {
         *) warn "  timemachine: a destination is configured; a backup can start mid-run"; bad=1 ;;
     esac
 
-    # Not `softwareupdate --schedule`, which reports "on" with
-    # AutomaticCheckEnabled 0 in the same plist. `sudo -n` first: an
-    # ordinary user reads this domain as "does not exist"; `-n` never prompts.
+    # Not `softwareupdate --schedule`: it reports "on" with AutomaticCheckEnabled 0 in
+    # the same plist. `sudo -n`: an ordinary user reads this domain as "does not
+    # exist", and -n never prompts.
     v=$(sudo -n defaults read /Library/Preferences/com.apple.SoftwareUpdate AutomaticCheckEnabled 2>/dev/null) \
         || v=$(defaults read /Library/Preferences/com.apple.SoftwareUpdate AutomaticCheckEnabled 2>/dev/null) \
         || v=""
     case "$v" in
         0)  log  "  updates:    automatic checking off" ;;
         1)  warn "  updates:    automatic checking is on"; bad=1 ;;
-        # Unreadable is unknown elsewhere, but a benchmark install has
-        # passwordless root, so it means something is wrong there.
         '') if [ -f /etc/wk-image ]; then
                 warn "  updates:    unreadable, on an install that has passwordless root."
                 warn "              Not fatal -- see the scanner note below -- but not reassuring."
@@ -40,11 +35,9 @@ macos_noise() {
         *)  log  "  updates:    unknown (AutomaticCheckEnabled=$v)" ;;
     esac
 
-    # AutomaticCheckEnabled=0 still lets a background scan advance -- a
-    # network fetch and CPU burst no preference read would catch. Checked
-    # on a benchmark install only; warned not failed, since SIP permission
-    # for `launchctl bootout` can't be checked from host mode (the hard
-    # check is bench/mac-bench-autorun.sh sampling scan timestamps per arm).
+    # AutomaticCheckEnabled=0 still lets a background scan advance -- a network fetch
+    # and CPU burst no preference read would catch. Warned not failed: SIP permission
+    # for `launchctl bootout` cannot be checked from host mode.
     if [ -f /etc/wk-image ]; then
         if sudo -n launchctl print system/com.apple.softwareupdated >/dev/null 2>&1; then
             warn "  scanner:    softwareupdated is LOADED -- a scan can start mid-run."
@@ -53,8 +46,7 @@ macos_noise() {
             log "  scanner:    softwareupdated not loaded"
         fi
 
-        # bench/mac-quiet-hosts.sh's own check, not a second one: "denied"
-        # here means exactly what do_provision's read-back means. Read-only.
+        # bench/mac-quiet-hosts.sh's own check, not a second one. Read-only.
         local _qh
         _qh="$(dirname "${BASH_SOURCE[0]}")/../bench/mac-quiet-hosts.sh"
         if [ -r "$_qh" ]; then
@@ -68,9 +60,8 @@ macos_noise() {
         fi
     fi
 
-    # A banner takes focus, a lock is "nowhere to draw" -- both invisible
-    # to `screen_blocker`'s frontmost-*application* check. Benchmark
-    # install only; warned not failed, per the scanner note above.
+    # A banner takes focus and a lock is "nowhere to draw" -- both invisible to
+    # `screen_blocker`'s frontmost-*application* check.
     if [ -f /etc/wk-image ]; then
         if pgrep -x NotificationCenter >/dev/null 2>&1; then
             warn "  notifs:     NotificationCenter is RUNNING -- a banner can draw mid-run"
@@ -92,8 +83,7 @@ macos_noise() {
     v=$(pmset -g 2>/dev/null | awk '$1 == "lowpowermode" { print $2 }')
     [ "${v:-0}" = 0 ] && log "  lowpower:   off" || { warn "  lowpower:   ON -- every number from this machine is a low-power number"; bad=1; }
 
-    # Invalidates a comparison, not just adds variance: throttling during
-    # one half of an A/B produces a difference unrelated to the change.
+    # Throttling during one half of an A/B produces a difference unrelated to the change.
     v=$(pmset -g therm 2>/dev/null | sed -n 's/.*CPU_Speed_Limit *= *//p' | head -1)
     if [ -n "$v" ] && [ "$v" != 100 ]; then
         warn "  thermal:    CPU_Speed_Limit=$v -- the machine is being held back right now"
@@ -105,21 +95,15 @@ macos_noise() {
     return $bad
 }
 
-# --- is the screen usable, as opposed to merely occupied --------------------
-# Prints the name of an app owning the *front window*, or nothing: a
-# benchmark in a background window is throttled and times out silently
-# (run-benchmark exit 124). `lsappinfo front` asks the window server
-# directly rather than grepping process command lines (which matches
-# daemons like softwareupdated living *inside* an .app bundle); needs no
-# assistive access, unlike System Events, which lies on a fresh install.
-# WK_SCREEN_BLOCKERS overrides the pipe-separated list, for a dialog whose
-# title differs on another macOS locale or version.
+# Prints the name of an app owning the *front window*, or nothing: a benchmark in a
+# background window is throttled and times out silently (run-benchmark exit 124).
+# `lsappinfo front` asks the window server directly; grepping process command lines
+# matches daemons inside an .app bundle, and System Events needs assistive access.
+# WK_SCREEN_BLOCKERS overrides the pipe-separated list of window titles.
 WK_SCREEN_BLOCKERS="${WK_SCREEN_BLOCKERS:-Setup Assistant|Software Update|Installer|Migration Assistant|System Settings}"
 
-# --- the panel that is not an application ------------------------------------
-# screen_blocker can't see a modal auth panel: macOS draws those from
-# SecurityAgent, not a frontmost application. SecurityAgent runs only
-# while a panel is up, so it's a reliable signal.
+# screen_blocker cannot see a modal auth panel: macOS draws those from
+# SecurityAgent, which runs only while a panel is up.
 auth_panel() {
     pgrep -x SecurityAgent >/dev/null 2>&1 && printf 'SecurityAgent'
     return 0

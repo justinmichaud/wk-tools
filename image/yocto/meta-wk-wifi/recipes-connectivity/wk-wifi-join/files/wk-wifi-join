@@ -2,13 +2,12 @@
 #
 # Bring up WiFi from a credential seeded onto the card, every boot.
 #
-# Unlike wk-tailnet-join's key, a WiFi credential is not single-use -- the
-# radio must associate every boot, so wpa_supplicant-wlan0.conf is read every
-# time and never deleted. Seeded by `wk sysimage write` (disk_seed_wifi,
-# boot/disk.sh): per-card state, not baked into the image.
+# A WiFi credential is not single-use: the radio must associate every boot, so
+# wpa_supplicant-wlan0.conf is read every time and never deleted. Seeded by
+# `wk sysimage write` (disk_seed_wifi, boot/disk.sh), per card.
 #
-# Only ever adds wlan0 alongside eth0's existing DHCP; a board with a cable
-# keeps using it. Exits 0 on any failure that isn't this node's own, POSIX sh, same as wk-tailnet-join.
+# Only ever adds wlan0 alongside eth0's existing DHCP. Exits 0 on any failure
+# that isn't this node's own.
 
 set -u
 

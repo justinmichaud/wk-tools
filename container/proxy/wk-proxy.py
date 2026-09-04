@@ -41,6 +41,12 @@ import socket
 import sys
 import time
 
+# The one sd_notify in the tree. systemd starts this by absolute path, so the
+# import path is derived from this file's own rather than assumed.
+sys.path.insert(0, os.path.join(
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "lib"))
+from wknotify import sd_notify  # noqa: E402
+
 # --- policy ------------------------------------------------------------------
 # Checked before the allowlist, on the same dot-boundary suffix match: a
 # workspace fetches from github.com and nothing more. `gh` -- and anything else
@@ -605,23 +611,6 @@ class Proxy:
                         w.close()
                     except OSError:
                         pass
-
-
-def sd_notify(state):
-    """Tell systemd we are listening, without depending on python3-systemd.
-
-    Type=notify matters here: `wk` must be able to treat "the service is
-    active" as "the boundary is up", and a Type=simple service is active
-    before the socket exists.
-    """
-    addr = os.environ.get("NOTIFY_SOCKET")
-    if not addr:
-        return
-    if addr.startswith("@"):
-        addr = "\0" + addr[1:]
-    with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM) as sock:
-        sock.connect(addr)
-        sock.sendall(state.encode())
 
 
 async def main():

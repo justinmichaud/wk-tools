@@ -4,24 +4,15 @@
 # wk: where=workspace name=required lifecycle post=zed group=workspaces
 #
 # Other targets take minutes (a guest clone, a git clone over ssh), so creation
-# is *detached*: the driver runs under nohup and this command waits in the
-# foreground, so a dropped connection does not take the creation with it --
-# re-running `wk new` resumes it.
+# is *detached*: a dropped connection does not take it with it, and re-running
+# `wk new` resumes it.
 #
-# The two halves:
+# The two halves: this end refuses what should be refused, starts the driver and
+# follows its log; the driver (`--_detached`) does everything that changes
+# anything, under the workspace lock, writing `ws.status` as it goes.
 #
-#   this end     resolves the target, refuses what should be refused, starts
-#                the driver, and follows its log until it ends. Holds no lock
-#                and creates nothing, except --pr's checkout once the
-#                workspace is ready (wk_pr_checkout, lib/store.sh -- the same
-#                function `wk pr` calls).
-#   the driver   (`--_detached`, internal) does everything that changes
-#                anything, under the workspace lock, writing `ws.status` as it
-#                goes and `.wk-ready` next to the workspace as its last act.
-#
-# `--no-wait` returns as soon as the driver is started; `wk status <name>` and
-# the log say where it got to. Incompatible with --pr, which needs the
-# workspace to be ready first.
+# `--no-wait` returns as soon as the driver is started. Incompatible with --pr,
+# which needs the workspace to be ready first.
 #
 #   --target <target>   container, vm, or a machine named in
 #                        targets/hosts/<name>.conf (default: container)
@@ -38,13 +29,10 @@
 #                        up (default 3600); the driver itself is unaffected
 #                        and 'wk status <name>' still finds it when it ends
 #
-# Creation fetches: a workspace is an overlay of a snapshot, and the mirror
-# beside that snapshot is the freshest WebKit this machine has, so the driver
-# fetches from it once and fast-forwards the checkout onto it -- a local fetch
-# of a handful of refs. It never fetches over the network and never refreshes
-# the mirror itself: that is a fetch of WebKit from GitHub and a new snapshot
-# (`wk sync --tools`), minutes of work nobody asked for by typing `wk new`.
-# A workspace with no mirror in reach (a guest) is told what would move it.
+# Creation fetches from the mirror beside its snapshot -- a local fetch of a
+# handful of refs -- and fast-forwards the checkout onto it. It never fetches
+# over the network and never refreshes the mirror itself: that is `wk sync
+# --tools`, minutes of work nobody asked for by typing `wk new`.
 
 set -euo pipefail
 WK_ROOT="${WK_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
@@ -55,18 +43,12 @@ WK_ROOT="${WK_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
 . "$WK_ROOT/lib/arch.sh"
 . "$WK_ROOT/lib/detach.sh"
 
-# --- what the checkout is, once the environment is there ---------------------
 
-# new_fetch_from <probe> -- where a fresh workspace's checkout can be brought
-# up to date from, given what the probe below answered from inside it. The
-# question is asked of the workspace rather than decided from its target: a
-# target naming a mirror (t_mirror_dir) is not the same as one being there --
-# a guest cloned from a base built before its mirror existed has none, and a
-# guest that has not been started yet answers nothing at all.
-#   mirror       the mirror is in there -- a local fetch
-#   network      no mirror in reach; `wk sync` would go to GitHub, which
-#                creation does not wait on
-#   unreachable  nothing answered, so there is nothing to fetch in yet
+# new_fetch_from <probe> -- where a fresh workspace's checkout can be brought up
+# to date from, asked of the workspace rather than decided from its target: a
+# target naming a mirror (t_mirror_dir) is not the same as one being there.
+#   mirror  a local fetch    network  no mirror in reach; `wk sync` goes to
+#   GitHub    unreachable  nothing answered, so there is nothing to fetch yet
 new_fetch_from() {
     case "$1" in
         yes) printf 'mirror\n' ;;
@@ -75,17 +57,10 @@ new_fetch_from() {
     esac
 }
 
-# new_checkout_script <src> -- where the checkout ended up, and the one thing
-# creation does to it: fast-forward the branch it is on onto what the fetch
-# just brought in. A portable `sh` snippet, because the checkout is on the far
-# side of a container exec or an ssh. A fast-forward, never a reset: nothing
-# here may discard a commit, and a workspace this command has only just made
-# has none of anyone's to fast-forward over.
-# Prints `<key>=<value>` lines for the caller to report:
-#   branch=    the branch HEAD is on        detached=  the sha, when it is on none
-#   upstream=  what that branch tracks      behind=    commits it was behind
-#   moved=     how far it fast-forwarded, or `refused` when it cannot
-#   head=      the sha it ended on
+# new_checkout_script <src> -- fast-forward the branch the checkout is on onto
+# what the fetch brought in, as a portable `sh` snippet because the checkout is
+# behind a container exec or an ssh. Never a reset: nothing here may discard a
+# commit. Prints branch=, detached=, upstream=, behind=, moved=, head=.
 new_checkout_script() { # <src>
     printf 'cd %s || exit 2\n' "$(sh_quote "$1")"
     cat <<'EOF'
@@ -111,20 +86,14 @@ echo "head=$(git rev-parse --short HEAD)"
 EOF
 }
 
-# new_freshen <name> -- creation's fetch, and the report of where the
-# checkout ended up. Never fatal: the workspace exists by the time this runs,
-# and a fetch that could not happen must not turn a made workspace into a
-# failed command -- every arm below names what would move it instead.
-#
-# The fetch itself is `wk sync <name>`: that command is the one
-# implementation of a workspace's fetch (cmd/sync's sync_workspaces), and it
-# is only asked for when the probe says the mirror is in there, so creation
-# never waits on GitHub.
+# Never fatal: a fetch that could not happen must not turn a made workspace into
+# a failed command. The fetch is `wk sync <name>`, the one implementation, asked
+# for only when the probe says the mirror is in there.
 new_freshen() { # <name>
     local name="$1" probe out b u moved head detached mirror
     mirror=$(t_mirror_dir "$name")
-    # A subshell: t_exec dies when there is nothing to run in (a guest that
-    # is not started), and `die` from a function would end this driver.
+    # A subshell: t_exec dies when there is nothing to run in, and `die` from a
+    # function would end this driver.
     probe=$( ( t_exec "$name" sh -c \
                    "[ -n $(sh_quote "$mirror") ] && [ -d $(sh_quote "$mirror") ] \
                     && echo yes || echo no" ) \
@@ -169,28 +138,24 @@ new_freshen() { # <name>
     esac
 }
 
-# tests/test_new_fetch.py sources this file to exercise the functions
-# above without creating anything: `bash -c '. cmd/new functions'`. `wk`
-# always execs this file as its own process, never sources it, so a real
-# invocation can never take this arm.
+# tests/test_new_fetch.py sources this file for the functions above. `wk` always
+# execs it, so a real run cannot take this arm.
 if (return 0 2>/dev/null); then
     [ "${1:-}" = functions ] && return 0
 fi
 
-# Inside a workspace this resolves to local, whose driver refuses to create --
-# so `wk new` there stops with "a workspace cannot create a workspace".
+# Inside a workspace this resolves to local, whose driver refuses to create.
 TARGET=$(default_target)
 BASE=""
 
-# "Asked otherwise" means another architecture *natively*, never a cross
-# build -- see lib/arch.sh for why those are two words and not one.
+# Another architecture *natively*, never a cross build (lib/arch.sh).
 ARCH=native
 
 ZED=""
 NO_WAIT=""
 
-# Internal: this process *is* the detached driver, not advertised in `wk
-# help` -- the driver is this same file, so the two halves cannot drift apart.
+# Internal: this process *is* the detached driver, which is this same file, so
+# the two halves cannot drift apart.
 DETACHED=""
 
 PR_SPEC=""
@@ -220,8 +185,8 @@ done
 
 load_target "$TARGET"
 
-# Only a container can be a different architecture from the host it runs on:
-# a macOS guest is whatever Tart booted, a remote box is whatever it is.
+# Only a container can be a different architecture from the host it runs on: a
+# macOS guest is whatever Tart booted, a remote box is whatever it is.
 if ! arch_is_native "$ARCH" && [ "$WK_TARGET_KIND" != container ]; then
     die "--arch $ARCH is a container-only capability (this is target '$TARGET').
     32-bit ARM needs a host that can execute it: this Neoverse-N1 runs AArch32
@@ -235,8 +200,8 @@ if [ -n "$PR_SPEC" ]; then
     pr_parse_spec "$PR_SPEC"
 fi
 
-# Refuse before detaching: t_create's refusal belongs on the terminal, not in
-# a log file nobody was told to read yet.
+# Refuse before detaching: t_create's refusal belongs on the terminal, not in a
+# log nobody was told to read yet.
 if [ "$WK_TARGET_KIND" = local ]; then t_create "$NAME"; fi
 
 t_store_init
@@ -245,8 +210,8 @@ SF=$(ws_status_file "$NAME")
 LOG=$(ws_create_log "$NAME")
 
 # --- the driver: everything that changes anything ----------------------------
-# Reached only through the detach below, with no terminal: everything it has
-# to say goes to the log, and what it is *doing* goes to ws.status.
+# No terminal here: everything it has to say goes to the log, and what it is
+# *doing* goes to ws.status.
 if [ -n "$DETACHED" ]; then
     CUR=starting
 
@@ -256,21 +221,19 @@ if [ -n "$DETACHED" ]; then
         status_write "$SF" state=creating "pid=$$" "stage=$1" "log=$LOG" "target=$TARGET"
     }
 
-    # A failure has to leave a state behind, or a waiter would sit there until
-    # its timeout deciding from the process table alone.
+    # A failure has to leave a state behind, or a waiter sits there until its
+    # timeout deciding from the process table alone.
     _driver_exit() {
         [ -n "${REFUSED:-}" ] && return 0
-        # WK_EXIT_STATUS: published by the atexit trap (_wk_run_atexit,
-        # lib/common.sh) to this process's exit code before atexit handlers
-        # run; the ":-0" only guards a handler invoked some other way.
+        # WK_EXIT_STATUS: published by the atexit trap (lib/common.sh) as this
+        # process's exit code before handlers run; ":-0" guards other callers.
         [ "${WK_EXIT_STATUS:-0}" -eq 0 ] || \
             status_write "$SF" state=failed "pid=$$" "stage=$CUR" "log=$LOG" "target=$TARGET"
         release_locks
     }
 
-    # A refusal is not a failed creation: this driver changed nothing. A flag
-    # rather than dropping the shared exit trap, which would drop the lock
-    # release too.
+    # A refusal is not a failed creation. A flag rather than dropping the shared
+    # exit trap, which would drop the lock release too.
     REFUSED=""
     refuse() {
         REFUSED=1
@@ -287,11 +250,9 @@ if [ -n "$DETACHED" ]; then
 
     stage checking
 
-    # Crash-only: converge by remaking, never repairing. An unfinished
-    # workspace holds nothing of value, so the cheap answer is to destroy the
-    # rubble and retry. A finished workspace, and one whose environment
-    # vanished from under it, cannot converge this way -- its overlay layer
-    # may still hold real work, so those refuse instead.
+    # Crash-only: converge by remaking. An unfinished workspace holds nothing of
+    # value; a finished one, or one whose environment vanished, may still hold
+    # real work in its overlay, so those refuse.
     case "$(ws_state "$NAME")" in
     present)
         refuse "workspace '$NAME' already exists (target '$TARGET').
@@ -314,32 +275,29 @@ if [ -n "$DETACHED" ]; then
         ;;
     esac
 
-    # Only the overlay scheme has base snapshots: a macOS VM's "base" is the
-    # golden guest image, which the driver manages itself.
+    # A macOS VM's "base" is the golden guest image, which its driver manages.
     if t_needs_base; then
         stage base
         [ -n "$BASE" ] || BASE=$(current_base) \
             || die "no base snapshot yet -- run 'wk sync' first"
-        # Never build on an unpublished or tampered snapshot -- --base can
-        # name one directly, so this isn't just current_base's job.
+        # --base can name a snapshot directly, so this isn't just
+        # current_base's job.
         _why=$(base_verify "$BASE") || die "$_why"
     fi
 
     stage create
     t_create "$NAME" "$BASE" "$ARCH"
 
-    # Creation is asynchronous on some targets, so waiting for the marker
-    # makes "created" mean "usable".
+    # Creation is asynchronous on some targets, so waiting for the marker makes
+    # "created" mean "usable".
     stage init
     t_ready "$NAME" || die "'$NAME' was created but never finished initialising -- the push
     keys, the Claude CLI, the lldb config and the shell rc are set up at first
     start, and something above went wrong before the end of it.
     Nothing here is worth repairing:  wk new $NAME    (destroys it and retries)"
 
-    # A workspace is as old as the snapshot it overlays; the mirror beside
-    # that snapshot is younger whenever a publish was interrupted, a `wk pr`
-    # fetched into it, or --base named an older one. So the checkout is
-    # fetched in and moved onto it here, at creation, from the mirror only.
+    # The mirror beside a workspace's snapshot is younger whenever a publish was
+    # interrupted, a `wk pr` fetched into it, or --base named an older one.
     stage fetch
     new_freshen "$NAME"
 
@@ -354,7 +312,7 @@ fi
 
 # --- this end: refuse what should be refused, then follow the driver ---------
 # Advisory -- the driver takes the lock and checks again, but this is worth
-# saying now, at a terminal, rather than in a log.
+# saying at a terminal rather than in a log.
 case "$(ws_state "$NAME")" in
 present)
     die "workspace '$NAME' already exists (target '$TARGET').
@@ -379,7 +337,6 @@ if [ -n "$NO_WAIT" ]; then
     info "creating '$NAME' on $TARGET, detached as pid $_pid -- this end can go away"
     log  "  follow:  tail -f $LOG"
     log  "  state:   wk status $NAME"
-    # --no-wait skips the checkout Zed needs; say what waits for it instead.
     [ -z "$ZED" ] || log  "  open it:  wk enter $NAME --zed   (waits for it to be ready)"
     exit 0
 fi
@@ -404,19 +361,14 @@ esac
 LABEL=$(arch_label "$ARCH")
 info "workspace '$NAME' ready${LABEL:+ ($LABEL)}"
 
-# The same function `wk pr` calls (lib/store.sh), so this is not a second
-# implementation of checking out a PR.
+# The same function `wk pr` calls (lib/store.sh).
 if [ -n "$PR_SPEC" ]; then
     wk_pr_checkout "$NAME" "$PR_SPEC"
 fi
 
 # Remote control, so the workspace is reachable from the phone without anybody
-# having remembered to ask for it. Through `wk ai claude --rc`, which is the one
-# implementation -- not a second copy of rc_start here.
-#
-# Never fatal: the workspace exists and `wk new` has already said so, and an
-# agent that cannot start must not turn a successful creation into a failed
-# command. A shared build machine is skipped by that command's own barrier.
+# having asked. Through `wk ai claude --rc`, the one implementation. Never
+# fatal.
 RC_UP=""
 if [ -z "${WK_NO_CLAUDE_RC:-}" ] && [ "$WK_TARGET_KIND" != remote ]; then
     if "$WK_ROOT/wk" ai claude "$NAME" --rc; then
@@ -427,8 +379,7 @@ if [ -z "${WK_NO_CLAUDE_RC:-}" ] && [ "$WK_TARGET_KIND" != remote ]; then
     fi
 fi
 
-# An armhf workspace is software-rendering (no NVIDIA userspace for it): fine
-# for JSC and CPU-class benchmarks, not a measurement for MotionMark.
+# An armhf workspace is software-rendering (no NVIDIA userspace for it).
 if ! arch_is_native "$ARCH"; then
     log "  $ARCH: native 32-bit, no GPU. 'wk bench' will run CPU-class plans"
     log "  in here and refuse GPU-class ones."
@@ -459,8 +410,7 @@ remote)
     ;;
 esac
 
-# Not fatal: `wk new` already said the workspace exists, and an editor that
-# fails to open must not turn a successful creation into a failed command.
+# Not fatal: an editor that fails to open must not fail the creation.
 if [ -n "$ZED" ]; then
     "$WK_ROOT/cmd/zed" "$NAME" \
         || warn "'$NAME' is there; opening it in Zed is what failed (above) -- 'wk zed $NAME' retries"

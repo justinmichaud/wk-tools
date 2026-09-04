@@ -35,8 +35,8 @@ WK_ROOT="${WK_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
 . "$WK_ROOT/lib/common.sh"
 . "$WK_ROOT/lib/store.sh"
 . "$WK_ROOT/lib/target.sh"
-# For the pmos build-host caches below: the one part of "where did the disk
-# go" that no local du can reach.
+# For the pmos build-host caches below: the one part of "where did the disk go"
+# that no local du can reach.
 . "$WK_ROOT/lib/image.sh"
 . "$WK_ROOT/image/profiles.sh"
 . "$WK_ROOT/boot/machines.sh"
@@ -45,18 +45,17 @@ WK_ROOT="${WK_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
 WK_MACHINE="${WK_MACHINE:-wk}"
 TART_HOME="${TART_HOME:-$HOME/.tart}"
 
-# On a shared build machine the store is the remote root `wk remote setup`
-# named in the conf here, not this machine's default -- reporting /var/lib/wk
-# or an XDG directory there would confidently measure an empty tree.
+# On a shared build machine the store is the remote root `wk remote setup` named
+# in the conf here, not this machine's default.
 if in_remote_host; then
     load_target "$(wk_remote_field target)" 2>/dev/null || true
 fi
 
 # --- measuring ---------------------------------------------------------------
 
-# KiB actually allocated to a path, 0 for one that is not there. The sudo
-# retry is for a container-root subtree; only when passwordless, since this
-# must never prompt.
+# KiB actually allocated to a path, 0 for one that is not there. The sudo retry
+# is for a container-root subtree; only when passwordless, since this must never
+# prompt.
 _kb() {
     local p="$1" err out
     [ -e "$p" ] || { echo 0; return 0; }
@@ -80,8 +79,8 @@ _human() {
     }'
 }
 
-# One line: a size, what it is, and -- when there is one -- what to do about
-# it. The note column is padded only when non-empty, to avoid trailing spaces.
+# One line: a size, what it is, and -- when there is one -- what to do about it.
+# The note column is padded only when non-empty, to avoid trailing spaces.
 _line() { # <size> <what> [note]
     if [ -n "${3:-}" ]; then printf '  %7s  %-28s %s\n' "$1" "$2" "$3" >&2
     else                     printf '  %7s  %s\n' "$1" "$2" >&2; fi
@@ -120,9 +119,8 @@ probe_store() {
         printf '%s\t%s\t%s\n' "$(_kb "$d")" "workspace $id" "wk rm $id"
     done
 
-    # No secrets/ row: a few kilobytes of keys, and on macOS that path is a
-    # mount of the host's own directory rather than disk in this store
-    # (wk_secrets_dir, lib/store.sh).
+    # No secrets/ row: a few kilobytes of keys, and on macOS that path is a mount
+    # of the host's own directory rather than disk in this store.
     for d in cache/ccache cache/bench cache/images cache/yocto cache/buildroot \
              images bench skills tools; do
         [ -d "$WK_STORE/$d" ] || continue
@@ -130,8 +128,7 @@ probe_store() {
     done
 
     # Not under $WK_STORE, and still the store: the container images every
-    # workspace is made from live in podman's own rootless tree, same path on
-    # a Linux workstation and inside the podman VM.
+    # workspace is made from live in podman's own rootless tree.
     d="${XDG_DATA_HOME:-$HOME/.local/share}/containers/storage"
     if [ -d "$d" ]; then
         printf '%s\t%s\t%s\n' "$(_kb "$d")" "container images" \
@@ -139,8 +136,8 @@ probe_store() {
     fi
 }
 
-# Render a probe's lines. `add` decides whether they count towards the total:
-# not on a macOS host, where they're already inside the charged disk image.
+# Render a probe's lines. `add` decides whether they count towards the total: not
+# on a macOS host, where they are already inside the charged disk image.
 render_probe() { # <add|noted> [input file]
     local mode="$1" kb what note
     while IFS=$'\t' read -r kb what note; do
@@ -166,8 +163,8 @@ esac
 info "wk disk on $(wk_os) ($(hostname -s 2>/dev/null || hostname))"
 
 # --- inside a workspace ------------------------------------------------------
-# The host's store is not visible from a workspace by design, so what this
-# machine is storing *is* the checkout and its build trees.
+# The host's store is not visible from a workspace by design, so what this machine
+# is storing *is* the checkout and its build trees.
 if in_workspace; then
     src=$(wk_marker_field src)
     section "workspace '$(wk_self)'"
@@ -176,9 +173,8 @@ if in_workspace; then
         [ -d "$d" ] || continue
         row "$(_kb "$d")" "build tree ${d#"$src"/WebKitBuild/}"
     done
-    # A container's ccache is bind-mounted from the host store and shared
-    # with every other workspace, so it is reported and not added -- charging
-    # one workspace for all of them is how a total stops meaning anything.
+    # A container's ccache is bind-mounted from the host store and shared with
+    # every other workspace, so it is reported and not added.
     for d in "$HOME/Library/Developer/Xcode/DerivedData" "$HOME/Library/Caches/clang"; do
         [ -d "$d" ] || continue
         row "$(_kb "$d")" "$(basename "$d")" "compilation cache"
@@ -221,9 +217,9 @@ if is_macos && [ -z "${WK_IN_VM:-}" ]; then
     if [ "$(podman machine inspect "$WK_MACHINE" --format '{{.State}}' 2>/dev/null)" = running ]; then
         tmp=$(mktemp)
         # This file, piped in and run by the VM's bash, rather than the copy at
+        # This file, piped in and run by the VM's bash, rather than the copy at
         # /opt/wk-tools/cmd/disk: that copy is only as new as the last
-        # `wk sync --tools container`. Only the libraries it sources come
-        # from in there.
+        # `wk sync --tools container`.
         podman machine ssh "$WK_MACHINE" -- \
             "WK_ROOT=/opt/wk-tools WK_STORE=/var/lib/wk bash -s -- --probe-store" \
             <"$0" >"$tmp" 2>/dev/null || true
@@ -265,9 +261,8 @@ fi
 section "this host"
 if [ -d "$(wk_state_dir)" ]; then
     row "$(_kb "$(wk_state_dir)")" "host-side state" "logs, keys, remote build status"
-    # On a macOS host the fetch builder's input cache lives in there
-    # ($WK_STORE is the podman VM's path, which this machine cannot write).
-    # Noted rather than added: it is inside the row above.
+    # On a macOS host the fetch builder's input cache lives in there ($WK_STORE is
+    # the podman VM's path, which this machine cannot write). Noted, not added.
     if [ -d "$(image_cache_dir)" ] && case "$(image_cache_dir)" in "$(wk_state_dir)"/*) true ;; *) false ;; esac; then
         kb=$(_kb "$(image_cache_dir)")
         [ "$kb" -gt 0 ] && noted "$kb" "fetched base images" \
@@ -277,10 +272,9 @@ fi
 row "$(_kb "$WK_ROOT")" "wk-tools checkout" "$WK_ROOT"
 
 # --- other machines this repo stores things on -------------------------------
-# Not this machine, and still this repo's: a pmos build host holds
-# pmbootstrap's chroots and finished builds, on a machine whose own `wk disk`
-# doesn't know they are wk's. Not added to the total, which is this
-# machine's; a host that does not answer says so and the report carries on.
+# Not this machine, and still this repo's: a pmos build host holds pmbootstrap's
+# chroots and finished builds, on a machine whose own `wk disk` does not know they
+# are wk's. Not added to the total; a host that does not answer says so.
 if [ -z "${WK_IN_VM:-}" ] && ! in_remote_host; then
     _pmos_rows=$(for h in $(pmos_build_hosts); do pmos_cache_probe "$h"; done)
     if [ -n "$_pmos_rows" ]; then

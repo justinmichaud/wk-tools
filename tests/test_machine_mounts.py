@@ -1,14 +1,17 @@
 """host/macos/machine.sh: the podman machine's three mounts.
 
-The machine mounts exactly this checkout at /opt/wk-tools and this device's
-secrets directory at $WK_STORE/secrets, both read-only, plus the one directory
-a workspace may write -- $WK_STORE/agent-rw, holding the claude.ai login
-credential the Claude CLI rewrites in place (wk_agent_rw_dir, lib/store.sh) --
-and nothing else: `/Users` above all, which podman mounts by default. Which
-mount is writable is as much a part of the invariant as which mounts there are,
-so the two are separate verdicts: a different *set* is recreated, a set mounted
-the wrong way round is refused (recreating that would ask podman for the same
-modes again and loop).
+The machine mounts exactly this checkout at /var/opt/wk-tools -- which the
+machine OS also spells /opt/wk-tools, /opt being a symlink into /var on an
+ostree system -- and this device's secrets directory at $WK_STORE/secrets,
+both read-only, plus the one directory a workspace may write --
+$WK_STORE/agent-rw, holding the claude.ai login credential the Claude CLI
+rewrites in place (wk_agent_rw_dir, lib/store.sh) -- and nothing else:
+`/Users` above all, which podman mounts by default. Which mount is writable is
+as much a part of the invariant as which mounts there are, so the two are
+separate verdicts: a different *set* is recreated, a set mounted the wrong way
+round is refused (recreating that would ask podman for the same modes again
+and loop). A third verdict comes from the machine rather than its config: a
+mount the config asks for and the machine has not got.
 
 A mount is settable only at creation, so a machine with any other set is
 destroyed and made again rather than patched, after a prompt that says what
@@ -50,14 +53,24 @@ case "$1 $2" in
     case "$*" in
     *"{{.State}}"*)           cat "$WK_TEST_VM/state" ;;
     # What the machine currently has, which the resources step compares the
-    # envelope against; a value nothing matches by default.
-    *"{{.Resources.CPUs}}"*)   echo "${WK_TEST_CPUS:-999}" ;;
-    *"{{.Resources.Memory}}"*) echo "${WK_TEST_MEM:-999}" ;;
+    # envelope against: what the init was given, or WK_TEST_CPUS/WK_TEST_MEM
+    # for a machine no init in this run made -- a value nothing matches by
+    # default, so the resize is exercised.
+    *"{{.Resources.CPUs}}"*)   cat "$WK_TEST_VM/cpus" 2>/dev/null || echo "${WK_TEST_CPUS:-999}" ;;
+    *"{{.Resources.Memory}}"*) cat "$WK_TEST_VM/mem"  2>/dev/null || echo "${WK_TEST_MEM:-999}" ;;
     *) echo '{}' ;;
     esac ;;
 "machine init")
     : > "$WK_TEST_VM/exists"
     echo stopped > "$WK_TEST_VM/state"
+    # In a subshell: it inherits "$@" and the config write below still needs it.
+    ( while [ $# -gt 0 ]; do
+          case "$1" in
+          --cpus)   echo "$2" > "$WK_TEST_VM/cpus" ;;
+          --memory) echo "$2" > "$WK_TEST_VM/mem" ;;
+          esac
+          shift
+      done )
     mkdir -p "$(dirname "$WK_TEST_CFG")"
     python3 - "$WK_TEST_CFG" "$@" <<'PY'
 import json, sys
@@ -72,12 +85,22 @@ json.dump({"Name": "wk", "Mounts": mounts}, open(cfg, "w"))
 PY
     ;;
 "machine rm")
-    rm -f "$WK_TEST_VM/exists" "$WK_TEST_CFG" ;;
+    rm -f "$WK_TEST_VM/exists" "$WK_TEST_VM/cpus" "$WK_TEST_VM/mem" "$WK_TEST_CFG" ;;
 "machine stop")
     echo stopped > "$WK_TEST_VM/state" ;;
 "machine start")
     echo running > "$WK_TEST_VM/state" ;;
 "machine ssh")
+    # The mounts the machine actually has, which is not the same question as
+    # what its config asks for: every target by default, and none of the
+    # targets named in WK_TEST_ABSENT.
+    case "$*" in
+    *findmnt*)
+        for t in ${WK_TEST_ABSENT:-}; do
+            case "$*" in *"$t"*) exit 1 ;; esac
+        done
+        exit 0 ;;
+    esac
     echo "workspaces  wk-demo" ;;
 esac
 exit 0
@@ -117,7 +140,7 @@ class _Stage(WkTest):
         """source, target, read-only -- the triples the stage asks podman for
         and then holds the machine to."""
         return ((str(self.secrets), "/var/lib/wk/secrets", True),
-                (str(REPO), "/opt/wk-tools", True),
+                (str(REPO), "/var/opt/wk-tools", True),
                 (str(self.agent_rw), "/var/lib/wk/agent-rw", False))
 
     def run_stage(self, env=None, podman=None):
@@ -208,6 +231,28 @@ class TestInitAsksForExactlyThreeMountsOnlyOneWritable(_Stage):
         self.assertIn("read-write (verified)", cp.stdout + cp.stderr)
 
 
+class TestProvisioningHasOnePath(_Stage):
+    """podman takes a `--playbook` and runs it at first boot from a generated
+    `ConditionFirstBoot=yes` unit whose recap nothing reads: a task that fails
+    there is silent, and the failed unit it leaves behind outlives every
+    re-run. The vmtools stage runs the same playbook over ssh and dies on its
+    recap, and a machine that already exists is provisioned through that path
+    regardless -- so that is the only path."""
+
+    VMTOOLS = REPO / "host" / "macos" / "vmtools.sh"
+
+    def test_init_is_handed_no_playbook(self):
+        cp = self.run_stage()
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertTrue(self.init_argv(), self.podman)
+        self.assertNotIn("--playbook", self.init_argv(), self.podman)
+
+    def test_the_stage_that_does_run_it_reads_the_recap(self):
+        text = self.VMTOOLS.read_text()
+        self.assertIn("ansible-playbook /home/core/playbook.yaml", text)
+        self.assertIn("_playbook_verdict", text)
+
+
 class TestAMachineWithTheWantedMountsIsLeftAlone(_Stage):
     def test_no_change_and_nothing_destroyed(self):
         self.exists()
@@ -226,7 +271,7 @@ class TestAMachineWithAnyOtherMountSetIsRecreated(_Stage):
     CASES = {
         "none": [],
         "users": [("/Users", "/Users", False)],
-        "one of three": [(str(REPO), "/opt/wk-tools", True)],
+        "one of three": [(str(REPO), "/var/opt/wk-tools", True)],
     }
 
     def setUp(self):
@@ -313,6 +358,122 @@ class TestAMachineWithAnyOtherMountSetIsRecreated(_Stage):
         verbs = [l.split()[1] for l in self.podman.splitlines()
                  if l.startswith("machine ") and l.split()[1] in ("stop", "rm", "init")]
         self.assertEqual(["stop", "rm", "init"], verbs, self.podman)
+
+
+class TestEveryTargetIsCanonicalInTheMachineOS(_Stage):
+    """The machine OS is an ostree system: /var is the only writable tree, and
+    every mutable top-level directory outside it -- /opt, /home, /srv,
+    /usr/local, /media, /mnt -- is a symlink into it. podman names each
+    generated .mount unit after the target it was handed, and systemd refuses
+    a Where= that is not canonical ("Mount path /opt/wk-tools is not canonical
+    (contains a symlink)"), so a target outside /var comes up as a failed unit
+    and a machine running without the mount.
+
+    Read off the init argv, not off this file's own list: the argv is what
+    podman is actually asked for."""
+
+    def test_no_volume_target_is_outside_var(self):
+        cp = self.run_stage()
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        argv = self.init_argv().split()
+        targets = [argv[i + 1].split(":")[1]
+                   for i, a in enumerate(argv) if a == "--volume"]
+        self.assertEqual(3, len(targets), self.podman)
+        for target in targets:
+            with self.subTest(target=target):
+                self.assertTrue(target.startswith("/var/"), target)
+
+
+class TestAMountTheMachineAsksForAndHasNotGot(_Stage):
+    """The config file records what podman was asked for; whether the machine
+    got it is a question only the machine can answer, and it is the one that
+    counts. A mount is settable only at creation, so the answer is the same
+    recreate -- which is why every remedy in the tree can go on saying
+    `./setup`."""
+
+    ABSENT = "/var/opt/wk-tools"
+
+    def _running_machine_missing_the_tools_mount(self, env=None):
+        self.exists()
+        (self.vm / "state").write_text("running\n")
+        write_cfg(self.cfg, list(self.want()))
+        return self.run_stage({"WK_TEST_ABSENT": self.ABSENT, **(env or {})})
+
+    def test_it_is_not_reported_as_verified(self):
+        cp = self._running_machine_missing_the_tools_mount()
+        out = cp.stdout + cp.stderr
+        self.assertNotIn("read-write (verified)", out)
+        self.assertIn("has not got them", out)
+        self.assertIn(f"absent {self.ABSENT}", out)
+
+    def test_it_names_the_command_that_says_why_the_unit_failed(self):
+        cp = self._running_machine_missing_the_tools_mount()
+        self.assertIn("systemctl --failed", cp.stdout + cp.stderr)
+
+    def test_it_destroys_nothing_without_an_answer(self):
+        cp = self._running_machine_missing_the_tools_mount()
+        self.assertNotEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertNotIn("machine rm", self.podman, self.podman)
+
+    def test_a_headless_yes_recreates_it(self):
+        """Answered yes, the machine is destroyed and made again with the same
+        triples -- and this fake podman goes on withholding the mount, so the
+        run ends at the refusal TestAFreshMachineThatCameUpWithoutAMount is
+        about rather than reporting success."""
+        cp = self._running_machine_missing_the_tools_mount(env={"WK_YES": "1"})
+        self.assertIn("machine rm", self.podman, self.podman)
+        self.assertIn("machine init", self.podman, self.podman)
+        self.assertIn("internal error", cp.stdout + cp.stderr)
+
+    def test_a_stopped_machine_is_not_started_to_ask(self):
+        """This runs from the read that decides whether anything needs
+        changing; starting a machine to answer it is a change."""
+        self.exists()
+        write_cfg(self.cfg, list(self.want()))
+        cp = self.run_stage({"WK_TEST_ABSENT": self.ABSENT})
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertNotIn("machine start", self.podman, self.podman)
+        self.assertIn("read-write (verified)", cp.stdout + cp.stderr)
+
+    def test_a_dry_run_reads_it_and_still_touches_nothing(self):
+        cp = self._running_machine_missing_the_tools_mount(
+            env={"WK_DRY_RUN": "1", "WK_YES": "1"})
+        out = cp.stdout + cp.stderr
+        self.assertEqual(cp.returncode, 0, out)
+        self.assertIn("would be destroyed and recreated", out)
+        for verb in ("machine rm", "machine init"):
+            with self.subTest(verb=verb):
+                self.assertNotIn(verb, self.podman, self.podman)
+
+
+class TestAFreshMachineThatCameUpWithoutAMount(_Stage):
+    """The one case a recreate cannot fix: podman was handed these exact
+    triples a moment ago and the machine still came up without one, so
+    `./setup` would destroy and recreate it into the same state for ever.
+    It is caught because the create starts the machine, which is what makes
+    the mounts readable at all."""
+
+    def _run(self):
+        return self.run_stage({"WK_TEST_ABSENT": "/var/opt/wk-tools",
+                               "WK_YES": "1"})
+
+    def test_it_starts_the_machine_it_just_created(self):
+        self._run()
+        order = [l.split()[1] for l in self.podman.splitlines()
+                 if l.startswith("machine ") and l.split()[1] in ("init", "start")]
+        self.assertEqual(["init", "start"], order[:2], self.podman)
+
+    def test_it_refuses_and_forbids_the_re_run(self):
+        cp = self._run()
+        out = cp.stdout + cp.stderr
+        self.assertNotEqual(cp.returncode, 0, out)
+        self.assertIn("internal error", out)
+        self.assertIn("Do NOT re-run ./setup", out)
+        self.assertIn("/var/opt/wk-tools", out)
+
+    def test_it_does_not_destroy_the_machine_it_just_made(self):
+        self._run()
+        self.assertNotIn("machine rm", self.podman, self.podman)
 
 
 # A `podman` whose `machine init` records each mount source the way the kernel
@@ -597,6 +758,18 @@ class TestTheMountsAreThereOnThisMachine(unittest.TestCase):
         self.assertIn(__doc__.splitlines()[0], cp.stdout,
                       f"{self.REMEDY}: {cp.stdout}{cp.stderr}")
 
+    def _an_image(self):
+        """Any image the machine already has, to run the probe in -- asked
+        before the run, not read out of its failure: a machine with none
+        expands the substitution to nothing and podman takes the next
+        argument as the image name, which fails for a reason that has
+        nothing to do with the mounts."""
+        cp = podman_vm_ssh("podman images --format '{{.Repository}}:{{.Tag}}' | head -1")
+        image = cp.stdout.strip()
+        if not image or image.startswith("<none>"):
+            self.skipTest("no container image on this machine to run a probe in")
+        return image
+
     def test_the_secrets_directory_is_a_mount(self):
         cp = podman_vm_ssh("findmnt -no TARGET /var/lib/wk/secrets")
         self.assertIn("/var/lib/wk/secrets", cp.stdout,
@@ -638,14 +811,11 @@ class TestTheMountsAreThereOnThisMachine(unittest.TestCase):
         """Nested: a container bind-mounts the VM's mount of this checkout at
         /opt/wk-tools and of the secrets at /secrets."""
         cp = podman_vm_ssh(
-            "podman run --rm "
-            "-v /opt/wk-tools:/opt/wk-tools:ro -v /var/lib/wk/secrets:/secrets:ro "
-            "--entrypoint /bin/sh "
-            "$(podman images --format '{{.Repository}}:{{.Tag}}' | head -1) "
-            "-c 'test -x /opt/wk-tools/wk && test -d /secrets && echo both'",
+            f"podman run --rm "
+            f"-v /opt/wk-tools:/opt/wk-tools:ro -v /var/lib/wk/secrets:/secrets:ro "
+            f"--entrypoint /bin/sh {self._an_image()} "
+            f"-c 'test -x /opt/wk-tools/wk && test -d /secrets && echo both'",
             timeout=180)
-        if "no such" in (cp.stdout + cp.stderr).lower() and "images" in cp.stderr:
-            self.skipTest("no container image on this machine to run in")
         self.assertIn("both", cp.stdout, f"{self.REMEDY}: {cp.stdout}{cp.stderr}")
 
     def test_a_container_can_write_the_agent_credential_directory(self):
@@ -655,15 +825,12 @@ class TestTheMountsAreThereOnThisMachine(unittest.TestCase):
         virtiofs and a bind mount stand between it and the host directory, and
         this is the only place that is measurable."""
         cp = podman_vm_ssh(
-            "podman run --rm -v /var/lib/wk/agent-rw:/agent-rw "
-            "--entrypoint /bin/sh "
-            "$(podman images --format '{{.Repository}}:{{.Tag}}' | head -1) "
-            "-c 'echo hi > /agent-rw/.wk-probe.tmp "
-            "&& mv /agent-rw/.wk-probe.tmp /agent-rw/.wk-probe "
-            "&& rm -f /agent-rw/.wk-probe && echo wrote'",
+            f"podman run --rm -v /var/lib/wk/agent-rw:/agent-rw "
+            f"--entrypoint /bin/sh {self._an_image()} "
+            f"-c 'echo hi > /agent-rw/.wk-probe.tmp "
+            f"&& mv /agent-rw/.wk-probe.tmp /agent-rw/.wk-probe "
+            f"&& rm -f /agent-rw/.wk-probe && echo wrote'",
             timeout=180)
-        if "no such" in (cp.stdout + cp.stderr).lower() and "images" in cp.stderr:
-            self.skipTest("no container image on this machine to run in")
         self.assertIn("wrote", cp.stdout,
                       f"a container cannot write and rename inside /agent-rw, so the "
                       f"Claude login credential cannot be rotated from a workspace: "

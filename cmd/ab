@@ -114,14 +114,13 @@ case "$BITS" in ''|32|64) ;; *) die "--bits takes 32 or 64 (got '$BITS')" ;; esa
 
 # --- the patched side ----------------------------------------------------------
 # A pull request (fetched into the mirror the way `wk pr` does) or a commit.
-# Which of the two the spec is settles here, with the rest of the argument
-# checks and before the mirror is required: a malformed spec is refused as
-# the argument error it is, not as a missing mirror.
+# Which of the two settles here, before the mirror is required: a malformed spec
+# is refused as the argument error it is, not as a missing mirror.
 HEAD_SHA="" HEAD_DESC="" PR_BASE_BRANCH="" PR_REMOTE_NAME="" SPEC_SHA=""
 if [ "${#SPEC}" -eq 40 ] && [ -z "${SPEC//[0-9a-f]/}" ]; then
     SPEC_SHA="$SPEC"
 else
-    # A pull request spec (wpe:<n>, <n>); anything else pr_parse_spec refuses by name.
+    # A pull request spec (wpe:<n>, <n>); anything else pr_parse_spec refuses.
     pr_parse_spec "$SPEC"
     [ "$PR_KIND" = pull ] || die "'$SPEC' names a fork's branch; an A/B takes a pull request
     (wpe:<n>, <n>) or a commit sha. 'wk pr' can check the branch out; its
@@ -146,10 +145,9 @@ else
 fi
 
 # --- which image, per device ---------------------------------------------------
-# The release names the image: derived from the PR's base branch when the
-# spec is a PR and nobody said (wpe-2.38 -> 2.38, webkitglib/2.52 -> 2.52).
-# The branch is asked of GitHub only when there is a PR to ask about; a bare
-# sha has no base branch, so --release is required for one.
+# The release names the image, derived from the PR's base branch when nobody said
+# (wpe-2.38 -> 2.38, webkitglib/2.52 -> 2.52). A bare sha has no base branch, so
+# --release is required for one.
 if [ -z "$RELEASE" ]; then
     [ -n "$PR_REMOTE_NAME" ] || die "--release is required with a bare commit: nothing says which image it is for."
     url=$(wk_remotes | awk -v r="$PR_REMOTE_NAME" '$1 == r {print $2; exit}')
@@ -164,9 +162,8 @@ if [ -z "$RELEASE" ]; then
     Say which image to measure on: --release 2.38 (wk sysimage --list)"
 fi
 
-# One profile per device: the configurations this checkout defines that
-# match <project>-<release>-<builder>-<device>-<bits>; ambiguity is refused
-# by name, never guessed.
+# One profile per device: the configurations this checkout defines that match
+# <project>-<release>-<builder>-<device>-<bits>; ambiguity is refused, never guessed.
 declare -a DEV PROFILE MACHINE_OK
 ab_profile_for() { # <device> <bits or empty> -- prints the one profile, or dies naming the choices
     local dev="$1" bits="$2" c matches="" pattern
@@ -190,19 +187,19 @@ $(printf '    %s\n' "$@")
 }
 i=0
 for tok in $(printf '%s' "$DEVICES" | tr ',' ' '); do
-    # <device>[-32|-64]: the width belongs to the device, so one run can mix
-    # a 32-bit rpi3 and rpi4 with a 64-bit rpi5.
+    # <device>[-32|-64]: the width belongs to the device, so one run can mix a
+    # 32-bit rpi3 and rpi4 with a 64-bit rpi5.
     dev="$tok"; bits="$BITS"
     case "$tok" in
         *-32) dev="${tok%-32}"; bits=32 ;;
         *-64) dev="${tok%-64}"; bits=64 ;;
     esac
-    # Any fleet device `wk boot` can put into a bench system, whatever its
-    # role: the rpi5 is a workstation by role and still measured on a stick.
+    # Any fleet device `wk boot` can put into a bench system, whatever its role:
+    # the rpi5 is a workstation by role and still measured on a stick.
     machine_load "$dev" || die "no such fleet device '$dev' (wk boot --list)"
     DEV[$i]="$dev"; PROFILE[$i]=$(ab_profile_for "$dev" "$bits")
-    # A configuration that declares what it is missing is refused here, in
-    # the first second, not hours in (the same check cmd/sysimage build makes).
+    # A configuration that declares what it is missing is refused here, in the
+    # first second, not hours in.
     image_profile_load "${PROFILE[$i]}" >/dev/null 2>&1
     [ -z "${CFG_NEEDS:-}" ] || die "${PROFILE[$i]} cannot be built yet: $CFG_NEEDS
     ($(image_config_file "${PROFILE[$i]}"))"
@@ -210,8 +207,8 @@ for tok in $(printf '%s' "$DEVICES" | tr ',' ' '); do
 done
 NDEV=$i
 
-# Every profile at one release shares the branch and remote it tracks;
-# read off the first, checked against the rest.
+# Every profile at one release shares the branch and remote it tracks; read off
+# the first, checked against the rest.
 image_profile_load "${PROFILE[0]}" >/dev/null 2>&1 || die "profile ${PROFILE[0]} would not load"
 CFG_BRANCH0="$CFG_BRANCH"; CFG_REMOTE0="$CFG_REMOTE"; CFG_PROJECT0="$CFG_PROJECT"
 for ((i = 1; i < NDEV; i++)); do
@@ -224,9 +221,9 @@ done
     || die "${PROFILE[0]} declares no CFG_BRANCH/CFG_REMOTE, so there is no branch to take a base from"
 
 # --- the unpatched side -----------------------------------------------------------
-# The merge-base of the PR head and the image's own branch, so the two slots
-# differ by the PR's commits and nothing else. The branch is refreshed first:
-# a stale mirror would pick an older base than the PR was made against.
+# The merge-base of the PR head and the image's own branch, so the two slots differ
+# by the PR's commits and nothing else. The branch is refreshed first: a stale
+# mirror would pick an older base than the PR was made against.
 BRANCH_URL=$(wk_remotes | awk -v r="$CFG_REMOTE0" '$1 == r {print $2; exit}')
 [ -n "$BRANCH_URL" ] || die "no upstream remote '$CFG_REMOTE0' (lib/store.sh wk_remotes) to fetch $CFG_BRANCH0 from"
 _mirror_fetch_into "$BRANCH_URL" "refs/heads/$CFG_BRANCH0" "refs/remotes/$CFG_REMOTE0/$CFG_BRANCH0" \
@@ -259,11 +256,9 @@ fi
 TASK_DIR=$(bench_task_dir "$TASK")
 
 # --- evidence, taken now ---------------------------------------------------------
-# What already exists decides what the plan repeats: an image, a slot holding
-# the wanted commit, a board booted into the image, a slot deployed there.
-# Where the builder leaves the image and its slots (image_slot_dir,
-# lib/image.sh); each loads the profile in a subshell, since this file walks
-# several devices' profiles in turn.
+# What already exists decides what the plan repeats: an image, a slot holding the
+# wanted commit, a board booted into the image, a slot deployed there. Each loads
+# the profile in a subshell, since this file walks several devices' profiles.
 ab_image_path() { # <profile>
     ( image_profile_load "$1" >/dev/null 2>&1 || exit 1
       case "${IMG_BUILDER:-}" in
@@ -276,10 +271,8 @@ ab_slot_has()  { # <profile> <slot> <sha>
     local sj; sj=$(ab_slot_json "$1" "$2")
     [ -f "$sj" ] && [ "$(wkslot get "$sj" commit)" = "$3" ]
 }
-# What device <i>'s board is doing, for the line that names it: the slots it
-# already holds when it is booted into that device's image, and what to do
-# about it when it is not. A function, not a `$(case ...)` inside the string:
-# bash 3.2 does not parse one there.
+# What device <i>'s board is doing, for the line that names it. A function, not a
+# `$(case ...)` inside the string: bash 3.2 does not parse one there.
 _board_mode_note() { # <i>
     case "${BOARD_MODE[$1]}" in
         "bench ${PROFILE[$1]}-"*) echo "  (slots there: ${BOARD_SLOTS[$1]:-none})" ;;
@@ -392,8 +385,8 @@ fi
 info "task $TASK  ($TASK_DIR)"
 
 # --detach: the same command, minus --detach and with the task it made, in a
-# process nothing this end does can kill (detach_run, lib/detach.sh). The
-# child takes the lock as this one exits.
+# process nothing this end does can kill (detach_run). The child takes the lock
+# as this one exits.
 if [ -n "$DETACH" ]; then
     det=()
     for a in "${ORIG_ARGS[@]:1}"; do [ "$a" = --detach ] || det+=("$a"); done
@@ -407,17 +400,16 @@ if [ -n "$DETACH" ]; then
 fi
 
 # --- run it -------------------------------------------------------------------------
-# A step that fails stops its pipeline where it is; every step is re-runnable
-# and the plan above recomputes what is left. The stage file is a hint for
-# `wk status` while nothing has run yet (the runs are the evidence after).
+# A step that fails stops its pipeline where it is; every step is re-runnable and
+# the plan above recomputes what is left. The stage file is a hint for `wk status`
+# while nothing has run yet.
 run_cmd() { info "\$ $1"; eval "$WK_ROOT/$1" || die "'${1%% *}' failed; the steps above it are done and the plan recomputes what is left: re-run wk ab $SPEC ..."; }
 task_stage() { status_write "$TASK_DIR/status" state=running "stage=$1"; }
 task_stage "starting"
 
 # Builds first, in order and one at a time (README.md); then every board's
-# deploy-and-bench pipeline at once -- boards are independent, and the
-# runs are recorded per board. Each pipeline's output goes to its own log
-# beside the runs, since interleaved boards are unreadable.
+# deploy-and-bench pipeline at once -- boards are independent. Each pipeline's
+# output goes to its own log, since interleaved boards are unreadable.
 for ((k = 0; k < n; k++)); do
     case "${CMDS[$k]}" in "wk sysimage "*) task_stage "${CMDS[$k]}"; run_cmd "${CMDS[$k]}" ;; esac
 done

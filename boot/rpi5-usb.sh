@@ -17,34 +17,24 @@ BOOT_ORDER_NORMAL=0xf461   # the EEPROM's own order: SD -> NVMe -> USB -> restar
 # images needs no second stick and no reflash between arms.
 B_SYSTEM_PARTS="1 3"
 
-# Which pair a boot lands on is the *firmware's* own A/B, not something this
-# end puts back afterwards: a static `autoboot.txt` on the stick's first boot
-# partition says `boot_partition=1` under `[all]` and `boot_partition=3` under
-# `[tryboot]`, so pair 3 is one `reboot "0 tryboot"` away and pair 1 is where
-# every other boot lands. Two one-shots, both firmware-reverting, and nothing
-# on the medium changes when a leg is armed -- unlike pi-sd, which edits a
-# config.txt and needs the bench system to put it back.
-#
-# The file is written when the second pair is made (`wk sysimage write`), not
-# at arm time: it never varies, and a file that never varies is not state to
-# keep in step.
+# Which pair a boot lands on is the firmware's own A/B: a static `autoboot.txt`
+# on the stick's first boot partition says `boot_partition=1` under `[all]` and
+# `boot_partition=3` under `[tryboot]`, so pair 3 is one `reboot "0 tryboot"`
+# away and pair 1 is where every other boot lands. The file is written when the
+# second pair is made (`wk sysimage write`), not at arm time.
 RPI5_AUTOBOOT=autoboot.txt
 
-# Asked of this driver by `wk sysimage write` when it makes a second pair on
-# this board's medium (_medium_autoboot_for, cmd/sysimage). Declared rather than
-# assumed of every dedicated medium: the rpi4's stick is one too, and an
-# autoboot.txt there would make its tryboot flag boot the *stick's* second pair
-# instead of the staged kernel on its SD -- a working lane broken by a file
-# written for another board.
+# Asked of this driver by `wk sysimage write` when it makes a second pair
+# (_medium_autoboot_for, cmd/sysimage). Declared rather than assumed of every
+# dedicated medium: an autoboot.txt on the rpi4's stick would make its tryboot
+# flag boot that stick's second pair instead of the staged kernel on its SD.
 b_medium_selects_by_partition() { return 0; }
 
 # Set by b_arm when the selected pair is the tryboot one, read by b_reboot in
-# the same breath -- the same shape pi-tryboot uses, for the same reason: only
-# the reboot that follows an arming carries the flag.
+# the same breath: only the reboot that follows an arming carries the flag.
 RPI5_TRYBOOT=""
 
-# Re-arming with the EEPROM's current order is a safe no-op that still
-# proves the mailbox call works -- also how arming is *cancelled*.
+# Re-arming with the EEPROM's current order is how arming is cancelled.
 b_arm() {
     local order="$1" reply word2
 
@@ -63,8 +53,8 @@ b_arm() {
     reply=$(r_sudo "vcmailbox 0x0003808b 4 4 $order") \
         || die "the firmware mailbox call failed on $NODE_NAME"
 
-    # 0x80000000 in the second word means success; checked rather than
-    # assumed, since a silent no-op call looks like one that worked.
+    # 0x80000000 in the second word means success; a silent no-op call looks
+    # like one that worked.
     word2=$(printf '%s\n' "$reply" | tr ' ' '\n' | sed -n '2p')
     [ "$word2" = "0x80000000" ] \
         || die "the firmware refused the boot order ($word2, wanted 0x80000000)
@@ -72,16 +62,13 @@ b_arm() {
     debug "mailbox reply: $reply"
 }
 
-# Selecting pair 3 needs the firmware to have been told how, and the file that
-# tells it is on the medium rather than in a record here. Absent, the flag is
-# ignored and the board boots pair 1 -- the wrong system, silently, which is the
-# one outcome an A/B must never produce.
+# Without autoboot.txt the tryboot flag is ignored and the board boots pair 1 --
+# the wrong system, silently.
 rpi5_check_autoboot() {
     local out
-    # Through b_medium_read (boot/machines.sh), like every other read of a
-    # medium: this board is a workstation, where only the card helper runs
-    # privileged, and a bare `sudo -n mount` here came back empty -- read as
-    # "no autoboot.txt", which refused to arm pair 3 and blamed the medium.
+    # Through b_medium_read (boot/machines.sh): this board is a workstation,
+    # where only the card helper runs privileged, so a bare `sudo -n mount`
+    # comes back empty and reads as "no autoboot.txt".
     out=$(b_medium_read "$(disk_part "$NODE_DEVICE" 1)" "$RPI5_AUTOBOOT") || out=""
     case "$out" in
         *boot_partition=3*) return 0 ;;
@@ -94,8 +81,7 @@ rpi5_check_autoboot() {
         wk sysimage write --from <path> --disk $NODE_NAME:$NODE_DEVICE@second"
 }
 
-# Only an arming for the second pair carries the flag; every other reboot is
-# plain, and a plain boot lands on pair 1 by the autoboot.txt [all] section.
+# A plain reboot lands on pair 1, by the autoboot.txt [all] section.
 b_reboot() {
     if [ -n "$RPI5_TRYBOOT" ]; then
         b_reboot_tryboot
@@ -110,7 +96,6 @@ b_evidence() {
     r_ssh "rpi-eeprom-config 2>/dev/null | sed -n 's/^BOOT_ORDER=/eeprom_boot_order=/p'" || true
 }
 
-# The wk-managed media, one line, for `wk status`'s fleet block.
 b_media() {
     local id order
     case "${MODE:-}" in
@@ -128,8 +113,7 @@ b_media() {
         "${order:+ (eeprom $order)}"
 }
 
-# Only the stick: the NVMe workstation install is not wk's to write, is
-# never touched (`wk help`), and is the one medium this must never name.
+# Only the stick: the NVMe workstation install is not wk's to write.
 b_reprovision() {
     cat <<REPROV
 wk sysimage build $NODE_PROFILE

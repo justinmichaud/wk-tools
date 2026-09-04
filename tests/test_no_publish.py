@@ -69,14 +69,22 @@ class TestProxyRefusesGitHubsApi(unittest.TestCase):
 
 
 class TestVerifyMeasuresThatNothingCanPublish(unittest.TestCase):
-    def test_both_sides_of_the_api_are_measured(self):
-        """Reaching api.github.com is the new state and not a fault; what is
-        measured is that an *authenticated* call is refused while push is off
-        and succeeds while it is on."""
+    """What each probe answers is tests/test_verify_credentials.py's subject,
+    driven. What is held here is that the probes exist at all -- reaching the
+    API, reading it, the write table, and the switch over writing."""
+
+    def test_every_side_of_the_api_is_measured(self):
+        """Reaching api.github.com is the state and not a fault, and neither is
+        an authenticated read: what is measured is that a write outside the
+        table never leaves the injector, and that an allowed one is
+        authenticated only while push is on."""
         self.assertIn("https://github.com/", VERIFY)
         self.assertRegex(VERIFY, r"curl [^\n]*https://api\.github\.com/ ")
         self.assertIn("https://api.github.com/user", VERIFY)
+        self.assertIn("https://api.github.com/repos/$FORK/keys", VERIFY)
+        self.assertIn("https://api.github.com/repos/$FORK/pulls", VERIFY)
         self.assertIn("401", VERIFY)
+        self.assertIn("422", VERIFY)
 
     def test_the_old_claim_that_the_api_is_refused_is_gone(self):
         self.assertNotIn("api.github.com is refused", VERIFY)
@@ -85,8 +93,15 @@ class TestVerifyMeasuresThatNothingCanPublish(unittest.TestCase):
         self.assertIn("PRIVATE KEY", VERIFY)
         self.assertIn("ssh-add -l", VERIFY)
         self.assertIn("~/.config/gh/hosts.yml", VERIFY)
-        self.assertIn("GH_TOKEN|GITHUB_TOKEN", VERIFY)
+        self.assertIn("GITHUB_TOKEN|GH_ENTERPRISE_TOKEN", VERIFY)
         self.assertIn("wk-injects-this", VERIFY)
+
+    def test_gh_holding_the_placeholder_is_what_is_measured_now(self):
+        """`gh` reaches GitHub through the injector like everything else, so
+        the check is that its token is the placeholder -- not that it has
+        none, which would be `gh` unable to read a pull request."""
+        self.assertIn("for _var in GITHUB_COM_TOKEN GH_TOKEN", VERIFY)
+        self.assertNotIn("gh auth status", VERIFY)
 
 
 class TestClaudeHoldsPushBackBeforeVerifying(unittest.TestCase):

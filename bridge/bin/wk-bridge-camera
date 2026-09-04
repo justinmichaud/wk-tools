@@ -1,12 +1,9 @@
 #!/bin/sh
 # Streams the phone's camera over the tailnet, for watching a screen the
-# out-of-band console (blank BMC framebuffer, GPU-bypassed firmware) cannot show.
-#
-# The kill switch is hardware: with the camera switch off, the sensor is
-# electrically disconnected and no software fault can make it stream, so this
-# waits for the device rather than failing without it.
-#
-# Binds to the tailnet address only, never the house WiFi (the firewall is a second line, not the enforcement).
+# out-of-band console (blank BMC framebuffer, GPU-bypassed firmware) cannot
+# show. With the camera kill switch off the sensor is electrically
+# disconnected, so this waits for the device rather than failing without it.
+# Binds to the tailnet address only, never the house WiFi.
 #
 # UNTESTED on either phone: libcamera's sensor formats aren't always what plain
 # v4l2 consumers expect. If ffmpeg can't open the node, fix the pipeline here.

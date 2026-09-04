@@ -1,16 +1,8 @@
-# ./setup --stage benchkey -- the credentials the macOS benchmark lane needs.
-#
-# Without a tailnet identity, the benchmark install cannot be reached from a
-# driver that reaches this Mac over the tailnet (rpi5 does): the A/B lane plants
-# a job it cannot watch, and collecting a result needs somebody to walk over.
-# Asked for once, here, next to the other things ./setup asks for, and stored
-# 0600. Skipping is fine and says what is lost.
-#
-# Only on the Mac that has the benchmark volume: nothing else uses this.
-#
-# Sourced by ./setup, so WK_ROOT, the shell options and common.sh are already
-# in scope: re-deriving WK_ROOT from `dirname $0` would resolve two levels
-# above the checkout, since `$0` in a sourced file is the *sourcing* script.
+# The credentials the macOS benchmark lane needs. Without a tailnet identity the
+# benchmark install cannot be reached from a driver that reaches this Mac over
+# the tailnet, so the A/B lane plants a job it cannot watch. Skipping is fine.
+# Sourced by ./setup, so WK_ROOT is already in scope: `$0` in a sourced file is
+# the *sourcing* script, so re-deriving it would land above the checkout.
 
 is_macos || { debug "benchkey: macOS only"; return 0; }
 
@@ -34,8 +26,7 @@ else
     fi
 fi
 
-# Cached next to the key, for the same reason: a provisioning step that needs
-# the network every time fails on the day the network is what's being fixed.
+# Cached: a step needing the network fails on the day the network is broken.
 PKG="$HOME/.config/wk/Tailscale-macos.pkg"
 if [ -s "$PKG" ]; then
     info "tailscale package already cached ($(du -h "$PKG" | awk '{print $1}'))"

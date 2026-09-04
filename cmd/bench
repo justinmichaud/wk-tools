@@ -133,28 +133,20 @@ WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 . "$WK_ROOT/lib/common.sh"
 . "$WK_ROOT/lib/resources.sh"
 . "$WK_ROOT/lib/store.sh"
-# The result store, seeded payloads and the variance knobs' record, shared
-# with `wk pi bench`.
 . "$WK_ROOT/lib/bench.sh"
 # Raised before lib/watchdog.sh is sourced: see its header.
 WK_STALL_SECONDS="${WK_STALL_SECONDS:-900}"
 WK_ABORT_SECONDS="${WK_ABORT_SECONDS:-5400}"
 . "$WK_ROOT/lib/watchdog.sh"
-# Shared with `wk quiesce`, which does the quieting: one answer to "is it
-# quiet", not two that can disagree.
 . "$WK_ROOT/lib/quiet.sh"
 . "$WK_ROOT/build/configs.sh"
 
 . "$WK_ROOT/lib/target.sh"
 . "$WK_ROOT/lib/arch.sh"
-# build_live: one rule for "is that build actually running", shared with
-# `wk status` rather than re-derived here.
 . "$WK_ROOT/lib/detach.sh"
 
-# `wk bench --where <args>`: seed is workspace-scoped for one argument shape
-# and host-scoped for another, so the dispatcher asks rather than being told
-# once in the declaration. compare and report are plain where=host and never
-# reach here.
+# `wk bench --where <args>`: seed is workspace-scoped for a container
+# workspace and host-scoped for any other, so the dispatcher asks.
 _bench_where() { # <verb> <args...> -- prints host or workspace
     case "${1:-}" in
         seed)
@@ -173,9 +165,7 @@ if [ "${1:-}" = --where ]; then
 fi
 
 
-# bench's paths (/bench, /cache/bench, /src/WebKit) are container mounts, so
-# only container workspaces are supported; refused by name rather than
-# failing on a path that doesn't exist.
+# bench's paths (/bench, /cache/bench, /src/WebKit) are container mounts.
 load_bench_target() {
     local ws="$1" t
     t="$(ws_target "$ws")"
@@ -183,20 +173,16 @@ load_bench_target() {
     load_target "$t"
 }
 
-# One value here: `wk bench` refuses every target but the container.
 # `wk bench staged` and `wk pi bench` write bench_host=image instead.
 BENCH_HOST=container
 
-# The storage the run read from, described rather than named: a run off a
-# USB stick and one off an NVMe are two series, not two samples, same rule
-# as bench_host. Reports the parent disk with the three facts that decide it
-# (transport, spins or not, takes a discard or not). Best-effort: unknown
-# storage is recorded as unknown, and nothing refuses a run over it.
+# The storage the run read from: a run off a USB stick and one off an NVMe
+# are two series, not two samples. Best-effort -- unknown storage is recorded
+# as unknown, and nothing refuses a run over it.
 bench_root_device() { # <path>
     local path="${1:-/}"
     if is_macos; then
-        # Answers for the mount point directly, including the synthesised
-        # APFS case where the "device" is a volume in a container.
+        # diskutil answers for the mount point, including a synthesised APFS volume.
         local out; out=$(diskutil info "$path" 2>/dev/null) || { echo unknown; return 0; }
         local node proto ssd
         node=$(printf '%s' "$out" | sed -n 's/^ *Device Node: *//p' | head -1)
@@ -210,11 +196,9 @@ bench_root_device() { # <path>
     local src disk line rota tran model
     src=$(findmnt -no SOURCE --target "$path" 2>/dev/null | head -1) || true
     [ -n "$src" ] || { echo unknown; return 0; }
-    # -s walks *up* to the parent disk, which carries the model and
-    # transport (a partition, LVM volume or device-mapper name reports
-    # neither). -l as well as -s: the tree form draws glyphs into the NAME
-    # column, and `/sys/block/<glyphs>nvme0n1` resolves to nothing, which
-    # reads as a disk that takes no discard.
+    # -s walks *up* to the parent disk, which carries the model and transport.
+    # -l as well as -s: the tree form draws glyphs into the NAME column, and
+    # `/sys/block/<glyphs>nvme0n1` resolves to nothing.
     line=$(lsblk -nlo NAME,TYPE,ROTA,TRAN,MODEL -s "$src" 2>/dev/null \
              | awk '$2 == "disk" { print; exit }') || true
     [ -n "$line" ] || { echo "$src"; return 0; }
@@ -229,28 +213,15 @@ bench_root_device() { # <path>
         "${tran:-unknown}" "$([ "$rota" = 0 ] && echo ssd || echo rotational)" "$trim"
 }
 
-# What the benchmark measures. gpu-class is the default for anything
-# unclassified: guessing gpu fails as an easy refusal, guessing cpu fails as
-# a MotionMark score from llvmpipe that looks like a regression. Speedometer
-# is gpu-class despite being mostly script, since its score depends on the
-# rendering it drives. The classifier is `wkdata.py bench-class`, not a case
-# statement here, so `wk pi bench` can share it.
 bench_class() {
     wkdata bench-class "$1"
 }
 
 # --- variance knobs -----------------------------------------------------
-# WK_BENCH_ASLR, WK_BENCH_ENV_PAD and WK_BENCH_PATH_PAD are listed above (wk
-# bench -h). Turning one on is recorded into `configuration`
-# (bench_configuration_args below) so `wk bench report` can group variance
-# by it. ASLR (Linux only, setarch -R) fixes the address layout every
-# iteration. ENV_PAD and PATH_PAD both move where the initial stack starts:
-# envp's size and the executable's own path both land on it.
+# ENV_PAD and PATH_PAD both move where the initial stack starts: envp's size
+# and the executable's own path both land on it.
 
-# bench_aslr_wrap -- the command prefix that pins the address layout, or
-# nothing. Interpolated straight into a `bash -lc "..."` string built by the
-# caller (run_jsc, the browser run in cmd_run), which already builds one
-# shell command as text.
+# Interpolated into a `bash -lc "..."` string built by the caller.
 bench_aslr_wrap() {
     [ "${WK_BENCH_ASLR:-}" = off ] && printf 'setarch $(uname -m) -R -- '
     return 0
@@ -259,17 +230,12 @@ bench_aslr_wrap() {
 # --cores: taskset -c <set>, not podman --cpuset-cpus -- one pin that works
 # on every Linux target this file execs into.
 
-# bench_cores_valid <set> -- delegates to `wkdata.py cores-valid`, the one
-# cpu-list parser (also used by bench_cores_wrap below).
 bench_cores_valid() {
     wkdata cores-valid "$1"
 }
 
-# bench_cores_refusal <target> <os> -- prints why --cores cannot be
-# honoured, or nothing if it can. <target> is the workspace's `ws_target`;
-# <os> is `wk_os` for the machine that runs the benchmark. A `vm` target and
-# `local` on macOS both have no per-run pin, only the vCPU count chosen when
-# the guest was created.
+# bench_cores_refusal <target> <os> -- <target> is the workspace's ws_target,
+# <os> is `wk_os` for the machine that runs the benchmark.
 bench_cores_refusal() {
     local target="$1" os="$2"
     if [ "$target" = vm ] || { [ "$target" = local ] && [ "$os" = macos ]; }; then
@@ -277,18 +243,13 @@ bench_cores_refusal() {
     fi
 }
 
-# bench_cores_wrap -- the command prefix that pins the run via taskset, or
-# nothing; same interpolation contract as bench_aslr_wrap. `wkdata.py
-# cores-wrap` only prints for a set cores-valid already accepted, so it
-# needs no shell quoting here.
+# `wkdata.py cores-wrap` only prints for a set cores-valid already accepted.
 bench_cores_wrap() {
     [ -n "$CORES" ] && wkdata cores-wrap "$CORES"
     return 0
 }
 
-# bench_env_pad_prelude -- a shell fragment exporting a dummy variable of
-# WK_BENCH_ENV_PAD bytes, or nothing. Emitted as source, same reason as
-# bench_aslr_wrap: it has to land in the same shell as the benchmark.
+# Emitted as source: it has to land in the same shell as the benchmark.
 bench_env_pad_prelude() {
     local n="${WK_BENCH_ENV_PAD:-0}"
     case "$n" in ''|*[!0-9]*) return 0 ;; esac
@@ -297,9 +258,7 @@ bench_env_pad_prelude() {
 }
 
 # bench_padded_path <run-fn-or-empty> <target> -- a symlink to <target> whose
-# own path is WK_BENCH_PATH_PAD characters longer than <target>'s, created
-# through <run-fn> (empty runs locally, for the staged macOS tree) if the
-# knob is set, <target> unchanged otherwise.
+# own path is WK_BENCH_PATH_PAD characters longer; empty <run-fn> runs locally.
 bench_padded_path() {
     local runner="$1" target="$2" n="${WK_BENCH_PATH_PAD:-0}"
     case "$n" in ''|*[!0-9]*) n=0 ;; esac
@@ -309,9 +268,8 @@ bench_padded_path() {
     fi
     local pad=""
     while [ "${#pad}" -lt "$n" ]; do pad="${pad}p"; done
-    # Two statements, not `local dir=X link=$dir/Y`: bash expands every
-    # value in one `local` before assigning any of them, so a combined form
-    # gives link=$target's basename at the filesystem root, not under $dir.
+    # Two statements, not `local dir=X link=$dir/Y`: bash expands every value in
+    # one `local` before assigning any of them.
     local dir="/tmp/wk-bench-pad-$pad"
     local link="$dir/$(basename "$target")"
     if [ -n "$runner" ]; then
@@ -326,46 +284,33 @@ bench_padded_path() {
 
 
 CONFIG="${WK_CONFIG:-wpe-release}"
-# Defaulted from the config's port below: the two ports have different
-# run-benchmark drivers (minibrowser-wpe, minibrowser-gtk), and picking the
-# wrong one fails in a way that looks like a broken build. `--browser` is
-# the one override point (below); an env var would be a second one.
+# Defaulted from the config's port: the two ports have different run-benchmark
+# drivers (minibrowser-wpe, minibrowser-gtk).
 BROWSER=""
 COUNT=""
 # --force is consumed by `wk` and arrives as WK_FORCE.
 FORCE="${WK_FORCE:-}"
 SUBTESTS=""
 SOFTWARE=""
-# Why the software path was taken: --software is deliberate, a cpu-class
-# run with no display is derived, and a result must tell them apart.
+# --software is deliberate; a cpu-class run with no display is derived.
 SOFTWARE_REASON=""
 BROWSER_ARGS=""
-# The Linux cpu list to pin the run to (taskset -c), or empty for unpinned --
-# the default and, on macOS, the only option.
 CORES=""
 
 # --- saved tasks and their runs -----------------------------------------------
-# Everything but "which tasks are running" is read off the store by
-# lib/wkdata.py; running is the task's lock, checked here (lock_alive).
 cmd_ls() {
     [ -d "$BENCH_DIR" ] || { log "(no tasks yet)"; return 0; }
     wkdata ls "$BENCH_DIR" --running "$(bench_running_tasks)"
 }
 
 # --- the payload -------------------------------------------------------------
-# Read the plan from the workspace's own checkout (through t_src, not the
-# container's /src/WebKit: `wk bench stage` reads a plan out of a macOS
-# guest, where that path doesn't exist), since a workspace may be testing a
-# change to the plan itself.
-# lib/bench.sh's plan resolver reads plans through this: the workspace's
-# own checkout, so a seeded payload is the one its run-benchmark names.
+# Through t_src, not the container's /src/WebKit: `wk bench stage` reads a
+# plan out of a macOS guest, where that path does not exist.
 bench_plan_read() { # <path under Tools/Scripts>
     t_exec "$SEED_WS" cat "$(t_src "$SEED_WS")/Tools/Scripts/$1"
 }
 
 # --- preflight ---------------------------------------------------------------
-# Each check answers one question otherwise answered by "the number looked
-# odd, I wonder why".
 PREFLIGHT_FAILS=0
 PREFLIGHT_NOTES=""
 
@@ -388,8 +333,7 @@ preflight() {
     info "preflight"
 
     # 1. the build exists. Which binary depends on the runner: a JSCOnly tree
-    #    has no MiniBrowser, so looking for one there would report a missing
-    #    browser when nothing is actually missing.
+    #    has no MiniBrowser.
     if [ "$runner" = jsc ]; then
         if t_exec "$ws" test -x "$build_dir/bin/jsc" 2>/dev/null; then
             check yes "build present" "$build_dir/bin/jsc"
@@ -404,14 +348,10 @@ preflight() {
     fi
 
     # 2. the sandbox, and with it the GPU: --gpu makes a software renderer
-    #    fatal rather than a footnote (MotionMark on llvmpipe measures
-    #    llvmpipe). --software skips this and the compositor check and
-    #    records the run as software, so it is never mistaken for comparable.
+    #    fatal rather than a footnote (MotionMark on llvmpipe measures llvmpipe).
     if [ "$class" = cpu ]; then
-        # Not having a GPU is not a finding for a cpu-class benchmark: this run
-        # is directly comparable with every other cpu-class run. The sandbox
-        # check still runs -- it catches a network interface or host mount,
-        # not rendering.
+        # Not having a GPU is not a finding for a cpu-class benchmark. The sandbox
+        # check still runs: it catches a network interface or host mount.
         check yes "class" "cpu -- no GPU or compositor required"
         "$WK_ROOT/cmd/verify" "$ws" >/dev/null 2>&1 \
             || check no "sandbox intact" "wk verify $ws"
@@ -426,17 +366,14 @@ preflight() {
         check no  "sandbox and GPU" "$(grep FAIL /tmp/.wk-bench-verify.$$ | head -2 | tr '\n' ' ')"
     fi
     # awk rather than grep|head: a pipeline whose reader exits early trips
-    # `set -o pipefail`, and this is inside a command substitution under
-    # `set -e`, so it would abort the run rather than leave a field blank.
+    # `set -o pipefail`, inside a command substitution under `set -e`.
     GPU_RENDERER=$(awk -F'renderer=' '/renderer=/{sub(/ *\|.*/,"",$2); print $2; exit}' /tmp/.wk-bench-verify.$$ 2>/dev/null || true)
     rm -f /tmp/.wk-bench-verify.$$
 
-    # 3. a real compositor: the socket says one is there, not what it is
-    #    drawing on. `wk session on --bmc` puts the session on the BMC's
-    #    software-rendered display chip, invisible both from the socket and
-    #    from the GPU probe above (which asks the *client* its EGL vendor,
-    #    still NVIDIA when the compositor behind it is llvmpipe). The mode
-    #    `wk session` recorded is the only place the difference shows.
+    # 3. a real compositor: the socket says one is there, not what it is drawing
+    #    on. `wk session on --bmc` puts it on the BMC's software-rendered chip,
+    #    invisible from the socket and from the GPU probe above (which asks the
+    #    *client* its EGL vendor). `wk session`'s recorded mode is the only tell.
     local sock="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/wk/display/wayland-0"
     SESSION_MODE=$(session_mode)
     if [ "$class" = cpu ] || [ -n "$SOFTWARE" ]; then
@@ -445,8 +382,7 @@ preflight() {
         check no  "graphical session" "no compositor -- wk session on"
     else
         case "$SESSION_MODE" in
-            # none: a session wk did not start, i.e. somebody's own desktop --
-            # the renderer check above already answers whether it's on the GPU.
+            # none: a session wk did not start, i.e. somebody's own desktop.
             gpu|none) check yes "graphical session" "$sock ($SESSION_MODE)" ;;
             *)        check no  "graphical session" \
                           "session mode '$SESSION_MODE' -- watchable over the BMC, not measurable; wk session on" ;;
@@ -462,19 +398,16 @@ preflight() {
         check no  "cpu governor" "$gov -- wk quiesce on"
     fi
 
-    # 5. idle: a build in another workspace is the single most likely
-    #    reason a benchmark run is quietly wrong here.
+    # 5. idle: another workspace's build is the likeliest reason a run is wrong.
     local load busy f
     load=$(awk '{print $1}' /proc/loadavg)
 
-    # Counted in a loop rather than `... | wc -l`: with `set -o pipefail`, a
-    # grep matching nothing fails the pipeline, the assignment, and then
-    # `set -e` aborts the run before printing anything.
+    # Counted in a loop rather than `... | wc -l`: with `set -o pipefail`, a grep
+    # matching nothing fails the pipeline and `set -e` aborts the run.
     busy=0
     for f in "$WK_STORE"/ws/*/build.status; do
         [ -f "$f" ] || continue
-        # `build_live`, not a grep for the state: a build killed with -9 leaves
-        # `state=running` behind for ever (lib/detach.sh).
+        # `build_live`: a build killed with -9 leaves `state=running` for ever.
         if build_live "$f"; then
             busy=$((busy + 1))
         fi
@@ -495,8 +428,7 @@ preflight() {
         break
     done
     # An `x && y` as the last statement of a function is a `set -e` landmine:
-    # a board with no thermal zones makes the test false and the non-zero
-    # status aborts the run silently.
+    # a board with no thermal zones would abort the run silently.
     if [ -n "$temp" ]; then
         PREFLIGHT_NOTES="${PREFLIGHT_NOTES}temp $temp; "
     fi
@@ -516,15 +448,11 @@ preflight() {
 }
 
 # --- the jsc runner ----------------------------------------------------------
-# JetStream and the other JS benchmarks ship a cli.js that drives the whole
-# suite inside a JavaScript shell -- the only way to benchmark a JSCOnly
-# build, since there is no browser in the tree.
-#
-# The output is deliberately byte-compatible with run-benchmark's: it's the
-# same object the browser driver's resultsJSON() POSTs to run-benchmark's
-# /report endpoint -- {"<suite>": {"tests": {"<test>": {"metrics": {"Score":
-# {"current": [...]}}}}}} -- so compare-results, `wk bench compare` and
-# container/bench/js3-ci.py all read it with no special case.
+# JetStream and the other JS benchmarks ship a cli.js that drives the whole suite
+# inside a JavaScript shell -- the only way to benchmark a JSCOnly build. Its
+# output is byte-compatible with run-benchmark's (the same object the browser
+# driver's resultsJSON() POSTs to /report), so compare-results and js3-ci.py read
+# it with no special case.
 #
 # run_jsc <workspace> <plan> <out-dir> <run-id> <payload-host> <payload-in-target> <src>
 run_jsc() {
@@ -542,8 +470,7 @@ run_jsc() {
     var=$(config_run_var)
     dir=$(config_run_dir "$src")
 
-    # Through the same t_exec this runner already uses, so the symlink lives
-    # in the container the binary will actually run in.
+    # Through the runner's own t_exec, so the symlink lives in that container.
     if [ "${WK_BENCH_PATH_PAD:-0}" -gt 0 ] 2>/dev/null; then
         _bench_pad_runner() { t_exec "$ws" "$@"; }
         jsc=$(bench_padded_path _bench_pad_runner "$jsc")
@@ -552,20 +479,17 @@ run_jsc() {
     local cores_wrap; cores_wrap=$(bench_cores_wrap)
     local pad_prelude; pad_prelude=$(bench_env_pad_prelude)
 
-    # cli.js takes its options from the shell's script arguments, everything
-    # after `--`. Passed as flags rather than set as globals: the driver
-    # reads them off a JetStreamParams object built from these arguments and
-    # ignores a global of the same name (JetStreamDriver.js:3263,
-    # utils/params.js), and rejects a flag it does not know, so a payload
-    # too old for this interface fails loudly here.
+    # cli.js takes its options from the shell's script arguments, everything after
+    # `--`: the driver reads them off a JetStreamParams object and ignores a global
+    # of the same name (JetStreamDriver.js:3263, utils/params.js), and rejects a
+    # flag it does not know, so a payload too old for this interface fails loudly.
     local cliargs="--dump-json-results"
     if [ -n "$SUBTESTS" ]; then
         cliargs="$cliargs --test=$(printf '%s' "$SUBTESTS" | tr ' ' ',')"
     fi
 
-    # One jsc invocation per iteration, not one invocation asked to repeat
-    # itself: a fresh process per iteration keeps a warmed-up heap or JIT
-    # tier from the previous pass out of the next one's numbers.
+    # One jsc invocation per iteration: a fresh process keeps a warmed-up heap
+    # or JIT tier from the previous pass out of the next one's numbers.
     local n="${COUNT:-1}" i=1 rc=0
     info "running $plan in '$ws' ($CONFIG, jsc shell, $n iteration(s))"
     log  "  results: $out"
@@ -587,8 +511,7 @@ run_jsc() {
         i=$((i + 1))
     done
 
-    # Appends each pass's score to the same "current" list, what
-    # run-benchmark's --count does and what compare-results needs for variance.
+    # Appends each pass to the same "current" list, what compare-results needs.
     wkdata merge-jsc-logs "$out/result.json" "$out"/run-*.log
     return 0
 }
@@ -609,9 +532,8 @@ cmd_run() {
 
     config_load "$CONFIG" "$(t_os)" || die "unknown config '$CONFIG' (wk build --list)"
 
-    # class, runner and arch (see header) are derived here, never taken as
-    # flags: a flag for any of them would let the record disagree with what
-    # happened.
+    # class, runner and arch are derived, never flagged: a flag would let the
+    # record disagree with what happened.
     local class runner arch
     class=$(bench_class "$plan")
     arch=$(t_arch "$ws")
@@ -620,7 +542,6 @@ cmd_run() {
         *)          runner=browser ;;
     esac
 
-    # A JSCOnly tree has no browser and no flag changes that.
     if [ "$runner" = jsc ] && [ "$class" = gpu ]; then
         die "$plan is a gpu-class benchmark and $CONFIG builds no browser.
     Either build a browser port (wk build $ws wpe-release) and pass
@@ -628,10 +549,6 @@ cmd_run() {
     kraken, sunspider, ares6 -- which the jsc shell can drive directly."
     fi
 
-    # An armhf workspace is permanently software-rendering (the NVIDIA
-    # userspace is aarch64-only), so a rendering benchmark here measures
-    # llvmpipe wearing MotionMark's name. A real 32-bit rendering number
-    # needs the device, not a container -- `wk pi bench`.
     if [ "$class" = gpu ] && ! arch_has_gpu "$arch"; then
         die "$plan is gpu-class and '$ws' is an $arch workspace, which has no GPU.
     cpu-class plans (jetstream3, octane, kraken, sunspider) do run in here,
@@ -651,9 +568,8 @@ cmd_run() {
     fi
     [ -n "$SOFTWARE" ] && SOFTWARE_REASON="--software"
 
-    # A cpu-class benchmark still needs a window: with no usable display it
-    # runs headless rather than not at all, since the display isn't the
-    # measurement, and is still recorded as software so comparing it warns.
+    # With no usable display a cpu-class run goes headless rather than not at all,
+    # and is recorded as software.
     if [ "$runner" = browser ] && [ "$class" = cpu ] && [ -z "$SOFTWARE" ]; then
         local sock="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/wk/display/wayland-0"
         if ! arch_has_gpu "$arch" || [ ! -S "$sock" ]; then
@@ -669,17 +585,14 @@ cmd_run() {
 
     preflight "$ws" "$build_dir" "$class" "$runner"
 
-    # Both host paths under the store; the container sees the same trees at
-    # /cache/bench and /bench.
+    # The container sees these same trees at /cache/bench and /bench.
     local seeded seeded_ctr
     SEED_WS="$ws"
     seeded=$(seed_payload "$plan")
     seeded_ctr=""
     [ -n "$seeded" ] && seeded_ctr="/cache/bench/$(basename "$seeded")"
 
-    # One task per invocation, one run in it; the container sees the store
-    # at /bench, so the run's store-relative path is what run-benchmark is
-    # told to write to.
+    # The container sees the store at /bench, which is what run-benchmark is told.
     local id="$(date -u +%Y%m%dT%H%M%SZ)-$plan-$ws"
     local task="$(bench_task_stamp)-$ws"
     bench_task_new "$task" subject.kind=workspace subject.spec="$ws" \
@@ -700,14 +613,10 @@ cmd_run() {
               done)
     cpu_model=$(awk -F: '/Model name/ {gsub(/^ +/,"",$2); print $2; exit}' <(lscpu) 2>/dev/null || true)
 
-    # session_mode is which chip the compositor was on: gpu, bmc (the BMC's
-    # chip, software rendered), or none for somebody's own desktop. display
-    # matters since MotionMark scores scale with the surface being animated,
-    # a fullscreen browser's surface being the display mode. host.kernel_arch
-    # is the *kernel's* width, beside the build's arch above: an armhf build
-    # on an armhf kernel and one on an arm64 kernel both report arch=armhf
-    # but are different measurements. A container borrows the host's kernel,
-    # so this is the host's answer.
+    # display matters since MotionMark scores scale with the surface being
+    # animated. host.kernel_arch is the *kernel's* width, beside the build's arch:
+    # an armhf build on an armhf kernel and one on an arm64 kernel both report
+    # arch=armhf but are different measurements.
     bench_configuration_args
     wkdata env-record "$out/env.json" \
         plan="$plan" workspace="$ws" config="$CONFIG" browser="$BROWSER" task="$task" \
@@ -728,7 +637,6 @@ cmd_run() {
 
     local wall_start; wall_start=$(date +%s)
 
-    # The jsc runner writes its own result.json and reports for itself.
     if [ "$runner" = jsc ]; then
         set +e
         run_jsc "$ws" "$plan" "$out" "$seeded" "$seeded_ctr" /src/WebKit
@@ -748,27 +656,21 @@ cmd_run() {
     info "running $plan in '$ws' ($CONFIG, $BROWSER)"
     log  "  results: $out"
 
-    # Software rendering: llvmpipe through Mesa, the dmabuf renderer off, and no
-    # Wayland display -- so WPE and GTK both fall back to their headless paths
-    # instead of failing to connect to a compositor that is not there.
     local run_env=""
     local browser_args="$BROWSER_ARGS"
     if [ -n "$SOFTWARE" ]; then
         # __EGL_VENDOR_LIBRARY_FILENAMES is what actually decides it.
-        # LIBGL_ALWAYS_SOFTWARE and GALLIUM_DRIVER only steer Mesa; with the
-        # NVIDIA vendor still listed in /usr/share/glvnd/egl_vendor.d, glvnd
-        # loads it for the GBM and device platforms and the run is quietly
-        # hardware-accelerated while calling itself software. Pinning glvnd
-        # to the Mesa vendor is what makes the label true.
+        # LIBGL_ALWAYS_SOFTWARE and GALLIUM_DRIVER only steer Mesa; with the NVIDIA
+        # vendor still listed in /usr/share/glvnd/egl_vendor.d, glvnd loads it for
+        # the GBM and device platforms and the run is quietly hardware-accelerated.
         run_env="WAYLAND_DISPLAY= WEBKIT_DISABLE_DMABUF_RENDERER=1"
         run_env="$run_env LIBGL_ALWAYS_SOFTWARE=1 GALLIUM_DRIVER=llvmpipe"
         run_env="$run_env __EGL_VENDOR_LIBRARY_FILENAMES=/usr/share/glvnd/egl_vendor.d/50_mesa.json"
         browser_args="--headless $browser_args"
     fi
 
-    # Padding the build directory, not one binary inside it: run-benchmark
-    # resolves MiniBrowser/WPEWebProcess relative to --build-directory, so
-    # padding that one path pads every binary it launches.
+    # run-benchmark resolves MiniBrowser/WPEWebProcess relative to this, so
+    # padding the directory pads every binary it launches.
     local run_build_dir="$build_dir"
     if [ "${WK_BENCH_PATH_PAD:-0}" -gt 0 ] 2>/dev/null; then
         _bench_pad_runner() { t_exec "$ws" "$@"; }
@@ -780,8 +682,7 @@ cmd_run() {
     [ -n "$COUNT" ] && args="$args --count $COUNT"
     [ -n "$seeded_ctr" ] && args="$args --local-copy $seeded_ctr"
     [ -n "$SUBTESTS" ] && args="$args --subtests $SUBTESTS"
-    # Positional and last: run-benchmark passes these straight to the
-    # browser, and anything starting with a dash needs the -- separator.
+    # Positional and last: anything starting with a dash needs the -- separator.
     [ -n "$browser_args" ] && args="$args -- $browser_args"
 
     local aslr; aslr=$(bench_aslr_wrap)
@@ -805,20 +706,16 @@ cmd_run() {
     wkdata env-record "$out/env.json" --update wall_time_s="$(( $(date +%s) - wall_start ))"
 
     info "BENCH OK  $plan -> $out/result.json"
-    # Surfaces the score line out of run-benchmark's own summary table.
     tr '\r' '\n' < "$out/run.log" | grep -iE '^(Score|Total|.*Score:)' | tail -5 | sed 's/^/  /' >&2 || true
     log ""
     log "  compare with:  wk bench report <other-run> $out"
 }
 
 # --- comparison --------------------------------------------------------------
-# `wkdata.py report` does the statistics; this only resolves run directories
-# to result.json files and refuses a comparison naming nothing. Either side
-# may be a comma-separated list of runs, pooled into the same subtest arrays.
-# A run is a directory: the path `wk bench ls` prints, or that path relative
-# to the store (<task>/runs/<run>). One path per line, never space-joined:
-# the benchmark volume is named `WK Bench` by default, so a result path on
-# it contains spaces and cannot be word-split back apart.
+# `wkdata.py report` does the statistics; this resolves run directories to
+# result.json files. Either side may be a comma-separated list, pooled. One
+# path per line, never space-joined: the benchmark volume is named `WK Bench`
+# by default, so a result path on it contains spaces.
 _compare_files() {
     local spec="$1" which="$2" n=0 one d
     local IFS=,
@@ -846,14 +743,9 @@ $2
 EOF
 }
 
-# wk bench report <task> [--html] [--text]
-# wk bench report <run-a> <run-b> [--html out.html] [--text]
-# One argument is a task: `wkdata.py task-report` pairs its rounds by the
-# round and arm each run recorded, reports what is there, and says whether
-# the task is running (its lock), complete or stopped short. Two are run
-# directories (aspec/bspec, comma-separated to pool), handed to `wkdata.py
-# report`. Both read results directly from the store or a macOS staged tree,
-# no workspace needed; `wk bench compare` is the two-run call in text mode.
+# One argument is a task: `wkdata.py task-report` pairs its rounds by the round
+# and arm each run recorded. Two are run directories, comma-separated to pool,
+# handed to `wkdata.py report`. Both read results straight from the store.
 _REPORT_USAGE="usage: wk bench report <task> [--html] [--text]
        wk bench report <run-a> <run-b> [--html out.html] [--text]; see wk bench -h"
 cmd_report() {
@@ -861,13 +753,11 @@ cmd_report() {
     local positional=()
     while [ $# -gt 0 ]; do
         case "$1" in
-            # `--html out.html` names a file in the two-run form; a bare
-            # `--html` is the task form's, whose files are named for it.
+            # A bare `--html` is the task form's; its files are named for it.
             --html) case "${2:-}" in *.html) html="$2"; shift 2 ;; *) html=1; shift ;; esac ;;
             --text) text=1; shift ;;
             -*) die "$_REPORT_USAGE" ;;
-            # A third bare word is `wk bench compare`'s <ws> -- accepted here
-            # (this function backs both) and ignored below; a fourth is not.
+            # A third bare word is `wk bench compare`'s <ws>, accepted and ignored.
             *) positional+=("$1"); shift ;;
         esac
     done
@@ -895,7 +785,6 @@ cmd_report() {
     _lines_into ca "$ca_s"; _lines_into cb "$cb_s"
 
     # A single-iteration run has no variance, so its p-values are all "-".
-    # Said here rather than left to be noticed in the table.
     local r
     for r in "${ca[0]}" "${cb[0]}"; do
         if [ "$(wkdata get "$(dirname "$r")/env.json" count 2>/dev/null)" = 1 ]; then
@@ -921,31 +810,15 @@ cmd_compare() {
 
 # --- staging a build onto a machine that will run it --------------------------
 # Builds inside the VM, runs outside on bare metal (docs/HANDOFF-mac-perf-mode.md).
-# Staging is a copy -- rsync onto a fixed path the other role finds when it
-# boots, while this machine is in host mode and the benchmark volume is
-# mounted. What is staged:
-#
-#   WebKitBuild/<config>   the product being measured.
-#   Tools/                 run-benchmark, webkitpy, plan files -- the
-#                          smallest tree that can drive a run; the install
-#                          has no checkout and must not grow one.
-#   stage.json             workspace, sha, config, build/stage time,
-#                          wk-tools version -- decided here, since the
-#                          other role can't ask a guest anything.
-#
-# Carries bench_host=image, which `wk bench compare` refuses to compare
-# against a container run.
+# Staging is a copy -- rsync onto a fixed path the other role finds when it boots,
+# while this machine is in host mode and the benchmark volume is mounted. The
+# staged tree carries bench_host=image, not comparable with a container run.
 # TODO: exercise the run half end to end; only staging (layout, provenance,
 # refusals) is tested so far.
 cmd_stage() {
     local ws="$1" machine="" config="" plan="" payload="" dry=""
     shift
 
-    # This copies a build onto a disk mounted on the workstation, so it
-    # cannot run from inside a workspace. The device lane's staging verb is
-    # `wk pi deploy`, which puts a build on a machine over the network
-    # instead. Checked here rather than left to fail as a missing
-    # b_bench_root further down.
     if in_workspace; then
         die "'wk bench stage' copies a build onto a benchmark volume attached to the
     workstation, and this is workspace '$(wk_self)' -- there is no such volume
@@ -959,10 +832,7 @@ cmd_stage() {
             --to)      machine="${2:-}"; shift 2 ;;
             --config)  config="${2:-}"; shift 2 ;;
             --plan)    plan="${2:-}"; shift 2 ;;
-            # A directory on this machine, copied in beside the build so the
-            # run needs no network and cannot silently measure a different
-            # benchmark revision than last time -- same argument `wk bench
-            # seed` makes for a container run.
+            # Copied in beside the build so the run needs no network.
             --payload) payload="${2:-}"; shift 2 ;;
             --dry-run) dry=1; shift ;;
             *) die "unknown option: $1
@@ -973,9 +843,8 @@ cmd_stage() {
     require_name "$ws"
     [ -n "$machine" ] || die "which machine is going to run it? --to <machine> (wk boot --list)"
 
-    # The machine, and its other role's disk. Loaded through the same
-    # registry and driver `wk boot` uses: where a staged payload goes is a
-    # property of the machine's boot arrangement, not this runner's opinion.
+    # Through the registry and driver `wk boot` uses: where a staged payload goes
+    # is a property of the machine's boot arrangement.
     . "$WK_ROOT/boot/machines.sh"
     machine_load "$machine" || die "unknown machine '$machine' (wk boot --list)"
     load_driver "$NODE_DRIVER"
@@ -988,10 +857,8 @@ cmd_stage() {
     root=$(b_bench_root) || die "$machine's benchmark disk is not attached, so there is nowhere to
     stage a build onto. 'wk boot $machine --status' says what it can see."
 
-    # Is that path reachable from here, or does the payload have to be sent?
-    # The MBP's benchmark disk is *mounted* while it is being staged onto,
-    # which is what makes staging a copy; every other machine in the fleet
-    # has to be sent the payload over the network.
+    # The MBP's benchmark disk is *mounted* while it is staged onto; every other
+    # machine is sent the payload.
     local deliver=""
     if command -v b_bench_local >/dev/null 2>&1 && ! b_bench_local; then
         command -v b_bench_put >/dev/null 2>&1 \
@@ -1000,9 +867,7 @@ cmd_stage() {
         deliver=1
     fi
 
-    # Deliberately not load_bench_target, which refuses everything but a
-    # container: right for running a benchmark here, wrong for staging one
-    # whose whole point is that the build came from a macOS guest.
+    # Not load_bench_target: a staged build comes from a macOS guest.
     local t; t="$(ws_target "$ws")"
     load_target "$t"
     wait_ready "$ws"
@@ -1017,17 +882,15 @@ cmd_stage() {
         || die "'$ws' has no $config build to stage ($build_dir).
     Build it first:  wk build $ws $config"
 
-    # Asked of the checkout now, not read from any record: a staged payload
-    # naming the wrong commit is worse than one naming none, since it's the
-    # only thing the other role can say about what it measured.
+    # Asked of the checkout now: it is the only thing the other role can say
+    # about what it measured.
     local sha; sha=$(t_exec "$ws" bash -lc "cd $(sh_quote "$src") && git rev-parse HEAD" 2>/dev/null | tr -d '\r' | tail -1) || sha=""
 
     local stamp dest
     stamp=$(date -u +%Y%m%dT%H%M%SZ)
     dest="$root/staged/$stamp-$config"
 
-    # How this machine is put into bench mode, in its own words: the arming
-    # models arrive at the same place by different routes.
+    # The arming models arrive at the same place by different routes.
     local arm_hint run_hint
     case "${BOOT_ARMING:-one-shot}" in
         hands-on) arm_hint="wk boot $machine        arm it; it prints the ritual (you pick the disk)"
@@ -1051,8 +914,7 @@ cmd_stage() {
 
     info "staging $config from '$ws' onto $machine${NODE_VOLUME:+ ($NODE_VOLUME)}"
 
-    # Where the tree is assembled: the destination itself for a mounted
-    # disk, or a directory here that is then delivered and removed.
+    # Assembled at the destination for a mounted disk, or here then delivered.
     local build assemble="$dest"
     if [ -n "$deliver" ]; then
         assemble="$(wk_state_dir)/bench-stage/$stamp-$config"
@@ -1060,11 +922,9 @@ cmd_stage() {
     fi
     mkdir -p "$assemble"
 
-    # Products, not the build tree. A full `WebKitBuild/Release` runs tens of
-    # gigabytes, almost all intermediates (*.build, XCBuildData, static
-    # libs) -- a machine that will never compile anything needs only the
-    # frameworks, dylibs, XPC services and MiniBrowser.app that the browser
-    # driver launches and DYLD_FRAMEWORK_PATH resolves against.
+    # Products, not the build tree: a full WebKitBuild/Release runs tens of
+    # gigabytes of intermediates, and a machine that will never compile needs
+    # only what the browser driver launches and DYLD_FRAMEWORK_PATH resolves.
     log  "  the build product (frameworks and MiniBrowser.app; no intermediates)"
     build="$assemble/WebKitBuild/$(basename "$build_dir")"
     t_pull_dir "$ws" "$build_dir" "$build" \
@@ -1079,14 +939,12 @@ cmd_stage() {
         log  "  the benchmark itself, pinned ($(basename "$payload"))"
         rm -rf "$assemble/payload"
         mkdir -p "$assemble/payload"
-        # --exclude .git: `--payload <dir>` takes any directory, and a
-        # working clone can carry git's fsmonitor socket, which no copy tool
-        # can reproduce. `wk bench seed` itself already leaves no .git.
+        # --exclude .git: a working clone can carry git's fsmonitor socket,
+        # which no copy tool can reproduce.
         rsync -a --exclude '.git' "$payload/" "$assemble/payload/"
     fi
 
-    # Written last, the publishing protocol every store in this repo uses
-    # (lib/image.sh, lib/store.sh): until it exists this directory is rubble.
+    # Written last, the publishing protocol every store here uses (lib/store.sh).
     local tools_ver wk_tools=unknown
     tools_ver=$("$WK_ROOT/cmd/version" 2>/dev/null || true)
     [ -z "$tools_ver" ] || wk_tools=$(kv_get sha <<<"$tools_ver")$([ "$(kv_get dirty <<<"$tools_ver")" = yes ] && printf '+dirty')
@@ -1109,10 +967,8 @@ EOF
 
     if [ -n "$deliver" ]; then
         info "sending it to $machine ($(du -sh "$assemble" 2>/dev/null | cut -f1))"
-        # The manifest crosses last, on its own: a delivery is minutes of
-        # rsync with no order guarantee, so a stage.json carried along with
-        # the bulk could arrive before the payload and a half-delivered
-        # payload would look finished.
+        # The manifest crosses last, on its own: a delivery is minutes of rsync
+        # with no order guarantee, so a half-delivered payload would look finished.
         mv "$assemble/stage.json" "$assemble/.stage.json.pending"
         b_bench_put "$assemble" "$dest" || die "could not deliver the payload to $machine"
         mv "$assemble/.stage.json.pending" "$assemble/stage.json"
@@ -1133,28 +989,19 @@ EOF
 }
 
 # --- running a staged build, in the role that was booted for it ---------------
-# The other half of `wk bench stage`: the machine has rebooted into its
-# benchmark install, the payload is on the volume that is now `/`, and this
-# runs it and records what it ran on.
+# The other half of `wk bench stage`: the machine has rebooted into its benchmark
+# install, the payload is on the volume that is now `/`.
 #
-#   run-benchmark drives from a *partial* tree: plan files and patches
-#   resolve relative to webkitpy itself, not against a checkout, so
-#   `Tools/Scripts` alone is enough.
-#   `--build-directory <dir>` makes the driver launch MiniBrowser.app itself
-#   with DYLD_FRAMEWORK_PATH set, instead of going through
-#   Tools/Scripts/run-minibrowser, which would need a checkout; it requires
-#   the build directory contain a *.framework.
+#   run-benchmark drives from a *partial* tree: plan files and patches resolve
+#   relative to webkitpy itself, so `Tools/Scripts` alone is enough.
+#   `--build-directory <dir>` makes the driver launch MiniBrowser.app itself with
+#   DYLD_FRAMEWORK_PATH set; it requires the build directory contain a
+#   *.framework.
 #   the interpreter must have PyObjC: prepare_env's first import is a bare
-#   `import objc`, and pyobjc-core is not autoinstalled. Which python3 has
-#   it varies by machine, so the interpreter is found by property and named
-#   explicitly (staged_python below), not left to `#!/usr/bin/env python3`.
-#   everything else webkitpy needs it installs itself into the staged tree
-#   on first use, needing the network once.
-#
-# The refusal --force does not open: a benchmark runs in bench mode or it
-# does not run, since a workstation run shares the machine with a desktop,
-# a podman VM, whatever else is open, and produces a number indistinguishable
-# on paper from a bare-metal one. `--dry-run` still describes it.
+#   `import objc`, and pyobjc-core is not autoinstalled. Which python3 has it
+#   varies by machine, so it is found by property (staged_python below).
+#   everything else webkitpy installs itself into the staged tree on first use,
+#   needing the network once.
 staged_python() {
     local p
     for p in "${WK_BENCH_PYTHON:-}" /usr/bin/python3 \
@@ -1168,25 +1015,21 @@ staged_python() {
     return 1
 }
 
-# The fallback, so every message and dry run has something to name even when
-# nothing on the machine qualifies.
+# The fallback, so every message and dry run has something to name.
 STAGED_PY="$(staged_python || echo /usr/bin/python3)"
 
-# Where the staged payloads are: `/` in bench mode, a mounted disk in host
-# mode -- the same b_bench_root `wk bench stage` writes into.
+# `/` in bench mode, the b_bench_root `wk bench stage` writes into in host mode.
 staged_root() {
-    # An explicit answer wins: this is also how the runner is exercised from
-    # host mode, by pointing it at a disposable volume -- the only way to
-    # reach bench mode's code path without rebooting into it.
+    # An explicit answer wins: the only way to reach bench mode's code path
+    # without rebooting into it.
     [ -n "${WK_BENCH_ROOT:-}" ] && { printf '%s' "$WK_BENCH_ROOT"; return 0; }
     if in_bench_mode; then
         printf '/var/wk'
         return 0
     fi
     . "$WK_ROOT/boot/machines.sh"
-    # No default: host mode has two macOS machines in the registry (mbp,
-    # benchvm) and nothing here can tell which one this process is running
-    # on, so the caller has to say.
+    # No default: host mode has two macOS machines in the registry and nothing
+    # here can tell which one this process is on.
     if [ -z "${WK_BENCH_MACHINE:-}" ]; then
         debug "WK_BENCH_MACHINE is not set -- staged_root cannot pick between this fleet's macOS machines"
         return 1
@@ -1197,9 +1040,8 @@ staged_root() {
     b_bench_root
 }
 
-# The newest staged payload with a manifest, or the one named. The manifest
-# is written last by `wk bench stage`, so a payload without one is an
-# interrupted copy and is ignored rather than measured.
+# The newest staged payload with a manifest, or the one named. The manifest is
+# written last, so a payload without one is an interrupted copy.
 staged_pick() {
     local root="$1" want="${2:-}" d
     if [ -n "$want" ]; then
@@ -1226,9 +1068,7 @@ cmd_staged() {
             --count)    COUNT="${2:-}"; shift 2 ;;
             --subtests) SUBTESTS="${2:-}"; shift 2 ;;
             --browser-args) BROWSER_ARGS="${2:-}"; shift 2 ;;
-            # Pinned, same argument as `wk bench seed` for a container run:
-            # left alone, run-benchmark clones the benchmark from GitHub on
-            # every run.
+            # Pinned: left alone, run-benchmark clones the benchmark from GitHub.
             --payload)  PAYLOAD="${2:-}"; shift 2 ;;
             --timeout)  TIMEOUT="${2:-}"; shift 2 ;;
                 --dry-run)  dry=1; shift ;;
@@ -1287,10 +1127,8 @@ cmd_staged() {
     local role marker_faked=""
     if in_bench_mode; then
         role=$(wk_image_id)
-        # The override exists so this code path can be exercised on a
-        # machine that hasn't been rebooted (lib/common.sh, WK_IMAGE_MARKER).
-        # It is announced and recorded rather than merely allowed: a
-        # workstation run must never be *reported* as a benchmark-role run.
+        # The override exists so this path can be exercised on a machine that has
+        # not been rebooted (lib/common.sh, WK_IMAGE_MARKER); it is recorded.
         if [ "$WK_IMAGE_MARKER" != /etc/wk-image ]; then
             marker_faked=1
             warn "WK_IMAGE_MARKER points at $WK_IMAGE_MARKER, not /etc/wk-image"
@@ -1299,11 +1137,8 @@ cmd_staged() {
         fi
         check yes "bench mode" "${role:-image}${marker_faked:+ (marker overridden)}"
     elif [ -n "$dry" ]; then
-        # A dry run describes; it does not refuse.
         check no "bench mode" "this is host mode -- a real run refuses"
     else
-        # Not forceable: the workstation and the benchmark install produce
-        # results indistinguishable on paper and incomparable in fact.
         die "this is host mode, and a benchmark does not run here.
     Nothing about a run on this machine-as-workstation is comparable with one
     on the benchmark install -- same command, same plan, same shape of result,
@@ -1341,9 +1176,8 @@ cmd_staged() {
         log  "        or point WK_BENCH_PYTHON at one that has it."
     fi
 
-    # A benchmark needs the *console* session: driven over ssh with nobody
-    # logged in at the screen, MiniBrowser has nowhere to draw and the run
-    # hangs rather than failing.
+    # Over ssh with nobody logged in at the screen, MiniBrowser has nowhere to
+    # draw and the run hangs.
     local console; console=$(stat -f %Su /dev/console 2>/dev/null)
     if [ "$console" = "$(id -un)" ]; then
         check yes "the console session" "$console is logged in at the screen"
@@ -1351,13 +1185,10 @@ cmd_staged() {
         check no "the console session" "the screen belongs to '${console:-nobody}', not $(id -un)"
     fi
 
-    # A session that exists is not one that's usable: an onboarding pane
-    # (Setup Assistant after a major upgrade, among others) owns the
-    # frontmost window until answered, and a background browser is throttled
-    # silently -- no error, just no progress until run-benchmark times out.
-    # A process check rather than AppleScript: window-title queries need
-    # assistive access a fresh install hasn't granted. The .app suffix
-    # excludes the always-running SoftwareUpdateSubscriber XPC service.
+    # An onboarding pane owns the frontmost window until answered, and a background
+    # browser is throttled silently. A process check rather than AppleScript:
+    # window-title queries need assistive access a fresh install has not granted.
+    # The .app suffix excludes the SoftwareUpdateSubscriber XPC service.
     local blocker; blocker=$(screen_blocker)
     if [ -n "$blocker" ]; then
         check no "the screen is free" "'$blocker' is running and owns the front window"
@@ -1369,9 +1200,8 @@ cmd_staged() {
         check yes "the screen is free" "no onboarding or installer pane in front"
     fi
 
-    # The panel that is not an application: screen_blocker cannot see a
-    # modal authentication sheet, since macOS draws it from SecurityAgent,
-    # which never becomes the frontmost *application*.
+    # screen_blocker cannot see a modal authentication sheet: macOS draws it from
+    # SecurityAgent, which never becomes the frontmost *application*.
     local panel; panel=$(auth_panel)
     if [ -n "$panel" ]; then
         check no "no auth panel" "$panel has a modal dialog up -- it is above the browser"
@@ -1382,8 +1212,7 @@ cmd_staged() {
         check yes "no auth panel" "no modal authentication dialog"
     fi
 
-    # A laptop on battery throttles silently. A machine with no battery --
-    # a desktop, or a guest -- is on AC by construction.
+    # A laptop on battery throttles silently; a machine with no battery is on AC.
     local _batt; _batt=$(pmset -g batt 2>/dev/null | head -1)
     case "$_batt" in
         *"AC Power"*)      check yes "power" "AC" ;;
@@ -1409,9 +1238,7 @@ cmd_staged() {
     fi
 
     # --- the run ------------------------------------------------------------
-    # Padding the build directory (same reasoning as the Linux browser run in
-    # cmd_run). Local, not through a runner function: this role has no
-    # t_exec, it *is* the machine.
+    # Local, not through a runner: this role has no t_exec, it *is* the machine.
     local run_build_dir="$build_dir"
     if [ "${WK_BENCH_PATH_PAD:-0}" -gt 0 ] 2>/dev/null; then
         run_build_dir=$(bench_padded_path "" "$build_dir")
@@ -1423,12 +1250,9 @@ cmd_staged() {
     [ -n "$COUNT" ] && args="$args --count $COUNT"
     [ -n "$TIMEOUT" ] && args="$args --timeout $TIMEOUT"
     [ -n "$SUBTESTS" ] && args="$args --subtests $SUBTESTS"
-    # Use the pinned payload only when it matches *this* plan: it's one
-    # benchmark's checkout, and using it for a mismatched plan can fail
-    # loudly inside `patch`, or -- worse, for a related plan like
-    # speedometer3.0 vs 3.1 -- patch cleanly and produce a number for the
-    # wrong benchmark labelled with the right one. So the manifest's plan is
-    # checked, not just the directory's existence; a mismatch fetches instead.
+    # Only when the pinned payload matches *this* plan: for a related plan like
+    # speedometer3.0 vs 3.1 it can patch cleanly and produce a number for the wrong
+    # benchmark labelled with the right one. A mismatch fetches instead.
     if [ -z "$PAYLOAD" ] && [ -d "$dir/payload" ]; then
         local payload_plan; payload_plan=$(staged_field "$dir" plan)
         if [ -z "$payload_plan" ] || [ "$payload_plan" = "$plan" ]; then
@@ -1450,9 +1274,7 @@ cmd_staged() {
         log  "  from:    workspace '$ws', $config${sha:+ @${sha:0:10}}"
         log  "  results: $out"
         log  "  would run, in $dir:"
-        # The same string the run builds, quoting included: the default
-        # volume name "WK Bench" has a space, so an unquoted preview would
-        # show something that would not actually work.
+        # Quoting included: the default volume name "WK Bench" has a space.
         printf '    %s\n' "$(sh_quote "$STAGED_PY") $(sh_quote "$runner_script") $args" >&2
         return 0
     fi
@@ -1463,14 +1285,11 @@ cmd_staged() {
     info "$plan on $(sysctl -n hw.model), from '$ws' ($config${sha:+ @${sha:0:10}})"
     log  "  results: $out"
 
-    # WK_BENCH_ENV_PAD's dummy variable and WK_BENCH_SHARED_CACHE=avoid's
-    # DYLD_SHARED_REGION both have to land in the same shell as run-benchmark.
+    # Both have to land in the same shell as run-benchmark.
     local pad_prelude; pad_prelude=$(bench_env_pad_prelude)
     local shared_cache_env=""
     [ "${WK_BENCH_SHARED_CACHE:-}" = avoid ] && shared_cache_env="DYLD_SHARED_REGION=avoid "
 
-    # In the staged tree: webkitpy resolves plans and patches relative to
-    # itself and autoinstalls into it.
     local wall_start; wall_start=$(date +%s)
     set +e
     run_watched "$out/run.log" -- \
@@ -1484,8 +1303,7 @@ cmd_staged() {
 
     if [ "$rc" -ne 0 ]; then
         warn "run-benchmark exited $rc"
-        # first_error knows what a *build* failure looks like; a benchmark
-        # fails with a python traceback, so fall back to the tail.
+        # first_error knows a *build* failure; a benchmark fails with a traceback.
         local _err; _err=$(first_error "$out/run.log" || true)
         if [ -n "$_err" ]; then
             printf '%s\n' "$_err" | sed 's/^/  /' >&2
@@ -1505,11 +1323,9 @@ cmd_staged() {
     log "    wk bench report <other> $out/result.json"
 }
 
-# The macOS browser driver turns the Dock's launch animation off before a
-# run (prepare_env) and back on after it (restore_env) -- but restore_env
-# does not run when the run raises, which a timed-out benchmark does. Put
-# back here, and only when it is actually off, so this never fights webkitpy
-# for it.
+# The macOS browser driver turns the Dock's launch animation off before a run
+# (prepare_env) and back on after it (restore_env) -- but restore_env does not run
+# when the run raises, which a timed-out benchmark does.
 staged_restore_desktop() {
     [ "$(defaults read com.apple.dock launchanim 2>/dev/null)" = 0 ] || return 0
     defaults write com.apple.dock launchanim -bool true 2>/dev/null || return 0
@@ -1517,15 +1333,10 @@ staged_restore_desktop() {
     info "restored the Dock's launch animation (the run left it off)"
 }
 
-# The record, in the same shape `wk bench` writes for a container run, so
-# `wk bench compare` can warn about what differs. bench_host is always
-# "image" here. `system` is the artifact that booted; `profile` is what it
-# was built from, so a stock and an overclocked profile read as two series,
-# not noise. role_marker_overridden is true when the role was asserted by
-# an override rather than by having booted the image -- a run marked this
-# way is a rehearsal. aslr starts "unset" and is updated to the real answer
-# after the run (cmd_staged, below): there is no live browser process to
-# probe until then.
+# The same shape a container run writes, so `wk bench compare` can warn about what
+# differs. `system` is the artifact that booted, `profile` what it was built from,
+# so a stock and an overclocked profile read as two series. aslr starts "unset":
+# there is no live browser process to probe until after the run.
 staged_env_json() {
     local f="$1" dir="$2" plan="$3" config="$4" sha="$5" ws="$6" role="$7" faked="${8:-}"
     local therm disp
@@ -1553,10 +1364,9 @@ staged_env_json() {
         --bool forced="$FORCE" --bool role_marker_overridden="$faked"
 }
 
-# ASLR cannot be turned off on Apple Silicon, so the axis worth recording is
-# what layout actually happened: the load address slide of the browser
-# process, read with `vmmap -slide` while it's still findable by name; else
-# "os-randomised".
+# ASLR cannot be turned off on Apple Silicon, so the axis worth recording is what
+# layout actually happened: the browser's load address slide, read with
+# `vmmap -slide` while it is still findable by name.
 mac_aslr_probe() {
     local pid slide
     pid=$(pgrep -n MiniBrowser 2>/dev/null | head -1)
@@ -1576,39 +1386,23 @@ case "${1:-}" in
              cmd_compare "$@"; exit 0 ;;
     report)  shift; cmd_report "$@"; exit 0 ;;
     staged)  shift; cmd_staged "$@"; exit 0 ;;
-    # The whole macOS lane, not one step of it: build, stage, arm, wait for
-    # the person at the startup manager, run, come back, read the result.
-    # Own file: it outlives a reboot and shares none of this script's
-    # preflight. exec, not a function: nothing below is wanted.
+    # Own file: it outlives a reboot and shares none of this script's preflight.
     mac)     shift; exec "$WK_ROOT/bench/mac-lane.sh" "$@" ;;
-    # Making the benchmark install, as opposed to using it: acts on the Mac's
-    # own disk and reboots it, while the lane is driven from elsewhere
-    # precisely to outlive that reboot.
+    # Making the benchmark install, not using it: acts on the Mac's own disk.
     mac-volume) shift; exec "$WK_ROOT/bench/mac-bench-volume.sh" "$@" ;;
-    # The unattended A/B: plants a job bench mode runs by itself, rather than
-    # the lane's ssh-per-phase. See bench/mac-ab.sh for which constraint
-    # forces which shape.
+    # The unattended A/B: plants a job bench mode runs by itself.
     mac-ab)  shift; exec "$WK_ROOT/bench/mac-ab.sh" "$@" ;;
-    # The verdict, computed where the results are. Called by the planted job at
-    # the end of a run, and again from host mode to re-read it afterwards.
+    # The verdict, computed where the results are.
     ab-summary) shift; exec "$WK_ROOT/bench/mac-ab-summary.sh" "$@" ;;
     stage)   shift
              [ $# -ge 1 ] || die "usage: wk bench stage <workspace> --to <machine> [--config C] [--plan P] [--payload <dir>] [--dry-run]; see wk bench -h"
              cmd_stage "$@"; exit 0 ;;
-    # Seeding is not running, and must not inherit running's refusal
-    # (load_bench_target, container workspaces only): the build the macOS
-    # lane measures comes from a macOS guest, so `wk bench seed <guest-ws>
-    # speedometer3.0` must be able to read the plan from a guest, even though
-    # the benchmark volume it's seeding for has no network at run time. The
-    # clone itself happens here, on the workstation, which has a route to
-    # GitHub.
-    #
-    # Prints the directory: the path is what a caller passes to
-    # `wk bench stage --payload`; progress lines go to stderr.
+    # Seeding must not inherit running's refusal (container workspaces only): the
+    # macOS lane's build comes from a macOS guest, and the clone happens here, on
+    # the workstation, which has a route to GitHub. Prints the directory.
     seed)    shift
-             # The dispatcher resolves the workspace into WK_NAME when the seed
-             # runs against a container workspace; for any other target the
-             # name is still the first argument.
+             # The dispatcher resolves the workspace into WK_NAME for a container
+             # workspace; for any other target the name is still the first argument.
              if [ -n "${WK_NAME:-}" ]; then SEED_WS="$WK_NAME"; else SEED_WS="${1:-}"; shift 2>/dev/null || true; fi
              [ -n "$SEED_WS" ] && [ $# -ge 1 ] || die "usage: wk bench seed <workspace> <plan>; see wk bench -h"
              [ -z "${2:-}" ] || die "usage: wk bench seed <workspace> <plan>; unexpected argument: $2; see wk bench -h"

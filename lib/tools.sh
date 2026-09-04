@@ -4,38 +4,11 @@
 #   tools_head                   this tree's HEAD sha
 #   tools_committed              is there a commit to send? (the refusal)
 #
-# A machine gets a commit that exists and nothing else: the copy over there is
-# a checkout whose HEAD equals this tree's, so `wk status` compares the two by
-# sha and a report never rests on a file copy nobody can name. An uncommitted
-# tree is refused rather than copied -- there is no sha for a copy of it.
-#
-# <run...> is the driver's own ssh wrapper (targets/remote.sh `_rsh`,
-# targets/vm.sh `_ssh <ip>`), called with one command string appended and the
-# git bundle on stdin: one ssh implementation per driver, and this file
-# reaches no machine itself.
-#
-# Convergence, from any state the far side is in -- no checkout, a directory
-# of loose files, a checkout at another commit, or a dirty one: the directory
-# is replaced unless it is already a checkout of its own, the bundle is
-# fetched into it, and HEAD is reset hard to the pushed commit. Killed at any
-# point, a re-run converges: every step is a write of the same final state,
-# and the far side's own `git rev-parse HEAD` at the end is what this reports
-# on, rather than the exit status of the copy.
-#
-# Once the far side is a checkout, ignored files in it (a build directory, a
-# machine-local conf) survive every push: `git clean` runs without -x, so only
-# untracked files that shadow the checkout go. A directory that is *not* a
-# checkout is replaced whole, ignored files in it included -- loose files
-# cannot be reconciled with a commit -- and that branch says so as it goes.
-#
-# Which is why the destination has a floor under it (tools_dest_ok): the far
-# side's replacement is an `rm -rf`, and `/` or an account's home is not a
-# thing this may be asked to converge.
-#
-# The bundle carries the whole history rather than negotiating what the far
-# side already has: measured at 3.8 MB in 0.9s for this repository, which
-# buys nothing worth a second code path (the have/have-not exchange, and the
-# far side's answer to trust) on a push that runs at every guest start.
+# A machine gets a commit and nothing else, so `wk status` compares the two by
+# sha; an uncommitted tree is refused, since there is no sha for a copy of it.
+# <run...> is the driver's own ssh wrapper (targets/remote.sh, targets/vm.sh),
+# called with one command string appended and the bundle on stdin. The bundle
+# carries the whole history rather than negotiating: 3.8 MB in 0.9s here.
 
 command -v warn >/dev/null 2>&1 || . "$WK_ROOT/lib/common.sh"
 
@@ -43,9 +16,8 @@ tools_head() {
     git -C "$WK_ROOT" rev-parse HEAD 2>/dev/null || return 1
 }
 
-# Tracked changes only, staged or not; untracked files -- ignored or not
-# (a .DS_Store, a __pycache__, a per-machine conf, a new file not yet added)
-# -- are not changes to this repository.
+# Tracked changes only: an untracked file -- a .DS_Store, a per-machine conf, a
+# file not yet added -- is not a change to this repository.
 tools_committed() {
     local st
     if ! git -C "$WK_ROOT" rev-parse --git-dir >/dev/null 2>&1; then
@@ -66,11 +38,8 @@ tools_committed() {
     return 1
 }
 
-# The floor under the far side's `rm -rf "$d"`. A destination that is empty,
-# the root, an account's home, shorter than two path components or written
-# with a trailing slash is refused before anything is generated -- and it has
-# to be absolute, since the far side runs the script from whatever directory
-# its login shell lands in.
+# The floor under the far side's `rm -rf "$d"`. It must be absolute: the far side
+# runs the script from whatever directory its login shell lands in.
 tools_dest_ok() { # <dest>
     local d="$1" rest
     case "$d" in
@@ -87,9 +56,10 @@ tools_dest_ok() { # <dest>
     return 1
 }
 
-# The far side's half, as one shell script: POSIX, since it runs in whatever
-# login shell the account over there has (bash on a build box, zsh in a
-# macOS guest). It reads the bundle from stdin and prints the sha it ended at.
+# The far side's half, as one shell script: POSIX, since it runs in whatever login
+# shell the account over there has (bash on a build box, zsh in a macOS guest). It
+# reads the bundle from stdin and prints the sha it ended at. `git clean` runs
+# without -x, so ignored files (a build directory, a machine-local conf) survive.
 tools_converge_script() { # <dest> <sha>
     printf 'set -e\nd=%s\ns=%s\n' "$(sh_quote "$1")" "$(sh_quote "$2")"
     cat <<'EOF'

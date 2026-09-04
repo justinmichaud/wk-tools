@@ -8,30 +8,17 @@
 #                            |
 #                    tailscaled advertises $BR_SEGMENT
 #
-# This file is the only source of truth, and it is idempotent: edit this,
-# re-run `wk bridge setup`, never hand-edit /etc on the device. POSIX sh, no
-# bash -- pmOS is Alpine and /bin/sh is busybox ash -- and nothing here
-# sources lib/common.sh either, since the phone gets this directory, not
-# the repo.
+# Idempotent: edit this, re-run `wk bridge setup`, never hand-edit /etc on the
+# device. POSIX sh, no bash -- pmOS is Alpine and /bin/sh is busybox ash -- and
+# nothing here sources lib/common.sh, since the phone gets this directory and
+# not the repo.
 #
-# Inputs, all from the environment, all set by cmd/bridge from the host conf:
-#
-#   BR_NAME       the bridge's name, which is also its conf file's name
-#   BR_DEVICE     pinephone | librem5 (bridge/devices.sh)
-#   BR_HOSTNAME   what the phone calls itself and how it appears on the tailnet
-#   BR_TAG        the tailnet tag it must hold -- tagged nodes never key-expire
-#   BR_SEGMENT    the subnet it routes, e.g. 10.99.1.0/24
-#   BR_ROUTER     its own address on that subnet
-#   BR_IF         what the downstream NIC is renamed to, e.g. lan0
-#   BR_POOL       dnsmasq's range: "first,last" (equal for a one-address segment)
-#   BR_LEASES     reservations: "mac,ip[,name] mac,ip[,name] ..."
-#   BR_EGRESS     none | nat -- whether the segment may reach the internet
-#   BR_CAMERA     off | http -- stream the camera over the tailnet
-#   BR_LAN_MAC    the USB Ethernet adapter's MAC; autodetected when empty
-#   BR_BATTERY    the power_supply node exposing charge_control_end_threshold;
-#                 autodetected when empty (bridge/hosts/<name>.conf)
-#   BR_BATTERY_LIMIT  the charge cap, in percent (cmd/bridge defaults it to 80)
-#   BR_AUTHKEY    a tagged tailscale auth key, only when the node needs one
+# Every BR_* input comes from the environment, set by cmd/bridge from
+# bridge/hosts/<name>.conf, which documents each one. The ones with a fact
+# behind them: BR_TAG must be a tag, since tagged nodes never key-expire;
+# BR_POOL is dnsmasq's "first,last" (equal for a one-address segment);
+# BR_LEASES is "mac,ip[,name] ..."; BR_LAN_MAC and BR_BATTERY are autodetected
+# when empty.
 set -eu
 
 : "${BR_NAME:?BR_NAME is not set (run this through 'wk bridge setup')}"
@@ -49,9 +36,9 @@ BR_CAMERA="${BR_CAMERA:-off}"
 BR_LAN_MAC="${BR_LAN_MAC:-}"
 BR_BATTERY="${BR_BATTERY:-}"
 
-# Everything except joining the tailnet: that needs a credential a person
-# fetches, and `--advertise-tags` can only be set at login, so it is
-# separable. BR_NO_TAILNET=1 stops short; `wk bridge tailnet <name>` finishes it.
+# Joining the tailnet needs a credential a person fetches, and
+# `--advertise-tags` can only be set at login. BR_NO_TAILNET=1 stops short;
+# `wk bridge tailnet <name>` finishes it.
 BR_NO_TAILNET="${BR_NO_TAILNET:-}"
 
 # The auth key arrives in a 0600 file on tmpfs: argv is world readable in
@@ -65,8 +52,8 @@ fi
 HERE=$(cd "$(dirname "$0")" && pwd)
 LEASEFILE=/var/lib/misc/dnsmasq.leases
 CHANGES=0
-# Built here, handed to write_file by redirect, not pipeline: a function
-# right of `|` runs in a subshell, silently discarding its change count.
+# By redirect, not pipeline: a function right of `|` runs in a subshell,
+# discarding its change count.
 TMPD=$(mktemp -d)
 trap 'rm -rf "$TMPD"' EXIT INT TERM
 
@@ -76,12 +63,9 @@ warn()    { printf '\033[1;33m    WARN: %s\033[0m\n' "$*"; }
 die()     { printf '\033[1;31m    ERROR: %s\033[0m\n' "$*"; exit 1; }
 changed() { CHANGES=$((CHANGES + 1)); printf '\033[1;32m    changed:\033[0m %s\n' "$*"; }
 
-# Write a file only when its content differs, and say which: "0 changes" is
-# what makes a re-run readable as "already matches the repository".
 write_file() {
-    # `local` is not POSIX but both ash and dash have it, and pmOS is busybox
-    # ash. Without it these leak into the caller, which matters here: `tmp` is
-    # also the name the sshd_config edit uses.
+    # `local` is not POSIX but both ash and dash have it. Without it these
+    # leak into the caller, and `tmp` is also the sshd_config edit's name.
     local dst mode tmp
     dst="$1"; mode="${2:-0644}"
     tmp=$(mktemp)
@@ -102,9 +86,6 @@ write_file() {
 svc() {
     local n
     for n in "$@"; do
-        # `if` rather than `[ ... ] && { ... }` for readability only -- the
-        # explicit `return 1` below is what makes the no-match case safe under
-        # `set -e`, and it has to stay there.
         if [ -x "/etc/init.d/$n" ]; then
             printf '%s' "$n"
             return 0
@@ -113,9 +94,8 @@ svc() {
     return 1
 }
 
-# Real files under bridge/init.d rather than heredocs here: everything
-# variable is in /etc/wk-bridge.conf, read at runtime, and a service file
-# you can read, grep and diff is worth more than one assembled at provision time.
+# Real files under bridge/init.d: everything variable is in
+# /etc/wk-bridge.conf, read at runtime.
 install_service() {
     local src
     src="$HERE/init.d/$1"
@@ -126,8 +106,6 @@ install_service() {
     fi
 }
 
-# rc-update is idempotent by itself but silent, and "what did this change"
-# is the question a re-run has to answer.
 enable_svc() {
     if rc-update show default 2>/dev/null | awk '{print $1}' | grep -x "$1" >/dev/null 2>&1; then
         return 0
@@ -136,20 +114,17 @@ enable_svc() {
     changed "enabled $1"
 }
 
-# Force OpenRC to re-read the init scripts: it regenerates the dependency
-# tree only when a script is *newer* than the cache, but this phone boots at
-# 1970 (no RTC) and chrony then steps the clock forward, making the cache
-# look decades newer than scripts that are enabled, symlinked and listed by
-# `rc-update show` yet invisible to `rc-status` and never started.
+# OpenRC regenerates the dependency tree only when a script is newer than the
+# cache, but this phone boots at 1970 (no RTC) and chrony then steps the clock
+# forward: the cache looks decades newer, and scripts that are enabled and
+# listed by `rc-update show` are invisible to `rc-status` and never started.
 refresh_deptree() {
     rc-update -u >/dev/null 2>&1 \
         || warn "could not refresh OpenRC's dependency cache; services may not start at boot"
 }
 
 # --- 0. is this the machine this script is for? ------------------------------
-# Refusing beats half-applying: running this against a non-Alpine phone
-# would install service files that fit no init system, succeed partway, and
-# leave a bridge that is neither.
+# A non-Alpine phone would get service files that fit no init system.
 [ "$(id -u)" -eq 0 ] || die "run as root"
 command -v apk >/dev/null 2>&1 || die "this is not an Alpine/postmarketOS system (no apk).
     The bridge role is pmOS-only on purpose: one provisioner for both phones.
@@ -160,21 +135,18 @@ command -v rc-update >/dev/null 2>&1 || die "no OpenRC here (rc-update is missin
 step "Provisioning $BR_NAME ($BR_DEVICE) on $(cat /etc/hostname 2>/dev/null)"
 info "segment $BR_SEGMENT via $BR_IF, router $BR_ROUTER, egress $BR_EGRESS"
 
-# Two lists: without the required set there is no bridge; the optional
-# set's absence is a warning, not a stop, so a moved-on apk index cannot
-# block re-provisioning a device that already works.
+# Without the required set there is no bridge; the optional set's absence is a
+# warning, so a moved-on apk index cannot block re-provisioning.
 REQUIRED="tailscale dnsmasq nftables chrony jq iw ethtool openssh networkmanager"
 OPTIONAL="logrotate zram-init v4l-utils"
 [ "$BR_CAMERA" = off ] || OPTIONAL="$OPTIONAL ffmpeg"
 
 # --- 1. stop it disappearing -------------------------------------------------
-# First, before anything slow: an unprovisioned phone suspends on idle, so
-# provisioning later loses the device mid-run. The GUI stays, the recovery
-# path if WiFi and ssh are both gone, but every reason to sleep must go.
+# Before anything slow: an unprovisioned phone suspends on idle and is lost
+# mid-run. The GUI stays: it is the recovery path when WiFi and ssh are gone.
 step "Never sleep"
 if [ -d /etc/elogind ]; then
     write_file /etc/elogind/logind.conf.d/10-wk-bridge.conf <<'EOF'
-# A power button wedged in a drawer is as likely to be a pocket as a person.
 [Login]
 HandlePowerKey=ignore
 HandleSuspendKey=ignore
@@ -215,14 +187,14 @@ else
 fi
 
 # Kernel-mode tailscale needs /dev/net/tun; userspace networking forwards
-# nothing for anyone else, the entire job here.
+# nothing for anyone else.
 [ -c /dev/net/tun ] || warn "/dev/net/tun is missing -- tailscale cannot route a
     subnet without it. Check that the kernel has tun (modprobe tun), or this
     bridge will come up healthy-looking and forward nothing."
 
 # --- 3. the scripts, and the fact file they all read -------------------------
-# One file says what this bridge is; every on-device script reads it, so
-# `wk bridge status` describes the running configuration, not the repository.
+# Every on-device script reads it, so `wk bridge status` describes the running
+# configuration rather than the repository.
 step "Scripts"
 mkdir -p /usr/local/sbin
 for b in "$HERE"/bin/*; do
@@ -258,8 +230,8 @@ if [ "$(cat /etc/hostname 2>/dev/null)" != "$BR_HOSTNAME" ]; then
     hostname "$BR_HOSTNAME"
     changed "hostname $BR_HOSTNAME"
 fi
-# 127.0.1.1, not 127.0.0.1: sudo and anything resolving its own name wants
-# the loopback entry that is always there.
+# 127.0.1.1, not 127.0.0.1: the loopback entry anything resolving its own name
+# expects to find.
 if ! grep "$BR_HOSTNAME" /etc/hosts >/dev/null 2>&1; then
     printf '127.0.1.1\t%s\n' "$BR_HOSTNAME" >> /etc/hosts
     changed "/etc/hosts entry for $BR_HOSTNAME"
@@ -277,9 +249,8 @@ wifi.powersave=2
 wifi.scan-rand-mac-address=no
 EOF
 
-# UDP GRO forwarding, re-applied on every interface that comes up: worth
-# roughly a factor on tailscale throughput, and not sticky across a link
-# bounce, hence a dispatcher hook rather than a one-shot.
+# UDP GRO forwarding: worth roughly a factor on tailscale throughput, and not
+# sticky across a link bounce, hence a dispatcher hook rather than a one-shot.
 write_file /etc/NetworkManager/dispatcher.d/50-wk-bridge-gro 0755 <<'EOF'
 #!/bin/sh
 IFACE="$1"
@@ -302,25 +273,20 @@ enable_svc wk-bridge-usb-host
 /usr/local/sbin/wk-bridge-usb-host || true
 
 step "Downstream NIC ($BR_IF)"
-# Found by being on USB and not WiFi, autodetected rather than declared: the
-# answer is a property of the dock in use.
 if [ -z "$BR_LAN_MAC" ]; then
     for n in /sys/class/net/*; do
         d=$(basename "$n")
-        # usb* excluded: on a phone that is the USB *gadget* interface (device
-        # mode), not a real adapter in host mode (eth0/enp*, or $BR_IF once
-        # the udev rule below applies).
+        # usb* excluded: on a phone that is the USB gadget interface (device
+        # mode), not an adapter in host mode.
         case "$d" in lo|wlan*|tailscale*|dummy*|usb*) continue ;; esac
         [ -e "$n/device/subsystem" ] || continue
         case "$(readlink -f "$n/device/subsystem")" in
             */usb)
-                # The *permanent* address, not the current one: pmOS ships
+                # The permanent address, not the current one: pmOS ships
                 # NetworkManager with `ethernet.cloned-mac-address=stable`, so
-                # a managed interface runs on a synthetic MAC within seconds
-                # of appearing. The udev rule below matches at ACTION=="add",
-                # against the hardware address, so a rule built from the
-                # current (synthetic) address matches nothing and the rename
-                # silently stops working at the next boot.
+                # a managed interface runs on a synthetic MAC seconds after
+                # appearing, and the udev rule below matches at ACTION=="add"
+                # against the hardware address.
                 perm=$(ethtool -P "$d" 2>/dev/null | sed -n 's/^Permanent address: //p')
                 case "$perm" in
                     ""|00:00:00:00:00:00) BR_LAN_MAC=$(cat "$n/address") ;;
@@ -343,19 +309,15 @@ if [ -z "$BR_LAN_MAC" ]; then
     warn "  appears, so waiting for it achieves nothing.)"
 else
     # A udev rule, not a systemd .link file: pmOS has eudev, no
-    # systemd-networkd. Renaming is what makes every other file here
-    # device-independent -- dnsmasq, nftables and the address all name
-    # $BR_IF -- so swapping the dock changes this one line and nothing else.
+    # systemd-networkd. The rename lets every other file here name $BR_IF.
     write_file /etc/udev/rules.d/70-wk-bridge-net.rules <<EOF
 # The bridge's downstream NIC, by MAC. Written by bridge/provision.sh.
 SUBSYSTEM=="net", ACTION=="add", ATTR{address}=="$(printf '%s' "$BR_LAN_MAC" | tr 'A-Z' 'a-z')", NAME="$BR_IF"
 EOF
 
     # NetworkManager owns the devices here, so this is a keyfile connection,
-    # not an /etc/network/interfaces stanza -- two things configuring one
-    # interface is how an address appears and disappears on its own.
-    # never-default/ignore-auto-dns: this leg is a segment, not a way out --
-    # a default route learned here would send the phone's own traffic at a BMC.
+    # not an /etc/network/interfaces stanza. never-default/ignore-auto-dns: a
+    # default route learned here would send the phone's own traffic at a BMC.
     write_file "/etc/NetworkManager/system-connections/wk-bridge-$BR_IF.nmconnection" 0600 <<EOF
 [connection]
 id=wk-bridge-$BR_IF
@@ -375,20 +337,16 @@ method=ignore
 
 # Keep the hardware address on this leg, against pmOS's global
 # `ethernet.cloned-mac-address=stable`: the udev rule above matches the
-# permanent MAC, and this segment address is a thing other machines key on
-# (an ARP entry, a far-side reservation) that a synthetic MAC would break.
-# The phone's *uplink* randomization is a privacy feature, left alone.
+# permanent MAC, and other machines key on this one (an ARP entry, a far-side
+# reservation). The uplink's randomization is left alone.
 [ethernet]
 cloned-mac-address=permanent
 EOF
     nmcli connection reload >/dev/null 2>&1 || true
 
-    # A udev NAME= applies when the device *appears*; an interface already up
-    # cannot be renamed underneath itself, so the first run against a
-    # plugged-in dock leaves it under its kernel name. Renamed here instead of
-    # asking for a hand at the phone -- the whole point of a bridge is being
-    # reachable without going to it -- and the udev rule makes it survive the
-    # next boot.
+    # A udev NAME= applies when the device appears, and an interface already
+    # up cannot be renamed underneath itself, so the first run against a
+    # plugged-in dock leaves it under its kernel name.
     if [ ! -e "/sys/class/net/$BR_IF" ]; then
         cur=""
         for n in /sys/class/net/*; do
@@ -422,8 +380,7 @@ fi
 
 # --- 7. DHCP for the segment -------------------------------------------------
 step "DHCP"
-# dnsmasq wants a netmask, the segment is written as a prefix length -- the
-# same fact twice, so it is derived rather than declared twice in the conf.
+# dnsmasq wants a netmask and the segment is written as a prefix length.
 case "${BR_SEGMENT#*/}" in
     16) NETMASK=255.255.0.0 ;;
     24) NETMASK=255.255.255.0 ;;
@@ -433,7 +390,6 @@ esac
 {
     printf '# DHCP for the bridge segment. Written by bridge/provision.sh.\n'
     if [ "$BR_EGRESS" = nat ]; then
-        # DNS on: a device that may reach the internet needs to resolve names.
         printf 'domain-needed\nbogus-priv\n'
     else
         # DNS off (port=0, empty option 6): a segment with no egress has
@@ -453,8 +409,8 @@ esac
     else
         printf 'dhcp-option=6\n'
     fi
-    # Reservations: on a one-address segment, the difference between "the
-    # BMC has the address" and "whatever asked first has it forever".
+    # On a one-address segment, the difference between the BMC having the
+    # address and whatever asked first having it for ever.
     for l in $BR_LEASES; do
         printf 'dhcp-host=%s,infinite\n' "$l"
     done
@@ -463,9 +419,9 @@ write_file /etc/dnsmasq.d/wk-bridge.conf < "$TMPD/dnsmasq.conf"
 
 mkdir -p "$(dirname "$LEASEFILE")"
 
-# Our own service, not the packaged one: the distribution's dnsmasq unit
-# reads /etc/dnsmasq.conf plus a conf *directory*, so `port=0` here never
-# reached the daemon, which then fought the system resolver for port 53.
+# Our own service, not the packaged one: the distribution's dnsmasq unit reads
+# /etc/dnsmasq.conf plus a conf directory, so `port=0` here never reaches the
+# daemon and it fights the system resolver for port 53.
 install_service wk-bridge-dhcp
 enable_svc wk-bridge-dhcp
 
@@ -501,16 +457,15 @@ info "uplink $UPLINK, segment interface $BR_IF"
     # ICMPv6 is not optional: dropping neighbour discovery reads as random
     # packet loss, not a firewall.
     printf '        meta l4proto ipv6-icmp accept\n\n'
-    # Access control for the tailnet lives in the tailnet policy; nftables
-    # cannot express "humans and workstations, not containers".
+    # Tailnet access control lives in the tailnet policy; nftables cannot
+    # express "humans and workstations, not containers".
     printf '        iifname "tailscale0" accept\n\n'
     printf '        # The uplink: only what the bridge itself must answer.\n'
     printf '        iifname "%s" tcp dport 22 accept\n' "$UPLINK"
     printf '        iifname "%s" udp dport 41641 accept\n' "$UPLINK"
     printf '        iifname "%s" udp sport 67 udp dport 68 accept\n' "$UPLINK"
-    # Unicast mDNS from the uplink, so the bridge stays findable by name:
-    # this file drops multicast below, and without this the phone is
-    # invisible to the one mechanism that finds it when the tailnet is down.
+    # Unicast mDNS from the uplink: this file drops multicast below, and mDNS
+    # is what finds the phone when the tailnet is down.
     printf '        iifname "%s" udp dport 5353 accept\n' "$UPLINK"
     printf '        iifname "%s" icmp type { echo-request, echo-reply, destination-unreachable, time-exceeded } accept\n\n' "$UPLINK"
     printf '        # The segment is untrusted: what it needs from us and nothing else.\n'
@@ -551,8 +506,8 @@ write_file /etc/nftables.d/wk-bridge.nft < "$TMPD/wk-bridge.nft"
 install_service wk-bridge-nftables
 enable_svc wk-bridge-nftables
 
-# The packaged service, off, named explicitly: "enabled by a later apk add"
-# is exactly how the tailnet would disappear.
+# The packaged service, off, named explicitly: a later `apk add` enabling it is
+# how the tailnet disappears.
 if [ -x /etc/init.d/nftables ]; then
     if rc-update show default 2>/dev/null | awk '{print $1}' | grep -x nftables >/dev/null 2>&1; then
         rc-update del nftables default >/dev/null 2>&1 || true
@@ -561,12 +516,10 @@ if [ -x /etc/init.d/nftables ]; then
 fi
 
 # --- 10. DNS that resolves ---------------------------------------------------
-# The image can arrive with an /etc/resolv.conf NetworkManager is not
-# managing -- a leftover systemd-resolved stub pointing at 127.0.0.53 on an
-# OpenRC system with no systemd-resolved, so every lookup gets "connection
-# refused" while routing is perfect and DHCP is offering working nameservers
-# the whole time. Nothing downstream survives it (chrony cannot resolve its
-# pool, TLS fails, `tailscale up` cannot log in), so this runs before NTP.
+# The image can arrive with an /etc/resolv.conf NetworkManager is not managing:
+# a leftover systemd-resolved stub pointing at 127.0.0.53 on an OpenRC system
+# with no systemd-resolved, so every lookup gets "connection refused" while
+# routing is perfect. Nothing downstream survives it, so this runs before NTP.
 step "DNS"
 write_file /etc/NetworkManager/conf.d/98-wk-bridge-dns.conf <<'EOF'
 # Without this an unmanaged /etc/resolv.conf shadows what DHCP offered.
@@ -575,16 +528,16 @@ dns=default
 rc-manager=file
 EOF
 
-# A resolv.conf NetworkManager did not write, it will not correct; NM
-# recreates it on the next reload, in the services step.
+# NetworkManager will not correct a resolv.conf it did not write; it recreates
+# one on the next reload, in the services step.
 if [ -f /etc/resolv.conf ] && grep -q '127\.0\.0\.53' /etc/resolv.conf 2>/dev/null; then
     rm -f /etc/resolv.conf
     changed "removed the stale systemd-resolved stub /etc/resolv.conf"
 fi
 
 # --- 11. NTP for the segment -------------------------------------------------
-# A BMC's clock resets with its configuration, and a bare board has no RTC
-# at all; both then produce logs and TLS errors dated 1970.
+# A BMC's clock resets with its configuration and a bare board has no RTC at
+# all; both then produce logs and TLS errors dated 1970.
 step "NTP"
 write_file /etc/chrony/conf.d/wk-bridge.conf <<EOF
 allow $BR_SEGMENT
@@ -597,10 +550,9 @@ rtcsync
 # are fine. -1, not a count: the offset recurs on every boot.
 makestep 1.0 -1
 EOF
-# Alpine ships `confdir /etc/chrony/conf.d` (verified on 3.24), so this is
-# the fallback for an image that reads only chrony.conf. Only an *active*
-# line counts: matching a commented mention would skip the edit and leave
-# the file above unread, silently.
+# Alpine ships `confdir /etc/chrony/conf.d` (verified on 3.24), so this is the
+# fallback for an image that reads only chrony.conf. Only an active line
+# counts: a commented mention would skip the edit and leave the file unread.
 if [ -f /etc/chrony/chrony.conf ] \
    && ! grep -E '^[[:space:]]*(include|confdir)[[:space:]]+/etc/chrony/conf\.d' \
           /etc/chrony/chrony.conf >/dev/null 2>&1; then
@@ -611,9 +563,8 @@ fi
 CHRONY_SVC=$(svc chronyd chrony) && enable_svc "$CHRONY_SVC" || warn "chrony has no init script here"
 
 # --- 12. ssh -----------------------------------------------------------------
-# Key-only. The account password is left alone deliberately: it is the
-# console login on the phone's own screen, the last recovery path, and it
-# cannot be used over the network once this is in place.
+# Key-only. The account password is left alone: it is the console login on the
+# phone's own screen, unusable over the network once this is in place.
 step "SSH"
 write_file /etc/ssh/sshd_config.d/10-wk-bridge.conf <<'EOF'
 PasswordAuthentication no
@@ -622,9 +573,8 @@ PermitRootLogin prohibit-password
 PermitEmptyPasswords no
 EOF
 # Alpine ships `Include /etc/ssh/sshd_config.d/*.conf` at the top already
-# (verified on 3.24), so this is the fallback. Prepends rather than appends:
-# OpenSSH takes the *first* value for a keyword, so at the bottom the stock
-# defaults would win.
+# (verified on 3.24), so this is the fallback. Prepended: OpenSSH takes the
+# first value for a keyword.
 if ! grep '^Include /etc/ssh/sshd_config.d/' /etc/ssh/sshd_config >/dev/null 2>&1; then
     tmp=$(mktemp)
     printf '# wk bridge: first-match-wins, so this include is first.\nInclude /etc/ssh/sshd_config.d/*.conf\n\n' > "$tmp"
@@ -641,8 +591,7 @@ else
 fi
 
 # --- 13. flash and memory ----------------------------------------------------
-# The phone's eMMC cannot be replaced without opening the device; swap and
-# verbose logs are what wear it out on a machine up for months.
+# The phone's eMMC cannot be replaced without opening the device.
 step "Flash and memory"
 if [ -d /etc/logrotate.d ]; then
     write_file /etc/logrotate.d/wk-bridge <<'EOF'
@@ -672,15 +621,12 @@ elif [ "${nonzram:-0}" -eq 0 ] && [ "$(awk 'NR > 1 { c++ } END { print c + 0 }' 
 fi
 
 # --- 14. the hardware watchdog -----------------------------------------------
-# The failure this catches is the one nothing else can: a kernel that stops
-# scheduling. Everything else here recovers a service or a link, assuming
-# the machine is still running.
+# The one failure nothing else here catches: a kernel that stops scheduling.
 step "Watchdog"
-# No /dev/watchdog may mean no driver, or a driver module nobody loaded --
-# indistinguishable from here, so the driver is asked for first.
-# wk-bridge-watchdog-load is a separate script since the watchdog service
-# runs it too: boot must not depend on udev's coldplug having loaded it. It
-# identifies the driver by the device's own modalias, no module name here.
+# No /dev/watchdog may mean no driver or a module nobody loaded, so the driver
+# is asked for first. wk-bridge-watchdog-load is a separate script since the
+# watchdog service runs it too: boot must not depend on udev's coldplug. It
+# identifies the driver by the device's own modalias.
 /usr/local/sbin/wk-bridge-watchdog-load || true
 
 if [ -e /dev/watchdog ]; then
@@ -713,19 +659,14 @@ else
     info "capture device and the service idles."
 fi
 
-# --- 17. battery charge limit -------------------------------------------------
-# A phone left on a charger at 100% every day swells its cell over months;
-# there is no kill switch for this the way there is for the radios, so
-# capping the charge in software is the one thing worth doing. One code path
-# for both phones: charge_control_end_threshold is a standard Linux
-# power_supply attribute, so the node exposing it is found by globbing for
-# the attribute itself rather than naming a chip (axp20x, bq2589x, ...) --
-# BR_BATTERY pins a specific node only if a phone ever exposes more than one.
+# --- 17. battery charge limit ------------------------------------------------
+# A phone left on a charger at 100% every day swells its cell over months.
+# charge_control_end_threshold is a standard Linux power_supply attribute, so
+# the node is found by globbing for the attribute rather than naming a chip
+# (axp20x, bq2589x, ...); BR_BATTERY pins one when a phone exposes several.
 #
-# The threshold does not survive a reboot on its own (the driver resets it to
-# the hardware default at every power-on), so a service applies it again at
-# every boot -- the same shape as wk-bridge-usb-host, which re-asserts a
-# setting the kernel also does not remember.
+# The driver resets the threshold to the hardware default at every power-on, so
+# a service applies it again at every boot.
 step "Battery charge limit (${BR_BATTERY_LIMIT}%)"
 BATT_NODE=""
 if [ -n "$BR_BATTERY" ]; then
@@ -754,8 +695,7 @@ EOF
     enable_svc wk-bridge-battery
     /usr/local/sbin/wk-bridge-battery || true
 
-    # Verified by reading the node back, not assumed from the write's exit
-    # status: a sysfs write can succeed against a value the driver clamps.
+    # A sysfs write can succeed against a value the driver clamps.
     cur=$(cat "$BATT_NODE/charge_control_end_threshold" 2>/dev/null || echo '?')
     if [ "$cur" = "$BR_BATTERY_LIMIT" ]; then
         info "$BATT_NODE now caps at ${cur}%"
@@ -770,7 +710,6 @@ TS_SVC=$(svc tailscale tailscaled) || die "the tailscale package has no init scr
 enable_svc "$TS_SVC"
 rc-service "$TS_SVC" status >/dev/null 2>&1 || rc-service "$TS_SVC" start >/dev/null 2>&1 || true
 
-# Wait for the daemon's socket rather than sleeping a guessed number of seconds.
 i=0
 while [ "$i" -lt 30 ]; do
     tailscale status >/dev/null 2>&1 && break
@@ -786,19 +725,16 @@ if [ -n "$BR_NO_TAILNET" ] && { [ "$TS_STATE" != Running ] || [ "$TS_TAGS" = non
     info "everything else in this role is applied. To finish:"
     info "    wk bridge tailnet $BR_NAME"
 elif [ "$TS_STATE" = Running ] && [ "$TS_TAGS" != none ]; then
-    # Already tagged: re-assert what can change without re-authenticating.
     tailscale set --advertise-routes="$BR_SEGMENT" --accept-dns=false --ssh=true >/dev/null 2>&1 \
         || warn "could not re-assert the advertised route"
     rm -f "$AUTHKEY_FILE"
     info "already on the tailnet, tags $TS_TAGS"
 
-    # `autoApprovers` is evaluated only when a node *advertises* a route, and
-    # the advertisement above is a no-op when the value has not changed (never,
-    # on a re-run) -- so a route first advertised before the policy existed
-    # stays unapproved forever, healthy-looking with nothing behind it
-    # reachable. Withdrawing and re-advertising forces the evaluation,
-    # conditional on the route not already being primary so a working bridge
-    # does not drop the segment for no reason.
+    # `autoApprovers` is evaluated only when a node advertises a route, and
+    # the advertisement above is a no-op when the value has not changed, so a
+    # route first advertised before the policy existed stays unapproved for
+    # ever. Withdrawing and re-advertising forces the evaluation, only when the
+    # route is not already primary.
     if [ "$(tailscale status --json 2>/dev/null | jq -rc '.Self.PrimaryRoutes // "none"')" = none ]; then
         info "the route is advertised but not approved -- re-advertising so"
         info "  autoApprovers is evaluated (a paste alone does not trigger it)"
@@ -816,8 +752,8 @@ elif [ "$TS_STATE" = Running ] && [ "$TS_TAGS" != none ]; then
         fi
     fi
 elif [ -n "$BR_AUTHKEY" ]; then
-    # A key handed over in the environment goes into the same file, so there
-    # is one code path into `tailscale up`, off the command line.
+    # A key from the environment goes into the same file, so there is one code
+    # path into `tailscale up`, off the command line.
     if [ ! -f "$AUTHKEY_FILE" ]; then
         ( umask 077; printf '%s\n' "$BR_AUTHKEY" > "$AUTHKEY_FILE" )
     fi
@@ -825,10 +761,9 @@ elif [ -n "$BR_AUTHKEY" ]; then
     # non-expiring; untagged, a bridge goes dark after 180 days.
     # --accept-dns=false: a subnet router keeps its own resolver.
     # --accept-routes=false: it publishes routes, does not consume them.
-    # --ssh: the phone's own screen should not be the only way back in.
-    # `--auth-key file:`, not `--authkey=<key>`: the latter puts the
-    # credential in the process table, readable from /proc by anyone with a
-    # shell (needs tailscale >= 1.38; a rejected key here means the version).
+    # `--auth-key file:`, not `--authkey=<key>`: the latter puts the credential
+    # in the process table (needs tailscale >= 1.38; a rejected key here means
+    # the version).
     tailscale up \
         --auth-key="file:$AUTHKEY_FILE" \
         --advertise-routes="$BR_SEGMENT" \
@@ -846,15 +781,15 @@ else
 fi
 
 # --- 19. start everything ----------------------------------------------------
-# Dependency cache rebuilt first: a service OpenRC cannot see in its tree
-# starts neither now nor at the next boot.
+# Dependency cache first: a service OpenRC cannot see in its tree starts
+# neither now nor at the next boot.
 step "Services"
 refresh_deptree
 for s in wk-bridge-nftables wk-bridge-usb-host wk-bridge-dhcp wk-bridge-netwatch wk-bridge-watchdog wk-bridge-camera wk-bridge-battery; do
     [ -x "/etc/init.d/$s" ] || continue
     if rc-service "$s" status >/dev/null 2>&1; then
-        # Restart what this run may have rewritten, so re-provisioning takes
-        # effect without a reboot (watchdog and netwatch read config at start).
+        # Restart what this run rewrote, so re-provisioning takes effect
+        # without a reboot: watchdog and netwatch read config at start.
         rc-service "$s" restart >/dev/null 2>&1 || warn "$s did not restart"
     else
         rc-service "$s" start >/dev/null 2>&1 || warn "$s did not start"

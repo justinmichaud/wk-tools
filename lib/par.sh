@@ -1,21 +1,8 @@
-# Several probes at once, without shuffling the listing: every ssh a walk of
-# the fleet needs goes out together, and one machine that will not answer
-# costs the walk its own timeout instead of everybody's.
-#
-# A job writes its records to fd 3 -- one file per job (fd 3 is a byte
-# stream; two writers interleave mid-line), read back in start order so the
-# listing never reshuffles. Two ways to read them: `par_join`, for a caller
-# that puts every record on fd 3 itself and defines `bump <rc>` (the worst
-# status seen so far, cmd/status); or `par_wait` and `par_record <name>`, for
-# one that reads each job's answer itself (ws_locate, lib/target.sh). `wait`
-# is always by pid, never bare, which would also catch the fleet probes left
-# running beside the walk. Every job's stdin is /dev/null: concurrent ssh
-# must not compete for a terminal, or a background reader is stopped by
-# SIGTTIN.
-#
-# One batch at a time per shell -- the state below is the batch. A job is a
-# subshell, so a batch a job opens is its own and cannot disturb the one it
-# was started from.
+# Several probes at once, without shuffling the listing: one machine that will not
+# answer costs the walk its own timeout instead of everybody's. A job writes its
+# records to fd 3 -- one file per job, since fd 3 is a byte stream and two writers
+# interleave mid-line -- read back in start order. `wait` is by pid, never bare,
+# which would catch the fleet probes too; stdin is /dev/null, or ssh gets SIGTTIN.
 _par_dir=""
 _par_names=""
 _par_pids=""
@@ -28,15 +15,12 @@ par_begin() {
 
 par_cleanup() { par_end; }   # wk_atexit: a killed run leaves nothing behind
 
-# par_run <name> <command...> -- <name> is both the file and the position
-# in the finished listing, unique among the batch. Each job drops a
-# marker (`$n.rc`) the instant it's done, which par_join_stream polls to
-# hand its records to fd 3 without waiting on jobs still running.
+# par_run <name> <command...> -- <name> is both the file and the position in the
+# listing. Each job drops a `$n.rc` marker the instant it is done, for par_join_stream.
 par_run() {
     local n="$1"; shift
-    # `-e` off around the job, on inside it: any exit must still leave the
-    # marker or par_join_stream waits forever. Not an `if`: bash
-    # suppresses `-e` throughout a tested command, subshell included.
+    # `-e` off around the job, on inside it: any exit must still leave the marker or
+    # par_join_stream waits forever. Not an `if`: bash suppresses `-e` in a tested command.
     ( set +e
       ( set -e; "$@" ) 3> "$_par_dir/$n"; _rc=$?
       printf '%s' "$_rc" > "$_par_dir/$n.rc"
@@ -51,10 +35,8 @@ par_end() {
     return 0
 }
 
-# par_wait -- wait for the whole batch, leaving `<name> <rc>` pairs in
-# $_par_status in start order. A variable and not stdout because `wait`
-# answers only about this shell's own children: a command substitution
-# would be asking about pids that are not its own.
+# par_wait -- leaves `<name> <rc>` pairs in $_par_status in start order. A variable,
+# not stdout: `wait` answers only about this shell's own children.
 _par_status=""
 par_wait() {
     local n p rc
@@ -79,12 +61,9 @@ par_join() {
     par_end
 }
 
-# par_join_stream -- the same batch, but a job's records reach fd 3 in
-# completion order, not start order, so a slow job no longer holds back
-# everything after it. A `{"kind":"flush"}` record follows each job's
-# records, naming the job, so a streaming reader (lib/status-view.py) can
-# draw a machine once every job feeding it is in. Polled, not `wait -n`:
-# bash 3.2 has no such builtin.
+# par_join_stream -- records reach fd 3 in completion order, each job's followed by
+# a `{"kind":"flush"}` record naming it, so lib/status-view.py can draw a machine
+# once every job feeding it is in. Polled, not `wait -n`: bash 3.2 has no builtin.
 par_join_stream() {
     local n p rc pending="$_par_names" next
     while [ -n "$pending" ]; do

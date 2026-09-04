@@ -1,17 +1,12 @@
 #!/usr/bin/env bash
 #
 # The detached half of `wk build --babysit`: build, and when the build fails,
-# have Claude fix it from inside the workspace, then build again.
-#
-# Runs on the host under nohup with no terminal, so it survives the ssh
-# session that started it. Everything it wants to say goes to babysit.log;
-# everything a human should read afterwards goes to babysit.report; and its
-# current state goes to babysit.status, which `wk status` renders.
-#
-# The agent runs through `wk ai claude` -- never claude directly -- so every fix
-# attempt passes the same sandbox verification an interactive session does,
-# and refuses the same targets. The babysitter itself edits nothing: the model
-# does, inside the workspace, or nobody does.
+# have Claude fix it from inside the workspace, then build again. Runs on the
+# host under nohup with no terminal, so it survives the ssh session that started
+# it: chatter goes to babysit.log, what a human reads to babysit.report, and its
+# state to babysit.status, which `wk status` renders. The agent runs through
+# `wk ai claude`, never claude directly, so a fix attempt gets the same sandbox
+# an interactive session does. This script itself edits nothing.
 
 set -euo pipefail
 WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -49,15 +44,14 @@ note() {
     printf '=== %s  %s ===\n%s\n\n' "$1" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$2" >> "$REPORT"
 }
 
-# A fresh run is a fresh report. The status file outlives the run on purpose --
-# it is how `wk status` still shows the outcome tomorrow -- but stale fix notes
-# under a new one would read as part of it.
+# A fresh run is a fresh report; the status file outlives the run, which is how
+# `wk status` still shows the outcome tomorrow.
 : > "$REPORT"
 bs_status starting
 info "babysitting '$CONFIG' in '$NAME' (model $MODEL, up to $MAX fixes)"
 
-# The branch, first and once. Not per attempt: a fix the model just made must
-# not be checked out from under it.
+# The branch once, before the loop: a checkout would take a fix from under the
+# model that just made it.
 if [ -n "$BRANCH" ]; then
     info "checking out '$BRANCH'"
     if ! t_exec "$NAME" bash -c "cd $(sh_quote "$(t_src "$NAME")") && {
@@ -87,9 +81,6 @@ while :; do
         exit 0
     fi
 
-    # A stall is memory pressure or a wedged process, not a source defect; a
-    # model cannot edit its way out of it, and rebuilding to find out is an
-    # hour of the same.
     if [ "$rc" -eq 124 ]; then
         bs_status stalled
         note "gave up" "the build stalled (no output; exit 124). That is load or
@@ -109,9 +100,8 @@ The log is $BLOG; the attempts above say what was tried."
     bs_status fixing
     info "build failed (exit $rc) -- fix attempt $ATTEMPT of $MAX"
 
-    # What the model gets: the classified errors, then the raw tail. The log
-    # lives on the host and the model runs in the workspace, so the excerpt
-    # goes in the prompt rather than by path.
+    # The log lives on the host and the model runs in the workspace, so the
+    # classified errors and the raw tail go in the prompt rather than by path.
     ERRS=$(first_error "$BLOG" 2>/dev/null || true)
     TAIL=$(tail -c 8000 "$BLOG" 2>/dev/null || true)
     PROMPT="You are an unattended build-fixer. The '$CONFIG' build of the WebKit
@@ -134,16 +124,13 @@ Log tail:
 $TAIL"
 
     FIX_RC=0
-    # WK_NAME, not a positional: cmd/ai reads the workspace from the
-    # environment the dispatcher sets (this runs detached, with no dispatcher
-    # above it), and everything in its argv after the agent word belongs to the
-    # agent -- a name passed there would reach `claude` as a stray argument.
+    # WK_NAME, not a positional: cmd/ai takes the workspace from the environment,
+    # and everything in its argv after the agent word is handed to the agent.
     FIX_OUT=$(WK_NAME="$NAME" "$WK_ROOT/cmd/ai" claude --model "$MODEL" -p "$PROMPT" </dev/null 2>>"$WS/babysit.log") || FIX_RC=$?
     note "fix attempt $ATTEMPT (exit $FIX_RC)" "$FIX_OUT"
 
-    # The agent failing to *run* is not a failed fix, it is the loop's own
-    # substrate gone -- a broken sandbox, a dead guest, no model. Retrying
-    # would fail identically forever.
+    # The agent failing to *run* is not a failed fix but the loop's own substrate
+    # gone; retrying would fail identically forever.
     if [ "$FIX_RC" -ne 0 ] && [ -z "$FIX_OUT" ]; then
         bs_status error
         note "gave up" "claude did not run (exit $FIX_RC) -- see $WS/babysit.log"

@@ -8,18 +8,16 @@
 #                                          report with histograms)
 #
 # Reads the arm-to-result map the autorun wrote (round, label, staged id,
-# result directory) and hands the two arms to `wk bench report` -- which is
-# where the per-subtest Score and Time, the axis warnings, the Welch/FDR
-# p-value and the histograms come from, and which is deliberately not
-# reimplemented here.
+# result directory) and hands the two arms to `wk bench report`, which is where
+# the per-subtest Score and Time, the axis warnings, the Welch/FDR p-value and
+# the histograms come from.
 #
-# Runs on the Mac in *either* mode: in bench mode it is the last thing the
-# autorun does, and in host mode it is how the same verdict is re-read after
-# the machine has come back. The only difference is the path to the results,
-# which is why --root exists.
+# Runs on the Mac in either mode: in bench mode as the last thing the autorun
+# does, in host mode to re-read the same verdict after the machine has come
+# back. --root is the difference between the two paths.
 #
-# Two arms with the same staged id is not a mistake -- it is the A/A control:
-# the noise floor a real A/B needs to be read against (below).
+# Two arms with the same staged id is the A/A control: the noise floor a real
+# A/B is read against.
 
 set -euo pipefail
 WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -45,8 +43,6 @@ done
 PY=/usr/bin/python3
 [ -x "$PY" ] || PY=python3
 
-# The arms, and the paths that make each one. Everything downstream reads these
-# two variables, so the grouping happens once.
 labels=$(awk -F'\t' '{print $2}' "$RUNS" | awk '!seen[$0]++')
 [ -n "$labels" ] || die "no arms in $RUNS"
 
@@ -68,12 +64,10 @@ emit "A/B summary -- $(date -u +%Y-%m-%dT%H:%M:%SZ)"
 emit "run map: $RUNS"
 emit ""
 
-# Contaminated arms, named before the numbers rather than after them (fifth
-# column in $RUNS; docs/HANDOFF-mac-perf-mode.md). Still averaged in below --
-# dropping data on a heuristic is its own way to get a wrong answer -- but
-# said first: a difference that lives entirely in a scanned arm is not a
-# difference between builds. Runs from before the column existed carry no
-# accusation.
+# Contaminated arms, named before the numbers (fifth column in $RUNS;
+# docs/HANDOFF-mac-perf-mode.md). Still averaged in -- dropping data on a
+# heuristic is its own way to get a wrong answer -- but a difference that lives
+# entirely in a scanned arm is not a difference between builds.
 scanned=$(awk -F'\t' '$5 == "scanned" { printf "    round %s arm %s\n", $1, $2 }' "$RUNS")
 if [ -n "$scanned" ]; then
     emit "  WARNING: a software-update scan ran during these arms:"
@@ -85,19 +79,18 @@ EOF
     emit ""
 fi
 
-# Per-arm numbers are not computed here: `wk bench report` below reads every
-# arm's result.json directly (lib/wkdata.py, via cmd/bench) and shows A and B
-# side by side, per subtest -- more than one arm's mean alone would say. This
-# just counts rounds per arm, so an empty arm is visible before the report
+# `wk bench report` below reads every arm's result.json directly
+# (lib/wkdata.py, via cmd/bench) and shows A and B side by side per subtest.
+# This counts rounds per arm, so an empty arm is visible before the report
 # tries to compare it against nothing.
 for l in $labels; do
     emit "arm $l: $(arm_paths "$l" | tr ',' '\n' | grep -c .) run(s)"
 done
 emit ""
 
-# A null result means nothing on its own: it is only informative next to the
-# smallest difference this run had the power to find (docs/HANDOFF-mac-perf-
-# mode.md has the noise-floor analysis and the count/rounds tradeoff).
+# A null result is only informative next to the smallest difference this run
+# had the power to find (docs/HANDOFF-mac-perf-mode.md has the noise-floor
+# analysis and the count/rounds tradeoff).
 mde_note() {
     "$PY" - "$RUNS" "$ROOT" <<'MDEPY'
 import json, os, statistics as st, sys
@@ -162,9 +155,7 @@ $(mde_note 2>/dev/null)
 MDEEOF
 emit ""
 
-# The comparison proper. Two arms only -- compare-results takes -a and -b, and
-# a three-arm A/B/C is two comparisons rather than one, which the caller can ask
-# for by naming the pairs.
+# compare-results takes -a and -b, so a three-arm A/B/C is two comparisons.
 set -- $labels
 if [ $# -lt 2 ]; then
     emit "only one arm ('$1') -- nothing to compare. Its numbers are above."
@@ -186,11 +177,9 @@ if [ -n "$same" ]; then
     emit ""
 fi
 
-# `wk bench report` rather than a script of its own: it checks the three
-# axes, computes the per-subtest Welch/FDR table and draws the histograms, so
-# nothing here re-derives any of that. --out also writes html next to the
-# text summary, same basename (docs/Urgent/"Benchmarking variance.md" asks
-# for one command producing a report with no one in the room).
+# `wk bench report` checks the three axes, computes the per-subtest Welch/FDR
+# table and draws the histograms. --out also writes html next to the text
+# summary, same basename.
 if [ -n "$OUT" ]; then
     "$WK_ROOT/cmd/bench" report "$(arm_paths "$A")" "$(arm_paths "$B")" \
         --html "${OUT%.*}.html" --text 2>&1 | tee -a "$OUT"

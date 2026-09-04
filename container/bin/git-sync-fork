@@ -1,22 +1,14 @@
 #!/bin/bash
 #
-# git-sync-fork -- put your fork's main back on top of upstream's.
+# git-sync-fork -- put your fork's main back on top of upstream's. A fork's
+# `main` on GitHub does not move by itself, which matters the moment somebody
+# branches from it on the web or reads a PR's diff against it. Not a way to
+# update your checkout: a wk workspace is created from the mirror `wk sync`
+# maintains, so a fresh one is already at upstream.
 #
-# A fork's `main` on GitHub does not move by itself, so it drifts behind
-# WebKit's by however long since you last pushed one. That matters the moment
-# somebody branches from the fork's main on the web, or reads a PR's diff
-# against it.
-#
-# What this is *not*: a way to update your checkout. A wk workspace is created
-# from the mirror `wk sync` maintains, so a fresh one is already at upstream --
-# rebasing local main is the pre-`wk` half of this ritual and it is gone with
-# the machine it made sense on.
-#
-# The remotes are the ones every checkout is wired with (wk_wiring_script,
-# lib/store.sh): `origin` is the upstream project, `fork`/`forkwpe` are yours.
-#
-# Pushing is gated by `wk push`, on the host, and this does not try to work
-# around that: with the switch off, ssh refuses at the door and this says so.
+# The remotes are the ones wk_wiring_script (lib/store.sh) wires: `origin` is
+# the upstream project, `fork`/`forkwpe` are yours. Pushing is gated by
+# `wk push` on the host, and with the switch off ssh refuses at the door.
 set -euo pipefail
 
 remote="${1:-fork}"
@@ -43,9 +35,8 @@ if [ -n "$current" ]; then
     behind=$(git rev-list --count "$current..$upstream" 2>/dev/null || echo "?")
     ahead=$(git rev-list --count "$upstream..$current" 2>/dev/null || echo "?")
     echo "$remote/$branch is $behind behind and $ahead ahead of origin/$branch"
-    # Commits on the fork's main that upstream does not have are somebody's
-    # work sitting on the wrong branch. A fast-forward cannot destroy them and
-    # a force push would, so this only ever fast-forwards.
+    # Commits on the fork's main that upstream does not have are work on the
+    # wrong branch: a fast-forward cannot destroy them and a force push would.
     [ "$ahead" = 0 ] || {
         echo "refusing: $remote/$branch has $ahead commit(s) origin does not." >&2
         echo "  That is work on the wrong branch, not drift. Move it to a branch of" >&2

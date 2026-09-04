@@ -1,56 +1,37 @@
 # Boot driver: a board with one medium, its SD card, holding both systems --
 # the rescue on partitions 1-2 and the bench system on 3-4 (`<device>@second`,
 # admin/wk-card-priv). The rpi3's Ethernet is a USB device, so a bench root on
-# a stick would share a bus with the traffic the benchmark generates; one card
-# it is, and the two systems are told apart by partition (b_system_kind:
-# NODE_ROOT is the rescue's root, anything else on NODE_DEVICE is the bench).
+# a stick would share a bus with the traffic the benchmark generates.
 #
 # The firmware boots the first FAT partition and only that one, so arming is
 # an edit of the rescue's boot partition: the bench system's kernel, device
 # trees and cmdline are copied into `second/` there and selected with one
 # `os_prefix=second/` line in config.txt, the rescue's own config.txt kept as
-# config.txt.rescue (`second-arm`). One boot: the bench system's self-disarm
-# (b_self_disarm_sh, staged onto the card by `wk sysimage write`) moves the
-# rescue's config.txt back as the first thing it does, and `second-disarm`
-# from the rescue does the same. Both run through the card helper on the
-# rescue, so the rescue has to be up to arm -- which is the state a board is
-# in whenever it is not being measured.
+# config.txt.rescue (`second-arm`). The one boot is made true by the bench
+# system's self-disarm (b_self_disarm_sh) moving config.txt back; `second-disarm`
+# from the rescue does the same. Both run through the card helper on the rescue,
+# so the rescue has to be up to arm.
 #
-# The failure modes, and where each ends:
-#   bench kernel cannot find its root  -> panic; a power cycle boots the same
-#                                          os_prefix again until the rescue's
-#                                          config.txt is put back by hand
-#                                          (TODO: docs/HANDOFF-boot.md, the
-#                                          stage-2 revert)
-#   bench system hangs after init      -> the self-return watchdog reboots it;
-#                                          the self-disarm already ran, so
-#                                          that boot is the rescue's
-#   rescue unreachable                 -> nothing to arm from; `wk boot` says so
+# TODO: a bench kernel that cannot find its root panics, and a power cycle
+# boots the same os_prefix again until config.txt is put back by hand --
+# docs/HANDOFF-boot.md, the stage-2 revert.
 BOOT_ARMING=medium
 
-# Whether this board can be armed while it is running a *bench* system.
-#
-# Yes -- the arming is an edit to the boot partition made by the privileged card
-# helper (`second-arm`), and every system a write makes now carries that helper
-# (disk_install_helper), so a bench system can arm its sibling where it stands:
-# one boot per A/B leg instead of two. The reboot needs nothing special here,
-# unlike pi-tryboot's flag.
-#
-# A system written *before* the helper reached bench systems has none, and there
-# the arming fails and says so -- which the leg switch answers by going back to
-# the rescue and arming from there (pi_system_boot, cmd/pi). So a card from
-# either era works, and the newer one is a boot per leg cheaper.
+# The arming is an edit to the boot partition made by the card helper
+# (`second-arm`), which every system a write makes carries
+# (disk_install_helper), so a bench system can arm its sibling where it stands.
+# A card written without the helper fails the arming and says so; the leg
+# switch answers by going back to the rescue (pi_system_boot, cmd/pi).
 B_ARM_FROM_BENCH=yes
 
 # Unused: nothing here is a per-boot firmware order.
 BOOT_ORDER_IMAGE=""
 BOOT_ORDER_NORMAL=""
 
-# The bench systems' candidate boot partitions, both layouts in one list: the
-# one-system layout keeps its pair on primaries 3-4, the shared layout (two
-# systems in an extended partition 3) puts pairs at 5-6 and 7-8. A partition
-# that is absent -- or is the extended container, which mounts as nothing --
-# is skipped by the enumeration, so the list needs no layout probe.
+# Both layouts in one list: the one-system layout keeps its pair on primaries
+# 3-4, the shared layout (two systems in an extended partition 3) puts pairs at
+# 5-6 and 7-8. A partition that is absent -- or is the extended container,
+# which mounts as nothing -- is skipped by the enumeration.
 B_SYSTEM_PARTS="3 5 7"
 
 # The helper's name for the system holding a given boot partition: the first
@@ -71,9 +52,8 @@ pisd_state() { # <address>
     card_priv second-state "$1" 2>/dev/null | tr -d '\r'
 }
 
-# Arms the *selected* system (ARM_SYS_PART, machine_select_system): staging
-# replaces whatever prefix was armed before, and the rescue's own config.txt
-# is kept aside by the first arming whichever system that was.
+# Staging replaces whatever prefix was armed before; the rescue's own
+# config.txt is kept aside by the first arming, whichever system that was.
 b_arm() {
     local addr state
     [ -n "${ARM_SYS_PART:-}" ] \
@@ -94,8 +74,7 @@ b_arm() {
         || die "could not arm the ${addr##*@} system on $NODE_NAME"
 }
 
-# Safe at any time, including a board not armed -- the common case. The
-# disarm puts the rescue's config.txt back whichever system was armed, so
+# The disarm puts the rescue's config.txt back whichever system was armed, so
 # any present system's address serves.
 b_disarm() {
     local state
@@ -110,15 +89,14 @@ b_disarm_note() {
     log "  rescue's kernel again. 'wk boot $NODE_NAME' arms the bench system once more."
 }
 
-# The half that runs *inside* the bench system, first thing after its root is
-# up, as a systemd unit or a BusyBox init script (`wk sysimage write` stages
-# whichever the image runs). The boot partition is partition 1 of the disk
-# this root is on; the root is named by PARTUUID (disk_retarget_root), which
-# is why this waits for nothing but udev's /dev/disk links.
-# **No single quote and no `%` may appear in what this returns**:
-# interpolated into a systemd `ExecStart=/bin/sh -c '...'`, a quote would
-# hand systemd three fragments instead of one command, and systemd expands
-# `%` specifiers before it parses quotes. wk selftest asserts both.
+# Runs inside the bench system, first thing after its root is up, as a systemd
+# unit or a BusyBox init script. The boot partition is partition 1 of the disk
+# this root is on, and the root is named by PARTUUID (disk_retarget_root), so
+# this waits for nothing but udev's /dev/disk links.
+# **No single quote and no `%` may appear in what this returns**: interpolated
+# into a systemd `ExecStart=/bin/sh -c '...'`, a quote would hand systemd three
+# fragments instead of one command, and systemd expands `%` specifiers before
+# it parses quotes. wk selftest asserts both.
 b_self_disarm_sh() {
     printf "%s" "r=\$(sed -n \"/root=PARTUUID=/{s/.*root=PARTUUID=//;s/ .*//;p;}\" /proc/cmdline); \
 [ -n \"\$r\" ] || { echo \"wk-self-disarm: root is not named by PARTUUID; cannot find the boot partition\"; exit 0; }; \
@@ -128,8 +106,6 @@ m=\$(mktemp -d); if mount -t vfat \"\$b\" \"\$m\"; then \
 sync; umount \"\$m\"; fi; rmdir \"\$m\""
 }
 
-# Evidence from the card, not the record: is the rescue's config.txt stepped
-# aside, and is there a bench system to step aside for.
 b_evidence() {
     local state systems
     state=$(pisd_state "$NODE_DEVICE@second") || { echo "arming=unreadable (the rescue did not answer)"; return 0; }
@@ -140,27 +116,15 @@ b_evidence() {
     return 0
 }
 
-# The first bench pair's boot partition on the one-system layout; reading
-# verbs go through the enumeration (b_systems), which covers both layouts.
+# The first bench pair's boot partition on the one-system layout; reading verbs
+# go through the enumeration (b_systems), which covers both layouts.
 b_boot_part() { disk_part "$NODE_DEVICE" 3; }
 
-# The wk-managed media, in one line, for the fleet block in `wk status`.
 b_media() {
     printf 'SD card %s holds every system: rescue on p1-p2, bench system(s) beside it -- p3-p4, or pairs 5-6 and 7-8 in an extended p3 (wk boot %s --system <id> arms one for one boot)' \
         "$NODE_DEVICE" "$NODE_NAME"
 }
 
-# How this board is made from nothing, derived rather than written down.
-#
-# Every line is composed from what this machine's conf already declares -- its
-# profile, its device, its driver -- so there is no second copy to go stale when
-# one of them changes.
-#
-# One medium, so the two systems share it and the rescue is written without
-# growing: what is left of the card is where the bench system goes. Both writes
-# can be made from a reader on any machine with the card helper; once the
-# rescue is on the board, every later bench write is made from the rescue
-# itself (`--disk $NODE_NAME:$NODE_DEVICE@second`).
 b_reprovision() {
     cat <<REPROV
 wk sysimage build $NODE_PROFILE

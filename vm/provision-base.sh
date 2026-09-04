@@ -8,9 +8,7 @@
 set -euo pipefail
 
 SRC="$HOME/WebKit"
-# The guest's bare mirror. Handed over by targets/vm.sh, which is the one
-# place its path is decided (t_mirror_dir) -- a default here would be a second
-# copy of it, free to drift.
+# From targets/vm.sh (t_mirror_dir), the one place its path is decided.
 MIRROR="${WK_VM_MIRROR:?WK_VM_MIRROR must name the guest mirror; this script is run by targets/vm.sh}"
 # The tree targets/vm.sh pushes in as a git bundle (t_tools, tools_push).
 WK_TOOLS_DIR="$HOME/wk-tools"
@@ -18,9 +16,9 @@ WK_TOOLS_DIR="$HOME/wk-tools"
 say() { printf '==> %s\n' "$*" >&2; }
 
 # --- Xcode -------------------------------------------------------------------
-# Xcode without an accepted licence or first-launch components fails the
-# build far downstream with an unrelated error. sed (not `| head -1`) avoids
-# SIGPIPEing xcodebuild, which fails the pipeline even on success.
+# Xcode without an accepted licence or first-launch components fails the build
+# far downstream with an unrelated error. sed rather than `| head -1`, which
+# SIGPIPEs xcodebuild.
 _xcode=$(xcodebuild -version 2>/dev/null | sed -n 1p) || true
 [ -n "$_xcode" ] || {
     echo "error: no usable Xcode in this image" >&2
@@ -31,17 +29,16 @@ sudo xcodebuild -license accept >/dev/null 2>&1 || true
 sudo xcodebuild -runFirstLaunch >/dev/null 2>&1 || true
 
 # --- claim the whole disk ------------------------------------------------------
-# Growing the virtual disk doesn't grow the guest's APFS container; without a
-# resize the build dies with "No space left" while the host sees free space.
-# 60G is the floor: a Release build needs tens of GB on top of the ~19G checkout.
+# Growing the virtual disk does not grow the guest's APFS container. 60G is the
+# floor: a Release build needs tens of GB on top of a ~19G checkout.
 NEED_FREE_GB=60
 
 _free_gb() { df -g /System/Volumes/Data | awk 'NR==2 {print $4}'; }
 
 _store=$(python3 "$WK_TOOLS_DIR/lib/wkmac.py" physical-store 2>/dev/null)
 if [ -n "$_store" ]; then
-    # 0 = all available space. macOS may auto-expand already, returning error
-    # -69743 as success in disguise -- judged by free space after, not exit status.
+    # 0 = all available space. macOS may auto-expand and return error -69743
+    # for it, so this is judged by free space after, not exit status.
     _out=$(sudo diskutil apfs resizeContainer "$_store" 0 2>&1) || true
 fi
 
@@ -56,23 +53,15 @@ else
 fi
 
 # --- keep the guest awake ----------------------------------------------------
-# A sleeping headless VM looks like a stalled build to the watchdog, which
-# would kill it as one; there's no display or battery here to save power for.
+# A sleeping headless VM looks like a stalled build to the watchdog.
 sudo pmset -a disablesleep 1 >/dev/null 2>&1 || true
 sudo systemsetup -setcomputersleep Never >/dev/null 2>&1 || true
 
 # --- the mirror, and the checkout out of it ----------------------------------
-# The guest holds one bare mirror and the checkout borrows its objects
-# (`--shared`), so the history is stored once. Every workspace is a `tart
-# clone` of this base, so both are inherited through APFS copy-on-write and
-# cost a workspace nothing -- and a fetch in a workspace is then a local one
-# against a mirror that already carries the forks, instead of four fetches of
-# four upstreams through the guest's egress proxy.
-#
-# mirror_refresh_script (lib/store.sh) is what makes and wires it, the same
-# snippet every other mirror in the fleet is made by, so a `wk sync` in here
-# finds the layout it expects. Run in a separate bash because those files
-# define their own log()/warn(); they must not clash with this script's.
+# One bare mirror, whose objects the checkout borrows (`--shared`), so history
+# is stored once and every `tart clone` inherits both through APFS
+# copy-on-write. mirror_refresh_script (lib/store.sh) makes and wires it, in a
+# separate bash because those files define their own log()/warn().
 say "refreshing the WebKit mirror at $MIRROR (the first one clones all of WebKit)"
 _refresh=$(bash -c '. "$1/lib/common.sh"; . "$1/lib/store.sh"; mirror_refresh_script "$2"' \
                _ "$WK_TOOLS_DIR" "$MIRROR") \
@@ -80,19 +69,16 @@ _refresh=$(bash -c '. "$1/lib/common.sh"; . "$1/lib/store.sh"; mirror_refresh_sc
 sh -c "$_refresh" 2>&1 | sed 's/^/    /' >&2 \
     || { echo "error: the mirror at $MIRROR could not be made (above)" >&2; exit 1; }
 
-# The mirror is what the checkout is made from, so a mirror without origin's
-# main is the end of provisioning rather than a `git clone` error naming a
-# path. Every fetch in here goes through the guest's egress, unfiltered during
-# provisioning -- so this is a real network fault, not the allowlist.
+# Egress is unfiltered during provisioning, so a failure here is a real network
+# fault rather than the allowlist.
 git -C "$MIRROR" rev-parse --verify --quiet refs/heads/main >/dev/null || {
     echo "error: the mirror at $MIRROR has no origin/main, so there is nothing" >&2
     echo "       to check out. The fetch above says which upstream failed." >&2
     exit 1
 }
 
-# Single branch of the mirror's own heads (origin's ~920 cost tens of GB in
-# working trees nobody checks out) -- a workspace that needs another fetches
-# it on demand, from the mirror.
+# A single branch: origin's ~920 heads cost tens of GB in working trees nobody
+# checks out.
 if [ -d "$SRC/.git" ]; then
     say "WebKit checkout present, fast-forwarding it from the mirror"
     git -C "$SRC" fetch --quiet --no-tags --prune "$MIRROR" \
@@ -102,13 +88,9 @@ else
     say "cloning WebKit from the mirror"
     git clone --quiet --shared --branch main "$MIRROR" "$SRC"
 fi
-# origin is WebKit/WebKit; forks are wired the same way every checkout gets,
-# from wk_wiring_script (lib/store.sh), in a separate bash for the reason the
-# mirror refresh above is.
-#
-# The base carries no deploy key and no ssh alias config: both are per guest and
-# arrive on every start (targets/vm.sh's _write_deploy_keys), so a key sealed in
-# here would be one `wk push off` could never take back out.
+# The base carries no deploy key and no ssh alias config, both of which arrive
+# per guest on every start: a key sealed in here would be one `wk push off`
+# could never take back out.
 _wiring=$(bash -c '. "$1/lib/common.sh"; . "$1/lib/store.sh"; wk_wiring_script "$2"' \
               _ "$WK_TOOLS_DIR" "$SRC" 2>/dev/null) \
     && sh -c "$_wiring" \
@@ -118,13 +100,9 @@ _wiring=$(bash -c '. "$1/lib/common.sh"; . "$1/lib/store.sh"; wk_wiring_script "
 say "WebKit at $(git -C "$SRC" rev-parse --short HEAD)"
 
 # --- Claude Code -------------------------------------------------------------
-# Its own installer, to ~/.local/share/claude/versions/: a binary copied
-# elsewhere can't self-update.
-#
-# Credentials live in the login Keychain on Darwin, not
-# ~/.claude/.credentials.json, so the Linux workspaces' shared-secrets volume
-# has nothing to share here -- log in once per VM before shutdown and the
-# Keychain survives cloning.
+# Its own installer, to ~/.local/share/claude/versions/, because a binary copied
+# elsewhere cannot self-update. On Darwin the credential is a login Keychain item
+# rather than ~/.claude/.credentials.json.
 if command -v claude >/dev/null 2>&1 || [ -x "$HOME/.local/bin/claude" ]; then
     say "Claude CLI present"
 else
@@ -133,12 +111,9 @@ else
         echo "warning: Claude CLI install failed; 'wk ai claude' will not work here" >&2
 fi
 
-# Same Claude config entries container/firstrun.sh links in a container;
-# missing them means a skip-permissions agent with no CLAUDE.md, settings or skills.
-#
-# Skills are a read-only symlink here, not a mutable volume: every start
-# resets ~/wk-tools to this tree's commit (tools_push), so an in-guest skill
-# edit should fail to write rather than silently vanish on the next start.
+# Skills are a read-only symlink here rather than a mutable volume: every start
+# resets ~/wk-tools to this tree's commit, so an in-guest edit should fail to
+# write rather than vanish on the next start.
 if [ -d "$WK_TOOLS_DIR/claude" ]; then
     mkdir -p "$HOME/.claude"
     ln -sfn "$WK_TOOLS_DIR/claude/settings.json" "$HOME/.claude/settings.json"
@@ -149,44 +124,27 @@ if [ -d "$WK_TOOLS_DIR/claude" ]; then
 else
     echo "warning: $WK_TOOLS_DIR/claude missing; ~/.claude not configured" >&2
 fi
-# The same include every other machine gets (container/firstrun.sh,
-# remote/provision.sh, host/dotfiles.sh): the author identity and the git
-# settings wk relies on come from dotfiles/gitconfig, never from a hand edit.
+# The author identity and the git settings wk relies on, from one file.
 git config --global --replace-all include.path "$WK_TOOLS_DIR/dotfiles/gitconfig"
 say "git identity and settings included from $WK_TOOLS_DIR/dotfiles/gitconfig"
 
 # --- egress ---------------------------------------------------------------
-# Nothing about the proxy is written here. The base boots without Softnet, on
-# the open vmnet, so it has no proxy to name; a clone does, and the address is
-# the host's own on the guest bridge, which changes -- so the host writes it
-# into every guest on every start (_set_guest_egress, targets/vm.sh) rather
-# than an image carrying a copy that goes stale.
-#
-# ssh doesn't honour http_proxy either way, so `git push` over ssh from inside
-# a guest fails -- push over HTTPS or from the host instead.
+# Nothing about the proxy is written here: the base boots on the open vmnet, and
+# the address a clone needs is the host's own on the guest bridge, which changes,
+# so the host writes it in on every start. ssh does not honour http_proxy either
+# way, so `git push` over ssh from inside a guest fails.
 
-# The account's password. Two facts: what the pulled image ships with (Cirrus
-# Labs: admin/admin) and what this guest is meant to have. Both arrive from
-# targets/vm.sh, which is where they are declared and explained; the defaults
-# here only cover running this script by hand.
+# What the pulled image ships with (Cirrus Labs: admin/admin) and what this guest
+# is meant to have, both from targets/vm.sh.
 WK_VM_USER="${WK_VM_USER:-admin}"
 WK_VM_IMAGE_PASSWORD="${WK_VM_IMAGE_PASSWORD:-admin}"
 WK_VM_PASSWORD="${WK_VM_PASSWORD:-1}"
 
-# Changed once, here, so everything after this -- the screen-lock call below,
-# an Xcode prompt at the window, `wk vm enter`'s note -- means one password.
-# Skipped when it already is that: the change needs the *current* password, so
-# a re-provision must not offer the image's.
-#
-# `dscl . -authonly` decides, before and after, and sysadminctl's exit status
-# decides nothing: it exits 0 while leaving the password as the image's, and
-# every later step -- vm/desktop.sh's screen lock first -- would then be
-# working with a password the account does not have. The self-change form (no
-# sudo, no -adminUser) is what the account itself can do, and it is the account
-# this runs as.
-#
-# On downgrade WK_VM_PASSWORD becomes what the account actually has, so
-# vm/desktop.sh below is handed the truth rather than the intent.
+# Skipped when it already is that: the change needs the current password, so a
+# re-provision must not offer the image's. `dscl . -authonly` decides, before and
+# after; sysadminctl exits 0 while leaving the password as the image's. The
+# self-change form (no sudo, no -adminUser) is what the account itself can do. On
+# downgrade WK_VM_PASSWORD becomes what the account actually has.
 _set_password() {
     [ "$WK_VM_PASSWORD" != "$WK_VM_IMAGE_PASSWORD" ] || return 0
     if dscl . -authonly "$WK_VM_USER" "$WK_VM_PASSWORD" >/dev/null 2>&1; then
@@ -210,18 +168,12 @@ WK_VM_DISPLAY_W="${WK_VM_DISPLAY%x*}"
 WK_VM_DISPLAY_H="${WK_VM_DISPLAY#*x}"
 
 # --- the screen ------------------------------------------------------------
-# A macOS guest is the only workspace kind with a real GPU and a window meant
-# to be looked at, so it must come up on a usable desktop, not a password
-# prompt and not behind a modal panel.
-#
-# vm/desktop.sh, which t_start runs again on every guest boot -- not a copy of
-# it here. The base cannot settle this on its own: `defaults -currentHost`
-# writes per hardware UUID and `tart clone` gives the clone a new one, so the
-# screen-saver setting the base holds does not apply to anything cloned from it
-# (measured with `wk vm check`). One file, two callers.
+# vm/desktop.sh, which t_start runs again on every boot: the base cannot settle
+# this alone, since `defaults -currentHost` writes per hardware UUID and
+# `tart clone` gives the clone a new one.
 WK_VM_PASSWORD="$WK_VM_PASSWORD" bash "$WK_TOOLS_DIR/vm/desktop.sh"
 
-# pmset alone doesn't keep the display awake; hold a power assertion for the guest's life.
+# pmset alone does not keep the display awake.
 sudo -n tee /Library/LaunchDaemons/org.wk.nosleep.plist >/dev/null <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -236,14 +188,11 @@ PLIST
 sudo -n launchctl bootout system/org.wk.nosleep 2>/dev/null || true
 sudo -n launchctl bootstrap system /Library/LaunchDaemons/org.wk.nosleep.plist 2>/dev/null || true
 
-# Set once at login to the VM's configured size so it doesn't come up on a
-# stale saved mode; --display-refit then tracks the window on resize. Do NOT
-# raise this "big" -- it's a floor on the tart window (WK_VM_DISPLAY in
-# targets/vm.sh), and a large floor makes the window unresizable.
-#
-# `tart set --display WxH` sets display capability, not the picked mode, and
-# the CoreGraphics call to pick it errors against a sleeping display -- hence
-# a login agent, not a one-shot during provisioning.
+# Set once at login, so the guest does not come up on a stale saved mode. Do NOT
+# raise this: it is a floor on the tart window, and a large floor makes the
+# window unresizable. `tart set --display WxH` sets display capability, not the
+# picked mode, and the CoreGraphics call to pick it errors against a sleeping
+# display -- hence a login agent rather than a one-shot here.
 mkdir -p "$HOME/.local/bin"
 cat > "$HOME/.local/bin/wk-set-display.m" <<'OBJC'
 #import <Foundation/Foundation.h>
@@ -285,18 +234,12 @@ cat > "$HOME/Library/LaunchAgents/org.wk.display.plist" <<PLIST
 PLIST
 
 # --- the shell ---------------------------------------------------------------
-# The same rc every other machine in the fleet reads (shell/bashrc), wired in by
-# vm/shell-rc.sh -- which targets/vm.sh also runs on every start, so a guest
-# cloned before this existed converges too. One script, so the base and the
-# clones cannot end up with different shells.
+# vm/shell-rc.sh, which targets/vm.sh also runs on every start.
 bash "$WK_TOOLS_DIR/vm/shell-rc.sh" "$WK_TOOLS_DIR"
 
 # --- webkitpy's autoinstalled packages ----------------------------------------
-# run-webkit-tests downloads webkitpy's PyPI dependencies (11 MB, measured)
-# into Tools/Scripts/libraries/autoinstalled on first use; warming it here puts
-# it in the golden image, free for every workspace via the APFS clone.
-#
-# Best-effort: a base that skips this just pays the download later, per workspace.
+# run-webkit-tests downloads webkitpy's PyPI dependencies (11 MB, measured) into
+# Tools/Scripts/libraries/autoinstalled on first use.
 if [ -d "$SRC/Tools/Scripts" ]; then
     say "warming webkitpy's autoinstalled packages"
     ( cd "$SRC" && Tools/Scripts/run-webkit-tests --help >/dev/null 2>&1 ) || \

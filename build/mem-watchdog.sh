@@ -1,26 +1,12 @@
 #!/usr/bin/env bash
 #
-# Watch a build's memory, from inside the machine that is building.
-#
-#   mem-watchdog.sh <pid> <budget-mb> [floor-mb]
-#
-# Started in the background by build/build-in-target.sh just before it execs
-# the build, so <pid> is the build itself and every compiler underneath is a
-# descendant of it.
-#
-# The job count is a *prediction* (lib/resources.sh, sized from memory free
-# at the time) that a hungry link step or a shared machine's arriving job
-# can break -- left unwatched, the OOM killer picks a victim that may be
-# somebody else's work. Killing our own build early is the polite failure.
-#
-# Two ways to be over: `budget`, this build's own resident memory; `floor`,
-# what the *machine* has left, since on a shared machine memory we aren't
-# using isn't ours either.
-#
-# Goes to stderr, the build log on both sides of an ssh, so a marker line
-# survives a dropped connection; `wk build` reads it into the status file.
-#
-# bash 3.2: this runs in macOS guests as well as on Linux.
+# Watch a build's memory, from inside the machine that is building. Started by
+# build/guard.sh just before the build execs, so <pid> is the build and every
+# compiler is a descendant of it. Over `budget` (the tree's own RSS), or with
+# the machine under `floor` -- memory we are not using is not ours either on a
+# shared machine -- it kills the build rather than leave the OOM killer to pick
+# somebody else's work. Output is on stderr, and `wk build` lifts the peak line
+# into the status file. bash 3.2: this runs in macOS guests as well as Linux.
 
 set -uo pipefail
 
@@ -29,9 +15,8 @@ BUDGET="${2:?budget in MB}"
 FLOOR="${3:-0}"
 INTERVAL="${WK_MEM_INTERVAL:-30}"
 
-# Every process in the tree under $1, as a pid list plus total RSS in MB. One
-# `ps` per sample, walked in awk rather than recursing with pgrep (a process
-# per node per sample). Eight passes covers any real tree depth.
+# Every process in the tree under $1: pid list plus total RSS in MB. One `ps`
+# per sample walked in awk, not a pgrep recursion; eight passes covers any depth.
 _tree() {
     ps -eo pid=,ppid=,rss= 2>/dev/null | awk -v root="$1" '
         { pid[NR] = $1; ppid[NR] = $2; rss[NR] = $3; n = NR }
@@ -47,25 +32,20 @@ _tree() {
         }'
 }
 
-# What the machine has left. macOS has no MemAvailable equivalent, so the
-# floor check doesn't apply there and this returns nothing.
+# What the machine has left. macOS has no MemAvailable, so this returns nothing.
 _avail_mb() {
     [ -r /proc/meminfo ] || return 0
     awk '/^MemAvailable:/ {print int($2/1024)}' /proc/meminfo
 }
 
 peak=0
-# Last peak logged, reported as it grows: no "end" to report once the build
-# `exec`s over the shell that started this child.
 reported=0
 
-# TERM first, then KILL: a half-written object file fails the *next* build
-# strangely rather than this one.
+# TERM before KILL: a half-written object file fails the *next* build, not this.
 _kill_tree() {
     local pids="$1" p
     for p in $pids; do
-        # Not ourselves: this process is a child of the shell that becomes
-        # the build, so it is *in* the tree it is measuring.
+        # Not ourselves: this watchdog is inside the tree it is measuring.
         [ "$p" = "$$" ] && continue
         kill -TERM "$p" 2>/dev/null || true
     done
@@ -84,8 +64,6 @@ while kill -0 "$PID" 2>/dev/null; do
     [ -n "$rss" ] || rss=0
     [ "$rss" -gt "$peak" ] && peak=$rss
 
-    # A tenth more than last reported, and at least 64 MB: enough lines to
-    # follow a build's shape without being noise in a log somebody reads.
     if [ "$peak" -gt $(( reported + reported / 10 + 64 )) ]; then
         echo "wk: memory: peak ${peak}MB of budget ${BUDGET}MB" >&2
         reported=$peak
@@ -113,5 +91,4 @@ while kill -0 "$PID" 2>/dev/null; do
     sleep "$INTERVAL"
 done
 
-# Printed always: `wk build` lifts this into the status file.
 echo "wk: memory: peak ${peak}MB of budget ${BUDGET}MB" >&2

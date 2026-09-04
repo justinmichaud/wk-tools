@@ -1,17 +1,6 @@
 # The workstation itself: storage, identity, and the few things that need root.
-#
-# There is no VM here: on Linux the workstation is the machine, so this file
-# does what the macOS side's ansible playbook does to its podman VM -- and
-# nothing more.
-#
-# Everything below is written so that root is needed exactly once, on a fresh
-# machine, from an interactive `./setup`. After this stage completes, no wk
-# command needs a privilege: workspaces are rootless podman, the egress
-# boundary is a user-owned proxy (`--network none` plus a proxy, since
-# rootless podman has no filterable forward path to firewall), and the only
-# privileged operations left (quiesce, the benchmark session) go through the
-# fixed-allowlist helper in admin/. macOS has since adopted the same model
-# (targets/container.sh, WK_SANDBOX).
+# On Linux the workstation is the machine, so this does what the macOS playbook
+# does to its podman VM. Root is needed once; after this, no wk command is.
 
 . "$WK_ROOT/lib/store.sh"
 
@@ -19,9 +8,7 @@ _uid=$(id -u)
 _gid=$(id -g)
 _user=$(id -un)
 
-# --- the store ---------------------------------------------------------------
-# Under the user's own data directory (lib/store.sh), so creating, repairing
-# and deleting it are all unprivileged.
+# Under the user's own data directory (lib/store.sh), so it is unprivileged.
 info "store: $WK_STORE"
 store_init
 
@@ -33,9 +20,7 @@ else
     changed "created $WK_STORE/pi-hosts"
 fi
 
-# The headless marker selects a 2 GB reserve instead of 12 GB -- right for a
-# VM with no desktop, wrong for a workstation whose GUI must stay
-# interactive under a full build.
+# The headless marker selects a 2 GB reserve instead of 12 GB: wrong here.
 _hm=$(headless_marker)
 if [ -f "$_hm" ]; then
     warn "$_hm exists on a workstation -- removing it"
@@ -45,9 +30,7 @@ if [ -f "$_hm" ]; then
 fi
 unset _hm
 
-# --- rootless podman prerequisites -------------------------------------------
-# Without these, rootless podman cannot map any user but the invoking one,
-# and `--userns keep-id` fails at container creation.
+# Without these, `--userns keep-id` fails at container creation.
 if grep -q "^$_user:" /etc/subuid 2>/dev/null && grep -q "^$_user:" /etc/subgid 2>/dev/null; then
     unchanged "subuid/subgid ranges for $_user"
 else
@@ -57,9 +40,7 @@ else
     changed "subuid/subgid ranges for $_user"
 fi
 
-# Cgroup delegation is what makes --memory and --cpus work rootless. Not
-# fatal if absent: the build still runs, just without the cap that keeps it
-# from taking the machine down with it.
+# Cgroup delegation is what makes --memory and --cpus work rootless.
 _deleg=$(cat "/sys/fs/cgroup/user.slice/user-$_uid.slice/user@$_uid.service/cgroup.controllers" 2>/dev/null || echo "")
 case " $_deleg " in
     *" memory "*) unchanged "cgroup delegation (memory, cpu)" ;;
@@ -67,12 +48,8 @@ case " $_deleg " in
        log  "  expected 'memory' in /sys/fs/cgroup/user.slice/user-$_uid.slice/user@$_uid.service/cgroup.controllers" ;;
 esac
 
-# --- GPU device access -------------------------------------------------------
-# /dev/dri/renderD128 is root:render 0660. logind grants an ACL to whoever
-# holds the active seat, so a user at the console can open it but the same
-# user over ssh cannot -- exactly the case that matters, since benchmark
-# runs are driven remotely. Group membership makes access independent of
-# who is logged in at the console.
+# /dev/dri/renderD128 is root:render 0660 and logind grants an ACL only to the
+# active seat, so the same user over ssh cannot open it. Group membership can.
 _want_groups=""
 for g in render video; do
     getent group "$g" >/dev/null 2>&1 || continue
@@ -85,10 +62,7 @@ done
 if [ -z "$_want_groups" ]; then
     unchanged "render/video group membership"
 else
-    # The only privileged step in the whole setup, and not fatal: logind's
-    # own ACL still lets a session started at the console work without it.
-    # What this buys is GPU access from an ssh session -- how unattended
-    # runs actually happen.
+    # Not fatal: what it buys is GPU access from an ssh session.
     if sudo -n true 2>/dev/null || [ -t 0 ]; then
         info "adding $_user to:$_want_groups (needs root once)"
         if sudo usermod -aG "$(echo $_want_groups | tr ' ' ',')" "$_user"; then
@@ -103,9 +77,7 @@ else
     fi
 fi
 
-# --- lingering ---------------------------------------------------------------
-# The egress proxy is a systemd --user service; without lingering it dies
-# with the last login session, breaking the unattended runs this supports.
+# Without lingering the systemd --user egress proxy dies with the last login.
 if [ "$(loginctl show-user "$_user" -p Linger --value 2>/dev/null)" = yes ]; then
     unchanged "systemd lingering for $_user"
 else
@@ -119,10 +91,7 @@ fi
 
 unset _uid _gid _user _deleg _want_groups g _missing_keys _remote _repo _alias
 
-# --- shared mutable skills ---------------------------------------------------
-# Seeded from the repo once, then left alone: workspaces share this
-# directory read-write, so re-seeding on every setup run would destroy
-# their edits. `wk skills pull` is how edits come back.
+# Workspaces share this read-write, so re-seeding every run destroys their edits.
 if [ -n "$(ls -A "$WK_STORE/skills" 2>/dev/null)" ]; then
     unchanged "shared skills present (not overwritten)"
     diff -rq "$WK_ROOT/claude/skills" "$WK_STORE/skills" >/dev/null 2>&1 \
@@ -132,15 +101,12 @@ else
     changed "seeded $WK_STORE/skills"
 fi
 
-# --- build keys --------------------------------------------------------------
-# One deploy key per fork: GitHub refuses the same key on a second
-# repository. Only reported here, never generated: `wk key register` needs a
-# token and a decision, neither of which belongs in an unattended setup.
+# One deploy key per fork: GitHub refuses the same key on a second repository.
+# Reported, never generated: `wk key register` needs a token and a decision.
 _missing_keys=""
 while read -r _remote _repo _alias; do
     [ -n "$_remote" ] || continue
-    # The private half, in the directory nothing mounts (wk_push_held_dir):
-    # a public half in secrets/ is not a key this machine can push with.
+    # The private half, in the directory nothing mounts (wk_push_held_dir).
     [ -f "$(wk_push_held_dir)/build_key_$_remote" ] || _missing_keys="$_missing_keys $_repo"
 done <<EOF
 $(wk_push_forks)

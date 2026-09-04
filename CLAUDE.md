@@ -44,6 +44,16 @@ rewritten file resumes a running process mid-word. Check `wk status` first.
   A comment says what the code does and why it has to be that way; if the code
   already says it, the comment goes. Help text states what a flag does, not why
   the alternative was rejected. Duplicated prose is deleted, not synchronised.
+  The ceiling is **15% of a file's non-blank lines**, and a file above it is
+  trimmed, not defended. A `cmd/*` file's leading block is not a comment for
+  this purpose -- it is what `wk <cmd> -h` prints (`explain_cmd`, the
+  dispatcher) -- and it is held to the help-text rule instead: what a flag
+  does, not why the alternative was rejected. What earns a line is what a reader cannot re-derive
+  from the code in a minute: an external constraint, a measurement, a hardware
+  or firmware fact, the one line naming why a construct has to be that way.
+  What does not: a restatement of the code, the case against a rejected
+  alternative, a narration of what a file used to do, a second copy of
+  README.md.
 - **A claim of work is backed by evidence.** Done means a test ran and passed;
   a status report derives every word from evidence taken at that moment.
   Nothing reports done, healthy or running from a record it did not just

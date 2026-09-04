@@ -3,13 +3,13 @@
 # wk verify <workspace> -- prove the sandbox is what it claims to be
 # wk: where=workspace name=required ready=yes outside group=workspaces
 #
-# Refused inside a workspace: a workspace cannot certify its own sandbox,
-# and half the properties below are only visible from the host.
+# Refused inside a workspace: a workspace cannot certify its own sandbox, and
+# half the properties below are only visible from the host.
 #
-# Every property here is checked by testing it from inside the workspace,
-# not by reading the config that was supposed to produce it: a firewall
-# that failed to load, a hand-recreated container, or a dead proxy all look
-# fine from the host's config and all fail open.
+# Every property is checked by testing it from inside the workspace, not by
+# reading the config that was supposed to produce it: a firewall that failed to
+# load, a hand-recreated container, or a dead proxy all look fine from the
+# host's config and all fail open.
 #
 #   0  every check passed
 #   1  a check failed -- the sandbox is not intact
@@ -38,15 +38,14 @@ case "${1:-}" in
 esac
 [ $# -le 1 ] || die "usage: wk verify <workspace> [--gpu]; see wk verify -h"
 
-# Resolved from the registry: a fixed default would load the container
-# driver for a vm workspace and report "no such workspace" about one that exists.
+# Resolved from the registry: a fixed default would load the container driver
+# for a vm workspace and report "no such workspace" about one that exists.
 TARGET="$(ws_target "$NAME")"
 load_target "$TARGET"
 
 [ "$(t_info "$NAME")" != absent ] || die "no such workspace: $NAME"
 
 # A remote target claims none of the container properties checked below.
-# Running the checks would report failure against promises never made.
 if [ "$WK_TARGET_KIND" = remote ]; then
     die "'wk verify' proves a sandbox holds, and a remote target has none:
     a plain checkout on a shared machine, no container, no firewall, no
@@ -54,10 +53,8 @@ if [ "$WK_TARGET_KIND" = remote ]; then
     promised. 'wk ai claude' refuses on this target for the same reason."
 fi
 
-# The vm target's egress boundary is Softnet on the host rather than any
-# container property, so the block guarded by $WK_SANDBOX below does not apply
-# to a guest. The credential checks do, and are measured the same way in both:
-# from inside, over t_exec.
+# The vm target's egress boundary is Softnet on the host, so the $WK_SANDBOX
+# block below does not apply to a guest.
 # TODO: measure the guest's *egress* from inside it; `wk ai claude` carries the
 # vm-side network checks for now.
 if [ "$WK_TARGET_KIND" = vm ]; then
@@ -108,8 +105,8 @@ if [ "${WK_SANDBOX:-}" = rootless-proxy ]; then
     fi
 
     # --- egress, measured -----------------------------------------------------
-    # Allowed: the API the agent needs. Denied: a host off the list, and the
-    # local network. Direct: with the proxy bypassed there must be no path at all.
+    # Allowed: the API the agent needs. Denied: a host off the list and the
+    # local network. Direct: with the proxy bypassed there must be no path.
     code=$(inside "curl -sS -m 20 -o /dev/null -w '%{http_code}' https://github.com/ 2>/dev/null")
     [ "$code" = 200 ] && pass "github reachable through the proxy (HTTP $code)" \
                       || fail "github unreachable through the proxy (got '${code:-nothing}')"
@@ -135,9 +132,8 @@ if [ "${WK_SANDBOX:-}" = rootless-proxy ]; then
     esac
 
     # --- no host filesystem ---------------------------------------------------
-    # wkdev mounts the host home at /host/home and the runtime directory
-    # (session D-Bus socket included) at /host/run. --isolated turns both
-    # off; this confirms it rather than assuming it.
+    # wkdev mounts the host home at /host/home and the runtime directory at
+    # /host/run; --isolated turns both off, and this confirms it.
     for path in /host/home /host/run /run/user/*/bus /run/dbus/system_bus_socket; do
         found=$(inside "ls -d $path 2>/dev/null | head -1")
         if [ -n "$found" ]; then
@@ -148,10 +144,9 @@ if [ "${WK_SANDBOX:-}" = rootless-proxy ]; then
 
     # --- the commit wall works here ------------------------------------------
     # `wk ai claude` runs the agent under bwrap with the checkout's .git commit
-    # parts read-only (WK_COMMIT_WALL_PATHS, lib/common.sh); this proves, in
-    # this container, that the recipe blocks a commit and leaves an ordinary
-    # write alone, against a throwaway repo in /tmp -- never the real checkout.
-    # No bwrap here means `wk ai claude` refuses, so the sandbox is not whole.
+    # parts read-only (WK_COMMIT_WALL_PATHS); this proves, in this container,
+    # that the recipe blocks a commit and leaves an ordinary write alone,
+    # against a throwaway repo in /tmp -- never the real checkout.
     if inside "command -v bwrap >/dev/null 2>&1 && echo WKBWRAP" | grep -q WKBWRAP; then
         probe=$(inside 'set -e
             D=$(mktemp -d /tmp/wk-wall.XXXXXX); cd "$D"
@@ -186,30 +181,27 @@ if [ "${WK_SANDBOX:-}" = rootless-proxy ]; then
 fi
 
 # --- what an agent in here can spend -----------------------------------------
-# Informational, and deliberately not a `fail`: this reports the blast radius
-# rather than the boundary. A workspace with the claude.ai login can act as
-# the account -- that is what remote control needs and what an agent in here
-# is being handed. Presence only: whether it still works is Anthropic's to
-# say, and asking would spend a request.
-if wk_agent_secret_present claude-login; then
+# Informational, not a `fail`: this reports the blast radius rather than the
+# boundary. A workspace with the claude.ai login can act as the account.
+# Presence only: whether it still works is Anthropic's to say. Of the target,
+# not this machine's store -- a guest holds a login of its own.
+if t_agent_secret_present "$NAME" claude-login; then
     note "this workspace has your claude.ai login (account scope, not just inference)"
 else
-    note "no claude.ai login here -- 'wk key set claude-login' stores one, and"
-    note "remote control refuses to start without it"
+    note "no claude.ai login here, and remote control refuses to start without one:"
+    note "$(t_agent_secret_remedy "$NAME" claude-login)"
 fi
 
 # --- the two credentials, and that neither one is in here ---------------------
 # An agent's blast radius ends at the workspace only if nothing inside it can
-# publish. Two things could: an ssh key that pushes, and a GitHub API token
-# that posts. Neither is a file in here at all -- the keys are in an ssh-agent
-# outside the workspace (push_agent_*, lib/store.sh) and the token is in the
-# injector (container/proxy/github-inject.py) -- so what is measured is that no
+# publish. Two things could: an ssh key that pushes, and a GitHub API token that
+# posts. Neither is a file in here -- the keys are in an ssh-agent outside the
+# workspace and the token is in the injector -- so what is measured is that no
 # key material is present, that the switch is where the host says it is, and
-# that the workspace holds the placeholder rather than a token.
-#
-# Both targets. A container reaches the agent through a bind-mounted socket and
-# a guest through an `ssh -R` forward, but every probe below is the same
-# command run inside by t_exec.
+# that the workspace holds the placeholders rather than a token. Publishing is
+# what the switch is over: reading GitHub is open, so a read answering 200 is a
+# healthy workspace and not a finding. Both targets: every probe below is the
+# same command run inside by t_exec.
 
 # The host's own answer, once. Both positions are correct states -- what would
 # be wrong is the workspace disagreeing with the host about which one it is in.
@@ -219,12 +211,10 @@ PUSH_ON=0
 
 # Never the checkout, and that is why home is not walked as a whole: WebKit
 # ships PEM test fixtures of its own, and on a guest the checkout is *inside*
-# $HOME (t_src is /Users/<user>/WebKit), so a recursive grep of home reports
-# the upstream tree -- and walks gigabytes of it -- on every guest. So the
-# places a key delivered or copied by anything in here would actually land are
-# named instead: the two directories ssh and the agent read, both mounts, and
-# the top of home itself, which is not recursive and therefore does not descend
-# into the checkout or the mirror.
+# $HOME, so a recursive grep would report the upstream tree and walk gigabytes
+# of it. The places a key delivered or copied by anything in here would land are
+# named instead: the two directories ssh and the agent read, and the top of home
+# itself, which is not recursive.
 material=$(inside "{ grep -rl 'PRIVATE KEY' \$HOME/.ssh \$HOME/.claude /secrets /run/wk;
                      grep -l  'PRIVATE KEY' \$HOME/* ; } 2>/dev/null | head -5")
 if [ -z "$material" ]; then
@@ -235,16 +225,14 @@ else
 fi
 
 # The agent, asked from inside. The socket is there whichever way the switch is
-# set -- the service owns it -- so what it *holds* is the question, and
-# `ssh-add -l` is how a workspace would find out too.
+# set, so what it *holds* is the question.
 agent_sock=$(t_agent_sock 2>/dev/null) || agent_sock=""
 if [ -z "$agent_sock" ]; then
     fail "the '$TARGET' target names no ssh-agent socket (t_agent_sock), so a push
         from in here would use a credential wk does not control"
 else
-    # `command -v` first, for the reason the interface probe above gives: a
-    # missing tool would answer "no identities" and fail in the direction that
-    # looks fine.
+    # `command -v` first, for the reason the interface probe gives: a missing
+    # tool would answer "no identities" and fail in the direction that looks fine.
     ident=$(inside "command -v ssh-add >/dev/null 2>&1 \
         && (SSH_AUTH_SOCK=$agent_sock ssh-add -l 2>/dev/null | grep -c . || true) \
         || echo MISSING")
@@ -262,58 +250,94 @@ else
     fi
 fi
 
-# The API. Reaching it is the new state and is not itself a fault: the injector
-# strips whatever the workspace sent, so an unauthenticated call is answered by
-# GitHub exactly as it would be from anywhere.
+# The API. Reaching it is not itself a fault: the injector strips whatever the
+# workspace sent, so an unauthenticated call is answered as from anywhere.
 code=$(inside "curl -sS -m 20 -o /dev/null -w '%{http_code}' https://api.github.com/ 2>/dev/null")
 [ "$code" = 200 ] \
     && pass "api.github.com reachable through the injector (HTTP $code)" \
     || fail "api.github.com answered '${code:-nothing}' -- the injector is not in the path
         (systemctl --user status wk-github-inject; the CA is /run/wk/wk-github-ca.pem)"
 
-# And the switch, measured on an endpoint that needs an account.
-code=$(inside "curl -sS -m 20 -o /dev/null -w '%{http_code}' -H 'Authorization: Basic d2s6d2s=' https://api.github.com/user 2>/dev/null")
-if [ "$PUSH_ON" = 1 ]; then
+# A read, which the switch does not govern: it is authenticated from the
+# standing token whatever position `wk push` is in. So the question is whether
+# the machine agrees with this device -- a token stored here is a read that
+# answers 200 in there, and no token here is a read that answers 401.
+code=$(inside "curl -sS -m 20 -o /dev/null -w '%{http_code}' https://api.github.com/user 2>/dev/null")
+if [ -n "$(wk_github_pat)" ]; then
     [ "$code" = 200 ] \
-        && pass "an authenticated API call succeeds (HTTP $code), and push is on" \
-        || fail "push is ON but api.github.com/user answered '${code:-nothing}' -- 'wk key set github-pat'"
+        && pass "a read is authenticated (HTTP 200) from a token this workspace never holds" \
+        || fail "there is a GitHub token on this device, yet a read in here answered
+        '${code:-nothing}': the machine has not been given the standing read token
+        ('./setup' delivers it, and so does 'wk key set github-pat')"
 else
     [ "$code" = 401 ] \
-        && pass "an authenticated API call is refused (HTTP 401): nothing in here can post" \
-        || fail "push is off, yet api.github.com/user answered '${code:-nothing}' -- expected 401"
+        && pass "a read is unauthenticated (HTTP 401): this device holds no token at all
+        ('wk key set github-pat' gives reads an identity)" \
+        || fail "this device holds no GitHub token, yet a read in here answered
+        '${code:-nothing}' -- a credential wk did not put there is in the injector"
 fi
 
-# The placeholder, never its value: printing what the workspace holds would
-# print a token on the one run where this check matters.
-tok=$(inside 'printf %s "${GITHUB_COM_TOKEN:-}"')
-case "$tok" in
-    wk-injects-this) pass "GITHUB_COM_TOKEN in the workspace is the placeholder" ;;
-    "")              fail "GITHUB_COM_TOKEN is unset in here, so 'git-webkit pr' has nothing to send
-        ('wk push on' or 'wk push off' writes /secrets/github-user, which sets it)" ;;
-    *)               fail "GITHUB_COM_TOKEN in the workspace is not the placeholder -- something
-        put a real credential in here; find it and remove it" ;;
-esac
+# The fork this machine pushes to, for the two write probes below.
+FORK=$(wk_push_forks | awk 'NF {print $2; exit}')
 
-ghcred=$(inside "test -e ~/.config/gh/hosts.yml && echo ~/.config/gh/hosts.yml; env | grep -E '^(GH_TOKEN|GITHUB_TOKEN|GH_ENTERPRISE_TOKEN)=' | cut -d= -f1")
-[ -z "$ghcred" ] && pass "no gh credential inside (gh has nothing to post with)" \
+# The write table, measured with a write it does not have. This one is answered
+# by the injector and never reaches GitHub, so it is safe on every run.
+probe=$(inside "curl -sS -m 20 -w '\n%{http_code}' -X POST -d '{}' https://api.github.com/repos/$FORK/keys 2>/dev/null")
+code=$(printf '%s\n' "$probe" | tail -1)
+if [ "$code" = 403 ] && printf '%s' "$probe" | grep -q 'container/proxy/github-inject.py'; then
+    pass "a write outside the ALLOW table is refused by the injector itself (HTTP 403)"
+else
+    fail "POST /repos/$FORK/keys answered '${code:-nothing}' instead of the injector's 403 --
+        a workspace reaches write endpoints the ALLOW table (container/proxy/github-inject.py)
+        does not have, so the injector is not the thing answering"
+fi
+
+# And the switch, measured with a write the table *does* have, shaped so GitHub
+# cannot act on it: an empty body names no branch, so an authenticated call is
+# 422 (validation failed, nothing created) and one with no token is 401. The
+# injector forwards a write in both positions -- GitHub answering for itself is
+# the whole difference -- so nothing weaker distinguishes them from in here.
+code=$(inside "curl -sS -m 20 -o /dev/null -w '%{http_code}' -X POST -d '{}' https://api.github.com/repos/$FORK/pulls 2>/dev/null")
+if [ "$PUSH_ON" = 1 ]; then
+    [ "$code" = 422 ] \
+        && pass "an allowed write is authenticated (HTTP 422, nothing created), and push is on" \
+        || fail "push is ON but POST /repos/$FORK/pulls answered '${code:-nothing}' rather than
+        422 -- the injector has no write token, or GitHub refuses this one
+        ('wk key set github-pat --replace')"
+else
+    [ "$code" = 401 ] \
+        && pass "an allowed write is unauthenticated (HTTP 401): nothing in here can post" \
+        || fail "push is off, yet POST /repos/$FORK/pulls answered '${code:-nothing}' --
+        expected 401, so a write token is still on the machine:  wk push off"
+fi
+
+# The placeholders, never their values: printing what the workspace holds would
+# print a token on the one run where this check matters. Both, because
+# `git-webkit` sends one (webkitcorepy) and `gh` the other, and a request with
+# no Authorization header at all has nothing for the injector to replace.
+for _var in GITHUB_COM_TOKEN GH_TOKEN; do
+    tok=$(inside "printf %s \"\${$_var:-}\"")
+    case "$tok" in
+        wk-injects-this) pass "$_var in the workspace is the placeholder" ;;
+        "")              fail "$_var is unset in here, so nothing that reads it sends an
+        Authorization header for the injector to replace (container/proxy/ensure-bridge.sh
+        exports both, from /secrets/github-user and the injector's CA)" ;;
+        *)               fail "$_var in the workspace is not the placeholder -- something
+        put a real credential in here; find it and remove it" ;;
+    esac
+done
+
+# A stored credential, which no placeholder covers: `gh auth login` writes one
+# here and it would go to GitHub as itself, past the table and the switch.
+ghcred=$(inside "test -e ~/.config/gh/hosts.yml && echo ~/.config/gh/hosts.yml; env | grep -E '^(GITHUB_TOKEN|GH_ENTERPRISE_TOKEN)=' | cut -d= -f1")
+[ -z "$ghcred" ] && pass "no stored GitHub credential inside: gh has only the placeholder" \
                  || fail "GitHub credential inside the workspace: $ghcred -- remove it (rm ~/.config/gh/hosts.yml; unset the token) before an agent runs"
 
-# `gh` authenticates with a token of its own and would bypass the injector
-# entirely, so it must not be logged in -- whether or not it is installed.
-ghauth=$(inside "command -v gh >/dev/null 2>&1 && (gh auth status >/dev/null 2>&1 && echo AUTHED || echo REFUSED) || echo ABSENT")
-case "$ghauth" in
-    ABSENT)  pass "gh is not installed in the workspace" ;;
-    REFUSED) pass "gh is installed but not authenticated: it can post nothing" ;;
-    *)       fail "gh IS authenticated inside the workspace -- it bypasses the injector:  gh auth logout" ;;
-esac
-
 # --- GPU ---------------------------------------------------------------------
-# Informational unless --gpu (the benchmark runner's flag: a Speedometer or
-# MotionMark number from llvmpipe is a different measurement, not a slow
-# one). Probe exit status: 0 hardware, 1 software only, 2 no EGL, 3 build
-# failed. Skipped on another architecture: the NVIDIA userspace is
-# aarch64-only, and probing would just print Mesa errors about a device
-# that was never there.
+# Informational unless --gpu (a Speedometer or MotionMark number from llvmpipe
+# is a different measurement, not a slow one). Probe exit status: 0 hardware,
+# 1 software only, 2 no EGL, 3 build failed. Skipped on another architecture:
+# the NVIDIA userspace is aarch64-only.
 if ! arch_has_gpu "$(t_arch "$NAME")"; then
     note "no GPU: an $(t_arch "$NAME") workspace gets none (the NVIDIA userspace is aarch64-only)"
     [ -n "$WANT_GPU" ] && fail "--gpu on an $(t_arch "$NAME") workspace, which cannot have one"

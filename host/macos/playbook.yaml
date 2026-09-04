@@ -3,14 +3,16 @@
 #
 # Scope is deliberately narrow: only OS-level state that has no dependency on
 # wk-tools itself. The repo is not copied in at all -- the machine mounts this
-# checkout read-only at /opt/wk-tools (host/macos/machine.sh), so the VM runs
+# checkout read-only at /var/opt/wk-tools -- which it also spells
+# /opt/wk-tools (host/macos/machine.sh) -- so the VM runs
 # the working tree and nothing has to be pushed to GitHub to be testable --
 # and what needs the repo (the egress proxy, the SDK) is installed around that
 # mount afterwards by host/macos/vmtools.sh.
 #
-# Nothing here touches /opt/wk-tools or {{ wk_root }}/secrets: both are mounts,
-# and a task that chowns or creates one either fails against a read-only
-# filesystem or writes into this host's own directories.
+# Nothing here touches the contents of /opt/wk-tools or {{ wk_root }}/secrets:
+# both are mounts, and a task that chowns or creates one either fails against a
+# read-only filesystem or writes into this host's own directories. Their mount
+# *units* are another matter, and the last task here is about those.
 #
 # Recovering from `podman machine rm` is still one `./setup`.
 
@@ -71,33 +73,20 @@
         modification_time: preserve
         access_time: preserve
 
-    - name: Layer the two packages the base image lacks
-      # The machine image is Fedora CoreOS: an ostree-based immutable OS, so
-      # there is no dnf and packages are layered with rpm-ostree. Layering
-      # mutates the base OS, so keep it to what is genuinely missing.
+    - name: Check the machine image still provides git and python3
+      # Neither is layered: the podman machine image has python3 and git (as
+      # git-core). `wk sync` maintains the WebKit mirror and the base
+      # snapshots inside the machine, so git has to run here, and the SDK
+      # patcher (container/sdk-patches/apply.sh) is python.
       #
-      # Only these two are absent from the base image. nftables, jq and rsync
-      # are already there -- asking for them made rpm-ostree resolve
-      # dependencies on every run for no reason.
-      #
-      #   git      the WebKit mirror and the base snapshots live in the VM and
-      #            are maintained by `wk sync`, so git has to run here.
-      #   python3  the SDK patcher (container/sdk-patches/apply.sh) uses it for
-      #            exact-match and regex edits; doing that in sed would be far
-      #            more fragile against an SDK that moves under us.
-      #
-      # --apply-live avoids a reboot; --idempotent makes a re-run free.
-      ansible.builtin.command:
-        cmd: rpm-ostree install --idempotent --apply-live --allow-inactive git python3
-      register: pkgs
-      # rpm-ostree prints "No change." when everything is already layered. The
-      # previous condition tested for a string it never emits, so this task
-      # reported changed on every run and made ./setup look like it had done
-      # work when it had not.
-      changed_when: "'No change.' not in pkgs.stdout"
-      failed_when:
-        - pkgs.rc != 0
-        - "'already requested' not in (pkgs.stderr | default(''))"
+      # Layering them would pull in the `git` metapackage, whose perl-Git
+      # dependency is carried only by Fedora's updates-archive -- which
+      # answers 404 for it, and takes the whole playbook down with it. An
+      # image that stops providing either of these is a real break, and it is
+      # named here rather than found three stages later.
+      ansible.builtin.shell:
+        cmd: command -v git && command -v python3
+      changed_when: false
 
     - name: Layer Tailscale
       # Runs on the VM, not inside a workspace. That is deliberate: a workspace
@@ -111,6 +100,67 @@
       register: ts
       changed_when: "'No change.' not in ts.stdout"
       failed_when: ts.rc != 0 and 'No change.' not in ts.stdout
+
+    - name: Find the machine's host mounts
+      # One systemd .mount unit per `podman machine init --volume`, written by
+      # podman into /etc/systemd/system at first boot.
+      ansible.builtin.find:
+        paths: /etc/systemd/system
+        patterns: "*.mount"
+        contains: "^Type=virtiofs$"
+      register: host_mounts
+
+    - name: Find the one of them that must stay writable
+      # By its target rather than by unit name: the name is systemd's escaping
+      # of the target, and this asks the question the design states.
+      ansible.builtin.find:
+        paths: /etc/systemd/system
+        patterns: "*.mount"
+        contains: "^Where={{ wk_root }}/agent-rw$"
+      register: writable_mounts
+
+    - name: Hold every other host mount read-only
+      # podman takes `--volume src:target:ro` and drops the mode on the way to
+      # the unit it generates (measured on podman 5.4 + applehv: the guest
+      # mounts it rw, and a write from a workspace lands in this host's own
+      # directory). Which mounts are writable is half the isolation invariant,
+      # so it is imposed here, on the machine -- and from the design rule
+      # rather than from a second list of paths: exactly one host mount, the
+      # agent credential directory, is writable.
+      #
+      # The existing options are kept and `ro` is put in front of them: they
+      # carry the SELinux context virtiofs cannot express in xattrs, and a
+      # mount that loses it is one containers are then denied.
+      # TODO: upstream -- podman should carry `:ro` into the generated unit.
+      ansible.builtin.lineinfile:
+        path: "{{ item.path }}"
+        regexp: '^Options=(?!ro,)(.+)$'
+        line: 'Options=ro,\1'
+        backrefs: true
+      loop: "{{ host_mounts.files }}"
+      loop_control:
+        label: "{{ item.path | basename }}"
+      when: item.path not in (writable_mounts.files | map(attribute='path') | list)
+      register: ro_units
+
+    - name: Re-read the unit files
+      ansible.builtin.systemd_service:
+        daemon_reload: true
+      when: ro_units is changed
+
+    - name: Re-mount them read-only now, rather than at the next boot
+      # A remount, not a restart: a restart unmounts first, and a workspace
+      # bind-mounting the same directory is running while ./setup is. Already
+      # read-only, this changes nothing and says so.
+      ansible.builtin.shell:
+        cmd: >-
+          mount -o remount,ro
+          "$(systemctl show -p Where --value {{ item.item.path | basename | quote }})"
+      loop: "{{ ro_units.results }}"
+      loop_control:
+        label: "{{ item.item.path | basename }}"
+      when: item is changed
+      changed_when: true
 
     - name: Enable tailscaled
       # `tailscale up --advertise-tags=tag:wk` is deliberately NOT done here: it

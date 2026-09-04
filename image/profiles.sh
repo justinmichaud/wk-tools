@@ -1,38 +1,32 @@
-# Named system profiles -- the spec that `wk sysimage build` executes.
-# A configuration lives in image/configs as a file (README.md has the naming
-# scheme). The phones and the fetched service image are exceptions, being
-# one of a kind rather than points in a matrix.
+# Named system profiles -- the spec that `wk sysimage build` executes. A
+# configuration lives in image/configs as a file (README.md has the naming
+# scheme); the phones and the fetched service image are one of a kind rather
+# than points in a matrix.
 #
 # A profile sets:
-#   IMG_BUILDER      which mechanism builds it: yocto (bitbake from source,
-#                    image/yocto.sh), buildroot (WPE fork's cog defconfigs,
-#                    image/buildroot.sh), pmos (postmarketOS via pmbootstrap,
-#                    image/pmos.sh), or fetch (downloaded, pinned by content,
-#                    image/fetch.sh)
+#   IMG_BUILDER      yocto (image/yocto.sh), buildroot (image/buildroot.sh),
+#                    pmos (image/pmos.sh) or fetch (image/fetch.sh)
 #   IMG_MACHINE      the fleet machine it is built for (boot/machines.sh)
-#   IMG_ARCH         the image's architecture
-#   IMG_HOSTNAME     what it calls itself once booted
-#   IMG_WATCHDOG     seconds before the self-return reboot after a wedged
-#                    run; inert until `wk sysimage write --rescue` marks the card
-#   IMG_SPEC_DIR     the profile's own files
-# No role field: rescue and bench are the same distribution, distinguished
-# only by a card marker (`wk sysimage write --rescue`; b_system_kind).
+#   IMG_ARCH, IMG_HOSTNAME, IMG_SPEC_DIR
+#   IMG_WATCHDOG     seconds before the self-return reboot after a wedged run;
+#                    inert until `wk sysimage write --rescue` marks the card
+# No role field: rescue and bench are the same distribution, distinguished only
+# by a card marker (`wk sysimage write --rescue`; b_system_kind).
 #
 # A yocto profile sets these instead (image/yocto.sh reads them):
 #   YOC_BRANCH       the WebKit branch whose Tools/yocto config is the spec
 #   YOC_TARGET       the cross-target section in Tools/yocto/targets.conf
 #   YOC_IMAGE        the bitbake image recipe (targets.conf's image_basename)
-#   YOC_RM_WORK      1 to inherit rm_work (disk space; image/yocto.sh)
-#   YOC_CHROMIUM     1 to leave Chromium in the image, 0 to drop it
+#   YOC_RM_WORK, YOC_CHROMIUM   1 or 0
 #   YOC_PORT_TARGET_FROM  a target this branch does have, to derive YOC_TARGET
 #                    from when the branch has no such section (port-target.py)
 #   YOC_MACHINE      the yocto MACHINE that derived target selects
 #   YOC_MULTILIB     a multilib variant to build the userspace as ('lib32'),
 #                    leaving the machine -- and so the kernel -- alone
 #   YOC_MULTILIB_TUNE  the tune that variant builds at
-# Identity is stamped per disk at write time: two cards from one image share
-# an MBR signature, so `root=LABEL=` would resolve to whichever disk the
-# firmware enumerated first. `disk_unique_identity` (boot/disk.sh) fixes it.
+# Identity is stamped per disk at write time (`disk_unique_identity`,
+# boot/disk.sh): two cards from one image share an MBR signature, so
+# `root=LABEL=` would resolve to whichever disk the firmware enumerated first.
 
 image_config_dir()  { echo "$WK_ROOT/image/configs"; }
 image_config_file() { echo "$(image_config_dir)/$1.conf"; }
@@ -86,8 +80,8 @@ image_profile_load() {
     IMG_PROFILE="$1"
     IMG_SPEC_DIR="$WK_ROOT/image/$1"
 
-    # Reset every field: `wk boot --list` loops over profiles, and a stale
-    # field would describe a nonexistent image.
+    # Reset every field: `wk boot --list` loops over profiles, and a stale one
+    # would describe a nonexistent image.
     IMG_BUILDER=""
     IMG_MACHINE=""; IMG_ARCH=""; IMG_HOSTNAME=""; IMG_WATCHDOG=""
     YOC_BRANCH=""; YOC_TARGET=""; YOC_IMAGE=""; YOC_RM_WORK=""
@@ -115,7 +109,7 @@ image_profile_load() {
     fi
 
     case "$1" in
-    # Tombstones: point at the current spelling rather than meaning something quietly.
+    # Tombstones.
     rpi5-perf|rpi4-perf|rpi3-perf|rpi4-wpe-2.48|rpi4-wpe-2.48-32|rpi3-wpe-2.48-32|rpi3-wpe-2.48-64|rpi5-wpe-2.48|mac-bench)
         die "there is no profile '$1'. Use:
     rpi5-perf        -> webkit-2.52-yocto-rpi5-64
@@ -146,7 +140,6 @@ image_profile_load() {
 
     'wk sysimage --list' has all of them."
         ;;
-    # Tombstone: refused by name, rather than failing as "unknown profile".
     perf-linux-rpi3|perf-linux-rpi4|perf-linux-rpi5)
         die "there is no '$1'. A perf system is built by yocto or buildroot, or
     it is macOS (wk help). For this board:
@@ -173,8 +166,8 @@ image_profile_load() {
     bridge-pinephone|bridge-librem5)
         IMG_BUILDER=pmos
         IMG_ARCH=aarch64
-        # Empty, not absent: lets `wk sysimage write` tell "not for the
-        # machine holding the card" from "does not say".
+        # Empty, not absent: lets `wk sysimage write` tell "not for the machine
+        # holding the card" from "does not say".
         IMG_MACHINE=""
 
         # phosh: the last way in if WiFi and ssh both fail.
@@ -204,10 +197,9 @@ image_profile_load() {
                 IMG_HOSTNAME=tailnet-bridge-generic
 
                 # pmOS ships this kernel with CONFIG_SUNXI_WATCHDOG unset
-                # despite the A64 DT declaring the watchdog (0x1c20ca0), the
-                # only recovery for a hung kernel on a device nobody can walk
-                # up to. `=m` so a bad driver is a modules-file line, not a
-                # reflash; not needed for the Librem 5.
+                # despite the A64 DT declaring the watchdog (0x1c20ca0). `=m`
+                # so a bad driver is a modules-file line, not a reflash; not
+                # needed for the Librem 5.
                 PMO_KERNEL_APORT=device/community/linux-postmarketos-allwinner
                 PMO_KCONFIG="CONFIG_SUNXI_WATCHDOG=m"
                 # 2.4 GHz only: the RTL8723CS is single-band, else the copied PSK would be unusable.

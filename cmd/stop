@@ -3,15 +3,14 @@
 # wk stop [<workspace>] [--keep-vm] -- shut down one workspace, or everything
 # wk: where=workspace name=optional forward=no group=hosts needs podman
 #
-# A named workspace: stops only its container or macOS guest (t_stop); nothing on disk
-# is touched, and a target with no notion of stopping one workspace refuses and says why.
+# A named workspace: stops only its container or macOS guest (t_stop); nothing
+# on disk is touched.
 #
-# `forward=no`: runs on the host holding the environment, never forwarded into the podman
-# VM -- stopping its own containers from inside it would kill the ssh session mid-word.
+# `forward=no`: runs on the host holding the environment -- stopping its own
+# containers from inside the podman VM would kill the ssh session mid-word.
 #
-# No workspace: stops every container, the macOS VMs first (a guest holds its full
-# allocation regardless of what it's building), then the machine, which returns CPU and
-# memory to the host.
+# No workspace: every container, the macOS VMs first (a guest holds its full
+# allocation regardless of what it's building), then the machine.
 #
 #   wk stop                  macOS VMs, containers, then the machine
 #   wk stop --keep-vm        macOS VMs and containers, leave the machine running
@@ -29,7 +28,6 @@ WK_MACHINE="${WK_MACHINE:-wk}"
 
 NAME="${WK_NAME:-}"
 
-# --- one workspace ------------------------------------------------------------
 if [ -n "$NAME" ]; then
     [ $# -eq 0 ] || die "usage: wk stop [<workspace>] [--keep-vm]; see wk stop -h
     'wk stop $NAME' takes no options -- --keep-vm only applies to a bare 'wk stop'"
@@ -37,8 +35,9 @@ if [ -n "$NAME" ]; then
     load_target "$TARGET"
     [ "$(t_info "$NAME")" != absent ] || die "no such workspace: $NAME"
 
-    # claude remote-control runs detached inside the target; t_stop takes it down with
-    # a container or guest, but a remote target's checkout keeps running, so it is killed here.
+    # claude remote-control runs detached inside the target; t_stop takes it
+    # down with a container or guest, but a remote target's checkout keeps
+    # running, so it is killed here.
     if [ "$WK_TARGET_KIND" = remote ]; then
         _rc_sf="$(wk_ws_dir "$NAME")/claude-rc.status"
         _rc_pid=$([ -f "$_rc_sf" ] && status_field "$_rc_sf" pid || true)
@@ -53,7 +52,6 @@ if [ -n "$NAME" ]; then
     exit 0
 fi
 
-# --- everything ----------------------------------------------------------------
 KEEP_VM=""
 case "${1:-}" in
     --keep-vm) KEEP_VM=1; shift ;;

@@ -3,17 +3,16 @@
 # wk test <workspace> [flags] [paths...] -- run the JSC or layout test suites
 # wk: where=workspace name=required ready=yes group=workspaces
 #
-# Runs the JSC or layout test suites with the same reportability as `wk
-# build`: a watchdog that detects a silent run, a status file `wk status`
-# can read, and a summary instead of a few hundred KB of raw output.
+# The same reportability as `wk build`: a watchdog that detects a silent run, a
+# status file `wk status` can read, and a summary instead of raw output.
 #
 # --lldb turns all of that off and debugs one layout test instead (see
 # "debugging one test" below).
 #
 # Layout tests default to software rendering: there is no GPU inside the
-# workspace on macOS (the podman VM has no /dev/dri to pass through), so
-# without llvmpipe the runner fails to start or silently produces garbage.
-# On Linux with a real seat, pass --gpu to use the real device.
+# workspace on macOS (the podman VM has no /dev/dri to pass through), so without
+# llvmpipe the runner fails to start or silently produces garbage. On Linux with
+# a real seat, pass --gpu.
 #
 #   --config <config>   the build config to test (default: last built, or
 #                        default_config); `wk build --list` lists every name
@@ -36,8 +35,8 @@ WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 NAME="${WK_NAME:-}"
 require_name "$NAME"
 
-# Resolved after the options: the workspace's own build history can answer
-# when nothing on the command line does (below).
+# Resolved after the options: the workspace's own build history can answer when
+# nothing on the command line does.
 CONFIG="${WK_CONFIG:-}"
 SUITE=jsc
 GPU=""
@@ -60,10 +59,9 @@ while [ $# -gt 0 ]; do
     esac
 done
 
-# What to test, when nobody said: the config this workspace was last built
-# with, then the fallback default. Without this a bare `wk test <ws>
-# --layout` resolved jsc-release -> --jsc-only, pointing run-webkit-tests at
-# a tree with neither WebKitTestRunner nor ImageDiff built.
+# What to test, when nobody said: the config this workspace was last built with.
+# Without this a bare `wk test <ws> --layout` resolved jsc-release, pointing
+# run-webkit-tests at a tree with neither WebKitTestRunner nor ImageDiff built.
 if [ -z "$CONFIG" ]; then
     CONFIG=$(last_built_config "$NAME")
     if [ -n "$CONFIG" ]; then
@@ -74,16 +72,15 @@ if [ -z "$CONFIG" ]; then
 fi
 
 # The target first: on macOS a config does not choose its own build system, so
-# config_load needs the platform it will be built on (t_os, lib/target.sh).
+# config_load needs the platform it will be built on (t_os).
 TARGET="$(ws_target "$NAME")"
 load_target "$TARGET"
 
 config_load "$CONFIG" "$(t_os)" || die "unknown config '$CONFIG' (wk build --list)"
 
-# A JSC-only build has no layout tests -- no driver to run a page in, no
-# ImageDiff to compare one with -- and saying so beats run-webkit-tests
-# discovering it. Asked of the config, not of CFG_PORT: on macOS a jsc-*
-# config is an Apple-port build with no port flag at all (build/configs.sh).
+# A JSC-only build has no layout tests -- no driver, no ImageDiff. Asked of the
+# config, not of CFG_PORT: on macOS a jsc-* config is an Apple-port build with
+# no port flag.
 if [ "$SUITE" = layout ] && config_jsc_only; then
     die "'$CONFIG' builds JavaScriptCore alone, which has no layout tests -- no
     WebKitTestRunner and no ImageDiff are built by it. Name a full-port config
@@ -103,9 +100,9 @@ fi
 lower=$(echo "$CFG_TYPE" | tr '[:upper:]' '[:lower:]')
 SRC=$(t_src "$NAME")
 
-# The same personality wrapper the build ran under: without it, `uname -m` in
-# an armhf container answers aarch64, webkitdirs turns that into arm64, and
-# run-jsc-stress-tests gets --arch=64-bit for a 32-bit binary.
+# The same personality wrapper the build ran under: without it `uname -m` in an
+# armhf container answers aarch64, and run-jsc-stress-tests gets --arch=64-bit
+# for a 32-bit binary.
 ARCH=$(t_arch "$NAME")
 WRAP=$(arch_wrapper "$ARCH")
 export_target_resources "$NAME"
@@ -115,10 +112,9 @@ JOBS=$(build_jobs "$POLITE")
 build_admit "this test run" "$JOBS"
 build_record "wk test $NAME" "$JOBS" "$(( JOBS * WK_MB_PER_JOB ))" "pid:$$"
 
-# llvmpipe via Mesa's software gallium driver, and the WPE headless backend
-# so no compositor is needed. None of it applies to Apple ports: a macOS
-# guest renders through Virtualization.framework's paravirtualised GPU
-# regardless, so setting these there would be cargo cult.
+# llvmpipe via Mesa's software gallium driver, and the WPE headless backend so
+# no compositor is needed. None of it applies to Apple ports, which render
+# through Virtualization.framework's paravirtualised GPU regardless.
 if [ "$CFG_BUILDSYS" = xcode ]; then
     RENDER_ENV=""
     RENDER_DESC="the guest's GPU"
@@ -136,8 +132,7 @@ else
 fi
 
 # --lldb is a layout-test flow: the JSC suite runs a shell, and `wk run --lldb`
-# already debugs that. It needs a process to wait for by name, which a
-# jsc-only config has no answer to, since it builds neither binary.
+# already debugs that. It needs a process to wait for by name.
 #
 #   --lldb, --lldb web   the web process the test runs in -- its JS, its layout,
 #                        its rendering, and so nearly always the right one
@@ -153,10 +148,9 @@ if [ -n "$LLDB" ]; then
     [ $# -gt 0 ] || die "--lldb needs a test to debug, e.g. fast/dom/Element/id-attribute.html"
     JOBS=1  # one driver, so exactly one process of either kind to catch
 
-    # Check the test exists before handing the terminal to a debugger. A
-    # mistyped path is not an error the debug flow can report: the run behind
-    # lldb fails in a log nobody is looking at, while lldb waits for a process
-    # that will now never start -- so the whole thing reads as a hang.
+    # Check the test exists before handing the terminal to a debugger: a
+    # mistyped path fails in a log nobody is looking at while lldb waits for a
+    # process that will never start.
     for _t in "$@"; do
         t_exec "$NAME" test -e "$SRC/LayoutTests/${_t%%\?*}" -o -e "$SRC/${_t%%\?*}" 2>/dev/null \
             || die "no such test in $NAME: $_t"
@@ -165,9 +159,8 @@ if [ -n "$LLDB" ]; then
 fi
 
 # mac-release-asan builds into Release-asan/, and only WEBKIT_OUTPUTDIR tells
-# webkitdirs so -- without it the runner resolves the *non*-sanitized tree
-# and reports a green mac-release-asan for mac-release. Same answer
-# config_build_env() gives the build, so the two can't disagree.
+# webkitdirs so -- without it the runner reports a green mac-release-asan for
+# mac-release. Same answer config_build_env() gives the build.
 OUT_ENV=""
 [ "$CFG_BUILDSYS" = xcode ] && OUT_ENV="WEBKIT_OUTPUTDIR=$(config_build_dir "$SRC")"
 
@@ -180,9 +173,9 @@ jsc)
 layout)
     info "layout tests ($CONFIG, $RENDER_DESC, $JOBS processes)"
     # --no-timeout: the runner's own 30s per-test timeout can't tell a process
-    # stopped at a breakpoint from one that hung, and kills the driver
-    # mid-session. --additional-env-var: the pause that gives lldb time to
-    # attach, since the web process is a child of the driver, not this shell.
+    # stopped at a breakpoint from one that hung. --additional-env-var: the
+    # pause that gives lldb time to attach, since the web process is a child of
+    # the driver. --no-retry-failures: a retry doubles the runtime.
     # --no-retry-failures: a retry doubles the runtime and hides flakiness.
     DEBUG_FLAGS=""
     [ -n "$LLDB" ] && DEBUG_FLAGS="--no-timeout"
@@ -200,8 +193,7 @@ if [ -n "$DRY" ]; then
     log "  workspace: $NAME ($TARGET, $WS_STATE${ARCH_LABEL:+, $ARCH_LABEL})"
     log "  suite:     $SUITE ($CONFIG)"
     log "  would run: bash -lc $(sh_quote "$CMD")"
-    # The debugger is the other half of a debug run; showing only the run
-    # itself would describe a command nobody is about to issue.
+    # The debugger is the other half of a debug run.
     [ -n "$LLDB" ] && log "  in front of: lldb $(lldb_pin_opts) -o 'process attach --name $ATTACH --waitfor'"
     exit 0
 fi
@@ -214,11 +206,9 @@ t_sync_tools "$NAME"
 # --- debugging one test ------------------------------------------------------
 # Everything below (watchdog, status file, summary) makes an unattended run
 # *reportable*, and is wrong here: the watchdog kills a silent job after
-# WK_ABORT_SECONDS, and a process at a breakpoint is silent by definition.
-#
-# Same shape as `wk gui --lldb web`: lldb waits first, the run starts behind
-# it, and the attach lands as the web process is created -- anything else
-# races, since by the time a run prints enough to attach the process is gone.
+# WK_ABORT_SECONDS, and a process at a breakpoint is silent by definition. Same
+# shape as `wk gui --lldb web`: lldb waits first, the run starts behind it, and
+# the attach lands as the web process is created -- anything else races.
 if [ -n "$LLDB" ]; then
     info "debugging $* ($CONFIG) in '$NAME', lldb waiting for $ATTACH"
     log  "  it attaches as that process starts; 'continue' runs the test"
@@ -261,9 +251,9 @@ set -e
 ELAPSED=$(( $(date +%s) - START_EPOCH ))
 MINS=$(( ELAPSED / 60 )); SECS=$(( ELAPSED % 60 ))
 
-# run-webkit-tests reports its own totals; surface them rather than a raw
-# tail. `|| true` is load-bearing: grep exits 1 on no match, and under
-# `set -e` that would abort the script, leaving the status file at "running".
+# run-webkit-tests reports its own totals; surface them rather than a raw tail.
+# `|| true` is load-bearing: grep exits 1 on no match, and under `set -e` that
+# would abort the script, leaving the status file at "running".
 summary=$(tr '\r' '\n' < "$LOG" | grep -iE '^(Ran |Test suite|[0-9]+ test|All [0-9]+ test)' | tail -4 || true)
 
 echo >&2

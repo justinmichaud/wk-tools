@@ -1,6 +1,5 @@
-# What every benchmark lane shares: the result store, seeded payloads, the
-# variance knobs' record, and the host-side runner tree a board lane drives
-# a browser from. Sourced by cmd/bench and cmd/pi; neither carries a copy.
+# What every benchmark lane shares: the result store, seeded payloads, the variance
+# knobs' record, and the host-side runner tree a board lane drives a browser from.
 
 wkdata() { python3 "$WK_ROOT/lib/wkdata.py" "$@"; }
 wkslot() { python3 "$WK_ROOT/lib/wkslot.py" "$@"; }
@@ -8,21 +7,13 @@ wkslot() { python3 "$WK_ROOT/lib/wkslot.py" "$@"; }
 BENCH_DIR="$WK_STORE/bench"
 SEED_DIR="$WK_STORE/cache/bench"
 
-# --- tasks ------------------------------------------------------------------------
-# A task is what one benchmarking command produced, and the unit `wk bench
-# ls`, `wk bench report` and `wk status` speak in: $BENCH_DIR/<task>/ holds
-# task.json (the request), runs/<run>/ (one directory per run), the command's
-# logs and its reports. Its name is the moment it was requested and what it
-# measures: <stamp>-wpe-pr1725, <stamp>-<sha12>, <stamp>-rpi3-base-vs-pr1725.
-# The command that creates a task holds its lock (bench-task-<name>) for as
-# long as it works on it; a live lock is what "running" means everywhere a
-# task is reported, and nothing else is stored about its progress
-# (lib/wkdata.py, task_state).
+# --- tasks --------------------------------------------------------------------
+# A task is one benchmarking command's output: $BENCH_DIR/<task>/ holds task.json
+# (the request), runs/<run>/, logs and reports. A live lock (bench-task-<name>) is
+# what "running" means anywhere a task is reported; no progress is stored.
 bench_task_dir() { printf '%s/%s' "$BENCH_DIR" "$1"; }
 bench_task_stamp() { date -u +%Y%m%dT%H%M%SZ; }
 
-# bench_task_new <name> <task-write fields...> -- creates the task and takes
-# its lock; the caller keeps the lock by staying alive.
 bench_task_new() {
     local name="$1"; shift
     valid_name "$name" || die "'$name' is not a task name (letters, digits, '.', '_' and '-')"
@@ -34,17 +25,11 @@ bench_task_new() {
         || die "could not write $dir/task.json"
 }
 
-# bench_task_attach <name> -- an existing task another command created and
-# holds the lock of (`wk ab` handing its task to `wk pi bench`); refused
-# when there is no such task, so a typo cannot file runs into a fresh
-# directory nothing describes.
 bench_task_attach() {
     local dir; dir=$(bench_task_dir "$1")
     [ -f "$dir/task.json" ] || die "no such task '$1' ($dir has no task.json); 'wk bench ls' lists the tasks"
 }
 
-# The tasks whose lock is held right now, comma-separated: what --running
-# hands to lib/wkdata.py so state is decided from the lock and nothing else.
 bench_running_tasks() {
     local d out=""
     for d in "$BENCH_DIR"/*/task.json; do
@@ -54,15 +39,12 @@ bench_running_tasks() {
     done
     printf '%s' "$out"
 }
-# Exported Tools/Scripts trees, keyed by the WebKit commit they came from:
-# artifacts, re-exportable from the mirror, never edited in place.
+# Exported Tools/Scripts trees, keyed by the WebKit commit: artifacts, never edited.
 RUNNER_DIR="$WK_STORE/cache/bench-runner"
 
-# --- plans and payloads -----------------------------------------------------
-# A plan is read wherever the caller's run-benchmark lives: a workspace's
-# checkout for `wk bench`, the runner tree for `wk pi bench`. The caller
-# defines `bench_plan_read <relative path under Tools/Scripts>` and this
-# file asks it; one plan resolver, two places to read from.
+# --- plans and payloads -------------------------------------------------------
+# The caller defines `bench_plan_read <path under Tools/Scripts>`: a workspace's
+# checkout for `wk bench`, the runner tree for `wk pi bench`.
 plan_json() { # <plan>
     local plan="$1" body seen=0
     while [ "$seen" -lt 5 ]; do
@@ -77,18 +59,12 @@ plan_json() { # <plan>
     die "plan $plan indirects too many times"
 }
 
-# `wk bench --list` runs before any workspace exists to read a plan from, so
-# it cannot go through bench_plan_read (a workspace's checkout) or
-# bench_runner_tree (which exports a whole Tools/Scripts tree for a run --
-# more than listing names needs). It reads the machine's own WebKit mirror
-# instead -- one git ls-tree, read-only and instant, no export, no checkout.
-# Prints one plan name per line and returns 0 when the mirror can answer;
-# when it cannot (no mirror synced on this machine yet), prints the one
-# place the list does live and returns 1 so the caller still has something
-# to show.
+# `wk bench --list` runs before any workspace exists to read a plan from, so it asks
+# the mirror -- one git ls-tree, no export -- and returns 1 when there is no mirror.
 bench_plan_list() {
     local mirror ref
     mirror=$(wk_mirror)
+    # WK_BENCH_RUNNER_REF names another ref for a runner an older lane needs.
     ref="${WK_BENCH_RUNNER_REF:-refs/heads/main}"
     if [ ! -d "$mirror" ] || ! git -C "$mirror" rev-parse --verify --quiet "$ref^{commit}" >/dev/null; then
         printf "no mirror at %s to read plans from; 'wk sync' fetches one, or read\n" "$mirror"
@@ -100,10 +76,8 @@ bench_plan_list() {
         | sed -n 's#.*/\([^/]*\)\.plan$#\1#p' | sort
 }
 
-# Seeded copies are keyed by the exact commit, so a moved upstream branch
-# produces a new directory rather than quietly changing an existing one.
-# Prints the seeded directory, or nothing when the plan has no fetchable
-# source (run-benchmark then fetches it itself, and the run says so).
+# Keyed by the exact commit, so a moved upstream branch produces a new directory.
+# Prints nothing when the plan has no fetchable source (run-benchmark fetches it).
 seed_payload() { # <plan>
     local plan="$1" json
     json=$(plan_json "$plan")
@@ -125,8 +99,7 @@ seed_payload() { # <plan>
     local dest="$SEED_DIR/$plan-${sha:0:12}"
     if [ -d "$dest/.wk-seeded" ]; then
         debug "payload cached: $dest"
-        # Repairs a cache that may still carry a .git (dropped below), and
-        # with it the fsmonitor socket that makes it more than a size issue.
+        # Repairs a cache still carrying a .git, and with it the fsmonitor socket.
         [ -d "$dest/.git" ] && rm -rf "$dest/.git"
         echo "$dest"; return 0
     fi
@@ -147,9 +120,8 @@ seed_payload() { # <plan>
         mv "$tmp/repo/$subdir" "$dest"
     fi
     rm -rf "$tmp"
-    # No .git in a pinned payload: a clone carries git's runtime state,
-    # including fsmonitor's Unix domain socket, which no copy tool can
-    # reproduce.
+    # No .git in a pinned payload: a clone carries git's runtime state, including
+    # fsmonitor's Unix domain socket, which no copy tool can reproduce.
     rm -rf "$dest/.git"
     mkdir -p "$dest/.wk-seeded"
     printf 'url=%s\nref=%s\nsha=%s\nsubdir=%s\n' "$url" "$ref" "$sha" "$subdir" > "$dest/.wk-seeded/origin"
@@ -158,11 +130,9 @@ seed_payload() { # <plan>
 }
 
 # --- variance knobs -----------------------------------------------------------
-# WK_BENCH_ASLR, WK_BENCH_ENV_PAD and WK_BENCH_PATH_PAD (wk bench -h). Turning
-# one on is recorded into `configuration`, which `wk bench report` groups
-# variance by; off contributes nothing. path_len records the pad *requested*,
-# not a resolved path's length: what matters for grouping is which axis was
-# varied. Into the global array BENCH_CFG_ARGS, as `wkdata env-record` fields.
+# WK_BENCH_ASLR, WK_BENCH_ENV_PAD and WK_BENCH_PATH_PAD (wk bench -h) are recorded
+# into `configuration`, which `wk bench report` groups by. path_len is the pad
+# *requested*: what matters for grouping is the axis varied.
 bench_configuration_args() {
     BENCH_CFG_ARGS=()
     [ "${WK_BENCH_ASLR:-}" = off ] && BENCH_CFG_ARGS+=("configuration.aslr=off")
@@ -177,16 +147,9 @@ bench_configuration_args() {
 
 # --- the runner tree ------------------------------------------------------------
 # A board runs a browser and nothing else -- no python, no checkout -- so
-# run-benchmark runs here, out of Tools/Scripts exported from the mirror at
-# one commit, with this repo's board driver (bench/wk_board_driver.py) beside
-# WebKit's own. Pinned to a commit so two arms of one A/B are driven by the
-# same runner, and recorded with every result as runner_sha.
-#
-# Sets BENCH_RUNNER (the tree's path) and BENCH_RUNNER_SHA -- variables, not
-# stdout, since a command substitution would lose the second. The export is
-# the mirror's main (refs/heads/main; the other remotes sit under
-# refs/remotes/<name>) by default, where run-benchmark's driver plugin loader
-# is; WK_BENCH_RUNNER_REF names another ref for a runner an older lane needs.
+# run-benchmark runs here, from Tools/Scripts exported at one mirror commit (kept as
+# runner_sha, so both arms of an A/B share a runner) with this repo's board driver
+# beside WebKit's. BENCH_RUNNER/BENCH_RUNNER_SHA are variables, not stdout.
 bench_runner_tree() {
     local mirror ref sha tree drivers
     mirror=$(wk_mirror)
@@ -199,8 +162,7 @@ bench_runner_tree() {
     drivers="$tree/Tools/Scripts/webkitpy/benchmark_runner/browser_driver"
 
     if [ ! -x "$tree/Tools/Scripts/run-benchmark" ]; then
-        # Exported into a sibling and renamed into place, so a tree that is
-        # there is whole: a kill mid-export leaves a .tmp- nothing reads.
+        # Exported into a sibling and renamed: a kill mid-export leaves a .tmp- nothing reads.
         ensure_dir "$RUNNER_DIR"
         local tmp; tmp=$(mktemp -d "$RUNNER_DIR/.tmp-XXXXXX")
         info "exporting run-benchmark from the mirror at ${sha:0:12} (Tools/Scripts only)"
@@ -209,9 +171,7 @@ bench_runner_tree() {
         [ -x "$tmp/Tools/Scripts/run-benchmark" ] || { rm -rf "$tmp"; die "the export has no Tools/Scripts/run-benchmark"; }
         rm -rf "$tree"; mv "$tmp" "$tree"
     fi
-    # This repo's driver, refreshed on every use: the tree is an artifact of
-    # the WebKit commit, the driver is this checkout's, and copying it is how
-    # the two stay in step without the driver living in two places.
+    # This repo's driver, refreshed on every use, so it never lives in two places.
     cp "$WK_ROOT/bench/wk_board_driver.py" "$drivers/wk_board_driver.py" \
         || die "could not install the board driver into $drivers"
     BENCH_RUNNER="$tree"

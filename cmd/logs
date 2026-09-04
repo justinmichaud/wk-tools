@@ -26,10 +26,8 @@ LOG="$WSDIR/build.log"
 _shown=""
 if [ ! -f "$LOG" ]; then
     # An image workspace has no build.log: its stages log to
-    # home/<kind>-<stage>.log instead (yocto_log in image/yocto.sh,
-    # buildroot_log in image/buildroot.sh) -- not sourced here just for the
-    # path, since that glob is the whole contract those two functions keep.
-    # The newest one is whichever stage is running or ran last.
+    # home/<kind>-<stage>.log instead (yocto_log in image/yocto.sh, buildroot_log
+    # in image/buildroot.sh). The newest is whichever stage is running or ran last.
     shopt -s nullglob
     _stage_logs=("$WSDIR"/home/yocto-*.log "$WSDIR"/home/buildroot-*.log)
     shopt -u nullglob

@@ -1,29 +1,10 @@
 #!/usr/bin/env bash
-#===============================================================================
-# rpi5-numa-kernel.sh — Build a linux-raspi kernel with CONFIG_NUMA_EMU=y so
-#   that `numa=fake=N` works on Ubuntu 26.04 "Resolute Raccoon" (kernel 7.0).
-#   This is "Path B" from rpi5-numa-README.md, made turnkey.
-#
-# WHY: stock 26.04 ships all NUMA plumbing enabled EXCEPT the emulation switch
-#   (# CONFIG_NUMA_EMU is not set). It is a config-only change — the code is
-#   already upstream (Igalia's arm64 NUMA work, mainline since 6.12).
-#
-# RUN AS YOUR NORMAL USER (must have sudo). Do NOT prefix with sudo:
-#     bash rpi5-numa-kernel.sh
-#   Steps that need root call sudo internally (you'll be prompted once).
-#   Takes ~1-2h to compile on the Pi. IDEMPOTENT + RESUMABLE: safe to re-run;
-#   it skips phases already completed (source fetch, build) and re-uses them.
-#
-# SAFETY: this only BUILDS + (optionally) installs .debs. 26.04's A/B boot
-#   auto-reverts a kernel that fails to boot, so a bad build won't brick you.
-#   The compile ABORTS before the long step if CONFIG_NUMA_EMU didn't stick,
-#   so you never burn 1-2h on a mis-configured tree.
-#
-# Tunables (override via env):
+# Build a linux-raspi kernel with CONFIG_NUMA_EMU=y so numa=fake=N works on
+# Ubuntu 26.04, which ships every NUMA piece but that one switch. ~1-2h to
+# compile, resumable; 26.04's A/B boot auto-reverts a kernel that fails to boot.
 KBUILD_DIR="${KBUILD_DIR:-$HOME/kbuild}"
 JOBS="${JOBS:-$(nproc)}"
 DO_INSTALL="${DO_INSTALL:-ask}"     # ask | yes | no  -> dpkg -i the built .debs
-#===============================================================================
 set -euo pipefail
 log(){ printf '\n\033[1;36m== %s\033[0m\n' "$*"; }
 ok(){  printf '   \033[32m✓\033[0m %s\n' "$*"; }
@@ -33,9 +14,7 @@ die(){ printf '\n\033[1;31mABORT:\033[0m %s\n' "$*" >&2; exit 1; }
 [ "$(id -u)" -ne 0 ] || die "Run as your normal user (not root/sudo). sudo is used internally."
 command -v sudo >/dev/null || die "sudo is required."
 
-# Confirm we can sudo non-interactively (cached creds or a NOPASSWD rule). If we
-# only have interactive sudo, prime the timestamp now and keep it warm so the
-# long build doesn't stall on a password prompt halfway through.
+# Keep the sudo timestamp warm so the long build never stalls on a password.
 if ! sudo -n true 2>/dev/null; then
   sudo -v || die "sudo authentication failed."
   ( while true; do sudo -n true 2>/dev/null; sleep 50; done ) &
@@ -43,10 +22,8 @@ if ! sudo -n true 2>/dev/null; then
   trap 'kill "$SUDO_KEEPALIVE" 2>/dev/null || true' EXIT
 fi
 
-#-------------------------------------------------------------------------------
 log "1  Enable deb-src (needed for 'apt-get source linux-raspi')"
-# 26.04 uses the deb822 format in /etc/apt/sources.list.d/ubuntu.sources with
-# only 'Types: deb'. Derive a parallel deb-src file from it (idempotent).
+# 26.04 uses deb822 /etc/apt/sources.list.d/ubuntu.sources with only 'Types: deb'.
 SRC=/etc/apt/sources.list.d/ubuntu.sources
 DSRC=/etc/apt/sources.list.d/ubuntu-src.sources
 if [ -f "$SRC" ]; then
@@ -55,7 +32,6 @@ if [ -f "$SRC" ]; then
     ok "wrote $DSRC (deb-src for the same suites)"
   else skip "deb-src already present ($DSRC)"; fi
 else
-  # Fallback for classic sources.list layout.
   if ! grep -rqsE '^deb-src ' /etc/apt/sources.list /etc/apt/sources.list.d/ 2>/dev/null; then
     . /etc/os-release
     printf 'deb-src http://archive.ubuntu.com/ubuntu %s main\ndeb-src http://archive.ubuntu.com/ubuntu %s-updates main\n' \
@@ -65,29 +41,21 @@ else
 fi
 sudo apt-get update -qq || die "apt-get update failed"
 
-#-------------------------------------------------------------------------------
 log "2  Install build toolchain + kernel build-deps"
 sudo apt-get install -y build-essential fakeroot dpkg-dev debhelper rsync kmod cpio bc \
   flex bison libssl-dev libncurses-dev libelf-dev libdw-dev dwarves zstd python3 \
   || die "toolchain install failed"
-# build-dep pulls anything else the raspi kernel needs (best-effort; the
-# explicit list above already covers the essentials).
 sudo apt-get build-dep -y linux-raspi >/dev/null 2>&1 && ok "build-dep linux-raspi satisfied" \
   || skip "build-dep linux-raspi unavailable (explicit deps installed above — continuing)"
 
-#-------------------------------------------------------------------------------
 log "3  Fetch linux-raspi kernel source"
 mkdir -p "$KBUILD_DIR"
 cd "$KBUILD_DIR"
-# The extracted kernel tree is named linux-raspi-<upstream> (e.g. linux-raspi-7.0.0),
-# NOT linux-meta-raspi-* — match only the real tree.
 find_srcdir(){ find "$KBUILD_DIR" -maxdepth 1 -type d -name 'linux-raspi-*' 2>/dev/null | sort -V | tail -1; }
 SRCDIR="$(find_srcdir)"
 if [ -z "$SRCDIR" ]; then
-  # GOTCHA: the *binary* pkg 'linux-raspi' is a metapackage whose source is
-  # 'linux-meta-raspi' (~14kB, no kernel). The real kernel tree is source
-  # 'linux-raspi', produced by the versioned image binary linux-image-<abi>-raspi.
-  # Fetch source via that concrete binary name so apt resolves the real tree.
+  # 'linux-raspi' is a metapackage whose source is 'linux-meta-raspi' (no kernel);
+  # the real tree comes from the versioned linux-image-<abi>-raspi binary.
   IMG_PKG="$(apt-cache pkgnames linux-image-7 2>/dev/null | grep -E '^linux-image-[0-9].*-raspi$' | grep -v realtime | sort -V | tail -1)"
   [ -n "$IMG_PKG" ] || IMG_PKG="linux-image-$(uname -r)"
   ok "resolving kernel source via binary pkg: $IMG_PKG"
@@ -100,13 +68,10 @@ else
 fi
 cd "$SRCDIR"
 
-# Ubuntu ships symlinks/permissions that the .orig tarball can't carry; they're
-# recreated by debian.<flavour>/reconstruct during Ubuntu's own build prep, which
-# a bare `make bindeb-pkg` never runs. Most important: arch/arm64/.../overlays is
-# meant to be a symlink to the arm/ overlays tree — without it `make dtbs` dies on
-# a missing overlays/Makefile. Run reconstruct (chmod noise about missing debian/*
-# is harmless) then force the overlays symlink (reconstruct's own `ln -sf` misfires
-# when the empty dir already exists, nesting the link inside it).
+# Ubuntu ships symlinks the .orig tarball cannot carry, recreated by
+# debian.<flavour>/reconstruct, which `make bindeb-pkg` never runs: arch/arm64
+# overlays must be a symlink to the arm/ tree or `make dtbs` dies, and
+# reconstruct's own `ln -sf` misfires when the empty dir already exists.
 for rc in debian.raspi/reconstruct debian.master/reconstruct; do
   [ -f "$rc" ] && sh "$rc" >/dev/null 2>&1 || true
 done
@@ -116,70 +81,42 @@ if [ ! -L "$OVL" ] && [ -d arch/arm/boot/dts/overlays ]; then
 fi
 [ -f "$OVL/Makefile" ] && ok "dts overlays symlink OK" || skip "overlays Makefile still missing (dtbs may fail)"
 
-#-------------------------------------------------------------------------------
 log "4  Configure: base on running config; trim modules (lean) + NUMA + max-perf"
-# Base on the currently-running kernel's config so we inherit Ubuntu's raspi
-# choices, then flip on the emulation switch. olddefconfig fills any new symbols.
 LEAN="${LEAN:-yes}"        # yes = localmodconfig: build only currently-loaded modules
 MAXPERF="${MAXPERF:-yes}"  # yes = throughput-oriented tuning (see below)
 if [ ! -f .config ] || [ "${RECONFIG:-}" = 1 ]; then
-  # Purge objects from any prior (full) build so we don't ship stale modules.
   make clean >/dev/null 2>&1 || true
   cp "/boot/config-$(uname -r)" .config
 
   if [ "$LEAN" = yes ]; then
-    # localmodconfig disables every module NOT currently loaded (lsmod). Cuts the
-    # module count from thousands to ~100-200 -> build drops from hours to minutes.
-    # Boots on THIS hardware; drivers for devices not plugged in at build time are
-    # omitted (rebuild, or grab them from the stock kernel, if you add hardware).
-    # Feed defaults to the oldconfig prompts localmodconfig fires for NEW symbols.
-    # Use process substitution, not `yes | make`: under `set -o pipefail`, yes's
-    # harmless SIGPIPE (141) when make stops reading would false-fail the pipeline.
+    # Process substitution, not `yes | make`: under pipefail, yes's SIGPIPE (141)
+    # would false-fail the pipeline.
     make LSMOD=/proc/modules localmodconfig < <(yes '') || die "localmodconfig failed"
     ok "localmodconfig: trimmed to $(grep -c '=m' .config) modules"
   fi
 
-  # The whole point: NUMA emulation.
   scripts/config --enable NUMA --enable NUMA_MEMBLKS --enable NUMA_EMU
 
   if [ "$MAXPERF" = yes ]; then
-    # Throughput/benchmark tuning (trade some interactivity/latency for raw speed):
-    # PREEMPTION: do NOT force PREEMPT_NONE on arm64. This kernel has
-    # ARCH_HAS_PREEMPT_LAZY=y, which makes PREEMPT_NONE (depends on ARCH_NO_PREEMPT)
-    # and PREEMPT_VOLUNTARY (depends on !ARCH_HAS_PREEMPT_LAZY) UNBUILDABLE. The only
-    # throughput-oriented model available is PREEMPT_LAZY (the modern NONE-successor),
-    # which is already the default; forcing the choice lands on PREEMPT (full) = WORSE
-    # throughput. So leave the preemption choice at its default (lazy).
+    # ARCH_HAS_PREEMPT_LAZY=y makes PREEMPT_NONE and PREEMPT_VOLUNTARY
+    # unbuildable, and forcing the choice lands on full PREEMPT — worse throughput.
     scripts/config --disable HZ_1000 --disable HZ_300 --disable HZ_250 --enable HZ_100 --set-val HZ 100  # fewer timer ticks
     scripts/config --enable NO_HZ_IDLE                                                    # tickless idle
     scripts/config --enable  CPU_FREQ_DEFAULT_GOV_PERFORMANCE                             # governor default = performance
     scripts/config --disable CPU_FREQ_DEFAULT_GOV_SCHEDUTIL --disable CPU_FREQ_DEFAULT_GOV_ONDEMAND --disable CPU_FREQ_DEFAULT_GOV_POWERSAVE
     scripts/config --enable  CC_OPTIMIZE_FOR_PERFORMANCE --disable CC_OPTIMIZE_FOR_SIZE   # -O2 for speed, not size
-    # sched_ext (SCX): Meta-led BPF-pluggable scheduler class — load custom schedulers
-    # (scx_lavd/scx_bpfland for interactivity, scx_rusty/scx_layered for throughput) at
-    # runtime. REQUIRES kernel BTF, so keep DEBUG_INFO_BTF ON. (Do NOT set
-    # DEBUG_INFO_NONE — it strips BTF and breaks sched_ext, bpftrace, and BPF CO-RE.)
-    # BTF needs the debug-info CHOICE off NONE (scripts/config can't drive a choice
-    # by --enable alone), so disable NONE + pick the DWARF default first.
+    # sched_ext needs kernel BTF, so DEBUG_INFO_NONE must be off; scripts/config
+    # cannot drive a choice by --enable, so pick the DWARF default explicitly.
     scripts/config --disable DEBUG_INFO_NONE --enable DEBUG_INFO_DWARF_TOOLCHAIN_DEFAULT \
                    --enable DEBUG_INFO --enable DEBUG_INFO_BTF \
                    --enable BPF_SYSCALL --enable SCHED_CLASS_EXT
-    # Strip pure runtime debug/instrumentation overhead (safe; does not affect BTF):
     scripts/config --disable DEBUG_PREEMPT --disable SCHEDSTATS --disable LATENCYTOP
     scripts/config --disable PROVE_LOCKING --disable DEBUG_ATOMIC_SLEEP
     ok "max-perf knobs applied (HZ=100, gov=performance, -O2, sched_ext+BTF kept, lazy preempt)"
   fi
 
-  # Removable storage + USB — PIN EXPLICITLY. localmodconfig (LEAN=yes) disables
-  # any module not loaded AT BUILD TIME, so anything not plugged in when you build
-  # gets silently dropped. On this box that killed USB_STORAGE/USB_UAS (no USB disk
-  # attached) and MMC_BLOCK (empty microSD slot) — leaving the numa kernel unable
-  # to see USB drives OR create /dev/mmcblk* for the SD reader. Core USB (USB,
-  # USB_XHCI_HCD, USB_DWC2, USB_HID) usually survives via the keyboard/mouse being
-  # present, but pin it too so a headless build can't strip it.
-  #   USB core stays =y (built-in, matches stock); leaf drivers are =m (modular),
-  #   which is fine since root is on NVMe so none are needed at early boot.
-  #   olddefconfig (below) resolves deps — SCSI/BLK_DEV_SD/MMC/SDHCI are already =y.
+  # localmodconfig drops any module not loaded at build time, which killed
+  # USB_STORAGE/USB_UAS (no USB disk attached) and MMC_BLOCK (empty microSD slot).
   scripts/config \
     --enable USB_SUPPORT --enable USB --enable USB_XHCI_HCD --enable USB_DWC2 \
     --module USB_HID --module HID_GENERIC \
@@ -188,21 +125,10 @@ if [ ! -f .config ] || [ "${RECONFIG:-}" = 1 ]; then
     --module EXFAT_FS --module NTFS3_FS --module NLS_ISO8859_1
   ok "storage/USB pinned (USB_STORAGE, USB_UAS, MMC_BLOCK, exFAT/NTFS) — survives LEAN"
 
-  # Tailscale / VPN networking — PIN EXPLICITLY. Tailscale runs a userspace
-  # WireGuard tunnel over a TUN device ('tailscale0'); without the TUN driver
-  # tailscaled dies at startup with 'CreateTUN("tailscale0") failed; /dev/net/tun
-  # does not exist' and systemd gives up after 5 rapid restarts. The stock raspi
-  # config ships TUN as =m, but this box's base config has "# CONFIG_TUN is not
-  # set" AND localmodconfig (LEAN=yes) drops any module not loaded at build time —
-  # so pin it. Build TUN *in* (=y) so /dev/net/tun always exists with no module
-  # autoload needed: this is exactly the failure we're fixing, so make it
-  # unrecurrable. The netfilter/iptables/nftables + masquerade modules let
-  # tailscaled install its packet-filter rules and enable subnet-router / exit-node
-  # operation (the matching IP-forwarding sysctl is a userspace setting tailscaled
-  # configures itself on `tailscale up --advertise-routes/--exit-node`, not a kernel
-  # option — nothing to set here).
-  # WIREGUARD (kernel) is optional for tailscale (it ships its own userspace impl)
-  # but cheap to keep for wg-quick / kernel-mode use.
+  # Tailscale runs userspace WireGuard over a TUN device; without it tailscaled
+  # dies with 'CreateTUN("tailscale0") failed; /dev/net/tun does not exist'. This
+  # box's base config has "# CONFIG_TUN is not set", so build TUN in (=y). The
+  # netfilter modules carry tailscaled's subnet-router / exit-node rules.
   scripts/config --enable TUN
   scripts/config \
     --module WIREGUARD \
@@ -215,21 +141,10 @@ if [ ! -f .config ] || [ "${RECONFIG:-}" = 1 ]; then
     --module NETFILTER_XT_TARGET_MASQUERADE
   ok "tailscale networking pinned (TUN builtin; iptables/nftables + masquerade for subnet-router/exit-node)"
 
-  # Localversion so the kernel is clearly ours and won't clash with the stock
-  # 7.0.0-10xx-raspi package (A/B boot keeps the stock one as fallback).
-  # CRITICAL: the name MUST be <version>-<ABInum>-<flavour>, i.e. include a
-  # NUMERIC ABI field ("-1-numa", not "-numa"). Ubuntu boots via flash-kernel's
-  # pi-try method, whose latest-kernel selection is:
-  #   linux-version list | include_only_flavors raspi raspi-realtime numa | linux-version sort | tail -1
-  # include_only_flavors only recognises the Debian/Ubuntu VERSION-ABINUM-FLAVOUR
-  # form. A bare "-numa" (no numeric ABI) is silently dropped by that filter, so
-  # flash-kernel decides the stock kernel is "latest", prints "Ignoring old or
-  # unknown version <kver>", exit 0 — and NEVER stages our kernel into
-  # /boot/firmware/new/. Result: reboots keep landing on stock and numa=fake is
-  # ignored. The "-1-" makes the name parseable and (7.0.x release > stock's
-  # 7.0.0) rank newest, so flash-kernel stages + tryboots it.
+  # The localversion MUST carry a numeric ABI field ("-1-numa", not "-numa"):
+  # flash-kernel's pi-try filters names through include_only_flavors, which only
+  # recognises VERSION-ABINUM-FLAVOUR, and a bare "-numa" is silently dropped.
   scripts/config --set-str LOCALVERSION "-1-numa" --disable LOCALVERSION_AUTO
-  # Out-of-tree module signing / debian cert paths break a bare `make`.
   scripts/config --disable SYSTEM_TRUSTED_KEYS   --disable SYSTEM_REVOCATION_KEYS 2>/dev/null || true
   scripts/config --set-str SYSTEM_TRUSTED_KEYS "" --set-str SYSTEM_REVOCATION_KEYS "" 2>/dev/null || true
   make olddefconfig
@@ -238,7 +153,6 @@ else
   skip ".config already exists (RECONFIG=1 to rebuild it)"
 fi
 
-#-------------------------------------------------------------------------------
 log "5  PRE-FLIGHT: verify CONFIG_NUMA_EMU=y before the long build"
 if ! grep -q '^CONFIG_NUMA_EMU=y' .config; then
   echo "   current state:"; grep -E 'CONFIG_NUMA(_EMU|_MEMBLKS)?=' .config || true
@@ -248,10 +162,8 @@ fi
 grep -E '^CONFIG_NUMA(_EMU|_MEMBLKS)?=y' .config | sed 's/^/   /'
 ok "CONFIG_NUMA_EMU=y confirmed"
 
-# Removable storage / USB must survive localmodconfig — a kernel that can't see
-# USB drives or the SD reader is a bad build. Assert the essentials are set (as
-# =y or =m) before the long compile. olddefconfig can silently drop any whose
-# dependency it couldn't satisfy, so check the *resolved* .config, not our intent.
+# olddefconfig can silently drop a symbol whose dependency it could not satisfy,
+# so assert the *resolved* .config before the long compile.
 MISSING=""
 for sym in USB USB_XHCI_HCD USB_STORAGE USB_UAS MMC_BLOCK MMC_SDHCI_BRCMSTB; do
   grep -qE "^CONFIG_$sym=[ym]$" .config || MISSING="$MISSING $sym"
@@ -267,18 +179,14 @@ fi
 grep -E '^CONFIG_(USB=|USB_STORAGE|USB_UAS|MMC_BLOCK|MMC_SDHCI_BRCMSTB|EXFAT_FS|NTFS3_FS)' .config | sed 's/^/   /'
 ok "USB mass storage + SD card reader (MMC_BLOCK) + exFAT/NTFS confirmed"
 
-# TUN is the hard requirement for tailscale (userspace WireGuard over /dev/net/tun).
-# It must be BUILT IN (=y) so the device always exists — assert that before the long
-# compile, else tailscaled fails with 'CreateTUN(...) /dev/net/tun does not exist'.
+# TUN must be =y so /dev/net/tun always exists; assert before the long compile.
 if ! grep -q '^CONFIG_TUN=y' .config; then
   echo "   current TUN state:"; grep -E '^(# )?CONFIG_TUN\b' .config | sed 's/^/     /'
   die "CONFIG_TUN is not built in (=y) — refusing to build a kernel tailscale can't
      use. It is pinned via 'scripts/config --enable TUN' in step 4; if it won't
      stick, its dependency (NET/INET) may have been trimmed by localmodconfig."
 fi
-# Netfilter bits (needed for subnet-router / exit-node use + tailscaled's firewall
-# rules) are modules; warn rather than abort if any didn't stick — a plain client
-# node works with TUN alone.
+# The netfilter extras only matter for exit-node use; a client works with TUN alone.
 TS_MISSING=""
 for sym in NF_TABLES IP_NF_IPTABLES NFT_MASQ NETFILTER_XT_MATCH_MARK; do
   grep -qE "^CONFIG_$sym=[ym]$" .config || TS_MISSING="$TS_MISSING $sym"
@@ -299,22 +207,16 @@ if [ "$MAXPERF" = yes ]; then
   fi
 fi
 
-#-------------------------------------------------------------------------------
 log "6  Build .deb packages (~1-2h on the Pi; JOBS=$JOBS)"
-# A reconfig invalidates any previously-built debs — clear them so we don't skip
-# the compile and ship a kernel that doesn't match the new .config.
 if [ "${RECONFIG:-}" = 1 ]; then
   rm -f "$KBUILD_DIR"/linux-{image,headers}-*-numa_*.deb 2>/dev/null || true
 fi
 if ls "$KBUILD_DIR"/linux-image-*-numa_*.deb >/dev/null 2>&1; then
   skip "built .debs already exist in $KBUILD_DIR — skipping compile (rm them to rebuild)"
 else
-  # bindeb-pkg produces installable linux-image + linux-headers debs in the
-  # parent dir. LOCALVERSION=-numa keeps them side-by-side with the stock kernel.
-  # NOTE: scripts/Makefile.dtbinst uses `install -D`, which races under -j (two
-  # jobs mkdir the same overlays/ dir → "cannot create directory"). If the
-  # parallel run trips on that, retry the packaging serially (compile is cached,
-  # so the retry is quick and race-free).
+  # scripts/Makefile.dtbinst uses `install -D`, which races under -j (two jobs
+  # mkdir the same overlays/ dir), so retry packaging serially; the compile is
+  # cached, so the retry is quick.
   if ! make -j"$JOBS" bindeb-pkg 2>&1 | tee "$KBUILD_DIR/build.log"; then
     echo "   (parallel packaging failed — retrying dtbs_install/packaging with -j1)"
     make -j1 bindeb-pkg 2>&1 | tee -a "$KBUILD_DIR/build.log" || die "kernel build failed (see $KBUILD_DIR/build.log)"
@@ -323,7 +225,6 @@ else
 fi
 ls -1 "$KBUILD_DIR"/linux-{image,headers}-*.deb 2>/dev/null | sed 's/^/   /' || true
 
-#-------------------------------------------------------------------------------
 log "7  Install"
 IMG_DEB="$(ls -t "$KBUILD_DIR"/linux-image-*-numa_*.deb 2>/dev/null | head -1)"
 HDR_DEB="$(ls -t "$KBUILD_DIR"/linux-headers-*-numa_*.deb 2>/dev/null | head -1)"
@@ -335,19 +236,12 @@ if [ "$DO_INSTALL" = yes ]; then
   sudo dpkg -i "$IMG_DEB" ${HDR_DEB:+"$HDR_DEB"} || die "dpkg -i failed"
   ok "installed: $(basename "$IMG_DEB")"
 
-  # Derive the kernel version (uname -r style) from the deb name:
-  #   linux-image-7.0.6-numa_7.0.6-1_arm64.deb -> 7.0.6-numa
   KVER="$(basename "$IMG_DEB")"; KVER="${KVER#linux-image-}"; KVER="${KVER%%_*}"
   [ -f "/boot/vmlinuz-$KVER" ] || die "dpkg installed but /boot/vmlinuz-$KVER is missing"
 
-  # Pi 5 firmware GATEKEEPER: os_check. By default (os_check=1) the Pi 5 bootloader
-  # refuses to boot a kernel it can't confirm is Pi5-compatible ("...OS does not
-  # support..."). Ubuntu's official raspi images carry a trailer that satisfies it;
-  # a locally-built bindeb-pkg kernel does NOT. So under the pi-try scheme the
-  # firmware rejects our kernel during the one-shot tryboot, piboot marks new/ as
-  # 'bad', and it falls back to stock — the kernel never boots. Disable os_check so
-  # the firmware will load our kernel. (Idempotent; inserted globally, before the
-  # first section, so it applies to both the normal and [tryboot] paths.)
+  # With os_check=1 (the default) the Pi 5 bootloader refuses a kernel it cannot
+  # confirm is Pi5-compatible. Ubuntu's raspi images carry a trailer that satisfies
+  # it; a bindeb-pkg kernel does not. Set before the first section so [tryboot] too.
   CFG=/boot/firmware/config.txt
   if [ -f "$CFG" ]; then
     if grep -qE '^\s*os_check\s*=\s*0' "$CFG"; then
@@ -363,19 +257,12 @@ if [ "$DO_INSTALL" = yes ]; then
     skip "no $CFG found — if boot fails with an 'OS does not support' error, set os_check=0 there"
   fi
 
-  # THE STEP THAT ACTUALLY MAKES IT BOOT. On RPi Ubuntu the firmware boots the
-  # image under /boot/firmware/ (os_prefix, e.g. current/vmlinuz) — NOT
-  # /boot/vmlinuz-*. dpkg's zz-flash-kernel hook is supposed to promote it there,
-  # but it is unreliable for a bindeb-pkg kernel and can be clobbered by a later
-  # flash-kernel run against the stock kernel. So promote it EXPLICITLY, by
-  # version, rather than trusting the hook.
+  # The firmware boots the image under /boot/firmware/ (os_prefix), not
+  # /boot/vmlinuz-*, and dpkg's zz-flash-kernel hook does not reliably promote it.
   if command -v flash-kernel >/dev/null; then
     log "7b Promote $KVER into /boot/firmware (flash-kernel)"
-    # flash-kernel's pi-try method only STAGES the kernel it considers "latest"
-    # among the accepted flavours; a version it can't rank it dismisses with
-    # "Ignoring old or unknown version ... (latest is ...)" AND STILL EXITS 0.
-    # So capture the output and treat that message as a hard failure — otherwise
-    # the numa kernel is never staged and the reboot lands back on stock.
+    # pi-try stages only the kernel it ranks "latest"; one it cannot rank it
+    # dismisses with "Ignoring old or unknown version ..." and still exits 0.
     FK_OUT="$(sudo flash-kernel "$KVER" 2>&1)"; printf '%s\n' "$FK_OUT" | sed 's/^/   /'
     if printf '%s' "$FK_OUT" | grep -q 'Ignoring old or unknown version'; then
       die "flash-kernel refused to stage $KVER (see 'Ignoring old or unknown version' above).
@@ -387,15 +274,9 @@ if [ "$DO_INSTALL" = yes ]; then
     skip "flash-kernel not installed — cannot promote to /boot/firmware automatically"
   fi
 
-  # DEVICE TREE FIX (pi-try + bindeb-pkg). flash-kernel's pi-try method copies the
-  # board DTB + overlays into new/ by searching /usr/lib/firmware/$KVER/device-tree/
-  # — where Ubuntu's PACKAGED kernels put them. A bindeb-pkg kernel instead ships
-  # them at /usr/lib/linux-image-$KVER/{broadcom/*.dtb,overlays/*.dtbo}, so the
-  # search finds nothing (watch for "find: ... device-tree: No such file" in 7b) and
-  # new/ ends up with NO DTB and an EMPTY overlays/. The Pi5 firmware cannot boot
-  # without bcm2712-rpi-5-b.dtb from the os_prefix dir → the tryboot is marked 'bad'
-  # and falls back to stock, WITHOUT the kernel ever executing (nothing in the
-  # journal). So copy the kernel's own device trees into new/ ourselves.
+  # pi-try searches /usr/lib/firmware/$KVER/device-tree/ for the board DTB, where
+  # Ubuntu's packaged kernels put them; a bindeb-pkg kernel ships them under
+  # /usr/lib/linux-image-$KVER/, so new/ ends up with no DTB and cannot boot.
   NEWDIR=/boot/firmware/new
   if [ -d "$NEWDIR" ]; then
     log "7b+ Stage device tree(s) + overlays into $NEWDIR (flash-kernel's pi-try misses them)"
@@ -409,20 +290,15 @@ if [ "$DO_INSTALL" = yes ]; then
     if [ -d "$OVL_SRC" ]; then
       sudo mkdir -p "$NEWDIR"/overlays
       sudo cp "$OVL_SRC"/*.dtbo "$NEWDIR"/overlays/ 2>/dev/null
-      # bring the overlay_map/README too if present (config.txt overlay resolution)
       sudo cp "$OVL_SRC"/overlay_map.dtb "$OVL_SRC"/README "$NEWDIR"/overlays/ 2>/dev/null || true
       ok "copied $(ls "$NEWDIR"/overlays/*.dtbo 2>/dev/null | wc -l) overlays into new/overlays"
     fi
-    # The board DTB MUST now be present in new/ or the firmware won't boot it.
     DTB_ID="bcm2712-rpi-5-b.dtb"
     sudo test -e "$NEWDIR/$DTB_ID" || die "$NEWDIR/$DTB_ID still missing after copy — tryboot would fail at the firmware"
     ok "$NEWDIR/$DTB_ID present — firmware has a device tree to boot"
   fi
 
-  # HARD-VERIFY the numa image actually reached the firmware boot dir. Compare by
-  # content: find any vmlinuz under /boot/firmware whose md5 matches our image.
-  # Without this a silent promotion failure sails straight through to DONE and you
-  # reboot back into the stock kernel (numa=fake is then silently ignored).
+  # A silent promotion failure otherwise lands the reboot back on stock.
   log "7c Verify the firmware boot image IS the numa kernel"
   NUMA_MD5="$(md5sum "/boot/vmlinuz-$KVER" | awk '{print $1}')"
   FW_MATCH="$(find /boot/firmware -maxdepth 2 -type f -name 'vmlinuz*' 2>/dev/null | while read -r f; do
@@ -449,7 +325,6 @@ else
   echo "     sudo flash-kernel <version>   # e.g. 7.0.6-numa — promote into /boot/firmware, else it won't boot"
 fi
 
-#-------------------------------------------------------------------------------
 log "DONE"
 cat <<EOF
    Next:

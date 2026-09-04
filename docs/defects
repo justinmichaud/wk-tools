@@ -53,39 +53,15 @@ NEEDS YOU
 OWED, WITH THE DECISION ALREADY MADE
 ================================================================================
 
-- The podman machine recreate (yours: the classifier refuses it from an
-  agent). `./setup --stage machine --dry-run` reports what goes: the test
-  leftover wk-test-isvvgw, 14G mirror, 21G base snapshots, 26G cache, an
-  empty bench. Before destroying, the current machine holds the only copy of
-  the two deploy keys; either re-register them (`wk key register`, then add
-  the new public keys to the forks on GitHub) or carry them across by hand
-  first:
-      podman machine ssh wk -- tar -C /var/lib/wk -cf - secrets \
-        | tar -C ~/.config/wk -xf -      # then move build_key_* (private
-                                          # halves) into ~/.config/wk/push-keys
-  Then:
-      claude auth login          # if not already
-      wk key set claude-login
-      wk key set github-pat
-      WK_YES=1 ./setup           # destroys and recreates wk with three mounts
-      wk sync
+- `wk sync`, then the machine's own tests:
       env -u WK_NAME -u WK_TARGET -u WK_TARGET_KIND python3 -m unittest \
         tests.test_machine_mounts tests.test_push_agent tests.test_build
-  The two unverified assumptions those tests settle: applehv honours `:ro`
-  on a `--volume`, and a container's own uid can write+rename inside the
-  agent-rw virtiofs mount. If the second fails, `wk_agent_rw_dir` gets a
-  VM-local answer plus a seed step; nothing downstream changes.
-
-Done. One issue:
-
-==> stage: vmtools
-error: /opt/wk-tools/wk is not executable inside 'wk', so nothing in
-    there can run this tooling. The machine mounts this checkout there when it
-    is created:  ./setup --stage machine
-warning: stage 'vmtools' failed (exit 1) -- continuing with the remaining stages
-
-tolken:host ~/Development/wk-tools main* ❯ wk sync
-bash: line 1: /opt/wk-tools/wk: No such file or directory
+  The machine is recreated and the deploy keys are regenerated, so both forks
+  need `wk key register` and the new public keys added on GitHub before
+  anything can push. One assumption is still unsettled: that a container's own
+  uid can write and rename inside the agent-rw virtiofs mount. If it cannot,
+  `wk_agent_rw_dir` gets a VM-local answer plus a seed step and nothing
+  downstream changes.
 
 - Live check after the recreate: `wk new <ws>`; `wk push on`;
   `podman machine ssh wk -- 'SSH_AUTH_SOCK=$XDG_RUNTIME_DIR/wk/ssh-agent.sock ssh-add -l'`;
@@ -108,6 +84,24 @@ bash: line 1: /opt/wk-tools/wk: No such file or directory
 ================================================================================
 STILL OPEN
 ================================================================================
+
+- A wk user service that starts and then dies is reported as started. The
+  vmtools stage asks `systemctl --user is-active --quiet` straight after
+  `enable --now`, and a service that execs and fails a fraction of a second
+  later answers active at that instant (measured: wk-github-inject with no
+  PrivateTmp restarted 36 times while ./setup called it started). The three
+  services do this three times, so the fix is one helper beside
+  `unit_install` (host/units.sh) that asks systemd for readiness rather than
+  for liveness at t=0 -- `Type=notify` and a sd_notify in the two Python
+  services is the off-the-shelf answer; a settle-and-look-again is not.
+
+- Two podman bugs to upstream, both worked around here and both silent:
+  `podman machine init --volume src:target:ro` generates a systemd .mount
+  unit with no `ro` in Options (podman 5.4, applehv), so the guest mounts it
+  read-write and a write reaches the host; and it names the unit after the
+  target it was handed without canonicalising it against the machine OS, so a
+  target under a symlinked directory produces a unit systemd refuses to mount
+  and a machine that comes up without it.
 
 - The `remote` target has no ssh-agent, so `wk push` on a build box reports
   "always live, no switch on this machine" (remote/provision.sh points

@@ -1,10 +1,10 @@
 #!/bin/sh
 # Escalating recovery for a WiFi-uplinked tailscale subnet router.
 #
-# Both phones' WiFi is the weakest link: the Librem 5's RS9116 wedges its
-# firmware in a way a link bounce does not clear, and the PinePhone's 8723cs
-# drops associations under load. So recovery is a ladder, not a retry -- each
-# consecutive failed check climbs one rung, any success resets to the bottom:
+# The Librem 5's RS9116 wedges its firmware in a way a link bounce does not
+# clear, and the PinePhone's 8723cs drops associations under load. So recovery
+# is a ladder: each consecutive failed check climbs one rung, any success
+# resets to the bottom.
 #
 #   1      log only (most failures are a roam that recovers itself)
 #   2-3    bounce the WiFi interface
@@ -14,11 +14,9 @@
 #   10+    reboot -- rate limited, never in the first 15 minutes of uptime
 #
 # The rate limit matters: an unconditional reboot rung turns a clearing fault
-# into a device that reboots forever and that you cannot walk up to.
-#
-# Runs under supervise-daemon rather than a cron/timer one-shot: OpenRC has no
-# timer units, and the escalation counter is a live variable rather than a
-# file that would need to survive a crash.
+# into a device that reboots forever. Runs under supervise-daemon rather than a
+# timer one-shot: OpenRC has no timer units, and the escalation counter is a
+# live variable rather than a file that would have to survive a crash.
 set -u
 
 INTERVAL="${WK_BRIDGE_NETWATCH_INTERVAL:-60}"
@@ -53,11 +51,9 @@ svc() {
 NM_SVC=$(svc networkmanager NetworkManager) || NM_SVC=""
 TS_SVC=$(svc tailscale tailscaled) || TS_SVC=""
 
-# Asked of the *reservations*, not the lease file: they're declared rather
-# than discovered, so a yes is unambiguous. A segment with none declared falls
-# back to the lease file -- the only evidence there is in that case, but not a
-# reliable one, since these leases never expire and it records history, not
-# the present.
+# Asked of the reservations, which are declared rather than discovered. A
+# segment with none declared falls back to the lease file, which records
+# history rather than the present: these leases never expire.
 segment_answers() {
     local l ip any=""
     for l in $leases; do
@@ -94,8 +90,8 @@ healthy() {
     [ "$(printf '%s' "$st" | jq -r '.Self.Online')" = true ] \
         || { log "tailscale reports self offline"; return 1; }
 
-    # Noted, never escalated on: an unapproved route is a tailnet-policy
-    # problem no reboot fixes. `wk bridge status` is where this gets noticed.
+    # Never escalated on: an unapproved route is a tailnet-policy problem no
+    # reboot fixes.
     if [ -n "$segment" ]; then
         printf '%s' "$st" | jq -e --arg r "$segment" \
             '.Self.PrimaryRoutes // [] | index($r)' >/dev/null 2>&1 \
@@ -139,16 +135,14 @@ while :; do
     WIFI=$(wifi_if)
     [ -n "$WIFI" ] || { log "no wifi device present"; WIFI=wlan0; }
 
-    # Every pass: power save comes back on after a reassociation on both
-    # ends, and is the single most reliable way to turn a working uplink into
-    # one that answers every third ping.
+    # Every pass: power save comes back on after a reassociation on both ends,
+    # and turns a working uplink into one that answers every third ping.
     iw dev "$WIFI" set power_save off 2>/dev/null || true
 
-    # Downstream leg: checked but never escalated on -- losing it is a dock or
-    # cable fault, and rebooting the phone over it would take out the uplink
-    # that is the only way to be told about any of this. Run every pass, not
-    # only when the interface is missing, since wk-bridge-usb-host's companion-
-    # controller trap (see there) leaves it present but forty times too slow.
+    # Downstream leg: never escalated on -- losing it is a dock or cable
+    # fault, and rebooting over it takes out the uplink. Run every pass rather
+    # than only when the interface is missing, since wk-bridge-usb-host's
+    # companion-controller trap leaves it present but forty times too slow.
     /usr/local/sbin/wk-bridge-usb-host 2>/dev/null || true
 
     if [ ! -e "/sys/class/net/$iface" ]; then
@@ -157,19 +151,17 @@ while :; do
         if [ -e "/sys/class/net/$iface" ]; then
             log "$iface came back"
         else
-            # Not "check the dock/power/cable": a dock can be powered, cabled
-            # and in host mode with the NIC still never enumerating.
-            # wk-bridge-healthcheck tells the cases apart; this just points at it.
+            # A dock can be powered, cabled and in host mode with the NIC
+            # still never enumerating; wk-bridge-healthcheck tells them apart.
             log "$iface still absent -- wk-bridge-healthcheck says which fault"
         fi
     elif [ "$(cat "/sys/class/net/$iface/carrier" 2>/dev/null)" = 1 ] \
          && ! segment_answers; then
         # Carrier up but nothing answers: a client asks for an address only
-        # when the link comes up, so one that missed that window stays without
-        # one -- only taking the carrier away and back makes it ask again.
-        # Reachability, not an empty lease file, is the trigger: these leases
-        # never expire, so an already-addressed client re-uses it via ARP
-        # after a carrier drop and never files another request.
+        # when the link comes up, so one that missed that window needs the
+        # carrier taken away and back. Reachability, not an empty lease file,
+        # is the trigger: these leases never expire, so an already-addressed
+        # client re-uses one via ARP and never files another request.
         nopeer=$((nopeer + 1))
         # Two passes before flapping, except right after this phone's own
         # boot: measured, a board's DHCPDISCOVER can land 134s after this

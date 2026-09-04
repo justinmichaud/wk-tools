@@ -4,30 +4,22 @@
 # comes out is the same disk image `wk sysimage ls`/`write` handle for every
 # builder, so the two share the scan and the write path and nothing before it.
 #
-# Differs from the distro builder in three ways: it drives a workspace
-# instead of running on the host, since hours of compilation need a
-# toolchain and 100 GB of scratch, which a workspace is for and the
-# workstation deliberately is not (the "host stays boring" rule in
-# README.md); its spec is WebKit's own Tools/yocto on the release branch,
-# not a profile in this repo, so it pins the same commits as the WebKit that
-# will run on the board; and DL_DIR/SSTATE_DIR are store-backed cache mounts
-# (targets/container.sh), so `wk rm` on the build workspace throws away
-# TMPDIR but keeps what makes the next build fast.
+# Drives a workspace rather than running on the host: hours of compilation need
+# a toolchain and 100 GB of scratch. Its spec is WebKit's own Tools/yocto on
+# the release branch, not a profile in this repo, so it pins the same commits
+# as the WebKit that will run on the board; DL_DIR/SSTATE_DIR are store-backed
+# cache mounts (targets/container.sh), so `wk rm` on the build workspace throws
+# away TMPDIR but keeps what makes the next build fast.
 #
-# The build is hours, so nothing may depend on the driving process staying
-# alive: under `podman exec` a detached process does not survive its client
-# even under `setsid`, measured rather than assumed (t_spawn,
-# targets/container.sh). The stage runs through `t_spawn` with its output in
-# a host bind mount, so `tail -f` follows it with no podman in the way, and
-# this end can be killed without the build noticing. `--detach` only decides
-# whether we wait; `--stop` ends a detached one.
+# Under `podman exec` a detached process does not survive its client even under
+# `setsid`, so the stage runs through `t_spawn` with its output in a host bind
+# mount: `tail -f` follows it with no podman in the way and this end can be
+# killed without the build noticing. `--detach` only decides whether we wait;
+# `--stop` ends a detached one.
 
-# --- where the pieces are ----------------------------------------------------
 
-# The build workspace's default name. Derived from the profile so that two
-# profiles cannot land in one workspace: their WebKitBuild/CrossToolChains
-# subdirectories would differ, but their checkouts are on different branches
-# and only one branch can be checked out at a time.
+# Derived from the profile so two profiles cannot land in one workspace: their
+# checkouts are on different branches, and only one can be checked out.
 yocto_ws_default() { echo "yocto-$1"; }
 
 # Inside the workspace. The layout is cross-toolchain-helper's, not ours.
@@ -40,7 +32,6 @@ yocto_log()    { echo "$(wk_ws_dir "$1")/home/yocto-$2.log"; }
 yocto_pidfile() { echo "$(wk_ws_dir "$1")/home/yocto-$2.pid"; }
 yocto_status() { echo "$(wk_ws_dir "$1")/yocto.status"; }
 
-# --- the workspace image -----------------------------------------------------
 
 # A plain Ubuntu, not the wkdev SDK image: 24.04 is a supported Yocto
 # scarthgap build host, and the SDK image is three releases past one
@@ -48,10 +39,9 @@ yocto_status() { echo "$(wk_ws_dir "$1")/yocto.status"; }
 # the pinned poky moves to a release whose supported host is newer.
 YOCTO_BASE_IMAGE="${WK_YOCTO_BASE:-docker.io/library/ubuntu:24.04}"
 
-# The workspace image for a Yocto build, built if it is not already there.
-# Tagged with the base's tag *and* a digest of the Containerfile, so editing
-# the spec builds a new image instead of `podman image exists` reusing a
-# layer that no longer matches it.
+# Tagged with the base's tag and a digest of the Containerfile, so editing the
+# spec builds a new image instead of `podman image exists` reusing a layer that
+# no longer matches.
 yocto_ensure_image() {
     local base="$YOCTO_BASE_IMAGE" derived spec
     spec="$WK_ROOT/container/yocto/Containerfile"
@@ -76,12 +66,10 @@ yocto_ensure_image() {
     export WK_SDK_IMAGE
 }
 
-# --- the workspace -----------------------------------------------------------
 
 # Make sure there is a workspace, on the right branch, ready to build in.
-# Created rather than demanded: it is derivable from the profile, so there
-# is nothing to ask the user to type first. An existing one is reused --
-# the sstate cache needs a workspace to sit next to.
+# Created rather than demanded, since it is derivable from the profile; an
+# existing one is reused, the sstate cache needing a workspace to sit next to.
 yocto_ensure_ws() {
     local ws="$1" branch="$2"
 
@@ -94,10 +82,8 @@ yocto_ensure_ws() {
         info "creating workspace '$ws' for the Yocto build"
         "$WK_ROOT/wk" new "$ws" || die "could not create workspace '$ws'"
     else
-        # An existing workspace is pinned to whatever image it was created
-        # from; nothing can migrate a running container to a new one, so a
-        # mismatch is reported rather than silently building with stale
-        # host packages.
+        # An existing workspace is pinned to the image it was created from and
+        # nothing can migrate a running container, so a mismatch is reported.
         local was
         was=$(podman container inspect "wk-$ws" --format '{{.ImageName}}' 2>/dev/null) || was=""
         if [ -n "$was" ] && [ "$was" != "$WK_SDK_IMAGE" ]; then
@@ -133,14 +119,9 @@ yocto_ensure_ws() {
     fi
 }
 
-# --- running it --------------------------------------------------------------
 
-# Does the branch have a section for the target this profile names?
-#
-# What a dry run can honestly say about the cross-target. The check below needs
-# the branch checked out, which a dry run has usually not done yet -- so it says
-# which of the two it is rather than printing the target and letting the reader
-# assume it was verified.
+# What a dry run can honestly say about the cross-target: the check below needs
+# the branch checked out, which a dry run has usually not done yet.
 yocto_target_note() { # <workspace>
     local ws="$1" have
     [ "$(t_info "$ws")" = absent ] && {
@@ -158,25 +139,22 @@ yocto_target_note() { # <workspace>
     esac
 }
 
-# Asked here rather than left to bitbake: the failure is otherwise a
-# config-parse error inside a spawned build whose log the caller has not
-# been told to read yet, for a fix the caller can see from this message.
+# Asked here rather than left to bitbake, whose failure is a config-parse error
+# inside a spawned build whose log the caller has not been told to read.
 yocto_check_target() {
     local ws="$1" conf=/src/WebKit/Tools/yocto/targets.conf have
-    # A profile that declares a port has no section *yet*: the build writes one
-    # into the checkout before configuring, and its own --print-available-targets
-    # check is what then refuses if the port did not take. Refusing here would
-    # refuse the very case the port exists for.
+    # A profile that declares a port has no section yet: the build writes one
+    # into the checkout before configuring, and its own
+    # --print-available-targets check refuses if the port did not take.
     if [ -n "${YOC_PORT_TARGET_FROM:-}" ]; then
         info "$YOC_BRANCH has no [$YOC_TARGET]; the build derives one from [$YOC_PORT_TARGET_FROM]"
         return 0
     fi
     have=$(t_exec "$ws" bash -c "grep -c '^\[$YOC_TARGET\]' $conf 2>/dev/null || echo 0" \
         2>/dev/null | tr -d '\r' | tail -1)
-    # Only a count is an answer. `!= 0` reads *anything* unexpected -- a failed
-    # t_exec, a container that is not up, one line of noise -- as "the section
-    # is there", which costs hours: a dry run reporting a target fine on a
-    # branch that has never had it.
+    # Only a count is an answer: `!= 0` reads anything unexpected -- a failed
+    # t_exec, a container that is not up, a line of noise -- as "the section is
+    # there".
     case "$have" in
         ''|*[!0-9]*)
             die "could not read $conf in '$ws', so whether $YOC_BRANCH has a
@@ -210,10 +188,9 @@ yocto_check_target() {
 $(t_exec "$ws" bash -c "sed -n 's/^\[\(.*\)\]/      \1/p' $conf" 2>/dev/null | tr -d '\r')"
 }
 
-# Evidence, not the status file: the pid is read from the workspace and
-# tested in the workspace, the only namespace the number means anything in.
-# The wrapper outlives a failed command briefly, so a restart inside that
-# window is refused as "already running" until it exits or `--stop`.
+# The pid is read from the workspace and tested in the workspace, the only
+# namespace the number means anything in. The wrapper outlives a failed command
+# briefly, so a restart inside that window is refused as "already running".
 yocto_running() {
     local ws="$1" stage="$2" pid
     pid=$(cat "$(yocto_pidfile "$ws" "$stage")" 2>/dev/null | tr -dc '0-9') || true
@@ -221,10 +198,9 @@ yocto_running() {
     t_exec "$ws" kill -0 "$pid" >/dev/null 2>&1
 }
 
-# Every stage, not just the one asked for: the stages share a build
-# directory, so checking only the requested one would let `--stage fetch`
-# start on top of a live `--stage image`, getting as far as two cookers.
-# Prints the stage it found, so the refusal can name it.
+# Every stage, not just the one asked for: the stages share a build directory,
+# so checking only the requested one lets `--stage fetch` start on top of a
+# live `--stage image` and get as far as two cookers.
 YOCTO_STAGES="layers fetch image toolchain webkit"
 yocto_any_running() {
     local ws="$1" s
@@ -254,8 +230,7 @@ yocto_spawn() {
     build_admit "the $stage build" "$(build_jobs)"
     build_record "wk sysimage $stage $ws" "$(envelope_cores)" "$(envelope_mem_mb)" "ws:$ws:yocto-$stage.pid"
 
-    # Truncated, not unlinked: `tail -f` follows an inode, so deleting it
-    # would leave a follower staring at a file nobody writes to any more.
+    # Truncated, not unlinked: `tail -f` follows an inode.
     : > "$log"
     rm -f "$pid_host"
 
@@ -266,8 +241,7 @@ yocto_spawn() {
         "$(t_tools "$ws")/image/yocto-build.sh" "$@" \
         || die "could not start the build in '$ws'"
 
-    # A pid file that never appears means the exec itself failed, and reporting
-    # "started" then would leave a watcher waiting on nothing.
+    # A pid file that never appears means the exec itself failed.
     local i=0
     while [ ! -s "$pid_host" ]; do
         i=$((i + 1)); [ "$i" -gt 50 ] && die "the build did not start in '$ws' (no pid after 5s)
@@ -277,13 +251,12 @@ $(sed 's/^/    /' "$log" 2>/dev/null | tail -5)"
     debug "stage $stage running as pid $(cat "$pid_host") inside '$ws'"
 }
 
-# Stop a detached build. Kills the bitbake processes as well as the wrapper
-# -- the wrapper is a shell waiting on cross-toolchain-helper, and killing
-# only it leaves bitbake building with nothing recording that it is.
+# Kills the bitbake processes as well as the wrapper, which is only a shell
+# waiting on cross-toolchain-helper.
 #
 # SIGTERM, not SIGKILL: bitbake writes its own state and sstate cache as it
-# goes, and letting it close them is the difference between a resumable
-# build and a corrupt cache.
+# goes, and closing them cleanly is the difference between a resumable build
+# and a corrupt cache.
 yocto_stop() {
     local ws="$1" stage="$2" pid
     pid=$(cat "$(yocto_pidfile "$ws" "$stage")" 2>/dev/null | tr -dc '0-9') || true
@@ -311,14 +284,10 @@ yocto_stop() {
     info "stopped. sstate is intact, so restarting resumes rather than starts over."
 }
 
-# Wait for a stage, reporting progress, and return its exit status.
-#
-# Written rather than reusing run_watched(), which watches a *child* -- the
-# whole point of the detach above is that this build is not one.
-#
-# Does NOT kill a stalled build, unlike run_watched: a bitbake task can be
-# silent for a long time on legitimate work, and killing one costs hours
-# sstate cannot always give back.
+# Wait for a stage, reporting progress, and return its exit status. Not
+# run_watched(), which watches a child; and unlike run_watched this does NOT
+# kill a stalled build, a bitbake task being legitimately silent for a long
+# time.
 yocto_wait() {
     local ws="$1" stage="$2"
     local log start now idle warned=0 last_beat
@@ -347,13 +316,11 @@ yocto_wait() {
     done
 
     # The exit status of a process we did not fork cannot be waited for, so
-    # the wrapper's own marker line is the verdict: a build whose container
-    # was killed leaves a log with no marker.
+    # the wrapper's own marker line is the verdict.
     grep -q "^wk-yocto: stage '$stage' done" "$log" 2>/dev/null && return 0
     return 1
 }
 
-# --- the build ---------------------------------------------------------------
 
 yocto_dry_run() {
     local ws="$1" stage="$2"
@@ -407,9 +374,8 @@ yocto_build() {
             # against numbers taken without it in the fleet.
             --no-tailnet)     YOC_TAILNET=0 ;;
             --tailnet)        YOC_TAILNET=1 ;;
-            # The webkit stage as a slot: WebKit's own build-webkit
-            # --cross-target of one commit, packed beside the image
-            # (`wk sysimage webkit`; image_slot_dir, lib/image.sh).
+            # The webkit stage as a slot: build-webkit --cross-target of one
+            # commit, packed beside the image (image_slot_dir, lib/image.sh).
             --commit)         commit="${2:-}"; shift ;;
             --slot)           slot="${2:-}"; image_check_slot_name "$slot"; shift ;;
             *) die "usage: wk sysimage build $profile [--dry-run|--workspace <name>|--stage <name>|
@@ -419,18 +385,15 @@ yocto_build() {
         shift
     done
 
-    # The profile's value unless the flag overrode it: the expensive choice is
-    # written down in one place rather than typed per invocation.
     [ -n "$chromium" ] || chromium="${YOC_CHROMIUM:-1}"
 
     [ -n "$ws" ] || ws=$(yocto_ws_default "$profile")
     require_name "$ws"
     [ -n "$keep_work" ] && YOC_RM_WORK=0
 
-    # One stage per invocation: the wrapper syncs layers and writes
-    # local.conf before whatever it was asked for, so the stages are a
-    # *depth*, not a pipeline this end has to sequence -- which is what
-    # makes `--detach` honest.
+    # One stage per invocation: the wrapper syncs layers and writes local.conf
+    # before whatever it was asked for, so the stages are a depth rather than a
+    # pipeline this end sequences.
     stage="${stage:-image}"
     if [ -n "$commit$slot" ]; then
         [ "$stage" = webkit ] || die "--commit/--slot belong to the webkit stage (wk sysimage webkit $profile)"
@@ -479,13 +442,9 @@ yocto_build() {
 
     # Free space, before anything is created: TMPDIR lands in the workspace's
     # overlay, on the store's filesystem, and the thresholds below are
-    # measured, not estimated.
-    #
-    # Per stage, because they are not the same size: bitbaking a whole
-    # distribution unpacks and builds every recipe in it, while the webkit
-    # stage is one cmake/ninja tree against a toolchain that is already there
-    # -- an ordinary build's figure (WK_BUILD_DISK_GB), and charging it the
-    # image's would refuse a slot build on a disk that can hold several.
+    # measured. Per stage, since bitbaking a whole distribution unpacks and
+    # builds every recipe in it while the webkit stage is one cmake/ninja tree
+    # against a toolchain already there (WK_BUILD_DISK_GB).
     local need_gb what
     case "$stage" in
         webkit)
@@ -506,9 +465,8 @@ yocto_build() {
     built=$(date -u +%Y-%m-%dT%H:%M:%SZ)
     id="$profile-$(date -u +%Y%m%dT%H%M%SZ)"
 
-    # The workspace lock, for the whole build: what must not happen is a `wk
-    # build` in the same workspace at the same time -- two builds in one
-    # checkout corrupt both -- and that is what this lock is.
+    # The workspace lock, for the whole build: two builds in one checkout
+    # corrupt both.
     hold_lock "ws-$ws" -w "${WK_BUILD_LOCK_WAIT:-3600}"
 
     cat > "$(yocto_status "$ws")" <<EOF
@@ -563,11 +521,9 @@ EOF
         return 0
     fi
 
-    # No import: the image stays where bitbake left it (yocto_image_dir),
-    # and 'wk sysimage ls' reads it there (image_workspace_scan, lib/image.sh).
-    # The fleet integration -- identity marker, watchdog, driving key,
-    # retargeted root -- is applied once, at write time, by
-    # 'wk sysimage write --from' (cmd/sysimage).
+    # No import: the image stays where bitbake left it (yocto_image_dir) and
+    # 'wk sysimage ls' reads it there (image_workspace_scan, lib/image.sh). The
+    # fleet integration is applied at write time by 'wk sysimage write --from'.
     sed -i 's/^state=running/state=ok/' "$(yocto_status "$ws")"
     local wic; wic="$(yocto_image_dir "$YOC_TARGET")/$YOC_IMAGE.wic.xz"
     info "built $id  ($(du -h "$wic" 2>/dev/null | cut -f1))"

@@ -1,27 +1,19 @@
 #!/usr/bin/env bash
-# rpi5-stress.sh — RIGOROUS validation of the CPU overclock (arm_freq, currently 2.8GHz).
-# Research finding: short stress tests can PASS while compute/NEON workloads FAIL
-# on an under-volted OC. So we use --verify (detects silent miscalculations from
-# instability) and cycle ALL cpu methods (incl. NEON) for 10 min.
-# If this fails: add `over_voltage_delta=25000` (then 50000) to config.txt [pi5].
-# Run AFTER reboot:  sudo bash ~/rpi5-tune/rpi5-stress.sh
+# Validate the CPU overclock, after a reboot. A short stress test passes while
+# compute/NEON workloads fail on an under-volted OC, hence --verify.
 set -euo pipefail
 command -v stress-ng >/dev/null || {
   echo "installing stress-ng..."
   apt-get install -y stress-ng >/dev/null 2>&1 || { echo "ERROR: could not install stress-ng" >&2; exit 1; }
 }
 
-# vcgencmd (temp/clock/throttle) needs /dev/vcio, which is root-only. Without sudo
-# it returns nothing, temp/throttle monitoring is blank, and an empty $t makes
-# the awk comparison below fail with a syntax error (harmless, but looks like an
-# error). Warn loudly — stress-ng itself still runs and its exit code is valid.
+# vcgencmd needs /dev/vcio: without sudo an empty $t breaks the awk below.
 [ "$(id -u)" -eq 0 ] || echo "WARNING: not running as root — vcgencmd sensors need sudo; temp/throttle will be blank. For full monitoring: sudo bash $0"
 
 echo "Clock: $(vcgencmd measure_clock arm 2>/dev/null | cut -d= -f2 | awk '{printf "%.0f MHz",$1/1e6}')   throttled: $(vcgencmd get_throttled 2>/dev/null)"
 echo "Running 10-min CPU torture (--verify, all methods incl. NEON) + monitoring..."
-# Per-run private temp file. A hardcoded /tmp/stress.err collides across users:
-# fs.protected_regular=2 then blocks even root from writing a file it doesn't own
-# in sticky /tmp, which silently aborts the launch and fakes a "NOT STABLE" result.
+# fs.protected_regular=2 blocks even root from writing a file it does not own in
+# sticky /tmp, so a hardcoded path silently aborts the launch.
 ERR="$(mktemp "${TMPDIR:-/tmp}/rpi5-stress.XXXXXX.err")"
 trap 'rm -f "$ERR"' EXIT
 stress-ng --cpu 4 --cpu-method all --verify --timeout 600s --metrics-brief 2>"$ERR" &

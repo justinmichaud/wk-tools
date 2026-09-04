@@ -43,10 +43,10 @@ set -euo pipefail
 WK_ROOT="${WK_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
 . "$WK_ROOT/lib/common.sh"
 
-# Replace <target> with the content already sitting in <tmp> (created next to
-# <target> by the caller, so the rename below is same-filesystem) only if it
-# differs -- so an unchanged run doesn't bump the mtime, and a process killed
-# before this point never touches <target> at all.
+# Replace <target> with the content already in <tmp> (created next to <target> by
+# the caller, so the rename is same-filesystem) only if it differs -- so an
+# unchanged run does not bump the mtime, and a process killed before this point
+# never touches <target>.
 atomic_update() { # <target> <tmp> <label>
     local target="$1" tmp="$2" label="$3"
     if cmp -s "$tmp" "$target" 2>/dev/null; then
@@ -58,10 +58,9 @@ atomic_update() { # <target> <tmp> <label>
     fi
 }
 
-# Machine-specific and secret entries dropped from a live `dconf dump /`:
-# WiFi 802.1X UUIDs, a weather location, terminal profile UUIDs and a GTK
-# last-folder path -- none of which belong in a repo, and all of which make
-# the file differ on every single run.
+# Machine-specific and secret entries dropped from a live `dconf dump /`: WiFi
+# 802.1X UUIDs, a weather location, terminal profile UUIDs and a GTK last-folder
+# path -- all of which make the file differ on every run.
 dconf_filter() {
     awk '
         /^\[/ {
@@ -83,9 +82,8 @@ dconf_filter() {
 macos_backup() {
     local conf="$WK_ROOT/host/macos/defaults.conf" tmp domain key type cur
 
-    # Preserve the file's comments and ordering, refreshing only the values.
-    # A regenerated-from-scratch file would lose the rationale for each
-    # choice, which is most of what makes the file worth keeping.
+    # Preserve the file's comments and ordering, refreshing only the values: a
+    # regenerated file would lose the rationale for each choice.
     tmp=$(mktemp "$conf.XXXXXX")
     while IFS= read -r line; do
         case "$line" in
@@ -119,10 +117,8 @@ linux_backup() {
     local out="$WK_ROOT/host/linux/config.dconf" tmp header
 
     # The file's own leading comment block (everything before the first
-    # `[section]` line) documents why each group of settings is tracked;
-    # unlike defaults.conf this file is otherwise regenerated whole from the
-    # live dump, so that header is carried forward by hand here rather than
-    # being something the dump could ever reproduce.
+    # `[section]` line) documents why each group is tracked; the rest is
+    # regenerated whole from the live dump, so the header is carried forward here.
     tmp=$(mktemp "$out.XXXXXX")
     if [ -f "$out" ]; then
         header=$(awk '/^\[/ { exit } { print }' "$out")
@@ -225,9 +221,8 @@ main() {
     fi
 }
 
-# Guards `main` so tests can `source cmd/backup` (with WK_ROOT already
-# pointed at a scratch tree) and call atomic_update/dconf_filter/etc.
-# directly, without running the real backup as a side effect.
+# Guards `main` so tests can `source cmd/backup` (with WK_ROOT pointed at a
+# scratch tree) and call atomic_update/dconf_filter directly.
 if [ "${BASH_SOURCE[0]}" = "$0" ]; then
     main "$@"
 fi

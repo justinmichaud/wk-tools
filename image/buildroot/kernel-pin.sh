@@ -4,22 +4,18 @@
 # kernel for a buildroot image, and print the tarball it made.
 #
 # A profile that declares its kernel rather than building one
-# (BR_KERNEL_DEB_URL, image/configs/<profile>.conf) needs four things that
-# must agree about a version -- the kernel, its modules, its device trees and
-# its overlays. A Raspberry Pi kernel package carries all four, so the pin is
-# one artifact and one hash.
+# (BR_KERNEL_DEB_URL, image/configs/<profile>.conf) needs the kernel, its
+# modules, its device trees and its overlays to agree about a version; a
+# Raspberry Pi kernel package carries all four, so the pin is one artifact and
+# one hash.
 #
-# The preparation happens here, on the machine that fetched it, because this
-# is the machine with `depmod`: the build image has dpkg-deb and xz but no
-# kmod, and doing it there would mean adding a tool to a container image to
-# run a command this side already has. What crosses into the build is a
-# finished tree, not a package to unpack.
+# Prepared here rather than in the build image, which has dpkg-deb and xz but
+# no kmod for the depmod below.
 #
-# The modules are decompressed and depmod re-run over the result. These
-# images run BusyBox modprobe against modules.dep; leaving the modules as
-# .ko.xz -- or decompressing them while modules.dep still names the .xz
-# paths -- leaves every module unloadable, wifi first among them, which is
-# the whole tailnet.
+# The modules are decompressed and depmod re-run over the result: these images
+# run BusyBox modprobe against modules.dep, and leaving .ko.xz -- or
+# decompressing while modules.dep still names the .xz paths -- leaves every
+# module unloadable, wifi first among them.
 
 set -euo pipefail
 

@@ -1,0 +1,29 @@
+[Unit]
+Description=wk workspace fleet-request broker
+Documentation=file://@WK_ROOT@/container/broker/wk-broker.py
+
+[Service]
+# Ready is "the socket is bound", for the reason wk-github-inject.service gives.
+Type=notify
+NotifyAccess=all
+ExecStart=/usr/bin/python3 @WK_ROOT@/container/broker/wk-broker.py
+Environment=WK_ROOT=@WK_ROOT@
+Environment=WK_STORE=@WK_STORE@
+Restart=on-failure
+RestartSec=2
+# %t/wk holds the sockets a workspace can see, and containers bind-mount
+# that directory: preserved across restarts, or systemd deleting it on stop
+# leaves every running workspace holding a mount of a deleted directory.
+RuntimeDirectory=wk
+RuntimeDirectoryMode=0700
+RuntimeDirectoryPreserve=yes
+
+# Not sandboxed the way wk-proxy is: the proxy only opens sockets, but this
+# one runs `wk boot`/`wk pi`, reading what system a device's own boot
+# partition holds and ssh-ing to a board -- it is the thing with the
+# privilege. What bounds it instead is the vocabulary: seven commands against
+# machines the fleet declares as bench devices.
+PrivateTmp=yes
+
+[Install]
+WantedBy=default.target

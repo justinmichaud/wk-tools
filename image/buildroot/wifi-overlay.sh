@@ -5,21 +5,13 @@
 #
 #   image/buildroot/wifi-overlay.sh <staging-dir>
 #
-# Simpler than tailnet-overlay.sh, and deliberately so: there is no binary to
-# fetch here. wpa_supplicant is a package this board's defconfig selects
-# (BR2_PACKAGE_WPA_SUPPLICANT, image/buildroot/external/configs) and is
-# compiled by the ordinary build, so this overlay only ever carries the script
-# and the init line that spend a credential the *card* provides -- the same
-# division tailnet-overlay.sh draws for tailscaled versus wk-tailnet-join.
+# No binary to fetch: wpa_supplicant is a package this board's defconfig
+# selects (BR2_PACKAGE_WPA_SUPPLICANT, image/buildroot/external/configs), so
+# the overlay carries only the script and init line.
 #
-# What it must NOT contain is a credential: the SSID and passphrase arrive
-# with the card (disk_seed_wifi, boot/disk.sh), never in the image, for the
-# reason tailnet-overlay.sh gives -- an image is stored, copied and kept after
-# it is superseded, and a credential inside one is a credential in every copy.
-#
-# wk-wifi-join itself is not duplicated here: this installs the one copy the
-# Yocto layer carries, the same way tailnet-overlay.sh installs
-# meta-wk-tailnet's wk-tailnet-join rather than writing a second one.
+# It must contain no credential: the SSID and passphrase arrive with the card
+# (disk_seed_wifi, boot/disk.sh). wk-wifi-join is installed from the Yocto
+# layer's one copy rather than duplicated here.
 set -euo pipefail
 WK_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 . "$WK_ROOT/lib/common.sh"
@@ -29,10 +21,9 @@ STAGE="${1:-}"
 
 info "assembling the wifi overlay in $STAGE"
 rm -rf "$STAGE"
-# Regular, world-readable files and nothing else -- the same rule
-# tailnet-overlay.sh follows, for the same reason: rsync at target-finalize
-# runs as the build user, and a mode-0700 directory here fails the build with
-# rsync error 23.
+# Regular, world-readable files and nothing else: rsync at target-finalize runs
+# as the build user, and a mode-0700 directory here fails the build with rsync
+# error 23.
 mkdir -p "$STAGE/usr/sbin" "$STAGE/etc/init.d"
 
 install -m 0755 \

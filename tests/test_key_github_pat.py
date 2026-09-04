@@ -30,8 +30,14 @@ class _PatRun(WkTest):
         super().setUp()
         self.secrets = self.tmp / "secrets"
         self.held = self.tmp / "push-keys"
+        self.store = self.tmp / "store"
         self.secrets.mkdir()
         self.held.mkdir()
+        # A store this process can write is a machine `push_agent_exec` runs
+        # on directly (store_is_local, lib/store.sh), which is what makes the
+        # read token's delivery observable here without a podman machine.
+        self.store.mkdir()
+        self.extra_env = {}
 
     def _env(self, binp):
         env = dict(os.environ)
@@ -41,9 +47,10 @@ class _PatRun(WkTest):
         reg = self.tmp / "no-registry"
         reg.mkdir(exist_ok=True)
         env.update({"WK_HOST_SECRETS": str(self.secrets),
-                    "WK_STORE": str(self.tmp / "store"),
+                    "WK_STORE": str(self.store),
                     "WK_TARGET_REGISTRY": str(reg),
                     "PATH": f"{binp}:/usr/bin:/bin:/usr/sbin:/sbin"})
+        env.update(self.extra_env)
         return env
 
     def key(self, *args):
@@ -180,6 +187,55 @@ class TestReplacingOne(_PatRun):
         self.assertNotEqual(rc, 0, out)
         self.assertFalse(self.pat().exists())
         self.assertIn("nothing stored", out)
+
+
+class TestTheStandingReadTokenReachesTheMachine(_PatRun):
+    """Reading GitHub is open whatever position `wk push` is in, so the machine
+    that runs the workspaces keeps a standing copy of this token. Storing,
+    rotating or withdrawing one converges that copy here, because ./setup is
+    the only other place that does and nobody re-runs it to fix a read."""
+
+    def read_pat(self):
+        return self.store / "read-github-pat"
+
+    def test_storing_one_delivers_it(self):
+        rc, out = self.key_tty("set", "github-pat", paste=TOKEN)
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(TOKEN, self.read_pat().read_text().strip())
+        self.assertEqual(0o600, self.read_pat().stat().st_mode & 0o777)
+
+    def test_rotating_one_delivers_the_new_one(self):
+        self.pat().write_text("ghp_theoldone\n")
+        self.read_pat().write_text("ghp_theoldone\n")
+        rc, out = self.key_tty("set", "github-pat", "--replace", paste=TOKEN)
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(TOKEN, self.read_pat().read_text().strip())
+
+    def test_withdrawing_one_removes_it_there_too(self):
+        """`--replace` with an empty answer leaves this device with no token,
+        and a machine still reading GitHub with the old one would be the
+        withdrawal not having happened."""
+        self.pat().write_text("ghp_theoldone\n")
+        self.read_pat().write_text("ghp_theoldone\n")
+        rc, out = self.key_tty("set", "github-pat", "--replace", paste="")
+        self.assertNotEqual(rc, 0, out)
+        self.assertFalse(self.read_pat().exists())
+
+    def test_the_value_is_never_an_argument_on_the_way_there_either(self):
+        rc, out = self.key_tty("set", "github-pat", paste=TOKEN)
+        self.assertEqual(rc, 0, out)
+        self.assertNotIn(TOKEN, out)
+
+    def test_a_machine_that_cannot_take_it_is_a_warning_naming_the_other_delivery(self):
+        """Best effort: the token is stored either way, and ./setup converges
+        the machine. A `die` here would refuse to keep a credential the person
+        has already pasted."""
+        self.extra_env = {"WK_STORE": str(self.tmp / "not-a-store")}
+        rc, out = self.key_tty("set", "github-pat", paste=TOKEN)
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(TOKEN, self.pat().read_text().strip())
+        self.assertIn("did not take the read token", out)
+        self.assertIn("./setup", out)
 
 
 if __name__ == "__main__":

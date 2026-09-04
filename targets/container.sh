@@ -1,15 +1,7 @@
 # Target driver: podman container, on top of the webkit-container-sdk.
-#
 # rootless podman, --userns keep-id, --network none: no network interface,
 # egress only through the proxy's unix socket, no privilege needed anywhere.
-#
-# WK_SDK overrides where the SDK lives (tests/test_build_perf.py points it
-# at a scratch copy). WK_SDK_IMAGE overrides which SDK image a workspace is
-# created from -- set by image/buildroot.sh and image/yocto.sh when they
-# need a non-default one, not normally hand-set. WK_CONTAINER_USER overrides
-# the user a workspace runs as, in place of $(id -un). WK_TOOLS_SRC is the
-# bind-mount source for /opt/wk-tools; plumbing, set only inside the VM
-# (below), never by a person.
+# WK_SDK, WK_SDK_IMAGE, WK_CONTAINER_USER and WK_TOOLS_SRC are plumbing overrides.
 
 if [ -n "${WK_IN_VM:-}" ]; then
     WK_SDK="${WK_SDK:-/opt/webkit-container-sdk}"
@@ -17,67 +9,42 @@ else
     WK_SDK="${WK_SDK:-${XDG_DATA_HOME:-$HOME/.local/share}/webkit-container-sdk}"
 fi
 
-# Every SDK script checks this and aborts without it (register-sdk-on-host.sh
-# normally sets it -- a shell-rc mechanism this deliberately bypasses).
+# Every SDK script checks this and aborts without it.
 export WKDEV_SDK="$WK_SDK"
 
 # rootless podman has no filterable forward path; the alternative, rootful
 # podman with nftables, turns a container escape into a root escape.
 WK_SANDBOX=rootless-proxy
 
-# No sudo anywhere in the daily path, which is what keeps this usable by an
-# unattended agent.
 _sdk() { "$@"; }
 
-# keep-id maps the invoking user through unchanged: no id derivation, no
-# mismatch between checkout/caches/home.
+# keep-id maps the invoking user through unchanged: no id derivation, no mismatch.
 export WKDEV_CONTAINER_UID="$(id -u)"
 export WKDEV_CONTAINER_GID="$(id -g)"
 export WKDEV_CONTAINER_USER="${WK_CONTAINER_USER:-$(id -un)}"
 
-# wkdev-create defaults --shell to the host's $SHELL, which need not exist in
-# the image (zsh does not) -- firstrun then fails silently with no git
-# identity, push key or Claude install.
+# wkdev-create defaults --shell to the host's $SHELL, which the image need not have (zsh).
 export WKDEV_CONTAINER_SHELL=/bin/bash
 
 command -v arch_canon >/dev/null 2>&1 || . "$WK_ROOT/lib/arch.sh"
 
-# GPU policy depends on the host's driver stack, so it lives with the Linux
-# host support.
 if [ -f "$WK_ROOT/host/linux/gpu.sh" ]; then
     . "$WK_ROOT/host/linux/gpu.sh"
 else
     gpu_flags() { :; }
 fi
 
-# One directory of sockets a workspace may see, mounted at /run/wk rather
-# than the whole runtime directory -- which would hand over the D-Bus socket too.
+# Mounted at /run/wk, not the whole runtime directory, which would hand over D-Bus.
 _wk_runtime() { echo "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/wk"; }
 
-# The ssh-agent holding the deploy keys is wk-ssh-agent.service on this
-# machine, and its socket is in that same directory -- so it arrives in every
-# container that already exists through the mount below, with nothing to
-# recreate. The private halves are never on this side of it (push_agent_load,
-# lib/store.sh).
+# wk-ssh-agent.service's socket is in that directory, so it reaches containers that already exist.
 t_agent_sock() { echo /run/wk/ssh-agent.sock; }
 
-# In the VM the tooling is this checkout, mounted at /opt/wk-tools by the
-# machine itself (host/macos/machine.sh); on a workstation it is the checkout
-# this script came from. Either way a container bind-mounts what is there.
+# In the VM the tooling is mounted at /opt/wk-tools by host/macos/machine.sh.
 [ -n "${WK_IN_VM:-}" ] && WK_TOOLS_SRC=/opt/wk-tools
 
 _ctr() { echo "wk-$1"; }
 
-# This target's furniture (`wk sync --tools`) is the tooling, and there is
-# nothing to copy: a container bind-mounts this checkout, on a workstation
-# directly and on macOS through the podman machine's own mount of it
-# (host/macos/machine.sh). The mirror and the snapshots are the store's, which
-# `wk sync --tools` publishes itself -- here on a workstation, and inside the
-# VM on macOS, where a bare `wk sync` is what reaches them.
-#
-# The message names the one thing the mount does not carry, because this is
-# where someone looks for it: the VM's units, skills and packages are
-# installed, not mounted.
 t_sync() {
     info "nothing to copy: a container bind-mounts this checkout ($WK_ROOT) at
   /opt/wk-tools, so the tooling in one is never stale. What the VM has
@@ -85,8 +52,7 @@ t_sync() {
   its packages -- comes from:  ./setup --stage vmtools"
 }
 
-# Recorded at creation: the container reports the kernel's (host's)
-# architecture, so `uname -m` in an armhf workspace answers aarch64.
+# Recorded at creation: `uname -m` in an armhf container answers the host's aarch64.
 t_arch() {
     local f; f="$(wk_ws_dir "$1")/arch"
     [ -f "$f" ] && cat "$f" || echo native
@@ -97,15 +63,12 @@ t_list() {
         | sed 's/^wk-//'
 }
 
-# The container's home is a directory on this machine, so the readiness
-# marker is a file here. `.wk-firstrun-complete` predates the marker contract.
-# TODO: drop that clause once no pre-marker workspace is left anywhere.
+# TODO: drop the `.wk-firstrun-complete` clause once no pre-marker workspace is left.
 t_created() {
     local h; h="$(wk_ws_dir "$1")/home"
     [ -f "$h/$WK_READY_MARKER" ] || [ -f "$h/.wk-firstrun-complete" ]
 }
 
-# Existing vs. running needs the marker: creation is asynchronous.
 t_info() {
     local c st
     c=$(_ctr "$1")
@@ -116,8 +79,7 @@ t_info() {
     echo "$st"
 }
 
-# Read, not exec'd: HEAD is a file on this machine (overlay upper layer), so
-# reading it avoids a container exec's latency.
+# Read, not exec'd: HEAD is a file on this machine, so no container exec is needed.
 t_branch() {
     local ws head ref base
     ws=$(wk_ws_dir "$1")
@@ -135,31 +97,23 @@ t_branch() {
     esac
 }
 
-# wkdev-create's own options, kept apart from --additional-flags: podman
-# rejects --isolated as unknown there, and --network in both places gives
-# the container two.
+# wkdev-create's own options, kept apart from --additional-flags: podman rejects
+# --isolated as unknown there, and --network in both places gives the container two.
 _sdk_opts() {
-    # --network none is the boundary; loopback still exists for
-    # run-benchmark's local server. --isolated drops the host session
-    # entirely -- D-Bus, keyring, dconf, X11, host home, shared runtime dir.
+    # --network none is the boundary; --isolated drops D-Bus, keyring, dconf, X11, host home.
     printf '%s\n' --network none --isolated
 }
 
-# _sandbox_flags <arch>
 _sandbox_flags() {
     local arch="${1:-native}"
     local rt; rt=$(_wk_runtime)
     mkdir -p "$rt"
 
-    # No GPU for a non-native workspace: NVIDIA userspace libraries match
-    # only the host kernel driver and ship for aarch64 (arch_has_gpu, lib/arch.sh).
+    # No GPU for a non-native workspace: NVIDIA userspace matches only the host kernel driver.
     local gpu=""
     arch_has_gpu "$arch" && gpu=$(gpu_flags)
 
-    # Mounting the directory, not the socket: the compositor's socket comes
-    # and goes with `wk session` without recreating containers -- and so does
-    # the ssh-agent's (t_agent_sock above), which is what lets `wk push on`
-    # reach a workspace made before the agent existed.
+    # The directory, not the socket: `wk session`'s and `wk push on`'s sockets come and go.
     printf '%s' "--volume $rt:/run/wk
          --env WK_PROXY_SOCKET=/run/wk/proxy.sock
          --env http_proxy=http://127.0.0.1:3128
@@ -172,7 +126,6 @@ _sandbox_flags() {
          $gpu"
 }
 
-# t_create <name> <base-id> [arch]
 t_create() {
     local name="$1" base_id="$2" arch="${3:-native}"
     local c ws base
@@ -189,29 +142,18 @@ t_create() {
     ensure_dir "$ws/home"
     ensure_dir "$ws/build"
 
-    # Before creation, not after: everything downstream resolves architecture
-    # from this file.
+    # Before creation: everything downstream resolves architecture from this file.
     printf '%s\n' "$arch" > "$ws/arch"
 
-    # Explicit upperdir/workdir: a bare :O gives an ephemeral upper podman
-    # discards on container stop. podman never deletes a user-managed
-    # upperdir on removal -- that is t_destroy's job.
+    # Explicit upperdir/workdir: a bare :O gives an ephemeral upper podman discards on
+    # container stop. podman never deletes a user-managed upperdir -- t_destroy does.
     local overlay="$base:/src/WebKit:O,upperdir=$ws/changes,workdir=$ws/overlay-work"
 
-    # Bind-mounted over WebKitBuild rather than left in the overlay: every
-    # object a build writes would otherwise pay overlayfs's copy-up cost on
-    # first write. A plain bind mount also makes WebKitBuild a mount point
-    # git and an editor see, not tracked-repo churn.
+    # Bind-mounted over WebKitBuild: every object a build writes would otherwise pay copy-up.
     local build_mount="$ws/build:/src/WebKit/WebKitBuild"
 
-    # $ws itself, at the same absolute path the host resolves for it: a
-    # `wk build` typed inside the workspace uses the `local` driver, which
-    # without this mount would resolve $WK_STORE to a path nothing outside
-    # the container can see -- a build.status `wk status` never finds.
-    # WK_LOCAL_STORE is what targets/local.sh reads to find this shared path.
-    #
-    # ccache settings: WebKit's CMake sets them on Apple only, so Linux
-    # skips the precompiled header without them.
+    # $ws at the same absolute path the host resolves for it: a `wk build` typed inside uses
+    # the local driver's WK_LOCAL_STORE. WebKit's CMake sets ccache on Apple only.
     local -a flags
     flags=(
         --additional-flags
@@ -248,9 +190,7 @@ t_create() {
          $(_sandbox_flags "$arch")"
     )
 
-    # Explicit image and podman arch, neither inferred: without --image,
-    # `--arch arm` would ask the aarch64 image for a 32-bit container.
-    # WK_SDK_IMAGE overrides it, for the Yocto builder (image/yocto.sh).
+    # Without --image, `--arch arm` would ask the aarch64 image for a 32-bit container.
     local -a archopts=()
     local image="${WK_SDK_IMAGE:-}"
     arch_is_native "$arch" || archopts+=(--arch "$(arch_podman "$arch")")
@@ -270,25 +210,20 @@ t_create() {
         --home "$ws/home" \
         "${flags[@]}"
 
-    # .wkdev-init picks this up on first start; it writes `.wk-ready` as its
-    # last act, so completion evidence lives next to the workspace.
+    # .wkdev-init picks this up on first start; it writes `.wk-ready` as its last act.
     install -m 0755 "$WK_ROOT/container/firstrun.sh" "$ws/home/.wkdev-firstrun"
 
-    # Last, deliberately: base-id is the completion marker (ws_state,
-    # lib/target.sh). Written first, a killed `wk new` would re-pin it over an
-    # already-started overlay on re-run.
+    # Last, deliberately: base-id is the completion marker. Written first, a killed
+    # `wk new` would re-pin it over an already-started overlay on re-run.
     printf '%s\n' "$base_id" > "$ws/base-id"
 }
 
-# .wkdev-init runs firstrun (push keys, Claude CLI, helix, lldb config, shell
-# rc) after the container starts, without checking its exit -- this waits for
-# firstrun's marker and reports honestly when it never appears.
+# .wkdev-init runs firstrun after the container starts without checking its exit.
 t_ready() {
     local name="$1" c i=0
     c=$(_ctr "$name")
     while [ "$i" -lt "${WK_READY_TIMEOUT:-300}" ]; do
         t_created "$name" && return 0
-        # No process left to write the marker if the container is gone.
         _hpodman container exists "$c" >/dev/null 2>&1 || break
         sleep 1; i=$((i + 1))
     done
@@ -298,70 +233,54 @@ t_ready() {
     return 1
 }
 
-# Starts the loopback-to-proxy forwarder if not already running; wrapping
-# keeps this to one container exec rather than a second round trip.
+# Wrapping keeps this to one container exec rather than a second round trip.
 _wrap_cmd() {
     printf '%s\n' /opt/wk-tools/container/proxy/ensure-bridge.sh
 }
 
-# --quiet is not cosmetic: without it wkdev-enter prints its banner on stdout
-# ahead of the command's output, mixing SDK chatter into the result (wk
-# verify's interface list, wk bench's renderer string).
+# --quiet: without it wkdev-enter's banner mixes SDK chatter into the output.
 t_exec() {
     local name="$1"; shift
     local c; c=$(_ctr "$name")
     _sdk "$WK_SDK/scripts/host-only/wkdev-enter" --quiet --name "$c" --exec -- $(_wrap_cmd) "$@"
 }
 
-# ASLR: podman's seccomp allow-list lacks personality(ADDR_NO_RANDOMIZE), so
-# lldb reads "no personality()" with nothing pointing at the real cause.
-# stop-on-exec: lldb's default stops the session at each child exec,
-# hijacking `wk gui --lldb ui` away from the breakpoints set for `run`.
+# podman's seccomp allow-list lacks personality(ADDR_NO_RANDOMIZE), so lldb reports
+# "no personality()"; stop-on-exec would hijack `wk gui --lldb ui` at each exec.
 t_lldb_opts() {
     printf '%s' "-O 'settings set target.disable-aslr false'"
     printf '%s' " -O 'settings set target.process.stop-on-exec false'"
 }
 
-# Bind-mounted from `home/` in t_create, so naming it here lets the host
-# follow a detached build's log with a plain `tail -f`.
+# Bind-mounted from `home/` in t_create, so the host can `tail -f` a build's log.
 t_home() { echo "/home/$WKDEV_CONTAINER_USER"; }
 
-# This machine's own mirror, bind-mounted read-only in t_create: a fetch in a
-# container reads it directly and touches no network. Read-only, so the fetch
-# *into* it is this machine's (`wk sync --tools`, mirror_fetch_pr).
+# This machine's mirror, read-only: a fetch in a container touches no network.
 t_mirror_dir() { mirror_in_container; }
 
-# `podman cp`, not the generic `t_exec ... cat`: wkdev-enter is an
-# interactive-shell wrapper, not a byte pipe (a 1396-byte file arrived as
-# 1399 bytes over it, and xz refused it).
+# `podman cp`, not the generic `t_exec ... cat`: wkdev-enter is an interactive-shell
+# wrapper, not a byte pipe (a 1396-byte file arrived as 1399 bytes, and xz refused it).
 t_pull() {
     local name="$1" src="$2" dest="$3"
     _hpodman cp "$(_ctr "$name"):$src" "$dest"
 }
 
-# One `podman cp`: the generic rsync implementation needs rsync inside the
-# container and a transport to run it over. Trailing `/.` copies contents,
-# not the directory itself.
+# One `podman cp`: rsync would have to exist inside the container. `/.` copies contents.
 t_pull_dir() {
     local name="$1" src="$2" dest="$3"; shift 3
-    # `podman cp` has no filter: refused rather than silently over-copying.
     [ $# -eq 0 ] || die "t_pull_dir: the container driver cannot exclude paths ($*).
     Copy the whole tree, or make the selection inside the workspace first."
     rm -rf "$dest"; mkdir -p "$dest"
     _hpodman cp "$(_ctr "$name"):$src/." "$dest"
 }
 
-# The same `podman cp`, the other way. Its --archive default chowns what
-# arrives to the container's own user, so a file pushed in is writable by
-# whoever works in there.
+# --archive chowns what arrives to the container's user, so a pushed file is writable there.
 t_push() {
     local name="$1" src="$2" dest="$3"
     _hpodman cp "$src" "$(_ctr "$name"):$dest"
 }
 
-# One `podman cp` again, so this needs no rsync inside the container. The
-# emptying is a container exec because it happens on that side, and as the
-# container's user so the directory it recreates is not root's.
+# The emptying is a container exec as the container's user, so the new directory is not root's.
 t_push_dir() {
     local name="$1" src="$2" dest="$3" u
     u=$(_ctr_user "$name") \
@@ -371,8 +290,7 @@ t_push_dir() {
     _hpodman cp "$src/." "$(_ctr "$name"):$dest"
 }
 
-# `podman exec`, not t_exec: one `test` needs no bridge and no login shell,
-# and wkdev-enter is not reachable from a macOS host at all.
+# `podman exec`, not t_exec: wkdev-enter is not reachable from a macOS host at all.
 t_path_kind() {
     local name="$1" p="$2" u
     u=$(_ctr_user "$name") \
@@ -383,10 +301,7 @@ t_path_kind() {
          else echo absent; fi" 2>/dev/null | tr -d '\r'
 }
 
-# podman's own detached exec: `setsid nohup` (lib/target.sh) does not
-# survive here -- podman tears the session down when `podman exec` exits.
-# Bypassing wkdev-enter means reproducing the bridge and login shell it
-# would otherwise provide (`podman exec` defaults to root, no login shell).
+# podman's own detached exec: `setsid nohup` (lib/target.sh) does not survive here.
 t_spawn() {
     local name="$1" log="$2" pidf="$3"; shift 3
     local c u; c=$(_ctr "$name"); u="$WKDEV_CONTAINER_USER"
@@ -406,18 +321,10 @@ t_enter() {
     _sdk "$WK_SDK/scripts/host-only/wkdev-enter" --name "$c"
 }
 
-# --- an ssh route into the container, for Zed --------------------------------
-#
-# A container has no network interface, so there is no address for Zed's
-# `ssh` to reach. `podman exec` substitutes: sshd's inetd mode (`-i`) makes
-# one exec a complete transport (`ProxyCommand container/ssh-transport.sh <name>`).
+# A container has no network interface, so sshd's inetd mode (`-i`) makes one
+# `podman exec` a complete transport (container/ssh-transport.sh), for Zed.
 
-# How this machine reaches podman, and the only way anything here does: local
-# inside the VM and on Linux; from macOS, the rootless connection named
-# explicitly, since podman's default there is the rootful one (`wk-root`). A
-# second, bare wrapper would work everywhere the daemon is local and reach the
-# wrong podman from a macOS host -- the one command a person types outside the
-# VM (`wk scp`, `wk stop`) is exactly where that shows up.
+# From macOS the rootless connection is named explicitly: the default there is rootful.
 _hpodman() {
     if [ -n "${WK_IN_VM:-}" ] || ! is_macos; then
         podman "$@"
@@ -426,16 +333,10 @@ _hpodman() {
     fi
 }
 
-# The wkdev SDK's own repository, read here and by `wk status`'s upstream
-# check below -- not this machine's derived builder images
-# (localhost/wk-yocto-host, localhost/wk-buildroot-host), which are never
-# published anywhere to compare against.
+# The wkdev SDK's own repository, not this machine's derived builder images.
 WK_SDK_REPO="ghcr.io/igalia/wkdev-sdk"
 
-# The SDK image a workspace here actually runs, and when it was pulled --
-# podman's own record, not a guessed default (nothing in this tree names one;
-# wkdev-create's own default is baked into the SDK checkout). Empty when
-# nothing under this repository has ever been pulled onto this machine.
+# podman's own record, not a guessed default; empty when nothing was ever pulled.
 t_sdk_local() {
     local img created
     img=$(_hpodman images --format '{{.Repository}}:{{.Tag}}' 2>/dev/null \
@@ -445,19 +346,13 @@ t_sdk_local() {
     printf 'image=%s\ncreated=%s\n' "$img" "$created"
 }
 
-# Every tag the registry publishes for it, unauthenticated: `podman search
-# --list-tags` needs no credential for a public image and is already the one
-# registry client every container-target machine has (no skopeo dependency to
-# add). Callers cap this themselves (WK_FLEET_TIMEOUT) -- a slow or silent
-# registry is not this function's problem to time out.
+# `podman search --list-tags` needs no credential for a public image (no skopeo).
 t_sdk_upstream() {
     _hpodman search --list-tags "$WK_SDK_REPO" --limit 100 2>/dev/null \
         | awk 'NR > 1 {print $2}'
 }
 
-# Asked of the container, not assumed: WKDEV_CONTAINER_USER is the invoking
-# user, wrong on macOS (the container was created inside the podman VM as
-# `core`). Its working directory (home) is the one place both hosts agree.
+# Asked of the container: on macOS it was created inside the podman VM as `core`.
 _ctr_user() {
     local c home
     c=$(_ctr "$1")
@@ -470,25 +365,15 @@ _ctr_user() {
 
 _ctr_home() { echo "/home/$(_ctr_user "$1")"; }
 
-# The sshd command line, in one place: this file installs what it names,
-# container/ssh-transport.sh runs it.
-#
 #   -i             inetd mode: protocol on stdin/stdout, no listener.
-#   AllowUsers     without it, root login (this exec's own user) would be
-#                  permitted by a server whose job is one account.
-#   SetEnv         one option with every assignment: ssh config keywords take
-#                  only the first value, so six `-o SetEnv=` flags would set
-#                  exactly one variable.
-#   internal-sftp  not sftp-server, which runs through the login shell where
-#                  ~/.bashrc `cd`s to /src/WebKit, breaking `~`-relative paths.
+#   AllowUsers     root (this exec's own user) would otherwise be permitted.
+#   SetEnv         one option carries every assignment: keywords take only the first.
+#   internal-sftp  sftp-server runs through the login shell, whose ~/.bashrc `cd`s away.
 t_ssh_sshd_cmd() {
     local name="$1" u h
     u=$(_ctr_user "$name") || return 1
     h="/home/$u"
-    # SetEnv is why this differs from bare sshd -i: without it there is no
-    # other route out (`wk enter` worked, Zed's terminal had no DNS/github).
-    # ensure-bridge wraps this because 127.0.0.1:3128 only listens once
-    # something started the forwarder.
+    # ensure-bridge wraps this: 127.0.0.1:3128 only listens once the forwarder started.
     printf '%s' "mkdir -p /run/sshd && exec /opt/wk-tools/container/proxy/ensure-bridge.sh \
 /usr/sbin/sshd -i -e -f /dev/null \
 -o HostKey=$h/.wk-ssh/ssh_host_ed25519_key \
@@ -500,13 +385,10 @@ HTTP_PROXY=http://127.0.0.1:3128 HTTPS_PROXY=http://127.0.0.1:3128 \
 no_proxy=localhost,127.0.0.1,::1 NO_PROXY=localhost,127.0.0.1,::1'"
 }
 
-# The two halves of the editor's route (lib/target.sh): a container has no
-# address, so the whole ssh conversation goes through one `podman exec`.
 t_ssh_user()  { _ctr_user "$1"; }
 t_ssh_proxy() { printf '%s %s' "$WK_ROOT/container/ssh-transport.sh" "$1"; }
 
-# /run/sshd is created here, not at install time: /run is a tmpfs podman
-# remakes on every container start. No `exec`: _hpodman is a shell function.
+# /run/sshd is created here, not at install time: /run is a tmpfs podman remakes.
 t_ssh_exec() {
     local name="$1" cmd
     cmd=$(t_ssh_sshd_cmd "$name") \
@@ -514,17 +396,11 @@ t_ssh_exec() {
     _hpodman exec -i "$(_ctr "$name")" /bin/sh -c "$cmd"
 }
 
-# Idempotent -- every step tests itself, so this resumes a `wk zed`
-# interrupted half-way. sshd is installed on first use (the SDK image carries
-# only the client); the host key lives in the workspace's home.
-#
-# t_ssh_prepare <name>
+# Idempotent -- every step tests itself, so this resumes a `wk zed` interrupted half-way.
 t_ssh_prepare() {
     local name="$1" c u h pub waited=0 said=""
     c=$(_ctr "$name")
 
-    # Failing to find the user honestly answers "is this a workspace at all"
-    # (unanswerable from the store on macOS).
     u=$(_ctr_user "$name") \
         || die "no container workspace called '$name' on this machine.
     'wk ls' lists the ones there are, and 'wk start' brings the podman machine up
@@ -532,10 +408,8 @@ t_ssh_prepare() {
     workspace has no network interface, so there is no other route in.)"
     h="/home/$u"
 
-    # Asked of the container, not the store: on macOS the store is inside the
-    # podman VM, so ws_state cannot be computed out here. Path spelled out,
-    # not `~`: these execs run as root, where `~` is /root. A wait, not a
-    # refusal: creation is asynchronous.
+    # Asked of the container, not the store: on macOS the store is inside the podman VM.
+    # Path spelled out, not `~`: these execs run as root, where `~` is /root.
     while ! _hpodman exec "$c" /bin/sh -c \
             "test -f '$h/$WK_READY_MARKER' || test -f '$h/.wk-firstrun-complete'" 2>/dev/null; do
         _hpodman container exists "$c" 2>/dev/null \
@@ -573,8 +447,7 @@ t_ssh_prepare() {
         chmod 0600 '$h/.ssh/authorized_keys'" \
         || die "could not prepare the ssh identity in '$name'"
 
-    # This machine's key, or the asking machine's when another workstation is
-    # opening a workspace this one owns (zed_key_pub, lib/target.sh).
+    # This machine's key, or the asking machine's when another workstation opens this one's.
     pub=$(zed_key_pub) || die "could not create this machine's zed key"
     if ! _hpodman exec --user "$u" "$c" grep -qsF "$pub" "$h/.ssh/authorized_keys"; then
         printf '%s\n' "$pub" | _hpodman exec -i --user "$u" "$c" \
@@ -583,14 +456,12 @@ t_ssh_prepare() {
         changed "authorised the editor's key in '$name'"
     fi
 
-    # Rewritten every time: the alias derives from the user and checkout
-    # path, both of which can change under it.
+    # Rewritten every time: the alias derives from the user and checkout path.
     ssh_alias_set "$name" "wk-$name.container.invalid" "$u" "$(zed_key)" \
         "ProxyCommand $(t_ssh_proxy "$name")"
 }
 
-# This container cannot start inside a podman machine that is not running,
-# and `wk start` (bare) already brings the machine up for its own sweep.
+# `wk start` (bare) already brings the machine up for its own sweep.
 t_start() {
     local name="$1" c mstate
     if is_macos && [ -z "${WK_IN_VM:-}" ]; then
@@ -613,9 +484,7 @@ t_start() {
     info "started '$name'"
 }
 
-# One container, not the bulk sweep `wk stop` (bare) does. `_hpodman`:
-# cmd/stop runs directly on the host with `forward=no` -- on macOS that has
-# to be the connection that reaches across, the same one t_ssh_exec uses.
+# `_hpodman`: cmd/stop runs on the host with `forward=no`, which on macOS must reach across.
 t_stop() {
     local name="$1" c
     c=$(_ctr "$name")
@@ -642,10 +511,8 @@ t_destroy() {
         info "removed container $c"
     fi
 
-    # Podman creates and deletes nothing for a user-managed overlay
-    # upper/work dir. Rootless needs `podman unshare`: with --userns keep-id
-    # the container's root is a subordinate host uid, so anything
-    # .wkdev-init wrote as root is undeletable from outside the namespace.
+    # Podman creates and deletes nothing for a user-managed overlay upper/work dir.
+    # Rootless needs `podman unshare`: with keep-id, root's files are a subordinate uid.
     if [ -d "$ws" ]; then
         podman unshare rm -rf "$ws" 2>/dev/null || rm -rf "$ws"
         [ -d "$ws" ] && warn "could not fully remove $ws" || info "removed $ws"

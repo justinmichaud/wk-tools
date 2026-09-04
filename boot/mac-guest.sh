@@ -1,10 +1,8 @@
 # Boot driver: a macOS guest standing in for a machine in bench mode.
 #
-# Rehearses the bare-metal boot path end to end, and answers mechanism-only
-# questions (does the staged tree carry everything, does the payload survive
-# the crossing, is the record complete) without taking the workstation away
-# from its user. A guest shares its host's CPU and a paravirtualised GPU, so
-# runs from here are marked accordingly and are not comparable with anything.
+# Rehearses the bare-metal boot path end to end without taking the workstation
+# away from its user. A guest shares its host's CPU and a paravirtualised GPU,
+# so runs from here are marked accordingly and are comparable with nothing.
 #
 # The transition here is scriptable (`wk vm start`), unlike the MBP's, so
 # BOOT_ARMING is `guest` -- neither one-shot, server, nor hands-on.
@@ -13,19 +11,16 @@ BOOT_ARMING=guest
 
 # NODE_GUEST is a workspace name; t_start/t_stop/_ip map it to the tart VM
 # themselves, but _vm_state wants the already-mapped name from _vm(). Passing
-# the unmapped name silently answers "absent" -- easy to miss since the
-# workspace is itself "wk-bench", so "wk-wk-bench" looks plausible too.
+# the unmapped name silently answers "absent".
 
 BOOT_ORDER_IMAGE=""
 BOOT_ORDER_NORMAL=""
 
 # WK_BENCH_GUEST overrides which vm workspace stands in for this machine, so
-# two rehearsals (or a rehearsal and a test) can run against different
-# guests without colliding.
+# two rehearsals can run against different guests.
 NODE_GUEST="${WK_BENCH_GUEST:-wk-bench}"
 
-# Matches the path `wk bench staged` expects in bench mode -- a rehearsal on a
-# different path would rehearse a different thing. Created on first delivery;
+# The path `wk bench staged` expects in bench mode. Created on first delivery;
 # the guest's passwordless sudo is needed only for this.
 BENCH_GUEST_ROOT=/var/wk
 
@@ -101,8 +96,8 @@ b_reboot() {
 b_diag() { m_ssh 'cat /var/log/wk-diag.txt 2>/dev/null || echo "(no diag on the guest)"'; }
 
 # --- where a staged payload goes ---------------------------------------------
-# Reached over ssh, not as a local path: unlike the MBP (whose benchmark disk
-# is mounted while staging), every other machine takes the payload over the wire.
+# Over ssh rather than as a local path: unlike the MBP, whose benchmark disk is
+# mounted while staging, every other machine takes the payload over the wire.
 b_bench_root() { printf '%s' "$BENCH_GUEST_ROOT"; }
 b_bench_local() { return 1; }
 
@@ -130,7 +125,6 @@ b_bench_put() {
 # /usr/bin:/bin:/usr/sbin:/sbin, so that answers "no" even with tart running.
 b_probeable() { is_macos && ( load_target vm >/dev/null 2>&1; _tart_bin >/dev/null 2>&1 ); }
 
-# The wk-managed media, in one line, for the fleet block in `wk status`.
 b_media() {
     local st
     if ! is_macos || ! command -v tart >/dev/null 2>&1; then

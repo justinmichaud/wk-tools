@@ -15,25 +15,21 @@
 # from, both are tried, and a branch existing in both is refused by name rather than guessed at.
 # A bare number is a WebKit/WebKit pull request, `wpe:<number>` a WPEWebKit one. Either way it is
 # fetched once into this machine's mirror ('wk sync' keeps it under refs/remotes/pr/...) and the
-# workspace fetches that ref from there; a workspace whose mirror is not this machine's -- a guest,
-# a build box -- fetches the one ref from GitHub itself. The remote
-# is added if missing and the branch checked out tracking it -- no confirmation, except for your
-# own work: uncommitted changes are named before anything moves, and a local branch with commits
-# the PR head lacks is never overwritten, only named. `--force` takes the remote version instead.
+# workspace fetches that ref from there; a workspace whose mirror is not this machine's fetches
+# the one ref from GitHub itself. Uncommitted changes are named before anything moves, and a local
+# branch with commits the PR head lacks is never overwritten, only named.
 #
 #   --force   take the PR head even when the local branch has commits it does not, discarding them
 #
 # 'rebase' fetches just enough of the mirror for origin/main into the workspace and rebases the
 # current branch onto it; either argument order works, and a bare 'wk pr rebase' runs inside a
-# workspace. Runs in the workspace, like `wk build`: from a host, name it; from inside one, do not.
+# workspace.
 #
 # 'open' pushes the workspace's current branch to its fork and opens it as a pull request with
-# `gh pr create --fill` (title and body from the commits). Runs on the host only and refuses
-# inside a workspace: publishing is the person's act, never an agent's
-# (docs/HANDOFF-sandboxing.md). The project comes from which upstream the branch tracks (`git
-# branch -u origin/main` or `wpe/main`); no upstream, `main`, a detached HEAD, or a dirty tree is
-# refused by name. Pushing needs `wk push on`, which a workspace with the switch off is told to
-# run, never flipped here.
+# `gh pr create --fill`. Runs on the host only and refuses inside a workspace: publishing is the
+# person's act, never an agent's (docs/HANDOFF-sandboxing.md). The project comes from which
+# upstream the branch tracks; no upstream, `main`, a detached HEAD, or a dirty tree is refused by
+# name. Pushing needs `wk push on`, which is never flipped here.
 #
 #   --draft   open it as a draft
 #   --web     open the browser's new-PR form instead of creating it directly
@@ -45,11 +41,10 @@ WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 . "$WK_ROOT/lib/store.sh"
 . "$WK_ROOT/lib/target.sh"
 
-# pr_open_target <src-dir> -- decides the checked-out branch and project 'wk pr open' opens as
-# (refusals: 'wk pr -h'). Prints "<base-repo>\t<user>:<branch>\t<fork-remote>\t<branch>".
-#
-# A plain function -- no WK_ROOT, no color codes, only git and lib/store.sh tables -- so it ships
-# via `declare -f` into a workspace, and runs the same way against a bare repo in a test.
+# pr_open_target <src-dir> -- decides the checked-out branch and project 'wk pr open' opens as.
+# Prints "<base-repo>\t<user>:<branch>\t<fork-remote>\t<branch>". A plain function -- no WK_ROOT,
+# no color codes, only git and lib/store.sh tables -- so it ships via `declare -f` into a
+# workspace, and runs the same way against a bare repo in a test.
 pr_open_target() {
     local src="$1" branch dirty up up_remote up_url up_repo fork url owner base
     branch=$(git -C "$src" symbolic-ref --quiet --short HEAD 2>/dev/null) || {
@@ -88,8 +83,7 @@ pr_open_target() {
 }
 
 # pr_open_gh_args <base-repo> <head> [--draft] [--web] -- argv for 'gh pr create', one token per
-# line so a caller reads it into an array without word-splitting. --fill always: title and body
-# come from the branch's commits.
+# line so a caller reads it into an array without word-splitting. --fill always.
 pr_open_gh_args() {
     local base="$1" head="$2" a; shift 2
     printf '%s\n' --repo "$base" --head "$head" --fill
@@ -192,9 +186,8 @@ fi
 
 [ -n "$SPEC" ] \
     || die "usage: wk pr [<workspace>] <user>:<branch>|<n>|wpe:<n>, or 'wk pr rebase [<ws>]', or 'wk pr open <ws> [--draft] [--web]' (from the host); see wk pr -h"
-# The ref is a ref, never a workspace name (takes=1, the declaration above), so
-# what is missing here is the workspace -- said as that, rather than as a
-# refusal of the ref.
+# The ref is a ref, never a workspace name (takes=1), so what is missing here is
+# the workspace -- said as that, rather than as a refusal of the ref.
 [ -n "$NAME" ] \
     || die "'wk pr $SPEC' does not say which workspace to check it out into.
     Name one:        wk pr <workspace> $SPEC   ('wk ls' lists them)

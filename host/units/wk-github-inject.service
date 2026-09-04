@@ -5,7 +5,11 @@ Documentation=file://@WK_ROOT@/container/proxy/github-inject.py
 RequiresMountsFor=@WK_ROOT@
 
 [Service]
-Type=simple
+# Ready is "the socket is bound", which only the program knows, so it says
+# so (sd_notify, lib/wknotify.py) and the start job waits for it. Type=simple
+# would report a service that execs and dies a moment later as started.
+Type=notify
+NotifyAccess=all
 ExecStart=/usr/bin/python3 @WK_ROOT@/container/proxy/github-inject.py
 Environment=WK_STORE=@WK_STORE@
 Restart=on-failure
@@ -14,6 +18,10 @@ RestartSec=2
 RuntimeDirectory=wk
 RuntimeDirectoryMode=0700
 RuntimeDirectoryPreserve=yes
+# It mints its CA through openssl, which is handed a config file written to a
+# temporary directory -- and under ProtectSystem=strict every path outside the
+# ones named here is read-only, /tmp included.
+PrivateTmp=yes
 ProtectSystem=strict
 ProtectHome=read-only
 ReadWritePaths=@WK_STORE@

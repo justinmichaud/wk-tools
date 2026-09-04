@@ -10,6 +10,7 @@ calls into lib/resources.sh / build/configs.sh cover the logic without it.
 Run: python3 -m unittest tests.test_build -v
 """
 import platform
+import re
 import shutil
 import subprocess
 import tempfile
@@ -623,3 +624,119 @@ class TestSdkImageCarriesLibbacktrace(unittest.TestCase):
             f"the wkdev SDK image ({img}) carries no libbacktrace -- "
             f"USE_LIBBACKTRACE=ON (build/configs.sh, container/vm/local kinds) "
             f"would fail to configure: {cp.stdout}{cp.stderr}")
+
+
+class TestCcacheIsBlindToTheJobCount(unittest.TestCase):
+    """ccache's hash covers the compiler command line, the preprocessed
+    source and the CCACHE_* settings that affect hashing -- never the job
+    count. So two builds of the same source that differ only in -j must
+    still be one ccache cache, which holds only if config_build_env
+    (build/configs.sh) never lets the job count or the nice level leak into
+    anything that reaches a compiler: CC/CXX, CCACHE_*, WK_BUILD_CMAKE (the
+    -D flags), WK_BUILD_ARGS, WK_BUILD_SCRIPT or WK_BUILD_DIR. This pins that
+    by construction rather than by measurement: change config_build_env to
+    route the job count anywhere else and this fails."""
+
+    # The only CFG_ENV entries the job count or the nice level are allowed
+    # to change (build/configs.sh: NUMBER_OF_PROCESSORS, CMAKE_BUILD_PARALLEL_
+    # LEVEL and WK_JOBS carry the job count to the build driver; WK_NICE
+    # carries the nice level to build/guard.sh's `nice -n`). None of the
+    # four is a compiler flag or a CCACHE_* setting.
+    JOB_OR_NICE_DEPENDENT = frozenset(
+        {"NUMBER_OF_PROCESSORS", "CMAKE_BUILD_PARALLEL_LEVEL", "WK_JOBS", "WK_NICE"})
+
+    def _cfg_env(self, config, os, kind, jobs, nice):
+        cp = bash(f'''
+set -euo pipefail
+. "{REPO}/lib/common.sh"
+. "{REPO}/lib/arch.sh"
+. "{REPO}/build/configs.sh"
+config_load {config} {os} {kind}
+config_build_env /src/WebKit {jobs} {nice} native
+for e in "${{CFG_ENV[@]}}"; do echo "$e"; done
+''')
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        out = {}
+        for line in cp.stdout.strip().splitlines():
+            k, _, v = line.partition("=")
+            out[k] = v
+        return out
+
+    def _assert_only_job_and_nice_fields_move(self, config, os, kind):
+        low = self._cfg_env(config, os, kind, jobs=1, nice=19)
+        high = self._cfg_env(config, os, kind, jobs=64, nice=0)
+        self.assertEqual(set(low), set(high),
+            f"{config}: the job count changed which variables config_build_env "
+            "sets, not just their values")
+        moved = {k for k in low if low[k] != high[k]}
+        extra = moved - self.JOB_OR_NICE_DEPENDENT
+        self.assertFalse(extra,
+            f"{config}: a change of -j reached {sorted(extra)}, which ccache's "
+            "hash can see -- the invariant that a job-count change cannot "
+            "invalidate ccache no longer holds")
+
+    def test_cmake_port(self):
+        """The CMake ports (build-webkit --makeargs=-jN): jsc-release under a
+        container target."""
+        self._assert_only_job_and_nice_fields_move("jsc-release", "linux", "container")
+
+    def test_apple_port(self):
+        """The Xcode port (xcodebuild -jobs N): mac-release, where CC/CXX are
+        left empty for Xcode's own toolchain and WEBKIT_OUTPUTDIR/WK_DERIVED_
+        DATA also enter CFG_ENV -- none of it job-dependent either."""
+        self._assert_only_job_and_nice_fields_move("mac-release", "macos", "vm")
+
+    def test_jsc_only_port_with_ccache_explicitly_turned_on(self):
+        """jsc-debug adds WK_USE_CCACHE=YES to CFG_ENV (build/configs.sh) --
+        checked by name so a future change to how that flag is set cannot
+        make it start reading the job count."""
+        low = self._cfg_env("jsc-debug", "linux", "container", jobs=1, nice=19)
+        self.assertEqual(low.get("WK_USE_CCACHE"), "YES")
+        self._assert_only_job_and_nice_fields_move("jsc-debug", "linux", "container")
+
+
+class TestJobCountNeverReachesACompilerLine(unittest.TestCase):
+    """The other half of the same invariant, checked statically rather than
+    by running a build: build/build-in-target.sh is the one place that turns
+    CFG_ENV's WK_JOBS into the argument a build driver actually sees, and
+    every one of those argument constructions is a parallelism flag consumed
+    by xcodebuild or make/ninja (or the memory watchdog's job count) --
+    never a compiler flag or a cmake -D, which is what would put it inside
+    ccache's hash."""
+
+    BUILD_IN_TARGET = REPO / "build" / "build-in-target.sh"
+
+    def test_the_compiler_flag_variables_never_mention_the_job_count(self):
+        """cmakeargs (--cmakeargs=..., the -D flags) and CFLAGS/CXXFLAGS/
+        LDFLAGS are each assigned exactly once in this file, from
+        WK_BUILD_CMAKE/WK_ARCH_CFLAGS/WK_ARCH_LDFLAGS -- never from the job
+        count. A second assignment, or an append, that mentions the job
+        count anywhere in this file is exactly the leak this test exists to
+        catch."""
+        text = self.BUILD_IN_TARGET.read_text()
+        for name in ("cmakeargs", "CFLAGS", "CXXFLAGS", "LDFLAGS"):
+            assignments = re.findall(rf'^\s*(?:export\s+)?{name}\+?=.*$', text, re.M)
+            self.assertEqual(len(assignments), 1,
+                f"{name} is assigned {len(assignments)} times in "
+                f"build-in-target.sh, expected exactly 1: {assignments}")
+            self.assertNotIn("jobs", assignments[0],
+                f"the job count reaches {name}: {assignments[0]!r}")
+
+    def test_every_other_use_of_the_job_count_is_a_named_parallelism_flag(self):
+        """Every code line in build-in-target.sh that names the job count,
+        enumerated: `guard_jobs` clamping it to the cgroup limit, xcodebuild's
+        `-jobs N`, build-webkit's `--makeargs=-jN`, and guard_exec's own
+        argument (the memory watchdog's budget, build/guard.sh). If a new
+        line uses the job count another way, this fails until the new use
+        gets the same scrutiny this test encodes."""
+        text = self.BUILD_IN_TARGET.read_text()
+        lines = [l.strip() for l in text.splitlines()
+                 if re.search(r'\bjobs\b', l) and not l.strip().startswith("#")]
+        allowed = {
+            'jobs=$(guard_jobs "${WK_JOBS:-4}")',
+            'xc=(-jobs "$jobs")',
+            'args+=("--makeargs=-j$jobs")',
+            'guard_exec "$jobs" -- $wrapper "$script" "${args[@]}" ${@+"$@"}',
+        }
+        self.assertEqual(set(lines), allowed,
+            f"build-in-target.sh's uses of the job count changed: {lines}")

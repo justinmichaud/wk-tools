@@ -2,24 +2,19 @@
 #
 # The benchmark install configuring itself, once, at its first boot.
 #
-# Installed by the package `wk bench mac-volume --build-pkg` makes, laid
-# down by `startosinstall --installpackage` during the install. Runs as
-# root from a LaunchDaemon, removes that LaunchDaemon when it finishes, and
-# is the reason nobody has to sit at this machine.
+# Installed by the package `wk bench mac-volume --build-pkg` makes, laid down
+# by `startosinstall --installpackage`. Runs as root from a LaunchDaemon and
+# removes that LaunchDaemon when it finishes.
 #
-# A first-boot daemon, not a package postinstall script: a package installed
-# by startosinstall runs against a volume that is not running, so creating a
-# user offline means hand-editing dslocal and hoping it matches
-# opendirectoryd -- a known source of accounts that exist but cannot log in.
-# Idempotent throughout, so a failure is repaired by re-running rather than
-# reprovisioning.
+# A first-boot daemon, not a package postinstall script: a package installed by
+# startosinstall runs against a volume that is not running, so creating a user
+# offline means hand-editing dslocal and hoping it matches opendirectoryd.
+# Idempotent throughout, so a failure is repaired by re-running.
 #
-# WK_BENCH_USER (default: bench) and WK_BENCH_PASSWORD (default: benchbench,
-# bench/mac-bench-volume.sh) name and set the account; a LaunchDaemon has no
-# environment to inherit, so in the real flow these only ever take their
-# defaults -- the account's real password comes from $PAYLOAD/password
-# instead, written by `wk bench mac-volume --build-pkg`. The env vars exist
-# so this script is runnable by hand, off the daemon, for debugging.
+# WK_BENCH_USER (default: bench) and WK_BENCH_PASSWORD (default: benchbench)
+# name and set the account, but a LaunchDaemon inherits no environment: the
+# real password comes from $PAYLOAD/password. The env vars are for running this
+# by hand.
 
 set -euo pipefail
 export PATH=/usr/sbin:/usr/bin:/sbin:/bin
@@ -38,10 +33,9 @@ echo "=== wk-bench first boot: $(date -u +%Y-%m-%dT%H:%M:%SZ) ==="
 say() { echo "[wk-bench] $*"; }
 
 # --- the account -------------------------------------------------------------
-#
-# An account with no password cannot be an autologin account. Read only in
-# the branch that *creates* the account: a re-run over an existing account
-# sets PW="" and skips autologin.
+# An account with no password cannot be an autologin account. Read only in the
+# branch that creates the account: a re-run over an existing one sets PW="" and
+# skips autologin.
 if [ -r "$PAYLOAD/password" ]; then
     PW=$(cat "$PAYLOAD/password") || PW=""
 else
@@ -57,9 +51,8 @@ else
         || say "WARNING: sysadminctl -addUser failed"
 fi
 
-# The failsafe: without the account, .AppleSetupDone plus no account is a
-# login window offering nothing and Recovery as the only way back in -- so
-# the marker comes back off and the next boot asks a person instead.
+# Without the account, .AppleSetupDone leaves a login window offering nothing
+# and Recovery as the only way back in, so the marker comes back off.
 if ! id -u "$BENCH_USER" >/dev/null 2>&1; then
     say "FAILSAFE: '$BENCH_USER' does not exist after creation; restoring Setup Assistant"
     rm -f /var/db/.AppleSetupDone
@@ -69,12 +62,9 @@ if ! id -u "$BENCH_USER" >/dev/null 2>&1; then
 fi
 
 # --- sudo without a password, deliberately -----------------------------------
-#
-# Defensible here, not on a workstation: this install is cattle, the
-# alternative defeats the purpose (`wk quiesce` runs unattended, and a
-# password prompt there is a hang), and the *other* install has separate
-# accounts and sudoers. Not the wk-quiesce NOPASSWD rule, a narrower grant
-# that would quietly widen if conflated with this one.
+# Defensible here, not on a workstation: this install is cattle, and a password
+# prompt in the unattended `wk quiesce` is a hang. Kept apart from the narrower
+# wk-quiesce NOPASSWD rule, which would widen if conflated with this one.
 if [ ! -f /etc/sudoers.d/wk-bench ]; then
     printf '%s ALL=(ALL) NOPASSWD: ALL\n' "$BENCH_USER" > /etc/sudoers.d/wk-bench
     chmod 0440 /etc/sudoers.d/wk-bench
@@ -87,15 +77,13 @@ if [ ! -f /etc/sudoers.d/wk-bench ]; then
 fi
 
 # --- a console session with nobody in the room -------------------------------
-#
-# `wk bench staged` refuses without one: a browser driven over ssh with no
-# console session has nowhere to draw, and the run looks like a hang.
+# A browser driven over ssh with no console session has nowhere to draw.
 if [ -n "$PW" ]; then
     # `sysadminctl -resetPasswordFor`, not `dscl . -passwd`: the latter needs
-    # the old password and fails on every re-run, drifting the account from
-    # the login keychain and raising an unlock panel that can sit on screen
-    # through an entire A/B. `dscl . -authonly` below is checked because
-    # macOS tools here exit 0 without acting.
+    # the old password, fails on every re-run, and drifts the account from the
+    # login keychain, raising an unlock panel that can sit on screen through an
+    # entire A/B. `dscl . -authonly` is checked because these tools exit 0
+    # without acting.
     sysadminctl -resetPasswordFor "$BENCH_USER" -newPassword "$PW" >/dev/null 2>&1 \
         || dscl . -passwd "/Users/$BENCH_USER" "$PW" >/dev/null 2>&1 \
         || true
@@ -116,9 +104,9 @@ if [ -n "$PW" ]; then
             || say "WARNING: could not reset the login keychain; expect an unlock prompt"
     fi
 
-    # Written directly, not via `sysadminctl -autologin set`, which logged
-    # `SACSetAutoLoginPassword error:22` and *exited 0*: /etc/kcpassword
-    # (XORed with Apple's fixed key, NUL-padded to a multiple of 12) and
+    # Written directly, not via `sysadminctl -autologin set`, which logs
+    # `SACSetAutoLoginPassword error:22` and exits 0: /etc/kcpassword (XORed
+    # with Apple's fixed key, NUL-padded to a multiple of 12) and
     # autoLoginUser.
     /usr/bin/python3 - "$PW" <<'KCP' 2>/dev/null || say "WARNING: could not write /etc/kcpassword"
 import sys, os
@@ -135,7 +123,6 @@ KCP
     defaults write /Library/Preferences/com.apple.loginwindow autoLoginUser "$BENCH_USER" 2>/dev/null \
         || say "WARNING: could not set autoLoginUser"
 
-    # verified by its artefacts, not an exit status
     if [ -f /etc/kcpassword ] \
        && [ "$(defaults read /Library/Preferences/com.apple.loginwindow autoLoginUser 2>/dev/null)" = "$BENCH_USER" ]; then
         say "autologin set for $BENCH_USER (kcpassword written, autoLoginUser set)"
@@ -174,12 +161,10 @@ if [ -f "$PAYLOAD/authorized_keys" ]; then
 fi
 
 # --- tailscale, so this machine has an address that does not move -------------
-#
-# Without it the LAN address changes between reboots and the ssh alias
-# resolves to the *host* install instead. The standalone/macsys package
-# variant, whose LaunchDaemon gives "runs before login" -- not the App
-# Store build, which is sandboxed and needs a session. Failure is reported,
-# not fatal.
+# Without it the LAN address changes between reboots and the ssh alias resolves
+# to the host install instead. The standalone/macsys package variant, whose
+# LaunchDaemon runs before login -- not the App Store build, which is sandboxed
+# and needs a session. Failure is reported, not fatal.
 TS_CLI=/Applications/Tailscale.app/Contents/MacOS/Tailscale
 TS_PKG=$(ls "$PAYLOAD"/Tailscale-*macos.pkg 2>/dev/null | head -1) || TS_PKG=""
 
@@ -225,10 +210,9 @@ else
 fi
 
 # --- the network, without which none of the above can be reached --------------
-#
-# A fresh macOS install has no Wi-Fi credentials. SSID and passphrase come
-# from the payload and land on the bench volume in the clear -- the same
-# disk and network the credentials already belong to.
+# A fresh macOS install has no Wi-Fi credentials. SSID and passphrase come from
+# the payload and land on the bench volume in the clear -- the same disk and
+# network the credentials already belong to.
 if [ -r "$PAYLOAD/wifi.conf" ]; then
     # shellcheck disable=SC1090
     . "$PAYLOAD/wifi.conf"
@@ -254,16 +238,14 @@ else
 fi
 
 # --- where staged builds land ------------------------------------------------
-#
-# Created here, as root, since `wk bench stage` runs unattended over ssh and
-# cannot sudo. Owned by the bench account: staging writes as the *host*
-# account and the benchmark reads as this one, and both are uid 501.
+# Created here as root, since `wk bench stage` runs unattended over ssh and
+# cannot sudo. Owned by the bench account: staging writes as the host account
+# and the benchmark reads as this one, and both are uid 501.
 install -d -o "$BENCH_USER" -g staff -m 0755 /var/wk 2>/dev/null \
     && say "staging root /var/wk ready, owned by $BENCH_USER" \
     || say "WARNING: could not create /var/wk -- staging will fail from host mode"
 
-# The one thing that tells wk this is bench mode; without it `wk bench
-# staged` refuses.
+# Without this marker `wk bench staged` refuses.
 if [ ! -f /etc/wk-image ]; then
     printf 'id=%s-%s\nprofile=%s\n' "$PROFILE" "$(date -u +%Y-%m)" "$PROFILE" > /etc/wk-image
     say "wrote /etc/wk-image"
@@ -280,12 +262,9 @@ say "quieted: spotlight=$(mdutil -a -s 2>&1 | tr '\n' ' ' | sed 's/  */ /g')"
 say "updates schedule: $(softwareupdate --schedule 2>&1 | tail -1)"
 say "filevault: $(fdesetup status 2>&1 | head -1)"
 
-# The schedule preference above does not stop softwareupdated from checking
-# in anyway (lib/quiet.sh's "scanner: softwareupdated is LOADED" warning);
-# this is the fix, not another report of the same fault. Sourced from the
-# payload -- same function text as do_provision's, installed next to this
-# script by do_build_pkg/do_repair -- and run directly, since this daemon is
-# already root.
+# The schedule preference above does not stop softwareupdated checking in
+# anyway (lib/quiet.sh's "scanner: softwareupdated is LOADED" warning). Sourced
+# from the payload, installed next to this script by do_build_pkg/do_repair.
 QUIET_HOSTS=/usr/local/libexec/wk-bench-quiet-hosts.sh
 if [ -r "$QUIET_HOSTS" ]; then
     # shellcheck disable=SC1090
@@ -301,9 +280,8 @@ else
     say "WARNING: $QUIET_HOSTS missing from the payload; update endpoints not denied"
 fi
 
-# Carried in the package rather than fetched: `wk bench staged` cannot be
-# the thing that needs provisioning first. wk-tools only -- a WebKit
-# checkout here would make this a second workstation.
+# Carried in the package rather than fetched. wk-tools only: a WebKit checkout
+# here would make this a second workstation.
 if [ -d "$PAYLOAD/wk-tools" ]; then
     home=$(dscl . -read "/Users/$BENCH_USER" NFSHomeDirectory 2>/dev/null | awk '{print $2}') || home=""
     if [ -n "$home" ] && [ -d "$home" ]; then
@@ -325,9 +303,8 @@ else
     say "    xcode-select --install"
 fi
 
-# Deliberately not `launchctl bootout` on this daemon's own label: that
-# would kill this script before the `rm -f` below executes, leaving the
-# files in place and every reboot silently re-running provisioning.
+# Not `launchctl bootout` on this daemon's own label: that would kill this
+# script before the `rm -f` below, leaving every reboot to re-run provisioning.
 say "removing the first-boot daemon"
 rm -f "$DAEMON" "$SELF" || true
 if [ -f "$DAEMON" ]; then
@@ -337,8 +314,7 @@ else
 fi
 say "=== first boot provisioning complete ==="
 
-# Autologin only takes effect at the *next* boot, so reboot rather than
-# leave a login window nobody is there to answer.
+# Autologin only takes effect at the next boot.
 say "rebooting so autologin takes effect"
 shutdown -r +1 &
 exit 0

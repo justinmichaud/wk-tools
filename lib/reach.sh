@@ -1,22 +1,11 @@
-# How a machine is reached -- calculated, never written down (CLAUDE.md: a
-# second copy of a fact goes stale and reads like broken hardware). Derived
-# at read time:
-#   the tailnet     `tailscale status --json`. Not cached beyond one run.
-#   the config      `ssh -G <name>` -- a calculation, not a copy. Answers
-#                   only for machines that genuinely cannot be on the
-#                   tailnet: Igalia's build boxes and moose's BMC.
-#   enumeration     a sweep for the hardware address on segments this
-#                   machine can see (reach_enumerate). Last: the only one
-#                   that costs traffic.
-# No name lookup below the tailnet: every image this repo builds joins on
-# first boot, so a board the tailnet cannot name has no uplink either.
-# Read-only and bounded, called from probes that already run in parallel
-# under a ceiling (`capped`, lib/common.sh).
+# How a machine is reached -- calculated, never written down: the tailnet
+# (`tailscale status --json`), then `ssh -G <name>` for the machines that cannot be
+# on it (Igalia's build boxes, moose's BMC), then a sweep for the hardware address,
+# last because it is the only one that costs traffic. No name lookup below the
+# tailnet: an image that cannot join it on first boot has no uplink either.
 
-# The tailnet's view, once per process, under a ceiling: a wedged
-# tailscaled has no timeout of its own and would otherwise hang the walk.
-# WK_TAILSCALE_TIMEOUT overrides it; tests/test_quick.py sets it to 1 against
-# a stub `tailscale` that never answers, to prove the walk does not hang.
+# Once per process, under a ceiling: a wedged tailscaled has no timeout of its own
+# and would otherwise hang the walk. WK_TAILSCALE_TIMEOUT overrides it.
 _WK_TS_PEERS=""
 _WK_TS_READ=""
 
@@ -54,8 +43,6 @@ for p in (d.get("Peer") or {}).values():
     printf '%s' "$_WK_TS_PEERS"
 }
 
-# reach_tailnet <name> -- "<ip> (up|down)", or nothing when the tailnet has
-# never heard of it.
 reach_tailnet() {
     local name="$1" line
     line=$(wk_tailscale_peers | awk -F'\t' -v n="$name" '$1 == n {print; exit}')
@@ -63,8 +50,8 @@ reach_tailnet() {
     printf '%s (%s)' "$(printf '%s' "$line" | cut -f2)" "$(printf '%s' "$line" | cut -f3)"
 }
 
-# reach_ssh <name> -- what `ssh <name>` would dial. `ssh -G` performs the
-# whole config resolution and prints it without connecting.
+# reach_ssh <name> -- what `ssh <name>` would dial; `ssh -G` performs the whole
+# config resolution without connecting.
 reach_ssh() {
     local name="$1" g host port jump user out
     have ssh || return 0
@@ -81,18 +68,13 @@ reach_ssh() {
     printf '%s' "$out"
 }
 
-# For a host whose key cannot be pinned: a fresh one is generated on every
-# image write, so pinning would produce a man-in-the-middle warning.
-# LogLevel=ERROR: with known-hosts at /dev/null, ssh announces a
-# permanently-added key every connection. Lives here, not boot/machines.sh:
-# targets/vm.sh needs it too, and boot depending on targets would be a cycle.
+# For a host whose key cannot be pinned: a fresh one is generated on every image
+# write, so pinning would produce a man-in-the-middle warning. LogLevel=ERROR:
+# with known-hosts at /dev/null, ssh announces a new key every connection. Here,
+# not boot/machines.sh: boot depending on targets would be a cycle.
 _unpinned_host_key_opts() {
     printf '%s' "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR"
 }
-
-# --- enumeration: the one fallback there is ------------------------------------
-# What answers when the first way says nothing, by *looking*; nothing here
-# is stored.
 
 # Every IPv4 segment this machine is directly on. tailscale0 excluded: a
 # /32 on a mesh with no broadcast domain to sweep.
@@ -103,23 +85,16 @@ reach_segments_local() {
           print o[1] "." o[2] "." o[3] ".0/" a[2] }'
 }
 
-# reach_sweep <cidr> -- "<ip> <mac> <state>" for every address on that
-# segment the kernel has a hardware address for. nmap generates the
-# traffic; the *neighbour table* is the answer, not nmap's own verdict --
-# unprivileged nmap calls a host with tcp/80 and tcp/443 closed `down`
-# while the board it just ARPed for sits there.
-#
-# FAILED and INCOMPLETE are dropped as stale DHCP leases. The vantage
-# defaults to this machine; a segment it's not on can only be swept from
-# one that is (a bridge phone, for its cable), so it's the caller's to name.
+# reach_sweep <cidr> [vantage] -- "<ip> <mac> <state>" for every address on that
+# segment the kernel has a hardware address for. nmap generates the traffic but the
+# *neighbour table* is the answer: unprivileged nmap calls a host with tcp/80 and
+# tcp/443 closed `down`. FAILED and INCOMPLETE are dropped as stale DHCP leases.
+# A segment this machine is not on is swept from one that is: the caller names it.
 reach_sweep() { # <cidr> [vantage]
     local cidr="$1" van="${2:-}" pre=""
     [ -z "$van" ] || [ "$van" = local ] || pre="ssh -o BatchMode=yes -o ConnectTimeout=$(wk_ssh_timeout) $van"
     if [ -z "$pre" ]; then
         have nmap || return 1
-        # No override: nothing in the tree or its tests ever wanted a sweep
-        # longer or shorter than this, and a person tuning it would not know
-        # this file exists to look in.
         capped 60 nmap -sn -n --host-timeout 5s "$cidr" >/dev/null 2>&1 || true
         ip neigh show 2>/dev/null
     else
@@ -146,8 +121,6 @@ reach_sweep() { # <cidr> [vantage]
         }'
 }
 
-# reach_enumerate <mac> -- the address that hardware is at right now.
-# Shared by `wk status` and `wk find`, so the two can't disagree.
 reach_enumerate() { # <mac>
     local mac hit seg
     mac=$(printf '%s' "${1:-}" | tr 'A-Z' 'a-z')
@@ -160,15 +133,13 @@ reach_enumerate() { # <mac>
     return 1
 }
 
-# reach_without_tailnet <machine> -- where it is, when the tailnet does not
-# say: tries the ssh config's answer first, then falls back to the sweep.
+# reach_without_tailnet <machine> -- the ssh config's answer, else the sweep.
 reach_without_tailnet() {
     local m="$1" ssh_path ts_name mac n
 
-    # Called from inside the fleet walk, so an unconditional sweep here
-    # would lose the line to its own ceiling. A fleet device is on the
-    # tailnet under its role names (NODE_SSH, NODE_BENCH_SSH), which need
-    # not be the machine name.
+    # An unconditional sweep here would lose the line to the fleet walk's own ceiling.
+    # A fleet device is on the tailnet under its role names (NODE_SSH, NODE_BENCH_SSH),
+    # which need not be the machine name.
     for n in "$m" $(kv_field "$WK_ROOT/boot/machines/$m.conf" NODE_SSH | tr -d '"'"'"' ') \
                   $(kv_field "$WK_ROOT/boot/machines/$m.conf" NODE_BENCH_SSH | tr -d '"'"'"' '); do
         [ -z "$(reach_tailnet "$n")" ] || return 0

@@ -1,42 +1,20 @@
-# Softnet: the egress boundary for macOS guest VMs.
+# Softnet: the egress boundary for macOS guest VMs. Tart runs it as a userspace
+# packet filter on the host, default-deny with the host itself the one allowed
+# address, and the guest reaches wk-proxy over TCP there. It needs root because
+# vmnet does, so it is installed SUID root here, once, at setup time.
 #
-# Container workspaces reach the outside through a proxy because they have no
-# network interface at all; a macOS guest is a whole operating system and
-# needs one, so the boundary is put in front of it instead:
-#
-#   Softnet     a userspace packet filter that Tart runs as a subprocess on the
-#               HOST, outside the guest. Default-deny, with one address allowed:
-#               the host itself.
-#   wk-proxy    the same policy engine the containers use, listening on TCP on
-#               the host, reached over that one allowed address.
-#
-# The guest gets the same hostname allowlist as a container, enforced
-# somewhere it cannot reach -- what `pf` inside the guest could never be,
-# since pf is modifiable by anything running as root there.
-#
-# --- about the privilege ------------------------------------------------------
-# Softnet needs root, because vmnet does. It is installed SUID root here,
-# once, at setup time -- the same trade the quiesce helper makes: a
-# privilege granted deliberately during setup, never taken in the daily
-# path. `wk` itself still never calls sudo.
-
-# WK_SOFTNET_VERSION pins the release this stage installs; WK_SOFTNET_BIN
-# overrides the install path. cmd/ai, cmd/doctor, setup and targets/vm.sh
-# all read WK_SOFTNET_BIN the same way, with the same default, to find the
-# binary this stage installed -- one path, read consistently rather than
-# passed around.
+# WK_SOFTNET_VERSION pins the release; WK_SOFTNET_BIN overrides the install
+# path, and cmd/ai, cmd/doctor, setup and targets/vm.sh all read it with this
+# same default to find what this stage installed.
 WK_SOFTNET_VERSION="${WK_SOFTNET_VERSION:-0.23.0}"
 WK_SOFTNET_BIN="${WK_SOFTNET_BIN:-/usr/local/bin/softnet}"
 
-# Only meaningful if the macOS VM target is in use at all.
 if ! have tart && [ ! -x "$HOME/.local/bin/tart" ]; then
     debug "tart not installed; skipping softnet (see README.md, Setup)"
     return 0 2>/dev/null || true
 fi
 
-# `softnet --version` prints "softnet 0.23.0-e5fd48c": the release version
-# with the build's commit appended, so the whole string never matches the
-# release number alone.
+# `softnet --version` prints "softnet 0.23.0-e5fd48c": version plus commit.
 _installed_ver=""
 [ -x "$WK_SOFTNET_BIN" ] && \
     _installed_ver=$("$WK_SOFTNET_BIN" --version 2>/dev/null | awk '{print $NF}' | cut -d- -f1)
@@ -51,17 +29,14 @@ else
     if curl -fsSL -o "$_tmp/softnet.tar.gz" "$_base/softnet.tar.gz" &&
        curl -fsSL -o "$_tmp/sums.txt"      "$_base/softnet_${WK_SOFTNET_VERSION}_checksums.txt"; then
 
-        # Verified before anything is installed, and certainly before anything
-        # is made SUID root. An unverified download that then gets the setuid
-        # bit is a local root exploit with extra steps.
+        # Verified before anything is made SUID root.
         _want=$(awk '/softnet.tar.gz$/ {print $1}' "$_tmp/sums.txt")
         _got=$(shasum -a 256 "$_tmp/softnet.tar.gz" | awk '{print $1}')
 
         if [ -n "$_want" ] && [ "$_want" = "$_got" ]; then
             tar -xzf "$_tmp/softnet.tar.gz" -C "$_tmp"
             if [ -f "$_tmp/softnet" ]; then
-                # root-owned, not writable by the invoking user: a SUID binary
-                # in a user-writable path is not a boundary at all.
+                # A SUID binary in a user-writable path is not a boundary.
                 if sudo install -o root -g wheel -m 4755 "$_tmp/softnet" "$WK_SOFTNET_BIN"; then
                     changed "installed softnet $WK_SOFTNET_VERSION at $WK_SOFTNET_BIN (SUID root)"
                 else

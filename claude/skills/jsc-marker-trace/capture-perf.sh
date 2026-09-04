@@ -1,10 +1,10 @@
 #!/bin/bash
-# Capture a Linux perf profile of MiniBrowser with GC-section text markers and a group of
-# hardware PMU events, for splitting per GC section with split-perf.py. Unlike capture.sh
-# (samply, wall-clock stacks), this records cycles/instructions/cache events so each GC
-# section's instructions-per-cycle and cache-miss behaviour can be measured.
+# Capture a Linux perf profile of MiniBrowser with GC-section text markers and a
+# group of hardware PMU events, for splitting per GC section with split-perf.py.
+# Unlike capture.sh (samply, wall-clock stacks) this records cycles/instructions/
+# cache events, so each section's IPC and cache-miss behaviour can be measured.
 #
-# Linux/GTK only (perf). Requires a Release WebKit build with the GC text-marker patch,
+# Linux/GTK only. Requires a Release WebKit build with the GC text-marker patch,
 # and perf (`linux-perf`) whose major.minor matches the running kernel.
 #
 # Usage:   capture-perf.sh <periodMS> <durationSec> <out.data> [url] [freqHz]
@@ -29,10 +29,9 @@ URL=${4:-http://localhost:8080}
 FREQ=${5:-4000}
 AUX="${TRACE_AUX:-/tmp/jsc-trace-aux}"
 
-# Leader is cycles (dedicated counter). instructions gives IPC; l1d_cache_refill and
-# ll_cache_miss_rd locate memory-bound work; stall_backend is the memory-stall signal.
-# Five events fit the Neoverse-N1 PMU (cycles on the fixed counter + 4 of 6 programmable),
-# so there is no multiplexing. Override with PERF_EVENTS for a different uarch.
+# Leader is cycles, on the fixed counter. Five events fit the Neoverse-N1 PMU
+# (cycles plus 4 of 6 programmable), so there is no multiplexing. Override with
+# PERF_EVENTS for a different uarch.
 EVENTS="${PERF_EVENTS:-cycles,instructions,l1d_cache_refill,ll_cache_miss_rd,stall_backend}"
 
 mkdir -p "$AUX" "$(dirname "$OUT")"
@@ -73,15 +72,14 @@ echo
 stop_browser
 sleep 1
 
-# --clockid=monotonic puts perf sample timestamps on CLOCK_MONOTONIC, the same base as JSC's
-# MonotonicTime markers, so split-perf.py can match samples to marker spans with no conversion.
-# perf records the launched workload and its children (inherit), so the forked/exec'd
-# WebKitWebProcess where GC runs is captured too.
+# --clockid=monotonic puts perf sample timestamps on CLOCK_MONOTONIC, the same
+# base as JSC's MonotonicTime markers, so split-perf.py needs no conversion. perf
+# records the launched workload and its children, so the forked WebKitWebProcess
+# where GC runs is captured too.
 #
-# Call graphs are OFF by default: per-function counter attribution needs only the leaf symbol,
-# and recording a callchain per sample makes perf.data ~10x larger and the perf-script Python
-# pass minutes-long (it marshals+symbolizes every frame of every sample). Set CALLGRAPH=fp to
-# enable them when you want split-perf.py's cache-miss flamegraph (.folded) output.
+# Call graphs are off by default: a callchain per sample makes perf.data ~10x
+# larger and the perf-script Python pass minutes-long. Set CALLGRAPH=fp for
+# split-perf.py's cache-miss flamegraph (.folded) output.
 CG=()
 [ "${CALLGRAPH:-}" = "" ] || CG=(--call-graph "${CALLGRAPH}")
 "$PERF" record -e "$EVENTS" -F "$FREQ" --clockid=monotonic "${CG[@]}" \

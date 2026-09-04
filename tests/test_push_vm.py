@@ -723,6 +723,74 @@ _set_guest_egress demo 1.2.3.4 || true
         self.assertFalse((home / ".wk-ca-bundle.pem").exists())
 
 
+class TestTheGuestsInjectorGetsTheStandingReadToken(WkTest):
+    """The injector a guest talks to runs on this host, so its standing read
+    token is a file here. Reading is open whatever position `wk push` is in, so
+    every `wk vm start` converges that file from what this host holds -- and
+    `wk push on|off` never touches it."""
+
+    START_INJECT = """
+. "$WK_ROOT/lib/common.sh"
+. "$WK_ROOT/lib/store.sh"
+. "$WK_ROOT/lib/target.sh"
+load_target vm >/dev/null 2>&1
+# Already up: what a start has to converge is the token, whether or not it
+# also has to start the program.
+_inject_running() { return 0; }
+_start_host_inject
+"""
+
+    def _start_inject(self, vmstore, pat=None):
+        store = self.tmp / "store"
+        held = store / "push-keys"
+        held.mkdir(parents=True, exist_ok=True)
+        (store / "secrets").mkdir(parents=True, exist_ok=True)
+        if pat is None:
+            (held / "github-pat").unlink(missing_ok=True)
+        else:
+            (held / "github-pat").write_text(pat)
+        return bash(self.START_INJECT,
+                    env={"WK_STORE": str(store),
+                         "WK_HOST_SECRETS": str(store / "secrets"),
+                         "WK_VM_STORE": str(vmstore)})
+
+    def read_pat(self, vmstore):
+        return vmstore / "vm" / "read-github-pat"
+
+    def test_a_start_writes_it_from_the_token_this_host_holds(self):
+        _, vmstore = _guest(self.tmp)
+        cp = self._start_inject(vmstore, pat="ghp-not-a-real-token\n")
+        self.assertEqual(0, cp.returncode, cp.stdout + cp.stderr)
+        self.assertEqual("ghp-not-a-real-token\n", self.read_pat(vmstore).read_text())
+        self.assertEqual(0o600, self.read_pat(vmstore).stat().st_mode & 0o777)
+
+    def test_a_token_withdrawn_on_this_host_is_gone_at_the_next_start(self):
+        _, vmstore = _guest(self.tmp)
+        self._start_inject(vmstore, pat="ghp-not-a-real-token\n")
+        self._start_inject(vmstore, pat=None)
+        self.assertFalse(self.read_pat(vmstore).exists())
+
+    def test_the_injector_is_told_where_to_read_it(self):
+        """A file nothing names is a file nothing reads: the program takes the
+        path from WK_INJECT_READ_PAT (container/proxy/github-inject.py)."""
+        body = func_body((REPO / "targets" / "vm.sh").read_text(), "_start_host_inject")
+        self.assertIn('WK_INJECT_READ_PAT="$(_inject_read_pat)"', body)
+        self.assertIn("github-inject.py", body)
+
+    @unittest.skipUnless(os.uname().sysname == "Darwin",
+                         "guests are a macOS-host thing (tart)")
+    def test_neither_position_of_the_switch_touches_it(self):
+        home, vmstore = _guest(self.tmp)
+        store = _store(self.tmp, keys=("fork",))
+        (store / "push-keys" / "github-pat").write_text("ghp-not-a-real-token\n")
+        (vmstore / "vm").mkdir(parents=True, exist_ok=True)
+        self.read_pat(vmstore).write_text("ghp-standing\n")
+        for action in ("on", "off"):
+            with self.subTest(action=action):
+                TestTheGuestHalfOfTheSwitch._push(self, action, store, home, vmstore)
+                self.assertEqual("ghp-standing\n", self.read_pat(vmstore).read_text())
+
+
 class TestBothHalvesRunHere(WkTest):
     def test_the_whole_command_runs_here(self):
         src = (REPO / "cmd" / "push").read_text()

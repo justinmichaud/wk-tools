@@ -1,18 +1,19 @@
 """`wk verify` proves that nothing in a workspace can publish.
 
-The two things that could are an ssh key that pushes and a GitHub API token
-that posts, and neither is a file inside the boundary any more: the keys are in
-an ssh-agent outside it and the token is in the credential injector. So the
-checks changed shape -- "there is no key in the mount" became "no key material
-anywhere, the agent holds nothing, and an authenticated API call is refused" --
-and the old claim that api.github.com is unreachable is retired, because it is
-now reachable and unauthenticated.
+Reading GitHub is open and writing is not, so what the checks measure is that
+split. The two things that could publish are an ssh key that pushes and a
+GitHub API token that posts, and neither is a file inside the boundary: the
+keys are in an ssh-agent outside it and the tokens are in the credential
+injector. So the workspace is asked whether a read is authenticated, whether a
+write outside the injector's ALLOW table is refused by the injector itself, and
+whether an allowed write is authenticated only while the switch is on.
 
 The block is run for real rather than read: it is lifted out of cmd/verify and
 given a stub `inside` that answers each probe from a table, a stub `wk` that
-answers `push status`, and the same pass/fail/note the command uses. Every
-check therefore has a passing case and a failing case, which is the point --
-a check that cannot fail is not a check.
+answers `push status`, stubs for the two store functions it asks about this
+device, and the same pass/fail/note the command uses. Every check therefore has
+a passing case and a failing case, which is the point -- a check that cannot
+fail is not a check.
 
 Run: python3 -m unittest tests.test_verify_credentials -v
 """
@@ -28,22 +29,36 @@ VERIFY = (REPO / "cmd" / "verify").read_text()
 START = "# --- the two credentials, and that neither one is in here"
 END = "# --- GPU ---"
 
+POLICY = "container/proxy/github-inject.py"
+
+# What the injector answers a write its table does not have: a body naming the
+# file the table is in, and 403. `tail -1` is how cmd/verify takes the code.
+REFUSED = ("POST /repos/wkuser/WebKit/keys is a write, and it is not in the wk "
+           "credential injector's ALLOW table. It is ALLOW in %s.\n403" % POLICY)
+
 # Answers for every probe the block makes, keyed by a substring of the command
-# it runs inside the workspace. A default per key is the healthy workspace; a
-# test overrides one and asserts the check fails.
+# it runs inside the workspace. The defaults are a healthy workspace with the
+# switch off on a device that holds a token; a test overrides one and asserts
+# the check fails.
 DEFAULTS = {
     "PRIVATE KEY": "",
     "ssh-add -l": "0",
     "https://api.github.com/ ": "200",
-    "api.github.com/user": "401",
+    "api.github.com/user": "200",
+    "/keys": REFUSED,
+    "/pulls": "401",
     "GITHUB_COM_TOKEN": "wk-injects-this",
+    "GH_TOKEN": "wk-injects-this",
     "hosts.yml": "",
-    "command -v gh": "ABSENT",
 }
 
 ORDER = ("PRIVATE KEY", "ssh-add -l", "api.github.com/user",
-         "https://api.github.com/ ", "GITHUB_COM_TOKEN", "hosts.yml",
-         "command -v gh")
+         "https://api.github.com/ ", "/keys", "/pulls",
+         "GITHUB_COM_TOKEN", "GH_TOKEN", "hosts.yml")
+
+# The one fork the stubbed wk_push_forks names, which is what the two write
+# probes address.
+FORK = "wkuser/WebKit"
 
 
 class _Block(WkTest):
@@ -52,14 +67,15 @@ class _Block(WkTest):
         j = VERIFY.index(END)
         return VERIFY[i:j]
 
-    def run_block(self, push_on=False, answers=None, agent_sock="/run/wk/ssh-agent.sock"):
+    def run_block(self, push_on=False, answers=None, stored_pat="ghp-stored-here",
+                  agent_sock="/run/wk/ssh-agent.sock"):
         table = dict(DEFAULTS)
         table.update(answers or {})
 
         # A `wk` that answers only `push status`: 0 is on, 1 is off, which is
         # the command's own contract (cmd/push).
         root = self.tmp / "root"
-        root.mkdir()
+        root.mkdir(exist_ok=True)
         (root / "wk").write_text("#!/bin/sh\nexit %d\n" % (0 if push_on else 1))
         (root / "wk").chmod(0o755)
 
@@ -77,6 +93,8 @@ pass() {{ printf "ok    %s\\n" "$*"; }}
 fail() {{ printf "FAIL  %s\\n" "$*"; fails=$((fails + 1)); }}
 note() {{ printf "      %s\\n" "$*"; }}
 t_agent_sock() {{ {"echo " + agent_sock if agent_sock else "return 1"}; }}
+wk_github_pat() {{ printf %s "{stored_pat}"; }}
+wk_push_forks() {{ printf "%s\\n" "fork {FORK} github-webkit"; }}
 inside() {{
     case "$*" in
 {cases}
@@ -103,17 +121,26 @@ class TestAHealthyWorkspacePasses(_Block):
         self.assertIn("no private key material", out)
         self.assertIn("no identity reaches this workspace", out)
         self.assertIn("reachable through the injector", out)
-        self.assertIn("refused (HTTP 401)", out)
-        self.assertIn("is the placeholder", out)
+        self.assertIn("a read is authenticated (HTTP 200)", out)
+        self.assertIn("refused by the injector itself", out)
+        self.assertIn("an allowed write is unauthenticated (HTTP 401)", out)
+        self.assertIn("GITHUB_COM_TOKEN in the workspace is the placeholder", out)
+        self.assertIn("GH_TOKEN in the workspace is the placeholder", out)
 
     def test_push_on_is_the_other_correct_state(self):
         out = self.run_block(push_on=True,
-                             answers={"ssh-add -l": "2",
-                                      "api.github.com/user": "200"})
+                             answers={"ssh-add -l": "2", "/pulls": "422"})
         self.assertEqual(0, self.fails(out), out)
         self.assertIn("the host says push is ON", out)
         self.assertIn("2 deploy key(s) reach this workspace", out)
-        self.assertIn("an authenticated API call succeeds", out)
+        self.assertIn("an allowed write is authenticated (HTTP 422", out)
+
+    def test_a_device_with_no_token_stored_is_a_correct_state_too(self):
+        """No `wk key set github-pat` here at all: reads answer 401 and that
+        is the machine agreeing with this device, not a fault."""
+        out = self.run_block(stored_pat="", answers={"api.github.com/user": "401"})
+        self.assertEqual(0, self.fails(out), out)
+        self.assertIn("this device holds no token at all", out)
 
 
 class TestKeyMaterial(_Block):
@@ -203,7 +230,7 @@ class TestTheAgent(_Block):
         """The other direction, and it matters: a workspace whose socket is
         empty while the host says on is a `git push` that will fail at the
         door, reported as the sandbox holding when it is the plumbing."""
-        out = self.run_block(push_on=True, answers={"api.github.com/user": "200"})
+        out = self.run_block(push_on=True, answers={"/pulls": "422"})
         self.assertEqual(1, self.fails(out), out)
         self.assertIn("no identity reaches", out)
 
@@ -226,48 +253,155 @@ class TestTheApi(_Block):
         self.assertEqual(1, self.fails(out), out)
         self.assertIn("the injector is not in the path", out)
 
-    def test_an_authenticated_call_that_succeeds_while_push_is_off_fails(self):
-        out = self.run_block(push_on=False, answers={"api.github.com/user": "200"})
-        self.assertEqual(1, self.fails(out), out)
-        self.assertIn("expected 401", out)
 
-    def test_an_authenticated_call_that_is_refused_while_push_is_on_fails(self):
-        out = self.run_block(push_on=True, answers={"ssh-add -l": "1",
-                                                    "api.github.com/user": "401"})
+class TestAReadIsAuthenticatedFromTheStandingToken(_Block):
+    """Reading is open whatever position the switch is in, so the read probe
+    measures delivery: a token on this device is a read that answers 200 in
+    the workspace, and the failure names what did not deliver it."""
+
+    def test_a_token_here_and_a_401_in_there_is_the_undelivered_read_token(self):
+        out = self.run_block(answers={"api.github.com/user": "401"})
         self.assertEqual(1, self.fails(out), out)
+        self.assertIn("the machine has not been given the standing read token", out)
+        self.assertIn("./setup", out)
         self.assertIn("wk key set github-pat", out)
 
+    def test_a_read_that_answers_200_with_no_token_here_is_a_credential_wk_did_not_place(self):
+        out = self.run_block(stored_pat="")
+        self.assertEqual(1, self.fails(out), out)
+        self.assertIn("a credential wk did not put there", out)
 
-class TestThePlaceholder(_Block):
+    def test_the_switch_does_not_govern_it(self):
+        """The same 200 with push on and with push off: a check that answered
+        differently would be measuring the write token."""
+        for push_on, pulls in ((True, "422"), (False, "401")):
+            with self.subTest(push_on=push_on):
+                out = self.run_block(push_on=push_on, answers={"/pulls": pulls,
+                                                               "ssh-add -l": "2" if push_on else "0"})
+                self.assertEqual(0, self.fails(out), out)
+                self.assertIn("a read is authenticated (HTTP 200)", out)
+
+
+class TestTheWriteTableIsEnforcedByTheInjector(_Block):
+    """A write the table does not have never reaches GitHub, so this probe is
+    safe on every run -- and 403 alone is not the evidence, because GitHub
+    answers 403 too. The body has to name the file the table is in."""
+
+    def test_a_write_outside_the_table_is_refused_and_the_body_names_the_table(self):
+        out = self.run_block()
+        self.assertEqual(0, self.fails(out), out)
+        self.assertIn("refused by the injector itself (HTTP 403)", out)
+
+    def test_a_403_from_somewhere_that_is_not_the_injector_fails(self):
+        out = self.run_block(answers={"/keys": "403"})
+        self.assertEqual(1, self.fails(out), out)
+        self.assertIn("the injector is not the thing answering", out)
+
+    def test_a_write_endpoint_that_answers_anything_else_fails(self):
+        out = self.run_block(answers={"/keys": "{}\n201"})
+        self.assertEqual(1, self.fails(out), out)
+        self.assertIn("answered '201'", out)
+
+    def test_the_probe_addresses_the_fork_this_machine_pushes_to(self):
+        """Not a literal repository: the refusal a person reads has to name
+        the endpoint their own workspace was refused."""
+        out = self.run_block(answers={"/keys": "403"})
+        self.assertIn("POST /repos/%s/keys" % FORK, out)
+
+
+class TestTheSwitch(_Block):
+    def test_an_allowed_write_that_succeeds_while_push_is_off_fails(self):
+        out = self.run_block(push_on=False, answers={"/pulls": "422"})
+        self.assertEqual(1, self.fails(out), out)
+        self.assertIn("a write token is still on the machine", out)
+        self.assertIn("wk push off", out)
+
+    def test_an_allowed_write_that_is_refused_while_push_is_on_fails(self):
+        out = self.run_block(push_on=True, answers={"ssh-add -l": "1",
+                                                    "/pulls": "401"})
+        self.assertEqual(1, self.fails(out), out)
+        self.assertIn("the injector has no write token", out)
+
+    def test_the_probe_cannot_create_a_pull_request(self):
+        """An empty body names no head or base branch, which is why a 422 is
+        the authenticated answer and nothing is created by measuring."""
+        block = self.block()
+        self.assertIn("-X POST -d '{}' https://api.github.com/repos/$FORK/pulls", block)
+
+
+class TestThePlaceholders(_Block):
+    """Both variables, because `git-webkit` sends one and `gh` the other, and
+    a request with no Authorization header has nothing for the injector to
+    replace."""
+
     def test_a_real_looking_token_fails_and_is_never_printed(self):
         """Printing what the workspace holds would print a token on the one
         run where this check matters."""
-        out = self.run_block(answers={"GITHUB_COM_TOKEN": "ghp-a-real-one"})
-        self.assertEqual(1, self.fails(out), out)
-        self.assertIn("is not the placeholder", out)
-        self.assertNotIn("ghp-a-real-one", out)
+        for var in ("GITHUB_COM_TOKEN", "GH_TOKEN"):
+            with self.subTest(var=var):
+                out = self.run_block(answers={var: "ghp-a-real-one"})
+                self.assertEqual(1, self.fails(out), out)
+                self.assertIn("%s in the workspace is not the placeholder" % var, out)
+                self.assertNotIn("ghp-a-real-one", out)
 
-    def test_an_unset_token_fails_and_names_what_writes_it(self):
-        out = self.run_block(answers={"GITHUB_COM_TOKEN": ""})
-        self.assertEqual(1, self.fails(out), out)
-        self.assertIn("/secrets/github-user", out)
+    def test_an_unset_token_fails_and_names_what_exports_it(self):
+        for var in ("GITHUB_COM_TOKEN", "GH_TOKEN"):
+            with self.subTest(var=var):
+                out = self.run_block(answers={var: ""})
+                self.assertEqual(1, self.fails(out), out)
+                self.assertIn("%s is unset in here" % var, out)
+                self.assertIn("container/proxy/ensure-bridge.sh", out)
 
 
-class TestGh(_Block):
+class TestAStoredGhCredential(_Block):
     def test_a_gh_credential_in_the_home_fails(self):
         out = self.run_block(answers={"hosts.yml": "/home/u/.config/gh/hosts.yml"})
         self.assertEqual(1, self.fails(out), out)
         self.assertIn("GitHub credential inside the workspace", out)
 
-    def test_an_authenticated_gh_fails_because_it_bypasses_the_injector(self):
-        out = self.run_block(answers={"command -v gh": "AUTHED"})
-        self.assertEqual(1, self.fails(out), out)
-        self.assertIn("bypasses the injector", out)
+    def test_the_placeholder_gh_reads_is_not_itself_a_finding(self):
+        """`gh` holding GH_TOKEN is the arrangement working: the injector
+        replaces it. What is scanned for is a credential nothing put there."""
+        block = self.block()
+        self.assertIn("GITHUB_TOKEN|GH_ENTERPRISE_TOKEN", block)
+        self.assertNotIn("gh auth status", block)
 
-    def test_gh_present_but_logged_out_passes(self):
-        out = self.run_block(answers={"command -v gh": "REFUSED"})
-        self.assertEqual(0, self.fails(out), out)
-        self.assertIn("not authenticated", out)
+
+class TestWhatAnAgentInHereCanSpend(WkTest):
+    """The blast-radius note, lifted and run: whether this workspace has the
+    claude.ai login is a question for the target driver, not for this
+    machine's store -- a guest holds one of its own and is never handed the
+    host's (t_agent_secret_present, lib/target.sh)."""
+
+    START = "# --- what an agent in here can spend"
+
+    def run_note(self, present):
+        block = VERIFY[VERIFY.index(self.START):VERIFY.index(START)]
+        harness = f'''
+set -u
+NAME=demo
+note() {{ printf "      %s\\n" "$*"; }}
+t_agent_secret_present() {{ printf "asked %s about %s\\n" "$1" "$2" >&2; [ {present} = yes ]; }}
+t_agent_secret_remedy()  {{ printf "the remedy for %s" "$2"; }}
+'''
+        cp = bash(harness + block)
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        return cp.stdout + cp.stderr
+
+    def test_it_asks_the_target_about_this_workspace(self):
+        out = self.run_note("yes")
+        self.assertIn("asked demo about claude-login", out, out)
+
+    def test_a_workspace_that_has_one_is_reported_as_account_scope(self):
+        out = self.run_note("yes")
+        self.assertIn("account scope", out, out)
+
+    def test_a_workspace_without_one_gets_the_targets_remedy(self):
+        """Not one baked sentence: a container's remedy is `wk key set` here
+        and a guest's is a login in there."""
+        out = self.run_note("no")
+        self.assertIn("the remedy for claude-login", out, out)
+        self.assertIn("remote control refuses", out, out)
 
 
 class TestBothTargetsAreMeasured(unittest.TestCase):

@@ -1,9 +1,6 @@
-# macOS desktop settings. Applied from data files so that `wk backup` can
-# regenerate them without touching code.
-#
-# Every write is guarded by a read, so a second ./setup reports no changes.
-# `defaults write` always rewrites the plist and bumps its mtime, which would
-# otherwise make the idempotency check meaningless.
+# macOS desktop settings, applied from data files so `wk backup` can regenerate
+# them without touching code. `defaults write` always rewrites the plist and
+# bumps its mtime, so every write is guarded by a read.
 
 _defaults_conf="$WK_ROOT/host/macos/defaults.conf"
 _hotkeys_plist="$WK_ROOT/host/macos/symbolichotkeys.plist"
@@ -46,9 +43,7 @@ apply_default() {
         *)      die "defaults.conf: unknown type '$type' for $domain $key" ;;
     esac
     changed "default $domain $key = $value (was ${current:-unset})"
-    # The Dock reads its preferences once, at launch: a written key that nothing
-    # restarts is a setting that is in the file and not on the screen, which
-    # reads as "./setup did not work".
+    # The Dock reads its preferences once, at launch.
     [ "$domain" = com.apple.dock ] && _dock_changed=1
     return 0
 }

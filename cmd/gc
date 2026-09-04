@@ -21,16 +21,15 @@
 #   --refresh-net    no-op; egress is allowlisted by hostname, not address sets
 
 set -euo pipefail
-# Honours the environment rather than deriving from $0: the container half
-# pipes this file into `bash -s`, which sets $0 to "bash" (wrong root).
+# Honours the environment rather than deriving from $0: the container half pipes
+# this file into `bash -s`, which sets $0 to "bash".
 WK_ROOT="${WK_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
 . "$WK_ROOT/lib/common.sh"
 . "$WK_ROOT/lib/store.sh"
 . "$WK_ROOT/lib/target.sh"
 . "$WK_ROOT/lib/detach.sh"
-# Sourced optionally: WK_ROOT may be a caller-supplied checkout (the
-# pre-set-$WK_ROOT comment above), where one of these libraries may not
-# exist yet, so a hard source of a new file fails there.
+# Sourced optionally: WK_ROOT may be a caller-supplied checkout where one of
+# these libraries does not exist yet.
 _source_if_there() { [ -f "$1" ] && . "$1"; return 0; }
 _source_if_there "$WK_ROOT/lib/image.sh"
 _source_if_there "$WK_ROOT/image/profiles.sh"
@@ -40,18 +39,15 @@ _source_if_there "$WK_ROOT/image/pmos.sh"
 # ws_target (lib/target.sh) derives this fresh; nothing reads the directory.
 rm -rf "$(wk_state_dir)/targets"
 
-# Through load_target: only it does the per-target reset that stops two
-# drivers sharing globals.
+# Through load_target: only it does the per-target reset that stops two drivers
+# sharing globals.
 TARGET="${WK_TARGET:-$(default_target)}"
 load_target "$TARGET"
 
-# `wk sync` and `wk new` hold the same lock, or gc can delete a base between
-# it being resolved and the pin being recorded.
+# `wk sync` and `wk new` hold the same lock, or gc can delete a base between it
+# being resolved and the pin being recorded.
 hold_lock store
 
-# A real loop, not one `[ "${1:-}" = ... ]` test per flag: that shape only
-# ever looked at $1, so a second flag (or a typo next to a valid one) was
-# silently dropped instead of applied or refused.
 REFRESH_NET=""
 # Each --purge-* is a flag, not gc's default: what it erases is expensive to
 # rebuild (a network refetch, or hours of compilation).
@@ -69,9 +65,9 @@ while [ $# -gt 0 ]; do
 done
 
 # --- the halves, and which machine each belongs to ----------------------------
-# On a Mac, wk's storage spans two machines: the container store is inside
-# the podman VM, the build outputs and pmos caches out here. The halves run
-# separately, the second piped into the VM's bash.
+# On a Mac, wk's storage spans two machines: the container store inside the podman
+# VM, the build outputs and pmos caches out here. The halves run separately, the
+# second piped into the VM's bash.
 
 # Nothing writes serve/, so anything under it is unreferenced bytes.
 gc_retired_trees() {
@@ -116,10 +112,9 @@ gc_build_outputs() {
 }
 
 # --- final report --------------------------------------------------------------
-# One line, from one place, on every path that ends here reporting success:
-# a podman machine that is not running still only skips its own half, not
-# this report, or a caller watching for "gc complete" sees that skip as a
-# hang instead of what it is.
+# One line, from one place, on every path that ends here reporting success: a
+# podman machine that is not running skips only its own half, or a caller watching
+# for "gc complete" sees that skip as a hang.
 gc_report_complete() {
     info "gc complete"
     df -h "$WK_STORE" 2>/dev/null | tail -1 || true
@@ -133,8 +128,8 @@ gc_report_complete() {
 }
 
 # --- a macOS host: do this machine's half, hand the rest to the VM -----------
-# Placed before the store work below: on a Mac $WK_STORE is the VM's
-# /var/lib/wk, meaningless out here. The VM's exit status is this one's.
+# Before the store work below: on a Mac $WK_STORE is the VM's /var/lib/wk,
+# meaningless out here. The VM's exit status is this one's.
 if is_macos && [ -z "${WK_IN_VM:-}" ]; then
     info "this machine's half: the pmos build hosts"
     gc_pmos
@@ -143,9 +138,8 @@ if is_macos && [ -z "${WK_IN_VM:-}" ]; then
     if command -v podman >/dev/null 2>&1 \
        && [ "$(podman machine inspect "${WK_MACHINE:-wk}" --format '{{.State}}' 2>/dev/null)" = running ]; then
         info "the container store's half, inside the podman machine"
-        # The flags as parsed here, not the original argv: every one of them
-        # is a literal word with no quoting to preserve, and re-forwarding
-        # the parsed set (rather than raw "$@") is what makes this agree with
+        # The flags as parsed here, not the original argv: every one is a literal
+        # word with no quoting to preserve, and the parsed set is what agrees with
         # the refusal above about which flags are real.
         _fwd=""
         [ -n "$PURGE" ]         && _fwd="$_fwd --purge-mirror"
@@ -168,9 +162,9 @@ fi
 _uses_snapshots() { t_needs_base; }
 
 # --- --purge-mirror: the master git store -------------------------------------
-# Refused while any workspace exists -- not politeness: a snapshot is the
-# *lower layer of a live overlay mount*, and the kernel leaves an overlay
-# whose underlying filesystem changes undefined.
+# Refused while any workspace exists: a snapshot is the *lower layer of a live
+# overlay mount*, and the kernel leaves an overlay whose underlying filesystem
+# changes undefined.
 if [ -n "$PURGE" ]; then
     _uses_snapshots || die "target '$TARGET' has no mirror or snapshots to purge: its base is
     $([ "$WK_TARGET_KIND" = vm ] \
@@ -184,8 +178,7 @@ if [ -n "$PURGE" ]; then
     this would delete the ground they stand on. Remove them first (wk rm <name>)
     -- or run plain 'wk gc', which prunes only what nothing references."
 
-    # tr: macOS du right-aligns its size field, and " 0B" in a listing reads as
-    # a typo rather than as a measurement.
+    # tr: macOS du right-aligns its size field, and " 0B" reads as a typo.
     sz_m=$(du -sh "$(wk_mirror)" 2>/dev/null | cut -f1 | tr -d ' ' || echo '?')
     sz_b=$(du -sh "$(wk_base_dir)" 2>/dev/null | cut -f1 | tr -d ' ' || echo '?')
     n_b=$(ls -1 "$(wk_base_dir)" 2>/dev/null | wc -l | tr -d ' ')
@@ -201,7 +194,7 @@ fi
 
 # --- unreferenced base snapshots --------------------------------------------
 # `unreferenced_bases` refuses while a workspace has no recorded pin: that
-# reference can't be counted, so the snapshots stay.
+# reference cannot be counted, so the snapshots stay.
 unpinned=""
 if _uses_snapshots; then
     unpinned=$(unpinned_workspaces | tr '\n' ' ')
@@ -227,8 +220,8 @@ if [ "$WK_TARGET_KIND" = container ] && have podman; then
 fi
 
 # --- the mirror --------------------------------------------------------------
-# Repacking rewrites pack files snapshots share inodes with via cp -al, safe
-# only when nothing is using them.
+# Repacking rewrites pack files snapshots share inodes with via cp -al, safe only
+# when nothing is using them.
 active=$(list_workspaces | wc -l | tr -d ' ')
 if ! _uses_snapshots; then
     debug "no snapshot store on target '$TARGET'; nothing to repack"
@@ -249,9 +242,8 @@ if have ccache; then
 fi
 
 # --- firewall address sets ---------------------------------------------------
-# The egress proxy allowlists by hostname (container/proxy/wk-proxy.py), so
-# there is no CIDR set to refresh; `--refresh-net` stays a no-op rather than
-# an error, so a habit or a stale script doesn't fail.
+# The egress proxy allowlists by hostname, so there is no CIDR set to refresh;
+# `--refresh-net` stays a no-op rather than an error.
 if [ -n "$REFRESH_NET" ]; then
     warn "--refresh-net does nothing: the egress policy is by hostname,
   in container/proxy/wk-proxy.py, and needs no periodic refresh."
@@ -259,14 +251,14 @@ if [ -n "$REFRESH_NET" ]; then
 fi
 
 # --- stale benchmark payload seeds --------------------------------------------
-# Seeds are keyed <plan>-<sha12> and re-fetchable, so keeping only the newest
-# per plan is safe.
+# Seeds are keyed <plan>-<sha12> and re-fetchable, so keeping only the newest per
+# plan is safe.
 if [ -d "$WK_STORE/cache/bench" ]; then
     for seed in "$WK_STORE"/cache/bench/*/; do
         [ -d "$seed" ] || continue
         seed="${seed%/}"
-        # Exactly twelve trailing characters: plan names contain dashes too, so
-        # a looser match would let one plan's newer seed delete another's.
+        # Exactly twelve trailing characters: plan names contain dashes too, so a
+        # looser match would let one plan's newer seed delete another's.
         case "$seed" in
             *-????????????) ;;
             *) continue ;;
@@ -285,8 +277,8 @@ if [ -d "$WK_STORE/cache/bench" ]; then
 fi
 
 # --- run-benchmark trees exported for the board lanes -------------------------
-# Keyed by WebKit commit and re-exportable from the mirror (bench_runner_tree,
-# lib/bench.sh); only the newest is worth keeping.
+# Keyed by WebKit commit and re-exportable from the mirror (bench_runner_tree);
+# only the newest is worth keeping.
 if [ -d "$WK_STORE/cache/bench-runner" ]; then
     newest=$(ls -1t "$WK_STORE/cache/bench-runner" 2>/dev/null | grep -v '^\.tmp-' | head -1)
     for tree in "$WK_STORE"/cache/bench-runner/*/ "$WK_STORE"/cache/bench-runner/.tmp-*/; do

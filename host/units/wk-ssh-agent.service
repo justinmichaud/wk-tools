@@ -3,8 +3,13 @@ Description=wk deploy-key ssh-agent (outside every workspace)
 Documentation=file://@WK_ROOT@/cmd/push
 
 [Service]
-Type=simple
-ExecStart=/usr/bin/ssh-agent -D -a %t/wk/ssh-agent.sock
+# ssh-agent binds and listens on the socket in its parent, and only then
+# forks and lets the parent exit -- which is exactly what Type=forking waits
+# for, so the start job finishes when the socket a workspace uses exists.
+# It says nothing over sd_notify, so there is no Type=notify to have; -D
+# (stay in the foreground) would put readiness back at the exec.
+Type=forking
+ExecStart=/usr/bin/ssh-agent -a %t/wk/ssh-agent.sock
 Restart=on-failure
 RestartSec=2
 # The same directory wk-proxy.service owns, preserved for the same reason:

@@ -3,57 +3,48 @@
 # container workspace and `image/buildroot-build.sh` runs inside it, from
 # /opt/wk-tools so the two halves cannot skew.
 #
-# --- the recipe, and why each piece is what it is -----------------------------
+# --- the recipe ---------------------------------------------------------------
 #
-#   tree        WebPlatformForEmbedded/buildroot, branch `wpe`, pinned 2020.02.
-#               A fork, not upstream buildroot: the release-pinned `cog`
-#               defconfigs only exist there.
-#   host        Ubuntu 22.04, as its own workspace image (WK_SDK_IMAGE, same
-#               mechanism image/yocto.sh uses): buildroot 2020.02 builds
-#               2009-era tarballs, and a newer host stops compiling them.
+#   tree        WebPlatformForEmbedded/buildroot, branch `wpe`, pinned 2020.02:
+#               a fork, since the release-pinned `cog` defconfigs only exist
+#               there.
+#   host        Ubuntu 22.04, as its own workspace image (WK_SDK_IMAGE):
+#               buildroot 2020.02 builds 2009-era tarballs, and a newer host
+#               stops compiling them.
 #   downloads   BR2_DL_DIR/BR2_CCACHE_DIR under $WK_STORE/cache/buildroot
 #               (lib/store.sh reserves it, targets/container.sh mounts it);
-#               buildroot-build.sh reads them from its own environment, not
-#               a command-line path -- a host path names nothing in the
-#               container it runs in.
-#   external    BR_EXTERNAL -> image/buildroot/external, a BR2_EXTERNAL tree
-#               this repo owns. It carries the fix an arm64 build host needs:
-#               host-python-2.7's bundled libffi cannot assemble
-#               aarch64/sysv.S, applied from outside (external.mk) rather
-#               than patching the vendor branch.
+#               buildroot-build.sh reads them from its own environment, a host
+#               path naming nothing inside the container.
+#   external    BR_EXTERNAL -> image/buildroot/external, carrying the fix an
+#               arm64 build host needs: host-python-2.7's bundled libffi cannot
+#               assemble aarch64/sysv.S, applied from outside (external.mk).
 #   overlay     BR2_ROOTFS_OVERLAY, assembled by
 #               image/buildroot/tailnet-overlay.sh <arch> <staging>. Only
 #               world-readable regular files: the overlay is rsynced at
-#               target-finalize as the build user, and a 0700 directory in
-#               it fails the build with rsync error 23.
-#   wifi        image/buildroot/wifi-overlay.sh <staging>, the same shape:
-#               wk-wifi-join and the S-init line that spends the credential
-#               the card seeds. TODO: whether the rpi3 defconfig compiles
-#               wpa_supplicant at all is unverified until a build runs.
+#               target-finalize as the build user, and a 0700 directory fails
+#               the build with rsync error 23.
+#   wifi        image/buildroot/wifi-overlay.sh <staging>, the same shape.
+#               TODO: whether the rpi3 defconfig compiles wpa_supplicant at all
+#               is unverified until a build runs.
 #   output      genimage -> output/images/$BR_IMAGE. The cog defconfigs'
 #               filesystem output is tar-only, so buildroot-build.sh adds
 #               BR2_TARGET_ROOTFS_EXT2 whenever the profile names a `.img`.
-#               The completion line requires that file's mtime newer than
-#               the run's own start, since a `make` with nothing to do can
-#               report success too.
 #   init        BusyBox, so no systemd units: the card helper reads the init
-#               out of the rootfs and installs the init.d scripts `wk
-#               sysimage write` stages for the same jobs (self-return,
-#               self-disarm) instead. S99tailscale is the join's equivalent.
+#               out of the rootfs and installs the init.d scripts `wk sysimage
+#               write` stages for the same jobs. S99tailscale is the join's.
 #
 # Owed work: docs/HANDOFF-ab-bench.md #3.
 
 # WK_BUILDROOT_BASE overrides the build host image, pinned at 22.04 because
-# buildroot 2020.02 needs it (above); overriding it without also repinning
-# buildroot is a build that stops compiling, so this exists for testing a
-# newer host ahead of that repin, not for routine use.
+# buildroot 2020.02 needs it (above): for testing a newer host ahead of a
+# buildroot repin, not for routine use.
 BUILDROOT_BASE_IMAGE="${WK_BUILDROOT_BASE:-docker.io/library/ubuntu:22.04}"
 
 buildroot_log()      { echo "$(wk_ws_dir "$1")/home/buildroot-$2.log"; }
 buildroot_pidfile()  { echo "$(wk_ws_dir "$1")/home/buildroot-$2.pid"; }
 
-# Tagged with the base's tag *and* a digest of the Containerfile, so
-# editing the spec builds a new image rather than reusing a stale layer.
+# Tagged with the base's tag and a digest of the Containerfile, so editing the
+# spec builds a new image rather than reusing a stale layer.
 buildroot_ensure_image() {
     local base="$BUILDROOT_BASE_IMAGE" derived spec
     spec="$WK_ROOT/container/buildroot/Containerfile"
@@ -166,11 +157,9 @@ EOF
         return 0
     fi
 
-    # A pinned kernel is fetched here, on the machine with the network and the
-    # one content-addressed artifact cache (image_fetch_base), and handed to
-    # the build through the download cache both sides already share -- rather
-    # than a second downloader inside the workspace, behind the egress
-    # allowlist, fetching the same bytes again.
+    # Fetched here, on the machine with the network and the content-addressed
+    # artifact cache (image_fetch_base), and handed to the build through the
+    # download cache both sides share.
     local kernel_deb=""
     if [ -n "${BR_KERNEL_DEB_URL:-}" ]; then
         [ -n "${BR_KERNEL_DEB_SHA256:-}" ] && [ -n "${BR_KERNEL_RELEASE:-}" ] \
@@ -210,11 +199,10 @@ EOF
     [ -n "$detach" ] || info "built $profile in '$ws'"
 }
 
-# One job per workspace: an image build and a slot build both move the
-# checkout and the tree's output under them. (What the machine as a whole
-# can fit is build_admit's question, lib/resources.sh.) Evidence is the pid
-# a detached stage leaves, asked of the workspace (ws_busy_reason); a dead
-# pid is a finished job, whatever its log says.
+# One job per workspace: an image build and a slot build both move the checkout
+# and the tree's output under them. Evidence is the pid a detached stage
+# leaves, asked of the workspace (ws_busy_reason); a dead pid is a finished
+# job, whatever its log says.
 buildroot_refuse_busy() {
     local ws="$1" busy
     busy=$(ws_busy_reason "$ws") || return 0
@@ -226,9 +214,8 @@ buildroot_refuse_busy() {
 }
 
 # Start a stage's script in the workspace and, unless detached, wait for its
-# completion line. `<stage>` names the log and pid files (buildroot-<stage>.*
-# in the workspace's home); the script ends with "stage '<stage>' done" or it
-# did not finish, whatever its exit status says.
+# completion line. `<stage>` names the log and pid files; the script ends with
+# "stage '<stage>' done" or it did not finish, whatever its exit status says.
 _buildroot_run() { # <ws> <stage> <detach> <how long> <jobs> -- <script> <args...>
     local ws="$1" stage="$2" detach="$3" howlong="$4" jobs="$5"; shift 5
     [ "${1:-}" = -- ] && shift
@@ -238,8 +225,7 @@ _buildroot_run() { # <ws> <stage> <detach> <how long> <jobs> -- <script> <args..
     # runs (lib/resources.sh): the pid it leaves is the workspace's own.
     build_admit "the $stage build" "$jobs"
     build_record "wk sysimage $stage $ws" "$jobs" "$(( jobs * 2048 ))" "ws:$ws:buildroot-$stage.pid"
-    # Truncated, not unlinked: `tail -f` follows an inode, so deleting the
-    # log leaves an existing follower watching a file nobody writes to.
+    # Truncated, not unlinked: `tail -f` follows an inode.
     : > "$log"; rm -f "$pid"
     log "  log: $log"
 
@@ -274,13 +260,11 @@ $(tail -20 "$log" | sed 's/^/    /')"
 }
 
 # --- slots: one image, several WebKits ------------------------------------------
-# `wk sysimage webkit <profile> --commit <sha> --slot <name>` builds one
-# WebKit commit with the image's own wpewebkit package, into
-# output/wk-slots/<name>/ in the image's workspace (image/buildroot-webkit.sh
-# has the recipe; image_slot_dir, lib/image.sh, the location). A board
-# running the image carries any number of slots beside the WebKit it shipped
-# with, and `wk pi bench --ab` alternates between two of them with no reflash
-# and no reboot.
+# `wk sysimage webkit <profile> --commit <sha> --slot <name>` builds one WebKit
+# commit with the image's own wpewebkit package, into output/wk-slots/<name>/
+# in the image's workspace (image/buildroot-webkit.sh has the recipe;
+# image_slot_dir, lib/image.sh, the location). `wk pi bench --ab` alternates
+# between two slots with no reflash and no reboot.
 buildroot_webkit() {
     local profile="$1"; shift
     local detach="" dry="" ws="" commit="" slot=""

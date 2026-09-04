@@ -335,6 +335,88 @@ kill "$(cat "$TMP_HOME/claude-remote-control.pid" 2>/dev/null)" 2>/dev/null || t
 '''
 
 
+# The same probe again, with the target's answer about the login forced and
+# this machine's store stocked the other way round: the gate has to follow the
+# target, and a store full of credentials is the case that would hide it.
+_PROBE_TARGET_ANSWERS = r"""
+set -euo pipefail
+export WK_ROOT="__REPO__"
+export WK_CLAUDE_LIB=1
+. "__REPO__/cmd/ai"
+
+WS="probe-ws-target"
+mkdir -p "$(wk_ws_dir "$WS")"
+TMP_HOME=$(mktemp -d); TMP_SRC=$(mktemp -d)
+t_exec()  { local name="$1"; shift; "$@"; }
+t_home()  { printf '%s' "$TMP_HOME"; }
+t_src()   { printf '%s' "$TMP_SRC"; }
+t_spawn() {
+    local name="$1" log="$2" pidf="$3"; shift 3
+    echo "SPAWNED" >> "$TMP_HOME/spawned"
+    "$@" > "$log" 2>&1 < /dev/null &
+    printf '%s' "$!" > "$pidf"
+}
+# The driver hook cmd/ai asks, standing in for a guest that has -- or has not
+# -- had its own `claude auth login`.
+t_agent_secret_present() { [ "$TARGET_SAYS" = yes ]; }
+t_agent_secret_remedy()  { printf 'log in inside the guest: claude auth login'; }
+
+FAKE_CLAUDE="$TMP_HOME/claude"
+printf '#!/bin/sh\nsleep 20\n' > "$FAKE_CLAUDE"
+chmod +x "$FAKE_CLAUDE"
+if ( rc_start "$WS" "$FAKE_CLAUDE" ) 2>"$TMP_HOME/err"; then echo "MARK:started"; else echo "MARK:refused"; fi
+echo "MARK:err"; cat "$TMP_HOME/err"
+echo "MARK:spawned"; cat "$TMP_HOME/spawned" 2>/dev/null || true
+kill "$(cat "$TMP_HOME/claude-remote-control.pid" 2>/dev/null)" 2>/dev/null || true
+"""
+
+
+class TestTheGateFollowsTheTargetAndNotThisMachine(unittest.TestCase):
+    """A guest is never handed the rotating login and holds one of its own, so
+    "can this workspace authenticate" is a question for the target driver
+    (t_agent_secret_present, lib/target.sh). Asking this machine's store would
+    let a container's credential vouch for a guest that has none, and refuse a
+    guest that has logged in on a machine that never did."""
+
+    @staticmethod
+    def _probe(target_says, login):
+        tmp = tempfile.mkdtemp(prefix="wk-rc-target-")
+        env = {"WK_STORE": tmp, "TARGET_SAYS": target_says}
+        env.update(credential_env(tmp, login=login))
+        return bash(_PROBE_TARGET_ANSWERS.replace("__REPO__", str(REPO)),
+                    env=env, timeout=60)
+
+    def test_a_target_that_says_no_refuses_though_the_store_is_full(self):
+        cp = self._probe("no", login=True)
+        self.assertIn("MARK:refused", cp.stdout, cp.stdout + cp.stderr)
+        self.assertEqual("", _section(cp.stdout, "spawned").strip(), cp.stdout)
+
+    def test_the_refusal_prints_the_targets_own_remedy(self):
+        """The remedy differs by target -- store one here, or log in in there
+        -- so it comes from the driver rather than from one baked sentence."""
+        cp = self._probe("no", login=True)
+        err = _section(cp.stdout, "err")
+        self.assertIn("log in inside the guest", err, err)
+
+    def test_a_target_that_says_yes_starts_though_the_store_is_empty(self):
+        cp = self._probe("yes", login=False)
+        self.assertIn("MARK:started", cp.stdout, cp.stdout + cp.stderr)
+        self.assertIn("SPAWNED", _section(cp.stdout, "spawned"), cp.stdout)
+
+
+class TestNothingAsksTheStoreDirectly(unittest.TestCase):
+    """One implementation of the rule: the commands that gate on the login ask
+    the driver, so a target whose workspaces authenticate for themselves is not
+    a second code path in each of them."""
+
+    def test_neither_command_reads_this_machines_store_for_it(self):
+        for f in ("cmd/ai", "cmd/verify"):
+            with self.subTest(command=f):
+                text = (REPO / f).read_text()
+                self.assertNotIn("wk_agent_secret_present claude-login", text)
+                self.assertIn("t_agent_secret_present", text)
+
+
 class TestRemoteControlRefusesWithoutTheLoginCredential(unittest.TestCase):
     """Remote control needs the claude.ai account login: measured in the CLI,
     a long-lived `claude setup-token` token is inference-only and refused for

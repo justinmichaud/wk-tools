@@ -154,7 +154,7 @@ wk sudo setup                  # closes sudo's 5-minute timestamp and NOPASSWD
 gh auth login                  # wk key register calls the GitHub API with this
 wk key register                # a deploy key per fork, registered with write access
 wk key set github-pat          # the token 'git-webkit pr' opens a pull request with
-wk push on                     # loads the keys into the agent and hands the token to the injector
+wk push on                     # loads the keys into the agent and gives the injector a write token
 claude setup-token             # then paste it into the next line
 wk key set claude              # every workspace this machine makes starts authenticated
 claude auth login              # then the next line reads what it stored -- nothing to paste
@@ -346,7 +346,8 @@ re-asserts them):
   `wk pr open` opens a PR from. Pushes over ssh with a per-fork deploy key
   held in an ssh-agent outside the workspace (`wk push on`); `git-webkit pr`
   inside one reaches GitHub's API through the credential injector, holding a
-  placeholder rather than the token.
+  placeholder rather than the token: it may read anything and write only the
+  endpoints `git-webkit` needs.
 - `forkwpe` -- your own fork of WPEWebKit, the same, for that project.
 
 **Sync (a workspace, a target, or the furniture a machine keeps)**
@@ -691,12 +692,17 @@ a rename, which would replace a symlink with a private copy on the first
 refresh; pointing every container at one directory also puts them all on the
 CLI's own `.storage-write` lock, so concurrent refreshes serialize.
 
-A macOS guest can be handed nothing but a copy, and that copy is a second
-holder: a refresh in there rotates the token and invalidates the one every
-container shares. `wk vm start` says so each time it writes one. A shared build
-box gets no login at all -- an account credential on a machine other people are
-root on is theirs -- so an agent there has the inference-only token and no
-remote control.
+A macOS guest could be handed nothing but a copy, and a copy is a second holder
+whose first refresh invalidates the file every container shares -- so a guest
+is never given one. It logs in for itself instead: `wk enter <ws>`, then
+`claude auth login` once, and what that leaves lives only in that guest, in
+`~/.claude-login` -- a directory this host never writes, which is why `wk vm
+start` can take the login's file out of `~/.claude` on every start without ever
+touching the guest's own. `wk ai claude --rc` and `wk verify` ask that guest
+rather than this machine's store, and their refusal names the login to run in
+there. A shared build box gets no login at all -- an account credential on a
+machine other people are root on is theirs -- so an agent there has the
+inference-only token and no remote control.
 
 **`wk push`: pushing and opening a pull request without holding the credentials**
 
@@ -725,11 +731,41 @@ its CONNECT goes to the injector, which replaces the `Authorization` header
 with the real token and forwards the request. The workspace holds
 `GITHUB_COM_USERNAME` and the literal placeholder `GITHUB_COM_TOKEN=wk-injects-this`,
 plus the injector's CA certificate (`/run/wk/wk-github-ca.pem`, added to the
-system bundle -- never replacing it). With push off the injector has no token
-and forwards the call unauthenticated, so GitHub answers 401 for anything
-needing an account and 200 for anything public: the switch withholds a
-credential, it does not pretend the API is unreachable. `uploads.github.com`
-stays refused outright.
+system bundle -- never replacing it). With push off the injector has no write
+token and forwards a write unauthenticated, so GitHub answers 401 for itself:
+the switch withholds a credential, it does not pretend the API is unreachable.
+`uploads.github.com` stays refused outright.
+
+**Reading is open; writing is a table, and the switch is over writing.** A
+`GET` or `HEAD` on any path -- and a GraphQL document with no mutation in it --
+is forwarded and authenticated from a standing token, whatever position `wk
+push` is in: an agent in a workspace has to read a pull request, its EWS
+statuses and the issue a branch tracks, `gh` has to work, and no read changes
+anything of yours. A write is forwarded only where `ALLOW` in
+`container/proxy/github-inject.py` has it -- the `git-webkit` endpoints, each
+row naming the file in `webkitscmpy` or `webkitbugspy` that builds that URL --
+and only with the token `wk push on` puts on the machine. Anything else is
+answered `403` there and never reaches GitHub, naming the method, the path and
+the file the table is in, so a `git-webkit` that grows an endpoint fails
+legibly and is fixed with one row. Neither token is ever inside a workspace,
+and the standing one is spent on reads alone: a write asks for the switch's
+file and nothing else. Without the split the token is the whole account -- a
+workspace that could spend it on any path could delete a repository, add a
+deploy key or dispatch an Actions workflow. `git-webkit setup` is deliberately
+outside the table: creating and renaming a fork, and `PATCH` on a repository,
+are a person's act on the host (`wk remotes`), not a workspace's.
+
+The standing token is one file on the machine that runs the workspaces
+(`$WK_STORE/read-github-pat`, and `~/.local/state/wk/vm/read-github-pat` on the
+macOS host whose injector serves the guests), written from the one it holds:
+`wk key set github-pat` delivers it when you store, rotate or withdraw one, and
+`./setup` again on every run, so a machine remade from scratch has it before
+anything runs there. `wk push off` therefore no longer strips every token from
+the machine -- it removes the write one, and reads keep working, which is what
+lets `gh` and `git-webkit` see a pull request in a workspace nothing can
+publish from. `gh` holds the same placeholder `GITHUB_COM_TOKEN` does
+(`GH_TOKEN`), plus the CA in `SSL_CERT_FILE`/`SSL_CERT_DIR`, which is what Go
+reads.
 
 The per-fork alias blocks are in `/secrets/ssh_config`, which every container
 `Include`s and `wk push on|off` regenerates -- so a rotated key, an added fork
@@ -752,12 +788,15 @@ and the injector inside the podman machine is one `podman machine ssh`, and
 `wk push status` never starts it.
 
 Nothing an agent runs can publish or commit, on any target. Publishing: the
-deploy keys are out of the agent and the API token is gone for the session
+deploy keys are out of the agent and the write token is gone for the session
 (`wk push off`, before the sandbox is verified), and `wk verify` measures all
 of it from inside the workspace -- no private key material in the home,
-`/secrets` or `/run/wk`; the agent socket holding nothing; an authenticated
-`api.github.com/user` answering 401; `GITHUB_COM_TOKEN` being the placeholder;
-`gh` not logged in. On a build box a `gh` login in the agent's account is a
+`/secrets` or `/run/wk`; the agent socket holding nothing; a write outside the
+`ALLOW` table refused by the injector itself; an allowed write answering 401
+rather than being authenticated; `GITHUB_COM_TOKEN` and `GH_TOKEN` being the
+placeholders, with no stored `gh` credential beside them. A read answering 200
+is the arrangement working, and is measured against whether this device holds a
+token at all. On a build box a `gh` login in the agent's account is a
 refusal. Committing: a container `wk ai claude` session runs the agent
 under bwrap with the checkout's `.git` commit-parts (`objects`, `refs`, `logs`,
 `HEAD`, `packed-refs`) read-only, so a commit, a stage, a stash, a branch move
@@ -812,14 +851,24 @@ podman machine rm wk && ./setup && wk sync
 ```
 
 `./setup` does the same by itself, prompting first, whenever the machine's
-mounts are not the three it must have -- this checkout at `/opt/wk-tools` and
-`~/.config/wk/secrets` read-only, and `~/.config/wk/agent-rw` read-write: a
+mounts are not the three it must have -- this checkout at `/var/opt/wk-tools`
+and `~/.config/wk/secrets` read-only, and `~/.config/wk/agent-rw` read-write: a
 mount is settable only at creation, so a machine made any other way is
 destroyed and made again rather than patched. That third one is the only
 writable mount in the design and holds one thing, the Claude login credential
 the CLI rotates in place; a machine that has the right three mounted the wrong
 way round is refused instead, since recreating it would ask podman for the same
-modes again and loop.
+modes again and loop. Every target is under `/var` because the machine's OS is
+an ostree one, where `/opt` is a symlink into it and systemd will not mount on
+a path that is not canonical -- so the machine also spells that first mount
+`/opt/wk-tools`, and everything else here does too.
+
+Two of podman's own guarantees are not delivered and are imposed on the
+machine instead. It generates one systemd `.mount` unit per `--volume` and
+drops the read-only mode, so the machine's provisioning puts `ro` back on
+every host mount but the writable one, and `./setup` holds the machine to
+that by asking the kernel rather than the config file -- a config that names
+a mount the machine has not got is another recreate.
 
 ## Hardware
 

@@ -1,20 +1,10 @@
-# What a shared build machine needs installed, and the one command that
-# installs it. Sourceable; defines functions and nothing else.
-#
-# One list, because three places ask the same question and must not disagree:
-# remote/provision.sh (on the machine, while provisioning), `wk remote setup`
-# (from this side, before it provisions) and `wk doctor --all` (afterwards,
-# read-only).
-#
-# wk installs none of this. A build box belongs to everyone who logs into it and
-# provisioning never takes root (remote/provision.sh's one rule), so what wk
-# does instead is print the exact root command -- ready to run, or to send to the
-# machine's administrators. Naming the command is the whole of the help there is
-# to give: "install ccache" is a sentence, `sudo apt-get install -y ccache` is
-# an action.
+# What a shared build machine needs installed, and the one command that installs
+# it. Sourceable; defines functions and nothing else. One list, because
+# remote/provision.sh, `wk remote setup` and `wk doctor --all` all ask it and
+# must not disagree. wk installs none of it -- provisioning never takes root on
+# someone else's machine -- so it prints the root command for its administrators.
 
 # <tool> <required|wanted> <what it is for>
-#
 # required: a build cannot start without it, and provisioning refuses.
 # wanted:   the machine works without it and works badly. Never a refusal.
 wk_remote_deps() {
@@ -29,8 +19,7 @@ zsh wanted the shell wk's rc moves an interactive session to; bash works too
 EOF
 }
 
-# The package that carries <tool> on <family>. Only the ones whose package name
-# is not the tool's name need saying; the rest fall through to the tool.
+# Only a tool whose package name is not the tool's name needs an entry here.
 wk_remote_package() { # <tool> <family>
     case "$2:$1" in
         debian:ninja)  printf 'ninja-build' ;;
@@ -41,10 +30,8 @@ wk_remote_package() { # <tool> <family>
     esac
 }
 
-# Which family a machine's /etc/os-release puts it in -- from ID, then ID_LIKE,
-# so a derivative (Raspberry Pi OS, Linux Mint, Rocky) resolves to its parent
-# without being named here. `unknown` when it says nothing recognisable, which
-# is reported as such rather than guessed at.
+# From ID, then ID_LIKE, so a derivative (Raspberry Pi OS, Mint, Rocky) resolves
+# to its parent without being named here. `unknown` is reported, never guessed.
 wk_remote_family() { # <ID> <ID_LIKE>
     local w
     for w in $1 $2; do
@@ -58,9 +45,8 @@ wk_remote_family() { # <ID> <ID_LIKE>
     printf unknown
 }
 
-# The one command to run as root on that machine, or nothing when the family is
-# not one this knows -- in which case the caller names the packages and leaves
-# the command to the person, rather than printing a command that does not exist.
+# Nothing for a family this does not know: the caller then names the packages
+# and leaves the command to the person.
 wk_remote_install_cmd() { # <family> <package>...
     local family="$1"; shift
     [ $# -gt 0 ] || return 1
@@ -73,11 +59,7 @@ wk_remote_install_cmd() { # <family> <package>...
     esac
 }
 
-# The environment wk's build sets for itself, whatever the machine has in it
-# (config_build_env, build/configs.sh). Reported when a login shell there
-# already sets one, because a machine whose administrators export CC or
-# CCACHE_DIR is a machine where a build's flags are not what its owner expects
-# -- wk wins, silently, and this is where that gets said out loud.
+# The variables wk's build sets for itself (config_build_env, build/configs.sh).
 wk_remote_build_env_vars() {
     printf '%s\n' CC CXX CFLAGS CXXFLAGS LDFLAGS MAKEFLAGS \
         CCACHE_DIR CCACHE_BASEDIR CCACHE_SLOPPINESS \
@@ -85,18 +67,9 @@ wk_remote_build_env_vars() {
 }
 
 # What is wrong with a machine, from remote/probe.sh's output: one finding per
-# line, tab-separated,
-#
-#     <state>  <what>  <remedy>
-#
-# with state one of ok | required | wanted | note. Findings rather than printed
-# prose, because the two callers render differently -- `wk doctor --all` counts
-# them into its own ok/--/?? columns and `wk remote setup` narrates -- and
-# neither should be re-deciding what counts as wrong.
-#
-# The remedy for a missing tool is one root command for the whole set, appended
-# once at the end: three lines each naming apt-get is three chances to run two
-# of them and stop.
+# line, tab-separated <state>\t<what>\t<remedy>, state one of ok | required |
+# wanted | note, because `wk doctor --all` counts them into its columns while
+# `wk remote setup` narrates. Missing tools share one root command at the end.
 wk_remote_findings() { # <probe output>
     local probe="$1" tool need why path family v pkgs=""
     _f() { printf '%s\t%s\t%s\n' "$1" "$2" "${3:-}"; }
@@ -131,11 +104,8 @@ DEPS
     fi
 
     # The identity a commit made there would carry, against the identity this
-    # repository declares (dotfiles/gitconfig) -- not merely "is it set". Both
-    # ways of being wrong are silent until a commit is already made: unset, and
-    # git refuses it after the work with "Please tell me who you are"; set to
-    # something else, and it is authored by whatever that says. One machine here
-    # had `user.name = no`, an answer to a prompt years ago.
+    # repository declares (dotfiles/gitconfig) -- not merely "is it set". One
+    # machine here had `user.name = no`, an answer to a prompt years ago.
     local want have
     for v in name email; do
         want=$(git config --file "$WK_ROOT/dotfiles/gitconfig" --get "user.$v" 2>/dev/null || true)
@@ -156,10 +126,6 @@ DEPS
                      "wk remote setup <target>  (dotfiles/gitconfig, through the include)" ;;
     esac
 
-    # A machine whose administrators export CC or CCACHE_DIR: wk's build sets
-    # its own (config_build_env) and does not read theirs, so the flags in force
-    # are not the ones that machine's owner would expect. Said out loud rather
-    # than silently won.
     printf '%s\n' "$probe" | sed -n 's/^env\.\([A-Z_]*\)=\(.*\)$/\1 \2/p' \
         | while read -r v rest; do
         _f note "$v is set to '$rest' in a login shell there" \
@@ -171,15 +137,8 @@ DEPS
 }
 
 # The probe, run on a machine: these two files concatenated and fed to a shell
-# over there. One implementation, so `wk remote setup` and `wk doctor --all`
-# send the same evidence-gatherer and cannot answer differently about the same
-# machine.
-#
-# The far side needs no wk-tools of its own -- deps.sh carries the list, and
-# this must answer about a machine that has never been provisioned. `_rsh`
-# (targets/remote.sh, in scope once the caller has load_target'd the machine)
-# and not `_rsh_q`: the script arrives on stdin, and `_rsh_q` is the form that
-# closes stdin so a question cannot drink the terminal.
+# over there, so the far side needs no wk-tools of its own. `_rsh` and not
+# `_rsh_q`: the script arrives on stdin, which `_rsh_q` closes.
 wk_remote_probe() {
     cat "$WK_ROOT/remote/deps.sh" "$WK_ROOT/remote/probe.sh" | _rsh 'bash -s'
 }

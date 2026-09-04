@@ -311,16 +311,18 @@ class TestNothingButAFileIsReadOrWrittenThroughAgentRw(_Here):
         self.assertIn("no", cp.stdout)
         self.assertIn("bytes=[]", cp.stdout)
 
-    def test_the_guest_copy_is_refused_rather_than_carried_in(self):
-        """targets/vm.sh copies a file row into a guest, which is the one
-        delivery that makes a second holder of it -- so a refused path must
-        stop the start, not arrive in there as an empty file."""
+    def test_a_refused_path_stops_a_guests_start_rather_than_arriving_empty(self):
+        """targets/vm.sh copies a value row into a guest, so a path its reader
+        refuses must stop the start rather than land in there as an empty file.
+        A file row is never copied into a guest at all -- a copy is a second
+        holder of a credential its tool rotates -- so the document is not read
+        out of the store on that path either."""
         vm = (REPO / "targets" / "vm.sh").read_text()
         body = vm[vm.index("_write_agent_secrets() {"):]
         body = body[:body.index("\n}\n")]
         self.assertIn("wk_agent_secret_present", body)
-        self.assertIn("set -o pipefail", body)
         self.assertIn('[ "$here" -lt 2 ] || return 1', body)
+        self.assertNotIn("wk_agent_secret_bytes", body)
 
 
 class TestNoForwardingIsLeftInTheSource(unittest.TestCase):

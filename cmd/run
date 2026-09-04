@@ -4,8 +4,7 @@
 # wk: where=workspace name=required ready=yes group=workspaces
 #
 # Runs the jsc binary a build produced, from the workspace's own build tree on
-# its target, so the shell you are in never needs the build's paths or env.
-# Everything after `--` goes to jsc verbatim.
+# its target. Everything after `--` goes to jsc verbatim.
 #
 #   --config <config>   the build config to run (default: default_config;
 #                       wk build --list prints every name)
@@ -52,43 +51,39 @@ while [ $# -gt 0 ]; do
 done
 
 # The target first: on macOS a config does not choose its own build system, so
-# config_load needs the platform it will be built on (t_os, lib/target.sh).
+# config_load needs the platform it will be built on (t_os).
 TARGET="$(ws_target "$NAME")"
 load_target "$TARGET"
 
 config_load "$CONFIG" "$(t_os)" || die "unknown config '$CONFIG'"
 
-# Layout comes from build/configs.sh: four ports lay trees out four ways and
-# the Apple build resolves frameworks rather than shared libraries.
+# Layout comes from build/configs.sh: four ports lay trees out four ways and the
+# Apple build resolves frameworks rather than shared libraries.
 SRC=$(t_src "$NAME")
 JSC=$(config_jsc_path "$SRC")
 VAR=$(config_run_var)
 DIR=$(config_run_dir "$SRC")
 
 # Login shell so the loader variable is *prepended*, not replaced: `env
-# LD_LIBRARY_PATH=...` would drop the wkdev image's jhbuild prefix and break
-# WPE/GTK binaries that depend on a library already on the path.
+# LD_LIBRARY_PATH=...` would drop the wkdev image's jhbuild prefix.
 PRELUDE="export $VAR=\"$DIR\${${VAR}:+:\${${VAR}}}\""
 
 if [ -n "$UNTIL_CRASH" ]; then
-    # Under the workspace's own home, next to the other per-workspace
-    # artifacts (t_home; cmd/profile's OUTDIR is the same idea): not /tmp,
-    # which a container restart takes away before anyone reads a crash log.
+    # Under the workspace's own home, next to the other per-workspace artifacts
+    # (t_home): not /tmp, which a container restart takes away.
     HOMEDIR="$(t_home "$NAME")"
     LOGDIR="$HOMEDIR/until-crash"
-    # Matches container/firstrun.sh's core_pattern -- $CORE_DIR/core.%e.%p.%t
-    # under the same home -- so a core a crashing iteration wrote is found by
-    # being newer than a marker touched just before that iteration ran.
+    # Matches container/firstrun.sh's core_pattern under the same home, so a
+    # core a crashing iteration wrote is found by being newer than a marker
+    # touched just before that iteration ran.
     CORE_DIR="$HOMEDIR/wk-cores"
 
     if [ -n "$DEBUGGER" ]; then
-        # Driven by until-crash-run-file: each iteration runs under a plain
-        # lldb session that launches, waits for the stop, writes the
-        # debuggee's exit status (or 128+signal, for a real crash) to
-        # $WK_UNTIL_CRASH_STATUS, and only then quits itself -- but only
-        # when that status is 0. A crash leaves the quit command un-run, so
-        # lldb stays at its prompt with the person, exactly like `wk run
-        # --lldb` without --until-crash.
+        # Driven by until-crash-run-file: each iteration runs under a plain lldb
+        # session that launches, waits for the stop, writes the debuggee's exit
+        # status (or 128+signal) to $WK_UNTIL_CRASH_STATUS, and only then quits
+        # -- but only when that status is 0. A crash leaves the quit un-run, so
+        # lldb stays at its prompt.
         RUNFILE="$(t_tools "$NAME")/container/lldb/until-crash-run-file"
         CMD="$(lldb_prelude)
 $PRELUDE
