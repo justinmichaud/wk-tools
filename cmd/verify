@@ -259,9 +259,8 @@ code=$(inside "curl -sS -m 20 -o /dev/null -w '%{http_code}' https://api.github.
         (systemctl --user status wk-github-inject; the CA is /run/wk/wk-github-ca.pem)"
 
 # A read, which the switch does not govern: it is authenticated from the
-# standing token whatever position `wk push` is in. So the question is whether
-# the machine agrees with this device -- a token stored here is a read that
-# answers 200 in there, and no token here is a read that answers 401.
+# standing token in either position. So the question is whether the machine
+# agrees with this device about there being a token at all.
 code=$(inside "curl -sS -m 20 -o /dev/null -w '%{http_code}' https://api.github.com/user 2>/dev/null")
 if [ -n "$(wk_github_pat)" ]; then
     [ "$code" = 200 ] \
@@ -295,8 +294,8 @@ fi
 # And the switch, measured with a write the table *does* have, shaped so GitHub
 # cannot act on it: an empty body names no branch, so an authenticated call is
 # 422 (validation failed, nothing created) and one with no token is 401. The
-# injector forwards a write in both positions -- GitHub answering for itself is
-# the whole difference -- so nothing weaker distinguishes them from in here.
+# injector forwards a write in both positions, so nothing weaker tells them
+# apart from in here.
 code=$(inside "curl -sS -m 20 -o /dev/null -w '%{http_code}' -X POST -d '{}' https://api.github.com/repos/$FORK/pulls 2>/dev/null")
 if [ "$PUSH_ON" = 1 ]; then
     [ "$code" = 422 ] \
@@ -313,8 +312,7 @@ fi
 
 # The placeholders, never their values: printing what the workspace holds would
 # print a token on the one run where this check matters. Both, because
-# `git-webkit` sends one (webkitcorepy) and `gh` the other, and a request with
-# no Authorization header at all has nothing for the injector to replace.
+# `git-webkit` sends one (webkitcorepy) and `gh` the other.
 for _var in GITHUB_COM_TOKEN GH_TOKEN; do
     tok=$(inside "printf %s \"\${$_var:-}\"")
     case "$tok" in

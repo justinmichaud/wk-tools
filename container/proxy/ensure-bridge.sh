@@ -62,10 +62,8 @@ if [ -r "$WK_CA_SRC" ]; then
         export CURL_CA_BUNDLE="$WK_CA_BUNDLE"
         export GIT_SSL_CAINFO="$WK_CA_BUNDLE"
         # `gh` is Go: crypto/x509 reads none of the three above, only these
-        # two, and it sends an Authorization header only when it has a token --
-        # so it gets the same placeholder, and the injector replaces it. A read
-        # is authenticated from the standing token whatever position `wk push`
-        # is in; a write `gh` tries is the ALLOW table's to answer.
+        # two -- and it sends an Authorization header only when it has a token,
+        # so it gets the same placeholder for the injector to replace.
         export SSL_CERT_FILE="$WK_CA_BUNDLE"
         export SSL_CERT_DIR=/etc/ssl/certs
         export GH_TOKEN=wk-injects-this

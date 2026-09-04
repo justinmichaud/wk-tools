@@ -378,9 +378,8 @@ push_agent_machine_pat() {
     printf '%s' "${WK_PUSH_PAT_FILE:-${WK_STORE:-/var/lib/wk}/push-github-pat}"
 }
 
-# The standing read token, beside it and on the same machine. The switch is
-# over writing, so this one is not `wk push`'s: every converging call writes it
-# from the token this device holds (push_agent_pat_sync).
+# The standing read token, beside it on the same machine. The switch is over
+# writing, so `wk push` never touches this one: push_agent_pat_sync does.
 push_agent_machine_read_pat() {
     # WK_PUSH_READ_PAT_FILE: tests point this at a file of their own.
     printf '%s' "${WK_PUSH_READ_PAT_FILE:-${WK_STORE:-/var/lib/wk}/read-github-pat}"
@@ -456,9 +455,8 @@ push_agent_pat_clear() { # <execfn> <path>
     "$1" "rm -f $(sh_quote "$2")" </dev/null
 }
 
-# Write-or-clear, for the token no switch withholds: a token withdrawn on this
-# device has to vanish from the machine on the next converging call, so the
-# absent case is a removal and not a skip.
+# Write-or-clear: a token withdrawn on this device has to vanish from the
+# machine on the next converging call, so absent is a removal and not a skip.
 push_agent_pat_sync() { # <execfn> <path>
     if [ -n "$(wk_github_pat)" ]; then
         push_agent_pat_write "$1" "$2"

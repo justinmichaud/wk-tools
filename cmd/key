@@ -263,8 +263,7 @@ set|claude)
     # on the machine that runs the workspaces (container/proxy/github-inject.py).
     if [ "$_name" = github-pat ]; then
         # Reading GitHub is open whatever position `wk push` is in, so the
-        # machine that runs the workspaces keeps a standing copy of this token
-        # (push_agent_machine_read_pat). Best effort: ./setup converges it too.
+        # machine keeps a standing copy. Best effort: ./setup converges it too.
         _deliver_read_pat() {
             push_agent_pat_sync push_agent_exec "$(push_agent_machine_read_pat)" \
                 && return 0

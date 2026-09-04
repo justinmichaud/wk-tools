@@ -202,9 +202,8 @@ unit_start wk-ssh-agent.service "$_unit_root" "$_unit_store" \
 unit_start wk-github-inject.service "$_unit_root" "$_unit_store" \
     "'git-webkit pr' in a workspace will fail" "$_unit_journal" _rsh
 
-# The standing read token goes in beside it: reading is open whatever position
-# `wk push` is in, so this file is delivered here and by `wk key set github-pat`
-# -- and removed again when this device no longer holds a token.
+# The standing read token goes in beside it, from what this device holds:
+# reading is open whatever position `wk push` is in.
 if push_agent_pat_sync push_agent_exec "$(push_agent_machine_read_pat)"; then
     debug "GitHub read token converged on the machine"
 else
