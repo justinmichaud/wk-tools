@@ -1197,7 +1197,7 @@ fi
 refuse_workstation() { # <what this verb cannot do there, e.g. "install the helper on it">
     [ "${NODE_ROLE:-}" = bench-device ] || die "$HOST is a workstation, so this cannot $1:
     that needs a root it is not driven as, and wk takes no passwordless sudo
-    on a workstation beyond the two privileged helpers (CLAUDE.md). Do it
+    on a workstation beyond its named privileged helpers (CLAUDE.md). Do it
     there instead, where the one password prompt can be answered:
 
       ssh $HOST 'cd ~/Development/wk-tools && ./setup --stage quiesce'

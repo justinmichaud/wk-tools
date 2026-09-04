@@ -227,7 +227,7 @@ EOF
     # they survive is a question of include order (admin/install.sh names that
     # drop-in `zzz-`). Checked, not assumed.
     local _h _broke=""
-    for _h in /usr/local/libexec/wk-quiesce-priv /usr/local/libexec/wk-card-priv; do
+    for _h in /usr/local/libexec/wk-quiesce-priv /usr/local/libexec/wk-card-priv /usr/local/libexec/wk-boot-priv; do
         [ -x "$_h" ] || continue
         sudo -n "$_h" status >/dev/null 2>&1 || _broke="$_broke $_h"
     done

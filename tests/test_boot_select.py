@@ -281,7 +281,8 @@ load_driver rpi5-usb
         ignored and pair 1 boots -- the wrong system, silently."""
         cp = bash(self.LOAD + '''
 rpi5_check_autoboot() { echo "checked" >&2; }
-r_sudo() { echo "0x0 0x80000000"; }
+boot_priv_require() { :; }
+boot_priv() { echo "0x0 0x80000000"; }
 b_reboot_tryboot() { echo "tryboot reboot" >&2; }
 ARM_SYS_PART=/dev/sda3 b_arm 0xf64
 b_reboot
@@ -293,7 +294,8 @@ b_reboot
     def test_arming_the_first_pair_is_a_plain_reboot(self):
         cp = bash(self.LOAD + '''
 rpi5_check_autoboot() { echo "MUST NOT check" >&2; }
-r_sudo() { case "$*" in *vcmailbox*) echo "0x0 0x80000000" ;; *) echo "plain reboot" >&2 ;; esac; }
+boot_priv_require() { :; }
+boot_priv() { case "$1" in order) echo "0x0 0x80000000" ;; reboot) echo "plain reboot" >&2 ;; esac; }
 b_reboot_tryboot() { echo "MUST NOT carry the flag" >&2; }
 ARM_SYS_PART=/dev/sda1 b_arm 0xf64
 b_reboot
@@ -303,7 +305,7 @@ b_reboot
         self.assertNotIn("MUST NOT", cp.stderr, cp.stderr)
 
     def test_a_partition_this_stick_does_not_select_is_refused(self):
-        cp = bash(self.LOAD + 'r_sudo() { echo "0x0 0x80000000"; }\nARM_SYS_PART=/dev/sda5 b_arm 0xf64\n')
+        cp = bash(self.LOAD + 'boot_priv_require() { :; }\nboot_priv() { echo "0x0 0x80000000"; }\nARM_SYS_PART=/dev/sda5 b_arm 0xf64\n')
         self.assertNotEqual(cp.returncode, 0)
         self.assertIn("partition 1 or 3", cp.stderr)
 
@@ -415,3 +417,56 @@ machine_load {conf.stem}
                 stray = [l for l in conf.read_text().splitlines()
                          if re.match(r"[A-Z][A-Z0-9_]*=", l) and not l.startswith("NODE_")]
                 self.assertEqual(stray, [], f"{conf.name} assigns fields outside NODE_")
+
+
+class TestTheArmingRecordNeedsNoPrivilege(unittest.TestCase):
+    """`wk boot` records its intent on the machine it describes, because no
+    probe can derive it: once armed, the firmware register and the running
+    system look unchanged.
+
+    Writing it used `sudo` over `m_ssh`, which is a BatchMode ssh with no
+    terminal -- so on a workstation, where wk is driven as a person rather than
+    as root, arming died with "sudo: A terminal is required to authenticate"
+    before the firmware call ran (rpi5, 2026-09-03). `./setup` grants ownership
+    of the directory once, where a prompt can be answered."""
+
+    RECORD_FNS = ("record_write()", "record_read()", "record_clear()")
+
+    def test_no_record_function_calls_sudo(self):
+        text = (REPO / "boot" / "machines.sh").read_text()
+        for fn in self.RECORD_FNS:
+            body = text[text.index(fn):]
+            body = body[:body.index("\n}\n")]
+            with self.subTest(fn=fn):
+                self.assertNotIn("sudo", body,
+                                 f"{fn} takes a privilege a workstation cannot give")
+
+    def test_the_record_is_not_directly_under_the_root_owned_dir(self):
+        """/var/lib/wk stays root-owned: the card helper keeps the board's
+        tailnet node key there (TAILNET_KEEP_DIR, 0700). Only a subdirectory
+        is handed to the driving user."""
+        text = (REPO / "boot" / "machines.sh").read_text()
+        m = re.search(r"^NODE_RECORD=(\S+)", text, re.M)
+        self.assertIsNotNone(m, "NODE_RECORD is not set")
+        path = m.group(1)
+        self.assertTrue(path.startswith("/var/lib/wk/"), path)
+        self.assertNotEqual("/var/lib/wk", path.rsplit("/", 1)[0],
+                            "the record sits directly in the root-owned directory")
+
+    def test_setup_owns_that_directory_and_not_its_parent(self):
+        text = (REPO / "admin" / "install.sh").read_text()
+        self.assertIn("/var/lib/wk/boot", text,
+                      "./setup does not make the record directory writable")
+        for line in text.splitlines():
+            if "install -d" in line and "/var/lib/wk" in line:
+                with self.subTest(line=line.strip()):
+                    self.assertIn("/var/lib/wk/boot", line,
+                                  "setup chowns /var/lib/wk itself, exposing the tailnet stash")
+
+    def test_it_says_what_to_do_when_it_cannot_be_granted(self):
+        """A refusal names the remedy: without a terminal, setup skips rather
+        than aborting, and says which command to run."""
+        text = (REPO / "admin" / "install.sh").read_text()
+        block = text[text.index("_bootdir=/var/lib/wk/boot"):]
+        block = block[:block.index("unset _bootdir")]
+        self.assertIn("./setup --stage quiesce", block)

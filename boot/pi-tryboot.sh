@@ -162,7 +162,7 @@ b_reboot() {
     if [ -n "$TRYBOOT_ARMED" ]; then
         b_reboot_tryboot
     else
-        r_sudo "setsid sh -c 'sleep 3; reboot' </dev/null >/dev/null 2>&1 &" >/dev/null
+            boot_priv reboot >/dev/null
     fi
 }
 

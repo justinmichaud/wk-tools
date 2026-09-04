@@ -38,6 +38,10 @@ RPI5_TRYBOOT=""
 b_arm() {
     local order="$1" reply word2
 
+    # Before the mailbox call, so a missing helper is reported as itself rather
+    # than as a firmware that would not answer.
+    boot_priv_require
+
     # Which pair, before the order: an arming that set the boot order and then
     # refused would leave a one-shot pointing at the stick with no say in which
     # system on it boots.
@@ -50,7 +54,7 @@ b_arm() {
     (partition 1 or 3, the two pairs of a dedicated bench medium)" ;;
     esac
 
-    reply=$(r_sudo "vcmailbox 0x0003808b 4 4 $order") \
+    reply=$(boot_priv order "$order") \
         || die "the firmware mailbox call failed on $NODE_NAME"
 
     # 0x80000000 in the second word means success; a silent no-op call looks
@@ -86,7 +90,7 @@ b_reboot() {
     if [ -n "$RPI5_TRYBOOT" ]; then
         b_reboot_tryboot
     else
-        r_sudo "setsid sh -c 'sleep 3; reboot' </dev/null >/dev/null 2>&1 &" >/dev/null
+        boot_priv reboot >/dev/null
     fi
 }
 

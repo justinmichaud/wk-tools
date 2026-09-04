@@ -167,11 +167,13 @@ class TestReboot(unittest.TestCase):
         "0 tryboot". Every other reboot (--back from bench mode) is plain, so
         the firmware reads the rescue's config.txt."""
         # The stubs speak on stderr: b_reboot sends the ssh's stdout to
-        # /dev/null (the real command prints nothing useful).
+        # /dev/null (the real command prints nothing useful). Both reboots go
+        # through boot_priv now, and this board is a bench-device, so both
+        # arrive as r_ssh -- the guard call that asks whether the answering
+        # system carries systemd is the one that stays quiet.
         cp = bash(LOAD + '''
 m_ssh() { echo "m_ssh: $*" >&2; }
-r_sudo() { echo "r_sudo: $*" >&2; }
-r_ssh() { return 0; }   # the answering system carries systemd
+r_ssh() { case "$*" in *setsid*) echo "r_ssh: $*" >&2 ;; *) return 0 ;; esac; }
 TRYBOOT_ARMED=1; b_reboot
 TRYBOOT_ARMED=""; MODE="bench x-1"; b_reboot
 ''')
@@ -182,7 +184,10 @@ TRYBOOT_ARMED=""; MODE="bench x-1"; b_reboot
         self.assertIn('/run/systemd/reboot-param', armed)
         self.assertIn('"0 tryboot"', armed)
         self.assertIn("systemctl reboot", armed)
-        self.assertTrue(plain.startswith("r_sudo:"), plain)
+        # ...and the plain one carries none of it.
+        self.assertNotIn("reboot-param", plain)
+        self.assertNotIn("tryboot", plain)
+        self.assertIn("reboot", plain)
         self.assertNotIn("tryboot", plain)
 
     def test_evidence_reads_the_staging_not_a_record(self):

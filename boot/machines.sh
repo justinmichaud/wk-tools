@@ -163,6 +163,43 @@ r_sudo() { # <command string>
     if [ "${NODE_ROLE:-}" = bench-device ]; then r_ssh "$@"; else r_ssh "sudo -n $*"; fi
 }
 
+# The privileged half of arming a board that boots itself: one firmware
+# mailbox call and the reboot that spends it. A bench-device is driven as root
+# and does them directly; a workstation is driven as a person over a BatchMode
+# ssh with no terminal, where the only password-free root is a named helper
+# (CLAUDE.md) -- `sudo -n vcmailbox` there answers "interactive authentication
+# is required" and the arming died before the mailbox call (rpi5, 2026-09-03).
+#
+# One spelling for both, so a driver names the operation and never the
+# privilege. Fixed verbs, and the only argument any of them takes is a boot
+# order the helper checks for itself.
+BOOT_PRIV=/usr/local/libexec/wk-boot-priv
+boot_priv() { # <verb> [order]
+    if [ "${NODE_ROLE:-}" = bench-device ]; then
+        case "$1" in
+            order)          r_ssh "vcmailbox 0x0003808b 4 4 $(sh_quote "$2")" ;;
+            reboot)         r_ssh "setsid sh -c 'sleep 3; reboot' </dev/null >/dev/null 2>&1 &" ;;
+            reboot-tryboot) r_ssh "setsid sh -c 'sleep 3; printf \"0 tryboot\" > /run/systemd/reboot-param && systemctl reboot' </dev/null >/dev/null 2>&1 &" ;;
+            status)         return 0 ;;
+        esac
+        return $?
+    fi
+    r_sudo "$BOOT_PRIV $(sh_quote "$@")"
+}
+
+# Asked before the first refusal that would otherwise blame the firmware for a
+# missing helper, the same shape card_priv_require has (boot/disk.sh).
+boot_priv_require() {
+    [ "${NODE_ROLE:-}" = bench-device ] && return 0
+    boot_priv status >/dev/null 2>&1 && return 0
+    die "$NODE_NAME cannot be armed: its boot helper is missing, or its sudoers
+    rule is not in force. A workstation is driven as a person and wk takes no
+    passwordless sudo on one beyond its named helpers, so there is deliberately
+    no second way in.
+    What fails:  sudo -n $BOOT_PRIV status
+    The remedy, from a terminal on $NODE_NAME:  ./setup --stage quiesce"
+}
+
 # Read one of the fixed files a wk system leaves on a boot partition of this
 # machine's medium; three readers differ only in the filename.
 #
@@ -209,7 +246,7 @@ mac_ssh() {
 # No probe can derive `wk boot`'s intent half: once armed, the firmware
 # register and running system look unchanged. So arming leaves one record of
 # intent on the machine it describes.
-NODE_RECORD=/var/lib/wk/boot-armed
+NODE_RECORD=/var/lib/wk/boot/armed
 
 # Stamped with its own boot id, so "has this arming been spent" compares two
 # values from one kernel rather than two machines' wall clocks.
@@ -218,7 +255,7 @@ record_write() {
     # bench system has nowhere to put one. Not an error: a medium-armed board's
     # arming is on the medium, where b_evidence reads it.
     [ "${MODE_CHANNEL:-host}" = host ] || { debug "$NODE_NAME answered as its bench system; the arming is on its medium and no record is written"; return 0; }
-    m_ssh "sudo mkdir -p $(dirname $NODE_RECORD) && sudo tee $NODE_RECORD >/dev/null <<EOF
+    m_ssh "mkdir -p $(dirname $NODE_RECORD) && cat > $NODE_RECORD <<EOF
 image=$1
 profile=$2
 device=$3
@@ -232,14 +269,14 @@ EOF"
 # Only host mode: a bench system does not mount the host install's root.
 record_read() {
     [ "${MODE_CHANNEL:-host}" = host ] || return 0
-    m_ssh "sudo cat $NODE_RECORD 2>/dev/null" || true
+    m_ssh "cat $NODE_RECORD 2>/dev/null" || true
 }
 # Nothing to clear on a machine answering as its bench system, and silence
 # rather than failure: a medium-armed board answers that way precisely when its
 # arming needs disarming, and spent-ness is computed from boot ids anyway.
 record_clear() {
     [ "${MODE_CHANNEL:-host}" = host ] || { debug "$NODE_NAME answered as its bench system; its arming record is on the host install and stays"; return 0; }
-    m_ssh "sudo rm -f $NODE_RECORD"
+    m_ssh "rm -f $NODE_RECORD"
 }
 
 # Refuse to mutate a machine between `wk boot` and the reboot it asked for: in
@@ -443,14 +480,17 @@ b_reboot_tryboot() {
     tryboot flag to the reboot it rides on (only 'systemctl reboot' with
     /run/systemd/reboot-param does). Arm from a system that can:
         wk boot $NODE_NAME --back"
-    r_sudo "setsid sh -c 'sleep 3; printf \"0 tryboot\" > /run/systemd/reboot-param && systemctl reboot' </dev/null >/dev/null 2>&1 &" >/dev/null
+    boot_priv reboot-tryboot >/dev/null
 }
 
 b_reboot() {
-    # Detached and delayed: the reboot kills the ssh session, which would
-    # otherwise exit nonzero and read as a failure under `set -e`. setsid
-    # rather than systemd-run, since the system answering may be a BusyBox one.
-    r_sudo "setsid sh -c 'sleep 3; reboot' </dev/null >/dev/null 2>&1 &" >/dev/null
+    # Through boot_priv, like every reboot here: a bench-device is already root
+    # and reboots directly, a workstation has no password-free root but the
+    # helper. Detached and after a delay either way -- the reboot kills the ssh
+    # session, which would otherwise exit nonzero and, under `set -e`, read as
+    # a failure -- and setsid rather than systemd-run, since the system
+    # answering may be a BusyBox one.
+    boot_priv reboot >/dev/null
 }
 
 # Which system a boot partition holds, read off the FAT boot partition rather

@@ -164,6 +164,76 @@ else
 fi
 unset _card_target _card_source _card_sudoers _card_sudoers_old _card_needs _card_owner _card_ok _card_tmp _card_perm
 
+# --- the boot helper ----------------------------------------------------------
+# The third privileged helper, and the narrowest. What earns it is the same
+# shape as the other two: a fixed verb list, no passthrough, and one argument
+# -- a boot order -- checked against `0x` and eight hex digits before it is
+# used, against a mailbox tag the helper fixes and no caller can name.
+#
+# Why it is needed at all: a workstation whose bench medium is its own stick
+# (rpi5) is armed by a firmware mailbox call and the reboot that spends it,
+# both root, over a BatchMode ssh with no terminal for sudo to prompt on.
+# A bench-device is driven as root and never calls it.
+_boot_target="$_libexec/wk-boot-priv"
+_boot_source="$WK_ROOT/admin/wk-boot-priv"
+_boot_sudoers=/etc/sudoers.d/zzz-wk-boot
+
+if [ ! -f "$_boot_source" ]; then
+    warn "boot helper missing at $_boot_source; skipping"
+elif ! is_linux; then
+    # The mailbox and /run/systemd/reboot-param are Linux-on-Pi concepts.
+    unchanged "boot helper (linux only)"
+else
+    _boot_needs=0
+    if [ ! -f "$_boot_target" ] || ! cmp -s "$_boot_source" "$_boot_target"; then _boot_needs=1; fi
+    _boot_owner=$(stat -c '%U' "$_boot_target" 2>/dev/null || echo "")
+    [ -f "$_boot_target" ] && [ "$_boot_owner" != root ] && _boot_needs=1
+
+    _boot_ok=0
+    if [ -x "$_boot_target" ] && sudo -n "$_boot_target" status >/dev/null 2>&1; then _boot_ok=1; fi
+
+    if [ "$_boot_needs" -eq 0 ] && [ "$_boot_ok" -eq 1 ]; then
+        unchanged "boot helper and sudoers rule"
+    elif ! sudo -n true 2>/dev/null && [ ! -t 0 ]; then
+        if [ "$_boot_needs" -eq 0 ]; then
+            warn "the boot helper is installed, but its sudoers rule is not in force"
+            log  "  'sudo -l' shows the order; $_boot_sudoers has to be the last match."
+            log  "  from an interactive shell:  ./setup --stage quiesce"
+        else
+            warn "boot helper not installed: sudo needs a terminal"
+            log  "  run this from an interactive shell:  ./setup --stage quiesce"
+        fi
+    else
+        info "installing the boot helper (requires sudo once)"
+        sudo install -d -o root -g root -m 0755 "$_libexec"
+        sudo install -o root -m 0755 "$_boot_source" "$_boot_target"
+        changed "installed $_boot_target"
+
+        _boot_tmp="$(mktemp)"
+        printf '%s\n' "$(id -un) ALL=(root) NOPASSWD: $_boot_target" > "$_boot_tmp"
+        if sudo visudo -cqf "$_boot_tmp"; then
+            sudo install -o root -m 0440 "$_boot_tmp" "$_boot_sudoers"
+            changed "installed $_boot_sudoers"
+        else
+            rm -f "$_boot_tmp"
+            die "generated boot sudoers rule failed validation; nothing was installed"
+        fi
+        rm -f "$_boot_tmp"
+    fi
+
+    # Checked every run: writable by anyone but root is a root escalation.
+    if [ -f "$_boot_target" ]; then
+        _boot_perm=$(stat -c '%a' "$_boot_target" 2>/dev/null || echo "")
+        case "$_boot_perm" in
+            ''|*[!0-7]*) die "could not read the mode of $_boot_target -- refusing to vouch for $_boot_sudoers" ;;
+            *[2367])     die "$_boot_target is world-writable (mode $_boot_perm) -- remove $_boot_sudoers now" ;;
+            ?[2367]?)    die "$_boot_target is group-writable (mode $_boot_perm) -- remove $_boot_sudoers now" ;;
+        esac
+        unchanged "boot helper permissions ($_boot_perm)"
+    fi
+fi
+unset _boot_target _boot_source _boot_sudoers _boot_needs _boot_owner _boot_ok _boot_tmp _boot_perm
+
 # --- privileged files this repo has retired -----------------------------------
 # Tombstones. Without them a machine provisioned by an older revision keeps a
 # root-owned file and a sudoers grant nothing uses. Entries come out of this
@@ -252,5 +322,34 @@ for _u in getty@tty2.service autovt@tty2.service; do
 done
 fi
 unset _u _link
+
+# --- where `wk boot` records an arming --------------------------------------
+# No probe can derive `wk boot`'s *intent* half -- once armed, the firmware
+# register and the running system look unchanged -- so the arming leaves one
+# record on the machine it describes (NODE_RECORD, boot/machines.sh).
+#
+# Writing it needs no privilege, and that is what this directory is for. A
+# bench-device is driven as root and could write anywhere; a workstation is
+# driven as a person over a BatchMode ssh with no terminal, so a `sudo` there
+# cannot be answered and `wk boot` died on it. Ownership is granted once, here,
+# where a password prompt can be answered, rather than per-arming where it
+# cannot.
+#
+# Only this subdirectory: /var/lib/wk itself stays root-owned, because the card
+# helper keeps the board's tailnet node key beside it (TAILNET_KEEP_DIR, 0700
+# root) and a user-owned parent would let that be replaced.
+_bootdir=/var/lib/wk/boot
+_bootowner=$(stat -c '%U' "$_bootdir" 2>/dev/null || stat -f '%Su' "$_bootdir" 2>/dev/null || echo "")
+if [ "$_bootowner" = "$(id -un)" ]; then
+    unchanged "$_bootdir is writable by $(id -un)"
+elif ! sudo -n true 2>/dev/null && [ ! -t 0 ]; then
+    warn "$_bootdir is not writable by $(id -un): sudo needs a terminal"
+    log  "  'wk boot <machine>' cannot record an arming until it is."
+    log  "  run this from an interactive shell:  ./setup --stage quiesce"
+else
+    sudo install -d -o "$(id -un)" -m 0755 "$_bootdir"
+    changed "made $_bootdir writable by $(id -un) -- where wk boot records an arming"
+fi
+unset _bootdir _bootowner
 
 unset _libexec _target _source _sudoers _sudoers_old _needs_install _owner _rule _sudoers_ok _tmp _perm _sessenv _sessline _tmp2

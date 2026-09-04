@@ -179,8 +179,8 @@ test or it refuses loudly; it never silently degrades.
 - **No credential, key or token in the tree.** The repo is public. Machine-local
   values live in gitignored per-machine conf files.
 - **`wk` never calls `sudo` on the workstation without a password prompt.** The
-  two privileged helpers — `admin/wk-quiesce-priv`, `admin/wk-card-priv` — are
-  the carve-outs; do not add more. What earns one is shape: a fixed verb list,
+  three privileged helpers — `admin/wk-quiesce-priv`, `admin/wk-card-priv`,
+  `admin/wk-boot-priv` — are the carve-outs; do not add more. What earns one is shape: a fixed verb list,
   no passthrough, no argument that becomes part of a command, and a gate
   narrower than the capability sounds. The card helper touches only a usb or
   mmc **whole disk the machine is not running from**.
