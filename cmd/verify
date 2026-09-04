@@ -67,7 +67,9 @@ pass() { printf '  \033[32mok\033[0m    %s\n' "$*" >&2; }
 fail() { printf '  \033[31mFAIL\033[0m  %s\n' "$*" >&2; fails=$((fails + 1)); }
 note() { printf '        %s\n' "$*" >&2; }
 
-inside() { t_exec "$NAME" bash -lc "$*" 2>/dev/null || true; }   # never fails the script
+# Never fails the script, and never carries a \r: a container's exec path adds
+# one, and every numeric probe below would then be an integer test on "2\r".
+inside() { t_exec "$NAME" bash -lc "$*" 2>/dev/null | tr -d '\r' || true; }
 
 info "verifying workspace '$NAME' (${WK_SANDBOX:-$TARGET})"
 
@@ -193,15 +195,11 @@ else
 fi
 
 # --- the two credentials, and that neither one is in here ---------------------
-# An agent's blast radius ends at the workspace only if nothing inside it can
-# publish. Two things could: an ssh key that pushes, and a GitHub API token that
-# posts. Neither is a file in here -- the keys are in an ssh-agent outside the
-# workspace and the token is in the injector -- so what is measured is that no
-# key material is present, that the switch is where the host says it is, and
-# that the workspace holds the placeholders rather than a token. Publishing is
-# what the switch is over: reading GitHub is open, so a read answering 200 is a
-# healthy workspace and not a finding. Both targets: every probe below is the
-# same command run inside by t_exec.
+# Two things could publish: an ssh key that pushes and a GitHub API token that
+# posts, and neither is a file in here -- the keys are in an ssh-agent outside
+# the workspace and the tokens are in the injector. A read is authenticated in
+# either switch position, so a read answering 200 is the arrangement working;
+# a write is authenticated only while push is on.
 
 # The host's own answer, once. Both positions are correct states -- what would
 # be wrong is the workspace disagreeing with the host about which one it is in.
@@ -209,12 +207,8 @@ PUSH_ON=0
 "$WK_ROOT/wk" push status >/dev/null 2>&1 && PUSH_ON=1
 [ "$PUSH_ON" = 1 ] && note "the host says push is ON" || note "the host says push is OFF"
 
-# Never the checkout, and that is why home is not walked as a whole: WebKit
-# ships PEM test fixtures of its own, and on a guest the checkout is *inside*
-# $HOME, so a recursive grep would report the upstream tree and walk gigabytes
-# of it. The places a key delivered or copied by anything in here would land are
-# named instead: the two directories ssh and the agent read, and the top of home
-# itself, which is not recursive.
+# Named places, never the checkout: WebKit ships PEM fixtures and on a guest
+# the checkout is inside $HOME, so a recursive walk reports the upstream tree.
 material=$(inside "{ grep -rl 'PRIVATE KEY' \$HOME/.ssh \$HOME/.claude /secrets /run/wk;
                      grep -l  'PRIVATE KEY' \$HOME/* ; } 2>/dev/null | head -5")
 if [ -z "$material" ]; then
@@ -233,8 +227,11 @@ if [ -z "$agent_sock" ]; then
 else
     # `command -v` first, for the reason the interface probe gives: a missing
     # tool would answer "no identities" and fail in the direction that looks fine.
+    # `ssh-add -l` prints "The agent has no identities." on stdout for an empty
+    # agent, so counting its lines counts that one as a key.
     ident=$(inside "command -v ssh-add >/dev/null 2>&1 \
-        && (SSH_AUTH_SOCK=$agent_sock ssh-add -l 2>/dev/null | grep -c . || true) \
+        && (SSH_AUTH_SOCK=$agent_sock ssh-add -l 2>/dev/null \
+            | grep -v 'has no identities' | grep -c . || true) \
         || echo MISSING")
     if [ "$ident" = MISSING ]; then
         fail "no ssh-add in the workspace, so what the agent holds cannot be measured
@@ -259,60 +256,50 @@ code=$(inside "curl -sS -m 20 -o /dev/null -w '%{http_code}' https://api.github.
         (systemctl --user status wk-github-inject; the CA is /run/wk/wk-github-ca.pem)"
 
 # A read, which the switch does not govern: it is authenticated from the
-# standing token in either position. So the question is whether the machine
-# agrees with this device about there being a token at all.
+# standing token in either position. Asked of the answer alone, not of a store:
+# the token lives where the injector reads it, which is this machine for a
+# container and the macOS host for a guest, and neither is where this runs.
 code=$(inside "curl -sS -m 20 -o /dev/null -w '%{http_code}' https://api.github.com/user 2>/dev/null")
-if [ -n "$(wk_github_pat)" ]; then
-    [ "$code" = 200 ] \
-        && pass "a read is authenticated (HTTP 200) from a token this workspace never holds" \
-        || fail "there is a GitHub token on this device, yet a read in here answered
-        '${code:-nothing}': the machine has not been given the standing read token
-        ('./setup' delivers it, and so does 'wk key set github-pat')"
-else
-    [ "$code" = 401 ] \
-        && pass "a read is unauthenticated (HTTP 401): this device holds no token at all
-        ('wk key set github-pat' gives reads an identity)" \
-        || fail "this device holds no GitHub token, yet a read in here answered
-        '${code:-nothing}' -- a credential wk did not put there is in the injector"
-fi
+case "$code" in
+    200) pass "a read is authenticated (HTTP 200) from a token this workspace never holds" ;;
+    401) note "reads are unauthenticated (HTTP 401): no standing read token where the
+        injector reads one, so a workspace sees public GitHub at 60 requests an
+        hour ('wk key set github-pat', then './setup')" ;;
+    *)   fail "a read answered '${code:-nothing}' rather than 200 or 401 -- the injector
+        is in the path but not answering for api.github.com/user" ;;
+esac
 
-# The fork this machine pushes to, for the two write probes below.
+# The fork this machine pushes to, for the write probe below.
 FORK=$(wk_push_forks | awk 'NF {print $2; exit}')
 
-# The write table, measured with a write it does not have. This one is answered
-# by the injector and never reaches GitHub, so it is safe on every run.
-probe=$(inside "curl -sS -m 20 -w '\n%{http_code}' -X POST -d '{}' https://api.github.com/repos/$FORK/keys 2>/dev/null")
-code=$(printf '%s\n' "$probe" | tail -1)
-if [ "$code" = 403 ] && printf '%s' "$probe" | grep -q 'container/proxy/github-inject.py'; then
-    pass "a write outside the ALLOW table is refused by the injector itself (HTTP 403)"
-else
-    fail "POST /repos/$FORK/keys answered '${code:-nothing}' instead of the injector's 403 --
-        a workspace reaches write endpoints the ALLOW table (container/proxy/github-inject.py)
-        does not have, so the injector is not the thing answering"
-fi
-
-# And the switch, measured with a write the table *does* have, shaped so GitHub
-# cannot act on it: an empty body names no branch, so an authenticated call is
-# 422 (validation failed, nothing created) and one with no token is 401. The
-# injector forwards a write in both positions, so nothing weaker tells them
-# apart from in here.
+# The switch, measured with a write shaped so GitHub cannot act on it: an empty
+# body names no branch, so an authenticated call is 422 (validation failed,
+# nothing created) and one with no token is 401. The injector forwards a write
+# in both positions, so nothing weaker tells them apart from in here.
 code=$(inside "curl -sS -m 20 -o /dev/null -w '%{http_code}' -X POST -d '{}' https://api.github.com/repos/$FORK/pulls 2>/dev/null")
 if [ "$PUSH_ON" = 1 ]; then
-    [ "$code" = 422 ] \
-        && pass "an allowed write is authenticated (HTTP 422, nothing created), and push is on" \
-        || fail "push is ON but POST /repos/$FORK/pulls answered '${code:-nothing}' rather than
-        422 -- the injector has no write token, or GitHub refuses this one
-        ('wk key set github-pat --replace')"
+    # 403 is GitHub refusing the token's permissions, not the switch failing:
+    # the token was spent, or the answer would be 401. Said apart, because the
+    # remedy is a different one and `git-webkit pr` fails on it.
+    case "$code" in
+        422) pass "a write is authenticated (HTTP 422, nothing created), and push is on" ;;
+        403) fail "push is ON and the token reached GitHub, which refused it: the
+        stored PAT has no 'Pull requests: write' on $FORK, so 'git-webkit pr'
+        cannot open one. Reissue it with that permission and
+        'wk key set github-pat --replace'" ;;
+        *)   fail "push is ON but POST /repos/$FORK/pulls answered '${code:-nothing}' rather
+        than 422 -- the injector has no write token ('wk push on' again)" ;;
+    esac
 else
     [ "$code" = 401 ] \
-        && pass "an allowed write is unauthenticated (HTTP 401): nothing in here can post" \
+        && pass "a write is unauthenticated (HTTP 401): nothing in here can post" \
         || fail "push is off, yet POST /repos/$FORK/pulls answered '${code:-nothing}' --
         expected 401, so a write token is still on the machine:  wk push off"
 fi
 
-# The placeholders, never their values: printing what the workspace holds would
-# print a token on the one run where this check matters. Both, because
-# `git-webkit` sends one (webkitcorepy) and `gh` the other.
+# Never their values: printing what the workspace holds would print a token on
+# the one run where this check matters. Both, because `git-webkit` sends one
+# (webkitcorepy) and `gh` the other.
 for _var in GITHUB_COM_TOKEN GH_TOKEN; do
     tok=$(inside "printf %s \"\${$_var:-}\"")
     case "$tok" in
@@ -326,7 +313,7 @@ for _var in GITHUB_COM_TOKEN GH_TOKEN; do
 done
 
 # A stored credential, which no placeholder covers: `gh auth login` writes one
-# here and it would go to GitHub as itself, past the table and the switch.
+# here and it would go to GitHub as itself, past the switch.
 ghcred=$(inside "test -e ~/.config/gh/hosts.yml && echo ~/.config/gh/hosts.yml; env | grep -E '^(GITHUB_TOKEN|GH_ENTERPRISE_TOKEN)=' | cut -d= -f1")
 [ -z "$ghcred" ] && pass "no stored GitHub credential inside: gh has only the placeholder" \
                  || fail "GitHub credential inside the workspace: $ghcred -- remove it (rm ~/.config/gh/hosts.yml; unset the token) before an agent runs"

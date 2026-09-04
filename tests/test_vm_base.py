@@ -204,6 +204,27 @@ echo "prebuilt=${_base_prebuilt:-none}"
         self.assertNotIn("if ", tail, tail)
 
 
+class TestADirtyTreeIsRefusedBeforeTheBaseIsDestroyed(WkTest):
+    """A base is given a commit (tools_committed, lib/tools.sh), so a dirty
+    tree cannot provision one. Asked before the delete: measured, refusing
+    afterwards costs a `tart delete`, a clone, a 140GB -> 320GB grow and a boot
+    to reach a verdict that is local and free."""
+
+    CMD = REPO / "cmd" / "vm"
+
+    def test_the_refusal_precedes_every_destructive_step(self):
+        arm = self.CMD.read_text().split("--rebuild)", 1)[1].split("--rm)", 1)[0]
+        self.assertIn("tools_committed", arm)
+        self.assertLess(arm.index("tools_committed"), arm.index("tart delete"),
+                        "the base is deleted before the tree is checked")
+        self.assertLess(arm.index("tools_committed"), arm.index("confirm "),
+                        "the prompt comes before the check it would waste")
+
+    def test_it_says_nothing_was_deleted(self):
+        arm = self.CMD.read_text().split("--rebuild)", 1)[1].split("--rm)", 1)[0]
+        self.assertIn("Nothing has been deleted", arm)
+
+
 class TestTheConfigIsCheckedBeforeTheHours(WkTest):
     def _check(self, config):
         store = self.tmp / "store"

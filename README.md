@@ -346,8 +346,8 @@ re-asserts them):
   `wk pr open` opens a PR from. Pushes over ssh with a per-fork deploy key
   held in an ssh-agent outside the workspace (`wk push on`); `git-webkit pr`
   inside one reaches GitHub's API through the credential injector, holding a
-  placeholder rather than the token: it may read anything and write only the
-  endpoints `git-webkit` needs.
+  placeholder rather than the token: it reads with a standing token and writes
+  only while `wk push` is on.
 - `forkwpe` -- your own fork of WPEWebKit, the same, for that project.
 
 **Sync (a workspace, a target, or the furniture a machine keeps)**
@@ -736,24 +736,16 @@ token and forwards a write unauthenticated, so GitHub answers 401 for itself:
 the switch withholds a credential, it does not pretend the API is unreachable.
 `uploads.github.com` stays refused outright.
 
-**Reading is open; writing is a table, and the switch is over writing.** A
-`GET` or `HEAD` on any path -- and a GraphQL document with no mutation in it --
-is forwarded and authenticated from a standing token, whatever position `wk
-push` is in: an agent in a workspace has to read a pull request, its EWS
-statuses and the issue a branch tracks, `gh` has to work, and no read changes
-anything of yours. A write is forwarded only where `ALLOW` in
-`container/proxy/github-inject.py` has it -- the `git-webkit` endpoints, each
-row naming the file in `webkitscmpy` or `webkitbugspy` that builds that URL --
-and only with the token `wk push on` puts on the machine. Anything else is
-answered `403` there and never reaches GitHub, naming the method, the path and
-the file the table is in, so a `git-webkit` that grows an endpoint fails
-legibly and is fixed with one row. Neither token is ever inside a workspace,
-and the standing one is spent on reads alone: a write asks for the switch's
-file and nothing else. Without the split the token is the whole account -- a
-workspace that could spend it on any path could delete a repository, add a
-deploy key or dispatch an Actions workflow. `git-webkit setup` is deliberately
-outside the table: creating and renaming a fork, and `PATCH` on a repository,
-are a person's act on the host (`wk remotes`), not a workspace's.
+**A read is always authenticated; a write is authenticated only while push is
+on.** A `GET` or `HEAD` on any path -- and a GraphQL document with no mutation
+in it -- is forwarded with the standing read token whatever position `wk push`
+is in: an agent in a workspace has to read a pull request, its EWS statuses and
+the issue a branch tracks, `gh` has to work, and no read changes anything of
+yours. Everything else is a write, and a write spends the switch's token or
+none. The injector refuses nothing of its own: push on means you are watching
+what the workspace does, so which of your own endpoints it reaches is your
+call, and push off leaves it nothing to spend. Neither token is ever inside a
+workspace.
 
 The standing token is one file on the machine that runs the workspaces
 (`$WK_STORE/read-github-pat`, and `~/.local/state/wk/vm/read-github-pat` on the
@@ -791,10 +783,9 @@ Nothing an agent runs can publish or commit, on any target. Publishing: the
 deploy keys are out of the agent and the write token is gone for the session
 (`wk push off`, before the sandbox is verified), and `wk verify` measures all
 of it from inside the workspace -- no private key material in the home,
-`/secrets` or `/run/wk`; the agent socket holding nothing; a write outside the
-`ALLOW` table refused by the injector itself; an allowed write answering 401
-rather than being authenticated; `GITHUB_COM_TOKEN` and `GH_TOKEN` being the
-placeholders, with no stored `gh` credential beside them. A read answering 200
+`/secrets` or `/run/wk`; the agent socket holding nothing; a write answering
+401 rather than being authenticated; `GITHUB_COM_TOKEN` and `GH_TOKEN` being
+the placeholders, with no stored `gh` credential beside them. A read answering 200
 is the arrangement working, and is measured against whether this device holds a
 token at all. On a build box a `gh` login in the agent's account is a
 refusal. Committing: a container `wk ai claude` session runs the agent

@@ -3,9 +3,9 @@ variables naming that proxy get into a macOS guest's shells.
 
 Three parts of one boundary. `container/proxy/wk-proxy.py` decides what may be
 reached and is shared by containers and guests alike, so an entry widens both.
-`container/proxy/github-inject.py` is the one host whose TLS is terminated: a
-read of that host is forwarded on every path and a write only where its ALLOW
-table has it, and the two spend different tokens.
+`container/proxy/github-inject.py` is the one host whose TLS is terminated: it
+forwards every request and refuses none, and what it decides is which of the
+two tokens the request spends.
 `~/.wk-egress` carries the variables naming that proxy into a guest. The host
 writes it on every start and vm/shell-rc.sh sources it from all four rc files,
 so every shell that reads an rc gets it -- not login shells alone: an editor's
@@ -83,13 +83,6 @@ def _reader(data=b"", eof=True):
     if eof:
         r.feed_eof()
     return r
-
-
-def _head(method, target):
-    """A request head with no body -- what `policy_refusal` is handed once the
-    relay has read one."""
-    return ("%s %s HTTP/1.1\r\nHost: api.github.com"
-            % (method, target)).encode("latin-1")
 
 
 def drive_injector(tmp, client_bytes,
@@ -500,8 +493,8 @@ class TestTheInjectorReadsOneRequestAndNoMore(WkTest):
 
 
 # Every request `git-webkit` makes of api.github.com, by the file that builds
-# the URL, split the way the injector splits them. The reads are listed to be
-# forwarded, not to be found in a table: no rule matches any of these paths.
+# the URL, split the way the injector splits them: a read spends the standing
+# token, a write spends the switch's.
 GIT_WEBKIT_READS = (
     # webkitbugspy/github.py: Tracker.credentials, Tracker.user, Tracker.me
     ("GET", "/user"),
@@ -531,8 +524,6 @@ GIT_WEBKIT_READS = (
     ("POST", "/graphql"),
 )
 
-# The other half: every request `git-webkit` makes that changes something, and
-# therefore every row ALLOW has to hold.
 GIT_WEBKIT_WRITES = (
     # webkitscmpy/remote/git_hub.py: PRGenerator.create, .update,
     # ._make_comment, .review
@@ -551,15 +542,14 @@ GIT_WEBKIT_WRITES = (
     ("POST", "/repos/justinmichaud/WebKit/merge-upstream"),
 )
 
-# Paths a workspace reaches that no rule ever named -- `gh`, curl by hand, and
-# the two probes `wk verify` measures the injector with. They are forwarded
-# because they are reads, and for no other reason.
-READS_NO_RULE_EVER_HAD = ("/user", "/rate_limit", "/repos/a/b/actions/runs",
-                          "/orgs/x", "/")
+# Paths a workspace reaches that `git-webkit` never asks for -- `gh`, curl by
+# hand, and the reachability probe `wk verify` measures the injector with.
+READS_WITH_NO_GIT_WEBKIT_CALLER = ("/user", "/rate_limit",
+                                   "/repos/a/b/actions/runs", "/orgs/x", "/")
 
-# What the token would buy a hostile workspace if a write were not the table.
-# Each one is a real GitHub endpoint and each one is destructive, exfiltrating
-# or both.
+# Real GitHub endpoints, each destructive, exfiltrating or both. Every one of
+# them is forwarded, and every one of them spends the switch's token when there
+# is one.
 HOSTILE_WRITES = (
     ("DELETE", "/repos/WebKit/WebKit"),                        # delete the repo
     ("PATCH", "/repos/WebKit/WebKit"),                         # settings: private -> public
@@ -577,165 +567,106 @@ HOSTILE_WRITES = (
 )
 
 
-class TestTheInjectorForwardsEveryRead(WkTest):
-    """A read is forwarded on every path, and the table is not consulted at
-    all. An agent in a workspace has to read a pull request, EWS statuses and
-    the issue a branch tracks, and `gh` has to work; nothing a read reaches is
-    something the person has to be protected from, so a list of readable paths
-    would only be a list to keep in step with GitHub."""
+class TestTheInjectorForwardsEverything(WkTest):
+    """The decision, and it is a decision rather than an oversight: the
+    injector refuses nothing on policy. Every method on every path reaches
+    api.github.com and GitHub answers for itself. `wk push on` means a person
+    is watching what the workspace does, so which of their own endpoints it
+    reaches is theirs to decide; `wk push off` leaves a write no credential at
+    all, and GitHub answers 401."""
 
-    def setUp(self):
-        super().setUp()
-        self.m = _load(INJECT, "wkinject")
+    def forward(self, method, target, body=b"", **kw):
+        """Drives the relay and returns what api.github.com received."""
+        head = ("%s %s HTTP/1.1\r\nHost: api.github.com\r\n"
+                "Content-Length: %d\r\n\r\n"
+                % (method, target, len(body))).encode("latin-1")
+        client, upstream, opened, logged = drive_injector(
+            self.tmp, head + body, **kw)
+        self.assertEqual([("api.github.com", 443)], opened,
+                         "%s %s never left the injector: %r" % (method, target, client))
+        self.assertIn(("%s %s HTTP/1.1" % (method, target)).encode("latin-1"),
+                      upstream)
+        return upstream, logged
 
     def test_every_read_git_webkit_makes_is_forwarded(self):
         for method, target in GIT_WEBKIT_READS:
             with self.subTest(request="%s %s" % (method, target)):
-                self.assertIsNone(
-                    self.m.policy_refusal(_head(method, target), b""))
+                _, logged = self.forward(method, target, read_token="ghp-read-only")
+                self.assertIn("read inject", logged)
 
-    def test_a_path_no_rule_ever_had_is_read_all_the_same(self):
-        for method in self.m.READ_METHODS:
-            for target in READS_NO_RULE_EVER_HAD:
+    def test_every_write_git_webkit_makes_is_forwarded(self):
+        for method, target in GIT_WEBKIT_WRITES:
+            with self.subTest(request="%s %s" % (method, target)):
+                _, logged = self.forward(method, target)
+                self.assertIn("write inject", logged)
+
+    def test_a_path_git_webkit_never_asks_for_is_read_all_the_same(self):
+        for method in ("GET", "HEAD"):
+            for target in READS_WITH_NO_GIT_WEBKIT_CALLER:
                 with self.subTest(request="%s %s" % (method, target)):
-                    self.assertIsNone(
-                        self.m.policy_refusal(_head(method, target), b""))
-
-    def test_the_table_is_not_consulted_for_a_read(self):
-        """The table holds writes only, so `allowed` refuses the very paths
-        every workspace reads all day: what forwards them is that they are
-        reads."""
-        self.assertFalse(self.m.allowed("GET", "/user"))
-        self.assertIsNone(self.m.policy_refusal(_head("GET", "/user"), b""))
+                    self.forward(method, target, read_token="ghp-read-only")
 
     def test_a_read_is_open_where_it_is_sensitive_too(self):
-        """The decision, stated where a reader will look for it: the read
-        token reaches whatever the account it belongs to can read. What bounds
-        that is the token's own scope, not this program."""
+        """The read token reaches whatever the account it belongs to can read.
+        What bounds that is the token's own scope, not this program."""
         for target in ("/repos/WebKit/WebKit/actions/secrets",
                        "/repos/an-employer/private-thing/contents/secrets.txt",
-                       "/repos/an-employer/private-thing/tarball/main",
                        "/user/emails"):
             with self.subTest(target=target):
-                self.assertIsNone(
-                    self.m.policy_refusal(_head("GET", target), b""))
+                self.forward("GET", target, read_token="ghp-read-only")
 
-    def test_a_read_needs_no_path_shape_check(self):
-        """`..` and a percent-escape are refused for a write because they turn
-        a rule for one path into another path. A read has no rule to escape
-        from: whatever GitHub normalises this to, it is still a read."""
-        self.assertIsNone(self.m.policy_refusal(
-            _head("GET", "/repos/a/b/commits/../../../user"), b""))
-        self.assertIsNone(self.m.policy_refusal(
-            _head("GET", "/repos/a/b/commits/%2e%2e/keys"), b""))
-
-
-class TestTheInjectorsWriteTable(WkTest):
-    """What may be *changed* at api.github.com with the person's token. The
-    table is derived from `git-webkit`; every other write is refused here and
-    never reaches GitHub, so a workspace running an agent cannot spend the
-    credential on the rest of the API."""
-
-    def setUp(self):
-        super().setUp()
-        self.m = _load(INJECT, "wkinject")
-
-    def test_every_write_git_webkit_needs_is_allowed(self):
-        for method, target in GIT_WEBKIT_WRITES:
-            with self.subTest(request="%s %s" % (method, target)):
-                self.assertTrue(self.m.allowed(method, target))
-                self.assertIsNone(
-                    self.m.policy_refusal(_head(method, target), b""))
-
-    def test_no_rule_in_the_table_is_there_without_a_caller(self):
-        """Every row is reached by a write above. A row added without a client
-        behind it is caught here rather than by a reader."""
-        used = set()
-        for method, target in GIT_WEBKIT_WRITES:
-            segments = self.m.path_segments(target.split("?", 1)[0])
-            for rule in self.m.ALLOW:
-                if rule[0] == method and self.m._matches(rule[1], segments):
-                    used.add(rule)
-        self.assertEqual(set(self.m.ALLOW), used)
-
-    def test_the_table_holds_no_read(self):
-        """Reading is not policy any more, so a GET or HEAD row would be a
-        second way to decide the same thing."""
-        for method, _ in self.m.ALLOW:
-            with self.subTest(method=method):
-                self.assertNotIn(method, self.m.READ_METHODS)
-
-    def test_a_write_outside_the_table_is_refused_and_says_how_to_fix_it(self):
+    def test_a_hostile_write_is_forwarded_and_carries_the_switchs_token(self):
+        """Deliberate. Each of these could delete a repository, add a deploy
+        key or exfiltrate, and with push on a person is watching every one of
+        them; the workspace is not the thing deciding, and neither is this
+        program."""
         for method, target in HOSTILE_WRITES:
             with self.subTest(request="%s %s" % (method, target)):
-                self.assertFalse(self.m.allowed(method, target))
-                status, reason = self.m.policy_refusal(
-                    _head(method, target), b"")
-                self.assertEqual(b"403 Forbidden", status)
-                self.assertIn(method.encode(), reason)
-                self.assertIn(target.encode(), reason)
-                self.assertIn(b"container/proxy/github-inject.py", reason)
+                upstream, _ = self.forward(method, target)
+                self.assertIn(b"Authorization: Bearer ghp-not-a-real-token",
+                              upstream)
 
-    def test_the_refusal_says_which_half_of_the_policy_refused(self):
-        """A person who reads this has just had a request refused that the
-        same path would have answered as a GET, so the 403 says why."""
-        _, reason = self.m.policy_refusal(_head("POST", "/gists"), b"")
-        self.assertIn(b"is a write", reason)
-        self.assertIn(b"Reading is open on every path", reason)
-        self.assertIn(b"ALLOW", reason)
+    def test_a_hostile_write_carries_nothing_with_the_switch_off(self):
+        for method, target in HOSTILE_WRITES:
+            with self.subTest(request="%s %s" % (method, target)):
+                upstream, logged = self.forward(
+                    method, target, token=None, read_token="ghp-read-only")
+                self.assertNotIn(b"Authorization", upstream)
+                self.assertNotIn(b"ghp-read-only", upstream)
+                self.assertIn("write unauthenticated", logged)
 
-    def test_a_wildcard_does_not_reach_past_the_segment_it_stands_for(self):
-        """`POST /repos/*/*/pulls` is the rule; the owner and the repository
-        are one segment each and the fixed tail is fixed."""
-        self.assertTrue(self.m.allowed("POST", "/repos/a/b/pulls"))
-        for target in ("/repos/a/b/c/pulls", "/repos/a/pulls",
-                       "/repos/a/b/pulls/1234/merge", "/repos/a/b/pullsx"):
-            with self.subTest(target=target):
-                self.assertFalse(self.m.allowed("POST", target))
-
-    def test_a_number_wildcard_takes_ascii_digits_only(self):
-        self.assertTrue(self.m.allowed("POST", "/repos/a/b/pulls/1234"))
-        for number in ("foo", "comments", "1234x", "\u00b2", "\u0661\u0662"):
-            with self.subTest(number=number):
-                self.assertFalse(
-                    self.m.allowed("POST", "/repos/a/b/pulls/" + number))
-
-    def test_the_query_string_is_not_part_of_the_match(self):
-        """Neither a way in nor a way out: the rule is decided on the path."""
-        self.assertTrue(self.m.allowed("POST", "/repos/a/b/pulls?draft=true"))
-        self.assertFalse(self.m.allowed("POST", "/repos/a/b/keys?x=/pulls"))
-        self.assertFalse(self.m.allowed("POST", "/gists?path=/repos/a/b/pulls"))
-
-    def test_a_path_a_server_would_normalise_is_refused_outright(self):
-        """`..` is what turns a rule for `/repos/*/*/pulls` into `/user`, and a
-        percent-escape is what turns a segment into `..` at the far end. The
-        path this matches is the path GitHub is sent, so neither is ever a
-        segment."""
+    def test_a_path_a_server_would_normalise_is_forwarded_unchanged(self):
+        """There is no rule left for a `..` or a percent-escape to walk past,
+        so the path GitHub is sent is the path the workspace wrote."""
         for target in ("/repos/a/b/pulls/../../../../user",
-                       "/repos/a/b/./pulls",
                        "/repos/a/b/%2e%2e/%2e%2e/keys",
-                       "/repos/a/b/pulls%2f../keys",
-                       "//repos/a/b/pulls",
-                       "/repos/a/b/pulls/",
-                       "repos/a/b/pulls",
-                       ""):
+                       "//repos/a/b/pulls"):
             with self.subTest(target=target):
-                self.assertFalse(self.m.allowed("POST", target))
+                self.forward("POST", target)
 
-    def test_the_method_is_matched_exactly(self):
-        """A row is one method. The lowercase spellings are here because a
-        client that sent one would be answered by GitHub, not by a rule that
-        happened to fold case."""
-        for method in ("post", "Post", "PUT", "DELETE", "OPTIONS"):
-            with self.subTest(method=method):
-                self.assertFalse(self.m.allowed(method, "/repos/a/b/pulls"))
+    def test_a_request_line_this_cannot_read_is_a_write(self):
+        """`request_line` answers ("", "") rather than refusing, which is not
+        a read: the line goes on to api.github.com exactly as it arrived and
+        is answered there, having spent the switch's token and nothing else."""
+        for line in (b"GET", b"GET /user", b"GET /user HTTP/1.1 extra",
+                     b"GET https://api.github.com/user HTTP/1.1"):
+            with self.subTest(line=line):
+                _, upstream, opened, logged = drive_injector(
+                    self.tmp, line + b"\r\nHost: api.github.com\r\n\r\n",
+                    read_token="ghp-read-only")
+                self.assertEqual([("api.github.com", 443)], opened)
+                self.assertIn(line, upstream)
+                self.assertIn(b"Authorization: Bearer ghp-not-a-real-token",
+                              upstream)
+                self.assertIn("write inject", logged)
 
 
-class TestTheInjectorsGraphQLRule(WkTest):
-    """GraphQL is the whole API behind one path, so the read/write split
-    cannot be made on the method: `git-webkit` sends one search query
-    (PRGenerator.find), and a mutation would be `deleteRef` or
-    `mergePullRequest` as the person, with no path to name in the table."""
+class TestTheGraphQLReadWriteSplit(WkTest):
+    """GraphQL is the whole API behind one path, so the method cannot decide
+    read from write there and the document does. Neither answer is a refusal:
+    a query spends the standing read token, which is what keeps `git-webkit`'s
+    pull request lookup (PRGenerator.find) working with the switch off, and a
+    mutation is a write like any other."""
 
     def setUp(self):
         super().setUp()
@@ -746,16 +677,10 @@ class TestTheInjectorsGraphQLRule(WkTest):
                 b'is:pr\\", type: ISSUE, last: 100) { edges { node { number } '
                 b'} } }"}')
         self.assertTrue(self.m.is_read("POST", "/graphql", body))
-        self.assertIsNone(self.m.policy_refusal(_head("POST", "/graphql"), body))
 
-    def test_a_mutation_is_refused_and_says_so(self):
-        body = b'{"query": "mutation { deleteRef(input: {}) }"}'
-        self.assertFalse(self.m.is_read("POST", "/graphql", body))
-        status, reason = self.m.policy_refusal(_head("POST", "/graphql"), body)
-        self.assertEqual(b"403 Forbidden", status)
-        self.assertIn(b"mutation", reason)
-        self.assertIn(b"POST /graphql", reason)
-        self.assertIn(self.m.POLICY_SOURCE.encode(), reason)
+    def test_a_mutation_is_a_write(self):
+        self.assertFalse(self.m.is_read(
+            "POST", "/graphql", b'{"query": "mutation { deleteRef(input: {}) }"}'))
 
     def test_a_mutation_after_a_query_in_one_document_is_still_a_mutation(self):
         """A GraphQL document holds as many operations as it likes, and GitHub
@@ -765,119 +690,40 @@ class TestTheInjectorsGraphQLRule(WkTest):
                 b'mutation Land { mergePullRequest(input: {}) { clientMutationId } }",'
                 b' "operationName": "Land"}')
         self.assertFalse(self.m.is_read("POST", "/graphql", body))
-        self.assertEqual(b"403 Forbidden",
-                         self.m.policy_refusal(_head("POST", "/graphql"), body)[0])
-
-    def test_a_query_string_does_not_hide_the_body_from_the_rule(self):
-        """The path is read the same way the table reads one."""
-        self.assertIsNotNone(self.m.policy_refusal(
-            _head("POST", "/graphql?anything"),
-            b'{"query": "mutation { deleteRef(input: {}) }"}'))
 
     def test_the_keyword_is_matched_however_it_is_spelled(self):
-        """Case-insensitively, which refuses documents GitHub would run as
-        queries and never the other way round."""
+        """Case-insensitively, which calls documents writes that GitHub would
+        run as queries and never the other way round."""
         for spelled in (b"Mutation", b"MUTATION", b"mUtAtIoN"):
             with self.subTest(spelled=spelled):
-                self.assertIsNotNone(self.m.policy_refusal(
-                    _head("POST", "/graphql"), b'{"query": "' + spelled + b' { x }"}'))
+                self.assertFalse(self.m.is_read(
+                    "POST", "/graphql", b'{"query": "' + spelled + b' { x }"}'))
 
-    def test_graphql_by_any_other_method_is_an_ordinary_write(self):
-        """The exception is POST /graphql and nothing else, so a PUT there
-        meets the table like everything else does."""
-        status, reason = self.m.policy_refusal(
-            _head("PUT", "/graphql"), b'{"query": "query { x }"}')
-        self.assertEqual(b"403 Forbidden", status)
-        self.assertIn(b"is a write", reason)
+    def test_a_query_string_does_not_hide_the_body(self):
+        self.assertTrue(self.m.is_read("POST", "/graphql?anything",
+                                       b'{"query": "query { x }"}'))
+        self.assertFalse(self.m.is_read("POST", "/graphql?anything",
+                                        b'{"query": "mutation { x }"}'))
 
+    def test_graphql_by_any_other_method_is_a_write(self):
+        self.assertFalse(self.m.is_read("PUT", "/graphql",
+                                        b'{"query": "query { x }"}'))
 
-class TestTheInjectorsRefusalNamesTheFix(WkTest):
-    """A `git-webkit` that grows a write must fail legibly: the 403 and the
-    log name the method, the path and the file the table is in, so the fix is
-    one row in one place rather than a debugging session."""
-
-    def setUp(self):
-        super().setUp()
-        self.m = _load(INJECT, "wkinject")
-
-    def test_the_refusal_names_the_method_the_path_and_the_file(self):
-        status, reason = self.m.policy_refusal(
-            b"POST /repos/WebKit/WebKit/actions/workflows/ci.yml/dispatches "
-            b"HTTP/1.1\r\nHost: api.github.com", b"")
-        self.assertEqual(b"403 Forbidden", status)
-        self.assertIn(b"POST", reason)
-        self.assertIn(b"/repos/WebKit/WebKit/actions/workflows/ci.yml"
-                      b"/dispatches", reason)
-        self.assertIn(b"ALLOW", reason)
-        self.assertIn(b"container/proxy/github-inject.py", reason)
-        self.assertIn(self.m.POLICY_SOURCE.encode(), reason)
-
-    def test_the_file_it_names_is_the_file_the_table_is_in(self):
-        self.assertTrue((REPO / self.m.POLICY_SOURCE).exists())
-        self.assertIn("\nALLOW = (",
-                      (REPO / self.m.POLICY_SOURCE).read_text())
-
-    def test_an_unreadable_request_line_is_refused_and_still_names_the_file(self):
-        """The absolute-form target is here because it is a target this
-        program would otherwise match one way and GitHub route another."""
-        for line in (b"GET", b"GET /user", b"GET /user HTTP/1.1 extra",
-                     b"GET https://api.github.com/user HTTP/1.1",
-                     b"POST https://api.github.com/gists HTTP/1.1"):
-            with self.subTest(line=line):
-                status, reason = self.m.policy_refusal(line, b"")
-                self.assertEqual(b"400 Bad Request", status)
-                self.assertIn(self.m.POLICY_SOURCE.encode(), reason)
-
-    def test_a_refused_request_opens_no_connection_and_spends_no_token(self):
-        client, upstream, opened, _ = drive_injector(
-            self.tmp,
-            b"DELETE /repos/WebKit/WebKit HTTP/1.1\r\n"
-            b"Host: api.github.com\r\n\r\n")
-        self.assertEqual([], opened)
-        self.assertEqual(b"", upstream)
-        self.assertIn(b"403 Forbidden", client)
-        self.assertIn(b"DELETE /repos/WebKit/WebKit", client)
-        self.assertIn(b"container/proxy/github-inject.py", client)
-        self.assertNotIn(b"ghp-not-a-real-token", client)
-
-    def test_the_log_says_what_was_refused_and_where_the_table_is(self):
-        _, _, _, logged = drive_injector(
-            self.tmp,
-            b"POST /repos/WebKit/WebKit/keys HTTP/1.1\r\n"
-            b"Host: api.github.com\r\nContent-Length: 2\r\n\r\nhi")
-        self.assertIn("POST /repos/WebKit/WebKit/keys", logged)
-        self.assertIn("container/proxy/github-inject.py", logged)
-        self.assertEqual(1, len(logged.strip().splitlines()), logged)
-
-    def test_an_allowed_write_is_forwarded_with_the_token(self):
-        """The other side of the same door: the table refuses, it does not
-        stand between `git-webkit` and the endpoint it needs."""
-        _, upstream, opened, logged = drive_injector(
-            self.tmp,
-            b"POST /repos/WebKit/WebKit/pulls HTTP/1.1\r\n"
-            b"Host: api.github.com\r\nContent-Length: 2\r\n\r\nhi")
-        self.assertEqual([("api.github.com", 443)], opened)
-        self.assertIn(b"Authorization: Bearer ghp-not-a-real-token", upstream)
-        self.assertIn("write inject POST /repos/WebKit/WebKit/pulls", logged)
-
-    def test_the_table_holds_with_the_switch_off_too(self):
-        """`wk push off` removes the write token; what a write may reach is
-        the table either way, so no request's fate depends on which side of
-        the switch it arrived on."""
-        client, upstream, opened, _ = drive_injector(
-            self.tmp,
-            b"POST /gists HTTP/1.1\r\nHost: api.github.com\r\n"
-            b"Content-Length: 2\r\n\r\nhi", token=None)
-        self.assertEqual([], opened)
-        self.assertEqual(b"", upstream)
-        self.assertIn(b"403 Forbidden", client)
-
-    def test_a_very_long_path_does_not_become_a_very_long_refusal(self):
-        short = self.m.policy_refusal(b"DELETE /aaaa HTTP/1.1", b"")[1]
-        status, reason = self.m.policy_refusal(
-            b"DELETE /" + b"a" * 5000 + b" HTTP/1.1", b"")
-        self.assertEqual(b"403 Forbidden", status)
-        self.assertLess(len(reason) - len(short), 210)
+    def test_a_query_spends_the_read_token_and_a_mutation_the_switchs(self):
+        """End to end, both ways, on a machine holding both tokens."""
+        for body, token, half in (
+                (b'{"query": "query { viewer { login } }"}', b"ghp-read-only", "read"),
+                (b'{"query": "mutation { deleteRef(input: {}) }"}',
+                 b"ghp-not-a-real-token", "write")):
+            with self.subTest(half=half):
+                _, upstream, opened, logged = drive_injector(
+                    self.tmp,
+                    b"POST /graphql HTTP/1.1\r\nHost: api.github.com\r\n"
+                    b"Content-Length: %d\r\n\r\n" % len(body) + body,
+                    read_token="ghp-read-only")
+                self.assertEqual([("api.github.com", 443)], opened)
+                self.assertIn(b"Authorization: Bearer " + token, upstream)
+                self.assertIn("%s inject POST /graphql" % half, logged)
 
 
 class TestTheTwoTokens(WkTest):
@@ -931,10 +777,10 @@ class TestTheTwoTokens(WkTest):
         self.assertIn(b"Authorization: Bearer ghp-read-only", upstream)
         self.assertIn("read inject GET /repos/WebKit/WebKit/pulls/1234", logged)
 
-    def test_a_write_in_the_table_carries_nothing_with_the_switch_off(self):
-        """The same machine, the same read token, a write the table allows:
-        forwarded, because refusing it would be this program pretending the
-        API is unreachable, and unauthenticated, because the switch is off."""
+    def test_a_write_carries_nothing_with_the_switch_off(self):
+        """The same machine and the same read token: the write is forwarded,
+        because refusing it would be this program pretending the API is
+        unreachable, and unauthenticated, because the switch is off."""
         _, upstream, opened, logged = drive_injector(
             self.tmp,
             b"POST /repos/WebKit/WebKit/pulls HTTP/1.1\r\n"

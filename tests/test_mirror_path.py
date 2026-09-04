@@ -163,6 +163,12 @@ class MirrorFixture(WkTest):
         self._git("-c", "user.email=t@example.com", "-c", "user.name=T",
                   "commit", "-q", "-m", "b", cwd=seed)
         self._git("push", "-q", str(self.tmp / "fk.git"), "side", cwd=seed)
+        # The fork's own default branch is not the mirror's: WPEWebKit's is
+        # `wpe-2.46`, and `git fetch` in a bare repository takes the fetched
+        # remote's HEAD as its own (measured, git 2.48.1). A stand-in whose
+        # default branch is also `main` hides that.
+        self._git("symbolic-ref", "HEAD", "refs/heads/side",
+                  cwd=self.tmp / "fk.git")
 
         # wk_remotes is the one list of upstreams; overridden here so nothing
         # reaches github.com, and the rest of the snippet is the real one.

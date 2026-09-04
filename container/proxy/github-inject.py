@@ -37,22 +37,18 @@ host's python altogether.
     WK_INJECT_READ_PAT  the read token, which stands whatever position the
                         switch is in
 
-Reading and writing are separated, and that separation is the whole policy.
-A read -- GET, HEAD, and a GraphQL document with no mutation in it -- is
-forwarded on every path and authenticated from the standing token: an agent in
-a workspace has to read a pull request, EWS statuses and the issue a branch
-tracks, `gh` has to work, and no read changes anything of the person's. A write
-is forwarded only where ALLOW below has it, row by row from what `git-webkit`
-issues, and only with the switch's token: a workspace that could spend the
-token on any path could delete a repository, add a deploy key or run an Actions
-workflow as them.
+Which token a request spends is the whole policy. A read -- GET, HEAD, and a
+POST /graphql document with no mutation in it -- is authenticated from the
+standing token whatever position the switch is in: an agent in a workspace has
+to read a pull request, EWS statuses and the issue a branch tracks, `gh` has to
+work, and no read changes anything of the person's. Everything else is a write,
+authenticated from the switch's token alone: `wk push on` means a person is
+watching what the workspace does, so it is not this program's place to decide
+which of their own endpoints they may reach.
 
-Neither token is ever inside a workspace. A refused write is answered 403 here
-and never reaches GitHub, naming the method, the path and this file, because a
-`git-webkit` that grows an endpoint has to fail legibly and be fixed with one
-row. A write with no token goes on unauthenticated and GitHub answers 401 for
-itself: the switch withholds a credential, it does not pretend the API is
-unreachable.
+Every request is forwarded and this program refuses none of them on policy. A
+write with no token goes on unauthenticated and GitHub answers 401 for itself:
+the switch withholds a credential, it does not pretend the API is unreachable.
 """
 
 import asyncio
@@ -62,15 +58,13 @@ import subprocess
 import sys
 import tempfile
 
-# systemd starts this by absolute path, so the import path is derived from this
-# file's own rather than assumed (lib/wknotify.py).
+# systemd starts this by absolute path, so lib/ is derived from this file's own.
 sys.path.insert(0, os.path.join(
     os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "lib"))
 from wknotify import sd_notify  # noqa: E402
 
-# Exactly one host, and it is not a list for a reason: every name that is
-# terminated here is a name whose traffic something reads, so widening this is
-# a decision and not a configuration change.
+# Not a list, for a reason: every name terminated here is a name whose traffic
+# something reads, so widening this is a decision and not a configuration change.
 INJECT_HOST = "api.github.com"
 INJECT_PORT = 443
 
@@ -78,120 +72,43 @@ READ_TIMEOUT = 30
 IDLE_TIMEOUT = 300
 MAX_HEAD = 65536          # a request head larger than this is not a request
 
-# Headers dropped from every request before it is forwarded. Authorization,
-# because replacing it is the point. The connection ones, because this handles
-# one request per TLS connection: forwarding `Connection: close` makes GitHub
-# close, the client learns it from GitHub's own response, and no response
-# header has to be parsed here at all. Host, because this TLS session is pinned
-# to INJECT_HOST and the token goes with it: a client that sent
-# `Host: uploads.github.com` would otherwise reach a host the allowlist refuses
-# (DENIED_HOSTS, container/proxy/wk-proxy.py) carrying the real credential.
-# Transfer-Encoding and Content-Length, because the body this forwards is
-# exactly the Content-Length bytes it read and it re-states that itself.
+# Dropped from every request before it is forwarded: Authorization because
+# replacing it is the point, Host and the framing headers because rewrite_head
+# states them itself, and the connection ones because this handles one request
+# per TLS connection and so parses no response header at all.
 DROP = ("authorization", "connection", "proxy-connection", "keep-alive",
         "proxy-authorization", "host", "transfer-encoding", "content-length")
+
+READ_METHODS = ("GET", "HEAD")
+
+# The grammar has no other spelling of a mutation, and the shorthand `{...}` is
+# a query. Case-insensitive, which calls more documents writes than GitHub would
+# treat as mutations and never fewer.
+_MUTATION = re.compile(rb"mutation", re.IGNORECASE)
 
 
 def log(msg):
     print("[wk-github-inject] %s" % msg, file=sys.stderr, flush=True)
 
 
-# --- the policy table --------------------------------------------------------
-# What may be *written*. Every row names the file in WebKit's
-# Tools/Scripts/libraries that builds that URL, so the table is re-derived
-# rather than trusted. Reading is not in here at all: READ_METHODS is open on
-# every path.
-#
-#   *   exactly one path segment
-#   #   exactly one path segment of ASCII digits -- a pull request or issue
-#       number, so a rule for `pulls/1234` is not also a rule for `pulls/foo`
-#
-# A wildcard never crosses the fixed segments around it, so `POST
-# /repos/*/*/pulls` is not also `POST /repos/*/*/actions/workflows/x/dispatches`.
-POLICY_SOURCE = "container/proxy/github-inject.py"
-
-# The methods that cannot change anything at GitHub. They are allowed on every
-# path and authenticated whatever position `wk push` is in: reading is what an
-# agent in a workspace has to do to work -- a pull request, EWS statuses, the
-# issue a branch tracks, and `gh` -- and a read cannot be the thing a person
-# has to be protected from. The switch is over writing.
-READ_METHODS = ("GET", "HEAD")
-
-ALLOW = (
-    # Opening and updating a pull request, and the review conversation on it --
-    # what `git-webkit pr` and `git-webkit review` exist to do
-    # (webkitscmpy/remote/git_hub.py, PRGenerator.create/update/_make_comment
-    # /review; GitHub takes POST, not PATCH, for the update).
-    ("POST", "/repos/*/*/pulls"),
-    ("POST", "/repos/*/*/pulls/#"),
-    ("POST", "/repos/*/*/pulls/#/comments"),
-    ("POST", "/repos/*/*/pulls/#/reviews"),
-    # The issue side of the same act: file the bug, comment the PR's URL on it,
-    # assign it, label it (webkitbugspy/github.py, Tracker.create/add_comment
-    # /add_assignees/set; webkitscmpy/program/create_bug.py).
-    ("POST", "/repos/*/*/issues"),
-    ("POST", "/repos/*/*/issues/#/comments"),
-    ("POST", "/repos/*/*/issues/#/assignees"),
-    ("PATCH", "/repos/*/*/issues/#"),
-    ("PUT", "/repos/*/*/issues/#/labels"),
-    # Fast-forwarding the fork's branch to upstream instead of pushing it,
-    # with webkitscmpy.update-fork set (webkitscmpy/program/pull_request.py).
-    ("POST", "/repos/*/*/merge-upstream"),
-)
-
-# What is deliberately absent, because it is not something a workspace does:
-# `git-webkit setup` creating and renaming a fork (POST /repos/*/*/forks, PATCH
-# /repos/*/*, PUT /orgs/*/repos/*/*) -- `wk remotes` sets a workspace's remotes
-# up from the host, and PATCH on a repository is its settings, including
-# whether a private one stays private. Releases and their assets are absent for
-# the same reason, and their upload host is refused outright anyway
-# (DENIED_HOSTS, container/proxy/wk-proxy.py).
-
-_NUMBER = re.compile(r"[0-9]+")
-
-# A GraphQL document executes a mutation only if the keyword appears in it: the
-# grammar has no other spelling, and the shorthand `{...}` is a query. Matched
-# case-insensitively, which refuses more documents than GitHub would treat as
-# mutations and never fewer -- `git-webkit`'s one query (PRGenerator.find) does
-# not contain the word.
-_MUTATION = re.compile(rb"mutation", re.IGNORECASE)
-
-
-def path_segments(path):
-    """The segments of a path this program is willing to match, or None.
-
-    None for anything whose segments are not what GitHub will route on: a
-    percent-escape (this matches the undecoded path, so `%2e%2e` would be a
-    segment here and a parent directory there), an empty segment, and `.` or
-    `..` -- which a server normalises away, so `commits/../../user` would match
-    a rule for `commits/**` here and be `/user` at the far end.
-    """
-    if not path.startswith("/") or "%" in path:
-        return None
-    if path == "/":
-        return []
-    segments = path[1:].split("/")
-    if any(s in ("", ".", "..") for s in segments):
-        return None
-    return segments
-
-
 def request_line(head):
-    """(method, target) from the request head, or None for one this cannot
-    read. Both are what the workspace sent, undecoded."""
+    """(method, target) as the workspace sent them, undecoded, or ("", "") for
+    a line this cannot read -- which is therefore not a read, spends the
+    switch's token and nothing else, and goes on to GitHub exactly as it
+    arrived to be answered there."""
     parts = head.split(b"\r\n", 1)[0].decode("latin-1", "replace").split(" ")
     if len(parts) != 3 or not parts[1].startswith("/"):
-        return None
+        return "", ""
     return parts[0], parts[1]
 
 
 def is_read(method, target, body):
     """Whether this request can only read.
 
-    GET and HEAD by definition. POST /graphql is the exception in both
-    directions: GraphQL is the whole API behind one path, so a document with no
-    mutation in it is a read like any other, and one with a mutation is refused
-    outright rather than weighed against the write table.
+    GET and HEAD by definition. GraphQL is the whole API behind one path, so
+    the method cannot decide it there: a POST /graphql document with no
+    mutation in it is a read like any other, which is what keeps
+    `git-webkit`'s pull request lookup working with the switch off.
     """
     if method in READ_METHODS:
         return True
@@ -200,100 +117,22 @@ def is_read(method, target, body):
             and not _MUTATION.search(body))
 
 
-def allowed(method, target):
-    """Is this write one the table authenticates?
-
-    `target` is the request line's target, query string and all: the query is
-    dropped before matching, so `/user?x=/repos/a/b/pulls` is `/user` and
-    nothing reaches a rule through a `?`.
-    """
-    segments = path_segments(target.split("?", 1)[0])
-    if segments is None:
-        return False
-    for allowed_method, pattern in ALLOW:
-        if allowed_method == method and _matches(pattern, segments):
-            return True
-    return False
-
-
-def _matches(pattern, segments):
-    parts = pattern[1:].split("/")
-    for i, part in enumerate(parts):
-        if i >= len(segments):
-            return False
-        if part == "*":
-            continue
-        if part == "#":
-            if not _NUMBER.fullmatch(segments[i]):
-                return False
-            continue
-        if part != segments[i]:
-            return False
-    return len(parts) == len(segments)
-
-
-def policy_refusal(head, body):
-    """None if this request may be forwarded, else (status line, reason).
-
-    A read is always forwarded. A write is forwarded only where the table has
-    it, and the reason a refused one gets is what a person in a workspace reads
-    when `git-webkit` grows an endpoint the table does not have yet: it names
-    the method, the path, the table and the file the table is in, so the fix is
-    one row, in one place.
-    """
-    parsed = request_line(head)
-    if parsed is None:
-        return (b"400 Bad Request",
-                b"a request line the wk credential injector cannot read is "
-                b"refused; it matches METHOD /path HTTP/1.1 against the ALLOW "
-                b"table in " + POLICY_SOURCE.encode("latin-1") + b"\r\n")
-    method, target = parsed
-    if method == "POST" and target.split("?", 1)[0] == "/graphql" \
-            and _MUTATION.search(body):
-        return (b"403 Forbidden",
-                ("POST /graphql carrying a mutation is refused by the wk "
-                 "credential injector: GraphQL is the whole API behind one "
-                 "path, so a query is a read and a mutation is a write with no "
-                 "path to name in the table.\r\nThe rule is next to ALLOW in "
-                 "%s.\r\n" % POLICY_SOURCE).encode("latin-1"))
-    if is_read(method, target, body) or allowed(method, target):
-        return None
-    return (b"403 Forbidden",
-            ("%s %s is a write, and it is not in the wk credential injector's "
-             "ALLOW table, so it was not sent to api.github.com and no token "
-             "was spent on it.\r\nReading is open on every path; writing is "
-             "this table. It is ALLOW in %s: add the (method, path) rule there "
-             "if git-webkit needs this endpoint. A path with a percent-escape, "
-             "an empty segment or a '.' or '..' segment never matches a "
-             "rule.\r\n" % (method, target[:200], POLICY_SOURCE))
-            .encode("latin-1"))
-
-
 def rewrite_head(head, token, length=0):
     """The whole of the injection: one request head in, one out.
 
     Whatever the workspace sent as Authorization is dropped -- it is a
     placeholder, and forwarding it would only ever be a way to smuggle a
-    credential out. The real token is added when there is one.
+    credential out -- and the real token is added when there is one. With no
+    token the request goes on *unauthenticated* rather than being refused:
+    GitHub answers for itself, 200 for a public endpoint and 401 for one that
+    needs an account, and that is what `wk verify` measures either side of the
+    switch.
 
-    With no token this forwards the request *unauthenticated* rather than
-    refusing it: GitHub then answers for itself, 200 for a public endpoint and
-    401 for one that needs an account. That is the honest answer -- the switch
-    withholds a credential, it does not pretend the API is unreachable -- and
-    it is what `wk verify` measures either side of the switch.
-
-    The Host header is this program's own, never the client's: the connection
-    it forwards on is a TLS session pinned to INJECT_HOST and carrying the real
-    token, so a client-chosen Host is a way to spend that token against another
-    name behind GitHub's front end.
-
-    Content-Length is this program's own too, and `length` is the number of
-    body bytes it actually relays: the client's framing headers are dropped
-    (DROP) so that GitHub and this program cannot disagree about where the
-    request ends, which is the disagreement a smuggled second request needs.
-
-    A function rather than inline code because it is the part with a rule in
-    it, and the rule is testable without a socket (tests/test_egress.py).
+    Host and Content-Length are this program's own. A client-chosen Host is a
+    way to spend the token against another name behind GitHub's front end, and
+    `length` is the number of body bytes actually relayed, so GitHub and this
+    program cannot disagree about where the request ends -- the disagreement a
+    smuggled second request needs.
     """
     lines = head.split(b"\r\n")
     out = [lines[0], b"Host: " + INJECT_HOST.encode("latin-1")]
@@ -312,18 +151,16 @@ def rewrite_head(head, token, length=0):
 
 
 def body_length(head):
-    """How many body bytes this request declares, or a refusal.
+    """How many body bytes this request declares, as (length, None), or
+    (None, (status line, reason)).
 
-    Returns (length, None) or (None, (status line, reason)). Everything after
-    that many bytes is a *second* request on the same connection, and the head
-    of a second request is a head this program never rewrote -- so it would
-    carry the client's own Authorization straight to GitHub. Only what is
-    declared here is relayed, and the connection is then closed.
-
-    A chunked body would need this program to parse the framing to know where
-    the request ends, and a framing this does not agree with GitHub about is
-    exactly how a second request is smuggled through. Refused instead: the
-    clients in a workspace (`git-webkit pr`, curl, requests) all send a length.
+    Everything after that many bytes is a *second* request on the same
+    connection, whose head is one nothing here rewrote -- so it would carry the
+    client's own Authorization straight to GitHub. A chunked body would need
+    this program to parse the framing to know where the request ends, and a
+    framing it does not agree with GitHub about is exactly how that second
+    request is smuggled; the clients in a workspace (`git-webkit pr`, curl,
+    requests) all send a length.
     """
     for line in head.split(b"\r\n")[1:]:
         name = line.split(b":", 1)[0].strip().lower()
@@ -365,13 +202,10 @@ def read_token(path):
 
 # --- certificate material ----------------------------------------------------
 # Made once and kept: the CA's public certificate is what every workspace is
-# told to trust, so regenerating it on each start would break every workspace
-# that had already read it.
-#
-# The leaf's private key can impersonate api.github.com to a client that trusts
-# this CA -- which is precisely what this program does on purpose -- and it can
-# do nothing else. It is not a credential that publishes, so unlike the token it
-# lives on this machine permanently, in a directory no container mounts.
+# told to trust, so remaking it would break every workspace that had read it.
+# The leaf key impersonates api.github.com to a client that trusts this CA and
+# can do nothing else, so unlike the token it lives here permanently, in a
+# directory no container mounts.
 
 _CONF = """[req]
 distinguished_name = dn
@@ -402,14 +236,11 @@ def _conf(cn):
 
 
 def ensure_certs(d, ca_out):
-    """CA, leaf and the published public certificate; returns the chain file.
-
-    The chain is leaf-then-CA in one file: a client that trusts the CA still
-    needs to be sent it, and sending it costs nothing.
-    """
-    # `mode=` applies only to a directory this call creates, so an existing one
-    # keeps whatever mode it had -- and this directory holds the leaf key that
-    # impersonates api.github.com to everything that trusts the CA.
+    """CA, leaf and the published public certificate; returns the chain file,
+    which is leaf-then-CA: a client that trusts the CA still needs to be sent
+    it, and sending it costs nothing."""
+    # `mode=` applies only to a directory this call creates, and this one holds
+    # the leaf key.
     os.makedirs(d, exist_ok=True)
     os.chmod(d, 0o700)
     ca_key = os.path.join(d, "ca.key")
@@ -451,9 +282,7 @@ def ensure_certs(d, ca_out):
             with open(part, "rb") as f:
                 out.write(f.read())
 
-    # Published where a workspace can read it. 0644 and deliberately so: a
-    # CA's certificate is public, and every workspace has to be able to read
-    # this one or nothing in it can talk to the API at all.
+    # 0644: a CA certificate is public, and every workspace has to read this one.
     os.makedirs(os.path.dirname(ca_out), mode=0o700, exist_ok=True)
     tmp = ca_out + ".new"
     with open(ca_crt, "rb") as f:
@@ -531,10 +360,8 @@ class Injector:
                 await self.refuse(cwriter, *refusal)
                 return
 
-            # Exactly the declared body and no byte more. What follows it on
-            # this connection is a second request head, and the second head is
-            # one nothing here rewrote -- so it is not relayed and the client
-            # side is never piped upstream at all.
+            # Exactly the declared body and no byte more: what follows it is a
+            # second request head, one nothing here rewrote.
             body = body[:length]
             while len(body) < length:
                 chunk = await asyncio.wait_for(
@@ -542,12 +369,6 @@ class Injector:
                 if not chunk:
                     break
                 body += chunk
-
-            refusal = policy_refusal(head, body)
-            if refusal is not None:
-                log(" ".join(refusal[1].decode("latin-1", "replace").split()))
-                await self.refuse(cwriter, *refusal)
-                return
 
             method, target = request_line(head)
             reading = is_read(method, target, body)
@@ -601,9 +422,8 @@ async def main():
     server_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     server_ctx.load_cert_chain(chain, os.path.join(certs, "leaf.key"))
 
-    # The upstream leg verifies normally against the system trust store: this
-    # program is the only thing that gets to see inside the workspace's TLS,
-    # and it must not become a way to reach a forged api.github.com itself.
+    # Verified against the system trust store: this program must not become a
+    # way to reach a forged api.github.com itself.
     client_ctx = ssl.create_default_context()
 
     injector = Injector(pat, read_pat, client_ctx)
@@ -611,10 +431,10 @@ async def main():
     if os.path.exists(sock):
         os.unlink(sock)
     os.makedirs(os.path.dirname(sock), mode=0o700, exist_ok=True)
-    server = await asyncio.start_unix_server(injector.handle, path=sock)
-    # Only wk-proxy connects here, and it runs as this same user. 0600 keeps a
-    # workspace from reaching the injector directly even if the socket were
-    # ever placed somewhere a container could see.
+    server = await asyncio.start_unix_server(injector.handle, path=sock,
+                                             ssl=server_ctx)
+    # Only wk-proxy connects here, as this same user; 0600 keeps a workspace
+    # from reaching the injector directly wherever the socket is placed.
     os.chmod(sock, 0o600)
     log("listening on %s for %s (write token: %s, read token: %s, CA published at %s)"
         % (sock, INJECT_HOST, pat, read_pat, ca_out))

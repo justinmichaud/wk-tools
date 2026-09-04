@@ -540,10 +540,6 @@ mirror_refresh_script() { # <mirror-dir>
                 "$name" "$(sh_quote "+refs/heads/*:refs/remotes/$name/*")"
         fi
     done
-    # A bare repository has no HEAD by default, and `git clone` of one warns
-    # "remote HEAD refers to nonexistent ref, unable to checkout".
-    printf 'git -C "$M" symbolic-ref HEAD %s\n' \
-        "$(sh_quote "refs/heads/$(wk_mirror_branches | awk '{print $1}')")"
     # One fetch per remote rather than `remote update`, so one unreachable
     # upstream leaves the others fetched. --prune, or a deleted branch stays.
     printf 'for r in %s; do\n' "$(wk_mirror_default_remotes)"
@@ -551,6 +547,15 @@ mirror_refresh_script() { # <mirror-dir>
     printf '        echo "mirror-fetch $r ok"\n'
     printf '    else echo "mirror-fetch $r FAILED"\n    fi\n'
     printf 'done\n'
+    # After the fetches, not before: `git fetch` in a bare repository overwrites
+    # HEAD with that remote's default branch, valid local HEAD or not and
+    # `fetch.followRemoteHEAD=never` or not (measured, git 2.48.1). Left as the
+    # last remote fetched, HEAD names a branch only that upstream has, and
+    # cloning the mirror warns "remote HEAD refers to nonexistent ref" and
+    # checks out nothing.
+    # TODO: upstream -- report the bare-repository HEAD overwrite to git.
+    printf 'git -C "$M" symbolic-ref HEAD %s\n' \
+        "$(sh_quote "refs/heads/$(wk_mirror_branches | awk '{print $1}')")"
 }
 
 # `git fetch origin <branch>`, mirror first: a branch the target's mirror

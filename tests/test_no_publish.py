@@ -71,17 +71,15 @@ class TestProxyRefusesGitHubsApi(unittest.TestCase):
 class TestVerifyMeasuresThatNothingCanPublish(unittest.TestCase):
     """What each probe answers is tests/test_verify_credentials.py's subject,
     driven. What is held here is that the probes exist at all -- reaching the
-    API, reading it, the write table, and the switch over writing."""
+    API, reading it, and the switch over writing."""
 
     def test_every_side_of_the_api_is_measured(self):
         """Reaching api.github.com is the state and not a fault, and neither is
-        an authenticated read: what is measured is that a write outside the
-        table never leaves the injector, and that an allowed one is
+        an authenticated read: what is measured is that a write is
         authenticated only while push is on."""
         self.assertIn("https://github.com/", VERIFY)
         self.assertRegex(VERIFY, r"curl [^\n]*https://api\.github\.com/ ")
         self.assertIn("https://api.github.com/user", VERIFY)
-        self.assertIn("https://api.github.com/repos/$FORK/keys", VERIFY)
         self.assertIn("https://api.github.com/repos/$FORK/pulls", VERIFY)
         self.assertIn("401", VERIFY)
         self.assertIn("422", VERIFY)

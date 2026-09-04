@@ -10,30 +10,44 @@ Remember the goal: everything should be reproducable. It should be easy to reset
 NEEDS YOU
 ================================================================================
 
-1. `wk <cmd> -h` is the leading comment block of `cmd/<name>` (`explain_cmd`,
-   the dispatcher), so it counts against the 15% ceiling and cannot come down
-   without changing what a user reads. Command bodies are at ~17%; the headers
-   add about 8 points -- 632 lines in cmd/n-z alone. The argumentative prose in
-   them is cut; the option tables, exit codes and env-var documentation are
-   kept. Thin those too, and if so which (`wk bench -h` is 129 lines, ~30 of
-   them design essay)? [decision]
+1. `wk key register` writes two deploy keys to your forks through `gh`, which
+   this session does not use. The machine recreate regenerated both keys on
+   2026-09-03; measured 2026-09-04, GitHub answers `Permission denied
+   (publickey)` for each. Nothing in a workspace can push until they are
+   registered, and that is the one step of the round trip below that cannot
+   run from here. [yours to run]
 
-   Thin everything; help should be concise and to-the point, using standard techinical documentation style. -h blocks can have more comments, but in general, code portions themselves should be under 5% comments. Variable names and overall structure should explain what is happening, not prose.
+2. The stored `github-pat` has no `Pull requests: write` on justinmichaud/WebKit.
+   Measured 2026-09-04 with push on: `POST /repos/justinmichaud/WebKit/pulls`
+   is answered `403 Resource not accessible by personal access token`, so the
+   token is spent and GitHub refuses it -- `git-webkit pr` cannot open a pull
+   request. Reissue it with that permission and
+   `wk key set github-pat --replace`. `wk verify` says this in those words.
+   [yours to run]
 
-2. `claude/skills/fix-webkit-ews` and `claude/skills/jsc-review` tell an agent
-   to run `gh pr view` and `gh api`. Reading now works through the injector, so
-   those instructions run. Writing is uneven rather than refused: where `gh`
-   posts to an endpoint `git-webkit` also uses -- `gh pr create`, `gh pr
-   comment`, `gh pr review` -- the table has it and push-on lets it through,
-   while `gh pr edit` (a PATCH on a pull request, which webkitscmpy does as a
-   POST) and everything else is 403. Say reads only in those skills, add the
-   verbs `gh` uses to the table, or leave the unevenness? [decision]
+3. The stored `claude-login` no longer satisfies Remote Control: measured
+   2026-09-04, `wk ai claude <ws> --rc` starts and the server exits at once
+   with *"Unable to determine your organization for Remote Control
+   eligibility. Run `claude auth login` to refresh your account
+   information."* `claude auth login` here, then
+   `wk key set claude-login --replace`. [yours to run]
 
-   It should be always read-only, and all writes should be accepted when push is enabled. Push on means a human is watching everything, so there is no need for any restrictions. Otherwise, it should be read-only for agents.
+4. `wk vm base --rebuild` refuses on an uncommitted tree, so the guest half of
+   the live checks is blocked until this session's work is committed. The
+   refusal now comes before anything is destroyed (cmd/vm). [yours to run]
 
 ================================================================================
 OWED, WITH THE DECISION ALREADY MADE
 ================================================================================
+
+- The comment pass, second round, to the standard you set: help text concise
+  and in standard technical documentation style, and **code bodies under 5%
+  comments**, with variable names and structure carrying what prose carries
+  today. The first round took the tree from 35% to 24% treating contract and
+  failure-mode prose as protected; that protection is what you have just
+  withdrawn. `cmd/verify` (23%) and `container/proxy/github-inject.py` (7% of
+  `#` lines, 25% counting docstrings) are the two files a change this session
+  touched and left above the bar.
 
 - Every live check below is unrun: the tree was under edit until now. In order:
       wk sync --tools container
@@ -52,9 +66,8 @@ OWED, WITH THE DECISION ALREADY MADE
 - The round trip, once a workspace can be made: `wk new <ws>`; `wk push on`;
   `podman machine ssh wk -- 'SSH_AUTH_SOCK=$XDG_RUNTIME_DIR/wk/ssh-agent.sock ssh-add -l'`;
   in the workspace `git push --dry-run fork HEAD`, `GET /user` (200 in both
-  switch positions now), `POST /repos/<fork>/pulls` with `{}` (422 on, 401
-  off) and `POST /repos/<fork>/keys` (403 from the injector, never reaching
-  GitHub); `wk verify <ws>`; `wk push off`; the three again; `wk ai claude
+  switch positions now) and `POST /repos/<fork>/pulls` with `{}` (422 on, 401
+  off); `wk verify <ws>`; `wk push off`; the two again; `wk ai claude
   <ws> --rc` starts and survives 60s. A workspace made before this keeps its
   old ~/.ssh/config; one `wk rm`/`wk new` converges it.
 
@@ -72,7 +85,11 @@ OWED, WITH THE DECISION ALREADY MADE
   anonymously from that box, so the earlier `could not read Username` was
   transient.
 
-- Confirm layout tests can run headless and with a real GPU.
+- Confirm layout tests can run headless and with a real GPU. Not on this
+  target: measured 2026-09-04, a container here reports `wayland
+  unavailable (eglInitialize failed)`, `gbm unavailable (cannot open
+  /dev/dri/renderD128)` and `llvmpipe [SOFTWARE]`, so the GPU half needs moose
+  or a macOS guest.
 
 ================================================================================
 STILL OPEN
@@ -89,15 +106,23 @@ STILL OPEN
 
   Work around this, but leave the upstream bug report so we can remove the workaround when it is fixed.
 
-- The `remote` target has no ssh-agent, so `wk push` on a build box reports
-  "always live, no switch on this machine" (remote/provision.sh points
-  core.sshCommand at the private half). Installing wk-ssh-agent.service there
-  through host/units.sh is the owed work (docs/HANDOFF-sandboxing.md).
+- `wk push` on a build box fails open: with no ssh-agent there it reports
+  "always live, no switch on this machine" and leaves core.sshCommand pointed
+  at the private half (remote/provision.sh). It must fail safe -- a target with
+  no switch does not push -- and `wk-ssh-agent.service` installed there through
+  host/units.sh becomes part of `./setup`'s prerequisite steps rather than an
+  optional extra (docs/HANDOFF-sandboxing.md).
 
-We should fail safe, not fail open. Then, setup should include this setup as part of pre-requisite installation instructions.
+- Asking a target what it can authenticate as is a driver question, not a
+  per-command one: `cmd/ai`'s `--rc` gate goes through `t_agent_secret_present`
+  today, `targets/vm.sh` implements it, `targets/remote.sh` does not, and the
+  default answers about this device instead of about the machine that will run
+  the agent. It belongs in the target-driver contract with a conformance test
+  across container/remote/vm, which is the owed item in
+  docs/HANDOFF-architecture-review.md.
 
-- `targets/remote.sh` has no `t_agent_secret_present` override, so
-  `wk ai claude <ws> --rc` on a build box passes the gate against this device's
-  store and then dies over there. One override and a test, beside the vm one.
-
-This sounds like an architecture problem, not a one-time override.
+- Report to git: `git fetch <remote>` in a **bare** repository overwrites the
+  local HEAD with that remote's default branch, even when HEAD names an
+  existing local branch and even with `fetch.followRemoteHEAD=never` (measured
+  on git 2.48.1, minimal repro in the podman machine). The mirror sets HEAD
+  after its fetches because of it (lib/store.sh).

@@ -154,6 +154,13 @@ base)
     --rebuild)
     # Re-pulls nothing -- the OCI cache is still there -- but does redo the
     # WebKit clone and the installers.
+    #
+    # Asked before the delete, not by provisioning an hour later: a base is
+    # given a commit, so a dirty tree refuses -- and refusing after the destroy
+    # costs a clone, a 320GB grow and a boot to reach a verdict this one knows
+    # for free.
+        tools_committed || die "the golden base is given a commit, so it cannot be built from
+    this tree (see above). Nothing has been deleted."
         confirm "delete and rebuild the golden base VM '$WK_VM_BASE'?" || die "aborted"
         _tart delete "$WK_VM_BASE" 2>/dev/null || true
         rm -f "$(_base_marker)"
