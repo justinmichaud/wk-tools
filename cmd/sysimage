@@ -289,10 +289,17 @@ cmdline_append_text() {
 # Clock pinning matters: a board that idles low and ramps on demand turns DVFS
 # into measurement variance. The block's own first line makes appending it twice
 # a no-op.
+# Two sources, the board's first. `os_check=0` on a Pi 5 is a fact about that
+# board's firmware and every image written for it needs it; clock pinning is a
+# choice a measurement makes and belongs to the profile. Keyed on IMG_MACHINE,
+# so a new profile for a board already known is right without being told --
+# which is what five of six rpi5 profiles were not (2026-09-04).
 config_append_text() {
+    local b="$WK_ROOT/image/boards/${IMG_MACHINE:-}/config.txt.append"
     local f="${IMG_SPEC_DIR:-}/config.txt.append"
-    [ -f "$f" ] || return 0
-    cat "$f"
+    if [ -f "$b" ]; then cat "$b"; fi
+    if [ -f "$f" ]; then cat "$f"; fi
+    return 0
 }
 
 

@@ -1,0 +1,25 @@
+# --- wk sysimage: every image written for the rpi5 -----------------------------
+# Appended to the card's own config.txt by `wk sysimage write`, ahead of
+# whatever the profile appends. What belongs here is what the *board's firmware*
+# requires of any image at all; what a particular measurement wants belongs to
+# the profile.
+
+[all]
+# Pi 5 firmware rejects a kernel that lacks Ubuntu's trailer and marks the boot
+# 'bad'. Anything built here is "locally built" by that test, so every image for
+# this board needs its own copy -- the workstation's config.txt does nothing for
+# an image booting from its own firmware partition.
+#
+# Per profile, this was carried by exactly one of the six rpi5 profiles. The
+# other five produced images that could not boot, silently and identically:
+# armed, no kernel, no userspace, no diagnostic, and a board that had to be
+# power-cycled because the watchdog it never reached is what hands it back
+# (wpewebkit-2.46-yocto-rpi5-64, 2026-09-04).
+os_check=0
+
+# The overclock deliberately does NOT live here, and must never be written to
+# the EEPROM either: SDRAM_BANKLOW and BOOT_ORDER are firmware state shared by
+# both roles, so an overclock written there overclocks the workstation too --
+# the exact split this whole design exists to preserve. When an `oc` profile
+# arrives it sets arm_freq/over_voltage in that *profile's* config.txt.append,
+# because it is a property of the measurement and not of the board.
