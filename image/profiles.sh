@@ -9,7 +9,8 @@
 #   IMG_MACHINE      the fleet machine it is built for (boot/machines.sh)
 #   IMG_ARCH, IMG_HOSTNAME, IMG_SPEC_DIR
 #   IMG_WATCHDOG     seconds before the self-return reboot after a wedged run;
-#                    inert until `wk sysimage write --rescue` marks the card
+#                    inert until `wk sysimage write --rescue` marks the card.
+#                    Defaults to 300 for every profile; set it only to differ
 # No role field: rescue and bench are the same distribution, distinguished only
 # by a card marker (`wk sysimage write --rescue`; b_system_kind).
 #
@@ -83,7 +84,16 @@ image_profile_load() {
     # Reset every field: `wk boot --list` loops over profiles, and a stale one
     # would describe a nonexistent image.
     IMG_BUILDER=""
-    IMG_MACHINE=""; IMG_ARCH=""; IMG_HOSTNAME=""; IMG_WATCHDOG=""
+    IMG_MACHINE=""; IMG_ARCH=""; IMG_HOSTNAME=""
+    # Every system returns itself unless it is written as a rescue, which is a
+    # property of the card rather than of this build (wk sysimage write
+    # --rescue): a board that stays borrowed until somebody notices is the
+    # failure this exists for. Five minutes is long enough for a slow boot to
+    # finish and short enough that a wedged board is not still held when
+    # somebody comes looking for it. One value for the fleet: a profile that
+    # needs its own says so, and every profile restating this one was 21
+    # copies of a number that could then be changed in no single place.
+    IMG_WATCHDOG=300
     YOC_BRANCH=""; YOC_TARGET=""; YOC_IMAGE=""; YOC_RM_WORK=""
     YOC_CHROMIUM=1; YOC_REMOTE=origin; YOC_LOCAL_LAYER=1
     YOC_PORT_TARGET_FROM=""; YOC_MACHINE=""

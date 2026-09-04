@@ -386,3 +386,44 @@ class TestUnknownTargetRefusal(unittest.TestCase):
         self.assertIn("wk remote setup a-machine-with-no-conf", cp.stdout)
         self.assertIn("WK_REMOTE_HOST", cp.stdout)
 
+
+
+class TestTheWatchdogIsOneValue(unittest.TestCase):
+    """A borrowed board hands itself back on its own: every system reboots out
+    of bench mode after IMG_WATCHDOG seconds unless claimed, which is what stops
+    one staying borrowed until somebody notices.
+
+    All 21 profiles carried `IMG_WATCHDOG=900` and the same four lines of
+    reasoning above it -- one number that could then be changed in no single
+    place. It lives in image/profiles.sh now, and a profile names it only to
+    differ."""
+
+    CONFIGS = sorted((REPO / "image" / "configs").glob("*.conf"))
+    PROFILES = REPO / "image" / "profiles.sh"
+
+    def test_the_default_is_five_minutes(self):
+        m = re.search(r"^\s*IMG_WATCHDOG=(\d+)\s*$", self.PROFILES.read_text(), re.M)
+        self.assertIsNotNone(m, "image/profiles.sh sets no IMG_WATCHDOG default")
+        self.assertEqual(300, int(m.group(1)))
+
+    def test_no_profile_restates_the_default(self):
+        """Restating it is how 21 copies happened. A profile may still override,
+        but not with the value it would have got anyway."""
+        for conf in self.CONFIGS:
+            m = re.search(r"^IMG_WATCHDOG=(\d+)", conf.read_text(), re.M)
+            if m:
+                with self.subTest(profile=conf.stem):
+                    self.assertNotEqual(300, int(m.group(1)),
+                                        f"{conf.name} restates the default")
+
+    def test_the_reset_still_clears_every_img_field(self):
+        """profiles.sh resets each field before sourcing a conf, so a second
+        load cannot inherit the first profile's answers. The watchdog now
+        resets to a value rather than to empty, and must still be in that
+        block."""
+        text = self.PROFILES.read_text()
+        block = text[text.index("IMG_BUILDER=\"\""):]
+        block = block[:block.index("YOC_BRANCH=")]
+        for field in ("IMG_MACHINE", "IMG_ARCH", "IMG_HOSTNAME", "IMG_WATCHDOG"):
+            with self.subTest(field=field):
+                self.assertIn(field + "=", block, f"{field} is not reset per load")

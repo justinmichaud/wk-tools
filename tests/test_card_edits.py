@@ -1198,6 +1198,27 @@ class TestBootRead(CardEditTest):
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
         self.assertLessEqual(len(cp.stdout), 65536 + 200, "a card can hand back any amount of text")
 
+    def test_an_already_mounted_partition_is_read_where_it_is(self):
+        """An automounter usually has the card on a workstation with a desktop
+        session, and `mount` refuses a second mountpoint for a device it
+        already holds -- so mounting unconditionally turned a read into
+        "could not mount /dev/sda1" (rpi5, 2026-09-04)."""
+        body = re.search(r"(?ms)^v_boot_read\(\) \{.*?^\}", CARD_PRIV.read_text())
+        self.assertIsNotNone(body, "v_boot_read is not defined")
+        self.assertIn("_boot_read_at", body.group(0),
+                      "boot-read mounts even when something already has the partition")
+        probe = re.search(r"(?ms)^_boot_read_at\(\) \{.*?^\}", CARD_PRIV.read_text())
+        self.assertIsNotNone(probe, "_boot_read_at is not defined")
+        self.assertIn("/proc/mounts", probe.group(0),
+                      "the mountpoint does not come from /proc/mounts")
+
+    def test_the_mountpoint_is_never_the_callers(self):
+        """Reading somewhere it did not choose is fine; reading somewhere it
+        was told is a different and much larger grant."""
+        body = re.search(r"(?ms)^v_boot_read\(\) \{.*?^\}", CARD_PRIV.read_text()).group(0)
+        self.assertNotIn('"$4"', body)
+        self.assertIn('_boot_read_at "$(part "$dev" "$2")"', body)
+
     def test_it_mounts_read_only(self):
         body = re.search(r"(?ms)^v_boot_read\(\) \{.*?^\}", CARD_PRIV.read_text())
         self.assertIsNotNone(body, "v_boot_read is not defined")

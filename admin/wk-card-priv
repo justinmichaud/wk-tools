@@ -1001,8 +1001,22 @@ _boot_read_probe() { # <mountpoint> <file>
     [ -f "$1/$2" ] || return 0
     head -c "$BOOT_READ_MAX" "$1/$2"
 }
+# Where the partition already is, if anything has it. An automounter usually
+# does on a workstation with a desktop session, and `mount` refuses a second
+# mountpoint for a device it already holds -- so mounting unconditionally
+# turned a read into "could not mount /dev/sda1" the first time this was asked
+# of a card in a running desktop (rpi5, 2026-09-04). Read it where it is, and
+# mount only when nothing else has: the same rule the bench-device half of
+# b_medium_read follows, and the one this verb replaced.
+#
+# The mountpoint comes from /proc/mounts for that exact partition, never from
+# the caller: this reads somewhere it did not choose, but not somewhere it was
+# told.
+_boot_read_at() { # <partition> -- its mountpoint, if it has one
+    awk -v p="$1" '$1 == p { print $2; exit }' /proc/mounts
+}
 v_boot_read() {
-    local dev; gate "${1:-}" allow-mounted; dev=$GATED_DEV
+    local dev at; gate "${1:-}" allow-mounted; dev=$GATED_DEV
     check_partno "${2:-}"
     # The allowlist is this verb's whole surface.
     case "${3:-}" in
@@ -1010,6 +1024,11 @@ v_boot_read() {
         *) deny "'${3:-}' is not a file this helper reads off a boot partition
     (wk-image.id, wk-diag.txt, autoboot.txt)" ;;
     esac
+    at=$(_boot_read_at "$(part "$dev" "$2")")
+    if [ -n "$at" ]; then
+        _boot_read_probe "$at" "$3"
+        return 0
+    fi
     with_mount -r "$(part "$dev" "$2")" _boot_read_probe "$3"
 }
 

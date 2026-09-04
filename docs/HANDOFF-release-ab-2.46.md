@@ -20,31 +20,40 @@ a `report-<board>-speedometer2.1.html` beside the runs.
       release fixed and varies only the width, which is the measurement that
       separates them [no hardware needed to decide, then see below]
 
-## rpi5, 2.46 32-bit userspace vs 2.46 64-bit — ready to measure
+## rpi5, 2.46 32-bit userspace vs 2.46 64-bit — blocked: the bench system does not boot
 
-Both systems are on the stick (`/dev/sda`: `sda1/2` =
-`wpewebkit-2.46-yocto-rpi5-64-9ee1cf59c4d1`, `sda3/4` =
-`wpewebkit-2.46-yocto-rpi5-32-64f773b84146`), both read off the medium by
-`wk boot rpi5 --system <id>`, and the stick's `autoboot.txt` carries
-`[all] boot_partition=1` and `[tryboot] boot_partition=3`, so either pair
-arms. Both slots are built from `6977eef7cd9ab01506bf0ff131dc169e8cfac601`
-and their widths are confirmed from the slot itself, not the board:
-64-bit `base` build-id 2f19338d, `MiniBrowser` ELF 64-bit aarch64; 32-bit
-`base` build-id ae181e9f, `MiniBrowser` ELF 32-bit ARM EABI5 interpreter
-`/lib/ld-linux-armhf.so.3`.
+Everything up to the boot is done and verified. Both systems are on the stick
+(`/dev/sda`: `sda1/2` = `wpewebkit-2.46-yocto-rpi5-64-9ee1cf59c4d1`, `sda3/4` =
+`wpewebkit-2.46-yocto-rpi5-32-64f773b84146`), both slots are built from
+`6977eef7cd9ab01506bf0ff131dc169e8cfac601` with their widths confirmed from the
+slots themselves (64-bit build-id 2f19338d, `MiniBrowser` ELF 64-bit aarch64;
+32-bit build-id ae181e9f, ELF 32-bit ARM EABI5, interpreter
+`/lib/ld-linux-armhf.so.3`), and `wk boot rpi5 --system <id>` now arms and
+reboots the board.
 
-- [ ] per system: `wk boot rpi5 --system <id>`, `wk boot rpi5 --keep`,
-      `wk pi deploy wpewebkit-2.46-yocto-rpi5-<width> rpi5 --slot base`, and
-      finally
-      `wk pi bench rpi5 speedometer2.1 --ab-systems <64-id>,<32-id> --slot base --rounds 5`
-      [needs the rpi5 free of its own workstation session]
-- [ ] confirm on the booted board that the process measured is the slot's and
-      not the image's own browser: `/proc/<pid>/exe` of the running
-      WPEWebProcess. The slot's width is settled; which binary the board loads
-      is not [needs the board booted into each system]
-- [ ] rpi5's card helper is installed from that machine's own checkout; keep
-      it in step with this one, since every medium read now needs `boot-read`
-      [no hardware needed]
+- [ ] armed into the 64-bit system, the board never came back and never
+      appeared on the tailnet under any name. It did not self-return either:
+      the 900s watchdog never fired, so it did not reach the userspace that
+      arms it, and a power cycle was needed. What the card says afterwards:
+      `wk-image.id` and `autoboot.txt` are on the boot partition, the rootfs
+      mounts and carries its `/etc/wk-image` marker, and both join units are
+      installed (`wk-card-priv joins` and `wifi-joins` answer yes) -- but there
+      is **no `wk-diag.txt`**. That file is written by a userspace unit ~75-90s
+      in and exists to capture exactly a network failure, so its absence says
+      the system did not get that far: this is earlier than WiFi or the
+      tailnet, and re-seeding credentials will not address it. Next step is a
+      console -- HDMI or serial on ttyAMA10 (`SERIAL_CONSOLES` in
+      `raspberrypi5.conf`) -- to see where it stops
+      [needs the board and a console]
+- [ ] `boot-read` reads a partition an automounter already holds, rather than
+      failing to mount it a second time. Fixed and unit-tested, but proven only
+      against an unmounted card: rpi5 still runs the helper its last `./setup
+      --stage quiesce` installed, and a helper cannot replace itself. Re-check
+      with the card automounted after the next setup there
+      [needs the rpi5]
+- [ ] the 32-bit system has never been booted at all. Whatever stops the
+      64-bit one may or may not affect it; do not assume the pair is dead
+      until it has been tried [needs the board]
 
 ## Constraints that bound all of the above
 
