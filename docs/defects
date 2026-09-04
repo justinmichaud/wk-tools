@@ -10,126 +10,94 @@ Remember the goal: everything should be reproducable. It should be easy to reset
 NEEDS YOU
 ================================================================================
 
-1. A tart guest is a second holder of the claude.ai login. The Claude CLI
-   rotates the refresh token on every refresh (measured in the CLI: the new
-   refreshToken replaces the stored one under a compare-and-swap, and a
-   superseded one is answered invalid_grant and blanked). Every container on
-   a machine therefore shares ONE writable file (~/.config/wk/agent-rw,
-   mounted rw) and the CLI's own .storage-write lock serialises them. A
-   guest mounts nothing of the host, so `wk vm start` writes it a COPY and
-   warns: a refresh in that guest invalidates the file every container
-   shares, and vice versa. Shapes: (a) accept it -- use claude in a guest or
-   in containers, not both at once; (b) pass the agent-rw directory into the
-   guest with `tart run --dir` (the guest then mounts one host directory,
-   which targets/vm.sh today forbids by design); (c) a per-guest login
-   (`claude auth login` inside the guest, no copy). [decision]
+1. `wk <cmd> -h` is the leading comment block of `cmd/<name>` (`explain_cmd`,
+   the dispatcher), so it counts against the 15% ceiling and cannot come down
+   without changing what a user reads. Command bodies are at ~17%; the headers
+   add about 8 points -- 632 lines in cmd/n-z alone. The argumentative prose in
+   them is cut; the option tables, exit codes and env-var documentation are
+   kept. Thin those too, and if so which (`wk bench -h` is 129 lines, ~30 of
+   them design essay)? [decision]
 
-   do c then
+   Thin everything; help should be concise and to-the point, using standard techinical documentation style. -h blocks can have more comments, but in general, code portions themselves should be under 5% comments. Variable names and overall structure should explain what is happening, not prose.
 
-2. With push on, the api.github.com injector authenticates whatever the
-   workspace sends (Host is forced to api.github.com, Authorization is
-   replaced, one request per connection), so a workspace can use the whole
-   API as your account, not only open a pull request. Restricting method or
-   path (e.g. GET anywhere, POST only to /repos/*/pulls) is a policy table in
-   container/proxy/github-inject.py. Restrict, or leave whole-API while push
-   is on? [decision]
+2. `claude/skills/fix-webkit-ews` and `claude/skills/jsc-review` tell an agent
+   to run `gh pr view` and `gh api`. Reading now works through the injector, so
+   those instructions run. Writing is uneven rather than refused: where `gh`
+   posts to an endpoint `git-webkit` also uses -- `gh pr create`, `gh pr
+   comment`, `gh pr review` -- the table has it and push-on lets it through,
+   while `gh pr edit` (a PATCH on a pull request, which webkitscmpy does as a
+   POST) and everything else is 403. Say reads only in those skills, add the
+   verbs `gh` uses to the table, or leave the unevenness? [decision]
 
-   restrict it to only things that git-webkit needs
-
-3. buildbox4 has no libc++ (measured 2026-09-03: clang++ and clang++-19 are
-   the same Debian clang 19.1.7 binary; `-stdlib=libc++` cannot find
-   <string>; dpkg lists libstdc++-14-dev only). The libc++ flags are the
-   default for every Linux clang config and `WK_TARGET_LIBCXX=0` in
-   targets/hosts/buildbox4.conf turns them off there, with that reason. Your
-   reference command uses them, so it was run somewhere else or before the
-   package went away. `sudo apt-get install -y libc++-19-dev libc++abi-19-dev`
-   there, then delete the line. Also measured there: gtk-release took 25m42s
-   (build.status in your image-decoders workspace, -j64, no ccache), not
-   3m00s and not 40m. [decision]
-
-   As long as a fresh build completes this is fine.
+   It should be always read-only, and all writes should be accepted when push is enabled. Push on means a human is watching everything, so there is no need for any restrictions. Otherwise, it should be read-only for agents.
 
 ================================================================================
 OWED, WITH THE DECISION ALREADY MADE
 ================================================================================
 
-- `wk sync`, then the machine's own tests:
+- Every live check below is unrun: the tree was under edit until now. In order:
+      wk sync --tools container
+      ./setup --stage vmtools
       env -u WK_NAME -u WK_TARGET -u WK_TARGET_KIND python3 -m unittest \
         tests.test_machine_mounts tests.test_push_agent tests.test_build
-  The machine is recreated and the deploy keys are regenerated, so both forks
-  need `wk key register` and the new public keys added on GitHub before
-  anything can push. One assumption is still unsettled: that a container's own
-  uid can write and rename inside the agent-rw virtiofs mount. If it cannot,
-  `wk_agent_rw_dir` gets a VM-local answer plus a seed step and nothing
-  downstream changes.
+  The machine has carried no mirror and no base snapshot since it was
+  recreated, which is what `wk new`'s "no base snapshot yet" is. The deploy
+  keys went with it, so both forks need `wk key register` and the new public
+  keys on GitHub before anything can push. One assumption is still unmeasured:
+  that a container's own uid can write and rename inside the agent-rw virtiofs
+  mount (tests/test_machine_mounts.py measures it and skips with no image). If
+  it cannot, `wk_agent_rw_dir` gets a VM-local answer plus a seed step and
+  nothing downstream changes.
 
-- Live check after the recreate: `wk new <ws>`; `wk push on`;
+- The round trip, once a workspace can be made: `wk new <ws>`; `wk push on`;
   `podman machine ssh wk -- 'SSH_AUTH_SOCK=$XDG_RUNTIME_DIR/wk/ssh-agent.sock ssh-add -l'`;
-  in the workspace `git push --dry-run fork HEAD` and
-  `curl -sS -o /dev/null -w '%{http_code}\n' https://api.github.com/user`
-  (200); `wk verify <ws>`; `wk push off`; the curl again (401);
-  `wk verify <ws>`; `wk ai claude <ws> --rc` starts and survives 60s.
-  A workspace created before this change keeps its old ~/.ssh/config; one
-  `wk rm`/`wk new` converges it.
+  in the workspace `git push --dry-run fork HEAD`, `GET /user` (200 in both
+  switch positions now), `POST /repos/<fork>/pulls` with `{}` (422 on, 401
+  off) and `POST /repos/<fork>/keys` (403 from the injector, never reaching
+  GitHub); `wk verify <ws>`; `wk push off`; the three again; `wk ai claude
+  <ws> --rc` starts and survives 60s. A workspace made before this keeps its
+  old ~/.ssh/config; one `wk rm`/`wk new` converges it.
 
-- `wk vm base --rebuild` (hours). The failure at its end is fixed
-  (config_load now gets the platform; a prebuild failure can no longer unmake
-  a provisioned base; the password change is verified by `dscl -authonly`,
-  not by sysadminctl's exit status). Owed live on a real guest: the rebuild
-  itself, the guest mirror's first fetch (targets/vm.sh puts a bare mirror
-  carrying all four remotes in the base; a workspace is a --shared clone of
-  it), the password actually becoming `1`, and the gitconfig include that
-  provisioning now installs.
+- `wk vm base --rebuild` (hours), then on a guest: the rebuild itself, the
+  guest mirror's first fetch, the password becoming `1`, the gitconfig include
+  provisioning installs, `wk vm check`'s resident shells / editor server
+  report, which Software Update key a tahoe guest obeys (TODO in
+  vm/desktop.sh), guest egress (TODO in cmd/verify), and one `claude auth
+  login` inside a guest to confirm it lands in `~/.claude-login` rather than a
+  Keychain item.
+
+- `wk sync --tools buildbox4` and `wk sync --tools devbox-arm64-2`. The first
+  clears BASE `?`. The second rebuilds devbox's mirror, which carries only
+  `origin` today; measured 2026-09-04, all four remotes answer `git ls-remote`
+  anonymously from that box, so the earlier `could not read Username` was
+  transient.
+
+- Confirm layout tests can run headless and with a real GPU.
 
 ================================================================================
 STILL OPEN
 ================================================================================
 
-- A wk user service that starts and then dies is reported as started. The
-  vmtools stage asks `systemctl --user is-active --quiet` straight after
-  `enable --now`, and a service that execs and fails a fraction of a second
-  later answers active at that instant (measured: wk-github-inject with no
-  PrivateTmp restarted 36 times while ./setup called it started). The three
-  services do this three times, so the fix is one helper beside
-  `unit_install` (host/units.sh) that asks systemd for readiness rather than
-  for liveness at t=0 -- `Type=notify` and a sd_notify in the two Python
-  services is the off-the-shelf answer; a settle-and-look-again is not.
-
 - Two podman bugs to upstream, both worked around here and both silent:
-  `podman machine init --volume src:target:ro` generates a systemd .mount
-  unit with no `ro` in Options (podman 5.4, applehv), so the guest mounts it
+  `podman machine init --volume src:target:ro` generates a systemd .mount unit
+  with no `ro` in Options (podman 5.4, applehv), so the guest mounts it
   read-write and a write reaches the host; and it names the unit after the
   target it was handed without canonicalising it against the machine OS, so a
   target under a symlinked directory produces a unit systemd refuses to mount
-  and a machine that comes up without it.
+  and a machine that comes up without it. Both repros are in the TODO comments
+  at host/macos/machine.sh and host/macos/playbook.yaml.
+
+  Work around this, but leave the upstream bug report so we can remove the workaround when it is fixed.
 
 - The `remote` target has no ssh-agent, so `wk push` on a build box reports
   "always live, no switch on this machine" (remote/provision.sh points
   core.sshCommand at the private half). Installing wk-ssh-agent.service there
   through host/units.sh is the owed work (docs/HANDOFF-sandboxing.md).
 
-- devbox-arm64-2's mirror update fails with `could not read Username for
-  'https://github.com'`. Retry when GitHub is healthy; if it persists, the
-  box has lost its route or credential helper.
+We should fail safe, not fail open. Then, setup should include this setup as part of pre-requisite installation instructions.
 
-- BASE still reads `?` for a workspace on buildbox4 until
-  `wk sync --tools buildbox4` puts this tree's commit there (needs a
-  committed tree, which you now have).
+- `targets/remote.sh` has no `t_agent_secret_present` override, so
+  `wk ai claude <ws> --rc` on a build box passes the gate against this device's
+  store and then dies over there. One override and a test, beside the vm one.
 
-- Confirm layout tests can run headless and with a real GPU.
-
-- Confirm ccache still caches across a change of -j (an argument, not a
-  measurement: nothing wk passes the compiler varies with the job count).
-
-- Live measurement owed on a real tart guest: `wk vm check <name>`'s resident
-  shells / editor server report, and which Software Update key a tahoe guest
-  obeys (TODO in vm/desktop.sh).
-
-- Guest egress from inside a guest is unmeasured (TODO in cmd/verify); the
-  credential and GPU checks run there now.
-
-- The comment pass: dead functions, dated narration and the two design-laden
-  handoffs are gone, but shell comment density is still ~35% across the
-  densest 25 files (boot/pi-tryboot.sh 54%, container/firstrun.sh 43%,
-  cmd/sync 40%). Most of what remains is failure-mode and contract prose;
-  say whether that density is acceptable or name the ceiling.
+This sounds like an architecture problem, not a one-time override.

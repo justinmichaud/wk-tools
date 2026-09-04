@@ -10,7 +10,9 @@ workspace image or the guest.
 - [ ] `git-lfs` in host/linux/apt.txt: the mirror is bare and the macOS
       podman VM has no git-lfs, so Linux snapshots smudge LFS objects and
       macOS ones keep pointers; one behaviour -- drop it, or add it to
-      host/macos/playbook.yaml [decision]
+      host/macos/playbook.yaml, which layers no packages at all today because
+      rpm-ostree resolves through Fedora's updates-archive and that answers 404
+      for a dependency [decision]
 - [ ] the pmOS image builder's prerequisites (`multipath-tools`,
       `python3-venv`, `xz-utils`) are installed on every Linux host though
       only the aarch64 build host runs pmbootstrap; either the builder runs
