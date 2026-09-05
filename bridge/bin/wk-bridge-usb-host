@@ -1,18 +1,12 @@
 #!/bin/sh
-# Put the Type-C port into host mode, so the USB Ethernet adapter enumerates.
-#
-# Both phones default to device mode and become host only if the dock
-# performs a Data Role Swap on the CC pins -- not every dock does, and not
-# always in the same plug order, so the role is asserted at boot and again by
-# the watchdog whenever the downstream interface disappears. Exits 0 even when
-# nothing could be done: a dock not yet plugged in must not hold boot back.
+# Both phones default to USB device mode and become host only if the dock performs a Data Role Swap on the CC pins -- not every dock does, and not always in the same plug order, so the role is asserted at boot and again by the watchdog. Exits 0 even when nothing could be done.
 set -u
 
 changed=0
 
 for f in /sys/class/typec/port*/data_role; do
     [ -w "$f" ] || continue
-    # "device [host]": brackets mark the active role; no `host` listed means unswitchable.
+    # "device [host]": the brackets mark the active role, and no `host` in the list means the port cannot switch.
     cur=$(cat "$f" 2>/dev/null)
     case "$cur" in
         *"[host]"*) ;;
@@ -25,7 +19,7 @@ for f in /sys/class/typec/port*/data_role; do
     esac
 done
 
-# The USB controller's own role: on some kernels this moves even when the Type-C port already agrees.
+# The USB controller's own role moves independently on some kernels, even where the Type-C port already agrees.
 for f in /sys/class/usb_role/*/role; do
     [ -w "$f" ] || continue
     [ "$(cat "$f" 2>/dev/null)" = host ] && continue
@@ -35,28 +29,13 @@ for f in /sys/class/usb_role/*/role; do
     fi
 done
 
-# Enumeration is not instant; only wait when something actually moved.
 [ "$changed" -eq 1 ] && sleep 3
 
-# --- the companion-controller trap -------------------------------------------
-# A downstream NIC can enumerate at OHCI (12Mbit/s) instead of EHCI
-# (480Mbit/s) even with host mode otherwise correct. On a PinePhone: the dock
-# swaps role and the phone is host by 3.5s, but at 13s pmOS's initramfs flips
-# the phy back to peripheral, so EHCI fails and gives up at 77s, and the port
-# falls to the companion OHCI controller -- a race, intermittent between boots.
-#
-# Recovery is a four-step rebind in this order -- OHCI must release the device
-# before EHCI's rebind will take it: unbind OHCI, unbind EHCI, bind EHCI, bind
-# OHCI. Capped at 3 attempts (state in /run, scoped to one boot): a repair
-# that repeats forever is a fault, not a recovery.
-#
-# NIC/controller/companion are found via sysfs, not named: the sunxi companion
-# sits 0x400 below its OHCI controller.
+# A downstream NIC can enumerate on the companion OHCI (12Mbit/s) instead of EHCI (480Mbit/s) with host mode otherwise correct: on a PinePhone the dock swaps role by 3.5 s, pmOS's initramfs flips the phy back to peripheral at 13 s, EHCI gives up at 77 s and the port falls through -- a race, intermittent between boots. The rebind order below is forced, since OHCI must release the device before EHCI's rebind will take it, and a half-done sequence leaves the port with no USB until the next boot. The sunxi companion sits 0x400 below its OHCI controller.
 nic_usb_dev() {
     local n d p
     for n in /sys/class/net/*; do
         d=$(basename "$n")
-        # usb*: the gadget interface this file exists to get out of
         case "$d" in lo|wlan*|tailscale*|dummy*|usb*) continue ;; esac
         [ -e "$n/device/subsystem" ] || continue
         case "$(readlink -f "$n/device/subsystem")" in */usb) ;; *) continue ;; esac
@@ -98,7 +77,6 @@ ehci=/sys/bus/platform/drivers/ehci-platform
 logger -t wk-bridge-usb-host \
     "downstream NIC is at ${speed}Mbit/s on $ctrl.usb -- rebinding (attempt $((tries + 1)))"
 
-# Guarded on binding state: a half-done sequence leaves the port with no USB until the next boot.
 [ -e "$ohci/$ctrl.usb" ] && { printf '%s\n' "$ctrl.usb" > "$ohci/unbind" 2>/dev/null || true; }
 sleep 2
 [ -e "$ehci/$companion.usb" ] && { printf '%s\n' "$companion.usb" > "$ehci/unbind" 2>/dev/null || true; }

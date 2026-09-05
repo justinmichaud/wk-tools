@@ -1,12 +1,8 @@
 #!/bin/bash
-#
-# Build the EGL probe once per workspace and run it. Built rather than shipped:
-# the toolchain is right there, the binary is 20 KB, and a prebuilt one would
-# have to match the image's libEGL rather than the host's driver.
+# Build the EGL probe against the image's own libEGL, then run it.
 
 set -euo pipefail
 SRC=/opt/wk-tools/container/gpu/gpu-probe.c
-# WK_GPU_PROBE_BIN overrides where the built probe binary lands.
 BIN=${WK_GPU_PROBE_BIN:-/tmp/.wk-gpu-probe}
 
 if [ ! -x "$BIN" ] || [ "$SRC" -nt "$BIN" ]; then

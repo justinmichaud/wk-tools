@@ -1,13 +1,6 @@
 #!/bin/bash
-# attach-gdb.sh <url> [gdb_bt_log] [console_log]
-# Launch a benchmark under cog (sandbox DISABLED so the WPEWebProcess is a plain
-# child) and capture the FATAL crash backtrace with gdb.
-#
-# gdb-attach and not a core file: WebKit makes the web process non-dumpable
-# (RLIMIT_CORE=0 / PR_SET_DUMPABLE 0), so the kernel writes no core even with
-# core_pattern set. WTF uses SIGUSR1 for GC stop-the-world thread suspension and
-# SIGUSR2 for VMTraps, which gdb stops on by default, so they are passed through
-# and only SIGSEGV/SIGABRT/SIGBUS/SIGILL/SIGTRAP are trapped.
+# attach-gdb.sh <url> [gdb_bt_log] [console_log] -- runs a benchmark under cog with the sandbox disabled, so WPEWebProcess is a plain child, and captures the fatal backtrace with gdb.
+# An attach and not a core file: WebKit makes the web process non-dumpable (RLIMIT_CORE=0 / PR_SET_DUMPABLE 0), so the kernel writes no core whatever core_pattern says. WTF's SIGUSR1 (GC stop-the-world) and SIGUSR2 (VMTraps) are passed through, gdb stopping on them by default.
 set -u
 URL="${1:?usage: attach-gdb.sh <url> [gdb_bt_log] [console_log]}"
 GLOG="${2:-/tmp/cog_gdb_bt.log}"

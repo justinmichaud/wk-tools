@@ -1,7 +1,3 @@
-# The systemd --user units a machine that runs workspaces carries, one body each
-# in host/units/*.service; the installers differ only in @WK_ROOT@ and
-# @WK_STORE@. <run...> runs one command string there, with the body on stdin.
-
 command -v warn >/dev/null 2>&1 || . "$WK_ROOT/lib/common.sh"
 
 unit_exists() { # <unit name>
@@ -13,8 +9,6 @@ unit_render() { # <unit name> <tools root over there> <store over there>
     sed -e "s|@WK_ROOT@|$2|g" -e "s|@WK_STORE@|$3|g" "$WK_ROOT/host/units/$1"
 }
 
-# The ExecStart word under @WK_ROOT@, which unit_start watches: a service runs
-# its program straight off the tree. ssh-agent runs the system binary and has none.
 unit_program() { # <unit name>
     unit_exists "$1"
     awk -v p='@WK_ROOT@/' 'index($0, "ExecStart=") == 1 {
@@ -23,7 +17,6 @@ unit_program() { # <unit name>
     }' "$WK_ROOT/host/units/$1"
 }
 
-# Moved into place only when it differs: no daemon-reload under a live build.
 unit_install() { # <unit name> <tools root> <store> <run...>
     local name="$1" root="$2" store="$3"; shift 3
     local dir='~/.config/systemd/user' tmp
@@ -45,8 +38,7 @@ unit_unready() { # <unit name> <consequence> <journal prefix>
   why: ${3}journalctl --user -u $1 -e"
 }
 
-# Every body here is Type=notify or Type=forking, so a start job finishes when
-# the service can be *used*; Type=simple answers `is-active` yes at t=0.
+# Every body is Type=notify or forking: Type=simple answers is-active yes at t=0.
 unit_start() { # <unit name> <root> <store> <consequence> <journal prefix> <run...>
     local name="$1" root="$2" store="$3" why="$4" jrn="$5"; shift 5
     local prog stamp="" want="" have="" active=yes
@@ -77,7 +69,6 @@ unit_start() { # <unit name> <root> <store> <consequence> <journal prefix> <run.
         return 0
     fi
 
-    # A restart drops every workspace's egress, so only a changed program earns one.
     if [ "$have" = "$want" ]; then
         unchanged "$name ready"
         return 0

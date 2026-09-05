@@ -4,20 +4,17 @@
 # wk: where=workspace name=optional here outside group=workspaces
 # wk: flag --tools name=none
 #
-# Refused inside a workspace: Zed runs where the person is, and a container has
-# no display and a macOS guest is driven from the host.
+# Refused inside a workspace: Zed runs where the person is.
 #
 #   --tools [<machine>|<workspace>]   open a wk-tools copy instead of the
 #                                     checkout: a machine's, a workspace's, or
 #                                     (with no argument) this one
 #   --url                             print the ssh:// URL and the `zed` command
-#                                     line for it instead of opening Zed -- to
-#                                     paste onto a machine that has Zed
+#                                     line for it instead of opening Zed
 #   --route                           prepare this workspace's sshd for the
 #                                     machine that asked and print the three
 #                                     fields it needs to build a route of its
-#                                     own (user, src, proxy). What `wk zed` runs
-#                                     on another workstation; nothing to type
+#                                     own (user, src, proxy)
 
 set -euo pipefail
 WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -25,8 +22,6 @@ WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 . "$WK_ROOT/lib/store.sh"
 . "$WK_ROOT/lib/target.sh"
 
-# With --tools the name may be a machine, which the dispatcher does not resolve
-# (`flag --tools name=none`), so it comes from argv here, not $WK_NAME.
 TOOLS=""
 NAME="${WK_NAME:-}"
 URL_ONLY=""
@@ -46,9 +41,8 @@ while [ $# -gt 0 ]; do
     esac
 done
 
-# emit <url> -- hands it to Zed, or with --url prints it. Zed outlives this
-# command and every terminal it opens inherits its environment, so it gets none
-# of the dispatcher's variables (wk_exec_clean).
+# Zed outlives this command and every terminal it opens inherits its
+# environment, so wk_exec_clean strips the dispatcher's variables.
 emit() {
     local url="$1"
     if [ -n "$URL_ONLY" ]; then
@@ -63,15 +57,12 @@ emit() {
     || die "--route describes a workspace; a wk-tools copy is already an ssh destination
     (wk zed --tools --url $NAME prints it)"
 
-# Neither --url nor --route opens anything, so neither needs a Zed here.
 if [ -z "$URL_ONLY" ] && [ -z "$ROUTE" ]; then
     Z=$(zed_cli) || die "zed is not installed (no 'zed' on PATH, no /Applications/Zed.app)
     https://zed.dev/download -- 'wk doctor' checks for it, or add --url to print
     the route instead and open it from a machine that does have Zed"
 fi
 
-# --- --tools ------------------------------------------------------------------
-# A path, not an ssh:// url: the local checkout is already where Zed runs.
 if [ -n "$TOOLS" ]; then
     if [ -z "$NAME" ] || [ "$NAME" = here ] || [ "$NAME" = "$(hostname -s 2>/dev/null)" ]; then
         if [ -n "$URL_ONLY" ]; then
@@ -82,7 +73,6 @@ if [ -n "$TOOLS" ]; then
         wk_exec_clean "$Z" "$WK_ROOT"
     fi
 
-    # A machine is tested for first (`target_kind` reads its conf file).
     if [ "$(target_kind "$NAME" 2>/dev/null)" = remote ]; then
         load_target "$NAME"
         # "" -- t_tools and t_ssh_host answer for the machine itself here.
@@ -101,7 +91,6 @@ if [ -n "$TOOLS" ]; then
     esac
 
     require_name "$NAME"
-    # Checked here, not by the dispatcher: with --tools a name may be a machine.
     ws_exists "$NAME" || die "no machine or workspace named '$NAME'
     'wk ls' lists the workspaces, 'wk status' the machines."
     TARGET="$(ws_target "$NAME")"
@@ -111,16 +100,12 @@ if [ -n "$TOOLS" ]; then
     emit "ssh://$host$(t_tools "$NAME")"
 fi
 
-# --- a workspace --------------------------------------------------------------
 require_name "$NAME"
 TARGET="$(ws_target "$NAME")"
 load_target "$TARGET"
 
 t_ssh_prepare "$NAME"
 
-# The fields, not a URL: only this machine can say what to run here to speak ssh
-# to a workspace that has no address. Printed after the preparation above, so by
-# the time anybody uses them the sshd is installed and the key is authorised.
 if [ -n "$ROUTE" ]; then
     USER_IN=$(t_ssh_user "$NAME") \
         || die "a '$WK_TARGET_KIND' workspace has no ssh account for an editor to log in to"
@@ -132,9 +117,7 @@ fi
 host=$(t_ssh_host "$NAME") || die "'$NAME' is not running, so there is no route to it.
     A macOS guest needs booting first:  wk vm start $NAME"
 
-# A guest is the one workspace kind with a window of its own, and the editor
-# opening it is often the moment something on that screen asks to be logged
-# into. vm_login_note is the one place that password is stated.
+# vm_login_note is the one place the guest's login password is stated.
 [ "$WK_TARGET_KIND" != vm ] || vm_login_note
 
 emit "ssh://$host$(t_src "$NAME")"

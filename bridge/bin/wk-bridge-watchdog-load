@@ -1,8 +1,5 @@
 #!/bin/sh
-# Loads the driver for this device's hardware watchdog, if it has one.
-# Matched by the device's own MODALIAS from sysfs (works across kernels,
-# no-ops where absent). PinePhone needs sun50i-a64-wdt, built via
-# image/profiles.sh's CONFIG_SUNXI_WATCHDOG=m; always exits 0, since no watchdog is valid too.
+# Matched by the device's own MODALIAS from sysfs, so it works across kernels; the PinePhone's sun50i-a64-wdt is a module only because image/profiles.sh sets CONFIG_SUNXI_WATCHDOG=m. No watchdog is a valid state, so this always exits 0.
 set -u
 
 [ -e /dev/watchdog ] && exit 0

@@ -1,37 +1,12 @@
 #!/bin/bash
-#
-# The privileged half of arming a board that boots itself. Runs as root via a
-# NOPASSWD sudoers rule that names this exact path.
-#
-# Why it exists: a *workstation* whose bench medium is its own stick (rpi5) is
-# armed by two root operations -- one firmware mailbox call to set a one-shot
-# boot order, and the reboot that spends it. `wk` drives a workstation as a
-# person over a BatchMode ssh, which has no terminal, so a `sudo` there cannot
-# be answered: `wk boot rpi5` died with "sudo: A terminal is required to
-# authenticate" before the mailbox call ran. A bench-device is driven as root
-# and never comes through here.
-#
-# Not folded into wk-quiesce-priv or wk-card-priv: the first grants a display
-# and session, the second only ever touches a usb or mmc whole disk the machine
-# is not running from, and neither gate says anything about a firmware
-# register. A grant is auditable when its file states one purpose.
-#
-# Everything here must be safe to grant unconditionally, because granting it is
-# granting it forever:
-#
-#   - The verb set is a fixed allowlist. No passthrough, no eval, and no
-#     argument becomes part of a command line.
-#   - The **only** argument any verb takes is a boot order, checked against
-#     `0x` and at most eight hex digits before it is used. The mailbox tag it
-#     is passed to (0x0003808b, set_reboot_order) is fixed here and never
-#     comes from the caller: this cannot be turned into "call any mailbox".
-#   - `reboot` and `reboot-tryboot` take no arguments at all.
-#   - Rebooting is not an escalation this creates. It is refused over ssh only
-#     because polkit asks for admin auth on a non-local session
-#     (`auth_admin_keep`, measured on rpi5); a person at the machine already
-#     has it. What this adds is the ability to do it without a terminal.
-#
-# It cannot write a file, mount anything, or name a path.
+# Root via a NOPASSWD sudoers rule naming this exact path (polkit refuses a
+# non-local session's reboot: auth_admin_keep, measured on rpi5; wk's BatchMode
+# ssh has no terminal for sudo). Bounded by shape: a fixed verb list, no
+# passthrough, no eval, no argument becoming part of a command line, no file
+# written, nothing mounted, no path named; the sole argument any verb takes is a
+# boot order matched against 0x plus at most eight hex digits, and the mailbox
+# tag it reaches is fixed below, so this cannot be turned into "call any
+# mailbox".
 
 set -euo pipefail
 
@@ -39,12 +14,9 @@ say()  { printf 'wk-boot-priv: %s\n' "$*"; }
 deny() { printf 'wk-boot-priv: REFUSED: %s\n' "$*" >&2; exit 3; }
 fail() { printf 'wk-boot-priv: %s\n' "$*" >&2; exit 1; }
 
-# The one tag this helper may call: set_reboot_order. Fixed here so no caller
-# can reach another.
+# set_reboot_order.
 MAILBOX_TAG=0x0003808b
 
-# A boot order and nothing else. Checked against what it is allowed to be
-# rather than escaped, the same rule admin/wk-card-priv holds its arguments to.
 check_order() {
     case "${1:-}" in
         0x[0-9a-fA-F]) ;;
@@ -59,14 +31,9 @@ check_order() {
     esac
 }
 
-# What this helper can do, for a driving end that must not assume it: a
-# machine's copy is the one its last ./setup installed.
 v_status() { say "ok"; say "order=yes"; say "reboot=yes"; say "tryboot=yes"; }
 
-# order <0xNNNN> -- the firmware's one-shot boot order. The register the
-# firmware clears after one use, so this is an intent that reverts by itself.
-# The reply is printed for the caller to check: a silent no-op call looks
-# exactly like one that worked.
+# One-shot: the firmware clears the register after one use.
 v_order() {
     check_order "${1:-}"
     command -v vcmailbox >/dev/null 2>&1 \
@@ -74,17 +41,14 @@ v_order() {
     vcmailbox "$MAILBOX_TAG" 4 4 "$1"
 }
 
-# Detached and after a delay: the reboot kills the ssh session that asked for
-# it, which would otherwise exit non-zero and read as a failure.
+# Detached after a delay: the reboot kills the ssh session that asked for it.
 v_reboot() {
     [ $# -eq 0 ] || deny "reboot takes no arguments"
     setsid sh -c 'sleep 3; reboot' </dev/null >/dev/null 2>&1 &
     say "rebooting in 3s"
 }
 
-# reboot-tryboot -- the reboot that carries the firmware's tryboot flag, which
-# only systemd can pass (/run/systemd/reboot-param). The flag is this fixed
-# string; nothing about it comes from the caller.
+# Only systemd can pass the tryboot flag (/run/systemd/reboot-param).
 v_reboot_tryboot() {
     [ $# -eq 0 ] || deny "reboot-tryboot takes no arguments"
     [ -d /run/systemd ] \
@@ -94,9 +58,6 @@ v_reboot_tryboot() {
     say "rebooting into tryboot in 3s"
 }
 
-# --- dispatch ----------------------------------------------------------------
-# One case, one verb, no default that runs anything. An unknown verb is a usage
-# error and not a fallback.
 verb="${1:-}"; shift || true
 case "$verb" in
     status)         v_status ;;

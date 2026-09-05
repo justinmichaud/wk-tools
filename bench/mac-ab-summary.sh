@@ -1,23 +1,8 @@
 #!/usr/bin/env bash
-#
 # wk bench ab-summary -- turn a run of `wk bench mac-ab` into a verdict.
 #
 #   wk bench ab-summary --runs <runs.tsv> [--root <dir>] [--out <file>]
 #                                          (--out also writes <file-without-
-#                                          extension>.html, a self-contained
-#                                          report with histograms)
-#
-# Reads the arm-to-result map the autorun wrote (round, label, staged id,
-# result directory) and hands the two arms to `wk bench report`, which is where
-# the per-subtest Score and Time, the axis warnings, the Welch/FDR p-value and
-# the histograms come from.
-#
-# Runs on the Mac in either mode: in bench mode as the last thing the autorun
-# does, in host mode to re-read the same verdict after the machine has come
-# back. --root is the difference between the two paths.
-#
-# Two arms with the same staged id is the A/A control: the noise floor a real
-# A/B is read against.
 
 set -euo pipefail
 WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -32,7 +17,7 @@ while [ $# -gt 0 ]; do
         --root) ROOT="${2:-}"; shift 2 ;;
         --runs) RUNS="${2:-}"; shift 2 ;;
         --out)  OUT="${2:-}"; shift 2 ;;
-        -h|--help) sed -n '3,6p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2 ;;
+        -h|--help) usage_block "$0" >&2; exit 2 ;;
         *) die "unknown option: $1" ;;
     esac
 done
@@ -64,10 +49,6 @@ emit "A/B summary -- $(date -u +%Y-%m-%dT%H:%M:%SZ)"
 emit "run map: $RUNS"
 emit ""
 
-# Contaminated arms, named before the numbers (fifth column in $RUNS;
-# docs/HANDOFF-mac-perf-mode.md). Still averaged in -- dropping data on a
-# heuristic is its own way to get a wrong answer -- but a difference that lives
-# entirely in a scanned arm is not a difference between builds.
 scanned=$(awk -F'\t' '$5 == "scanned" { printf "    round %s arm %s\n", $1, $2 }' "$RUNS")
 if [ -n "$scanned" ]; then
     emit "  WARNING: a software-update scan ran during these arms:"
@@ -79,18 +60,11 @@ EOF
     emit ""
 fi
 
-# `wk bench report` below reads every arm's result.json directly
-# (lib/wkdata.py, via cmd/bench) and shows A and B side by side per subtest.
-# This counts rounds per arm, so an empty arm is visible before the report
-# tries to compare it against nothing.
 for l in $labels; do
     emit "arm $l: $(arm_paths "$l" | tr ',' '\n' | grep -c .) run(s)"
 done
 emit ""
 
-# A null result is only informative next to the smallest difference this run
-# had the power to find (docs/HANDOFF-mac-perf-mode.md has the noise-floor
-# analysis and the count/rounds tradeoff).
 mde_note() {
     "$PY" - "$RUNS" "$ROOT" <<'MDEPY'
 import json, os, statistics as st, sys
@@ -155,13 +129,12 @@ $(mde_note 2>/dev/null)
 MDEEOF
 emit ""
 
-# compare-results takes -a and -b, so a three-arm A/B/C is two comparisons.
 set -- $labels
 if [ $# -lt 2 ]; then
     emit "only one arm ('$1') -- nothing to compare. Its numbers are above."
     exit 0
 fi
-A="$1"; B="$2"
+A="$1"; B="$2"   # compare-results takes -a and -b, so a third arm is a second comparison
 [ $# -gt 2 ] && emit "note: $# arms; comparing '$A' against '$B' only"
 
 emit "comparing arm $A against arm $B"
@@ -177,9 +150,6 @@ if [ -n "$same" ]; then
     emit ""
 fi
 
-# `wk bench report` checks the three axes, computes the per-subtest Welch/FDR
-# table and draws the histograms. --out also writes html next to the text
-# summary, same basename.
 if [ -n "$OUT" ]; then
     "$WK_ROOT/cmd/bench" report "$(arm_paths "$A")" "$(arm_paths "$B")" \
         --html "${OUT%.*}.html" --text 2>&1 | tee -a "$OUT"

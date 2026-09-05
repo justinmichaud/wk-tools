@@ -1,37 +1,25 @@
 #!/bin/bash
-#
-# The privileged half of writing a card. Runs as root via a NOPASSWD sudoers
-# rule naming this exact path: `wk sysimage write` drives it down a BatchMode
-# ssh with no terminal to answer a password prompt, and Linux cannot make a
-# #! script setuid.
-#
-# The grant is unconditional and forever, so:
-#
-#   - The verb set is a fixed allowlist. No passthrough, no eval, and no
-#     argument becomes part of a command line.
-#   - **Only USB and SD/MMC whole disks may be touched, ever.** Not
-#     "removable" -- RM=1 is set by things that are not cards, and an
-#     internal disk can present as removable. Transport is checked against
-#     a two-item list instead.
-#   - **A disk this machine is currently running from is refused**,
-#     whatever its transport: root's disk, /boot's, /boot/firmware's, any
-#     swap's, and the kernel command line's root=. On the fleet's Pis the
-#     system disk *is* an SD card or USB stick, so the transport check alone
-#     would happily overwrite the running machine.
-#     The one carve-out is a *second system* beside a rescue
-#     (`<device>@second`): every verb addresses partitions 3 and 4 only, the
-#     image is split into them rather than written over the disk, the disk
-#     identity is never touched, and arming is one line in the rescue's
-#     config.txt (os_prefix). Partitions 1 and 2 are never addressed.
-#   - A disk with anything mounted from it is refused.
-#   - Nothing is read from the environment; sudo's env_reset plus the explicit
-#     PATH below means a hostile environment cannot redirect a binary.
-#   - Secrets (a tailscale auth key, a WiFi passphrase) arrive on stdin,
-#     never as arguments, which are world-readable in /proc; the marker
-#     and the ssh *public* key are arguments because neither is a secret.
-#   - What arrives on stdin is data, never code: an image to a gated device, a
-#     key to a file, a unit archive to fixed directories under /etc, each under
-#     a size bound. No file root runs is a path a caller names.
+# Root via a NOPASSWD sudoers rule naming this exact path (`wk sysimage write` drives it
+# down a BatchMode ssh with no terminal for a password prompt, and Linux cannot make a
+# #! script setuid). The grant is forever, so:
+#   - a fixed verb allowlist: no passthrough, no eval, no argument becoming part of a
+#     command line, and nothing read from the environment (env_reset plus the PATH below);
+#   - **only usb and mmc whole disks may be touched, ever** -- not "removable", which
+#     RM=1 claims for things that are not cards and denies to no internal disk, so
+#     transport is checked against a two-item list instead;
+#   - **a disk this machine is running from is refused** whatever its transport (root's,
+#     /boot's, /boot/firmware's, any swap's, the kernel's root=): on these Pis the system
+#     disk *is* an SD card or USB stick, so transport alone would overwrite it;
+#   - a disk with anything mounted from it is refused;
+#   - the one carve-out is a system beside this one (`<device>@second`, `@third`): the
+#     image is split into partitions 3 and up, the disk identity is never touched, and
+#     1 and 2 are never addressed;
+#   - secrets (a tailscale auth key, a WiFi passphrase) arrive on stdin, never as
+#     arguments, which are world-readable in /proc; the marker and the ssh *public* key
+#     are arguments because neither is a secret;
+#   - what arrives on stdin is data, never code: an image to a gated device, a key to a
+#     file, a unit archive to fixed directories under /etc, each under a size bound, and
+#     no file root runs is a path a caller names.
 
 set -euo pipefail
 export PATH=/usr/sbin:/usr/bin:/sbin:/bin
@@ -42,11 +30,8 @@ say()  { printf 'wk-card-priv: %s\n' "$*"; }
 deny() { printf 'wk-card-priv: REFUSED: %s\n' "$*" >&2; exit 3; }
 fail() { printf 'wk-card-priv: %s\n' "$*" >&2; exit 1; }
 
-# --- the gate ----------------------------------------------------------------
-
-# Every disk this machine is running from, by kernel name. Four sources because
-# none is complete: findmnt misses swap, and the kernel command line is all that
-# is left when / is on an overlay.
+# Every disk this machine is running from, by kernel name. Four sources because none is
+# complete: findmnt misses swap, and the cmdline is all that is left over an overlay.
 booted_disks() {
     {
         findmnt -no SOURCE / 2>/dev/null || true
@@ -69,16 +54,12 @@ booted_disks() {
     done | sort -u
 }
 
-# gate <device> leaves the validated device path in GATED_DEV, or refuses.
-# Every check runs before anything is written: that is the security argument for
-# the sudoers rule. BOOTP/ROOTP are the pair a verb addresses -- 1 and 2, or a
-# system beside it (logical 5-6 and 7-8 inside an extended partition 3 on a card
-# shared with a rescue, primaries 3-4 on a dedicated bench medium). Set in this
-# shell, so gate is never called in a command substitution.
+# gate leaves the validated device in GATED_DEV or refuses, and every check runs before
+# anything is written: that is the security argument for the sudoers rule. BOOTP/ROOTP
+# are the pair a verb addresses -- 1 and 2, or 5-6/7-8 inside an extended partition 3
+# beside a rescue, or 3-4 on a dedicated medium. Set here, so gate is never a subshell.
 BOOTP=1; ROOTP=2; SECOND=""; SLOT=0; PFX=""; GATED_DEV=""
 
-# The addressed pair, from the table that exists. `write` changes the shape and
-# re-derives it from the first system's role instead (_second_write).
 _slot_resolve() { # <disk>
     local p3type
     # sfdisk prints the type indented (" 5"), and a case pattern does not trim.
@@ -139,10 +120,9 @@ EOF
 
     [ -z "$SECOND" ] || _slot_resolve "$dev"
 
-    # Skipped for `unmount`, whose purpose is to end this state, and for
-    # `boot-read`, which mounts read-only; the checks above it are never
-    # skipped. Under @second/@third only the addressed partitions are asked
-    # about: 1 and 2 may be this machine's own running root and boot.
+    # Skipped only for `unmount` and read-only `boot-read`; no check above it is ever
+    # skipped. Under @second/@third only the addressed partitions are asked about, since
+    # 1 and 2 may be this machine's own running root and boot.
     if [ "$allow_mounted" != allow-mounted ]; then
         if [ -n "$SECOND" ]; then
             mounted=$(lsblk -no MOUNTPOINT "$(part "$dev" "$BOOTP")" "$(part "$dev" "$ROOTP")" 2>/dev/null | grep -c . || true)
@@ -158,7 +138,6 @@ EOF
     GATED_DEV="$dev"
 }
 
-# /dev/sda -> /dev/sda1, /dev/mmcblk0 -> /dev/mmcblk0p1.
 part() {
     case "$1" in
         *[0-9]) printf '%sp%s' "$1" "$2" ;;
@@ -166,8 +145,7 @@ part() {
     esac
 }
 
-# Arguments that end up inside files: checked against what they may be, not
-# escaped.
+# Arguments that end up inside files: checked against what they may be, never escaped.
 check_name() {
     case "${1:-}" in
         ''|*[!a-zA-Z0-9._-]*) deny "'${1:-}' is not a usable name" ;;
@@ -192,8 +170,7 @@ check_partno() {
         || deny "'$1' is not a partition number this helper addresses (1-16)"
 }
 
-# A scratch mountpoint of this helper's own making: the caller never names a
-# path, which would be a far larger grant.
+# A scratch mountpoint of this helper's own making: a caller-named path is a bigger grant.
 with_mount() { # [-r] <partition> <function> [args...]
     local ro=""
     [ "${1:-}" = -r ] && { ro="-o ro"; shift; }
@@ -201,8 +178,7 @@ with_mount() { # [-r] <partition> <function> [args...]
     local m rc; m=$(mktemp -d /run/wk-card.XXXXXX)
     # shellcheck disable=SC2086
     mount $ro "$p" "$m" || { rmdir "$m"; fail "could not mount $p"; }
-    # Under a trap, not a bare call: `set -e` and `fail` both skip the line
-    # after it, and a card left mounted is one the next verb's gate refuses.
+    # Under a trap: `set -e` and `fail` skip the line after the call.
     trap 'umount "$m" 2>/dev/null || true; rmdir "$m" 2>/dev/null || true' EXIT
     rc=0; "$fn" "$m" "$@" || rc=$?
     trap - EXIT
@@ -212,10 +188,6 @@ with_mount() { # [-r] <partition> <function> [args...]
     return "$rc"
 }
 
-# --- the verbs ---------------------------------------------------------------
-
-# What this helper can do: a board's rescue carries the helper its image was
-# built with, which the driving end must not assume.
 v_status() { say "ok"; say "second=yes"; say "third=yes"; say "init.d=yes"; say "tailnet-keep=yes"; say "boot-read=yes"; }
 
 v_check() {
@@ -223,8 +195,7 @@ v_check() {
     say "$dev may be written: $(lsblk -dno TRAN,SIZE,MODEL "$dev" | tr -s ' ')"
 }
 
-# Nothing about the image is inspected: what makes it safe is where it can go,
-# which the gate has settled.
+# Nothing about the image is inspected: what makes it safe is where it may go.
 v_write() {
     local dev; gate "${1:-}"; dev=$GATED_DEV
     if [ -n "$SECOND" ]; then
@@ -235,9 +206,7 @@ v_write() {
     dd of="$dev" bs=4M conv=fsync status=none
     sync
 
-    # The kernel keeps using the table it read when the disk appeared, so
-    # everything after this would see stale partitions. Best-effort: EBUSY is
-    # not a reason to fail a write whose bytes are down and synced.
+    # Everything after this reads the table the kernel took when the disk appeared.
     if blockdev --rereadpt "$dev" 2>/dev/null; then
         say "partition table re-read"
     else
@@ -263,14 +232,12 @@ _fleet_edit() { # <mountpoint> <marker> <pubkey>
     chmod 0600 "$m$home/.ssh/authorized_keys"
     chown -R 0:0 "$m$home/.ssh"
 
-    # Read back: a write that did not land is invisible from here.
     grep -q . "$m/etc/wk-image" || fail "the identity marker did not land on this disk"
     grep -q '^ssh-\|^ecdsa-\|^sk-' "$m$home/.ssh/authorized_keys" \
         || fail "the driving key did not land in $home/.ssh/authorized_keys"
 }
 
-# base64 so neither value survives a quoting round trip and both can be
-# character-checked first.
+# base64 so neither value survives a quoting round trip and both can be checked first.
 v_fleet() {
     local dev marker key
     gate "${1:-}"; dev=$GATED_DEV
@@ -302,7 +269,6 @@ _tailnet_edit() { # <mountpoint> <hostname> <tag> <keyfile>
     chmod 0600 "$m/etc/wk/tailscale-authkey"
     chown -R 0:0 "$m/etc/wk"
 
-    # The key itself is not printed: its size and mode answer "did it land".
     grep -qx "hostname=$host" "$m/etc/wk/tailnet.conf" \
         || fail "the tailnet name did not survive the write to this disk"
     [ "$(stat -c '%a' "$m/etc/wk/tailscale-authkey")" = 600 ] \
@@ -313,14 +279,12 @@ _tailnet_edit() { # <mountpoint> <hostname> <tag> <keyfile>
 _whose_probe() { # <mountpoint>
     local f="$1/etc/wk-image"
     if [ -r "$f" ]; then
-        # Only the identifying fields this repo writes, not the whole file.
         sed -n 's/^\(id\|machine\|profile\|role\|builder\)=/&/p' "$f"
     else
         echo "marker: none"
     fi
 }
 
-# Which machine's system is on this disk, from /etc/wk-image on the disk itself.
 v_whose() {
     local dev; gate "${1:-}"; dev=$GATED_DEV
     with_mount -r "$(part "$dev" "$ROOTP")" _whose_probe
@@ -330,14 +294,11 @@ _joins_probe() { # <mountpoint>
     [ -x "$1/usr/sbin/wk-tailnet-join" ] && say "tailnet-join: yes" || say "tailnet-join: no"
 }
 
-# A verb of its own because the key has to be on stdin before `tailnet` can look:
-# the driving end decides whether to resolve it at all.
 v_joins() {
     local dev; gate "${1:-}"; dev=$GATED_DEV
     with_mount -r "$(part "$dev" "$ROOTP")" _joins_probe
 }
 
-# The auth key arrives on stdin.
 v_tailnet() {
     local dev host tag tmp rc
     gate "${1:-}"; dev=$GATED_DEV
@@ -349,8 +310,7 @@ v_tailnet() {
     esac
     tmp=$(mktemp /run/wk-card-key.XXXXXX); chmod 0600 "$tmp"
     cat > "$tmp"
-    # tskey-auth-, not tskey-: an API access token and an OAuth client secret
-    # share the prefix and administer the tailnet.
+    # tskey-auth-, not tskey-: an API token and an OAuth secret share the prefix.
     grep -q '^tskey-auth-' "$tmp" \
         || { rm -f "$tmp"; deny "that is not a tailscale auth key (they start 'tskey-auth-')"; }
     rc=0
@@ -364,14 +324,12 @@ _wifi_joins_probe() { # <mountpoint>
     [ -x "$1/usr/sbin/wk-wifi-join" ] && say "wifi-join: yes" || say "wifi-join: no"
 }
 
-# The same shape as `joins`, and for the same reason.
 v_wifi_joins() {
     local dev; gate "${1:-}"; dev=$GATED_DEV
     with_mount -r "$(part "$dev" "$ROOTP")" _wifi_joins_probe
 }
 
-# A value that sits inside a double-quoted wpa_supplicant string: a quote or
-# backslash would break out of it, a newline would start a second config line.
+# Sits in a double-quoted wpa_supplicant string: a quote, backslash or newline breaks out.
 check_wifi_value() { # <what> <value>
     case "${2:-}" in
         '') deny "$1 is empty" ;;
@@ -382,10 +340,7 @@ check_wifi_value() { # <what> <value>
     esac
 }
 
-# This machine's own WiFi credential, as a 0600 temp file holding ssid=/psk=, or
-# returns 3. A workstation holds it in its netplan -- NetworkManager writes its
-# connections there (/etc/netplan/90-NM-*.yaml). A board's rescue holds it in the
-# wpa_supplicant conf the card seeded, so it can seed the medium beside it.
+# netplan on a workstation; on a board's rescue, the wpa_supplicant conf a card seeded.
 _host_wifi() {
     if ls /etc/netplan/*.yaml >/dev/null 2>&1; then
         _netplan_wifi
@@ -416,8 +371,7 @@ sys.exit(3)
     fi
 }
 
-# The first network block's ssid= and psk= out of a wpa_supplicant conf (the
-# shape _wifi_edit writes). sed only: a rescue has no PyYAML.
+# sed only: a rescue has no PyYAML.
 _wpa_conf_wifi() { # <conf> -> a 0600 temp file holding ssid=/psk=, or returns 3
     local ssid psk tmp
     [ -r "$1" ] || return 3
@@ -470,8 +424,7 @@ _wifi_edit() { # <mountpoint> <ssid> <psk>
     } > "$f"
     chmod 0600 "$f"; chown 0:0 "$f"
 
-    # Fixed-string match (-F), not a pattern: an SSID must not be read as regex.
-    # The passphrase itself is not printed.
+    # Fixed-string match (-F): an SSID must not be read as a regex.
     grep -qxF "    ssid=\"$ssid\"" "$f" \
         || fail "the SSID did not survive the write to this disk"
     [ "$(stat -c '%a' "$f")" = 600 ] && [ -s "$f" ] \
@@ -486,7 +439,6 @@ _id_edit() { # <mountpoint> <old> <new>
     done
 }
 
-# So two cards written from one image cannot be confused for each other.
 v_identity() {
     local dev old new
     gate "${1:-}"; dev=$GATED_DEV
@@ -502,8 +454,7 @@ v_identity() {
 
 v_grow() {
     local dev root; gate "${1:-}"; dev=$GATED_DEV; root=$(part "$dev" "$ROOTP")
-    # A logical pair is already its zone's full size, and growing to the end of
-    # the disk would eat the system beside it.
+    # A logical pair fills its zone, and growing to the disk's end eats its neighbour.
     [ "$ROOTP" -gt 4 ] || printf ', +\n' | sfdisk -N "$ROOTP" --no-reread --force "$dev" >/dev/null
     partx -u "$dev" 2>/dev/null || partprobe "$dev" 2>/dev/null || true
     e2fsck -fy "$root" >/dev/null 2>&1 || true
@@ -511,8 +462,7 @@ v_grow() {
     say "$root grown to fill $dev"
 }
 
-# The only verb that may see mounted filesystems, and it still may not touch a
-# disk the machine is running from.
+# The only verb that may see mounted filesystems; the running-from refusal still holds.
 v_unmount() {
     local dev p mp any=0
     gate "${1:-}" allow-mounted; dev=$GATED_DEV
@@ -533,8 +483,7 @@ _role_edit() { # <mountpoint> <role>
 
     mkdir -p "$m/etc/wk"; chmod 0755 "$m/etc/wk"; chown 0:0 "$m/etc/wk"
 
-    # An absence as much as a presence: every unit that hands a machine back is
-    # `ConditionPathExists=!/etc/wk/rescue`, and a bench card has no marker.
+    # Every unit that hands a machine back is `ConditionPathExists=!/etc/wk/rescue`.
     if [ "$role" = rescue ]; then
         printf 'This system is a rescue: it keeps its board reachable and is never measured.\n' \
             > "$m/etc/wk/rescue"
@@ -543,8 +492,6 @@ _role_edit() { # <mountpoint> <role>
         rm -f "$m/etc/wk/rescue"
     fi
 
-    # And the identity marker's own `role=`, so a board can be asked what it is.
-    # One image serves both roles, and this is where they are reconciled.
     if [ -f "$f" ]; then
         sed -i "s/^role=.*/role=$role/" "$f"
         grep -qx "role=$role" "$f" \
@@ -560,8 +507,7 @@ _role_edit() { # <mountpoint> <role>
     fi
 }
 
-# A two-word vocabulary and nothing else reaches a command line: one known path
-# created or removed, one field of another rewritten.
+# A two-word vocabulary and nothing else reaches a command line.
 v_role() {
     local dev role
     gate "${1:-}"; dev=$GATED_DEV
@@ -574,7 +520,6 @@ v_role() {
     say "$dev is a $role system"
 }
 
-# For comparing a written card against the image streamed to it.
 v_verify() {
     local dev bytes
     gate "${1:-}"; dev=$GATED_DEV
@@ -591,21 +536,14 @@ v_eject() {
     say "$dev flushed"
 }
 
-# --- every edit an image needs, made on the card ------------------------------
-#
-# On the machine holding the reader, so the driving end never opens a Linux
-# filesystem: a macOS workstation has no mtools, debugfs or sfdisk.
+# Every edit is made where the reader is: a macOS workstation has no mtools or sfdisk.
 
-# The model of what a Pi's firmware asks of a boot tree
-# (boot/check-boot-files.py), root-owned beside this helper because root runs
-# it, so it may not be a path a caller names.
+# Root-owned beside this helper because root runs it, so not a path a caller names.
 CHECK_BOOT_FILES=/usr/local/libexec/wk-check-boot-files.py
 
-# This helper's own file, for the `helper` verb. $0 rather than a written-down
-# path: root runs this from the absolute path its sudoers rule names.
+# $0 rather than a written-down path: root runs this from the path sudoers names.
 SELF="$0"
 
-# Printable ASCII and whitespace only: anything else in a config.txt is not one.
 check_text() { # <what> <text>
     case "${2:-}" in
         '') deny "$1 is empty" ;;
@@ -631,8 +569,7 @@ print("partitions=%d" % len(table.get("partitions") or []))
 '
 }
 
-# Asked straight after a write: a stream that arrived with a shell banner ahead
-# of it hashes perfectly against itself and carries no table.
+# A stream that arrived with a shell banner ahead of it hashes against itself.
 v_parts() {
     local dev out
     gate "${1:-}"; dev=$GATED_DEV
@@ -640,8 +577,7 @@ v_parts() {
     printf '%s\n' "$out"
 }
 
-# Ubuntu's raspi images keep their cmdline under the os_prefix directory the
-# firmware selects, and an image carrying both boots the one under the prefix.
+# Ubuntu's raspi images keep their cmdline under the os_prefix directory.
 _boot_file() { # <mountpoint> <name> -- the path the firmware would read, or nothing
     local m="$1" name="$2" f
     for f in "$m/current/$name" "$m/$name"; do
@@ -666,8 +602,7 @@ v_root_spec() {
 _retarget_boot() { # <mountpoint> <partuuid of partition 2>
     local m="$1" root="$2" f
     f=$(_boot_file "$m" cmdline.txt) || fail "no cmdline.txt on this disk's boot partition"
-    # Both values as arguments: a root= read off a card is data, and data
-    # spliced into a sed script is a sed script.
+    # Both values as arguments: data spliced into a sed script is a sed script.
     python3 -c '
 import sys
 path, new = sys.argv[1], sys.argv[2]
@@ -682,9 +617,7 @@ with open(path, "w") as fh:
 _retarget_fstab() { # <mountpoint> <partuuid of partition 1> <partuuid of partition 2>
     local m="$1" boot="$2" root="$3" f="$1/etc/fstab"
     [ -f "$f" ] || { say "no /etc/fstab on this disk"; return 0; }
-    # A device path follows the reader rather than the card; a PARTUUID can be
-    # another disk's. A /boot line naming the old one fails local-fs.target and
-    # every network unit after it: the board boots and goes quiet.
+    # A device path follows the reader; a stale /boot line takes local-fs.target down.
     python3 -c '
 import sys
 path, boot, root = sys.argv[1], sys.argv[2], sys.argv[3]
@@ -716,10 +649,7 @@ if left:
     down with it."
 }
 
-# retarget <device> -- name the card's own partitions by PARTUUID, so it boots
-# from whatever device it is put in: a wic image says `root=/dev/mmcblk0p2`
-# because its wks file did. Both the kernel's root= and /boot in /etc/fstab are
-# rewritten, because fixing only the first leaves an empty /boot.
+# A wic image says `root=/dev/mmcblk0p2` because its wks file did; fstab's /boot too.
 v_retarget() {
     local dev out sig root boot
     gate "${1:-}"; dev=$GATED_DEV
@@ -748,7 +678,6 @@ _cmdline_append_edit() { # <mountpoint> <text>
     grep -qF -- "$add" "$f" || fail "the kernel command line addition did not land on this disk"
 }
 
-# Kernel command-line additions a profile declares. Idempotent by content.
 v_cmdline_append() {
     local dev add
     gate "${1:-}"; dev=$GATED_DEV
@@ -773,9 +702,7 @@ _config_append_edit() { # <mountpoint> <block> <marker line>
     grep -qxF -- "$marker" "$f" || fail "config.txt on this disk did not take the block"
 }
 
-# Firmware settings a profile declares, appended to the config.txt a Pi's
-# firmware reads whatever the OS is. Idempotent by the block's own
-# `# --- wk sysimage: <profile> ---` first line.
+# A Pi's firmware reads config.txt whatever the OS is.
 v_config_append() {
     local dev block marker
     gate "${1:-}"; dev=$GATED_DEV
@@ -798,8 +725,7 @@ _boot_id_edit() { # <mountpoint> <id>
         || fail "the identity did not survive the write to the boot partition"
 }
 
-# On the boot partition rather than in /etc/wk-image, so `wk boot` can read it
-# off a disk that is not running without touching ext4.
+# On the boot partition, so `wk boot` reads it off a stopped disk without ext4.
 v_boot_id() {
     local dev
     gate "${1:-}"; dev=$GATED_DEV
@@ -808,8 +734,7 @@ v_boot_id() {
     say "$dev's boot partition names this system $2"
 }
 
-# Checked before anything is unpacked: a traversal, an absolute path and a
-# nested directory are refused by the same rule.
+# Checked before anything is unpacked: traversal, absolute path, nested directory alike.
 _units_names() { # <tar file>
     local list name
     list=$(tar -tf "$1") || deny "the unit archive is not a tar file"
@@ -849,10 +774,7 @@ _unit_target() { # <unit file> -- the target its [Install] section asks for
 
 _units_edit() { # <mountpoint> <staging directory>
     local m="$1" work="$2" f name target n=0
-    # Which init this image runs, read out of the image: one without systemd
-    # would take these units and land them where they never start. A BusyBox
-    # init runs /etc/init.d/S??* and nothing else, so it takes the archive's
-    # init.d scripts instead.
+    # A BusyBox init runs /etc/init.d/S??* and nothing else, so it takes those.
     if [ ! -e "$m/lib/systemd/systemd" ] && [ ! -e "$m/usr/lib/systemd/systemd" ]; then
         if [ ! -d "$m/etc/init.d" ]; then
             say "units: neither systemd nor /etc/init.d on this disk; nothing installed"
@@ -874,11 +796,9 @@ _units_edit() { # <mountpoint> <staging directory>
     for f in "$work"/systemd/*; do
         [ -f "$f" ] || continue
         name=$(basename "$f")
-        # `systemctl enable` never runs against a card, so the unit's own
-        # WantedBy= is what decides where it is symlinked.
+        # `systemctl enable` never runs against a card, so WantedBy= decides the link.
         target=$(_unit_target "$f")
-        # A service a timer starts declares no WantedBy= and must not, or it
-        # would run once at boot too.
+        # A service a timer starts declares no WantedBy=, or it runs at boot too.
         if [ -z "$target" ] && [ -f "$work/systemd/${name%.service}.timer" ]; then
             cat "$f" > "$m/etc/systemd/system/$name"
             chmod 0644 "$m/etc/systemd/system/$name"; chown 0:0 "$m/etc/systemd/system/$name"
@@ -905,7 +825,6 @@ _units_edit() { # <mountpoint> <staging directory>
     say "units: installed $n file(s)"
 }
 
-# The sysctl drop-ins, the same for either init (both read /etc/sysctl.d).
 SYSCTL_N=0
 _units_sysctl() { # <mountpoint> <staging directory>
     local m="$1" work="$2" f name
@@ -921,9 +840,6 @@ _units_sysctl() { # <mountpoint> <staging directory>
     done
 }
 
-# What makes a booted image a fleet system (a self-return watchdog, a
-# self-disarm, the profiling knobs), as a tar on stdin. The init the disk carries
-# decides whether the systemd units or the init.d scripts land.
 UNITS_MAX=1048576
 v_units() {
     local dev tmp work rc
@@ -947,11 +863,8 @@ v_units() {
     return "$rc"
 }
 
-# This machine's card helper and boot-file checker onto the system being written,
-# so the board that boots it can make the card edits its own lane needs. Every
-# system, not only a rescue: a bench system arms the next one. Nothing executable
-# arrives from the caller -- the bytes copied are the ones root already runs
-# here -- so this grants nothing on this machine.
+# Every system, not only a rescue: a bench system arms the next one. Nothing executable
+# arrives from the caller; these bytes are the ones root already runs here.
 _helper_install() { # <mountpoint>
     local m="$1" d="$m/usr/local/libexec"
     mkdir -p "$d" || fail "could not make $d on this disk"
@@ -973,10 +886,7 @@ v_helper() {
     with_mount "$(part "$dev" "$ROOTP")" _helper_install
 }
 
-# autoboot <device> -- the selector a medium holding two systems needs when the
-# firmware chooses between them (rpi5): partition 1 under [all], partition 3
-# under [tryboot], so one `reboot "0 tryboot"` boots the second pair. Fixed
-# content, written once when the second pair is made.
+# Where the firmware itself chooses between two systems (rpi5), spent by one reboot.
 _autoboot_write() { # <mountpoint>
     printf '[all]\nboot_partition=1\n[tryboot]\nboot_partition=3\n' > "$1/autoboot.txt"
     grep -q 'boot_partition=3' "$1/autoboot.txt" \
@@ -985,46 +895,26 @@ _autoboot_write() { # <mountpoint>
 }
 v_autoboot() {
     local dev; gate "${1:-}"; dev=$GATED_DEV
-    # Partition 1 whichever pair was addressed: the firmware reads the file from
-    # the medium's first boot filesystem.
+    # Partition 1 whichever pair was addressed: the firmware reads the medium's first.
     with_mount "$(part "$dev" 1)" _autoboot_write
 }
 
-# boot-read <device> <partition> <file> -- one of the fixed files a wk system
-# leaves on its boot partition, plus the two the *firmware* and the kernel read
-# there. Privileged because on a workstation the only password-free root is this
-# helper, so a plain `mount` over `sudo -n` answers "interactive authentication
-# is required" and the reader sees an empty card.
-# Read-only, a fixed filename allowlist, a bounded number of bytes, and a
-# partition number rather than a path. An absent file prints nothing.
-#
-# config.txt and cmdline.txt are on the list because a write's own appends land
-# there (disk_config_append, disk_cmdline_append) and nothing else could read
-# them back: whether `os_check=0` had reached an rpi5 card was a hypothesis for
-# two boots that this verb answers in one line (2026-09-04).
+# Read-only, a fixed filename allowlist, a bounded byte count, and a partition number
+# rather than a path. Privileged: a plain `mount` over `sudo -n` reads an empty card.
 BOOT_READ_MAX=65536
 _boot_read_probe() { # <mountpoint> <file>
     [ -f "$1/$2" ] || return 0
     head -c "$BOOT_READ_MAX" "$1/$2"
 }
-# Where the partition already is, if anything has it. An automounter usually
-# does on a workstation with a desktop session, and `mount` refuses a second
-# mountpoint for a device it already holds -- so mounting unconditionally
-# turned a read into "could not mount /dev/sda1" the first time this was asked
-# of a card in a running desktop (rpi5, 2026-09-04). Read it where it is, and
-# mount only when nothing else has: the same rule the bench-device half of
-# b_medium_read follows, and the one this verb replaced.
-#
-# The mountpoint comes from /proc/mounts for that exact partition, never from
-# the caller: this reads somewhere it did not choose, but not somewhere it was
-# told.
+# An automounter usually holds the partition on a desktop workstation, and `mount`
+# refuses a second mountpoint for it. The mountpoint comes from /proc/mounts, not the
+# caller.
 _boot_read_at() { # <partition> -- its mountpoint, if it has one
     awk -v p="$1" '$1 == p { print $2; exit }' /proc/mounts
 }
 v_boot_read() {
     local dev at; gate "${1:-}" allow-mounted; dev=$GATED_DEV
     check_partno "${2:-}"
-    # The allowlist is this verb's whole surface.
     case "${3:-}" in
         wk-image.id|wk-diag.txt|autoboot.txt|config.txt|cmdline.txt) ;;
         *) deny "'${3:-}' is not a file this helper reads off a boot partition
@@ -1042,8 +932,7 @@ _boot_check_run() { # <mountpoint> <dtb>
     python3 "$CHECK_BOOT_FILES" --root "$1" --dtb "$2"
 }
 
-# A kernel that cannot find its root panics and reboots; firmware that cannot
-# find a kernel halts, which costs a trip to the board.
+# A kernel that cannot find its root reboots; firmware missing a kernel halts the board.
 v_boot_check() {
     local dev rc=0
     gate "${1:-}"; dev=$GATED_DEV
@@ -1057,19 +946,10 @@ v_boot_check() {
     say "boot-check: every file the firmware asks for resolves"
 }
 
-# --- a system beside this machine's own (@second, @third) --------------------
-# The image on stdin is a whole card (MBR, boot FAT as partition 1, root as
-# partition 2). Where it lands depends on the first system's role: a rescue
-# shares its medium with two bench systems in an extended partition 3 whose
-# geometry is a pure function of the disk size (logical pairs 5-6 and 7-8, each
-# a 256 MiB boot and half the remaining space), so every write converges on the
-# same table; a dedicated bench medium carries one system as primaries 3-4,
-# sized to the image. Both partitions are hashed as they stream, for `verify`.
-# The python program arrives on stdin too, so the image is handed to it on fd 3
-# before the heredoc takes fd 0.
-
-# Where it is already mounted when this machine runs from the disk, mounted
-# briefly otherwise.
+# The image on stdin is a whole card (MBR, boot FAT as 1, root as 2). Beside a rescue it
+# goes into an extended partition 3 whose geometry is a function of the disk size alone
+# (5-6 and 7-8, a 256 MiB boot and half the rest each); on a dedicated medium, into 3-4.
+# The program arrives on stdin too, so the image is on fd 3 before the heredoc takes 0.
 _rescue_marker_probe() { [ -f "$1/etc/wk/rescue" ]; }
 _first_is_rescue() { # <disk>
     local p2 m; p2=$(part "$1" 2)
@@ -1241,20 +1121,15 @@ v_second_verify() {
     say "verified: partitions $BOOTP and $ROOTP hold the image's boot and root"
 }
 
-# Arming. The firmware boots the first FAT partition and only that one, so the
-# addressed system's kernel, device trees, overlays and cmdline are copied into
-# a prefix directory on the rescue's boot partition and selected with os_prefix.
-# The rescue's config.txt steps aside (config.txt.rescue) for one boot: the
-# armed system moves it back first thing, as does `second-disarm`.
+# The firmware boots the first FAT partition and only that one, so the addressed
+# system's boot files go into a prefix directory on it, selected with os_prefix.
 
-# `-r` for a verb that only reads: mounting a FAT read-write and unmounting it
-# rewrites the volume's dirty flag and its FSInfo sector.
+# Mounting a FAT read-write rewrites its dirty flag and FSInfo sector on unmount.
 _second_with_boot() { # [-r] <disk> <function> [args...] -- calls <function> <boot mountpoint> [args...]
     local ro=""
     [ "${1:-}" = -r ] && { ro=-r; shift; }
     local dev="$1" fn="$2" m; shift 2
-    # findmnt exits 1 for "not mounted", which under pipefail would end this
-    # helper before the mount below.
+    # findmnt exits 1 for "not mounted", which under pipefail would end this helper.
     m=$(findmnt -no TARGET "$(part "$dev" 1)" 2>/dev/null | head -1 || true)
     if [ -n "$m" ]; then
         "$fn" "$m" "$@"
@@ -1269,18 +1144,15 @@ _second_stage_copy() { # <mountpoint of the system's boot partition> <staging di
     [ -f "$stage/cmdline.txt" ] || fail "the system's boot partition has no cmdline.txt"
     [ -f "$stage/config.txt" ]  || fail "the system's boot partition has no config.txt"
 }
-# Plain copies onto the FAT: `cp -a` would try to preserve ownership over a
-# filesystem that has none. Both prefix directories go before the new one lands.
+# Plain copies onto the FAT: `cp -a` would preserve ownership a FAT cannot hold.
 _second_arm_install() { # <boot mountpoint> <staging directory> <prefix>
     local boot="$1" stage="$2" pfx="$3"
     rm -rf "$boot/$pfx.part"
     cp -r "$stage" "$boot/$pfx.part" || fail "could not copy the system's boot files onto the boot partition"
     rm -rf "$boot/second" "$boot/third"; mv "$boot/$pfx.part" "$boot/$pfx"
     [ -f "$boot/config.txt.rescue" ] || cp "$boot/config.txt" "$boot/config.txt.rescue"
-    # The prefix leads the file: the firmware resolves a filename as it reads
-    # the directive asking for one, so a prefix set after a `dtoverlay=` line
-    # never reaches that overlay's .dtbo, and one appended at the end lands
-    # inside whichever conditional section the image closes with.
+    # The prefix leads the file: the firmware resolves a filename as it reads the
+    # directive asking for one, and the end of the file is inside a conditional section.
     {
         printf '# --- wk armed: the %s system, for one boot (wk boot) ---\nos_prefix=%s/\n\n' "$pfx" "$pfx"
         sed '/^os_prefix=/d' "$boot/$pfx/config.txt"
@@ -1297,8 +1169,6 @@ _second_disarm_edit() { # <boot mountpoint>
         say "not armed"
     fi
 }
-# armed=yes|no is whether the rescue's config.txt has stepped aside;
-# armed_prefix says for which system, read from the os_prefix in force.
 _second_state_edit() { # <boot mountpoint>
     if [ -f "$1/config.txt.rescue" ]; then
         say "armed=yes"
@@ -1307,8 +1177,7 @@ _second_state_edit() { # <boot mountpoint>
         say "armed=no"
     fi
 }
-# Under the shared layout the partitions exist from the day the card is laid
-# out, so existence alone says nothing.
+# Under the shared layout the partitions exist from the day the card is laid out.
 _slot_present() { # <disk>
     [ -b "$(part "$1" "$ROOTP")" ] \
         && [ "$(blkid -o value -s TYPE "$(part "$1" "$ROOTP")" 2>/dev/null)" = ext4 ]
@@ -1335,20 +1204,13 @@ v_second_state() {
     _slot_present "$dev" && say "present=yes" || say "present=no"
 }
 
-# --- the second system's tailnet identity, across a rewrite ------------------
-# tailscaled's state on the bench root is the second system's node identity.
-# Kept aside before the split and put back after it, the rewritten system comes
-# up as the node the old one was: same name, same address, no join.
+# tailscaled's state is the node identity: a rewritten system comes up as the old node.
 TAILNET_STATE=var/lib/tailscale/tailscaled.state
-# Keyed by the medium, not by the pair: a board's bench role is one tailnet node.
-# Kept on the rescue's own root, the one filesystem a bench rewrite never
-# touches, so a fresh bench card rejoins as the node it was without any
-# credential that can administer the tailnet.
+# Keyed by the medium, not the pair: a board's bench role is one tailnet node. Kept on
+# the rescue's root, which a bench rewrite never touches; no tailnet credential.
 TAILNET_KEEP_DIR=/var/lib/wk/tailnet
 _tailnet_stash() { printf '%s/%s.state' "$TAILNET_KEEP_DIR" "$(basename "$1")"; }
 
-# The addressed pair first: a system written beside one already holding the
-# board's identity adopts it.
 _tailnet_roots() { # <disk>
     local p
     printf '%s\n' "$ROOTP"
@@ -1368,12 +1230,8 @@ _tailnet_restore_edit() { # <mountpoint of partition 4> <stash>
     [ -s "$1/$TAILNET_STATE" ] || fail "the tailnet state did not land"
     say "restored: the second system comes up as the node it was"
 }
-# Three places the identity can be, in decreasing immediacy: the pair being
-# rewritten, another bench pair on the medium, and what this board remembered.
 v_tailnet_save() {
     local dev stash p root; gate "${1:-}"; dev=$GATED_DEV
-    # A dedicated bench medium is rewritten whole, and the node it holds is the
-    # board's bench node just as a second system's is.
     mkdir -p "$TAILNET_KEEP_DIR" && chmod 0700 "$TAILNET_KEEP_DIR" && chown 0:0 "$TAILNET_KEEP_DIR" \
         || fail "could not make $TAILNET_KEEP_DIR, where this board remembers its bench node"
     stash=$(_tailnet_stash "$dev")
@@ -1388,7 +1246,6 @@ v_tailnet_save() {
             return 0
         fi
     done
-    # Nothing live on the medium: the remembered copy is the board's identity.
     if [ -f "$stash" ]; then
         say "kept=yes"
         say "adopted=remembered"
@@ -1402,14 +1259,9 @@ v_tailnet_restore() {
     stash=$(_tailnet_stash "$dev")
     [ -f "$stash" ] || { say "nothing kept"; return 0; }
     with_mount "$(part "$dev" "$ROOTP")" _tailnet_restore_edit "$stash"
-    # The stash is not spent: the next card written for this board -- a fresh
-    # one included -- takes the same identity rather than colliding with it.
+    # The stash is not spent: the next card for this board takes the same identity.
 }
 
-# --- dispatch ----------------------------------------------------------------
-#
-# One case, one verb, no default that runs anything: an unknown verb is a usage
-# error, never a fallback.
 verb="${1:-}"; shift || true
 case "$verb" in
     status)   v_status ;;

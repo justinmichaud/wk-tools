@@ -1,30 +1,10 @@
 #!/bin/bash
-#
-# The benchmark install running an A/B by itself, with nobody driving it.
-#
-# Planted onto the benchmark volume by `wk bench mac-ab` while the machine is
-# still in host mode, started by a per-user LaunchAgent when the bench account
-# auto-logs in, and gone again by the time the machine hands itself back.
-#
-# Runs itself here, unlike bench/mac-lane.sh, because this machine has no
-# network in bench mode (tolken is Wi-Fi only; the benchmark install joins
-# nothing). Nothing here persists: one job file, one agent, both removed by the
-# run that consumed them.
-#
-# There is no software boot-volume switch on Apple Silicon
-# (docs/HANDOFF-mac-perf-mode.md), so this script reboots and sees where it
-# lands: Macintosh HD returns to host mode; WK Bench lands back here, and the
-# state file saying the job is finished makes this script halt.
-#
-# THE ORDER OF OPERATIONS IS THE SAFETY: the state file is advanced before the
-# run so a panic or power cut does not repeat the attempt, the watchdog is
-# armed before the first run, and the hand-back runs from a trap.
+# The benchmark install running an A/B by itself: planted by `wk bench mac-ab` from host mode, started by a per-user LaunchAgent at autologin. It drives itself, unlike bench/mac-lane.sh, because this machine has no network in bench mode (tolken is Wi-Fi only).
+# There is no software boot-volume switch on Apple Silicon, so it reboots and sees where it lands. THE ORDER OF OPERATIONS IS THE SAFETY: the state file is advanced before the run so a power cut cannot repeat the attempt, the watchdog is armed before the first run, and the hand-back runs from a trap.
 
 set -euo pipefail
 export PATH=/usr/sbin:/usr/bin:/sbin:/bin
 
-# Set by the LaunchAgent plist `wk bench mac-ab` writes, always to /var/wk; the
-# fallback here is for running this by hand.
 WK_AB_ROOT="${WK_AB_ROOT:-/var/wk}"
 JOB="$WK_AB_ROOT/job.json"
 STATE="$WK_AB_ROOT/autorun.state"
@@ -32,27 +12,23 @@ LOG="$WK_AB_ROOT/autorun.log"
 AGENT_LABEL="com.wk.bench-ab"
 AGENT_PLIST="$HOME/Library/LaunchAgents/$AGENT_LABEL.plist"
 
-# Bounded, so "try again" cannot mean "boot loop".
-MAX_ATTEMPTS=3
+MAX_ATTEMPTS=3   # so "try again" cannot mean "boot loop"
 
 mkdir -p "$WK_AB_ROOT" 2>/dev/null
 exec >>"$LOG" 2>&1
 
 say() { printf '[%s] %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*"; }
 
-# `|| true`: a missing $STATE makes `sed` exit nonzero, fatal under pipefail.
-state_get() { sed -n "s/^$1=//p" "$STATE" 2>/dev/null | tail -1 || true; }
+state_get() { sed -n "s/^$1=//p" "$STATE" 2>/dev/null | tail -1 || true; }  # || true: a missing $STATE makes sed exit nonzero, fatal under pipefail
 state_set() {
     local k="$1" v="$2" tmp
     tmp="$STATE.tmp.$$"
-    # `|| true`: before $STATE exists `grep` exits nonzero, killing the group.
     { grep -v "^$k=" "$STATE" 2>/dev/null || true; printf '%s=%s\n' "$k" "$v"; } > "$tmp" \
         && mv "$tmp" "$STATE"
     sync 2>/dev/null || true  # the next thing this has to survive is an ungraceful reboot
 }
 
-# `|| true`: the python side signals an absent field with `sys.exit(1)`.
-jf() {  # a field out of the job, by python because the job is json
+jf() {  # a field out of the job, by python because the job is json; || true because the python side signals an absent field with exit 1
     /usr/bin/python3 - "$JOB" "$1" <<'PY' 2>/dev/null || true
 import json, sys
 try:
@@ -74,8 +50,6 @@ else: print(v)
 PY
 }
 
-# --- leaving bench mode ------------------------------------------------------
-# `halt` when rebooting would loop back to this same volume.
 _left=""
 leave_bench() {
     local how="$1" why="$2"
@@ -85,7 +59,7 @@ leave_bench() {
     state_set left_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     state_set left_how "$how"
     sync 2>/dev/null || true
-    case "$how" in  # sudo -n: log rather than hang on a prompt if NOPASSWD is gone
+    case "$how" in  # halt where a reboot would loop back to this volume; sudo -n logs rather than hangs if NOPASSWD is gone
         halt)   sudo -n shutdown -h now >/dev/null 2>&1 || say "WARNING: could not halt" ;;
         *)      sudo -n shutdown -r now >/dev/null 2>&1 || say "WARNING: could not reboot" ;;
     esac
@@ -98,12 +72,7 @@ remove_agent() {
     say "removed the launch agent ($AGENT_PLIST)"
 }
 
-# --- defusing the first-boot daemon -----------------------------------------
-# bench/mac-bench-firstboot.sh removes itself when it can; when it cannot it
-# runs on every boot, rsync --deletes its wk-tools copy over
-# ~bench/Development/wk-tools and ends with `shutdown -r +1`. The daemon and
-# this agent start within seconds of each other and its `shutdown` is a minute
-# later, so the script is killed first and the check repeated after the settle.
+# A first-boot daemon that could not remove itself runs on every boot, rsync --deletes its wk-tools copy over ~bench/Development/wk-tools, and ends with `shutdown -r +1` -- a minute after this agent starts, so it is killed first and the check repeated after the settle.
 FB_PLIST=/Library/LaunchDaemons/com.wk.bench-firstboot.plist
 FB_SELF=/usr/local/libexec/wk-bench-firstboot.sh
 
@@ -187,7 +156,6 @@ NARMS=$(jf n_arms);      NARMS="${NARMS:-2}"
 SETTLE=$(jf settle);     SETTLE="${SETTLE:-90}"
 FORCE=$(jf force)  # for the guest rehearsal, which cannot pass the quiet check; empty on the real volume
 
-# The variance knobs; cmd/bench's header documents each.
 export WK_BENCH_ASLR=$(jf aslr)
 export WK_BENCH_ENV_PAD=$(jf env_pad)
 export WK_BENCH_PATH_PAD=$(jf path_pad)
@@ -205,14 +173,11 @@ say "     wk-tools=$TOOLS"
     exit 1
 }
 
-# A mid-run kill leaves `running` for the attempt counter above to retry.
 state_set phase running
 state_set plan "$PLAN"
 state_set started_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
-# --- the watchdog ------------------------------------------------------------
-# Generous: the first run against a freshly copied build tree is legitimately
-# much slower than the rest, and a watchdog firing on it costs a whole cycle.
+# Generous: the first run against a freshly copied build tree is legitimately much slower than the rest, and a watchdog firing on it costs a whole cycle.
 DEADLINE=$(( (ROUNDS * NARMS + 1) * TIMEOUT + 600 ))
 say "watchdog: ${DEADLINE}s"
 (
@@ -228,13 +193,11 @@ WATCHDOG=$!
 # A trap, so a `set -e` death cannot leave the machine in bench mode.
 trap 'kill "$WATCHDOG" 2>/dev/null; leave_bench reboot "run finished or failed"' EXIT INT TERM
 
-# --- a settled session -------------------------------------------------------
 # The agent starts at login, the moment the machine is least quiet.
 say "settling for ${SETTLE}s"
 sleep "$SETTLE"
 
-# DARWIN_USER_TEMP_DIR, which run-benchmark's `patch` writes into, is created
-# by the per-user bootstrap, which at login may not have happened yet.
+# DARWIN_USER_TEMP_DIR, which run-benchmark's `patch` writes into, is created by the per-user bootstrap, which at login may not have happened yet.
 for _t in 1 2 3 4 5 6 7 8 9 10 11 12; do
     _tmp=$(getconf DARWIN_USER_TEMP_DIR 2>/dev/null) || true
     [ -n "$_tmp" ] && [ -d "$_tmp" ] && [ -w "$_tmp" ] && break
@@ -250,8 +213,7 @@ fi
 
 cancel_pending_reboot  # again, now that the minute someone else could schedule one has passed
 
-# Whatever owns the front window would throttle MiniBrowser into a timeout with
-# no error, so try to clear it first and let the runner have the last word.
+# Whatever owns the front window would throttle MiniBrowser into a timeout with no error.
 if [ -r "$TOOLS/lib/quiet.sh" ]; then
     front=$( . "$TOOLS/lib/common.sh" >/dev/null 2>&1
              . "$TOOLS/lib/quiet.sh"  >/dev/null 2>&1
@@ -264,9 +226,7 @@ if [ -r "$TOOLS/lib/quiet.sh" ]; then
     fi
 fi
 
-# The modal auth panel, invisible to the check above (SecurityAgent never
-# becomes the frontmost *application*). SIGKILL, not SIGTERM: SecurityAgent
-# holds XPC transactions open and logs forever instead of exiting.
+# The modal auth panel is invisible to the check above (SecurityAgent never becomes the frontmost *application*), and SIGKILL because it holds XPC transactions open instead of exiting.
 if pgrep -x SecurityAgent >/dev/null 2>&1; then
     say "a modal authentication panel is up (SecurityAgent) -- dismissing it"
     sudo -n killall -9 SecurityAgent >/dev/null 2>&1 || true
@@ -276,9 +236,7 @@ if pgrep -x SecurityAgent >/dev/null 2>&1; then
         || say "  dismissed"
 fi
 
-# Stopped, not merely asked to stay away: the preference reads back false yet a
-# scan can still run (docs/HANDOFF-mac-perf-mode.md). Booting the daemon out is
-# self-reversing, since this install reboots when the job ends.
+# The preference reads back false yet a scan can still run, so the daemon is booted out; self-reversing, since this install reboots when the job ends.
 say "stopping the software-update scanner"
 for svc in system/com.apple.softwareupdated system/com.apple.mobile.softwareupdated; do
     if sudo -n launchctl bootout "$svc" >/dev/null 2>&1; then
@@ -296,35 +254,22 @@ sudo -n defaults write /Library/Preferences/com.apple.SoftwareUpdate \
 sudo -n defaults write /Library/Preferences/com.apple.SoftwareUpdate \
     AutomaticDownload -bool false >/dev/null 2>&1 || true
 
-# Read out of the plist file, not `defaults`: cfprefsd answers with values the
-# file does not carry. Sorted, since `defaults write` rewrites the file at job
-# start and a re-serialised dict can reorder. Any of these moving across a run
-# means a scan happened, recorded against the arm rather than aborting.
+# Read out of the plist file because cfprefsd answers with values the file does not carry, and sorted because a re-serialised dict can reorder. Any of these moving across a run means a scan ran.
 msu_stamp() {
     /usr/bin/plutil -p /Library/Preferences/com.apple.SoftwareUpdate.plist 2>/dev/null \
         | grep -E '"Last[A-Za-z]*Date"' | sort | tr -d ' \n' || true
 }
 say "  scan stamp before the job: $(msu_stamp)"
 
-# The radio stays on during a run (docs/HANDOFF-mac-perf-mode.md); the scan
-# is only *detected*, per arm below.
-
 say "quiescing"
 "$TOOLS/wk" quiesce on >>"$LOG" 2>&1 || say "WARNING: quiesce reported a problem; the runner will judge it"
 
-# An A/A control runs both arms out of one staged payload, so file names alone
-# cannot say which side is which.
 RUNS="$WK_AB_ROOT/ab/$(state_get job_stamp)"
 [ -n "$(state_get job_stamp)" ] || RUNS="$WK_AB_ROOT/ab/unstamped"
 mkdir -p "$RUNS" 2>/dev/null
 newest_result() { ls -1 "$WK_AB_ROOT/results" 2>/dev/null | sort | tail -1 || true; }
 
-# --- the A/B -----------------------------------------------------------------
-# Interleaved (A B A B …), not blocked (A A B B): the machine drifts, and
-# blocking puts all of that drift on one side of the comparison.
-#
-# any_ok: a whole round failing means the next fails the same way. Not "abort
-# on the first failure" -- one flaky arm is what more rounds are for.
+# Interleaved (A B A B ...), not blocked (A A B B): the machine drifts, and blocking puts all of that drift on one side of the comparison.
 any_ok=""
 
 r=1
@@ -378,12 +323,9 @@ while [ "$r" -le "$ROUNDS" ]; do
     r=$((r + 1))
 done
 
-# No `wk quiesce off`: quiet is this install's permanent state
-# (bench/mac-bench-firstboot.sh sets it at provisioning time).
+# No `wk quiesce off`: quiet is this install's permanent state, set at provisioning time.
 say "leaving the machine quiesced (its permanent state; see the comment here)"
 
-# --- the verdict, written where the results are ------------------------------
-# Best effort: it can be redone from host mode against the same files.
 say "summarising"
 "$TOOLS/wk" bench ab-summary --root "$WK_AB_ROOT" --runs "$RUNS/runs.tsv" \
     --out "$RUNS/summary.txt" >>"$LOG" 2>&1 \
@@ -398,9 +340,7 @@ kill "$WATCHDOG" 2>/dev/null  # and reaped below, or bash logs "Terminated: 15" 
 wait "$WATCHDOG" 2>/dev/null || true
 trap - EXIT INT TERM
 
-# Read the same way `wk boot mbp --status` does: `boot-volume` is three
-# colon-separated UUIDs, only the last naming anything on disk, compared
-# against the group booted now.
+# `boot-volume` is three colon-separated UUIDs, only the last naming anything on disk.
 booted_is_default() {
     local nv grp
     nv=$(python3 "$TOOLS/lib/wkmac.py" boot-volume 2>/dev/null) || true
@@ -411,9 +351,6 @@ booted_is_default() {
     [ "$nv" = "$grp" ]
 }
 
-# When this volume is the firmware default, the reboot below would land back
-# here and halt, leaving a completed A/B unreachable. Staying up does not loop:
-# the agent is removed.
 if booted_is_default; then
     say "this volume is the firmware default, so a reboot would land back here and"
     say "halt -- leaving a finished A/B on a machine nothing can reach. Staying up"

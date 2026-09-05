@@ -1,21 +1,6 @@
 #!/usr/bin/env python3
-"""The workspace half of the fleet-request boundary.
-
-Runs *inside* a workspace, where the only thing that exists is one unix socket
-at /run/wk/broker.sock. It speaks the protocol and prints; it decides nothing.
-Every refusal in the exchange comes from the far end, and this deliberately
-adds none of its own beyond "there is no socket here" -- a client that
-pre-validated would be a second copy of a policy, and the copy inside the
-sandbox is the one that could be edited.
-
-Usage, which is not a user interface: `wk boot` and `wk pi` build these lines
-(lib/broker.sh), and a person sees their own command's words, not this.
-
-    wk-broker-client.py <verb> [key=value ...]
-
-Exit status is the brokered command's own, so a workspace script can branch on
-it: 0 success, 1 the command failed or was refused, 2 no broker is listening.
-"""
+"""wk-broker-client.py <verb> [key=value ...] -- the workspace half of the fleet-request boundary, over /run/wk/broker.sock. It speaks and prints; every refusal comes from the far end.
+Exit status is the brokered command's own: 0 success, 1 failed or refused, 2 no broker listening."""
 
 import json
 import os
@@ -24,9 +9,7 @@ import sys
 
 SOCKET = os.environ.get("WK_BROKER_SOCKET", "/run/wk/broker.sock")
 
-# Colours match lib/common.sh's, so a brokered line is indistinguishable from a
-# local one in a terminal -- which is the point: the request is a detail of how
-# the command reached the hardware, not a different kind of output.
+# Colours match lib/common.sh's, so a brokered line reads the same as a local one.
 RED, YEL, GRN, OFF = "\033[31m", "\033[33m", "\033[32m", "\033[0m"
 if not sys.stderr.isatty():
     RED = YEL = GRN = OFF = ""

@@ -3,24 +3,19 @@
 # wk mcp -- MCP server exposing workspace management to the Claude Desktop app
 # wk: where=host name=none group=hosts needs python3
 #
-# Lets the desktop app spin up a workspace on its own, the way the cloud
-# container feature does: ask it to look at a bug, and it creates a named
-# workspace and works inside it.
+# Lets the desktop app create a named workspace and work inside it.
 #
-# Two properties matter more than features here, because unlike `wk ai claude`
-# this process runs on the *host*, outside the sandbox:
+# This process runs on the *host*, outside the sandbox, so:
 #
 #   Only the driver contract is exposed. There is no generic exec tool, no
 #   argument that becomes a host path, and no way to name a directory outside
 #   a workspace. Every call bottoms out in `wk <subcommand> <validated-name>`,
 #   and the name is checked against a strict pattern before it is used.
 #
-#   Creation is bounded. An agent that can make workspaces can fill a disk, so
-#   there is a ceiling on how many can exist at once (WK_MCP_MAX_WORKSPACES).
+#   Creation is bounded: WK_MCP_MAX_WORKSPACES caps how many can exist at once.
 #
-# No third-party dependencies: raw JSON-RPC over stdio, so the host needs
-# nothing installed beyond the python3 that ships with the Xcode command line
-# tools.
+# Raw JSON-RPC over stdio, so the host needs nothing beyond the python3 that
+# ships with the Xcode command line tools.
 #
 # Tools exposed over MCP: workspace_create, workspace_list, workspace_build,
 # workspace_exec, workspace_status, workspace_destroy.
@@ -36,8 +31,7 @@ WK = os.path.normpath(WK)
 
 MAX_WORKSPACES = int(os.environ.get("WK_MCP_MAX_WORKSPACES", "6"))
 
-# Deliberately strict. This value becomes a container name, a directory name
-# and an ssh host alias, so anything exotic is a bug at best.
+# This value becomes a container name, a directory name and an ssh host alias.
 NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$")
 
 
@@ -73,7 +67,6 @@ def count_workspaces():
     rc, out = run_wk(["ls"], timeout=60)
     if rc != 0:
         return 0
-    # Skip the header and the trailing summary lines.
     return sum(
         1
         for line in out.splitlines()[1:]
@@ -186,11 +179,8 @@ def call_tool(name, args):
         if not re.match(r"^[a-z0-9-]{1,32}$", str(config)):
             raise ValueError("invalid config name")
         rc, out = run_wk(["build", ws, config], timeout=14400)
-        # `wk build` already reports a verdict, extracts the first error, and
-        # detects stalls, so pass its summary through rather than dumping a log
-        # tail the model then has to interpret. Exit 124 means the watchdog
-        # killed a job that had gone silent -- worth naming, because otherwise
-        # it is indistinguishable from a slow build.
+        # `wk build` already extracts the first error, so its summary is passed
+        # through. Exit 124 is the watchdog killing a job that had gone silent.
         summary = "\n".join(out.splitlines()[-40:])
         if rc == 0:
             return f"BUILD OK\n{summary}"
@@ -203,10 +193,8 @@ def call_tool(name, args):
         cmd = args.get("command", "")
         if not isinstance(cmd, str) or not cmd.strip():
             raise ValueError("command must be a non-empty string")
-        # The command is passed as a single argument to the workspace's own
-        # shell, inside the container. It cannot reach the host: `wk` execs
-        # podman, and a container bind-mounts this checkout and the secrets
-        # dir read-only, nothing else of the host's.
+        # This cannot reach the host: a container bind-mounts only this checkout
+        # and the secrets dir, read-only.
         rc, out = run_wk(["enter", ws, "bash", "-lc", cmd], timeout=3600)
         tail = "\n".join(out.splitlines()[-200:])
         return tail if rc == 0 else f"exit {rc}:\n{tail}"

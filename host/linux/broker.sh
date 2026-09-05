@@ -1,6 +1,4 @@
-# The fleet-request broker, as a systemd --user service. Containers and broker
-# share this machine, so the socket it binds in %t/wk is the directory every
-# workspace bind-mounts at /run/wk (targets/container.sh).
+# The socket the unit binds in %t/wk is what workspaces mount at /run/wk.
 
 . "$WK_ROOT/lib/store.sh"
 . "$WK_ROOT/host/units.sh"

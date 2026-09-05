@@ -3,11 +3,11 @@
 # wk vm <sub> -- disposable macOS VMs for building the Apple ports
 # wk: where=host name=none group=hosts needs tart
 #
-# macOS has no container primitive for macOS userspace -- Apple's `container`
-# CLI runs Linux containers -- so isolation for an Apple-port build is a VM.
+# macOS has no container primitive for macOS userspace, so isolation for an
+# Apple-port build is a VM.
 #
-# Lifecycle only. Everything else goes through the ordinary commands, because
-# `wk new <name> --target vm` registers the target and they resolve it there.
+# Lifecycle only: `wk new <name> --target vm` registers the target, and the
+# ordinary commands resolve it from there.
 #
 #   ls                        list guests and their state, and whether the
 #                             golden base still matches its provisioning inputs
@@ -22,8 +22,7 @@
 #   sync <name>               put this checkout's HEAD commit of wk-tools in it
 #   rm <name>                 destroy it and forget the target
 #
-# `wk vm base` is the exception that is not lifecycle-per-workspace: the golden
-# guest every workspace is cloned from.
+# `wk vm base` manages the golden guest every workspace is cloned from.
 #
 #   base                      build it if missing, otherwise report it ready
 #   base --refresh            fast-forward its checkout in place (cheap)
@@ -50,8 +49,6 @@ _write_alias() {
 
 SUB="${1:-ls}"; shift || true
 
-# Every lifecycle subverb but `base` takes exactly one positional, never a flag.
-# Checked once here rather than in each arm.
 case "$SUB" in
     ls)   [ $# -eq 0 ] || die "usage: wk vm ls; see wk vm -h" ;;
     base) [ $# -le 1 ] || die "usage: wk vm base [--refresh|--rebuild|--rm]; see wk vm -h" ;;
@@ -63,11 +60,7 @@ esac
 case "$SUB" in
 ls)
     printf '%-20s %s\n' NAME STATE
-    # t_list is tab-separated so it stays machine-readable; the columns are a
-    # presentation concern.
     t_list 2>/dev/null | awk -F'\t' '{printf "%-20s %s\n", $1, $2}' || true
-    # Recomputed on every read (vm_base_findings), never remembered, and
-    # rendered by the one renderer `wk vm check` and `wk vm start` use.
     printf '\n%-20s %s\n' BASE "$WK_VM_BASE -- every guest above is a clone of it"
     vm_render_findings <<FINDINGS || true
 $(vm_base_findings)
@@ -79,10 +72,6 @@ new)
     info "created; start it with: wk vm start $NAME"
     ;;
 check)
-    # Read-only, and it starts nothing: booting a stopped guest to look would
-    # change the thing being asked about. A desktop answer is a property of the
-    # base, so its remedy is a base that carries the setting -- never a patch to
-    # the running guest; what is resident is this guest's own.
     NAME="${1:-}"; require_name "$NAME"
     _probe=$(vm_desktop_probe "$NAME" 2>/dev/null) || _probe=""
     [ -n "$_probe" ] || die "'$NAME' did not answer. It has to be running and reachable
@@ -90,8 +79,6 @@ check)
     _load=$(vm_load_probe "$NAME" 2>/dev/null) || _load=""
     _bad=0
 
-    # The base first: it causes most of what the desktop report finds, and the
-    # one thing no start can converge -- the account's password.
     vm_render_findings <<FINDINGS || _bad=$?
 $(vm_base_findings)
 FINDINGS
@@ -124,7 +111,6 @@ start)
     info "$NAME is up at $ip"
     log  "  wk build $NAME mac-release"
     log  "  zed ssh://wk-$NAME$(t_src "$NAME")"
-    vm_login_note
     ;;
 stop)
     NAME="${1:-}"; require_name "$NAME"
@@ -136,29 +122,19 @@ ip)
     ;;
 enter)
     NAME="${1:-}"; require_name "$NAME"
-    # Before the shell, not after: this exec's away and never comes back, and
-    # the note is for the guest's *window*.
     vm_login_note
     t_enter "$NAME"
     ;;
 sync)
-    # This tree's HEAD commit of wk-tools into a running guest (lib/tools.sh
-    # refuses while the tree is dirty), for a change wanted before a build.
     NAME="${1:-}"; require_name "$NAME"
     t_sync_tools "$NAME"
     info "synced wk-tools into $NAME"
     ;;
 base)
-    # Pulled, provisioned and shut down once, then cloned for every workspace.
     case "${1:-}" in
     --rebuild)
-    # Re-pulls nothing -- the OCI cache is still there -- but does redo the
-    # WebKit clone and the installers.
-    #
-    # Asked before the delete, not by provisioning an hour later: a base is
-    # given a commit, so a dirty tree refuses -- and refusing after the destroy
-    # costs a clone, a 320GB grow and a boot to reach a verdict this one knows
-    # for free.
+    # Asked before the delete: refusing a dirty tree after the destroy would
+    # cost a clone, a 320GB grow and a boot to reach the same verdict.
         tools_committed || die "the golden base is given a commit, so it cannot be built from
     this tree (see above). Nothing has been deleted."
         confirm "delete and rebuild the golden base VM '$WK_VM_BASE'?" || die "aborted"
@@ -167,11 +143,8 @@ base)
         _ensure_base
         ;;
     --rm)
-        # Erasing the largest single thing on the machine (162 GB measured
-        # here). Two artifacts, asked separately since they cost differently to
-        # get back: the golden guest (hours) and the pulled OCI image (a
-        # download). Existing workspaces are unaffected: a `tart clone` is
-        # independent, and APFS keeps referenced blocks alive.
+        # The largest single thing on the machine (162 GB measured here). Existing
+        # workspaces survive it: a `tart clone` is independent and APFS keeps its blocks.
         _base_exists || die "no golden base '$WK_VM_BASE' on this machine -- nothing to erase.
     'wk vm base' builds one; 'wk disk' says what everything here costs."
         sz=$(du -sh "${TART_HOME:-$HOME/.tart}/vms/$WK_VM_BASE" 2>/dev/null | cut -f1 | tr -d ' ' || echo '?')
@@ -195,12 +168,8 @@ base)
         exit 0
         ;;
     --refresh)
-        # The cheap one: boot the existing base, fast-forward its checkout, shut
-        # it down, so new workspaces start from current main. Existing
-        # workspaces are already independent clones.
         _base_exists || die "no golden base yet -- run 'wk vm base'"
-        # A refresh re-runs provisioning, which ends by writing the marker -- so
-        # it is also how a base that lost its marker gets one back.
+        # Provisioning ends by writing the marker, so this also restores a lost one.
         _provision_base
         ;;
     "")

@@ -1,14 +1,9 @@
-# The podman machine that hosts every workspace: exactly three mounts (only one
-# writable), rootful, and bounded resources, each verified rather than assumed
-# (README.md, "Recovery"). Renaming this checkout breaks the mounts; `./setup`.
-# TODO: nothing here is known to need root. Measure a machine created without
-# --rootful -- `wk new`, `wk build`, `wk status`, `wk enter` -- before dropping it.
+# TODO: measure a machine created without --rootful before dropping the flag.
 . "$WK_ROOT/lib/store.sh"
 
 WK_MACHINE="${WK_MACHINE:-wk}"
 
-# applehv permits exactly one running VM, so a leftover machine blocks `wk` from
-# starting with "only one VM can be active at a time".
+# applehv permits exactly one running VM, so a leftover machine blocks `wk`.
 _others=$(podman machine list --format json 2>/dev/null \
     | python3 -c "
 import json,sys
@@ -39,24 +34,18 @@ _mem=$(envelope_mem_mb)
 # Set only at creation: podman machine cannot resize a disk afterwards.
 _disk="${WK_DISK_GB:-200}"
 
-# The mounts, as `source:target:mode` triples -- one list, read by the init and
-# by the verify that follows. The source directories exist first: podman refuses
-# to init against a mount source that is not there. Every target is under /var
-# because the machine OS is an ostree one (README.md, "Recovery").
-# TODO: upstream -- podman should canonicalise a --volume target against the
-# machine OS at init, or refuse one it knows systemd will not mount.
+# TODO: upstream -- podman 5.4 does not canonicalise a --volume target against
+# the machine OS (ostree, hence /var), and a non-canonical one yields a .mount
+# unit that fails at boot: the machine then runs without the mount, silently.
 ensure_dir "$(wk_secrets_dir)" 0700
 ensure_dir "$(wk_agent_rw_dir)" 0700
 _secrets_mount="$(wk_secrets_dir):$WK_STORE/secrets:ro"
 _tools_mount="$WK_ROOT:/var/opt/wk-tools:ro"
 _agent_rw_mount="$(wk_agent_rw_dir):$WK_STORE/agent-rw:rw"
 
-# `podman machine inspect` does not expose Mounts at all (podman 5.4), so a
-# --format query yields nothing and the check would pass by accident.
+# `podman machine inspect` does not expose Mounts (podman 5.4); read the config.
 _cfg="$HOME/.config/containers/podman/machine/applehv/$WK_MACHINE.json"
 
-# One of `ok`, `notro`, `differs` or `unknown` on the first line, then one
-# `source:target ro|rw` line per mount the machine actually has.
 _mount_state() {
     python3 - "$_cfg" "$_secrets_mount" "$_tools_mount" "$_agent_rw_mount" <<'PY'
 import json, os, sys
@@ -94,7 +83,6 @@ for m in sorted(mounts, key=lambda m: (m["Source"], m["Target"])):
 PY
 }
 
-# All a recreate destroys is regenerable but bench/, which holds measurements.
 _report_losses() {
     if [ "$(podman machine inspect "$WK_MACHINE" --format '{{.State}}')" != running ]; then
         if [ -n "${WK_DRY_RUN:-}" ]; then
@@ -113,9 +101,6 @@ _report_losses() {
     ' </dev/null 2>/dev/null | sed 's/^/    /' >&2
 }
 
-# The targets the machine asks for and has not got: a .mount unit that fails at
-# boot leaves the machine running without the mount while the config goes on
-# naming it. A stopped machine is not started to ask; this is reached from a read.
 _absent_targets() {
     [ "$(podman machine inspect "$WK_MACHINE" --format '{{.State}}' 2>/dev/null)" = running ] \
         || return 0
@@ -128,15 +113,12 @@ _absent_targets() {
     done
 }
 
-# Read into variables rather than piped into `head`, which under `pipefail` makes
-# a python killed by SIGPIPE the caller's failure.
+# No `| head`: under pipefail a python killed by SIGPIPE is the caller's failure.
 _mounts=""
 _verdict=""
 _absent=""
 _read_mounts() {
     _mounts=$(_mount_state)
-    # $'\n', not "$(printf '\n')": command substitution strips the trailing
-    # newline, leaving `%%*`, which strips the whole string.
     _verdict=${_mounts%%$'\n'*}
     _absent=""
     if [ "$_verdict" = ok ]; then
@@ -146,10 +128,6 @@ _read_mounts() {
 }
 _mount_rows() { printf '%s\n' "$_mounts" | tail -n +2 | sed '/^[[:space:]]*$/d'; }
 
-# The one gate, called before the recreate decision and again after it.
-# <after-init> is set on the call following this run's own `podman machine init`,
-# where a failure is podman and this file disagreeing about a path's spelling, so
-# advising `./setup` would loop for ever.
 _check_mounts() { # [after-init]
     _read_mounts
     if [ "$_verdict" = absent ] && [ -n "${1:-}" ]; then
@@ -250,10 +228,8 @@ if ! podman machine inspect "$WK_MACHINE" >/dev/null 2>&1; then
     info "creating podman machine '$WK_MACHINE' (${_cores} cpus, ${_mem} MiB, ${_disk} GiB)"
     log  "this downloads a Fedora CoreOS image and takes a few minutes"
 
-    # Naming any --volume overrides podman's defaults (/Users, /private,
-    # /var/folders). No --playbook, though podman takes one: it runs at first
-    # boot from a generated `ConditionFirstBoot=yes` unit whose recap nothing
-    # reads, so a failed task is silent; vmtools.sh runs it over ssh instead.
+    # Naming any --volume overrides podman's defaults (/Users, /private, /var/folders).
+    # No --playbook: it runs from a first-boot unit whose failures nothing reads.
     podman machine init "$WK_MACHINE" \
         --cpus "$_cores" \
         --memory "$_mem" \
@@ -265,15 +241,11 @@ if ! podman machine inspect "$WK_MACHINE" >/dev/null 2>&1; then
 
     changed "created podman machine '$WK_MACHINE'"
 
-    # The mounts are only readable from a running machine.
     podman machine start "$WK_MACHINE" >/dev/null
 fi
 
-# Checked on every setup run rather than trusted from creation time, including
-# straight after an init, whose own flags it holds to.
 _check_mounts after-init
 
-# `podman machine set` requires the machine to be stopped.
 _cur_cpus=$(podman machine inspect "$WK_MACHINE" --format '{{.Resources.CPUs}}' 2>/dev/null || echo "")
 _cur_mem=$(podman machine inspect "$WK_MACHINE" --format '{{.Resources.Memory}}' 2>/dev/null || echo "")
 

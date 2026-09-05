@@ -1,12 +1,5 @@
 #!/bin/sh
-# Streams the phone's camera over the tailnet, for watching a screen the
-# out-of-band console (blank BMC framebuffer, GPU-bypassed firmware) cannot
-# show. With the camera kill switch off the sensor is electrically
-# disconnected, so this waits for the device rather than failing without it.
-# Binds to the tailnet address only, never the house WiFi.
-#
-# UNTESTED on either phone: libcamera's sensor formats aren't always what plain
-# v4l2 consumers expect. If ffmpeg can't open the node, fix the pipeline here.
+# UNTESTED on either phone: libcamera's sensor formats are not always what a plain v4l2 consumer expects, so the pipeline below may need work. With the camera kill switch off the sensor is electrically disconnected, so this waits for a device rather than failing without one.
 set -u
 
 camera=off
@@ -26,7 +19,6 @@ pick_device() {
     [ -n "$camera_device" ] && { [ -e "$camera_device" ] && printf '%s' "$camera_device"; return; }
     for d in /dev/video*; do
         [ -e "$d" ] || continue
-        # Picked by capability: a phone exposes several video nodes (ISP, mem2mem) besides the sensor.
         if v4l2-ctl -d "$d" --all 2>/dev/null | grep "Video Capture" >/dev/null 2>&1; then
             printf '%s' "$d"; return
         fi
@@ -48,11 +40,9 @@ while :; do
     fi
 
     log "streaming $dev on http://$addr:$camera_port/"
-    # -listen 1: one client at a time. Low frame rate: a screen, over WiFi, on a phone that is also routing.
     ffmpeg -nostdin -hide_banner -loglevel warning \
         -f v4l2 -framerate 5 -video_size 640x480 -i "$dev" \
         -q:v 8 -f mjpeg -listen 1 "http://$addr:$camera_port" \
         || log "ffmpeg exited ($?) -- retrying"
-    # A clean exit is usually the switch flipping off or a client disconnecting.
     sleep 5
 done

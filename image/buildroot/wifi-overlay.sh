@@ -1,17 +1,4 @@
 #!/usr/bin/env bash
-#
-# Assemble the rootfs overlay that lets a buildroot image bring up WiFi from a
-# credential seeded onto the card.
-#
-#   image/buildroot/wifi-overlay.sh <staging-dir>
-#
-# No binary to fetch: wpa_supplicant is a package this board's defconfig
-# selects (BR2_PACKAGE_WPA_SUPPLICANT, image/buildroot/external/configs), so
-# the overlay carries only the script and init line.
-#
-# It must contain no credential: the SSID and passphrase arrive with the card
-# (disk_seed_wifi, boot/disk.sh). wk-wifi-join is installed from the Yocto
-# layer's one copy rather than duplicated here.
 set -euo pipefail
 WK_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 . "$WK_ROOT/lib/common.sh"
@@ -21,9 +8,7 @@ STAGE="${1:-}"
 
 info "assembling the wifi overlay in $STAGE"
 rm -rf "$STAGE"
-# Regular, world-readable files and nothing else: rsync at target-finalize runs
-# as the build user, and a mode-0700 directory here fails the build with rsync
-# error 23.
+# World-readable only: rsync at target-finalize runs as the build user, and a mode-0700 directory fails it with error 23.
 mkdir -p "$STAGE/usr/sbin" "$STAGE/etc/init.d"
 
 install -m 0755 \

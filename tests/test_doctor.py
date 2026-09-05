@@ -362,8 +362,11 @@ class TestTheCredentialsSection(unittest.TestCase):
     it is one verdict from lib/credcheck.py's rules, driven here by what is in
     a scratch store."""
 
-    START = "# --- what each credential can still do"
-    END = "# --- root costs a password"
+    # Anchored on the sections themselves, not on the comment banners above
+    # them: a banner is not structure, and slicing by one made this suite
+    # demand that two comments keep existing.
+    START = 'section "credentials"'
+    END = 'section "root access"'
 
     def block(self):
         text = CMD_DOCTOR.read_text()

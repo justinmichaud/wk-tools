@@ -3,17 +3,14 @@
 # wk start [<workspace>] -- bring one workspace back up, or everything
 # wk: where=workspace name=optional forward=no group=hosts needs podman
 #
-# With a workspace named, brings only that workspace's environment back through
-# the driver contract (t_start). A target with no notion of starting one says so.
 # `forward=no`: runs on the host that holds the environment, never forwarded
-# into the podman VM.
-#
-# With no workspace, starts the podman machine, then every workspace container
-# that exists. Container init does not re-run: .wkdev-init guards its task list
-# behind /run/.wkdev-init-done. macOS guests are listed rather than started.
+# into the podman VM. macOS guests are listed rather than started.
 #
 #   wk start                 the podman machine, then every container
 #   wk start <workspace>     only that workspace's environment
+#
+# WK_NO_CLAUDE_RC=1 skips restarting claude remote control in the containers
+# that came back up.
 
 set -euo pipefail
 WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -50,7 +47,6 @@ if is_macos && [ -z "${WK_IN_VM:-}" ]; then
     fi
 fi
 
-# Plain podman, not sudo: see the note in cmd/stop.
 stopped=$(_in_machine 'podman ps -a --filter "name=^wk-" --filter "status=exited" --filter "status=created" --format "{{.Names}}"' || true)
 if [ -n "$stopped" ]; then
     printf '%s\n' "$stopped" | sed 's/^/  starting /' >&2
@@ -60,9 +56,6 @@ else
     info "no stopped containers"
 fi
 
-# Remote control in every container that just came back up, so a workspace is
-# reachable from the phone after a reboot. Through `wk ai claude --rc`, the one
-# implementation, and never fatal. WK_NO_CLAUDE_RC=1 turns it off.
 if [ -n "$stopped" ] && [ -z "${WK_NO_CLAUDE_RC:-}" ]; then
     printf '%s\n' "$stopped" | sed 's/^wk-//' | while read -r _ws; do
         [ -n "$_ws" ] || continue
@@ -71,8 +64,6 @@ if [ -n "$stopped" ] && [ -z "${WK_NO_CLAUDE_RC:-}" ]; then
     done
 fi
 
-# macOS VMs are not started here: they compete with the podman machine for
-# memory, so bringing both up unattended causes swapping.
 if is_macos && [ -z "${WK_IN_VM:-}" ]; then
     . "$WK_ROOT/targets/vm.sh"
     if _tart_bin >/dev/null 2>&1; then

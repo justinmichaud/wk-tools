@@ -1,21 +1,14 @@
-# Resource governance: the host GUI must stay interactive and never be the process
-# the OOM killer picks. Every WK_* below is overridable; export_target_resources
-# replaces WK_AVAIL_MB/WK_CGROUP_*/WK_LOAD/WK_BUILD_MACHINE with the target's.
+# The host GUI must stay interactive and never be the process the OOM killer picks. Every WK_* here is overridable.
 
-# Headroom left to the host, never a VM's or a build's: a *count*, since
-# Virtualization.framework places threads itself. A swapped desktop is unusable.
+# Held back from a GUI host, and a *count* of cores because Virtualization.framework places threads itself. A swapped desktop is unusable.
 WK_RESERVE_CORES="${WK_RESERVE_CORES:-1}"
-# WK_RESERVE_CORES/WK_RESERVE_MB: held back from a GUI host.
 WK_RESERVE_MB="${WK_RESERVE_MB:-12288}"
 
-# A headless machine needs far less: the macOS host already reserved for it when
-# sizing the VM, and reserving again double-counts and starves containers.
+# A headless machine needs far less: the macOS host reserved for it when sizing the VM, and reserving again double-counts and starves containers.
 WK_HEADLESS_RESERVE_CORES="${WK_HEADLESS_RESERVE_CORES:-0}"
-# WK_HEADLESS_RESERVE_CORES/WK_HEADLESS_RESERVE_MB: held back from a headless one.
 WK_HEADLESS_RESERVE_MB="${WK_HEADLESS_RESERVE_MB:-2048}"
 
-# Written by the provisioning playbook. Fixed path, matching _wk_default_store's
-# default (lib/store.sh): provisioning runs before any wk command can derive $WK_STORE.
+# Written by the provisioning playbook, at a fixed path matching lib/store.sh's default: provisioning runs before any wk command can derive $WK_STORE.
 headless_marker() { printf '%s' "${WK_STORE:-/var/lib/wk}/.headless"; }
 
 is_headless() {
@@ -26,9 +19,7 @@ is_headless() {
 reserve_cores() { is_headless && echo "$WK_HEADLESS_RESERVE_CORES" || echo "$WK_RESERVE_CORES"; }
 reserve_mb()    { is_headless && echo "$WK_HEADLESS_RESERVE_MB"    || echo "$WK_RESERVE_MB"; }
 
-# Working set of a C++ compile job. 4 GB (rare DFG/FTL TUs and link steps) applied to
-# every job is too pessimistic; build/build-in-target.sh's cgroup clamp is the real
-# net. WK_MB_PER_JOB_EXPLICIT keeps a config default from overriding an explicit one.
+# The working set of a C++ compile job: the 4 GB a rare DFG/FTL TU or link step takes is too pessimistic for every job, and build/build-in-target.sh's cgroup clamp is the real net. WK_MB_PER_JOB_EXPLICIT keeps a config default from overriding an explicit one.
 WK_MB_PER_JOB_EXPLICIT="${WK_MB_PER_JOB:+1}"
 WK_MB_PER_JOB="${WK_MB_PER_JOB:-1536}"
 
@@ -44,13 +35,11 @@ host_mem_mb() {
     fi
 }
 
-# A cgroup limit, when present, wins over MemAvailable, which reports the whole
-# machine's free memory inside a container and can size a job count the cgroup kills.
+# A cgroup limit, when present, wins over MemAvailable, which inside a container reports the whole machine's free memory and can size a job count the cgroup kills.
 avail_mem_mb() {
     local cg=/sys/fs/cgroup/memory.max avail=""
 
-    # This host's free memory says nothing about a build over ssh.
-    if [ -n "${WK_AVAIL_MB:-}" ]; then echo "$WK_AVAIL_MB"; return 0; fi
+    if [ -n "${WK_AVAIL_MB:-}" ]; then echo "$WK_AVAIL_MB"; return 0; fi  # this host's free memory says nothing about a build over ssh
 
     if is_linux && [ -r /proc/meminfo ]; then
         avail=$(awk '/^MemAvailable:/ {print int($2/1024)}' /proc/meminfo)
@@ -58,10 +47,7 @@ avail_mem_mb() {
         avail=$(( $(host_mem_mb) - $(reserve_mb) ))
     fi
 
-    # cmd/build knows the container limit even outside the container.
-    # WK_CGROUP_MB/WK_CGROUP_CORES: what the caller measured of the target's own
-    # cgroup, when that is smaller than this machine.
-    if [ -n "${WK_CGROUP_MB:-}" ] && [ "$WK_CGROUP_MB" -lt "$avail" ]; then
+    if [ -n "${WK_CGROUP_MB:-}" ] && [ "$WK_CGROUP_MB" -lt "$avail" ]; then  # what the caller measured of the target's own cgroup, which cmd/build knows from outside it
         avail=$WK_CGROUP_MB
     fi
 
@@ -76,8 +62,7 @@ avail_mem_mb() {
     echo "$avail"
 }
 
-# --- envelope: the cap on the VM (macOS) or container (Linux) ----------------
-envelope_cores() {
+envelope_cores() {  # the cap on the VM (macOS) or container (Linux)
     local c
     c=$(( $(host_cores) - $(reserve_cores) ))
     [ "$c" -lt 1 ] && c=1
@@ -101,9 +86,7 @@ envelope_mem_mb() {
     echo "$m"
 }
 
-# A remote target's numbers (load average included) replace this machine's. Call
-# after `load_target` has resolved the target.
-export_target_resources() {
+export_target_resources() {  # a remote target's numbers, load average included, replace this machine's; call after `load_target`
     local name="$1"
     if [ "$WK_TARGET_KIND" = remote ]; then
         WK_AVAIL_MB=$(t_mem_mb "$name"); WK_CGROUP_CORES=$(t_cores "$name")
@@ -116,12 +99,7 @@ export_target_resources() {
     fi
 }
 
-# --- what is already building on this machine ---------------------------------
-# A build's memory is spoken for before it is used: a link step allocates late, and
-# MemAvailable at the start of a second build says nothing about the first. So each
-# build leaves a lock-shaped record of its budget -- `pid:<n>` for a foreground build,
-# `ws:<name>:<pidfile>` for one in a workspace -- per build machine, and build_jobs
-# sizes the next build against it.
+# A build's memory is spoken for before it is used -- a link step allocates late, so MemAvailable at the start of a second build says nothing about the first -- so each build leaves a record of its budget per build machine and build_jobs sizes the next one against it.
 builds_dir() { echo "$(wk_state_dir)/builds"; }
 build_machine() { printf '%s' "${WK_BUILD_MACHINE:-$(hostname)}"; }
 
@@ -132,7 +110,7 @@ build_record() { # <label> <jobs> <budget-mb> <holder>
         > "$(builds_dir)/$(date +%s)-$$-$RANDOM"
 }
 
-_build_holder_alive() { # <holder>
+_build_holder_alive() { # <holder>: pid:<n> for a foreground build, ws:<name>:<pidfile> for one in a workspace
     local h="$1" name pidf pid
     case "$h" in
         pid:*) kill -0 "${h#pid:}" 2>/dev/null ;;
@@ -146,8 +124,7 @@ _build_holder_alive() { # <holder>
     esac
 }
 
-# A record whose holder is gone is removed on the way: a killed build leaves nothing.
-builds_running() {
+builds_running() {  # a record whose holder is gone is removed on the way: a killed build leaves nothing
     local f label machine jobs budget holder
     [ -d "$(builds_dir)" ] || return 0
     for f in "$(builds_dir)"/*; do
@@ -166,22 +143,17 @@ builds_running() {
 build_reserved_mb()   { builds_running | awk -F'\t' '{ s += $3 } END { print s + 0 }'; }
 build_reserved_jobs() { builds_running | awk -F'\t' '{ s += $2 } END { print s + 0 }'; }
 
-# --- disk headroom -----------------------------------------------------------
-# A build that fills the filesystem does not fail cleanly: bitbake halts hours in and
-# a container's overlay ENOSPCs mid-link. A builder that unpacks a whole distribution
-# declares its own figure (image/yocto.sh).
+# A build that fills the filesystem does not fail cleanly: bitbake halts hours in and a container's overlay ENOSPCs mid-link. A builder that unpacks a whole distribution declares its own figure.
 WK_BUILD_DISK_GB="${WK_BUILD_DISK_GB:-25}"
 
-# The filesystem that fills is the one under the store: overlays, build trees, cache.
-store_free_gb() {
+store_free_gb() {  # the filesystem that fills is the one under the store: overlays, build trees, cache
     df -B1G --output=avail "${WK_STORE:-$HOME}" 2>/dev/null | tail -1 | tr -dc '0-9'
 }
 
 disk_admit() {
     local what="$1" need="${2:-$WK_BUILD_DISK_GB}" free
     free=$(store_free_gb)
-    # No answer from df is not evidence of a full disk.
-    [ -n "$free" ] || return 0
+    [ -n "$free" ] || return 0  # no answer from df is not evidence of a full disk
     [ "$free" -ge "$need" ] && return 0
     barrier "${free} GB free on ${WK_STORE:-$HOME}'s filesystem; $what wants about ${need} GB.
     It would halt part-built rather than fill the disk. 'wk gc' reclaims what
@@ -189,10 +161,7 @@ disk_admit() {
     of, and 'wk disk' says where the rest went."
 }
 
-# build_admit <what> <jobs> [disk-gb] -- refuse a build the machine cannot fit beside
-# those running, naming them; fewer than WK_MIN_JOBS (4) left over is a machine spoken
-# for. Disk is asked here, so no build path can forget it.
-build_admit() {
+build_admit() {  # <what> <jobs> [disk-gb]: refuse a build the machine cannot fit beside those running, naming them; under WK_MIN_JOBS left over is a machine spoken for. Disk is asked here, so no build path can forget it
     local what="$1" jobs="$2" running
     disk_admit "$what" "${3:-}"
     running=$(builds_running)
@@ -204,14 +173,11 @@ $(printf '%s\n' "$running" | awk -F'\t' '{ printf "      %s (%s jobs, %s MB)\n",
     ('wk status' shows a workspace's build), or --force to build that small."
 }
 
-# --- build parallelism: from the memory not already spoken for (running out of RAM
-# during a link is what hangs a machine), clamped by cores left and by load --------
-build_jobs() {
+build_jobs() {  # from the memory not already spoken for -- running out of RAM during a link is what hangs a machine -- clamped by the cores left and by load
     local polite="${1:-}"
     local by_mem by_cpu jobs cores avail
 
-    # The container is limited to envelope_cores, fewer than nproc, which would oversubscribe.
-    cores=$(( ${WK_CGROUP_CORES:-$(host_cores)} - $(build_reserved_jobs) ))
+    cores=$(( ${WK_CGROUP_CORES:-$(host_cores)} - $(build_reserved_jobs) ))  # the container is limited to envelope_cores, fewer than nproc, which would oversubscribe
     [ "$cores" -lt 1 ] && cores=1
     avail=$(( $(avail_mem_mb) - $(build_reserved_mb) ))
     [ "$avail" -lt 0 ] && avail=0
@@ -219,25 +185,21 @@ build_jobs() {
     by_cpu=$cores
 
     if [ -n "$polite" ]; then
-        # Caller-supplied for a remote target; /proc/loadavg here answers for the wrong machine.
         local load
-        load=${WK_LOAD:-$(awk '{print int($1)}' /proc/loadavg 2>/dev/null || echo 0)}
+        load=${WK_LOAD:-$(awk '{print int($1)}' /proc/loadavg 2>/dev/null || echo 0)}  # caller-supplied for a remote target; /proc/loadavg here answers for the wrong machine
 
-        # A load average decays over its window, so a killed build's cores stay spoken for a
-        # minute; memory-idle with load still high means the average is stale, and is halved.
+        # A load average decays over its window, so a killed build's cores stay spoken for a minute: memory-idle with load still high means a stale average, and it is halved.
         [ "$by_mem" -ge "$cores" ] && [ "$load" -gt $(( cores / 2 )) ] && load=$(( load / 2 ))
 
         by_cpu=$(( cores - load ))
-        # Never take more than half a shared box, however idle it looks.
-        local half=$(( cores / 2 ))
+        local half=$(( cores / 2 ))  # never more than half a shared box, however idle it looks
         [ "$by_cpu" -gt "$half" ] && by_cpu=$half
     fi
 
     jobs=$by_mem
     [ "$by_cpu" -lt "$jobs" ] && jobs=$by_cpu
 
-    # Policy, not capacity -- applied last so it caps the answer, not the inputs.
-    [ -n "${WK_MAX_JOBS:-}" ] && [ "$jobs" -gt "$WK_MAX_JOBS" ] && jobs=$WK_MAX_JOBS
+    [ -n "${WK_MAX_JOBS:-}" ] && [ "$jobs" -gt "$WK_MAX_JOBS" ] && jobs=$WK_MAX_JOBS  # policy, not capacity: last, so it caps the answer and not the inputs
 
     [ "$jobs" -lt 1 ] && jobs=1
 
@@ -251,7 +213,6 @@ explain_jobs() {
     local reserved; reserved=$(build_reserved_mb)
     log "resources: ${jobs} jobs (cores=${cores} avail=$(avail_mem_mb)MB${reserved:+ minus ${reserved}MB other builds} @ ${WK_MB_PER_JOB}MB/job${polite:+, polite, load=${WK_LOAD:-0}}${WK_MAX_JOBS:+, max $WK_MAX_JOBS})"
 
-    # Below half the target's own cores is worth a look, unless WK_MAX_JOBS is why.
     if [ -z "${WK_MAX_JOBS:-}" ] && [ "$jobs" -lt $(( cores / 2 )) ]; then
         by_mem=$(( $(avail_mem_mb) / WK_MB_PER_JOB ))
         if [ "$by_mem" -le "$jobs" ]; then

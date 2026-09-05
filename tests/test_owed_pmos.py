@@ -50,9 +50,11 @@ def _lift_running_check(rest_of_the_function=""):
     something to run after it keeps this test honest about which shape it is
     checking.
     """
+    # Anchored on the check itself, not on a comment above it: a comment is
+    # not structure, and slicing by one made this test demand it keep existing.
     text = subprocess.run(
         ["sed", "-n",
-         r"/# One build at a time on a build host/,/build\.log\"$/p",
+         r"/^    local running$/,/build\.log\"$/p",
          str(PMOS)],
         capture_output=True, text=True,
     ).stdout

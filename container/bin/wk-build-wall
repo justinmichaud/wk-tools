@@ -1,43 +1,14 @@
 #!/usr/bin/env bash
-# wk-build-wall: this line is how _real below recognises another copy of this
-# file. Keep it within the first few lines and do not reword the prefix.
-#
-# The build wall. The tools named in WALL_NAMES below refuse to run for an agent
-# and run normally for a person. One file, invoked under each wrapped name
-# through a symlink beside it.
-#
-# It covers a bare name resolved on PATH, in every shell that sources
-# shell/path.sh, which puts container/bin ahead of /usr/bin. A path form --
-# `Tools/Scripts/build-webkit`, `./configure` -- never consults PATH and is
-# covered instead by the `Bash(*/<name> *)` deny rules in claude/settings.json
-# and claude/settings-host.json. A shim as well as those rules, because
-# `wk ai claude` relaxes the agent's own permissions.
-#
-# Who is asking, from evidence the caller did not write:
-#
-#   CLAUDECODE=1    Claude Code exports it into every shell it runs
-#   WK_AGENT=<name> exported by `wk ai <agent>` (cmd/ai), so the next agent is
-#                   walled by the line that names it and nothing else
-#   WK_BUILD=1      wk's own build (build/build-in-target.sh), through which
-#                   the real cmake and ninja are reached
-#
-# A person in `wk enter` has none of them and gets the real tool, found further
-# along PATH. This is not a defence against a caller who scrubs its own
-# environment.
+# wk-build-wall: _is_wall greps this prefix within the first 5 lines; without it two wk-tools trees on PATH exec each other until the process table gives out (measured).
+# Covers a bare name resolved on PATH in every shell that sources shell/path.sh; a path form is covered instead by the `Bash(*/<name> *)` deny rules in claude/settings.json and claude/settings-host.json.
 
 set -euo pipefail
 
-# The symlinks beside this file are the same set, and tests/test_build_wall.py
-# reads this line to check that they are.
 WALL_NAMES="ninja cmake make xcodebuild build-webkit build-jsc run-javascriptcore-tests run-webkit-tests run-benchmark"
 
 self=${0##*/}
 
-# By following $0 rather than looking beside it for a sibling: bitbake builds a
-# yocto build's tmp/hosttools by resolving each tool name on PATH, so a wall
-# invoked as tmp/hosttools/make has no sibling to find (measured: an rpi5 slot
-# build died in gcc-cross-canadian's do_compile). Not `readlink -f`: macOS's
-# readlink has no -f, and this file runs in the workstation's shells too.
+# Follows $0 because bitbake's tmp/hosttools copies have no sibling wall to find; not `readlink -f`, which macOS lacks.
 _resolve_self() {
     local p="$0" t n=0 d
     while [ -L "$p" ] && [ "$n" -lt 40 ]; do
@@ -52,8 +23,6 @@ _resolve_self() {
     printf '%s/%s' "$d" "${p##*/}"
 }
 WALL=$(_resolve_self) || :
-# Unresolvable, WALL matches nothing and the skip below becomes a self-exec
-# loop. `|| :` lets the empty value form under `set -e`.
 [ -x "$WALL" ] || {
     printf '%s: cannot locate the wall behind %s -- refusing rather than guessing\n' \
         "$self" "$0" >&2
@@ -75,24 +44,18 @@ if [ -z "${WK_BUILD:-}" ] && { [ -n "${CLAUDECODE:-}" ] || [ -n "${WK_AGENT:-}" 
     exit 1
 fi
 
-# `-ef` recognises only this copy, and two wk-tools trees on PATH -- a person's
-# clone and the one `wk` pushed -- exec each other until the process table gives
-# out (measured).
 _is_wall() { # <path>
     local t
     t=$(readlink "$1" 2>/dev/null) && [ "${t##*/}" = wk-build-wall ] && return 0
     head -n 5 "$1" 2>/dev/null | grep -q '^# wk-build-wall:'
 }
 
-# The next executable of this name along PATH that is not a wall.
 _real() {
     local oldifs=$IFS d cand
     IFS=:
     set -- $PATH
     IFS=$oldifs
     for d in "$@"; do
-        # An empty PATH entry means the current directory, which decides which
-        # binary runs.
         [ -n "$d" ] || continue
         cand=$d/$self
         [ -x "$cand" ] && [ ! -d "$cand" ] || continue

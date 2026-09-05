@@ -1,9 +1,4 @@
-# Register the wk MCP server with the Claude Desktop app, so it can create and
-# drive workspaces on its own.
-#
-# The config file is shared with any other MCP servers, so this merges rather
-# than overwrites -- rewriting it wholesale would silently remove servers set
-# up elsewhere.
+# The config file is shared with other MCP servers, so merge rather than write.
 
 _cfg="$HOME/Library/Application Support/Claude/claude_desktop_config.json"
 

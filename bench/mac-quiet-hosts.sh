@@ -1,16 +1,6 @@
 #!/usr/bin/env bash
-#
-# Denies the hosts macOS software update scans, in /etc/hosts, on a bench
-# install only. Sourced by mac-bench-volume.sh's do_provision (sudo, on the
-# Mac) and by mac-bench-firstboot.sh (root, at first boot); do_build_pkg and
-# do_repair install this file next to the first-boot script so firstboot can
-# source it at the same relative path.
-#
-# mesu.apple.com and gdmf.apple.com still answer OTA/DDM check-ins with
-# automatic checking off (the "scanner: softwareupdated is LOADED" warning in
-# lib/quiet.sh); swscan/swdist/swcdn/swdownload.apple.com and the two
-# updates.cdn-apple.com hosts serve catalogs and packages; xp.apple.com is the
-# client provisioning endpoint a scan also reaches.
+# Denies the hosts macOS software update scans, in /etc/hosts, on a bench install only.
+# mesu and gdmf still answer OTA/DDM check-ins with automatic checking off, so the whole scan path is denied: catalogs, both CDNs, xp.apple.com.
 
 WK_BENCH_HOSTS_LIST="swscan.apple.com swdist.apple.com swcdn.apple.com swdownload.apple.com mesu.apple.com gdmf.apple.com updates.cdn-apple.com updates-http.cdn-apple.com xp.apple.com"
 
@@ -32,8 +22,6 @@ wk_bench_hosts_block() {
     printf '%s\n' "$WK_BENCH_HOSTS_END"
 }
 
-# True when $1 (default /etc/hosts) carries exactly this block between the
-# markers; a stale block from a different list reads back false.
 wk_bench_hosts_present() {
     local hosts="${1:-/etc/hosts}"
     [ -r "$hosts" ] || return 1
@@ -47,14 +35,7 @@ wk_bench_hosts_present() {
     [ "$got" = "$want" ]
 }
 
-# Strips any existing marker block and appends a freshly rendered one, so a
-# re-run converges on exactly one block. $2 = 1 means dry: prints the block to
-# stderr and touches nothing.
-#
-# A direct `cat > $hosts`, not a rename over a temp file: a rename only needs
-# the containing directory to be writable, which would hide a $hosts that is
-# itself read-only. Every real write is read back with wk_bench_hosts_present
-# before this returns 0.
+# A direct write, not a rename over a temp file: a rename needs only the directory writable and would hide a read-only $hosts.
 wk_bench_hosts_apply() {
     local hosts="${1:-/etc/hosts}" dry="${2:-}"
 

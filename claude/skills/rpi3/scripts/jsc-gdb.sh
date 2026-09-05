@@ -1,12 +1,5 @@
 #!/bin/bash
-# jsc-gdb.sh <jsfile> [JSC_opt=val ...]
-# Run a JS file in the jsc shell under gdb and print a backtrace if it crashes.
-# Useful for trying to get a fast standalone repro of a browser crash.
-# Pass JSC options as environment, e.g.:
-#   JSC_useConcurrentGC=0 jsc-gdb.sh /tmp/repro.js
-#   jsc-gdb.sh /tmp/repro.js         # default options
-# NOTE: some JSC crashes only reproduce under the browser's real memory pressure
-# and will NOT reproduce in the jsc shell (which has the whole machine to itself).
+# jsc-gdb.sh <jsfile> [JSC_opt=val ...] -- runs the file in the jsc shell under gdb, options passed as `JSC_*` environment, and prints a backtrace on a crash. A crash that needs the browser's real memory pressure will not reproduce here, the shell having the machine to itself.
 set -u
 JS="${1:?usage: jsc-gdb.sh <jsfile> [env JSC_*=..]}"
 BUILD=/WebKit/WebKit/WebKitBuild/WPE/Release

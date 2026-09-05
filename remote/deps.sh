@@ -1,13 +1,6 @@
-# What a shared build machine needs installed, and the one command that installs
-# it. Sourceable; defines functions and nothing else. One list, because
-# remote/provision.sh, `wk remote setup` and `wk doctor --all` all ask it and
-# must not disagree. wk installs none of it -- provisioning never takes root on
-# someone else's machine -- so it prints the root command for its administrators.
+# What a shared build machine needs installed, and the one command that installs it. Sourceable, defining functions and nothing else. One list, because remote/provision.sh, `wk remote setup` and `wk doctor --all` all ask it and must not disagree. wk installs none of it -- provisioning never takes root on someone else's machine -- so it prints the root command for the machine's administrators.
 
-# <tool> <required|wanted> <what it is for>
-# required: a build cannot start without it, and provisioning refuses.
-# wanted:   the machine works without it and works badly. Never a refusal.
-wk_remote_deps() {
+wk_remote_deps() {   # <tool> <required|wanted> <what it is for>; a build cannot start without a `required` one and provisioning refuses, where a `wanted` one missing makes the machine work badly and is never a refusal
     cat <<'EOF'
 git required the checkout, and the lock that serialises builds
 cmake required configures every CMake port
@@ -19,8 +12,7 @@ zsh wanted the shell wk's rc moves an interactive session to; bash works too
 EOF
 }
 
-# Only a tool whose package name is not the tool's name needs an entry here.
-wk_remote_package() { # <tool> <family>
+wk_remote_package() { # <tool> <family> -- only a tool whose package name is not the tool's name needs an entry
     case "$2:$1" in
         debian:ninja)  printf 'ninja-build' ;;
         fedora:ninja)  printf 'ninja-build' ;;
@@ -30,9 +22,7 @@ wk_remote_package() { # <tool> <family>
     esac
 }
 
-# From ID, then ID_LIKE, so a derivative (Raspberry Pi OS, Mint, Rocky) resolves
-# to its parent without being named here. `unknown` is reported, never guessed.
-wk_remote_family() { # <ID> <ID_LIKE>
+wk_remote_family() { # <ID> <ID_LIKE> -- ID then ID_LIKE, so a derivative (Raspberry Pi OS, Mint, Rocky) resolves to its parent without being named here; `unknown` is reported, never guessed
     local w
     for w in $1 $2; do
         case "$w" in
@@ -45,9 +35,7 @@ wk_remote_family() { # <ID> <ID_LIKE>
     printf unknown
 }
 
-# Nothing for a family this does not know: the caller then names the packages
-# and leaves the command to the person.
-wk_remote_install_cmd() { # <family> <package>...
+wk_remote_install_cmd() { # <family> <package>... -- nothing for a family it does not know, the caller then naming the packages and leaving the command to the person
     local family="$1"; shift
     [ $# -gt 0 ] || return 1
     case "$family" in
@@ -59,18 +47,13 @@ wk_remote_install_cmd() { # <family> <package>...
     esac
 }
 
-# The variables wk's build sets for itself (config_build_env, build/configs.sh).
-wk_remote_build_env_vars() {
+wk_remote_build_env_vars() {   # the variables wk's build sets for itself (config_build_env, build/configs.sh)
     printf '%s\n' CC CXX CFLAGS CXXFLAGS LDFLAGS MAKEFLAGS \
         CCACHE_DIR CCACHE_BASEDIR CCACHE_SLOPPINESS \
         NUMBER_OF_PROCESSORS CMAKE_BUILD_PARALLEL_LEVEL WEBKIT_OUTPUTDIR
 }
 
-# What is wrong with a machine, from remote/probe.sh's output: one finding per
-# line, tab-separated <state>\t<what>\t<remedy>, state one of ok | required |
-# wanted | note, because `wk doctor --all` counts them into its columns while
-# `wk remote setup` narrates. Missing tools share one root command at the end.
-wk_remote_findings() { # <probe output>
+wk_remote_findings() { # <probe output> -- what is wrong with a machine, one finding per line, tab-separated <state>\t<what>\t<remedy> with state one of ok | required | wanted | note, because `wk doctor --all` counts them into its columns while `wk remote setup` narrates. Missing tools share one root command at the end.
     local probe="$1" tool need why path family v pkgs=""
     _f() { printf '%s\t%s\t%s\n' "$1" "$2" "${3:-}"; }
     _v() { printf '%s\n' "$probe" | sed -n "s|^$1=||p" | tail -1; }
@@ -103,9 +86,7 @@ DEPS
         fi
     fi
 
-    # The identity a commit made there would carry, against the identity this
-    # repository declares (dotfiles/gitconfig) -- not merely "is it set". One
-    # machine here had `user.name = no`, an answer to a prompt years ago.
+    # The identity a commit made there would carry, against the identity this repository declares (dotfiles/gitconfig), not merely "is it set": one machine here had `user.name = no`, an answer to a prompt years ago.
     local want have
     for v in name email; do
         want=$(git config --file "$WK_ROOT/dotfiles/gitconfig" --get "user.$v" 2>/dev/null || true)
@@ -136,9 +117,6 @@ DEPS
     return 0
 }
 
-# The probe, run on a machine: these two files concatenated and fed to a shell
-# over there, so the far side needs no wk-tools of its own. `_rsh` and not
-# `_rsh_q`: the script arrives on stdin, which `_rsh_q` closes.
-wk_remote_probe() {
+wk_remote_probe() {   # these two files concatenated and fed to a shell over there, so the far side needs no wk-tools of its own; `_rsh` and not `_rsh_q`, the script arriving on stdin, which `_rsh_q` closes
     cat "$WK_ROOT/remote/deps.sh" "$WK_ROOT/remote/probe.sh" | _rsh 'bash -s'
 }

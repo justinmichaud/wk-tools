@@ -1,25 +1,10 @@
 #!/usr/bin/env python3
-"""Render `wk status`.
+"""status-view.py <text|json|html|web> <records-file> [--port N] [--interval S] [--out FILE]
 
-    status-view.py <text|json|html|web> <records-file> [--port N] [--interval S] [--out FILE]
-
-The input is the record stream `wk status --records` writes: one JSON object per
-line, in the order the walk found things. Several processes can write to it --
-on a macOS host a listing is assembled by this machine's own targets out here
-and its containers inside the podman VM, and two JSON *documents* cannot be
-concatenated where two streams of lines can. Merging by machine name here is
-also what saves the two halves from having to tell each other which of them has
-already printed a heading.
-
-Every view is drawn from the same merged document, which is the point: a number
-that appears in the terminal and not in the browser is impossible rather than
-merely unlikely, and `--json` is that document rather than a fourth rendering of
-the same facts.
-
-No third-party library, deliberately. Aligning columns whose widths are not
-known until the last machine has answered is a page of python; needing
-`pip install` before `wk status` would run on a build box, a Pi or a podman VM
-is not a trade this repository makes.
+Input is the stream `wk status --records` writes: one JSON object per line, from
+several processes at once -- two JSON documents cannot be concatenated where two
+streams of lines can. Every view, `--json` included, draws the one merged
+document. No third-party library, `pip install` being no trade to make here.
 """
 
 import http.server
@@ -31,24 +16,10 @@ import threading
 import time
 import webbrowser
 
-# --- the document -------------------------------------------------------------
-
-
 class Merger:
-    """Records -> one document, grouped machine / method / workspace, applied
-    one record at a time.
-
-    A class rather than a function, because the text renderer wants to draw a
-    machine's block the moment its records stop arriving rather than only
-    once the whole fleet has answered -- and both that streaming reader and
-    `merge` (below, for --json/--html/--web) are the same fold over the same
-    records, so there is exactly one place that knows what a record means.
-
-    Order is the order the records arrived in, per group, because that is the
-    order the walk found them and it is stable (order_targets in cmd/status
-    puts this machine first). Machines are *merged* rather than appended: the
-    same machine can be reported by two processes, and it is one machine.
-    """
+    # Records -> one document, grouped machine / method / workspace, in arrival
+    # order. `merge` and the streaming renderer both fold over this, and two
+    # reports of one machine merge.
 
     def __init__(self):
         self.doc = {"machines": [], "fleet": [], "bridges": [], "exit": 0}
@@ -72,20 +43,12 @@ class Merger:
         return g
 
     def feed(self, r):
-        """Fold one record into the document. Returns the name of the
-        machine it belongs to, so a streaming reader knows what just changed
-        -- or None for a record with no single machine (fleet, bridge, exit),
-        or for a stream marker (`probing`, `flush`) it does not know about
-        and leaves for the caller.
-        """
+        # Returns the machine, or None for fleet/bridge/exit and for a marker.
         kind = r.get("kind")
         if kind == "machine":
             m = self.machine(r["name"])
             m["self"] = m["self"] or bool(r.get("self"))
-            # Everything else the record carries -- how it is reached, which
-            # conf declared it -- kept from whichever half knew it. Dropping
-            # these would be invisible: the machine still appears, with the
-            # answer to "how do I get there" silently missing.
+            # Kept from whichever half knew it: losing these is invisible.
             for k in ("tailnet", "direct", "conf"):
                 if r.get(k) and not m.get(k):
                     m[k] = r[k]
@@ -121,9 +84,7 @@ class Merger:
             self.machine(name)["switches"].append(r)
             return name
         elif kind == "capacity":
-            # Kept per reporter, not overwritten: on a macOS host the VM and the
-            # Mac each answer, and "9 cores" and "10 cores" are both true about
-            # different things.
+            # Per reporter: on a macOS host the VM and the Mac each answer.
             name = r.get("machine", "?")
             m = self.machine(name)
             if m.get("capacity") is None:
@@ -131,7 +92,6 @@ class Merger:
             m["capacity"].append(r)
             return name
         elif kind == "bench":
-            # One record per task shown: every running one, else the newest.
             name = r.get("machine", "?")
             self.machine(name)["bench"].append(r)
             return name
@@ -146,18 +106,12 @@ class Merger:
             self.doc["bridges"].append(r)
             return None
         elif kind == "exit":
-            # The worst of them, not the last: two halves each report their own,
-            # and this command's contract is that a script can branch on it.
             self.doc["exit"] = max(self.doc["exit"], int(r.get("code", 0)))
             return None
         return None
 
 
 def parse_record(line):
-    """One line -> a record, or None for a blank one. Raises ValueError
-    (chained from the JSON error) with the offending text attached, so every
-    caller reports an unreadable record the same way instead of each writing
-    its own version of that message."""
     line = line.strip()
     if not line or not line.startswith("{"):
         return None
@@ -168,18 +122,11 @@ def parse_record(line):
 
 
 def merge(lines):
-    """Records -> one document. See `Merger` -- this is that fold, run to
-    completion over a whole stream, for the three views that only draw once
-    they have seen all of it."""
     merger = Merger()
     for line in lines:
         try:
             r = parse_record(line)
         except ValueError as exc:
-            # A record that cannot be read is worth saying so about: it means
-            # a collector wrote something malformed, and silently dropping it
-            # is how a workspace goes missing from a listing that looks
-            # complete.
             print("wk status: unreadable record: %s" % exc, file=sys.stderr)
             continue
         if r is None or r.get("kind") in ("probing", "flush"):
@@ -193,27 +140,13 @@ def read_doc(path):
         return merge(fh)
 
 
-# --- shared vocabulary --------------------------------------------------------
-#
-# One place where a state word becomes a colour, because a state that is red in
-# the terminal and grey on the page is two answers to one question.
-
-# Matched on the *first word*, because most of these states are phrases: "bench
-# mode", "base image -- not a bench system", "role installed", "no answer within
-# 20s". The page is handed these four lists rather than carrying a second copy
-# (page(), below): one shared vocabulary, so a state cannot be coloured in the
-# terminal and plain on the page.
 GOOD = ("ok", "present", "running", "host mode", "up", "bench", "open", "complete")
 BUSY = ("creating", "starting", "building", "fixing", "no", "empty", "held",
-        # A board that fell back to its base image is not a bench system, and
-        # reading it as one is how an unarmed board came to be benchmarked; a
-        # bridge with the role installed but no way to run its health check
-        # from here is likewise an answer that is not yet "good".
+        # A board on its base image is not a bench system.
         "base", "role")
 BAD = (
     "unhealthy",
-    # A benchmark task that stopped before every planned run ended.
-    "incomplete",
+    "incomplete",   # a bench task that stopped before every planned run ended
     "failed",
     "oom",
     "stalled",
@@ -238,8 +171,7 @@ def severity(word):
     return ""
 
 
-def sub_text(sub):
-    """A build/test/babysit line, in one string, for a table cell."""
+def sub_text(sub):   # a build/test/babysit line, in one string, for a table cell
     out = "%s=%s" % (sub.get("kind", "?"), sub.get("state", "?"))
     bits = [b for b in (sub.get("config"), sub.get("arch")) if b]
     if sub.get("kind") == "babysit" and sub.get("config"):
@@ -257,8 +189,6 @@ def sub_text(sub):
     return out
 
 
-# --- the terminal view --------------------------------------------------------
-
 RESET = "\033[0m"
 ANSI = {
     "good": "\033[32m",
@@ -271,14 +201,11 @@ ANSI = {
     "head": "\033[1;36m",
 }
 
-# Seven columns: what a person actually needs before touching a workspace --
-# including whether there is work in it (`work`) that exists nowhere else,
-# and which upstream line it is on (`base`: main, or a release like 2.52).
+# `work` exists nowhere else; `base` is the upstream line: main, or 2.52.
 COLUMNS = ("workspace", "state", "branch", "base", "work", "snap", "build")
 
 
-def ws_work(ws):
-    """What is in this workspace that a `wk rm` would take with it."""
+def ws_work(ws):   # what a `wk rm` would take with it
     bits = []
     if ws.get("unpushed"):
         bits.append("%s unpushed" % ws["unpushed"])
@@ -292,21 +219,13 @@ def ws_work(ws):
 
 
 def ws_work_hue(ws):
-    # Yellow, not red: unpushed work is not a fault, it is a thing to know
-    # before remaking the workspace. Nothing to lose reads dim.
     if ws.get("unpushed") or ws.get("dirty"):
         return "busy"
     return "idle"
 
 
 def ws_branch(ws, cap=40):
-    """The branch, and how far it has drifted from its upstream.
-
-    Capped for the table, because a column is as wide as the widest thing in it
-    and a WebKit bug branch is a sentence: one 78-character name pushed BUILD --
-    the column somebody is actually reading -- off the side of the terminal.
-    The page shows the whole thing; this is the view where width is scarce.
-    """
+    # Capped: one 78-character WebKit bug branch pushes BUILD off the terminal.
     b = ws.get("branch") or "-"
     if len(b) > cap:
         b = b[: cap - 1] + "\u2026"
@@ -318,11 +237,7 @@ def ws_branch(ws, cap=40):
 
 
 def ws_snap(ws):
-    """How far the layer *underneath* has been left behind.
-
-    A workspace is pinned to the snapshot it was made on, and `wk sync` cannot
-    change that -- which is the honest answer to "I synced and nothing moved".
-    """
+    # A workspace is pinned to the snapshot it was made on; `wk sync` cannot move it.
     n = ws.get("snap_behind")
     return "-%s" % n if n else ""
 
@@ -351,7 +266,6 @@ def ws_hues(ws):
 
 
 def gb(mb):
-    """Megabytes as something a person reads at a glance."""
     try:
         mb = int(mb)
     except (TypeError, ValueError):
@@ -364,15 +278,12 @@ def disk_hue(pct):
         pct = int(pct)
     except (TypeError, ValueError):
         return ""
-    # The thresholds are about what fits next, not about tidiness: a WebKit
-    # build tree is tens of gigabytes, so 90% of a disk this size is already
-    # "the next build may not finish".
+    # A WebKit build tree is tens of gigabytes, so 90% may not hold the next.
     return "bad" if pct >= 90 else "busy" if pct >= 75 else "good"
 
 
 def load_hue(load, cores):
-    """Load against cores, which is the only reading of a load average that
-    means anything: 8 is idle on a 64-core build box and desperate on a Pi."""
+    # Against cores: 8 is idle on a 64-core build box and desperate on a Pi.
     try:
         load, cores = float(load), int(cores)
     except (TypeError, ValueError):
@@ -383,12 +294,6 @@ def load_hue(load, cores):
 
 
 def sdk_verdict(s):
-    """current / behind (<upstream tag>) / unknown -- <why>, and its hue.
-
-    cmd/status's report_sdk_image already decided which one, from the local
-    pull and an unauthenticated registry query capped like any other network
-    probe -- this only picks the words and the colour for them.
-    """
     upstream = s.get("upstream")
     if upstream:
         if upstream == s.get("tag"):
@@ -406,12 +311,7 @@ def sdk_line(s, colour):
 
 
 def where_word(obj):
-    """Which of a machine's two of something this is, as a column-heading word.
-
-    "in the podman VM" reads as a phrase in the middle of a sentence and as
-    noise next to a label; the record carries the sentence form because the
-    collector is the one that knows.
-    """
+    # The record carries "in the podman VM"; a column heading wants the word.
     return (obj.get("where") or "").replace("in the ", "").replace("the ", "")
 
 
@@ -421,23 +321,13 @@ def paint(text, key, colour):
     return "%s%s%s" % (ANSI[key], text, RESET)
 
 
-# A label/value line is buffered rather than formatted, because its column
-# width is not known until every label in the section has been seen.
-#
-# Measured rather than a constant. At a fixed 14 a machine's block reads as
-# three ragged tables: every label wider than that -- "without
-# tailscale", "push (podman VM)", "wk-tools (in the podman VM)" -- pushed
-# its own value out to a column of its own, and the wk-tools and push-key
-# rows were formatted by a *separate* pair of hardcoded widths (30 and 14)
-# that lined up with nothing above them. One section, one column.
+# Buffered, not formatted: the column width waits on the section's last label.
 class Kv(tuple):
     __slots__ = ()
 
 
 def row(cells, widths, hues, colour):
-    # Every column padded but the last, so a row does not end in a field of
-    # spaces -- with colour on, the reset sequence sits after them and no
-    # amount of stripping afterwards can find them.
+    # All but the last: with colour on, trailing spaces precede the reset.
     hues = hues or {}
     last = len(cells) - 1
     return "    " + "  ".join(
@@ -447,16 +337,7 @@ def row(cells, widths, hues, colour):
 
 
 class Writer:
-    """The handful of things every section of the text listing needs: a
-    heading, a buffered label/value line whose column lines up with the rest
-    of its section (`align`, called once the section is complete), how a
-    machine or a fleet device is reached, and its notes.
-
-    A machine's own block (`render_machine_block`) and the fleet/bridges tail
-    (`render_fleet_and_bridges`) each build one of these; the whole-document
-    renderer and the streaming one both call the same two functions, so there
-    is one description of what a block looks like, not two that can drift.
-    """
+    # A heading, label/value lines `align` squares up, reachability, notes.
 
     def __init__(self, colour):
         self.colour = colour
@@ -471,12 +352,7 @@ class Writer:
         self.out.append(Kv((indent, label, value)))
 
     def align(self, start):
-        """Give every buffered line in out[start:] one label column.
-
-        Called at the end of a section. The width is the widest label actually
-        present and never less than 14, so a section of short labels does not
-        pull its values left of where every other section puts them.
-        """
+        # The widest label but never under 14, so short sections still line up.
         labels = [k[1] for k in self.out[start:] if isinstance(k, Kv)]
         if not labels:
             return
@@ -485,15 +361,10 @@ class Writer:
             if not isinstance(self.out[i], Kv):
                 continue
             indent, label, value = self.out[i]
-            # An empty label is a continuation of the line above -- a fix, a
-            # remedy -- so it is spaces, not a painted blank.
             lab = label.ljust(w) if label else " " * w
             self.out[i] = indent + (paint(lab, "dim", self.colour) if label else lab) + " " + value
 
     def meta(self, obj, indent="  "):
-        """How a machine is reached, and which file said it exists. Both are
-        calculated at read time (lib/reach.sh) and both are dim: they answer a
-        question asked when something above them is wrong."""
         if obj.get("tailnet"):
             self.kv("reached", obj["tailnet"], indent)
         if obj.get("direct"):
@@ -510,17 +381,7 @@ class Writer:
 
 
 def render_machine_block(m, colour, widths=None):
-    """One machine's whole section: heading, how it is reached, its
-    workspace tables, and what it is apart from the workspaces on it.
-
-    `widths` is the column widths for the workspace table. The whole-document
-    renderer measures them once, across every machine, so every table in the
-    listing lines up with every other. The streaming renderer (widths=None)
-    draws a machine before the rest of the fleet is known, so it can only
-    measure that one machine's own workspaces -- the concession streaming
-    makes for not waiting: tables line up within a machine, not across the
-    listing.
-    """
+    # widths=None is the streaming renderer, aligned within a machine only.
     w = widths
     if w is None:
         w = [len(h) for h in COLUMNS]
@@ -547,14 +408,11 @@ def render_machine_block(m, colour, widths=None):
         for ws in g["workspaces"]:
             subs = ws.get("subs") or []
             out.append(row(ws_cells(ws), w, ws_hues(ws), colour))
-            # Everything else this workspace was asked to do, one per line
-            # under its row rather than as a row with the identity blanked.
             for sub in subs[1:]:
                 out.append("      " + paint(sub_text(sub), severity(sub.get("state")), colour))
             wr.notes(ws.get("notes"))
 
-    # What the machine is, apart from the workspaces on it. Every line is a
-    # thing that breaks a build or costs work.
+    # Apart from its workspaces: every line here breaks a build or costs work.
     if any(m.get(k) for k in ("disk", "sdk", "services", "switches", "capacity", "locks")) or m.get("bench"):
         out.append("")
     for d in m.get("disk") or []:
@@ -580,15 +438,11 @@ def render_machine_block(m, colour, widths=None):
     for cap in m.get("capacity") or []:
         label = "load" + (" (%s)" % where_word(cap) if where_word(cap) else "")
         if not cap.get("cores"):
-            # A probe that did not answer says so here rather than the
-            # line vanishing, which reads as "this machine has no load" --
-            # the one thing that is never true.
+            # Said, rather than the line vanishing: no load is never true.
             if cap.get("note"):
                 wr.kv(label, paint(cap["note"], "bad", colour))
             continue
-        # A remote target's free memory is measured with no total beside
-        # it (t_mem_mb there is MemAvailable, not a size, targets/remote.sh)
-        # -- so the total is only ever printed when there is one.
+        # A remote t_mem_mb is MemAvailable, not a size (targets/remote.sh).
         free = "%s free" % gb(cap.get("free_mb"))
         if cap.get("mem_mb"):
             free += " of %s" % gb(cap.get("mem_mb"))
@@ -596,9 +450,7 @@ def render_machine_block(m, colour, widths=None):
               % (paint(cap.get("load") or "?", load_hue(cap.get("load"), cap.get("cores")), colour),
                  cap.get("cores"), free))
     for lk in m.get("locks") or []:
-        # A lock whose holder is gone is not a lock: the next taker breaks
-        # it. "held" against "stale" is the difference between waiting and
-        # not.
+        # A lock whose holder is gone is not a lock: the next taker breaks it.
         wr.kv("lock", "%s  %s  %s"
               % (lk.get("resource", "?"),
                  paint("held" if lk.get("alive") else "stale",
@@ -610,8 +462,6 @@ def render_machine_block(m, colour, widths=None):
                                         paint(b.get("summary", ""), "dim", colour)))
         wr.kv("", "%s" % paint("%s  %s" % (b.get("subject", ""), b.get("path", "")), "dim", colour))
 
-    # A machine that could not answer in records: its own listing, as it
-    # sent it, rather than nothing.
     for r in m["raw"]:
         out.append("")
         for ln in r.get("text", "").split("\n"):
@@ -628,8 +478,6 @@ def render_machine_block(m, colour, widths=None):
                                   "bad", colour))
             ident = (f.get("sha") or "?") + ("+dirty" if f.get("dirty") else "")
             wr.kv(what, "%s  %s" % (paint(ident, "dim", colour), verdict))
-            # The command, not "push it there": which one it is depends on
-            # what kind of copy this is, and none of the three is guessable.
             if f.get("fix"):
                 wr.kv("", paint(f["fix"], "busy", colour))
         elif f.get("type") == "key":
@@ -640,13 +488,6 @@ def render_machine_block(m, colour, widths=None):
 
 
 def render_fleet_and_bridges(doc, colour):
-    """The fleet board and the tailnet bridges: the tail of the listing,
-    printed after every machine because that is what they are -- what wk owns
-    beyond the machines that answer to `wk status` themselves, and (fleet
-    devices, bridges) the listing's own longest pole. A streaming reader
-    holds this for last for exactly that reason: it usually finishes last
-    anyway.
-    """
     wr = Writer(colour)
     out = wr.out
 
@@ -669,13 +510,7 @@ def render_fleet_and_bridges(doc, colour):
             wr.meta(f, "  " + " " * fw + "  ")
         wr.align(_fleet_start)
 
-        # How each machine is made again from nothing.
-        #
-        # Composed by the machine's own boot driver from the fields its conf
-        # declares (b_reprovision), so nothing here is a second copy of a fact
-        # and a lane that changes shape changes this with it. Printed after the
-        # table rather than inside it: it is several lines per machine, and the
-        # table's job is the one-line answer.
+        # From each machine's boot driver (b_reprovision): no second copy.
         recipes = [f for f in doc["fleet"] if f.get("reprovision")]
         if recipes:
             wr.heading("re-provisioning",
@@ -686,23 +521,12 @@ def render_fleet_and_bridges(doc, colour):
                 for line in f["reprovision"].split("\n"):
                     if not line.strip():
                         continue
-                    # A line that is indented in the driver is a note about the
-                    # command above it, not a command -- so it stays dim and the
-                    # commands stay copyable.
                     if line.startswith(" "):
                         out.append("          " + paint(line.strip(), "dim", colour))
                     else:
                         out.append("      " + line)
                 out.append("")
 
-            # And the one command each *role* is provisioned by, which is the
-            # question the per-machine recipes above do not answer: those say
-            # how a particular board is rebuilt, and this says which verb to
-            # reach for when the thing in front of you is a kind of thing.
-            #
-            # Derived from what the fleet actually holds -- a role nothing here
-            # plays contributes no line, so this cannot drift into advertising a
-            # lane that was removed.
             roles = []
             if any(f.get("role") == "bench-device" for f in doc["fleet"]):
                 roles.append(("a rescue system",
@@ -749,22 +573,7 @@ def render_fleet_and_bridges(doc, colour):
 
 
 def render_text(doc, colour):
-    """The listing as plain aligned columns.
-
-    Deliberately the plainest thing that carries the facts. The page is what
-    this fleet is looked at with now -- `wk status` at a terminal opens it
-    (status_default_mode, lib/common.sh) -- and this is what a pipe, a redirect,
-    `wk selftest` and an agent get. That reader wants the columns to line up and
-    wants nothing else. A box-drawn grid -- rules, corner glyphs, blank-celled
-    continuation rows -- is a second showpiece to keep correct for a reader who
-    already has a better one.
-
-    The one piece of machinery kept is a single set of column widths for the
-    whole listing. Per-group widths made every block line up with itself and
-    with nothing else, so the eye had to find the columns again at every heading
-    -- and it is four lines, not machinery. (render_text_stream, below, cannot
-    keep this: the whole listing is exactly what it does not wait for.)
-    """
+    # What a pipe, `wk selftest` and an agent get. One set of column widths.
     out = []
 
     w = [len(h) for h in COLUMNS]
@@ -783,40 +592,11 @@ def render_text(doc, colour):
 
 
 def render_text_stream(fh, out, colour):
-    """Draw the text listing as records arrive, instead of waiting for the
-    whole fleet to answer before drawing anything.
-
-    Chosen shape: *arrival order*, not the fixed order the collector started
-    probes in, with a stable heading per machine printed once its own records
-    are complete. cmd/status's par_join_stream hands back a finished job's
-    records as soon as they exist -- true completion order, since bash 3.2 (a
-    macOS host's own bash) has no `wait -n` to ask for anything narrower -- and
-    a `{"kind":"flush"}` record marks where one job's contribution ends.
-    Re-imposing a fixed order here would mean buffering a fast machine's
-    output behind a slower one started earlier, which is the exact wait this
-    exists to remove. In practice "this machine" still tends to print first:
-    a local target has no network round trip to wait through.
-
-    A `{"kind":"probing","name":<target>,"machine":<machine>}` record
-    (emitted for every target before its probe starts) gets a one-line
-    placeholder immediately, so a slow or dead machine is *visibly* still
-    being asked about rather than silently missing. The placeholder is not
-    erased when the real block follows (this is a stream, not a terminal
-    being redrawn in place), and a machine that never answers keeps only the
-    placeholder, which is the honest state of the world rather than invented
-    data.
-
-    A machine's block is drawn exactly once: when the last job feeding it
-    has flushed. On a macOS host two targets (container, vm) are one
-    machine, so drawing at every flush would print that block twice, the
-    second a superset of the first.
-
-    Fleet devices and tailnet bridges print once, at the end: they are one
-    more job in the same batch (see cmd/status), not a machine, and they are
-    already documented as the listing's longest pole -- holding them for last
-    matches both how they actually arrive and the layout `render_text` already
-    uses.
-    """
+    # Arrival order: par_join_stream (cmd/status) hands back each job's records
+    # as they exist, `{"kind":"flush"}` ending one job. Re-imposing an order
+    # would buffer a fast machine behind a slow one, the wait this removes.
+    # `{"kind":"probing"}` gets a placeholder at once, never erased -- a stream,
+    # not a redrawn terminal. A block is drawn at the last flush feeding it.
     merger = Merger()
     probing = {}     # target -> still waiting on a machine record to match it
     pending = {}     # machine -> targets whose job has not flushed yet
@@ -867,35 +647,11 @@ def render_text_stream(fh, out, colour):
     out.flush()
 
 
-# --- the page -----------------------------------------------------------------
-#
-# Self-contained: no CDN, no font host, no framework. A page served from a
-# laptop to look at a fleet must not depend on the network the fleet is the
-# reason you are worried about -- and a status page that cannot render because
-# a stylesheet host is unreachable is the exact failure it exists to report on.
-#
-# This is the view a bare `wk status` opens at a terminal (status_default_mode,
-# lib/common.sh). So it is built to be read at a glance and not merely to
-# contain the facts -- the same document underneath, arranged so that the
-# things that cost time or work are the things the eye lands on:
-#
-#   the verdict     the exit code, in the words cmd/status's header gives it,
-#                   coloured, at the top -- the command's contract, otherwise
-#                   visible only to `echo $?`.
-#   what is wrong   a strip of counts, and only of things that are non-zero: a
-#                   listing with nothing wrong shows nothing there rather than
-#                   six zeroes to read past.
-#   pressure        disk and load as bars against their own ceiling, because
-#                   "92%" and "1.32" are numbers whose meaning is the ratio.
-#   work at risk    unpushed commits and a dirty tree, in the column consulted
-#                   before `wk rm`.
-#   a stale lock    one whose holder is gone is not a lock at all, and it reads
-#                   exactly like one that is held.
-#
-# The state vocabulary is injected rather than written twice (__SEV__ below).
-# A second copy in JavaScript drifts from this one: `up`, `clean`, `finished`
-# and `held` end up coloured in the terminal and plain on the page, which is a
-# listing that answers a question two ways.
+# Self-contained: no CDN, no font host, no framework. A page for looking at a
+# fleet must not depend on the network the fleet is the reason you are worried
+# about. Arranged so what costs time or work is what the eye lands on: the exit
+# code as a verdict, non-zero counts only, disk and load as bars against their
+# ceiling. The state vocabulary is injected (__SEV__ below), never rewritten.
 
 PAGE = """<!doctype html>
 <meta charset="utf-8">
@@ -1332,25 +1088,14 @@ def page(doc, live):
     )
 
 
-# --- the server ---------------------------------------------------------------
-
-
 class Live:
-    """The document, kept current by re-running `wk status` in the background.
-
-    Refreshed on a timer rather than on every request, because a bare
-    `wk status` walks the fleet over ssh -- a page that re-ran it per poll would
-    put a browser's refresh rate onto a phone-linked Pi. The page polls this
-    process, which is cheap; this process asks the fleet, which is not.
-    """
+    # Re-run on a timer, not per request: a walk goes over ssh, and a browser's
+    # poll rate onto a phone-linked Pi is not that.
 
     def __init__(self, interval):
         self.interval = max(5, int(interval))
-        # Two locks with two jobs: `lock` guards the document while it is being
-        # swapped under a request, and `busy` guards the *right to walk*. One
-        # lock could not do both -- holding it for the whole walk would block
-        # every page poll for the walk's entire duration, which is the thing the
-        # timer exists to keep off the request path.
+        # `lock` guards the document mid-swap, `busy` the right to walk: one
+        # lock for both would hold a poll across a whole walk.
         self.lock = threading.Lock()
         self.busy = threading.Lock()
         self.doc = {"machines": [], "fleet": [], "bridges": [], "exit": 0}
@@ -1369,17 +1114,8 @@ class Live:
             ).encode()
 
     def refresh_once(self):
-        # One walk at a time, ever. `wk status` on this fleet takes tens of
-        # seconds and can take minutes when the tailnet is down -- longer than
-        # any sensible interval -- so a timer that fired regardless would have
-        # two walks probing the same boards over the same phone at once. Not
-        # merely wasteful: two fleet blocks running together disagree with each
-        # other about which boards are up, and neither answer is a fleet that
-        # has changed.
-        #
-        # A refusal rather than a queue, because the answer a second walk would
-        # give is the answer the first one is already about to give. Non-blocking
-        # for the same reason: a caller told "no" here has lost nothing.
+        # One walk at a time, ever: a walk takes minutes when the tailnet is
+        # down, and two over one phone disagree about which boards are up.
         if not self.busy.acquire(blocking=False):
             return
         try:
@@ -1390,13 +1126,9 @@ class Live:
             )
             doc = None
             try:
-                # --json, and not --records: this asks for the same document
-                # every other view is drawn from, through the same dispatcher a
-                # person would type -- so the page cannot be showing a listing
-                # assembled differently from the one the terminal gets.
-                #
-                # WK_STATUS_VIEW so the walk cannot decide it is a person at a
-                # terminal and try to serve a second page from inside this one.
+                # --json through the dispatcher a person would type, so the page
+                # cannot differ from the terminal's; WK_STATUS_VIEW keeps the
+                # walk from serving a second page from inside this one.
                 env = dict(os.environ, WK_STATUS_VIEW="json")
                 out = subprocess.run(
                     [wk, "status", "--json"],
@@ -1420,11 +1152,8 @@ class Live:
         while True:
             started = time.time()
             self.refresh_once()
-            # The interval is a gap between walks, not a period to fire on: a
-            # walk that overran its interval must not be followed immediately by
-            # another, and one that was quick must not wait the whole interval
-            # again on top of the time it already took. A second of floor so a
-            # fleet that answers instantly cannot become a spin.
+            # A gap between walks, not a period; a second of floor, so an
+            # instant answer cannot become a spin.
             time.sleep(max(1.0, self.interval - (time.time() - started)))
 
 
@@ -1454,14 +1183,11 @@ def serve(doc, port, interval):
         def log_message(self, *_):
             pass  # the terminal that started this is not a web server log
 
-    # 127.0.0.1, never 0.0.0.0: this page says what every machine in the fleet is
-    # doing and which keys it holds, and it is nobody else's business.
+    # 127.0.0.1, never 0.0.0.0: this page names the keys every machine holds.
     try:
         httpd = http.server.ThreadingHTTPServer(("127.0.0.1", int(port)), Handler)
     except OSError as exc:
-        # A refusal that names the remedy, rather than a traceback: the usual
-        # cause is the last `wk status --web` still running in another terminal,
-        # and the page it is already serving is the one being asked for.
+        # The usual cause is the last `wk status --web` still running elsewhere.
         print(
             "wk status: cannot serve on 127.0.0.1:%s (%s).\n"
             "    Another 'wk status --web' is probably still running -- its page is\n"
@@ -1485,9 +1211,6 @@ def serve(doc, port, interval):
     return 0
 
 
-# --- entry --------------------------------------------------------------------
-
-
 def main(argv):
     if len(argv) < 3:
         print(__doc__, file=sys.stderr)
@@ -1506,11 +1229,8 @@ def main(argv):
             out = value
 
     if mode == "text":
-        # Streamed straight off the record stream `collect` is still writing
-        # -- cmd/status hands this a fifo for text mode precisely so reading
-        # can start before the last machine has answered. The other views
-        # (below) want the whole document before they draw anything, so they
-        # still read to EOF first; only text sees the difference.
+        # Straight off the stream `collect` is still writing: text mode gets a
+        # fifo so reading starts before the last machine answers.
         colour = sys.stdout.isatty() and not os.environ.get("NO_COLOR")
         with open(recs, encoding="utf-8", errors="replace", buffering=1) as fh:
             render_text_stream(fh, sys.stdout, colour)

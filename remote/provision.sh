@@ -1,9 +1,5 @@
 #!/usr/bin/env bash
-#
-# Runs on a shared build machine, over ssh from `wk remote setup`. Nothing here
-# needs root -- these are other people's machines -- so everything lives under
-# $HOME and prerequisites are checked, never installed. Non-interactive:
-# cleanup is a decision for `wk remote setup`, which has a terminal.
+# Runs on a shared build machine, over ssh from `wk remote setup`. Nothing here needs root -- these are other people's machines -- so everything lives under $HOME and prerequisites are checked, never installed. Non-interactive, cleanup being a decision for `wk remote setup`, which has a terminal.
 
 set -euo pipefail
 
@@ -18,8 +14,7 @@ ROOT="${WK_REMOTE_ROOT:-$HOME/wk}"
 
 info "provisioning $(hostname) for target '$TARGET'"
 
-# git is load-bearing (the checkout, and the lock that serialises builds).
-_missing=""
+_missing=""   # git is load-bearing: the checkout, and the lock that serialises builds
 for _t in git; do
     have "$_t" || _missing="$_missing $_t"
 done
@@ -33,9 +28,7 @@ ensure_dir "$ROOT"
 ensure_dir "$ROOT/ws"
 ensure_dir "$ROOT/cache/ccache"
 
-# inputs= is the hash of this file and remote/deps.sh, computed on the driving
-# side (remote_provision_inputs_hash, targets/remote.sh) so both ends cannot
-# hash differently; `wk doctor --all` recomputes it and compares.
+# inputs= is the hash of this file and remote/deps.sh, computed on the driving side (remote_provision_inputs_hash, targets/remote.sh) so the two ends cannot hash differently; `wk doctor --all` recomputes it and compares.
 write_file "$HOME/.wk-remote" 0644 <<EOF
 # wk: this machine hosts wk remote workspaces. Written by remote/provision.sh.
 #
@@ -48,13 +41,7 @@ root=$ROOT
 inputs=${WK_REMOTE_INPUTS:-}
 EOF
 
-# No second conf: targets/remote.sh recomputes WK_TARGET_KIND and the rest.
-
-# ~/.ssh/config is often shared over NFS between machines, so ssh is pointed at
-# the key per checkout (`core.sshCommand`); `wk key ensure` generates it into
-# `push-keys` (wk_push_held_dir, lib/store.sh). The private half, and no agent:
-# the key and the process that would use it are in one filesystem here, which is
-# why `wk ai claude` refuses this target too (cmd/verify).
+# ~/.ssh/config is often shared over NFS between machines, so ssh is pointed at the key per checkout (`core.sshCommand`), `wk key ensure` generating it into `push-keys` (wk_push_held_dir, lib/store.sh). The private half and no agent: the key and the process that would use it are in one filesystem here, which is why `wk ai claude` refuses this target too (cmd/verify).
 ensure_dir "$ROOT/secrets" 0700
 ensure_dir "$ROOT/push-keys" 0700
 write_file "$ROOT/ssh/config" 0600 <<EOF
@@ -67,19 +54,12 @@ write_file "$ROOT/ssh/config" 0600 <<EOF
 $(WK_ROOT="$TOOLS" bash -c '. "$1/lib/common.sh"; . "$1/lib/store.sh"; wk_ssh_alias_blocks "$2"' _ "$TOOLS" "$ROOT/push-keys")
 EOF
 
-# An include, so the identity is declared once for every machine
-# (dotfiles/gitconfig) and the settings that keep `git status` in a WebKit
-# checkout fast reach a build box too -- an editor over ssh asks on every
-# keystroke. --replace-all: git reads every include.path it finds.
+# An include, so the identity is declared once for every machine (dotfiles/gitconfig) and the settings that keep `git status` in a WebKit checkout fast reach a build box too, an editor over ssh asking on every keystroke. --replace-all, because git reads every include.path it finds.
 git config --global --replace-all include.path "$TOOLS/dotfiles/gitconfig"
 changed "gitconfig includes $TOOLS/dotfiles/gitconfig"
 [ -f "$HOME/.gitignore" ] || printf '.DS_Store\n.cache\ncompile_commands.json\n' > "$HOME/.gitignore"
 
-# The include is not the last word: git takes a key's last value, so a [user]
-# section below it in ~/.gitconfig wins and every commit from this box carries
-# it -- one machine here had `user.name = no`. Only *this account's* file is
-# touched; /etc/gitconfig is reported instead.
-for _id in name email; do
+for _id in name email; do   # the include is not the last word: git takes a key's last value, so a [user] section below it in ~/.gitconfig wins and every commit from this box carries it -- one machine here had `user.name = no`. Only *this account's* file is touched, /etc/gitconfig being reported instead
     _want=$(git config --file "$TOOLS/dotfiles/gitconfig" --get "user.$_id" || true)
     [ -n "$_want" ] || continue
     _have=$(git config --get "user.$_id" || true)
@@ -99,9 +79,7 @@ for _id in name email; do
 done
 unset _id _want _have _now
 
-# `chsh` wants a password and is often refused under LDAP, and $HOME is shared
-# between these machines; shell/bashrc execs zsh from bash instead (NO_ZSH=1).
-if have zsh; then
+if have zsh; then   # `chsh` wants a password and is often refused under LDAP, and $HOME is shared between these machines, so shell/bashrc execs zsh from bash instead (NO_ZSH=1)
     info "zsh: $(command -v zsh) -- interactive bash sessions will move to it"
 else
     warn "no zsh on this machine, and installing one needs root.
@@ -112,11 +90,9 @@ _rc_line=". \"$TOOLS/shell/bashrc\""
 for _rc in "$HOME/.zshrc" "$HOME/.bashrc" "$HOME/.bash_profile"; do
     [ -f "$_rc" ] || : > "$_rc"
 
-    # A moved checkout leaves a stale source line that errors every shell.
-    if grep -qE 'wk-tools/bashrc' "$_rc" 2>/dev/null; then
+    if grep -qE 'wk-tools/bashrc' "$_rc" 2>/dev/null; then   # a moved checkout leaves a stale source line that errors every shell
         _tmp="$(mktemp)"
-        # || true: under set -e, a match-nothing grep (an all-stale file) would abort here instead of emptying it.
-        grep -vE '(^|[[:space:]])(source|\.)[[:space:]]+.*wk-tools/bashrc' "$_rc" > "$_tmp" || true
+        grep -vE '(^|[[:space:]])(source|\.)[[:space:]]+.*wk-tools/bashrc' "$_rc" > "$_tmp" || true   # || true: under set -e a match-nothing grep, an all-stale file, would abort here instead of emptying it
         mv "$_tmp" "$_rc"
         changed "removed stale wk-tools/bashrc line from $_rc"
     fi

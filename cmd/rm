@@ -3,13 +3,11 @@
 # wk rm <name>... -- destroy one or more workspaces and everything they created
 # wk: where=workspace name=required lifecycle post=ssh-alias-remove group=workspaces
 #
-# Thorough, since this is the guarantee that makes workspaces disposable: the
-# container, the overlay, the home directory and the ssh alias all go. Shared
-# caches (ccache, yocto, buildroot) survive.
+# The container, the overlay, the home directory and the ssh alias all go;
+# shared caches (ccache, yocto, buildroot) survive.
 #
-# `wk`'s header resolves only the first name into WK_NAME, leaving the rest in
-# argv, so `wk rm a b c` is three removals: one confirmation for all, each
-# destroyed independently.
+# `wk rm a b c` is three removals: one confirmation for all, each destroyed
+# independently.
 
 set -euo pipefail
 WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -23,8 +21,6 @@ NAME="${WK_NAME:-}"
 require_name "$NAME"
 
 NAMES=("$NAME")
-# Validated up front, before the confirmation below: asking "destroy '--bogus'?"
-# is a worse refusal than saying so straight away.
 for _a in ${@+"$@"}; do
     case "$_a" in
         -*) die "usage: wk rm <name>...; unknown option: $_a; see wk rm -h" ;;
@@ -39,8 +35,7 @@ for _n in "${NAMES[@]}"; do _list="$_list '$_n'"; done
 confirm "destroy workspace(s)${_list} and all their changes?" || die "aborted"
 export WK_YES=1
 
-# rm_one <name> -- in a subshell so a refusal ends only this one name's attempt,
-# with its own target load and its own locks.
+# rm_one <name> -- a subshell, so a refusal ends only this one name's attempt.
 rm_one() (
     set -euo pipefail
     local NAME="$1" TARGET ws sf clog n rc left _t _sf _pid
@@ -48,35 +43,24 @@ rm_one() (
     TARGET="$(ws_target "$NAME")"
     load_target "$TARGET"
 
-    # Refuse before asking: prompting for a decision that cannot be carried out
-    # either way is worse than saying so straight away.
     if [ "$WK_TARGET_KIND" = local ]; then t_destroy "$NAME"; fi
 
     ws=$(wk_ws_dir "$NAME")
 
-    # Beside the workspace directory, not in it (lib/target.sh): left behind,
-    # `wk status` would report a workspace gone anywhere.
     sf=$(ws_status_file "$NAME")
     clog=$(ws_create_log "$NAME")
 
-    # Before the lock: a creation in flight holds it, so waiting and then
-    # destroying what it just made would look exactly like a slow `wk rm`.
     if detach_alive "$sf"; then
         warn "'$NAME' is being created right now (pid $(status_field "$sf" pid), at stage
   '$(status_field "$sf" stage)') -- this will wait for that to finish and then
   destroy it. Ctrl-C now if that is not what you meant."
     fi
 
-    # The workspace being destroyed, and the store -- `wk gc` must not be
-    # counting references while this is removing one.
     hold_lock "ws-$NAME"
     if t_needs_base; then hold_lock store -s; fi
 
-    # Nothing left but the record: what a `wk rm` killed right after `wk new`
-    # took its lock leaves behind, and re-running has to finish the job.
     if [ ! -d "$ws" ] && [ "$(t_info "$NAME")" = absent ]; then
-        # ws_target falls back to a guess once nothing else answers for the
-        # name, so every target's own store is asked directly.
+        # ws_target guesses once nothing answers for the name, so ask each target's store.
         if [ ! -f "$sf" ]; then
             for _t in $(target_all 2>/dev/null); do
                 [ "$_t" = "$TARGET" ] && continue
@@ -97,7 +81,6 @@ rm_one() (
     fi
 
 
-    # Uncommitted work lives only in the overlay layer, so warn before discarding.
     if [ -d "$ws/changes" ]; then
         n=$(find "$ws/changes" -type f 2>/dev/null | wc -l | tr -d ' ')
         if [ "$n" -gt 0 ]; then warn "$NAME has $n modified file(s) in its overlay"; fi
@@ -105,9 +88,7 @@ rm_one() (
 
     confirm "destroy workspace '$NAME' and all its changes?" || die "aborted"
 
-    # claude remote-control runs detached inside the target; t_destroy takes it
-    # down with a container or guest, but a remote target's checkout keeps
-    # running.
+    # t_destroy kills claude remote-control with a container or guest, not with a checkout.
     if [ "$WK_TARGET_KIND" = remote ]; then
         _sf="$(wk_ws_dir "$NAME")/claude-rc.status"
         _pid=$([ -f "$_sf" ] && status_field "$_sf" pid || true)
@@ -118,8 +99,6 @@ rm_one() (
         fi
     fi
 
-    # The artifacts first, the bookkeeping last: what actually happened is
-    # re-derived from evidence (t_info, $ws) on every attempt.
     rc=0
     t_destroy "$NAME" || rc=$?
 

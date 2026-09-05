@@ -1,12 +1,5 @@
 #!/bin/bash
-#
-# commit-count -- who committed how much, over a window.
-#
-# `git shortlog --summary` over the last year by default; any other window is
-# the first argument, in git's own date language ("6 months", "2026-01-01").
-# Read-only, and restored as its own script rather than folded into anything
-# else: it answers a question about people, and the destructive `git-clean`
-# beside it answers one about files. They share nothing.
+# commit-count [<since>] [<git-log-args>] -- git shortlog over a window, default 1 year.
 set -euo pipefail
 since="${1:-1 year}"
 git rev-parse --git-dir >/dev/null 2>&1 || { echo "not a git checkout" >&2; exit 1; }

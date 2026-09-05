@@ -1,45 +1,24 @@
-# Target driver: a disposable macOS VM, for building the Apple ports, on Tart.
-# `tart clone` is APFS copy-on-write, so a golden base VM with Xcode and a
-# WebKit checkout is built once and every workspace is a free clone of it.
-# Apple permits two *running* macOS VMs per host (Virtualization.framework
-# fails a third with VZErrorDomain code 6), so t_start checks it, not t_create.
-# Egress is filtered by Softnet, a packet filter tart runs on the HOST, outside
-# the guest since root inside it could rewrite a `pf` there and
-# host/macos/softnet.sh installs it SUID root. WK_VM_UNFILTERED=1 turns it off.
+# Target driver: a disposable macOS VM on Tart. `tart clone` is APFS copy-on-write, so a
+# golden base with Xcode and a checkout is built once and every workspace is a free clone.
+# Apple permits two *running* macOS VMs per host (a third fails with VZErrorDomain code 6).
 
-# Overridable, named here once rather than at each read:
-#   WK_VM_BASE            the golden base VM's own name
-#   WK_VM_USER            the account every guest is provisioned with
-#   WK_VM_IMAGE_PASSWORD  the password the pulled image ships with
-#   WK_VM_CPUS/WK_VM_MEM_MB            a workspace guest's allocation
-#   WK_VM_BASE_CPUS/WK_VM_BASE_MEM_MB  the golden base's own
-#   WK_VM_DISK_GB         the sparse disk ceiling every guest is cloned with
-#   WK_VM_SHELLS_WARN     shells in a guest before `wk vm check` calls it an
-#                         accumulation, WK_VM_MEM_FREE_WARN_PCT and
-#                         WK_VM_SWAP_WARN_MB the same for its memory
-#   WK_VM_SUBNET, WK_VM_PROXY_ADDR, WK_VM_PROXY_PORT   the guest-facing bridge
-#                         and the egress proxy listening on it
-#   WK_HOST_FREE_WARN_GB  host disk headroom below which a start warns
 WK_VM_IMAGE="${WK_VM_IMAGE:-ghcr.io/cirruslabs/macos-tahoe-xcode:26.5}"
 WK_VM_BASE="${WK_VM_BASE:-wk-base}"
 WK_VM_MAX="${WK_VM_MAX:-2}"
 WK_VM_USER="${WK_VM_USER:-admin}"
 
-# The image ships one password (admin/admin, Cirrus Labs) and provisioning
-# changes it to the other, once. Only the guest's own window ever asks for it.
-WK_VM_PASSWORD="${WK_VM_PASSWORD:-1}"
-WK_VM_IMAGE_PASSWORD="${WK_VM_IMAGE_PASSWORD:-admin}"
+# The image ships admin/admin (Cirrus Labs) and it is kept: macOS refuses the change
+# from inside the guest, and only the guest's own login window ever asks for it.
+WK_VM_PASSWORD="${WK_VM_PASSWORD:-admin}"
 
 vm_login_note() {
     log "  the guest's own window logs in as $WK_VM_USER / $WK_VM_PASSWORD"
     log "  (wk itself uses an ssh key; this is for a prompt on the screen)"
-    log "  wk vm check <name>   what is in front of that window, whether that"
-    log "                       password is still what the base gave it, and what"
-    log "                       is piling up in there"
+    log "  wk vm check <name>   what is in front of that window, and what is"
+    log "                       piling up in it"
 }
 
-# Softnet runs its own network, NOT vmnet's usual 192.168.64.1, so the host
-# address the guest can reach is discovered from the live interface.
+# Softnet runs its own network, not vmnet's usual 192.168.64.1, so the host address the guest can reach is discovered from the live interface.
 WK_VM_SUBNET="${WK_VM_SUBNET:-192.168.2}"
 WK_VM_PROXY_PORT="${WK_VM_PROXY_PORT:-3128}"
 
@@ -52,8 +31,7 @@ _proxy_addr() {
 }
 WK_SOFTNET_BIN="${WK_SOFTNET_BIN:-/usr/local/bin/softnet}"
 
-# softnet's directory goes on PATH for *tart's* benefit: tart resolves softnet
-# through PATH, and a non-interactive ssh has only /usr/bin:/bin:/usr/sbin:/sbin.
+# tart resolves softnet through PATH, and a non-interactive ssh has only /usr/bin:/bin:/usr/sbin:/sbin.
 case ":$PATH:" in
     *":$(dirname "$WK_SOFTNET_BIN"):"*) ;;
     *) PATH="$(dirname "$WK_SOFTNET_BIN"):$PATH"; export PATH ;;
@@ -65,40 +43,30 @@ WK_VM_BASE_MEM_MB="${WK_VM_BASE_MEM_MB:-}"
 _base_cpus()   { echo "${WK_VM_BASE_CPUS:-$(envelope_cores)}"; }
 _base_mem_mb() { echo "${WK_VM_BASE_MEM_MB:-$(envelope_mem_mb)}"; }
 
-# What the base is built with before it is sealed; empty disables it.
 WK_VM_BASE_PREBUILD="${WK_VM_BASE_PREBUILD-mac-release}"
 
-# The prepared image's stock 140 GB does not fit even one build. A ceiling,
-# not an allocation: the disk is sparse and the clones are copy-on-write.
+# The prepared image's stock 140 GB does not fit even one build. A ceiling, not an allocation: the disk is sparse and the clones are copy-on-write.
 WK_VM_DISK_GB="${WK_VM_DISK_GB:-320}"
 
 # Not zero: the reading is taken over ssh, so a round trip is in every compare.
 WK_VM_CLOCK_SKEW="${WK_VM_CLOCK_SKEW:-30}"
 
-# Twelve shells -- an editor with a few panes, an agent and two ssh sessions
-# -- measured as nothing wrong. macOS pages below 15% free (memory_pressure).
+# Twelve shells measured as nothing wrong; macOS pages below 15% free (memory_pressure).
 WK_VM_SHELLS_WARN="${WK_VM_SHELLS_WARN:-12}"
 WK_VM_MEM_FREE_WARN_PCT="${WK_VM_MEM_FREE_WARN_PCT:-15}"
 WK_VM_SWAP_WARN_MB="${WK_VM_SWAP_WARN_MB:-1024}"
 
-# In points (tart's default unit). Tart pins the window's *minimum* content size
-# to it, and AppKit drops fullScreenPrimary once minSize exceeds the screen.
+# In points. Tart pins the window's *minimum* content size to it, and AppKit drops fullScreenPrimary once minSize exceeds the screen.
 WK_VM_DISPLAY="${WK_VM_DISPLAY:-1280x800}"
 
-# Short of this, a build fails as an I/O error inside the guest, naming nothing.
 WK_HOST_FREE_WARN_GB="${WK_HOST_FREE_WARN_GB:-80}"
 WK_HOST_FREE_MIN_GB="${WK_HOST_FREE_MIN_GB:-25}"
 
-# $WK_STORE defaults to /var/lib/wk, right inside the podman VM and wrong on
-# a macOS workstation, where nothing may write outside $HOME.
 WK_STORE="${WK_VM_STORE:-$(wk_state_dir)}"
 WK_VM_DIR="$WK_STORE/vm"
 WK_VM_KEY="$WK_VM_DIR/id_ed25519"
 
-# --- the tart binary ---------------------------------------------------------
-# Not in ./setup: tart needs the com.apple.security.virtualization entitlement,
-# so it stays in the signed app bundle. Launching it from outside the .app loses
-# fullScreenPrimary, hence the symlink resolution.
+# tart needs the com.apple.security.virtualization entitlement, so it stays in the signed app bundle; launched from outside the .app it loses fullScreenPrimary.
 _tart_bin() {
     local p
     if command -v tart >/dev/null 2>&1; then p=$(command -v tart)
@@ -107,8 +75,7 @@ _tart_bin() {
         p="$HOME/.local/share/tart/tart.app/Contents/MacOS/tart"
     else return 1
     fi
-    # `readlink -f` only grew symlink-chain resolution on recent macOS, and
-    # this file has to keep working under bash 3.2 on an older one.
+    # `readlink -f` only grew symlink-chain resolution on recent macOS, and bash 3.2 must still work.
     if readlink -f "$p" >/dev/null 2>&1; then readlink -f "$p"
     elif command -v python3 >/dev/null 2>&1; then
         python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$p"
@@ -131,12 +98,8 @@ _tart() {
 
 _vm() { echo "wk-$1"; }
 
-# Delete a VM and reap what ran it. `tart delete` removes the disk and leaves
-# the `tart run` process alive, and a runner for a VM that no longer exists
-# goes on holding one of macOS's few Virtualization framework slots: two of
-# them, left by interrupted builds, made the next base build die in
-# base.run.log with "The number of VMs exceeds the system limit" (measured
-# 2026-09-04). Every delete goes through here so no path can leak one.
+# `tart delete` leaves the `tart run` process alive, and a runner for a VM that no longer
+# exists still holds one of Apple's two slots (measured 2026-09-04: base.run.log said "The number of VMs exceeds the system limit").
 _vm_delete() { # <vm name>
     local v="$1" rc=0 pids
     _tart stop "$v" >/dev/null 2>&1 || true
@@ -152,14 +115,11 @@ _vm_delete() { # <vm name>
     return "$rc"
 }
 
-# The pids running <vm name>, by exact final argument: `wk-demo` must not match
-# `wk-demo2`.
 _vm_runners() { # <vm name>
     pgrep -f "tart run .*[[:space:]]$1\$" 2>/dev/null || true
 }
 
-# `tart list` mixes local VMs and cached OCI images, spelling Source "local"
-# case-folded. No tart means an empty list, not a state t_info would read.
+# `tart list` mixes local VMs and cached OCI images, spelling Source "local" case-folded.
 _vm_json() {
     local bin
     bin=$(_tart_bin) || { echo '[]'; return 0; }
@@ -188,16 +148,11 @@ elif q == "list":
 _vm_state()      { _vm_query state "$1"; }
 _running_count() { _vm_query running_count; }
 
-# --- contract ----------------------------------------------------------------
-
 t_src()   { echo "/Users/$WK_VM_USER/WebKit"; }
 t_tools() { echo "/Users/$WK_VM_USER/wk-tools"; }
 
-# The guest's own bare mirror, built into the golden base and inherited by every
-# clone through copy-on-write. Refreshed by t_sync.
 t_mirror_dir() { mirror_beside_checkout "$(t_src "$1")"; }
 
-# `wk new` resolves a base *snapshot*; cloning the golden VM is the checkout.
 t_needs_base() { return 1; }
 
 t_store_init() {
@@ -207,12 +162,9 @@ t_store_init() {
 }
 
 t_list() {
-    # Listing the golden base would invite `wk rm` on the one expensive thing.
     _vm_query list "$WK_VM_BASE"
 }
 
-# The golden guest is not running while the clone happens, so this rules out a
-# `tart clone`/`tart set` killed part-way, which `tart list` reports happily.
 t_created() { [ -f "$(wk_ws_dir "$1")/$WK_READY_MARKER" ]; }
 
 t_info() {
@@ -229,8 +181,7 @@ t_ssh_host() {
 
 t_ssh_user() { printf '%s' "$WK_VM_USER"; }
 
-# A guest cannot see a unix socket across the hypervisor, so unlike a container
-# this is a socket sshd creates and this host's `ssh -R` carries.
+# A guest cannot see a unix socket across the hypervisor, so this one is created by sshd and carried by this host's `ssh -R`.
 t_agent_sock() { printf '/Users/%s/.wk-ssh-agent.sock' "$WK_VM_USER"; }
 
 t_os() { echo macos; }
@@ -243,17 +194,14 @@ t_create() {
 
     _ensure_base
 
-    # A warning, not a refusal: an older base still clones to a usable
-    # workspace, the rebuild costs hours, and its password comes with it.
     if why=$(vm_base_stale); then
         warn "'$WK_VM_BASE' predates its own provisioning inputs: $why.
   '$name' is a clone of it, so it carries what that base was built with -- the
-  image's password if the change came later, and the desktop settings of the day
-  it was sealed. 'wk vm check $name' says which of them are still wrong.
+  desktop settings of the day it was sealed included. 'wk vm check $name' says
+  which of them are still wrong.
       wk vm base --rebuild     hours; existing guests are unaffected"
     fi
 
-    # Not fatal -- the guest limit applies to running VMs, not created ones.
     local running; running=$(_running_count)
     [ "${running:-0}" -ge "$WK_VM_MAX" ] && \
         warn "$running macOS VM(s) already running; you will have to stop one before starting '$name'"
@@ -261,24 +209,19 @@ t_create() {
     info "cloning $WK_VM_BASE -> $v (APFS copy-on-write)"
     local t0; t0=$(date +%s)
     _tart clone "$WK_VM_BASE" "$v"
-    # Set.swift assigns displayRefit unconditionally, so a `tart set` that omits
-    # --display-refit silently clears it.
+    # Set.swift assigns displayRefit unconditionally, so a `tart set` omitting --display-refit clears it.
     _tart set "$v" --cpu "$(_vm_cpus)" --memory "$(_vm_mem_mb)" --random-mac --random-serial \
         --display "$WK_VM_DISPLAY" --display-refit
     debug "clone took $(( $(date +%s) - t0 ))s"
 
-    # A clone that took minutes fell back to a real copy, not clonefile(2).
     [ $(( $(date +%s) - t0 )) -gt 60 ] && \
         warn "the clone took $(( $(date +%s) - t0 ))s -- APFS copy-on-write may not be in play; check disk use"
 
     ensure_dir "$(wk_ws_dir "$name")"
 
-    # Last: a kill before here leaves a guest read as `creating`.
     : > "$(wk_ws_dir "$name")/$WK_READY_MARKER"
 }
 
-# Everything a start puts into a guest, in one place: t_start's two arms must
-# not deliver different halves of it. Best-effort.
 _converge_guest() { # <name> <ip>
     local name="$1" ip="$2"
     _push_tools "$name" "$ip" || warn "wk-tools in $name is not this tree's commit; 'wk sync --tools' puts it there once it is committed"
@@ -290,10 +233,8 @@ _converge_guest() { # <name> <ip>
     _write_claude_config "$name" "$ip" || warn "could not link ~/.claude in $name; an agent in there would have no instructions"
     _write_agent_secrets "$name" "$ip" || warn "could not write the agent credentials into $name; an agent in there will ask you to log in"
     _write_deploy_keys "$name" "$ip" || warn "could not write $name's ssh config and public key halves; a push from in there is refused ('wk push status')"
-    # After the config: only a guest booted while push is on gets the forward.
     _agent_converge_guest "$name" "$ip" || warn "could not converge $name's ssh-agent forward; 'wk push status' says what it can reach"
     _settle_desktop "$name" "$ip" || warn "could not settle $name's desktop; 'wk vm check $name' says what is in front of the window"
-    # After the settle, or it reports the state the settle was fixing.
     _report_desktop "$name"
 }
 
@@ -304,27 +245,23 @@ t_start() {
     [ "$(_vm_state "$v")" != absent ] || die "no such workspace: $name"
     if [ "$(_vm_state "$v")" = running ]; then
         ip=$(_ip "$name")
-        # The proxy is the guest's only route out and does not outlive a crash
-        # of its own. Idempotent -- _start_host_proxy asks the socket first.
         _start_host_proxy || true
         _converge_guest "$name" "$ip"
-        echo "$ip"
-        return 0
+    else
+        _check_guest_limit
+        _check_memory_budget "$name" "$(t_mem_mb "$name")"
+        _check_host_disk
+
+        ip=$(_boot "$v" 180)
+        _converge_guest "$name" "$ip"
     fi
 
-    _check_guest_limit
-    _check_memory_budget "$name" "$(t_mem_mb "$name")"
-    _check_host_disk
-
-    ip=$(_boot "$v" 180)
-    _converge_guest "$name" "$ip"
+    # One exit, so every command that starts a guest states the login.
+    vm_login_note
     echo "$ip"
 }
 
-# On every start, not only in the base: `defaults -currentHost` writes per
-# hardware UUID and `tart clone` gives the clone a new one, so a screen saver
-# the base turned off is armed again in every clone. The password goes down
-# stdin, never in the ssh command -- an argument is in `ps` on both ends.
+# `defaults -currentHost` writes per hardware UUID and `tart clone` gives the clone a new one, so a screen saver the base turned off is armed again in every clone.
 _settle_desktop() { # <name> <ip>
     {
         printf 'WK_VM_PASSWORD=%s\n' "$(sh_quote "$WK_VM_PASSWORD")"
@@ -332,7 +269,6 @@ _settle_desktop() { # <name> <ip>
     } | _ssh "$2" "bash -s" >/dev/null 2>&1
 }
 
-# On stderr, since t_start's stdout is the guest's address; best-effort.
 _report_desktop() { # <name>
     local probe
     probe=$(vm_desktop_probe "$1" 2>/dev/null) || return 0
@@ -343,15 +279,13 @@ $(vm_desktop_findings "$probe")
 FINDINGS
 }
 
-# --net-softnet-block=0.0.0.0/0 is default-deny, and longest-prefix-match makes
-# the single --net-softnet-allow "nothing except the proxy".
+# --net-softnet-block=0.0.0.0/0 is default-deny, and longest-prefix-match makes the single --net-softnet-allow "nothing except the proxy".
 _softnet_flags() {
     if [ -n "${WK_VM_UNFILTERED:-}" ]; then
         warn "WK_VM_UNFILTERED=1 -- this guest gets the open network, with no egress filter"
         return 0
     fi
-    # Fail closed: Softnet applies at `tart run` and cannot be added later,
-    # so a guest booted without it has the open network for its whole life.
+    # Fail closed: Softnet applies at `tart run` and cannot be added later, so a guest booted without it has the open network for its whole life.
     [ -x "$WK_SOFTNET_BIN" ] || die "softnet is not installed, so this guest's egress would not be filtered.
     Install it:  ./setup --stage softnet   (needs a terminal for sudo)
     Or set WK_VM_UNFILTERED=1 to boot with the open network anyway."
@@ -360,11 +294,8 @@ _softnet_flags() {
         "--net-softnet-allow=$(_proxy_addr)/32"
 }
 
-# wk-proxy.py, the same one containers use, on TCP since a guest cannot see a
-# unix socket. On demand: it binds an address that exists only while a VM runs.
 _proxy_pidfile() { echo "$WK_VM_DIR/proxy.pid"; }
 
-# Ask the socket, not the pidfile: a proxy outlives the shell that recorded it.
 _proxy_running() {
     local pf; pf=$(_proxy_pidfile)
     [ -f "$pf" ] && kill -0 "$(cat "$pf" 2>/dev/null)" 2>/dev/null && return 0
@@ -379,7 +310,6 @@ _start_host_proxy() {
     ensure_dir "$WK_VM_DIR"
     local log="$WK_VM_DIR/proxy.log" addr i=0
 
-    # A proxy started before the address exists dies with EADDRNOTAVAIL.
     addr=$(_proxy_addr)
     while [ "$i" -lt 30 ]; do
         ifconfig 2>/dev/null | grep -q "inet $addr " && break
@@ -390,11 +320,9 @@ _start_host_proxy() {
         return 1
     fi
 
-    # The injector first: the proxy hands it api.github.com's CONNECT, and one
-    # started after the proxy answers those with 502 until it is up.
+    # The injector first: the proxy hands it api.github.com's CONNECT, and one started after the proxy answers those with 502 until it is up.
     _start_host_inject || true
 
-    # WK_PROXY_UNIX=0: that socket is for containers, in the podman VM.
     WK_PROXY_UNIX=0 \
     WK_PROXY_TCP="$addr:$WK_VM_PROXY_PORT" \
     WK_STORE="$WK_STORE" \
@@ -418,24 +346,17 @@ _start_host_proxy() {
     return 1
 }
 
-# --- the GitHub API credential injector, for the guests -----------------------
-# container/proxy/github-inject.py, the same program the podman machine runs for
-# containers: it terminates TLS for api.github.com and adds the Authorization
-# header, so a guest opens a PR without holding the token. Every path is
-# explicit: this host has no XDG_RUNTIME_DIR.
+# container/proxy/github-inject.py, the same program the podman machine runs for containers: it terminates TLS for api.github.com and adds the Authorization header, so a guest opens a PR without holding the token.
 _inject_sock()  { echo "$WK_VM_DIR/github-inject.sock"; }
 _inject_dir()   { echo "$WK_VM_DIR/github-inject"; }
 _inject_ca()    { echo "$WK_VM_DIR/wk-github-ca.pem"; }
 _inject_pat()   { echo "$WK_VM_DIR/push-github-pat"; }
 _inject_read_pat() { echo "$WK_VM_DIR/read-github-pat"; }
 
-# Asked of the socket, for the reason _proxy_running gives.
 _inject_running() { [ -S "$(_inject_sock)" ] && nc -z -U "$(_inject_sock)" 2>/dev/null; }
 
 _start_host_inject() {
     ensure_dir "$WK_VM_DIR"
-    # Whatever this host holds, before the read that spends it: the switch is
-    # over writing, so this token stands and every start converges it.
     push_agent_pat_sync _agent_exec "$(_inject_read_pat)" \
         || warn "could not converge $(_inject_read_pat); a read from a guest answers 401"
     _inject_running && return 0
@@ -457,16 +378,12 @@ _start_host_inject() {
     return 1
 }
 
-# --- the deploy keys' agent, and the forward that carries it into a guest -----
-# A guest cannot see a unix socket across the hypervisor, so the ssh-agent
-# holding the private halves runs *here* and an `ssh -N -R` carries its socket
-# in: one agent per host, one forward per running guest, up only while push is.
+# A guest cannot see a unix socket across the hypervisor, so the ssh-agent holding the private halves runs *here* and an `ssh -N -R` carries its socket in.
 _agent_sock()    { echo "$WK_VM_DIR/ssh-agent.sock"; }
 _agent_pidfile() { echo "$WK_VM_DIR/ssh-agent.pid"; }
 
 _agent_exec() { sh -c "$1"; }
 
-# -D keeps ssh-agent in the foreground, so nohup's pid is the agent's.
 _start_host_agent() {
     push_agent_ensure _agent_exec "$(_agent_sock)" && return 0
     ensure_dir "$WK_VM_DIR"
@@ -489,15 +406,10 @@ _start_host_agent() {
 
 _forward_status() { echo "$WK_VM_DIR/$1.agent-forward"; }
 
-# One forward per guest, under the guest's own lock: two interleaved starts have
-# the second `rm -f` the socket the first bound, and its failure path then remove
-# the *first's* status file, after which `wk push off` cannot stop the forward.
 _agent_forward_start() { # <name> <ip>
     with_lock "vm-agent-forward-$1" -- _agent_forward_start_locked "$@"
 }
 
-# Detached with a status file (detach_run, lib/detach.sh). sshd will not bind
-# a socket path that already exists, so the stale one goes first.
 _agent_forward_start_locked() { # <name> <ip>
     local name="$1" ip="$2" sf log pid
     command -v detach_run >/dev/null 2>&1 || . "$WK_ROOT/lib/detach.sh"
@@ -509,11 +421,8 @@ _agent_forward_start_locked() { # <name> <ip>
     pid=$(detach_run "$sf" "$log" -- \
         ssh $(_ssh_opts) -N -R "$(t_agent_sock):$(_agent_sock)" "$WK_VM_USER@$ip")
     status_write "$sf" state=running pid="$pid" log="$log" stage=forwarding
-    # A forward that failed to bind exits at once.
     sleep 0.5
     detach_alive "$sf" && return 0
-    # This run's own record and no other's: removing a live forward's file
-    # leaves `wk push off` unable to stop it.
     [ "$(status_field "$sf" pid)" = "$pid" ] && rm -f "$sf"
     return 1
 }
@@ -531,8 +440,6 @@ _agent_forward_stop_locked() { # <name>
     rm -f "$sf"
 }
 
-# Make one guest match what the host agent holds; the agent's own answer
-# decides, so a start and `wk push` cannot disagree.
 _agent_converge_guest() { # <name> <ip>
     local name="$1" ip="$2"
     if push_agent_list _agent_exec "$(_agent_sock)" | grep -q .; then
@@ -550,20 +457,17 @@ _boot() {
     runlog="$WK_VM_DIR/${v#wk-}.run.log"
 
     if [ "$(_vm_state "$v")" != running ]; then
-        # Computed *before* the tart command line: inline, a die in
-        # _softnet_flags would kill only the subshell and tart would run anyway.
+        # Computed *before* the tart command line: inline, a die in _softnet_flags would kill only the subshell and tart would run anyway.
         local sflags
         sflags=$(_softnet_flags)
 
-        # Recorded so `wk ai claude` can tell how this guest was *booted*.
         if [ -z "$sflags" ]; then
             : > "$WK_VM_DIR/${v#wk-}.unfiltered"
         else
             rm -f "$WK_VM_DIR/${v#wk-}.unfiltered"
         fi
 
-        # nohup, not a bare `&`, or the VM dies with the terminal. Windowed:
-        # a macOS guest is the one workspace kind with a real GPU.
+        # nohup, not a bare `&`, or the VM dies with the terminal. Windowed: a macOS guest is the one workspace kind with a real GPU.
         # shellcheck disable=SC2086 -- deliberate word splitting of the flags.
         nohup "$(_tart_bin)" run $sflags "$v" >"$runlog" 2>&1 &
         disown 2>/dev/null || true
@@ -574,7 +478,6 @@ _boot() {
     ip=$(_tart ip "$v" --wait "$wait" 2>/dev/null | grep .) \
         || die "$v did not come up within ${wait}s; see $runlog"
 
-    # Only now can the proxy bind: the guest bridge exists only once running.
     _start_host_proxy || true
 
     _wait_ssh "$ip" || die "$v is up at $ip but ssh never answered; see $runlog"
@@ -583,8 +486,6 @@ _boot() {
 
 t_stop() {
     local v; v=$(_vm "$1")
-    # Before the stop: the forward is a process on *this* host, and one
-    # holding a socket in a dead guest is never reaped.
     _agent_forward_stop "$1"
     [ "$(_vm_state "$v")" = running ] || { info "$1 is not running"; return 0; }
     _tart stop "$v"
@@ -594,13 +495,11 @@ t_stop() {
 t_exec() {
     local name="$1"; shift
     local ip; ip=$(_ip "$name") || die "'$name' is not running (wk vm start $name)"
-    # Two layers of quoting: ssh joins its arguments with spaces, so the
-    # command must be one already-quoted string, in a *login* shell for PATH.
+    # Two layers of quoting: ssh joins its arguments with spaces, so the command must be one already-quoted string, in a *login* shell for PATH.
     local cmd; cmd=$(sh_quote "$@")
     _ssh "$ip" "bash -lc $(sh_quote "$cmd")"
 }
 
-# scp rather than `t_exec cat`: stdout through a login shell is not a pipe.
 t_pull() {
     local name="$1" src="$2" dest="$3"
     local ip; ip=$(_ip "$name") || die "'$name' is not running (wk vm start $name)"
@@ -608,7 +507,6 @@ t_pull() {
     scp -q $(_ssh_opts) "$WK_VM_USER@$ip:$src" "$dest"
 }
 
-# rsync, since a build tree is tens of thousands of files.
 t_pull_dir() {
     local name="$1" src="$2" dest="$3"; shift 3
     _t_pull_dir_excludes "$@"
@@ -619,7 +517,6 @@ t_pull_dir() {
         "$WK_VM_USER@$ip:$src/" "$dest/"
 }
 
-# The same scp and rsync inbound; the login shell is in the way either way.
 t_push() {
     local name="$1" src="$2" dest="$3"
     local ip; ip=$(_ip "$name") || die "'$name' is not running (wk vm start $name)"
@@ -634,8 +531,6 @@ t_push_dir() {
     rsync -a --delete -e "ssh $(_ssh_opts)" "$src/" "$WK_VM_USER@$ip:$dest/"
 }
 
-# Stdin from /dev/null: this runs inside a command substitution that inherits
-# it, and ssh would drink it.
 t_path_kind() {
     local name="$1" p="$2"
     local ip; ip=$(_ip "$name") || die "'$name' is not running (wk vm start $name)"
@@ -658,9 +553,7 @@ t_enter() {
     exec ssh -t $(_ssh_opts) "$WK_VM_USER@$ip" "cd $(t_src "$name") 2>/dev/null; exec \$SHELL -l"
 }
 
-# The marker that tells the guest's own wk that it *is* a workspace, and which
-# one -- without it, `wk build` in there tries to reach a podman machine a
-# macOS guest can never host. Never written into the golden base.
+# The marker that tells the guest's own wk that it *is* a workspace, and which one. Never written into the golden base.
 _write_marker() {
     local name="$1" ip="$2"
     _ssh "$ip" "printf '%s\n' \
@@ -670,8 +563,6 @@ _write_marker() {
         > \$HOME/.wk-workspace"
 }
 
-# Symlinks rather than copies: every start resets $HOME/wk-tools to this tree's
-# commit (_push_tools), so a copy goes stale.
 _write_claude_config() {
     local name="$1" ip="$2" tools; tools=$(t_tools "$name")
     _ssh "$ip" "[ -d $(sh_quote "$tools/claude") ] || exit 1
@@ -681,19 +572,8 @@ _write_claude_config() {
         done"
 }
 
-# The agents' credentials: a guest mounts nothing of ours, so a copy is the
-# only delivery there is. One row per named secret (wk_agent_secrets,
-# lib/store.sh), the same table container/firstrun.sh links and cmd/remote
-# copies to a build box. Rewritten every start so a rotation converges, and
-# removed unconditionally when the store has none -- a guest holding a
-# withdrawn credential is the state this must not leave behind. 0600, on
-# stdin, since an argument is in `ps` inside the guest.
-#
-# A file row is a credential its own tool rewrites in place, spending a
-# refresh token, so a refresh in a guest's copy invalidates the bytes every
-# container here shares. No file row is written into a guest: it is delivered
-# as absence, and the guest authenticates for itself into a store this host
-# never writes (CLAUDE_SECURESTORAGE_CONFIG_DIR, vm/shell-rc.sh).
+# One row per named secret (wk_agent_secrets, lib/store.sh), rewritten every start so a rotation converges and removed when the store has none: a guest holding a withdrawn credential is the state this must not leave behind.
+# A *file* row is a credential its own tool rewrites in place, spending a refresh token, so it is never copied in -- it is delivered as absence, and the guest authenticates into a store this host never writes (CLAUDE_SECURESTORAGE_CONFIG_DIR, vm/shell-rc.sh).
 _write_agent_secrets() { # <name> <ip>
     local name="$1" ip="$2" sname sfile shome svar skind val here n=0
     while read -r sname sfile shome svar skind; do
@@ -702,12 +582,9 @@ _write_agent_secrets() { # <name> <ip>
             here=1
         else
             here=0; wk_agent_secret_present "$sname" || here=$?
-            # 1 is "there is none"; above it is lib/secretfile.py refusing
-            # what is at that path, having already said why.
             [ "$here" -lt 2 ] || return 1
         fi
         if [ "$here" -ne 0 ]; then
-            # </dev/null: this loop's stdin is the table below.
             _ssh "$ip" "rm -f \$HOME/$(sh_quote "$shome")" </dev/null || return 1
             continue
         fi
@@ -721,8 +598,6 @@ EOF
     debug "agent credentials in $name: $n"
 }
 
-# A file row is never copied in, so this asks the guest's own login shell --
-# the one authority on where its credential store is (vm/shell-rc.sh).
 t_agent_secret_present() { # <name> <secret>
     local name="$1" sname="$2" ip probe
     [ "$(wk_agent_secret_kind "$sname")" = file ] || { wk_agent_secret_present "$sname"; return; }
@@ -737,21 +612,12 @@ t_agent_secret_remedy() { # <name> <secret>
     printf "a guest logs in for itself and this host is never a second holder: 'wk enter %s', then 'claude auth login' once" "$name"
 }
 
-# Softnet allows one address, where wk-proxy listens, so a guest's direct TCP
-# to port 22 is dropped and this proxy is an HTTP CONNECT one; github.com:22
-# is in its allowlist. macOS's own nc speaks CONNECT with `-X connect`, and
-# there is no other nc in a Cirrus Labs image. Absolute path: ssh runs this
-# through /bin/sh with the guest's environment, not the login PATH.
+# Softnet allows one address, where wk-proxy listens, so a guest's direct TCP to port 22 is dropped and this proxy is an HTTP CONNECT one; github.com:22 is in its allowlist.
+# macOS's own nc speaks CONNECT with `-X connect`, and there is no other nc in a Cirrus Labs image. Absolute path: ssh runs this through /bin/sh, not the login PATH.
 _ssh_proxy_command() {
     printf '/usr/bin/nc -X connect -x %s:%s %%h %%p' "$(_proxy_addr)" "$WK_VM_PROXY_PORT"
 }
 
-# The ssh config that picks one identity per fork, and the *public* halves it
-# names. No private half is ever written into a guest: the signature is made
-# by the ssh-agent on this host, through the forwarded socket. Written every
-# start, and the public half *removed* when this host has none -- a guest
-# offering a dead key reads as a GitHub permission problem. An IdentityAgent
-# pointing at a socket that is not there says `Permission denied (publickey)`.
 _write_deploy_keys() { # <name> <ip>
     local name="$1" ip="$2" remote repo alias pub idf n=0 total=0
 
@@ -770,7 +636,6 @@ EOF
             printf '%s\n' "$pub" | _ssh "$ip" "cat > $idf" || return 1
             n=$((n + 1))
         else
-            # </dev/null: ssh drinks stdin, and stdin here is the fork list.
             _ssh "$ip" "rm -f $idf" </dev/null || return 1
         fi
     done <<EOF
@@ -779,17 +644,11 @@ EOF
     debug "public deploy halves in $name: $n of $total"
 }
 
-# `wk push on|off`, the guest half: the private halves never move, so this
-# converges what the host agent holds and which running guests still reach it.
-# `tart` is macOS only, so only this side can do it. Running guests only: a
-# stopped one is converged by t_start.
 vm_push_keys_converge() { # <on|off>
     local action="$1" g ip rc=0
     if [ "$action" = on ]; then
         _start_host_agent || return 1
         push_agent_load _agent_exec "$(_agent_sock)" >/dev/null || rc=1
-        # The api half, at this host's own path: the guests' injector is here
-        # and reads a different file from the podman machine's (cmd/push).
         push_agent_pat_write _agent_exec "$(_inject_pat)" \
             || push_agent_pat_clear _agent_exec "$(_inject_pat)"
     else
@@ -821,8 +680,6 @@ vm_push_keys_converge() { # <on|off>
     return "$rc"
 }
 
-# For `wk push status`: one tab-separated `<guest> <state> <what it can push
-# with>` row each, asked of the guest and the agent, not of a record.
 vm_push_keys_state() {
     local g ip state keys n
     keys=$(push_agent_list _agent_exec "$(_agent_sock)")
@@ -833,8 +690,6 @@ vm_push_keys_state() {
             printf '%s\t%s\t\n' "$g" "${state:-unknown}"
             continue
         fi
-        # Both ends, because either alone is a false report: a forwarded
-        # socket over an empty agent cannot sign, nor can an unreached agent.
         if [ "$n" -gt 0 ] \
             && _ssh "$ip" "test -S $(sh_quote "$(t_agent_sock)")" </dev/null 2>/dev/null; then
             printf '%s\trunning\t%s\n' "$g" "$n key(s) through the agent on this host"
@@ -844,24 +699,11 @@ vm_push_keys_state() {
     done
 }
 
-# Everything in the guest that names the egress proxy, written on every start:
-# the address is the host's own on the guest bridge and can change, so no image
-# may bake it in. Two halves, and a guest needs both:
-#
-#   the system proxy   WebKit's network process does not read
-#                      http_proxy/https_proxy, so MiniBrowser loading
-#                      https://webkit.org/ gives a blank window while curl to
-#                      the same host goes straight through.
-#   ~/.wk-egress       http_proxy/https_proxy, for every shell that reads an
-#                      rc -- vm/shell-rc.sh sources it from all four. A profile
-#                      would reach only *login* shells, and an editor's
-#                      terminal pane is not one.
+# The proxy address is the host's own on the guest bridge and can change, so no image may bake it in. A guest needs both halves:
+#   WebKit's network process does not read http_proxy/https_proxy (MiniBrowser gives a blank window where curl goes through), so the *system* proxy is set too; ~/.wk-egress carries http_proxy/https_proxy into all four rc files, where a profile would reach only login shells.
 _set_guest_egress() {
     local name="$1" ip="$2" addr="" ca=""
     [ -n "${WK_VM_UNFILTERED:-}" ] || addr=$(_proxy_addr)
-    # api.github.com is the one host whose TLS is terminated on this host, so
-    # the guest must trust the injector's CA. A property of this host too, so
-    # it is carried in the same write.
     [ -z "$addr" ] || ca=$(cat "$(_inject_ca)" 2>/dev/null) || ca=""
     debug "guest egress in $name: ${addr:-off}"
 
@@ -941,16 +783,10 @@ sudo -n networksetup -setproxybypassdomains "\$svc" localhost 127.0.0.1
 EOF
 }
 
-# The guest's clock, set from this host on every start. `tart clone` hands a
-# clone the golden base's clock, and nothing inside can correct it: Softnet
-# allows one address, and NTP is UDP, which an HTTP CONNECT proxy cannot carry.
-# What that looks like from inside is not a clock -- every TLS handshake to a
-# certificate issued after that date fails, as CERT_NOT_YET_VALID. Idempotent
-# by measurement: a guest within WK_VM_CLOCK_SKEW costs no sudo.
+# `tart clone` hands a clone the golden base's clock and nothing inside can correct it: Softnet allows one address, and NTP is UDP, which an HTTP CONNECT proxy cannot carry.
+# From inside that looks like every TLS handshake failing as CERT_NOT_YET_VALID, not like a clock. Idempotent by measurement: a guest within WK_VM_CLOCK_SKEW costs no sudo.
 _set_guest_clock() { # <name> <ip>
     local name="$1" ip="$2" skew
-    # The guest decides whether to write, so an in-time guest needs no sudo.
-    # `date -u MMDDhhmmCCYY.ss` is BSD date's set form, UTC on both sides.
     skew=$(_ssh "$ip" "env WK_NOW_EPOCH=$(date -u +%s) WK_NOW_SET=$(date -u +%m%d%H%M%Y.%S) \
                            WK_SKEW=$(sh_quote "$WK_VM_CLOCK_SKEW") bash -s" <<'EOF'
 set -u
@@ -965,8 +801,6 @@ EOF
     info "$name's clock was ${skew}s out; set from this host"
 }
 
-# WebKit's lldb helpers, as container/firstrun.sh wires them up.
-# container/lldb/rr.py is left out because rr is Linux-only.
 _write_lldbinit() {
     local name="$1" ip="$2"
     {
@@ -976,22 +810,15 @@ _write_lldbinit() {
     } | _ssh "$ip" "cat > \$HOME/.lldbinit"
 }
 
-# The guest's shells, pointed at the shared rc -- which is where `wk` gets onto
-# PATH (shell/path.sh). From the same file vm/provision-base.sh runs, so a
-# guest cloned from an older base converges rather than needing it rebuilt.
 _write_shell_rc() { # <name> <ip>
     _ssh "$2" "bash -s $(sh_quote "$(t_tools "$1")")" < "$WK_ROOT/vm/shell-rc.sh"
 }
 
 command -v tools_push >/dev/null 2>&1 || . "$WK_ROOT/lib/tools.sh"
 
-# A checkout of this tree's HEAD, pushed as a git bundle (tools_push,
-# lib/tools.sh) rather than mounted: no --dir is ever passed to `tart run`. An
-# uncommitted tree here is refused, so a guest holds a commit that exists.
+# A git bundle of this tree's HEAD (tools_push, lib/tools.sh) rather than a mount: no --dir is ever passed to `tart run`, and an uncommitted tree here is refused.
 _push_tools() {
     local name="$1" ip="$2"
-    # The transport as a command *prefix*, so nothing is left behind holding
-    # a stale `ip`.
     tools_push "$(t_tools "$name")" _ssh "$ip"
 }
 
@@ -1002,9 +829,6 @@ t_sync_tools() {
     _write_marker "$name" "$ip"
 }
 
-# This target's furniture (`wk sync --tools`). Each guest's mirror is its own,
-# inherited from the base by copy-on-write and diverging from there, so `wk
-# sync <workspace>` then fetches from it without a network round trip.
 t_sync() {
     local g rc=0 ip m
     command -v mirror_refresh_script >/dev/null 2>&1 || . "$WK_ROOT/lib/store.sh"
@@ -1020,9 +844,6 @@ t_sync() {
             continue
         fi
         m=$(t_mirror_dir "$g")
-        # Only a mirror that is there: a guest cloned from a base built
-        # before the mirror existed has none, and making one here would be a
-        # 19 GB clone nobody asked for.
         if _ssh "$ip" "if [ -d $(sh_quote "$m") ]; then
                            $(mirror_refresh_script "$m")
                        else echo mirror-absent
@@ -1053,24 +874,15 @@ t_destroy() {
         info "deleted VM $v"
     fi
 
-    # The guest's disk goes with `tart delete`; the host-side files do not.
     local ws; ws=$(wk_ws_dir "$name")
     [ -d "$ws" ] && { rm -rf "$ws"; info "removed $ws"; }
     rm -f "$WK_VM_DIR/$name.run.log"
-    # The unfiltered marker too, or it falsely refuses the next guest of the
-    # same name (cmd/ai).
     rm -f "$WK_VM_DIR/$name.unfiltered"
 }
 
-# What the base was built with, for _base_mark_ready; empty when the prebuild
-# was disabled or failed.
 _base_prebuilt=""
 
-# Build the base once, so every workspace starts warm: `tart clone` is
-# copy-on-write, so the build tree and compilation cache cost each clone
-# nothing. It never fails the provisioning it is the last step of -- the
-# completion marker is written after it, so anything fatal here would leave a
-# provisioned base the next `_ensure_base` deletes as rubble.
+# Never fails the provisioning it is the last step of: the completion marker is written after it, so anything fatal here would leave a base the next `_ensure_base` deletes as rubble.
 _prebuild_base() {
     local ip="$1"
     _base_prebuilt=""
@@ -1078,8 +890,6 @@ _prebuild_base() {
 
     # shellcheck disable=SC1090
     . "$WK_ROOT/build/configs.sh"
-    # The platform is the target's (t_os); checked hours earlier by
-    # _ensure_base and _provision_base.
     config_load "$WK_VM_BASE_PREBUILD" "$(t_os)"
 
     local jobs
@@ -1100,8 +910,7 @@ _prebuild_base() {
     local cmd
     cmd="env $(sh_quote "${CFG_ENV[@]}") $(sh_quote "$(t_tools "$WK_VM_BASE")/build/build-in-target.sh")"
 
-    # Detached and polled, NOT a foreground `ssh <long command>`: this build
-    # takes over an hour, and any blip on the connection kills it.
+    # Detached and polled, not a foreground `ssh <long command>`: this build takes over an hour, and any blip on the connection kills it.
     command -v detach_remote >/dev/null 2>&1 || . "$WK_ROOT/lib/detach.sh"
     local rlog="/tmp/wk-base-build.log" rrc="/tmp/wk-base-build.rc"
     detach_remote _base_ssh "$rlog" "$rrc" -- bash -lc "$cmd" || {
@@ -1122,22 +931,16 @@ _prebuild_base() {
         warn "base prebuild FAILED after $(( ($(date +%s) - t0) / 60 ))m -- the base is
   still usable, but every workspace will pay for a cold build.
   log: $WK_VM_DIR/base-build.log"
-        # first_error is in lib/watchdog.sh, which not every caller sources.
         if command -v first_error >/dev/null 2>&1; then
             first_error "$WK_VM_DIR/base-build.log" 2>/dev/null | sed 's/^/    /' || true
         fi
     fi
 }
 
-# --- helpers -----------------------------------------------------------------
-
 command -v _unpinned_host_key_opts >/dev/null 2>&1 || . "$WK_ROOT/lib/reach.sh"
 
 _ssh_opts() {
-    # ServerAliveInterval: builds go quiet for long stretches, and without
-    # keepalives a NAT timeout drops the connection mid-build and reports it
-    # as a build failure. A guest's key is minted fresh on every clone at the
-    # same address, which _unpinned_host_key_opts is for.
+    # ServerAliveInterval: builds go quiet for long stretches, and without keepalives a NAT timeout drops the connection mid-build and reports it as a build failure.
     printf '%s' "$(_ssh_opts_base "$(wk_ssh_timeout)") $(_unpinned_host_key_opts) \
 -o ServerAliveInterval=60 -o ServerAliveCountMax=10 -i $WK_VM_KEY"
 }
@@ -1148,9 +951,7 @@ _ssh() {
     ssh $(_ssh_opts) "$WK_VM_USER@$ip" "$@"
 }
 
-# The ssh-fn detach_remote/detach_wait_remote (lib/detach.sh) want, for both
-# long jobs in the base. `ip` is the caller's own local, in scope through
-# bash's dynamic scoping.
+# `ip` is the caller's own local, in scope through bash's dynamic scoping.
 _base_ssh() { _ssh "$ip" "$@"; }
 
 _ip() {
@@ -1168,7 +969,6 @@ _wait_ssh() {
     return 1
 }
 
-# In GB: the guest disks are sparse, so what matters is what the host can back.
 _host_free_gb() {
     df -g / 2>/dev/null | awk 'NR==2 {print $4}'
 }
@@ -1199,9 +999,6 @@ _check_guest_limit() {
     a third fails with VZErrorDomain code 6. Stop one first:  wk vm stop <name>"
 }
 
-# --- resource envelope -------------------------------------------------------
-# The mac VM competes with the podman VM for the same physical memory.
-
 _podman_mem_mb() {
     have podman || { echo 0; return; }
     podman machine inspect "${WK_MACHINE:-wk}" --format '{{.Resources.Memory}}' 2>/dev/null || echo 0
@@ -1212,9 +1009,7 @@ _podman_running() {
     [ "$(podman machine inspect "${WK_MACHINE:-wk}" --format '{{.State}}' 2>/dev/null)" = running ]
 }
 
-# How many containers are running in it, asked of the machine. A stopped or
-# absent machine has none, and an unreadable answer counts as busy: stopping a
-# machine underneath something is the mistake this guards.
+# An unreadable answer counts as busy: stopping a machine underneath something is the mistake this guards.
 _podman_containers_running() {
     _podman_running || { echo 0; return 0; }
     podman machine ssh "${WK_MACHINE:-wk}" -- 'podman ps -q | grep -c . || true' \
@@ -1224,8 +1019,6 @@ _podman_containers_running() {
 _vm_cpus()   { echo "${WK_VM_CPUS:-$(envelope_cores)}"; }
 _vm_mem_mb() { echo "${WK_VM_MEM_MB:-$(envelope_mem_mb)}"; }
 
-# What an *existing* VM was created with: it keeps that allocation for life, so
-# sizing a build from the default envelope instead risks an OOM.
 _vm_get() {
     _tart get "$1" --format json 2>/dev/null | python3 -c '
 import json, sys
@@ -1235,8 +1028,6 @@ print("" if v is None else v)' "$2"
 
 _vm_configured() { _vm_get "$(_vm "$1")" "$2"; }
 
-# Memory already promised to running guests, less one named guest so a caller
-# re-using it does not count it against itself.
 _committed_mem_mb() {
     local skip="${1:-}" total=0 v m
     for v in $(_vm_query running); do
@@ -1269,11 +1060,7 @@ _check_memory_budget() {
 
     [ "$total" -le "$budget" ] && return 0
 
-    # An idle podman machine is not a reason to refuse a guest: it holds the
-    # whole envelope whether or not anything runs in it, workspaces and their
-    # state survive a stop, and `wk` starts it again on the next container
-    # command. Anything actually running in there is a different matter and is
-    # named below rather than stopped underneath.
+    # An idle podman machine is not a reason to refuse a guest: it holds the whole envelope whether or not anything runs in it, and `wk` starts it again on the next container command.
     if [ "$podman_mb" -gt 0 ] && [ "$(_podman_containers_running)" = 0 ] \
        && [ $(( mine + guests )) -le "$budget" ]; then
         info "stopping the idle podman machine to free ${podman_mb}MB for '$name'"
@@ -1292,8 +1079,6 @@ _check_memory_budget() {
 
     spare=$(( budget - podman_mb - guests ))
 
-    # Advice, not a command line: this is reached for the golden base too, and
-    # "wk vm start wk-base" is not a thing anyone can run.
     local advice
     if [ "$spare" -ge 4096 ]; then
         advice="      WK_VM_MEM_MB=$spare, then retry
@@ -1328,35 +1113,23 @@ $advice
           proceed anyway"
 }
 
-# --- the golden base ---------------------------------------------------------
-
 _base_exists() { [ "$(_vm_state "$WK_VM_BASE")" != absent ]; }
 
-# Existing is not the same as finished: a base that failed provisioning partway
-# would otherwise be inherited by every clone.
 _base_marker() { echo "$WK_VM_DIR/base.ready"; }
 
 _base_ready() { _base_exists && [ -f "$(_base_marker)" ]; }
 
-# The inputs that produced this base, as one hash: the three provisioning
-# scripts, the image, the account, and whether the password change applies.
-# Never the password itself -- a digest over public files plus a trivial
-# password is one a reader of the marker could recover. vm_base_stale
-# recomputes and compares on every read, so a script edited here makes every
-# base built before it read stale immediately.
+# The inputs that produced this base, as one hash: vm_base_stale recomputes and compares on every read, so a script edited here makes every base built before it read stale at once.
 _base_inputs_hash() {
     {
         cat "$WK_ROOT/vm/provision-base.sh" "$WK_ROOT/vm/desktop.sh" \
             "$WK_ROOT/vm/shell-rc.sh"
-        printf 'image=%s\nuser=%s\npassword_change=%s\n' \
-            "$WK_VM_IMAGE" "$WK_VM_USER" \
-            "$([ "$WK_VM_PASSWORD" = "$WK_VM_IMAGE_PASSWORD" ] && echo no || echo yes)"
+        printf 'image=%s\nuser=%s\n' "$WK_VM_IMAGE" "$WK_VM_USER"
     } | python3 -c 'import hashlib,sys
 print(hashlib.sha256(sys.stdin.buffer.read()).hexdigest()[:16])'
 }
 
-# Prints the reason and succeeds when the base is stale, so a caller reads
-# `if why=$(vm_base_stale); then`. It never rebuilds anything.
+# Prints the reason and succeeds when the base is stale, so a caller reads `if why=$(vm_base_stale); then`.
 vm_base_stale() {
     local rec
     rec=$(marker_field "$(_base_marker)" inputs)
@@ -1365,12 +1138,10 @@ vm_base_stale() {
         return 0
     fi
     [ "$rec" = "$(_base_inputs_hash)" ] && return 1
-    echo "vm/provision-base.sh, vm/desktop.sh, vm/shell-rc.sh, WK_VM_IMAGE, WK_VM_USER or the password change has changed since it was built"
+    echo "vm/provision-base.sh, vm/desktop.sh, vm/shell-rc.sh, WK_VM_IMAGE or WK_VM_USER has changed since it was built"
     return 0
 }
 
-# The base, in the `<state> <what> <remedy>` shape vm_desktop_findings and
-# remote/deps.sh's wk_remote_findings use, so one renderer serves all three.
 vm_base_findings() {
     local why
     _f() { printf '%s\t%s\t%s\n' "$1" "$2" "${3:-}"; }
@@ -1382,7 +1153,7 @@ vm_base_findings() {
         _f wrong "'$WK_VM_BASE' exists but provisioning never finished in it" \
                  "wk vm base --refresh   (re-runs provisioning; nothing is re-downloaded)"
     elif why=$(vm_base_stale); then
-        _f wrong "'$WK_VM_BASE' predates its own provisioning inputs: $why -- every guest cloned from it carries what that base was built with, the account's password included" \
+        _f wrong "'$WK_VM_BASE' predates its own provisioning inputs: $why -- every guest cloned from it carries what that base was built with" \
                  "wk vm base --rebuild   (hours; existing guests are unaffected)"
     else
         _f ok "golden base '$WK_VM_BASE' matches its provisioning inputs"
@@ -1392,8 +1163,6 @@ vm_base_findings() {
     return 0
 }
 
-# prebuild= is what the base *got*, not what was asked for: a prebuild that
-# failed leaves a usable base whose workspaces pay for a cold build.
 _base_mark_ready() {
     ensure_dir "$WK_VM_DIR" 0700 >/dev/null
     printf 'image=%s
@@ -1405,8 +1174,6 @@ finished=%s
         "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$(_base_marker)"
 }
 
-# Checked before any work rather than at the step that uses it, which is hours
-# in. In a subshell: the CFG_* it sets belong to the build that runs later.
 _check_prebuild_config() {
     [ -n "$WK_VM_BASE_PREBUILD" ] || return 0
     # shellcheck disable=SC1090
@@ -1442,7 +1209,6 @@ sys.exit(0 if any(v.get("Name") == sys.argv[1] for v in json.load(sys.stdin)) el
     _provision_base
 }
 
-# Runs against the base VM only; every workspace inherits the result.
 _provision_base() {
     _check_prebuild_config
     _check_guest_limit
@@ -1455,7 +1221,6 @@ _provision_base() {
         info "growing the base disk ${cur}GB -> ${WK_VM_DISK_GB}GB"
         _tart set "$WK_VM_BASE" --disk-size "$WK_VM_DISK_GB"
     fi
-    # Also while off: the base ends provisioning with a full build.
     _tart set "$WK_VM_BASE" --cpu "$(_base_cpus)" --memory "$(_base_mem_mb)"
     _check_host_disk
 
@@ -1464,8 +1229,7 @@ _provision_base() {
         changed "generated the macOS VM ssh key"
     fi
 
-    # A first boot has Setup Assistant work to get through, hence the longer
-    # wait than t_start uses. ssh is not reachable until the key goes in below.
+    # A first boot has Setup Assistant work to get through, hence the longer wait than t_start uses.
     local runlog="$WK_VM_DIR/base.run.log"
     local ip
     if [ "$(_vm_state "$WK_VM_BASE")" != running ]; then
@@ -1476,9 +1240,7 @@ _provision_base() {
     ip=$(_tart ip "$WK_VM_BASE" --wait 300 2>/dev/null | grep .) \
         || die "base VM did not boot; see $runlog"
 
-    # The guest agent is how the key gets in the FIRST time, without typing
-    # the default password. Later ssh is the better question: `tart ip --wait`
-    # answers before the agent is listening.
+    # The guest agent is how the key gets in the FIRST time, without typing the default password; `tart ip --wait` answers before the agent is listening.
     if _wait_ssh "$ip"; then
         debug "ssh already works in '$WK_VM_BASE'; no key to install"
     else
@@ -1497,32 +1259,22 @@ _provision_base() {
         _wait_ssh "$ip" || die "ssh key was installed but ssh still refuses; see $runlog"
     fi
 
-    # Before anything here speaks TLS: provisioning's first act is an HTTPS
-    # clone, which a stale clock fails as a not-yet-valid certificate. A
-    # refusal, since a base sealed at the wrong date hands it to every clone.
+    # Before anything here speaks TLS: provisioning's first act is an HTTPS clone, which a stale clock fails as a not-yet-valid certificate. A refusal, since a base sealed at the wrong date hands it to every clone.
     _set_guest_clock "$WK_VM_BASE" "$ip" \
         || die "could not set the clock in '$WK_VM_BASE'. Passwordless sudo is what it
     needs, and the base is built from the image WK_VM_IMAGE names -- check that
     image rather than patching the guest:  ssh into it and run  sudo -n true"
 
     info "provisioning the base VM (Xcode licence, WebKit mirror and checkout, Claude CLI)"
-    # The whole checkout: provision-base.sh links ~/.claude out of it too.
     _push_tools "$WK_VM_BASE" "$ip" \
         || die "the base cannot be provisioned without wk-tools in it (see above)"
-    # No proxy address: the base boots unfiltered. A clone's is written at
-    # start, by _set_guest_egress.
     vm_login_note
-    # Detached and polled, for the reason _prebuild_base gives: this clones all
-    # of WebKit, which is over an hour, and a foreground ssh takes the work
-    # down with the connection (measured 2026-09-04: "Read from remote host:
-    # Connection reset by peer" an hour in, and the clone died with it).
-    # WK_VM_MIRROR: t_mirror_dir is the one place that path is decided.
+    # Detached and polled, for the reason _prebuild_base gives (measured 2026-09-04: "Read from remote host: Connection reset by peer" an hour into the clone, which died with it).
     command -v detach_remote >/dev/null 2>&1 || . "$WK_ROOT/lib/detach.sh"
     local plog="/tmp/wk-base-provision.log" prc="/tmp/wk-base-provision.rc"
     detach_remote _base_ssh "$plog" "$prc" -- \
         env WK_VM_DISPLAY="$WK_VM_DISPLAY" WK_VM_USER="$WK_VM_USER" \
             WK_VM_PASSWORD="$WK_VM_PASSWORD" \
-            WK_VM_IMAGE_PASSWORD="$WK_VM_IMAGE_PASSWORD" \
             WK_VM_MIRROR="$(t_mirror_dir "$WK_VM_BASE")" \
             bash "$(t_tools "$WK_VM_BASE")/vm/provision-base.sh" \
         || die "could not start base provisioning in '$WK_VM_BASE'"
@@ -1533,23 +1285,15 @@ _provision_base() {
     What it printed is in $WK_VM_DIR/base-provision.log; the base is rubble
     until this finishes, and a re-run starts it again:  wk vm base --refresh"
 
-    # Never fatal: leaving a usable base unmarked would have the next run
-    # delete every hour of this.
     _prebuild_base "$ip"
 
     info "shutting the base VM down"
     _tart stop "$WK_VM_BASE"
-    # Last: until this exists the guest is rubble that the next run destroys.
     _base_mark_ready
     changed "golden base VM '$WK_VM_BASE' is ready"
 }
 
-# --- is this guest on an empty desktop? --------------------------------------
-# What vm/desktop-probe.sh found, as findings -- one per line, tab-separated
-# `<state> <what> <remedy>`, state one of ok | wrong | note. Every renderer
-# reads these a line at a time, so a remedy wrapped over two lines loses its
-# second half. All of it is provisioned into the golden base, so the remedy
-# for most of it is a base that carries it.
+# Findings, one per line, tab-separated `<state> <what> <remedy>` with state ok | wrong | note. Every renderer reads a line at a time, so a remedy wrapped over two lines loses its second half.
 vm_desktop_findings() { # <probe output>
     local probe="$1" v
     _f() { printf '%s\t%s\t%s\n' "$1" "$2" "${3:-}"; }
@@ -1584,10 +1328,7 @@ vm_desktop_findings() { # <probe output>
         && _f ok "Setup Assistant already clicked through" \
         || _f wrong "Setup Assistant will put a modal pane on the desktop:$v" "$rebuild"
 
-    # The offer that puts a panel on the desktop is the *system* one:
-    # softwareupdated acts on /Library/Preferences, while the per-user domain
-    # is what System Settings shows. `?` is "no such key", which is not off;
-    # an empty reading is the guest answering with an older probe than this.
+    # The offer that puts a panel on the desktop is the *system* one: softwareupdated acts on /Library/Preferences, while the per-user domain is what System Settings shows. `?` is "no such key", which is not off.
     case "$(_v update_check_system)" in
         0)  _f ok "Software Update checks off where softwareupdated reads them (/Library/Preferences)" ;;
         "") _f note "the guest did not answer about Software Update, so what it will offer on that desktop is unknown" \
@@ -1613,9 +1354,7 @@ vm_desktop_findings() { # <probe output>
         *)  _f wrong "macOS updates are set to install themselves in there (AutomaticallyInstallMacOSUpdates=$(_v update_autoinstall_system)), which reboots the guest -- mid-build, if that is when one lands" "$rebuild" ;;
     esac
 
-    # Setup Assistant's "what is new in macOS" pane is a Software Update
-    # screen by another name: Buddy shows it whenever these keys do not
-    # already name the running system.
+    # Setup Assistant's "what is new in macOS" pane is a Software Update screen by another name: Buddy shows it whenever these keys do not already name the running system.
     v=$(_v os_product)
     if [ -z "$v" ] || [ "$v" = '?' ]; then
         _f note "the guest did not say which macOS it runs, so Setup Assistant's 'what is new in macOS' pane cannot be judged from here" \
@@ -1632,7 +1371,6 @@ vm_desktop_findings() { # <probe output>
         || _f wrong "something is on the desktop right now: $v" \
                     "$restart  -- the settings above stop the next one, and killing this one would take the desktop session with it (vm/desktop.sh)"
 
-    # The account, not its password: vm_login_note is the one place for that.
     _f note "the guest's own window logs in as $(_v user)" \
             "wk itself uses an ssh key; 'wk vm start' and 'wk vm enter' state that account's password"
 
@@ -1640,16 +1378,13 @@ vm_desktop_findings() { # <probe output>
     return 0
 }
 
-# `_ssh`, not t_exec: this must answer about a guest whose wk-tools copy is
-# older than this file.
+# `_ssh`, not t_exec: this must answer about a guest whose wk-tools copy is older than this file.
 vm_desktop_probe() { # <name>
     local ip; ip=$(_ip "$1") || return 1
     [ -n "$ip" ] || return 1
     _ssh "$ip" 'bash -s' < "$WK_ROOT/vm/desktop-probe.sh"
 }
 
-# One renderer for every findings stream here. Findings on stdin; the count of
-# `wrong` ones is the exit status. On stderr, like every report here.
 vm_render_findings() {
     local state what remedy bad=0
     while IFS="$(printf '\t')" read -r state what remedy; do
@@ -1666,20 +1401,13 @@ vm_render_findings() {
     return "$bad"
 }
 
-# --- what is resident in this guest? -----------------------------------------
-# A guest holds its whole memory allocation whether or not it is busy. Nothing
-# wk runs in a guest outlives its ssh session and _ssh_opts sets no
-# ControlPersist, so what accumulates is something keeping its own process: an
-# editor's remote server (Zed's outlives the window, and each terminal pane in
-# it is another shell), an agent, or a detached build.
+# A guest holds its whole memory allocation whether or not it is busy, and nothing wk runs in one outlives its ssh session, so what accumulates keeps its own process: an editor's remote server, an agent, or a detached build.
 vm_load_probe() { # <name>
     local ip; ip=$(_ip "$1") || return 1
     [ -n "$ip" ] || return 1
     _ssh "$ip" 'bash -s' < "$WK_ROOT/vm/load-probe.sh"
 }
 
-# python3 because grouping a few hundred `proc=` rows by executable and summing
-# their RSS is arithmetic bash must not be doing (CLAUDE.md).
 vm_load_findings() { # <probe output>
     printf '%s\n' "$1" | python3 -c '
 import re, sys
@@ -1702,8 +1430,6 @@ def out(state, what, remedy=""):
 def mb(kb):
     return int(kb / 1024)
 
-# Each family is matched on the executable, so an argument mentioning "zed"
-# is not counted as one.
 FAMILIES = (
     ("shell", r"(^|/)(-?zsh|bash|sh|dash|tcsh|fish|login)$"),
     ("editor remote server", r"(zed-remote-server|\.zed_server/|\.vscode-server/)"),
@@ -1725,8 +1451,6 @@ def named(fam):
 
 shells, shell_kb = named("shell")
 if shells > shells_warn:
-    # Every family present is named -- the largest count alone would name
-    # sshd and leave the cause out.
     holders = ["%d %s process(es)" % (groups[f][0], f)
                for f in ("editor remote server", "agent", "ssh session")
                if f in groups]

@@ -1,9 +1,5 @@
 #!/bin/bash
-# probe-tests.sh <test1> <test2> ...
-# Run each named JetStream2.2 subtest ALONE (browserbench ?report=true&test=NAME) and
-# report whether it crashes/OOMs or passes, plus peak RSS. Used to find which single
-# subtest is responsible for a JetStream OOM/crash on the memory-constrained rpi3.
-# Requires /tmp/run-cog.sh present and the fake seat running.
+# probe-tests.sh <test1> <test2> ... -- runs each named JetStream2.2 subtest alone and reports crash/OOM against pass with peak RSS, naming the single subtest behind a crash on the memory-constrained rpi3. Needs /tmp/run-cog.sh and the fake seat.
 set -u
 RESULTS=/tmp/probe_results.txt
 : > "$RESULTS"

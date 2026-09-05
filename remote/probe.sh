@@ -1,13 +1,9 @@
-# What a shared build machine has, as key=value lines. Runs *on* the machine,
-# sent over ssh appended to remote/deps.sh, which defines the functions it calls:
-#     cat remote/deps.sh remote/probe.sh | ssh <host> bash -s
-# Sources nothing (it must answer about an unprovisioned machine); never prompts.
+# What a shared build machine has, as key=value lines. Runs on the machine, sent over ssh appended to remote/deps.sh, which defines the functions it calls: `cat remote/deps.sh remote/probe.sh | ssh <host> bash -s`. Sources nothing, having to answer about an unprovisioned machine, and never prompts.
 
 printf 'host=%s\n' "$(hostname 2>/dev/null || echo '?')"
 
 _id=""; _like=""; _pretty=""
-if [ -r /etc/os-release ]; then
-    # In a subshell: /etc/os-release sets ID and friends, names this script keeps.
+if [ -r /etc/os-release ]; then   # in a subshell: /etc/os-release sets ID and friends, names this script keeps
     eval "$(. /etc/os-release 2>/dev/null; printf '_id=%s\n_like=%s\n_pretty=%s\n' \
         "$(printf '%q' "${ID:-}")" "$(printf '%q' "${ID_LIKE:-}")" \
         "$(printf '%q' "${PRETTY_NAME:-}")")"
@@ -24,9 +20,7 @@ done <<EOF
 $(wk_remote_deps)
 EOF
 
-# A *login* shell, because that is what a build runs under: an export from
-# /etc/profile.d or the account's profile is invisible to `ssh host env`.
-for _v in $(wk_remote_build_env_vars); do
+for _v in $(wk_remote_build_env_vars); do   # a *login* shell, which is what a build runs under: an export from /etc/profile.d or the account's profile is invisible to `ssh host env`
     _val=$(bash -lc "printf '%s' \"\${$_v:-}\"" 2>/dev/null || true)
     [ -n "$_val" ] || continue
     printf 'env.%s=%s\n' "$_v" "$_val"

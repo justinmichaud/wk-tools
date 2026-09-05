@@ -1,10 +1,3 @@
-# The fleet-request broker, as a per-user LaunchAgent. On macOS the workspace
-# and the workstation are not the same machine: workspaces live in the podman
-# guest and bind-mount *its* /run/wk, while everything the broker needs -- the
-# tailnet identity, the ssh config, `wk boot`'s drivers -- is on this Mac. So
-# the process runs here and the socket is published into the guest by the broker
-# itself, over an ssh remote unix-socket forward (publish_into_machine,
-# container/broker/wk-broker.py). RunAtLoad plus KeepAlive is launchd's lingering.
 
 . "$WK_ROOT/lib/store.sh"
 
@@ -62,16 +55,14 @@ else
     changed "installed $_label.plist"
 fi
 
-# Otherwise left alone: `./setup` must be runnable while a request is in flight,
-# and a bootout takes the request with it.
+# Reload only on a real change: a bootout takes an in-flight request with it.
 _policy_stamp="$(wk_state_dir)/.broker-policy"
 _policy_hash=$(cksum < "$WK_ROOT/container/broker/wk-broker.py" | awk '{print $1}')
 [ "$(cat "$_policy_stamp" 2>/dev/null)" = "$_policy_hash" ] || _reload=1
 
 _svc="gui/$(id -u)/$_label"
 if [ -n "$_reload" ]; then
-    # bootout then bootstrap, not kickstart -k: launchd re-reads the plist only
-    # on bootstrap, and a bootout of an unloaded label exits non-zero.
+    # launchd re-reads the plist only on bootstrap, so bootout then bootstrap.
     launchctl bootout "$_svc" >/dev/null 2>&1 || true
     if launchctl bootstrap "gui/$(id -u)" "$_plist" >/dev/null 2>&1; then
         printf '%s\n' "$_policy_hash" > "$_policy_stamp"

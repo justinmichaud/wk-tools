@@ -68,8 +68,6 @@ MODES="sampling bytecode samply instruments heaptrack massif"
 
 NAME="${WK_NAME:-}"
 
-# Same constant cmd/quiesce and cmd/session use: the only mechanism that may
-# touch the host sysctl below.
 PRIV=/usr/local/libexec/wk-quiesce-priv
 
 MODE=sampling
@@ -115,15 +113,12 @@ esac
 require_name "$NAME"
 
 [ -n "$CONFIG" ] || CONFIG=$(default_config)
-# The target first: on macOS a config does not choose its own build system, so
-# config_load needs the platform it will be built on (t_os).
+# The target first: on macOS a config does not choose its own build system, so config_load needs t_os.
 TARGET="$(ws_target "$NAME")"
 load_target "$TARGET"
 
 config_load "$CONFIG" "$(t_os)" || die "unknown config '$CONFIG' (wk build --list)"
 
-# `native` is a question about the platform, not a mode of its own: xctrace is
-# already there on the Apple ports.
 [ "$MODE" = native ] && { case "$CFG_BUILDSYS" in xcode) MODE=instruments ;; *) MODE=samply ;; esac; }
 case " $MODES " in
     *" $MODE "*) ;;
@@ -144,23 +139,13 @@ SRC=$(t_src "$NAME")
 VAR=$(config_run_var)
 DIR=$(config_run_dir "$SRC")
 
-# --- where the recording lands ------------------------------------------------
-# Not /tmp: a profile is worth more than the ten minutes it took to record, and
-# /tmp on a container workspace is the first thing a restart takes away.
-# Computed before "what is being profiled" below, which needs it to name
-# samply's own file.
+# Not /tmp: a profile is worth more than the ten minutes it took to record, and /tmp on a container workspace is the first thing a restart takes away.
 STAMP=$(date -u +%Y%m%dT%H%M%SZ)
 RUN="$STAMP-$MODE"
 OUTDIR="$(t_home "$NAME")/wk-profile/$RUN"
 
-# --- what is being profiled ---------------------------------------------------
-# One of three shapes, each resolving to a command in the workspace. The jsc
-# shell is the default: one process, one workload, nothing else in the way.
-MB_PREFIX=""      # set below when --process ui's recorder belongs in
-                  # WEBKIT_MINI_BROWSER_PREFIX, not prepended to TARGET_CMD
-CMAKE_BROWSER=""  # set below for any CMake --browser run, to keep the mode
-                  # case's own WRAP out of TARGET_CMD -- this shape builds its
-                  # own command line instead (prefix env var, or launch+attach)
+MB_PREFIX=""      # --process ui's recorder belongs in WEBKIT_MINI_BROWSER_PREFIX, not TARGET_CMD
+CMAKE_BROWSER=""  # any CMake --browser run: it builds its own command line below
 if [ -n "$ATTACH" ]; then
     SUBJECT="attach:$ATTACH"
     TARGET_CMD=""
@@ -179,11 +164,8 @@ elif [ -n "$BROWSER" ]; then
         ;;
     *)
         CMAKE_BROWSER=1
-        # MiniBrowser is a grandchild of Tools/Scripts/run-minibrowser here, so a
-        # profiler pointed at the launcher would record the launcher.
-        # run-minibrowser reads WEBKIT_MINI_BROWSER_PREFIX after setting up the
-        # port's own launch environment and splits it in front of the MiniBrowser
-        # command it builds (webkitpy/port/{gtk,wpe}.py).
+        # MiniBrowser is a grandchild of Tools/Scripts/run-minibrowser here, so a profiler pointed at the launcher would record the launcher.
+        # run-minibrowser splits WEBKIT_MINI_BROWSER_PREFIX in front of the MiniBrowser command it builds (webkitpy/port/{gtk,wpe}.py).
         case "$MODE" in
             heaptrack|massif)
                 die "--browser --mode $MODE is not wired up on the CMake ports: $MODE has to
@@ -206,10 +188,7 @@ elif [ -n "$BROWSER" ]; then
         LAUNCH_CMD="Tools/Scripts/run-minibrowser $CFG_PORT $TYPE_FLAG -- $(sh_quote "$URL")"
         [ ${#ARGS[@]} -gt 0 ] && LAUNCH_CMD="$LAUNCH_CMD $(sh_quote "${ARGS[@]}")"
         if [ "$MODE" = samply ] && [ "$PROCESS" != ui ]; then
-            # samply cannot be a prefix of a process the UI process spawns later,
-            # so it attaches instead: launch, wait for the named process, then
-            # `samply record -p <pid>`. First cut -- a fixed wait, then the
-            # newest process of that name, which is not necessarily mid-load.
+            # samply cannot be a prefix of a process the UI process spawns later, so it attaches instead: a fixed wait, then the newest process of that name.
             case "$PROCESS" in
                 web)     PROC_NAME=$(config_web_process_name) ;;
                 network) PROC_NAME=$(config_network_process_name) ;;
@@ -236,31 +215,23 @@ exec samply record --save-only -o $(sh_quote "$OUTDIR/profile.json") -p \"\$_pid
 else
     BIN=$(config_jsc_path "$SRC")
     SUBJECT="jsc${ARGS[0]:+ ${ARGS[0]}}"
-    # jsc takes its options *before* the script: a `--sample` appended after the
-    # file name is silently handed to the script as an argument instead.
+    # jsc takes its options *before* the script: a `--sample` after the file name is silently handed to the script as an argument.
     TARGET_CMD=""
 fi
 
-# --- the environment ----------------------------------------------------------
-# The loader variable is prepended, not replaced: a plain assignment would drop
-# the wkdev image's own libwpe/jhbuild prefix on that path. Same prelude cmd/run uses.
+# The loader variable is prepended, not replaced: a plain assignment would drop the wkdev image's own libwpe/jhbuild prefix on that path.
 PRELUDE="export $VAR=\"$DIR\${${VAR}:+:\${${VAR}}}\""
 
-# JSC_<option> is spelled the way JSC's OptionsList.h spells it -- a typo'd
-# variable is ignored in silence, and the profile looks like the code changed.
+# JSC_<option> is spelled the way JSC's OptionsList.h spells it -- a typo'd variable is ignored in silence, and the profile looks like the code changed.
 JSC_ENV=""
 add_env() { JSC_ENV="$JSC_ENV $1"; }
 
 if [ -n "$MARKERS" ]; then
-    # For splitting one trace into per-phase profiles (jsc-marker-trace skill).
-    # With the default empty directory the markers go nowhere.
     add_env "JSC_useTextMarkers=1"
     add_env "JSC_textMarkersDirectory=$OUTDIR"
 fi
 
 if [ -n "$JITDUMP" ]; then
-    # Opt-in: known to take the WebKitGTK UI process down within seconds of
-    # startup -- a warning rather than a barrier, since the jsc shell is fine.
     add_env "JSC_useJITDump=1"
     add_env "JSC_jitDumpDirectory=$OUTDIR"
     if [ "$CFG_BUILDSYS" != xcode ] && [ -n "$BROWSER" ]; then
@@ -278,10 +249,6 @@ $EXTRA_ENV
 EOF
 fi
 
-# --- the tool -----------------------------------------------------------------
-# Each mode contributes three things -- what has to be present, what wraps the
-# command, what it leaves behind -- assembled here rather than branched over
-# three times below.
 NEEDS=""       # a binary that must exist in the workspace
 JSC_FLAGS=""   # options for the jsc shell itself, which go before the script
 TEE=""         # a file the run's own output is copied into
@@ -296,14 +263,11 @@ sampling)
     on when the process starts. Use --mode samply (or instruments) to profile
     something already running."
     if [ -n "$BROWSER" ]; then
-        # In a browser the report has nowhere to print to at exit but stderr.
         add_env "JSC_useSamplingProfiler=1"
         add_env "JSC_collectExtraSamplingProfilerData=1"
         add_env "JSC_reportSamplingProfilerData=1"
         ARTIFACT="the report goes to the browser's stderr at exit"
     else
-        # The shell's own spelling of useSamplingProfiler plus
-        # collectExtraSamplingProfilerData.
         JSC_FLAGS="--sample"
         if [ -n "$TOP" ]; then
             JSC_FLAGS="$JSC_FLAGS --samplingProfilerTopFunctionsCount=$TOP"
@@ -318,10 +282,7 @@ bytecode)
     process starts -- there is nothing to attach to."
     add_env "JSC_useProfiler=true"
     add_env "JSC_dumpProfilerDataAtExit=true"
-    # JSC writes JSCProfile-<pid>-<n>.json into the working directory, so the
-    # file is moved out afterwards -- identified by being newer than a stamp
-    # taken just before the run, not by being newest in the tree, which on a
-    # machine with two runs going would be somebody else's profile.
+    # JSC writes JSCProfile-<pid>-<n>.json into the working directory, so the file is moved out afterwards -- identified by being newer than a stamp, not newest in the tree.
     ARTIFACT="$OUTDIR/JSCProfile.json"
     PRE="touch $(sh_quote "$OUTDIR/.stamp")"
     POST="p=\$(find $(sh_quote "$SRC") -maxdepth 1 -name 'JSCProfile-*.json' -newer $(sh_quote "$OUTDIR/.stamp") 2>/dev/null | head -1)
@@ -371,19 +332,13 @@ heaptrack|massif)
     ;;
 esac
 
-# A CMake --browser run builds its own command line above instead of leaning on
-# WRAP: prepending WRAP here would wrap Tools/Scripts/run-minibrowser rather than
-# MiniBrowser, or double up the attach script already assembled. --process ui
-# moves it into WEBKIT_MINI_BROWSER_PREFIX instead.
+# A CMake --browser run builds its own command line above: prepending WRAP here would wrap Tools/Scripts/run-minibrowser rather than MiniBrowser.
 if [ -n "$CMAKE_BROWSER" ]; then
     [ -n "$MB_PREFIX" ] && add_env "WEBKIT_MINI_BROWSER_PREFIX=$(sh_quote "$WRAP")"
     WRAP=""
 fi
 
-# --- what has to be true before anything runs ---------------------------------
 
-# Under --dry-run this is reported, not enforced: the point of a dry run is to
-# see what an invocation would do.
 BIN_PRESENT=""
 if [ -z "$ATTACH" ] && [ -n "${BIN:-}" ]; then
     if t_exec "$NAME" test -x "$BIN" 2>/dev/null; then
@@ -403,11 +358,7 @@ if [ -n "$NEEDS" ] && [ -z "$DRY" ]; then
         wk profile $NAME --mode sampling   which needs no tools at all."
 fi
 
-# samply reads the kernel's perf events, refused by the default paranoia level;
-# the sysctl is not namespaced, so a container cannot set it, which reads from
-# inside the workspace as a permission problem with samply. On Linux the quiesce
-# helper's perf-on verb lowers it. On macOS the container runs inside the podman
-# VM, a different kernel the helper has no reach into.
+# samply reads the kernel's perf events, refused by the default paranoia level; the sysctl is not namespaced, so a container cannot set it, which reads from inside as a samply permission problem.
 if [ "$MODE" = samply ] && [ -z "$DRY" ]; then
     _par=$(t_exec "$NAME" cat /proc/sys/kernel/perf_event_paranoid 2>/dev/null | tr -dc '0-9') || _par=""
     if [ -n "$_par" ] && [ "$_par" -gt 1 ] && is_linux && [ -x "$PRIV" ]; then
@@ -436,15 +387,13 @@ if [ "$MODE" = samply ] && [ -z "$DRY" ]; then
     fi
 fi
 
-# --- run it -------------------------------------------------------------------
 
 if [ -z "$TARGET_CMD" ]; then
     TARGET_CMD="$(sh_quote "$BIN")${JSC_FLAGS:+ $JSC_FLAGS}"
     [ ${#ARGS[@]} -gt 0 ] && TARGET_CMD="$TARGET_CMD $(sh_quote "${ARGS[@]}")"
 fi
 
-# pipefail with the tee, or the run's status becomes tee's own and every crash
-# reads as a clean exit.
+# pipefail with the tee, or the run's status becomes tee's own and every crash reads as a clean exit.
 [ -n "$TEE" ] && TARGET_CMD="set -o pipefail; $TARGET_CMD 2>&1 | tee $(sh_quote "$TEE")"
 
 CMD="$PRELUDE
@@ -467,8 +416,7 @@ fi
 info "$MODE: $SUBJECT in '$NAME' ($CONFIG)"
 log  "  output: $OUTDIR"
 
-# A tty when the subject is interactive: xctrace and an attached samply both
-# expect ctrl-c, which without a pty kills the ssh instead of the recorder.
+# A tty when the subject is interactive: xctrace and an attached samply both expect ctrl-c, which without a pty kills the ssh instead of the recorder.
 if [ -n "$ATTACH" ] || [ -n "$BROWSER" ]; then
     t_exec_tty "$NAME" bash -lc "cd $(sh_quote "$SRC") && $CMD"
 else
@@ -477,15 +425,12 @@ fi
 
 [ -n "$POST" ] && t_exec "$NAME" bash -lc "$POST" || true
 
-# --- what to do with it -------------------------------------------------------
 
 info "recorded in '$NAME': $ARTIFACT"
 
 if [ -n "$FETCH" ]; then
     [ -n "$FETCH_DIR" ] || FETCH_DIR="$(wk_state_dir)/profiles/$NAME/$RUN"
-    # The whole run directory in one copy (t_pull_dir), not a loop over t_pull:
-    # a loop only reaches top-level files, silently missing a subdirectory like
-    # instruments' .trace bundle. Replaces the destination rather than merging.
+    # The whole run directory in one copy (t_pull_dir): a loop over t_pull only reaches top-level files, silently missing instruments' .trace bundle.
     if t_pull_dir "$NAME" "$OUTDIR" "$FETCH_DIR" 2>/dev/null; then
         info "copied to $FETCH_DIR"
     else

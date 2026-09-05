@@ -1,14 +1,5 @@
 #!/usr/bin/env python3
-"""ssh ProxyCommand for the workspace.
-
-Used for pushing to the fork over SSH and for reaching the Raspberry Pi test
-devices. Talks to the egress proxy's unix socket directly rather than going
-through the loopback bridge, so `git push` works even if the bridge is not
-running -- ssh is the one thing likely to be used before anything has started
-it.
-
-    ProxyCommand /opt/wk-tools/container/proxy/ssh-proxy.py %h %p
-"""
+"""ProxyCommand /opt/wk-tools/container/proxy/ssh-proxy.py %h %p -- onto the egress proxy's unix socket directly, so ssh works before the loopback bridge is up."""
 
 import os
 import select
@@ -32,8 +23,7 @@ def main():
     sock.sendall(f"CONNECT {host}:{port} HTTP/1.1\r\nHost: {host}:{port}\r\n\r\n"
                  .encode())
 
-    # Read just the status line and the blank line that ends the response;
-    # anything after that belongs to the tunnel and must not be swallowed.
+    # Only up to the blank line: what follows belongs to the tunnel.
     response = b""
     while b"\r\n\r\n" not in response:
         chunk = sock.recv(1)

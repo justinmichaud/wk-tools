@@ -6,47 +6,14 @@
     credcheck.py check <name> [--repos "<owner/repo> ..."] [--path <file>]
                               [--evidence <key>=<value>]...
 
-The value arrives on stdin, always: reading a stored credential is one
-discipline (lib/secretfile.py, which refuses a link or a shared inode) and
-it lives in one place. --path names where that value is kept, for the one
-rule that hands the file to another tool, and makes an empty value `absent`
-rather than malformed. One verdict comes back, its
-first line `<verdict>\\t<summary>` and any further lines the detail:
+The value arrives on stdin, always; reading a stored one is lib/secretfile.py's discipline. --path names where it is kept, for the rule that hands the file to another tool, and makes an empty value `absent` rather than malformed.
+One verdict comes back, first line `<verdict>\\t<summary>`, further lines the detail:
 
-    absent      nothing is stored, which for an optional credential is a
-                state and not a fault
+    absent      nothing is stored -- a state, not a fault, when optional
     ok          it can do the job and reaches no further
-    wide        it can do the job and reaches further than wk ever spends it;
-                stored, with the extra reach named
-    bad         it cannot do the job, is malformed, or carries a power wk
-                refuses to hold; nothing is stored
-    unverified  the answer needs a network that did not answer; stored, and
-                re-asked by every reader -- no verdict is ever written down
-
-Both directions are the point. A credential that cannot do the job fails hours
-later at the one moment it is needed (a `git-webkit pr` answered 403), and one
-that can do far more than the job turns any escape from the boundary into the
-blast radius of the whole account. So each rule names what wk spends it on,
-what it must be able to do, what it must not, and the exact page or command
-that reissues it.
-
-The rules are data because the same questions are asked in three places -- when
-a credential is admitted (`wk key set`) and by the two commands that report on
-one (`wk doctor`, `wk key check`) -- and a rule written three times is three
-rules that drift.
-
-What GitHub will and will not answer about a token bounds the github-pat rule.
-It answers: whether the token is live and as whom (`GET /user`), a classic
-token's whole scope list (the `x-oauth-scopes` response header), an expiry when
-the token has one (`github-authentication-token-expiration`), and whether a
-pull request can be opened on a given repository -- a `POST /repos/<r>/pulls`
-with an empty body is 422 (validation failed, nothing created) when the token
-carries the permission and 403 when it does not, which is the same write-shaped
-probe `wk verify` runs from inside a workspace. It does not answer what a
-fine-grained token's permission set is: there is no endpoint that enumerates
-one, so a fine-grained token's breadth is established by construction (it
-reaches only the repositories selected for it) rather than by asking.
-"""
+    wide        it can do the job and reaches further than wk spends it; stored
+    bad         it cannot do the job, is malformed, or carries a power wk refuses to hold; nothing is stored
+    unverified  the answer needs a network that did not answer; stored, and re-asked by every reader -- no verdict is ever written down"""
 import collections
 import json
 import os
@@ -71,8 +38,6 @@ class Unreachable(Exception):
 
 
 def _http(method, url, token, body=None):
-    """(status, lower-cased headers, body). Raises Unreachable when nothing
-    answered, which is a state and not a fault."""
     req = urllib.request.Request(url, method=method, data=body)
     req.add_header("Authorization", "Bearer " + token)
     req.add_header("Accept", "application/vnd.github+json")
@@ -92,10 +57,7 @@ def _lower(headers):
     return dict((k.lower(), v) for k, v in headers.items())
 
 
-# --- github-pat ---------------------------------------------------------------
-# Powers no wk code path spends and that a token reachable from the boundary
-# must not carry: deleting a repository, or administering one, an org or the
-# site. Every other classic scope is merely broader than needed.
+# Powers no wk code path spends and a token reachable from the boundary must not carry; every other classic scope is merely broader than needed.
 CLASSIC_REFUSED = ("delete_repo", "site_admin")
 
 
@@ -171,8 +133,7 @@ def _github_pat(value, repos, path, evidence):
 
 
 def _github_pat_can_open_a_pr(token, repo):
-    """The write-shaped probe that creates nothing: an empty body names no head
-    or base branch, so an authorised call is 422 and an unauthorised one 403."""
+    """The write-shaped probe that creates nothing: an empty body names no head or base branch, so an authorised call is 422 and an unauthorised one 403."""
     url = "%s/repos/%s/pulls" % (GITHUB_API, repo)
     try:
         status, _headers, _body = _http("POST", url, token, body=b"{}")
@@ -196,9 +157,7 @@ def _github_pat_can_open_a_pr(token, repo):
                         "not known." % (repo, status))
 
 
-# --- the claude.ai login ------------------------------------------------------
-# What an agent in a workspace spends this on: inference, and the profile fetch
-# remote control decides eligibility from.
+# What an agent in a workspace spends this on: inference, and the profile fetch remote control decides eligibility from.
 LOGIN_SCOPES = ("user:profile", "user:inference")
 
 
@@ -249,7 +208,6 @@ def _when(millis):
     return time.strftime("%Y-%m-%d", time.localtime(millis / 1000.0))
 
 
-# --- the two pasted API keys ---------------------------------------------------
 def _claude_token(value, repos, path, evidence):
     token = value.strip()
     if token.startswith("{"):
@@ -283,10 +241,7 @@ def _litellm_key(value, repos, path, evidence):
         "nothing was asked of it.")
 
 
-# --- the two tailscale credentials ---------------------------------------------
-# Tailscale spells three very different powers with one prefix: an auth key
-# enrolls a node, an API access token administers the tailnet, an OAuth client
-# secret mints both. The auth key is copied onto every card written from here.
+# Tailscale spells three very different powers with one prefix: an auth key enrolls a node, an API access token administers the tailnet, an OAuth client secret mints both.
 def _tailnet_authkey(value, repos, path, evidence):
     key = value.strip()
     if key.startswith("tskey-auth-") and len(key) > len("tskey-auth-"):
@@ -346,12 +301,7 @@ def _tailscale_wrong(key, wanted, because, shape):
     return "that does not look like a tailscale key at all (they start 'tskey-')."
 
 
-# --- a deploy key -------------------------------------------------------------
-# Repo-scoped by construction: GitHub refuses the same key on a second
-# repository, so the only questions left are whether it authenticates as this
-# fork and whether it was registered with write access. The evidence is
-# gathered where the key is (`wk key sshtest` runs on that machine) and the
-# verdict is reached here, so both halves are one rule.
+# Repo-scoped by construction: GitHub refuses the same key on a second repository. The evidence is gathered where the key is (`wk key sshtest`) and the verdict reached here, so both halves are one rule.
 def _deploy_key(value, repos, path, evidence):
     repo = repos[0] if repos else "?"
     ssh = evidence.get("ssh", "")

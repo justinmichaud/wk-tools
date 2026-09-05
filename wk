@@ -1,43 +1,19 @@
 #!/usr/bin/env bash
 #
 # wk -- WebKit development workspaces. `wk` lists the commands, `wk help` prints
-# README.md, and `wk <command> -h` explains one command.
+# README.md, `wk <cmd> -h` explains one. bash 3.2: macOS ships nothing newer.
+# Every command is a file under cmd/ whose header declares what it acts on (see
+# "declarations" below); this file reads that and does, once for all of them,
+# what each would otherwise re-decide: resolve the workspace name, refuse one
+# inside a workspace, wait for readiness, decide where the command runs, forward
+# container work into the podman VM on macOS, delegate to the machine holding it.
 #
-# Every command is a file under cmd/, and declares in its header what it acts
-# on (see "declarations" below). This file reads that declaration and does, once
-# for every command, what would otherwise be re-decided in each: resolve the
-# workspace name, refuse a name inside a workspace, wait for readiness, decide
-# where the command runs, forward container work into the podman VM on a macOS
-# host, and hand a command about another machine's workspace to that machine.
-# bash 3.2 throughout: macOS ships nothing newer.
-#
-# --- environment protocol -----------------------------------------------------
-# Set here for a forwarded or delegated child and read by cmd/* and lib/*:
-#   WK_NAME         the workspace name this invocation resolved to (main)
-#   WK_TARGET       which target answers -- an explicit value skips discovery,
-#                   else lib/target.sh's default_target. Set for the command
-#                   that runs *here*; a forwarded or delegated child is never
-#                   told, the target being that machine's own to resolve
-#   WK_CONFIG       the build config an already-forwarded command inherits
-#   WK_IN_VM        this is the re-invocation inside the podman VM; stops it
-#                   forwarding a second time
-#   WK_ROW_LABEL    the machine name a forwarded or delegated command's records
-#                   should claim, and WK_HOST_SELF alongside it when the row is
-#                   *this* machine rather than one being asked about
-#   WK_NO_DELEGATE  set by a command already walking the fleet, so a machine it
-#                   asks reports only what it holds and asks nobody
-#   WK_ZED_PUBKEY   the key an editor on the *asking* machine will present
-#   WK_QUIET        --quiet: drop info/log narration (lib/common.sh)
-#   WK_FORCE        --force: cross a refusal that exists because of a rule
+# Exported for a forwarded or delegated child and read by cmd/* and lib/*: WK_NAME (the resolved name); WK_TARGET (which target answers, set only for a
+# command running here, since a child resolves its own); WK_CONFIG; WK_IN_VM (the re-invocation in the podman VM, which stops a second forward);
+# WK_ROW_LABEL and WK_HOST_SELF (what a child's records call the machine); WK_NO_DELEGATE; WK_ZED_PUBKEY; WK_QUIET; WK_FORCE.
 
 set -euo pipefail
 
-# The directory this file sits in -- unless that directory is not a checkout,
-# which is what `bin/wk` is: a symlink to `../wk`. Decided by evidence rather
-# than by resolving the link, because a *root* may itself be built out of
-# symlinks to another checkout and still be the root that was meant
-# (tests/test_peer.py's scratch WK_ROOT). `readlink` without -f: macOS ships no
-# GNU coreutils.
 WK_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 if [ ! -f "$WK_ROOT/lib/common.sh" ]; then
     _wk_self="${BASH_SOURCE[0]}"
@@ -58,60 +34,18 @@ fi
 
 WK_MACHINE="${WK_MACHINE:-wk}"
 
-# --- declarations -------------------------------------------------------------
-#
-# Line 2 of cmd/<name> is its synopsis:   # wk <name> <args> -- <summary>
-# and one or more `# wk:` lines in the first 15 lines declare its shape:
-#
-#   where=host       this workstation's own hardware; never forwarded,
-#                    refused inside a workspace and on a shared build host
-#   where=store      acts on the store, and runs on the machine that holds it:
-#                    forwarded into the podman VM on a macOS workstation,
-#                    run here on a Linux workstation and on a build machine
-#                    (each holds its own). Refused inside a workspace.
-#   where=local      runs wherever it is invoked; never forwarded
-#   where=workspace  acts on a workspace: the name is resolved here, the
-#                    target decides where it runs
-#   where=dynamic    the command answers `wk <cmd> --where <args>` itself
-#   name=required|optional|none   how the workspace name arrives. Outside a
-#                    workspace the first positional is the name; inside one it
-#                    is implicit. `optional` differs from `required` only in
-#                    what a missing one means: all of them, or none. Either way
-#                    a name no workspace answers to is refused here.
-#   takes=<n>        how many positionals of the command's own follow the name.
-#                    Default 0. With takes=1 -- `wk pr [<workspace>] <ref>` -- a
-#                    lone positional is the command's, and only a second one
-#                    makes the first the workspace.
-#   ready=yes        wait for the workspace to finish creating first
-#   group=<g>        which block of `wk help` lists it
-#   lifecycle        creates or destroys the workspace record (new, rm)
-#   readonly [<subverbs>]   changes nothing; never starts the podman machine
-#   broker <subverbs>|*     allowed inside a workspace, through the broker
-#   forward no       a workspace command that runs on this host rather than
-#                    inside the podman VM; it still goes to the machine that
-#                    holds the workspace, if that is another one
-#   here             a workspace command that runs where the person typed it and
-#                    nowhere else -- it needs this device's editor or files.
-#                    Implies forward=no
-#   outside          a workspace command refused inside a workspace
-#   bare merged      with no workspace named, report on every target here
-#   post <hook>      zed | ssh-alias-remove, after the forwarded half
-#   values=<flag>    the closed set this command accepts lives in one list in
-#                    the code, and `wk <cmd> -h` prints it by running `wk <cmd>
-#                    <flag>`. One flag, read-only and instant: `values=--list`.
-#   needs <a,b>      tools and standing this command cannot start without: a
-#                    command name (gh, tart, nmap...), `gh-auth` (gh's token
-#                    works), or `tailnet`. Checked before anything runs.
-#   sub <a,b> where=<w> name=<n>[@2] needs=<list>   per-subverb override of
-#                    where, name and/or needs; @2 means the name is the
-#                    positional after the subverb, and an empty needs= clears
-#                    the command's list
-#   flag <--x,--y> where=<w>|name=<n>   per-flag override of where and/or name
+# Line 2 of cmd/<name> is `# wk <name> <args> -- <summary>`; `# wk:` lines in its first 15 declare its shape:
+#   where=  host (this workstation's hardware; never forwarded, refused inside a workspace and on a shared build host) | store (the store, on the machine holding it: the podman VM on a macOS workstation, here on Linux and on a build machine; refused inside a workspace) | local (wherever invoked) | workspace (the name resolves here, the target decides where it runs) | dynamic (the command answers `wk <cmd> --where <args>` itself)
+#   name=   required|optional|none -- how the name arrives; a missing one means all of them or none, and one no workspace answers to is refused here
+#   takes=<n>  positionals of the command's own that follow the name, so `wk pr <ref>` is a ref and `wk pr <ws> <ref>` is both
+#   ready=yes  wait for the workspace to finish creating.  group=<g>  which block of `wk help` lists it.  lifecycle  creates or destroys the workspace record
+#   readonly [<subverbs>]  changes nothing, never starts the podman machine.  broker <subverbs>|*  allowed inside a workspace, through the broker.  outside  refused inside one
+#   forward=no  runs on this host, still on the machine holding the workspace.  here  also pins it to where the person typed it.  bare=merged  with no name, report on every target here
+#   post=<hook>  zed|ssh-alias-remove, after the forwarded half.  values=<flag>  the read-only flag `wk <cmd> -h` runs to print the closed set.  needs <a,b>  tools and standing checked before anything runs (gh, tart, nmap, gh-auth, tailnet)
+#   sub <a,b> / flag <--x,--y>  per-subverb or per-flag override of where=, name= (@2 = the positional after the subverb) and needs=; an empty needs= clears the command's list
 
 decl_load() { # <impl>
-    # The whole `where=` vocabulary, in one place: this function refuses
-    # anything else and the tests read this line. Inside the function because
-    # tests lift it on its own (tests/test_sync.py's _lift_func).
+    # The one `where=` vocabulary; tests read this line and lift the function on its own (tests/test_sync.py's _lift_func).
     local WK_WHERE_VALUES="host store local workspace dynamic"
     D_WHERE=workspace D_NAME=none D_READY=no D_GROUP=other D_LIFECYCLE=""
     D_READONLY="" D_BROKER="" D_FORWARD=yes D_BARE="" D_POST="" D_SUB="" D_FLAG="" D_OUTSIDE="" D_NEEDS=""
@@ -196,8 +130,7 @@ EOF
     return 1
 }
 
-# `--flag=value` counts as `--flag`: an unrecognised `--target=<t>` would leave
-# `where` at its default and send a host command to the podman VM instead.
+# `--flag=value` counts as `--flag`: an unrecognised `--target=<t>` would leave `where` at its default and send a host command to the podman VM.
 flag_override() { # <key> <args...>
     local key="$1" e flags a tok found=""; shift
     while IFS= read -r e; do
@@ -222,7 +155,6 @@ cmd_name() { # <args...>
     printf '%s' "$n"
 }
 
-# The other half of where the name sits, after the sub/flag overrides.
 cmd_takes() { # <args...>
     local n
     n=$(flag_override takes ${1+"$@"}) || n=$(sub_override takes "${1:-}") || n="$D_TAKES"
@@ -244,9 +176,6 @@ cmd_readonly() { # <subverb>
     in_list "${1:-}" "$D_READONLY"
 }
 
-# Checked before the command starts, in one message shape; `wk doctor` holds
-# the remedies. <subverb> lets a `sub <verbs> needs=<list>` line override the
-# top-level list -- `wk quiesce status` reads what it can without the helper.
 check_needs() { # <cmd> [<subverb>]
     local n missing="" needs="$D_NEEDS" ov
     if [ -n "${2:-}" ] && ov=$(sub_override needs "$2"); then needs="$ov"; fi
@@ -273,7 +202,6 @@ check_needs() { # <cmd> [<subverb>]
     wk doctor says how to get each of these."
 }
 
-# The <n>th positional argument (1-based): where the workspace name sits.
 positional() { # <n> <args...>
     local n="$1" a i=0; shift
     for a in "$@"; do
@@ -282,8 +210,6 @@ positional() { # <n> <args...>
     return 1
 }
 
-# So a command's own arguments can be told apart from a workspace name that
-# may or may not be in front of them.
 positional_count() { # <args...>
     local a i=0
     for a in ${1+"$@"}; do
@@ -292,18 +218,12 @@ positional_count() { # <args...>
     printf '%s' "$i"
 }
 
-# The workspace name in this argv, or nothing: the positional at the name's
-# slot, but only when the command's own positionals (`takes`) are all still
-# there after it, so `wk pr <ref>` is a ref and `wk pr <ws> <ref>` is both.
 argv_name() { # <slot> <takes> <args...>
     local slot="$1" takes="$2"; shift 2
     [ "$(positional_count ${1+"$@"})" -ge "$((slot + takes))" ] || return 1
     positional "$slot" ${1+"$@"}
 }
 
-# The workspace whose tree the person is standing in, or nothing. On a shared
-# build machine several live side by side under one root with no marker to be
-# inside of, so the directory says which one is meant; argv still wins.
 cwd_workspace() {
     in_remote_host || return 1
     local root name
@@ -325,12 +245,10 @@ without_positional() { # <n> <args...>
     done
 }
 
-# Where the name sits in argv: 1, or the @N of the name declaration.
 name_slot() { # <name-decl>
     case "$1" in *@*) printf '%s' "${1#*@}" ;; *) printf 1 ;; esac
 }
 
-# --- usage, derived from the commands themselves ------------------------------
 
 usage() {
     {
@@ -375,8 +293,6 @@ usage_group() { # <group> <title>
     done
 }
 
-# `wk --declarations`: one line per command, so `wk completion` reads what
-# `wk`'s own usage reads. Tab-separated: name, where, name=, group, synopsis.
 dump_declarations() {
     local f n line syn
     for f in "$WK_ROOT"/cmd/*; do
@@ -389,9 +305,6 @@ dump_declarations() {
     done
 }
 
-# --- help ---------------------------------------------------------------------
-# README.md is the one document. `wk help <topic>` prints the sections whose
-# heading names the topic (a `##` section, or a `**bold**` workflow title).
 help_doc() { # [topic]
     local f="$WK_ROOT/README.md"
     if [ -n "${1:-}" ]; then
@@ -425,8 +338,6 @@ PY
     exit 0
 }
 
-# The answer to "runs on", for one `where=` value. One table, printed for the
-# command and again for every subverb and flag that overrides it.
 where_prose() { # <where>
     case "$1" in
         host)    printf "this host's own hardware; refused inside a workspace and on a build machine" ;;
@@ -443,9 +354,6 @@ where_prose() { # <where>
     esac
 }
 
-# One line per `sub`/`flag where=` override: the top-level `where=` is wrong for
-# most invocations of a command whose subverbs run somewhere else (`wk push on`).
-# Read from D_SUB/D_FLAG, not a second reading of the header.
 where_overrides() {
     local e verbs w tok
     while IFS= read -r e; do
@@ -463,8 +371,6 @@ $D_FLAG
 EOF
 }
 
-# The one help path for every command: cmd/<name>'s header is the reference
-# text, the declaration says what it acts on.
 explain_cmd() { # <cmd> <impl>
     local cmd="$1" impl="$2"
     printf 'wk %s\n\n' "$(synopsis "$impl")"
@@ -483,34 +389,21 @@ explain_cmd() { # <cmd> <impl>
          /^# wk [a-z]/ && !seen { next }
          /^#/  { sub(/^# ?/, ""); if ($0 == "" && !seen) next; seen = 1; print "  " $0; next }
          { exit }' "$impl"
-    # The closed set, from the one list that defines it (values=<flag>).
     if [ -n "$D_VALUES" ]; then
         printf '\nvalid values (wk %s %s):\n' "$cmd" "$D_VALUES"
-        # Through wk itself, not the impl directly: a values flag can carry its
-        # own `where=` override (`wk bench --list` runs in the podman VM on
-        # macOS). Whatever it says, refusal included, since help never fails.
         { "$WK_ROOT/wk" "$cmd" "$D_VALUES" 2>&1 || true; } | sed 's/^/  /'
     fi
     exit 0
 }
 
-# --- which target, and whether to forward -------------------------------------
-# Only the container target lives inside the podman VM; vm and remote workspaces
-# are driven from the host. An explicit WK_TARGET wins, then `--target`, then
-# which target answers for the name (ws_locate). Called once per invocation.
 resolve_target() {
     local prev='' a name='' decl slot takes
     [ -n "${WK_TARGET:-}" ] && { printf '%s' "$WK_TARGET"; return 0; }
     for a in "$@"; do
         if [ "$prev" = --target ]; then printf '%s' "$a"; return 0; fi
-        # Both spellings, since a command's own parser takes both: a
-        # `--target=<t>` read as no target resolves to the default and sends
-        # the command to a machine nobody named.
         case "$a" in --target=?*) printf '%s' "${a#*=}"; return 0 ;; esac
         prev="$a"
     done
-    # Which positional is the name is the declaration's answer (argv_name), not
-    # "the first that is not a flag": name=none has no workspace in its argv.
     decl=$(cmd_name "$@"); slot=$(name_slot "$decl"); takes=$(cmd_takes "$@")
     if [ "${decl%@*}" != none ]; then
         name=$(argv_name "$slot" "$takes" "$@") || name=$(cwd_workspace) || name=""
@@ -524,17 +417,8 @@ machine_running() {
 }
 
 status_view_env() {
-    # The default is the shared one (status_default_mode, lib/common.sh): on a
-    # macOS host *this* process renders and on Linux cmd/status does, and a bare
-    # `wk status` meaning two things would be two commands with one name.
-    # Computed by bare_report *before* this is substituted, since in here stdout
-    # is this substitution's pipe.
     local mode="${WK_STATUS_DEFAULT_MODE:-text}"
-    # Seeded from the environment for the same reason the mode is: cmd/status
-    # honours WK_STATUS_PORT and WK_STATUS_INTERVAL, and on a macOS host it is
-    # not the process that renders.
     local out="" port="${WK_STATUS_PORT:-}" interval="${WK_STATUS_INTERVAL:-}"
-    # Asked for, as against defaulted to -- see the --wait clause below.
     local asked="" wait=""
     while [ $# -gt 0 ]; do
         case "$1" in
@@ -542,8 +426,6 @@ status_view_env() {
             --web)  mode=web;  asked=1 ;;
             --text|--cli) mode=text; asked=1 ;;
             --wait) wait=1 ;;
-            # The raw stream the halves speak to each other, useful for exactly
-            # one thing: seeing what a collector said when a listing looks wrong.
             --records) mode=records ;;
             --html) mode=html; asked=1
                     case "${2:-}" in -*|"") ;; *) out="$2"; shift ;; esac ;;
@@ -554,9 +436,6 @@ status_view_env() {
         esac
         shift
     done
-    # `--wait` is not "look at the fleet": the answer is the line and the exit
-    # code, which a page that blocks until ctrl-c buries. Needed here as well as
-    # in cmd/status, this being the process that would serve on a macOS host.
     if [ -z "$asked" ] && [ -n "$wait" ] && [ "$mode" = web ]; then mode=text; fi
     printf 'WK_STATUS_MODE=%s\n' "$(sh_quote "$mode")"
     printf 'WK_STATUS_HTML_OUT=%s\n' "$(sh_quote "$out")"
@@ -569,8 +448,6 @@ bare_subject() {
         case "$1" in
             --port|--interval|--timeout)
                 shift; [ $# -gt 0 ] && shift ;;
-            # --html takes an optional path, so only a non-flag word after it is
-            # its value rather than a workspace name.
             --html)
                 shift
                 case "${1:-}" in -*|"") ;; *) shift ;; esac ;;
@@ -584,9 +461,7 @@ bare_subject() {
 bare_report() {
     local impl="$1" cmd="$2" t hosts='' rc worst=0
     shift 2
-    # A function, because `[ x -gt y ] && worst=x` as the last command of an
-    # AND-OR list returns 1 when the test is false, and `set -e` then ends the
-    # walk on the second target reporting the same state as the first.
+    # A function, because `[ x -gt y ] && worst=x` as the last command of an AND-OR list returns 1 when the test is false, and `set -e` would end the walk.
     _bump() { [ "$1" -gt "$worst" ] && worst="$1"; return 0; }
 
     for t in $(target_all); do
@@ -594,30 +469,16 @@ bare_report() {
         hosts="$hosts $t"
     done
 
-    # This machine's own name, for both halves: the container store is inside
-    # the podman VM, where `hostname` is the VM's and means nothing out here.
-    # WK_HOST_SELF says it is *this* machine rather than one being asked about.
     _self=$(wk_machine_name)
 
-    # Two halves, rendered once. Both write *records* (one JSON object per line)
-    # into the same file, and the renderer merges them by machine name -- which
-    # puts this machine's guests and containers under one heading.
     if [ "$cmd" = status ]; then
         _recs=$(mktemp)
-        # Parsed here as well as in cmd/status because on this host *this*
-        # process renders -- the two halves only collect. A function, so the
-        # parse can shift its own arguments without disturbing the halves'.
         status_default_mode
         eval "$(status_view_env ${@+"$@"})"
         _mode="$WK_STATUS_MODE"
         export WK_STATUS_HTML_OUT WK_STATUS_PORT WK_STATUS_INTERVAL
 
-        # Both halves at once, into files of their own. They ask entirely
-        # different machines, so run serially the listing would wait for the sum
-        # of two independent waits. Neither can write into the other's file
-        # while it runs (a record stream interleaves mid-line), so the parent
-        # concatenates them. Stdin from /dev/null: a background job that reads
-        # the terminal is stopped by SIGTTIN, and `podman machine ssh` inherits.
+        # Stdin from /dev/null: a background job that reads the terminal is stopped by SIGTTIN, and `podman machine ssh` inherits it.
         _recs_vm=$(mktemp)
         _recs_host=$(mktemp)
         _vm_pid=""
@@ -625,8 +486,6 @@ bare_report() {
 
         if machine_running; then
             ( WK_ROW_LABEL="$_self" WK_HOST_SELF=1
-              # --no-devices, not --no-fleet: the boards are reached over ssh
-              # from out here and the VM can see none of them.
               forward_to_vm "$cmd" --records --no-devices ${@+"$@"} ) \
                 > "$_recs_vm" </dev/null &
             _vm_pid=$!
@@ -641,8 +500,6 @@ bare_report() {
             _host_pid=$!
         fi
 
-        # By pid: a bare `wait` would promise about every background job this
-        # shell ever starts, and each half's exit code is half the contract.
         if [ -n "$_vm_pid" ];   then rc=0; wait "$_vm_pid"   || rc=$?; _bump "$rc"; fi
         if [ -n "$_host_pid" ]; then rc=0; wait "$_host_pid" || rc=$?; _bump "$rc"; fi
         cat "$_recs_vm" "$_recs_host" > "$_recs" 2>/dev/null || true
@@ -653,9 +510,6 @@ bare_report() {
         exit "$worst"
     fi
 
-    # One document from up to two processes, like the status halves -- captured
-    # into files and merged (json_merge_list), two JSON documents back to back
-    # not being one.
     _ls_json=""
     if [ "$cmd" = ls ]; then
         for _a in ${@+"$@"}; do [ "$_a" = --json ] && _ls_json=1; done
@@ -668,8 +522,6 @@ bare_report() {
             _ls_local=$(mktemp)
             WK_TARGET="${hosts# }" "$impl" ${@+"$@"} > "$_ls_local" || rc=$?
         elif [ "$cmd" = ls ] && machine_running; then
-            # The VM's half follows, so this half must not call the listing
-            # empty; whether it printed a row is what the second half is told.
             _ls_local=$(mktemp)
             WK_TARGET="${hosts# }" "$impl" --more-follows ${@+"$@"} > "$_ls_local" || rc=$?
             cat "$_ls_local"
@@ -682,7 +534,6 @@ bare_report() {
     fi
 
     if machine_running; then
-        # The second half of one listing: rows, no header, no empty note.
         rc=0
         if { [ "$cmd" = ls ] || [ "$cmd" = remotes ]; } && [ -n "$hosts" ]; then
             if [ -n "$_ls_json" ]; then
@@ -707,19 +558,11 @@ bare_report() {
     exit "$worst"
 }
 
-# --- handing a command to the machine that holds the workspace ----------------
-# A workspace lives on exactly one machine, and a peer workstation's containers
-# and guests are reachable by no path from here. The driver says so
-# (t_delegates), the whole command goes over, and the far side resolves the name
-# from its own evidence. Two kinds stay here, both declared: `here` and
-# `lifecycle`.
 delegate_target() { # <target> -- it back when it is such a machine, nothing otherwise
     ( load_target "$1" >/dev/null 2>&1 && t_delegates ) 2>/dev/null || return 0
     printf '%s' "$1"
 }
 
-# A pty when this end is one, like forward_to_vm: `wk enter` and `wk run --lldb`
-# are conversations. Both ends checked, so a captured stdout stays clean.
 delegate_run() { # <machine> <cmd> <args...>
     local t="$1" cmd="$2" rc=0
     shift 2
@@ -731,7 +574,6 @@ delegate_run() { # <machine> <cmd> <args...>
         *) die "'$cmd' acts on a workspace on $t, which has no wk-tools of its own to
     run it:  wk remote setup $t" ;;
     esac
-    # No WK_HOST_SELF: what comes back is a report about another machine.
     WK_ROW_LABEL="$t"; export WK_ROW_LABEL
 
     if [ -t 0 ] && [ -t 1 ]; then t_wk_tty "$cmd" ${@+"$@"}; exit $?; fi
@@ -747,9 +589,7 @@ forward_to_vm() {
         || die "podman machine '$WK_MACHINE' does not exist -- run ./setup first"
 
     if [ "$(podman machine inspect "$WK_MACHINE" --format '{{.State}}' 2>/dev/null)" != running ]; then
-        # Rule 6: read-only commands are read-only absolutely. Here rather than
-        # at the call sites because this is the single place that can start the
-        # machine, and it closes the window after a caller's own check.
+        # Rule 6: read-only is read-only absolutely. Here because this is the single place that can start the machine.
         if cmd_readonly "${2:-}"; then
             warn "the podman machine '$WK_MACHINE' is stopped, so its store cannot be read"
             log  "  'wk start' to bring it up -- 'wk $1' will not start it"
@@ -759,26 +599,14 @@ forward_to_vm() {
         podman machine start "$WK_MACHINE" >&2
     fi
 
-    # Everything the VM reports is about *this* machine, and its own hostname
-    # ("localhost") means nothing out here -- so it is told what to call itself,
-    # unless the caller has already said (bare_report does).
     : "${WK_ROW_LABEL:=$_self_name}"
     : "${WK_HOST_SELF:=1}"
 
-    # -- separates our args from ssh's. WK_IN_VM stops the VM-side wk from
-    # trying to forward again if anything is ever misconfigured.
     local _cmd
     _cmd="WK_IN_VM=1 $(wk_forwarded_env)${WK_ROW_LABEL:+WK_ROW_LABEL=$(sh_quote "${WK_ROW_LABEL:-}") }${WK_HOST_SELF:+WK_HOST_SELF=1 }${WK_CONFIG:+WK_CONFIG=$(sh_quote "${WK_CONFIG:-}") }/opt/wk-tools/wk $(sh_quote "$@")"
 
-    # A terminal does not survive `podman machine ssh`: it runs ssh without
-    # asking for a pty, so the far side sees no tty and everything forwarded
-    # that needs to *ask* something is unanswerable. So when this end really is
-    # a terminal, the hop is made with ssh directly and `-t`, from the machine's
-    # own connection details. Both ends of the pipe are checked, not just stdin:
-    # a pty rewrites line endings, and `wk status`'s halves have stdout
-    # redirected into a records file while stdin is still the terminal. The host
-    # key is not pinned: podman regenerates it whenever the machine is recreated,
-    # and it is reached at 127.0.0.1 on this user's own forwarded port.
+    # `podman machine ssh` runs ssh without asking for a pty, so anything forwarded that needs to *ask* is unanswerable; when this end really is a
+    # terminal the hop is made with ssh and `-t`. Both ends checked: a pty rewrites line endings, and `wk status`'s halves redirect stdout only.
     if [ -t 0 ] && [ -t 1 ]; then
         local _p _k _u
         _p=$(podman machine inspect "$WK_MACHINE" --format '{{.SSHConfig.Port}}' 2>/dev/null) || _p=""
@@ -795,7 +623,6 @@ forward_to_vm() {
 }
 
 
-# --- main ---------------------------------------------------------------------
 
 main() {
     [ $# -ge 1 ] || usage
@@ -824,14 +651,11 @@ main() {
     done
     set -- ${_rest[@]+"${_rest[@]}"}
 
-    # WK_NAME is this invocation's answer, never an inherited one: a shell
-    # started by an earlier `wk` would otherwise hand on that workspace.
+    # WK_NAME is this invocation's answer, never an inherited one: a shell started by an earlier `wk` would otherwise hand on that workspace.
     unset WK_NAME
 
     where=$(cmd_where "$impl" "$@")
 
-    # A host command inside a workspace or on a shared build host acts on a
-    # store that is not here.
     if in_workspace && { [ "$where" = host ] || [ "$where" = store ] || [ -n "$D_OUTSIDE" ]; } && ! in_list "${1:-}" "$D_BROKER"; then
         if [ -n "$D_OUTSIDE" ]; then
             die "'wk $cmd' acts on a host, and this is workspace '$(wk_self)'.
@@ -853,38 +677,26 @@ main() {
     later 'wk build' finds its target from that store."
     fi
 
-    # Once, for the two questions that need it: which machine this command is
-    # about, and which positional to take the name from.
     if [ "$where" = workspace ]; then
         decl=$(cmd_name "$@"); slot=$(name_slot "$decl"); takes=$(cmd_takes "$@")
     fi
 
-    # Resolved once, here, because resolving a name walks every target that
-    # could hold it (ws_locate) and three questions below need the same answer.
-    # Inside a workspace there is nothing to resolve.
+    # Resolved once, here: resolving a name walks every target that could hold it (ws_locate), and three questions below need the same answer.
     resolved=""
     if [ "$where" = workspace ] && ! in_workspace; then
         resolved=$(resolve_target "$@")
     fi
 
-    # Decided once here. Before check_needs, because what a command needs is
-    # needed on the machine that will run it.
     if [ "$where" = workspace ] && [ "${decl%@*}" != none ] \
        && ! in_workspace && [ -z "${WK_IN_VM:-}" ] \
        && [ -z "$D_HERE" ] && [ -z "$D_LIFECYCLE" ]; then
         delegate=$(delegate_target "$resolved")
     fi
 
-    # After the refusals about where it may run and before anything starts. On a
-    # macOS host a container command is answered in the podman VM, which has its
-    # own tools; the check runs there.
     { [ "$where" = workspace ] && is_macos && [ -z "${WK_IN_VM:-}" ] && ! in_workspace \
         && [ "$D_FORWARD" = yes ] && [ "$resolved" = container ]; } \
         || [ -n "$delegate" ] || check_needs "$cmd" "${1:-}"
 
-    # A store command on a macOS workstation acts on /var/lib/wk inside the
-    # podman VM, which this side can neither create nor read. Forwarded rather
-    # than attempted: attempting it is `mkdir: Permission denied`.
     if [ "$where" = store ] && [ -z "${WK_IN_VM:-}" ]; then
         command -v store_is_local >/dev/null 2>&1 || . "$WK_ROOT/lib/store.sh"
         store_is_local || forward_to_vm "$cmd" "$@"
@@ -892,11 +704,8 @@ main() {
 
     [ "$where" = workspace ] || exec "$impl" "$@"
 
-    # Resolved, waited for and acted on over there, by the same dispatcher
-    # reading the same declaration.
     [ -z "$delegate" ] || delegate_run "$delegate" "$cmd" "$@"
 
-    # --- a workspace command ---------------------------------------------------
     if ! in_workspace && [ "${decl%@*}" = required ]; then
         argv_name "$slot" "$takes" "$@" >/dev/null || cwd_workspace >/dev/null \
             || usage_die "$cmd" "$impl"
@@ -911,8 +720,6 @@ main() {
         fi
     elif is_macos && [ -z "${WK_IN_VM:-}" ] && [ "$D_FORWARD" = yes ] \
             && [ "$resolved" = container ]; then
-        # A container workspace on a macOS host lives in the podman VM; the
-        # VM's own `wk` resolves the name and waits for readiness there.
         if [ "$D_POST" = zed ] && in_list --zed "$(printf '%s,' "$@")"; then
             ARGS=(); for _a in "$@"; do [ "$_a" = --zed ] || ARGS+=("$_a"); done
             name=$(positional 1 ${ARGS[@]+"${ARGS[@]}"}) \
@@ -939,8 +746,6 @@ main() {
         forward_to_vm "$cmd" "$@"
     fi
 
-    # Resolve the name once; the command reads WK_NAME. The positional at the
-    # slot is the name whatever it says -- what it says is checked below.
     case "${decl%@*}" in
         required|optional)
             if [ -z "$name" ]; then
@@ -948,8 +753,6 @@ main() {
                 if [ -n "$_a" ]; then
                     name="$_a"; without_positional "$slot" "$@"; set -- ${ARGS[@]+"${ARGS[@]}"}
                 else
-                    # Nothing in argv: the directory, on a machine where that
-                    # is what "this workspace" means (cwd_workspace).
                     name=$(cwd_workspace || true)
                 fi
             fi ;;
@@ -957,20 +760,12 @@ main() {
     if [ -n "$name" ]; then
         WK_NAME="$name"; export WK_NAME
         command -v wk_ws_dir >/dev/null 2>&1 || . "$WK_ROOT/lib/store.sh"
-        # A name nothing answers to is refused here, once, for every command.
-        # Left to reach the command it is either ignored -- `wk stop <typo>`
-        # stopped every workspace on the machine -- or reported as an argument
-        # the command never expected. Inside a workspace the marker is the proof
-        # it exists, and a lifecycle command is handed a name with nothing yet.
+        # A name nothing answers to is refused here, once, for every command: left to reach the command it is ignored (`wk stop <typo>` stopped every
+        # workspace on the machine) or reported as an argument it never expected. In a workspace the marker is the proof; a lifecycle name has nothing yet.
         if [ -z "$D_LIFECYCLE" ] && ! in_workspace; then
-            # On the target it resolved to, not on every target again: the
-            # walk that produced $resolved already asked them all.
             ws_exists_on "$resolved" "$name" \
                 || usage_die "$cmd" "$impl" "no such workspace: $name -- 'wk ls' lists them"
         fi
-        # The target this name resolved to, handed to the command rather than
-        # walked a second time. Only on this path -- a forwarded or delegated
-        # child resolves over there, and a lifecycle command has its own list.
         [ -n "$D_LIFECYCLE" ] || { WK_TARGET="$resolved"; export WK_TARGET; }
         if [ "$D_READY" = yes ]; then
             load_target "$resolved"

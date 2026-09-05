@@ -1,49 +1,18 @@
-# Boot driver: a Pi 4 whose bench medium the bootloader will not boot, armed
-# through the firmware's tryboot one-shot instead. The firmware's USB-MSD boot
-# rejects some devices outright (the rpi4's stick: armed, correct files,
-# enumerates in 1.5 s under Linux -- skipped on either bus, warm or cold), so
-# the firmware loads the kernel from the rescue's SD card and the kernel mounts
-# the bench root on NODE_DEVICE by PARTUUID.
-#
-# Arming stages the bench system's kernel, NODE_DTB, overlays and cmdline into
-# `second/` on the SD's boot partition and writes `tryboot.txt` (that system's
-# config.txt plus one `os_prefix=second/` line) beside the rescue's untouched
-# config.txt; `reboot "0 tryboot"` makes the firmware read tryboot.txt exactly
-# once and clear the flag, whatever happens next, so the fall-through is
-# firmware-enforced and there is no state to put back. The argument travels as
-# systemd's reboot parameter (/run/systemd/reboot-param, written directly --
-# the positional `systemctl reboot ARG` form is deprecated and drops it
-# silently on some versions), so the rescue must run systemd.
+# Boot driver: a Pi 4 whose bench medium the bootloader will not boot (this stick: armed, correct files, enumerating in 1.5 s under Linux, skipped on either bus warm or cold). The bench system's kernel, NODE_DTB, overlays and cmdline are staged into `second/` on the rescue's SD beside a `tryboot.txt` that `reboot "0 tryboot"` makes the firmware read, and the kernel mounts the bench root on NODE_DEVICE by PARTUUID.
+# The flag travels as systemd's reboot parameter (/run/systemd/reboot-param; the positional `systemctl reboot ARG` form is deprecated and silently drops it), so the rescue must run systemd.
 
 BOOT_ARMING=medium
 
-# A BusyBox bench system can copy the staging but cannot pass the flag, so it
-# would stage perfectly and reboot without it, losing the leg.
 B_ARM_FROM_BENCH=no
 
-# Unused: the boot order here is permanent, not per-boot. sd-first is the right
-# EEPROM order (`wk pi boot-order`); usb-first wastes the discovery window on a
-# medium the firmware rejects.
 BOOT_ORDER_IMAGE=""
 BOOT_ORDER_NORMAL=""
 
-# The medium can hold a second system on partitions 3-4 (`wk sysimage write
-# --disk <machine>:$NODE_DEVICE@second`). Arming stages from the selected
-# system's own boot partition -- its kernel, its cmdline, its root PARTUUID.
 B_SYSTEM_PARTS="1 3"
 
-# Appends panic=10 to a staged cmdline that sets no panic of its own: without
-# it a panicking kernel hangs instead of rebooting, and the hang is the one
-# failure tryboot's firmware revert cannot see past.
 TRYBOOT_CMDLINE_SED='/ panic=[0-9]/!s/[[:space:]]*$/ panic=10/'
 
-# `wk_sd_boot` prints the SD boot partition's mountpoint, mounting it if
-# nothing has; `wk_sd_drop` undoes only a mount it made. The partition is named
-# from the conf (partition 1 of the rescue root's disk), not found by content:
-# a bench system's own /boot/firmware is the medium's FAT and carries
-# start4.elf too.
-# **No single quote and no `%`**: spliced into b_self_disarm_sh, which systemd
-# puts inside an `ExecStart=/bin/sh -c '...'`. wk selftest asserts both.
+# **No single quote and no `%`**: spliced into b_self_disarm_sh, which systemd puts inside an `ExecStart=/bin/sh -c '...'`.
 _tryboot_sd_sh() {
     local part
     part=$(disk_part "$(disk_of_part "$NODE_ROOT")" 1)
@@ -55,19 +24,7 @@ echo \"\$wk_sd_m\"; }; \
 wk_sd_drop() { if [ -n \"\$wk_sd_own\" ]; then sync; umount \"\$wk_sd_m\"; rmdir \"\$wk_sd_m\"; wk_sd_own=; fi; }; "
 }
 
-# The staging, run on the rescue as one script. The second-stage firmware pair
-# (start4.elf, fixup4.dat) has to sit under the prefix too -- os_prefix applies
-# to it, and a prefix with incomplete files is silently ignored -- but is
-# copied from the *SD's own root*: an image's own pair can predate the board
-# (the 2.38 fork pins rpi-firmware from 2020-01, which cannot bring up a Pi 4
-# rev 1.5 -- it hangs before the kernel, the one failure the tryboot revert
-# cannot see past). Built into `second.new` and renamed, so a kill mid-arm
-# leaves the previous staging whole.
-#
-# Which file is the kernel is the firmware's own name resolution: a `kernel=`
-# line names it, and without one the firmware picks from its defaults by what
-# is present. With several the choice follows from arm_64bit and the board, so
-# this refuses instead.
+# os_prefix applies to the second-stage firmware pair too and a prefix with incomplete files is silently ignored, so start4.elf and fixup4.dat are staged from the SD's own root -- an image's own pair can predate the board (the 2.38 fork's 2020-01 rpi-firmware hangs a Pi 4 rev 1.5 before the kernel).
 tryboot_stage_sh() { # <bench boot partition> <dtb name>
     printf '%s' "set -e
 $(_tryboot_sd_sh)
@@ -90,15 +47,7 @@ cp \"\$boot/start4.elf\" \"\$boot/fixup4.dat\" \"\$boot/second.new/\"
 cp \"\$src/$2\" \"\$boot/second.new/\"
 [ -d \"\$src/overlays\" ] && cp -r \"\$src/overlays\" \"\$boot/second.new/overlays\"
 sed $(sh_quote "$TRYBOOT_CMDLINE_SED") \"\$src/cmdline.txt\" > \"\$boot/second.new/cmdline.txt\"
-# os_prefix leads the file: the firmware resolves a filename when it reads the
-# directive that asks for one, so a prefix after a dtoverlay line never reaches
-# that overlay's .dtbo, and one appended at the end lands inside whichever
-# conditional section the image closes with.
-#
-# arm_64bit, stated explicitly from the kernel's own magic (zImage: 0x016f2818
-# at offset 36; ARM64 Image: 'ARM\x64' at 56): the SD's firmware defaults to
-# 64-bit, and jumping into a 32-bit zImage as if it were an arm64 Image is a
-# silent hang before any kernel code, no diag, no watchdog.
+# os_prefix leads the file: the firmware resolves a filename as it reads the directive asking for one, so a prefix after a dtoverlay line never reaches that overlay's .dtbo.
 bits=''
 case \"\$(od -An -tx4 -j36 -N4 \"\$src/\$kernel\" | tr -d ' ')\" in (016f2818) bits=0 ;; esac
 [ -n \"\$bits\" ] || case \"\$(od -An -tx4 -j56 -N4 \"\$src/\$kernel\" | tr -d ' ')\" in (644d5241) bits=1 ;; esac
@@ -110,12 +59,7 @@ sync
 wk_sd_drop"
 }
 
-# Runs inside the bench system, first thing after its root is up. This board
-# does not consume the tryboot flag -- a plain reboot and a cold power cycle
-# both read `tryboot.txt` again -- so "one boot" is made true by the boot that
-# spends it removing the staging.
-# **No single quote and no `%` may appear in what this returns**: interpolated
-# into a systemd `ExecStart=/bin/sh -c '...'`. wk selftest asserts both.
+# This board does not consume the tryboot flag -- a plain reboot and a cold power cycle both read `tryboot.txt` again -- so the boot that spends the staging removes it.
 b_self_disarm_sh() {
     printf "%s" "$(_tryboot_sd_sh)boot=\$(wk_sd_boot) || exit 0; \
 if [ -f \"\$boot/tryboot.txt\" ]; then rm -f \"\$boot/tryboot.txt\"; rm -rf \"\$boot/second\"; \
@@ -123,12 +67,8 @@ echo \"wk-self-disarm: this boot spent the tryboot staging; the rescue boots nex
 wk_sd_drop"
 }
 
-# Set by b_arm and read by b_reboot in the same cmd_arm breath: only the reboot
-# that follows an arming carries the tryboot flag.
 TRYBOOT_ARMED=""
 
-# ARM_SYS_PART is required rather than defaulted: an arm that guessed the
-# partition could boot the system beside the one recorded.
 b_arm() {
     [ -n "${ARM_SYS_PART:-}" ] \
         || die "b_arm needs the selected boot partition (machine_select_system, cmd/boot)"
@@ -140,10 +80,6 @@ b_arm() {
     TRYBOOT_ARMED=1
 }
 
-# Nothing here can clear the flag; removing the staging is the disarm. Over
-# whichever channel answered rather than the rescue's alone: while the staging
-# is in force this board boots the *bench* system.
-# /proc/mounts and not findmnt: a BusyBox bench system may carry no findmnt.
 b_disarm() {
     r_ssh "$(_tryboot_sd_sh)
     boot=\$(wk_sd_boot) || exit 0
@@ -156,8 +92,6 @@ b_disarm_note() {
     log "  the tryboot flag itself is the firmware's and any boot clears it."
 }
 
-# A plain reboot carries no flag, reads the rescue's config.txt, and so is
-# itself the disarm.
 b_reboot() {
     if [ -n "$TRYBOOT_ARMED" ]; then
         b_reboot_tryboot
@@ -166,7 +100,6 @@ b_reboot() {
     fi
 }
 
-# The flag itself is write-only and spent by any boot, so it is never evidence.
 b_evidence() {
     printf 'lane=kernel from the SD via tryboot (one boot, firmware-reverting); bench root on %s\n' "$NODE_DEVICE"
     local staged systems source
@@ -175,10 +108,6 @@ b_evidence() {
         if [ -f \"\$boot/tryboot.txt\" ] && [ -d \"\$boot/second\" ]; then echo yes; else echo no; fi
         wk_sd_drop" 2>/dev/null | tr -d '\r' | head -1) || staged=""
 
-    # Which config the running boot came from: the running root= against the
-    # two cmdlines on the SD. `tr` and `grep`, not sed: a sed script's
-    # backslashes would have to survive this string, the ssh command line and
-    # the remote shell all at once.
     source=$(r_ssh "$(_tryboot_sd_sh)
         wk_root_of() { tr \" \" \"\\n\" < \"\$1\" | grep \"^root=\" | head -1; }
         r=\$(wk_root_of /proc/cmdline)
@@ -189,8 +118,6 @@ b_evidence() {
         elif [ -n \"\$sd\" ] && [ \"\$r\" = \"\$sd\" ]; then echo sd-config
         else echo unknown; fi
         wk_sd_drop" 2>/dev/null | tr -d '\r' | head -1) || source=""
-    # "unknown": the running cmdline is neither the SD's nor what is staged
-    # now, so the board runs a staging that has since been replaced.
     case "${source:-}" in
         staging)   printf 'boot_source=the tryboot staging now on the SD (second/), so this boot spent this arming\n' ;;
         sd-config) printf 'boot_source=the SD config.txt, the plain path\n' ;;

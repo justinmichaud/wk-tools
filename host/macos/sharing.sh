@@ -1,7 +1,3 @@
-# Only Remote Login: a fresh macOS install ships it off, so a new workstation
-# answers nothing on port 22. Needs root, hence its own stage. authorized_keys
-# is not here: it is re-authable machine-local state decided per machine.
-
 _want_remote_login=1
 
 # `systemsetup -getremotelogin` needs admin and exits 0 even while refusing.
@@ -11,7 +7,6 @@ _rl_state() {
     case "$out" in
         *"=> enabled"*)  echo on ;;
         *"=> disabled"*) echo off ;;
-        # Absent: reported unknown, not assumed off (wrong-off means a sudo prompt forever).
         *) echo unknown ;;
     esac
 }
@@ -27,7 +22,6 @@ if [ "$_want_remote_login" = 1 ]; then
             elif sudo -n true 2>/dev/null || [ -t 0 ]; then
                 if sudo systemsetup -setremotelogin on >/dev/null 2>&1; then
                     changed "enabled remote login"
-                    # Read back: silent on failure when the real blocker is Full Disk Access.
                     [ "$(_rl_state)" = on ] || warn "  ...but it still reports off -- check
     System Settings -> General -> Sharing -> Remote Login. A terminal without
     Full Disk Access can be refused here without saying so."

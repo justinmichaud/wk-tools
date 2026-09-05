@@ -4,7 +4,7 @@
 # wk: where=workspace name=required group=workspaces readonly
 #
 # ninja writes progress with carriage returns; this normalises that and shows
-# the parts worth reading -- the tail after a failure is usually unrelated.
+# the first error plus the last output.
 #
 #   --follow, -f   stream the log live
 #   --all, -a      print the full normalised log
@@ -25,9 +25,6 @@ WSDIR="$(wk_ws_dir "$NAME")"
 LOG="$WSDIR/build.log"
 _shown=""
 if [ ! -f "$LOG" ]; then
-    # An image workspace has no build.log: its stages log to
-    # home/<kind>-<stage>.log instead (yocto_log in image/yocto.sh, buildroot_log
-    # in image/buildroot.sh). The newest is whichever stage is running or ran last.
     shopt -s nullglob
     _stage_logs=("$WSDIR"/home/yocto-*.log "$WSDIR"/home/buildroot-*.log)
     shopt -u nullglob
@@ -55,7 +52,6 @@ log ""
 log "last output:"
 tr '\r' '\n' < "$LOG" | grep -v '^$' | tail -15 | sed 's/^/  /'
 log ""
-# implicit inside a workspace; noise outside it
 _hint=""; in_workspace || _hint=" $NAME"
 log "  wk logs$_hint --all     full log"
 log "  wk logs$_hint --follow  live"

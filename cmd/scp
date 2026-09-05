@@ -7,8 +7,8 @@
 #   wk scp bug-238 ./foo.js :Tools/foo.js      # into it
 #   wk scp :WebKitBuild/build.log ~/log        # inside a workspace: no name
 #
-#   -r   the source may be a directory. The destination becomes a copy of it --
-#        contents replaced, not merged -- so one that already exists is refused
+#   -r   the source may be a directory. The destination becomes a copy of it,
+#        contents replaced rather than merged, so an existing one is refused
 #        unless --force.
 
 set -euo pipefail
@@ -17,8 +17,6 @@ WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 . "$WK_ROOT/lib/store.sh"
 . "$WK_ROOT/lib/target.sh"
 
-# The dispatcher's own shape for a bad invocation (usage_die in `wk`), so both
-# routes into it read the same.
 _usage() { # <why>
     warn "$1"
     log "usage: wk scp [<workspace>] [-r] <src> <dst>"
@@ -55,8 +53,6 @@ fi
 
 load_target "$(ws_target "$NAME")"
 
-# `:<path>`, resolved: relative to the checkout (t_src), or taken as it is when
-# it is already absolute.
 _ws_path() { # <:path>
     local p="${1#:}"
     case "$p" in
@@ -65,8 +61,6 @@ _ws_path() { # <:path>
     esac
 }
 
-# What a path is, in one word, on each side -- the two are different machines,
-# so each is asked its own way (t_path_kind for the workspace).
 _kind_here() { # <path>
     if [ -d "$1" ]; then echo dir; elif [ -e "$1" ]; then echo file; else echo absent; fi
 }
@@ -81,7 +75,6 @@ _kind_or_die() { # <kind> <what>
     'wk status $NAME' says whether it is up."
 }
 
-# The direction, and with it everything that differs between the two.
 if _is_ws_side "$SRC"; then
     SRC_PATH=$(_ws_path "$SRC"); SRC_PFX="$NAME:"
     DST_PATH="$DST";             DST_PFX=""
@@ -104,8 +97,7 @@ _kind_or_die "$SRC_KIND" "$SRC_PFX$SRC_PATH"
 
 DST_KIND=$(_kind_dst "$DST_PATH")
 _kind_or_die "$DST_KIND" "$DST_PFX$DST_PATH"
-# An existing directory receives the copy under the source's own name, as cp and
-# scp do. From here on the destination names the copy itself.
+# An existing directory receives the copy under the source's own name, as cp does.
 if [ "$DST_KIND" = dir ]; then
     DST_PATH="$DST_PATH/$(basename "$SRC_PATH")"
     DST_KIND=$(_kind_dst "$DST_PATH")

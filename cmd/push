@@ -9,9 +9,9 @@
 # while a shell in the same workspace, run by a human, should push normally.
 #
 # A switch over *credentials nothing in a workspace ever holds*: the private
-# deploy keys sit in an ssh-agent outside the workspace, and the GitHub API
-# token in the injector that terminates TLS for api.github.com. README.md has
-# the mechanism.
+# deploy keys sit in an ssh-agent outside the workspace, and the GitHub API token
+# in the injector that terminates TLS for api.github.com. README.md has the
+# mechanism.
 #
 #   on     the keys are in the agent and the token is where the injector reads
 #          it. `git push` and `git-webkit pr` work.
@@ -19,19 +19,15 @@
 #          no identity to offer and the injector answers 401. Nothing in a
 #          workspace can undo either.
 #
-# There is no state file to disagree with reality: `status` asks the agent what
-# it holds (`ssh-add -l`) and the machine whether the token file is there.
-#
-# Both halves run here, which is why this is where=local. A macOS guest cannot
-# see a unix socket across the hypervisor, so its ssh half is a forward this host
-# holds open while push is on (targets/vm.sh).
-#
-# `wk ai claude` turns it off before handing over control.
+# There is no state file to disagree with reality: `status` asks the agent what it
+# holds (`ssh-add -l`) and the machine whether the token file is there. Both
+# halves run here (where=local): a macOS guest cannot see a unix socket across the
+# hypervisor, so its ssh half is a forward this host holds open while push is on
+# (targets/vm.sh). `wk ai claude` turns it off before handing over control.
 #
 #   --target <machine>   ask that fleet machine instead of this one, through
 #                        its own wk. A `remote` target names no ssh-agent
-#                        socket, so it reports that there is no switch there;
-#                        installing one is owed (docs/HANDOFF-sandboxing.md)
+#                        socket, so it reports that there is no switch there
 #   --all                ask everywhere: this machine and every other one
 #                        (wk boot --list names them); a machine that does not
 #                        answer is skipped, not fatal
@@ -46,17 +42,11 @@ WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 . "$WK_ROOT/lib/store.sh"
 . "$WK_ROOT/lib/target.sh"
 
-# Refused inside a workspace, but *not* on a build machine: the switch acts on
-# the machine that holds the credentials. Before load_target, and that order is
-# load-bearing: `default_target` in a workspace is `local`, whose load would
-# exit before the refusal was printed.
+# Refused inside a workspace, not on a build machine: the switch acts where the credentials are. Before load_target, or `default_target` (`local` in a workspace) would exit before the refusal printed.
 in_workspace && die "'wk push' throws the credential switch, and this is workspace '$(wk_self)'.
     The keys and the token are on the host and a workspace cannot reach either --
     which is what makes the switch a switch. Run it on the host."
 
-# $WK_STORE is target-dependent: /var/lib/wk in the podman VM, the remote root
-# on a build machine. Loading the target this machine *is* puts the workspaces
-# and secrets where this machine actually keeps them.
 load_target "$(default_target)" 2>/dev/null || true
 
 ACTION=status
@@ -70,8 +60,7 @@ while [ $# -gt 0 ]; do
     esac
 done
 
-# Each machine answers for itself, by running this same file over there, exactly
-# as `wk sudo` does -- the credentials never travel.
+# Each machine answers for itself, by running this same file over there -- the credentials never travel.
 if [ -n "$TARGET" ]; then
     _row() { sed "s/^/$(printf '%-22s' "$1")/"; }
 
@@ -84,7 +73,6 @@ if [ -n "$TARGET" ]; then
         return "$rc"
     }
 
-    # This machine holds keys too, and for_each_machine walks only the others.
     _here() {
         local rc=0 out
         out=$("$WK_ROOT/wk" push "$ACTION" 2>&1) || rc=$?
@@ -102,26 +90,20 @@ if [ -n "$TARGET" ]; then
     exit $?
 fi
 
-# Nothing moves between the two directories: HELD holds every private half and
-# the API token and is mounted nowhere; LIVE is the mounted one and carries the
-# *public* halves and the ssh config every container includes.
+# Nothing moves between the two: HELD holds every private half and the API token and is mounted nowhere; LIVE is the mounted one, with the public halves.
 HELD="$(wk_push_held_dir)"
 LIVE="$(wk_secrets_dir)"
 
-# The socket a workspace reads the agent through (t_agent_sock), and two paths
-# as the machine holding the workspaces spells them -- push_agent_* expands them
-# there, because /run/user/501 is not on a Mac.
+# push_agent_* expands these on the machine holding the workspaces, because /run/user/501 is not on a Mac.
 WS_SOCK=$(t_agent_sock 2>/dev/null) || WS_SOCK=""
 MACHINE_SOCK="$(push_agent_machine_sock)"
 MACHINE_PAT="$(push_agent_machine_pat)"
 
 forks() { wk_push_forks | awk 'NF {print $1}'; }
 
-# Read once: one `ssh-add -l` over one hop rather than one per fork.
 AGENT_KEYS="$(push_agent_list push_agent_exec "$MACHINE_SOCK")"
 
-# Matched by the public half's own fingerprint: `ssh-add -l` prints a
-# fingerprint and a comment, never a name this switch chose.
+# Matched by the public half's own fingerprint: `ssh-add -l` prints a fingerprint and a comment, never a name this switch chose.
 agent_holds() { # <fork>
     local fp
     [ -f "$LIVE/build_key_$1.pub" ] || return 1
@@ -130,10 +112,7 @@ agent_holds() { # <fork>
     printf '%s\n' "$AGENT_KEYS" | awk '{print $2}' | grep -qxF "$fp"
 }
 
-# The evidence, per fork: loaded | held | live | absent. `loaded` is the agent's
-# own answer, not a record -- an agent restarted since is empty. `live` is a key
-# on a machine with no agent socket: remote/provision.sh points `core.sshCommand`
-# at the private half directly there, and it pushes anyway.
+# loaded | held | live | absent. `live` is a key on a machine with no agent socket: remote/provision.sh points `core.sshCommand` at it directly.
 where() {
     local r="$1"
     agent_holds "$r" && { echo loaded; return 0; }
@@ -144,8 +123,6 @@ where() {
     echo absent
 }
 
-# Every private key in the mounted directory -- where none belongs. Not only the
-# forks wk_push_forks names: a hand-added key here is exactly as usable.
 exposed_private_keys() {
     local f
     [ -d "$LIVE" ] || return 0
@@ -157,11 +134,7 @@ exposed_private_keys() {
     return 0
 }
 
-# The workspaces here in which a claude process is running -- asked of the
-# machine, not of a record. A running agent is one whose executable resolves
-# under the Claude install, read from /proc inside the workspace: the process is
-# called `claude`, `node` or a version string depending on how it was launched,
-# but its exe path is not.
+# Asked of the machine, not of a record: the process is called `claude`, `node` or a version string, but its exe path resolves under the Claude install.
 agent_sessions() {
     local ws
     while IFS=$(printf '\t') read -r ws _; do
@@ -179,8 +152,6 @@ EOF
     return 0
 }
 
-# A target with no agent socket has nowhere to hold a key outside the workspace.
-# Refused rather than putting the key where the workspace can read it.
 require_agent_target() {
     [ -n "$WS_SOCK" ] && return 0
     die "'$WK_TARGET' workspaces name no ssh-agent socket (t_agent_sock), so the
@@ -190,8 +161,6 @@ require_agent_target() {
     from the workstation that holds the keys."
 }
 
-# Nothing moves on disk, so nothing can be left half-done -- a killed
-# `wk push on` re-run converges.
 switch_half() {
     case "$ACTION" in
 on)
@@ -210,8 +179,7 @@ on)
         return 1
     fi
 
-    # Before the keys: a workspace whose ssh config names no fork host cannot
-    # use an agent that holds one.
+    # Before the keys: a workspace whose ssh config names no fork host cannot use an agent that holds one.
     push_agent_publish_config "$LIVE" "$WS_SOCK" \
         || die "could not write $LIVE/ssh_config, which every workspace includes"
 
@@ -234,8 +202,6 @@ on)
     log "  every workspace can push to the forks now, including any agent in one."
     log "  'wk push off' when you are done; 'wk ai claude' turns it off by itself."
 
-    # Reported separately because it fails separately: a machine with keys and
-    # no token pushes and cannot open a pull request.
     if push_agent_pat_write push_agent_exec "$MACHINE_PAT"; then
         changed "the GitHub API token is where the injector reads it ($(wk_github_user))"
         log  "  'git-webkit pr' in a workspace posts as that account; the token stays here"
@@ -245,7 +211,6 @@ on)
         log  "  'wk key set github-pat' stores one (repo scope; it never enters a workspace)"
     fi
 
-    # Whether GitHub has this machine's key, this cannot see.
     log "  a push also needs this machine's key registered:  wk key check"
     ;;
 
@@ -253,15 +218,12 @@ off)
     require_agent_target
     push_agent_clear    push_agent_exec "$MACHINE_SOCK" || true
     push_agent_pat_clear push_agent_exec "$MACHINE_PAT" || true
-    # Rewritten on `off` as well as `on`: it names public halves and a socket,
-    # not a credential, and a workspace that cannot resolve `github-webkit`
-    # fails with a hostname error instead of "no identity".
+    # Rewritten on `off` too: it names public halves and a socket, not a credential, and an unresolvable `github-webkit` fails with a hostname error.
     push_agent_publish_config "$LIVE" "$WS_SOCK" \
         || warn "could not rewrite $LIVE/ssh_config; a push from a workspace will fail
     on the host alias rather than on the missing identity"
 
-    # Evidence, not the exit status of the clear: an agent that ignored
-    # `ssh-add -D` is an agent a workspace can still push with.
+    # Evidence, not the exit status of the clear: an agent that ignored `ssh-add -D` is an agent a workspace can still push with.
     left=$(push_agent_list push_agent_exec "$MACHINE_SOCK")
     if [ -n "$left" ]; then
         warn "the agent at $MACHINE_SOCK still holds $(printf '%s\n' "$left" | grep -c .) identity/identities"
@@ -297,7 +259,6 @@ status)
         printf '%-10s %s\n' "api" "no token ('wk key set github-pat')"
     fi
 
-    # A private half in the mounted directory is exposed to every workspace.
     exposed=$(exposed_private_keys)
     if [ -n "$exposed" ]; then
         warn "private key(s) in the mounted secrets directory, readable by every workspace:
@@ -317,9 +278,7 @@ status)
             || log "  no ssh-agent answers at $MACHINE_SOCK ('./setup' installs it there)"
     fi
 
-    # A live key is push being on, and `wk push off --all` must not report it as
-    # off: a 0 here would tell cmd/ai's `push_switch status || return 0` the
-    # fleet is shut when one box is not.
+    # A 0 here would tell cmd/ai's `push_switch status || return 0` the fleet is shut when one box is not.
     if [ "$live" -gt 0 ]; then
         info "push is ON here and cannot be switched off -- $live key(s) are live"
         return 0
@@ -342,21 +301,13 @@ status)
     esac
 }
 
-# --- the guests on this host -------------------------------------------------
-# A container reads the agent's socket through its /run/wk mount, so the half
-# above is the whole switch for one. A macOS guest cannot, so its half is an
-# ssh-agent on this host and an `ssh -N -R` per guest (targets/vm.sh); only this
-# host can throw that, since `tart` is macOS only. The driver goes in a subshell
-# because it points $WK_STORE at its own state directory.
+# A container reads the agent's socket through its /run/wk mount; a macOS guest cannot, so its half is an ssh-agent here and an `ssh -N -R` per guest (targets/vm.sh), driven in a subshell that re-points $WK_STORE.
 _in_vm_driver() { # <function to call in the vm driver> [args...]
     is_macos || return 0
     local fn="$1"; shift
     ( load_target vm >/dev/null 2>&1 && "$fn" "$@" )
 }
 
-# The guest half's status, folded into this command's at the end: a guest whose
-# ssh failed during `wk push off` has an emptied agent here and a live forward
-# in there.
 GUEST_RC=0
 GUEST_LIVE=0
 
@@ -367,8 +318,7 @@ converge_guests() {
     'wk push $ACTION' again once each one answers"
 }
 
-# A stopped guest is not started to find out: `wk vm start` converges it before
-# anything in it can run.
+# A stopped guest is not started to find out: `wk vm start` converges it before anything in it can run.
 guest_rows() {
     local rows g state forks
     rows=$(_in_vm_driver vm_push_keys_state) || return 0
@@ -396,14 +346,11 @@ case "$ACTION" in
     status) guest_rows ;;
 esac
 
-# The switch is ON when *anything* can push, and a running guest whose forward
-# is still up can.
 if [ "$ACTION" = status ] && [ "$GUEST_LIVE" -eq 1 ] && [ "$SWITCH_RC" -ne 0 ]; then
     info "push is ON -- a running guest above still reaches the agent ('wk push off')"
     SWITCH_RC=0
 fi
 
-# Both halves, so a guest that did not answer is a failure and not a warning.
 if [ "$GUEST_RC" -gt "$SWITCH_RC" ]; then
     exit "$GUEST_RC"
 fi

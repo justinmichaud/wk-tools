@@ -34,7 +34,6 @@ snapshot_current() {
     [ -n "$1" ] && [ "$1" = "$2" ]
 }
 
-# The decision behind "autodetect, then ask" below, named on stdout.
 sync_scope_decide() {
     local n="$1" tty="$2" pick="${3:-}"
     [ "$n" -eq 0 ] && { printf 'empty\n'; return 0; }
@@ -61,10 +60,7 @@ local_store_named() {
     return 1
 }
 
-# A snapshot's checkout goes on a local branch tracking <branch>, since every
-# workspace overlays it and inherits whatever HEAD says here. `-B` resets
-# rather than switches: the branch `git clone` leaves keeps the sha it was
-# cloned at, and every later snapshot is hardlinked from that one.
+# `-B` resets rather than switches: the branch `git clone` leaves keeps the sha it was cloned at, and every later snapshot is hardlinked from that one.
 snapshot_checkout() { # <tree> <branch>
     local tree="$1" branch="$2" ref upstream local_branch
     ref=$(git -C "$tree" rev-parse --symbolic-full-name "$branch" 2>/dev/null || true)
@@ -85,7 +81,6 @@ snapshot_checkout() { # <tree> <branch>
         || { printf "branch %s does not track %s\n" "$local_branch" "$upstream"; return 1; }
 }
 
-# origin's branches are the mirror's own heads; other upstreams are namespaced.
 mirror_refspecs() {
     local r out="+refs/heads/*:refs/remotes/origin/*"
     for r in $(wk_mirror_default_remotes); do
@@ -95,8 +90,6 @@ mirror_refspecs() {
     printf '%s' "$out"
 }
 
-# The same refs asked of one upstream itself, for a checkout with no mirror in
-# reach. origin is narrowed to wk_mirror_branches: WebKit/WebKit has ~920.
 net_refspecs() { # <remote>
     local b out=""
     if [ "$1" = origin ]; then
@@ -109,17 +102,11 @@ net_refspecs() { # <remote>
     printf '%s' "${out# }"
 }
 
-# Generated here as portable `sh` because the checkout is behind a container
-# exec or an ssh. Only the remotes the checkout actually has: naming an absent
-# one fails the whole fetch. The `[ -d ]` test is not "does this target have a
-# mirror" -- a guest cloned from a base built before its mirror existed carries
-# none at that path. --no-tags: following tags re-negotiates every tag the
-# source has (5,000-tag stand-in: first fetch 0.97s -> 0.23s, repeat 0.33s ->
-# 0.25s).
+# Generated here as portable `sh` because the checkout is behind a container exec or an ssh, and only for the remotes the checkout actually has:
+# naming an absent one fails the whole fetch. --no-tags, because following tags re-negotiates every tag the source has (0.97s -> 0.23s on a 5,000-tag stand-in).
 ws_fetch_script() { # <src> <mirror-dir>
     local src="$1" mirror="$2" r
-    # The refspecs are `*` globs git reads: `set -f` so `sh` cannot expand one
-    # into a filename that happens to be in the working tree.
+    # The refspecs are `*` globs git reads: `set -f` so `sh` cannot expand one into a filename that happens to be in the working tree.
     printf 'set -f\n'
     printf 'cd %s || exit 1\n' "$(sh_quote "$src")"
     if [ -n "$mirror" ]; then
@@ -137,13 +124,11 @@ ws_fetch_script() { # <src> <mirror-dir>
     printf 'echo from=remotes\nexit $rc\n'
 }
 
-# tests/test_sync.py and tests/test_new_fetch.py source this file for its
-# helpers. `wk` always execs it, so a real run cannot take this arm.
+# tests/test_sync.py and tests/test_new_fetch.py source this file for its helpers; `wk` always execs it, so a real run cannot take this arm.
 if (return 0 2>/dev/null); then
     [ "${1:-}" = functions ] && return 0
 fi
 
-# Before the store lock, which concerns no target across an ssh.
 USAGE="usage: wk sync [<workspace>|--target <target>|--all|--tools [<target>]]"
 SCOPE=""            # ws | target | all | tools -- what this run brings up to date
 SCOPE_AS=""         # how it was spelled, for a message about two of them
@@ -157,9 +142,7 @@ scope_set() { # <scope> <as-typed>
     SCOPE="$1"; SCOPE_AS="$2"
 }
 
-# What the dispatcher's where=host and name checks leave unrefused in here is
-# a *different* workspace's name. Before the loop, since $ONLY already holds
-# this workspace's own name from WK_NAME.
+# What the dispatcher's where=host and name checks leave unrefused in here is a *different* workspace's name, checked before the loop.
 if in_workspace && [ -n "${1:-}" ]; then
     case "$1" in
         -*|"$(wk_self)") ;;
@@ -180,7 +163,6 @@ while [ $# -gt 0 ]; do
             TARGET="$_v"
             case "$1" in --target=*) shift ;; *) shift 2 ;; esac
             scope_set target --target ;;
-# Optional as a word, never as a value: the `=` spelling has said there is one.
         --tools|--tools=*)
             case "$1" in
                 --tools=*)
@@ -195,8 +177,6 @@ while [ $# -gt 0 ]; do
                     esac ;;
             esac
             scope_set tools --tools ;;
-        # A tombstone: --machine meant two unrelated pieces of work at once.
-        # Declared where=host so it refuses here, not in the podman VM.
         --machine)  die "'wk sync --machine' is gone: it meant a machine's furniture and
     every workspace on it at once. Say which:
         wk sync --all         every workspace on every target
@@ -211,7 +191,6 @@ done
 
 [ -z "$ONLY" ] || scope_set ws "'$ONLY'"
 
-# stdout only -- the refusal is on stderr.
 if [ -n "$TARGET" ]; then
     ( load_target "$TARGET" >/dev/null ) || exit 1
 fi
@@ -255,17 +234,13 @@ if [ -z "$SCOPE" ] && [ -z "$ONLY" ]; then
     esac
 fi
 
-# walk_targets, not target_all: on a machine answering another machine's
-# --tools (WK_NO_DELEGATE) it refreshes what it holds and asks nobody, so a
-# sweep cannot bounce between two workstations that are peers of each other.
+# walk_targets, not target_all: a machine answering another machine's --tools (WK_NO_DELEGATE) refreshes what it holds and asks nobody, so a sweep cannot bounce between peers.
 sync_furniture() { # <target>, or empty for every target this machine knows
     local only="${1:-}" _bad=0 _t _targets
     if [ -n "$only" ]; then _targets="$only"; else _targets=$(walk_targets); fi
     for _t in $_targets; do
-        # A subshell per target: a driver is a sourced file that sets globals.
         (
             load_target "$_t" >/dev/null || exit 3
-            # A snapshot on somebody else's workstation only when named.
             [ -z "$only" ] || { WK_SYNC_NAMED=1; export WK_SYNC_NAMED; }
             t_sync
         ) || _bad=$((_bad + 1))
@@ -295,8 +270,6 @@ sync_workspaces() {
             fi
             printf '  %-24s ' "$ws" >&2
 
-            # The one implementation of a workspace's fetch: `wk new` reaches
-            # it by running `wk sync <name>` at creation.
             stage_begin
             out=$(t_exec "$ws" sh -c \
                     "$(ws_fetch_script "$(t_src "$ws")" "$(t_mirror_dir "$ws")")" \
@@ -312,8 +285,7 @@ sync_workspaces() {
             echo "FAILED (continuing)" >&2
             exit 1
         ) && rc=0 || rc=$?
-        # `&& rc=0 || rc=$?`, not a bare `( … )`: under `set -e` a non-zero
-        # compound command would end the run at one unreachable workspace.
+        # `&& rc=0 || rc=$?`, not a bare `( … )`: under `set -e` a non-zero compound command would end the run at one unreachable workspace.
         case "$rc" in
             0)   n=$((n + 1)) ;;
             2)   [ "$SCOPE" != ws ] || die "workspace '$ONLY' is not there to fetch in
@@ -325,9 +297,7 @@ sync_workspaces() {
     return 0
 }
 
-# One workspace at a time, by name, never a scope word: what a scope means is
-# decided by *that* machine's copy of wk-tools, a different version as often
-# as not. WK_NO_DELEGATE marks a fleet walk already in progress.
+# One workspace at a time, by name, never a scope word: what a scope means is decided by *that* machine's copy of wk-tools, a different version as often as not.
 sync_target() { # <target>
     local _t="$1" _ws
     if ( load_target "$_t" >/dev/null 2>&1; [ -n "${WK_REMOTE_PEER:-}" ] ); then
@@ -343,8 +313,7 @@ sync_target() { # <target>
         )
         return 0
     fi
-    # On macOS the container store lives inside the podman VM, so every
-    # workspace out here reads as "creating" from an invisible base-id.
+    # On macOS the container store lives inside the podman VM, so every workspace out here reads as "creating" from an invisible base-id.
     if ( load_target "$_t" >/dev/null 2>&1; t_needs_base && ! store_is_local ); then
         info "$_t keeps its workspaces' records in the podman VM, not out here"
         log  "  from in there:  wk sync <workspace>, or a bare 'wk sync' for the menu"
@@ -353,17 +322,13 @@ sync_target() { # <target>
 
     _ws=$( ( load_target "$_t" >/dev/null || exit 3; target_workspaces ) )
     [ -n "$_ws" ] || { info "no workspaces on $_t"; return 0; }
-    # WK_TARGET: these names came from this target, so ws_target must not ask
-    # every other one where each lives -- an ssh probe per workspace per target.
+    # WK_TARGET: these names came from this target, so ws_target must not ask every other one where each lives -- an ssh probe per workspace per target.
     # shellcheck disable=SC2086 -- deliberate word splitting of the name list.
     ( export WK_TARGET="$_t"; sync_workspaces $_ws )
 }
 
-# A snapshot only starts a *new* workspace; existing ones are overlays pinned
-# to the snapshot they were made from, which never moves.
 case "$SCOPE" in
     ws)
-        # Inside a workspace there is no store of this machine's to prep.
         in_workspace || store_init
         sync_workspaces "$ONLY"
         log "'git rebase origin/main' in the workspace moves onto what it just fetched."
@@ -378,15 +343,12 @@ case "$SCOPE" in
         exit 0 ;;
 esac
 
-# Only --tools reaches here. A target that did not take the tooling is this
-# command's failure, however much of the rest succeeds below.
 FURNITURE_RC=0
 sync_furniture "$TARGET" || FURNITURE_RC=1
 
 local_store_named "$TARGET" || exit "$FURNITURE_RC"
 
-# On macOS $WK_STORE is /var/lib/wk *inside the podman VM*, unreadable from out
-# here. Said rather than attempted: a permission error would name no remedy.
+# On macOS $WK_STORE is /var/lib/wk *inside the podman VM*, unreadable from out here. Said rather than attempted: a permission error would name no remedy.
 if ! store_is_local; then
     echo >&2
     info "the mirror and the snapshot are in the podman VM, not out here"
@@ -397,13 +359,11 @@ fi
 
 store_init
 
-# Exclusive: two of these racing would hardlink from each other's
-# half-published snapshot. It also holds off `wk gc` and `wk new`.
+# Exclusive: two of these racing would hardlink from each other's half-published snapshot. It also holds off `wk gc` and `wk new`.
 hold_lock store
 
 MIRROR=$(wk_mirror)
 
-# Always safe: the mirror is bare and is never an overlay lower layer.
 
 if [ -d "$MIRROR" ]; then
     unchanged "mirror exists"
@@ -413,8 +373,6 @@ fi
 
 info "fetching $(wk_mirror_default_remotes) (origin: $(wk_mirror_branches))"
 
-# mirror_refresh_script prints `mirror-fetch <remote> ok|FAILED` per upstream
-# and survives an unreachable one.
 stage_begin
 { sh -c "$(mirror_refresh_script "$MIRROR")" 2>/dev/null \
       || warn "the mirror refresh did not finish"; } \
@@ -427,7 +385,6 @@ stage_begin
       done
 stage_end "mirror fetch"
 
-# checked as refs/heads/main because origin's branches are the mirror's own heads
 git -C "$MIRROR" rev-parse --verify --quiet refs/heads/main >/dev/null \
     || die "main was not fetched into the mirror; cannot publish a snapshot"
 _mirror_main_sha=$(git -C "$MIRROR" rev-parse refs/heads/main)
@@ -440,8 +397,7 @@ NEW_TREE="$NEW_DIR/WebKit"
 
 PREV_ID=$(current_base 2>/dev/null || true)
 
-# Hardlinking a half-published snapshot then fetching fails with "not a git
-# repository" *after* copying everything, leaving a second broken one.
+# Hardlinking a half-published snapshot then fetching fails with "not a git repository" *after* copying everything, leaving a second broken one.
 if [ -n "$PREV_ID" ] && [ ! -d "$(base_path "$PREV_ID")/.git" ]; then
     warn "previous snapshot $PREV_ID is not a git checkout; ignoring it"
     log  "  (remove it with: wk gc)"
@@ -452,8 +408,7 @@ if [ -n "$PREV_ID" ] && ! _why=$(base_verify "$PREV_ID"); then
     warn "$_why"
 fi
 
-# Skipped only for the default branch, where the mirror's own head is exactly
-# the ref checked out; a non-default WK_BRANCH has no such mapping to compare.
+# Skipped only for the default branch, where the mirror's own head is exactly the ref checked out; a non-default WK_BRANCH has no such mapping.
 if [ "$BRANCH" = "origin/main" ] && [ -n "$PREV_ID" ] && base_verify "$PREV_ID" >/dev/null 2>&1 \
     && snapshot_current "$(base_recorded_sha "$PREV_ID")" "$_mirror_main_sha"; then
     unchanged "mirror unchanged; base $PREV_ID is already $(printf '%s' "$_mirror_main_sha" | cut -c1-10)"
@@ -465,7 +420,6 @@ if [ -n "$PREV_ID" ]; then
     PREV_TREE=$(base_path "$PREV_ID")
     info "snapshotting $PREV_ID -> $NEW_ID"
     ensure_dir "$NEW_DIR"
-    # Hardlinks: one filesystem. Safe -- git never writes in place.
     stage_begin
     cp -al "$PREV_TREE" "$NEW_TREE"
     stage_end "snapshot publish (cp -al)"
@@ -479,22 +433,19 @@ else
     stage_end "snapshot publish (clone)"
 fi
 
-# The mirror lives in the VM and isn't mounted into workspaces: as origin it
-# would be an unreachable remote in every workspace.
+# The mirror lives in the VM and is not mounted into workspaces: as origin it would be an unreachable remote in every workspace.
 info "wiring snapshot remotes for workspace use"
 sh -c "$(wk_wiring_script "$NEW_TREE")"
 
 _why=$(snapshot_checkout "$NEW_TREE" "$BRANCH") || { rm -rf "$NEW_DIR"; die "$_why"; }
 info "checked out on branch $(git -C "$NEW_TREE" symbolic-ref --short HEAD) (tracking $BRANCH)"
-# A stray file in the lower layer appears in every workspace built from this
-# snapshot and cannot be deleted from any of them.
+# A stray file in the lower layer appears in every workspace built from this snapshot and cannot be deleted from any of them.
 git -C "$NEW_TREE" reset --hard --quiet
 git -C "$NEW_TREE" clean -qfdx
 
 [ -d "$NEW_TREE/.git" ] || { rm -rf "$NEW_DIR"; die "snapshot $NEW_ID was not published"; }
 
-# `sha` is the completion marker (lib/store.sh), written last and atomically;
-# `branch` goes first, so a snapshot marked complete has everything beside it.
+# `sha` is the completion marker (lib/store.sh), written last and atomically; `branch` goes first, so a snapshot marked complete has everything beside it.
 printf '%s\n' "$BRANCH" > "$NEW_DIR/branch"
 git -C "$NEW_TREE" rev-parse HEAD > "$NEW_DIR/sha.tmp"
 [ -s "$NEW_DIR/sha.tmp" ] || { rm -rf "$NEW_DIR"; die "snapshot $NEW_ID has no HEAD to record"; }

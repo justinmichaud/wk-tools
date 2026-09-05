@@ -1,11 +1,7 @@
-# GPU passthrough for workspaces: a benchmark is meaningless under llvmpipe.
-# NVIDIA's userspace libraries must match the host kernel driver exactly and
-# cannot be installed inside an offline container, so either CDI (nvidia-ctk,
-# not packaged for Ubuntu 26.04, only 26.10) or a list derived from ldconfig.
+# NVIDIA userspace must match the host kernel driver exactly, so mount the host's.
 gpu_flags() {
     local flags=""
 
-    # The card node is only needed for modesetting, which a workspace never does.
     if [ -e /dev/dri/renderD128 ]; then
         flags="$flags --device /dev/dri"
     else
@@ -13,7 +9,7 @@ gpu_flags() {
         return 0
     fi
 
-    # Counted, not `lsmod | grep -q`: grep -q exits early, lsmod takes SIGPIPE.
+    # Counted, not `grep -q`: grep -q exits early and lsmod takes SIGPIPE.
     local nvidia_modules
     nvidia_modules=$(lsmod 2>/dev/null | grep -c '^nvidia' || true)
     if [ "${nvidia_modules:-0}" -eq 0 ]; then
@@ -40,11 +36,9 @@ _cdi_available() {
     return 1
 }
 
-# Missing entries are skipped: the set differs between driver branches.
 _nvidia_derived_flags() {
     local out="" f
 
-    # /dev/nvidia-caps is a directory and only matters for MIG.
     for f in /dev/nvidia0 /dev/nvidiactl /dev/nvidia-modeset \
              /dev/nvidia-uvm /dev/nvidia-uvm-tools; do
         [ -e "$f" ] && out="$out --device $f"
@@ -70,12 +64,10 @@ _nvidia_derived_flags() {
         fi
     done
 
-    # The GBM backend, so EGL can render to a dmabuf the compositor imports.
     for f in /usr/lib/*/gbm/nvidia-drm_gbm.so; do
         [ -e "$f" ] && out="$out --volume $f:$f:ro"
     done
 
-    # Without these glvnd loads Mesa and reports llvmpipe.
     for f in /usr/share/glvnd/egl_vendor.d/10_nvidia.json \
              /usr/share/egl/egl_external_platform.d/10_nvidia_wayland.json \
              /usr/share/egl/egl_external_platform.d/15_nvidia_gbm.json \

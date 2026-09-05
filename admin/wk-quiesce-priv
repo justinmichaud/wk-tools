@@ -1,20 +1,10 @@
 #!/bin/bash
-#
-# The privileged half of `wk quiesce`. Runs as root via a NOPASSWD sudoers rule
-# naming this exact path; Linux ignores the setuid bit on a #! script. The grant
-# is unconditional and forever, so:
-#
-#   - The command set is a fixed allowlist. No passthrough, no eval, no
-#     argument that becomes part of a command.
-#   - Nothing is read from the environment: sudo's env_reset plus the explicit
-#     PATH below means a hostile environment cannot redirect a binary.
-#   - Every action is reversible with `off`, which is also what runs on an
-#     unrecognised argument.
-#   - One verb per configuration (session-on, session-on-bmc, session-gdm,
-#     session-gdm-bmc, session-stop, session-off) rather than one verb taking
-#     one, so each spells a fixed device list and compositor command line.
-#   - The compositor's user comes from a root-owned file written at install
-#     time; an argument would widen this into "run a compositor as anyone".
+# Root via a NOPASSWD sudoers rule naming this exact path (Linux ignores setuid on a #!
+# script), forever, so the grant is bounded by shape: a fixed verb list, no passthrough,
+# no eval, no argument that becomes part of a command, nothing read from the environment
+# (env_reset plus the PATH below), one verb per configuration each spelling a fixed
+# device list and command line, the session user from a root-owned file rather than an
+# argument, and every action undone by `off` -- what an unrecognised argument runs.
 
 set -euo pipefail
 export PATH=/usr/sbin:/usr/bin:/sbin:/bin
@@ -24,7 +14,6 @@ export PATH=/usr/sbin:/usr/bin:/sbin:/bin
 os=$(uname -s)
 action="${1:-off}"
 
-# --- macOS -------------------------------------------------------------------
 macos_on() {
     mdutil -a -i off >/dev/null 2>&1 || true
     tmutil stopbackup >/dev/null 2>&1 || true
@@ -44,7 +33,6 @@ macos_status() {
     printf 'lowpower:  %s\n' "$(pmset -g | awk '/lowpowermode/ {print $2}')"
 }
 
-# --- Linux -------------------------------------------------------------------
 linux_on() {
     for g in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do
         [ -w "$g" ] && echo performance > "$g" || true
@@ -78,9 +66,7 @@ linux_status() {
     printf 'aslr:      %s\n' "$(sysctl -n kernel.randomize_va_space 2>/dev/null || echo n/a)"
 }
 
-# --- Linux: perf_event_paranoid alone -----------------------------------------
-# samply (wk profile --mode samply) needs only this sysctl lowered, and `1` is
-# the least-restrictive value requiring no capability the container lacks.
+# 1 is the least-restrictive paranoid value needing no capability the container lacks.
 perf_on() {
     sysctl -q -w kernel.perf_event_paranoid=1 \
         || { echo "wk-quiesce-priv: could not set kernel.perf_event_paranoid" >&2; exit 1; }
@@ -93,15 +79,9 @@ perf_off() {
     printf 'perf_event_paranoid: %s (restored)\n' "$(sysctl -n kernel.perf_event_paranoid)"
 }
 
-# --- Linux: the benchmark session -------------------------------------------
-# cage is a one-client kiosk compositor: a real DRM session without a desktop's
-# compositing overhead in the numbers. systemd-run with PAMName=login and a TTY
-# gives it a logind session on seat0; without one, libseat cannot take DRM master
-# and cage exits immediately. Not as root: the Wayland socket is the one host
-# socket a workspace can see.
+# PAMName=login plus a TTY: without a logind session libseat refuses cage DRM master.
 WK_SESSION_CONF=/usr/local/libexec/wk-session.env
 WK_SESSION_UNIT=wk-session
-# Hardcoded, not an override point: sudo's env_reset would drop one anyway.
 WK_SESSION_TTY=/dev/tty2
 WK_SESSION_MODE_FILE=/run/wk-session-mode
 
@@ -115,18 +95,13 @@ session_user() {
     echo "$WK_SESSION_USER"
 }
 
-# --- which DRM device the compositor is allowed to use ------------------------
-# This board has two and only one is a GPU: the ASPEED BMC exposes a
-# display-only `ast` device it serves over KVM-over-IP. Both sit on seat0, so
-# every session below names its devices through WLR_DRM_DEVICES. The kernel
-# driver is the discriminator, never the card number.
+# The kernel driver discriminates the GPU from the BMC's `ast`, never the card number.
 drm_driver() {
     local link
     link=$(readlink -f "/sys/class/drm/$1/device/driver" 2>/dev/null) || true
     [ -n "$link" ] && basename "$link" || echo none
 }
 
-# cardN-CONNECTOR-M is not a device.
 drm_cards() {
     local d c
     for d in /sys/class/drm/card[0-9]*; do
@@ -157,23 +132,17 @@ gpu_card() {
     return 1
 }
 
-# --- removing a DRM device from every seat -----------------------------------
-# mutter has no per-process device allowlist, so the only lever is which devices
-# logind hands to seat0. Not a distinct ID_SEAT: logind then creates a real seat,
-# and gdm starts a greeter on every seat it finds. The rule lives under /run, so
-# a crashed helper never leaves a device hidden past the next boot.
+# Untagging, not a distinct ID_SEAT (logind would make a real seat, and gdm greets every
+# seat it finds); under /run, so a crash never hides a device past the next boot.
 WK_SEAT_RULE=/run/udev/rules.d/72-wk-session-seat.rules
 WK_DESKTOP_MODE_FILE=/run/wk-desktop-mode
 
-# seat0's device tree, not the udev property, which says what was asked for.
-# Anchored so "card2" cannot match "card2-DP-1".
+# seat0's device tree, not the udev property; anchored so "card2" misses "card2-DP-1".
 seat0_has_card() {
     loginctl seat-status seat0 2>/dev/null | grep -qE "drm:$1([^-[:alnum:]]|\$)"
 }
 
-# The card and each of its cardN-CONNECTOR-M children: 71-seat.rules tags both
-# with `seat` and `master-of-seat`, so a rule reaching only the bare card leaves
-# every connector on seat0.
+# 71-seat.rules tags the connectors too, so untagging the bare card leaves them seated.
 _card_paths() {
     local card="$1" p
     for p in "/sys/class/drm/$card" "/sys/class/drm/$card"-*; do
@@ -181,10 +150,7 @@ _card_paths() {
     done
 }
 
-# "change" first: it never touches the driver and is enough for logind to
-# recompute the seat on every systemd tested; remove+add is the stronger
-# fallback, at the cost of the device briefly not existing.
-# True once $1's presence on seat0 matches $2 (0 present, 1 absent).
+# "change" is enough for logind to recompute the seat on every systemd tested.
 _reseated() {
     if seat0_has_card "$1"; then [ "$2" != 1 ]; else [ "$2" = 1 ]; fi
 }
@@ -212,13 +178,11 @@ _reseat() {
     return 1
 }
 
-# Hide $1 (a card basename) from seat0, idempotently: `master-of-seat` makes a
-# device define a seat and `seat` makes it a member of one.
+# `master-of-seat` makes a device define a seat, `seat` makes it a member of one.
 seat_hide() {
     local card="$1"
     {
         printf 'SUBSYSTEM=="drm", KERNEL=="%s", TAG-="master-of-seat", TAG-="seat"\n' "$card"
-        # Connectors are separate udev devices, tagged by 71-seat.rules too.
         # seat_restore reads the first KERNEL== value, so the card comes first.
         printf 'SUBSYSTEM=="drm", KERNEL=="%s-*", TAG-="master-of-seat", TAG-="seat"\n' "$card"
     } > "$WK_SEAT_RULE"
@@ -226,8 +190,6 @@ seat_hide() {
     _reseat "$card" 1
 }
 
-# Undo whatever hide is in effect, if any: which mode was active before a crash
-# is not something this helper remembers.
 seat_restore() {
     local card=""
     [ -f "$WK_SEAT_RULE" ] && card=$(sed -n 's/.*KERNEL=="\([^"]*\)".*/\1/p' "$WK_SEAT_RULE" | head -1)
@@ -238,12 +200,6 @@ seat_restore() {
         || echo "wk-quiesce-priv: warning: could not confirm $card is back on seat0" >&2
 }
 
-# --- making gdm run a compositor the seat hide can actually reach -------------
-# Hiding a device from seat0 only constrains a compositor that asks logind for
-# its devices. mutter does; NVIDIA's Xorg DDX does not, and 61-gdm.rules makes
-# that the default greeter when modeset=Y -- it drives the card through
-# /dev/nvidia0 and friends, plain character devices with no seat tags. So the
-# greeter goes on Wayland, through gdm's own runtime-config tool.
 GDM_RUNTIME_CONFIG=/usr/libexec/gdm-runtime-config
 
 gdm_prefer_wayland() {
@@ -252,8 +208,6 @@ gdm_prefer_wayland() {
     "$GDM_RUNTIME_CONFIG" set daemon PreferredDisplayServer wayland || return 1
 }
 
-# The greeter's session type, once it has one: x11 means the device hide did not
-# apply and the desktop is on whichever chip NVIDIA's DDX chose.
 greeter_type() {
     local i sid class typ
     for i in $(seq 1 40); do
@@ -268,9 +222,8 @@ greeter_type() {
     return 1
 }
 
-# `systemctl stop` on gdm returning does not mean logind has finished: PAM
-# cleanup, D-Bus deregistration and VT release continue after it, and claiming
-# the seat before that settles races gdm's own Xorg wrapper into a crash loop.
+# `systemctl stop` on gdm returns before logind finishes, and claiming the seat that
+# early races gdm's Xorg wrapper into a crash loop.
 wait_seat0_quiet() {
     local i
     for i in $(seq 1 20); do
@@ -280,16 +233,11 @@ wait_seat0_quiet() {
     return 1
 }
 
-# --- turning the outputs off, as opposed to painting them black --------------
-# A held CRTC still scans out a real mode, and cage 0.1.5 has no idle timeout or
-# DPMS option. It does export wlr-output-management v4, whose disable_head is an
-# atomic commit with the CRTC off; that does not release the device, since
-# wlroots keeps the DRM fd open, so fbcon still cannot repaint. wlr-randr runs as
-# the session user, not root.
+# cage 0.1.5 has no DPMS option; wlr-output-management v4's disable_head commits
+# CRTC-off, and wlr-randr runs as the session user.
 WLR_RANDR=/usr/bin/wlr-randr
 
-# Connector names as wlr-randr prints them: one per unindented line, name then a
-# quoted description. The whole first field, since HDMI-A-1 is not NAME-N.
+# One head per unindented line: name, then a quoted description. HDMI-A-1 is not NAME-N.
 _heads() {
     local socket="$1" uid="$2" gid="$3" out
     out=$(setpriv --reuid="$uid" --regid="$gid" --clear-groups \
@@ -308,8 +256,7 @@ outputs_off() {
         return 1
     fi
 
-    # wlroots binds the seat and enumerates connectors after it starts
-    # listening, so asking straight away can see no heads.
+    # wlroots enumerates connectors after it starts listening, so an early ask sees none.
     local heads="" i
     for i in 1 2 3 4 5 6 7 8; do
         heads=$(_heads "$socket" "$uid" "$gid")
@@ -324,13 +271,11 @@ outputs_off() {
             >/dev/null 2>&1 || rc=1
     done
 
-    # No heads at all means the compositor took no output.
     [ -n "$any" ] || return 1
     return "$rc"
 }
 
-# Which connected connectors are still driven, from sysfs. `dpms` alone reads On
-# for a CRTC that was never enabled, so only `enabled`+`On` counts as lit.
+# `dpms` alone reads On for a CRTC never enabled, so only `enabled`+`On` counts as lit.
 outputs_power() {
     local conn name
     for conn in /sys/class/drm/card[0-9]*-*; do
@@ -347,19 +292,9 @@ outputs_power() {
     echo
 }
 
-# $1 is a mode set by the dispatch table at the bottom of this file, never by
-# the caller: each verb passes one fixed literal.
-#
-#   gpu  the GPU alone. What a benchmark runs on, and the default.
-#   bmc  the BMC's `ast` chip alone, software-rendered (`pixman` named
-#        explicitly, since ast has no render node): watchable over KVM-over-IP,
-#        never a number to compare with anything. GPU-render/BMC-scanout
-#        mirroring fails on this board's NVIDIA+ast pairing -- every frame
-#        fails "EGLImage not supported", silently.
-#   off  the screen-off placeholder: `fb_blank` never reaches real hardware on
-#        this board's NVIDIA driver, so releasing DRM master leaves the last
-#        latched frame on screen forever. The GPU alone, since wlroots' pixman
-#        cannot copy frames to a secondary with no render node.
+# $1 is a fixed literal from the dispatch table at the bottom, never from the caller.
+# GPU-render/BMC-scanout mirroring fails silently on this NVIDIA+ast pairing -- every
+# frame "EGLImage not supported" -- so no mode drives both devices.
 session_on() {
     local mode="${1:-gpu}"
     local user uid runtime gpu bmc devices cage_args renderer allow_sw
@@ -370,9 +305,7 @@ session_on() {
     gpu=$(gpu_card) || gpu=""
     bmc=$(bmc_card) || bmc=""
 
-    # Pinned: auto-detect tries GLES2 regardless of fit, and
-    # WLR_RENDERER_ALLOW_SOFTWARE only permits a software renderer rather than
-    # choosing one. Against the ast, GLES2 fails and nothing is drawn.
+    # Pinned: auto-detect tries GLES2, which fails on the ast and draws nothing.
     renderer=gles2
     allow_sw=""
     cage_args="-d"
@@ -388,8 +321,6 @@ session_on() {
             allow_sw=1
             ;;
         off)
-            # The GPU is the one that matters: it drives the monitor and is the
-            # one fbcon would repaint.
             devices="$gpu"
             [ -n "$devices" ] || devices="$bmc"
             [ -n "$devices" ] || { echo "wk-quiesce-priv: no DRM device found" >&2; exit 1; }
@@ -400,7 +331,6 @@ session_on() {
             echo "wk-quiesce-priv: unknown session mode $mode" >&2; exit 1 ;;
     esac
 
-    # Two things cannot own DRM master at once.
     if systemctl is-active --quiet gdm3 2>/dev/null || systemctl is-active --quiet gdm 2>/dev/null; then
         systemctl stop gdm3 2>/dev/null || systemctl stop gdm 2>/dev/null || true
         wait_seat0_quiet \
@@ -408,13 +338,10 @@ session_on() {
         echo "stopped the display manager"
     fi
 
-    # A gdm session may have left a device hidden from seat0, and libseat
-    # refuses to hand cage a hidden device whatever WLR_DRM_DEVICES asks for.
+    # libseat refuses cage a device gdm left hidden, whatever WLR_DRM_DEVICES asks for.
     seat_restore
     rm -f "$WK_DESKTOP_MODE_FILE"
 
-    # nvidia-drm without modesetting has no KMS to drive, and the failure is
-    # otherwise a bare "no DRM device".
     if [ -r /sys/module/nvidia_drm/parameters/modeset ]; then
         if [ "$(cat /sys/module/nvidia_drm/parameters/modeset)" != Y ]; then
             echo "warning: nvidia-drm modeset is off; the compositor cannot take the display" >&2
@@ -427,10 +354,7 @@ session_on() {
 
     systemctl stop "$WK_SESSION_UNIT" 2>/dev/null || true
 
-    # A dedicated XDG_RUNTIME_DIR, so the workspace gets the Wayland socket and
-    # not the user's whole runtime directory. Exported in the ExecStart shell:
-    # PAMName=login runs pam_systemd, which sets XDG_RUNTIME_DIR itself, and
-    # which of the two wins is undocumented.
+    # Exported in the ExecStart shell: pam_systemd sets XDG_RUNTIME_DIR too.
     local setenv=(--setenv=XDG_SESSION_TYPE=wayland
                   --setenv=WLR_NO_HARDWARE_CURSORS=1
                   "--setenv=WLR_DRM_DEVICES=$devices")
@@ -450,20 +374,17 @@ session_on() {
         /bin/sh -c "export XDG_RUNTIME_DIR='$runtime'; exec /usr/bin/cage $cage_args -- /usr/bin/sleep infinity" \
         >/dev/null
 
-    # The socket appearing is the only evidence that matters.
     for _ in $(seq 1 40); do
         [ -S "$runtime/wayland-0" ] && break
         sleep 0.25
     done
 
     if [ -S "$runtime/wayland-0" ]; then
-        # A BMC/software session looks like a GPU one from the socket alone.
         printf '%s\n' "$mode" > "$WK_SESSION_MODE_FILE"
         chmod 0644 "$WK_SESSION_MODE_FILE"
         echo "compositor up: $runtime/wayland-0"
         echo "mode: $mode  scanout: $devices  render: $devices"
 
-        # A black-but-lit screen beats no session holding the console off.
         if [ "$mode" = off ]; then
             outputs_off "$runtime/wayland-0" "$user" \
                 || echo "wk-quiesce-priv: warning: could not power the outputs down --" \
@@ -477,8 +398,6 @@ session_on() {
     fi
 }
 
-# gpu or bmc, as session_on. mutter has nothing like WLR_DRM_DEVICES, so the
-# other device is kept off seat0 instead.
 session_gdm() {
     local mode="${1:-gpu}"
     local gpu bmc hide _u _r _t
@@ -500,7 +419,6 @@ session_gdm() {
 
     # Nothing may hold DRM master while the seat's device list changes.
     systemctl stop "$WK_SESSION_UNIT" 2>/dev/null || true
-    # A socket left behind is indistinguishable from a running compositor.
     if _u=$(session_user); then
         _r="/run/user/$(id -u "$_u")/wk/display"
         rm -f "$_r/wayland-0" "$_r/wayland-0.lock"
@@ -519,7 +437,7 @@ session_gdm() {
     printf '%s\n' "$mode" > "$WK_DESKTOP_MODE_FILE"
     chmod 0644 "$WK_DESKTOP_MODE_FILE"
 
-    # Before starting it, not after: gdm reads its config once, at startup.
+    # Before starting it: gdm reads its config once, at startup.
     gdm_prefer_wayland \
         || echo "wk-quiesce-priv: warning: could not set gdm's display server to wayland" >&2
 
@@ -532,7 +450,6 @@ session_gdm() {
         echo "gdm starting: mode $mode"
     fi
 
-    # On x11 the hide never reaches the compositor, so `mode` is intent.
     if _t=$(greeter_type); then
         echo "greeter: $_t"
         [ "$_t" = wayland ] || {
@@ -545,13 +462,11 @@ session_gdm() {
     fi
 }
 
-# For a caller about to claim the seat for something else.
 session_stop() {
     local user uid runtime
     systemctl stop "$WK_SESSION_UNIT" 2>/dev/null || true
     systemctl stop gdm3 2>/dev/null || systemctl stop gdm 2>/dev/null || true
 
-    # Left in place, the socket looks exactly like a running session.
     if user=$(session_user); then
         uid=$(id -u "$user")
         runtime="/run/user/$uid/wk/display"
@@ -561,9 +476,6 @@ session_stop() {
     seat_restore
 }
 
-# Not just session_stop: on this board's NVIDIA driver fb_blank stops console
-# redraw but never reaches real hardware, so the last latched frame stays on
-# the monitor while sysfs reports "blanked" throughout.
 session_off() {
     session_stop
     session_on off
@@ -574,8 +486,7 @@ session_status() {
     user=$(session_user) || { echo "session:   no user configured"; return 0; }
     uid=$(id -u "$user")
     runtime="/run/user/$uid/wk/display"
-    # `systemctl is-active` prints its answer and exits 3 when inactive, so a
-    # `||` chain piped to printf repeats the format and pipefail ends this.
+    # `systemctl is-active` prints its answer and exits 3 when inactive.
     local unit_state dm_state
     unit_state=$(systemctl is-active "$WK_SESSION_UNIT" 2>/dev/null | head -1 || true)
     [ -n "$unit_state" ] || unit_state=unknown

@@ -1,6 +1,3 @@
-# How quiet is this machine, measured rather than assumed. Sourced by `wk quiesce`
-# and `wk bench staged`, which refuses a number taken on a busy machine. It covers
-# what quiesce does not touch too: a Time Machine destination and thermal state.
 macos_noise() {
     local bad=0 v
 
@@ -17,9 +14,7 @@ macos_noise() {
         *) warn "  timemachine: a destination is configured; a backup can start mid-run"; bad=1 ;;
     esac
 
-    # Not `softwareupdate --schedule`: it reports "on" with AutomaticCheckEnabled 0 in
-    # the same plist. `sudo -n`: an ordinary user reads this domain as "does not
-    # exist", and -n never prompts.
+    # Not `softwareupdate --schedule`: it says "on" with AutomaticCheckEnabled 0 in the same plist. An ordinary user reads this domain as absent; `sudo -n` never prompts.
     v=$(sudo -n defaults read /Library/Preferences/com.apple.SoftwareUpdate AutomaticCheckEnabled 2>/dev/null) \
         || v=$(defaults read /Library/Preferences/com.apple.SoftwareUpdate AutomaticCheckEnabled 2>/dev/null) \
         || v=""
@@ -35,9 +30,7 @@ macos_noise() {
         *)  log  "  updates:    unknown (AutomaticCheckEnabled=$v)" ;;
     esac
 
-    # AutomaticCheckEnabled=0 still lets a background scan advance -- a network fetch
-    # and CPU burst no preference read would catch. Warned not failed: SIP permission
-    # for `launchctl bootout` cannot be checked from host mode.
+    # AutomaticCheckEnabled=0 still lets a background scan advance -- a fetch and CPU burst no preference read catches -- and host mode cannot check SIP for `launchctl bootout`.
     if [ -f /etc/wk-image ]; then
         if sudo -n launchctl print system/com.apple.softwareupdated >/dev/null 2>&1; then
             warn "  scanner:    softwareupdated is LOADED -- a scan can start mid-run."
@@ -46,7 +39,6 @@ macos_noise() {
             log "  scanner:    softwareupdated not loaded"
         fi
 
-        # bench/mac-quiet-hosts.sh's own check, not a second one. Read-only.
         local _qh
         _qh="$(dirname "${BASH_SOURCE[0]}")/../bench/mac-quiet-hosts.sh"
         if [ -r "$_qh" ]; then
@@ -60,8 +52,6 @@ macos_noise() {
         fi
     fi
 
-    # A banner takes focus and a lock is "nowhere to draw" -- both invisible to
-    # `screen_blocker`'s frontmost-*application* check.
     if [ -f /etc/wk-image ]; then
         if pgrep -x NotificationCenter >/dev/null 2>&1; then
             warn "  notifs:     NotificationCenter is RUNNING -- a banner can draw mid-run"
@@ -83,7 +73,6 @@ macos_noise() {
     v=$(pmset -g 2>/dev/null | awk '$1 == "lowpowermode" { print $2 }')
     [ "${v:-0}" = 0 ] && log "  lowpower:   off" || { warn "  lowpower:   ON -- every number from this machine is a low-power number"; bad=1; }
 
-    # Throttling during one half of an A/B produces a difference unrelated to the change.
     v=$(pmset -g therm 2>/dev/null | sed -n 's/.*CPU_Speed_Limit *= *//p' | head -1)
     if [ -n "$v" ] && [ "$v" != 100 ]; then
         warn "  thermal:    CPU_Speed_Limit=$v -- the machine is being held back right now"
@@ -95,15 +84,10 @@ macos_noise() {
     return $bad
 }
 
-# Prints the name of an app owning the *front window*, or nothing: a benchmark in a
-# background window is throttled and times out silently (run-benchmark exit 124).
-# `lsappinfo front` asks the window server directly; grepping process command lines
-# matches daemons inside an .app bundle, and System Events needs assistive access.
-# WK_SCREEN_BLOCKERS overrides the pipe-separated list of window titles.
+# A benchmark in a background window is throttled and times out silently (run-benchmark exit 124); `lsappinfo front` asks the window server which app owns it.
 WK_SCREEN_BLOCKERS="${WK_SCREEN_BLOCKERS:-Setup Assistant|Software Update|Installer|Migration Assistant|System Settings}"
 
-# screen_blocker cannot see a modal auth panel: macOS draws those from
-# SecurityAgent, which runs only while a panel is up.
+# A modal auth panel is invisible to screen_blocker; SecurityAgent runs only while one is up.
 auth_panel() {
     pgrep -x SecurityAgent >/dev/null 2>&1 && printf 'SecurityAgent'
     return 0

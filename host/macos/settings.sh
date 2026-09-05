@@ -1,6 +1,4 @@
-# macOS desktop settings, applied from data files so `wk backup` can regenerate
-# them without touching code. `defaults write` always rewrites the plist and
-# bumps its mtime, so every write is guarded by a read.
+# `defaults write` rewrites the plist and bumps its mtime, so read before write.
 
 _defaults_conf="$WK_ROOT/host/macos/defaults.conf"
 _hotkeys_plist="$WK_ROOT/host/macos/symbolichotkeys.plist"
@@ -9,7 +7,7 @@ _current_value() {
     defaults read "$1" "$2" 2>/dev/null || true
 }
 
-# Normalise so that a stored `true` compares equal to the `1` defaults reports.
+# `defaults read` reports a bool as 1/0.
 _normalise_bool() {
     case "$1" in
         true|yes|1) echo 1 ;;
@@ -56,9 +54,6 @@ if [ -f "$_defaults_conf" ]; then
     done < "$_defaults_conf"
 fi
 
-# Keyboard shortcuts: compare the whole domain against the stored copy and
-# import only on difference. 16 shortcuts are disabled here (Spaces and Mission
-# Control switching, input-source cycling) so they stay free for other uses.
 if [ -f "$_hotkeys_plist" ]; then
     _tmp="$(mktemp -t wk-hotkeys).plist"
     defaults export com.apple.symbolichotkeys "$_tmp" 2>/dev/null || true
@@ -74,11 +69,8 @@ if [ -f "$_hotkeys_plist" ]; then
     rm -f "$_tmp"
 fi
 
-# Only nudge the UI when something actually moved; otherwise a no-op setup run
-# would still visibly flicker the Dock and menu bar.
 if [ "$WK_CHANGES" -gt 0 ]; then
     if [ -n "${_hotkeys_changed:-}" ]; then
-        # Reload the shortcut table without a logout.
         /System/Library/PrivateFrameworks/SystemAdministration.framework/Resources/activateSettings -u \
             >/dev/null 2>&1 || warn "could not reload shortcuts; log out to apply"
     fi

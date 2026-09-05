@@ -1,11 +1,5 @@
 #!/bin/zsh
-# Interleaved full-suite JetStream3 loop: baseline vs patched (WebKit MiniBrowser).
-# Pairs with quiesce.sh (run `./quiesce.sh on` first) and js3-ci.py.
-#
-#   BASE_SHA=<sha> WEBKIT_ROOT=<path> ./js3-run-loop.sh [ROUNDS] [START]
-#
-# Baseline build at /tmp/js3-builds/$BASE_SHA/Release, patched at
-# $WEBKIT_ROOT/WebKitBuild/Release. One JSON per build per round in /tmp/js3-runs/.
+# Interleaved JetStream3 loop, baseline vs patched, after `./quiesce.sh on`:  BASE_SHA=<sha> WEBKIT_ROOT=<path> ./js3-run-loop.sh [ROUNDS] [START]
 set -u
 
 WEBKIT_ROOT=${WEBKIT_ROOT:-/Users/justinmichaud/Development/DebugVersion/OpenSource}

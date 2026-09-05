@@ -1,17 +1,12 @@
 #!/usr/bin/env bash
-# Performance tuning for a Raspberry Pi 5 (16GB) on Ubuntu 24.04 / NVMe.
-# Idempotent; run as your normal user. Tunables override via env.
 BROWSER="${BROWSER:-flatpak-chromium}"   # flatpak-chromium | vivaldi | brave | none
 REMOVE_FIREFOX="${REMOVE_FIREFOX:-yes}"  # yes | no
-# 2900 survives a 10-min stress-ng --verify torture but hard-locks with no kernel
-# log under real use; +50mV already pins VDD_CORE at the ~1.0V cap, so more delta
-# buys nothing. Validate a higher clock with a full kernel build, not stress-ng.
+# 2900 passes stress-ng torture but hard-locks in real use; +50mV pins VDD_CORE at its cap.
 ARM_FREQ="${ARM_FREQ:-2800}"             # 2800 = stable; 2900 hard-locks in real use
 V3D_FREQ="${V3D_FREQ:-1200}"             # 960 stock; 1000 current; 1200 ran earlier — re-test w/ glmark2 before raising
 OVER_VOLTAGE_DELTA="${OVER_VOLTAGE_DELTA:-50000}"  # µV; 50mV = at the ~1.0V core cap; higher adds no real voltage
-# NUMA is firmware-driven on Pi 5: with SDRAM_BANKLOW set the bootloader banks the
-# SDRAM and auto-appends the optimal numa=fake=N (log2(N) = high-bank bits, so 8 on
-# this 16GB dual-rank board) when numa_policy is present. Needs CONFIG_NUMA_EMU.
+# NUMA is firmware-driven: with SDRAM_BANKLOW set the bootloader banks the SDRAM
+# and appends the optimal numa=fake=N when numa_policy is on the cmdline.
 NUMA_FAKE="${NUMA_FAKE:-auto}"            # auto = let the bootloader pick optimal N; a number forces numa=fake=N; 0/off disables
 NUMA_POLICY="${NUMA_POLICY:-interleave}"  # round-robin allocations across nodes — the actual memory-bandwidth win
 SDRAM_BANKLOW="${SDRAM_BANKLOW:-1}"       # Pi5 EEPROM memory banking (Pi4=3). Enables NUMA auto-split + best mem perf. Empty = leave EEPROM as-is
@@ -69,10 +64,8 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now cpu-performance.service >/dev/null 2>&1 || true
 ok "governor -> $(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor 2>/dev/null)"
 
-# config.txt fan_temp params are ignored by firmware, and a bare PWM write gets
-# reclaimed by the thermal governor on trip crossings; lowering every *active*
-# trip pins the governor at max state. A standalone script, not an inline
-# ExecStart: systemd expands ${...} itself, mangling ${t%_temp}.
+# Firmware ignores config.txt fan_temp, and the thermal governor reclaims a bare
+# PWM write; a standalone script because systemd would expand ${t%_temp} itself.
 sudo tee /usr/local/sbin/rpi5-fan-max >/dev/null <<'EOF'
 #!/bin/bash
 # Pin thermal state to max (lower all active trips) + full PWM. Run by fan-max.service.
@@ -111,15 +104,10 @@ sudo sed -i '/^[^#].*\sswap\s/s/^/#/' /etc/fstab || true
 ok "swap devices active: $(swapon --show | grep -c /)"
 
 log "4  Disable unneeded services + AUTOMATIC UPDATES (keeping WiFi/NetworkManager; Bluetooth OFF)"
-# systemd-oomd is the proactive, pressure-based OOM killer: on this 16GB swap-off
-# box it kills a heavy-but-healthy benchmark under transient pressure. It exposes
-# only org.freedesktop.oom1 (a KILL API) and never broadcasts pressure to apps.
-# anacron fires cron.daily/weekly mid-benchmark; SSD TRIM runs from fstrim.timer
-# (step 7), not cron, so it is unaffected.
+# systemd-oomd kills a healthy benchmark under transient pressure on a swap-off box.
 disable_sys(){
   if sudo systemctl disable --now "$1" >/dev/null 2>&1; then ok "disabled $1"
   else skip "$1 absent"; fi; }
-# NetworkManager-wait-online stays enabled: on WiFi, boot must wait for the link.
 for u in bluetooth.service \
          ModemManager.service switcheroo-control.service \
          kerneloops.service cups.service cups-browsed.service cups.socket \
@@ -132,8 +120,7 @@ for u in bluetooth.service \
          ua-timer.timer dpkg-db-backup.timer anacron.timer anacron.service \
          sysstat.service sysstat-collect.timer sysstat-rotate.timer sysstat-summary.timer \
          systemd-oomd.service; do disable_sys "$u"; done
-# power-profiles-daemon comes back active via GNOME's SettingsDaemon.Power and
-# fights the pinned `performance` governor; colord is static, dbus-activated.
+# power-profiles-daemon returns via GNOME's SettingsDaemon.Power and fights the governor.
 for m in apt-daily.service apt-daily-upgrade.service packagekit.service \
          packagekit-offline-update.service motd-news.service \
          power-profiles-daemon.service colord.service; do
@@ -141,7 +128,6 @@ for m in apt-daily.service apt-daily-upgrade.service packagekit.service \
 done
 sudo touch /etc/cloud/cloud-init.disabled 2>/dev/null && ok "cloud-init disabled" || skip "no cloud-init"
 
-# Masking blocks every path into suspend; the gsettings timeout alone does not.
 sudo systemctl mask sleep.target suspend.target hibernate.target hybrid-sleep.target >/dev/null 2>&1 \
   && ok "suspend/sleep/hibernate masked (box stays awake)" || skip "sleep targets n/a"
 if systemctl --user show-environment >/dev/null 2>&1; then
@@ -149,17 +135,14 @@ if systemctl --user show-environment >/dev/null 2>&1; then
   gsettings set org.gnome.settings-daemon.plugins.power sleep-inactive-battery-type 'nothing' 2>/dev/null || true
 fi
 
-# set-ntp enables whichever NTP daemon is installed (chrony, or timesyncd).
 if command -v timedatectl >/dev/null; then
   sudo timedatectl set-ntp true 2>/dev/null \
     && ok "automatic date/time ON (NTP=$(timedatectl show -p NTP --value 2>/dev/null))" \
     || skip "could not enable NTP via timedatectl"
 else skip "timedatectl absent — leaving clock config untouched"; fi
 
-# This Pi 5 has no battery-backed RTC, so the clock resets to 1970 at every boot.
-# chrony syncs via NTS (NTP-over-TLS) and a 1970 clock fails certificate validation
-# ("certificate is not yet valid"), so nothing over HTTPS works and the clock never
-# corrects itself. fake-hwclock restores a recent time, enough for the NTS certs.
+# No battery-backed RTC: the clock resets to 1970, chrony's NTS then fails
+# certificate validation, and nothing over HTTPS works. fake-hwclock breaks that.
 if ! dpkg -l fake-hwclock 2>/dev/null | grep -q '^ii'; then
   sudo apt-get install -y fake-hwclock >/dev/null 2>&1 || true
 fi
@@ -174,33 +157,23 @@ else
 fi
 
 log "4b  WiFi stability (disable power-save + roaming, pin BSSID, wait for network at boot)"
-# Two brcmfmac failure modes, both showing as "network unavailable": after idle,
-# powersave idles the radio down and it does not re-associate cleanly (NM defaults
-# wifi.powersave=3; 2 is off); at boot, wlan0 associates after
-# network-online.target unless wait-online is enabled.
+# brcmfmac powersave stops the radio re-associating after idle (NM defaults 3; 2 is off).
 if [ -d /etc/NetworkManager ]; then
   sudo install -d /etc/NetworkManager/conf.d
   printf '[connection]\nwifi.powersave = 2\n' \
     | sudo tee /etc/NetworkManager/conf.d/wifi-powersave-off.conf >/dev/null
   ok "wifi.powersave=2 (off) drop-in written"
-  # SIGHUP re-reads conf.d without dropping the active link (safe over SSH).
   sudo systemctl reload NetworkManager >/dev/null 2>&1 || true
 else
   skip "no /etc/NetworkManager — WiFi powersave drop-in not written"
 fi
-# The CYW43455 firmware's roam engine scans off-channel and wedges the radio:
-# wlan0 stays associated but passes no traffic, and re-association then fails with
-# CTRL-EVENT-ASSOC-REJECT status_code=16 for 10-15 min until the driver is
-# reloaded. Both of this AP's BSSIDs are DFS (ch52 / ch132) and phy#0's own
-# regdomain is 'country 99: DFS-UNSET'.
+# The CYW43455 roam engine scans off-channel and wedges the radio: associated but
+# passing nothing, then ASSOC-REJECT status_code=16 for 10-15 min. This AP is DFS.
 printf '%s\n' 'options brcmfmac roamoff=1' \
   | sudo tee /etc/modprobe.d/brcmfmac-roamoff.conf >/dev/null
 ok "brcmfmac roamoff=1 written (takes effect on driver reload / reboot)"
 
-# Pin the BSSID, not the channel: a DFS radar-vacate changes the AP's channel but
-# keeps its BSSID. The identity comes from the gitignored rpi5.conf beside this
-# script; a pin whose BSS has vanished is cleared, because a connection pinned to
-# a BSS that is off the air never associates at all.
+# Pin the BSSID, not the channel: a DFS radar-vacate changes the channel, not the BSSID.
 _conf_dir=$(cd "$(dirname "$0")" && pwd)
 # shellcheck disable=SC1091
 [ -f "$_conf_dir/rpi5.conf" ] && . "$_conf_dir/rpi5.conf"
@@ -213,7 +186,6 @@ if [ -z "$WIFI_SSID" ]; then
 elif ! nmcli -g name connection show 2>/dev/null | grep -qx "$WIFI_SSID"; then
   skip "no '$WIFI_SSID' connection — BSSID not pinned"
 else
-  # -t output escapes the BSSID's own colons as '\:'; swap for '-' and back.
   _scan=$(nmcli -t -f SSID,SIGNAL,BSSID dev wifi list --rescan yes 2>/dev/null | sed 's/\\:/-/g')
   _pin=""
   case "$WIFI_PIN_BSSID" in
@@ -242,8 +214,6 @@ sudo systemctl enable --now NetworkManager-wait-online.service >/dev/null 2>&1 \
   && ok "NetworkManager-wait-online enabled (boot waits for network)" \
   || skip "NetworkManager-wait-online n/a"
 
-# Even with powersave off the brcmfmac radio drops the link for many minutes while
-# other clients on the same AP stay up; the watchdog re-associates it in ~45s.
 sudo tee /usr/local/sbin/rpi5-wifi-watchdog >/dev/null <<'WDEOF'
 #!/bin/bash
 # NetworkManager's own reconnect first (~100s), then escalate. No 'nmcli device
@@ -289,8 +259,7 @@ sudo systemctl enable --now rpi5-wifi-watchdog.service >/dev/null 2>&1 || true
 ok "wifi watchdog installed + enabled (auto re-associate wlan0 on drop)"
 
 log "4c  Boot reliability: bound plymouth-quit-wait (headless must not stall multi-user.target)"
-# plymouth-quit-wait ships TimeoutStartUSec=infinity Before=multi-user.target, and
-# headless nothing triggers the quit, so it strands every After= service.
+# plymouth-quit-wait is Before=multi-user.target with no timeout, and headless nothing quits it.
 sudo install -d /etc/systemd/system/plymouth-quit-wait.service.d
 printf '[Service]\nTimeoutStartSec=20s\n' \
   | sudo tee /etc/systemd/system/plymouth-quit-wait.service.d/10-timeout.conf >/dev/null
@@ -305,7 +274,6 @@ ok "core_pattern: $(cat /proc/sys/kernel/core_pattern)"
 
 log "6  Disable GNOME bloat (tracker indexer + Evolution + gvfs/SettingsDaemon helpers)"
 if systemctl --user show-environment >/dev/null 2>&1; then
-  # GNOME <=45 names the indexer tracker-*; 46+ renamed it localsearch-/tinysparql-.
   for u in $(systemctl --user list-unit-files --no-legend 2>/dev/null | awk '{print $1}' \
              | grep -iE 'tracker|localsearch|tinysparql|evolution-(addressbook|calendar|source-registry|user-prompter)'); do
     systemctl --user stop "$u" 2>/dev/null || true
@@ -320,7 +288,6 @@ if systemctl --user show-environment >/dev/null 2>&1; then
   (localsearch3 reset -s -r || tracker3 reset --filesystem || tracker reset --hard) >/dev/null 2>&1 || true
   ok "file indexer + Evolution masked"
 
-  # Hotplug pollers for hardware this box lacks; udisks2 stays, so storage mounts.
   for u in gvfs-afc-volume-monitor.service gvfs-gphoto2-volume-monitor.service \
            gvfs-mtp-volume-monitor.service gvfs-goa-volume-monitor.service \
            org.gnome.SettingsDaemon.Smartcard.service org.gnome.SettingsDaemon.Wwan.service \
@@ -404,8 +371,6 @@ elif ! grep -q '^CONFIG_NUMA_EMU=y' "$KCONF" 2>/dev/null; then
 else
   ok "kernel supports NUMA emulation (CONFIG_NUMA_EMU=y, $(uname -r))"
 
-  # (a) The bootloader banks the SDRAM and appends the optimal numa=fake=N only
-  #     when SDRAM_BANKLOW is set (1 = best on BCM2712). --apply lands on reboot.
   if [ -n "$SDRAM_BANKLOW" ] && command -v rpi-eeprom-config >/dev/null; then
     cur_bl="$(sudo rpi-eeprom-config 2>/dev/null | sed -n 's/^SDRAM_BANKLOW=//p' || true)"
     if [ "$cur_bl" = "$SDRAM_BANKLOW" ]; then
@@ -428,8 +393,7 @@ else
     skip "SDRAM_BANKLOW empty or rpi-eeprom-config absent — relying on bootloader default (banklow=1 on 2712)"
   fi
 
-  # (b) numa_policy on the cmdline triggers the bootloader's optimal-N auto-add.
-  #     This box has no cmdline.txt: the Pi firmware assembles /chosen/bootargs.
+  # With no cmdline.txt the Pi firmware assembles /chosen/bootargs instead.
   if [ -f "$CL" ]; then
     sudo cp -a "$CL" "$CL.bak-$(date +%Y%m%d-%H%M%S)"
     ensure_cmdline_token "numa_policy=$NUMA_POLICY"

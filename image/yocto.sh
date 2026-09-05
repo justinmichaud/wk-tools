@@ -1,48 +1,20 @@
-# The yocto image builder: `wk sysimage build <a yocto profile>`.
-#
-# A field of a profile (IMG_BUILDER=yocto), not a separate command: what
-# comes out is the same disk image `wk sysimage ls`/`write` handle for every
-# builder, so the two share the scan and the write path and nothing before it.
-#
-# Drives a workspace rather than running on the host: hours of compilation need
-# a toolchain and 100 GB of scratch. Its spec is WebKit's own Tools/yocto on
-# the release branch, not a profile in this repo, so it pins the same commits
-# as the WebKit that will run on the board; DL_DIR/SSTATE_DIR are store-backed
-# cache mounts (targets/container.sh), so `wk rm` on the build workspace throws
-# away TMPDIR but keeps what makes the next build fast.
-#
-# Under `podman exec` a detached process does not survive its client even under
-# `setsid`, so the stage runs through `t_spawn` with its output in a host bind
-# mount: `tail -f` follows it with no podman in the way and this end can be
-# killed without the build noticing. `--detach` only decides whether we wait;
-# `--stop` ends a detached one.
+# The yocto image builder: `wk sysimage build <a yocto profile>`. The spec is WebKit's own Tools/yocto on
+# the release branch, so an image pins the same commits as the WebKit that runs on the board. Under
+# `podman exec` a detached process does not survive its client even under `setsid`, hence `t_spawn`.
 
+yocto_ws_default() { echo "yocto-$1"; }  # per profile: two branches cannot both be checked out in one workspace
 
-# Derived from the profile so two profiles cannot land in one workspace: their
-# checkouts are on different branches, and only one can be checked out.
-yocto_ws_default() { echo "yocto-$1"; }
-
-# Inside the workspace. The layout is cross-toolchain-helper's, not ours.
-yocto_workdir()  { echo "/src/WebKit/WebKitBuild/CrossToolChains/$1"; }
+yocto_workdir()  { echo "/src/WebKit/WebKitBuild/CrossToolChains/$1"; }  # cross-toolchain-helper's layout, not ours
 yocto_image_dir() { echo "$(yocto_workdir "$1")/build/image"; }
 
-# In the workspace's home directory, a host bind mount, so following the
-# build costs a plain `tail -f` with no exec into the container.
-yocto_log()    { echo "$(wk_ws_dir "$1")/home/yocto-$2.log"; }
+yocto_log()    { echo "$(wk_ws_dir "$1")/home/yocto-$2.log"; }  # a host bind mount, so `tail -f` needs no exec into the container
 yocto_pidfile() { echo "$(wk_ws_dir "$1")/home/yocto-$2.pid"; }
 yocto_status() { echo "$(wk_ws_dir "$1")/yocto.status"; }
 
 
-# A plain Ubuntu, not the wkdev SDK image: 24.04 is a supported Yocto
-# scarthgap build host, and the SDK image is three releases past one
-# (container/yocto/Containerfile). WK_YOCTO_BASE overrides it, for the day
-# the pinned poky moves to a release whose supported host is newer.
-YOCTO_BASE_IMAGE="${WK_YOCTO_BASE:-docker.io/library/ubuntu:24.04}"
+YOCTO_BASE_IMAGE="${WK_YOCTO_BASE:-docker.io/library/ubuntu:24.04}"  # a supported scarthgap build host, unlike the wkdev SDK image; WK_YOCTO_BASE overrides
 
-# Tagged with the base's tag and a digest of the Containerfile, so editing the
-# spec builds a new image instead of `podman image exists` reusing a layer that
-# no longer matches.
-yocto_ensure_image() {
+yocto_ensure_image() {  # tagged with a digest of the Containerfile, so editing the spec builds a new image
     local base="$YOCTO_BASE_IMAGE" derived spec
     spec="$WK_ROOT/container/yocto/Containerfile"
 
@@ -67,23 +39,15 @@ yocto_ensure_image() {
 }
 
 
-# Make sure there is a workspace, on the right branch, ready to build in.
-# Created rather than demanded, since it is derivable from the profile; an
-# existing one is reused, the sstate cache needing a workspace to sit next to.
-yocto_ensure_ws() {
+yocto_ensure_ws() {  # created rather than demanded: the name is derivable from the profile
     local ws="$1" branch="$2"
 
-    # Before the existence check: an existing workspace must re-ask for the
-    # image after the Containerfile changes, not silently build against the
-    # old one. `podman image exists` makes the common case free.
-    yocto_ensure_image
+    yocto_ensure_image  # before the existence check, so a Containerfile change is re-asked for on every run
 
     if [ "$(t_info "$ws")" = absent ]; then
         info "creating workspace '$ws' for the Yocto build"
         "$WK_ROOT/wk" new "$ws" || die "could not create workspace '$ws'"
     else
-        # An existing workspace is pinned to the image it was created from and
-        # nothing can migrate a running container, so a mismatch is reported.
         local was
         was=$(podman container inspect "wk-$ws" --format '{{.ImageName}}' 2>/dev/null) || was=""
         if [ -n "$was" ] && [ "$was" != "$WK_SDK_IMAGE" ]; then
@@ -95,18 +59,12 @@ yocto_ensure_ws() {
         fi
     fi
 
-    # The branch is the version pin, checked rather than assumed: a workspace
-    # left on a different one would build a different distribution silently.
-    local at
-    # tail -1: a container still running its firstrun hook prints that hook's
-    # output through wkdev-enter, ahead of the command's own.
+    local at  # the branch is the version pin, checked rather than assumed
+    # tail -1: a container still in its firstrun hook prints that hook's output through wkdev-enter first.
     at=$(t_exec "$ws" bash -c "cd /src/WebKit && git rev-parse --abbrev-ref HEAD" 2>/dev/null | tr -d '\r' | tail -1) || at=""
     if [ "$at" != "$branch" ]; then
         info "checking out '$branch' in '$ws' (was ${at:-unknown})"
-        # The mirror carries main only (lib/store.sh), so a release branch
-        # is fetched on demand -- from the profile's remote, not always
-        # origin: WPE's known-good configurations live in a different
-        # repository, wired as `wpe` (lib/store.sh).
+        # The mirror carries main only, so a release branch is fetched on demand, from the profile's remote.
         local remote="${YOC_REMOTE:-origin}"
         t_exec "$ws" bash -c "cd /src/WebKit && {
             git checkout -q $(sh_quote "$branch") 2>/dev/null ||
@@ -120,9 +78,7 @@ yocto_ensure_ws() {
 }
 
 
-# What a dry run can honestly say about the cross-target: the check below needs
-# the branch checked out, which a dry run has usually not done yet.
-yocto_target_note() { # <workspace>
+yocto_target_note() { # <workspace>; the real check needs a branch a dry run has usually not checked out
     local ws="$1" have
     [ "$(t_info "$ws")" = absent ] && {
         printf '%s' "  (not verified: '$ws' does not exist yet, so this branch's
@@ -139,22 +95,15 @@ yocto_target_note() { # <workspace>
     esac
 }
 
-# Asked here rather than left to bitbake, whose failure is a config-parse error
-# inside a spawned build whose log the caller has not been told to read.
-yocto_check_target() {
+yocto_check_target() {  # asked here: bitbake's own version of it is a config-parse error hours into a spawned build
     local ws="$1" conf=/src/WebKit/Tools/yocto/targets.conf have
-    # A profile that declares a port has no section yet: the build writes one
-    # into the checkout before configuring, and its own
-    # --print-available-targets check refuses if the port did not take.
     if [ -n "${YOC_PORT_TARGET_FROM:-}" ]; then
         info "$YOC_BRANCH has no [$YOC_TARGET]; the build derives one from [$YOC_PORT_TARGET_FROM]"
         return 0
     fi
     have=$(t_exec "$ws" bash -c "grep -c '^\[$YOC_TARGET\]' $conf 2>/dev/null || echo 0" \
         2>/dev/null | tr -d '\r' | tail -1)
-    # Only a count is an answer: `!= 0` reads anything unexpected -- a failed
-    # t_exec, a container that is not up, a line of noise -- as "the section is
-    # there".
+    # Only a count is an answer: `!= 0` would read a failed t_exec as "the section is there".
     case "$have" in
         ''|*[!0-9]*)
             die "could not read $conf in '$ws', so whether $YOC_BRANCH has a
@@ -188,19 +137,14 @@ yocto_check_target() {
 $(t_exec "$ws" bash -c "sed -n 's/^\[\(.*\)\]/      \1/p' $conf" 2>/dev/null | tr -d '\r')"
 }
 
-# The pid is read from the workspace and tested in the workspace, the only
-# namespace the number means anything in. The wrapper outlives a failed command
-# briefly, so a restart inside that window is refused as "already running".
-yocto_running() {
+yocto_running() {  # the pid means something only in the workspace's own namespace
     local ws="$1" stage="$2" pid
     pid=$(cat "$(yocto_pidfile "$ws" "$stage")" 2>/dev/null | tr -dc '0-9') || true
     [ -n "$pid" ] || return 1
     t_exec "$ws" kill -0 "$pid" >/dev/null 2>&1
 }
 
-# Every stage, not just the one asked for: the stages share a build directory,
-# so checking only the requested one lets `--stage fetch` start on top of a
-# live `--stage image` and get as far as two cookers.
+# The stages share one build directory, so `--stage fetch` on top of a live `--stage image` reaches two cookers.
 YOCTO_STAGES="layers fetch image toolchain webkit"
 yocto_any_running() {
     local ws="$1" s
@@ -210,7 +154,6 @@ yocto_any_running() {
     return 1
 }
 
-# Start one stage, detached inside the workspace, and return immediately.
 yocto_spawn() {
     local ws="$1" stage="$2"; shift 2
     local log pid_host
@@ -225,24 +168,18 @@ yocto_spawn() {
     Stop it:    wk sysimage build $IMG_PROFILE --stage $live --stop"
     fi
 
-    # Sized against the machine's other builds and on its books while it
-    # runs (lib/resources.sh): a bitbake run takes the whole envelope.
     build_admit "the $stage build" "$(build_jobs)"
     build_record "wk sysimage $stage $ws" "$(envelope_cores)" "$(envelope_mem_mb)" "ws:$ws:yocto-$stage.pid"
 
-    # Truncated, not unlinked: `tail -f` follows an inode.
-    : > "$log"
+    : > "$log"  # truncated, not unlinked: `tail -f` follows an inode
     rm -f "$pid_host"
 
-    # The wrapper runs from /opt/wk-tools, the read-only mount of this repo,
-    # so there is no version skew between the two halves.
     t_spawn "$ws" "$(t_home "$ws")/$(basename "$log")" \
                   "$(t_home "$ws")/$(basename "$pid_host")" \
         "$(t_tools "$ws")/image/yocto-build.sh" "$@" \
         || die "could not start the build in '$ws'"
 
-    # A pid file that never appears means the exec itself failed.
-    local i=0
+    local i=0  # a pid file that never appears means the exec itself failed
     while [ ! -s "$pid_host" ]; do
         i=$((i + 1)); [ "$i" -gt 50 ] && die "the build did not start in '$ws' (no pid after 5s)
 $(sed 's/^/    /' "$log" 2>/dev/null | tail -5)"
@@ -251,12 +188,7 @@ $(sed 's/^/    /' "$log" 2>/dev/null | tail -5)"
     debug "stage $stage running as pid $(cat "$pid_host") inside '$ws'"
 }
 
-# Kills the bitbake processes as well as the wrapper, which is only a shell
-# waiting on cross-toolchain-helper.
-#
-# SIGTERM, not SIGKILL: bitbake writes its own state and sstate cache as it
-# goes, and closing them cleanly is the difference between a resumable build
-# and a corrupt cache.
+# SIGTERM, not SIGKILL: bitbake writes its state and sstate as it goes, and closing them cleanly is the difference between resumable and corrupt.
 yocto_stop() {
     local ws="$1" stage="$2" pid
     pid=$(cat "$(yocto_pidfile "$ws" "$stage")" 2>/dev/null | tr -dc '0-9') || true
@@ -265,10 +197,7 @@ yocto_stop() {
         return 0
     fi
     info "stopping the '$stage' build in '$ws' (pid $pid)"
-    # The pattern is this workspace's own build directory, not the word
-    # "bitbake": a wkdev container shares the host's PID namespace, so a bare
-    # `pkill -f bitbake` would reach every bitbake on the machine, including
-    # another workspace's build.
+    # A wkdev container shares the host's PID namespace, so the pattern is this workspace's build directory, not "bitbake".
     local pat; pat=$(yocto_workdir "$YOC_TARGET")
     t_exec "$ws" bash -c "kill -TERM $pid 2>/dev/null
         pkill -TERM -f $(sh_quote "$pat") 2>/dev/null
@@ -284,10 +213,6 @@ yocto_stop() {
     info "stopped. sstate is intact, so restarting resumes rather than starts over."
 }
 
-# Wait for a stage, reporting progress, and return its exit status. Not
-# run_watched(), which watches a child; and unlike run_watched this does NOT
-# kill a stalled build, a bitbake task being legitimately silent for a long
-# time.
 yocto_wait() {
     local ws="$1" stage="$2"
     local log start now idle warned=0 last_beat
@@ -296,13 +221,10 @@ yocto_wait() {
     start=$(date +%s); last_beat=$start
 
     while yocto_running "$ws" "$stage"; do
-        # Slower than run_watched's poll: each check is a container exec.
-        # WK_YOCTO_POLL_SECONDS overrides the interval.
-        sleep "${WK_YOCTO_POLL_SECONDS:-30}"
+        sleep "${WK_YOCTO_POLL_SECONDS:-30}"  # each check is a container exec, so slower than run_watched
         now=$(date +%s)
         idle=$(log_age "$log" 2>/dev/null) || idle=0
-        # 900, not lib/watchdog.sh's 300 default: see that file's header.
-        if [ "$idle" -lt "${WK_STALL_SECONDS:-900}" ]; then
+        if [ "$idle" -lt "${WK_STALL_SECONDS:-900}" ]; then  # 900, not lib/watchdog.sh's 300 default: see that file
             warned=0
         elif [ "$warned" -eq 0 ]; then
             warn "no output for ${idle}s in '$ws' -- not killing it; a bitbake task
@@ -315,8 +237,7 @@ yocto_wait() {
         fi
     done
 
-    # The exit status of a process we did not fork cannot be waited for, so
-    # the wrapper's own marker line is the verdict.
+    # A process this end did not fork cannot be waited for, so the wrapper's marker line is the verdict.
     grep -q "^wk-yocto: stage '$stage' done" "$log" 2>/dev/null && return 0
     return 1
 }
@@ -351,8 +272,7 @@ EOF
     log "dry run -- nothing was built."
 }
 
-# yocto_build <profile> <args...>
-yocto_build() {
+yocto_build() { # <profile> <args...>
     local profile="$1"; shift
     local dry="" ws="" stage="" detach="" keep_work="" stop=""
     local chromium="" commit="" slot=""
@@ -366,16 +286,10 @@ yocto_build() {
             --detach)    detach=1 ;;
             --keep-work) keep_work=1 ;;
             --chromium)  chromium=1 ;;
-            # A flag, not a profile field: "does this build unmodified?" is a
-            # question asked of a build, not of a configuration.
-            --no-local-layer) YOC_LOCAL_LAYER=0 ;;
+            --no-local-layer) YOC_LOCAL_LAYER=0 ;;  # a flag, not a profile field: "does this build unmodified?" is asked of a build
             --local-layer)    YOC_LOCAL_LAYER=1 ;;
-            # An image without tailscale, for measurements that must compare
-            # against numbers taken without it in the fleet.
-            --no-tailnet)     YOC_TAILNET=0 ;;
+            --no-tailnet)     YOC_TAILNET=0 ;;  # for measurements comparing against fleet numbers taken without tailscale
             --tailnet)        YOC_TAILNET=1 ;;
-            # The webkit stage as a slot: build-webkit --cross-target of one
-            # commit, packed beside the image (image_slot_dir, lib/image.sh).
             --commit)         commit="${2:-}"; shift ;;
             --slot)           slot="${2:-}"; image_check_slot_name "$slot"; shift ;;
             *) die "usage: wk sysimage build $profile [--dry-run|--workspace <name>|--stage <name>|
@@ -385,15 +299,14 @@ yocto_build() {
         shift
     done
 
+    # YOC_CHROMIUM=0 in a config drops it: measured here, chromium-ozone-wayland and gn-native are 21 GB of TMPDIR *each* and roughly half of the 13,379 tasks.
     [ -n "$chromium" ] || chromium="${YOC_CHROMIUM:-1}"
 
     [ -n "$ws" ] || ws=$(yocto_ws_default "$profile")
     require_name "$ws"
     [ -n "$keep_work" ] && YOC_RM_WORK=0
 
-    # One stage per invocation: the wrapper syncs layers and writes local.conf
-    # before whatever it was asked for, so the stages are a depth rather than a
-    # pipeline this end sequences.
+    # One stage per invocation: the wrapper syncs layers and writes local.conf before whatever it was asked for.
     stage="${stage:-image}"
     if [ -n "$commit$slot" ]; then
         [ "$stage" = webkit ] || die "--commit/--slot belong to the webkit stage (wk sysimage webkit $profile)"
@@ -432,19 +345,15 @@ yocto_build() {
         return 0
     fi
 
-    # Before the disk check and before anything is created: stopping is the one
-    # thing that must work when the build has already gone wrong.
+    # Before the disk check and before anything is created: stopping must work when the build has gone wrong.
     if [ -n "$stop" ]; then
         [ "$(t_info "$ws")" = absent ] && die "no workspace '$ws', so nothing is building"
         yocto_stop "$ws" "$stage"
         return $?
     fi
 
-    # Free space, before anything is created: TMPDIR lands in the workspace's
-    # overlay, on the store's filesystem, and the thresholds below are
-    # measured. Per stage, since bitbaking a whole distribution unpacks and
-    # builds every recipe in it while the webkit stage is one cmake/ninja tree
-    # against a toolchain already there (WK_BUILD_DISK_GB).
+    # Measured thresholds; TMPDIR lands in the workspace's overlay, on the store's filesystem. Per stage: an
+    # image build unpacks every recipe in the distribution, the webkit stage is one ninja tree.
     local need_gb what
     case "$stage" in
         webkit)
@@ -465,9 +374,7 @@ yocto_build() {
     built=$(date -u +%Y-%m-%dT%H:%M:%SZ)
     id="$profile-$(date -u +%Y%m%dT%H%M%SZ)"
 
-    # The workspace lock, for the whole build: two builds in one checkout
-    # corrupt both.
-    hold_lock "ws-$ws" -w "${WK_BUILD_LOCK_WAIT:-3600}"
+    hold_lock "ws-$ws" -w "${WK_BUILD_LOCK_WAIT:-3600}"  # two builds in one checkout corrupt both
 
     cat > "$(yocto_status "$ws")" <<EOF
 state=running
@@ -483,6 +390,7 @@ EOF
 
     info "stage '$stage' for $profile in '$ws'"
     log  "  log: $(yocto_log "$ws" "$stage")"
+    # YOC_IMAGE names targets.conf's image_basename in the config too, so a renamed or missing section fails here rather than four hours into bitbake.
     yocto_spawn "$ws" "$stage" \
         --target "$YOC_TARGET" --image "$YOC_IMAGE" --stage "$stage" \
         --jobs "$(envelope_cores)" --rm-work "${YOC_RM_WORK:-0}" \
@@ -522,9 +430,7 @@ EOF
         return 0
     fi
 
-    # No import: the image stays where bitbake left it (yocto_image_dir) and
-    # 'wk sysimage ls' reads it there (image_workspace_scan, lib/image.sh). The
-    # fleet integration is applied at write time by 'wk sysimage write --from'.
+    # No import: the image stays where bitbake left it, and 'wk sysimage write --from' applies the fleet integration.
     sed -i 's/^state=running/state=ok/' "$(yocto_status "$ws")"
     local wic; wic="$(yocto_image_dir "$YOC_TARGET")/$YOC_IMAGE.wic.xz"
     info "built $id  ($(du -h "$wic" 2>/dev/null | cut -f1))"

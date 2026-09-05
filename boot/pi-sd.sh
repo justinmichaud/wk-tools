@@ -1,42 +1,15 @@
-# Boot driver: a board with one medium, its SD card, holding both systems --
-# the rescue on partitions 1-2 and the bench system on 3-4 (`<device>@second`,
-# admin/wk-card-priv). The rpi3's Ethernet is a USB device, so a bench root on
-# a stick would share a bus with the traffic the benchmark generates.
-#
-# The firmware boots the first FAT partition and only that one, so arming is
-# an edit of the rescue's boot partition: the bench system's kernel, device
-# trees and cmdline are copied into `second/` there and selected with one
-# `os_prefix=second/` line in config.txt, the rescue's own config.txt kept as
-# config.txt.rescue (`second-arm`). The one boot is made true by the bench
-# system's self-disarm (b_self_disarm_sh) moving config.txt back; `second-disarm`
-# from the rescue does the same. Both run through the card helper on the rescue,
-# so the rescue has to be up to arm.
-#
-# TODO: a bench kernel that cannot find its root panics, and a power cycle
-# boots the same os_prefix again until config.txt is put back by hand --
-# docs/HANDOFF-boot.md, the stage-2 revert.
+# Boot driver: one SD card holds every system, the rescue on partitions 1-2. The firmware boots the first FAT
+# partition and only that one, so arming is an `os_prefix=second/` line the card helper writes into the rescue's config.txt.
+
 BOOT_ARMING=medium
 
-# The arming is an edit to the boot partition made by the card helper
-# (`second-arm`), which every system a write makes carries
-# (disk_install_helper), so a bench system can arm its sibling where it stands.
-# A card written without the helper fails the arming and says so; the leg
-# switch answers by going back to the rescue (pi_system_boot, cmd/pi).
 B_ARM_FROM_BENCH=yes
 
-# Unused: nothing here is a per-boot firmware order.
 BOOT_ORDER_IMAGE=""
 BOOT_ORDER_NORMAL=""
 
-# Both layouts in one list: the one-system layout keeps its pair on primaries
-# 3-4, the shared layout (two systems in an extended partition 3) puts pairs at
-# 5-6 and 7-8. A partition that is absent -- or is the extended container,
-# which mounts as nothing -- is skipped by the enumeration.
-B_SYSTEM_PARTS="3 5 7"
+B_SYSTEM_PARTS="3 5 7"   # 3: the one-system layout's pair; 5 and 7: the pairs a shared layout keeps inside an extended partition 3.
 
-# The helper's name for the system holding a given boot partition: the first
-# pair (3-4 or 5-6, by layout) is '@second', the shared layout's other pair
-# (7-8) is '@third'.
 pisd_addr() { # <boot partition>
     case "$1" in
         *[!0-9]3|*[!0-9]5) printf '%s@second' "$NODE_DEVICE" ;;
@@ -45,15 +18,10 @@ pisd_addr() { # <boot partition>
     esac
 }
 
-# The one place the rescue is asked about the arming: armed=yes|no from
-# whether its config.txt has stepped aside, armed_prefix for which system,
-# present=yes|no from whether the addressed pair holds a filesystem.
 pisd_state() { # <address>
     card_priv second-state "$1" 2>/dev/null | tr -d '\r'
 }
 
-# Staging replaces whatever prefix was armed before; the rescue's own
-# config.txt is kept aside by the first arming, whichever system that was.
 b_arm() {
     local addr state
     [ -n "${ARM_SYS_PART:-}" ] \
@@ -74,8 +42,6 @@ b_arm() {
         || die "could not arm the ${addr##*@} system on $NODE_NAME"
 }
 
-# The disarm puts the rescue's config.txt back whichever system was armed, so
-# any present system's address serves.
 b_disarm() {
     local state
     state=$(pisd_state "$NODE_DEVICE@second") || return 0
@@ -89,14 +55,7 @@ b_disarm_note() {
     log "  rescue's kernel again. 'wk boot $NODE_NAME' arms the bench system once more."
 }
 
-# Runs inside the bench system, first thing after its root is up, as a systemd
-# unit or a BusyBox init script. The boot partition is partition 1 of the disk
-# this root is on, and the root is named by PARTUUID (disk_retarget_root), so
-# this waits for nothing but udev's /dev/disk links.
-# **No single quote and no `%` may appear in what this returns**: interpolated
-# into a systemd `ExecStart=/bin/sh -c '...'`, a quote would hand systemd three
-# fragments instead of one command, and systemd expands `%` specifiers before
-# it parses quotes. wk selftest asserts both.
+# Interpolated into a systemd `ExecStart=/bin/sh -c '...'`: no single quote (systemd would read three fragments), no `%` (expanded before quotes are).
 b_self_disarm_sh() {
     printf "%s" "r=\$(sed -n \"/root=PARTUUID=/{s/.*root=PARTUUID=//;s/ .*//;p;}\" /proc/cmdline); \
 [ -n \"\$r\" ] || { echo \"wk-self-disarm: root is not named by PARTUUID; cannot find the boot partition\"; exit 0; }; \
@@ -116,8 +75,6 @@ b_evidence() {
     return 0
 }
 
-# The first bench pair's boot partition on the one-system layout; reading verbs
-# go through the enumeration (b_systems), which covers both layouts.
 b_boot_part() { disk_part "$NODE_DEVICE" 3; }
 
 b_media() {

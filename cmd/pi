@@ -42,8 +42,6 @@ WK_STALL_SECONDS="${WK_STALL_SECONDS:-900}"
 WK_ABORT_SECONDS="${WK_ABORT_SECONDS:-5400}"
 . "$WK_ROOT/lib/watchdog.sh"
 
-# The verb table in one place: `wk pi --list` prints it verbatim and the
-# dispatch `case` below is checked against its names (tests/test_pi.py).
 pi_verbs() {
     printf '%-10s  %s\n' setup      "put a board on the tailnet (pinned tailscale binaries, no image rebuild)"
     printf '%-10s  %s\n' helper     "install this checkout's card helper on the board"
@@ -59,8 +57,6 @@ if [ "${1:-}" = --list ]; then
     exit 0
 fi
 
-# The tailscale release, from the one file that declares it -- the same one the
-# Yocto layer's recipe requires.
 TS_RELEASE="$WK_ROOT/image/yocto/meta-wk-tailnet/recipes-network/tailscale/tailscale-release.inc"
 ts_release_field() { # <name> -- one `NAME = "value"` line out of the .inc
     sed -n "s/^$1 = \"\(.*\)\"\$/\1/p" "$TS_RELEASE" | head -1
@@ -75,15 +71,11 @@ pi_usage_page() {
          /^# wk [a-z]/ && !seen { next }
          /^#/  { sub(/^# ?/, ""); if ($0 == "" && !seen) next; seen = 1; print; next }
          { exit }' "$0"
-    # explain_cmd's "valid values" block: bare and unknown-verb never reach the
-    # dispatcher.
     printf '\nvalid values (wk pi --list):\n'
     pi_verbs | sed 's/^/  /'
 }
 
 ACTION="${1:-}"; HOST="${2:-}"
-# The arms below name the same five verbs as pi_verbs, plus the `flash`
-# tombstone; tests/test_pi.py checks both directions.
 case "$ACTION" in
     "") pi_usage_page; exit 0 ;;
     setup|boot-order|helper)
@@ -91,7 +83,6 @@ case "$ACTION" in
             ""|-*) die "usage: wk pi $ACTION <machine|ssh-host>; see wk pi -h" ;;
         esac ;;
     deploy|bench) : ;;
-    # Kept only to say where it went; see below.
     flash) : ;;
     *) log "usage: wk pi <verb> ...; wk pi --list lists them; see wk pi -h"
        log "unknown verb: $ACTION"
@@ -106,17 +97,12 @@ if [ "$ACTION" = setup ] && [ $# -gt 0 ]; then
     esac
 fi
 
-# A fleet machine is reached the way every fleet verb reaches it (m_ssh);
-# anything else is an ssh destination as given, which is how `wk pi setup` meets
-# a board that is not in the fleet yet.
 PI_FLEET=""
 case "$ACTION" in
     setup|boot-order|helper)
         if machine_by_ssh "$HOST" 2>/dev/null; then PI_FLEET=1; HOST="$NODE_SSH"; fi ;;
 esac
-# A fleet board is reached over whichever channel answered, not its rescue's: a
-# board whose medium the firmware prefers answers as its bench system, which is
-# the state a boot order has to be changed from. `b_probe` sets the channel.
+# A board whose medium the firmware prefers answers as its bench system, not as its rescue; `b_probe` sets the channel.
 PI_PROBED=""
 rsh() {
     if [ -n "$PI_FLEET" ]; then
@@ -126,8 +112,7 @@ rsh() {
         ssh -o BatchMode=yes "$HOST" "$@"
     fi
 }
-# The scp destination over the channel `rsh` chose: `$HOST` is the *rescue's*
-# name, so on a board answering as its bench system it goes nowhere.
+# `$HOST` is the *rescue's* name, so on a board answering as its bench system it goes nowhere.
 rsh_dest() {
     if [ -z "$PI_FLEET" ]; then printf '%s' "$HOST"; return 0; fi
     [ -n "$PI_PROBED" ] || { b_probe >/dev/null 2>&1 || true; PI_PROBED=1; }
@@ -150,11 +135,7 @@ if [ "$ACTION" = flash ]; then
     the tailnet, and its EEPROM boot order."
 fi
 
-# --- slots ---------------------------------------------------------------------
-# A *slot* is one built WebKit on the board, beside the WebKit its image shipped
-# with and beside any other slot: `/var/wk/slots/<name>/root/` is an install tree
-# and `slot.json` says what it is -- the commit, the linker's per-slot build-id,
-# a sha256 of every file. Built by `wk sysimage webkit`.
+# One built WebKit on the board: `<name>/root/` is an install tree, `slot.json` says what it is.
 PI_SLOTS=/var/wk/slots
 pi_slot_dir() { printf '%s/%s' "$PI_SLOTS" "$1"; }
 
@@ -163,13 +144,6 @@ PI_TMP=""
 _pi_tmp_cleanup() { [ -n "${PI_TMP:-}" ] && rm -rf "$PI_TMP"; PI_TMP=""; return 0; }
 pi_tmp() { [ -n "$PI_TMP" ] || { PI_TMP=$(mktemp -d); wk_atexit _pi_tmp_cleanup; }; }
 
-# --- wk pi deploy --------------------------------------------------------------
-#
-#   wk pi deploy <image-profile> <machine> --slot <name>
-#
-# Put a built WebKit on the board as a slot. Streamed as a tarball into
-# `<slot>.part`, checked byte for byte against the manifest with the board's own
-# sha256sum, and only then moved into place.
 cmd_deploy() {
     local profile="${1:-}" machine="${2:-}"; shift $(( $# < 2 ? $# : 2 ))
     local slot=a
@@ -223,14 +197,11 @@ pi_deploy_slot() { # <slot dir> <machine> <slot>
     info "deploying slot '$slot' to $machine ($browser, WebKit ${commit:0:12}, $size)"
     i_ssh "rm -rf $(sh_quote "$part") && mkdir -p $(sh_quote "$part")" >/dev/null 2>&1 \
         || die "cannot create $part on $machine. Is its root filesystem writable?"
-    # `tar | ssh tar` rather than scp: nothing but tar and gzip on the far side,
-    # as two commands, since a BusyBox tar has no -z.
+    # `tar | ssh tar` rather than scp: a BusyBox tar has no -z, so gzip is a second command.
     tar -C "$slotdir" -cf - root slot.json | gzip -1 \
         | i_ssh "gzip -dc | tar -C $(sh_quote "$part") -xf -" \
         || die "could not copy the slot to $machine ($part is left there)"
 
-    # Every file, against the manifest, with the board's own sha256sum. The far
-    # side is a busybox sh, so the status is carried by hand.
     local bad
     if ! bad=$(wkslot sums "$slotdir/slot.json" --prefix "$part/root" \
                  | i_ssh 'out=$(sha256sum -c - 2>&1); rc=$?; printf "%s\n" "$out" | grep -v ": OK$"; exit $rc'); then
@@ -248,42 +219,23 @@ $(printf '%s\n' "$bad" | head -5 | sed 's/^/    /')
     log "  next:     wk pi bench $machine <plan> --slot $slot"
 }
 
-# --- wk pi bench ---------------------------------------------------------------
-#
-#   wk pi bench <machine> <plan> [--slot NAME | --ab A,B [--rounds N]]
-#                                 [--count N] [--timeout S] [--cores <set>]
-#
-# Run a browser benchmark against a booted bench system and bring the number
-# back. --count N is iterations per run, --timeout S the seconds one iteration
-# may take (default: the plan's own).
-#
-# The harness is WebKit's own `run-benchmark`, run *here*, driving the board's
-# browser over ssh: a bench image is a browser and nothing else -- no python, no
-# checkout -- so the Tools/Scripts tree is exported from the mirror with this
-# repo's `wk-board` driver. The board reaches the server through a reverse ssh
-# tunnel, since the tailnet lets a board reach nothing but boards. While the web
-# process that computed a number is still alive, the driver reads its
-# executable, the WebKit library it mapped and that library's build-id.
+# The harness is WebKit's own `run-benchmark`, run here and driving the board's
+# browser over ssh through a reverse tunnel: the tailnet lets a board reach nothing but boards.
 
 PI_TUNNEL_PID=""
 _pi_tunnel_cleanup() { [ -n "$PI_TUNNEL_PID" ] && kill "$PI_TUNNEL_PID" 2>/dev/null; PI_TUNNEL_PID=""; return 0; }
 
-# The same options i_ssh applies, spelled out because the driver is python.
 pi_ssh_cmd() {
     # shellcheck disable=SC2046
     printf 'ssh -o BatchMode=yes -o ConnectTimeout=%s %s %s' "$(wk_ssh_timeout)" "$(i_ssh_opts)" "$(image_addr)"
 }
 
-# One number on both ends keeps the URL rewrite to a host swap.
 pi_free_port() {
     python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1])'
 }
 
 bench_plan_read() { cat "$BENCH_RUNNER/Tools/Scripts/$1"; }
 
-# Two kinds of board: one with a DRM connector (yocto, vc4) and one that renders
-# through the firmware's dispmanx (buildroot), where tvservice is the only thing
-# that knows about a panel.
 pi_display() {
     local drm tv
     drm=$(i_ssh 'grep -l "^connected$" /sys/class/drm/card*-HDMI-*/status 2>/dev/null | head -1' 2>/dev/null | tr -d '\r')
@@ -295,7 +247,6 @@ pi_display() {
     return 1
 }
 
-# A board that throttles readily makes an unpinned score a temperature reading.
 pi_pin_governor() {
     i_ssh 'for p in /sys/devices/system/cpu/cpufreq/policy*; do
                [ -w "$p/scaling_governor" ] && echo performance > "$p/scaling_governor"
@@ -303,9 +254,7 @@ pi_pin_governor() {
         2>/dev/null | tr -d '\r' | tail -1
 }
 
-# The session a browser needs, from what the image carries rather than who built
-# it: weston gets a compositor session (the Pi 4 has no firmware GL, so its 2.38
-# browser renders through wayland+mesa); without it, dispmanx (wpebackend-rdk).
+# The Pi 4 has no firmware GL, so its 2.38 browser renders through wayland+mesa.
 PI_RENDERER=""; PI_SESSION=""
 pi_session_up() { # <display evidence, or empty>
     if i_ssh 'command -v weston >/dev/null' >/dev/null 2>&1; then
@@ -315,9 +264,7 @@ pi_session_up() { # <display evidence, or empty>
     fi
 }
 
-# A web process holds a vchiq service (rdk) or the GPU (weston), a browser mid
-# crash-storm shrugs off TERM, and a survivor makes every later web process die
-# at startup with "failed to add service - already in use".
+# A survivor holds the vchiq service or the GPU, and every later web process then dies with "failed to add service - already in use".
 pi_browsers_dead() {
     i_ssh '[ -x /etc/init.d/S90cog ] && /etc/init.d/S90cog stop >/dev/null 2>&1
            killall cog MiniBrowser WPEWebProcess WPENetworkProcess 2>/dev/null
@@ -330,19 +277,16 @@ pi_browsers_dead() {
     a survivor holds the GPU and the vchiq service the run needs."
 }
 
-# No compositor to start: the browser draws through dispmanx (wpebackend-rdk).
 pi_session_rdk() {
     pi_browsers_dead
     PI_RENDERER=dispmanx; PI_SESSION=rdk
     log "  session     rdk backend, dispmanx ($([ -n "$1" ] && echo "$1" || echo 'no display evidence'))"
 }
 
-# The compositor is up when it reports an output and its shell is running.
 pi_session_wait_compositor() {
     local i=0 out=""
     while [ "$i" -lt 20 ]; do
-        # `|| true`: the remote ends on pidof, which exits 1 while the shell is
-        # still coming up -- under pipefail that would end this command.
+        # `|| true`: pidof exits 1 while the shell is still coming up, which pipefail would make fatal.
         out=$(i_ssh 'grep -oiE "Output .[a-z0-9-]+. enabled" /tmp/wk-weston.log 2>/dev/null | tail -1;
                      pidof weston-desktop-shell 2>/dev/null' 2>/dev/null | tr -d '\r' | head -1 || true)
         [ -n "$out" ] && break
@@ -356,8 +300,6 @@ pi_session_wait_compositor() {
     return 0
 }
 
-# A yocto image: weston on the panel when there is one, weston's RDP virtual
-# head with pixman when there is not, and the fake input seat cog asserts without.
 PI_SEAT_PY='import fcntl,os,struct,signal
 IOC=lambda d,t,nr,size:(d<<30)|(size<<16)|(t<<8)|nr
 U=ord("U")
@@ -373,17 +315,12 @@ pi_session_weston() {
     # netdata competes for the CPU being measured (systemd images run it).
     i_ssh 'systemctl stop netdata 2>/dev/null' >/dev/null 2>&1 || true
     if [ -n "$1" ]; then
-        # A real panel: weston on DRM, GL -- the one configuration whose number
-        # is comparable with other hardware.
         PI_RENDERER=gl; PI_SESSION=drm
         if i_ssh 'command -v systemctl >/dev/null' >/dev/null 2>&1; then
             i_ssh 'systemctl start --no-block weston' >/dev/null 2>&1 || true
         else
-            # --tty: weston's DRM backend wants a seat -- logind's, or a VT it
-            # is told to claim. A BusyBox image has no logind and a command over
-            # ssh has no controlling terminal, so weston refuses ("drm backend
-            # should be run using weston-launch, or your system should provide
-            # the logind D-Bus API").
+            # --tty: weston's DRM backend wants a seat -- logind's, or a VT it is told
+            # to claim. A BusyBox image has no logind and an ssh command no terminal.
             i_ssh 'pkill -x weston 2>/dev/null; sleep 1
                    mkdir -p /run/user/0 && chmod 700 /run/user/0
                    XDG_RUNTIME_DIR=/run/user/0 setsid weston \
@@ -391,14 +328,10 @@ pi_session_weston() {
                      </dev/null >/tmp/wk-weston.log 2>&1 & sleep 5' >/dev/null 2>&1 || true
         fi
     elif ! i_ssh 'command -v systemctl >/dev/null' >/dev/null 2>&1; then
-        # The RDP head below is the systemd images' weston; this BusyBox one
-        # has none to synthesise, even under --force.
         die "$machine reports no attached display, and this image's weston has no
     RDP virtual head to synthesise one. Attach a panel."
     else
-        # weston's RDP backend synthesises a head with no display hardware and
-        # no client on the port. Not the same as forcing a mode with `video=`,
-        # which hangs vc4 in probe.
+        # The RDP backend synthesises a head; forcing a mode with `video=` instead hangs vc4 in probe.
         PI_RENDERER=pixman; PI_SESSION=headless-rdp
         info "  no display attached: RDP virtual head + pixman (software) compositing"
         i_ssh 'mkdir -p /etc/wk-bench && [ -f /etc/wk-bench/rdp.key ] || {
@@ -407,8 +340,7 @@ pi_session_weston() {
                    -days 3650 -subj /CN=wk-bench >/dev/null 2>&1
                  chmod 600 /etc/wk-bench/rdp.key; }' >/dev/null 2>&1 \
             || die "could not create the RDP backend's keys on $machine (needs openssl)"
-        # desktop-shell, not fullscreen-shell: the latter serves no xdg-shell,
-        # and a browser asking for one gets "invalid object" and exits.
+        # desktop-shell, not fullscreen-shell: the latter serves no xdg-shell, and a browser asking for one exits.
         i_ssh 'pkill -x weston 2>/dev/null; sleep 1
                mkdir -p /run/user/0 && chmod 700 /run/user/0
                XDG_RUNTIME_DIR=/run/user/0 setsid weston \
@@ -435,11 +367,8 @@ pi_launch_cmd() { # <slot> <slot.json> <cores wrap>
     root="$(pi_slot_dir "$slot")/root"
     env=$(wkslot env "$json" "$root" | tr '\n' ' ')
     browser=$(wkslot get "$json" browser)
-    # Under a compositor the browser needs weston's own environment, read out of
-    # the running compositor, and the backend named explicitly: the 2.38
-    # buildroot image cannot not build wpebackend-rdk and rdk's cmake claims the
-    # libWPEBackend-default.so symlink, so the default would be the stub. POSIX
-    # sh: the driver runs this through the board's /bin/sh, busybox ash included.
+    # rdk's cmake claims the libWPEBackend-default.so symlink, so the default backend
+    # would be the stub. POSIX sh: this runs through the board's /bin/sh, busybox ash included.
     [ "${PI_SESSION:-rdk}" = rdk ] \
         || wenv='eval "$(strings /proc/$(pidof weston-desktop-shell)/environ | grep -E "^(XDG_RUNTIME_DIR|WAYLAND_DISPLAY)=")" && export XDG_RUNTIME_DIR WAYLAND_DISPLAY && export WPE_BACKEND_LIBRARY=libWPEBackend-fdo-1.0.so && '
     case "$browser" in
@@ -452,8 +381,6 @@ pi_launch_cmd() { # <slot> <slot.json> <cores wrap>
     esac
 }
 
-# The driver has already read its evidence off /proc, and a browser that
-# survives TERM still holds the vchiq service.
 pi_kill_cmd() { # <slot.json>
     case "$(wkslot get "$1" browser)" in
         cog)         printf 'killall cog WPEWebProcess WPENetworkProcess 2>/dev/null; sleep 1; killall -9 cog WPEWebProcess WPENetworkProcess 2>/dev/null; true' ;;
@@ -495,11 +422,7 @@ pi_bench_record() { # <out dir> <slot> <slot.json>
 }
 
 
-# Everything a booted bench system needs before a run, and the provenance read
-# off it -- for the one-boot path and for every leg of a system A/B alike.
 pi_leg_prepare() { # <expected system id, or empty>
-    # 1. Bench mode or nothing: a run on a machine that never left host mode
-    # measures a desktop with a browser on it.
     probe=$(i_ssh "$_b_probe_sh" 2>/dev/null | tr -d '\r') \
         || die "cannot reach $machine's bench system ($(image_addr)) over ssh."
     sysid=$(kv_get id <<<"$probe")
@@ -509,8 +432,6 @@ pi_leg_prepare() { # <expected system id, or empty>
     A benchmark runs in bench mode or it does not run:
         wk boot $machine --system <id>   then   wk boot $machine --keep"
 
-    # A marker alone is not enough: every image wk writes carries /etc/wk-image,
-    # the rescue included. Which device the running root is on decides.
     kind=$(b_system_kind "$rootdev")
     if [ "$kind" = base ] || [ "$(kv_get role <<<"$probe")" = rescue ]; then
         barrier "$machine is running its rescue system ($sysid, root on $rootdev), not a
@@ -520,11 +441,9 @@ pi_leg_prepare() { # <expected system id, or empty>
     fi
     [ "$kind" != unknown ] || warn "cannot tell which medium $machine booted from (root: ${rootdev:-unknown}); check 'wk boot $machine --status'"
 
-    # The system that answered is the one the leg is for, by its own marker.
     [ -z "${1:-}" ] || [ "$sysid" = "$1" ] || die "$machine answered as system '$sysid', not the '$1' this leg is for.
     Nothing was measured; 'wk boot $machine --status' says what it is running."
 
-    # 1b. Compositing on the CPU puts the CPU under test to work drawing frames.
     PI_DISPLAY=$(pi_display) || PI_DISPLAY=""
     if [ -z "$PI_DISPLAY" ]; then
         barrier "$machine reports no attached display (no connected DRM connector, and
@@ -534,7 +453,6 @@ pi_leg_prepare() { # <expected system id, or empty>
     as software-composited either way."
     fi
 
-    # 2. The slot(s), all checked before the session is touched.
     pi_tmp
     local _s _need="$slot"
     [ -z "$ab" ] || _need="${ab%%,*} ${ab##*,}"
@@ -552,11 +470,9 @@ pi_leg_prepare() { # <expected system id, or empty>
     defconfig), not something to approximate here."
     fi
 
-    # 3. Provenance, gathered before the run. The governor is pinned first.
     kernel=$(i_ssh 'uname -r' 2>/dev/null | tr -d '\r')
     gov=$(pi_pin_governor)
-    # The firmware's throttle flags from sysfs rather than vcgencmd: the same
-    # bits, and no rpi-userland on the board needed.
+    # From sysfs rather than vcgencmd: the same bits, with no rpi-userland on the board.
     throttled=$(i_ssh 'cat /sys/devices/platform/soc/soc:firmware/get_throttled 2>/dev/null || true' 2>/dev/null | tr -d '\r ')
     [ -z "$throttled" ] || throttled="throttled=0x$throttled"
     root_dev="$rootdev"
@@ -567,8 +483,6 @@ pi_leg_prepare() { # <expected system id, or empty>
     log "  governor    ${gov:-unknown}$([ "$gov" = performance ] || echo '   <-- not pinned; the score is not a perf result')"
     log "  throttled   ${throttled:-unknown}$(case "$throttled" in ''|throttled=0x0) ;; *) echo '   <-- non-zero: thermally or voltage limited' ;; esac)"
 
-    # 4. The image's self-return watchdog reboots the board out from under
-    # anything not holding this marker (`wk boot --keep` writes it).
     i_ssh 'mkdir -p /run && touch /run/wk-keep-running' \
         || die "could not claim $machine's bench system (mkdir/touch /run/wk-keep-running failed).
     Without the claim, the image's self-return watchdog reboots the board
@@ -576,8 +490,7 @@ pi_leg_prepare() { # <expected system id, or empty>
 
 }
 
-# A system A/B's reboot severs the previous leg's tunnel, so every leg opens
-# its own onto the same port.
+# A system A/B's reboot severs the previous leg's tunnel, so every leg opens its own.
 pi_tunnel_up() {
     _pi_tunnel_cleanup
     # shellcheck disable=SC2046
@@ -592,21 +505,14 @@ $(sed 's/^/    /' "$PI_TMP/tunnel.log")"
     log "  tunnel      127.0.0.1:$port on $machine -> run-benchmark here"
 }
 
-# Put the board into one named system by converging on it: arm the system wanted
-# -- which a medium-armed board takes where it stands -- reboot, then ask
-# *whoever answers* what it is, on either channel, and arm again if it is not
-# the one. Soft-fails: a boot that timed out may recover by the next arming.
 PI_SYSTEM_TRIES=3
 pi_system_boot() { # <system id>
     local want="$1" try=0 out id kind deadline
 
-    # `-le`, not `-lt`: the passes are one more than the armings, because a
-    # pass arms and the *next* one reads what answered.
+    # `-le`, not `-lt`: a pass arms and the *next* one reads what answered.
     while [ "$try" -le "$PI_SYSTEM_TRIES" ]; do
         try=$((try + 1))
 
-        # Nothing answering is not an answer -- a board between systems says
-        # exactly that, so wait for it on either channel before deciding.
         out=$(i_ssh "$_b_probe_sh" 2>/dev/null | tr -d '\r') || out=""
         if [ -z "$(kv_get id <<<"$out")" ] && ! m_ssh true >/dev/null 2>&1; then
             info "$machine is not answering yet; waiting for it before deciding"
@@ -621,7 +527,6 @@ pi_system_boot() { # <system id>
         id=$(kv_get id <<<"$out")
         kind=$(b_system_kind "$(kv_get rootdev <<<"$out")")
         if [ "$id" = "$want" ] && [ "$kind" = bench ]; then
-            # The self-return watchdog is already counting.
             i_ssh 'mkdir -p /run && touch /run/wk-keep-running' >/dev/null 2>&1 \
                 || { warn "could not claim $machine after booting $want; the leg is lost"; return 1; }
             info "$machine is running $want (verified from its own marker)"
@@ -629,15 +534,11 @@ pi_system_boot() { # <system id>
         fi
         [ -z "$id" ] || info "$machine answers as ${id}${kind:+ ($kind)}, not $want"
 
-        # The last pass reads the last arming's result and then stops: N armings,
-        # N+1 looks, so a board that needs the trip through its rescue is not
-        # declared lost on the pass that finally works.
         [ "$try" -le "$PI_SYSTEM_TRIES" ] || break
 
         info "$machine: arming and booting system $want (attempt $try of $PI_SYSTEM_TRIES)"
         if ! "$WK_ROOT/wk" boot "$machine" --system "$want" >/dev/null 2>&1; then
-            # Some boards can only be armed from their rescue -- the arming is
-            # an edit their privileged card helper makes (B_ARM_FROM_BENCH).
+            # Some boards arm only from their rescue: the arming is a card-helper edit (B_ARM_FROM_BENCH).
             if [ "$kind" = bench ]; then
                 info "$machine: it will not arm from a bench system; going back to its rescue"
                 "$WK_ROOT/wk" boot "$machine" --back >/dev/null 2>&1 || true
@@ -653,7 +554,6 @@ pi_system_boot() { # <system id>
             continue
         fi
 
-        # Wait for *a* system: which it is, is the next pass's question.
         deadline=$(( $(date +%s) + 420 ))
         until out=$(i_ssh "$_b_probe_sh" 2>/dev/null | tr -d '\r') && [ -n "$(kv_get id <<<"$out")" ]; do
             if m_ssh true >/dev/null 2>&1; then break; fi
@@ -666,8 +566,6 @@ pi_system_boot() { # <system id>
     return 1
 }
 
-# One leg of a system A/B. The session is per boot, so both arms get a fresh
-# compositor and a cold page cache.
 pi_system_leg() { # <system id>
     pi_system_boot "$1" || return 1
     pi_tunnel_up
@@ -677,9 +575,6 @@ pi_system_leg() { # <system id>
     pi_bench_once "$slot"
 }
 
-# Interleaved A/B across *system images* on the bench medium: a boot per leg,
-# each verified to be the system it claims. What is measured inside each is the
-# slot both carry under one name.
 pi_bench_ab_systems() { # <sysA,sysB> <rounds>
     local a b n i ra rb kept=0 lost=0
     a="${1%%,*}"; b="${1##*,}"; n="$2"
@@ -744,6 +639,7 @@ cmd_bench() {
     local machine="${1:-}" plan="${2:-}"; shift $(( $# < 2 ? $# : 2 ))
     local count="" timeout_s="" slot=a ab="" ab_systems="" rounds=3 cores="" task=""
     local stamp; stamp=$(bench_task_stamp)
+    # --count N is iterations per run, --timeout S the seconds one iteration may take (default: the plan's own).
     local usage="usage: wk pi bench <machine> <plan> [--slot NAME | --ab A,B | --ab-systems A,B] [--rounds N] [--count N] [--timeout S] [--cores <set>] [--task NAME]; see wk pi -h"
     while [ $# -gt 0 ]; do
         case "$1" in
@@ -751,7 +647,6 @@ cmd_bench() {
             --timeout) timeout_s="${2:-}"; shift ;;
             --task)    task="${2:-}"; shift ;;
             --slot)    slot="${2:-}"; image_check_slot_name "$slot"; shift ;;
-            # Same cpu-list syntax as `wk bench --cores`, same parser.
             --cores)   cores="${2:-}"; shift ;;
             --ab)      ab="${2:-}"
                        case "$ab" in
@@ -783,22 +678,17 @@ cmd_bench() {
     [ -n "$machine" ] && [ -n "$plan" ] || die "$usage"
     [ -z "$ab" ] || [ -z "$ab_systems" ] || die "$usage; --ab compares two slots in one
     booted system, --ab-systems two systems -- they are different comparisons; pick one."
-    # A plan name is a file name in the runner tree and lands on command lines
-    # this command builds.
     valid_name "$plan" || die "'$plan' is not a plan name (letters, digits, '.', '_' and '-')"
     [ -z "$cores" ] || wkdata cores-valid "$cores" \
         || die "--cores '$cores' is not a valid Linux cpu list (e.g. 0-3, 2,3, 0-1,4, 7)"
     case "$rounds" in ''|*[!0-9]*) die "--rounds takes a number (got '$rounds')" ;; esac
     [ -z "$timeout_s" ] || case "$timeout_s" in *[!0-9]*) die "--timeout takes seconds (got '$timeout_s')" ;; esac
-    # Checked before any board is touched: a typo must not file an hour of runs
-    # somewhere nothing describes.
     if [ -n "$task" ]; then
         bench_task_attach "$task"
         PI_TASK="$task"
     fi
 
     machine_load "$machine" || die "no such machine '$machine' (boot/machines.sh)"
-    # Two runs would share the browser, the GPU and the tunnel port.
     hold_lock "pi-bench-$machine" -w 5 \
         || die "a benchmark is already running against $machine from this machine."
 
@@ -819,13 +709,9 @@ cmd_bench() {
     PI_SEEDED=$(seed_payload "$plan")
     port=$(pi_free_port)
     pi_tunnel_up
-    # 6. One session for every run: down-and-up between the halves of an A/B
-    # would put a fresh compositor on one side only.
     info "bringing up the session on $machine"
     pi_session_up "$PI_DISPLAY"
 
-    # 7. wk ab's task when given, else this command's own -- created once the
-    # slots are known to exist, so a refusal above leaves no empty task.
     if [ -z "$PI_TASK" ]; then
         local _first="$slot"; [ -z "$ab" ] || _first="${ab%%,*}"
         local profile; profile=$(wkslot get "$PI_TMP/slot-$_first.json" profile)
@@ -854,11 +740,8 @@ cmd_bench() {
     cat "$PI_LAST_RUN/result.json"
 }
 
-# One run, from a named slot, recorded. Wall-clock silence is watched by
-# run_watched (lib/watchdog.sh).
 pi_bench_once() {
-    # Two statements: in one `local a=.. b=$a`, $a expands before the first
-    # assignment lands, to the caller's slot rather than this run's.
+    # Two statements: in one `local a=.. b=$a`, $a is the caller's slot, not this run's.
     local slot="$1"
     local json="$PI_TMP/slot-$slot.json"
     local id="$(date -u +%Y%m%dT%H%M%SZ)-$plan-$machine-$slot"
@@ -867,7 +750,6 @@ pi_bench_once() {
     local cores_wrap=""
     [ -z "$cores" ] || cores_wrap=$(wkdata cores-wrap "$cores")
 
-    # Written before the run so it exists even if the run dies.
     pi_bench_record "$out" "$slot" "$json"
 
     local args="--plan $(sh_quote "$plan") --browser wk-board --platform linux --driver webserver"
@@ -893,16 +775,12 @@ pi_bench_once() {
         bash -c "cd $(sh_quote "$BENCH_RUNNER") && exec python3 Tools/Scripts/run-benchmark $args"
     local rc=$?
     set -e
-    # Whatever run-benchmark left behind ends here, not at the next run's
-    # prepare_env: a browser that outlives a timed-out run is a second browser on
-    # the GPU and in the 623 MB. Then the browser's own output (moved -- the
-    # board keeps nothing) and the tail of its system log.
+    # A browser that outlives a timed-out run is a second browser on the GPU and in the 623 MB.
     i_ssh "$(pi_kill_cmd "$json")" >/dev/null 2>&1 || true
     i_ssh 'cat /tmp/wk-browser.log 2>/dev/null; rm -f /tmp/wk-browser.log' > "$out/browser.log" 2>/dev/null || true
     i_ssh 'tail -n 300 /tmp/messages 2>/dev/null' > "$out/board.log" 2>/dev/null || true
     wkdata env-record "$out/env.json" --update wall_time_s="$(( $(date +%s) - wall_start ))"
 
-    # Recorded either way; a run whose process was not the slot failed above.
     local verified
     verified=$(wkslot verified "$out/verify.jsonl" 2>/dev/null) || verified=""
     wkdata env-record "$out/env.json" --update --bool verified="$verified"
@@ -921,11 +799,8 @@ pi_bench_once() {
     return 0
 }
 
-# Interleaved A/B: A B A B ..., not AAA then BBB. These boards drift
-# monotonically over the tens of minutes an A/B takes (warm-up, SoC throttling,
-# SD card cache state); all of A then all of B would put the drift entirely on B.
-# `wk bench report <task>` keeps only rounds where both arms produced a result
-# -- a crash correlates with the heavier binary under a memory ceiling.
+# Interleaved A B A B, not AAA then BBB: these boards drift monotonically over the
+# tens of minutes an A/B takes, and blocking would put all of that drift on B.
 pi_bench_ab() {
     local spec="$1" n="$2" a b i
     a="${spec%%,*}"; b="${spec##*,}"
@@ -952,7 +827,6 @@ pi_bench_ab() {
         else
             lost=$((lost + 1))
             warn "round $i produced ${ra:+$a }${rb:+$b }only -- the report drops it"
-            # Three losses stops a quietly-failing board burning the rest.
             [ "$lost" -lt 3 ] || { warn "three rounds lost; stopping early"; break; }
         fi
         i=$((i + 1))
@@ -961,8 +835,6 @@ pi_bench_ab() {
 
     log ""
     log "$kept round(s) usable, $lost dropped; the runs are in $(bench_task_dir "$PI_TASK")/runs"
-    # The task's creator reports it: this command when the task is its own,
-    # `wk ab` when it is not.
     if [ -n "$PI_TASK_OWNED" ]; then
         "$WK_ROOT/wk" bench report "$PI_TASK" --html --text \
             || warn "the report did not complete; the runs are recorded:  wk bench report $PI_TASK"
@@ -972,35 +844,21 @@ pi_bench_ab() {
     [ "$kept" -ge 1 ] || die "no round produced both halves on $machine; nothing to compare."
 }
 
-# --- wk pi boot-order ----------------------------------------------------------
-#
-# The EEPROM's only writer: `BOOT_ORDER` is firmware state *shared by both of a
-# machine's modes*, so a wrong value costs a trip to the device.
-#
-# BOOT_ORDER reads lowest-nibble-first, so the string is written in reverse
-# priority: 0xf41 is SD(1), then USB(4), then restart(f). The network nibble (2)
-# and the TFTP_IP/CLIENT_IP keys are stripped by every order here.
-#
-# Whichever medium the board's bench system boots from tries first, the rescue
-# medium behind it. A medium with no bootable filesystem is skipped and the board
-# lands on its rescue image; firmware that gets as far as start4.elf and no
-# further **halts**, and a halted board needs a person.
+# BOOT_ORDER reads lowest-nibble-first, so it is written in reverse priority:
+# 0xf41 is SD(1), then USB(4), then restart(f). It is firmware state shared by
+# both of a machine's modes, and firmware that reaches start4.elf and no further halts.
 boot_order_without_net() {
     local order="${1#0x}"
     printf '0x%s' "$(printf '%s' "$order" | sed 's/2//g')"
 }
 
-# <order> <nibble>: that nibble to the front, network stripped, every other left
-# in place. `0xf412 4 -> 0xf14`. Derived from the current order, so an entry this
-# does not know about (6 is NVMe on a Pi 5) keeps it.
+# `0xf412 4 -> 0xf14`; an entry this does not know about (6 is NVMe on a Pi 5) keeps its place.
 boot_order_first() {
     local order="${1#0x}" nibble="$2"
     order=$(printf '%s' "$order" | sed "s/2//g; s/$nibble//g")
     printf '0x%s%s' "$order" "$nibble"
 }
 
-# No overclock is written here: SDRAM_BANKLOW and BOOT_ORDER are shared by both
-# of the board's modes, so a value set for one is inherited by the other.
 cmd_boot_order() {
     local dry="" revert=""
     local order_name="${ORDER_NAME:-}"
@@ -1018,10 +876,7 @@ cmd_boot_order() {
         if [ -n "$revert" ]; then
             order_name=local
         else
-            # The order defaults from what the fleet says this machine is: a
-            # bench-device follows the bench medium's own transport (NODE_DEVICE,
-            # disk_tran_of_name) -- except under pi-tryboot, where the firmware
-            # never boots the bench medium and the rescue's SD is the authority.
+            # Under pi-tryboot the firmware never boots the bench medium, so the rescue's SD is the authority.
             if machine_by_ssh "$HOST" && [ "${NODE_ROLE:-workstation}" = bench-device ]; then
                 if [ "${NODE_DRIVER:-}" = pi-tryboot ]; then
                     order_name=sd-first
@@ -1053,10 +908,8 @@ cmd_boot_order() {
     running and reachable -- a Pi that cannot be reached at all has to be met
     physically first, with a card written by 'wk sysimage write'."
 
-    # Two ways to write an EEPROM, a property of the image the board runs:
-    # `onboard` (rpi-eeprom-config --apply) edits the *running* image and changes
-    # only what was asked; `recovery` (boot/rpi-eeprom.sh, needs nothing there)
-    # stages recovery.bin + pieeprom.upd and replaces the whole image.
+    # `onboard` (rpi-eeprom-config --apply) edits the running image and changes only
+    # what was asked; `recovery` stages recovery.bin + pieeprom.upd and replaces it whole.
     local method=onboard
     if ! rsh 'command -v rpi-eeprom-config >/dev/null 2>&1'; then
         method=recovery
@@ -1074,7 +927,6 @@ cmd_boot_order() {
     order=$(kv_get BOOT_ORDER <<<"$current")
     [ -n "$order" ] || order=0xf41
 
-    # A TFTP_IP left behind on a board is a stale fact that reads as a live one.
     local stripped want
     stripped=$(printf '%s\n' "$current" | grep -vE '^(TFTP_IP|CLIENT_IP|SUBNET|GATEWAY)=')
 
@@ -1087,9 +939,6 @@ cmd_boot_order() {
 
     if [ "$current" = "$new" ]; then
         info "$HOST's firmware already says this; nothing to write"
-        # If it says this *because* a staged update was applied, the files that
-        # carried it have done their job -- the only knowable moment, since
-        # staging runs before the reboot that consumes it.
         [ "$method" = recovery ] && eeprom_clear_staged
         return 0
     fi
@@ -1102,8 +951,6 @@ cmd_boot_order() {
         return 0
     fi
 
-    # Not for an ad-hoc ssh destination (PI_FLEET unset): no arming record to
-    # race, and NODE_NAME would be whatever machine_by_ssh last tried.
     [ -n "$PI_FLEET" ] && machine_armed_barrier "A boot-order write now races the reboot the arming is
     waiting for: BOOT_ORDER is shared by both of the board's roles, and a write
     that lands mid-transition can leave the EEPROM aimed at the wrong one."
@@ -1134,13 +981,7 @@ cmd_boot_order() {
     log  "  undo with:   wk pi boot-order $HOST local"
 }
 
-# --- inside a workspace, deploy and bench are requests -------------------------
-#
-# `wk pi` is host-only: the tailnet needs an auth key and an EEPROM write needs
-# the board. Two of its verbs are outcomes a sandboxed benchmark run has to have
-# and cannot produce, so in a workspace those become a request over the socket
-# (lib/broker.sh). Parsed here rather than forwarded as a line, so the broker's
-# vocabulary is the limit.
+# In a workspace these two verbs become a broker request, parsed here so the broker's vocabulary is the limit.
 if in_workspace; then
     . "$WK_ROOT/lib/broker.sh"
     case "$ACTION" in
@@ -1149,8 +990,7 @@ if in_workspace; then
     esac
     broker_present || broker_no_route "'wk pi $ACTION'" "wk pi $ACTION $HOST $*"
 
-    # One bare word after the top-level shift: the machine for `deploy` (whose
-    # first argument is the workspace, taken into $HOST), the plan for `bench`.
+    # One bare word after the top-level shift: the machine for `deploy` (whose workspace is in $HOST), the plan for `bench`.
     _pos=""; _opts=""; _slot=""; _extra=""
     while [ $# -gt 0 ]; do
         case "$1" in
@@ -1179,8 +1019,7 @@ if in_workspace; then
     exit "$_rc"
 fi
 
-# $HOST holds $2, which for `deploy` is the workspace -- the argument order is
-# <workspace> <machine>. $HOST means an ssh host everywhere else in this file.
+# For `deploy`, $HOST holds the workspace: the argument order is <workspace> <machine>.
 if [ "$ACTION" = deploy ]; then
     cmd_deploy "$HOST" "$@"
     exit 0
@@ -1191,9 +1030,6 @@ if [ "$ACTION" = bench ]; then
     exit 0
 fi
 
-# A bench-device is driven as root; a workstation is not, and `wk` takes no
-# passwordless sudo on one beyond the two privileged helpers. `wk pi helper` and
-# `wk pi setup` both write board-only state, so both refuse through this gate.
 refuse_workstation() { # <what this verb cannot do there, e.g. "install the helper on it">
     [ "${NODE_ROLE:-}" = bench-device ] || die "$HOST is a workstation, so this cannot $1:
     that needs a root it is not driven as, and wk takes no passwordless sudo
@@ -1206,15 +1042,7 @@ refuse_workstation() { # <what this verb cannot do there, e.g. "install the help
     fix you want is not in it yet."
 }
 
-# --- wk pi helper --------------------------------------------------------------
-#
-#   wk pi helper <machine>
-#
-# A board's *rescue* writes that board's bench media, and the privileged half is
-# admin/wk-card-priv. A rescue image bakes a copy in at build time, so every fix
-# would otherwise cost an image rebuild and a card carried to a reader. The same
-# two files admin/install.sh puts on a machine with a reader, by the same rule:
-# copied to a root-owned path, never linked into a checkout.
+# Copied to a root-owned path, never linked into a checkout -- admin/install.sh's rule.
 cmd_helper() {
     local src="$WK_ROOT/admin/wk-card-priv" check="$WK_ROOT/boot/check-boot-files.py"
     [ $# -eq 0 ] || die "usage: wk pi helper <machine>; unexpected argument: $1; see wk pi -h"
@@ -1226,7 +1054,6 @@ cmd_helper() {
 
     rsh "install -d -o root -g root -m 0755 ${CARD_PRIV%/*}" \
         || die "could not make ${CARD_PRIV%/*} on $HOST"
-    # Into `.part` and renamed: a copy that stops halfway is never the helper.
     rsh "cat > $CARD_PRIV.part" < "$src" \
         || die "could not copy the card helper onto $HOST"
     rsh "cat > $CARD_CHECKER.part" < "$check" \
@@ -1238,7 +1065,6 @@ cmd_helper() {
          mv -f $CARD_CHECKER.part $CARD_CHECKER
          sync" || die "could not install the card helper on $HOST"
 
-    # The copy that is there answers, and it is the one this checkout holds.
     local there here
     there=$(rsh "sha256sum $CARD_PRIV" | cut -d" " -f1) || there=""
     here=$(sha256sum "$src" | cut -d" " -f1)
@@ -1247,8 +1073,6 @@ cmd_helper() {
     card_priv status >/dev/null 2>&1 \
         || die "the card helper is installed on $HOST but does not answer 'status'.
     A rescue that cannot run it cannot write this board's bench media."
-    # Named for the system that answered, not for $HOST -- the *rescue's* ssh
-    # name whichever system the board is running.
     info "$NODE_NAME's $(case "${MODE_CHANNEL:-host}" in bench) echo "bench system" ;; *) echo rescue ;; esac) runs this checkout's card helper (${here:0:12})"
     log  "  it makes this board's card edits:  wk sysimage write --disk $NODE_NAME:$NODE_DEVICE@second ...,"
     log  "  and 'wk boot $NODE_NAME --system <id>' arms one where the board stands"
@@ -1269,8 +1093,6 @@ if [ "$ACTION" = boot-order ]; then
     exit 0
 fi
 
-# Only `setup` reaches here. A host outside the fleet has no role yet, which is
-# exactly the board this verb exists to bring up.
 [ -z "$PI_FLEET" ] || refuse_workstation "put it on the tailnet this way"
 
 info "probing $HOST"
@@ -1294,8 +1116,7 @@ DEST=$(rsh 'for d in /opt /data /usr/local /home/root /root; do
             echo /tmp')
 log "  writable prefix: $DEST"
 
-# Kernel-mode Tailscale needs /dev/net/tun. Userspace mode needs no kernel
-# support at all, which keeps the no-image-change promise on a buildroot device.
+# Userspace mode needs no kernel support, which keeps the no-image-change promise.
 if rsh 'test -c /dev/net/tun'; then
     TS_MODE=kernel
     log "  /dev/net/tun present -> kernel networking"
@@ -1306,7 +1127,6 @@ else
     warn "  if it does not, fall back to a Pi-originated reverse tunnel (still no image change)"
 fi
 
-# The published checksum for this arch, from the same file as the version.
 TS_SHA256=$(ts_release_field "TS_SHA256_$TS_ARCH")
 [ -n "$TS_SHA256" ] || die "$TS_RELEASE declares no TS_SHA256_$TS_ARCH.
     Add the published checksum for that architecture:
@@ -1334,22 +1154,16 @@ rsh "set -e
     fi
     mkdir -p '$DEST/tailscale-state'"
 
-# BusyBox init: an S-script is the portable option, since buildroot images
-# usually have neither systemd nor a service manager with a unit format.
 FLAGS="--state=$DEST/tailscale-state/tailscaled.state --socket=$DEST/tailscale-state/tailscaled.sock"
 [ "$TS_MODE" = userspace ] && FLAGS="$FLAGS --tun=userspace-networking"
 
-# A function of its own so a test can drive it with a fake rsh (tests/test_pi.py).
 pi_setup_start_tailscaled() { # <dest> <flags>
     local dest="$1" flags="$2" waited=0
     local wait_s="${TAILSCALED_WAIT_SECONDS:-15}"
     local sock="$dest/tailscale-state/tailscaled.sock"
     local log="$dest/tailscale-state/tailscaled.log"
 
-    # A real heredoc into 'sh -s', the tree's remote-script convention: `set -u`
-    # first. tailscale-up.sh's own log goes under $dest, not /var/log, which is
-    # read-only on many of these images. The nested heredoc is quoted so the
-    # *remote* shell resolves its \$DEST at run time.
+    # The nested heredoc is quoted so the *remote* shell resolves its \$DEST at run time.
     rsh "sh -s" <<REMOTE || die "could not install or start tailscaled on $HOST"
 set -u
 cat > '$dest/tailscale-up.sh' <<'INNER'
@@ -1363,7 +1177,6 @@ chmod +x '$dest/tailscale-up.sh'
 '$dest/tailscale-up.sh'
 REMOTE
 
-    # Bounded: a launch that never creates the socket is reported with its log.
     while ! rsh "test -S '$sock'"; do
         waited=$((waited + 1))
         [ "$waited" -le "$wait_s" ] || die "tailscaled did not create $sock on $HOST within ${wait_s}s.
@@ -1376,23 +1189,18 @@ $(rsh "tail -n 20 '$log'" 2>/dev/null || echo '    (unreadable)')
 }
 pi_setup_start_tailscaled "$DEST" "$FLAGS"
 
-# A re-run against a device already on the tailnet needs no auth key.
 TSIP=$(rsh "'$DEST/tailscale' --socket='$DEST/tailscale-state/tailscaled.sock' ip -4" 2>/dev/null | head -1) || TSIP=""
 if [ -n "$TSIP" ]; then
     info "$HOST is already on the tailnet at $TSIP -- no auth key needed"
 else
     info "bringing the node up as $TAG"
 
-    # The fleet's one key, from the one place it lives (wk_tailscale_authkey):
-    # a command that stops to ask for a secret cannot be handed to an agent.
     KEYFILE=$(wk_tailscale_authkey) || die "no tailscale auth key, so this board cannot join the tailnet.
     It has to: everything wk touches is on the tailnet, and a node is reached by
     its tailnet name with nothing about how to reach it stored anywhere
     (CLAUDE.md, 'Cattle, not pets'). The key must be tagged $TAG."
 
-    # Into a 0600 file, never onto a command line: argv is world readable in
-    # /proc, so `--authkey=tskey-...` hands the key to anything with a shell on
-    # the board. `--auth-key file:` reads one without argv.
+    # Into a 0600 file, never argv: /proc makes `--authkey=tskey-...` world readable.
     rsh "umask 077; cat > '$DEST/tailscale-state/authkey'" < "$KEYFILE" \
         || die "could not hand the auth key to $HOST"
 
@@ -1410,9 +1218,7 @@ else
 fi
 info "$HOST is on the tailnet at $TSIP"
 
-# Individual addresses, not the whole CGNAT range: the workstation is itself an
-# unrestricted tailnet node, so 100.64.0.0/10 would let a workspace reach
-# everything it can. The file lives in the store, which ./setup never regenerates.
+# Individual addresses, not 100.64.0.0/10: the workstation is itself an unrestricted tailnet node.
 PI_FILE="$WK_STORE/pi-hosts"
 ensure_dir "$(dirname "$PI_FILE")"
 if ! grep -qxF "$TSIP" "$PI_FILE" 2>/dev/null; then
@@ -1420,7 +1226,6 @@ if ! grep -qxF "$TSIP" "$PI_FILE" 2>/dev/null; then
     info "recorded $TSIP in $PI_FILE"
 fi
 
-# The file *is* the policy: the egress proxy re-reads it on every request.
 info "allowed $TSIP (the egress proxy re-reads $PI_FILE per request)"
 
 cat >&2 <<EOF

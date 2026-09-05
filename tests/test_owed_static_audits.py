@@ -20,19 +20,25 @@ import unittest
 
 from tests.support import REPO
 
-FUNC_RE = re.compile(r'^([A-Za-z_][A-Za-z0-9_]*)\(\)\s*\{\s*$')
+# A trailing comment on the definition line is this tree's way of stating a
+# function's contract, so it cannot hide a function from this audit.
+FUNC_RE = re.compile(r'^([A-Za-z_][A-Za-z0-9_]*)\(\)\s*\{\s*(#.*)?$')
 
 # Predicates whose return value is the point, not commands whose failure
 # would surprise a caller under `set -e`; a function that ends in an `&&`
 # chain and is not a predicate gets `return 0` instead of a place here.
 DELIBERATE_PREDICATES = {
     ("lib/common.sh", "gh_authenticated"),
+    ("lib/common.sh", "lock_alive"),
     ("lib/resources.sh", "is_headless"),
     ("lib/target.sh", "ws_on_target"),
     ("lib/store.sh", "store_is_local"),
     ("cmd/sync", "snapshot_current"),
     ("cmd/doctor", "podman_machine_running"),
     ("cmd/doctor", "git_speed_ok"),
+    ("cmd/ab", "ab_slot_has"),
+    ("cmd/push", "_in_vm_driver"),
+    ("cmd/sysimage", "_ws_building"),
 }
 
 
@@ -78,13 +84,56 @@ def _last_statement(body):
     return ""
 
 
+def _without_data(s):
+    """The statement with quoted spans and command substitutions blanked out.
+
+    An `&&` inside a string wk hands to another shell, or inside `$( )`, is not
+    a chain at this statement's level: its falsiness never becomes the
+    function's exit status.
+    """
+    # Substitutions first, by paren depth: inside `$( )` quoting restarts, so a
+    # single left-to-right pass over quotes closes the outer one too early.
+    out = []
+    depth = 0
+    i = 0
+    while i < len(s):
+        if s.startswith("$(", i):
+            depth += 1
+            i += 2
+            continue
+        if depth:
+            if s[i] == ")":
+                depth -= 1
+            elif s[i] == "(":
+                depth += 1
+            i += 1
+            continue
+        out.append(s[i])
+        i += 1
+
+    # Then quoted spans in what is left.
+    kept = []
+    quote = None
+    for c in "".join(out):
+        if quote:
+            if c == quote:
+                quote = None
+            continue
+        if c in "'\"":
+            quote = c
+            continue
+        kept.append(c)
+    return "".join(kept)
+
+
 def find_offenders():
     offenders = []
     for f in _iter_shell_files():
         rel = str(f.relative_to(REPO))
         for name, body in _functions(f):
             last = _last_statement(body)
-            if not last or "&&" not in last or "||" in last:
+            bare = _without_data(last)
+            if not last or "&&" not in bare or "||" in bare:
                 continue
             if last.startswith(("return", "exit")):
                 continue

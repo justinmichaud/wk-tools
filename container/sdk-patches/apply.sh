@@ -1,14 +1,5 @@
 #!/usr/bin/env bash
-#
-# Patch the webkit-container-sdk fork so wkdev-create can produce a sandboxed
-# workspace. Idempotent, and it verifies rather than assumes. An applier rather
-# than a .patch file, because these edits must survive rebasing the fork onto
-# upstream.
-#
-# Fourteen numbered sections, each independently upstreamable. Load-bearing for
-# the sandbox: 2, 3, 6 and 11. Each has a token in the verify list at the bottom:
-# an anchor that drifts upstream silently no-ops the patch, and an unverified
-# hardening patch that no-ops is a sandbox hole that looks like a clean run.
+# Idempotent applier (not a .patch file, so the edits survive rebasing the fork onto upstream); sections 2, 3, 6 and 11 are load-bearing, and each section has a verify token below because one that no-ops reads as a clean run.
 
 set -euo pipefail
 
@@ -22,8 +13,7 @@ SYNC="$SDK/scripts/container-only/.wkdev-sync-runtime-state"
 
 py() { python3 - "$@"; }
 
-# --- 1 + 2: new options ------------------------------------------------------
-py "$CREATE" <<'PYEOF'
+py "$CREATE" <<'PYEOF'   # 1 + 2: new options
 import sys, re
 path = sys.argv[1]
 src = open(path).read()
@@ -41,8 +31,7 @@ if "additional-flags" not in src:
 open(path, "w").write(src)
 PYEOF
 
-# --- 2: honour --network -----------------------------------------------------
-py "$CREATE" <<'PYEOF'
+py "$CREATE" <<'PYEOF'   # 2: honour --network
 import sys
 path = sys.argv[1]
 src = open(path).read()
@@ -57,41 +46,48 @@ if old in src:
     open(path, "w").write(src)
 PYEOF
 
-# --- 3: gate the dangerous capabilities --------------------------------------
-py "$CREATE" <<'PYEOF'
+py "$CREATE" <<'PYEOF'   # 3: gate the dangerous capabilities
 import sys
 path = sys.argv[1]
 src = open(path).read()
 
-old = """    # Add 'NET_RAW' support, to be able to use ping
-    arguments+=("--cap-add=NET_RAW")
-
-    # Add 'SYS_ADMIN' support, to be able to use CPU profiiling.
-    arguments+=("--cap-add=SYS_ADMIN")"""
-new = """    # NET_RAW (ping) and SYS_ADMIN (CPU profiling) are opt-in. SYS_ADMIN in
-    # particular lets a container modify the host's nftables ruleset, which
-    # would make the workspace egress policy unenforceable.
-    if argsparse_is_option_set "unsafe-caps"; then
-        arguments+=("--cap-add=NET_RAW")
-        arguments+=("--cap-add=SYS_ADMIN")
-    fi"""
+old = (
+    "    # Add 'NET_RAW' support, to be able to use ping\n"
+    '    arguments+=("--cap-add=NET_RAW")\n'
+    '\n'
+    "    # Add 'SYS_ADMIN' support, to be able to use CPU profiiling.\n"
+    '    arguments+=("--cap-add=SYS_ADMIN")'
+)
+new = (
+    '    # NET_RAW (ping) and SYS_ADMIN (CPU profiling) are opt-in. SYS_ADMIN in\n'
+    "    # particular lets a container modify the host's nftables ruleset, which\n"
+    '    # would make the workspace egress policy unenforceable.\n'
+    '    if argsparse_is_option_set "unsafe-caps"; then\n'
+    '        arguments+=("--cap-add=NET_RAW")\n'
+    '        arguments+=("--cap-add=SYS_ADMIN")\n'
+    '    fi'
+)
 if old in src:
     src = src.replace(old, new, 1)
     print("gated NET_RAW/SYS_ADMIN behind --unsafe-caps", file=sys.stderr)
 
-old2 = """    # Allow for unprivileged user namespaces (bwrap) to work.
-    arguments+=("--security-opt" "unmask=ALL")
-
-    # Required for rr to work.
-    arguments+=("--security-opt" "seccomp=unconfined")"""
-new2 = """    # unmask=ALL re-exposes /proc and /sys paths the runtime masks by default;
-    # seccomp=unconfined removes the syscall filter. Both are needed for bwrap
-    # and rr, and both substantially widen the sandbox, so they follow the same
-    # opt-in as the capabilities above.
-    if argsparse_is_option_set "unsafe-caps"; then
-        arguments+=("--security-opt" "unmask=ALL")
-        arguments+=("--security-opt" "seccomp=unconfined")
-    fi"""
+old2 = (
+    '    # Allow for unprivileged user namespaces (bwrap) to work.\n'
+    '    arguments+=("--security-opt" "unmask=ALL")\n'
+    '\n'
+    '    # Required for rr to work.\n'
+    '    arguments+=("--security-opt" "seccomp=unconfined")'
+)
+new2 = (
+    '    # unmask=ALL re-exposes /proc and /sys paths the runtime masks by default;\n'
+    '    # seccomp=unconfined removes the syscall filter. Both are needed for bwrap\n'
+    '    # and rr, and both substantially widen the sandbox, so they follow the same\n'
+    '    # opt-in as the capabilities above.\n'
+    '    if argsparse_is_option_set "unsafe-caps"; then\n'
+    '        arguments+=("--security-opt" "unmask=ALL")\n'
+    '        arguments+=("--security-opt" "seccomp=unconfined")\n'
+    '    fi'
+)
 if old2 in src:
     src = src.replace(old2, new2, 1)
     print("gated unmask=ALL/seccomp behind --unsafe-caps", file=sys.stderr)
@@ -99,48 +95,49 @@ if old2 in src:
 open(path, "w").write(src)
 PYEOF
 
-# --- 1: splice the extra flags in before the image ---------------------------
-py "$CREATE" <<'PYEOF'
+py "$CREATE" <<'PYEOF'   # 1: splice the extra flags in before the image
 import sys
 path = sys.argv[1]
 src = open(path).read()
 anchor = '    arguments+=("${sdk_repo_qualified}:${container_tag}")'
-inject = """    # Caller-supplied podman flags. Must come before the image name, since
-    # everything after it is the container's own argv.
-    additional_flags="${program_options["additional-flags"]:-}"
-    if [ -n "${additional_flags}" ]; then
-        arguments+=(${additional_flags})
-    fi
-
-"""
+inject = (
+    '    # Caller-supplied podman flags. Must come before the image name, since\n'
+    "    # everything after it is the container's own argv.\n"
+    '    additional_flags="${program_options["additional-flags"]:-}"\n'
+    '    if [ -n "${additional_flags}" ]; then\n'
+    '        arguments+=(${additional_flags})\n'
+    '    fi\n'
+    '\n'
+)
 if "additional_flags" not in src and anchor in src:
     src = src.replace(anchor, inject + anchor, 1)
     print("spliced --additional-flags into podman create", file=sys.stderr)
     open(path, "w").write(src)
 PYEOF
 
-# --- 5: run as the container user, not the invoking user ---------------------
-# wkdev-enter derives the exec user from `id` on the host, right for upstream's
-# rootless keep-id. Here the SDK runs under sudo -- rootful podman is the only
-# way the workspace firewall applies -- so `id -u` is 0.
+# Under sudo (rootful podman) `id --user --real` is 0: not the exec user, and /run/user/0 does not exist.
 if [ -f "$ENTER" ]; then
-py "$ENTER" <<'PYEOF'
+py "$ENTER" <<'PYEOF'   # 5: run as the container user, not the invoking user
 import sys
 path = sys.argv[1]
 src = open(path).read()
 
 old = '''        podman_exec_arguments+=("--user" "$(id --user --real):$(id --group --real)")'''
-new = '''        # wk: use the container's own user. WKDEV_CONTAINER_USER is set by the
-        # caller; the fallback is the uid the image's user is created with.
-        podman_exec_arguments+=("--user" "${WKDEV_CONTAINER_UID:-1000}:${WKDEV_CONTAINER_GID:-1000}")'''
+new = (
+    "        # wk: use the container's own user. WKDEV_CONTAINER_USER is set by the\n"
+    "        # caller; the fallback is the uid the image's user is created with.\n"
+    '        podman_exec_arguments+=("--user" "${WKDEV_CONTAINER_UID:-1000}:${WKDEV_CONTAINER_GID:-1000}")'
+)
 if old in src:
     src = src.replace(old, new, 1)
     print("wkdev-enter: exec as the container user", file=sys.stderr)
 
 old2 = '''        podman_exec_arguments+=("/usr/bin/env" "USER=$(id --user --name)" "${SHELL}" "--login")'''
-new2 = '''        # wk: ${SHELL} is the *host* shell path and need not exist in the
-        # container; and USER must be the container account, not the caller.
-        podman_exec_arguments+=("/usr/bin/env" "USER=${WKDEV_CONTAINER_USER:-$(id --user --name)}" "${WKDEV_CONTAINER_SHELL:-/bin/bash}" "--login")'''
+new2 = (
+    '        # wk: ${SHELL} is the *host* shell path and need not exist in the\n'
+    '        # container; and USER must be the container account, not the caller.\n'
+    '        podman_exec_arguments+=("/usr/bin/env" "USER=${WKDEV_CONTAINER_USER:-$(id --user --name)}" "${WKDEV_CONTAINER_SHELL:-/bin/bash}" "--login")'
+)
 if old2 in src:
     src = src.replace(old2, new2, 1)
     print("wkdev-enter: use the container shell and user", file=sys.stderr)
@@ -149,17 +146,13 @@ open(path, "w").write(src)
 PYEOF
 fi
 
-# --- 4a: let .wkdev-init accept a user it is about to create ------------------
-# type:username validates --user against the container's /etc/passwd at parse
-# time, and the image userdel's uid 1000.
 if [ -f "$INIT" ]; then
-py "$INIT" <<'PYEOF'
+py "$INIT" <<'PYEOF'   # 4a: let .wkdev-init accept a user it is about to create
 import re, sys
 path = sys.argv[1]
 src = open(path).read()
 
-# Match on structure: the user/group lines have different alignment spacing,
-# and an exact-string patch silently skips one of them.
+# On structure: the user and group lines are aligned differently upstream.
 new_src, n = re.subn(
     r'(argsparse_use_option\s+=(?:user|group):\s+"[^"]*")\s+type:\w+',
     r'\1',
@@ -171,36 +164,36 @@ if n:
 PYEOF
 fi
 
-# --- 4: create the container user when absent --------------------------------
 if [ -f "$INIT" ]; then
-py "$INIT" <<'PYEOF'
+py "$INIT" <<'PYEOF'   # 4: create the container user when absent
 import sys
 path = sys.argv[1]
 src = open(path).read()
 if "wk: create the user" not in src:
     anchor = "try_switch_shell_for_user() {"
-    add = '''try_ensure_user_exists() {
-
-    # wk: create the user if podman did not (the image userdel's uid 1000
-    # for rootless keep-id; under rootful podman nothing recreates it).
-    if getent passwd "${container_user_name}" >/dev/null; then
-        return 0
-    fi
-
-    # Ids from whoever owns the bind-mounted home: rootful podman maps uids
-    # 1:1, so these must match the host side or nothing here is writable.
-    local _uid _gid
-    _uid=$(stat -c %u "/home/${container_user_name}" 2>/dev/null || echo 1000)
-    _gid=$(stat -c %g "/home/${container_user_name}" 2>/dev/null || echo 1000)
-
-    task_step "Creating user ${container_user_name} (${_uid}:${_gid})"
-    groupadd --force --gid "${_gid}" "${container_group_name}" 2>/dev/null || true
-    useradd --uid "${_uid}" --gid "${_gid}" --no-create-home \\
-            --home-dir "/home/${container_user_name}" \\
-            --shell /bin/bash "${container_user_name}" 2>/dev/null || true
-}
-
-'''
+    add = (
+        'try_ensure_user_exists() {\n'
+        '\n'
+        "    # wk: create the user if podman did not (the image userdel's uid 1000\n"
+        '    # for rootless keep-id; under rootful podman nothing recreates it).\n'
+        '    if getent passwd "${container_user_name}" >/dev/null; then\n'
+        '        return 0\n'
+        '    fi\n'
+        '\n'
+        '    # Ids from whoever owns the bind-mounted home: rootful podman maps uids\n'
+        '    # 1:1, so these must match the host side or nothing here is writable.\n'
+        '    local _uid _gid\n'
+        '    _uid=$(stat -c %u "/home/${container_user_name}" 2>/dev/null || echo 1000)\n'
+        '    _gid=$(stat -c %g "/home/${container_user_name}" 2>/dev/null || echo 1000)\n'
+        '\n'
+        '    task_step "Creating user ${container_user_name} (${_uid}:${_gid})"\n'
+        '    groupadd --force --gid "${_gid}" "${container_group_name}" 2>/dev/null || true\n'
+        '    useradd --uid "${_uid}" --gid "${_gid}" --no-create-home \\\n'
+        '            --home-dir "/home/${container_user_name}" \\\n'
+        '            --shell /bin/bash "${container_user_name}" 2>/dev/null || true\n'
+        '}\n'
+        '\n'
+    )
     src = src.replace(anchor, add + anchor, 1)
     src = src.replace('    "try_switch_shell_for_user"',
                       '    "try_ensure_user_exists"\n    "try_switch_shell_for_user"', 1)
@@ -209,10 +202,7 @@ if "wk: create the user" not in src:
 PYEOF
 fi
 
-# --- 6: do not hand the container the host podman socket ---------------------
-# wkdev-create mounts the host's podman socket for podman-in-podman. Under
-# rootful podman that is a complete sandbox escape.
-py "$CREATE" <<'PYEOF'
+py "$CREATE" <<'PYEOF'   # 6: do not hand over the host podman socket
 import sys
 path = sys.argv[1]
 src = open(path).read()
@@ -225,11 +215,7 @@ if old in src and "sandbox escape under rootful" not in src:
     open(path, "w").write(src)
 PYEOF
 
-# --- 7: let init skip apt when egress is restricted --------------------------
-# The workspace egress policy leaves every Ubuntu mirror unreachable, so
-# `apt-get update` stalls until it times out on each repo in turn. Opt-in via
-# WKDEV_OFFLINE, which wk sets.
-py "$INIT" <<'PYEOF'
+py "$INIT" <<'PYEOF'   # 7: let init skip apt when egress is restricted
 import sys
 path = sys.argv[1]
 src = open(path).read()
@@ -245,20 +231,13 @@ if "WKDEV_OFFLINE" not in src:
     open(path, "w").write(src)
 PYEOF
 
-# --- 8: let podman manage resolv.conf on a bridge network --------------------
-# wkdev-create bind-mounts the host's /etc/resolv.conf, right for upstream's
-# --network host but wrong on a bridge: the container inherits the host's
-# nameserver, reachable only through the forward chain where the egress policy
-# drops it. Without the mount, podman points the container at aardvark-dns on
-# the bridge gateway, which is input traffic, so DNS works without opening
-# port 53 to the world.
-py "$CREATE" <<'PYEOF'
+# The host's resolv.conf names a nameserver reachable only through the dropped forward chain; unmounted, podman points at aardvark-dns, which is input.
+py "$CREATE" <<'PYEOF'   # 8: let podman manage resolv.conf on a bridge
 import sys
 path = sys.argv[1]
 src = open(path).read()
 old = '    arguments+=("--mount" "type=bind,source=/etc/resolv.conf,destination=/etc/resolv.conf,ro")'
-# The replacement re-indents the line it replaces, so without a marker check
-# this section would re-apply to its own output on every run.
+# The replacement re-indents its own input, so this needs a marker check.
 already = "wk: host networking only" in src
 new = (
     '    # wk: host networking only -- see sdk-patches/apply.sh section 8.\n'
@@ -272,24 +251,22 @@ if old in src and not already:
     open(path, "w").write(src)
 PYEOF
 
-# --- 9: quieten flatpak runtime-state syncing --------------------------------
-# It symlinks flatpak instance directories from /host/run, which never exist
-# here, so every `wk run`/`build`/`enter` prints bare "ln: No such file" lines.
 if [ -f "$SYNC" ]; then
-py "$SYNC" <<'PYEOF'
+py "$SYNC" <<'PYEOF'   # 9: quieten flatpak runtime-state syncing
 import sys
 path = sys.argv[1]
 src = open(path).read()
 old = """mount_host_flatpak_instance_data() {"""
-new = """mount_host_flatpak_instance_data() {
-
-    # wk: the whole function is meaningless without a host runtime directory to
-    # share, which is the case for every headless container here. Left enabled
-    # it emits bare "ln: No such file or directory" lines before the output of
-    # every wk run/build/enter -- noise that teaches you to ignore errors from
-    # this script.
-    [ -d /host/run ] || return 0
-"""
+new = (
+    'mount_host_flatpak_instance_data() {\n'
+    '\n'
+    '    # wk: the whole function is meaningless without a host runtime directory to\n'
+    '    # share, which is the case for every headless container here. Left enabled\n'
+    '    # it emits bare "ln: No such file or directory" lines before the output of\n'
+    '    # every wk run/build/enter -- noise that teaches you to ignore errors from\n'
+    '    # this script.\n'
+    '    [ -d /host/run ] || return 0\n'
+)
 if old in src and "the whole function is meaningless" not in src:
     src = src.replace(old, new, 1)
     print("quietened flatpak runtime-state syncing", file=sys.stderr)
@@ -297,10 +274,7 @@ if old in src and "the whole function is meaningless" not in src:
 PYEOF
 fi
 
-# --- 10: XDG_RUNTIME_DIR must match the container user -----------------------
-# wkdev-create derives it from `id --user --real`, which is 0 under sudo, so
-# every container gets XDG_RUNTIME_DIR=/run/user/0, which does not exist.
-py "$CREATE" <<'PYEOF'
+py "$CREATE" <<'PYEOF'   # 10: XDG_RUNTIME_DIR must match the container user
 import sys
 path = sys.argv[1]
 src = open(path).read()
@@ -314,15 +288,8 @@ if old in src:
     open(path, "w").write(src)
 PYEOF
 
-# --- 11: --isolated, for a workspace that is not a desktop session ----------
-# wkdev integrates tightly with the desktop session: D-Bus sockets, the keyring,
-# dconf, X11, PulseAudio, the journal, ${XDG_RUNTIME_DIR} at /host/run. The
-# session bus alone is a full host escape -- org.freedesktop.systemd1's
-# StartTransientUnit runs any command outside the container -- and ${HOME} at
-# /host/home hands over the home directory a workspace is not supposed to see.
-# --isolated turns the whole group off. Display integration is not in it: wk
-# passes the GPU and compositor socket itself, one socket at a time.
-py "$CREATE" <<'PYEOF'
+# The session bus alone is a host escape: StartTransientUnit runs anything.
+py "$CREATE" <<'PYEOF'   # 11: --isolated, for a workspace that is no session
 import sys
 path = sys.argv[1]
 src = open(path).read()
@@ -347,8 +314,6 @@ for task in ("try_process_coredump_directory", "try_process_journal",
     if old in src and new not in src:
         src = src.replace(old, new, 1)
 
-# The workspace's own home mount stays; what must go is the *host* home
-# mount, and the systemd user unit directory that comes with it.
 old_home = '    podman_argument+=("--mount" "type=bind,source=${HOME},destination=/host/home/${container_user_name},rslave")'
 new_home = ('    # wk: the host home directory is not the workspace\'s business.\n'
             '    argsparse_is_option_set "isolated" || \\\n'
@@ -356,17 +321,8 @@ new_home = ('    # wk: the host home directory is not the workspace\'s business.
 if old_home in src and "not the workspace's business" not in src:
     src = src.replace(old_home, new_home, 1)
 
-# This needs an `if`, not the `||` prefix the other two use: the original
-# line is itself a compound (`[ -d ... ] && mount`), and `||`/`&&` have equal
-# precedence in shell, left to right. `guard || [ -d ... ] && mount` parses
-# as `(guard || [ -d ... ]) && mount` -- when --isolated IS set the guard
-# succeeds, the left side is true, and the mount is added anyway, the exact
-# opposite of the gate's intent. The symptom is indirect: the mount makes
-# podman create /home/<user>/.config as container-root, an unmapped
-# subordinate uid the workspace user can't chmod, so the helix install in
-# firstrun.sh fails, `set -e` aborts the rest of firstrun, and the workspace
-# comes up with no lldb config and no shell rc -- while wkdev-init reports
-# success anyway.
+# An `if`, not the `||` the other two use: this line is itself a compound, and
+# `guard || [ -d x ] && mount` mounts exactly when --isolated is set.
 old_sysd = '    [ -d "${HOME}/.config/systemd/user" ] && podman_argument+=("--mount" "type=bind,source=${HOME}/.config/systemd/user,destination=/home/${container_user_name}/.config/systemd/user,rslave")'
 if old_sysd in src and "isolated-systemd-user" not in src:
     src = src.replace(old_sysd,
@@ -375,8 +331,6 @@ if old_sysd in src and "isolated-systemd-user" not in src:
         '    ' + old_sysd + '\n'
         '    fi', 1)
 
-# ${XDG_RUNTIME_DIR} at /host/run: the session bus, keyring socket,
-# pipewire sockets and whatever else the session keeps there.
 old_run = '    arguments+=("--mount" "type=bind,source=${XDG_RUNTIME_DIR},destination=/host/run,bind-propagation=rslave")'
 new_run = ('    # wk: sharing the whole runtime directory shares the session bus with it.\n'
            '    argsparse_is_option_set "isolated" || \\\n' + old_run)
@@ -387,14 +341,7 @@ open(path, "w").write(src)
 print("gated host-session integration behind --isolated", file=sys.stderr)
 PYEOF
 
-# --- 12: pin the image explicitly -------------------------------------------
-# wkdev-create resolves the image from the SDK version and, with --arch, falls
-# back to a `_${arch}` tag only if the unsuffixed tag is missing locally -- so
-# on a machine that already has the aarch64 image, `--arch arm` hands podman an
-# arm64 image and asks for a 32-bit container from it. --image says which image,
-# inferring nothing, which is also what keeps the native-armhf and cross-sysroot
-# images apart: they differ only by a tag suffix.
-py "$CREATE" <<'PYSECTION12'
+py "$CREATE" <<'PYSECTION12'   # 12: pin the image explicitly
 import sys
 path = sys.argv[1]
 src = open(path).read()
@@ -409,14 +356,15 @@ if "argsparse_use_option =image:" not in src:
     print("added --image", file=sys.stderr)
 
 anchor = '    if argsparse_is_option_set "arch"; then'
-inject = """    # wk: an explicitly pinned image, which no version resolution or
-    # architecture fallback may then second-guess. See sdk-patches/apply.sh 12.
-    if argsparse_is_option_set "image"; then
-        sdk_repo_qualified="${program_options["image"]%:*}"
-        container_tag="${program_options["image"]##*:}"
-    fi
-
-"""
+inject = (
+    '    # wk: an explicitly pinned image, which no version resolution or\n'
+    '    # architecture fallback may then second-guess. See sdk-patches/apply.sh 12.\n'
+    '    if argsparse_is_option_set "image"; then\n'
+    '        sdk_repo_qualified="${program_options["image"]%:*}"\n'
+    '        container_tag="${program_options["image"]##*:}"\n'
+    '    fi\n'
+    '\n'
+)
 if "an explicitly pinned image" not in src and anchor in src:
     src = src.replace(anchor, inject + anchor, 1)
     print("spliced --image into image resolution", file=sys.stderr)
@@ -424,17 +372,9 @@ if "an explicitly pinned image" not in src and anchor in src:
 open(path, "w").write(src)
 PYSECTION12
 
-# --- 13: let a non-SDK container be initialised ------------------------------
-# `.wkdev-init` refuses to run outside a wkdev-sdk container
-# (`is_running_in_container && [ -f /usr/bin/podman-host ]`). The Yocto builder
-# needs a workspace whose image is not the SDK: scarthgap's supported hosts stop
-# at Ubuntu 24.04 and the SDK image is 26.04, so `wk sysimage build <yocto>`
-# builds from a plain 24.04 image. Our image writes `/etc/wk-container`,
-# accepted as a second discriminator -- another `-f` test on a path that does
-# not exist outside such a container, so the host's answer is unchanged.
 SETTINGS="$SDK/utilities/settings.sh"
 if [ -f "$SETTINGS" ]; then
-    py "$SETTINGS" <<'PYSECTION13'
+    py "$SETTINGS" <<'PYSECTION13'   # 13: let a non-SDK container initialise
 import sys
 path = sys.argv[1]
 src = open(path).read()
@@ -453,14 +393,9 @@ open(path, "w").write(src)
 PYSECTION13
 fi
 
-# --- 14: ask podman.sh's question, not the general one -----------------------
-# `utilities/podman.sh` requires `systemctl` and a working podman, but its own
-# comment says it only needs "/usr/bin/podman-host in the container image".
-# Asking that narrower question leaves host and real-SDK-container behaviour
-# unchanged and skips the requirement where there is no podman-host to reach.
 PODMANSH="$SDK/utilities/podman.sh"
 if [ -f "$PODMANSH" ]; then
-    py "$PODMANSH" <<'PYSECTION14'
+    py "$PODMANSH" <<'PYSECTION14'   # 14: ask podman.sh's own question
 import sys
 path = sys.argv[1]
 src = open(path).read()
@@ -507,9 +442,7 @@ open(path, "w").write(src)
 PYSECTION14
 fi
 
-# --- verify ------------------------------------------------------------------
-# One token per section that matters, matching text the section writes.
-fail=0
+fail=0                                  # one token per section that matters
 for token in \
     "additional-flags" \
     'program_options\["network"\]' \

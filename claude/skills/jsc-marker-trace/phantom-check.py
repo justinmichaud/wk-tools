@@ -1,11 +1,5 @@
 #!/usr/bin/env python3
-"""Detect samply/framehop phantom caller frames in a profile.
-
-A phantom frame is two ADJACENT physical frames (inlineDepth 0) in one stack that
-resolve to the SAME function -- the stale-link-register artifact around a bl into a
-frameless fragment. Also specifically flags the isRope->sweep seam. Reports the share
-of sampled stacks affected.
-"""
+"""Detect samply/framehop phantom caller frames -- two adjacent physical frames (inlineDepth 0) in one stack resolving to the same function, the stale-link-register artifact around a bl into a frameless fragment. Reports the share of sampled stacks affected, and the isRope->sweep seam by name."""
 import gzip, json, sys
 from collections import Counter
 
@@ -25,8 +19,7 @@ def fname(frame):
 def is_physical(frame):
     return (fdepth[frame] == 0) if isinstance(fdepth, list) else True
 
-# Build the physical-frame func sequence leaf->root for a stack index.
-def phys_funcs(si):
+def phys_funcs(si):   # leaf->root, one entry per physical frame
     seq = []
     while si is not None:
         fr = sframe[si]
@@ -35,8 +28,7 @@ def phys_funcs(si):
         si = prefix[si]
     return seq
 
-# Gather stacks that actually carry samples, weighted by sample count.
-sample_stacks = Counter()
+sample_stacks = Counter()   # only stacks a sample lands on, weighted by that count
 for t in d["threads"]:
     s = t["samples"]
     for si in s["stack"]:

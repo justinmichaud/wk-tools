@@ -40,24 +40,18 @@ wk_atexit par_cleanup
 
 worst=0
 
-# Everything below emits *records*, one JSON object per line, to fd 3 -- never
-# stdout, which the renderer (lib/status-view.py) owns. JSON Lines, not one
-# document, because a macOS listing is assembled from two processes and two line
-# streams concatenate where two JSON documents can't.
+# Everything below emits records to fd 3, never stdout, as JSON Lines: two line streams concatenate where two JSON documents cannot.
 
-# JSON string escaping in the shell, because the shell is what has the values.
 _jesc() {
     local s="$1"
-    # A raw ESC in a JSON string is unescapable and `json.loads` would reject
-    # the whole record. Walked, not pattern-substituted: a glob can't say
-    # "digits and semicolons until an m", and macOS's bash 3.2 has no extglob.
+    # A raw ESC is unescapable in a JSON string and `json.loads` would reject the
+    # record. Walked, not globbed: macOS's bash 3.2 has no extglob.
     local head tail
     while [ "${s#*$'\033'}" != "$s" ]; do
         head=${s%%$'\033'*}
         tail=${s#*$'\033'}
         tail=${tail#\[}
-        # Shortest prefix up to the first `m`. No `m` at all leaves tail
-        # unchanged, still ending the loop.
+        # No `m` at all leaves tail unchanged, still ending the loop.
         case "$tail" in *m*) tail=${tail#*m} ;; esac
         s="$head$tail"
     done
@@ -72,10 +66,8 @@ _jesc() {
 _rec=""
 _notes=""
 
-# `_notes` resets with the record: a note belongs to the one being built.
 rec_start() { _rec="{\"kind\":\"$1\""; _notes=""; }
 rec_set()   { _rec="$_rec,\"$1\":\"$(_jesc "${2:-}")\""; }
-# An empty string and an absent field mean different things to a renderer.
 rec_opt()   { [ -n "${2:-}" ] && rec_set "$1" "$2" || return 0; }
 rec_json()  { _rec="$_rec,\"$1\":$2"; }
 rec_emit()  {
@@ -90,11 +82,9 @@ note_warn() { _notes="$_notes${_notes:+,}{\"level\":\"warn\",\"text\":\"$(_jesc 
 _subs=""
 sub_add() { _subs="$_subs${_subs:+,}$1"; }
 
-# WK_ROW_LABEL is the name the asking machine knows this one by: inside the
-# podman VM, `hostname` answers `localhost`.
+# WK_ROW_LABEL is the name the asking machine knows this one by: inside the podman VM, `hostname` answers `localhost`.
 this_machine() { printf '%s' "${WK_ROW_LABEL:-$(wk_machine_name)}"; }
 
-# Not derivable from the name, so only the caller knows (WK_HOST_SELF).
 _is_self() { [ -n "${WK_HOST_SELF:-}" ] || [ -z "${WK_ROW_LABEL:-}" ]; }
 
 method_of() {
@@ -105,8 +95,6 @@ method_of() {
     esac
 }
 
-# A remote target *is* a machine; everything else is here. `t_ssh_host ""`
-# failing is the remote driver saying "this is the machine I am".
 machine_of() {
     if [ "$WK_TARGET_KIND" = remote ] && t_ssh_host "" >/dev/null 2>&1; then
         printf '%s' "$1"
@@ -118,8 +106,6 @@ machine_of() {
 # In a subshell, so the driver's overrides die with it.
 machine_of_target() { ( load_target "$1" >/dev/null 2>&1; machine_of "$1" ); }
 
-# One record per machine, so a machine with nothing on it still appears -- the
-# answer that says the podman machine is stopped rather than the workspaces gone.
 _machines_said=" "
 machine_seen() {
     local m="$1"
@@ -130,11 +116,9 @@ machine_seen() {
     if [ "$m" = "$(this_machine)" ] && _is_self; then
         rec_json self true
     else
-        # Computed rather than remembered (lib/reach.sh).
         rec_opt tailnet "$(reach_tailnet "$m")"
         rec_opt direct  "$(reach_without_tailnet "$m")"
     fi
-    # Relative to the checkout: an absolute path is one machine's layout.
     _conf=""
     _c=$(target_registry_conf "$m")
     [ -f "$_c" ] && _conf="${_c#$WK_ROOT/}"
@@ -159,9 +143,7 @@ report() {
     return 0
 }
 
-# Claude Code remote-control, if this workspace has ever had one. The pid names
-# a process `t_spawn` started *inside* the target, so liveness is asked through
-# `t_exec`, never a local `kill -0`.
+# The pid names a process `t_spawn` started inside the target, so liveness is asked through `t_exec`, never a local `kill -0`.
 report_claude_rc() {
     local ws="$1" sf pid
     sf="$(wk_ws_dir "$ws")/claude-rc.status"
@@ -175,26 +157,18 @@ report_claude_rc() {
     fi
 }
 
-# Every word is derived at read time (ws_state) except one: whether the process
-# claiming to create this is alive, which is not on disk.
 report_ws() {
     local ws="$1" st disp sf stage pid upd
     st=$(ws_state "$ws")
     sf=$(ws_status_file "$ws")
 
-    # `present` is the only state where the environment's own word adds
-    # anything; for the rest it *is* the answer.
     if [ "$st" = present ]; then disp=$(t_info "$ws"); else disp="$st"; fi
 
     rec_set state  "$disp"
     rec_set ws     "$st"
     rec_opt branch "$(t_branch "$ws")"
 
-    # A wrong `origin` is worth a line: it's how a push goes somewhere nobody
-    # intended.
     if [ "$st" = present ]; then
-        # ws_upstream_line goes along as text, so one round trip carries
-        # origin/dirty/drift and the base together.
         _ulfn=$(declare -f ws_upstream_line)
         _probe=$(t_exec "$ws" sh -c "cd $(sh_quote "$(t_src "$ws")") 2>/dev/null || exit 0
             printf 'origin=%s\n' \"\$(git config --get remote.origin.url 2>/dev/null)\"
@@ -223,7 +197,6 @@ report_ws() {
         done
     fi
 
-    # An image workspace's profile overrides whatever the checkout says.
     _wsbase=$(ws_image_base "$ws" 2>/dev/null) || _wsbase=""
     if [ -z "$_wsbase" ] && [ "$st" = present ]; then
         _wsbase=$(kv_get wsbase <<<"${_probe:-}")
@@ -231,14 +204,11 @@ report_ws() {
     fi
     rec_opt base "$_wsbase"
 
-    # The lower layer is pinned at creation, so `wk sync` did not change
-    # anything underneath it.
     _snap=$(ws_base_id "$ws" 2>/dev/null) || _snap=""
     if [ -n "$_snap" ]; then
         rec_set snap "$_snap"
         _cur=$(current_base 2>/dev/null) || _cur=""
         if [ -n "$_cur" ] && [ "$_cur" != "$_snap" ]; then
-            # Counted rather than dated: the timestamp is in the id already.
             _newer=$( { ls -1 "$(wk_base_dir)" 2>/dev/null || true; } \
                       | awk -v b="$_snap" '$0 > b' | wc -l | tr -d ' ')
             rec_set snap_behind "$_newer"
@@ -283,8 +253,7 @@ report_ws() {
     return 0
 }
 
-# The babysitter has a pid of its own on this host -- the detached loop -- so
-# liveness is the process, not the age of a log.
+# The babysitter has a pid of its own on this host, so liveness is the process rather than the age of a log.
 report_babysit() {
     local f="$1" state config model attempt max pid report
     state=$(awk -F= '/^state=/{print $2}' "$f")
@@ -329,19 +298,15 @@ report_one() {
         state=$(awk -F= '/^state=/{print $2}' "$status_file")
         peak=$(awk -F= '/^peak_mb=/{print $2}' "$status_file")
         config=$(awk -F= '/^config=/{print $2}' "$status_file")
-        # Recorded per build, not read from the workspace now.
         arch=$(awk -F= '/^arch=/{print $2}' "$status_file")
         secs=$(awk -F= '/^seconds=/{print $2}' "$status_file")
         rc=$(awk -F= '/^exit=/{print $2}' "$status_file")
         logf=$(awk -F= '/^log=/{print $2}' "$status_file")
     fi
 
-    # A 'running' status file is a claim, not a fact: the build may have been
-    # killed with -9. build_live (lib/detach.sh) turns it into evidence.
+    # A 'running' status file is a claim: the build may have been killed with -9.
     local age=""
     if [ "$state" = running ]; then
-        # log_age and its threshold are lib/detach.sh's, so `wk bench`'s
-        # preflight and this report agree on "is it running".
         [ -f "$logf" ] && age=$(log_age "$logf")
         build_live "$status_file" "$logf" || state=stalled
     fi
@@ -367,8 +332,6 @@ report_one() {
         ;;
     stalled)
         if [ -n "$age" ]; then
-            # Derived from a 'running' record the log's age contradicted, so a
-            # buffered listing doesn't put watchdog's diagnostic above this row.
             note_warn "no log output for ${age}s -- likely stalled or killed"
             while IFS= read -r _l; do note "$_l"; done \
                 < <(_stall_report "$logf" "$age" 2>&1)
@@ -377,7 +340,6 @@ report_one() {
         fi
         bump 3
         ;;
-    # The memory watchdog's verdict: the fix is a job count, not the code.
     oom)
         note_warn "killed for memory${peak:+ (peak ${peak}MB)}; see $logf"
         _lim=$(grep -a 'wk: MEMORY LIMIT' "$logf" 2>/dev/null | tail -1 | sed 's/^wk: //') || true
@@ -387,8 +349,7 @@ report_one() {
     esac
 }
 
-# A target that's a machine of its own answers for itself, through t_wk: a build
-# started from a shell over there is otherwise a confident `build=none`.
+# A target that is a machine of its own answers for itself: a build started from a shell over there is otherwise a confident `build=none`.
 delegate() {
     local rc=0 out a
     local -a args=() plain=()
@@ -397,14 +358,12 @@ delegate() {
         [ "$a" = --records ] || plain+=("$a")
     done
 
-    # Captured rather than streamed: what comes back has to be judged first.
     out=$( t_wk "${args[@]}" 2>/dev/null ) || rc=$?
     case "$out" in
         "{"*) printf '%s\n' "$out" >&3; return "$rc" ;;
     esac
 
-    # An older copy rejects `--records` as a workspace name, so it is asked
-    # again in the vocabulary it has.
+    # An older copy rejects `--records` as a workspace name, so it is asked again in the vocabulary it has.
     rc=0
     out=$( t_wk "${plain[@]}" 2>&1 ) || rc=$?
     if [ -n "$out" ]; then
@@ -419,9 +378,6 @@ delegate() {
     return "$rc"
 }
 
-# What a workspace here actually runs (t_sdk_local) against the newest tag the
-# registry publishes (t_sdk_upstream), capped like every other network probe. A
-# no-op wherever the container driver was never loaded.
 report_sdk_image() {
     local m="$1" info img tag pulled cap out newest
     command -v t_sdk_local >/dev/null 2>&1 || return 0
@@ -466,20 +422,15 @@ elif local in tags:
     rec_emit
 }
 
-# All local to the machine that reports it, so a machine answering for itself
-# answers this too.
 report_health() {
     local m="$1" line pid cmd at f n
 
-    # --- the store's disk
     if [ -d "$WK_STORE" ]; then
-        # `df` and not `du`: what matters is whether the next build fits.
         line=$(df -Pk "$WK_STORE" 2>/dev/null | awk 'NR==2 {print $2, $4, $5}')
         rec_start disk
         rec_set machine "$m"
         rec_set store   "$WK_STORE"
-        # A macOS host has two stores: the container one inside the podman VM,
-        # where builds actually fill a disk, and the host's own.
+        # A macOS host has two stores: the container one inside the podman VM, where builds fill a disk, and the host's own.
         rec_opt where "$([ -z "${WK_IN_VM:-}" ] || printf 'in the podman VM')"
         if [ -n "$line" ]; then
             rec_set total_mb "$(( $(printf '%s' "$line" | awk '{print $1}') / 1024 ))"
@@ -488,20 +439,15 @@ report_health() {
         fi
         n=$( { ls -1 "$(wk_base_dir)" 2>/dev/null || true; } | wc -l | tr -d ' ')
         rec_set snapshots "$n"
-        # What `wk gc` would take.
         n=$( { unreferenced_bases 2>/dev/null || true; } | wc -l | tr -d ' ')
         rec_set reclaimable "$n"
         [ "$n" = 0 ] || note "wk gc would reclaim $n snapshot(s)"
         rec_emit
     fi
 
-    # --- the container SDK image: the one container workspaces run on
     report_sdk_image "$m"
 
-    # --- the request broker: the one door out of the sandbox
-    # What's *in flight* is derived from the process table (`in_flight`,
-    # container/broker/wk-broker.py), since a `running` status file is a claim a
-    # killed broker leaves behind. Only from the machine itself.
+    # What is in flight comes from the process table (`in_flight`), since a `running` status file is a claim a killed broker leaves behind.
     local _bsock _brdir _bn=0 _brid _bst
     if [ -n "${WK_BROKER_SOCKET:-}" ]; then
         _bsock="$WK_BROKER_SOCKET"
@@ -535,7 +481,6 @@ report_health() {
         rec_emit
     fi
 
-    # --- the egress proxy, where there is one to have
     if have systemctl && systemctl --user cat wk-proxy.service >/dev/null 2>&1; then
         rec_start service
         rec_set machine "$m"
@@ -549,7 +494,6 @@ report_health() {
         rec_emit
     fi
 
-    # --- the locks this machine is holding right now
     for f in "$(wk_lock_dir)"/*.lock; do
         [ -e "$f" ] || continue
         line=$(readlink "$f" 2>/dev/null || cat "$f/payload" 2>/dev/null || true)
@@ -562,8 +506,7 @@ report_health() {
         rec_opt pid "$pid"
         rec_opt cmd "$cmd"
         rec_opt at  "$at"
-        # A lock is not state: it dies with its holder. One whose holder is gone
-        # breaks for the next taker -- looks exactly like one held.
+        # A lock dies with its holder, and one whose holder is gone looks exactly like one held.
         if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
             rec_json alive true
         else
@@ -572,10 +515,6 @@ report_health() {
         rec_emit
     done
 
-    # --- the credentials a push would need, in words
-    # Not the switch: what this machine *holds*, read from its own directories.
-    # The switch's position is the ssh-agent's and the injector's, neither of
-    # them a file -- asking would be a hop into the machine on every `wk status`.
     if [ -z "${WK_IN_VM:-}" ]; then
         local keys=0 absent=0 r
         for r in $(wk_push_forks | awk 'NF {print $1}'); do
@@ -596,8 +535,6 @@ report_health() {
         fi
     fi
 
-    # --- capacity: what decides where a build should go, from the same numbers
-    # this machine sizes a build from (lib/resources.sh)
     local _cap_cores _cap_mem _cap_free _cap_ok=1
     _cap_cores=$(host_cores 2>/dev/null)   || _cap_ok=""
     _cap_mem=$(host_mem_mb 2>/dev/null)    || _cap_ok=""
@@ -620,9 +557,7 @@ report_health() {
     fi
     rec_emit
 
-    # --- quiesced? the state a benchmark leaves a machine in
-    # WK_QUIESCE_STATE: the same override cmd/quiesce reads, a test hook
-    # tests/test_quiesce.py sets.
+    # The one cmd/quiesce writes; WK_QUIESCE_STATE is the hook tests/test_quiesce.py sets.
     local qs="${WK_QUIESCE_STATE:-$(wk_state_dir)/quiesce}"
     if [ -d "$qs" ]; then
         local bits=""
@@ -640,8 +575,6 @@ report_health() {
         fi
     fi
 
-    # --- benchmark tasks: every one running now, else the newest, with its state
-    # recomputed from its runs and "running" decided by its lock.
     if [ -d "$WK_STORE/bench" ]; then
         local t running="" shown="" newest=""
         for t in "$WK_STORE/bench"/*/task.json; do
@@ -673,8 +606,7 @@ report_health() {
 _tooling_said=""
 report_self() {
     local ver sha dirty
-    # Not twice: on Linux the container target *is* this machine and
-    # report_machine already said it; on macOS no walk produces this line.
+    # Not twice: on Linux the container target *is* this machine and report_machine already said it.
     [ -z "$_tooling_said" ] || return 0
     _tooling_said=1
     ver=$("$WK_ROOT/cmd/version" 2>/dev/null) || return 0
@@ -689,31 +621,20 @@ report_self() {
     rec_emit
 }
 
-# --no-fleet: the workspaces and nothing else, for the half of a listing
-# assembled by another machine. --no-devices: the machine facts, but not the
-# devices and bridges the podman VM can't reach over ssh.
+# --no-fleet: the workspaces alone, for the half of a listing another machine assembles. --no-devices: the machine facts without the devices and bridges.
 FLEET=1
 DEVICES=1
 if [ "${1:-}" = --no-fleet ]; then FLEET=""; DEVICES=""; shift; fi
 
-# How this listing is going to be looked at (one walk feeds all of them):
-#   web  the page, what a bare `wk status` means at a terminal   json  the records
-#   text plain aligned columns, what it means elsewhere          html  that as a page
-#   records  the raw stream, for whoever is assembling a bigger listing
-#
-# Called here, not substituted into the assignment: inside a substitution, "is
-# stdout a terminal" would ask about the pipe's, not this process's.
+# Called here, not in the assignment: inside a substitution, "is stdout a terminal" would ask about the pipe's.
 status_default_mode
 MODE="$WK_STATUS_DEFAULT_MODE"
-# Whether the view was *asked for* or merely defaulted to.
 MODE_ASKED=""
 RECORDS=""
 WEB_PORT="${WK_STATUS_PORT:-0}"
 WEB_INTERVAL="${WK_STATUS_INTERVAL:-20}"
 HTML_OUT=""
 
-# --wait: block until this workspace is not busy by polling `wk status` itself;
-# a timeout still reports "busy", not "failed".
 WAIT=""
 WAIT_TIMEOUT="${WK_WAIT_TIMEOUT:-0}"
 _args=""
@@ -723,7 +644,6 @@ while [ $# -gt 0 ]; do
         --no-devices) DEVICES=""; shift ;;
         --records)   RECORDS=1; shift ;;
         --json)      MODE=json; MODE_ASKED=1; shift ;;
-        # Named --text, not --no-web: negating a moving default rots.
         --text|--cli) MODE=text; MODE_ASKED=1; shift ;;
         --html)      MODE=html; MODE_ASKED=1
                      case "${2:-}" in -*|"") ;; *) HTML_OUT="$2"; shift ;; esac
@@ -746,18 +666,14 @@ done
 # shellcheck disable=SC2086 -- deliberate re-splitting of the collected words (at most one).
 set -- $_args
 
-# The dispatcher resolves $WK_NAME wherever it can and strips it there.
 [ -n "${1:-}" ] || set -- ${WK_NAME:+"$WK_NAME"}
 
-# Two shapes are not "look at the fleet", so the page default is withdrawn: one
-# named workspace, and --wait, whose line and exit code answer "is it finished".
+# One named workspace, and --wait, are not "look at the fleet", so the page default is withdrawn.
 if [ -z "$MODE_ASKED" ] && [ "$MODE" = web ] && { [ $# -gt 0 ] || [ -n "$WAIT" ]; }; then
     MODE=text
 fi
 
-# Raise the worst-so-far, folded into 0-4. A function, not `[ x -gt y ] &&
-# worst=x`, whose AND-OR form returns 1 when false and ends the walk under
-# `set -e`. Anything outside 0-4 folds to 4, never to 0.
+# A function, not `[ x -gt y ] && worst=x`, whose AND-OR form returns 1 when false and would end the walk under `set -e`.
 bump() {
     local v="$1"
     case "$v" in
@@ -768,8 +684,7 @@ bump() {
     return 0
 }
 
-# Two abbreviated commits, one a prefix of the other or not: `git rev-parse
-# --short` picks its own length per repository.
+# `git rev-parse --short` picks its own length per repository, so one abbreviation can be a prefix of the other.
 sha_matches() { # <a> <b>
     [ -n "$1" ] && [ -n "$2" ] || return 1
     case "$1" in "$2"*) return 0 ;; esac
@@ -785,7 +700,6 @@ report_machine() {
         keys=$( { t_wk key fingerprints  2>/dev/null || true; } | tr -d '\r' )
     elif [ "$label" = "$(default_target)" ]; then
         _tooling_said=1
-        # On a macOS host the container store lives in the podman VM.
         ver=$("$WK_ROOT/cmd/version"          2>/dev/null || true)
         keys=$("$WK_ROOT/cmd/key" fingerprints 2>/dev/null || true)
     else
@@ -795,9 +709,6 @@ report_machine() {
     if [ -n "$ver" ]; then
         sha=$(kv_get sha <<<"$ver")
         dirty=$(kv_get dirty <<<"$ver")
-        # Always by commit, against the machine the tooling comes *from*: every
-        # copy of this tree is a checkout (tools_push), or in the podman VM this
-        # very checkout mounted at /opt/wk-tools. A `-` sha differs.
         expect=$(git -C "$WK_ROOT" rev-parse --short HEAD 2>/dev/null || true)
         if sha_matches "$sha" "$expect"; then insync=true; else insync=false; fi
         rec_start fact
@@ -808,9 +719,6 @@ report_machine() {
         rec_json dirty  "$([ "$dirty" = yes ] && printf true || printf false)"
         rec_set expect  "$expect"
         rec_json insync "$insync"
-        # The podman VM's mount is this checkout, so a machine that disagrees
-        # was made without it; a build box takes a push by name; a peer pulls,
-        # which needs a committed, pushed tree here first.
         if [ "$insync" != true ]; then
             if [ -n "${WK_IN_VM:-}" ]; then
                 rec_set fix "./setup   (recreates the machine with this checkout mounted at /opt/wk-tools)"
@@ -841,8 +749,7 @@ $keys
 EOF
 }
 
-# Over the connection t_has_wk just opened (memoized). Remote's t_mem_mb is
-# MemAvailable, not a total, so only load, cores and free are ever printed.
+# Remote's t_mem_mb is MemAvailable, not a total, so only load, cores and free are printed.
 report_capacity_remote() {
     local m="$1" cores load mem
     rec_start capacity
@@ -859,18 +766,12 @@ report_capacity_remote() {
     rec_emit
 }
 
-# One line per fleet machine. Every machine is probed in its own subshell, all
-# at once, so no driver's overrides leak into the next. The ceiling is the
-# probe's own, not ssh's: `WK_SSH_TIMEOUT` doesn't reach a *jump* hop, and a
-# bridge with no known_hosts line can hang asking "are you sure".
+# The ceiling is the probe's own, not ssh's: `WK_SSH_TIMEOUT` does not reach a *jump* hop, and a bridge with no known_hosts line can hang asking "are you sure".
 report_fleet_device() {
     local m="$1" cap role
     cap=$(( ${WK_FLEET_TIMEOUT:-4} * 5 ))
-    # stdin from /dev/null so nothing down there can read the terminal, and a
-    # process group of its own (capped) so the kill reaches ssh too.
+    # stdin from /dev/null so nothing down there reads the terminal, and a process group of its own so the kill reaches ssh too.
     if capped "$cap" _fleet_probe "$m" </dev/null; then return 0; fi
-    # A machine dropped for time still gets a line: an omitted one reads as not
-    # in the fleet at all. Its role is declared rather than probed.
     role=$( . "$WK_ROOT/boot/machines.sh"
             machine_load "$m" >/dev/null 2>&1 && printf '%s' "${NODE_ROLE:-workstation}"
             true )
@@ -885,8 +786,6 @@ report_fleet_device() {
     return 0
 }
 
-# A fleet device has a tailnet node per role -- the rescue (NODE_SSH) and the
-# bench system (NODE_BENCH_SSH) -- so the line names each.
 fleet_tailnet() { # <machine>
     ( . "$WK_ROOT/boot/machines.sh"
       machine_load "$1" >/dev/null 2>&1 || exit 0
@@ -914,18 +813,12 @@ _fleet_probe() {
             b_probe 2>/dev/null
             case "${MODE:-unreachable}" in
                 host)    mode="host mode" ;;
-                # Told apart from an armed system by the medium the running root
-                # is on, or an unarmed board reads as benchmarkable.
                 base*)   mode="base image -- not a bench system" ;;
                 bench*)  mode="bench mode" ;;
-                # Naming the bridge is the difference between a dead end and a
-                # next command: the board may be off, or the segment behind it.
                 *)       mode="unreachable"
                          [ -z "${NODE_BRIDGE:-}" ] \
                              || mode="unreachable via $NODE_BRIDGE" ;;
             esac
-            # A record of intent on a machine still in host mode is the one
-            # transition worth shouting about here.
             armed=""
             if [ "${MODE:-}" = host ]; then
                 rec=$(record_read 2>/dev/null | kv_get image)
@@ -937,8 +830,6 @@ _fleet_probe() {
             armed=""
         fi
         media=$(b_media 2>/dev/null || printf 'unknown')
-        # Every reprovision recipe opens on NODE_PROFILE, so a conf missing it
-        # names the field rather than calling into a driver.
         if [ -z "${NODE_PROFILE:-}" ]; then
             reprov="missing NODE_PROFILE in boot/machines/$m.conf -- nothing to compose a recipe from"
         else
@@ -958,27 +849,19 @@ _fleet_probe() {
     )
 }
 
-# The bridges, from the same registry `wk bridge` reads. bridge_role_sum:
-# `bridge/provision.sh` installs bin/* and init.d/* byte for byte, so a checksum
-# of both sides answers "is this phone running today's role".
 bridge_role_sum() {
-    # bin first, then init.d, each sorted -- the order the probe uses on the
-    # phone, since the two directories share basenames.
+    # bin first, then init.d, each sorted -- the order the probe uses on the phone, since the two directories share basenames.
     ( cd "$WK_ROOT/bridge" 2>/dev/null || exit 0
       cat $(ls bin/* 2>/dev/null | sort) $(ls init.d/* 2>/dev/null | sort) 2>/dev/null \
         | cksum | awk '{print $1}' )
 }
 
-# Stderr-quiet for par_run: the probe's own ssh calls must not spill onto the
-# terminal mid-listing.
+# Stderr-quiet for par_run: a probe's ssh must not spill onto the terminal mid-listing.
 _bridge_probe_q() { _bridge_probe "$@" 2>/dev/null; }
 
-# One bridge, probed. Bounded and read-only, costs one ssh.
 _bridge_probe() {
     local n="$1" conf="$2" want="$3" out state="" role="" sum="" health="" line="" _bridge_script
-    # One round trip. Root first, then a non-interactive doas -- a provisioned
-    # bridge has root with the driving key, an unprovisioned one answers only as
-    # `user`. `doas -n` fails cleanly instead of asking for a tty.
+    # Root first, then `doas -n`: an unprovisioned bridge answers only as `user`, and `doas -n` fails cleanly instead of asking for a tty.
     _bridge_script='
         printf "reachable=yes\n"
         if [ -x /usr/local/sbin/wk-bridge-healthcheck ]; then
@@ -998,9 +881,7 @@ _bridge_probe() {
         else
             printf "role=no\n"
         fi'
-    # A ceiling larger than a fleet device's: the health check takes several
-    # seconds, and a probe killed mid-run loses everything (the remote shell
-    # buffers stdout when it's not a tty).
+    # A ceiling larger than a fleet device's: a probe killed mid-run loses everything, since the remote shell buffers stdout when it is not a tty.
     out=$( capped "${WK_BRIDGE_TIMEOUT:-20}" ssh -o BatchMode=yes -l root \
              -o ConnectTimeout="${WK_FLEET_TIMEOUT:-4}" "$n" "$_bridge_script" 2>/dev/null ) || out=""
     case "$out" in
@@ -1030,11 +911,8 @@ _bridge_probe() {
         rec_set state "no bridge role"
         note_warn "it answers, and nothing on it is a bridge -- 'wk bridge setup $n' provisions it"
     else
-        # The exit status is the verdict and the last line the reason.
         case "${health:-1}:$line" in
             0:*)   rec_set state "up" ;;
-            # Not about the bridge but about this end's route to it: the check
-            # needs root or a non-interactive doas.
             *doas*|*sudo*|*"not permitted"*|*"Authentication required"*)
                    rec_set state "role installed"
                    note_warn "its health check needs root and this end has no
@@ -1052,7 +930,6 @@ _bridge_probe() {
     rec_emit
 }
 
-# In parallel: the wall cost is one bounded probe, not one per phone.
 report_bridges() {
     local dir f n dev seg note want
     dir="$WK_ROOT/bridge/hosts"
@@ -1072,13 +949,11 @@ report_bridges() {
     return 0
 }
 
-# Stderr-quiet wrapper around report_fleet_device, for par_run.
 _fleet_device_q() { report_fleet_device "$@" 2>/dev/null; }
 
 report_fleet_devices() {
     [ -f "$WK_ROOT/boot/machines.sh" ] || return 0
-    # Not from inside a workspace: the fleet is the host's, and a sandbox with
-    # no network would spend five probe timeouts saying so.
+    # Not from inside a workspace: a sandbox with no network would spend five probe timeouts saying so.
     ! in_workspace || return 0
     local m
     par_begin
@@ -1090,8 +965,6 @@ report_fleet_devices() {
     return 0
 }
 
-# The waiting half: it drives this same command and then falls through to print
-# the final row exactly once.
 if [ -n "$WAIT" ]; then
     _interval="${WK_WAIT_INTERVAL:-5}"
     _waited=0
@@ -1114,8 +987,6 @@ if [ -n "$WAIT" ]; then
     done
 fi
 
-# This machine's targets first, and within a machine the container store before
-# the guests. `walk_targets`'s own order is not this.
 order_targets() {
     local t
     for t in "$@"; do
@@ -1128,9 +999,7 @@ order_targets() {
     done | sort -k1,1 -k2,2 | awk '{print $2}'
 }
 
-# Which target reports this machine's own health, decided before the walk forks:
-# on Linux the container and vm targets are both this machine, so whichever gets
-# there first in a parallel walk isn't a decision.
+# Decided before the walk forks: on Linux the container and vm targets are both this machine, so whichever answers first is not a decision.
 health_owner() {
     local t
     for t in $(order_targets "$@"); do
@@ -1144,8 +1013,7 @@ health_owner() {
     return 0
 }
 
-# The two group fields travel in globals because `report` is called per
-# workspace from three places.
+# In globals because `report` is called per workspace from three places.
 _group_machine=""
 _group_method=""
 _health_owner=""
@@ -1156,7 +1024,6 @@ report_target() {
     machine_seen "$_group_machine"
 
     if t_has_wk; then
-        # See delegate() for the older-copy fallback.
         WK_ROW_LABEL="$t" WK_NO_DELEGATE=1 \
             delegate status --no-fleet --records || rc=$?
         bump "$rc"
@@ -1170,15 +1037,12 @@ report_target() {
     if [ -n "${2:-}" ]; then
         report "$2"
     else
-        # One workspace's row costs one exec into the container or guest that
-        # holds it. Those execs share nothing, so run them in parallel.
         par_begin
         for ws in $(target_workspaces); do par_run "$ws" _report_ws_par "$ws"; done
         par_join
     fi
     if [ -n "$FLEET" ]; then
         report_machine "$t"
-        # The walk is the only place that knows we are on this machine.
         if [ "$_group_machine" = "$(this_machine)" ] && [ "$t" = "$_health_owner" ]; then
             report_self
             report_health "$_group_machine"
@@ -1187,12 +1051,9 @@ report_target() {
     return 0
 }
 
-# One workspace, in a process of its own. Its verdict crosses back as the job's
-# status (lib/par.sh).
 _report_ws_par() { report "$1"; return "$worst"; }
 
-# A driver overrides shell functions, so the first driver's t_branch answering
-# for the second target's workspaces would be a plausible-looking wrong answer.
+# A driver overrides shell functions, so one driver's t_branch answering for another target's workspaces would be a plausible-looking wrong answer.
 _report_target_par() {
     local t="$1"
     load_target "$t"
@@ -1200,49 +1061,33 @@ _report_target_par() {
     return "$worst"
 }
 
-# The fleet devices and the bridges, as one more par_run job in collect()'s batch.
 _devices_par() {
     report_fleet_devices
     report_bridges
     return "$worst"
 }
 
-# The walk is a function so that every mode runs the *same* walk: a terminal, a
-# browser and `--json` differ only in what they do with fd 3.
 collect() {
     if [ -n "${1:-}" ]; then
-        # In a workspace there is one workspace and it is this machine.
         require_name "$1"
         TARGET="$(ws_target "$1")"
         load_target "$TARGET"
-        # One workspace was asked about, so the machine's tooling and keys are
-        # not the question.
         FLEET=""
         report_target "$TARGET" "$1"
     else
         _TARGETS=$(walk_targets)
 
-        # Every machine asked at once, before the first record is written; the
-        # walk below finds them already answered (prefetch_targets).
         # shellcheck disable=SC2086 -- deliberate word splitting of the target list.
         prefetch_targets $_TARGETS
         wk_atexit prefetch_done
 
-        # The boards and the phones are one more job in the same batch as the
-        # targets, and run inside that one job in step, because a bridged board
-        # is reached *through* the same phone the bridge block ssh's into.
-        # Started after the prefetch, not beside it: the two contend for the
-        # resolver, and a wedged one serialises lookups a warm one answers
-        # instantly.
+        # Started after the prefetch, not beside it: the two contend for the resolver, and a wedged one serialises lookups a warm one answers instantly.
         # shellcheck disable=SC2086 -- deliberate word splitting of the target list.
         _health_owner=$(health_owner $_TARGETS)
 
         # shellcheck disable=SC2086 -- same, and order_targets takes them as words.
         par_begin
         for TARGET in $(order_targets $_TARGETS); do
-            # A placeholder a streaming reader can show while this one is still
-            # in flight, named for the target -- for a remote one *is* the
-            # machine name, so the real block answers to the same.
             printf '{"kind":"probing","name":"%s","machine":"%s"}\n' \
                 "$(_jesc "$TARGET")" "$(_jesc "$(machine_of_target "$TARGET")")" >&3
             par_run "$TARGET" _report_target_par "$TARGET"
@@ -1253,49 +1098,39 @@ collect() {
         par_join_stream
     fi
 
-    # The exit status, in the stream: a listing assembled from two machines'
-    # records has to carry the worst of them rather than the last.
+    # In the stream: a listing assembled from two machines carries the worst of them, not the last.
     rec_start exit
     rec_json code "$worst"
     rec_emit
 }
 
-# `--records`: the stream itself, for whoever is assembling a bigger listing --
-# the other half of a macOS run (bare_report in `wk`), or the machine that asked
-# this one to answer for itself. Renders nothing.
+# `--records`: the stream itself, for whoever assembles a bigger listing -- the other half of a macOS run (bare_report in `wk`). Renders nothing.
 if [ -n "$RECORDS" ]; then
     exec 3>&1
     collect ${1:+"$1"}
     exit "$worst"
 fi
 
-# json/html/web want the whole listing before they say anything; the text
-# renderer starts on whatever has landed so far (lib/status-view.py). A fifo
-# instead of a plain file makes that possible without a second collection path:
-# `collect` keeps running in the background, since a fifo open for writing
-# blocks until something is reading it.
+# A fifo, not a plain file: the text renderer starts on whatever has landed, and `collect` keeps writing from the background because opening a fifo for writing blocks until a reader arrives.
 _recs_dir=$(mktemp -d "${TMPDIR:-/tmp}/wk-status.XXXXXX")
 _recs="$_recs_dir/records"
 mkfifo "$_recs"
 _recs_cleanup() { rm -rf "$_recs_dir"; }
 wk_atexit _recs_cleanup
 
-( # A fork's atexit state is a copy of this process's, so this subshell's
-  # own exit also runs `_recs_cleanup`. Harmless: an unlink while a reader
-  # still has the fifo open does not disturb it.
+( # A fork's atexit copy makes this subshell's own exit run _recs_cleanup too;
+  # an unlink while a reader still has the fifo open does not disturb it.
   exec 3> "$_recs"
   collect ${1:+"$1"}
   exit "$worst"
 ) </dev/null &
 _collect_pid=$!
 
-# The port, interval and output path travel as environment, not arguments,
-# because `wk` renders too (bare_report) without having parsed them.
+# As environment, not arguments: `wk` renders too (bare_report) without having parsed them.
 WK_STATUS_PORT="$WEB_PORT" WK_STATUS_INTERVAL="$WEB_INTERVAL" \
     WK_STATUS_HTML_OUT="$HTML_OUT" status_render "$MODE" "$_recs"
 
-# `collect` ran in its own subshell (mandatory for the fifo not to deadlock), so
-# its `worst` comes back the only way a subshell can: its exit status.
+# `collect` ran in its own subshell (the fifo demands it), so its `worst` comes back as an exit status.
 rc=0; wait "$_collect_pid" || rc=$?
 bump "$rc"
 exit "$worst"

@@ -1,13 +1,5 @@
 #!/bin/sh
-# Build a postmarketOS system with pmbootstrap. Runs on a Linux aarch64
-# machine, over ssh from image/pmos.sh, which copies this file there:
-# pmbootstrap is Linux-only and needs root (loop devices, chroots, kpartx).
-# aarch64 so pmbootstrap never starts qemu; anything else is refused.
-#
-# Every PMO_* input comes from the environment, set by image/profiles.sh
-# through image/pmos.sh. PMO_PASSWORD is plain text on purpose (see the
-# --password comment below); PMO_ROOT is where the venv, the pmbootstrap work
-# folder and the output go.
+# Build a postmarketOS system with pmbootstrap, on the machine image/pmos.sh copies this to: pmbootstrap is Linux-only, needs root (loop devices, chroots, kpartx), and on aarch64 never starts qemu.
 set -eu
 
 : "${PMO_ID:?}"; : "${PMO_DEVICE:?}"; : "${PMO_CHANNEL:?}"; : "${PMO_PMB_VERSION:?}"
@@ -31,9 +23,7 @@ info() { printf '    %s\n' "$*"; }
 warn() { printf '    WARN: %s\n' "$*"; }
 die()  { printf '    ERROR: %s\n' "$*" >&2; exit 1; }
 
-# The build host roams WiFi between two APs on one SSID, so a brief drop fails
-# a fetch minutes into an hours-long build.
-retry() {
+retry() {  # the build host roams between two APs on one SSID, and a brief drop fails a fetch hours in
     n=0
     while :; do
         "$@" && return 0
@@ -51,9 +41,7 @@ arch=$(uname -m)
     pmbootstrap would emulate the whole build with qemu -- hours instead of
     minutes -- so this refuses. Build on an aarch64 machine."
 
-# pmbootstrap's error for a missing program names the program, not the
-# package; for `kpartx` those differ.
-missing=""
+missing=""  # pmbootstrap names the missing program, not its package; for kpartx those differ
 for t in python3 git xz; do
     command -v "$t" >/dev/null 2>&1 || missing="$missing $t"
 done
@@ -68,9 +56,7 @@ sudo -n true 2>/dev/null || die "sudo needs a password here.
     non-interactively without passwordless sudo."
 [ -r "$PMO_KEYFILE" ] || die "no public key at $PMO_KEYFILE"
 
-# From a pinned git tag, in a venv of its own: every PyPI release is yanked
-# (1.0.1 through 2.1.0 -- `pip install pmbootstrap` fails with "no matching
-# distribution") and Ubuntu carries no package.
+# A pinned git tag in a venv of its own: every PyPI release is yanked (1.0.1 through 2.1.0) and Ubuntu has no package.
 step "pmbootstrap $PMO_PMB_VERSION"
 have_ver=""
 [ -x "$PMB" ] && have_ver=$("$PMB" --version 2>/dev/null || true)
@@ -85,9 +71,6 @@ else
     info "installed $("$PMB" --version)"
 fi
 
-# Not `pmbootstrap init`, which prompts for the work path before reading
-# anything and whose `-y` only suppresses "are you sure". What it does that
-# matters is a version file and a pmaports clone.
 step "Work folder"
 WORK_VERSION=8
 if [ ! -d "$WORK" ]; then
@@ -95,19 +78,12 @@ if [ ! -d "$WORK" ]; then
     printf '%s\n' "$WORK_VERSION" > "$WORK/version"
     info "created $WORK (version $WORK_VERSION)"
 elif [ ! -f "$WORK/version" ]; then
-    # pmbootstrap refuses to migrate a work folder with no version file ("we
-    # can't migrate that automatically"), which an empty directory left by a
-    # failed run looks exactly like.
+    # pmbootstrap refuses to migrate a work folder with no version file, which a failed run's empty directory looks like.
     printf '%s\n' "$WORK_VERSION" > "$WORK/version"
     info "stamped $WORK with version $WORK_VERSION"
 fi
 
-# pmaports on the channel's branch, with `origin/master` fetched as well:
-# pmbootstrap reads channels.cfg from `origin/master` while pmaports' default
-# branch is `main`, so a single-branch clone resolves no channel at all
-# ("Failed to read channels.cfg from 'origin/master'"). The channel must also
-# be one channels.cfg lists -- `v26.06` is a branch but not a released
-# channel, and picking it gets a KeyError.
+# pmbootstrap reads channels.cfg from `origin/master` while pmaports' default branch is `main`, so a single-branch clone resolves no channel; and the channel must be one channels.cfg lists, not merely a branch.
 step "pmaports ($PMO_CHANNEL)"
 if [ ! -d "$APORTS/.git" ]; then
     mkdir -p "$(dirname "$APORTS")"
@@ -117,9 +93,7 @@ fi
 cd "$APORTS"
 retry git fetch -q --depth 1 origin "+refs/heads/master:refs/remotes/origin/master" \
     || die "could not fetch pmaports' master ref (channels.cfg lives there)"
-# Into the tracking ref, then `checkout -B` off it: git refuses to fetch
-# straight into refs/heads/<channel> while that branch is checked out, which it
-# is on every run after the first.
+# Into the tracking ref, then `checkout -B`: git refuses to fetch straight into refs/heads/<channel> while it is checked out.
 retry git fetch -q --depth 1 origin "+refs/heads/$PMO_CHANNEL:refs/remotes/origin/$PMO_CHANNEL" \
     || die "could not fetch the $PMO_CHANNEL branch of pmaports"
 git checkout -q -B "$PMO_CHANNEL" "refs/remotes/origin/$PMO_CHANNEL"
@@ -131,11 +105,7 @@ $( (cd "$APORTS" && git show origin/master:channels.cfg) | sed -n 's/^\[\(v[0-9.
 APORTS_REV=$(cd "$APORTS" && git rev-parse --short HEAD)
 info "pmaports $PMO_CHANNEL @ $APORTS_REV"
 
-# `aports` does not follow `work`: left out, pmbootstrap looks for pmaports
-# under the default work folder (~/.local/var/pmbootstrap) and reports
-# "pmaports dir not found" about a path nothing was put in.
-#
-# systemd = never: the bridge role is written in OpenRC service files.
+# `aports` does not follow `work`: left out, pmbootstrap looks under ~/.local/var/pmbootstrap. systemd = never, the bridge role being OpenRC.
 step "Config"
 cat > "$CFG" <<EOF
 # Written by image/pmos-build.sh for $PMO_ID. Edit the profile, not this.
@@ -152,30 +122,9 @@ systemd = never
 EOF
 info "$CFG"
 
-# --no-firewall because the bridge role owns the firewall (its own nftables
-# table, packaged service disabled). --password is pmbootstrap's automation
-# dummy, in plain text and logged: it is the console password on the phone's
-# own screen, and bridge/provision.sh turns password auth off. --no-split
-# gives one combined image file.
-#
-# Shut down what the last run left behind first: pmbootstrap leaves its chroots
-# bind-mounted and the previous image on a loop device ("chroot is still
-# active"), and the next install then fails at `mkfs.ext4 ... /dev/installp2`
-# on a mapping belonging to the old image. After Config, because the checksum
-# run below needs the config file Config wrote.
+# --password is pmbootstrap's automation dummy, logged in plain text: it is the console password on the phone's own screen, and bridge/provision.sh turns password auth off.
 
-# The kernel config delta: a profile may declare kernel options its device
-# needs and pmOS does not set (PMO_KCONFIG, PMO_KERNEL_APORT,
-# image/profiles.sh). Applied after the checkout above, since `git checkout -B`
-# resets the tree every run, and three things have to happen together:
-#
-#   the option     replaced in place whether pmOS spells it `# ... is not
-#                  set` or assigns it something else, appended if absent.
-#   the checksums  the APKBUILD's sha512sums cover the config file, so
-#                  editing it makes abuild stop with "Use 'abuild checksum'".
-#   pkgrel         bumped by a lot, or pmbootstrap reuses the previous build's
-#                  identical-version apk. +100 keeps a patched kernel
-#                  distinguishable from stock by version alone.
+# PMO_KCONFIG's options are applied after the checkout, which resets the tree every run; the APKBUILD's sha512sums cover the config, and pkgrel jumps 100 or pmbootstrap reuses the stock apk.
 if [ -n "${PMO_KCONFIG:-}" ]; then
     step "Kernel config delta ($PMO_KERNEL_APORT)"
     [ -n "${PMO_KERNEL_APORT:-}" ] \
@@ -183,8 +132,7 @@ if [ -n "${PMO_KCONFIG:-}" ]; then
     KDIR="$APORTS/$PMO_KERNEL_APORT"
     [ -d "$KDIR" ] || die "no such aport in pmaports $PMO_CHANNEL: $PMO_KERNEL_APORT"
 
-    # Globbed rather than `ls | head -1`, which SIGPIPEs under pipefail;
-    # there is one config per architecture.
+    # Globbed rather than `ls | head -1`, which SIGPIPEs under pipefail.
     KCFG=""
     for f in "$KDIR"/config-*.aarch64; do
         [ -f "$f" ] && { KCFG="$f"; break; }
@@ -193,9 +141,7 @@ if [ -n "${PMO_KCONFIG:-}" ]; then
 
     for opt in $PMO_KCONFIG; do
         name=${opt%%=*}
-        # Read *before* editing, or what is printed as the old value is the
-        # one that was just written.
-        was=$(sed -n "s/^$name=/=/p;s/^# $name is not set\$/unset/p" "$KCFG" | tr '\n' ' ')
+        was=$(sed -n "s/^$name=/=/p;s/^# $name is not set\$/unset/p" "$KCFG" | tr '\n' ' ')  # before editing, or the "old" value is the new one
         if grep -q "^$name=" "$KCFG" 2>/dev/null; then
             sed -i "s|^$name=.*|$opt|" "$KCFG"
             info "$opt (was ${was:-something else})"
@@ -210,8 +156,7 @@ if [ -n "${PMO_KCONFIG:-}" ]; then
             || die "could not apply $opt to $(basename "$KCFG")"
     done
 
-    # pkgrel before the checksums: the checksum run reads the APKBUILD.
-    KREL=$(sed -n 's/^pkgrel=\([0-9]*\)$/\1/p' "$KDIR/APKBUILD" | tail -1)
+    KREL=$(sed -n 's/^pkgrel=\([0-9]*\)$/\1/p' "$KDIR/APKBUILD" | tail -1)  # before the checksums: that run reads the APKBUILD
     [ -n "$KREL" ] || die "could not read pkgrel from $KDIR/APKBUILD"
     sed -i "s/^pkgrel=$KREL\$/pkgrel=$((KREL + 100))/" "$KDIR/APKBUILD"
     info "pkgrel $KREL -> $((KREL + 100)), so the cached stock package cannot win"
@@ -226,25 +171,20 @@ step "Shutting down any previous chroot"
 "$PMB" -c "$CFG" -y shutdown >/dev/null 2>&1 || warn "pmbootstrap shutdown reported a problem; continuing"
 
 step "pmbootstrap install ($PMO_DEVICE, $PMO_UI, +${PMO_EXTRA_SPACE}M)"
-# The artifacts, not the directory: $OUT holds this run's log, so `rm -rf
-# "$OUT"` unlinks it mid-run.
-mkdir -p "$OUT"
+mkdir -p "$OUT"  # the artifacts below, not the directory: $OUT holds this run's log
 rm -f "$OUT/disk.wic.xz" "$OUT/disk.bmap" "$OUT/result"
 add=""
 [ -n "$PMO_PACKAGES" ] && add="--add $PMO_PACKAGES"
 # shellcheck disable=SC2086
 "$PMB" -c "$CFG" -y -E "$PMO_EXTRA_SPACE" --details-to-stdout install \
     --no-split --no-firewall --password "$PMO_PASSWORD" $add \
-    || {
-        # pmbootstrap's traceback names the failed command without its
-        # output; the reason is in its own log.
+    || {  # pmbootstrap's traceback names the failed command without its output
         warn "pmbootstrap install failed; the last 40 lines of its own log:"
         tail -40 "$WORK/log.txt" 2>/dev/null | sed 's/^/    | /'
         die "pmbootstrap install failed (its log: $WORK/log.txt on this host)"
     }
 
-# The loop device the install used is still attached to the image.
-step "Shutting down the chroot"
+step "Shutting down the chroot"  # the loop device the install used is still attached to the image
 "$PMB" -c "$CFG" -y shutdown >/dev/null 2>&1 || warn "pmbootstrap shutdown reported a problem; continuing"
 
 img=$(find "$WORK/chroot_native/home/pmos/rootfs" -maxdepth 1 -name "$PMO_DEVICE.img" 2>/dev/null | head -1)
@@ -252,10 +192,7 @@ img=$(find "$WORK/chroot_native/home/pmos/rootfs" -maxdepth 1 -name "$PMO_DEVICE
 [ -n "$img" ] || die "pmbootstrap reported success but no $PMO_DEVICE.img is under $WORK"
 info "image: $img ($(du -h "$img" | cut -f1))"
 
-# pmbootstrap embeds each device's firmware into the image at the offset the
-# device declares ("Embed firmware u-boot/... at offset 8 with step size 1024"),
-# in units of 1024 bytes, not sectors. All that is left is to read back the
-# byte the boot ROM will read.
+# pmbootstrap embeds each device's firmware at the offset the device declares, in units of 1024 bytes, not sectors.
 step "Checking the bootloader pmbootstrap embedded"
 DEVICEINFO=$(find "$APORTS/device" -name deviceinfo -path "*device-$PMO_DEVICE/*" | head -1)
 [ -n "$DEVICEINFO" ] || die "no deviceinfo for $PMO_DEVICE under $APORTS/device"
@@ -263,9 +200,7 @@ embed=$(sed -n 's/^deviceinfo_sd_embed_firmware="\(.*\)"$/\1/p' "$DEVICEINFO")
 fw_step=$(sed -n 's/^deviceinfo_sd_embed_firmware_step_size="\{0,1\}\([0-9]*\).*/\1/p' "$DEVICEINFO")
 case "$fw_step" in ''|*[!0-9]*) fw_step=1024 ;; esac
 
-if [ -z "$embed" ]; then
-    # Some devices are flashed over fastboot or uuu, where an image with no
-    # embedded firmware is correct.
+if [ -z "$embed" ]; then  # a device flashed over fastboot or uuu is right to carry none
     warn "$PMO_DEVICE declares no sd_embed_firmware: this image carries no"
     warn "  bootloader of its own, and a card written from it boots only if the"
     warn "  device finds firmware somewhere else."
@@ -283,15 +218,7 @@ else
     done
 fi
 
-# Two things pmbootstrap cannot put in, both about the phone being reachable at
-# first boot: the WiFi credential (the uplink is WiFi) and avahi enabled (until
-# `wk bridge setup` runs `tailscale up` there is no tailnet name and no knowable
-# address, so <hostname>.local is the whole of first contact).
-#
-# The credential is read from this host's own connection, so the PSK never
-# travels through a log, command line, or agent context. The bssid is not
-# copied: two APs on one SSID here, and a pinned bssid turns a roam into an
-# outage.
+# The WiFi credential and avahi are what pmbootstrap cannot put in, and until `wk bridge setup` runs `tailscale up` <hostname>.local is the whole of first contact. The PSK is read from this host's own connection, so it travels through no log; no bssid is copied, two APs sharing one SSID.
 step "Seeding the image"
 keyfile=$(mktemp)
 chmod 600 "$keyfile"
@@ -314,12 +241,7 @@ for doc in docs:
             print("[wifi]")
             print("mode=infrastructure")
             print("ssid=%s" % ssid)
-            # The hardware MAC, not the random one NetworkManager uses by
-            # default: a stable MAC holds a DHCP reservation and is recognised
-            # by whatever filters devices, where a randomised one arrives as a
-            # new unknown device on every association.
-            # (No apostrophes in here: this block is inside a single-quoted
-            # shell string, and one apostrophe ends it.)
+            # A stable MAC holds a DHCP reservation. (No apostrophes in here: single-quoted shell string.)
             print("cloned-mac-address=permanent")
             print("")
             print("[wifi-security]")
@@ -342,8 +264,6 @@ ssid=$(sed -n 's/^ssid=//p' "$keyfile")
 loop=$(sudo -n losetup --show -P -f "$img")
 trap 'sudo -n umount "$OUT/mnt" 2>/dev/null || true; sudo -n losetup -d "$loop" 2>/dev/null || true; rm -f "$keyfile"' EXIT INT TERM
 mkdir -p "$OUT/mnt"
-# Partition 2 is the root on both phones' layouts (boot is 1), checked below:
-# seeding the boot partition instead would leave the phone with no uplink.
 sudo -n mount "${loop}p2" "$OUT/mnt" || die "could not mount ${loop}p2"
 [ -d "$OUT/mnt/etc/NetworkManager" ] \
     || die "${loop}p2 has no /etc/NetworkManager -- that is not the rootfs"
@@ -352,15 +272,7 @@ sudo -n install -o 0 -g 0 -m 0600 "$keyfile" \
     "$OUT/mnt/etc/NetworkManager/system-connections/wk-uplink.nmconnection"
 info "uplink: $ssid (the PSK stayed on this host)"
 
-# The same ssh key for root: pmbootstrap's `ssh_keys`/`ssh_key_glob` install
-# it for the console user only, who cannot become root without a password
-# (doas prompts), and `wk bridge setup` is non-interactive over ssh. sshd's
-# `prohibit-password` permits exactly the holder of this key, and
-# bridge/provision.sh turns password auth off again explicitly.
-#
-# `sudo -n test`, not a bare test: pmbootstrap's account .ssh is mode 700 owned
-# by the image's own uid, so `[ -f ... ]` comes back false on a file that is
-# plainly there.
+# The same key for root: pmbootstrap installs it for the console user only, who needs a password to become root, and `wk bridge setup` is non-interactive. `sudo -n test` because that .ssh is 700 owned by the image.
 if sudo -n test -f "$OUT/mnt/home/$PMO_USER/.ssh/authorized_keys"; then
     sudo -n install -d -o 0 -g 0 -m 0700 "$OUT/mnt/root/.ssh"
     sudo -n install -o 0 -g 0 -m 0600 \
@@ -373,16 +285,7 @@ else
     warn "  the console user cannot become root without typing a password."
 fi
 
-# The two settings a fresh phone must already have to be reachable.
-# bridge/provision.sh applies them too, but over ssh -- which a phone that
-# needs them to answer ssh can never receive.
-#
-#   power save    the RTL8723CS powers its RF side down when idle and misses
-#                 frames aimed at it, though it can still *initiate* -- known-
-#                 broken upstream, with distro patches whose only job is
-#                 disabling it.
-#   never sleep   an unprovisioned phone idles off the network in a few
-#                 minutes, taking the uplink with it.
+# bridge/provision.sh applies these too, but over ssh -- which a phone needing them to answer ssh cannot receive. The RTL8723CS misses frames aimed at it when its RF side idles, and an unprovisioned phone sleeps.
 sudo -n install -d -o 0 -g 0 -m 0755 "$OUT/mnt/etc/NetworkManager/conf.d"
 printf '%s\n' \
     '# Written into the image by image/pmos-build.sh. bridge/provision.sh writes' \
@@ -431,9 +334,7 @@ rm -f "$keyfile"
 trap - EXIT INT TERM
 rmdir "$OUT/mnt"
 
-# Compressed because this comes back over WiFi and a phone image is mostly
-# empty space; the driving end decompresses and deletes it.
-step "Compression"
+step "Compression"  # it comes back over WiFi and a phone image is mostly empty space
 raw_bytes=$(stat -c %s "$img")
 raw_sha=$(sha256sum "$img" | cut -d' ' -f1)
 xz -T0 -3 -c "$img" > "$OUT/disk.wic.xz" || die "could not compress $img"

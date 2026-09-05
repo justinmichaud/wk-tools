@@ -32,22 +32,27 @@ NEEDS YOU
    information."* `claude auth login` here, then
    `wk key set claude-login --replace`. [yours to run]
 
-4. `wk vm base --rebuild` refuses on an uncommitted tree, so the guest half of
-   the live checks is blocked until this session's work is committed. The
-   refusal now comes before anything is destroyed (cmd/vm). [yours to run]
+4. `wk vm base --refresh` on the golden base. The base was rebuilt 2026-09-04
+   (90 min, prebuild 73 min, marker inputs=af1b0526cb18f6e6) and reports ok,
+   but two things want a refresh: its screen lock is probably still on, since
+   it was provisioned by the code that tried to set the password to `1` and
+   vm/desktop.sh only unlocks when `dscl . -authonly` succeeds; and the comment
+   pass edited the three scripts _base_inputs_hash digests, so it now reads
+   stale on prose alone. A refresh clears both. [yours to run]
 
 ================================================================================
 OWED, WITH THE DECISION ALREADY MADE
 ================================================================================
 
-- The comment pass, second round, to the standard you set: help text concise
-  and in standard technical documentation style, and **code bodies under 5%
-  comments**, with variable names and structure carrying what prose carries
-  today. The first round took the tree from 35% to 24% treating contract and
-  failure-mode prose as protected; that protection is what you have just
-  withdrawn. `cmd/verify` (23%) and `container/proxy/github-inject.py` (7% of
-  `#` lines, 25% counting docstrings) are the two files a change this session
-  touched and left above the bar.
+- The comment pass, second round: DONE 2026-09-04. The tree went 23.9% -> 4.6%
+  (12,725 deletions), and tests/test_comment_density.py now measures it, so it
+  cannot drift back a third time. Data is not prose there: heredoc bodies and
+  string contents are excluded (shell scanned heredoc-aware, python through
+  `tokenize`), a cmd/* file's leading block is help text, `# wk:`/shellcheck/
+  noqa are directives, and a symlink is measured once at its target. The three
+  privileged helpers and admin/install.sh are exempt BY NAME: their comments
+  state the grant boundary, which is the artifact a reviewer reads.
+  cmd/verify 25.4% -> 3.5%, container/proxy/github-inject.py 31.7% -> 3.0%.
 
 - Every live check below is unrun: the tree was under edit until now. In order:
       wk sync --tools container
@@ -71,13 +76,18 @@ OWED, WITH THE DECISION ALREADY MADE
   <ws> --rc` starts and survives 60s. A workspace made before this keeps its
   old ~/.ssh/config; one `wk rm`/`wk new` converges it.
 
-- `wk vm base --rebuild` (hours), then on a guest: the rebuild itself, the
-  guest mirror's first fetch, the password becoming `1`, the gitconfig include
-  provisioning installs, `wk vm check`'s resident shells / editor server
-  report, which Software Update key a tahoe guest obeys (TODO in
-  vm/desktop.sh), guest egress (TODO in cmd/verify), and one `claude auth
-  login` inside a guest to confirm it lands in `~/.claude-login` rather than a
-  Keychain item.
+- On a guest (the base itself is rebuilt; see NEEDS YOU 4): the guest mirror's
+  first fetch, the gitconfig include provisioning installs, `wk vm check`'s
+  resident shells / editor server report, which Software Update key a tahoe
+  guest obeys (TODO in vm/desktop.sh), guest egress (TODO in cmd/verify), and
+  one `claude auth login` inside a guest to confirm it lands in
+  `~/.claude-login` rather than a Keychain item.
+  The password is no longer one of these: measured 2026-09-04, macOS Tahoe 26.5
+  refuses the only change form the account itself can run (`sysadminctl
+  -oldPassword` exits 0 having changed nothing), so the guest keeps the image's
+  `admin` and every command that hands a guest over states it. That also fixes
+  the screen lock, which vm/desktop.sh could never turn off while it was
+  handed a password `dscl . -authonly` refused.
 
 - `wk sync --tools buildbox4` and `wk sync --tools devbox-arm64-2`. The first
   clears BASE `?`. The second rebuilds devbox's mirror, which carries only
@@ -94,6 +104,29 @@ OWED, WITH THE DECISION ALREADY MADE
 ================================================================================
 STILL OPEN
 ================================================================================
+
+- A line-count bar rewards cramming. Several surviving comments are now single
+  lines of 200-280 characters, because one fact per line is the cheapest shape
+  under tests/test_comment_density.py. A max comment-line length in that test
+  would close it, at the cost of failing some legitimately long ones. Not done:
+  it is a judgement about house style, not a defect. [needs a decision]
+
+- Five sites read a source file's own comment block by FIXED LINE NUMBER, so a
+  comment edit above them silently changed or emptied user-visible text; two
+  image configs shipped a blank description that way. Fixed 2026-09-04: the
+  four bench usage windows now call `usage_block` (lib/common.sh), which reads
+  the title and synopsis by shape, and image/profiles.sh reads each config's
+  description from its header line. tests/test_confs.py proves a config with no
+  description fails. Worth knowing that the pattern existed at all: `cmd/*`
+  never had it, because `explain_cmd` stops at the first non-`#` line.
+
+- Seven test modules were coupled to COMMENT TEXT -- five sliced a source file
+  between `# --- banner ---` lines and executed the result, two pinned a
+  phrase. The comment pass broke 44 tests that way, none of them a behaviour
+  regression. All are re-anchored on code (`PUSH_ON=0`, `section "credentials"`,
+  `if [ -n "$RC" ]`, `local running`, `step "Battery charge limit`). If a test
+  needs to lift a region of a script, it anchors on a statement, never on a
+  comment.
 
 - Two podman bugs to upstream, both worked around here and both silent:
   `podman machine init --volume src:target:ro` generates a systemd .mount unit
@@ -132,3 +165,18 @@ STILL OPEN
   existing local branch and even with `fetch.followRemoteHEAD=never` (measured
   on git 2.48.1, minimal repro in the podman machine). The mirror sets HEAD
   after its fetches because of it (lib/store.sh).
+
+- wk new on moose fails:
+
+  FAIL  api.github.com answered '000' -- the injector is not in the path
+        (systemctl --user status wk-github-inject; the CA is /run/wk/wk-github-ca.pem)
+  FAIL  a read answered '000' rather than 200 or 401 -- the injector
+        is in the path but not answering for api.github.com/user
+  FAIL  push is off, yet POST /repos/justinmichaud/WebKit/pulls answered '000' --
+        expected 401, so a write token is still on the machine:  wk push off
+  FAIL  GITHUB_COM_TOKEN is unset in here, so nothing that reads it sends an
+        Authorization header for the injector to replace (container/proxy/ensure-bridge.sh
+        exports both, from /secrets/github-user and the injector's CA)
+  FAIL  GH_TOKEN is unset in here, so nothing that reads it sends an
+        Authorization header for the injector to replace (container/proxy/ensure-bridge.sh
+        exports both, from /secrets/github-user and the injector's CA)

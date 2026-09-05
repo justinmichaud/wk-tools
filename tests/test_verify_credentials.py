@@ -23,11 +23,14 @@ from tests.support import REPO, WkTest, bash
 
 VERIFY = (REPO / "cmd" / "verify").read_text()
 
-# The block under test, by the two comment banners that bound it. Sliced
-# rather than copied so that a check added to cmd/verify is a check this file
-# runs -- and one whose behaviour drifts is a failure here.
-START = "# --- the two credentials, and that neither one is in here"
-END = "# --- GPU ---"
+# The block under test, bounded by the first statement of the credential
+# section and the first of the GPU section that follows it. Sliced rather than
+# copied so that a check added to cmd/verify is a check this file runs -- and
+# one whose behaviour drifts is a failure here. Anchored on code, not on
+# comment banners: a banner is not structure, and slicing by one made this
+# suite demand that two comments keep existing.
+START = "PUSH_ON=0"
+END = "if ! arch_has_gpu"
 
 # Answers for every probe the block makes, keyed by a substring of the command
 # it runs inside the workspace. The defaults are a healthy workspace with the
@@ -345,7 +348,7 @@ class TestWhatAnAgentInHereCanSpend(WkTest):
     machine's store -- a guest holds one of its own and is never handed the
     host's (t_agent_secret_present, lib/target.sh)."""
 
-    START = "# --- what an agent in here can spend"
+    START = 'if t_agent_secret_present "$NAME" claude-login'
 
     def run_note(self, present):
         block = VERIFY[VERIFY.index(self.START):VERIFY.index(START)]

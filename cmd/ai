@@ -3,48 +3,31 @@
 # wk ai claude|pi <workspace> [agent options] -- run a coding agent inside a workspace
 # wk: where=workspace name=required@2 ready=yes group=workspaces
 #
-# One command for every coding agent, because everything around them is the
-# same: which workspace, the sandbox check before control is handed over, the
-# commit wall, the push switch, and remote control. The agent is the first
-# word, so `wk ai <agent> <workspace>` reads as what it does and a second
-# agent costs a case arm rather than a command.
-#
-# Permissions are relaxed because the workspace is the blast radius, not the
-# machine; this checks the boundary holds before handing over control.
-#
-# The workspace name comes first; everything after it is the agent's, verbatim
-# -- for claude and for pi alike. The two exceptions are wk's own and are
-# taken out of argv here rather than passed on: --rc and --stop, below.
+# The workspace name comes first; everything after it is the agent's, verbatim.
+# --rc and --stop are wk's own and are taken out of argv here.
 #
 #   wk ai claude bb4 -r          resume, in bb4
 #   wk ai claude bb4 --continue  and so on
 #   wk ai pi bb4 --help          pi's own help, not this one
 #
-# --rc: Claude Code Remote Control (claude.ai/code, the mobile app) instead of
-# a foreground session here -- a persistent server, started detached in the
-# workspace's checkout, left running after this command returns.
+# Permissions are relaxed because the workspace is the blast radius, not the
+# machine, so this checks the boundary holds before handing over control. For
+# the session it also holds back the push keys and walls off git commits.
+#
+# --rc runs Claude Code Remote Control (claude.ai/code, the mobile app) instead
+# of a foreground session: a persistent server, started detached in the
+# workspace's checkout and left running after this command returns.
 #
 #   wk ai claude <ws> --rc          start it (a no-op, reported, if already up)
 #   wk ai claude <ws> --rc --stop   stop it
 #
-# Remote control is started for every new workspace, and for every workspace a
-# `wk start` brings back up, so a workspace is reachable from the phone without
-# anybody having remembered to ask. WK_NO_CLAUDE_RC=1 turns that off -- one
-# variable rather than a flag on each of those commands, since they both call
-# exactly this one.
+# `wk new` and `wk start` start remote control themselves; WK_NO_CLAUDE_RC=1
+# turns that off. It needs the workspace's trust dialog accepted once, which
+# this does by running 'wk ai claude <ws>' when there is no trust record yet,
+# and the claude.ai account login rather than a `claude setup-token` token:
+# 'wk key set claude-login', or a guest logs in for itself.
 #
-# A fresh workspace needs one interactive `claude` run first, to accept its
-# trust dialog -- remote-control refuses without it, and this runs
-# 'wk ai claude <ws>' for you when the workspace has no trust record yet.
-#
-# It also needs the claude.ai account login, not the token below: measured, it
-# answers a `claude setup-token` credential with "Remote Control requires a
-# full-scope login token ... limited to inference-only". rc_start refuses
-# before spawning without one, asking the target that will run the agent --
-# `wk key set claude-login` puts one where a container reads it, and a guest
-# logs in for itself (t_agent_secret_present, lib/target.sh).
-#
-# The agents this knows, and what each one costs to add:
+# The agents this knows:
 #
 #   claude   Claude Code. Installed by container/firstrun.sh, authenticated
 #            from the store (`wk key set claude`), and the only one with a
@@ -60,21 +43,10 @@ WK_ROOT="${WK_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
 . "$WK_ROOT/lib/target.sh"
 . "$WK_ROOT/lib/detach.sh"
 
-# Which agent: the first positional, and the only one this command reads for
-# itself. Read above the library block because every way this command hands over
-# control carries it into the workspace as WK_AGENT, which is how the build wall
-# tells an agent's shell from a person's.
+# Carried into the workspace as WK_AGENT, which the build wall reads.
 AGENT="${1:-}"
 
-# --- the functions this hands over through ------------------------------------
-# Above everything else so a test can source just these: `WK_CLAUDE_LIB=1 . cmd/ai`
-# defines them and returns instead of running the sandbox checks.
-
-# --- nothing an agent runs can publish ---------------------------------------
-# The deploy keys and the API token are held back for the whole session by `wk
-# push`, which empties the ssh-agent and removes the injector's token file rather
-# than setting a flag an agent could clear. Off is the safe crash/kill direction.
-# What differs per target is which machine holds the credentials (PUSH_TARGET).
+# `wk push` empties the ssh-agent rather than setting a flag an agent could clear.
 PUSH_WAS_ON=""
 PUSH_TARGET=""
 
@@ -82,21 +54,13 @@ push_switch() { # <on|off|status>
     "$WK_ROOT/wk" push "$1" ${PUSH_TARGET:+--target "$PUSH_TARGET"} >/dev/null 2>&1
 }
 
-# Before `wk verify`, which measures the keys' absence in a container. t_exec
-# hands argv to an exec, not a shell, so a builtin like `command` needs `sh -c`
-# (measured: the bare form failed in every container).
+# t_exec hands argv to an exec, not a shell, so a builtin needs `sh -c` (measured).
 wall_available() { # <name>
     t_exec "$1" sh -c 'command -v bwrap >/dev/null 2>&1'
 }
 
-# Inside a workspace there is no switch to throw, so what runs instead is the
-# *measurement* -- the same two facts `wk verify` takes from the outside. A
-# refusal rather than a warning, because `wk push status` exits non-zero in here
-# and push_switch reads that as "push is off".
 push_measure_here() {
     local alias sock ident code
-    # Asked of ssh itself, against the alias a push would use: the config is an
-    # Include of /secrets/ssh_config, and re-deriving the path here could disagree.
     alias=$(wk_push_forks | awk 'NF {print $3; exit}')
     sock=$(ssh -G "$alias" 2>/dev/null | awk '$1 == "identityagent" {print $2; exit}') || sock=""
     if [ -n "$sock" ]; then
@@ -125,8 +89,6 @@ push_hold_back() { # <name>
         || die "refusing to run: could not hold back the push keys ('wk push status${PUSH_TARGET:+ --target $PUSH_TARGET}')"
 }
 
-# Back on only when a person is there to notice: a headless run re-enters this
-# command every few minutes via the babysitter's fix loop.
 restore_push() {
     [ -n "$PUSH_WAS_ON" ] || return 0
     if [ -t 0 ] && [ -t 1 ]; then
@@ -138,10 +100,6 @@ restore_push() {
     fi
 }
 
-# --- claude remote-control ----------------------------------------------------
-
-# The pid here names a process t_spawn started *inside* the target, so unlike
-# detach_alive everything below asks the driver, not this host's process table.
 rc_status_file() { printf '%s' "$(wk_ws_dir "$1")/claude-rc.status"; }
 rc_log()         { printf '%s' "$(t_home "$1")/claude-remote-control.log"; }
 rc_pidfile()     { printf '%s' "$(t_home "$1")/claude-remote-control.pid"; }
@@ -153,14 +111,12 @@ rc_alive() {
     t_exec "$name" kill -0 "$pid" >/dev/null 2>&1
 }
 
-# Minutes since the status file's `updated=`, for the "already running" report.
 rc_minutes() {
     local upd; upd=$(status_field "$(rc_status_file "$1")" updated)
     [ -n "$upd" ] || { printf '?'; return 0; }
     printf '%d' $(( ( $(date -u +%s) - $(utc_to_epoch "$upd") ) / 60 ))
 }
 
-# A second call is a no-op, found by rc_alive rather than trusted from state=.
 rc_start() {
     local name="$1" claude_bin="$2" sf log pidf pid i
     sf=$(rc_status_file "$name")
@@ -170,10 +126,7 @@ rc_start() {
         return 0
     fi
 
-    # Before the spawn, whose own answer is to start, print "Remote Control
-    # requires a full-scope login token" and exit -- which the evidence check below
-    # would report as a server that died. Asked of the target, not this machine's
-    # store: a guest holds a login of its own, with its own remedy.
+    # Measured: remote control refuses a `claude setup-token` credential as inference-only.
     t_agent_secret_present "$name" claude-login \
         || die "'$name' has no claude.ai login credential -- what 'claude auth login'
     leaves behind -- and remote control refuses anything less: a
@@ -188,8 +141,6 @@ rc_start() {
         "cd $(sh_quote "$(t_src "$name")") && exec $(sh_quote "$claude_bin") remote-control --spawn=same-dir --name $(sh_quote "$name")" \
         || die "could not start claude remote-control in '$name'"
 
-    # t_spawn's pidfile is inside the target -- read back through the driver
-    # rather than assumed host-visible, which is only true for container.
     pid=""; i=0
     while [ -z "$pid" ]; do
         pid=$(t_exec "$name" cat "$pidf" 2>/dev/null | tr -d '\r') || pid=""
@@ -199,8 +150,6 @@ rc_start() {
         sleep 0.1
     done
 
-    # Evidence, not a claim: a process that exits within its first seconds is not
-    # running, however promptly its pid was written.
     status_write "$sf" state=running "pid=$pid" "log=$log"
     sleep 2
     if ! rc_alive "$name"; then
@@ -211,7 +160,6 @@ $(t_exec "$name" tail -n 3 "$log" 2>/dev/null | sed 's/^/    /')"
     info "claude remote-control running in '$name' (pid $pid), log at $log"
 }
 
-# Through the driver, same reasoning as rc_alive.
 rc_stop() {
     local name="$1" sf pid
     sf=$(rc_status_file "$name")
@@ -228,27 +176,12 @@ rc_stop() {
     status_write "$sf" state=stopped "pid=$pid" "log=$(status_field "$sf" log)"
 }
 
-# --- pi: the runtime, and pi itself, in the workspace ------------------------
-# From pi's own package and docs
-# (https://www.npmjs.com/package/@earendil-works/pi-coding-agent ->
-# https://github.com/earendil-works/pi, packages/coding-agent):
-#
-#   install   `npm install -g --ignore-scripts @earendil-works/pi-coding-agent`;
-#             the launcher is `pi`, and package.json declares
-#             "engines": { "node": ">=22.19.0" } (0.84.4).
-#   the key   there is no LiteLLM provider built in (issue #4561, closed
-#             unimplemented). LiteLLM speaks the OpenAI wire format, so it is a
-#             custom provider in ~/.pi/agent/models.json: `baseUrl` is the
-#             endpoint, `api` is "openai-completions", and `apiKey` is the
-#             literal "$LITELLM_API_KEY", which pi resolves from the environment.
-#
-# No permission-mode flag: pi's `-a` is project *trust* and tool allowlists, not
-# --dangerously-skip-permissions.
+# From https://www.npmjs.com/package/@earendil-works/pi-coding-agent -> https://github.com/earendil-works/pi (packages/coding-agent).
+# pi has no LiteLLM provider (earendil-works/pi #4561, closed unimplemented), and
+# LiteLLM speaks the OpenAI wire format, so it is a custom provider in ~/.pi/agent/models.json.
 PI_PKG=@earendil-works/pi-coding-agent
 PI_NODE_MIN=22.19.0
 
-# Dotted-version compare, so the refusal below is about what pi actually requires
-# rather than a major number: `sort -V` is not on both a BSD and a GNU userland.
 pi_node_ok() { # <version, as `node -v` prints it>
     local have="${1#v}" want="$PI_NODE_MIN" hp wp
     [ -n "$have" ] || return 1
@@ -265,8 +198,6 @@ pi_node_ok() { # <version, as `node -v` prints it>
     return 0
 }
 
-# Everything in one round trip, testing the property rather than the file: a node
-# on PATH is not a node that runs.
 pi_probe() { # <name>
     t_exec "$1" bash -lc '
         printf "node=%s\n" "$(node -v 2>/dev/null || true)"
@@ -281,8 +212,7 @@ pi_probe() { # <name>
     ' 2>/dev/null | tr -d '\r'
 }
 
-# Leaves the pi to launch in PI_BIN, not printed: `die` in a command substitution
-# ends the subshell and the caller carries on.
+# `die` in a command substitution ends only the subshell, so PI_BIN is a global.
 pi_ensure() { # <name>
     local name="$1" probe node npm models key
     PI_BIN=""
@@ -306,9 +236,7 @@ pi_ensure() { # <name>
 
     if [ -z "$PI_BIN" ]; then
         info "installing pi in '$name' (npm, into your own ~/.local)"
-        # --ignore-scripts: an install hook is arbitrary code from a package this
-        # command chose. --prefix ~/.local: npm's global prefix in the image is
-        # /usr, which the workspace user cannot write.
+        # npm's global prefix in the image is /usr, which the workspace user cannot write.
         t_exec "$name" bash -lc \
             "npm install -g --ignore-scripts --prefix \"\$HOME/.local\" $(sh_quote "$PI_PKG")" \
             || die "npm could not install $PI_PKG in '$name'. By hand:
@@ -325,8 +253,6 @@ pi_ensure() { # <name>
         ~/.local/bin/pi --version"
     fi
 
-    # Which endpoint pi talks to is pi's own config: the key is on this machine,
-    # the URL and the model list are the endpoint's and are not stored here.
     [ "$models" = no ] || return 0
     key=$(wk_agent_secret litellm)
     if [ -n "$key" ]; then
@@ -345,8 +271,7 @@ pi_ensure() { # <name>
     fi
 }
 
-# This script has top-level side effects (require_name, load_target, the
-# sandbox checks below); WK_CLAUDE_LIB=1 sources only the functions above.
+# WK_CLAUDE_LIB=1 sources the functions above without the side effects below.
 [ "${WK_CLAUDE_LIB:-}" != 1 ] || return 0
 
 case "$AGENT" in
@@ -355,12 +280,9 @@ case "$AGENT" in
     *)      die "unknown agent '$AGENT'. This checkout knows: claude, pi" ;;
 esac
 
-# A bare session id ahead of the name (`wk ai claude -r <id> <ws>`) is taken by
-# position, not by checking which word is real.
 NAME="${WK_NAME:-}"
 require_name "$NAME"
 
-# wk's own flags come out of argv here, not Claude's, riding to the pass-through below.
 RC=""; RC_STOP=""
 _rc_args=()
 for _a in ${@+"$@"}; do
@@ -373,41 +295,28 @@ done
 set -- ${_rc_args[@]+"${_rc_args[@]}"}
 [ -z "$RC_STOP" ] || [ -n "$RC" ] || die "--stop only makes sense with --rc: wk ai claude $NAME --rc --stop"
 [ -z "$RC" ] || [ $# -eq 0 ] || die "wk ai claude $NAME --rc takes no other options (got: $*)"
-# Remote control is a Claude Code server (claude.ai/code attaches to it), not a
-# property of running an agent, so it is refused by name rather than ignored.
 [ -z "$RC" ] || [ "$AGENT" = claude ] || die "--rc is Claude Code's remote control; $AGENT has no equivalent.
     A foreground session:  wk ai $AGENT $NAME"
 
 TARGET="$(ws_target "$NAME")"
 load_target "$TARGET"
 
-# The permission mode is a property of the boundary, not a preference:
-# --dangerously-skip-permissions is what a disposable workspace buys; a shared
-# build machine has no such boundary, so it gets auto.
 AGENT_BIN="$AGENT"
 AGENT_MODE=()
 [ "$AGENT" != claude ] || AGENT_MODE=(--dangerously-skip-permissions)
 
-# --- verify the sandbox ------------------------------------------------------
-# Relaxed permissions hold only while the boundary does, and what it *is* differs
-# by target.
-
 if [ "$WK_TARGET_KIND" = local ]; then
-    # Nesting another relaxed session here would skip the boundary check the host
-    # already did when it started this one.
     die "already inside workspace '$(wk_self)' -- run '$AGENT' directly"
 fi
 
 if [ "$WK_TARGET_KIND" = remote ]; then
-    # A barrier, not a refusal: this is the one target with no boundary at all.
     barrier "'$NAME' is on the shared build machine '$TARGET', which has no sandbox at
     all: no container, no separate uid, no filesystem boundary, and other
     people's work on the same machine. An agent there is an agent on that
     machine, with your access."
 
     if [ "$AGENT" = claude ]; then
-        # Test the property, not the file: a shared box's `claude` on PATH may be
-        # someone else's npm install under too old a node (18+), dying silently.
+        # A shared box's `claude` on PATH can be an npm install under too old a node.
         AGENT_BIN=$(t_exec "$NAME" bash -lc '
             for c in "$HOME/.local/bin/claude" "$(command -v claude 2>/dev/null)"; do
                 [ -n "$c" ] && [ -x "$c" ] || continue
@@ -417,8 +326,7 @@ if [ "$WK_TARGET_KIND" = remote ]; then
 
         if [ -z "$AGENT_BIN" ]; then
             warn "there is no Claude CLI on $TARGET that runs"
-            # Single-quoted so the *far* side's shell expands $c and $(node -v);
-            # only $TARGET is substituted here.
+            # Single-quoted so the far side's shell expands $c and $(node -v).
             _diag=$(t_exec "$NAME" bash -lc '
                 c=$(command -v claude 2>/dev/null) || true
                 if [ -n "$c" ]; then
@@ -428,12 +336,9 @@ if [ "$WK_TARGET_KIND" = remote ]; then
                 else
                     echo "  nothing called claude is on PATH in a login shell there"
                 fi' 2>/dev/null) || true
-            # Captured then printed: `2>/dev/null >&2` would send stdout to the
-            # /dev/null the first redirect just made.
+            # Captured then printed: `2>/dev/null >&2` would send stdout to that /dev/null.
             [ -z "$_diag" ] || printf '%s\n' "$_diag" >&2
 
-            # Into your own ~/.local with its own runtime: it touches nothing
-            # shared, so it is not asked about.
             info "installing the Claude CLI on $TARGET (your own ~/.local, as you)"
             t_exec "$NAME" bash -lc 'curl -fsSL https://claude.ai/install.sh | bash' \
                 || die "the installer failed on $TARGET. By hand:
@@ -453,14 +358,10 @@ if [ "$WK_TARGET_KIND" = remote ]; then
     fi
 fi
 
-# --- the push switch, and the one credential that is a refusal ----------------
-# A build box keeps its own keys under its own wk root, so the switch is thrown
-# *there*, by name -- every other target's keys are this machine's.
+# A build box keeps its own keys under its own wk root, so the switch is thrown there.
 [ "$WK_TARGET_KIND" != remote ] || PUSH_TARGET="$TARGET"
 push_hold_back "$NAME"
 
-# A GitHub credential in the account the agent would run as on a shared box is a
-# refusal, not a barrier: nothing in a session may post as the person.
 if [ "$WK_TARGET_KIND" = remote ] \
    && t_exec "$NAME" sh -c 'test -e "$HOME/.config/gh/hosts.yml" || { command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1; }' 2>/dev/null; then
     die "'$TARGET' holds a GitHub credential in the account the agent would run as
@@ -469,17 +370,14 @@ if [ "$WK_TARGET_KIND" = remote ] \
 fi
 
 if [ "$WK_TARGET_KIND" = container ]; then
-    # `wk verify` measures container properties from inside, including that the
-    # keys are gone. It reads the name from WK_NAME, as every command does.
     WK_NAME="$NAME" "$WK_ROOT/cmd/verify" \
         || barrier "the sandbox around '$NAME' is not intact (see above), and relaxed
     permissions are only defensible while it is."
 fi
 
 if [ "$WK_TARGET_KIND" = vm ]; then
-    # Not `wk verify`: every property it measures is a container property. A macOS
-    # guest's egress is filtered on the *host* by Softnet, unmeasurable from here,
-    # and Softnet applies at `tart run`, so a guest booted without it is unfiltered.
+    # A macOS guest's egress is filtered on the host by Softnet, unmeasurable from
+    # here, and Softnet applies at `tart run`: a guest booted without it is unfiltered.
     if [ -f "$WK_VM_DIR/$NAME.unfiltered" ] && [ -z "${WK_VM_UNFILTERED:-}" ]; then
         barrier "'$NAME' was booted with NO egress filter.
     Restart it filtered:  wk vm stop $NAME && wk vm start $NAME
@@ -500,25 +398,17 @@ if [ "$WK_TARGET_KIND" = vm ]; then
     fi
 fi
 
-# --- wk ai claude <ws> --rc ------------------------------------------------------
-# Same sandbox gate as a foreground session; what differs is that a detached
-# server runs instead of a session in this process's own slot.
 if [ -n "$RC" ]; then
     if [ -n "$RC_STOP" ]; then
         rc_stop "$NAME"
         exit 0
     fi
 
-    # A background server left running unattended: the keys held back above stay
-    # held back -- there is no foreground moment here to turn push back on.
     if [ -n "$PUSH_WAS_ON" ]; then
         log "  git push stays off ('wk push on' when you want it back)"
         PUSH_WAS_ON=""
     fi
 
-    # remote-control refuses outright without the workspace's trust dialog accepted
-    # once, and there is no non-interactive substitute -- not -p, a piped stdout,
-    # nor any `claude config` subcommand -- so this runs `claude` once.
     if ! rc_alive "$NAME" && ! t_exec "$NAME" test -f "$(t_home "$NAME")/.claude.json" 2>/dev/null; then
         warn "'$NAME' has no Claude trust record yet -- remote-control refuses to start
     until the workspace trust dialog is accepted once, interactively. Running
@@ -535,13 +425,8 @@ if [ -n "$RC" ]; then
     exit 0
 fi
 
-# The session is a foreground one from here, so the switch can come back when it
-# ends (restore_push, which only does that with a person at the terminal).
 wk_atexit restore_push
 
-# The commit wall: a container agent session cannot write git history into the
-# checkout (commit_wall_prefix) -- the write-side twin of the push keys. A guest
-# has no bind to hang it on and a remote no sandbox.
 WALL=""
 if [ "$WK_TARGET_KIND" = container ]; then
     wall_available "$NAME" \
@@ -553,21 +438,16 @@ if [ "$WK_TARGET_KIND" = container ]; then
     info "git commits are walled off for this session (bwrap; 'wk push on' lifts it for the next)"
 fi
 
-# After the sandbox checks and after push was held back: this installs into the
-# workspace, and nothing goes in there while the boundary is unverified.
+# After the sandbox checks: nothing is installed into the workspace before then.
 [ "$AGENT" != pi ] || { pi_ensure "$NAME"; AGENT_BIN="$PI_BIN"; }
 
-# Said per agent because it is not the same claim: claude is handed the flag that
-# turns its prompts off, pi is handed nothing of the sort.
 if [ "$AGENT" = claude ]; then
     info "starting Claude in '$NAME' (permissions relaxed; the workspace is the boundary)"
 else
     info "starting $AGENT in '$NAME' ($AGENT_BIN; the workspace is the boundary)"
 fi
 
-# Headless when there's no terminal: the babysitter's fix loop runs this under
-# nohup with `-p`, and t_exec_tty would demand a tty. Not exec'd, so the EXIT trap
-# still runs when the agent does.
+# The babysitter's fix loop runs this under nohup with -p, where t_exec_tty would demand a tty.
 rc=0
 if [ -t 0 ] && [ -t 1 ]; then
     t_exec_tty "$NAME" env WK_AGENT="$AGENT" WK_WORKSPACE="$NAME" \

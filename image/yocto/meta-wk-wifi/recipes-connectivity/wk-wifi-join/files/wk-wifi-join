@@ -1,13 +1,5 @@
 #!/bin/sh
-#
-# Bring up WiFi from a credential seeded onto the card, every boot.
-#
-# A WiFi credential is not single-use: the radio must associate every boot, so
-# wpa_supplicant-wlan0.conf is read every time and never deleted. Seeded by
-# `wk sysimage write` (disk_seed_wifi, boot/disk.sh), per card.
-#
-# Only ever adds wlan0 alongside eth0's existing DHCP. Exits 0 on any failure
-# that isn't this node's own.
+# A WiFi credential is not single-use: the radio must associate every boot, so the seeded conf is read every time and never deleted.
 
 set -u
 
@@ -15,13 +7,11 @@ CONF=/etc/wpa_supplicant/wpa_supplicant-wlan0.conf
 WPA=/usr/sbin/wpa_supplicant
 
 say() { echo "wk-wifi-join: $*"; }
-# The console too: a board with no uplink has no other way to be heard.
 shout() { say "$*"; [ -w /dev/console ] && echo "wk-wifi-join: $*" > /dev/console; return 0; }
 
 [ -r "$CONF" ] || { shout "no $CONF -- this card carries no WiFi identity and cannot join the network; re-write it: wk sysimage write --machine <name>"; exit 1; }
 [ -x "$WPA" ]  || { shout "no $WPA -- a WiFi credential is seeded but this image cannot spend it"; exit 1; }
 
-# Found, not assumed: the kernel is free to name it other than wlan0.
 IFACE=""
 for c in /sys/class/net/wlan*; do
     [ -e "$c" ] || continue
@@ -30,7 +20,6 @@ for c in /sys/class/net/wlan*; do
 done
 [ -n "$IFACE" ] || { say "no wlan* interface on this board -- nothing to bring up"; exit 0; }
 
-# A second instance fights the first for the control socket rather than replacing it.
 if pgrep -f "wpa_supplicant .*-i$IFACE" >/dev/null 2>&1; then
     say "wpa_supplicant is already running on $IFACE"
 else
@@ -40,7 +29,6 @@ else
         || { say "wpa_supplicant failed to start on $IFACE -- the credential may be malformed"; exit 1; }
 fi
 
-# Whichever DHCP client is present is used; the absence of both is reported, not left to read as a silent hang.
 if command -v udhcpc >/dev/null 2>&1; then
     udhcpc -i "$IFACE" -n -q -t 5 >/dev/null 2>&1 \
         && say "$IFACE has a DHCP lease" \

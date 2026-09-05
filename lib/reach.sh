@@ -1,11 +1,5 @@
-# How a machine is reached -- calculated, never written down: the tailnet
-# (`tailscale status --json`), then `ssh -G <name>` for the machines that cannot be
-# on it (Igalia's build boxes, moose's BMC), then a sweep for the hardware address,
-# last because it is the only one that costs traffic. No name lookup below the
-# tailnet: an image that cannot join it on first boot has no uplink either.
-
-# Once per process, under a ceiling: a wedged tailscaled has no timeout of its own
-# and would otherwise hang the walk. WK_TAILSCALE_TIMEOUT overrides it.
+# Calculated, never written down: the tailnet, then `ssh -G` for a machine that cannot be on it, then a sweep for the hardware address, last because it alone costs traffic.
+# Peers are read once per process under a ceiling: a wedged tailscaled has no timeout of its own and would hang the walk.
 _WK_TS_PEERS=""
 _WK_TS_READ=""
 
@@ -16,8 +10,7 @@ wk_tailscale_cli() {
     return 1
 }
 
-# name<TAB>ip<TAB>online, one line per peer and one for this machine.
-wk_tailscale_peers() {
+wk_tailscale_peers() {  # name<TAB>ip<TAB>online, one line per peer plus one for this machine
     [ -z "$_WK_TS_READ" ] || { printf '%s' "$_WK_TS_PEERS"; return 0; }
     _WK_TS_READ=1
     local cli
@@ -50,9 +43,7 @@ reach_tailnet() {
     printf '%s (%s)' "$(printf '%s' "$line" | cut -f2)" "$(printf '%s' "$line" | cut -f3)"
 }
 
-# reach_ssh <name> -- what `ssh <name>` would dial; `ssh -G` performs the whole
-# config resolution without connecting.
-reach_ssh() {
+reach_ssh() {  # <name>: what `ssh <name>` would dial, `ssh -G` resolving the config without connecting
     local name="$1" g host port jump user out
     have ssh || return 0
     g=$(ssh -G "$name" 2>/dev/null) || return 0
@@ -68,16 +59,12 @@ reach_ssh() {
     printf '%s' "$out"
 }
 
-# For a host whose key cannot be pinned: a fresh one is generated on every image
-# write, so pinning would produce a man-in-the-middle warning. LogLevel=ERROR:
-# with known-hosts at /dev/null, ssh announces a new key every connection. Here,
-# not boot/machines.sh: boot depending on targets would be a cycle.
+# A fresh host key is generated on every image write, so pinning warns of a man-in-the-middle; with known-hosts at /dev/null ssh announces a new key every connection, hence LogLevel=ERROR.
 _unpinned_host_key_opts() {
     printf '%s' "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR"
 }
 
-# Every IPv4 segment this machine is directly on. tailscale0 excluded: a
-# /32 on a mesh with no broadcast domain to sweep.
+# tailscale0 is excluded: a /32 on a mesh, with no broadcast domain to sweep.
 reach_segments_local() {
     ip -4 -o addr show 2>/dev/null | awk '
         $2 == "lo" || $2 == "tailscale0" { next }
@@ -85,20 +72,15 @@ reach_segments_local() {
           print o[1] "." o[2] "." o[3] ".0/" a[2] }'
 }
 
-# reach_sweep <cidr> [vantage] -- "<ip> <mac> <state>" for every address on that
-# segment the kernel has a hardware address for. nmap generates the traffic but the
-# *neighbour table* is the answer: unprivileged nmap calls a host with tcp/80 and
-# tcp/443 closed `down`. FAILED and INCOMPLETE are dropped as stale DHCP leases.
-# A segment this machine is not on is swept from one that is: the caller names it.
-reach_sweep() { # <cidr> [vantage]
+# nmap generates the traffic but the *neighbour table* is the answer: unprivileged nmap calls a host with tcp/80 and tcp/443 closed `down`. FAILED and INCOMPLETE are stale DHCP leases.
+reach_sweep() { # <cidr> [vantage]: "<ip> <mac> <state>" per address the kernel has a hardware address for; a segment this machine is not on is swept from the named vantage
     local cidr="$1" van="${2:-}" pre=""
     [ -z "$van" ] || [ "$van" = local ] || pre="ssh -o BatchMode=yes -o ConnectTimeout=$(wk_ssh_timeout) $van"
     if [ -z "$pre" ]; then
         have nmap || return 1
         capped 60 nmap -sn -n --host-timeout 5s "$cidr" >/dev/null 2>&1 || true
         ip neigh show 2>/dev/null
-    else
-        # nmap and ip live in sbin on some of these; a login shell isn't guaranteed.
+    else  # nmap and ip live in sbin on some of these, and no login shell is guaranteed
         $pre "PATH=\$PATH:/usr/sbin:/sbin
              command -v nmap >/dev/null 2>&1 || exit 66
              nmap -sn -n --host-timeout 5s $(sh_quote "$cidr") >/dev/null 2>&1 || true
@@ -133,21 +115,16 @@ reach_enumerate() { # <mac>
     return 1
 }
 
-# reach_without_tailnet <machine> -- the ssh config's answer, else the sweep.
-reach_without_tailnet() {
+reach_without_tailnet() {  # <machine>: the ssh config's answer, else the sweep; the tailnet knows a fleet device by role names that need not be the machine name
     local m="$1" ssh_path ts_name mac n
 
-    # An unconditional sweep here would lose the line to the fleet walk's own ceiling.
-    # A fleet device is on the tailnet under its role names (NODE_SSH, NODE_BENCH_SSH),
-    # which need not be the machine name.
     for n in "$m" $(kv_field "$WK_ROOT/boot/machines/$m.conf" NODE_SSH | tr -d '"'"'"' ') \
                   $(kv_field "$WK_ROOT/boot/machines/$m.conf" NODE_BENCH_SSH | tr -d '"'"'"' '); do
         [ -z "$(reach_tailnet "$n")" ] || return 0
     done
 
     ssh_path=$(reach_ssh "$m") || ssh_path=""
-    # `ssh -G` answers with the name itself when no HostName is written down
-    # (MagicDNS) -- worse than silence under "without tailscale".
+    # `ssh -G` answers with the name itself when no HostName is written down (MagicDNS).
     ts_name="${ssh_path##*@}"; ts_name="${ts_name%%:*}"; ts_name="${ts_name%%  *}"
     if [ -n "$ssh_path" ] && [ "$ts_name" != "$m" ]; then
         printf '%s' "$ssh_path"

@@ -1,10 +1,4 @@
-# Boot images: where they live. An image is an artifact a workspace or a build host
-# produces, never imported or catalogued: `wk sysimage ls` scans where each builder
-# leaves its output, and `wk sysimage write --from <path>` writes straight from
-# there. cache/images/<file> is a fetched base, pinned by the spec's sha256.
-
-# Where the input cache lives: not simply $WK_STORE. On a macOS host that's
-# /var/lib/wk inside the podman VM, a path the Mac cannot create.
+# Not simply $WK_STORE: on a macOS host that is /var/lib/wk inside the podman VM, a path the Mac cannot create.
 _image_root() {
     if [ "$(uname -s)" = Darwin ] && [ -z "${WK_IN_VM:-}" ]; then
         wk_state_dir
@@ -12,24 +6,19 @@ _image_root() {
         printf '%s' "$WK_STORE"
     fi
 }
-# Every place a build can leave bytes, in one list, so `wk gc` can reclaim each. A
-# new builder adds a line here; `wk selftest` checks every IMG_BUILDER has one.
-image_build_locations() {
-    # builder: buildroot -- one tree per profile
+image_build_locations() {  # every place a build can leave bytes, so `wk gc` reclaims each; a new builder adds a line, and `wk selftest` checks every IMG_BUILDER has one
+    # builder: buildroot
     printf '%s\n' "$WK_STORE/cache/buildroot"
-    # builder: yocto -- DL_DIR, sstate, the build
+    # builder: yocto
     printf '%s\n' "$WK_STORE/cache/yocto"
-    # builder: fetch -- downloaded bases keyed by checksum, kept as input
+    # builder: fetch
     printf '%s\n' "$(image_cache_dir)"
-    # builder: pmos -- lives on the pmos build host; gc_pmos prunes it there.
+    # builder: pmos -- on the pmos build host, pruned there by gc_pmos
 }
 
 image_cache_dir() { echo "$(_image_root)/cache/images"; }
 
-# Which *kind* of device that root spec names, not the exact path: a card written in
-# one reader is often booted in another, and "SD card" vs "USB disk" is the mistake
-# worth catching. portable (LABEL=/UUID=/PARTUUID=) and network (NFS) are neither.
-image_root_class() {
+image_root_class() {  # which *kind* of device the spec names, not the path: a card written in one reader is often booted in another, and mmc-vs-usb is the mistake worth catching
     case "${1:-}" in
         "")                    echo unknown ;;
         LABEL=*|UUID=*|PARTUUID=*) echo portable ;;
@@ -50,11 +39,7 @@ device_class() {  # same classification, for a device about to be written
     esac
 }
 
-# image_check_root <root-spec> <device> <what-it-is> -- refuse to leave a card whose
-# system cannot boot from the device it is on, since otherwise the discovery happens
-# on a headless board that loaded a kernel and then could not find `/`. The spec is
-# the card's own (disk_root_spec, boot/disk.sh). WK_ANY_ROOT=1 warns instead.
-image_check_root() {
+image_check_root() {  # <root-spec> <device> <what-it-is>: refuse a card whose system cannot boot from the device it is on, or a headless board discovers it; WK_ANY_ROOT=1 warns instead
     local spec="$1" dev="$2" what="$3" class want
     class=$(image_root_class "$spec")
     want=$(device_class "$dev")
@@ -83,16 +68,14 @@ image_check_root() {
     anyway (for testing the transfer, which is all it can prove)."
 }
 
-# The device tree a board's firmware wants (NODE_DTB); missing it is a conf bug.
-image_dtb_for() {
+image_dtb_for() {  # the device tree a board's firmware wants; missing it is a conf bug
     . "$WK_ROOT/boot/machines.sh"
     machine_load "$1" 2>/dev/null || die "image_dtb_for: unknown machine '$1'"
     [ -n "$NODE_DTB" ] || die "image_dtb_for: '$1' (boot/machines/$1.conf) sets no NODE_DTB"
     printf '%s' "$NODE_DTB"
 }
 
-# Every class image_root_class returns needs a word, or LABEL= reads "unrecognised".
-image_root_word() {
+image_root_word() {  # every class image_root_class returns needs a word here
     case "$1" in
         mmc)      echo "an SD card (/dev/mmcblk*)" ;;
         usb)      echo "a USB or SCSI disk (/dev/sd*)" ;;
@@ -103,14 +86,8 @@ image_root_word() {
     esac
 }
 
-# --- images, where the builders left them ------------------------------------
-# One line per image, tab-separated: builder, workspace, path, bytes, mtime. Both
-# builders write under /src/WebKit/WebKitBuild, which targets/container.sh bind-mounts
-# to ws/<name>/build out of the overlay, so the scan is that directory and nothing
-# else. A yocto-*/buildroot-* workspace whose glob matches nothing gets a placeholder
-# row: a rebuild clears its image directory for the whole build, and vanishing would
-# read as "not an image workspace" instead of "rebuilding".
-image_workspace_scan() {
+# A rebuild clears its image directory, so a workspace whose glob matches nothing gets a placeholder row rather than reading as "not an image workspace".
+image_workspace_scan() {  # one line per image: builder, workspace, path, bytes, mtime, tab-separated. Both builders write under the build directory targets/container.sh bind-mounts, so that is the whole scan
     local ws name f found
 
     [ -d "$WK_STORE/ws" ] || return 0
@@ -119,7 +96,6 @@ image_workspace_scan() {
         [ -d "$ws" ] || continue
         name=$(basename "$ws")
 
-        # bitbake writes the wic beside the rootfs tarball (yocto_image_dir, image/yocto.sh).
         found=0
         for f in "$ws"/build/CrossToolChains/*/build/image/*.wic.xz; do
             [ -f "$f" ] || continue
@@ -131,7 +107,6 @@ image_workspace_scan() {
             yocto-*) [ "$found" = 1 ] || printf 'yocto\t%s\t-\t0\t-\n' "$name" ;;
         esac
 
-        # genimage assembles into output/images (BR_IMAGE names the file).
         found=0
         for f in "$ws"/build/buildroot/*/output/images/*.img; do
             [ -f "$f" ] || continue
@@ -176,12 +151,7 @@ image_fetch_base() {
     echo "$dest"
 }
 
-# --- WebKit slots ------------------------------------------------------------
-# A slot is one built WebKit beside an image, in the image's workspace, built the way
-# that builder builds WebKit and deployed to a board by `wk pi deploy`. Where it lives
-# is a fact of the builder, kept here so cmd/pi, cmd/ab and `wk sysimage ls` never
-# spell it twice; the caller loads the profile, and IMG_BUILDER is what decides.
-image_slot_dir() { # <profile> <slot> -- host path
+image_slot_dir() { # <profile> <slot> -- host path. A slot is one built WebKit beside an image in the image's workspace; where it lives is a fact of the builder, so the caller loads the profile and IMG_BUILDER decides
     case "${IMG_BUILDER:-}" in
         buildroot) echo "$(wk_ws_dir "buildroot-$1")/build/buildroot/$1/output/wk-slots/$2" ;;
         yocto)     echo "$(wk_ws_dir "yocto-$1")/build/wk-slots/$2" ;;

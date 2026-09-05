@@ -128,7 +128,8 @@ class TestClaudeHoldsPushBackBeforeVerifying(unittest.TestCase):
         """A background server left running unattended: there is no foreground
         moment to notice a session ending, so the keys stay held back and
         `restore_push` is never armed for it."""
-        rc = CLAUDE[CLAUDE.index("# --- wk ai claude <ws> --rc"):
+        # Anchored on the branch itself, not on the comment banner above it.
+        rc = CLAUDE[CLAUDE.index('if [ -n "$RC" ]; then'):
                     CLAUDE.index("wk_atexit restore_push")]
         self.assertNotIn("push_switch on", rc, "remote-control must leave push off")
         self.assertIn('PUSH_WAS_ON=""', rc, "remote-control must disarm restore_push")

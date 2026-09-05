@@ -1,9 +1,5 @@
 #!/usr/bin/env python3
-"""Per-subtest and overall b/a ratio with 95% CI for JetStream3 base vs patched runs.
-compare-results gives FDR significance; this gives the CI so we can check the
-equivalence bound (Step 5): smallest regression ruled out = 1 - lowerCI.
-b/a > 1 => patched faster; < 1 => regression (JS3 bigger-is-better).
-"""
+"""Per-subtest and overall b/a ratio with 95% CI for JetStream3 base vs patched; b/a > 1 is patched faster, and 1 - lowerCI is the smallest regression ruled out."""
 import glob, json, math, sys
 
 def load(pattern):
@@ -22,15 +18,13 @@ def load(pattern):
 def geomean(vals):
     return math.exp(sum(math.log(v) for v in vals) / len(vals))
 
-# t critical (two-sided 95%) approx via inverse; use table fallback
 def tcrit(df):
-    # 95% two-sided t critical values
-    table = {1:12.71,2:4.303,3:3.182,4:2.776,5:2.571,6:2.447,7:2.365,8:2.306,
+    t_95_two_sided = {1:12.71,2:4.303,3:3.182,4:2.776,5:2.571,6:2.447,7:2.365,8:2.306,
              9:2.262,10:2.228,12:2.179,15:2.131,20:2.086,30:2.042,60:2.0,1000:1.96}
-    keys = sorted(table)
+    keys = sorted(t_95_two_sided)
     for k in keys:
         if df <= k:
-            return table[k]
+            return t_95_two_sided[k]
     return 1.96
 
 def welch_log_ratio(a, b):
@@ -78,7 +72,6 @@ for name, ratio, lo, hi, ro in rows:
     bound = "" if name in NOISY else ("<=0.5% OK" if ro <= 0.5 else "")
     print(f"{name:<32}{ratio:>8.4f}  [{lo:.4f},{hi:.4f}]{ro:>8.2f}  {noisy}{bound}")
 
-# overall geomean per round
 gb = [geomean(list(r.values())) for r in base]
 gp = [geomean(list(r.values())) for r in pat]
 ratio, lo, hi = welch_log_ratio(gb, gp)

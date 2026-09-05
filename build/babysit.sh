@@ -1,12 +1,5 @@
 #!/usr/bin/env bash
-#
-# The detached half of `wk build --babysit`: build, and when the build fails,
-# have Claude fix it from inside the workspace, then build again. Runs on the
-# host under nohup with no terminal, so it survives the ssh session that started
-# it: chatter goes to babysit.log, what a human reads to babysit.report, and its
-# state to babysit.status, which `wk status` renders. The agent runs through
-# `wk ai claude`, never claude directly, so a fix attempt gets the same sandbox
-# an interactive session does. This script itself edits nothing.
+# The detached half of `wk build --babysit`: build, and when the build fails, have Claude fix it from inside the workspace, then build again. Runs on the host under nohup with no terminal, so it survives the ssh session that started it -- chatter goes to babysit.log, what a human reads to babysit.report, and its state to babysit.status, which `wk status` renders. The agent runs through `wk ai claude` and never claude directly, so a fix attempt gets the same sandbox an interactive session does. This script itself edits nothing.
 
 set -euo pipefail
 WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -44,15 +37,11 @@ note() {
     printf '=== %s  %s ===\n%s\n\n' "$1" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$2" >> "$REPORT"
 }
 
-# A fresh run is a fresh report; the status file outlives the run, which is how
-# `wk status` still shows the outcome tomorrow.
-: > "$REPORT"
+: > "$REPORT"   # a fresh run is a fresh report; the status file outlives the run, which is how `wk status` still shows the outcome tomorrow
 bs_status starting
 info "babysitting '$CONFIG' in '$NAME' (model $MODEL, up to $MAX fixes)"
 
-# The branch once, before the loop: a checkout would take a fix from under the
-# model that just made it.
-if [ -n "$BRANCH" ]; then
+if [ -n "$BRANCH" ]; then   # the branch once, before the loop: a checkout would take a fix from under the model that just made it
     info "checking out '$BRANCH'"
     if ! t_exec "$NAME" bash -c "cd $(sh_quote "$(t_src "$NAME")") && {
             git checkout -q $(sh_quote "$BRANCH") 2>/dev/null ||
@@ -100,9 +89,7 @@ The log is $BLOG; the attempts above say what was tried."
     bs_status fixing
     info "build failed (exit $rc) -- fix attempt $ATTEMPT of $MAX"
 
-    # The log lives on the host and the model runs in the workspace, so the
-    # classified errors and the raw tail go in the prompt rather than by path.
-    ERRS=$(first_error "$BLOG" 2>/dev/null || true)
+    ERRS=$(first_error "$BLOG" 2>/dev/null || true)   # the log lives on the host and the model runs in the workspace, so the classified errors and the raw tail go in the prompt rather than by path
     TAIL=$(tail -c 8000 "$BLOG" 2>/dev/null || true)
     PROMPT="You are an unattended build-fixer. The '$CONFIG' build of the WebKit
 checkout in the current directory failed (exit $rc); this is fix attempt
@@ -124,13 +111,11 @@ Log tail:
 $TAIL"
 
     FIX_RC=0
-    # WK_NAME, not a positional: cmd/ai takes the workspace from the environment,
-    # and everything in its argv after the agent word is handed to the agent.
+    # WK_NAME and not a positional: cmd/ai takes the workspace from the environment, and everything in its argv after the agent word is handed to the agent.
     FIX_OUT=$(WK_NAME="$NAME" "$WK_ROOT/cmd/ai" claude --model "$MODEL" -p "$PROMPT" </dev/null 2>>"$WS/babysit.log") || FIX_RC=$?
     note "fix attempt $ATTEMPT (exit $FIX_RC)" "$FIX_OUT"
 
-    # The agent failing to *run* is not a failed fix but the loop's own substrate
-    # gone; retrying would fail identically forever.
+    # The agent failing to *run* is not a failed fix but the loop's own substrate gone, and retrying would fail identically forever.
     if [ "$FIX_RC" -ne 0 ] && [ -z "$FIX_OUT" ]; then
         bs_status error
         note "gave up" "claude did not run (exit $FIX_RC) -- see $WS/babysit.log"

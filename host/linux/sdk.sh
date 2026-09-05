@@ -1,11 +1,7 @@
-# The container SDK and the units a workspace-running machine carries: the Linux
-# counterpart of host/macos/vmtools.sh. Nothing here needs root.
 
 . "$WK_ROOT/lib/store.sh"
 . "$WK_ROOT/host/units.sh"
 
-# Not /opt: an unprivileged checkout is one the user can reset and re-clone.
-# targets/container.sh reads WK_SDK the same way.
 SDK="${WK_SDK:-${XDG_DATA_HOME:-$HOME/.local/share}/webkit-container-sdk}"
 
 if [ -d "$SDK/.git" ]; then
@@ -40,8 +36,6 @@ unit_start wk-ssh-agent.service "$WK_ROOT" "$WK_STORE" \
 unit_start wk-github-inject.service "$WK_ROOT" "$WK_STORE" \
     "'git-webkit pr' in a workspace will fail" "$_unit_journal" sh -c
 
-# The standing read token goes in beside it, from what this machine holds:
-# reading is open whatever position `wk push` is in.
 if push_agent_pat_sync push_agent_exec "$(push_agent_machine_read_pat)"; then
     debug "GitHub read token converged"
 else

@@ -1,22 +1,6 @@
 #!/usr/bin/env python3
 """Will the firmware find everything it needs in this boot filesystem?
-
-Asked by `wk sysimage write` of an image's boot partition before anything is
-written to a disk.  Firmware reads config.txt, follows `os_prefix`, and looks
-for a kernel -- and a boot that gets *partway* is not harmless.  Once the
-bootloader has executed start4.elf, the second stage owns the boot and
-BOOT_ORDER is spent: if that stage cannot find the kernel its config.txt
-names, Pi 4 firmware halts with an LED error pattern.  It does not retry, it
-does not return to the bootloader, and it does not touch the next device.  A
-headless board in that state needs a hand on its power supply.
-
-What matters is *how* the files go missing: they are all present in the tree,
-and unreachable
-through the name-resolution rules the firmware actually applies.  So this
-check asks a resolver that models those rules, not os.path.exists -- the only
-question worth asking is the one the firmware asks: "if I request this name,
-do I get bytes?"
-"""
+Once the bootloader has executed start4.elf, BOOT_ORDER is spent: a second stage that cannot find the kernel its config.txt names halts a Pi 4 with an LED pattern rather than retrying or moving to the next device. So this asks a resolver that models the firmware's name resolution, not os.path.exists."""
 
 import argparse
 import os
@@ -24,12 +8,6 @@ import sys
 
 
 def _inside(root, wanted):
-    """Join onto the root, or None if the result escapes it.
-
-    Path traversal is refused by construction: the result must still be inside
-    the root after resolution.  A name like `../../etc/shadow` never resolves
-    to a file outside the tree being checked, no matter how it is spelled.
-    """
     path = os.path.realpath(os.path.join(root, wanted))
     if path != root and not path.startswith(root + os.sep):
         return None
@@ -37,25 +15,12 @@ def _inside(root, wanted):
 
 
 def resolve(root, filename):
-    """Map a requested name onto a real file inside the tree, or refuse."""
     wanted = filename.lstrip("/").replace("\\", "/")
     return _inside(root, wanted)
 
 
 def parse_config(text):
-    """The assignments a Pi 4 will act on, from config.txt.
-
-    Conditional filters are honoured by ignoring them: everything inside a
-    section that is not `[all]` is skipped.  That is deliberately conservative
-    rather than a partial reimplementation of the firmware's filter language --
-    `[tryboot]` in particular sets a *different* os_prefix for a boot path this
-    is not checking, and treating its value as live would look for files in a
-    directory the normal boot never opens.
-
-    `[pi4]` is skipped by the same rule.  Nothing in it has ever named a file;
-    it carries tuning like arm_boost, and a filter this ignores can only make
-    the check miss a problem, never invent one.
-    """
+    """The assignments a Pi 4 acts on: everything outside `[all]` is skipped, `[tryboot]` above all, its os_prefix belonging to a boot path this is not checking."""
     config = {}
     live = True
     for raw in text.splitlines():
@@ -71,44 +36,20 @@ def parse_config(text):
             key, _, value = line.partition("=")
             config[key.strip()] = value.strip()
         else:
-            # `initramfs initrd.img followkernel` is the one directive with
-            # this shape, and the filename is the first word after it.
-            parts = line.split()
-            if len(parts) >= 2:
-                config[parts[0]] = parts[1]
+            words = line.split()
+            if len(words) >= 2:
+                directive, filename = words[0], words[1]
+                config[directive] = filename
     return config
 
 
 def wanted_files(config, model_dtb):
-    """What the firmware will ask for, in the order it becomes fatal.
-
-    Only the files whose absence *stops* the boot. The firmware probes for a
-    long tail of optional things on every boot -- recovery.elf, dt-blob.bin,
-    bootcfg.txt -- and missing those is normal.
-    """
     prefix = config.get("os_prefix", "")
 
     if "kernel" in config:
-        # Named explicitly: that file and no other. The firmware will not look
-        # for anything else, so neither should this.
         kernels = [prefix + config["kernel"]]
     else:
-        # Not named, so the firmware picks from its own defaults by inspecting
-        # what is there -- on BCM2711 a bare config.txt with a `kernel8.img`
-        # next to it boots 64-bit without `arm_64bit=1` being set anywhere.
-        # The WebKit Dev@CI Yocto image is exactly that shape, and deriving one
-        # expected name from `arm_64bit` refused it as unbootable when it boots
-        # this board every day.
-        #
-        # So: any of the default names satisfies this. The check's question is
-        # "is there a kernel for the firmware to find", not "which one will it
-        # pick" -- guessing the second wrongly costs a refused write, while the
-        # failure being guarded against is *no kernel at all*, which this still
-        # catches.
-        # kernel_2712.img is the Pi 5's: meta-raspberrypi's raspberrypi5.conf
-        # sets SDIMG_KERNELIMAGE to it, so a correct Pi 5 image carries that
-        # name and none of the others, and leaving it out refuses every image
-        # for the board.
+        # Unnamed, so the firmware picks among these by what is present and any of them answers the question. kernel_2712.img is the Pi 5's, the only name meta-raspberrypi's raspberrypi5.conf puts on a correct image for that board.
         kernels = [prefix + k for k in
                    ("kernel8.img", "kernel_2712.img",
                     "kernel7l.img", "kernel7.img", "kernel.img")]
@@ -122,8 +63,6 @@ def wanted_files(config, model_dtb):
     if "initramfs" in config:
         files.append(("initramfs", [prefix + config["initramfs"]]))
     if "cmdline" in config:
-        # The firmware looks for the cmdline under os_prefix and then at the
-        # root, so either satisfies it.
         files.append(("kernel command line",
                       [prefix + config["cmdline"], config["cmdline"]]))
     return files

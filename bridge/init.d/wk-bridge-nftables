@@ -1,10 +1,5 @@
 #!/sbin/openrc-run
-# The bridge's own table, and nothing else in the ruleset.
-#
-# The packaged nftables service is deliberately disabled: its stock
-# configuration begins with `flush ruleset`, which would take out tailscale's
-# ts-input and ts-forward chains -- and with them the tailnet, which is the one
-# thing this device exists to keep.
+# The packaged nftables service stays disabled: its stock configuration opens with `flush ruleset`, which would take out tailscale's ts-input and ts-forward chains.
 description="The bridge's nftables table (never flushes the ruleset)"
 
 depend() {

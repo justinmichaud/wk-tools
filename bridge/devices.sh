@@ -1,11 +1,4 @@
-# The phones a tailnet bridge can run on -- WiFi to the house, USB-C
-# Ethernet to a segment with no other way onto the tailnet. Role identical
-# on both (postmarketOS, `purism-librem5`/`pine64-pinephone`, same tree), so
-# `bridge/provision.sh` never asks which one it runs on. Only two fields are
-# read: DEV_KILLSWITCH (which switches exist and where -- the camera stream
-# needs one *on*, the uplink another) and DEV_NOTE (for the listing). Not
-# the pmOS codename (image/profiles.sh's own source of truth) or the WiFi
-# chip/watchdog (differ per phone; bridge/bin/wk-bridge-netwatch, -healthcheck).
+# The phones a tailnet bridge can run on. The role is identical on both, so bridge/provision.sh never asks which one it runs on; only the kill switches differ, and the camera stream and the uplink each need one on.
 
 bridge_device_list() {
     cat <<'LIST'

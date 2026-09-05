@@ -1,11 +1,6 @@
-# Ubuntu 26.04: install the host's packages. Stock apt plus exactly one
-# third-party repository (Tailscale); Zed and Claude Code go into ~/.local.
-
 # `|| true`: grep exits 1 on no matches, which set -e would abort ./setup on.
 _pkgs=$(grep -vE '^\s*(#|$)' "$WK_ROOT/host/linux/apt.txt" | tr '\n' ' ' || true)
 
-# Validated per *line*, not per word: every legitimate line is a single token,
-# so whitespace inside one is prose that lost its `#`.
 while IFS= read -r _line; do
     case "$_line" in
         ''|\#*) continue ;;
@@ -57,8 +52,7 @@ else
     changed "installed claude"
 fi
 
-# Rootless podman's pasta backend re-emits container traffic as ordinary host
-# sockets, which never traverse the forward chain, so nftables cannot filter it.
+# Rootless pasta re-emits container traffic as host sockets: nftables cannot see it.
 if [ "$(id -u)" -ne 0 ] && ! sudo -n podman version >/dev/null 2>&1; then
     log "note: workspaces run under rootful podman so the egress firewall applies"
 fi

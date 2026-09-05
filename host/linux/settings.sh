@@ -1,8 +1,4 @@
-# Ubuntu 26.04 desktop settings, restored from a filtered dconf dump.
-#
-# `dconf load -f /` replaces the whole tree, which is destructive on a machine
-# that has settings this repo does not know about. Loading into the specific
-# subtrees that were captured is safer and still idempotent.
+# `dconf load` without -f merges; -f would replace the whole tree.
 
 _dconf="$WK_ROOT/host/linux/config.dconf"
 
@@ -13,13 +9,6 @@ elif [ ! -f "$_dconf" ]; then
 elif [ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ]; then
     warn "no session bus; run ./setup from inside a graphical session to apply GNOME settings"
 else
-    # Comparing the whole live tree against the captured file can never match:
-    # the dump holds only the subtrees `wk backup` captures, while the live
-    # tree holds everything this desktop has ever set -- that comparison would
-    # report a change on every run, which idempotency forbids.
-    #
-    # Instead: apply it, then ask whether anything actually moved. `dconf load`
-    # without -f merges, so this is safe to run when nothing changes.
     _before=$(mktemp)
     _after=$(mktemp)
     dconf dump / > "$_before" 2>/dev/null || true

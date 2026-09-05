@@ -1,14 +1,5 @@
 #!/bin/bash
-# Capture a Linux perf profile of MiniBrowser with GC-section text markers and a
-# group of hardware PMU events, for splitting per GC section with split-perf.py.
-# Unlike capture.sh (samply, wall-clock stacks) this records cycles/instructions/
-# cache events, so each section's IPC and cache-miss behaviour can be measured.
-#
-# Linux/GTK only. Requires a Release WebKit build with the GC text-marker patch,
-# and perf (`linux-perf`) whose major.minor matches the running kernel.
-#
-# Usage:   capture-perf.sh <periodMS> <durationSec> <out.data> [url] [freqHz]
-# Env overrides: WEBKIT_ROOT, WEBKIT_BUILD, PERF, TRACE_AUX, PERF_EVENTS
+# A Linux perf profile of MiniBrowser with GC-section text markers and a group of hardware PMU events, to split per GC section with split-perf.py. Where capture.sh (samply) gives wall-clock stacks, this records cycles/instructions/cache events, so each section's IPC and cache-miss behaviour can be measured. Linux/GTK only, and needs a Release WebKit build with the GC text-marker patch and a perf (`linux-perf`) whose major.minor matches the running kernel.  Usage:  capture-perf.sh <periodMS> <durationSec> <out.data> [url] [freqHz]  -- env overrides WEBKIT_ROOT, WEBKIT_BUILD, PERF, TRACE_AUX, PERF_EVENTS, CALLGRAPH
 set -u
 
 OS=$(uname -s)
@@ -29,9 +20,7 @@ URL=${4:-http://localhost:8080}
 FREQ=${5:-4000}
 AUX="${TRACE_AUX:-/tmp/jsc-trace-aux}"
 
-# Leader is cycles, on the fixed counter. Five events fit the Neoverse-N1 PMU
-# (cycles plus 4 of 6 programmable), so there is no multiplexing. Override with
-# PERF_EVENTS for a different uarch.
+# Leader is cycles, on the fixed counter; five events fit the Neoverse-N1 PMU (cycles plus 4 of 6 programmable), so there is no multiplexing. PERF_EVENTS for another uarch.
 EVENTS="${PERF_EVENTS:-cycles,instructions,l1d_cache_refill,ll_cache_miss_rd,stall_backend}"
 
 mkdir -p "$AUX" "$(dirname "$OUT")"
@@ -41,8 +30,7 @@ DIR="${WEBKIT_BUILD:-$ROOT/WebKitBuild/GTK/Release}"
 MB="$DIR/bin/MiniBrowser"
 export LD_LIBRARY_PATH="$DIR/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 export WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS=1
-# JIT dump segfaults the WebKitGTK process here; markers are all we need and GC is C++.
-JSC_OPTS=(
+JSC_OPTS=(   # no JIT dump: it segfaults the WebKitGTK process here, and GC is C++, so markers are all this needs
     "useFixedIntervalGCOnly=1"
     "fixedIntervalGCPeriodMS=$PERIOD_MS"
     "useTextMarkers=1"
@@ -72,14 +60,7 @@ echo
 stop_browser
 sleep 1
 
-# --clockid=monotonic puts perf sample timestamps on CLOCK_MONOTONIC, the same
-# base as JSC's MonotonicTime markers, so split-perf.py needs no conversion. perf
-# records the launched workload and its children, so the forked WebKitWebProcess
-# where GC runs is captured too.
-#
-# Call graphs are off by default: a callchain per sample makes perf.data ~10x
-# larger and the perf-script Python pass minutes-long. Set CALLGRAPH=fp for
-# split-perf.py's cache-miss flamegraph (.folded) output.
+# --clockid=monotonic puts sample timestamps on the same base as JSC's MonotonicTime markers, so split-perf.py converts nothing; perf records the workload's children too, so the forked WebKitWebProcess where GC runs is captured. A callchain per sample makes perf.data ~10x larger and the perf-script pass minutes-long, so CALLGRAPH is opt-in, `fp` feeding split-perf.py's .folded flamegraph.
 CG=()
 [ "${CALLGRAPH:-}" = "" ] || CG=(--call-graph "${CALLGRAPH}")
 "$PERF" record -e "$EVENTS" -F "$FREQ" --clockid=monotonic "${CG[@]}" \

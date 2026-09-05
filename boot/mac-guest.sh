@@ -1,36 +1,20 @@
 # Boot driver: a macOS guest standing in for a machine in bench mode.
-#
-# Rehearses the bare-metal boot path end to end without taking the workstation
-# away from its user. A guest shares its host's CPU and a paravirtualised GPU,
-# so runs from here are marked accordingly and are comparable with nothing.
-#
-# The transition here is scriptable (`wk vm start`), unlike the MBP's, so
-# BOOT_ARMING is `guest` -- neither one-shot, server, nor hands-on.
 
 BOOT_ARMING=guest
-
-# NODE_GUEST is a workspace name; t_start/t_stop/_ip map it to the tart VM
-# themselves, but _vm_state wants the already-mapped name from _vm(). Passing
-# the unmapped name silently answers "absent".
 
 BOOT_ORDER_IMAGE=""
 BOOT_ORDER_NORMAL=""
 
-# WK_BENCH_GUEST overrides which vm workspace stands in for this machine, so
-# two rehearsals can run against different guests.
 NODE_GUEST="${WK_BENCH_GUEST:-wk-bench}"
 
-# The path `wk bench staged` expects in bench mode. Created on first delivery;
-# the guest's passwordless sudo is needed only for this.
 BENCH_GUEST_ROOT=/var/wk
 
-# `|| true` / `return 0` throughout: a guest that is off is a normal state, not a failure.
+# `|| true` / `return 0` throughout: an off guest is a normal state, and cmd/boot runs under set -euo pipefail.
 _guest_ip() {
     ( load_target vm >/dev/null 2>&1; _ip "$NODE_GUEST" 2>/dev/null ) || return 1
 }
 
-# A guest's address is not in any ssh config and changes with every boot, so
-# the generic m_ssh in boot/machines.sh cannot be reused here.
+# A guest's address is in no ssh config and changes with every boot, so boot/machines.sh's m_ssh cannot serve here.
 m_ssh() {
     local ip; ip=$(_guest_ip) || return 1
     ( load_target vm >/dev/null 2>&1
@@ -48,8 +32,6 @@ b_probe() {
     return 0
 }
 
-# Load-bearing, not defensive: cmd/boot runs under set -euo pipefail, so an
-# off guest (normal between runs) would otherwise abort the command silently.
 _guest_boot_sec() {
     m_ssh 'sysctl -n kern.boottime' 2>/dev/null \
         | sed -n 's/.*{ *sec *= *\([0-9][0-9]*\).*/\1/p' || true
@@ -95,13 +77,9 @@ b_reboot() {
 
 b_diag() { m_ssh 'cat /var/log/wk-diag.txt 2>/dev/null || echo "(no diag on the guest)"'; }
 
-# --- where a staged payload goes ---------------------------------------------
-# Over ssh rather than as a local path: unlike the MBP, whose benchmark disk is
-# mounted while staging, every other machine takes the payload over the wire.
 b_bench_root() { printf '%s' "$BENCH_GUEST_ROOT"; }
 b_bench_local() { return 1; }
 
-# One file, for the manifest that publishes a delivery (cmd/bench, cmd_stage).
 b_bench_put_file() {
     local src="$1" dest="$2" ip
     ip=$(_guest_ip) || die "'$NODE_GUEST' is not running"
@@ -120,9 +98,7 @@ b_bench_put() {
       rsync -a --delete -e "ssh $(_ssh_opts)" "$src/" "$WK_VM_USER@$ip:$dest/" )
 }
 
-# Probed through the vm driver's own resolver (_tart_bin), not a bare
-# `command -v tart`: a non-interactive ssh session's PATH is just
-# /usr/bin:/bin:/usr/sbin:/sbin, so that answers "no" even with tart running.
+# Via _tart_bin: a non-interactive ssh session's PATH lacks tart's directory, so `command -v tart` answers "no" even with tart running.
 b_probeable() { is_macos && ( load_target vm >/dev/null 2>&1; _tart_bin >/dev/null 2>&1 ); }
 
 b_media() {
@@ -135,7 +111,6 @@ b_media() {
     printf 'a Tart guest, %s (%s); no physical media' "$NODE_GUEST" "${st:-unknown}"
 }
 
-# No medium to carry: cloned from the golden base and thrown away.
 b_reprovision() {
     cat <<REPROV
 wk vm base

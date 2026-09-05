@@ -1,25 +1,6 @@
-# Writes a Pi 4's bootloader EEPROM with nothing but `vcgencmd` on the board:
-# the ROM runs recovery.bin from the boot partition before anything else, and
-# recovery.bin flashes pieeprom.upd (checked against pieeprom.sig) and then
-# deletes itself. Staging those three files is done from the machine driving
-# this, over ssh, so the board needs no eeprom tooling of its own.
-#
-# Two consequences, both surfaced at the confirm prompt: the whole EEPROM image
-# is replaced rather than just its config section (the running image cannot be
-# read back without tooling the board lacks, so the bootloader is upgraded to
-# the pinned release below with the board's configuration carried across), and
-# it takes effect on the next boot, since recovery.bin only runs from the ROM.
-#
-# recovery.bin verifies pieeprom.upd's SHA-256 against pieeprom.sig before
-# writing anything, so a corrupt transfer flashes nothing.
-#
-# Sourced by cmd/pi, using that command's `rsh` and `$HOST`.
+# Writes a Pi 4's bootloader EEPROM with nothing on the board but `vcgencmd`: the ROM runs recovery.bin from the boot partition before
+# anything else, and it flashes pieeprom.upd (SHA-256-checked against pieeprom.sig) then deletes itself, so the whole image is replaced and only on the next boot.
 
-# Three files fetched by commit-addressed raw URL and pinned by sha256, rather
-# than cloning the 106 MB tree for 660 KB of files. firmware-2711 is the
-# BCM2711 (Pi 4 / CM4 / Pi 400) tree; eeprom_check_soc refuses any other SoC.
-# `default` is the channel `rpi-eeprom-update` installs when nothing is asked
-# for. Bump all three pins together.
 EEPROM_COMMIT=86759b04b22173e10186139ac3ae4debcd0d7252
 EEPROM_IMAGE=pieeprom-2026-05-17.bin
 
@@ -33,7 +14,6 @@ EOF
 
 eeprom_cache_dir() { echo "$WK_STORE/rpi-eeprom/$EEPROM_COMMIT"; }
 
-# Fetch the pinned set, once. Echoes the directory holding it.
 eeprom_fetch() {
     local dir name path sha url
     dir=$(eeprom_cache_dir)
@@ -59,9 +39,6 @@ EOF
     echo "$dir"
 }
 
-# The pinned image is BCM2711 firmware, so anything else is refused here rather
-# than discovered by a board that will not boot. /proc/device-tree/compatible is
-# NUL-separated, hence the tr.
 eeprom_check_soc() {
     local compat
     compat=$(rsh 'tr "\0" "\n" < /proc/device-tree/compatible 2>/dev/null' | tr -d '\r')
@@ -77,14 +54,8 @@ $(printf '%s\n' "$compat" | sed 's/^/      /')
     esac
 }
 
-# `vcgencmd bootloader_config` asks the firmware for the config section it
-# booted with -- the same text rpi-eeprom-config prints, available on any Pi
-# with the VideoCore tools.
 eeprom_read_config() {
     local out
-    # r_sudo, not `vcgencmd || sudo vcgencmd`: a BusyBox bench system has no
-    # sudo at all, so that pair reports `sudo: not found` where the real fault
-    # is a missing vcgencmd.
     out=$(r_sudo "vcgencmd bootloader_config" 2>/dev/null | tr -d '\r')
     if [ -z "$out" ]; then
         if ! r_ssh "command -v vcgencmd >/dev/null 2>&1"; then
@@ -101,10 +72,6 @@ eeprom_read_config() {
     printf '%s\n' "$out"
 }
 
-# Where the firmware reads files from: /boot on the Yocto image, /boot/firmware
-# on Ubuntu's. Asked of /proc/mounts rather than findmnt, which buildroot images
-# do not all have, and confirmed by the presence of the Pi 4 second-stage
-# firmware so that some unrelated FAT volume cannot win.
 eeprom_bootfs() {
     local d found=""
     for d in $(rsh 'awk "\$3 == \"vfat\" { print \$2 }" /proc/mounts' | tr -d '\r'); do
@@ -116,9 +83,7 @@ eeprom_bootfs() {
     echo "$found"
 }
 
-# recovery.bin renames itself to RECOVERY.000 but leaves pieeprom.upd and
-# pieeprom.sig behind, and an applied update then looks identical to a pending
-# one. Called only once the running firmware reports what was asked for.
+# recovery.bin renames itself to RECOVERY.000 but leaves pieeprom.upd and .sig behind, so an applied update looks identical to a pending one.
 eeprom_clear_staged() {
     local bootfs
     bootfs=$(eeprom_bootfs 2>/dev/null) || return 0
@@ -127,7 +92,6 @@ eeprom_clear_staged() {
         >/dev/null 2>&1 || return 0
 }
 
-# Build the update image and stage it. $1 is the configuration text.
 eeprom_stage_recovery() {
     local config="$1" dir work bootfs sum_local sum_remote f
     dir=$(eeprom_fetch)
@@ -139,9 +103,7 @@ eeprom_stage_recovery() {
         --config "$work/boot.conf" --out "$work/pieeprom.upd" "$dir/$EEPROM_IMAGE" \
         || die "rpi-eeprom-config could not apply that configuration to $EEPROM_IMAGE"
 
-    # recovery.bin hashes the image against this and refuses it on a mismatch.
-    # Written here rather than via upstream's rpi-eeprom-digest, which would be
-    # a fourth pinned file.
+    # recovery.bin hashes pieeprom.upd against this file and refuses it on a mismatch.
     {
         sha256sum "$work/pieeprom.upd" | cut -d' ' -f1
         echo "ts: $(date -u +%s)"
@@ -151,9 +113,7 @@ eeprom_stage_recovery() {
     bootfs=$(eeprom_bootfs)
     info "staging the EEPROM update in $bootfs on $HOST"
 
-    # recovery.bin last: it is the trigger, and the ROM runs whatever
-    # recovery.bin it finds, so a power cut partway through must leave a board
-    # that still boots normally.
+    # recovery.bin last: it is the trigger, so a power cut partway through leaves a board that still boots normally.
     # shellcheck disable=SC2046
     scp -q -o BatchMode=yes $(_unpinned_host_key_opts) "$work/pieeprom.upd" "$work/pieeprom.sig" "$(rsh_dest):$bootfs/" \
         || die "could not copy the EEPROM update to $HOST:$bootfs"

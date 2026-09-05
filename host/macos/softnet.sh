@@ -1,11 +1,4 @@
-# Softnet: the egress boundary for macOS guest VMs. Tart runs it as a userspace
-# packet filter on the host, default-deny with the host itself the one allowed
-# address, and the guest reaches wk-proxy over TCP there. It needs root because
-# vmnet does, so it is installed SUID root here, once, at setup time.
-#
-# WK_SOFTNET_VERSION pins the release; WK_SOFTNET_BIN overrides the install
-# path, and cmd/ai, cmd/doctor, setup and targets/vm.sh all read it with this
-# same default to find what this stage installed.
+# vmnet needs root, so softnet is installed SUID root.
 WK_SOFTNET_VERSION="${WK_SOFTNET_VERSION:-0.23.0}"
 WK_SOFTNET_BIN="${WK_SOFTNET_BIN:-/usr/local/bin/softnet}"
 
@@ -29,14 +22,12 @@ else
     if curl -fsSL -o "$_tmp/softnet.tar.gz" "$_base/softnet.tar.gz" &&
        curl -fsSL -o "$_tmp/sums.txt"      "$_base/softnet_${WK_SOFTNET_VERSION}_checksums.txt"; then
 
-        # Verified before anything is made SUID root.
         _want=$(awk '/softnet.tar.gz$/ {print $1}' "$_tmp/sums.txt")
         _got=$(shasum -a 256 "$_tmp/softnet.tar.gz" | awk '{print $1}')
 
         if [ -n "$_want" ] && [ "$_want" = "$_got" ]; then
             tar -xzf "$_tmp/softnet.tar.gz" -C "$_tmp"
             if [ -f "$_tmp/softnet" ]; then
-                # A SUID binary in a user-writable path is not a boundary.
                 if sudo install -o root -g wheel -m 4755 "$_tmp/softnet" "$WK_SOFTNET_BIN"; then
                     changed "installed softnet $WK_SOFTNET_VERSION at $WK_SOFTNET_BIN (SUID root)"
                 else

@@ -1,23 +1,6 @@
 #!/usr/bin/env python3
-"""Give a branch a cross-target it does not have, derived from one it does.
-
-WebKit's `Tools/yocto/targets.conf` gained its rpi5 section after the 2.4x
-releases branched, so those branches can build for every Pi but that one --
-even though the layers they pin already support the machine (wpe-2.46's
-meta-raspberrypi has conf/machine/raspberrypi5.conf).  What is missing is
-WebKit's own glue: a section, and the local.conf it points at.
-
-Both are *derived* from a target the branch does have, not vendored: the
-local.conf is that target's with one MACHINE line changed, and the section is
-its section with one path changed.  So there is no copy of somebody else's
-200-line local.conf here to drift from theirs.
-
-Idempotent: a checkout that already has the section is left alone, so a
-re-run after a killed build converges rather than appending a second section.
-
-Not a substitute for upstreaming the section.  The caller says, every run,
-that it ported a target.
-"""
+"""Give a branch a cross-target it does not have, derived from one it does: the derived-from section with its conf_local_path changed, pointing at that target's local.conf with one MACHINE line changed.
+Idempotent, and not a substitute for upstreaming the section."""
 
 import argparse
 import configparser
@@ -59,7 +42,6 @@ def main():
     if not os.path.isfile(src_local_abs):
         sys.exit("[%s] names %s, which is not in this checkout" % (args.from_target, src_local))
 
-    # The local.conf: that target's, with the machine changed and nothing else.
     new_local = os.path.join(os.path.dirname(src_local),
                              "local-%s.conf" % args.target)
     text = open(src_local_abs, errors="replace").read()
@@ -71,10 +53,7 @@ def main():
     with open(os.path.join(args.yocto_dir, new_local), "w") as fh:
         fh.write(swapped)
 
-    # The section: that target's, pointing at the local.conf just written.
     section = dict(src, conf_local_path=new_local)
-    # A multilib target builds a differently-named image recipe out of the same
-    # layers, and the helper reads which one from here.
     if args.image:
         section["image_basename"] = args.image
     cp[args.target] = section

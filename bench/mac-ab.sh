@@ -1,5 +1,4 @@
 #!/usr/bin/env bash
-#
 # wk bench mac-ab -- an interleaved A/B on this Mac's benchmark install, with
 # nobody in the room.
 #
@@ -8,27 +7,8 @@
 #   wk bench mac-ab <workspace> --patch <ref|diff> [--base <ref>] [--rounds N]
 #   wk bench mac-ab --preflight | --status | --collect | --dry-run
 #
-# **The benchmark install has no network** (tolken is Wi-Fi only and that
-# install joins nothing), so the phase-by-phase ssh bench/mac-lane.sh depends
-# on has nowhere to connect. The job is *planted* instead of driven:
-# everything it needs is written onto the volume while merely mounted, a
-# per-user LaunchAgent starts it when the bench account auto-logs in, and this
-# driver waits and reads.
-#
-# Staging and planting need no sudo because /var/wk and ~bench are both owned
-# by uid 501 -- this account in host mode, the bench account over there. The
-# reboot uses the loginwindow Apple event (phase_go), and the bench account
-# carries its own NOPASSWD sudo for the run.
-#
-# One thing needs a person: **which volume the firmware boots.** Nothing here
-# can set it -- `nvram boot-volume`, `bless --setBoot` and
-# `systemsetup -getstartupdisk` all fail silently
-# (docs/HANDOFF-mac-perf-mode.md). So this driver reboots and reports which
-# mode came back: at most one human action per A/B, never one per run, since
-# the planted job holds every round of every arm.
-#
-# WK_MAC_* are bench/mac-lane.sh's environment overrides; WK_BENCH_VOLUME is
-# bench/mac-bench-volume.sh's.
+# The benchmark install has no network (tolken is Wi-Fi only and that install joins nothing), so the job is planted rather than driven: everything it needs is written onto the volume while merely mounted, a per-user LaunchAgent starts it at autologin, and this driver waits and reads. No sudo, because /var/wk and ~bench are both uid 501.
+# Nothing here can set which volume the firmware boots -- `nvram boot-volume`, `bless --setBoot` and `systemsetup -getstartupdisk` all fail silently -- so this driver reboots and reports which mode came back: at most one human action per A/B, never one per run, since the planted job holds every round of every arm.
 
 set -euo pipefail
 WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -57,18 +37,14 @@ DRY=""
 ACTION=run
 BOOT_WAIT="${WK_MAC_BOOT_WAIT:-3600}"
 
-usage() { sed -n '4,10p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2; }
+usage() { usage_block "$0" >&2; exit 2; }
 
-# --- reaching the Mac --------------------------------------------------------
-# `mac_ssh` (boot/machines.sh) is shared with bench/mac-lane.sh's `ssh_to`.
 mac() {
     mac_ssh "$HOST" "$@"
 }
 mac_sh() { mac bash -lc "$(sh_quote "$*")"; }
 
-# What macOS names ByHost preferences by. Read from host mode: it identifies
-# the machine, and the two installs are one machine.
-mac_hw_uuid() {
+mac_hw_uuid() {   # what macOS names ByHost preferences by; either install answers, since they are one machine
     mac_sh 'ioreg -rd1 -c IOPlatformExpertDevice' 2>/dev/null \
         | awk -F'"' '/IOPlatformUUID/{print $4; exit}' | tr -d '\r'
 }
@@ -82,18 +58,12 @@ host_tools() {
 }
 rwk() { mac_sh "cd $(sh_quote "$(host_tools)") && ./wk $*"; }
 
-# The planted copy, which is the same age as the job.
-bwk() { mac_sh "cd $(sh_quote "$(bench_root)/wk-tools") && ./wk $*"; }
+bwk() { mac_sh "cd $(sh_quote "$(bench_root)/wk-tools") && ./wk $*"; }   # the planted copy, the same age as the job
 
-# Getting files onto the volume over ssh without depending on how the far end
-# spells a path with spaces in it (`/Volumes/WK Bench - Data/…`): openrsync,
-# which this Mac ships, sends an escaped path with its backslashes intact and
-# fails with `open: No such file or directory`. In tar over ssh the remote path
-# appears once, inside a command this side quotes.
+# openrsync, which this Mac ships, sends `/Volumes/WK Bench - Data/...` with its escaping intact and fails with `open: No such file or directory`; over ssh the remote path appears once, inside a command this side quotes.
 put_file() {  # $1 = local file, $2 = remote path
     mac "cat > $(sh_quote "$2")" < "$1" || return 1
-    # A `cat >` that wrote nothing exits 0, so verify by byte count instead.
-    local want got
+    local want got   # a `cat >` that wrote nothing exits 0, so verify by byte count
     want=$(wc -c < "$1" | tr -d ' ')
     got=$(mac "wc -c < $(sh_quote "$2")" 2>/dev/null | tr -d ' \r')
     [ "$want" = "$got" ] || {
@@ -102,17 +72,13 @@ put_file() {  # $1 = local file, $2 = remote path
     }
 }
 
-# $1 = local dir, $2 = remote dir -- replaced wholesale, then verified by
-# asking for a file only the new tree has: a stale tree that reports success is
-# discovered after the reboot, where nothing can say so.
+# $1 = local dir, $2 = remote dir, replaced wholesale. Verified by a sentinel only this tree carries plus a byte count, because a stale or truncated tree is otherwise discovered after the reboot, where nothing can report it.
 put_tree() {
     local src="$1" dst="$2"
     tar -cf - --exclude '.git' -C "$src" . \
         | mac "rm -rf $(sh_quote "$dst") && mkdir -p $(sh_quote "$dst") && tar -xf - -C $(sh_quote "$dst")" \
         || return 1
 
-    # A sentinel from this lane, so an older tree cannot satisfy it, plus a
-    # byte count, so a truncated copy cannot either.
     local probe="bench/mac-ab.sh" want got
     want=$(wc -c < "$src/$probe" | tr -d ' ')
     got=$(mac "wc -c < $(sh_quote "$dst/$probe") 2>/dev/null" 2>/dev/null | tr -d ' \r')
@@ -127,13 +93,10 @@ put_tree() {
     log "  verified: $dst carries this lane's own tree ($probe, $got bytes)"
 }
 
-# The bench volume's paths as host mode sees them (boot/mac-volume.sh).
 BROOT=""
 bench_root() {
     [ -n "$BROOT" ] && { printf '%s' "$BROOT"; return 0; }
     BROOT=$(mac_sh "cd $(sh_quote "$(host_tools)") && . lib/common.sh && . boot/machines.sh && machine_load $(sh_quote "$MACHINE") && load_driver \"\$NODE_DRIVER\" && b_bench_root" 2>/dev/null | tr -d '\r' | tail -1)
-    # Empty is normal in bench mode, where the same volume is `/`: every verb
-    # here is host-mode.
     [ -n "$BROOT" ] || die "'$VOLUME' is not visible from $HOST right now.
     Either it is not attached, or $HOST is *in* bench mode -- that install's own
     root is the volume, so it is not mounted under /Volumes and every verb here
@@ -147,9 +110,7 @@ bench_home() {
     printf '%s' "$(dirname "$(dirname "$d")")/Users/bench"
 }
 
-# --- preflight ---------------------------------------------------------------
-# Every check here is a thing that, if wrong, is discovered after the reboot on
-# a machine that cannot be reached.
+# Every check here is something that, if wrong, is discovered after the reboot on a machine that cannot be reached.
 PF_FAIL=0
 ck() {  # ck yes|no <label> <detail>
     if [ "$1" = yes ]; then printf '  \033[32mok\033[0m   %-24s %s\n' "$2" "$3" >&2
@@ -191,8 +152,7 @@ preflight() {
         ck no "bench home" "$bh/Library is not writable -- the agent cannot be planted"
     fi
 
-    # Without a console session the browser has nowhere to draw and the run
-    # looks like a hang.
+    # Without a console session the browser has nowhere to draw and the run looks like a hang.
     local alu
     alu=$(mac "defaults read $(sh_quote "$bh/../../Library/Preferences/com.apple.loginwindow") autoLoginUser 2>/dev/null" 2>/dev/null | tr -d '\r')
     if [ "$alu" = bench ]; then ck yes "autologin" "the bench account logs in at the console"
@@ -214,16 +174,12 @@ preflight() {
         log "  note scipy is not on the bench install; --plant installs it (needs this machine's network)" >&2
     fi
 
-    # The planted copy; the install's own ~bench/Development/wk-tools is not
-    # used.
     if mac "test -x $(sh_quote "$root/wk-tools/wk")" 2>/dev/null; then
         ck yes "planted wk-tools" "$root/wk-tools"
     else
         log "  note nothing planted yet; --plant puts this lane's own tree at $root/wk-tools" >&2
     fi
 
-    # A first-boot daemon that cannot remove itself reverts tooling and
-    # reboots the machine a minute into a run; the autorun defuses it.
     if mac "test -f $(sh_quote "$bh/../../Library/LaunchDaemons/com.wk.bench-firstboot.plist")" 2>/dev/null; then
         log "  note the first-boot daemon is still installed on this volume. It reverts" >&2
         log "       tooling and reboots the machine ~1 min into a boot; the autorun" >&2
@@ -241,8 +197,7 @@ preflight() {
         ck no "staged builds" "nothing on the volume, and no workspace given to stage from"
     fi
 
-    # Reported, never asserted: the startup manager can override the
-    # firmware's own variable without updating it.
+    # Reported, never asserted: the startup manager can override the firmware's own variable without updating it.
     local bv grp
     bv=$(mac "python3 $(sh_quote "$(host_tools)/lib/wkmac.py") boot-volume" 2>/dev/null | tr -d '\r')
     grp="${bv##*:}"
@@ -277,13 +232,10 @@ phase_stage() {
     info "stage: $CONFIG from '$WS' onto $VOLUME"
     [ -n "$DRY" ] && { log "  would: wk vm start $WS; wk bench seed $WS $PLAN; wk bench stage $WS --to $MACHINE"; return 0; }
     rwk vm start "$WS" >/dev/null 2>&1 || true
-    # The bench install has no network, so a run-benchmark that clones the
-    # benchmark dies where nobody can see it. stdout only: `2>&1 | tail -1`
-    # races `wk bench seed`'s stderr progress against its stdout path.
+    # The payload is pinned here because a run-benchmark that clones it over there dies where nobody can see it. stdout only: `2>&1 | tail -1` would race seed's stderr progress against its stdout path.
     local payload
     payload=$(rwk bench seed "$WS" "$PLAN" | tr -d '\r' | tail -1) || payload=""
     case "$payload" in /*) ;; *) payload="" ;; esac
-    # A payload named but absent produces a `--local-copy` pointing at nothing.
     if [ -n "$payload" ] && mac "test -d $(sh_quote "$payload")" 2>/dev/null; then
         log "  payload pinned: $payload"
     elif [ -n "$ALLOW_FETCH" ]; then
@@ -292,8 +244,6 @@ phase_stage() {
   clone $PLAN itself, so the benchmark install needs a working network *and*
   the two arms could in principle get different revisions of the benchmark."
     else
-        # A refusal: every arm would die in run-benchmark's fetch after a
-        # reboot with no network to report it over.
         die "the $PLAN payload could not be pinned, so nothing may be staged.
 
     Each run would clone the benchmark itself, over a network the benchmark
@@ -312,19 +262,11 @@ phase_stage() {
     rwk bench stage "$WS" --to "$MACHINE" --config "$CONFIG" --plan "$PLAN" \
         ${payload:+--payload "$payload"}
 
-    # A running macOS VM competes for CPU with whatever runs next.
-    info "  stopping the build guest"
+    info "  stopping the build guest"   # a running macOS VM competes for CPU with whatever runs next
     rwk vm stop "$WS" >/dev/null 2>&1 || warn "  could not stop '$WS'"
 }
 
-# --- building both arms ------------------------------------------------------
-# `--patch`: two builds from the same tree, staged, and the tree restored
-# afterwards since it is somebody's working copy. Takes a git ref (whose tree
-# is the patched state) or a diff file on this machine.
-
-# One command in the build guest, from here, two shells away. Written to a file
-# and then run, rather than piped into `bash`: a script on stdin is consumed by
-# the first thing inside it that reads stdin, silently truncating the rest.
+# One command in the build guest, two shells away, written to a file and then run: a script on stdin is consumed by the first thing inside it that reads stdin, silently truncating the rest.
 guest_sh() {
     local b; b=$(printf '%s' "$1" | base64 | tr -d '\n')
     mac_sh "ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new wk-$(sh_quote "$WS") 'printf %s $b | base64 -d > /tmp/wk-guest.sh && bash /tmp/wk-guest.sh'"
@@ -341,8 +283,7 @@ staged_ids() {
     mac "ls -1 $(sh_quote "$(bench_root)/staged") 2>/dev/null" 2>/dev/null | tr -d '\r' | sort
 }
 
-# The staged id, taken as the directory new since before the stage.
-build_and_stage() {
+build_and_stage() {   # the staged id is the directory new since before the stage
     local label="$1" before after id
     before=$(staged_ids)
     info "  building $label"
@@ -365,7 +306,6 @@ phase_build_ab() {
     [ -n "$DRY" ] && {
         log "  would build the baseline (${BASE_REF:-current HEAD}) in '$WS' and stage it"
         log "  would then apply '$PATCH' and stage that as the second arm"
-        # An empty A_ID falls through to the plant's "default B to A" rule.
         ARMS_PENDING=1
         A_ID="<baseline ${BASE_REF:-HEAD}, would be built>"
         B_ID="<patched $PATCH, would be built>"
@@ -375,8 +315,7 @@ phase_build_ab() {
     local src; src=$(guest_src)
     log "  checkout: $src"
 
-    # A detached HEAD prints nothing for --abbrev-ref, so the sha is next.
-    local orig
+    local orig   # a detached HEAD prints nothing for --abbrev-ref, so the sha is next
     orig=$(guest_sh "git -C $src symbolic-ref --quiet --short HEAD 2>/dev/null || git -C $src rev-parse HEAD" | tr -d '\r' | head -1)
     [ -n "$orig" ] || die "could not read the guest checkout's current ref"
     log "  will restore '$orig' when done"
@@ -409,16 +348,12 @@ phase_build_ab() {
     info "arms: A=$A_ID  B=$B_ID"
 }
 
-# --- planting ----------------------------------------------------------------
-# Everything the run needs, written while the volume is merely mounted. Nothing
-# here needs a password.
 phase_plant() {
     local root bh stamp
     root=$(bench_root); bh=$(bench_home)
     stamp=$(date -u +%Y%m%dT%H%M%SZ)
 
-    # Defaulting B to A is the A/A control. Skipped for a --patch dry run's
-    # placeholder arms, which do not exist yet.
+    # Defaulting B to A is the A/A control; skipped for a --patch dry run's placeholder arms.
     if [ -z "$ARMS_PENDING" ]; then
         local staged
         staged=$(mac "ls -1 $(sh_quote "$root/staged") 2>/dev/null" 2>/dev/null | tr -d '\r' | sort)
@@ -446,29 +381,18 @@ $(printf '%s' "$staged" | sed 's/^/    /')"
         return 0
     fi
 
-    # wk-tools into /var/wk, not ~bench/Development/wk-tools:
-    # bench/mac-bench-firstboot.sh `rsync --delete`s over that directory on
-    # every boot it runs, replacing a correctly planted tree with an older one.
+    # /var/wk, not ~bench/Development/wk-tools: the first-boot daemon `rsync --delete`s over that directory on every boot it runs, replacing a planted tree with an older one.
     info "  syncing wk-tools onto the volume"
     put_tree "$WK_ROOT" "$root/wk-tools" \
         || die "could not sync wk-tools onto the bench volume"
 
-    # Installed from here, where the network is: same machine, same python.
     if ! mac "test -d $(sh_quote "$bh/Library/Python/3.9/lib/python/site-packages/scipy")" 2>/dev/null; then
         info "  installing scipy into the bench account's site-packages"
         mac "/usr/bin/python3 -m pip install --quiet --target $(sh_quote "$bh/Library/Python/3.9/lib/python/site-packages") scipy" \
             >/dev/null 2>&1 || warn "  scipy did not install; the A/B will be compared from host mode instead"
     fi
 
-    # --- the screen lock, settled BEFORE the reboot --------------------------
-    # A lock mid-run is the same "nowhere to draw" failure as a stolen focus,
-    # and it is invisible to `screen_blocker`, which asks only for the
-    # frontmost application (docs/HANDOFF-mac-perf-mode.md).
-    #
-    # These are per-user preferences and ~bench is uid 501, so they are
-    # writable here while the volume is merely mounted -- by absolute path,
-    # with no cfprefsd on either side owning them, then read back to verify.
-    # `wk quiesce` enforces the same two settings again at run time.
+    # A lock mid-run is the same "nowhere to draw" failure as a stolen focus, and invisible to `screen_blocker`, which asks only for the frontmost application. Per-user preferences on a uid-501 home, so they are written here by absolute path with no cfprefsd owning them, then read back.
     local sspath="$bh/Library/Preferences/ByHost/com.apple.screensaver.$(mac_hw_uuid)"
     mac "mkdir -p $(sh_quote "$bh/Library/Preferences/ByHost")"
     mac "defaults write $(sh_quote "$sspath") idleTime -int 0" >/dev/null 2>&1 || true
@@ -498,10 +422,7 @@ $(printf '%s' "$staged" | sed 's/^/    /')"
     mac "chmod 0755 $(sh_quote "$root/bin/mac-bench-autorun.sh")"
 
     info "  writing the job"
-    # Written through python so quoting is not a shell problem: staged ids and
-    # browser arguments both reach this from a command line and can contain
-    # spaces. aslr/env_pad/path_pad/shared_cache carry the same WK_BENCH_*
-    # variance knobs cmd/bench documents through to the autorun.
+    # Written through python so quoting is not a shell problem: staged ids and browser arguments reach this from a command line and can contain spaces.
     WK_JOB_PLAN="$PLAN" WK_JOB_ROUNDS="$ROUNDS" WK_JOB_TIMEOUT="$TIMEOUT" \
     WK_JOB_COUNT="$COUNT" WK_JOB_SETTLE="$SETTLE" \
     WK_JOB_A="$A_ID" WK_JOB_B="$B_ID" WK_JOB_AA="$A_ARGS" WK_JOB_BA="$B_ARGS" \
@@ -537,20 +458,13 @@ PYEOF
     put_file "$(wk_state_dir)/mac-ab-job.json" "$root/job.json" \
         || die "could not write the job onto the volume"
 
-    # Reset here and nowhere else: the autorun only advances this state, so a
-    # fresh job needs a fresh one or the run is skipped as already done.
+    # Reset here and nowhere else: the autorun only advances this state, so a fresh job needs a fresh one or the run is skipped as already done.
     mac "printf 'phase=planted\njob_stamp=%s\nattempts=0\nplanted_at=%s\n' \
         $(sh_quote "$stamp") $(sh_quote "$(date -u +%Y-%m-%dT%H:%M:%SZ)") > $(sh_quote "$root/autorun.state")"
     mac "mkdir -p $(sh_quote "$root/ab/$stamp")"
 
     info "  installing the launch agent"
-    # RunAtLoad and nothing else: no KeepAlive (a finished benchmark must not
-    # restart) and no StartInterval. The agent removes itself when the job it
-    # was planted for is done.
-    #
-    # WK_AB_ROOT is plumbing: this plist is the only thing that sets it for
-    # mac-bench-autorun.sh, always to /var/wk. That script's own
-    # `${WK_AB_ROOT:-/var/wk}` fallback is for running it by hand.
+    # RunAtLoad and nothing else: KeepAlive would restart a finished benchmark. The agent removes itself once its job is done.
     mac "cat > $(sh_quote "$bh/Library/LaunchAgents/com.wk.bench-ab.plist")" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -580,7 +494,6 @@ PLIST
     printf '%s' "$stamp"
 }
 
-# Set by phase_go, read by phase_wait, so "it came back" is checked.
 BOOT_BEFORE=""
 
 mac_boottime() {
@@ -593,19 +506,8 @@ phase_go() {
     BOOT_BEFORE=$(mac_boottime)
     info "go: rebooting $HOST (boot before: ${BOOT_BEFORE:-unknown})"
 
-    # `tell application "System Events" to restart` returns 0 and does not
-    # reboot: host mode sits at the login screen with nobody in the GUI, so the
-    # restart has no user session to run in. The loginwindow restart Apple
-    # event works with no session -- it is what the login screen's own Restart
-    # button uses.
-    #
-    # Written to a file with octal escapes in printf's *format*, not as a %s
-    # argument: the event code is guillemets, and printf only expands \ooo in
-    # the format.
-    #
-    # Backgrounded and its exit status ignored: a successful reboot kills the
-    # ssh connection carrying it, so the reboot is verified by `kern.boottime`
-    # moving, below.
+    # `tell application "System Events" to restart` returns 0 without rebooting: at the login screen there is no user session to run it in. The loginwindow event is what the login screen's own Restart button uses, and it needs none.
+    # The event code is guillemets, so the octal escapes go in printf's *format*, not a %s argument. Backgrounded and its status ignored, because a successful reboot kills the ssh carrying it -- `kern.boottime` below is what verifies it.
     mac_sh 'printf "tell application \"loginwindow\" to \302\253event aevtrrst\302\273\n" > /tmp/wk-restart.scpt
             (osascript /tmp/wk-restart.scpt >/dev/null 2>&1 &)
             exit 0' >/dev/null 2>&1 || true
@@ -617,8 +519,6 @@ phase_go() {
         waited=$((waited + 5))
     done
 
-    # Still answering after two and a half minutes: the event was refused or
-    # ignored. Try the privileged spelling once, then give up loudly.
     warn "  the loginwindow restart event did not take; trying sudo -n"
     mac_sh 'sudo -n shutdown -r now >/dev/null 2>&1' >/dev/null 2>&1 || true
     waited=0
@@ -639,19 +539,14 @@ phase_go() {
 
 phase_wait() {
     local limit="$1" start now mode last=""
-    # The caller branches on this value, and an empty one reads as "not
-    # answering".
     [ -n "$DRY" ] && { log "  would wait up to ${limit}s for $HOST to answer again"; printf 'dry'; return 0; }
     info "wait: up to $((limit / 60)) minutes for $HOST to answer"
     start=$(date +%s)
-    # A head start: for the first few seconds the machine is still up and
-    # answering, and an immediate poll would report host mode too soon.
-    sleep 45
+    sleep 45   # for the first seconds the machine is still up, and an immediate poll would report host mode too soon
     while :; do
         if mode=$(mac 'cat /etc/wk-image 2>/dev/null | sed -n "s/^id=//p"; echo READY' 2>/dev/null); then
             mode=$(printf '%s' "$mode" | tr -d '\r' | head -1)
-            # Same boot as before means it never rebooted.
-            local bt; bt=$(mac_boottime)
+            local bt; bt=$(mac_boottime)   # the same boot as before means it never rebooted
             if [ -n "$BOOT_BEFORE" ] && [ "$bt" = "$BOOT_BEFORE" ]; then
                 warn "  $HOST is answering on the SAME boot ($bt) -- it never rebooted"
                 printf 'noreboot'; return 1
@@ -703,8 +598,6 @@ phase_collect() {
 phase_status() {
     local root; root=$(bench_root 2>/dev/null) || die "'$VOLUME' is not attached on $HOST"
     local mode; mode=$(mac 'cat /etc/wk-image 2>/dev/null | sed -n "s/^id=//p"' 2>/dev/null | tr -d '\r')
-    # Not `${mode:+bench mode ($mode)}${mode:-host mode}`: when mode is set the
-    # second expansion yields the value again.
     if [ -n "$mode" ]; then info "$HOST is in bench mode ($mode)"
     else                   info "$HOST is in host mode"; fi
     mac "cat $(sh_quote "$root/job.json") 2>/dev/null" 2>/dev/null | sed 's/^/  /' >&2 \
@@ -724,8 +617,7 @@ while [ $# -gt 0 ]; do
         --plan)     PLAN="${2:-}"; shift 2 ;;
         --config)   CONFIG="${2:-}"; shift 2 ;;
         --rounds)   ROUNDS="${2:-}"; shift 2 ;;
-        # The first Speedometer iteration is never trimmed from a result: it
-        # is a real iteration, and dropping it would bias the comparison.
+        # The first Speedometer iteration is never trimmed from a result: it is a real iteration, and dropping it would bias the comparison.
         --count)    COUNT="${2:-}"; shift 2 ;;
         --timeout)  TIMEOUT="${2:-}"; shift 2 ;;
         --settle)   SETTLE="${2:-}"; shift 2 ;;
@@ -754,16 +646,13 @@ while [ $# -gt 0 ]; do
     esac
 done
 
-# Deferred until MACHINE is final, so `--machine benchvm` picks up benchvm's
-# own conf rather than staying pinned to whatever MACHINE was at startup.
+# Deferred until MACHINE is final, so `--machine benchvm` picks up benchvm's own conf.
 if [ -z "$HOST" ]; then
     machine_load "$MACHINE" >/dev/null 2>&1 || die "no such machine: $MACHINE (wk boot --list)"
     HOST="${NODE_SSH:-}"
     [ -n "$HOST" ] || die "$MACHINE (boot/machines/$MACHINE.conf) sets no NODE_SSH"
 fi
 
-# The driver cannot live on the machine it reboots (same guard as
-# bench/mac-lane.sh: phase_go takes the shell with it).
 _lc() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
 if is_macos && [ "$(_lc "$(hostname -s 2>/dev/null)")" = "$(_lc "$HOST")" ]; then
     die "this lane reboots $HOST, so it cannot be driven from $HOST -- the reboot
@@ -781,8 +670,7 @@ if ! preflight; then
     warn "preflight failed; showing the plan anyway because this is --dry-run"
 fi
 
-# --patch supersedes --stage: it stages both arms itself, and must run
-# before the plant, which validates A_ID and B_ID against the volume.
+# --patch stages both arms itself, before the plant, which validates A_ID and B_ID against the volume.
 if [ -n "$PATCH" ]; then
     [ -z "$DO_STAGE" ] || warn "--stage is redundant with --patch (which stages both arms)"
     [ -z "$A_ID$B_ID" ] || die "--patch chooses both arms; do not also pass --a/--b"
@@ -809,12 +697,8 @@ case "$came_back" in
         info "$HOST came back in BENCH mode and is reachable -- the A/B is running there."
         log  "  'wk bench mac-ab --status' follows it." ;;
     host)
-        # A machine that ran the A/B and came back looks the same from here as
-        # one that never left; the state file tells them apart.
-        phase_collect ;;
+        phase_collect ;;   # the state file tells "ran it and came back" from "never left" apart
     noreboot)
-        # Not "not answering": the machine is up and the job untouched, only
-        # the reboot failed.
         warn "$HOST never rebooted, so the A/B has not run."
         log  "  The job is planted and still valid -- nothing needs re-staging."
         log  "  Reboot the machine by any means (the startup manager works too)"

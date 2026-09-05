@@ -8,14 +8,11 @@
 #   NAME      the workspace
 #   TARGET    where it lives (container, vm, or a machine)
 #   STATE     the environment's own word: running, exited, present, creating
-#   BASE      the upstream WebKit line it is built from: main, or a release
-#             like 2.52 -- an image workspace's own profile for `yocto-*`/
-#             `buildroot-*`, otherwise HEAD's upstream (`?` when neither is
-#             known; `wk status` has the full derivation and its cost)
+#   BASE      the upstream WebKit line it is built from: main, a release like
+#             2.52, an image workspace's profile, or `?` when unknown
 #   SNAP      the snapshot its checkout is pinned to (`wk help`)
 #   ARCH      what it builds natively; blank when that is the host's own
-#   CHANGES   disk its own writes take -- the overlay layer, which grows
-#             without bound between `wk gc` runs and is invisible to podman
+#   CHANGES   disk its own writes take -- the overlay layer, reclaimed by `wk gc`
 #
 #   --json    one JSON document ({"workspaces": [...]}), the same fields as
 #             the table's columns, lower-cased; nothing else on stdout
@@ -27,13 +24,6 @@ WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 . "$WK_ROOT/lib/target.sh"
 . "$WK_ROOT/lib/par.sh"
 
-# Every target, from the same walk `wk status` uses. SNAP and CHANGES are overlay
-# concepts, meaningful only for the container target. ARCH is the one property
-# invisible from inside a workspace: the kernel is the host's, so an armhf
-# container reports aarch64 from uname.
-
-# The upstream WebKit line a checkout's HEAD descends from, for everything that
-# is not an image workspace (ws_upstream_line, run in the workspace).
 ws_git_base() { # <ws>
     case "$(t_info "$1")" in
         absent|creating|broken|unreachable) return 0 ;;
@@ -50,11 +40,8 @@ ws_base() { # <ws>
     printf '%s' "${b:-?}"
 }
 
-# A listing assembled from two machines -- on a macOS host `wk ls` walks the
-# host-side targets here and the dispatcher forwards the container half into the
-# podman VM -- is one table: the first half prints the header and, told that more
-# follows, never calls the listing empty; the second (--continued) prints rows
-# only. Both flags are the dispatcher's (`wk`, bare_report), not a person's.
+# --continued/--more-follows/--empty-so-far are the dispatcher's (bare_report),
+# not a person's: they join this machine's rows and the podman VM's into one table.
 CONTINUED=""
 MORE_FOLLOWS=""
 EMPTY_SO_FAR=""
@@ -69,18 +56,14 @@ while [ $# -gt 0 ]; do
     esac
 done
 
-# One JSON document (own rows, or a peer target's own --json output) per
-# append; json_merge_list (lib/common.sh) reads them all back as one array.
 if [ -n "$JSON" ]; then
     JSON_DOCS=$(mktemp)
     _ls_json_cleanup() { rm -f "$JSON_DOCS"; }
     wk_atexit _ls_json_cleanup
 fi
 
-# WK_ROW_LABEL: the name the *asking* machine knows this one by, so rows are
-# qualified against a peer's colliding vocabulary: `moose:container`. Environment,
-# not a flag: an unknown flag on an older far-side checkout is fatal where an
-# unknown variable is ignored (t_wk).
+# WK_ROW_LABEL: the name the *asking* machine knows this one by, qualifying rows
+# as `moose:container`. An env var, since an older far-side checkout would die on a flag.
 LABEL="${WK_ROW_LABEL:-}"
 _col() { if [ -z "$LABEL" ] || [ "$1" = "$LABEL" ]; then printf '%s' "$1"; else printf '%s:%s' "$LABEL" "$1"; fi; }
 
@@ -89,9 +72,6 @@ if [ -z "$CONTINUED" ] && [ -z "$JSON" ]; then
         NAME TARGET STATE BASE SNAP ARCH CHANGES
 fi
 
-# One workspace's row, written to fd 3. Every field is measured here, and two of
-# them cost real time (ws_base runs git inside the workspace, `du` walks the
-# overlay), which is why this is a job of its own.
 ws_row() { # <target> <ws>
     local TARGET="$1" ws="$2" state base snap size
     state=$(ws_display_state "$ws")
@@ -111,13 +91,9 @@ print(json.dumps({"workspaces": [{
         "$ws" "$(_col "$TARGET")" "$state" "$base" "$snap" "$(t_arch "$ws")" "$size" >&3
 }
 
-# One target's rows, written to fd 3. Run as a par_run job (lib/par.sh), so it is
-# a subshell: the driver, the batch and the facts it measures are all its own.
 target_rows() { # <target>
     local TARGET="$1" ws list
     load_target "$TARGET"
-    # A machine of its own answers for itself, exactly as in `wk status`.
-    # workspaces are over there, and so is every fact about them.
     if t_has_wk; then
         if [ -n "$JSON" ]; then
             WK_ROW_LABEL="$TARGET" WK_NO_DELEGATE=1 t_wk ls --continued --json >&3
@@ -138,9 +114,7 @@ target_rows() { # <target>
 
 found=0
 TARGETS=$(walk_targets)
-# Every target at once, not one ten-second connect after another: a machine that
-# will not answer costs this listing its own timeout instead of everybody's. Rows
-# are read back in walk order, so the listing never reshuffles.
+# Every target at once: a machine that will not answer costs only its own timeout.
 wk_atexit par_cleanup
 par_begin
 for TARGET in $TARGETS; do par_run "$TARGET" target_rows "$TARGET"; done
@@ -153,8 +127,6 @@ for TARGET in $TARGETS; do
 done
 par_end
 
-# One document, nothing else on stdout: the advisory text below has no place in a
-# document a caller is about to parse.
 if [ -n "$JSON" ]; then
     json_merge_list workspaces "$JSON_DOCS"
     exit 0
@@ -168,9 +140,7 @@ if [ "$found" -ne 1 ] && [ -z "$MORE_FOLLOWS" ] && { [ -z "$CONTINUED" ] || [ -n
     fi
 fi
 
-# The snapshot store is per target, reported per target rather than once for
-# whatever driver was loaded last. Not at all with a label: that machine's store
-# is not the reader's to act on.
+# With a label, that machine's store is not the reader's to act on.
 [ -z "$LABEL" ] || exit 0
 
 _multi=""

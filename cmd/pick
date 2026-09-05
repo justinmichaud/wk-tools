@@ -3,19 +3,15 @@
 # wk pick [<workspace>] <commit>... -- cherry-pick WebKit commits onto this branch
 # wk: where=workspace name=required ready=yes group=sources
 #
-# Encodes the release-branch ritual: resolve each `NNNNNN@main` identifier to a
-# ToT sha and feed the shas to `git cherry-pick --stdin`.
-#
 # Each argument is a WebKit identifier (`287654@main`) or a sha/ref, picked in
 # the order given -- never reordered.
 #
 #   wk pick 287654@main 287655@main       # in a workspace
 #   wk pick relbranch 287654@main         # from the host, naming the workspace
 #
-# An identifier is a position: `N@main` is the Nth commit in main's first-parent
-# history, so the sha is arithmetic (`main~(count - N)`) and needs no network.
-# The result is verified against the commit's own `Canonical link:` trailer; a
-# mismatch falls back to a bounded search around the estimate.
+# `N@main` is the Nth commit in main's first-parent history, so the sha is
+# arithmetic (`main~(count - N)`) and needs no network. It is verified against
+# the commit's own `Canonical link:` trailer, with a bounded search on mismatch.
 #
 # A dirty tree is refused rather than carried into a conflict.
 
@@ -26,9 +22,7 @@ WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 . "$WK_ROOT/lib/store.sh"
 . "$WK_ROOT/lib/target.sh"
 
-# $WK_NAME: the dispatcher resolves it inside a workspace, and on a host by
-# checking the first word against the registry, so a bare identifier there is
-# left as a commit argument rather than mistaken for a name.
+# The dispatcher checks the first word against the registry, so a bare identifier stays an argument.
 NAME="${WK_NAME:-}"
 [ -n "$NAME" ] && [ $# -ge 1 ] \
     || die "usage: wk pick [<workspace>] <commit>...; see wk pick -h"
@@ -39,7 +33,6 @@ SRC=$(t_src "$NAME")
 
 SPECS="$*"
 
-# One round trip, like `wk pr`: everything the decision needs, read out here.
 probe=$(t_exec "$NAME" bash -c "
     cd $(sh_quote "$SRC") || exit 1
     echo \"branch=\$(git rev-parse --abbrev-ref HEAD 2>/dev/null)\"
@@ -54,21 +47,15 @@ PICKING=$(kv_get picking <<<"$probe")
 [ "$PICKING" = no ] || die "a cherry-pick is already in progress in '$NAME'.
     Finish it first:  git cherry-pick --continue   (or --abort)"
 
-# A barrier rather than a warning, unlike `wk pr`: a cherry-pick merges into
-# local changes, so a conflict arrives mixed with your own edits.
 if [ "${DIRTY:-0}" -gt 0 ] 2>/dev/null; then
     barrier "'$NAME' has $DIRTY uncommitted change(s), and a cherry-pick
     conflicts into them. Commit or stash first (git stash push)."
 fi
 
-# --- resolve ------------------------------------------------------------------
-# Runs in the workspace, because that is where the checkout is. Prints
-# `<spec> <sha> <how>` per line and nothing else on stdout.
+# Prints `<spec> <sha> <how>` per line and nothing else on stdout.
 resolved=$(t_exec "$NAME" bash -c "
 cd $(sh_quote "$SRC") || exit 1
 
-# The branch an identifier counts along. main for @main, and the identifier's
-# own branch name otherwise -- a release identifier counts along that release.
 tip_for() {
     case \"\$1\" in
         main) for r in origin/main main origin/master; do
@@ -80,8 +67,6 @@ tip_for() {
     esac
 }
 
-# The identifier a commit claims for itself, from the trailer commits.webkit.org
-# writes. Empty for a commit that has none, which is every unlanded one.
 ident_of() {
     git --no-pager log -1 --format=%B \"\$1\" 2>/dev/null \
         | sed -n 's|^ *Canonical link: https://commits.webkit.org/||p' | tail -1
@@ -102,9 +87,7 @@ for spec in $SPECS; do
             echo \"\$spec \$sha arithmetic\"
             continue
         fi
-        # The arithmetic disagreed with the commit's own trailer. Search a
-        # window around the estimate: the two can differ by a few when a
-        # branch's history was rewritten, never by thousands.
+        # A rewritten history moves an identifier by a few commits, never by thousands.
         found=\"\"
         for d in 1 2 3 4 5 6 7 8 9 10 20 50 100; do
             for cand in \"\${tip}~\$(( back - d ))\" \"\${tip}~\$(( back + d ))\"; do
@@ -145,10 +128,7 @@ done
 
 SHAS=$(printf '%s\n' "$resolved" | awk '{print $2}')
 
-# --- pick ---------------------------------------------------------------------
-# `--stdin` so the whole series is one invocation and one sequencer state: a
-# conflict stops it where it stopped, and `git cherry-pick --continue` in the
-# workspace resumes it.
+# `--stdin`: one sequencer state, so `git cherry-pick --continue` resumes a conflicted series.
 if t_exec "$NAME" bash -c "
     cd $(sh_quote "$SRC") &&
     printf '%s\n' $(sh_quote "$SHAS") | git cherry-pick --stdin

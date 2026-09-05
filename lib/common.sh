@@ -1,20 +1,8 @@
-# Shared helpers. Sourced by `wk`, `setup`, and everything under cmd/.
-# Keep this small: logging, idempotent file operations, and OS detection.
-
 set -euo pipefail
 
 WK_ROOT="${WK_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 export WK_ROOT
 
-# --- plumbing, documented once here rather than at every read site -----------
-# WK_MACHINE, WK_IN_VM, WK_ROOT, WK_STORE, WK_DEBUG, WK_QUIET, WK_FORCE, WK_YES,
-# WK_CMD: set by the dispatcher or a driver for its own children, so a delegated
-# `wk` sees the same choice the top-level invocation made. WK_TS_AUTHKEY,
-# WK_IMAGE_MARKER and WK_SESSION_MODE_FILE each override a path, for a machine
-# that keeps it elsewhere or for a test.
-
-# --- logging -----------------------------------------------------------------
-# Colours only when stderr is a tty, so logs stay clean when redirected.
 if [ -t 2 ]; then
     _c_dim=$'\033[2m'; _c_red=$'\033[31m'; _c_yel=$'\033[33m'
     _c_grn=$'\033[32m'; _c_off=$'\033[0m'
@@ -22,20 +10,16 @@ else
     _c_dim=''; _c_red=''; _c_yel=''; _c_grn=''; _c_off=''
 fi
 
-# WK_QUIET drops narration; warn()/die() still print.
 log()  { [ -z "${WK_QUIET:-}" ] && printf '%s\n' "$*" >&2 || true; }
 info() { [ -z "${WK_QUIET:-}" ] && printf '%s==>%s %s\n' "$_c_grn" "$_c_off" "$*" >&2 || true; }
 warn() { printf '%swarning:%s %s\n' "$_c_yel" "$_c_off" "$*" >&2; }
 die()  { printf '%serror:%s %s\n' "$_c_red" "$_c_off" "$*" >&2; exit 1; }
 debug() { [ -n "${WK_DEBUG:-}" ] && printf '%s  %s%s\n' "$_c_dim" "$*" "$_c_off" >&2 || true; }
 
-# Every mutating helper below bumps this, so `setup` can prove a re-run is a
-# no-op.
 WK_CHANGES=0
 changed() { WK_CHANGES=$((WK_CHANGES + 1)); info "$*"; }
 unchanged() { debug "ok: $*"; }
 
-# --- os ----------------------------------------------------------------------
 wk_os() {
     case "$(uname -s)" in
         Darwin) echo macos ;;
@@ -53,35 +37,23 @@ require() {
     have "$1" || die "${2:-$1 is required but not installed}"
 }
 
-# Whether gh can reach the API as somebody. `gh auth status` exits 0 for a
-# *configured* account whose token has since expired, saying "invalid" only in
-# prose on stdout; one request at the cheapest endpoint separates the two.
+# `gh auth status` exits 0 for a configured account whose token has expired.
 gh_authenticated() {
     have gh && gh api user >/dev/null 2>&1
 }
 
-# The one ssh connect timeout, read in every ssh wrapper across the tree.
-# WK_SSH_TIMEOUT overrides the 10s default.
 wk_ssh_timeout() { printf '%s' "${WK_SSH_TIMEOUT:-10}"; }
 
-# The variables the dispatcher exports for the one command it is running. A
-# long-lived program a command starts must not inherit them, or every `wk` typed
-# in it is about that one workspace. tests/support.py reads this list.
 WK_DISPATCH_VARS="WK_NAME WK_TARGET WK_TARGET_KIND WK_ROOT WK_FORCE WK_QUIET WK_ROW_LABEL WK_HOST_SELF WK_IN_VM"
 
-# wk_exec_clean <command...> -- exec it with none of WK_DISPATCH_VARS set.
-wk_exec_clean() {
+wk_exec_clean() { # <command...> -- exec with none of WK_DISPATCH_VARS set
     local v unset_args=""
     for v in $WK_DISPATCH_VARS; do unset_args="$unset_args -u $v"; done
     # shellcheck disable=SC2086 -- one -u per variable, deliberately split.
     exec env $unset_args "$@"
 }
 
-# --- idempotent file operations ----------------------------------------------
-
-# Symlinks destination -> source. Existing real files are moved aside once,
-# never clobbered; an already-correct symlink is left alone.
-link_config() {
+link_config() { # <src> <dst> -- symlink dst -> src, moving any real dst aside once
     local src="$1" dst="$2"
 
     [ -e "$src" ] || die "link_config: missing source $src"
@@ -95,7 +67,6 @@ link_config() {
 
     if [ -e "$dst" ] || [ -L "$dst" ]; then
         local backup="$dst.wk-backup"
-        # Keep the first backup; a later run must not overwrite it.
         if [ ! -e "$backup" ]; then
             mv "$dst" "$backup"
             warn "moved existing $dst -> $backup"
@@ -108,8 +79,7 @@ link_config() {
     changed "link $dst -> $src"
 }
 
-# Writes only when content or mode differs, so re-runs report no change.
-write_file() {
+write_file() { # <dst> [mode] -- write stdin only when content or mode differs
     local dst="$1" mode="${2:-0644}" tmp
     tmp="$(mktemp)"
     cat >"$tmp"
@@ -127,12 +97,7 @@ write_file() {
     changed "write $dst"
 }
 
-# ensure_dir <path> [mode]
-# Both steps are checked rather than left to errexit: a caller inside `$( )` has
-# none. A caller that names a mode is *asserting* it on every run, not only at
-# creation, or an existing 0755 directory stays readable by every account on the
-# machine for ever. WK_DRY_RUN mutates nothing.
-ensure_dir() {
+ensure_dir() { # <path> [mode] -- mode, if named, is asserted on every run
     local d="$1" mode="${2:-}"
     if [ -n "${WK_DRY_RUN:-}" ]; then
         if [ -d "$d" ]; then
@@ -149,23 +114,16 @@ ensure_dir() {
         chmod "${mode:-0755}" "$d" || die "cannot set mode ${mode:-0755} on $d"
         changed "create $d"
     fi
-    # Only where the mode is not already the one asked for: inside the podman
-    # machine the store's secrets directory is the host's, mounted read-only and
-    # already 0700, and a chmod of it fails on a read-only filesystem.
+    # In the podman machine the secrets directory is a read-only host mount, 0700.
     [ -z "$mode" ] || [ "$(file_mode "$d")" = "${mode#0}" ] \
         || chmod "$mode" "$d" || die "cannot set mode $mode on $d"
 }
 
-# --- sizes -------------------------------------------------------------------
-# `stat -c %s` is GNU, `stat -f %z` is BSD, and the fleet spans both. GNU first:
-# it fails outright on BSD, while GNU `stat -f` means *filesystem* status and
-# would print a filesystem block for the file instead of its size.
 file_bytes() {
     stat -c %s "$1" 2>/dev/null || stat -f %z "$1" 2>/dev/null || echo 0
 }
 
-# The permission bits alone, as octal without a leading zero (`700`).
-file_mode() {
+file_mode() { # octal permission bits alone, no leading zero (`700`)
     stat -c %a "$1" 2>/dev/null || stat -f %Lp "$1" 2>/dev/null || echo ""
 }
 
@@ -179,9 +137,7 @@ human_bytes() {
     }'
 }
 
-# json_merge_list <key> <file...> -- {"<key>": [...]} merged from files each
-# holding zero or more JSON documents concatenated with no delimiter.
-json_merge_list() { # <key> <file...>
+json_merge_list() { # <key> <file...> -- merge {"<key>": [...]} over undelimited docs
     local key="$1"; shift
     require python3 "python3 merges 'wk ls --json'; it ships with macOS and every distribution here"
     python3 -c '
@@ -207,10 +163,7 @@ print(json.dumps({key: items}))
 ' "$key" "$@"
 }
 
-# --- misc --------------------------------------------------------------------
-# One `key=value` field from KEY=VALUE text on stdin, split only on the first
-# "=". Exits 0 when the key is absent -- an optional field is not an error.
-kv_get() {
+kv_get() { # <key> -- one value from KEY=VALUE stdin, split on the first "=" only
     awk -F= -v k="$1" '$1 == k { sub(/^[^=]*=/, ""); sub(/\r$/, ""); print; exit }'
 }
 
@@ -221,11 +174,8 @@ kv_field() {
 }
 
 
-# Here, not in cmd/status, because the *dispatcher* needs it too: on macOS a
-# listing is assembled by two processes and neither renders it.
 status_render() {
     local mode="$1" recs="$2"
-    # The stream itself renders nothing: it *is* the answer.
     [ "$mode" != records ] || { cat "$recs"; return 0; }
     require python3 "python3 renders 'wk status'; it ships with macOS and with every
     distribution here, so a machine without it is a machine with something else wrong"
@@ -235,10 +185,7 @@ status_render() {
         ${WK_STATUS_HTML_OUT:+--out "$WK_STATUS_HTML_OUT"}
 }
 
-# Which view a bare `wk status` is, decided in one place since both cmd/status
-# (Linux) and the dispatcher (macOS) render. *Sets a variable* rather than
-# printing: inside `MODE=$(status_default_mode)` fd 1 is a pipe, so `[ -t 1 ]`
-# would always say "not a terminal".
+# Sets a variable, not stdout: in `$(...)` fd 1 is a pipe and `[ -t 1 ]` lies.
 status_default_mode() {
     WK_STATUS_DEFAULT_MODE=text
     if [ -n "${WK_STATUS_VIEW:-}" ]; then
@@ -248,7 +195,6 @@ status_default_mode() {
     [ -t 1 ]               || return 0
     [ -z "${CI:-}" ]       || return 0
     [ -z "${NO_COLOR:-}" ] || return 0
-    # Guarded: this file is sourced by things that do not source lib/target.sh.
     if command -v in_workspace >/dev/null 2>&1 && in_workspace; then return 0; fi
     if [ -n "${SSH_CONNECTION:-}${SSH_TTY:-}" ] && [ -z "${DISPLAY:-}" ]; then return 0; fi
     WK_STATUS_DEFAULT_MODE=web
@@ -256,23 +202,28 @@ status_default_mode() {
 }
 WK_STATUS_DEFAULT_MODE=text
 
-# Lower-case: macOS reports the hostname with whatever capitalisation it was
-# set up with ("Tolken"), while ssh aliases and target confs are lower-case.
+# macOS keeps the hostname's capitalisation; ssh aliases and confs are lower.
 wk_machine_name() {
     { hostname -s 2>/dev/null || echo here; } | tr '[:upper:]' '[:lower:]'
 }
 
-# The PATH entry if "Install CLI" ran, else the binary inside the app bundle:
-# a drag-installed Zed.app has no symlink but is still installed.
-zed_cli() {
+# A script's title and synopsis for its own usage(), by shape not line number: indented lines are the synopsis, the prose after it is not. A fixed window reprints the wrong thing the first time a comment above it moves.
+usage_block() { # <file>
+    awk 'NR == 1 { next }
+         !/^#/  { exit }
+         /^#  / { seen = 1; sub(/^# ?/, ""); print; next }
+         seen   { exit }
+                { sub(/^# ?/, ""); print }' "$1"
+}
+
+zed_cli() { # a drag-installed Zed.app has no PATH symlink but is installed
     if have zed; then echo zed; return 0; fi
     local c=/Applications/Zed.app/Contents/MacOS/cli
     [ -x "$c" ] && { echo "$c"; return 0; }
     return 1
 }
 
-# Names become container names, directory names and ssh host aliases.
-valid_name() {
+valid_name() { # names become container names, directories and ssh host aliases
     case "$1" in
         ''|*[!a-zA-Z0-9._-]*) return 1 ;;
         -*) return 1 ;;
@@ -284,9 +235,7 @@ require_name() {
     valid_name "${1:-}" || die "invalid name '${1:-}': use [a-zA-Z0-9._-], not starting with '-'"
 }
 
-# ssh concatenates its command arguments with spaces and hands the result to a
-# remote shell, so anything with a space or a quote is mangled without this.
-sh_quote() {
+sh_quote() { # ssh joins its arguments and hands them to a remote shell
     local arg out='' sep=''
     for arg in "$@"; do
         out="$out$sep'$(printf '%s' "$arg" | sed "s/'/'\\\\''/g")'"
@@ -295,18 +244,13 @@ sh_quote() {
     printf '%s' "$out"
 }
 
-# The dispatcher's global flags as an assignment prefix for the `wk` on the far
-# side of a hop. Environment, not arguments: an older copy over there ignores a
-# variable it does not know and dies on a flag it does not.
+# An older `wk` across a hop ignores an unknown variable, dies on a flag.
 wk_forwarded_env() {
     printf '%s' "${WK_DEBUG:+WK_DEBUG=1 }${WK_QUIET:+WK_QUIET=1 }${WK_YES:+WK_YES=1 }${WK_FORCE:+WK_FORCE=1 }"
 }
 
-# --- which lldb, decided where it is going to run ------------------------------
-# A shell fragment setting $LLDB to a debugger that starts in the workspace, or
-# failing with a reason. `lldb` is not the answer: the wkdev image puts
-# /opt/swift/usr/bin first on PATH, and that lldb is linked against libxml2.so.2
-# while the image ships libxml2.so.16. So a candidate is *run*, not found.
+# A candidate is run, not found: the wkdev image puts /opt/swift/usr/bin first
+# on PATH and that lldb links libxml2.so.2 while the image ships libxml2.so.16.
 lldb_prelude() {
     cat <<'EOF'
 LLDB=""
@@ -319,9 +263,7 @@ done
 EOF
 }
 
-# `~/.lldbinit` here sets follow-fork-mode child, which walks the debugger out
-# of the UI process the moment MiniBrowser forks its network process. `-O` runs
-# after the init file, so this wins whatever the user's own lldb setup is.
+# `~/.lldbinit` sets follow-fork-mode child; `-O` runs after the init file.
 lldb_pin_opts() {
     printf '%s' "-O 'settings set target.process.follow-fork-mode parent'"
 }
@@ -330,7 +272,6 @@ confirm() {
     local prompt="$1"
     [ -n "${WK_YES:-}" ] && return 0
 
-    # No tty means nobody can answer. Decline rather than block.
     if [ ! -t 0 ]; then
         warn "$prompt -- declining (no terminal; re-run interactively, or set WK_YES=1)"
         return 1
@@ -342,11 +283,6 @@ confirm() {
     case "$reply" in [yY]*) return 0 ;; *) return 1 ;; esac
 }
 
-# --- secrets this repository needs but must never contain ---------------------
-# ASK, DO NOT INSTRUCT: a manual step named in a warning is a step that does not
-# get taken. Read with `read -rs`, never logged or passed as an argument,
-# written 0600 through a umask. The asking is separated from the storing because
-# not every secret lands in a file this process can write.
 prompt_secret_value() {  # $1 = human description, $2 = optional URL or command
     local what="$1" url="${2:-}" val=""
 
@@ -382,18 +318,13 @@ prompt_secret() {  # $1 = path to store at, $2 = human description, $3 = optiona
     printf '%s' "$path"
 }
 
-# One key for the whole fleet; what it has to be is the tailnet rule's own text
-# (lib/credcheck.py), since none of it can be read from the key.
 wk_tailscale_authkey_path() { printf '%s' "${WK_TS_AUTHKEY:-$HOME/.config/wk/tailscale-authkey}"; }
 
-# Why this value is not the credential wk wants, or nothing when it is; the rule
-# is one row of lib/credcheck.py.
-wk_tailscale_key_reject() { # <key>
+wk_tailscale_key_reject() { # <key> -- prints why it is not the credential wanted
     wk_cred_reject tailnet "${1:-}"
 }
 
-# Exit 0 when the named rule accepts the value, otherwise print why and exit 1.
-wk_cred_reject() { # <rule name> <value>
+wk_cred_reject() { # <rule name> <value> -- exit 0 if accepted, else print why
     local line
     line=$(printf '%s' "$2" | python3 "$WK_ROOT/lib/credcheck.py" check "$1")
     case "$line" in
@@ -402,30 +333,19 @@ wk_cred_reject() { # <rule name> <value>
     return 0
 }
 
-# No prompting, no side effects -- safe for `wk doctor`. Shape checked, since an
-# empty file would otherwise read as "provisioned".
 wk_tailscale_authkey_present() {
     local p; p=$(wk_tailscale_authkey_path)
     [ -s "$p" ] || return 1
     wk_tailscale_key_reject "$(head -1 "$p" 2>/dev/null)" >/dev/null
 }
 
-# --- the tailnet's control plane -----------------------------------------------
-# An API access token administers the tailnet, so it lives *here only* and is
-# never seeded onto a card. One power is wanted of it: retiring a node the fleet
-# owns, so reprovisioning a board whose card lost its identity does not stop at
-# a person with a browser (lib/tailnet.py). Optional.
-# WK_TS_API_SECRET names another file to keep it in.
 wk_tailscale_api_path() { printf '%s' "${WK_TS_API_SECRET:-$HOME/.config/wk/tailscale-api-key}"; }
 
-# The mirror of wk_tailscale_key_reject: here an *auth* key is the wrong one.
-wk_tailscale_api_reject() { # <key>
+wk_tailscale_api_reject() { # <key> -- here an *auth* key is the wrong one
     wk_cred_reject tailnet-api "${1:-}"
 }
 
-# Safe for `wk doctor`. Presence is not usability: whether the tailnet still
-# accepts it is a request.
-wk_tailscale_api_present() {
+wk_tailscale_api_present() { # presence only; whether the tailnet accepts it is a request
     local p; p=$(wk_tailscale_api_path)
     [ -s "$p" ] || return 1
     wk_tailscale_api_reject "$(head -1 "$p" 2>/dev/null)" >/dev/null
@@ -445,8 +365,6 @@ wk_tailscale_api_key() {
     return 1
 }
 
-# The caller has already established that the name is this fleet's;
-# lib/tailnet.py adds the rest -- an exact match, never a node that is online.
 wk_tailnet_retire() { # <name>
     WK_TS_API_SECRET_FILE="$(wk_tailscale_api_path)" \
         python3 "$WK_ROOT/lib/tailnet.py" retire "$1"
@@ -466,22 +384,17 @@ wk_tailscale_authkey() {
     return 1
 }
 
-# --- at exit ------------------------------------------------------------------
-# One EXIT trap for the whole process: bash keeps only the last `trap ... EXIT`,
-# so a second claimant would silently disable the first -- for a lock, outliving
-# the command that took it. Handlers register instead.
+# bash keeps only the last `trap ... EXIT`, so handlers register here instead.
 _WK_ATEXIT=""
 
 _wk_run_atexit() {
     local _rc=$? _h
-    # Published, not passed: `trap 'f $?' EXIT` is the trap this replaces.
-    WK_EXIT_STATUS=$_rc
+    WK_EXIT_STATUS=$_rc   # published, not passed: this replaces `trap 'f $?' EXIT`
     for _h in $_WK_ATEXIT; do "$_h" || true; done
     return $_rc
 }
 
-# wk_atexit <function-name>  -- run it when this process ends, whatever ends it.
-wk_atexit() {
+wk_atexit() { # <function-name> -- run it when this process ends, whatever ends it
     case " $_WK_ATEXIT " in
         *" $1 "*) return 0 ;;   # already registered; registering is idempotent
     esac
@@ -490,16 +403,7 @@ wk_atexit() {
     return 0
 }
 
-# No wk_atexit_remove: a registry anything can take entries out of is one where
-# the lock release can be taken out too.
-
-# --- interruption ---------------------------------------------------------
-# One rule for the whole tree: a command holding a lock or a background helper
-# traps INT/TERM, stops what it started, and exits with the signal's own code --
-# 130 for INT, 143 for TERM. Ctrl-C at a terminal reaches the whole foreground
-# group, but a supervisor tracking one pid signals *this* process alone, and a
-# `nohup`'d or ssh-reached helper is not in this group at all.
-# `on_interrupt <fn>` registers as `wk_atexit` does, then exits with that code.
+# Ctrl-C reaches the foreground group; a supervisor signals one pid only.
 _WK_INTERRUPTED=""
 _WK_ON_INTERRUPT=""
 
@@ -522,13 +426,10 @@ _wk_interrupt() { # <sig>
     esac
 }
 
-# True once this process has caught INT or TERM.
 interrupted() { [ -n "$_WK_INTERRUPTED" ]; }
 
-# wk_sleep <seconds> -- `sleep` in <=1s chunks. bash defers a pending trap until
-# the command it interrupted finishes (bash(1), SIGNALS), so a single `sleep 30`
-# in a poll loop can leave Ctrl-C looking hung for 30s.
-wk_sleep() { # <seconds>
+# bash defers a pending trap until the interrupted command finishes (bash(1)).
+wk_sleep() { # <seconds> -- sleep in <=1s chunks
     local remain="${1:-0}" chunk
     while [ "$remain" -gt 0 ] 2>/dev/null; do
         chunk=1; [ "$remain" -lt 1 ] && chunk="$remain"
@@ -538,17 +439,10 @@ wk_sleep() { # <seconds>
     return 0
 }
 
-# --- a hard ceiling on wall time ----------------------------------------------
-# `timeout(1)` is GNU, absent on macOS, and per-tool timeout flags lie: ssh's
-# `ConnectTimeout` covers only the TCP connect, and a *jump* hop reads only its
-# own `Host` stanza, so it runs unbounded.
-#
-# The whole process group is killed, not just the child: TERM to a subshell
-# alone leaves its ssh running, holding the terminal. `set -m` gives the child a
-# group of its own; the plain `kill` after it is the no-job-control fallback.
+# `timeout(1)` is GNU, absent on macOS. TERM to the subshell alone leaves its
+# ssh holding the terminal, so the group is signalled; `set -m` makes one.
 capped() { # <seconds> <cmd...>
     local secs="$1"; shift
-    # Job control on for exactly one background start, then restored.
     local jc=""; case "$-" in *m*) jc=on ;; esac
     set -m
     "$@" &
@@ -563,11 +457,8 @@ capped() { # <seconds> <cmd...>
     return "$rc"
 }
 
-# --- barriers, and getting past one in a hurry --------------------------------
-# A barrier is a refusal that exists because of a rule, not because the command
-# cannot proceed (an unfiltered guest, passwordless sudo). Correctness failures
-# are not barriers. `wk <command> --force` turns one into a warning, repeated
-# when the command ends: a single line atop a long build is never seen again.
+# A forced barrier is warned about again at the end: one line atop a long build
+# is never seen.
 _WK_FORCED=""
 
 _forced_summary() {
@@ -577,8 +468,7 @@ _forced_summary() {
     printf '%s\n' "$_WK_FORCED" >&2
 }
 
-# barrier <message...> -- refuse, or warn loudly and continue under --force.
-barrier() {
+barrier() { # <message...> -- refuse, or warn loudly and continue under --force
     if [ -z "${WK_FORCE:-}" ]; then
         die "$*
     --force proceeds anyway, with a warning."
@@ -586,23 +476,14 @@ barrier() {
     warn "FORCED past a barrier: $*"
     _WK_FORCED="$_WK_FORCED
 - $(printf '%s' "$*" | head -1)"
-    # Composes with any lock this command has taken: both are registrations
-    # under one trap (wk_atexit above).
     wk_atexit _forced_summary
     return 0
 }
 
-# --- the commit wall ---------------------------------------------------------
-# "Only the person at the keyboard commits", the write-side twin of `wk push`:
-# the parts of `.git` a commit, a stage, a stash, a branch move or a rebase must
-# write are bound read-only while an agent holds the workspace.
 WK_COMMIT_WALL_PATHS="objects refs logs HEAD packed-refs index.lock ORIG_HEAD"
 
-# The bwrap prefix. bwrap needs no capability the sandbox lacks (measured: it
-# works with an empty capability set), and its read-only binds cannot be
-# unmounted, remounted, shadowed, or escaped through a nested user namespace
-# (all measured in tests/test_commit_wall.py). A human `wk enter` shell is not
-# wrapped. `--ro-bind-try` skips a path a fresh checkout has not created yet.
+# bwrap's read-only binds resist unmount, remount, shadowing and nested user
+# namespaces, with an empty capability set (tests/test_commit_wall.py).
 commit_wall_prefix() { # <checkout-dir> -- prints the bwrap argv prefix
     local src="$1" p ro=""
     for p in $WK_COMMIT_WALL_PATHS; do
@@ -611,39 +492,21 @@ commit_wall_prefix() { # <checkout-dir> -- prints the bwrap argv prefix
     printf 'bwrap --dev-bind / /%s --' "$ro"
 }
 
-# --- locks --------------------------------------------------------------------
-# Rule 4: one lock per mutated resource, dies with its holder. A symlink whose
-# target string names the holder, not `flock` (its fd is inherited by every
-# child -- podman's `conmon` would hold ours as long as a workspace exists --
-# and macOS ships no flock(1)) and not `mkdir`+pid-file (a kill between the two
-# leaves an unnameable lock). A dead holder's lock is broken by a rename over
-# the dead link, never unlink-then-create. Keyed by hostname, a home directory
-# being shareable over NFS. It cannot serialise against work that is not a
-# process here; that half is evidence at the artifact (ws_busy_reason).
+# A lock is a symlink whose target names the holder. Not `flock`: its fd is
+# inherited by every child (`conmon` would hold ours for the workspace's life)
+# and macOS ships none. Keyed by hostname: NFS homes.
 wk_state_dir() { echo "${XDG_STATE_HOME:-$HOME/.local/state}/wk"; }
 
-# The one directory on this device holding the credentials every workspace here
-# needs. On a macOS workstation it is mounted into the podman machine at
-# /var/lib/wk/secrets, so `wk key set` writes it with no VM running and a
-# container reads the same bytes live. Here rather than in lib/store.sh: the
-# mount source is a property of the device. WK_HOST_SECRETS: tests point this at
-# a scratch directory.
+# Mounted into the podman machine at /var/lib/wk/secrets, so `wk key set` works
+# with no VM running and a container reads the same bytes live.
 wk_host_secrets() { echo "${WK_HOST_SECRETS:-${XDG_CONFIG_HOME:-$HOME/.config}/wk/secrets}"; }
 
-# WK_LOCK_DIR: tests point this at a scratch directory.
 wk_lock_dir() { echo "${WK_LOCK_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/wk/locks}"; }
 
-# _WK_LOCK_HELD is what *this* scope must release; _WK_LOCK_MINE is what this
-# process already holds, for re-entrancy. `with_lock` clears the first (its
-# subshell must not release the caller's locks) and keeps the second.
-# Re-entrancy is decided from this list, never the pid: subshells share `$$`.
 _WK_LOCK_HELD=""
 _WK_LOCK_MINE=""
 _WK_LOCK_PAYLOAD=""
 
-# This scope's identity, written into every lock: pid= (is the holder alive?)
-# and tok= (am I the one that wrote this? `$$` cannot say, four bytes of urandom
-# can). By a call never a substitution -- `$(...)` runs in a subshell.
 _lock_init() {
     [ -n "$_WK_LOCK_PAYLOAD" ] && return 0
     local tok
@@ -670,8 +533,6 @@ _lock_release_all() {
     local f
     [ -n "$_WK_LOCK_HELD" ] || return 0
     for f in $_WK_LOCK_HELD; do
-        # Only if still ours: a lock lost to another taker's dead-holder check
-        # belongs to them now.
         [ "$(readlink "$f" 2>/dev/null || true)" = "$(_lock_payload)" ] || continue
         rm -f "$f"
     done
@@ -680,16 +541,12 @@ _lock_release_all() {
     return 0
 }
 
-# Break a lock whose holder is gone -- exactly once, however many takers saw it
-# dead at the same moment. The gap between "is it dead" and "replace it" races
-# every other taker, so the replacement is a compare-and-swap made atomic by a
-# short-lived breaker lock.
+# "Is it dead" then "replace it" races every other taker, so the replacement is
+# a compare-and-swap made atomic by a short-lived breaker lock.
 _lock_break() {
     local f="$1" seen="$2" bf="$f.breaking" tmp bpid rc=1
 
     if ! ln -s "$(_lock_payload)" "$bf" 2>/dev/null; then
-        # Someone else is breaking it, unless they died in the two syscalls it
-        # takes -- then this clears the way and the caller comes round again.
         bpid=$(_lock_pid_of "$(readlink "$bf" 2>/dev/null || true)")
         if [ -z "$bpid" ] || ! kill -0 "$bpid" 2>/dev/null; then rm -rf "$bf"; fi
         return 1
@@ -709,12 +566,7 @@ _lock_break() {
     return $rc
 }
 
-# hold_lock <resource> [-w seconds] [-s]
-# Takes the lock for the life of this process; dropped by an EXIT handler, or by
-# the next taker's liveness check. Re-entrant via _WK_LOCK_MINE, or a command
-# taking the same resource twice would deadlock against itself. Before an `exec`
-# into something long-lived, call release_locks.
-hold_lock() {
+hold_lock() { # <resource> [-w seconds] [-s]
     local res="$1" timeout=600 f owner opid started announced=""
     shift
     while [ $# -gt 0 ]; do
@@ -735,8 +587,7 @@ hold_lock() {
 
     while :; do
         if [ -d "$f" ] && [ ! -L "$f" ]; then
-            # A lock left by an older mkdir-form holder, checked before the
-            # `ln`: `ln -s x somedir` succeeds by creating a link inside it.
+            # Checked before the `ln`: `ln -s x somedir` links *inside* it.
             opid=$(cat "$f/pid" 2>/dev/null | tr -dc '0-9') || true
             if [ -z "$opid" ] || ! kill -0 "$opid" 2>/dev/null; then
                 rm -rf "$f"; continue
@@ -748,13 +599,11 @@ hold_lock() {
             opid=$(_lock_pid_of "$owner")
 
             if [ -n "$opid" ] && ! kill -0 "$opid" 2>/dev/null; then
-                # The holder is gone; its lock must not outlive it.
                 _lock_break "$f" "$owner" && break
                 continue
             fi
 
             if [ -z "$opid" ]; then
-                # Not a lock wk-tools wrote, and nothing to wait for.
                 warn "clearing a lock file with no holder in it: $f"
                 rm -rf "$f"; continue
             fi
@@ -776,12 +625,9 @@ hold_lock() {
     debug "lock: $res"
 }
 
-# Drop every lock this process holds, now.
 release_locks() { _lock_release_all; }
 
-# Reading a lock without taking it, for a reporting command: a dead holder's
-# lock reads as no lock here, exactly as the next taker treats it.
-lock_holder_pid() { # <lock file>
+lock_holder_pid() { # <lock file> -- read without taking; a dead holder reads as none
     local line
     line=$(readlink "$1" 2>/dev/null || cat "$1/payload" 2>/dev/null || true)
     printf '%s' "$line" | sed -n 's/.*pid=\([0-9][0-9]*\).*/\1/p'
@@ -792,8 +638,7 @@ lock_alive() { # <resource>
     [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null
 }
 
-# with_lock <resource> [-w seconds] [-s] -- cmd...   the scoped form.
-with_lock() {
+with_lock() { # <resource> [-w seconds] [-s] -- cmd...   the scoped form
     local res="$1" args=""
     shift
     while [ $# -gt 0 ]; do
@@ -803,15 +648,9 @@ with_lock() {
         esac
     done
     [ $# -gt 0 ] || die "with_lock: nothing to run"
-    # A subshell, so the EXIT handler drops the lock when the command ends, not
-    # this process. The held-list is cleared inside it, or it would drop every
-    # lock the caller still holds.
     ( _WK_LOCK_HELD=""; hold_lock "$res" $args; "$@" )
 }
 
-# --- the BMC's DRM device -----------------------------------------------------
-# The kernel driver is the discriminator, never the card number: which
-# /dev/dri/cardN is the ast depends on PCI enumeration order.
 bmc_drm_device() {
     local d c drv
     for d in /sys/class/drm/card[0-9]*; do
@@ -824,49 +663,35 @@ bmc_drm_device() {
     return 1
 }
 
-# --- dates, on two platforms that disagree about them -------------------------
-# GNU date and BSD date share no syntax for the two conversions this repo needs
-# (`date -u -d @1786800736` fails outright on macOS). GNU form first.
+# GNU and BSD date share no syntax here (`date -u -d @0` fails on macOS).
 epoch_to_utc() {
     date -u -d "@$1" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
         || date -u -r "$1" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
         || true
 }
 
-# Prints 0 when unparseable, since every caller compares it and a comparison
-# against nothing is a shell error rather than a false answer.
 utc_to_epoch() {
     date -u -d "$1" +%s 2>/dev/null \
         || date -u -j -f '%Y-%m-%dT%H:%M:%SZ' "$1" +%s 2>/dev/null \
         || echo 0
 }
 
-# --- which role is this machine in? ------------------------------------------
-# A machine booted into an image says so in one file, absent from a normal
-# install. WK_IMAGE_MARKER overrides the path.
 WK_IMAGE_MARKER="${WK_IMAGE_MARKER:-/etc/wk-image}"
 
 wk_image_id() { kv_field "$WK_IMAGE_MARKER" id 2>/dev/null || true; }   # the bench system's own id, or empty in host mode
-# Two systems from two profiles are two configurations (clocks, fan policy,
-# kernel), so a run records this beside the id.
 wk_image_profile() { kv_field "$WK_IMAGE_MARKER" profile 2>/dev/null || true; }
 in_bench_mode() { [ -f "$WK_IMAGE_MARKER" ]; }
 
-# --- the graphical session's mode --------------------------------------------
-# `wk session` can start the compositor a few ways, indistinguishable from the
-# Wayland socket alone, and only one makes a meaningful number. The privileged
-# helper records which one in a file under /run.
+# The compositor's start modes are indistinguishable at the Wayland socket, and
+# only one of them makes a meaningful number.
 WK_SESSION_MODE_FILE="${WK_SESSION_MODE_FILE:-/run/wk-session-mode}"
 
-# gpu | bmc | off | none
-session_mode() {
+session_mode() { # gpu | bmc | off | none
     local m=""
     [ -r "$WK_SESSION_MODE_FILE" ] && m=$(head -1 "$WK_SESSION_MODE_FILE" 2>/dev/null | tr -dc 'a-z-')
     printf '%s' "${m:-none}"
 }
 
-# Returns 0/1 so a caller that must refuse and one that only informs can share
-# one wording.
 session_mode_warn() {
     case "$(session_mode)" in
         bmc)

@@ -1,17 +1,5 @@
 #!/usr/bin/env python3
-"""Loopback-to-unix bridge, running inside the workspace.
-
-The workspace has no network interface, so the egress proxy cannot be reached
-at an address -- only through the unix socket bind-mounted at /run/wk/proxy.sock.
-Nothing in the toolchain speaks "HTTP proxy over a unix socket": curl, git, pip
-and the Claude CLI all want http_proxy=host:port. This bridges the gap by
-listening on loopback inside the container's own namespace and forwarding each
-connection, byte for byte, to that socket.
-
-It is not a security boundary and does not try to be -- the policy lives on the
-other end of the socket, outside the container, where the workspace cannot
-reach it. Killing this process only cuts the workspace's own egress.
-"""
+"""Forwards loopback to the egress proxy's unix socket, since the toolchain wants http_proxy=host:port. Not a boundary: the policy is on the socket's far end."""
 
 import asyncio
 import os
@@ -70,6 +58,5 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         pass
     except OSError as exc:
-        # Almost always "address already in use": another wk command won the
-        # race and the bridge is up, which is the desired state either way.
+        # Almost always "address already in use": another wk command won the race and the bridge is up.
         print(f"[wk-bridge] not started: {exc}", file=sys.stderr)

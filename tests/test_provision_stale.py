@@ -183,7 +183,10 @@ t_create demo-{rand_suffix()}
         out = self._create(mark_ready=False)
         self.assertIn("predates its own provisioning inputs", out, out)
         self.assertIn("wk vm base --rebuild", out, out)
-        self.assertIn("password", out, out)
+        # What a clone actually inherits from a stale base. Not the password:
+        # the guest keeps the one its image ships, so it cannot go stale.
+        self.assertIn("desktop settings", out, out)
+        self.assertIn("wk vm check", out, out)
 
     def test_a_current_base_clones_without_a_word(self):
         out = self._create(mark_ready=True)

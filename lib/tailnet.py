@@ -1,29 +1,5 @@
-"""The tailnet's control plane: retiring a node the fleet owns.
-
-Every other thing wk asks of the tailnet it asks of the local daemon (a
-node's address, whether a peer is up -- lib/reach.sh). This is the one
-administrative act, and it exists because a name is an identity here: a
-board is reached by its tailnet name and nothing about how to reach it is
-written down (CLAUDE.md, "Cattle, not pets"). A card written for a board
-whose old node still holds that name joins renamed `<name>-1` and is
-unreachable, so a write refuses -- and without this the remedy was a person
-at the admin console in the middle of a lane built to be repeatable.
-
-What keeps that narrow is not the credential but the gate below: this
-removes a node whose name the caller has already matched against the fleet's
-own (boot/machines/*.conf), and only while it is **offline**. An online node
-of that name is a live board, and a reprovision that silently evicted one
-would be the more expensive accident.
-
-    tailnet.py retire <name>   remove the offline node holding <name>
-    tailnet.py check           does the credential still work
-
-The credential is machine-local and gitignored (`wk key tailnet-api`), read
-from the file named by WK_TS_API_SECRET_FILE. Exit codes are the contract:
-0 done, 2 no such node, 3 the node is online, 4 no usable credential, 5 the
-tailnet refused us, 6 the tailnet could not be reached -- 5 and 6 apart
-because a refused credential is a fault and an unreachable one is a state.
-"""
+"""tailnet.py retire <name> | check -- retire an offline node the fleet owns.
+Exit: 0 done, 2 no such node, 3 online, 4 no credential, 5 refused, 6 unreachable."""
 import json
 import os
 import sys
@@ -51,8 +27,6 @@ def secret():
 
 def call(method, path, key):
     req = urllib.request.Request(API + path, method=method)
-    # Basic auth with the key as the username and an empty password, which is
-    # what the API documents; no dependency on curl's -u parsing.
     import base64
     req.add_header("Authorization",
                    "Basic " + base64.b64encode((key + ":").encode()).decode())
@@ -75,11 +49,7 @@ def devices(key):
 
 
 def matches(devs, name):
-    """A device whose name is this one. The API's `name` is the FQDN
-    (`rpi3-bench.tail1234.ts.net`) and `hostname` is what the machine calls
-    itself; a rename leaves the two disagreeing, so both are asked, and only
-    an exact match on the first label counts -- never a prefix, or retiring
-    `rpi3` would take `rpi3-bench` with it."""
+    """A rename leaves FQDN `name` and self-reported `hostname` disagreeing, so both are matched, on the whole first label only: a prefix would take `rpi3-bench` with `rpi3`."""
     want = name.lower()
     out = []
     for d in devs:

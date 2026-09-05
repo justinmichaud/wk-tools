@@ -5,9 +5,8 @@
 # wk: where=host name=none group=hosts needs quiesce-helper
 # wk: sub status needs=
 #
-# Privileged actions go through the sudoers-allowlisted helper
-# (wk-quiesce-priv); everything else stays here, keeping the root helper a
-# short, auditable, fixed allowlist.
+# Privileged actions go through the sudoers-allowlisted helper (wk-quiesce-priv);
+# everything else stays here.
 #
 #   on      quiet the machine: pause background daemons, disable the
 #           screensaver and lock screen, disable App Nap and keep MiniBrowser
@@ -22,8 +21,6 @@
 set -euo pipefail
 WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 . "$WK_ROOT/lib/common.sh"
-# macos_noise is shared: this asks before and after a run, and `wk bench staged`
-# asks before it will believe a number.
 . "$WK_ROOT/lib/quiet.sh"
 
 PRIV=/usr/local/libexec/wk-quiesce-priv
@@ -31,13 +28,9 @@ PRIV=/usr/local/libexec/wk-quiesce-priv
 ACTION="${1:-status}"
 [ $# -le 1 ] || die "usage: wk quiesce on|off|status -- quiet the machine for benchmarking.; see wk quiesce -h"
 
-# One state directory per machine, not `${TMPDIR:-/tmp}/wk-quiesce`: on macOS
-# $TMPDIR is per-user *and per-session*, so `on` at the keyboard and `off` over
-# ssh would strand state in two directories. WK_QUIESCE_STATE overrides it and
-# is a test hook (tests/test_quiesce.py sets it); cmd/status reads the same one.
+# One per machine: on macOS $TMPDIR is per-user *and per-session*, so `on` at the keyboard and `off` over ssh would strand state in two directories.
+# WK_QUIESCE_STATE is a test hook (tests/test_quiesce.py sets it); cmd/status reads the same one.
 STATE="${WK_QUIESCE_STATE:-$(wk_state_dir)/quiesce}"
-# A tombstone: an older wk-tools wrote its state here. `status` names it so a
-# person can `rm -rf` it themselves.
 STALE_STATE="${TMPDIR:-/tmp}/wk-quiesce"
 
 run_priv() {
@@ -48,9 +41,6 @@ run_priv() {
     Remedy:  ./setup --stage quiesce"
 }
 
-# Interrupting `on` partway must not leave the machine wedged between states.
-# `off` already undoes exactly what `on` did, one idempotent step per artifact
-# in $STATE, so INT/TERM during `on` runs it.
 _quiesce_on_interrupted() {
     warn "interrupted -- undoing what 'quiesce on' already did"
     "$0" off || true
@@ -58,33 +48,23 @@ _quiesce_on_interrupted() {
 
 case "$ACTION" in
 on)
-    # Never turns the radio off: the bench is driven over the tailnet, and a
-    # radio toggle drops the driver's own ssh session.
     on_interrupt _quiesce_on_interrupted
     run_priv on
     mkdir -p "$STATE"
 
     if is_macos; then
         if [ ! -f "$STATE/caffeinate.pid" ]; then
-            # All three descriptors detached: a backgrounded process holding the
-            # inherited ones keeps an ssh session open with it, hanging `on`
-            # over ssh forever.
+            # All three descriptors detached, or the backgrounded process keeps an ssh session open with it and `on` never returns.
             caffeinate -dimsu </dev/null >/dev/null 2>&1 &
             echo $! > "$STATE/caffeinate.pid"
             info "caffeinate started"
         fi
-        # The largest remaining noise source, and need no privilege to pause.
         killall -STOP photoanalysisd mediaanalysisd suggestd \
             knowledgeconstructiond parsecd proactived \
             AMPLibraryAgent bird cloudd ReportCrash 2>/dev/null || true
         touch "$STATE/daemons_paused"
         info "background daemons paused"
-        # DND can't be scripted reliably, so Notification Center itself is booted
-        # out: a banner is compositor work that can steal focus, and a
-        # MiniBrowser that loses focus gets rAF-throttled into the silent
-        # exit-124 timeout. `com.apple.notificationcenterui` is the plist
-        # *filename*, not its label -- macOS 26 answers "could not find service"
-        # for it while the agent keeps running, so `pgrep` is the verdict.
+        # `com.apple.notificationcenterui` is the plist *filename*, not its label: macOS 26 answers "could not find service" while the agent keeps running.
         if pgrep -x NotificationCenter >/dev/null 2>&1; then
             nc_label=$(/usr/libexec/PlistBuddy -c 'Print :Label' \
                 /System/Library/LaunchAgents/com.apple.notificationcenterui.plist 2>/dev/null)
@@ -104,8 +84,6 @@ on)
             info "NotificationCenter was not running"
         fi
 
-        # No input during a run, so the idle timer can engage the screensaver
-        # mid-run -- the same "nowhere to draw" failure as a stolen focus.
         # -currentHost is where idleTime actually lives.
         defaults -currentHost write com.apple.screensaver idleTime -int 0 2>/dev/null || true
         defaults write com.apple.screensaver askForPassword -int 0 2>/dev/null || true
@@ -113,11 +91,7 @@ on)
         [ "$v" = 0 ] && info "screensaver disabled (idleTime=0)" \
                      || warn "screensaver idleTime reads '$v' -- the screen can still lock mid-run"
 
-        # MiniBrowser is launched via a raw exec, so macOS never *activates* it:
-        # an unfocused window's page is marked hidden and rAF throttled, ending
-        # in a stalled, silent exit-124. Either half alone is insufficient: App
-        # Nap off stops the throttling policy, the raiser keeps the window
-        # frontmost, and it only acts when MiniBrowser isn't already frontmost.
+        # An unfocused MiniBrowser is rAF-throttled into a stalled, silent exit-124; App Nap off stops the policy, the raiser keeps the window frontmost.
         defaults write org.webkit.MiniBrowser NSAppSleepDisabled -bool YES 2>/dev/null \
             && { touch "$STATE/appnap_disabled"; info "App Nap disabled for MiniBrowser"; } \
             || warn "could not disable App Nap for MiniBrowser -- rAF may be throttled mid-run"
@@ -141,7 +115,6 @@ while True:
             a.activateWithOptions_(NSApplicationActivateIgnoringOtherApps)
     time.sleep(INTERVAL)
 RAISEREOF
-            # Detached like caffeinate above, same reason.
             /usr/bin/python3 "$STATE/raiser.py" 1 </dev/null >"$STATE/raiser.log" 2>&1 &
             echo $! > "$STATE/raiser.pid"
             info "raiser started -- MiniBrowser is kept frontmost during runs"
@@ -151,7 +124,6 @@ RAISEREOF
     anyway -- see docs/HANDOFF-mac-perf-mode.md."
         fi
 
-        # Reported just before a run, not in a status command nobody ran.
         info "measured, now that both halves have run:"
         macos_noise || warn "the machine is noisier than a benchmark install should be (above)"
     fi
@@ -177,11 +149,7 @@ off)
             rm -f "$STATE/appnap_disabled"
             info "App Nap restored for MiniBrowser"
         fi
-        # Comes back on its own at next login on a benchmark install that
-        # reboots; restarted here anyway so `quiesce off` hands the workstation
-        # desktop back exactly as it was found.
         if [ -f "$STATE/notifications_stopped" ]; then
-            # The label that actually worked, not a guess -- see `on`.
             nc_label=$(cat "$STATE/notifications_stopped" 2>/dev/null)
             launchctl bootstrap "gui/$(id -u)" \
                 /System/Library/LaunchAgents/com.apple.notificationcenterui.plist >/dev/null 2>&1 \
@@ -202,17 +170,12 @@ off)
     ;;
 
 status)
-    # Labelled rather than merged with what this machine says now: their
-    # disagreement is the finding. `|| true` guards the assignment, so a missing
-    # helper's die becomes the claim rather than aborting this report.
     _claim=$(run_priv status 2>&1) || true
     if [ -n "$_claim" ]; then
         log "  the privileged half's own account:"
         printf '%s\n' "$_claim" | sed 's/^/    /' >&2
     fi
     log "  measured here, now:"
-    # kill -0 asks the process, not the file: a pid left by a dead caffeinate is
-    # not "running".
     [ -f "$STATE/caffeinate.pid" ] && kill -0 "$(cat "$STATE/caffeinate.pid")" 2>/dev/null \
         && log "  caffeinate: running" || log "  caffeinate: no"
     [ -f "$STATE/daemons_paused" ] && log "  daemons:    paused" || log "  daemons:    running"

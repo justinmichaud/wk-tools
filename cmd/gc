@@ -4,14 +4,13 @@
 #
 # wk: where=host name=none group=sources
 #
-# Reclaims disk by reference count, so a plain `wk gc` never loses work:
-# unreferenced base snapshots, dangling podman images/volumes, the mirror
-# (repacked, not erased), ccache, the pmos build hosts' chroots, stale
-# benchmark payload seeds, and orphaned creation bookkeeping. A boot image
-# is not among these: it lives in the workspace that built it and is
-# reclaimed with that workspace (`wk rm`). Also runs fstrim, since the VM's
-# disk image is sparse and only the guest discarding blocks returns them to
-# the host. `wk disk` reports what any of it costs.
+# Reclaims by reference count, so a plain `wk gc` never loses work: unreferenced
+# base snapshots, dangling podman images/volumes, the mirror (repacked, not
+# erased), ccache, the pmos build hosts' chroots, stale benchmark payload seeds,
+# and orphaned creation bookkeeping. A boot image is reclaimed with the workspace
+# that built it (`wk rm`). Also runs fstrim, since the VM's disk image is sparse
+# and only the guest discarding blocks returns them to the host. `wk disk`
+# reports what any of it costs.
 #
 #   --purge-mirror   erase the master git store and every base snapshot (wk
 #                    sync refetches them); refused while any workspace exists
@@ -21,36 +20,27 @@
 #   --refresh-net    no-op; egress is allowlisted by hostname, not address sets
 
 set -euo pipefail
-# Honours the environment rather than deriving from $0: the container half pipes
-# this file into `bash -s`, which sets $0 to "bash".
+# Not derived from $0: the container half pipes this file into `bash -s`.
 WK_ROOT="${WK_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
 . "$WK_ROOT/lib/common.sh"
 . "$WK_ROOT/lib/store.sh"
 . "$WK_ROOT/lib/target.sh"
 . "$WK_ROOT/lib/detach.sh"
-# Sourced optionally: WK_ROOT may be a caller-supplied checkout where one of
-# these libraries does not exist yet.
 _source_if_there() { [ -f "$1" ] && . "$1"; return 0; }
 _source_if_there "$WK_ROOT/lib/image.sh"
 _source_if_there "$WK_ROOT/image/profiles.sh"
 _source_if_there "$WK_ROOT/boot/machines.sh"
 _source_if_there "$WK_ROOT/image/pmos.sh"
 
-# ws_target (lib/target.sh) derives this fresh; nothing reads the directory.
 rm -rf "$(wk_state_dir)/targets"
 
-# Through load_target: only it does the per-target reset that stops two drivers
-# sharing globals.
 TARGET="${WK_TARGET:-$(default_target)}"
 load_target "$TARGET"
 
-# `wk sync` and `wk new` hold the same lock, or gc can delete a base between it
-# being resolved and the pin being recorded.
+# The lock `wk sync` and `wk new` hold too, or gc can delete a base between it being resolved and pinned.
 hold_lock store
 
 REFRESH_NET=""
-# Each --purge-* is a flag, not gc's default: what it erases is expensive to
-# rebuild (a network refetch, or hours of compilation).
 PURGE=""
 PURGE_PMOS=""
 PURGE_BUILDS=""
@@ -64,12 +54,7 @@ while [ $# -gt 0 ]; do
     esac
 done
 
-# --- the halves, and which machine each belongs to ----------------------------
-# On a Mac, wk's storage spans two machines: the container store inside the podman
-# VM, the build outputs and pmos caches out here. The halves run separately, the
-# second piped into the VM's bash.
 
-# Nothing writes serve/, so anything under it is unreferenced bytes.
 gc_retired_trees() {
     if [ -d "$WK_STORE/serve" ]; then
         info "removing the retired serve/ tree ($(du -sh "$WK_STORE/serve" 2>/dev/null | cut -f1))"
@@ -90,8 +75,6 @@ gc_pmos() {
     return 0
 }
 
-# --- everywhere a build leaves bytes ------------------------------------------
-# Reports by default; `wk gc --purge-builds` is the decision to remove one.
 gc_build_outputs() {
     command -v image_build_locations >/dev/null 2>&1 || return 0
     local d sz any=""
@@ -111,15 +94,10 @@ gc_build_outputs() {
     return 0
 }
 
-# --- final report --------------------------------------------------------------
-# One line, from one place, on every path that ends here reporting success: a
-# podman machine that is not running skips only its own half, or a caller watching
-# for "gc complete" sees that skip as a hang.
 gc_report_complete() {
     info "gc complete"
     df -h "$WK_STORE" 2>/dev/null | tail -1 || true
 
-    # What gc deliberately does not prune, so growth is visible rather than silent.
     for d in bench cache/bench cache/bench-runner cache/images cache/yocto/sstate cache/yocto/downloads \
              cache/yocto/buildtools cache/buildroot; do
         [ -d "$WK_STORE/$d" ] || continue
@@ -127,20 +105,15 @@ gc_report_complete() {
     done
 }
 
-# --- a macOS host: do this machine's half, hand the rest to the VM -----------
-# Before the store work below: on a Mac $WK_STORE is the VM's /var/lib/wk,
-# meaningless out here. The VM's exit status is this one's.
+# On a Mac $WK_STORE is the VM's /var/lib/wk, meaningless out here; the VM's exit status is this one's.
 if is_macos && [ -z "${WK_IN_VM:-}" ]; then
     info "this machine's half: the pmos build hosts"
     gc_pmos
-    gc_build_outputs  # different locations than the VM's half
+    gc_build_outputs
 
     if command -v podman >/dev/null 2>&1 \
        && [ "$(podman machine inspect "${WK_MACHINE:-wk}" --format '{{.State}}' 2>/dev/null)" = running ]; then
         info "the container store's half, inside the podman machine"
-        # The flags as parsed here, not the original argv: every one is a literal
-        # word with no quoting to preserve, and the parsed set is what agrees with
-        # the refusal above about which flags are real.
         _fwd=""
         [ -n "$PURGE" ]         && _fwd="$_fwd --purge-mirror"
         [ -n "$PURGE_PMOS" ]    && _fwd="$_fwd --purge-pmos"
@@ -157,14 +130,9 @@ if is_macos && [ -z "${WK_IN_VM:-}" ]; then
     exit 0
 fi
 
-# The snapshot store and mirror belong to the overlay scheme; a vm or remote
-# target has neither.
 _uses_snapshots() { t_needs_base; }
 
-# --- --purge-mirror: the master git store -------------------------------------
-# Refused while any workspace exists: a snapshot is the *lower layer of a live
-# overlay mount*, and the kernel leaves an overlay whose underlying filesystem
-# changes undefined.
+# A snapshot is the lower layer of a live overlay mount, and the kernel leaves an overlay whose underlying filesystem changes undefined.
 if [ -n "$PURGE" ]; then
     _uses_snapshots || die "target '$TARGET' has no mirror or snapshots to purge: its base is
     $([ "$WK_TARGET_KIND" = vm ] \
@@ -192,9 +160,6 @@ if [ -n "$PURGE" ]; then
     log  "  'wk sync' rebuilds them; 'wk new' needs one, so run it before the next workspace"
 fi
 
-# --- unreferenced base snapshots --------------------------------------------
-# `unreferenced_bases` refuses while a workspace has no recorded pin: that
-# reference cannot be counted, so the snapshots stay.
 unpinned=""
 if _uses_snapshots; then
     unpinned=$(unpinned_workspaces | tr '\n' ' ')
@@ -212,16 +177,13 @@ elif _uses_snapshots; then
     done
 fi
 
-# --- podman ------------------------------------------------------------------
 if [ "$WK_TARGET_KIND" = container ] && have podman; then
     podman image prune -f >/dev/null 2>&1 || true
     podman volume prune -f >/dev/null 2>&1 || true
     info "pruned dangling images and volumes"
 fi
 
-# --- the mirror --------------------------------------------------------------
-# Repacking rewrites pack files snapshots share inodes with via cp -al, safe only
-# when nothing is using them.
+# Repacking rewrites pack files snapshots share inodes with via cp -al.
 active=$(list_workspaces | wc -l | tr -d ' ')
 if ! _uses_snapshots; then
     debug "no snapshot store on target '$TARGET'; nothing to repack"
@@ -234,31 +196,23 @@ else
     log "skipping mirror repack: $active workspace(s) still reference snapshots"
 fi
 
-# --- ccache ------------------------------------------------------------------
 if have ccache; then
     CCACHE_DIR="$WK_STORE/cache/ccache" ccache --max-size="$WK_CCACHE_MAXSIZE" >/dev/null
     CCACHE_DIR="$WK_STORE/cache/ccache" ccache --cleanup >/dev/null 2>&1 || true
     info "ccache trimmed to $WK_CCACHE_MAXSIZE"
 fi
 
-# --- firewall address sets ---------------------------------------------------
-# The egress proxy allowlists by hostname, so there is no CIDR set to refresh;
-# `--refresh-net` stays a no-op rather than an error.
 if [ -n "$REFRESH_NET" ]; then
     warn "--refresh-net does nothing: the egress policy is by hostname,
   in container/proxy/wk-proxy.py, and needs no periodic refresh."
     REFRESH_NET=""
 fi
 
-# --- stale benchmark payload seeds --------------------------------------------
-# Seeds are keyed <plan>-<sha12> and re-fetchable, so keeping only the newest per
-# plan is safe.
 if [ -d "$WK_STORE/cache/bench" ]; then
     for seed in "$WK_STORE"/cache/bench/*/; do
         [ -d "$seed" ] || continue
         seed="${seed%/}"
-        # Exactly twelve trailing characters: plan names contain dashes too, so a
-        # looser match would let one plan's newer seed delete another's.
+        # Exactly twelve trailing characters: plan names contain dashes too.
         case "$seed" in
             *-????????????) ;;
             *) continue ;;
@@ -276,9 +230,6 @@ if [ -d "$WK_STORE/cache/bench" ]; then
     done
 fi
 
-# --- run-benchmark trees exported for the board lanes -------------------------
-# Keyed by WebKit commit and re-exportable from the mirror (bench_runner_tree);
-# only the newest is worth keeping.
 if [ -d "$WK_STORE/cache/bench-runner" ]; then
     newest=$(ls -1t "$WK_STORE/cache/bench-runner" 2>/dev/null | grep -v '^\.tmp-' | head -1)
     for tree in "$WK_STORE"/cache/bench-runner/*/ "$WK_STORE"/cache/bench-runner/.tmp-*/; do
@@ -290,16 +241,12 @@ if [ -d "$WK_STORE/cache/bench-runner" ]; then
     done
 fi
 
-# --- creation bookkeeping orphaned by a workspace killed mid-create ----------
-# gc_creation_records (lib/target.sh) is the seam test_crash_only.py drives.
 gc_creation_records
 
 gc_retired_trees
-gc_build_outputs  # everywhere a build can leave bytes
+gc_build_outputs
 gc_pmos     # ...and the build hosts' caches, on the machine that can reach them
 
-# --- return free space to the host ------------------------------------------
-# Only with passwordless sudo: gc runs unattended; skipping is safe.
 if [ -n "${WK_IN_VM:-}" ] || is_linux; then
     if sudo -n true 2>/dev/null; then
         sudo -n fstrim -av 2>/dev/null || warn "fstrim failed; freed space may not return to the host"

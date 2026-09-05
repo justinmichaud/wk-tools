@@ -237,23 +237,24 @@ the `mac-*` config of the same configuration. The reverse is refused: a
 `mac-*` config on a Linux target says so rather than running xcodebuild.
 
 Every guest is an APFS clone of one golden base, so **what the base carries is
-what every guest carries**: Xcode, a checkout, a warm build tree, the desktop
-settled onto an empty screen, and the account's password changed from the
-image's to `1`. The base is made by scripts in this tree, and editing one of
+what every guest carries**: Xcode, a checkout, a warm build tree, and the
+desktop settled onto an empty screen. The base is made by scripts in this
+tree, and editing one of
 them does not change a base already built -- so the base records the hash of
 the inputs that produced it, and every read recomputes that hash and compares.
 `wk vm ls` prints the verdict under `BASE`, `wk new --target vm` warns before
 cloning a base that predates its inputs, and `wk doctor` says the same on the
 way past; each of them names `wk vm base --rebuild`, which is hours and is
 yours to run. Until it is run, a clone carries what that base was built with
--- the image's password if the change came later, and the settings of the day
-it was sealed.
+-- the settings of the day it was sealed.
 
 Nothing on the tailnet trusts that account, and the same is true of every
 workspace and machine this tool provisions: `wk rm` destroys a workspace
 whole, guest included, and each comes back from this repo plus its declared
-inputs, never patched in place. The guest password is `1` for the same reason
--- it is not a secret. The exceptions are a `remote` target this repo did not
+inputs, never patched in place. The guest keeps the password its image ships
+(`admin`) for the same reason -- it is not a secret, and macOS refuses to
+change it from inside the guest. Every command that hands a guest over states
+it. The exceptions are a `remote` target this repo did not
 provision -- a peer workstation, a build box someone else administers --
 whose account belongs to its owner, and a workspace `wk status` shows
 carrying uncommitted or unpushed changes, which is real work, not disposable.
@@ -1197,6 +1198,56 @@ before ntp).
 wk boot rpi3 --diag                                       # a yocto bench system's own boot account
 ssh root@rpi3-rescue 'mount -o ro /dev/mmcblk0p4 /mnt && ls /mnt/var/log; umount /mnt'
 ```
+
+## Overrides
+
+Every `WK_*` variable below is read with a default, so nothing here has to be
+set; each one exists to move a decision `wk` would otherwise make for itself.
+They are listed here rather than in each file's header because this is where a
+user looks for them, and because a knob nobody can find is a knob nobody uses.
+
+**What to build, and with what**
+`WK_CC`, `WK_CXX` (compilers), `WK_EXTRA_CMAKE` and `WK_BUILD_CMAKE` (extra
+CMake flags), `WK_EXTRA_ENV` (extra build environment), `WK_CCACHE_DIR` and
+`WK_CCACHE_MAXSIZE` (the shared ccache and its ceiling), `WK_TARGET_KIND`
+(which driver a config resolves against), `WK_REMOTE_MAX_JOBS` (job ceiling on
+a shared build box), `WK_MB_PER_JOB` (memory the job-count derivation assumes).
+
+**How much of the machine a job may take**
+`WK_MAX_JOBS`, `WK_MIN_JOBS`, `WK_LOAD`, `WK_AVAIL_MB`, `WK_RESERVE_CORES`,
+`WK_RESERVE_MB`, `WK_HEADLESS_RESERVE_CORES`, `WK_HEADLESS_RESERVE_MB`
+(the envelope a build is allowed), `WK_CGROUP_CORES` and `WK_CGROUP_MB` (what
+a container reports instead of the whole host), `WK_BUILD_MACHINE` and
+`WK_BUILD_DISK_GB` (where a build runs and how much disk it expects).
+
+**Where state lives**
+`WK_LOCAL_STORE`, `WK_REMOTE_STORE`, `WK_LOCK_DIR`, `WK_PREFETCH_DIR`,
+`WK_MARKER`, `WK_REMOTE_MARKER`, `WK_IMAGE_MARKER`, `WK_SESSION_MODE_FILE`,
+`WK_MIRROR_BRANCHES` (which branches the mirror carries), `WK_CMD` (the
+command name a delegated `wk` reports itself as).
+
+**The container target**
+`WK_SDK`, `WK_SDK_IMAGE`, `WK_CONTAINER_USER`, `WK_TOOLS_SRC`, `WK_MACHINE`
+(the podman machine), `WK_SANDBOX` (what `wk verify` measures against).
+
+**The macOS guest target**
+`WK_VM_IMAGE`, `WK_VM_BASE`, `WK_VM_USER`, `WK_VM_PASSWORD` (the account the
+guest's own window logs in as -- the image's, kept), `WK_VM_CPUS`,
+`WK_VM_MEM_MB`, `WK_VM_BASE_CPUS`, `WK_VM_BASE_MEM_MB`, `WK_VM_DISK_GB`,
+`WK_VM_DISPLAY`, `WK_VM_SUBNET`, `WK_VM_PROXY_ADDR`, `WK_VM_PROXY_PORT`,
+`WK_HOST_FREE_WARN_GB`, `WK_VM_SHELLS_WARN`, `WK_VM_MEM_FREE_WARN_PCT`,
+`WK_VM_SWAP_WARN_MB` (the thresholds `wk vm check` reports against).
+
+**Credentials and the tailnet**
+`WK_PUSH_AGENT_SOCK`, `WK_PUSH_PAT_FILE`, `WK_PUSH_READ_PAT_FILE`,
+`WK_TS_AUTHKEY`, `WK_TS_API_SECRET`, `WK_IMAGE_KEY`, `WK_ANY_ROOT`,
+`WK_TAILSCALE_TIMEOUT`, `WK_SOFTNET_BIN`.
+
+**Waiting, watching and reporting**
+`WK_READY_TIMEOUT`, `WK_READY_WAIT`, `WK_POLL_SECONDS`, `WK_HEARTBEAT_SECONDS`,
+`WK_STATUS_PORT`, `WK_STATUS_INTERVAL`, `WK_BROKER_SOCKET`,
+`WK_SCREEN_BLOCKERS` (what `wk quiesce` counts as holding the screen awake),
+`WK_BENCH_RUNNER_REF` (which benchmark runner a plan checks out).
 
 ## Where the rest is
 

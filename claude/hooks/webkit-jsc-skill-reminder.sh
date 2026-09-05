@@ -1,16 +1,11 @@
 #!/bin/bash
-# PreToolUse (Edit|Write|MultiEdit): once per session, when editing a WebKit source file,
-# inject a reminder that the jsc skill is mandatory. Guards against forgetting to load it.
+# PreToolUse (Edit|Write|MultiEdit): once per session, when a WebKit source file is edited, injects a reminder that the jsc skill is mandatory.
 input=$(cat)
 file=$(printf '%s' "$input" | jq -r '.tool_input.file_path // empty')
 session=$(printf '%s' "$input" | jq -r '.session_id // "nosession"')
 [ -z "$file" ] && exit 0
 
-# Match on tree shape, not on an absolute path: workspaces live at different
-# paths on every machine and inside every container, so the previous
-# /Users/<user>/Development/DebugVersion/OpenSource prefix matched almost
-# nowhere. These patterns cover any WebKit checkout, wherever it is.
-case "$file" in
+case "$file" in   # tree shape and not an absolute path: a workspace lives at a different path on every machine and in every container, so these cover any WebKit checkout wherever it is
     */Source/JavaScriptCore/*|*/Source/WebCore/*|*/Source/WTF/*|*/Source/bmalloc/*|*/Source/WebKit/*) ;;
     */JSTests/*|*/LayoutTests/*|*/PerformanceTests/*|*/Tools/*) ;;
     *) exit 0 ;;

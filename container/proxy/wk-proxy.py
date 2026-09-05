@@ -1,38 +1,6 @@
 #!/usr/bin/env python3
-"""The workspace egress boundary.
-
-A workspace runs with --network none: its network namespace has a loopback
-interface and nothing else -- no route, no address, no DNS. It reaches the
-outside world through exactly one channel, the unix socket this program
-listens on, and this program decides what is allowed.
-
-Why this rather than the nftables policy the macOS side uses:
-
-  Rootless podman has no filterable forward path. Its network helper
-  (slirp4netns, or pasta on podman 5) terminates container traffic and
-  re-emits it as ordinary sockets from a cgroup scope named
-  `rootless-netns-<random>.scope`, so there is no stable selector for a
-  packet filter to match on -- not an interface, not a uid, not a cgroup
-  path. Making nftables work therefore meant running podman as root, and
-  root in the daily path is a much worse trade than this proxy: a workspace
-  that escapes its container escapes as root.
-
-  With no interface at all there is nothing to filter and nothing to bypass.
-  The boundary is structural rather than enforced, and it needs no privilege:
-  this runs as an ordinary systemd --user service.
-
-The policy is by hostname, which is both tighter and far less work than the
-CIDR lists it replaces -- GitHub's, Fastly's (PyPI) and Anthropic's published
-ranges all had to be refreshed by hand, and `resolved_hosts` existed only
-because some names have no stable range at all.
-
-TLS is tunnelled, never terminated, with exactly one exception: CONNECT gets a
-byte pipe and this process sees only the hostname the client asked for. The
-exception is api.github.com (INJECTED_HOSTS below), whose CONNECT is handed to
-the credential injector so that a workspace can open a pull request without
-holding the token that does it -- one host, named here, and the reason is in
-container/proxy/github-inject.py.
-"""
+"""The workspace egress boundary: --network none, the outside reached only through this
+unix socket, by hostname. Rootless podman re-emits container traffic from a random scope, so an interface filter would have nothing to see."""
 
 import asyncio
 import ipaddress
@@ -41,117 +9,48 @@ import socket
 import sys
 import time
 
-# The one sd_notify in the tree. systemd starts this by absolute path, so the
-# import path is derived from this file's own rather than assumed.
 sys.path.insert(0, os.path.join(
     os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "lib"))
 from wknotify import sd_notify  # noqa: E402
 
-# --- policy ------------------------------------------------------------------
-# Checked before the allowlist, on the same dot-boundary suffix match: a
-# workspace fetches from github.com and nothing more. `gh` -- and anything else
-# that can post, comment or upload as a person -- has nothing to talk to.
 DENIED_HOSTS = {
     "uploads.github.com": "GitHub's upload API is refused: nothing in a workspace may publish",
 }
 
-# The one host whose TLS is not tunnelled. `git-webkit pr` has to reach GitHub's
-# API, and the credential that lets it must not be inside the workspace -- so
-# this CONNECT goes to the injector's unix socket instead of to a byte pipe, and
-# the injector puts the real token in the Authorization header
-# (container/proxy/github-inject.py). The workspace holds a placeholder.
-#
-# An exact match, and checked before the suffix scan below, because `github.com`
-# would otherwise match this name and hand it a plain tunnel on ports 22 and 80
-# as well. Only 443 exists here: there is nothing to inject into an ssh session
-# or a cleartext request, and a tunnel on either would be a way around this.
-#
-# NOTE FOR THE SANDBOX AUDIT (docs/HANDOFF-sandboxing.md): a workspace can now
-# reach GitHub's API, which it could not before. What it cannot do is
-# authenticate: with `wk push off` -- which `wk ai claude` sets before an agent
-# starts -- the injector has no token and answers 401. `wk verify` measures
-# both halves.
+# The one host whose TLS is not tunnelled: CONNECT goes to the credential injector (github-inject.py). Exact, and first, or `github.com` tunnels it.
+# SANDBOX AUDIT (docs/HANDOFF-sandboxing.md): a workspace reaches GitHub's API
+# but cannot authenticate -- under `wk push off`, which `wk ai claude` sets, the
+# injector holds no token and answers 401. `wk verify` measures both halves.
 INJECTED_HOSTS = {
     "api.github.com": 443,
 }
 
-# Where the injector listens. Under the store root and never under
-# $XDG_RUNTIME_DIR/wk, which is the directory every container bind-mounts: a
-# workspace must reach the injector through this policy and not around it.
-INJECT_SOCKET = os.environ.get(
+INJECT_SOCKET = os.environ.get(   # under the store root, not the mounted runtime dir
     "WK_INJECT_SOCK",
     os.path.join(os.environ.get("WK_STORE", "/var/lib/wk"), "github-inject.sock"))
 
-# Suffix matches: "github.com" matches github.com and codeload.github.com, but
-# not evilgithub.com -- the match is on a dot boundary. (api.github.com is
-# taken out first, above.)
-ALLOWED_HOSTS = {
-    # Anthropic: the API, the console, and the CLI's own installer.
-    "anthropic.com": (80, 443),
+# Port 80 as well as 443 where a client's own URLs are http (apt, poky's mirrors) or a site answers :80 with the redirect a browser follows to :443.
+ALLOWED_HOSTS = {                      # dot-boundary suffix matches
+    "anthropic.com": (80, 443),        # the API, the console, the CLI installer
     "claude.ai": (80, 443),
     "claude.com": (80, 443),
-    # GitHub: clones and fetches over HTTPS, pushes to the fork over SSH, and
-    # the raw/codeload hosts that benchmark payloads come from.
-    "github.com": (22, 80, 443),
+    "github.com": (22, 80, 443),       # https clones, ssh pushes to the fork
     "githubusercontent.com": (80, 443),
     "githubassets.com": (443,),
-    # PyPI. build-webkit autoinstalls setuptools on every clean build, so this
-    # is a build dependency rather than an escape hatch.
-    "pypi.org": (443,),
+    "pypi.org": (443,),                # build-webkit autoinstalls setuptools
     "pythonhosted.org": (443,),
-    # The distribution archive, so a workspace can install a package.
-    #
-    # What this boundary is for is unusual traffic -- a workspace reaching a
-    # machine, a service or a network nobody expects a WebKit checkout to talk
-    # to. `apt-get install` from Ubuntu's own archive is not that, and neither
-    # is an editor: both are ordinary things to do in a development container,
-    # and refusing them buys nothing an audit would thank us for. Signatures
-    # are apt's own, and the BLOCKED_NETS check below is
-    # unchanged -- so none of these names can become a route onto the LAN or the
-    # tailnet, which is the property that actually matters.
-    #
-    # Explicit hostnames rather than the `ubuntu.com` suffix, because the
-    # suffix would also cover every other host under that domain -- these are
-    # the two the image's sources.list names (ports. on arm, archive. on
-    # x86_64), security., which apt-get update reads on the same run, and
-    # ddebs., the debug-symbol archive (container/firstrun.sh provisions it;
-    # docs/Urgent/HANDOFF-debug.md). Port 80 as well as 443: apt's configured
-    # URIs are http, and it verifies the signature rather than the transport.
-    "ports.ubuntu.com": (80, 443),
-    "archive.ubuntu.com": (80, 443),
-    "security.ubuntu.com": (80, 443),
-    "ddebs.ubuntu.com": (80, 443),     # debug symbols for backtraces through system libraries
-    # Zed's own CDN, for the same reason. Its remote server asks this for the
-    # agent registry as it starts, and the refusal was a red line in the log of
-    # every remote session -- an editor failing at something that has nothing to
-    # do with what the boundary is watching for. The server binary itself comes
-    # from github.com, already above.
-    "agentclientprotocol.com": (443,),
+    "ports.ubuntu.com": (80, 443),     # apt: sources.list on arm
+    "archive.ubuntu.com": (80, 443),   # apt: sources.list on x86_64
+    "security.ubuntu.com": (80, 443),  # read by the same apt-get update
+    "ddebs.ubuntu.com": (80, 443),     # debug symbols for system-library frames
+    "agentclientprotocol.com": (443,), # zed's remote server reads its registry
 
-    # --- browsing and benchmarking -------------------------------------------
-    # Everything below exists so a workspace can actually drive a browser at
-    # real pages. Port 80 as well as 443 throughout: these are visited by
-    # MiniBrowser, and a site that answers :80 with a redirect to :443 still
-    # needs the first hop to be allowed or the load simply fails.
-    #
-    # This is a real widening of the boundary and it is deliberate. Note for
-    # the sandbox audit (docs/HANDOFF-sandboxing.md): a workspace can now reach
-    # general-purpose sites with user-generated content and ad/analytics
-    # networks, which the Anthropic/GitHub/PyPI list did not permit. The
-    # BLOCKED_NETS check below is unchanged and still keeps any of these names
-    # from resolving onto the LAN or the tailnet.
-
-    # Project and benchmark hosts.
-    "webkit.org": (80, 443),
+    "webkit.org": (80, 443),           # pages MiniBrowser is driven at
     "browserbench.org": (80, 443),     # Speedometer, MotionMark, JetStream
     "igalia.com": (80, 443),
     "gnome.org": (80, 443),
 
-    # The top-10 sites by global traffic, as a general-purpose browsing set.
-    # Each is paired with the asset/CDN domain it cannot render without --
-    # allowing only the front door gets a half-loaded page, which is worse than
-    # useless for judging a browser.
-    "google.com": (80, 443),
+    "google.com": (80, 443),           # top-10 by traffic, each with its CDN
     "gstatic.com": (80, 443),          # google's static assets
     "googleapis.com": (80, 443),
     "youtube.com": (80, 443),
@@ -178,129 +77,35 @@ ALLOWED_HOSTS = {
     "whatsapp.com": (80, 443),
     "baidu.com": (80, 443),
 
-    # --- building a Yocto image ----------------------------------------------
-    # `wk sysimage build webkit-2.52-yocto-rpi4-64` runs bitbake in a workspace, and bitbake
-    # fetches sources. A Yocto build touches, in principle, every upstream that
-    # every recipe in six layers names -- which is not a list anyone can write
-    # down, and is exactly the wrong shape for an allowlist.
-    #
-    # So the build is configured to fetch from the Yocto Project's own source
-    # mirror first (`INHERIT += "own-mirrors"` with SOURCE_MIRROR_URL, in
-    # image/yocto-build.sh). The mirror carries every source of every release
-    # branch, so the overwhelming majority of fetches resolve to one host, and
-    # this list is the *remainder*: the layer repositories named in the release
-    # branch's own manifest.xml, plus the two hosts the `repo` tool needs to
-    # bootstrap itself.
-    #
-    # NOTE FOR THE SANDBOX AUDIT (docs/HANDOFF-sandboxing.md): this is a real
-    # widening, of the same kind as the browsing block above and smaller. It
-    # adds source-code hosts only, it is still by hostname, and the BLOCKED_NETS
-    # check below is unchanged -- so none of these names can become a route
-    # onto the LAN or the tailnet. What it does mean is that a workspace can
-    # fetch arbitrary tarballs from a distribution mirror, which the
-    # Anthropic/GitHub/PyPI list did not permit.
-    #
-    # It is deliberately NOT the full set of upstreams a recipe might reach for
-    # when the mirror lacks something. When a fetch is refused, the proxy logs
-    # the name; add it here with a reason, rather than pre-emptively allowing a
-    # hundred hosts against the day one of them is needed.
-    # Port 80 as well as 443, and not out of laziness: poky's built-in PREMIRRORS
-    # and MIRRORS lists are written with `http://` URLs, so the mirror this whole
-    # arrangement depends on is reached over port 80 by default. Refusing it
-    # sends every fetch to its upstream instead, which is the opposite of the
-    # intent -- and shows up as `DENY downloads.yoctoproject.org:80`.
+    # bitbake fetches the Yocto source mirror first (image/yocto-build.sh); this is the remainder, from --runall=fetch over 1492 tasks.
+    # SANDBOX AUDIT: a real widening -- source-code hosts only, still by
+    # hostname, BLOCKED_NETS unchanged, so no name here becomes a route onto the
+    # LAN or the tailnet. It does let a workspace fetch distribution tarballs.
     "yoctoproject.org": (80, 443),     # git. and downloads. -- layers + the mirror
     "openembedded.org": (80, 443),     # git. (manifest.xml) and sources. (a MIRROR)
     "googlesource.com": (443,),        # `repo` clones its own git-repo from here
-    # Added from refusals in this log, not in anticipation of them. A full
-    # `--runall=fetch` pass over 1492 fetch tasks produced exactly these four
-    # beyond the mirror itself, which is the measurement that made this list
-    # short: point the build at the mirror and almost everything resolves there.
     "freedesktop.org": (80, 443),      # gitlab. -- polkit, wayland, mesa, libinput
     "kernel.org": (80, 443),           # mirrors. is one of poky's default PREMIRRORS
     "videolan.org": (80, 443),         # code. -- dav1d
     "metacpan.org": (80, 443),         # cpan. -- Archive-Zip
-    # hunspell/hyphen, which meta-webkit fetches at WebKit 2.52 and did not at
-    # 2.48 -- so this appeared the first time a 2.52 image was built.
-    #
-    # A suffix, where every other entry that could be a hostname is one, and it
-    # is forced rather than chosen: `downloads.sourceforge.net` answers a
-    # download with a 302 to a per-request mirror subdomain
-    # (`gigenet.dl.sourceforge.net` on the run that produced this line), so
-    # allowing only the name in the recipe allows the redirect and refuses the
-    # bytes. 443 alone -- the recipe's URL is https, and nothing here needs the
-    # port-80 argument the yocto mirror entries make.
-    #
-    # For the sandbox audit (docs/HANDOFF-sandboxing.md): this is a widening,
-    # and it is the same kind as the five entries above it -- a host a build
-    # fetches declared sources from, reached only through the proxy, with
-    # BLOCKED_NETS unchanged so the name cannot resolve onto the LAN or the
-    # tailnet. No allowed mirror carries this tarball: sources.openembedded.org,
-    # downloads.yoctoproject.org/mirror/sources and mirrors.kernel.org were all
-    # checked and answer 404 or nothing.
-    "sourceforge.net": (443,),         # downloads. + its dl. mirrors -- hyphen
+    "sourceforge.net": (443,),         # hyphen: downloads. 302s to a dl. mirror
 
-    # The buildroot lane. `sources.buildroot.net` is buildroot's own mirror of
-    # every package it knows how to fetch, and image/buildroot-build.sh points
-    # BR2_PRIMARY_SITE at it for the same reason yocto-build.sh points at the
-    # OpenEmbedded mirror: one host answers almost every fetch, so the set of
-    # names that has to be allowed collapses to something a person can read.
-    # Port 80 as well as 443 because buildroot's own default for it is http.
-    #
-    # gnu.org is the fallback that is actually needed: `ftpmirror.gnu.org` is
-    # where several host tools come from when the mirror does not carry the
-    # exact version a 2020 tree pins. Both names came out of a build's own
-    # refusals (DENY sources.buildroot.net:80, DENY ftpmirror.gnu.org:80), not
-    # from guessing at a list.
-    "sources.buildroot.net": (80, 443),
-    "gnu.org": (80, 443),              # ftp. and ftpmirror. -- host tools
-    # WPE's own release host, and not covered by `webkit.org` above -- a
-    # different domain. libwpe, wpebackend-fdo and cog tarballs come from here
-    # and the buildroot mirror does not carry them (it answers 404, which is how
-    # this was found).
-    "wpewebkit.org": (80, 443),
-    # github.com and githubusercontent.com are already allowed above, and carry
-    # meta-openembedded, meta-webkit, meta-clang, meta-browser and the
-    # Raspberry Pi firmware and kernel.
-    #
-    # pkgs.tailscale.com, for one recipe: image/yocto/meta-wk-tailnet fetches
-    # the pinned static tailscale build so that a board made from the image is
-    # on the tailnet and nothing about how to reach it has to be written down
-    # (CLAUDE.md, "Cattle, not pets"). The tarball is pinned by version and
-    # sha256 in that layer, so what this allows is one file whose bytes are
-    # decided before the fetch -- and the Yocto source mirror does not carry it,
-    # which is why the fetch has to go upstream at all.
-    "tailscale.com": (443,),
+    "sources.buildroot.net": (80, 443),  # BR2_PRIMARY_SITE, http by default
+    "gnu.org": (80, 443),              # ftpmirror. -- host tools the mirror lacks
+    "wpewebkit.org": (80, 443),        # libwpe, wpebackend-fdo, cog tarballs
+    "tailscale.com": (443,),           # pkgs. -- meta-wk-tailnet's pinned tarball
 
-    # --- ordinary development ------------------------------------------------
-    # NOTE FOR THE SANDBOX AUDIT (docs/HANDOFF-sandboxing.md): a real widening,
-    # and the widest in *kind* on this list. A package registry serves whatever
-    # a project's manifest names, so this is arbitrary third-party code chosen
-    # by a file in the checkout -- broader than the source mirrors above, which
-    # serve one distribution's own declared sources. It is deliberate: a
-    # workspace that cannot install a package is not a development machine, and
-    # every name here was measured as a refusal in a real session rather than
-    # guessed at. BLOCKED_NETS below is unchanged, so none of them can become a
-    # route onto the LAN or the tailnet, which is the property that matters.
+    # SANDBOX AUDIT: the widest widening in *kind*. A package registry serves
+    # whatever a project's manifest names, so this is third-party code chosen by
+    # a file in the checkout. Deliberate: a workspace that cannot install a
+    # package is not a development machine. Each name was measured as a refusal.
     "registry.npmjs.org": (443,),      # npm, and `npm install -g` for an agent
     "formulae.brew.sh": (443,),        # Homebrew's formula index
-    "ghcr.io": (443,),                 # Homebrew bottles (their blobs are on
-                                       # githubusercontent, already allowed)
+    "ghcr.io": (443,),                 # Homebrew bottle manifests
     "crates.io": (443,),               # cargo, and static. for the tarballs
     "rust-lang.org": (443,),           # static. -- rustup's toolchains
     "rustup.rs": (443,),               # sh. -- the rustup installer
 
-    # --- macOS guests --------------------------------------------------------
-    # Explicit hostnames, never the `apple.com` suffix: the refusals a guest
-    # actually produces are dominated by iCloud, Siri, Spotlight, ads, news and
-    # weather, and none of that is development. These are the two things that
-    # are.
-    #
-    # Software update, for Xcode and its command line tools. Allowing the
-    # catalog does not make an in-place upgrade the way to fix a guest -- a
-    # guest that is wrong is rebuilt from the image WK_VM_IMAGE names
-    # (CLAUDE.md) -- it means `xcode-select --install` and Xcode's own first
-    # launch can complete instead of hanging on a host they cannot reach.
     "developer.apple.com": (443,),     # and download. -- Xcode + CLT
     "swscan.apple.com": (443,),        # the softwareupdate catalog
     "swcdn.apple.com": (443,),         # its payloads
@@ -308,25 +113,14 @@ ALLOWED_HOSTS = {
     "mesu.apple.com": (443,),          # device support packages
     "gdmf.apple.com": (443,),          # what updates are offered at all
     "gdmf-ados.apple.com": (443,),
-    # Certificate validation. Gatekeeper checks notarization before it will run
-    # anything downloaded, and a check it cannot make is a binary that will not
-    # launch. Port 80 as well as 443 throughout: OCSP and CRL are http by
-    # design, and verified by signature rather than by transport.
-    "valid.apple.com": (80, 443),      # notarization
+    "valid.apple.com": (80, 443),      # gatekeeper: unchecked, it will not run
     "ocsp.apple.com": (80, 443),
     "ocsp2.apple.com": (80, 443),
     "crl.apple.com": (80, 443),
     "pki.goog": (80, 443),             # i. -- Google Trust Services CRL/OCSP
 }
 
-# Addresses that are never permitted as a *destination*, whatever resolved to
-# them. Without this an allowlisted name whose DNS is wrong -- or hostile --
-# becomes a route onto the LAN, which is precisely what the boundary exists to
-# prevent. The workstation is an unrestricted tailnet node, so this matters more
-# here than it would on an isolated machine. The boards sit on the house LAN,
-# not an isolated segment: this block and the pi-hosts exemption below are
-# the whole boundary between a workspace and them.
-BLOCKED_NETS = [
+BLOCKED_NETS = [   # never a destination: this workstation is a tailnet node
     ipaddress.ip_network(n) for n in (
         "0.0.0.0/8", "10.0.0.0/8", "127.0.0.0/8", "169.254.0.0/16",
         "172.16.0.0/12", "192.168.0.0/16", "100.64.0.0/10", "224.0.0.0/4",
@@ -345,26 +139,11 @@ def log(msg):
 
 
 def normalize_host(host):
-    """The one spelling every decision and every route is taken on.
-
-    A name is case-insensitive and may be written fully qualified with a
-    trailing dot, so `API.GITHUB.COM` and `api.github.com.` are the same host
-    to DNS and to the server -- but not to a dict lookup. `handle` normalises
-    once, before the allowlist check and before the route, because the two
-    reading different spellings is what let `CONNECT API.GITHUB.COM:443` pass
-    the allowlist as the injected host and then get a plain tunnel.
-    """
+    # `API.GITHUB.COM.` is one host to DNS and another to a dict, so the allowlist check and the route are taken on this one spelling.
     return host.lower().rstrip(".")
 
 
 class Policy:
-    """Hostname and address policy, reloaded from the store on every request.
-
-    Reloading rather than caching is deliberate: `wk pi setup` appends to
-    pi-hosts and the change must take effect without restarting the boundary,
-    and the file is tiny.
-    """
-
     def __init__(self, store):
         self.store = store
         self._extra_mtime = None
@@ -377,7 +156,7 @@ class Policy:
             mtime = os.stat(path).st_mtime
         except OSError:
             return set()
-        if mtime != self._pi_mtime:
+        if mtime != self._pi_mtime:    # `wk pi setup` appends without a restart
             with open(path) as f:
                 self._pi = {
                     line.strip() for line in f
@@ -389,13 +168,6 @@ class Policy:
         return self._pi
 
     def host_allowed(self, host, port):
-        """Allowlisted name, or a test device by address.
-
-        Test devices are individual tailnet addresses, never the whole
-        100.64.0.0/10 range: this workstation is itself an unrestricted tailnet
-        node, so allowing the range would hand a workspace every machine the
-        workstation can reach.
-        """
         host = normalize_host(host)
 
         try:
@@ -403,7 +175,7 @@ class Policy:
         except ValueError:
             addr = None
 
-        if addr is not None:
+        if addr is not None:           # one address at a time, never 100.64/10
             return (host in self._pi_hosts() and port == 22), "pi test device"
 
         if host in INJECTED_HOSTS:
@@ -423,11 +195,7 @@ class Policy:
         return False, "not in the allowlist"
 
     def is_pi(self, host):
-        """A Pi's address sits inside the tailnet range that BLOCKED_NETS
-        refuses. The block exists to stop an allowlisted *name* resolving onto
-        the tailnet, not to unlist the device itself -- so a destination that
-        is the allowlisted address must skip the address check."""
-        return normalize_host(host) in self._pi_hosts()
+        return normalize_host(host) in self._pi_hosts()  # exempt from BLOCKED_NETS
 
     def address_allowed(self, addr):
         ip = ipaddress.ip_address(addr)
@@ -443,31 +211,18 @@ class Proxy:
         self.active = 0
         self._denials = {}
 
-    def deny(self, host, port, why):
-        """Rate-limited, because a retry loop must not fill the journal -- and
-        must not hide the first occurrence either."""
+    def deny(self, host, port, why):   # rate-limited: a retry loop fills a log,
         key = (host, port, why)
         now = time.time()
         last = self._denials.get(key, 0)
         if now - last > DENY_LOG_INTERVAL:
             self._denials[key] = now
             log(f"DENY {host}:{port} -- {why}")
-        # This service runs for months; one entry per distinct denial would
-        # grow without bound if something enumerates hostnames.
-        if len(self._denials) > 512:
+        if len(self._denials) > 512:   # and enumeration grows one entry a name
             self._denials = {k: v for k, v in self._denials.items()
                              if now - v <= DENY_LOG_INTERVAL}
 
     async def open_upstream(self, host, port):
-        """Resolve, check every resolved address, then connect.
-
-        Checking after resolution rather than before is the point: the
-        allowlist is by name, but the danger is by address, and one name can
-        resolve to many.
-        """
-        # The injected host never leaves this machine from here: the injector
-        # opens its own verified connection to GitHub, so there is no address
-        # to check and nothing to resolve.
         if INJECTED_HOSTS.get(host) == port:
             return await asyncio.open_unix_connection(INJECT_SOCKET)
 
@@ -531,20 +286,12 @@ class Proxy:
                 host, _, port_s = target.rpartition(":")
                 port = int(port_s or 443)
                 headers = b""
-                # Drain the rest of the client's request. Without this the
-                # remaining header bytes are still buffered when the tunnel
-                # opens, and they are forwarded to the server as the first
-                # bytes of the TLS stream -- which fails as
-                # "SSL routines::wrong version number", a long way from the
-                # actual mistake.
+                # Drain the client's remaining header bytes, or they reach the server as the first TLS bytes.
                 while True:
                     line = await asyncio.wait_for(creader.readline(), 30)
                     if line in (b"\r\n", b"\n", b""):
                         break
-            else:
-                # Absolute-form request for plain HTTP. Rare -- almost
-                # everything is HTTPS -- but apt-style clients and some
-                # installers still use it.
+            else:                      # absolute-form plain HTTP, as apt sends
                 if "://" not in target:
                     cwriter.write(b"HTTP/1.1 400 Bad Request\r\n\r\n")
                     await cwriter.drain()
@@ -559,8 +306,6 @@ class Proxy:
                     port = int(port_s)
                 headers = f"{method} {path} {parts[2]}\r\n".encode("latin-1")
 
-            # Once, and before both the check and the route: open_upstream's
-            # injector branch is an exact match on this name.
             host = normalize_host(host)
 
             allowed, why = self.policy.host_allowed(host, port)
@@ -587,9 +332,7 @@ class Proxy:
                 cwriter.write(b"HTTP/1.1 200 Connection established\r\n\r\n")
                 await cwriter.drain()
             else:
-                uwriter.write(headers)
-                # Relay the client's headers verbatim after rewriting the
-                # request line above.
+                uwriter.write(headers)  # the rewritten request line
                 while True:
                     line = await asyncio.wait_for(creader.readline(), 30)
                     uwriter.write(line)
@@ -622,30 +365,15 @@ async def main():
     proxy = Proxy(Policy(store))
     servers = []
 
-    # A unix socket for containers, which have no network interface at all and
-    # reach this only through a bind-mounted socket. Creating its directory is
-    # part of the unix branch, not preamble: a TCP-only run (the macOS host,
-    # serving guest VMs) has no runtime directory to make and would die trying.
     if os.environ.get("WK_PROXY_UNIX", "1") != "0":
         os.makedirs(sock_dir, mode=0o700, exist_ok=True)
         if os.path.exists(sock_path):
             os.unlink(sock_path)
         servers.append(await asyncio.start_unix_server(proxy.handle, path=sock_path))
-        # The workspace runs as the same uid (--userns keep-id), so 0600 is
-        # enough and is the tightest thing that works.
-        os.chmod(sock_path, 0o600)
+        os.chmod(sock_path, 0o600)     # same uid as the workspace (keep-id)
         log(f"listening on {sock_path}")
 
-    # A TCP socket for macOS guest VMs, which cannot see a unix socket across
-    # the hypervisor boundary. Their egress is default-denied by Softnet on the
-    # host except to this address, so this listener is the guest's only way
-    # out -- the same structural position the unix socket holds for a
-    # container, reached differently.
-    #
-    # Bind address is explicit and never 0.0.0.0: this speaks for a policy
-    # boundary, and a proxy listening on every interface is an open relay for
-    # anything else that can reach the machine.
-    tcp = os.environ.get("WK_PROXY_TCP")
+    tcp = os.environ.get("WK_PROXY_TCP")  # guest VMs, Softnet-fenced to here
     if tcp:
         host, _, port = tcp.rpartition(":")
         if not host:

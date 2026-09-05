@@ -1,9 +1,3 @@
-# The credentials the macOS benchmark lane needs. Without a tailnet identity the
-# benchmark install cannot be reached from a driver that reaches this Mac over
-# the tailnet, so the A/B lane plants a job it cannot watch. Skipping is fine.
-# Sourced by ./setup, so WK_ROOT is already in scope: `$0` in a sourced file is
-# the *sourcing* script, so re-deriving it would land above the checkout.
-
 is_macos || { debug "benchkey: macOS only"; return 0; }
 
 KEY="${WK_TS_AUTHKEY:-$HOME/.config/wk/tailscale-authkey}"

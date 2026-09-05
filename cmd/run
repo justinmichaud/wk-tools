@@ -9,9 +9,8 @@
 #   --config <config>   the build config to run (default: default_config;
 #                       wk build --list prints every name)
 #   --lldb              run jsc under lldb instead of directly; under
-#                       --until-crash, each iteration runs under lldb instead,
-#                       and a crash leaves you at its prompt rather than lldb
-#                       exiting with it
+#                       --until-crash each iteration runs under lldb, and a
+#                       crash leaves you at its prompt
 #   --until-crash       repeat the run until it exits non-zero, in one round
 #                       trip into the workspace; keeps the failing iteration's
 #                       output, prints its exit status, arguments and any core
@@ -50,40 +49,26 @@ while [ $# -gt 0 ]; do
     esac
 done
 
-# The target first: on macOS a config does not choose its own build system, so
-# config_load needs the platform it will be built on (t_os).
 TARGET="$(ws_target "$NAME")"
 load_target "$TARGET"
 
 config_load "$CONFIG" "$(t_os)" || die "unknown config '$CONFIG'"
 
-# Layout comes from build/configs.sh: four ports lay trees out four ways and the
-# Apple build resolves frameworks rather than shared libraries.
 SRC=$(t_src "$NAME")
 JSC=$(config_jsc_path "$SRC")
 VAR=$(config_run_var)
 DIR=$(config_run_dir "$SRC")
 
-# Login shell so the loader variable is *prepended*, not replaced: `env
-# LD_LIBRARY_PATH=...` would drop the wkdev image's jhbuild prefix.
+# Prepended, not replaced: a bare assignment drops the wkdev image's jhbuild prefix.
 PRELUDE="export $VAR=\"$DIR\${${VAR}:+:\${${VAR}}}\""
 
 if [ -n "$UNTIL_CRASH" ]; then
-    # Under the workspace's own home, next to the other per-workspace artifacts
-    # (t_home): not /tmp, which a container restart takes away.
     HOMEDIR="$(t_home "$NAME")"
     LOGDIR="$HOMEDIR/until-crash"
-    # Matches container/firstrun.sh's core_pattern under the same home, so a
-    # core a crashing iteration wrote is found by being newer than a marker
-    # touched just before that iteration ran.
     CORE_DIR="$HOMEDIR/wk-cores"
 
     if [ -n "$DEBUGGER" ]; then
-        # Driven by until-crash-run-file: each iteration runs under a plain lldb
-        # session that launches, waits for the stop, writes the debuggee's exit
-        # status (or 128+signal) to $WK_UNTIL_CRASH_STATUS, and only then quits
-        # -- but only when that status is 0. A crash leaves the quit un-run, so
-        # lldb stays at its prompt.
+        # until-crash-run-file quits lldb only on a 0 status, so a crash leaves its prompt up.
         RUNFILE="$(t_tools "$NAME")/container/lldb/until-crash-run-file"
         CMD="$(lldb_prelude)
 $PRELUDE
@@ -104,7 +89,6 @@ while [ \"\$i\" -lt $MAX ]; do
 done
 echo \"until-crash: reached the cap of $MAX iterations without a crash\"
 exit 0"
-        # A tty for the same reason `--lldb` needs one below.
         t_exec_tty "$NAME" bash -lc "$CMD"
     else
         JSC_INVOKE="$(sh_quote "$JSC") --validateOptions=1 $(sh_quote "$@")"
@@ -144,8 +128,7 @@ exit 0"
     exit $?
 fi
 
-# validateOptions catches typo'd JSC flags, which otherwise fail silently and
-# make a benchmark look like it changed when it never ran the intended path.
+# validateOptions: a typo'd JSC flag otherwise fails silently, and the run measures nothing.
 if [ -n "$DEBUGGER" ]; then
     CMD="$(lldb_prelude)
 $PRELUDE; exec \"\$LLDB\" $(t_lldb_opts) -s $(sh_quote "$(t_tools "$NAME")/container/lldb/run-file") $(sh_quote "$JSC") -- --validateOptions=1 $(sh_quote "$@")"
@@ -153,8 +136,7 @@ else
     CMD="$PRELUDE; export JSC_validateOptions=1; exec $(sh_quote "$JSC") --validateOptions=1 $(sh_quote "$@")"
 fi
 
-# ssh allocates a pty only when asked; without one lldb prints but accepts no
-# input, and ctrl-c kills the session instead of interrupting the inferior.
+# ssh allocates a pty only when asked; lldb without one accepts no input.
 if [ -n "$DEBUGGER" ]; then
     t_exec_tty "$NAME" bash -lc "$CMD"
 else

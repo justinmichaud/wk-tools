@@ -1,8 +1,4 @@
-# The guard every heavy build step inside a target runs under -- guard_jobs,
-# guard_exec, guard_run -- sourced from /opt/wk-tools inside the target.
-# bash 3.2: this runs in macOS guests as well as on Linux. guard_jobs clamps to
-# the target's own cgroup memory limit, the authoritative ceiling: inside a
-# container the kernel reports the whole machine's MemAvailable.
+# The guard every heavy build step inside a target runs under -- guard_jobs, guard_exec, guard_run -- sourced from /opt/wk-tools inside the target. bash 3.2, this running in macOS guests as well as on Linux. guard_jobs clamps to the target's own cgroup memory limit, the authoritative ceiling: inside a container the kernel reports the whole machine's MemAvailable.
 
 guard_jobs() {
     local jobs="$1" limit max_jobs
@@ -20,8 +16,7 @@ guard_jobs() {
     printf '%s' "$jobs"
 }
 
-# The watchdog is pointed at <pid>, which `exec` preserves.
-_guard_watch() { # <pid> <jobs>
+_guard_watch() { # <pid> <jobs> -- the watchdog is pointed at <pid>, which `exec` preserves
     local budget watchdog
     if [ -n "${WK_MEM_BUDGET_MB:-}" ]; then
         budget=$WK_MEM_BUDGET_MB
@@ -35,9 +30,7 @@ _guard_watch() { # <pid> <jobs>
     echo "wk: memory watchdog: budget ${budget}MB, floor ${WK_MEM_FLOOR_MB:-2048}MB, sampled every ${WK_MEM_INTERVAL:-30}s" >&2
 }
 
-# ionice keeps the build off the desktop's I/O path; choom makes the OOM
-# killer choose the build over the session. Neither exists on macOS.
-_guard_prefix() {
+_guard_prefix() {   # ionice keeps the build off the desktop's I/O path and choom makes the OOM killer choose the build over the session; neither exists on macOS
     local pre=""
     command -v ionice >/dev/null 2>&1 && pre="ionice -c3"
     command -v choom  >/dev/null 2>&1 && pre="$pre choom -n 500 --"

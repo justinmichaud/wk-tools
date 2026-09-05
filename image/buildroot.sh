@@ -1,51 +1,14 @@
-# The buildroot builder: sourced by cmd/sysimage, dispatched on IMG_BUILDER.
-# The same host/worker split the yocto lane uses: this file drives a
-# container workspace and `image/buildroot-build.sh` runs inside it, from
-# /opt/wk-tools so the two halves cannot skew.
-#
-# --- the recipe ---------------------------------------------------------------
-#
-#   tree        WebPlatformForEmbedded/buildroot, branch `wpe`, pinned 2020.02:
-#               a fork, since the release-pinned `cog` defconfigs only exist
-#               there.
-#   host        Ubuntu 22.04, as its own workspace image (WK_SDK_IMAGE):
-#               buildroot 2020.02 builds 2009-era tarballs, and a newer host
-#               stops compiling them.
-#   downloads   BR2_DL_DIR/BR2_CCACHE_DIR under $WK_STORE/cache/buildroot
-#               (lib/store.sh reserves it, targets/container.sh mounts it);
-#               buildroot-build.sh reads them from its own environment, a host
-#               path naming nothing inside the container.
-#   external    BR_EXTERNAL -> image/buildroot/external, carrying the fix an
-#               arm64 build host needs: host-python-2.7's bundled libffi cannot
-#               assemble aarch64/sysv.S, applied from outside (external.mk).
-#   overlay     BR2_ROOTFS_OVERLAY, assembled by
-#               image/buildroot/tailnet-overlay.sh <arch> <staging>. Only
-#               world-readable regular files: the overlay is rsynced at
-#               target-finalize as the build user, and a 0700 directory fails
-#               the build with rsync error 23.
-#   wifi        image/buildroot/wifi-overlay.sh <staging>, the same shape.
-#               TODO: whether the rpi3 defconfig compiles wpa_supplicant at all
-#               is unverified until a build runs.
-#   output      genimage -> output/images/$BR_IMAGE. The cog defconfigs'
-#               filesystem output is tar-only, so buildroot-build.sh adds
-#               BR2_TARGET_ROOTFS_EXT2 whenever the profile names a `.img`.
-#   init        BusyBox, so no systemd units: the card helper reads the init
-#               out of the rootfs and installs the init.d scripts `wk sysimage
-#               write` stages for the same jobs. S99tailscale is the join's.
-#
-# Owed work: docs/HANDOFF-ab-bench.md #3.
+# The buildroot builder: sourced by cmd/sysimage, dispatched on IMG_BUILDER; the
+# in-workspace half is image/buildroot-build.sh, run from /opt/wk-tools so the
+# two halves cannot skew. The tree is a fork: the release-pinned `cog` defconfigs
+# exist nowhere else. TODO: whether the rpi3 defconfig compiles wpa_supplicant at all is unverified. Owed work: docs/HANDOFF-ab-bench.md #3.
 
-# WK_BUILDROOT_BASE overrides the build host image, pinned at 22.04 because
-# buildroot 2020.02 needs it (above): for testing a newer host ahead of a
-# buildroot repin, not for routine use.
-BUILDROOT_BASE_IMAGE="${WK_BUILDROOT_BASE:-docker.io/library/ubuntu:22.04}"
+BUILDROOT_BASE_IMAGE="${WK_BUILDROOT_BASE:-docker.io/library/ubuntu:22.04}"  # WK_BUILDROOT_BASE tests a newer host ahead of a buildroot repin
 
 buildroot_log()      { echo "$(wk_ws_dir "$1")/home/buildroot-$2.log"; }
 buildroot_pidfile()  { echo "$(wk_ws_dir "$1")/home/buildroot-$2.pid"; }
 
-# Tagged with the base's tag and a digest of the Containerfile, so editing the
-# spec builds a new image rather than reusing a stale layer.
-buildroot_ensure_image() {
+buildroot_ensure_image() {  # tagged with a digest of the Containerfile, so editing the spec builds a new image
     local base="$BUILDROOT_BASE_IMAGE" derived spec
     spec="$WK_ROOT/container/buildroot/Containerfile"
     derived="localhost/wk-buildroot-host:${base##*:}-$(sha256sum "$spec" | cut -c1-8)"
@@ -67,9 +30,7 @@ buildroot_ensure_image() {
     export WK_SDK_IMAGE
 }
 
-# Ensures the image *before* the existence check, so an edited Containerfile
-# changes the wanted tag on every run rather than only on creation.
-buildroot_ensure_ws() {
+buildroot_ensure_ws() {  # the image first, so an edited Containerfile changes the wanted tag on every run
     local ws="$1"
     buildroot_ensure_image
 
@@ -120,17 +81,13 @@ buildroot_build() {
         return 0
     fi
 
-    # Memory-sized, then capped near the wiki recipe's own `-j 8`: a WPE
-    # compile here runs roughly 2 GB a job, and 2009-era tarballs are where
-    # broken parallel rules live.
+    # A WPE compile runs roughly 2 GB a job, and 2009-era tarballs are where broken parallel rules live.
     local jobs overlay_arch overlay_wifi dl cc
     jobs=$(WK_MB_PER_JOB=2048 WK_MAX_JOBS=16 build_jobs)
     overlay_arch="${BR_OVERLAY_TAILSCALE:-}"
     overlay_wifi=""
     _image_wants_wifi "${IMG_MACHINE:-}" && overlay_wifi=1
-    # Display only, for the dry run; not passed to buildroot-build.sh, whose
-    # own (container-side) environment already has the real path.
-    dl="$WK_STORE/cache/buildroot/dl"
+    dl="$WK_STORE/cache/buildroot/dl"  # for the dry run: the container-side environment already has the real path
     cc="$WK_STORE/cache/buildroot/ccache"
 
     local kernel_says="built from the tree by buildroot"
@@ -157,10 +114,7 @@ EOF
         return 0
     fi
 
-    # Fetched here, on the machine with the network and the content-addressed
-    # artifact cache (image_fetch_base), and handed to the build through the
-    # download cache both sides share.
-    local kernel_deb=""
+    local kernel_deb=""  # fetched here, where the network is, and handed over through the download cache both sides share
     if [ -n "${BR_KERNEL_DEB_URL:-}" ]; then
         [ -n "${BR_KERNEL_DEB_SHA256:-}" ] && [ -n "${BR_KERNEL_RELEASE:-}" ] \
             || die "$profile pins a kernel but not its sha256 and release
@@ -168,8 +122,7 @@ EOF
         local fetched prepared
         fetched=$(image_fetch_base "$BR_KERNEL_DEB_URL" "$BR_KERNEL_DEB_SHA256") || return 1
         ensure_dir "$dl"
-        # Prepared here rather than in the build: this machine has depmod and
-        # the build image does not (image/buildroot/kernel-pin.sh says why).
+        # Prepared here: this machine has depmod, the build image does not (image/buildroot/kernel-pin.sh).
         prepared=$("$WK_ROOT/image/buildroot/kernel-pin.sh" \
                        "$fetched" "$BR_KERNEL_RELEASE" "$dl") \
             || die "could not prepare the pinned kernel $BR_KERNEL_RELEASE"
@@ -179,6 +132,7 @@ EOF
     buildroot_ensure_ws "$ws"
     buildroot_refuse_busy "$ws"
 
+    # BR_TREE_COMMIT is a commit, never the 2020.02 tag (the cog defconfig is absent there and the build dies at `No rule to make target`); BR_EXTERNAL=1 because host-python-2.7's bundled libffi cannot assemble aarch64/sysv.S.
     info "building $profile in '$ws'"
     _buildroot_run "$ws" image "$detach" "hours" "$jobs" -- \
         "$(t_tools "$ws")/image/buildroot-build.sh" \
@@ -199,10 +153,6 @@ EOF
     [ -n "$detach" ] || info "built $profile in '$ws'"
 }
 
-# One job per workspace: an image build and a slot build both move the checkout
-# and the tree's output under them. Evidence is the pid a detached stage
-# leaves, asked of the workspace (ws_busy_reason); a dead pid is a finished
-# job, whatever its log says.
 buildroot_refuse_busy() {
     local ws="$1" busy
     busy=$(ws_busy_reason "$ws") || return 0
@@ -213,20 +163,15 @@ buildroot_refuse_busy() {
     Stop it:    wk sysimage build $IMG_PROFILE --stop"
 }
 
-# Start a stage's script in the workspace and, unless detached, wait for its
-# completion line. `<stage>` names the log and pid files; the script ends with
-# "stage '<stage>' done" or it did not finish, whatever its exit status says.
+# `<stage>` names the log and pid files, and the script ends with "stage '<stage>' done" or it did not finish, whatever its exit status says.
 _buildroot_run() { # <ws> <stage> <detach> <how long> <jobs> -- <script> <args...>
     local ws="$1" stage="$2" detach="$3" howlong="$4" jobs="$5"; shift 5
     [ "${1:-}" = -- ] && shift
     local log pid
     log=$(buildroot_log "$ws" "$stage"); pid=$(buildroot_pidfile "$ws" "$stage")
-    # Sized against the machine's other builds, and on its books while it
-    # runs (lib/resources.sh): the pid it leaves is the workspace's own.
     build_admit "the $stage build" "$jobs"
     build_record "wk sysimage $stage $ws" "$jobs" "$(( jobs * 2048 ))" "ws:$ws:buildroot-$stage.pid"
-    # Truncated, not unlinked: `tail -f` follows an inode.
-    : > "$log"; rm -f "$pid"
+    : > "$log"; rm -f "$pid"  # truncated, not unlinked: `tail -f` follows an inode
     log "  log: $log"
 
     t_spawn "$ws" "$(t_home "$ws")/$(basename "$log")" \
@@ -250,8 +195,7 @@ $(sed 's/^/    /' "$log" 2>/dev/null | tail -5)"
     fi
 
     info "waiting for the $stage build ($howlong; --detach returns instead)"
-    # The pid is the workspace's (its own pid namespace); asked of the
-    # workspace, never of this host.
+    # The pid lives in the workspace's own namespace, so it is asked there.
     while t_exec "$ws" kill -0 "$(cat "$pid" 2>/dev/null)" >/dev/null 2>&1; do sleep 10; done
     grep -q "stage '$stage' done" "$log" \
         || die "the $stage build in '$ws' failed. Last lines:
@@ -259,12 +203,8 @@ $(tail -20 "$log" | sed 's/^/    /')"
     return 0
 }
 
-# --- slots: one image, several WebKits ------------------------------------------
-# `wk sysimage webkit <profile> --commit <sha> --slot <name>` builds one WebKit
-# commit with the image's own wpewebkit package, into output/wk-slots/<name>/
-# in the image's workspace (image/buildroot-webkit.sh has the recipe;
-# image_slot_dir, lib/image.sh, the location). `wk pi bench --ab` alternates
-# between two slots with no reflash and no reboot.
+# A slot is one WebKit commit built with the image's own wpewebkit package into
+# output/wk-slots/<name>/, so `wk pi bench --ab` alternates between two with no reflash.
 buildroot_webkit() {
     local profile="$1"; shift
     local detach="" dry="" ws="" commit="" slot=""
@@ -291,9 +231,7 @@ buildroot_webkit() {
     local image slotdir jobs
     image="$(wk_ws_dir "$ws")/build/buildroot/$profile/output/images/${BR_IMAGE:-sdcard.img}"
     slotdir=$(image_slot_dir "$profile" "$slot")
-    # WebKit's own build parallelises well and links large: memory-sized at
-    # 2 GB a job, capped where the link steps stop gaining.
-    jobs=$(WK_MB_PER_JOB=2048 WK_MAX_JOBS=64 build_jobs)
+    jobs=$(WK_MB_PER_JOB=2048 WK_MAX_JOBS=64 build_jobs)  # WebKit links large; capped where the link steps stop gaining
 
     if [ -n "$dry" ]; then
         cat >&2 <<EOF

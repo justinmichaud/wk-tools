@@ -1,15 +1,8 @@
 #!/usr/bin/env bash
-#
-# Bootstrap this machine. Idempotent: running it twice in a row must report no
-# changes the second time, and it must never install software the host does not
-# strictly need. Everything mutable belongs in a workspace, not here.
-#
+# Bootstrap this machine. Idempotent: running it twice in a row must report no changes the second time, and it must never install software the host does not strictly need. Everything mutable belongs in a workspace, not here.
 #   ./setup              everything for this OS
-#   ./setup --stage X    just one stage (tools, settings, dotfiles, claude,
-#                        mcp, sharing, machine, vmtools, softnet, sdk,
-#                        broker, benchkey, quiesce)
-#   ./setup --dry-run    report what would change (WK_DRY_RUN=1; host/macos/
-#                        sharing.sh reads the same variable)
+#   ./setup --stage X    just one stage (tools, settings, dotfiles, claude, mcp, sharing, machine, vmtools, softnet, sdk, broker, benchkey, quiesce)
+#   ./setup --dry-run    report what would change (WK_DRY_RUN=1; host/macos/sharing.sh reads the same variable)
 
 set -euo pipefail
 
@@ -29,8 +22,7 @@ while [ $# -gt 0 ]; do
     esac
 done
 
-# Each stage runs in a subshell rather than sourced: `set -e` inside a stage would
-# abort the whole script, and the stages that need a password are the last three.
+# Each stage runs in a subshell rather than sourced: `set -e` inside a stage would abort the whole script, and the stages that need a password are the last three.
 WK_FAILED_STAGES=""
 
 run_stage() {
@@ -47,9 +39,7 @@ run_stage() {
 
     set +e
     # shellcheck disable=SC1090
-    # `set -e` re-enabled inside: the subshell inherits the `set +e` above. $tmp is
-    # expanded now, not in the trap, where this function's locals may be out of scope.
-    ( set -e; trap "echo \$WK_CHANGES > $tmp" EXIT; . "$script" )
+    ( set -e; trap "echo \$WK_CHANGES > $tmp" EXIT; . "$script" )   # `set -e` re-enabled inside, the subshell inheriting the `set +e` above; $tmp is expanded now and not in the trap, where this function's locals may be out of scope
     rc=$?
     set -e
 
@@ -67,8 +57,7 @@ run_stage() {
 OS="$(wk_os)"
 info "wk-tools setup on $OS ($(describe_cores), $(host_mem_mb) MB)"
 
-# `wk sudo`'s 30-second window closes in the gaps between setup's privileged steps.
-_sudo_keepalive_pid=""
+_sudo_keepalive_pid=""   # `wk sudo`'s 30-second window closes in the gaps between setup's privileged steps
 _sudo_keepalive_stop() {
     [ -n "$_sudo_keepalive_pid" ] || return 0
     kill "$_sudo_keepalive_pid" 2>/dev/null || true
@@ -86,9 +75,7 @@ sudo_prime() {
     log  "  the window is held open only while setup runs, and closes when it ends"
     sudo -v || { warn "not authenticated -- the stages that need root will say so"; return 0; }
 
-    # Half the window, so a refresh never races its own expiry; `sudo -n -v` so a
-    # background refresher fails rather than prompts, and the parent check bounds it.
-    _setup_pid=$$
+    _setup_pid=$$   # refreshed at half the window, so it never races its own expiry; `sudo -n -v` so a background refresher fails rather than prompts, and the parent check bounds it
     ( while kill -0 "$_setup_pid" 2>/dev/null; do
           sleep 15
           sudo -n -v 2>/dev/null || exit 0
@@ -111,9 +98,7 @@ run_stage machine  "$HOST_DIR/machine.sh"
 run_stage vmtools  "$HOST_DIR/vmtools.sh"
 run_stage softnet  "$HOST_DIR/softnet.sh"
 run_stage sdk      "$HOST_DIR/sdk.sh"
-# After sdk and vmtools: the broker publishes its socket into the podman machine
-# on macOS, and binds beside the proxy the sdk stage started on Linux.
-run_stage broker   "$HOST_DIR/broker.sh"
+run_stage broker   "$HOST_DIR/broker.sh"   # after sdk and vmtools: the broker publishes its socket into the podman machine on macOS, and binds beside the proxy the sdk stage started on Linux
 run_stage benchkey "$HOST_DIR/benchkey.sh"
 run_stage quiesce  "$WK_ROOT/admin/install.sh"
 
@@ -151,8 +136,7 @@ if is_linux && [ "$STAGE" = all ]; then
     have cage || _todo="$_todo\n  - cage is not installed; 'wk session on' cannot start a compositor"
     [ -x /usr/local/libexec/wk-quiesce-priv ] \
         || _todo="$_todo\n  - the privileged helper is missing; 'wk quiesce' and 'wk session' will not work"
-    # Group membership only reaches a process at login: configured is not yet active.
-    case " $(id -nG "$(id -un)") " in
+    case " $(id -nG "$(id -un)") " in   # group membership only reaches a process at login, so configured is not yet active
         *" render "*)
             case " $(id -nG) " in
                 *" render "*) ;;

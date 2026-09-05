@@ -1,53 +1,9 @@
 #!/usr/bin/env python3
-"""plot-memory-log.py -- chart a WebKitWebProcess memory sampler log.
-
-docs/Urgent/HANDOFF-memory.md asked for the ~300-line charting script
-'plot-memory-log.py' to be rescued out of the wiki page
-'Memory-benchmark-charts-(2.52)' and committed here so it cannot be lost
-again. That page (and 'WPE-memory-usage-investigation', the other reference
-the handoff names) is not reachable from here -- it 404s on trac.webkit.org
-and is not indexed anywhere a web search reaches, which means it is Igalia
-internal rather than public. Nothing in this repository or its history has a
-copy either. So this is not a rescue: it is the stdlib-only replacement the
-handoff allows for when the original cannot be fetched, built to the shape
-'wk bench mem' needs (--include, --max-seconds) without assuming the original
-script's exact column vocabulary, which went down with the page.
-
-Log format this reads (plain and documented here because nothing upstream
-defines it any more): a text file, one sample per line, whitespace- or
-comma-separated, first field the sample time in seconds since the run
-started, the rest named numeric columns in bytes. Two header shapes are
-accepted -- a leading '#' comment naming the columns:
-
-    # t rss dirty shared
-    0.0 41943040 20971520 8388608
-    0.5 43121200 21004288 8388608
-    ...
-
-or, equivalently, comma-separated:
-
-    t,rss,dirty,shared
-    0.0,41943040,20971520,8388608
-    ...
-
-A blank line or a second '#' comment ends the header search; everything after
-the first non-comment line is data, split the same way the header was. Rows
-with the wrong field count are skipped with a warning rather than aborting the
-whole plot -- a truncated last line (the common shape of a killed process) is
-not a reason to lose every sample before it.
-
-Usage:
-
-    plot-memory-log.py <log> [--include col,col,...] [--max-seconds N]
-                        [--out chart.svg] [--title TEXT]
-
---include names the columns to plot, in that order; default is every column
-in the header, in header order. --max-seconds drops samples past that mark
-rather than rescaling the whole file. --out decides the format from its
-extension: .svg for a bare chart, anything else (default chart.html) wraps
-the same chart in a minimal HTML page. No third-party import anywhere in this
-file -- it has to draw on a workspace image with nothing but the interpreter.
-"""
+"""Chart a WebKitWebProcess memory sampler log; stdlib only, since it draws on
+a workspace image with nothing but the interpreter. The log format, which
+nothing upstream defines: one sample per line, whitespace- or comma-separated,
+the first field the time in seconds and the rest named byte columns, named by a
+leading '#' comment or by the first line; a wrong-width row is skipped."""
 
 import argparse
 import csv
@@ -63,10 +19,8 @@ def _split_row(line):
     return line.split()
 
 
-def read_log(path):
-    """Returns (columns, rows) -- columns excludes the time column, rows is
-    a list of (time, {column: value})."""
-    columns = None
+def read_log(path):                    # -> (columns without the time column,
+    columns = None                     #     [(time, {column: value})])
     rows = []
     skipped = 0
     with open(path, newline="") as f:
@@ -84,11 +38,7 @@ def read_log(path):
             if fields is None:
                 continue
             if columns is None:
-                # No '#' header seen -- the first data-shaped line names the
-                # columns instead, so a plain 'time_s,col,col' file (no
-                # comment marker) still works rather than silently plotting
-                # nothing.
-                columns = fields[1:]
+                columns = fields[1:]   # no '#' header: the first line names them
                 continue
             if len(fields) != len(columns) + 1:
                 print(f"plot-memory-log.py: {path}:{lineno}: expected "
@@ -147,8 +97,7 @@ def render_svg(columns, rows, title):
 
     parts = []
 
-    # gridlines + axis labels, 5 divisions on each axis
-    for i in range(6):
+    for i in range(6):                 # gridlines and labels, 5 divisions
         gy = pad_t + plot_h * i / 5
         val = vmax * (5 - i) / 5
         parts.append(f'<line x1="{pad_l}" y1="{gy:.1f}" x2="{width - pad_r}" y2="{gy:.1f}" '

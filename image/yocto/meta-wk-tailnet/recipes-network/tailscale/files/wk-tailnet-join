@@ -1,12 +1,4 @@
 #!/bin/sh
-#
-# Join this node to the tailnet, once, on first boot.
-#
-# The same built image is written to more than one card, so it carries no
-# tailnet identity: `wk sysimage write` seeds /etc/wk/tailscale-authkey and
-# /etc/wk/tailnet.conf (disk_seed_tailnet, boot/disk.sh), and this runs once
-# against them and deletes the key. Exits 0 whenever the failure isn't this
-# node's own. POSIX sh, no jq: this Yocto image's shell.
 
 set -u
 
@@ -16,7 +8,6 @@ TS=/usr/bin/tailscale
 
 say() { echo "wk-tailnet-join: $*"; }
 
-# say(), plus /dev/console: covers both systemd (stdout->journal) and BusyBox (stdout->console).
 shout() {
     say "$*"
     [ -w /dev/console ] && echo "wk-tailnet-join: $*" > /dev/console 2>/dev/null
@@ -25,8 +16,7 @@ shout() {
 
 [ -x "$TS" ] || { say "no $TS -- nothing to join with"; exit 0; }
 
-# `tailscale ip -4` checks the property, not the daemon's say-so: a running
-# tailscaled with no identity answers nothing here.
+# `tailscale ip -4` checks the property, not the daemon's say-so: a running tailscaled with no identity answers nothing here.
 if "$TS" ip -4 >/dev/null 2>&1; then
     say "already on the tailnet as $("$TS" ip -4 2>/dev/null | head -1)"
     rm -f "$KEY"
@@ -39,7 +29,6 @@ if [ ! -r "$KEY" ]; then
     exit 1
 fi
 
-# Name and tag come with the key, not the image: the fleet's name for this machine lives with the card.
 HOSTNAME_WANTED=""
 TAG="tag:wk"
 if [ -r "$CONF" ]; then
@@ -58,7 +47,6 @@ if "$TS" up --auth-key "file:$KEY" \
         --hostname="$HOSTNAME_WANTED" \
         --accept-dns=false; then
     say "up as $HOSTNAME_WANTED at $("$TS" ip -4 2>/dev/null | head -1)"
-    # Deleted only after a successful join, or a failed boot can't retry.
     rm -f "$KEY"
 else
     say "tailscale up failed -- the key is kept so the next boot can retry."

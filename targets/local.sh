@@ -1,18 +1,12 @@
-# Target driver: the workspace is this machine -- the only thing reachable from
-# inside one (no nested podman machine; a macOS guest has kern.hv_support = 0).
-
-# Not a sandbox boundary: that was drawn by whoever created this workspace.
+# Target driver: the workspace is this machine -- the only target reachable from inside one (no nested podman machine; a macOS guest has kern.hv_support = 0).
 WK_SANDBOX=self
 
-# Read once: inside a build $HOME may no longer point at the marker.
 _local_name=$(wk_marker_field name)
 _local_src=$(wk_marker_field src)
 _local_arch=$(wk_marker_field arch)
 [ -n "$_local_name" ] || die "$(wk_marker) does not name the workspace (name=)"
 [ -n "$_local_src" ] || die "$(wk_marker) does not name a checkout (src=)"
 
-# WK_LOCAL_STORE is the container exception: the workspace directory bind-mounted
-# in at the host's own path, so build.status here is what `wk status` reads out there.
 WK_STORE="${WK_LOCAL_STORE:-${XDG_STATE_HOME:-$HOME/.local/state}/wk}"
 mkdir -p "$WK_STORE/ws/$_local_name"
 
@@ -36,8 +30,6 @@ t_list()  { printf '%s\trunning\n' "$_local_name"; }
 
 t_info()  { [ "$1" = "$_local_name" ] && echo running || echo absent; }
 
-# A login shell: the proxy vars and PATH provisioning writes live in the profile.
-# bash, not $SHELL: the guest's login shell is zsh, and the profile covers both.
 t_exec() {
     shift
     bash -lc "exec $(sh_quote "$@")"
@@ -63,8 +55,7 @@ t_needs_base() { return 1; }
 
 t_store_init() { mkdir -p "$WK_STORE/ws/$_local_name"; }
 
-# `nproc` is wrong inside a container: --cpus sets a cpu.max quota that does not
-# restrict the affinity mask nproc reads, so a 7-CPU container reports 80.
+# nproc reads the affinity mask, which --cpus does not restrict: a 7-CPU container reports 80.
 command -v host_cores >/dev/null 2>&1 || . "$WK_ROOT/lib/resources.sh"
 
 t_cores() {

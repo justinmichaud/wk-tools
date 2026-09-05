@@ -1,21 +1,5 @@
 #!/usr/bin/env bash
-#
-# kernel-pin.sh <kernel .deb> <release> <output dir> -- prepare a pinned
-# kernel for a buildroot image, and print the tarball it made.
-#
-# A profile that declares its kernel rather than building one
-# (BR_KERNEL_DEB_URL, image/configs/<profile>.conf) needs the kernel, its
-# modules, its device trees and its overlays to agree about a version; a
-# Raspberry Pi kernel package carries all four, so the pin is one artifact and
-# one hash.
-#
-# Prepared here rather than in the build image, which has dpkg-deb and xz but
-# no kmod for the depmod below.
-#
-# The modules are decompressed and depmod re-run over the result: these images
-# run BusyBox modprobe against modules.dep, and leaving .ko.xz -- or
-# decompressing while modules.dep still names the .xz paths -- leaves every
-# module unloadable, wifi first among them.
+# The modules are decompressed and depmod re-run over the result: these images run BusyBox modprobe against modules.dep, and a .ko.xz path there leaves every module unloadable.
 
 set -euo pipefail
 
@@ -32,8 +16,6 @@ done
 mkdir -p "$out"
 tarball="$out/wk-kernel-$release.tar"
 
-# Keyed by the package's own content: a tarball made from this exact .deb is
-# this exact tarball, so a second build reuses it and a changed pin does not.
 stamp="$tarball.from"
 want="$(sha256sum "$deb" | cut -d' ' -f1)"
 if [ -f "$tarball" ] && [ -f "$stamp" ] && [ "$(cat "$stamp")" = "$want" ]; then
@@ -52,8 +34,7 @@ d="$work/x/usr/lib/linux-image-$release"
 [ -d "$work/x/lib/modules/$release" ] \
     || { echo "kernel-pin: $deb carries no modules for $release" >&2; exit 1; }
 
-# A 32-bit ARM zImage, checked rather than assumed: the firmware jumps to
-# whatever this is, and a mismatch here is a board that hangs with no console.
+# The firmware jumps to whatever this is, and a mismatch is a board that hangs with no console.
 magic=$(od -An -tx4 -j36 -N4 "$k" | tr -d ' \n')
 [ "$magic" = "016f2818" ] \
     || { echo "kernel-pin: $k is not a 32-bit ARM zImage (magic $magic)" >&2; exit 1; }

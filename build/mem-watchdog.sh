@@ -1,12 +1,5 @@
 #!/usr/bin/env bash
-#
-# Watch a build's memory, from inside the machine that is building. Started by
-# build/guard.sh just before the build execs, so <pid> is the build and every
-# compiler is a descendant of it. Over `budget` (the tree's own RSS), or with
-# the machine under `floor` -- memory we are not using is not ours either on a
-# shared machine -- it kills the build rather than leave the OOM killer to pick
-# somebody else's work. Output is on stderr, and `wk build` lifts the peak line
-# into the status file. bash 3.2: this runs in macOS guests as well as Linux.
+# Watches a build's memory from inside the machine that is building. Started by build/guard.sh just before the build execs, so <pid> is the build and every compiler is a descendant of it. Over `budget` (the tree's own RSS), or with the machine under `floor` -- memory we are not using is not ours either on a shared machine -- it kills the build rather than leave the OOM killer to pick somebody else's work. Output is on stderr, and `wk build` lifts the peak line into the status file. bash 3.2, this running in macOS guests as well as Linux.
 
 set -uo pipefail
 
@@ -15,9 +8,7 @@ BUDGET="${2:?budget in MB}"
 FLOOR="${3:-0}"
 INTERVAL="${WK_MEM_INTERVAL:-30}"
 
-# Every process in the tree under $1: pid list plus total RSS in MB. One `ps`
-# per sample walked in awk, not a pgrep recursion; eight passes covers any depth.
-_tree() {
+_tree() {   # every process in the tree under $1: pid list plus total RSS in MB. One `ps` per sample walked in awk rather than a pgrep recursion, eight passes covering any depth
     ps -eo pid=,ppid=,rss= 2>/dev/null | awk -v root="$1" '
         { pid[NR] = $1; ppid[NR] = $2; rss[NR] = $3; n = NR }
         END {
@@ -32,8 +23,7 @@ _tree() {
         }'
 }
 
-# What the machine has left. macOS has no MemAvailable, so this returns nothing.
-_avail_mb() {
+_avail_mb() {   # what the machine has left; macOS has no MemAvailable, so nothing comes back there
     [ -r /proc/meminfo ] || return 0
     awk '/^MemAvailable:/ {print int($2/1024)}' /proc/meminfo
 }
@@ -41,12 +31,10 @@ _avail_mb() {
 peak=0
 reported=0
 
-# TERM before KILL: a half-written object file fails the *next* build, not this.
-_kill_tree() {
+_kill_tree() {   # TERM before KILL: a half-written object file fails the *next* build, not this one
     local pids="$1" p
     for p in $pids; do
-        # Not ourselves: this watchdog is inside the tree it is measuring.
-        [ "$p" = "$$" ] && continue
+        [ "$p" = "$$" ] && continue   # not ourselves: this watchdog is inside the tree it measures
         kill -TERM "$p" 2>/dev/null || true
     done
     local i=0

@@ -1,28 +1,9 @@
 #!/usr/bin/env python3
 """Split a perf profile into per-GC-section hardware-counter breakdowns.
 
-Run as a perf script (NOT standalone), so parsing of perf.data is done by perf's own
-Python scripting API rather than by hand:
+Run as a perf script and not standalone, so perf's own Python API parses perf.data: `TRACE_AUX=/tmp/jsc-trace-aux perf script -i perf.data -s split-perf.py`. perf calls process_event() once per sample with a structured dict (event name, period, CLOCK_MONOTONIC timestamp, comm/tid/pid, resolved symbol, callchain), and every sample belonging to a GC thread of the marker-emitting process and falling inside a "GC <phase>" text-marker span is pooled across all GCs -- split-trace.py's split and stitch, summing PMU event periods instead of counting wall-clock samples. Per phase it reports instructions-per-cycle and cache behaviour, per-function tables showing where memory stalls concentrate, and folded stacks weighted by cache misses for flamegraphs.
 
-    TRACE_AUX=/tmp/jsc-trace-aux perf script -i perf.data \
-        -s split-perf.py
-
-perf calls process_event() once per sample with a structured dict (event name, period,
-CLOCK_MONOTONIC timestamp, comm/tid/pid, resolved symbol, callchain). This script pools
-every sample that (a) belongs to a GC thread of the marker-emitting process and (b) falls
-inside a "GC <phase>" text-marker span, across all GCs -- the same split+stitch as
-split-trace.py, but summing PMU event periods instead of counting wall-clock samples.
-
-For each phase it reports instructions-per-cycle and cache behaviour, and per-function
-tables so you can see where memory stalls concentrate (e.g. during sweeping). It also
-writes per-phase folded stacks weighted by cache misses for flamegraphs.
-
-Env:
-  TRACE_AUX     marker directory (default /tmp/jsc-trace-aux)
-  GC_PREFIX     marker-name prefix identifying sections (default "GC ")
-  PERF_OUTDIR   where folded-stack files are written (default $TRACE_AUX)
-  ALL_THREADS   if set, keep every thread's samples (default: GC threads only)
-"""
+Env: TRACE_AUX marker directory (default /tmp/jsc-trace-aux), GC_PREFIX the marker-name prefix identifying a section (default "GC "), PERF_OUTDIR where folded-stack files are written (default $TRACE_AUX), ALL_THREADS to keep every thread's samples rather than the GC threads' only."""
 import os
 import re
 import sys
@@ -36,10 +17,7 @@ ALL_THREADS = bool(os.environ.get("ALL_THREADS"))
 # Linux truncates thread names to 15 chars (prctl PR_SET_NAME); match by shared prefix.
 GC_THREAD_NAMES = ("Heap Helper Thread", "JSC Heap Collector Thread")
 
-# ---- marker spans (start_ns end_ns name), from the JSC text-marker files ----
-
-def load_markers():
-    """Return {phase_name: merged [ [start,end], ... ]}, set(marker pids)."""
+def load_markers():   # -> {phase name: merged [[start_ns, end_ns], ...]}, set(marker pids), from the JSC text-marker files
     spans = defaultdict(list)
     pids = set()
     import glob
@@ -75,20 +53,16 @@ def load_markers():
 
 SECTIONS = {}
 MARKER_PIDS = set()
-# per phase: event -> summed period; and (phase) -> {symbol: {event: period}}
-phase_events = defaultdict(lambda: defaultdict(int))
-phase_func = defaultdict(lambda: defaultdict(lambda: defaultdict(int)))
+phase_events = defaultdict(lambda: defaultdict(int))   # phase -> event -> summed period
+phase_func = defaultdict(lambda: defaultdict(lambda: defaultdict(int)))   # phase -> symbol -> event -> summed period
 phase_samples = defaultdict(int)
-# folded stacks: (phase, metric_event) -> {stack_string: weight}
-folded = defaultdict(lambda: defaultdict(int))
+folded = defaultdict(lambda: defaultdict(int))   # (phase, metric event) -> stack string -> weight
 MISS_EVENTS = ("l1d_cache_refill", "ll_cache_miss_rd")
 
 
-def _phase_for(ts):
-    """Yield every phase whose merged spans contain ts (independent, like split-trace.py)."""
+def _phase_for(ts):   # every phase whose merged spans contain ts; independent, like split-trace.py
     for name, iv in SECTIONS.items():
-        # linear scan is fine: a handful of spans per phase per GC, tens of GCs
-        for s, e in iv:
+        for s, e in iv:   # a handful of spans per phase per GC, tens of GCs, so a linear scan
             if s <= ts <= e:
                 yield name
                 break
@@ -130,8 +104,7 @@ def process_event(param_dict):
     if not ALL_THREADS and not _is_gc_thread(pid, tid, comm):
         return
     ev = param_dict.get("ev_name", "")
-    # perf appends ":" or a modifier suffix on some builds; normalise to the base name.
-    ev = ev.split(":")[0].strip()
+    ev = ev.split(":")[0].strip()   # perf appends ":" or a modifier suffix on some builds
     period = s.get("period") or 0
     sym = param_dict.get("symbol") or "[unknown]"
 
@@ -169,7 +142,6 @@ def _phase_report(phase):
     print(f"  L1D-refill MPKI     {l1_mpki:6.2f}   (l1d_cache_refill={_fmt(l1d)})")
     print(f"  LL-read-miss MPKI   {ll_mpki:6.2f}   (ll_cache_miss_rd={_fmt(llm)})")
     print(f"  backend-stall %cyc  {stall_frac:6.1f}   (stall_backend={_fmt(stall)})")
-    # per-function tables by each miss event
     for metric, total in (("ll_cache_miss_rd", llm), ("l1d_cache_refill", l1d)):
         if not total:
             continue

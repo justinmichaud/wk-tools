@@ -1,20 +1,6 @@
 #!/bin/bash
-#
-# The benchmark install configuring itself, once, at its first boot.
-#
-# Installed by the package `wk bench mac-volume --build-pkg` makes, laid down
-# by `startosinstall --installpackage`. Runs as root from a LaunchDaemon and
-# removes that LaunchDaemon when it finishes.
-#
-# A first-boot daemon, not a package postinstall script: a package installed by
-# startosinstall runs against a volume that is not running, so creating a user
-# offline means hand-editing dslocal and hoping it matches opendirectoryd.
-# Idempotent throughout, so a failure is repaired by re-running.
-#
-# WK_BENCH_USER (default: bench) and WK_BENCH_PASSWORD (default: benchbench)
-# name and set the account, but a LaunchDaemon inherits no environment: the
-# real password comes from $PAYLOAD/password. The env vars are for running this
-# by hand.
+# The benchmark install configuring itself once, at first boot. A LaunchDaemon, not a package postinstall: startosinstall's package runs against a volume that is not running, so an account could only be made by hand-editing dslocal. Idempotent throughout.
+# A LaunchDaemon inherits no environment, so the password comes from $PAYLOAD/password; WK_BENCH_USER and WK_BENCH_PASSWORD are for running this by hand.
 
 set -euo pipefail
 export PATH=/usr/sbin:/usr/bin:/sbin:/bin
@@ -32,10 +18,6 @@ echo "=== wk-bench first boot: $(date -u +%Y-%m-%dT%H:%M:%SZ) ==="
 
 say() { echo "[wk-bench] $*"; }
 
-# --- the account -------------------------------------------------------------
-# An account with no password cannot be an autologin account. Read only in the
-# branch that creates the account: a re-run over an existing one sets PW="" and
-# skips autologin.
 if [ -r "$PAYLOAD/password" ]; then
     PW=$(cat "$PAYLOAD/password") || PW=""
 else
@@ -51,8 +33,7 @@ else
         || say "WARNING: sysadminctl -addUser failed"
 fi
 
-# Without the account, .AppleSetupDone leaves a login window offering nothing
-# and Recovery as the only way back in, so the marker comes back off.
+# Without the account, .AppleSetupDone leaves a login window offering nothing and Recovery as the only way back in, so the marker comes back off.
 if ! id -u "$BENCH_USER" >/dev/null 2>&1; then
     say "FAILSAFE: '$BENCH_USER' does not exist after creation; restoring Setup Assistant"
     rm -f /var/db/.AppleSetupDone
@@ -61,10 +42,7 @@ if ! id -u "$BENCH_USER" >/dev/null 2>&1; then
     exit 1
 fi
 
-# --- sudo without a password, deliberately -----------------------------------
-# Defensible here, not on a workstation: this install is cattle, and a password
-# prompt in the unattended `wk quiesce` is a hang. Kept apart from the narrower
-# wk-quiesce NOPASSWD rule, which would widen if conflated with this one.
+# Cattle, and a password prompt in the unattended `wk quiesce` is a hang.
 if [ ! -f /etc/sudoers.d/wk-bench ]; then
     printf '%s ALL=(ALL) NOPASSWD: ALL\n' "$BENCH_USER" > /etc/sudoers.d/wk-bench
     chmod 0440 /etc/sudoers.d/wk-bench
@@ -76,14 +54,9 @@ if [ ! -f /etc/sudoers.d/wk-bench ]; then
     fi
 fi
 
-# --- a console session with nobody in the room -------------------------------
 # A browser driven over ssh with no console session has nowhere to draw.
 if [ -n "$PW" ]; then
-    # `sysadminctl -resetPasswordFor`, not `dscl . -passwd`: the latter needs
-    # the old password, fails on every re-run, and drifts the account from the
-    # login keychain, raising an unlock panel that can sit on screen through an
-    # entire A/B. `dscl . -authonly` is checked because these tools exit 0
-    # without acting.
+    # `dscl . -passwd` needs the old password and drifts the account from the login keychain, whose unlock panel can sit on screen through an entire A/B; both tools exit 0 unacted.
     sysadminctl -resetPasswordFor "$BENCH_USER" -newPassword "$PW" >/dev/null 2>&1 \
         || dscl . -passwd "/Users/$BENCH_USER" "$PW" >/dev/null 2>&1 \
         || true
@@ -104,10 +77,7 @@ if [ -n "$PW" ]; then
             || say "WARNING: could not reset the login keychain; expect an unlock prompt"
     fi
 
-    # Written directly, not via `sysadminctl -autologin set`, which logs
-    # `SACSetAutoLoginPassword error:22` and exits 0: /etc/kcpassword (XORed
-    # with Apple's fixed key, NUL-padded to a multiple of 12) and
-    # autoLoginUser.
+    # `sysadminctl -autologin set` logs `SACSetAutoLoginPassword error:22` and exits 0, so /etc/kcpassword (XOR Apple's fixed key, NUL-padded to a multiple of 12) is written here.
     /usr/bin/python3 - "$PW" <<'KCP' 2>/dev/null || say "WARNING: could not write /etc/kcpassword"
 import sys, os
 KEY = bytes([0x7D,0x89,0x52,0x23,0xD2,0xBC,0xDD,0xEA,0xA3,0xB9,0x1F])
@@ -134,11 +104,7 @@ else
     say "autologin left alone (no password on hand for an existing user)"
 fi
 
-# --- reachable ---------------------------------------------------------------
-# launchctl, not `systemsetup -setremotelogin on`: that failed here with
-# "could not enable remote login" (it wants Full Disk Access, which a
-# fresh-install LaunchDaemon cannot ask for). Remote Login *is* a launchd
-# override, so setting it directly is the same switch without the TCC prompt.
+# `systemsetup -setremotelogin on` wants Full Disk Access, which a fresh-install LaunchDaemon cannot ask for; Remote Login is a launchd override, so set that instead.
 launchctl enable system/com.openssh.sshd 2>/dev/null || true
 launchctl bootstrap system /System/Library/LaunchDaemons/ssh.plist 2>/dev/null || true
 systemsetup -setremotelogin on >/dev/null 2>&1 || true
@@ -160,11 +126,7 @@ if [ -f "$PAYLOAD/authorized_keys" ]; then
     fi
 fi
 
-# --- tailscale, so this machine has an address that does not move -------------
-# Without it the LAN address changes between reboots and the ssh alias resolves
-# to the host install instead. The standalone/macsys package variant, whose
-# LaunchDaemon runs before login -- not the App Store build, which is sandboxed
-# and needs a session. Failure is reported, not fatal.
+# The standalone/macsys package, whose LaunchDaemon runs before login -- not the App Store build, which is sandboxed and needs a session. Without a tailnet name the LAN address changes across reboots and the ssh alias resolves to the host install.
 TS_CLI=/Applications/Tailscale.app/Contents/MacOS/Tailscale
 TS_PKG=$(ls "$PAYLOAD"/Tailscale-*macos.pkg 2>/dev/null | head -1) || TS_PKG=""
 
@@ -178,8 +140,7 @@ if [ -r "$PAYLOAD/tailscale-authkey" ] && [ -n "$TS_PKG" ]; then
             sleep 10
         fi
         if [ -x "$TS_CLI" ]; then
-            # `file:` not the key itself: argv is world readable. Tagged
-            # nodes never key-expire; untagged ones drop off after 180 days.
+            # `file:` not the key itself: argv is world readable. Tagged nodes never key-expire.
             "$TS_CLI" up --auth-key "file:$PAYLOAD/tailscale-authkey" \
                 --advertise-tags=tag:wk \
                 --hostname tolken-bench --accept-dns=false >/dev/null 2>&1 || true
@@ -209,10 +170,6 @@ else
     say "  identity, so nothing that reaches this Mac over the tailnet can reach it"
 fi
 
-# --- the network, without which none of the above can be reached --------------
-# A fresh macOS install has no Wi-Fi credentials. SSID and passphrase come from
-# the payload and land on the bench volume in the clear -- the same disk and
-# network the credentials already belong to.
 if [ -r "$PAYLOAD/wifi.conf" ]; then
     # shellcheck disable=SC1090
     . "$PAYLOAD/wifi.conf"
@@ -237,22 +194,15 @@ else
     say "  have no network and nothing will be able to drive it"
 fi
 
-# --- where staged builds land ------------------------------------------------
-# Created here as root, since `wk bench stage` runs unattended over ssh and
-# cannot sudo. Owned by the bench account: staging writes as the host account
-# and the benchmark reads as this one, and both are uid 501.
 install -d -o "$BENCH_USER" -g staff -m 0755 /var/wk 2>/dev/null \
     && say "staging root /var/wk ready, owned by $BENCH_USER" \
     || say "WARNING: could not create /var/wk -- staging will fail from host mode"
 
-# Without this marker `wk bench staged` refuses.
 if [ ! -f /etc/wk-image ]; then
     printf 'id=%s-%s\nprofile=%s\n' "$PROFILE" "$(date -u +%Y-%m)" "$PROFILE" > /etc/wk-image
     say "wrote /etc/wk-image"
 fi
 
-# `wk quiesce` does the per-run half; these are permanent. Read back rather
-# than trusted: `softwareupdate --schedule off` is on record as not sticking.
 mdutil -i off -a >/dev/null 2>&1 || say "WARNING: spotlight still indexing"
 softwareupdate --schedule off >/dev/null 2>&1 || true
 defaults write /Library/Preferences/com.apple.SoftwareUpdate AutomaticCheckEnabled -bool false 2>/dev/null || true
@@ -262,9 +212,6 @@ say "quieted: spotlight=$(mdutil -a -s 2>&1 | tr '\n' ' ' | sed 's/  */ /g')"
 say "updates schedule: $(softwareupdate --schedule 2>&1 | tail -1)"
 say "filevault: $(fdesetup status 2>&1 | head -1)"
 
-# The schedule preference above does not stop softwareupdated checking in
-# anyway (lib/quiet.sh's "scanner: softwareupdated is LOADED" warning). Sourced
-# from the payload, installed next to this script by do_build_pkg/do_repair.
 QUIET_HOSTS=/usr/local/libexec/wk-bench-quiet-hosts.sh
 if [ -r "$QUIET_HOSTS" ]; then
     # shellcheck disable=SC1090
@@ -280,8 +227,6 @@ else
     say "WARNING: $QUIET_HOSTS missing from the payload; update endpoints not denied"
 fi
 
-# Carried in the package rather than fetched. wk-tools only: a WebKit checkout
-# here would make this a second workstation.
 if [ -d "$PAYLOAD/wk-tools" ]; then
     home=$(dscl . -read "/Users/$BENCH_USER" NFSHomeDirectory 2>/dev/null | awk '{print $2}') || home=""
     if [ -n "$home" ] && [ -d "$home" ]; then
@@ -293,8 +238,6 @@ if [ -d "$PAYLOAD/wk-tools" ]; then
     fi
 fi
 
-# pyobjc arrives with the Command Line Tools, and `xcode-select --install`
-# is a GUI prompt no LaunchDaemon can answer. Reported, not attempted.
 if /usr/bin/python3 -c 'import objc' >/dev/null 2>&1; then
     say "pyobjc: present"
 else
@@ -303,8 +246,7 @@ else
     say "    xcode-select --install"
 fi
 
-# Not `launchctl bootout` on this daemon's own label: that would kill this
-# script before the `rm -f` below, leaving every reboot to re-run provisioning.
+# Not `launchctl bootout` on this daemon's own label: that kills this script before the rm.
 say "removing the first-boot daemon"
 rm -f "$DAEMON" "$SELF" || true
 if [ -f "$DAEMON" ]; then
@@ -314,7 +256,6 @@ else
 fi
 say "=== first boot provisioning complete ==="
 
-# Autologin only takes effect at the next boot.
 say "rebooting so autologin takes effect"
 shutdown -r +1 &
 exit 0

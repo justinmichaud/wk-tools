@@ -4,24 +4,21 @@
 # wk: where=local name=none readonly group=hosts
 #
 # The reinstall companion: `./setup` is the automated path, but several pieces
-# are deliberately manual (interactive sudo, credentials, hardware) and after a
-# wipe the only record of them was memory. This prints the full checklist with
-# the exact next command for everything missing, so "is this machine ready" is
-# one read-only command instead of archaeology.
+# are deliberately manual (interactive sudo, credentials, hardware). This prints
+# the full checklist with the exact next command for everything missing.
 #
-# Read-only by design: it never starts the podman machine, never boots a
-# guest, and never prompts. State it cannot see without starting something is
-# reported as '??' with the command that would reveal it.
+# Read-only by design: it never starts the podman machine, never boots a guest,
+# and never prompts. State it cannot see without starting something is reported
+# as '??' with the command that would reveal it.
 #
 #   --all   also ask every configured build machine (targets/hosts/*.conf) what
 #           it has: the tools a build needs there, the identity a commit made
 #           there would carry, any build variable that machine's own profile
 #           sets, and whether what provisioned it is still what this tree says.
-#           Read-only, over ssh, and it starts nothing; a machine
-#           that does not answer is reported as unreachable, never as broken.
-#           Also reads every bridge phone's battery charge cap (`wk bridge
-#           battery`, over ssh) and, on a Mac with a battery, the honest
-#           `pmset -g batt` line -- macOS has no settable limit to check.
+#           A machine that does not answer is reported as unreachable, never as
+#           broken. Also reads every bridge phone's battery charge cap and, on a
+#           Mac with a battery, the `pmset -g batt` line -- macOS has no
+#           settable limit to check.
 #
 #   0  everything checkable is provisioned
 #   1  something is missing (the lines say what and how)
@@ -33,14 +30,12 @@ WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
 WK_MACHINE="${WK_MACHINE:-wk}"
 
-# The store lives where the containers do -- locally on Linux, inside the podman
-# VM on macOS -- so the macOS host asks the VM to run this probe.
+# The store lives where the containers do -- inside the podman VM on macOS -- so the macOS host asks the VM to run this probe.
 probe_store() {
     [ -d "$WK_STORE/git/WebKit.git" ] && echo mirror=ok || echo mirror=no
     [ -n "$(ls -1 "$WK_STORE/base" 2>/dev/null)" ] && echo base=ok || echo base=no
     [ -n "$(ls -1 "$WK_STORE/skills" 2>/dev/null)" ] && echo skills=ok || echo skills=no
-    # The socket is accepted as proof too: systemctl --user over a bare ssh
-    # session can fail to find the user bus even when the service is fine.
+    # The socket is proof too: systemctl --user over a bare ssh session can fail to find the user bus even when the service is fine.
     if systemctl --user is-active --quiet wk-proxy.service 2>/dev/null \
        || [ -S "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/wk/proxy.sock" ]; then
         echo proxy=ok
@@ -48,15 +43,10 @@ probe_store() {
         echo proxy=no
     fi
     [ -s "$WK_STORE/pi-hosts" ] && echo pihosts=ok || echo pihosts=no
-    # The socket, not the service: on macOS the broker runs on the Mac and
-    # publishes its socket in here over ssh, so a broker up with a broken forward
-    # is unreachable from every workspace and looks healthy out there.
+    # The socket, not the service: on macOS the broker runs on the Mac and publishes its socket in here, so a broken forward looks healthy out there.
     [ -S "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/wk/broker.sock" ] \
         && echo broker=ok || echo broker=no
-    # On macOS this probe runs inside the podman VM, a separate account from the
-    # Mac's own ~/.gitconfig. Same field names remote/probe.sh uses. Emitted only
-    # when git is present, so an absent git.name= line (not merely an empty one)
-    # is how the reader tells "not installed" from "installed but unset".
+    # Emitted only when git is present, so an absent git.name= line (not an empty one) tells "not installed" from "installed but unset".
     if command -v git >/dev/null 2>&1; then
         printf 'git.name=%s\n' "$(git config --get user.name 2>/dev/null || true)"
         printf 'git.email=%s\n' "$(git config --get user.email 2>/dev/null || true)"
@@ -87,8 +77,7 @@ check() { # check <description> <fix> <command...>
 
 link_ok() { [ -L "$1" ] && [ "$(readlink "$1")" = "$2" ]; }
 
-# Its own function so tests/test_battery.py can lift it without a phone:
-# "ok\t<line>" or "miss\t<line>\t<remedy>".
+# Its own function so tests/test_battery.py can lift it without a phone: "ok\t<line>" or "miss\t<line>\t<remedy>".
 battery_verdict() { # <name> <key=value blob>
     local name="$1" blob="$2" pct st limit cur
     pct=$(kv_get percent <<<"$blob")
@@ -103,9 +92,7 @@ battery_verdict() { # <name> <key=value blob>
     fi
 }
 
-# macOS has no CLI knob for its own optimized charging, so the honest report is
-# the raw percent and plug state. Fails when the second line is absent: a desktop
-# Mac's `pmset -g batt` is one line, no battery entry.
+# macOS has no CLI knob for optimized charging, so the report is the raw percent and plug state; a desktop Mac's `pmset -g batt` is one line, and fails here.
 mac_battery_line() { # <pmset -g batt output>
     local out="$1" head batt pct plug
     head=$(printf '%s\n' "$out" | sed -n '1p')
@@ -122,7 +109,6 @@ mac_battery_line() { # <pmset -g batt output>
 
 info "wk doctor on $(wk_os) ($(hostname))"
 
-# --- host tools ----------------------------------------------------------------
 section "host tools"
 if is_macos; then
     check "Xcode command line tools" "xcode-select --install"     xcode-select -p
@@ -136,8 +122,6 @@ else
     check "cage (benchmark kiosk)"  "./setup --stage tools" have cage
     check "wlr-randr (session off)" "./setup --stage tools" have wlr-randr
 fi
-# Optional: only `wk find` (the LAN sweep for a board with no tailnet name)
-# needs it, and it refuses by name without it.
 if have nmap; then
     ok "nmap (wk find)"
 elif is_macos; then
@@ -148,16 +132,10 @@ fi
 check "jq (claude hook)" "./setup --stage tools" have jq
 check "gh"               "install gh, then: gh auth login" have gh
 if have gh; then
-    # gh_authenticated, not `gh auth status`: the latter passes a configured
-    # account whose token has expired.
+    # gh_authenticated, not `gh auth status`: the latter passes a configured account whose token has expired.
     check "gh authenticated" "gh auth login   (then: wk key register)" gh_authenticated
 fi
 
-# --- what each credential can still do ------------------------------------------
-# One line per credential this machine can hold, from lib/credcheck.py's rules:
-# whether it can still do what wk spends it on, and how much further it reaches.
-# Asked of GitHub and of the tailnet as this prints, never read back from a
-# record; a machine that cannot reach either reports the credential unverified.
 section "credentials"
 for _cname in $(wk_cred_names); do
     if [ "$_cname" != deploy-key ]; then
@@ -175,19 +153,14 @@ for _cname in $(wk_cred_names); do
 done
 unset _cname _line _why _fix
 
-# --- root costs a password ------------------------------------------------------
-# Reported on every run rather than remembered: a site sudoers update, a
-# reinstall, or a forced `wk sudo setup` all change it underneath you.
 section "root access"
-# WK_QUIET, not a literal --quiet: this bypasses the dispatcher, which is what
-# strips the flag into the environment for every other caller.
+# WK_QUIET, not a literal --quiet: this bypasses the dispatcher, which strips the flag into the environment for every other caller.
 if _sudo=$(WK_QUIET=1 "$WK_ROOT/cmd/sudo" status 2>&1); then
     ok "sudo: $_sudo"
 else
     miss "sudo: $_sudo" "wk sudo setup"
 fi
 
-# --- config links ----------------------------------------------------------------
 section "config (./setup owns these)"
 check "~/.claude/settings.json is the HOST settings" "./setup --stage claude" \
     link_ok "$HOME/.claude/settings.json" "$WK_ROOT/claude/settings-host.json"
@@ -196,10 +169,7 @@ check "~/.claude/CLAUDE.md is the HOST briefing" "./setup --stage claude" \
 check "shell rc sources shell/bashrc" "./setup --stage dotfiles" \
     sh -c "grep -q 'wk-tools/shell/bashrc' '$HOME/.zshrc' 2>/dev/null || grep -q 'wk-tools/shell/bashrc' '$HOME/.bashrc' 2>/dev/null"
 
-# Both come from dotfiles/gitconfig, so both are checked against that file rather
-# than a literal here. The failure worth catching is not an absent include but a
-# [user] section written *after* it in ~/.gitconfig: git takes a key's last
-# value, so it silently wins.
+# The failure worth catching is a [user] section written *after* the include in ~/.gitconfig: git takes a key's last value, so it silently wins.
 git_identity_ok() { # <name|email>
     [ "$(git config --get "user.$1" 2>/dev/null)" \
       = "$(git config --file "$WK_ROOT/dotfiles/gitconfig" --get "user.$1" 2>/dev/null)" ]
@@ -214,15 +184,7 @@ if have git; then
     check "git speed settings (fsmonitor, manyFiles)" "./setup --stage dotfiles" git_speed_ok
 fi
 
-# The same judgement as above against a git.* blob probed from somewhere else --
-# probe_store's machine and a running tart guest both feed it. remote/deps.sh's
-# wk_remote_findings judges a build box the same way from its own probe, with the
-# same git.* field names, but interleaves its findings with that probe's tool
-# findings, which nothing here needs.
-#
-# Findings, not printed rows: <state>\t<what>\t<remedy>, state ok|wrong|note --
-# vm_base_findings' convention, so every caller's ok()/miss()/unk() stays the one
-# place deciding how a row prints. `note` covers "git is not installed there".
+# Findings, not printed rows: <state>\t<what>\t<remedy>, state ok|wrong|note, so each caller's ok()/miss()/unk() stays the one place a row prints.
 git_config_findings() { # <label> <blob> <remedy>
     local label="$1" blob="$2" remedy="$3" want have v
     if ! printf '%s\n' "$blob" | grep -q '^git\.name='; then
@@ -250,14 +212,10 @@ git_config_findings() { # <label> <blob> <remedy>
     return 0
 }
 
-# --- machine-local state: declared, never hidden ---------------------------------
-# The cattle-not-pets rule (CLAUDE.md): everything a rebuilt machine cannot get
-# from this repo is *declared here*, with how to get it back. The kind is the
-# restore story: `regenerable` wk makes a new one, `re-authable` a person logs in
-# again, `backed-up` is lost with the disk if it is not in your backups.
+# Everything a rebuilt machine cannot get from this repo is declared here: `regenerable`
+# wk makes a new one, `re-authable` a person logs in again, `backed-up` is lost with the disk.
 section "machine-local state (everything a rebuild cannot get from this repo)"
-# On macOS the store is the podman VM's, so a path under it is asked for in
-# there -- only while the machine is running, since doctor starts nothing.
+# On macOS a path under the store is asked for inside the VM, and only while it runs, since doctor starts nothing.
 podman_machine_running() {
     have podman && [ "$(podman machine inspect "$WK_MACHINE" --format '{{.State}}' 2>/dev/null)" = running ]
 }
@@ -283,41 +241,22 @@ local_state() { # <path> <kind> <how to get it back>
         unk "$disp (absent)" "$kind: $how"
     fi
 }
-# Benchmark runs are data, not a rebuildable artifact: a rerun is a different
-# measurement.
 local_state "$WK_STORE/bench"                      backed-up   "benchmark runs and their provenance -- not regenerable at any price; a rerun is a different measurement"
-# This device's credentials directory: on macOS it is here and mounted into the
-# podman machine.
 local_state "$(wk_secrets_dir)"                    regenerable "wk key register makes new deploy keys (revoke the old ones on GitHub)"
-# Beside it and mounted nowhere: every private key half and the GitHub API token,
-# which is what makes `wk push` a switch a workspace cannot reach.
 local_state "$(wk_push_held_dir)"                  regenerable "wk key register makes new deploy keys; wk key set github-pat stores a new token (revoke the old ones on GitHub)"
-# The standing read token, on the machine that runs the workspaces: a copy of
-# the token above, delivered so a workspace can read GitHub with the switch off.
 local_state "$(push_agent_machine_read_pat)"       regenerable "./setup and wk key set github-pat both write it from the token in $(wk_push_held_dir)"
-# One line per row of wk_agent_secrets. Absent is `??`, not a fault: an agent
-# with no credential asks the person to log in.
 for _sname in $(wk_agent_secret_names); do
     local_state "$(wk_agent_secret_path "$_sname")" re-authable \
         "wk key set $_sname stores one; every workspace this machine makes starts authenticated with it"
 done
 unset _sname
-# re-authable, not backed-up: a new tagged key from the admin console is as good
-# as the old one, and a tagged node never key-expires.
 local_state "${WK_TS_AUTHKEY:-$HOME/.config/wk/tailscale-authkey}" re-authable "wk key tailnet asks for one (tag:wk, reusable, not ephemeral, longest expiry); joined nodes are unaffected"
-# The tailnet API token: what retires a stale fleet node. Never written to a
-# card -- it administers the whole tailnet.
 local_state "$(wk_tailscale_api_path)" re-authable "wk key tailnet-api asks for one; only this machine holds it, and only writes that must retire a stale node need it"
-# Regenerable: a machine's state is always read back from the machine, so losing
-# this costs the words, not a fact.
 local_state "$(wk_state_dir)/broker"               regenerable "request records (argv, log, status) the fleet-request broker writes; the next request makes new ones"
 local_state "$HOME/.ssh/config.d/local"            backed-up   "hand-written ssh entries (host/dotfiles.sh moves them here and owns the rest)"
-# This machine's key for reaching its own container workspaces' sshd. The next
-# `wk zed` authorises whatever key it finds.
 local_state "$(wk_state_dir)/ssh/zed_ed25519"      regenerable "wk zed makes a new one and re-authorises it in the workspace"
 if [ "$(wk_os)" = linux ]; then
-    # "This machine is rpi5" is read off the registry (NODE_SSH), not a second
-    # "rpi5" literal here.
+    # "This machine is rpi5" is read off the registry (NODE_SSH), not a literal here.
     . "$WK_ROOT/boot/machines.sh"
     if machine_load rpi5 2>/dev/null && [ "$(wk_machine_name)" = "$NODE_SSH" ]; then
         local_state "$WK_ROOT/host/linux/rpi5/rpi5.conf" backed-up "site WiFi identity (gitignored: repo is public); rpi5.conf.example documents the shape"
@@ -326,29 +265,21 @@ if [ "$(wk_os)" = linux ]; then
 fi
 unset -f local_state
 
-# --- the store: mirror, snapshots, keys -------------------------------------------
-# Probed over one `podman machine ssh` on macOS, and only if the machine is
-# already running, because doctor never starts anything.
 report_store() { # <probe output> [container-machine git remedy]
     local out="$1" gitremedy="${2:-}" v _gs _gw _gr
     v() { printf '%s' "$out" | sed -n "s/^$1=//p"; }
     [ "$(v mirror)" = ok ] && ok "WebKit mirror"          || miss "WebKit mirror" "wk sync"
     [ "$(v base)" = ok ]   && ok "base snapshot"          || miss "base snapshot" "wk sync"
-    # Read here, not in the probe: the deploy keys are this machine's own, which
-    # on macOS is the host directory the podman machine mounts.
+    # Read here, not in the probe: the deploy keys are this machine's own, which on macOS is the directory the podman machine mounts.
     [ -f "$(wk_push_held_dir)/build_key_fork" ] \
         && ok "fork push key" || miss "fork push key" "wk key register  (needs gh auth)"
-    # The agents' credentials are one machine-local line each in the section
-    # above. Absent, one is `??` and not a fault: a workspace without one works.
     [ "$(v skills)" = ok ] && ok "shared skills seeded"   || miss "shared skills seeded" "wk skills push"
     [ "$(v proxy)" = ok ]  && ok "egress proxy running"   || miss "egress proxy running" "./setup --stage sdk, then systemctl --user status wk-proxy"
     [ "$(v pihosts)" = ok ] && ok "pi-hosts populated"    || miss "pi-hosts populated" "wk pi setup rpi5 / rpi4  (skip if no Pi devices)"
-    # Named for what a workspace loses without it.
     [ "$(v broker)" = ok ]  && ok "fleet-request broker reachable from workspaces" \
                            || miss "fleet-request broker reachable from workspaces" \
                                    "./setup --stage broker  (macOS: it also publishes the socket into the VM)"
-    # Only when the probe came from a genuinely different machine: on Linux this
-    # same probe runs locally, and the "config" section above already checked it.
+    # Only when the probe came from a genuinely different machine: on Linux it runs locally, and the config section above checked it.
     if [ -n "$gitremedy" ]; then
         while IFS="$(printf '\t')" read -r _gs _gw _gr; do
             [ -n "$_gs" ] || continue
@@ -384,11 +315,9 @@ else
     report_store "$(probe_store)"
 fi
 
-# --- benchmarking (Linux) ----------------------------------------------------------
 if is_linux; then
     section "benchmarking"
-    # The property, not the file: a helper whose sudoers rule is out-ranked is
-    # installed, executable and useless.
+    # The property, not the file: a helper whose sudoers rule is out-ranked is installed, executable and useless.
     if [ ! -x /usr/local/libexec/wk-quiesce-priv ]; then
         miss "privileged helper (wk quiesce / wk session)" \
              "./setup --stage quiesce  (interactive sudo)"
@@ -404,12 +333,8 @@ if is_linux; then
     esac
 fi
 
-# Every currently-running tart guest's git.* fields, in git_config_findings'
-# format -- called with load_target vm already done, like vm_base_findings, and
-# reached through t_exec. A stopped guest is skipped rather than reported
-# unreachable, since doctor starts nothing, and one that does not answer over an
-# established exec is a `note`, not a `wrong`. A guest is a clone of the golden
-# base, so the remedy for a wrong one is a refreshed base and a fresh clone.
+# A stopped guest is skipped rather than reported unreachable, since doctor starts nothing;
+# a guest is a clone of the golden base, so a wrong one is fixed by a refreshed base and a fresh clone.
 VM_GIT_PROBE='command -v git >/dev/null 2>&1 || exit 0
 printf "git.name=%s\n" "$(git config --get user.name 2>/dev/null || true)"
 printf "git.email=%s\n" "$(git config --get user.email 2>/dev/null || true)"
@@ -432,7 +357,6 @@ vm_guest_git_findings() {
     return 0
 }
 
-# --- macOS VM target ---------------------------------------------------------------
 if is_macos && [ -z "${WK_IN_VM:-}" ]; then
     section "macOS VM target (optional -- Apple ports)"
     if have tart || [ -x "$HOME/.local/bin/tart" ]; then
@@ -442,11 +366,7 @@ if is_macos && [ -z "${WK_IN_VM:-}" ]; then
         else
             miss "softnet installed SUID root" "./setup --stage softnet  (interactive sudo)"
         fi
-        # Asked of the driver, not of `tart list`: whether there is a base, and
-        # whether it still matches the scripts that provision one, is one question
-        # with one answer -- a base that predates its own inputs hands every guest
-        # cloned from it whatever has changed since. In a subshell, like the build
-        # machines below: the vm driver re-points WK_STORE at this machine's state.
+        # In a subshell, like the build machines below: the vm driver re-points WK_STORE at this machine's state.
         _base=$( ( . "$WK_ROOT/lib/target.sh"
                    load_target vm >/dev/null 2>&1
                    vm_base_findings ) 2>/dev/null ) || _base=""
@@ -466,7 +386,6 @@ FINDINGS
         fi
         unset _base _state _what _remedy
 
-        # Same reach and subshell isolation as the golden base above.
         _gfindings=$( ( . "$WK_ROOT/lib/target.sh"
                          load_target vm >/dev/null 2>&1
                          vm_guest_git_findings ) 2>/dev/null ) || _gfindings=""
@@ -486,9 +405,6 @@ GFINDINGS
     fi
 fi
 
-# --- the build machines (--all) ------------------------------------------------
-# Read-only and over ssh: remote/probe.sh behind remote/deps.sh, exactly as `wk
-# remote setup` sends it. Nothing is provisioned, started or asked for here.
 if [ -n "$ALL" ]; then
     . "$WK_ROOT/lib/target.sh"
     . "$WK_ROOT/remote/deps.sh"
@@ -512,9 +428,7 @@ if [ -n "$ALL" ]; then
         done <<FINDINGS
 $(wk_remote_findings "$_probe")
 FINDINGS
-        # And whether what provisioned the machine is still what this tree says
-        # (remote_provision_stale): a machine can have the tools a build needs while
-        # its wk-side provisioning came from an older remote/provision.sh.
+        # remote_provision_stale: a machine can have every tool a build needs while its wk-side provisioning came from an older remote/provision.sh.
         if _why=$( ( load_target "$_t" >/dev/null 2>&1; remote_provision_stale ) 2>/dev/null ); then
             miss "provisioning on $_t predates its inputs: $_why" "wk remote setup $_t"
         else
@@ -524,9 +438,6 @@ FINDINGS
     unset _t _probe _state _what _remedy _why
 fi
 
-# --- battery (--all) -----------------------------------------------------------
-# `wk bridge setup` writes charge_control_end_threshold on the two bridge phones;
-# this reads it back over ssh, read-only. macOS has no equivalent to set.
 if [ -n "$ALL" ]; then
     section "battery"
     if _names=$("$WK_ROOT/cmd/bridge" ls --names 2>/dev/null) && [ -n "$_names" ]; then
@@ -558,7 +469,6 @@ BRIDGES
     unset _pm _macline
 fi
 
-# --- verdict -----------------------------------------------------------------------
 echo >&2
 if [ "$missing" -eq 0 ]; then
     info "everything checkable is provisioned"

@@ -9,14 +9,12 @@ rubble (_ensure_base). So: what is knowable up front is checked up front, the
 prebuild cannot fail the provisioning it is the last step of, and the marker
 records what the base actually got.
 
-The password is the other thing every later step depends on: `sysadminctl`
-exited 0 while leaving the account's password as the image's, which is why the
-screen lock, `wk vm enter`'s note and `wk vm check` all disagreed with the run
-that set it. Only `dscl . -authonly` decides here.
+The password is not one of those steps any more: macOS Tahoe 26.5 refuses the
+only change form the account itself can run, so the guest keeps the password
+its image ships and every command that hands a guest over states it.
 
 Hermetic: the driver's own functions are run against a stub `tart` and stubbed
-helpers, and the password step is lifted out of vm/provision-base.sh and run
-against stub `dscl`/`sysadminctl` -- no VM, no guest, no ssh.
+helpers -- no VM, no guest, no ssh.
 
 Run: python3 -m unittest tests.test_vm_base -v
 """
@@ -382,102 +380,58 @@ class TestTheConfigIsCheckedBeforeTheHours(WkTest):
                               "config_load without the target's platform")
 
 
-class TestThePasswordIsProvedNotAssumed(WkTest):
-    """vm/provision-base.sh's `_set_password`, lifted and run against stubs.
-    `sysadminctl`'s exit status decides nothing; `dscl . -authonly` is the
-    proof, taken before and after."""
+class TestTheGuestKeepsTheImagesPassword(WkTest):
+    """Measured on macOS Tahoe 26.5: the only form the account itself can run,
+    `sysadminctl -oldPassword`, exits 0 having changed nothing. So the password
+    is not changed at all, and one variable names it."""
 
-    def _run(self, dscl_before, dscl_after, sysadminctl_rc=0):
-        """<dscl_before>/<dscl_after>: whether the wanted password
-        authenticates before and after the change is attempted. A stub `dscl`
-        that answers differently on its second call is the case a reading of
-        `sysadminctl`'s exit status alone gets wrong."""
-        lifted = subprocess.run(
-            ["sed", "-n", "/^_set_password()/,/^}/p", str(PROVISION)],
-            capture_output=True, text=True).stdout
-        self.assertTrue(lifted.strip(), "_set_password not found in vm/provision-base.sh")
-        count = self.tmp / "dscl-calls"
-        dscl = f'''#!/bin/sh
-n=$(cat {str(count)!r} 2>/dev/null || echo 0)
-n=$((n + 1)); echo "$n" > {str(count)!r}
-[ "$n" = 1 ] && exit {0 if dscl_before else 1}
-exit {0 if dscl_after else 1}
-'''
-        with stub_path({"dscl": dscl,
-                        "sysadminctl": f"exit {sysadminctl_rc}"}) as binp:
-            cp = bash(f'''
-set -euo pipefail
-say() {{ printf '==> %s\\n' "$*" >&2; }}
-WK_VM_USER=admin
-WK_VM_IMAGE_PASSWORD=admin
-WK_VM_PASSWORD=1
-{lifted}
-_set_password
-echo "password=$WK_VM_PASSWORD"
-''', env={"PATH": f"{binp}:{os.environ['PATH']}"})
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        return cp.stdout + cp.stderr
+    def test_provisioning_attempts_no_password_change(self):
+        """Code, not prose: the comment above the variable names the very flag
+        that is not used, and explains why."""
+        code = "\n".join(l for l in PROVISION.read_text().splitlines()
+                         if not l.lstrip().startswith("#"))
+        self.assertNotIn("-newPassword", code)
+        self.assertNotIn("-oldPassword", code)
+        self.assertNotIn("_set_password", code)
 
-    def test_a_change_that_did_not_take_is_a_downgrade_not_a_success(self):
-        """The measured case: exit status 0, password unchanged. Reported as
-        what it is, and WK_VM_PASSWORD becomes what the account actually has,
-        so vm/desktop.sh is handed the truth rather than the intent."""
-        out = self._run(dscl_before=False, dscl_after=False, sysadminctl_rc=0)
-        self.assertIn("still the image's", out, out)
-        self.assertNotIn("password set for", out, out)
-        self.assertIn("password=admin", out, out)
+    def test_the_password_defaults_to_the_one_the_image_ships(self):
+        for path in (PROVISION, REPO / "targets" / "vm.sh"):
+            src = path.read_text()
+            self.assertIn('WK_VM_PASSWORD="${WK_VM_PASSWORD:-admin}"', src, path.name)
 
-    def test_a_change_that_took_is_reported_once(self):
-        out = self._run(dscl_before=False, dscl_after=True, sysadminctl_rc=0)
-        self.assertIn("password set for admin", out, out)
-        self.assertIn("password=1", out, out)
+    def test_one_variable_names_it(self):
+        """A second name for the same fact is a thing that can disagree. Built
+        rather than written out, so this file is not its own only match."""
+        gone = "WK_VM_IMAGE" + "_PASSWORD"
+        out = subprocess.run(["git", "grep", "-l", gone],
+                             cwd=REPO, capture_output=True, text=True).stdout
+        self.assertEqual("", out.strip(), f"{gone} survives in: {out}")
 
-    def test_a_failing_tool_that_changed_it_anyway_counts_as_set(self):
-        """The exit status decides nothing in either direction; the account
-        authenticating with the wanted password is the whole test."""
-        out = self._run(dscl_before=False, dscl_after=True, sysadminctl_rc=1)
-        self.assertIn("password set for admin", out, out)
 
-    def test_a_re_provision_offers_nothing(self):
-        """sysadminctl needs the *current* password, so a base being
-        re-provisioned must not offer the image's -- it is already changed."""
-        out = self._run(dscl_before=True, dscl_after=True)
-        self.assertIn("password already set", out, out)
-        self.assertIn("password=1", out, out)
+class TestEveryHandoverStatesTheLogin(WkTest):
+    """`wk start <guest>` said nothing about the login before this: it goes
+    through t_start, which did not state it, while `wk vm start` stated it in
+    the command instead. One exit in t_start is what makes both say it."""
 
-    def test_an_image_whose_password_is_already_the_wanted_one_is_left_alone(self):
-        """The first line, and the only arm that touches nothing: when the two
-        are the same string there is no change to make, and attempting one
-        would need a current password that is also the new one."""
-        calls = self.tmp / "calls"
-        logger = f'#!/bin/sh\necho "$0 $*" >> {str(calls)!r}\n'
-        lifted = subprocess.run(
-            ["sed", "-n", "/^_set_password()/,/^}/p", str(PROVISION)],
-            capture_output=True, text=True).stdout
-        with stub_path({"dscl": logger, "sysadminctl": logger}) as binp:
-            cp = bash(f'''
-set -euo pipefail
-say() {{ printf '==> %s\\n' "$*" >&2; }}
-WK_VM_USER=admin
-WK_VM_IMAGE_PASSWORD=1
-WK_VM_PASSWORD=1
-{lifted}
-_set_password
-echo "password=$WK_VM_PASSWORD"
-''', env={"PATH": f"{binp}:{os.environ['PATH']}"})
-        out = cp.stdout + cp.stderr
-        self.assertEqual(cp.returncode, 0, out)
-        self.assertIn("password=1", out)
-        self.assertFalse(calls.exists(),
-                         f"the guest was asked something: {calls.read_text() if calls.exists() else ''}")
+    def test_t_start_states_the_login_on_its_one_exit(self):
+        body = func_body((REPO / "targets" / "vm.sh").read_text(), "t_start")
+        self.assertEqual(1, body.count("vm_login_note"), body)
+        # A second `echo "$ip"` would be a return path that skips the note.
+        self.assertEqual(1, body.count('echo "$ip"'), body)
 
-    def test_the_account_changes_its_own_password(self):
-        """No sudo and no -adminUser: the reset form needs an admin
-        credential, and this script runs as the account itself."""
-        body = func_body(PROVISION.read_text(), "_set_password")
-        self.assertIn("-oldPassword", body)
-        self.assertNotIn("-resetPasswordFor", body)
-        self.assertNotIn("sudo", body)
+    def test_the_note_is_not_restated_by_the_command_that_starts_a_guest(self):
+        """cmd/vm's start arm calls t_start, so a call of its own prints it
+        twice."""
+        src = (REPO / "cmd" / "vm").read_text()
+        arm = src.split("\nstart)", 1)[1].split("\nstop)", 1)[0]
+        self.assertNotIn("vm_login_note", arm, arm)
+
+    def test_the_attach_paths_state_it_themselves(self):
+        """`wk zed` and `wk vm enter` never call t_start -- they attach to a
+        guest that is already up -- so each states it directly."""
+        self.assertIn("vm_login_note", (REPO / "cmd" / "zed").read_text())
+        enter = (REPO / "cmd" / "vm").read_text().split("\nenter)", 1)[1]
+        self.assertIn("vm_login_note", enter.split("\nsync)", 1)[0])
 
 
 class TestSyncRefreshesEachGuestsMirror(WkTest):

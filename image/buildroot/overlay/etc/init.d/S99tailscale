@@ -1,11 +1,4 @@
 #!/bin/sh
-#
-# Start tailscaled, then join the tailnet if a key came with the card.
-#
-# An S-script and not a systemd unit: this is the 32-bit buildroot image (WPE
-# 2.38 + cog), which has no service manager. The Yocto images do the same two
-# things with tailscaled.service and wk-tailnet-join.service; the join script
-# is byte-identical between them.
 
 DAEMON=/usr/sbin/tailscaled
 STATE=/var/lib/tailscale
@@ -14,15 +7,9 @@ SOCK=/run/tailscale/tailscaled.sock
 start() {
     [ -x "$DAEMON" ] || { echo "no $DAEMON"; return 0; }
     printf 'Starting tailscaled: '
-    # 0700 set here rather than shipped in the overlay: an overlay is rsynced by
-    # the build user, and a directory that user cannot read fails the build.
     mkdir -p "$STATE" /run/tailscale
     chmod 0700 "$STATE"
-    # --state on the rootfs and not under /run: the key that joined the node is
-    # deleted once spent, so a state file lost at reboot is a board that cannot
-    # get back on the tailnet without being written again.
-    # start-stop-daemon when BusyBox was built with it: whether that applet
-    # exists is a line in somebody else's BusyBox config.
+    # --state on the rootfs, not /run: the key that joined the node is deleted once spent, so a state file lost at reboot is a board that cannot rejoin the tailnet.
     if command -v start-stop-daemon >/dev/null 2>&1; then
         start-stop-daemon -S -q -b -m -p /run/tailscaled.pid -x "$DAEMON" -- \
             --state="$STATE/tailscaled.state" --socket="$SOCK" >/var/log/tailscaled.log 2>&1
@@ -33,8 +20,6 @@ start() {
     fi
     echo "OK"
 
-    # Run here rather than from a second script: BusyBox init has no ordering
-    # to express "after tailscaled" other than being the next line.
     i=0
     while [ ! -S "$SOCK" ] && [ $i -lt 30 ]; do i=$((i + 1)); sleep 1; done
     [ -x /usr/sbin/wk-tailnet-join ] && /usr/sbin/wk-tailnet-join

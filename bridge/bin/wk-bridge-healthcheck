@@ -1,12 +1,6 @@
 #!/bin/sh
-# One-shot health report for a tailnet bridge. Read-only; changes nothing.
-# Exit 0 if everything essential is up, 1 otherwise -- so it is safe from cron,
-# and it is what `wk bridge status` runs.
-#
-# One rule for anyone editing this file: do **not** write `cmd | grep -q ...`.
-# grep -q exits at the first match, which SIGPIPEs the producer; with pipefail
-# set that turns a successful check into a reported failure. Capture the value
-# and compare it.
+# One-shot health report for a tailnet bridge, read-only, exit 0 when everything essential is up. What `wk bridge status` runs.
+# Never write `cmd | grep -q ...` here: grep -q exits at the first match, which SIGPIPEs the producer and turns a successful check into a reported failure. Capture the value and compare it.
 set -u
 
 name=unknown
@@ -42,10 +36,7 @@ printf '\033[1m%s\033[0m (%s)\n' "$name" "$device"
 hdr "Uplink"
 wifi=$(nmcli -t -f DEVICE,TYPE device status 2>/dev/null | awk -F: '$2 == "wifi" { print $1; exit }')
 [ -n "$wifi" ] || wifi=wlan0
-# `-o`, not `-br`. BusyBox ip -- which is what Alpine and therefore pmOS ships
-# -- has no brief mode: `ip -4 -br addr` exits 1 with a usage message, which
-# would read back empty and report an uplink with no address on a phone
-# holding a perfectly good lease. `-o[neline]` is in BusyBox's own usage string.
+# `-o`, not `-br`: BusyBox ip, which is what pmOS ships, has no brief mode and exits 1 with a usage message, reading back empty against a perfectly good lease.
 addr=$(ip -4 -o addr show dev "$wifi" 2>/dev/null | awk '{print $4; exit}')
 if [ -n "$addr" ]; then ok "$wifi $addr"; else bad "$wifi has no IPv4 address"; fi
 note "$(iw dev "$wifi" link 2>/dev/null | awk '/SSID|signal/ { $1 = $1; print }' | tr '\n' ' ')"
@@ -57,10 +48,7 @@ if ip -o link show "$iface" >/dev/null 2>&1; then
     ok "$iface $(ip -4 -o addr show "$iface" 2>/dev/null | awk '{print $4; exit}')"
     if [ "$(cat "/sys/class/net/$iface/carrier" 2>/dev/null)" = 1 ]; then
         ok "cable connected"
-        # The USB bus speed behind it: a segment can be perfectly up and forty
-        # times too slow if the NIC fell to the companion OHCI controller.
-        # wk-bridge-usb-host documents the trap and recovers it; this is what
-        # makes the fault visible.
+        # A segment can be perfectly up and forty times too slow if the NIC fell to the companion OHCI controller (wk-bridge-usb-host recovers that); the bus speed is what makes it visible.
         nicdev=$(readlink -f "/sys/class/net/$iface/device" 2>/dev/null)
         nicspeed=$(cat "${nicdev%/*}/speed" 2>/dev/null)
         case "$nicspeed" in
@@ -75,22 +63,13 @@ if ip -o link show "$iface" >/dev/null 2>&1; then
     fi
 else
     bad "$iface missing -- nothing on the segment"
-    # Which of three faults this is, because they have three different fixes:
-    # naming only the first points at USB host mode on a phone whose port is
-    # already in host mode with a partner attached and a hub enumerated.
     role=$(cat /sys/class/typec/port0/data_role 2>/dev/null)
-    # Everything on the bus that is not a root hub. `usbN` are the controllers'
-    # own root hubs and are always there; a `N-M` directory with an idVendor is
-    # something that actually answered an enumeration.
+    # `usbN` are the controllers' own root hubs and are always there; a `N-M` directory with an idVendor is something that answered an enumeration.
     downstream=""
     for d in /sys/bus/usb/devices/*-*; do
         [ -f "$d/idVendor" ] || continue
         downstream="$downstream $(cat "$d/idVendor"):$(cat "$d/idProduct") $(cat "$d/product" 2>/dev/null)"
     done
-    # A network interface on USB that is neither WiFi nor the gadget: the
-    # adapter is present and working, simply not called $iface -- cdc_ether has
-    # claimed it as eth0. Asked first, and separately from the bus scan, since
-    # nothing is wrong with the hardware in this case.
     found=""
     for n in /sys/class/net/*; do
         nn=$(basename "$n")
@@ -100,10 +79,7 @@ else
             */usb) found="$found $nn($(cat "$n/address" 2>/dev/null))" ;;
         esac
     done
-    # And an adapter on the bus with no driver bound to it, which is a kernel
-    # that lacks the module rather than a dock that is absent. Interface class
-    # 02 (communications) and 0a (CDC data) are what an ethernet adapter
-    # presents; ff is the vendor-specific one the ASIX and Realtek parts use.
+    # Interface class 02 (communications) and 0a (CDC data) are what an ethernet adapter presents; ff is the vendor-specific one the ASIX and Realtek parts use.
     unclaimed=""
     for i in /sys/bus/usb/devices/*-*/*:*; do
         [ -f "$i/bInterfaceClass" ] || continue
@@ -129,12 +105,6 @@ else
                 if [ -n "$downstream" ]; then
                     note "not a host-mode fault: the port is in host mode and the bus"
                     note "  enumerated$downstream -- no network adapter among it."
-                    # The PinePhone's port is USB 2.0 and there is no second data
-                    # path: the A64 has one OTG controller and one USB 2.0 host
-                    # controller, and the USB-C carries DP alt mode rather than
-                    # SuperSpeed. So a dock whose NIC hangs off its own USB3 hub
-                    # presents its USB2 hub here and nothing else, forever --
-                    # which reads exactly like a broken dock and is not one.
                     if [ "$device" = pinephone ]; then
                         note "  A dock's NIC behind its USB3 hub can never appear: this"
                         note "  phone's port is USB 2.0 only (A64 has no SuperSpeed at"
@@ -156,11 +126,6 @@ else
 fi
 note "typec data_role: $(cat /sys/class/typec/port0/data_role 2>/dev/null)"
 
-# The lease file shows who took which address, which makes visible a different
-# device holding the address you meant -- what an infinite lease on a
-# one-address pool guarantees if the cable is in the wrong socket. It is not
-# evidence about the present: these leases never expire, so a client re-uses
-# one via ARP after a carrier drop and never asks again.
 if [ -s "$leasefile" ]; then
     ok "DHCP leases:"
     sed 's/^/          /' "$leasefile"
@@ -171,8 +136,6 @@ else
     note "  what says whether anything is actually there."
 fi
 
-# Ping every reservation. A reservation that does not answer is either unplugged
-# or holding a different address than the one written down here.
 for l in $leases; do
     ip=$(printf '%s' "$l" | cut -d, -f2)
     nm=$(printf '%s' "$l" | cut -d, -f3)
@@ -191,9 +154,7 @@ if [ "$backend" = Running ]; then ok "tailscaled running"; else bad "tailscale b
 online=$(printf '%s' "$st" | jq -r '.Self.Online // false' 2>/dev/null)
 if [ "$online" = true ]; then ok "online"; else bad "reported offline"; fi
 tags=$(printf '%s' "$st" | jq -rc '.Self.Tags // "none"' 2>/dev/null)
-# An untagged node is the failure that hides: it works today and its key
-# expires in 180 days, which is exactly the kind of outage this device exists
-# to prevent. Tagged nodes never key-expire.
+# An untagged node works today and its key expires in 180 days; a tagged node never key-expires.
 if [ "$tags" != none ]; then ok "tags $tags"; else bad "UNTAGGED -- the node key will expire"; fi
 routes=$(printf '%s' "$st" | jq -rc '.Self.PrimaryRoutes // "none"' 2>/dev/null)
 if [ "$routes" != none ]; then
@@ -234,8 +195,7 @@ case "$egress" in
     *) ok "egress: none (nothing behind this bridge reaches the internet)" ;;
 esac
 
-# A bridge with no DNS and a bridge at 1970 both look like "no internet" while
-# ping and routing are perfect, and both stop `tailscale up` dead.
+# No DNS and a clock at 1970 both look like "no internet" while ping and routing are perfect, and both stop `tailscale up` dead.
 hdr "Name resolution and time"
 if [ -f /etc/resolv.conf ]; then
     ns=$(grep -c '^nameserver' /etc/resolv.conf 2>/dev/null)
@@ -255,8 +215,6 @@ else
     bad "DNS does not resolve -- tailscale cannot reach its coordination server"
 fi
 
-# A clock this far out fails every TLS certificate check there is, which is what
-# a phone with no RTC does on every boot until chrony steps it.
 year=$(date -u +%Y)
 if [ "${year:-1970}" -ge 2024 ] 2>/dev/null; then
     ok "clock sane ($(date -u '+%Y-%m-%d %H:%M UTC'))"
@@ -276,9 +234,6 @@ if [ -e /dev/watchdog ]; then
     fi
 else
     bad "no /dev/watchdog -- a kernel hang needs a person at the phone"
-    # Whether that is the hardware's fault or the kernel's: the A64 carries a
-    # watchdog and the device tree declares it, so a missing driver is a
-    # packaging gap and not a property of the phone.
     wdt=$(ls -d /proc/device-tree/*/watchdog@* 2>/dev/null | head -1)
     if [ -n "$wdt" ]; then
         note "the hardware is there and the device tree declares it:"
@@ -297,16 +252,12 @@ else
         note "  to drive: recovery is the netwatch ladder and a person."
     fi
 fi
-# Swap on eMMC wears out the only storage the phone has. /proc/swaps, not
-# `swapon --show`: the flag is util-linux's and busybox's swapon does not have
-# it, so it would report "no swap" on a phone that is swapping.
+# Swap on eMMC wears out the only storage the phone has. /proc/swaps, since --show is util-linux's flag and busybox's swapon would report "no swap" on a phone that is swapping.
 nonzram=$(awk 'NR > 1 && $1 !~ /zram/ { c++ } END { print c + 0 }' /proc/swaps 2>/dev/null)
 if [ "${nonzram:-0}" -eq 0 ]; then ok "swap is zram only"; else bad "swap on a non-zram device (eMMC wear)"; fi
 
 if [ "$camera" != off ]; then
     hdr "Camera"
-    # Off is electrically disconnected (hardware kill switch), so no software
-    # fault can bring the capture device up -- a legitimate state, not a failure.
     if [ -e /dev/video0 ]; then
         if rc-service wk-bridge-camera status >/dev/null 2>&1; then
             ok "streaming (see 'wk bridge status' for the URL)"
@@ -319,12 +270,7 @@ if [ "$camera" != off ]; then
 fi
 
 hdr "System"
-# Crashed services, minus the ones whose "crash" is how they are built: OpenRC
-# marks a service crashed when its process is gone while the service is marked
-# started, which is the normal end state of a one-shot. pmOS ships two --
-# kill-pbsplash (stops the splash animation, then exits) and
-# postmarketos-tweakd (short-lived on a headless-ish boot, and nothing in this
-# role depends on it). Anything else crashing is reported.
+# OpenRC marks a service crashed when its process is gone while the service is marked started, which is the normal end state of the two one-shots pmOS ships.
 crashed=$(rc-status --crashed 2>/dev/null | sed '/^$/d' \
           | grep -vxE 'kill-pbsplash|postmarketos-tweakd')
 if [ -z "$crashed" ]; then

@@ -4,22 +4,17 @@
 # wk: where=workspace name=optional bare=merged group=sources
 # wk: readonly
 #
-# One question, asked of the workspace rather than of a record: does `origin`
-# mean upstream (fetch-only, push URL `no-push://`), and can `fork` be pushed to
-# over ssh through its host alias? README.md has why the two are separate.
-#
-# Both are asserted at creation (wk_wiring_script, lib/store.sh) and never
-# *checked* afterwards. They drift: a workspace made before that authority
-# existed keeps what `git clone --shared <mirror>` left it.
+# Asked of the workspace, not of a record: does `origin` mean upstream
+# (fetch-only, push URL `no-push://`), and can `fork` be pushed to over ssh
+# through its host alias? README.md has why the two are separate.
 #
 #   wk remotes             every workspace this machine can see
 #   wk remotes <ws>        one of them, with its remotes printed
 #   wk remotes <ws> --fix  re-assert the wiring (idempotent)
 #   wk remotes --fix       ...for every workspace that needs it
 #
-# --fix is a re-assertion, not a repair in the wipe-over-repair sense: the
-# wiring is *derived*. Touches only git config -- remotes, `core.sshCommand`,
-# the branch's upstream -- never a commit or working tree.
+# --fix touches only git config -- remotes, `core.sshCommand`, the branch's
+# upstream -- never a commit or working tree.
 #
 #   0  every checkout is wired correctly (or --fix made it so)
 #   1  something is wrong (and --fix was not given)
@@ -31,9 +26,6 @@ WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 . "$WK_ROOT/lib/target.sh"
 
 FIX=""
-# --continued: the second half of a listing assembled from two machines, so the
-# empty-listing note and the closing hint belong to the half that knows whether
-# anything was listed at all.
 CONTINUED=""
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -47,16 +39,13 @@ NAME="${WK_NAME:-}"
 
 worst=0
 
-# Printed rather than summarised: when the answer is "these are wrong" the next
-# thing anybody wants is to see them.
 show_remotes() {
     local ws="$1"
     t_exec "$ws" git -C "$(t_src "$ws")" remote -v 2>/dev/null \
         | tr -d '\r' | sed 's/^/    /' || true
 }
 
-# The check runs *in the target*: ssh config and `core.sshCommand` only mean
-# anything where git will read them.
+# Run in the target: ssh config and `core.sshCommand` only mean anything where git reads them.
 check_one() {
     local ws="$1" out rc=0
     out=$(t_exec "$ws" sh -c "$(wk_wiring_check_script "$(t_src "$ws")")" 2>/dev/null) || rc=$?
@@ -67,8 +56,6 @@ check_one() {
     fi
     if [ "$rc" -eq 0 ]; then
         printf '%-20s %s\n' "$ws" "origin is upstream, fork pushes over ssh -- ok"
-        # Notes are about what the *branch* points at, a separate question from
-        # whether the remotes are right.
         [ -z "$out" ] || printf '%s\n' "$out" | tr -d '\r' | sed 's/^note: /  ~ /' >&2
         return 0
     fi
@@ -83,8 +70,7 @@ fix_one() {
     local ws="$1" extra_name="" extra_url="" ssh_config=""
     # shellcheck disable=SC2034 -- read into three names used just below.
 
-    # The same arguments the driver used at creation, from the driver itself, so
-    # --fix cannot wire a workspace differently from how it was created.
+    # Straight from the driver, so --fix cannot wire a workspace differently from its creation.
     { read -r extra_name; read -r extra_url; read -r ssh_config; } <<EOF
 $(t_wiring_args)
 EOF
@@ -94,8 +80,6 @@ EOF
         || { warn "could not re-wire '$ws'"; return 1; }
     changed "re-wired '$ws'"
 
-    # ...and the branch, one level down: reported, not silent -- it is
-    # somebody's branch, and pushing it is a decision.
     _b=$(t_exec "$ws" sh -c "$(wk_branch_upstream_fix_script "$(t_src "$ws")")" 2>/dev/null | tr -d '\r') || _b=""
     [ -z "$_b" ] || printf '%s\n' "$_b" | sed 's/^/  /' >&2
     check_one "$ws"   # say it worked, from the same check that would have said otherwise
@@ -124,7 +108,6 @@ if [ -n "$NAME" ]; then
     exit "$rc"
 fi
 
-# Every workspace this machine can see, from the same walk `wk status` uses.
 found=0
 _TARGETS=$(walk_targets)
 # shellcheck disable=SC2086 -- deliberate word splitting of the target list.
@@ -132,14 +115,10 @@ prefetch_targets $_TARGETS
 wk_atexit prefetch_done
 for TARGET in $_TARGETS; do
     load_target "$TARGET"
-    # A machine of its own answers for its own checkouts, exactly as in
-    # `wk status`: the git config being asked about is over there.
     if t_has_wk; then
         rc=0
         WK_NO_DELEGATE=1 t_wk remotes ${FIX:+--fix} || rc=$?
-        # A machine runs its *own* copy of wk-tools: what a far side does with a
-        # command it has never heard of is print its usage and exit 2,
-        # mid-listing. Say what that was.
+        # A far side running an older wk-tools prints its usage and exits 2, mid-listing.
         if [ "$rc" -eq 2 ]; then
             warn "$TARGET's wk-tools has no 'remotes' command yet (its usage is above)"
             if [ -n "${WK_REMOTE_PEER:-}" ]; then
@@ -159,10 +138,8 @@ for TARGET in $_TARGETS; do
         [ "$rc" -gt "$worst" ] && worst="$rc"
     done
 
-    # The base snapshot, where every *future* workspace gets its remotes from --
-    # the same fault one step upstream. This machine's store, read directly.
+    # The base snapshot is where every *future* workspace gets its remotes from.
     if t_needs_base; then
-        # base_path is the checkout itself, not the directory holding it.
         _base=$(current_base 2>/dev/null || true)
         _bp=""
         [ -z "$_base" ] || _bp=$(base_path "$_base" 2>/dev/null || true)

@@ -1,9 +1,5 @@
 #!/sbin/openrc-run
-# The camera stream, for watching a screen the out-of-band console cannot show.
-#
-# It idles rather than fails when there is no capture device, because that is
-# the normal resting state: the camera kill switch is hardware, and with it off
-# the sensor is disconnected. Flip it on and the stream appears.
+# Idles rather than fails with no capture device: the kill switch is hardware, and with it off the sensor is electrically disconnected.
 description="Stream the camera over the tailnet, while the kill switch allows it"
 
 supervisor=supervise-daemon

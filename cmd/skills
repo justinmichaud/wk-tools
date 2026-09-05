@@ -3,15 +3,14 @@
 # wk skills status|diff|pull|push -- manage the shared, mutable skills directory
 # wk: where=host name=none group=sources needs rsync
 #
-# Every workspace mounts the same writable /skills, so an edit benefits every
-# workspace but may never reach the repo for review.
+# Every workspace mounts the same writable /skills.
 #
 #   wk skills status   what differs between the shared copy and the repo
 #   wk skills diff     the actual diff
 #   wk skills pull     shared -> repo, so `git diff` shows it and you can commit
 #   wk skills push     repo -> shared, discarding workspace edits
 #
-# pull is the common direction; push is destructive and asks first.
+# push is destructive and asks first.
 
 set -euo pipefail
 WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -21,7 +20,6 @@ WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 SHARED="$WK_STORE/skills"
 REPO="$WK_ROOT/claude/skills"
 
-# The shared copy lives in the VM on macOS.
 if is_macos && [ -z "${WK_IN_VM:-}" ]; then
     die "run this inside the VM: wk skills $* (the shared copy lives there)"
 fi
@@ -53,8 +51,6 @@ pull)
         info "nothing to pull; already in sync"
         exit 0
     fi
-    # A committed repo copy makes pull reversible through git; uncommitted
-    # repo-side edits would be silently overwritten, so those ask first.
     if git -C "$WK_ROOT" rev-parse --git-dir >/dev/null 2>&1; then
         if [ -n "$(git -C "$WK_ROOT" status --porcelain -- claude/skills 2>/dev/null)" ]; then
             warn "the repo has uncommitted skill changes that pull would overwrite:"
@@ -62,8 +58,6 @@ pull)
             confirm "overwrite them with the shared copy?" || die "aborted; commit or stash first"
         fi
     else
-        # No git here (the rsynced copy in the VM): nothing makes this pull
-        # reversible.
         confirm "no git repo at $WK_ROOT -- pull cannot be undone; continue?" || die "aborted"
     fi
     # --delete so a skill deleted in a workspace is deleted in the repo too.

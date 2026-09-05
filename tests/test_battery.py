@@ -286,10 +286,13 @@ class TestNoCaseNamesAPhone(unittest.TestCase):
 
     def test_no_case_on_device_name_or_br_name(self):
         provision_text = PROVISION.read_text()
+        # Anchored on the step the script announces, not on a numbered comment
+        # banner: a comment is not the structure, and slicing by one made this
+        # test demand that two banners keep existing.
         step = re.search(
-            r"(?ms)^# --- 17\. battery charge limit.*?(?=^# --- 18\.)", provision_text
+            r'(?ms)^step "Battery charge limit.*?(?=^step ")', provision_text
         )
-        self.assertIsNotNone(step, "battery step markers moved in bridge/provision.sh")
+        self.assertIsNotNone(step, "the battery step is gone from bridge/provision.sh")
 
         bridge_text = CMD_BRIDGE.read_text()
         cmd_battery = re.search(r"(?ms)^cmd_battery\(\) \{.*?^\}", bridge_text)

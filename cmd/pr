@@ -11,10 +11,9 @@
 #   wk pr rebase [<workspace>]                 # rebase the current branch onto origin/main
 #   wk pr open <workspace> [--draft] [--web]   # push the branch and open it as a PR
 #
-# <user>:<branch> is a fork's branch; since the branch alone does not say which project it is
-# from, both are tried, and a branch existing in both is refused by name rather than guessed at.
-# A bare number is a WebKit/WebKit pull request, `wpe:<number>` a WPEWebKit one. Either way it is
-# fetched once into this machine's mirror ('wk sync' keeps it under refs/remotes/pr/...) and the
+# <user>:<branch> is a fork's branch; both projects are tried, and a branch existing in both is
+# refused by name. A bare number is a WebKit/WebKit pull request, `wpe:<number>` a WPEWebKit one.
+# Either way it is fetched once into this machine's mirror (under refs/remotes/pr/...) and the
 # workspace fetches that ref from there; a workspace whose mirror is not this machine's fetches
 # the one ref from GitHub itself. Uncommitted changes are named before anything moves, and a local
 # branch with commits the PR head lacks is never overwritten, only named.
@@ -26,10 +25,9 @@
 # workspace.
 #
 # 'open' pushes the workspace's current branch to its fork and opens it as a pull request with
-# `gh pr create --fill`. Runs on the host only and refuses inside a workspace: publishing is the
-# person's act, never an agent's (docs/HANDOFF-sandboxing.md). The project comes from which
-# upstream the branch tracks; no upstream, `main`, a detached HEAD, or a dirty tree is refused by
-# name. Pushing needs `wk push on`, which is never flipped here.
+# `gh pr create --fill`. Runs on the host only and refuses inside a workspace. The project comes
+# from which upstream the branch tracks; no upstream, `main`, a detached HEAD, or a dirty tree is
+# refused by name. Pushing needs `wk push on`, which is never flipped here.
 #
 #   --draft   open it as a draft
 #   --web     open the browser's new-PR form instead of creating it directly
@@ -41,10 +39,8 @@ WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 . "$WK_ROOT/lib/store.sh"
 . "$WK_ROOT/lib/target.sh"
 
-# pr_open_target <src-dir> -- decides the checked-out branch and project 'wk pr open' opens as.
-# Prints "<base-repo>\t<user>:<branch>\t<fork-remote>\t<branch>". A plain function -- no WK_ROOT,
-# no color codes, only git and lib/store.sh tables -- so it ships via `declare -f` into a
-# workspace, and runs the same way against a bare repo in a test.
+# pr_open_target <src-dir> -- prints "<base-repo>\t<user>:<branch>\t<fork-remote>\t<branch>".
+# No WK_ROOT and no color codes, so it ships via `declare -f` into a workspace.
 pr_open_target() {
     local src="$1" branch dirty up up_remote up_url up_repo fork url owner base
     branch=$(git -C "$src" symbolic-ref --quiet --short HEAD 2>/dev/null) || {
@@ -82,8 +78,7 @@ pr_open_target() {
     printf '%s\t%s\t%s\t%s\n' "$base" "$owner:$branch" "$fork" "$branch"
 }
 
-# pr_open_gh_args <base-repo> <head> [--draft] [--web] -- argv for 'gh pr create', one token per
-# line so a caller reads it into an array without word-splitting. --fill always.
+# pr_open_gh_args <base-repo> <head> [--draft] [--web] -- 'gh pr create' argv, one token per line.
 pr_open_gh_args() {
     local base="$1" head="$2" a; shift 2
     printf '%s\n' --repo "$base" --head "$head" --fill
@@ -94,11 +89,10 @@ pr_open_gh_args() {
     done
 }
 
-# $WK_NAME is the resolved workspace name, or empty ('open' is where=host); both then check argv.
 NAME="${WK_NAME:-}"
 SPEC="${1:-}"
 
-# 'rebase' never matches a workspace name (survives as $1); a name after it is $2, read if empty.
+# 'rebase' never matches a workspace name, so it survives as $1 and a name after it is $2.
 if [ "$SPEC" = rebase ]; then
     if [ -n "$NAME" ]; then
         [ -z "${2:-}" ] || die "usage: wk pr rebase [<workspace>]; unexpected argument: $2; see wk pr -h"
@@ -134,7 +128,6 @@ if [ "$SPEC" = rebase ]; then
     fi
 fi
 
-# 'open' refuses to run bare inside a workspace, so the workspace is always the remaining arg.
 if [ "$SPEC" = open ]; then
     shift
     DRAFT="" WEB="" NAME2=""
@@ -165,7 +158,6 @@ pr_open_target $(sh_quote "$SRC")"
     FORK=$(printf '%s' "$TARGET_LINE" | cut -f3)
     BRANCH=$(printf '%s' "$TARGET_LINE" | cut -f4)
 
-    # Checked via the switch, not error text: `wk push status` is the single source of truth here.
     "$WK_ROOT/wk" push status >/dev/null 2>&1 \
         || die "'wk pr open' pushes '$BRANCH' to '$FORK', and the deploy key is held back.
     wk push on"
@@ -186,8 +178,7 @@ fi
 
 [ -n "$SPEC" ] \
     || die "usage: wk pr [<workspace>] <user>:<branch>|<n>|wpe:<n>, or 'wk pr rebase [<ws>]', or 'wk pr open <ws> [--draft] [--web]' (from the host); see wk pr -h"
-# The ref is a ref, never a workspace name (takes=1), so what is missing here is
-# the workspace -- said as that, rather than as a refusal of the ref.
+# takes=1 means the ref is never read as a workspace name, so what is missing is the workspace.
 [ -n "$NAME" ] \
     || die "'wk pr $SPEC' does not say which workspace to check it out into.
     Name one:        wk pr <workspace> $SPEC   ('wk ls' lists them)
@@ -199,5 +190,4 @@ shift $#
 require_name "$NAME"
 load_target "$(ws_target "$NAME")"
 
-# Resolving and checking out the spec is shared with `wk new --pr` (lib/store.sh).
 wk_pr_checkout "$NAME" "$SPEC"

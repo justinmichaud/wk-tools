@@ -1,19 +1,15 @@
 #!/usr/bin/env bash
-# Validate the CPU overclock, after a reboot. A short stress test passes while
-# compute/NEON workloads fail on an under-volted OC, hence --verify.
 set -euo pipefail
 command -v stress-ng >/dev/null || {
   echo "installing stress-ng..."
   apt-get install -y stress-ng >/dev/null 2>&1 || { echo "ERROR: could not install stress-ng" >&2; exit 1; }
 }
 
-# vcgencmd needs /dev/vcio: without sudo an empty $t breaks the awk below.
 [ "$(id -u)" -eq 0 ] || echo "WARNING: not running as root — vcgencmd sensors need sudo; temp/throttle will be blank. For full monitoring: sudo bash $0"
 
 echo "Clock: $(vcgencmd measure_clock arm 2>/dev/null | cut -d= -f2 | awk '{printf "%.0f MHz",$1/1e6}')   throttled: $(vcgencmd get_throttled 2>/dev/null)"
 echo "Running 10-min CPU torture (--verify, all methods incl. NEON) + monitoring..."
-# fs.protected_regular=2 blocks even root from writing a file it does not own in
-# sticky /tmp, so a hardcoded path silently aborts the launch.
+# fs.protected_regular=2 stops even root writing a foreign file in sticky /tmp.
 ERR="$(mktemp "${TMPDIR:-/tmp}/rpi5-stress.XXXXXX.err")"
 trap 'rm -f "$ERR"' EXIT
 stress-ng --cpu 4 --cpu-method all --verify --timeout 600s --metrics-brief 2>"$ERR" &

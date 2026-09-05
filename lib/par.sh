@@ -1,8 +1,5 @@
-# Several probes at once, without shuffling the listing: one machine that will not
-# answer costs the walk its own timeout instead of everybody's. A job writes its
-# records to fd 3 -- one file per job, since fd 3 is a byte stream and two writers
-# interleave mid-line -- read back in start order. `wait` is by pid, never bare,
-# which would catch the fleet probes too; stdin is /dev/null, or ssh gets SIGTTIN.
+# A job writes to its own fd 3 file: two writers on one byte stream interleave
+# mid-line. `wait` is by pid (bare catches the fleet probes); stdin /dev/null, or ssh takes SIGTTIN.
 _par_dir=""
 _par_names=""
 _par_pids=""
@@ -15,12 +12,9 @@ par_begin() {
 
 par_cleanup() { par_end; }   # wk_atexit: a killed run leaves nothing behind
 
-# par_run <name> <command...> -- <name> is both the file and the position in the
-# listing. Each job drops a `$n.rc` marker the instant it is done, for par_join_stream.
-par_run() {
+par_run() {  # <name> <command...>: <name> is both the record file and the listing position
     local n="$1"; shift
-    # `-e` off around the job, on inside it: any exit must still leave the marker or
-    # par_join_stream waits forever. Not an `if`: bash suppresses `-e` in a tested command.
+    # `-e` off outside and on inside, and not an `if` (bash suppresses `-e` when tested): an exiting job must still leave the .rc marker.
     ( set +e
       ( set -e; "$@" ) 3> "$_par_dir/$n"; _rc=$?
       printf '%s' "$_rc" > "$_par_dir/$n.rc"
@@ -35,10 +29,8 @@ par_end() {
     return 0
 }
 
-# par_wait -- leaves `<name> <rc>` pairs in $_par_status in start order. A variable,
-# not stdout: `wait` answers only about this shell's own children.
 _par_status=""
-par_wait() {
+par_wait() {  # leaves `<name> <rc>` pairs in $_par_status, in start order
     local n p rc
     _par_status=""
     set -- $_par_pids
@@ -61,10 +53,7 @@ par_join() {
     par_end
 }
 
-# par_join_stream -- records reach fd 3 in completion order, each job's followed by
-# a `{"kind":"flush"}` record naming it, so lib/status-view.py can draw a machine
-# once every job feeding it is in. Polled, not `wait -n`: bash 3.2 has no builtin.
-par_join_stream() {
+par_join_stream() {  # fd 3 in completion order, each job followed by a flush record so lib/status-view.py can draw a machine; polled because bash 3.2 has no `wait -n`
     local n p rc pending="$_par_names" next
     while [ -n "$pending" ]; do
         next=""

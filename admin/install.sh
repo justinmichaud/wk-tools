@@ -1,22 +1,12 @@
-# Install the privileged quiesce helper and its sudoers rule.
-#
-# The rule grants NOPASSWD for one absolute path, so security reduces to: can
-# anyone but root modify that path? This refuses rather than proceeds if it
-# cannot guarantee no. The helper is copied to a root-owned location, never
-# symlinked into the repo, which would be a root escalation.
-
-# --- why the file names begin zzz- -------------------------------------------
-# sudo reads /etc/sudoers.d in lexical order and takes the LAST matching rule.
-# `wk sudo setup` installs `zz-<user>-passwd`, re-imposing `PASSWD: ALL` over a
-# site's blanket `NOPASSWD: ALL`, and `ALL` matches every command -- so a name
-# sorting before it has a dead grant. `zzz-` sorts after it under LC_ALL=C. No
-# dot in either name, since sudo skips those.
+# NOPASSWD on one absolute path each, so safety reduces to who can write that path:
+# root-owned installs, never a symlink into this repo, and an unverifiable mode refuses.
+# zzz-: sudo takes the LAST match in /etc/sudoers.d and zz-<user>-passwd re-imposes
+# `PASSWD: ALL` over every command, so an earlier name is a dead grant; a dot is skipped.
 _libexec=/usr/local/libexec
 _target="$_libexec/wk-quiesce-priv"
 _source="$WK_ROOT/admin/wk-quiesce-priv"
 _sudoers=/etc/sudoers.d/zzz-wk-quiesce
-# Tombstone: the name these rules carried on a machine provisioned earlier. A
-# second grant of the same path reads as in force even out-ranked.
+# Tombstone: an out-ranked second grant of the same path still reads as in force.
 _sudoers_old=/etc/sudoers.d/wk-quiesce
 
 if [ ! -f "$_source" ]; then
@@ -29,15 +19,12 @@ if [ ! -f "$_target" ] || ! cmp -s "$_source" "$_target"; then
     _needs_install=1
 fi
 
-# GNU form first, BSD second: `stat -f '%Su' FILE` on Linux does not fail, it
-# reads -f as "file system status", so the wrong order never equals "root".
+# GNU form first: Linux's `stat -f` succeeds as "filesystem status", never as an owner.
 _owner=$(stat -c '%U' "$_target" 2>/dev/null || stat -f '%Su' "$_target" 2>/dev/null || echo "")
 [ -f "$_target" ] && [ "$_owner" != root ] && _needs_install=1
 
 _rule="$(id -un) ALL=(root) NOPASSWD: $_target"
 
-# Whether the rule works, not how it reads: it grants exactly one path, so
-# `sudo -n test -r "$_sudoers"` is itself denied.
 _sudoers_ok=0
 if [ -x "$_target" ] && sudo -n "$_target" status >/dev/null 2>&1; then
     _sudoers_ok=1
@@ -46,8 +33,6 @@ fi
 if [ "$_needs_install" -eq 0 ] && [ "$_sudoers_ok" -eq 1 ]; then
     unchanged "quiesce helper and sudoers rule"
 elif ! sudo -n true 2>/dev/null && [ ! -t 0 ]; then
-    # Installing needs a real sudo prompt, so this skips rather than aborts.
-    # The two faults are reported apart because they have different fixes.
     if [ "$_needs_install" -eq 0 ]; then
         warn "the quiesce helper is installed, but its sudoers rule is not in force"
         log  "  something later in the include order grants PASSWD over it."
@@ -73,8 +58,6 @@ else
     if sudo visudo -cqf "$_tmp"; then
         sudo install -o root -m 0440 "$_tmp" "$_sudoers"
         changed "installed $_sudoers"
-        # Here, not earlier: this branch already has sudo, and a
-        # `sudo -n true` guard is false on exactly the affected machines.
         if [ -f "$_sudoers_old" ]; then
             sudo rm -f "$_sudoers_old"
             changed "removed $_sudoers_old (it sorted before zz-<user>-passwd and was dead)"
@@ -86,16 +69,11 @@ else
     rm -f "$_tmp"
 fi
 
-# --- the card helper ----------------------------------------------------------
-# The second privileged helper: a fixed verb list, no passthrough, and a gate
-# narrower than the thing it protects -- only a usb or mmc whole disk the
-# machine is not running from. The transport check alone would happily overwrite
-# a running system; the boot check is what makes the grant safe. Installed only
-# on machines with card readers; elsewhere `boot/disk.sh` refuses.
+# Card gate, narrower than the capability: only a usb or mmc whole disk the machine is
+# not running from -- the boot check, not the transport one, is what makes it safe.
 _card_target="$_libexec/wk-card-priv"
 _card_source="$WK_ROOT/admin/wk-card-priv"
-# The boot-file checker the helper's `boot-check` runs as root, beside it under
-# the name the helper knows (CHECK_BOOT_FILES), never at a path a caller names.
+# Beside the helper under the name it knows: boot-check never runs a caller-named path.
 _check_target="$_libexec/wk-check-boot-files.py"
 _check_source="$WK_ROOT/boot/check-boot-files.py"
 _card_sudoers=/etc/sudoers.d/zzz-wk-card
@@ -104,7 +82,6 @@ _card_sudoers_old=/etc/sudoers.d/wk-card
 if [ ! -f "$_card_source" ]; then
     warn "card helper missing at $_card_source; skipping"
 elif ! is_linux; then
-    # macOS holds no card readers in this fleet.
     unchanged "card helper (linux only)"
 else
     _card_needs=0
@@ -119,7 +96,6 @@ else
     if [ "$_card_needs" -eq 0 ] && [ "$_card_ok" -eq 1 ]; then
         unchanged "card helper and sudoers rule"
     elif ! sudo -n true 2>/dev/null && [ ! -t 0 ]; then
-        # Installed but out-ranked has a different fix than absent.
         if [ "$_card_needs" -eq 0 ]; then
             warn "the card helper is installed, but its sudoers rule is not in force"
             log  "  'sudo -l' shows the order; $_card_sudoers has to be the last match."
@@ -164,16 +140,7 @@ else
 fi
 unset _card_target _card_source _card_sudoers _card_sudoers_old _card_needs _card_owner _card_ok _card_tmp _card_perm
 
-# --- the boot helper ----------------------------------------------------------
-# The third privileged helper, and the narrowest. What earns it is the same
-# shape as the other two: a fixed verb list, no passthrough, and one argument
-# -- a boot order -- checked against `0x` and eight hex digits before it is
-# used, against a mailbox tag the helper fixes and no caller can name.
-#
-# Why it is needed at all: a workstation whose bench medium is its own stick
-# (rpi5) is armed by a firmware mailbox call and the reboot that spends it,
-# both root, over a BatchMode ssh with no terminal for sudo to prompt on.
-# A bench-device is driven as root and never calls it.
+# Same shape: a fixed verb list, no passthrough, one validated boot order, a fixed tag.
 _boot_target="$_libexec/wk-boot-priv"
 _boot_source="$WK_ROOT/admin/wk-boot-priv"
 _boot_sudoers=/etc/sudoers.d/zzz-wk-boot
@@ -181,7 +148,6 @@ _boot_sudoers=/etc/sudoers.d/zzz-wk-boot
 if [ ! -f "$_boot_source" ]; then
     warn "boot helper missing at $_boot_source; skipping"
 elif ! is_linux; then
-    # The mailbox and /run/systemd/reboot-param are Linux-on-Pi concepts.
     unchanged "boot helper (linux only)"
 else
     _boot_needs=0
@@ -221,7 +187,6 @@ else
         rm -f "$_boot_tmp"
     fi
 
-    # Checked every run: writable by anyone but root is a root escalation.
     if [ -f "$_boot_target" ]; then
         _boot_perm=$(stat -c '%a' "$_boot_target" 2>/dev/null || echo "")
         case "$_boot_perm" in
@@ -234,10 +199,7 @@ else
 fi
 unset _boot_target _boot_source _boot_sudoers _boot_needs _boot_owner _boot_ok _boot_tmp _boot_perm
 
-# --- privileged files this repo has retired -----------------------------------
-# Tombstones. Without them a machine provisioned by an older revision keeps a
-# root-owned file and a sudoers grant nothing uses. Entries come out of this
-# list once every machine is clean.
+# Tombstones: without these an older revision's root-owned file and dead grant stay.
 _retired="${_libexec:-/usr/local/libexec}/wk-tftpd /etc/sudoers.d/wk-netboot"
 _stale=""
 for _f in $_retired; do [ -e "$_f" ] && _stale="$_stale $_f"; done
@@ -254,9 +216,7 @@ if [ -n "$_stale" ]; then
 fi
 unset _retired _stale _f
 
-# --- the session user --------------------------------------------------------
-# The helper's session verbs run a compositor as a specific user, recorded here
-# root-owned: an argument would widen the allowlist into "as anybody".
+# Root-owned and argument-free: an argument would widen the allowlist to "as anybody".
 _sessenv="$_libexec/wk-session.env"
 _sessline="WK_SESSION_USER=$(id -un)"
 
@@ -276,14 +236,12 @@ if [ -f "$_target" ]; then
     fi
 fi
 
-# A world/group-writable helper means anyone who can write it gets root.
 if [ ! -f "$_target" ]; then
     unset _libexec _target _source _sudoers _sudoers_old _needs_install _owner _rule _sudoers_ok _tmp
     return 0 2>/dev/null || true
 fi
 _perm=$(stat -c '%a' "$_target" 2>/dev/null || stat -f '%Lp' "$_target" 2>/dev/null || echo "")
 
-# The GNU/BSD order above applies here too. An unverifiable mode is a refusal.
 case "$_perm" in
     ''|*[!0-7]*) die "could not read the mode of $_target -- refusing to vouch for the sudoers rule" ;;
 esac
@@ -296,20 +254,9 @@ case "$_perm" in
 esac
 unchanged "quiesce helper permissions ($_perm)"
 
-# --- keep the benchmark session's VT to itself -------------------------------
-# WK_SESSION_TTY (tty2) is cage's alone while a session runs, but logind
-# auto-spawns a getty on any unused low VT, and any console write -- a getty's
-# login prompt included -- auto-unblanks it.
-#
-# Both unit names: autovt@.service symlinks to the same getty@.service template
-# but is a different unit name to systemd's mask bookkeeping, and logind's
-# on-demand VT allocation goes through autovt@ specifically.
-#
-# The symlink /etc/systemd/system/<unit> -> /dev/null is checked directly rather
-# than with `systemctl is-enabled`, which reports an aliased template instance's
-# resolved template mask state, not the instance's own.
-#
-# Linux only: tty2/getty units do not exist on macOS.
+# logind auto-spawns a getty on any unused low VT and any console write unblanks it, and
+# it allocates through autovt@ -- a separate unit name to systemd's mask bookkeeping.
+# The symlink is read directly: `systemctl is-enabled` reports the template's mask state.
 if is_linux; then
 for _u in getty@tty2.service autovt@tty2.service; do
     _link="/etc/systemd/system/$_u"
@@ -323,21 +270,9 @@ done
 fi
 unset _u _link
 
-# --- where `wk boot` records an arming --------------------------------------
-# No probe can derive `wk boot`'s *intent* half -- once armed, the firmware
-# register and the running system look unchanged -- so the arming leaves one
-# record on the machine it describes (NODE_RECORD, boot/machines.sh).
-#
-# Writing it needs no privilege, and that is what this directory is for. A
-# bench-device is driven as root and could write anywhere; a workstation is
-# driven as a person over a BatchMode ssh with no terminal, so a `sudo` there
-# cannot be answered and `wk boot` died on it. Ownership is granted once, here,
-# where a password prompt can be answered, rather than per-arming where it
-# cannot.
-#
-# Only this subdirectory: /var/lib/wk itself stays root-owned, because the card
-# helper keeps the board's tailnet node key beside it (TAILNET_KEEP_DIR, 0700
-# root) and a user-owned parent would let that be replaced.
+# Only this subdirectory: /var/lib/wk stays root-owned because the card helper keeps the
+# board's tailnet node key beside it (TAILNET_KEEP_DIR, 0700 root). Granted here, where a
+# password prompt can be answered: `wk boot` records over a BatchMode ssh, no terminal.
 _bootdir=/var/lib/wk/boot
 _bootowner=$(stat -c '%U' "$_bootdir" 2>/dev/null || stat -f '%Su' "$_bootdir" 2>/dev/null || echo "")
 if [ "$_bootowner" = "$(id -un)" ]; then

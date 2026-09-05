@@ -55,8 +55,6 @@ while [ $# -gt 0 ]; do
         *) die "usage: wk session on [--bmc] | gdm [--bmc] | off | status -- a real graphical session for benchmark runs, or a real desktop, on real hardware.; see wk session -h" ;;
     esac
 done
-# --bmc/--mirror only chooses a chip for 'on'/'gdm'; accepting it elsewhere and
-# doing nothing would hide a typo'd invocation.
 case "$ACTION" in
     off|status) [ -z "$BMC" ] || die "usage: wk session on [--bmc] | gdm [--bmc] | off | status; --bmc/--mirror only applies to 'on'/'gdm'; see wk session -h" ;;
 esac
@@ -64,9 +62,7 @@ esac
 RUNTIME="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/wk/display"
 SOCKET="$RUNTIME/wayland-0"
 
-# `session-on-bmc` is *allowed* to fail, so whether sudo needs a password is
-# asked once with a read-only verb rather than inferred from a verb that did
-# something.
+# `session-on-bmc` is *allowed* to fail, so whether sudo needs a password is asked once with a read-only verb, not inferred from a verb that acted.
 PRIV_SUDO=""
 run_priv() {
     [ -x "$PRIV" ] || die "$PRIV is not installed -- run: ./setup --stage quiesce"
@@ -85,18 +81,14 @@ run_priv() {
     fi
 }
 
-# --- which connector belongs to which chip -----------------------------------
-# Not shared with the privileged helper: a root script sourcing a file from this
-# user-writable checkout would be the escalation the arrangement avoids. The
-# kernel driver is the discriminator, never the card number -- card1 is the ast
-# here only because of PCI enumeration order.
+# Not shared with the privileged helper: a root script sourcing a file from this user-writable checkout would be the escalation this avoids.
+# The kernel driver is the discriminator, never the card number -- card1 is the ast here only because of PCI enumeration order.
 drm_driver() {
     local link
     link=$(readlink -f "/sys/class/drm/$1/device/driver" 2>/dev/null) || true
     [ -n "$link" ] && basename "$link" || echo none
 }
 
-# Prints "NAME status" per connector. $1: ast, or not-ast for everything else.
 _connectors() {
     local which="$1" card drv conn name
     for card in /sys/class/drm/card[0-9]*; do
@@ -117,9 +109,7 @@ _connectors() {
     done
 }
 
-# Connected connectors still being driven -- the difference between "black" and
-# "off" without a monitor in front of you. Both files are needed: `dpms` reads
-# On for a connector whose CRTC was never enabled.
+# Connected connectors still being driven. Both files are needed: `dpms` reads On for a connector whose CRTC was never enabled.
 _lit_connectors() {
     local which="${1:-all}" card drv conn name out=""
     for card in /sys/class/drm/card[0-9]*; do
@@ -143,8 +133,7 @@ _lit_connectors() {
     printf '%s' "$out"
 }
 
-# wlroots is free to drop a device it cannot render for, silently, so this is
-# the only way to know which outputs it actually took.
+# wlroots is free to drop a device it cannot render for, silently, so this is the only way to know which outputs it actually took.
 session_outputs() {
     { WAYLAND_DISPLAY="$SOCKET" wayland-info 2>/dev/null || true; } \
         | sed -n 's/^[[:space:]]*name: \([A-Za-z][A-Za-z0-9]*-[0-9][0-9]*\)$/\1/p'
@@ -156,8 +145,6 @@ session_display_mode() {
         | head -1
 }
 
-# The greeter's session type on seat0, which decides whether `gdm --bmc` means
-# anything. $1: how many quarter-seconds to keep looking.
 _greeter_type() {
     have loginctl || return 1
     local i sid class typ
@@ -173,10 +160,8 @@ _greeter_type() {
     return 1
 }
 
-# cage gets its seat from PAMName=login (without it libseat cannot take DRM
-# master and the compositor exits), producing a Class=user, Type=wayland session
-# on seat0 -- a logged-in desktop in every field logind exposes. The unit's
-# ExecStart `exec`s cage, so its MainPID *is* the leader.
+# cage gets its seat from PAMName=login (without it libseat cannot take DRM master and the compositor exits), producing a Class=user,
+# Type=wayland session on seat0. The unit's ExecStart `exec`s cage, so its MainPID *is* the leader.
 wk_session_leader() {
     local pid
     pid=$(systemctl show wk-session -p MainPID --value 2>/dev/null || true)
@@ -184,10 +169,7 @@ wk_session_leader() {
     printf '%s' "$pid"
 }
 
-# A graphical session belonging to a logged-in *person*. Class matters as much
-# as Type: the greeter is itself a graphical session on seat0, and treating it as
-# somebody's desktop would make `wk session on` decline on exactly the machine
-# state it was written for. Our own compositor is excluded by name.
+# Class matters as much as Type: the greeter is itself a graphical session on seat0, and treating it as somebody's desktop would make `wk session on` decline on exactly the machine state it was written for.
 foreign_session() {
     have loginctl || return 1
     local sid typ class leader ours=""
@@ -209,11 +191,8 @@ foreign_session() {
 
 case "$ACTION" in
 on)
-    # The socket file can outlive the compositor after a crash.
     if [ -S "$SOCKET" ] && systemctl is-active --quiet wk-session 2>/dev/null; then
-        # Asking for a benchmark session and getting "already running" for a
-        # software one is how an afternoon of numbers turns out to have
-        # measured llvmpipe.
+        # Asking for a benchmark session and getting "already running" for a software one is how an afternoon of numbers turns out to have measured llvmpipe.
         wanted=gpu; [ -n "$BMC" ] && wanted=bmc
         running=$(session_mode)
         if [ "$wanted" = "$running" ]; then
@@ -234,8 +213,6 @@ on)
         exit 0
     fi
 
-    # Without wayland-info a started compositor could not be told apart from a
-    # broken one.
     have wayland-info || die "wayland-info missing -- a session nobody can verify is real is not started; ./setup --stage tools installs wayland-utils"
 
     if [ -z "$BMC" ]; then
@@ -243,14 +220,12 @@ on)
         run_priv session-on || die "the compositor did not start; journalctl -u wk-session"
         [ -S "$SOCKET" ] || die "no Wayland socket at $SOCKET after start"
     else
-        # The BMC's chip becomes the compositor's only modesetting device.
         log "  the monitor goes dark: the session moves to the BMC, it is not duplicated"
         info "starting a BMC session on seat0 (software-rendered)"
         run_priv session-on-bmc || die "the compositor did not start; journalctl -u wk-session"
         [ -S "$SOCKET" ] || die "no Wayland socket at $SOCKET after start"
 
-        # The compositor coming up is not proof the output it took is the BMC's
-        # -- a blank remote console is the one failure this can't miss.
+        # The compositor coming up is not proof the output it took is the BMC's -- a blank remote console is the one failure this cannot miss.
         outs=$(session_outputs)
         bmc_names=$(_connectors ast | awk '{print $1}')
         found=""
@@ -288,9 +263,7 @@ gdm)
         run_priv session-gdm-bmc || die "gdm did not start; journalctl -u gdm"
     fi
 
-    # Only enforced if the greeter takes its devices from logind; not on Xorg,
-    # where NVIDIA's DDX drives the card through /dev/nvidia*, which carries no
-    # seat tags to strip.
+    # Only enforced if the greeter takes its devices from logind; not on Xorg, where NVIDIA's DDX drives the card through /dev/nvidia*, which has no seat tags.
     greeter=$(_greeter_type) || greeter=""
     case "$greeter" in
         wayland)
@@ -318,8 +291,6 @@ gdm)
 off)
     run_priv session-off || die "the helper failed to turn the screen off"
 
-    # Two claims, easily conflated: the placeholder compositor is running (so
-    # fbcon can't repaint the console), *and* its outputs are modeset off.
     lit=$(_lit_connectors not-ast)
     if [ -n "$lit" ]; then
         warn "the screen is black but still lit: $lit"
@@ -334,15 +305,12 @@ off)
         log  "  console over the top of it"
     fi
 
-    # The placeholder covers one DRM device, so the BMC's chip keeps its frame.
     bmc_lit=$(_lit_connectors ast)
     [ -n "$bmc_lit" ] && log "  still lit on the BMC's chip: $bmc_lit (its console keeps its last frame)"
     log  "  a desktop back:  wk session gdm      a benchmark session:  wk session on"
     ;;
 
 status)
-    # Readable without privilege, so status doesn't go through the helper: a
-    # failure inside it would mean no status output at all.
     unit=$(systemctl is-active wk-session 2>/dev/null | head -1 || true)
     dm=$(systemctl is-active gdm3 2>/dev/null | head -1 || true)
     [ -n "$dm" ] || dm=$(systemctl is-active gdm 2>/dev/null | head -1 || true)
@@ -351,7 +319,6 @@ status)
     printf 'socket:    %s\n' "$([ -S "$SOCKET" ] && echo "$SOCKET" || echo none)"
     printf 'dm:        %s\n' "${dm:-unknown}"
 
-    # A few root-only facts, not worth a password for any of them.
     priv_status=$(sudo -n "$PRIV" session-status 2>/dev/null || true)
     modeset=$(printf '%s\n' "$priv_status" | awk '/^modeset:/ {print $2}')
     desktop=$(printf '%s\n' "$priv_status" | awk '/^desktop:/ {print $2}')
@@ -359,22 +326,17 @@ status)
     printf 'modeset:   %s\n' "${modeset:-unknown}"
 
     printf 'mode:      %s\n' "$(session_mode)"
-    # In `off` mode this must be empty; anything listed while the mode says off
-    # is a bug, visible from a shell rather than from a monitor.
     lit=$(_lit_connectors)
     printf 'lit:       %s\n' "${lit:-none}"
     printf 'gpu:       %s\n' "$(_connectors not-ast | tr '\n' ' ' | sed 's/ *$//')"
     printf 'bmc:       %s\n' "$(_connectors ast | tr '\n' ' ' | sed 's/ *$//')"
     printf 'desktop:   %s\n' "${desktop:-none}"
 
-    # A desktop mode is only enforced when the greeter takes its devices from
-    # logind. `x11` means `desktop:` above is intent, not fact.
     greeter=$(_greeter_type 1) || greeter=""
     [ -n "$greeter" ] && printf 'greeter:   %s%s\n' "$greeter" \
         "$([ "$greeter" = wayland ] || echo '  (mode NOT enforced -- see gdm notes)')"
     [ -n "$seathide" ] && printf 'seat-hide: %s (hidden from seat0)\n' "$seathide"
 
-    # Blank would read as "no output", indistinguishable from "cannot ask".
     if [ -S "$SOCKET" ]; then
         if have wayland-info; then
             printf 'outputs:   %s\n' "$(session_outputs | tr '\n' ' ')"
@@ -383,8 +345,7 @@ status)
         fi
     fi
 
-    # MotionMark scores scale with surface size, so two runs on different display
-    # modes are not comparable; cage takes the connector's preferred mode.
+    # MotionMark scores scale with surface size, so two runs on different display modes are not comparable; cage takes the preferred mode.
     if [ -S "$SOCKET" ]; then
         if have wayland-info; then
             mode=$(session_display_mode)
@@ -394,8 +355,6 @@ status)
         fi
     fi
 
-    # Our own compositor is a logind session too, so it matches foreign_session
-    # exactly -- checked only when our socket is absent.
     if [ ! -S "$SOCKET" ] && session=$(foreign_session); then
         printf 'foreign:   session %s\n' "$session"
     fi

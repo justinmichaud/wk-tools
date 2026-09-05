@@ -1,14 +1,7 @@
 #!/bin/bash
-# monitor.sh <logfile> <maxsecs>
-# Watch a running benchmark (WPEWebProcess) and emit a verdict:
-#   CRASH_OR_ASSERT  - crash/assert/OOM string seen in the console log
-#   WEBPROC_GONE     - the web process disappeared after having run
-#   IDLE_DONE        - ran, then went truly idle (benchmark finished / results screen)
-#   TIMEOUT          - hit the time cap
-# "Idle" requires BOTH low CPU AND low load-average, so heavy swap I/O
-# (low %CPU but high loadavg, process blocked in D-state) is NOT mistaken for done.
+# monitor.sh <logfile> <maxsecs> -- watches WPEWebProcess and prints one verdict: CRASH_OR_ASSERT (a crash, assert or OOM string in the console log), WEBPROC_GONE (it ran, then vanished), IDLE_DONE (it ran, then went idle) or TIMEOUT.
 LOG="$1"; MAX="${2:-2700}"
-idle=0; ran=0; elapsed=0; interval=10; need_idle=12   # 120s of true idle
+idle=0; ran=0; elapsed=0; interval=10; need_idle=12   # 120s of low %CPU *and* low loadavg, so swap thrash (D-state, high loadavg) is not read as done
 verdict="UNKNOWN"
 while [ $elapsed -lt $MAX ]; do
   if grep -qiE "assertion failed|Bail out|RELEASE_ASSERT|SIGSEGV|SIGABRT|SIGTRAP|CRASH|received signal|Segmentation fault|terminate called|out of memory|Cannot allocate|renderer process crashed" "$LOG" 2>/dev/null; then

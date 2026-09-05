@@ -1,11 +1,5 @@
 #!/sbin/openrc-run
-# Feed the hardware watchdog: 30 s timeout, fed every 10 s.
-#
-# This is the only thing here that recovers a kernel that has stopped
-# scheduling. Everything else -- the netwatch ladder, the service supervision --
-# assumes the machine is still running. busybox's applet rather than the
-# watchdog package, so there is one path on both phones and nothing extra to
-# install.
+# udev's coldplug usually autoloads the watchdog platform driver by modalias, but "usually" will not do for the one mechanism that recovers a hung kernel, so start_pre loads it.
 description="Feed the hardware watchdog"
 
 supervisor=supervise-daemon
@@ -18,11 +12,6 @@ depend() {
     after net
 }
 
-# The driver, before anything tries to feed it. udev's coldplug usually
-# autoloads a platform driver by modalias, but "usually" is not the standard for
-# the one mechanism that recovers a hung kernel on a device nobody can walk up
-# to -- so the service that needs /dev/watchdog is the service that ensures it.
-# Idempotent, and a no-op where there is nothing to load.
 start_pre() {
     /usr/local/sbin/wk-bridge-watchdog-load || true
 }

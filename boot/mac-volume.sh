@@ -1,36 +1,20 @@
-# Boot driver: this Mac, into a benchmark macOS install on another volume.
-#
-# Apple Silicon has no volume-boot primitive over software or the wire:
-# selection goes through a LocalPolicy in the machine's own secure storage,
-# changed only by an authenticated user action (docs/HANDOFF-boot.md, tier 2).
-# So `wk sysimage write` is never pointed at this machine, arming is a person,
-# and the machine drives itself (NODE_LOCAL, boot/machines.sh).
-#
-# TODO: unverified against hardware -- no benchmark volume exists here yet.
+# Boot driver: this Mac, into a benchmark macOS install on another volume. Apple Silicon has no volume-boot primitive over software or the wire --
+# selection goes through a LocalPolicy in the machine's own secure storage, changed only by an authenticated user action -- so arming is a person and the machine drives itself (NODE_LOCAL).
 
 BOOT_ARMING=hands-on   # the intent is recorded and the act is a person's; cmd/boot branches on it
 
 BOOT_ORDER_IMAGE=""    # no order to write; named so a diff shows a difference, not an omission
 BOOT_ORDER_NORMAL=""
 
-# --- where the other role lives ----------------------------------------------
-# By volume name: `disk5s2` changes with the port, the name doesn't.
 mac_volume_path() { printf '/Volumes/%s' "$NODE_VOLUME"; }
 
-# Mounted and a macOS system volume: an empty formatted disk with the right
-# name mounts perfectly and boots nothing.
 mac_volume_present() {
     local v; v=$(mac_volume_path)
     [ -d "$v/System/Library/CoreServices" ]
 }
 
-# --- which mode is answering --------------------------------------------------
-# The bench system writes an identity marker the host install does not, but
-# both modes are this same machine: MODE_CHANNEL is always `host`.
 b_probe() {
     local id
-    # Refuse before the first macOS-only command, or diskutil/bless/sysctl
-    # fail partway through printing a status.
     if ! is_macos; then
         MODE_CHANNEL=none; MODE=unreachable
         return 0
@@ -41,14 +25,9 @@ b_probe() {
     return 0
 }
 
-# No /proc on macOS: kern.boottime stands in for boot_id and boot time. The
-# brace in the pattern is load-bearing -- `{ sec = 1786800736, usec = 451078
-# } Sat Aug 15 ...` -- since a pattern anchored only on `sec = ` matches
-# greedily to the last one, returning usec, a plausible but wrong number.
+# The brace is load-bearing -- `{ sec = 1786800736, usec = 451078 } Sat Aug 15 ...` -- since a pattern anchored on `sec = ` alone matches greedily to the last one and returns usec.
 _mac_boottime() { sysctl -n kern.boottime 2>/dev/null | sed -n 's/.*{ *sec *= *\([0-9][0-9]*\).*/\1/p'; }
 
-# `|| true`: a boot id that cannot be read is a missing fact, not a failure,
-# and `set -e` should not turn the one into the other.
 b_boot_id() { _mac_boottime || true; }
 
 b_booted_at() {
@@ -57,11 +36,7 @@ b_booted_at() {
     epoch_to_utc "$sec"
 }
 
-# Not a firmware register -- nothing readable there -- but the two facts that
-# decide whether a transition is possible.
 b_evidence() {
-    # Accurate only on this Mac: elsewhere `df /` reports the driving
-    # machine's own root volume as if it were this Mac's.
     if ! is_macos; then
         echo "booted_volume=unknown (this is not that Mac; NODE_LOCAL machines answer only for themselves)"
         echo "benchmark_volume=$NODE_VOLUME (cannot be seen from here)"
@@ -79,10 +54,7 @@ b_evidence() {
     echo "firmware_default=$(mac_firmware_default)"
 }
 
-# Which install the firmware will boot next: `boot-volume` in
-# IODeviceTree:/options, whose last UUID is the APFS volume group `diskutil`
-# also reports. It names the next plain reboot and cannot be written
-# (`nvram boot-volume=...` discards the value).
+# The firmware publishes what it will boot next as `boot-volume` in IODeviceTree:/options, whose last UUID is the APFS volume group; it cannot be written (`nvram boot-volume=...` discards the value).
 mac_volume_group() {  # $1 = mount point
     python3 "$WK_ROOT/lib/wkmac.py" volume-group "$1" 2>/dev/null
 }
@@ -104,10 +76,7 @@ mac_firmware_default() {
     fi
 }
 
-# --- the record ---------------------------------------------------------------
-# In this user's state directory, since every `sudo` here is a password prompt
-# (docs/HANDOFF-sandboxing.md). Kept on the normal role's disk: the benchmark
-# volume has its own home directory and cannot see this one.
+# On the normal role's disk: the benchmark volume has its own home directory and cannot see this one.
 NODE_RECORD="$(wk_state_dir)/boot-armed"
 
 record_write() {
@@ -130,8 +99,6 @@ record_read() {
 
 record_clear() { rm -f "$NODE_RECORD"; }
 
-# --- arming -------------------------------------------------------------------
-# Everything checkable, then the ritual. NEEDS A VOLUME to have ever succeeded.
 b_arm() {
     mac_volume_present || die "'$NODE_VOLUME' is not attached, or is not a macOS system volume.
     What has to exist is a full macOS *install* on another volume, personalised
@@ -158,8 +125,6 @@ b_arm() {
 EOF
 }
 
-# No one-shot register to cancel, so disarming is only the record; the sticky
-# route has to be undone by a person.
 b_disarm_note() {
     log "  nothing in firmware was changed, so there is nothing there to cancel."
     log "  If you used System Settings -> Startup Disk (the sticky route), set it"
@@ -167,8 +132,6 @@ b_disarm_note() {
     log "  undo -- the next reboot is a normal one by itself."
 }
 
-# The benchmark volume's own account of its last boot, read while merely
-# mounted.
 b_diag() {
     local v; v=$(mac_volume_path)
     mac_volume_present || die "'$NODE_VOLUME' is not attached, so there is nothing to read."
@@ -176,26 +139,16 @@ b_diag() {
         || echo "(no var/log/wk-diag.txt on '$NODE_VOLUME' -- it has not been provisioned, or has never booted)"
 }
 
-# A plain reboot lands in the default startup disk -- the internal volume,
-# unless Startup Disk was used -- which is the way back from bench mode.
 b_reboot() {
     sudo shutdown -r +1 "wk boot: returning to host mode" >/dev/null 2>&1 \
         || die "could not schedule a reboot (this one needs sudo, and it is the
     only part of a transition that does)."
 }
 
-# --- where a staged payload goes ----------------------------------------------
-# A path on this machine: staging is a copy onto a mounted volume, not a
-# network transfer. Fails when the disk is not attached rather than naming a
-# creatable directory on the internal disk, invisible to both roles. The *Data*
-# volume, since the APFS system volume is sealed and read-only; `/var` is a
-# firmlink there, mounting outside it as `private/var`, so the same bytes are
-# `/var/wk` to the booted bench install and
-# `/Volumes/<name> - Data/private/var/wk` here.
+# The *Data* volume, the APFS system volume being sealed and read-only. `/var` firmlinks out of it, so the same bytes are `/var/wk` to the booted bench install and `/Volumes/<name> - Data/private/var/wk` here.
 mac_volume_data_path() {
     local d="/Volumes/$NODE_VOLUME - Data"
     [ -d "$d" ] && { printf '%s' "$d"; return 0; }
-    # No data volume: the system volume is the only place there is.
     printf '%s' "$(mac_volume_path)"
 }
 
@@ -208,7 +161,6 @@ b_bench_root() {
     esac
 }
 
-# A NODE_LOCAL machine answers only for itself.
 b_probeable() { is_macos; }
 
 b_media() {
@@ -223,8 +175,6 @@ b_media() {
     fi
 }
 
-# An APFS volume in its own container, made and populated on the Mac itself;
-# the last step is always a person holding the power button.
 b_reprovision() {
     cat <<REPROV
 wk bench mac-volume --create

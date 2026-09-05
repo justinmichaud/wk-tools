@@ -106,6 +106,45 @@ class TestConfShape(unittest.TestCase):
                     )
 
 
+class TestEveryImageListsADescription(unittest.TestCase):
+    """`wk sysimage --list` prints each image's description, and that text is
+    the header line's own second half.
+
+    It used to be line 3, read positionally (`sed -n '3s/^# //p'`), so trimming
+    a comment above it silently listed an image with a blank description --
+    measured on two configs. The reader and this test now use the same rule.
+    """
+
+    BLURB = re.compile(r"^# (\S+) -- (.+)$")
+
+    def test_every_image_config_header_carries_its_blurb(self):
+        files = conf_files("image/configs")
+        self.assertTrue(files, "no image/configs/*.conf found")
+        for path in files:
+            with self.subTest(conf=path.name):
+                first = path.read_text().splitlines()[0]
+                m = self.BLURB.match(first)
+                self.assertIsNotNone(
+                    m, f"{path.name}: header {first!r} is not '# <name> -- <description>'")
+                self.assertEqual(m.group(1), path.stem)
+                self.assertTrue(m.group(2).strip(), f"{path.name}: empty description")
+
+    def test_the_listing_reads_the_description_from_that_line(self):
+        """The one reader, exercised rather than retyped: image_config_list
+        must print a non-empty description under every image it names."""
+        cp = run("sysimage", "--list")
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        names = {p.stem for p in conf_files("image/configs")}
+        lines = cp.stdout.splitlines()
+        for i, line in enumerate(lines):
+            if line.strip() in names and not line.startswith(" "):
+                self.assertLess(i + 1, len(lines), f"{line}: nothing follows it")
+                described = lines[i + 1].strip()
+                self.assertTrue(
+                    described and not described.startswith("--"),
+                    f"{line.strip()} lists with no description (got {described!r})")
+
+
 class TestConfFieldSets(unittest.TestCase):
     """Every conf in a registry declares the same field set (image/configs'
     builder-specific fields are the documented optional subset: grouped by
@@ -143,15 +182,16 @@ class TestConfFieldSets(unittest.TestCase):
             )
 
     def test_targets_hosts_field_set(self):
-        # lib/target.sh is the loader but is read-only for this suite; the
-        # field list it documents is targets/remote.sh's own docblock (the
-        # registry's spec, "with targets/hosts/<name>.conf holding..."), plus
-        # WK_TARGET_KIND (read directly by lib/target.sh's target_kind) and
-        # whatever cmd/remote itself reads out of a target's conf.
+        # Every file that READS one of these fields, so the vocabulary comes
+        # from code. build/configs.sh and lib/target.sh are here because they
+        # are the only readers of some of them -- WK_TARGET_LIBCXX among them,
+        # which otherwise survives in this set only as prose in remote.sh.
         known = loader_fields(
             (REPO / "targets" / "remote.sh", "WK_"),
             (REPO / "cmd" / "remote", "WK_"),
             (REPO / "cmd" / "build", "WK_"),
+            (REPO / "build" / "configs.sh", "WK_"),
+            (REPO / "lib" / "target.sh", "WK_"),
         )
         known.add("WK_TARGET_KIND")
         files = conf_files("targets/hosts")

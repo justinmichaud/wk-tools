@@ -1,20 +1,4 @@
 ---
-# Provisioning for the wk podman machine, run by podman after first boot.
-#
-# Scope is deliberately narrow: only OS-level state that has no dependency on
-# wk-tools itself. The repo is not copied in at all -- the machine mounts this
-# checkout read-only at /var/opt/wk-tools -- which it also spells
-# /opt/wk-tools (host/macos/machine.sh) -- so the VM runs
-# the working tree and nothing has to be pushed to GitHub to be testable --
-# and what needs the repo (the egress proxy, the SDK) is installed around that
-# mount afterwards by host/macos/vmtools.sh.
-#
-# Nothing here touches the contents of /opt/wk-tools or {{ wk_root }}/secrets:
-# both are mounts, and a task that chowns or creates one either fails against a
-# read-only filesystem or writes into this host's own directories. Their mount
-# *units* are another matter, and the last task here is about those.
-#
-# Recovering from `podman machine rm` is still one `./setup`.
 
 - name: Provision the wk podman machine
   hosts: localhost
@@ -24,10 +8,7 @@
 
   tasks:
     - name: Create the workspace storage tree
-      # Every directory here is on the VM's native filesystem, and none of them
-      # is one of the machine's three host mounts. Hardlinks between base
-      # snapshots only work within one filesystem, and compiling over virtiofs
-      # would dominate build time -- so nothing a build touches may be a mount.
+      # No build path may be a host mount: hardlinks need one fs, virtiofs is slow.
       ansible.builtin.file:
         path: "{{ item }}"
         state: directory
@@ -47,8 +28,6 @@
         - "{{ wk_root }}/tools"
 
     - name: Create the Pi allowlist file
-      # Read back by ./setup when it regenerates the firewall, so the test
-      # devices survive a policy rebuild. Empty is the correct initial state.
       ansible.builtin.file:
         path: "{{ wk_root }}/pi-hosts"
         state: touch
@@ -59,12 +38,7 @@
         access_time: preserve
 
     - name: Mark this machine as headless
-      # Read by lib/resources.sh. The VM has no desktop to protect, and the
-      # macOS host already subtracted its own reserve when sizing the VM;
-      # applying the desktop reserve again here would leave containers with a
-      # fraction of the memory that is actually free.
       ansible.builtin.file:
-        # The one marker `headless_marker` (lib/resources.sh) reads.
         path: "{{ wk_root }}/.headless"
         state: touch
         owner: core
@@ -74,27 +48,12 @@
         access_time: preserve
 
     - name: Check the machine image still provides git and python3
-      # Neither is layered: the podman machine image has python3 and git (as
-      # git-core). `wk sync` maintains the WebKit mirror and the base
-      # snapshots inside the machine, so git has to run here, and the SDK
-      # patcher (container/sdk-patches/apply.sh) is python.
-      #
-      # Layering them would pull in the `git` metapackage, whose perl-Git
-      # dependency is carried only by Fedora's updates-archive -- which
-      # answers 404 for it, and takes the whole playbook down with it. An
-      # image that stops providing either of these is a real break, and it is
-      # named here rather than found three stages later.
+      # Not layered: `git` pulls perl-Git, carried only by a 404ing updates-archive.
       ansible.builtin.shell:
         cmd: command -v git && command -v python3
       changed_when: false
 
     - name: Layer Tailscale
-      # Runs on the VM, not inside a workspace. That is deliberate: a workspace
-      # then needs no TUN device and no CAP_NET_ADMIN, and `ssh rpi5` works
-      # normally instead of through a SOCKS proxy.
-      #
-      # It is the only way a workspace reaches the Pi test devices, since the
-      # egress policy drops all RFC1918 and the Pis sit on an isolated network.
       ansible.builtin.command:
         cmd: rpm-ostree install --idempotent --apply-live --allow-inactive tailscale
       register: ts
@@ -102,8 +61,6 @@
       failed_when: ts.rc != 0 and 'No change.' not in ts.stdout
 
     - name: Find the machine's host mounts
-      # One systemd .mount unit per `podman machine init --volume`, written by
-      # podman into /etc/systemd/system at first boot.
       ansible.builtin.find:
         paths: /etc/systemd/system
         patterns: "*.mount"
@@ -111,8 +68,6 @@
       register: host_mounts
 
     - name: Find the one of them that must stay writable
-      # By its target rather than by unit name: the name is systemd's escaping
-      # of the target, and this asks the question the design states.
       ansible.builtin.find:
         paths: /etc/systemd/system
         patterns: "*.mount"
@@ -120,18 +75,9 @@
       register: writable_mounts
 
     - name: Hold every other host mount read-only
-      # podman takes `--volume src:target:ro` and drops the mode on the way to
-      # the unit it generates (measured on podman 5.4 + applehv: the guest
-      # mounts it rw, and a write from a workspace lands in this host's own
-      # directory). Which mounts are writable is half the isolation invariant,
-      # so it is imposed here, on the machine -- and from the design rule
-      # rather than from a second list of paths: exactly one host mount, the
-      # agent credential directory, is writable.
-      #
-      # The existing options are kept and `ro` is put in front of them: they
-      # carry the SELinux context virtiofs cannot express in xattrs, and a
-      # mount that loses it is one containers are then denied.
-      # TODO: upstream -- podman should carry `:ro` into the generated unit.
+      # TODO: upstream -- podman 5.4 + applehv drops the :ro of `--volume src:tgt:ro`
+      # from the unit it generates, so the guest mounts it rw. `ro` is prefixed to
+      # Options, not substituted: those carry the SELinux context virtiofs needs.
       ansible.builtin.lineinfile:
         path: "{{ item.path }}"
         regexp: '^Options=(?!ro,)(.+)$'
@@ -149,9 +95,6 @@
       when: ro_units is changed
 
     - name: Re-mount them read-only now, rather than at the next boot
-      # A remount, not a restart: a restart unmounts first, and a workspace
-      # bind-mounting the same directory is running while ./setup is. Already
-      # read-only, this changes nothing and says so.
       ansible.builtin.shell:
         cmd: >-
           mount -o remount,ro
@@ -163,10 +106,6 @@
       changed_when: true
 
     - name: Enable tailscaled
-      # `tailscale up --advertise-tags=tag:wk` is deliberately NOT done here: it
-      # needs an auth key, which must not live in this repo. `wk pi setup` does
-      # it, and records the resulting Pi addresses in /var/lib/wk/pi-hosts so
-      # the firewall can allow them.
       ansible.builtin.systemd_service:
         name: tailscaled
         enabled: true

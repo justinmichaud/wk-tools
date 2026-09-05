@@ -1,13 +1,6 @@
 #!/bin/bash
-# Capture a samply trace of MiniBrowser with GC-section text markers + JIT data,
-# for splitting per GC section with split-trace.py.
-#
-# Works on macOS (Apple WebKit, XPC web process) and Linux (GTK WebKit, sandbox
-# disabled so the web process inherits env). Requires a Release WebKit build with
-# the GC text-marker patch, and samply on PATH (a workspace's, or $SAMPLY).
-#
-# Usage:   capture.sh <periodMS> <durationSec> <out.json.gz> [url] [rateHz]
-# Env overrides: WEBKIT_ROOT, WEBKIT_BUILD, SAMPLY, TRACE_AUX
+# A samply trace of MiniBrowser with GC-section text markers and JIT data, to split per GC section with split-trace.py. Runs on macOS (Apple WebKit, XPC web process) and Linux (GTK WebKit, the sandbox disabled so the web process inherits the env), and needs a Release WebKit build with the GC text-marker patch and samply on PATH. `wk profile --mode samply` composes the whole invocation and is the shorter road than this script.
+# Usage:  capture.sh <periodMS> <durationSec> <out.json.gz> [url] [rateHz]  -- env overrides WEBKIT_ROOT, WEBKIT_BUILD, SAMPLY, TRACE_AUX, JITDUMP
 set -u
 
 OS=$(uname -s)
@@ -16,9 +9,6 @@ if [ -z "$ROOT" ] || [ ! -d "$ROOT/Source/JavaScriptCore" ]; then
     echo "Set WEBKIT_ROOT to your WebKit checkout (or run from inside one)." >&2
     exit 1
 fi
-# samply comes from the workspace or PATH, never a hardcoded host path a
-# sandboxed run cannot reach. `wk profile --mode samply` composes the whole
-# invocation and is the shorter road than this script.
 SAMPLY="${SAMPLY:-$(command -v samply || echo samply)}"
 command -v "$SAMPLY" >/dev/null 2>&1 || SAMPLY=samply
 
@@ -32,19 +22,14 @@ AUX="${TRACE_AUX:-/tmp/jsc-trace-aux}"
 mkdir -p "$AUX" "$(dirname "$OUT")"
 rm -f "$AUX"/marker-*.txt "$AUX"/jit-*.dump
 
-# Periodic full GC only, with coarse GC-section markers in a fixed directory, so
-# the file names are deterministic and samply can read them.
-JSC_OPTS=(
+JSC_OPTS=(   # periodic full GC only, coarse GC-section markers into a fixed directory, so the file names are deterministic and samply can read them
     "useFixedIntervalGCOnly=1"
     "fixedIntervalGCPeriodMS=$PERIOD_MS"
     "useTextMarkers=1"
     "textMarkersDirectory=$AUX"
 )
 
-# JIT dump gives JS/JIT frame symbols. On Linux/GTK, JSC_useJITDump=1 makes the
-# web process exit within ~2s under samply -- its perf jitdump mmap collides with
-# samply's own perf session -- so it is off there; GC sections run in C++ and need
-# no JIT symbols. macOS keeps it on. Force with JITDUMP=1, disable with JITDUMP=0.
+# JIT dump gives JS/JIT frame symbols, and on Linux/GTK JSC_useJITDump=1 kills the web process within ~2s under samply, its perf jitdump mmap colliding with samply's own perf session; GC sections are C++ and need no JIT symbols, so it is off there and on under macOS.
 if [ -z "${JITDUMP:-}" ]; then
     [ "$OS" = "Darwin" ] && JITDUMP=1 || JITDUMP=0
 fi
@@ -57,12 +42,9 @@ if [ "$OS" = "Darwin" ]; then
     MB="$DIR/MiniBrowser.app/Contents/MacOS/MiniBrowser"
     export DYLD_FRAMEWORK_PATH="$DIR" __XPC_DYLD_FRAMEWORK_PATH="$DIR"
     export DYLD_LIBRARY_PATH="$DIR" __XPC_DYLD_LIBRARY_PATH="$DIR"
-    # WebContent is an XPC service, and libxpc only forwards __XPC_-prefixed env.
-    for o in "${JSC_OPTS[@]}"; do export "JSC_$o"; export "__XPC_JSC_$o"; done
+    for o in "${JSC_OPTS[@]}"; do export "JSC_$o"; export "__XPC_JSC_$o"; done   # WebContent is an XPC service, and libxpc forwards only __XPC_-prefixed env
     WEBPROCS=("com.apple.WebKit.WebContent" "com.apple.WebKit.GPU" "com.apple.WebKit.Networking")
 else
-    # Linux/GTK: WebKitWebProcess is a normal child, and disabling the sandbox
-    # lets it inherit the JSC_* env and write the marker/jitdump files.
     DIR="${WEBKIT_BUILD:-$ROOT/WebKitBuild/GTK/Release}"
     MB="$DIR/bin/MiniBrowser"
     export LD_LIBRARY_PATH="$DIR/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"

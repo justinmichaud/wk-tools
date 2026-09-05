@@ -1,20 +1,7 @@
-# The pmos builder: a postmarketOS system for a phone, built by pmbootstrap
-# on a Linux aarch64 machine. The build's output stays on that machine, and
-# `wk bridge provision` copies it down when it is actually needed for a
-# write. Sourced by cmd/sysimage.
-#
-# Over ssh because pmbootstrap is Linux-only and needs root (loop devices,
-# chroots, kpartx) while the workstation driving this is a Mac. The build host
-# must be aarch64, as both phones are, so pmbootstrap never starts qemu.
-#
-# A phone is not a fleet machine, so a bridge profile names a device (the pmOS
-# codename) instead of a machine, and `wk bridge provision <bridge>` builds
-# this and writes it to the card the bridge's conf names.
+# The pmos builder: a postmarketOS system for a phone, built over ssh because pmbootstrap is Linux-only and needs
+# root (loop devices, chroots, kpartx). The host must be aarch64, as both phones are, so qemu never starts.
 
-# One directory per image id under a root the build host owns, so an
-# interrupted build leaves rubble that names itself. The build host is
-# PMO_BUILD_HOST (image/profiles.sh); WK_PMOS_HOST overrides it.
-pmos_host() {
+pmos_host() {  # PMO_BUILD_HOST (image/profiles.sh), or WK_PMOS_HOST
     [ -n "${PMO_BUILD_HOST:-}" ] || die "this pmos profile sets no PMO_BUILD_HOST (image/profiles.sh)"
     echo "${WK_PMOS_HOST:-$PMO_BUILD_HOST}"
 }
@@ -23,9 +10,7 @@ pmos_out()       { echo "$(pmos_root)/out/$1"; }
 pmos_log()       { echo "$(pmos_root)/out/$1/build.log"; }
 pmos_rc()        { echo "$(pmos_root)/out/$1/build.rc"; }
 
-# A fleet machine's ssh destination when the name is one (boot/machines.sh),
-# otherwise the name itself: a build host need not be a fleet machine.
-pmos_ssh() {
+pmos_ssh() {  # a fleet machine's ssh destination when the name is one, else the name itself
     local h; h=$(pmos_host)
     if machine_load "$h" 2>/dev/null && [ -n "${NODE_SSH:-}" ]; then
         printf '%s' "$NODE_SSH"
@@ -34,11 +19,7 @@ pmos_ssh() {
     fi
 }
 
-# The fleet's own rule (`m_ssh_opts`, boot/machines.sh) plus keepalives: the
-# build host is on WiFi and roams, and ConnectTimeout only covers the
-# handshake, so a connection that stalls after connecting hangs until TCP gives
-# up. `machine_load` runs here, not inside `pmos_ssh`, so NODE_ROLE is set
-# before `m_ssh_opts` reads it.
+# Keepalives: the build host roams on WiFi and ConnectTimeout covers only the handshake. machine_load runs here so NODE_ROLE is set before `m_ssh_opts` reads it.
 pmos_ssh_opts() {
     machine_load "$(pmos_host)" >/dev/null 2>&1
     printf '%s' "-o BatchMode=yes -o ConnectTimeout=$(wk_ssh_timeout) $(m_ssh_opts) \
@@ -50,25 +31,14 @@ _pmos_sh() {
     ssh $(pmos_ssh_opts) "$(pmos_ssh)" "$@"
 }
 
-# Ask the build host something whose answer may legitimately be "nothing".
-# `set -o pipefail` makes a plain pipe take ssh's non-zero exit status and
-# `set -e` then kills the command with no message, so the remote side is made
-# to succeed and an empty answer is not an error.
+# pipefail would take ssh's non-zero status and set -e kill the caller silently, so the remote side is made to succeed: an empty answer is not an error.
 _pmos_ask() {
     _pmos_sh "$* 2>/dev/null || true" 2>/dev/null | tr -d '\r' || true
 }
 
-# --- what a pmos build leaves on its build host -------------------------------
-# Two directories under ~/wk-pmos:
-#
-#   work/  pmbootstrap's chroots and apk cache -- ~8 GB, rebuildable from the
-#          network. `wk gc --purge-pmos` erases it.
-#   out/   half a gigabyte per build: the compressed image, its block map and
-#          the log. Ordinary `wk gc` prunes these.
+# Under ~/wk-pmos on the build host: work/ is ~8 GB of chroots and apk cache (`wk gc --purge-pmos`), out/ half a gigabyte per build (`wk gc`).
 
-# A subshell per profile: image_profile_load sets globals neither `wk disk` nor
-# `wk gc` should keep.
-pmos_build_hosts() {
+pmos_build_hosts() {  # a subshell per profile: image_profile_load sets globals no caller should keep
     local p
     for p in $(image_profile_list | awk '/^[a-z0-9-]+$/ { print $1 }'); do
         ( image_profile_load "$p" >/dev/null 2>&1 || exit 0
@@ -77,9 +47,7 @@ pmos_build_hosts() {
     done | sed '/^$/d' | sort -u
 }
 
-# `kb<TAB>label<TAB>note`, the shape cmd/disk renders. `??` when unreachable:
-# "0" would be a measurement.
-pmos_cache_probe() { # <host>
+pmos_cache_probe() { # <host> -> kb<TAB>label<TAB>note; '??' when unreachable, since "0" would be a measurement
     local out
     out=$(WK_PMOS_HOST="$1" _pmos_ask "du -sk \$HOME/wk-pmos/work \$HOME/wk-pmos/out")
     if [ -z "$out" ]; then
@@ -104,9 +72,7 @@ pmos_purge_work() { # <host>
     case "$kb" in ''|*[!0-9]*) kb=0 ;; esac
     [ "$kb" -gt 0 ] || { debug "no pmbootstrap work folder on $h"; return 0; }
 
-    # Unmount before removing, or the chroots' bind mounts follow the rm into
-    # the host's own /proc and /dev. pmbootstrap's own shutdown is the only
-    # thing that knows what it mounted.
+    # Unmount first, or the chroots' bind mounts follow the rm into the host's own /proc and /dev -- and pmbootstrap's shutdown is the only thing that knows what it mounted.
     log "  $h: $(human_bytes $((kb * 1024))) of pmbootstrap chroots and package cache"
     confirm "erase it on $h? the next build there refetches (minutes, not hours)" \
         || { info "kept the chroots on $h"; return 0; }
@@ -141,8 +107,7 @@ EOF
     log "dry run -- nothing was built."
 }
 
-# "Finished" is a result block: --resume's own build has an rc but no result.
-pmos_newest_out() { # <profile>
+pmos_newest_out() { # <profile>; "finished" is a result block -- --resume's own build has an rc but no result
     local d
     for d in $(_pmos_ask "ls -1t $(pmos_root)/out" | grep "^$1-"); do
         _pmos_sh "test -f $(pmos_out "$d")/result" >/dev/null 2>&1 \
@@ -151,9 +116,7 @@ pmos_newest_out() { # <profile>
     return 1
 }
 
-# Copy a finished build's image off its build host to a local path,
-# decompressing on the way and checking the hash the build host computed --
-# the only form of that check that works from a Mac, which has no sfdisk.
+# The hash is the one the build host computed: the only form of that check that works from a Mac, with no sfdisk.
 pmos_fetch_out() { # <id> <local dest path>
     local id="$1" dest="$2" out result there here
     out=$(pmos_out "$id")
@@ -177,9 +140,7 @@ pmos_fetch_out() { # <id> <local dest path>
     printf '%s' "$dest"
 }
 
-# Launched under nohup on the build host and followed by tailing its log: a
-# foreground ssh build dies with the connection, having left a chroot mounted.
-# `--detach` is then just "do not tail".
+# Under nohup on the build host: a foreground ssh build dies with the connection, leaving a chroot mounted.
 pmos_spawn() {
     local id="$1" out; out=$(pmos_out "$id")
 
@@ -191,8 +152,6 @@ pmos_spawn() {
         < "$WK_ROOT/image/pmos-build.sh" \
         || die "could not copy image/pmos-build.sh to $(pmos_host)"
 
-    # The key that reaches the build host is not evidence of the key the
-    # phone needs.
     local key; key="${WK_IMAGE_KEY:-$HOME/.ssh/id_ed25519.pub}"
     [ -r "$key" ] || die "no public key at $key
     The image has to accept an ssh key on first boot. Set WK_IMAGE_KEY."
@@ -201,12 +160,7 @@ pmos_spawn() {
 
     pmos_ensure_packages
 
-    # One build at a time on a build host: the first thing a build does is
-    # `pmbootstrap shutdown`, unmounting chroots and detaching the loop device
-    # out from under any build still using them. A check, not a lock, since
-    # nothing coordinates this over ssh. The pattern is `pmos-build[.]sh`,
-    # brackets and all: `pgrep -f` matches full command lines, and the ssh
-    # carrying this check contains the plain spelling.
+    # A build's first act is `pmbootstrap shutdown`, unmounting the chroots under any other build; the pattern is bracketed because `pgrep -f` would match the ssh carrying this check.
     local running
     running=$(_pmos_ask "pgrep -f 'pmos-build[.]sh' >/dev/null && echo yes" | tr -d ' \n')
     [ "$running" = yes ] && die "a pmos build is already running on $(pmos_host).
@@ -214,9 +168,6 @@ pmos_spawn() {
     or watch it:  ssh $(pmos_ssh) tail -f \$HOME/wk-pmos/out/*/build.log"
 
     info "starting the build on $(pmos_host) (it survives this connection)"
-    # detach_remote (lib/detach.sh) owns the nohup/disown spelling and the
-    # log/rc-file convention. Each PMO_* value is its own argv item, so
-    # detach_remote quotes it.
     command -v detach_remote >/dev/null 2>&1 || . "$WK_ROOT/lib/detach.sh"
     detach_remote _pmos_sh "$(pmos_log "$id")" "$(pmos_rc "$id")" -- \
         env \
@@ -239,13 +190,9 @@ pmos_spawn() {
     sleep 3
 }
 
-# The build host's own prerequisites (host/linux/apt.txt; `./setup` installs
-# them), for a build host `./setup` has not run against. Asks before
-# installing: this is somebody's machine.
-pmos_ensure_packages() {
+pmos_ensure_packages() {  # the build host's own prerequisites, for a host `./setup` has not run against
     local missing="" pkgs=""
-    # command -> package: pmbootstrap names the program it cannot find, and
-    # apt wants the package that carries it. kpartx is the one that differs.
+    # pmbootstrap names the program it cannot find and apt wants the package carrying it; kpartx is the one whose names differ.
     _pmos_need() {
         _pmos_sh "command -v $1 >/dev/null 2>&1" >/dev/null 2>&1 && return 0
         missing="$missing $1"; pkgs="$pkgs $2"
@@ -264,23 +211,18 @@ pmos_ensure_packages() {
         ssh $(pmos_ssh) sudo apt install -y$pkgs"
 }
 
-# A directory with no rc file is an interrupted build that cannot be resumed,
-# so it goes. A finished one is kept -- `wk bridge provision` and `--resume`
-# both find it there -- but only the newest per profile.
+# No rc file is an interrupted build that cannot be resumed, so it goes; a finished one is kept, newest per profile.
 pmos_prune() {
     local d rc profile seen_profiles="" keep=1
     for d in $(_pmos_ask "ls -1t $(pmos_root)/out"); do
         case "$d" in ''|probe-*) continue ;; esac
         rc=$(_pmos_ask "cat $(pmos_root)/out/$d/build.rc" | tr -d ' \n')
         if [ -z "$rc" ]; then
-            # No rc and nothing running means it died partway.
             info "removing an interrupted build on $(pmos_host): $d"
             _pmos_sh "rm -rf $(pmos_root)/out/$d" || true
             continue
         fi
-        # Newest per profile, not overall: a build host can hold builds for
-        # more than one device.
-        profile="${d%-*}"
+        profile="${d%-*}"  # newest per profile, not overall: a host can hold builds for more than one device
         case " $seen_profiles " in
             *" $profile "*) ;;
             *) seen_profiles="$seen_profiles $profile"; continue ;;
@@ -296,10 +238,7 @@ pmos_running() {
     return 0
 }
 
-# Follow the remote log until the build ends. A poll, not `ssh tail -f`, which
-# has no idea when the build is over: polling ends when the rc file appears.
-# detach_wait_remote (lib/detach.sh) owns it, in streaming mode at 5s rather
-# than the shared default of 30, since a human is watching the log scroll.
+# A poll, not `ssh tail -f`, which cannot know when the build is over: it ends when the rc file appears.
 pmos_follow() {
     local id="$1" rc
     command -v detach_wait_remote >/dev/null 2>&1 || . "$WK_ROOT/lib/detach.sh"
@@ -312,23 +251,13 @@ pmos_follow() {
     Its own output is above, and the whole log is $(pmos_log "$id") there."
 }
 
-# The newest build of this profile, finished or not: what `--resume` attaches
-# to.
-pmos_find_build() {
+pmos_find_build() {  # the newest build of this profile, finished or not: what `--resume` attaches to
     _pmos_ask "ls -1t $(pmos_root)/out" | grep "^$IMG_PROFILE-" | head -1 || true
 }
 
-# --- can the phone actually reach the network the credential names? ----------
-# The uplink credential is copied from the build host's own association, which
-# keeps the PSK off every wire and log, but carries the band along implicitly:
-# a credential for a network the phone's radio cannot see boots it into
-# isolation while everything else about the image verifies. The question is
-# whether the SSID is on the air in a band the phone supports, not which band
-# the build host is on. Nothing here reads or transports the PSK.
+# The credential is copied from the build host's own association, so it carries that band implicitly: one for a network the phone's radio cannot see boots it into isolation.
 
-# Read the same way image/pmos-build.sh reads the whole credential, so the two
-# cannot disagree.
-pmos_uplink_ssid() {
+pmos_uplink_ssid() {  # read the way image/pmos-build.sh reads the whole credential, so the two cannot disagree
     _pmos_ask "sudo -n cat /etc/netplan/*.yaml 2>/dev/null \
         | python3 -c \"
 import sys, yaml
@@ -341,10 +270,8 @@ for doc in (d for d in yaml.safe_load_all(sys.stdin) if d):
 \""
 }
 
-# Every frequency, in MHz, that SSID is broadcast on, as seen from the build
-# host: a fresh scan and the cached `scan dump`, unioned, so a stale cache can
-# only be over-generous rather than blocking.
-pmos_ssid_freqs() { # <ssid>
+# A fresh scan unioned with the cached `scan dump`, so a stale cache can only be over-generous.
+pmos_ssid_freqs() { # <ssid> -> every frequency in MHz that SSID is broadcast on
     local ifs i how out all=""
     ifs=$(_pmos_ask "iw dev 2>/dev/null | awk '/Interface/ { print \$2 }'")
     for i in $ifs; do
@@ -372,18 +299,14 @@ pmos_check_uplink_band() {
     [ -n "$ssid" ] || { debug "could not read the uplink SSID from $(pmos_host) -- leaving the band unchecked"; return 0; }
 
     freqs=$(pmos_ssid_freqs "$ssid")
-    if [ -z "$freqs" ]; then
-        # Not proof: a scan can miss an AP, and the phone will be elsewhere in
-        # the house anyway.
+    if [ -z "$freqs" ]; then  # not proof: a scan can miss an AP, and the phone will be elsewhere anyway
         warn "$(pmos_host) cannot currently see '$ssid' on the air, so which bands it"
         warn "  offers could not be checked. $PMO_DEVICE's radio is ${bands} GHz."
         return 0
     fi
 
     for f in $freqs; do
-        # `iw` prints "freq: 2412.0", and `[ 2412.0 -lt 3000 ]` is a syntax
-        # error `[` reports as false, sending every frequency to the 5 GHz
-        # branch.
+        # `iw` prints "freq: 2412.0", and `[ 2412.0 -lt 3000 ]` is a syntax error `[` reports as false.
         f=${f%%.*}
         case "$f" in
             ''|*[!0-9]*) continue ;;
@@ -463,8 +386,6 @@ pmos_build() {
     on that machine."
 
     info "built $id on $(pmos_host) -- $(pmos_out "$id")/disk.wic.xz"
-    # `wk bridge provision` finds this build, copies it down, writes it, and
-    # prompts through the steps that are a person.
     log  "  the rest of the way:  wk bridge provision ${PMO_BRIDGE:-<bridge>}"
     log  "  ...or by hand: copy disk.wic.xz off $(pmos_host), then"
     log  "             wk sysimage write --from <path> --disk <machine>:<device>"

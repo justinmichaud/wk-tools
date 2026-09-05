@@ -1,8 +1,5 @@
 #!/sbin/openrc-run
-# Re-apply the battery charge-control threshold on every boot: the driver
-# resets charge_control_end_threshold to its hardware default (typically
-# 100%) at every power-on, so a value set by a previous run does not survive
-# one on its own. One-shot, like wk-bridge-usb-host.
+# The driver resets charge_control_end_threshold to its hardware default at every power-on, so the cap must be re-applied on each boot.
 description="Cap the battery charge threshold"
 
 depend() {
@@ -12,9 +9,6 @@ depend() {
 start() {
     ebegin "Applying the battery charge limit"
     /usr/local/sbin/wk-bridge-battery
-    # 0 when there is nothing to apply here or the write took; 1 only when
-    # the node exists and the write did not take, the one case worth a
-    # service marked failed (wk-bridge-battery's own exit convention).
     eend $?
 }
 

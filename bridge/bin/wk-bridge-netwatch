@@ -1,22 +1,6 @@
 #!/bin/sh
-# Escalating recovery for a WiFi-uplinked tailscale subnet router.
-#
-# The Librem 5's RS9116 wedges its firmware in a way a link bounce does not
-# clear, and the PinePhone's 8723cs drops associations under load. So recovery
-# is a ladder: each consecutive failed check climbs one rung, any success
-# resets to the bottom.
-#
-#   1      log only (most failures are a roam that recovers itself)
-#   2-3    bounce the WiFi interface
-#   4-5    restart NetworkManager
-#   6-7    reload the WiFi driver module
-#   8-9    restart tailscaled
-#   10+    reboot -- rate limited, never in the first 15 minutes of uptime
-#
-# The rate limit matters: an unconditional reboot rung turns a clearing fault
-# into a device that reboots forever. Runs under supervise-daemon rather than a
-# timer one-shot: OpenRC has no timer units, and the escalation counter is a
-# live variable rather than a file that would have to survive a crash.
+# Escalating recovery for a WiFi-uplinked tailscale subnet router: each consecutive failed check climbs a rung and any success drops back to the bottom -- 1 log only, 2-3 bounce WiFi, 4-5 restart NetworkManager, 6-7 reload the WiFi driver, 8-9 restart tailscaled, 10+ reboot. The reboot rung is rate limited because an unconditional one turns a clearing fault into a device that reboots forever.
+# The driver rung exists because the Librem 5's RS9116 wedges its firmware in a way a link bounce does not clear, and the PinePhone's 8723cs drops associations under load.
 set -u
 
 INTERVAL="${WK_BRIDGE_NETWATCH_INTERVAL:-60}"
@@ -27,17 +11,13 @@ REBOOT_WINDOW=21600     # ...6 hours
 
 iface=lan0
 segment=""
-# Defaulted like the two above: `set -u` must not turn a missing or older conf
-# into an unbound-variable crash.
 leases=""
 leasefile=/var/lib/misc/dnsmasq.leases
 [ -f /etc/wk-bridge.conf ] && . /etc/wk-bridge.conf
 
 log() { logger -t wk-bridge-netwatch -- "$*"; printf 'wk-bridge-netwatch: %s\n' "$*"; }
 
-# Service names differ between distros and packagings (NetworkManager vs
-# networkmanager); a restart aimed at a name that doesn't exist silently does
-# nothing, so it is resolved from what is actually installed.
+# Service names differ between distros and packagings (NetworkManager vs networkmanager), and a restart aimed at a name that does not exist silently does nothing.
 svc() {
     local n
     for n in "$@"; do
@@ -51,9 +31,6 @@ svc() {
 NM_SVC=$(svc networkmanager NetworkManager) || NM_SVC=""
 TS_SVC=$(svc tailscale tailscaled) || TS_SVC=""
 
-# Asked of the reservations, which are declared rather than discovered. A
-# segment with none declared falls back to the lease file, which records
-# history rather than the present: these leases never expire.
 segment_answers() {
     local l ip any=""
     for l in $leases; do
@@ -72,9 +49,7 @@ wifi_if() {
 }
 
 healthy() {
-    # `-o`, not `-br`: BusyBox ip has no brief mode and exits 1 with a usage
-    # message, which would read back empty and climb this ladder against a
-    # working uplink.
+    # `-o`, not `-br`: BusyBox ip has no brief mode and exits 1 with a usage message, which reads back empty and would climb this ladder against a working uplink.
     addr=$(ip -4 -o addr show dev "$WIFI" 2>/dev/null | awk '{print $4; exit}')
     [ -n "$addr" ] || { log "no IPv4 address on $WIFI"; return 1; }
 
@@ -90,8 +65,6 @@ healthy() {
     [ "$(printf '%s' "$st" | jq -r '.Self.Online')" = true ] \
         || { log "tailscale reports self offline"; return 1; }
 
-    # Never escalated on: an unapproved route is a tailnet-policy problem no
-    # reboot fixes.
     if [ -n "$segment" ]; then
         printf '%s' "$st" | jq -e --arg r "$segment" \
             '.Self.PrimaryRoutes // [] | index($r)' >/dev/null 2>&1 \
@@ -103,8 +76,6 @@ healthy() {
 reload_wifi_driver() {
     drv=$(basename "$(readlink -f "/sys/class/net/$WIFI/device/driver" 2>/dev/null)" 2>/dev/null)
     [ -n "$drv" ] || return 1
-    # Sleeps rather than a wait loop: the firmware upload is what takes the
-    # time, and nothing observable happens before it finishes.
     log "reloading wifi driver module '$drv'"
     modprobe -r "$drv" 2>/dev/null || true
     sleep 3
@@ -135,14 +106,10 @@ while :; do
     WIFI=$(wifi_if)
     [ -n "$WIFI" ] || { log "no wifi device present"; WIFI=wlan0; }
 
-    # Every pass: power save comes back on after a reassociation on both ends,
-    # and turns a working uplink into one that answers every third ping.
+    # Every pass: power save comes back on after a reassociation on both chips, and turns a working uplink into one that answers every third ping.
     iw dev "$WIFI" set power_save off 2>/dev/null || true
 
-    # Downstream leg: never escalated on -- losing it is a dock or cable
-    # fault, and rebooting over it takes out the uplink. Run every pass rather
-    # than only when the interface is missing, since wk-bridge-usb-host's
-    # companion-controller trap leaves it present but forty times too slow.
+    # Downstream leg, never escalated on: losing it is a dock or cable fault and rebooting over it takes out the uplink. Re-asserted every pass, not only when the interface is missing, since the companion-controller trap leaves it present but forty times too slow.
     /usr/local/sbin/wk-bridge-usb-host 2>/dev/null || true
 
     if [ ! -e "/sys/class/net/$iface" ]; then
@@ -151,24 +118,12 @@ while :; do
         if [ -e "/sys/class/net/$iface" ]; then
             log "$iface came back"
         else
-            # A dock can be powered, cabled and in host mode with the NIC
-            # still never enumerating; wk-bridge-healthcheck tells them apart.
             log "$iface still absent -- wk-bridge-healthcheck says which fault"
         fi
     elif [ "$(cat "/sys/class/net/$iface/carrier" 2>/dev/null)" = 1 ] \
          && ! segment_answers; then
-        # Carrier up but nothing answers: a client asks for an address only
-        # when the link comes up, so one that missed that window needs the
-        # carrier taken away and back. Reachability, not an empty lease file,
-        # is the trigger: these leases never expire, so an already-addressed
-        # client re-uses one via ARP and never files another request.
+        # Carrier up and nothing answers: these leases never expire, so a client that missed the window re-uses its address by ARP and never files another request -- taking the carrier away and back is what makes it ask. Two passes before flapping, except within 180 s of this phone's own boot, where a board's DHCPDISCOVER was measured landing 134 s in on its own retry schedule.
         nopeer=$((nopeer + 1))
-        # Two passes before flapping, except right after this phone's own
-        # boot: measured, a board's DHCPDISCOVER can land 134s after this
-        # phone reboots (its own retry schedule, not this phone's readiness),
-        # so flapping on pass 1 there turns a two-minute wait into ~20s. Once
-        # per episode either way, via a flag rather than the counter, so two
-        # failing passes in a row don't flap twice.
         up=$(cut -d. -f1 /proc/uptime 2>/dev/null || echo 999)
         if [ -z "$flapped" ] && { [ "$nopeer" -ge 2 ] || [ "$up" -lt 180 ]; }; then
             flapped=1

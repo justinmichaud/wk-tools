@@ -1,21 +1,6 @@
 #!/usr/bin/env python3
-"""A WebKit *slot*: one built WebKit that sits beside others on a board.
-
-`manifest`   write slot.json for an installed root -- the caller's key=value
-             facts plus a sha256 of every regular file under root/
-`sums`       print the manifest's files as `sha256  path` lines, the input
-             `sha256sum -c` takes, so a board with nothing but busybox can
-             prove its copy of the slot is byte-for-byte the one built
-`env`        the environment a browser needs to run from a deployed slot,
-             one KEY=VALUE per line, for a slot unpacked at <prefix>
-`expect`     the JSON the wk-board driver checks a result's process against
-`verified`   whether every check the wk-board driver recorded passed
-`get`        one field out of slot.json
-
-stdlib only; the slot layout it describes is written by
-image/buildroot-webkit.sh and read by cmd/pi. Structured data is handled
-here and nowhere in bash (CLAUDE.md).
-"""
+"""A WebKit *slot*: one built WebKit that sits beside others on a board. Its layout
+is written by image/buildroot-webkit.sh and read by cmd/pi."""
 import argparse
 import hashlib
 import json
@@ -33,8 +18,6 @@ def _sha256(path):
     return h.hexdigest()
 
 
-# The build-id the linker wrote, read with readelf -- binutils' own reader,
-# the toolchain's when the file is for another architecture.
 def build_id_of(path, readelf):
     cp = subprocess.run([readelf, "-n", path], capture_output=True, text=True)
     if cp.returncode != 0:
@@ -63,8 +46,7 @@ def cmd_manifest(args):
     if not files:
         sys.exit("manifest: nothing under %s" % root)
     doc["files"] = files
-    # The library that is the WebKit, and its identifier: what `wk pi bench`
-    # checks in the running process.
+    # The library that is the WebKit: what `wk pi bench` checks in the running process.
     libs = sorted(rel for rel in files
                   if os.path.dirname(rel) == doc.get("lib_dir", "usr/lib")
                   and os.path.basename(rel).startswith("libWPEWebKit-")
@@ -92,10 +74,6 @@ def cmd_sums(args):
         print("%s  %s%s" % (digest, prefix, rel))
 
 
-# What a browser process needs to run this slot's WebKit rather than the
-# image's: the loader finds the library, WebKit finds its helper processes
-# and its injected bundle. Read by WebKit's GLib process launcher
-# (WEBKIT_EXEC_PATH) and bundle client (WEBKIT_INJECTED_BUNDLE_PATH).
 def cmd_env(args):
     doc = _load(args.slot_json)
     p = args.prefix.rstrip("/")
@@ -104,8 +82,7 @@ def cmd_env(args):
     print("WEBKIT_INJECTED_BUNDLE_PATH=%s/%s" % (p, doc["bundle_dir"]))
 
 
-# What the wk-board run-benchmark driver checks in the process that produced
-# a result (bench/wk_board_driver.py, WK_BOARD_EXPECT).
+# Read as WK_BOARD_EXPECT by bench/wk_board_driver.py.
 def cmd_expect(args):
     doc = _load(args.slot_json)
     p = args.prefix.rstrip("/")
@@ -118,8 +95,7 @@ def cmd_expect(args):
     }))
 
 
-# The driver's evidence file: one check per iteration. Prints the number of
-# checks and exits 0 only when there was at least one and all passed.
+# The driver's evidence file: one JSON check per line, one line per iteration.
 def cmd_verified(args):
     n = 0
     try:

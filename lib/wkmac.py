@@ -1,9 +1,5 @@
 #!/usr/bin/env python3
-"""Answers the macOS boot/bench drivers' diskutil and nvram questions.
-
-Each subcommand reads `diskutil ... -plist` or `nvram -xp`, prints one
-value to stdout, and exits 1 with nothing printed when it is absent.
-"""
+"""Reads one diskutil/nvram plist value for the macOS boot and bench drivers; exit 1, printing nothing, when it is absent."""
 import argparse
 import plistlib
 import subprocess
@@ -54,11 +50,7 @@ def cmd_boot_volume(args):
 
 
 def cmd_physical_store(args):
-    # The physical store(s) backing the container that carries `target`
-    # (default `/`) -- not "the first container `diskutil apfs list`
-    # happens to print", which on a Mac with more than one APFS container
-    # (an internal-recovery container alongside the boot one) is not
-    # necessarily the same container at all.
+    # Via `target`'s own container: a Mac can have several APFS containers.
     info = _plist_of(["diskutil", "info", "-plist", args.target])
     stores = info.get("APFSPhysicalStores") if info else None
     if not stores:

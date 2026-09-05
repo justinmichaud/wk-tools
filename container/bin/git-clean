@@ -1,15 +1,6 @@
 #!/bin/bash
-#
-# git-clean -- throw away everything not committed, in one command:
-# `git reset . && git checkout . && git clean -fd`.
-#
-# Destructive by design and there is no undo, since `git clean -fd` removes
-# untracked files no editor has ever saved. So it says what it is about to
-# destroy and asks, unless --yes.
 set -euo pipefail
 
-# `case`, not `[ x ] && YES=1`: that is an AND-OR list returning 1 when the test
-# fails, which under `set -e` would end the script in the common case.
 YES=""
 case "${1:-}" in --yes|-y) YES=1 ;; esac
 
@@ -33,14 +24,9 @@ if [ -z "${YES:-}" ]; then
     case "$ans" in y|Y|yes) ;; *) echo "nothing done"; exit 1 ;; esac
 fi
 
-# Both need a HEAD to compare against, and a checkout with no commits has none:
-# `git checkout -- .` there fails with "pathspec '.' did not match any file(s)".
-# The untracked sweep below is the whole job in that case.
+# With no HEAD, or nothing tracked, these fail with "pathspec '.' did not match any file(s)", which under `set -e` would skip the clean below.
 if git rev-parse --verify --quiet HEAD >/dev/null; then
     git reset --quiet .
-    # And only when something is tracked: the same "pathspec '.' did not match
-    # any file(s)" failure would, under `set -e`, end the script before the
-    # clean below.
     [ -z "$(git ls-files)" ] || git checkout --quiet -- .
 fi
 git clean -fdq

@@ -1,5 +1,4 @@
 #!/usr/bin/env bash
-#
 # wk bench mac-volume -- make this Mac's benchmark install, on a second APFS
 # volume in the internal container.
 #
@@ -11,26 +10,8 @@
 #   wk bench mac-volume --repair           re-arm first-boot on an installed volume
 #   wk bench mac-volume --build-pkg        the provisioning package, on its own
 #   wk bench mac-volume --all              --create, --fetch if needed, --install
-#   ... any of the above with --dry-run    say what it would do, change nothing
-#
-# Runs *on the Mac*, unlike `wk bench mac`: every step acts on the machine it
-# runs on, needs real sudo, and one of them reboots.
-#
-# A second APFS volume in the internal container, not an external SSD: the
-# internal disk is the storage host mode measures on, so a second volume
-# removes disk hardware as a variable. It costs shared free space (hence the
-# headroom refusal below) and shared wear and thermals with the workstation.
-# `diskutil apfs deleteVolume` is the way back.
-#
-# Not in the `wk quiesce` privileged helper: creating a volume and running
-# startosinstall as root are once-per-machine, not the small reversible
-# per-run actions that allowlist grants.
-#
-# Environment overrides, each defaulted below where it is read. WK_BENCH_VOLUME
-# is also read by bench/mac-ab.sh and boot/machines/mbp.conf's NODE_VOLUME, so
-# the three have to agree; WK_BENCH_NO_PKG skips the provisioning package, which
-# leaves Setup Assistant needing a person, so it is for debugging --install
-# itself.
+# Runs *on the Mac*, unlike `wk bench mac`: every step acts on the machine it runs on, needs real sudo, and one of them reboots.
+# A second APFS volume in the internal container, not an external SSD: the internal disk is the storage host mode measures on, so a second volume removes disk hardware as a variable, at the cost of shared free space, wear and thermals.
 
 set -euo pipefail
 WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -39,15 +20,11 @@ WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 VOLUME="${WK_BENCH_VOLUME:-WK Bench}"
 PROFILE=perf-macos-tolken
 
-# How much the host install still has to work in afterwards, the container
-# being shared. Fatal rather than a warning: the failure mode is a full disk
-# discovered mid-build.
-NEED_GB="${WK_BENCH_NEED_GB:-120}"
+NEED_GB="${WK_BENCH_NEED_GB:-120}"   # what the host install still has to work in; the failure mode is a full disk discovered mid-build
 
 DRY=""
 
-# Every mutating command goes through here; nothing calls sudo directly.
-run() {
+run() {   # every mutating command goes through here; nothing calls sudo directly
     if [ -n "$DRY" ]; then
         local q="" a
         for a in "$@"; do q="$q $(sh_quote "$a")"; done
@@ -57,21 +34,15 @@ run() {
     "$@"
 }
 
-usage() { sed -n '3,13p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 1; }
+usage() { usage_block "$0" >&2; exit 1; }
 
-# The guard is here, not at the top: a question about the command has to be
-# answerable from a machine that is not the Mac.
-case "${1:-}" in
+case "${1:-}" in   # -h before the is_macos guard: the command has to be explicable from another machine
     -h|--help) usage ;;
 esac
 is_macos || die "this runs on the Mac itself -- it acts on the machine's own disk.
   From another machine, the lane that drives it is: wk bench mac <ws>"
 
-# --- reading the disk --------------------------------------------------------
-# plutil -extract against `diskutil info -plist`, not awk against the human
-# output, whose labels differ between macOS versions and disk kinds.
-
-dk() { diskutil info -plist "$1" 2>/dev/null; }
+dk() { diskutil info -plist "$1" 2>/dev/null; }   # -plist, not the human output, whose labels differ between macOS versions and disk kinds
 
 dk_field() {  # $1 target, $2 key; empty (not an error) when the key is absent
     dk "$1" | plutil -extract "$2" raw - 2>/dev/null || true
@@ -90,9 +61,7 @@ free_bytes_of_container() {
 
 volume_exists() { diskutil info "$VOLUME" >/dev/null 2>&1; }
 
-# Mounted and actually a macOS system volume: an empty formatted volume with
-# the right name mounts perfectly and boots nothing.
-volume_is_system() {
+volume_is_system() {   # an empty formatted volume with the right name mounts perfectly and boots nothing
     [ -d "/Volumes/$VOLUME/System/Library/CoreServices" ] \
         && [ -f "/Volumes/$VOLUME/System/Library/CoreServices/SystemVersion.plist" ]
 }
@@ -156,9 +125,7 @@ do_create() {
   WK_BENCH_NEED_GB deliberately lower if you have costed it."
     fi
 
-    # No size argument: a macOS upgrade that outgrows a quota fails looking
-    # like a disk fault.
-    info "adding APFS volume '$VOLUME' to $cont"
+    info "adding APFS volume '$VOLUME' to $cont"   # no size: an upgrade that outgrows a quota fails looking like a disk fault
     [ -n "$DRY" ] || log "  sudo will ask for your password"
     run sudo diskutil apfs addVolume "$cont" APFS "$VOLUME"
     [ -n "$DRY" ] && return 0
@@ -167,8 +134,6 @@ do_create() {
 
 do_fetch() {
     local want="${1:-}"
-    # softwareupdate, not a downloaded .app: the one source Apple personalises
-    # correctly for the machine asking.
     if [ -z "$want" ]; then
         info "full installers this Mac is offered"
         softwareupdate --list-full-installers 2>&1 | sed 's/^/  /' >&2
@@ -178,7 +143,7 @@ do_fetch() {
         log "  two different macOS versions is a second variable in every number."
         return 0
     fi
-    info "fetching the macOS $want installer (this is tens of GB)"
+    info "fetching the macOS $want installer (this is tens of GB)"   # softwareupdate, the one source Apple personalises for the machine asking
     run softwareupdate --fetch-full-installer --full-installer-version "$want"
 }
 
@@ -240,10 +205,7 @@ EOF
         confirm "start the install onto '$VOLUME' now?" || { log "nothing done"; return 0; }
     fi
 
-    # --user/--passprompt are not optional: on Apple Silicon the installer
-    # cannot personalise a volume without a credential from a volume owner,
-    # and omitting them dies at the licence banner. --nointeraction is dropped
-    # deliberately: it suppresses the prompt --passprompt needs.
+    # --user/--passprompt are not optional: on Apple Silicon the installer cannot personalise a volume without a volume owner's credential, and --nointeraction would suppress the prompt --passprompt needs.
     local admin="${WK_BENCH_ADMIN:-$(id -un)}"
     log "  authorising as '$admin' -- it must be a volume owner on this Mac"
 
@@ -261,21 +223,7 @@ EOF
     return 0
 }
 
-# --- the package that makes Setup Assistant unnecessary ----------------------
-# `startosinstall --installpackage` lays a package down before first boot, the
-# only hook early enough to answer Setup Assistant.
-#
-#   /private/var/db/.AppleSetupDone   marks setup done, safe to write on an
-#                                     offline volume
-#   /Library/LaunchDaemons/…plist     runs the script below at first boot
-#   /usr/local/libexec/…firstboot.sh  everything needing a *live* system,
-#                                     including account creation: writing
-#                                     dslocal records by hand on an offline
-#                                     volume risks an account that exists
-#                                     and cannot log in
-#   /usr/local/share/wk-bench/        its payload: authorized_keys, wk-tools
-#                                     (travels with the package -- the bench
-#                                     install has no network route yet)
+# `startosinstall --installpackage` lays a package down before first boot, the only hook early enough to answer Setup Assistant. Account creation waits for the live system, because writing dslocal by hand on an offline volume risks an account that exists and cannot log in; wk-tools travels in the payload because the install has no network route yet.
 
 pkg_default_out() { echo "${TMPDIR:-/tmp}/wk-bench-provision.pkg"; }
 
@@ -290,10 +238,7 @@ do_build_pkg() {
     install -d "$root/Library/LaunchDaemons" "$root/usr/local/libexec" \
                "$root/usr/local/share/wk-bench" "$root/private/var/db"
 
-    # Two forms of Setup Assistant: .AppleSetupDone (the system assistant) and
-    # .skipbuddy in the User Template (the per-user one). `defaults` keys
-    # written into a live account do not survive, since auto-login builds a new
-    # session on the next boot before those keys mean anything.
+    # Two forms of Setup Assistant: .AppleSetupDone for the system one, .skipbuddy in the User Template for the per-user one. `defaults` keys written into a live account do not survive, since autologin builds a new session first.
     : > "$root/private/var/db/.AppleSetupDone"
     for _lproj in English.lproj Non_localized; do
         install -d "$root/System/Library/User Template/$_lproj" 2>/dev/null || true
@@ -304,14 +249,10 @@ do_build_pkg() {
 
     install -m 0755 "$WK_ROOT/bench/mac-bench-firstboot.sh" \
                     "$root/usr/local/libexec/wk-bench-firstboot.sh"
-    # `--installpackage` lands the root tree as real files, so firstboot
-    # sources this at the same relative path.
     install -m 0644 "$WK_ROOT/bench/mac-quiet-hosts.sh" \
                     "$root/usr/local/libexec/wk-bench-quiet-hosts.sh"
 
-    # RunAtLoad with no KeepAlive, which would resurrect a job that has
-    # deleted its own script. Not a LaunchAgent: creating the user is what this
-    # does, so there is no session yet.
+    # RunAtLoad with no KeepAlive, which would resurrect a job that has deleted its own script. Not a LaunchAgent: creating the user is what this does, so there is no session yet.
     cat > "$root/Library/LaunchDaemons/com.wk.bench-firstboot.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -329,11 +270,7 @@ do_build_pkg() {
 </plist>
 PLIST
 
-    # A known constant, not random and discarded: this repository is public,
-    # so this password is public, and anyone who reaches this machine's
-    # console or ssh gets passwordless sudo -- defensible only because the
-    # machine is disposable and holds no user data. WK_BENCH_PASSWORD
-    # overrides it.
+    # A known constant, so this password is public and anyone at this machine's console or ssh gets passwordless sudo: defensible only because the install is disposable and holds no user data.
     local pw="${WK_BENCH_PASSWORD:-benchbench}"
     local pwfile; pwfile="$(wk_state_dir)/bench-password"
     ensure_dir "$(wk_state_dir)" >/dev/null
@@ -342,9 +279,6 @@ PLIST
     chmod 0600 "$root/usr/local/share/wk-bench/password"
     log "  bench account password: '$pw' (constant; also at $pwfile)"
 
-    # Tailscale, so the bench install has an identity that does not move: its
-    # LAN address is a DHCP lease that changes between reboots. The auth key is
-    # never in this repository -- `wk_tailscale_authkey` asks for it.
     local akey
     if akey=$(wk_tailscale_authkey); then
         install -m 0600 "$akey" "$root/usr/local/share/wk-bench/tailscale-authkey"
@@ -355,17 +289,10 @@ PLIST
         warn "  at all from a driver that reaches this Mac over the tailnet."
     fi
 
-    # The Tailscale package, fetched rather than built. macOS ships as
-    # `Tailscale-<ver>-macos.pkg`, the macsys/standalone variant with its own
-    # LaunchDaemon, installed non-interactively by `installer -pkg … -target /`.
-    # Kept next to the auth key so provisioning does not need the network on
-    # the day the network is what is being fixed.
     local tspkg_cache="$HOME/.config/wk/Tailscale-macos.pkg"
     if [ ! -s "$tspkg_cache" ]; then
         log "  tailscale: fetching the macOS package (once)"
-        # Scraped off the index rather than assembled from the JSON
-        # `TarballsVersion`, which names the Linux tarball artefacts and has no
-        # macOS version field.
+        # Scraped off the index because the JSON's `TarballsVersion` names the Linux artefacts and has no macOS version field.
         local tsname tsver
         tsname=$(curl -fsS 'https://pkgs.tailscale.com/stable/' 2>/dev/null \
                  | grep -oE 'Tailscale-[0-9.]+-macos\.pkg' | sort -u | tail -1)
@@ -404,12 +331,7 @@ PLIST
           "$WK_ROOT/" "$root/usr/local/share/wk-bench/wk-tools/" \
         || die "could not stage wk-tools into the package"
 
-    # A postinstall starts the daemon on the boot it was installed on:
-    # `--installpackage` packages land after launchd has scanned
-    # /Library/LaunchDaemons, so a RunAtLoad daemon dropped then waits for the
-    # next boot -- which, with Setup Assistant suppressed and no account
-    # created, nothing triggers. `|| true` throughout: a failure here must not
-    # fail the OS install.
+    # `--installpackage` packages land after launchd has scanned /Library/LaunchDaemons, so a RunAtLoad daemon dropped then would wait for a next boot that nothing triggers; a postinstall bootstraps it on this one.
     local scripts="${TMPDIR:-/tmp}/wk-bench-pkgscripts"
     rm -rf "$scripts"; install -d "$scripts"
     cat > "$scripts/postinstall" <<'POST'
@@ -424,11 +346,10 @@ POST
     chmod 0755 "$scripts/postinstall"
 
     rm -f "$comp" "$out"
+    # --installpackage documents "a package built with productbuild(1)"; a bare component package is refused.
     pkgbuild --root "$root" --scripts "$scripts" \
              --identifier com.wk.bench-provision --version 1 \
              --install-location / "$comp" >/dev/null || die "pkgbuild failed"
-    # --installpackage documents "a package built with productbuild(1)"; a
-    # bare component package is refused.
     productbuild --package "$comp" "$out" >/dev/null || die "productbuild failed"
     rm -rf "$root" "$comp" "$scripts"
 
@@ -437,10 +358,6 @@ POST
     printf '%s' "$out"
 }
 
-# The Wi-Fi identity the bench install needs to exist on the network, read from
-# this Mac's own configuration and System keychain rather than stored in the
-# repository. A passphrase that cannot be read is reported, never worked
-# around.
 write_wifi_conf() {
     local dest="$1" dev ssid psk
     dev=$(networksetup -listallhardwareports 2>/dev/null \
@@ -467,9 +384,6 @@ write_wifi_conf() {
     info "  wifi: '$ssid' written into the bench payload"
 }
 
-# --- everything this needs from a person, asked before anything starts --------
-# The tailscale key is used inside `do_install` -> `do_build_pkg`, which on
-# `--all` is after creating an APFS volume and downloading a ~15 GB installer.
 gather_secrets() {
     info "what this needs from you, before anything is created or downloaded"
 
@@ -490,11 +404,7 @@ gather_secrets() {
     log "  sudo: startosinstall needs a volume owner's password (once, at --install)"
 }
 
-# --- re-arming an install that is already there -------------------------------
-# `--install` refuses once the volume carries macOS, so this re-arms first boot
-# for provisioning that half-landed -- the account, marker and wk-tools arrived
-# but Remote Login or autologin did not, and the daemon has already removed
-# itself. Written from host mode onto the mounted volume.
+# `--install` refuses once the volume carries macOS, so this re-arms first boot from host mode for provisioning that half-landed and whose daemon has already removed itself.
 do_repair() {
     local S="/Volumes/$VOLUME" D="/Volumes/$VOLUME - Data"
     volume_exists   || die "'$VOLUME' is not attached"
@@ -503,13 +413,7 @@ do_repair() {
 
     info "re-arming first-boot provisioning on '$VOLUME'"
 
-    # Remote Login, set offline as the launchd override it is; without ssh
-    # every other repair needs a person. `false` means "not disabled".
-    # Add-then-Set because PlistBuddy's Add fails when the key exists and Set
-    # fails when it does not.
-    #
-    # The stderr redirects are on PlistBuddy only: wrapping the statement in
-    # `run ... 2>/dev/null` would swallow `run`'s own "would run" line.
+    # Remote Login is a launchd override, so `false` means "not disabled"; Add-then-Set because PlistBuddy's Add fails when the key exists and Set fails when it does not.
     local dis="$D/private/var/db/com.apple.xpc.launchd/disabled.plist"
     if [ -f "$dis" ]; then
         if [ -n "$DRY" ]; then
@@ -561,7 +465,6 @@ do_repair() {
         write_wifi_conf "$S/usr/local/share/wk-bench/wifi.conf"
     fi
 
-    # The only route to a tailnet identity once --install refuses to run twice.
     local akey
     if akey=$(wk_tailscale_authkey); then
         if [ -n "$DRY" ]; then
@@ -621,9 +524,6 @@ PLIST
 
 
 do_provision() {
-    # Run in host mode this would write a bench-mode marker onto the
-    # workstation, which `wk bench staged` would measure with a desktop
-    # underneath and label bench_host=image.
     if [ ! -d /System/Volumes/Data ] || [ "$(diskutil info -plist / | plutil -extract VolumeName raw - 2>/dev/null || true)" != "$VOLUME" ]; then
         local here
         here=$(diskutil info -plist / | plutil -extract VolumeName raw - 2>/dev/null || echo '?')
@@ -634,8 +534,7 @@ do_provision() {
 
     info "provisioning '$VOLUME' as the benchmark install"
 
-    # 1. The id= line is the only thing that tells wk bench mode answered.
-    local marker=/etc/wk-image
+    local marker=/etc/wk-image   # its id= line is the only thing that tells wk bench mode answered
     if [ -f "$marker" ]; then
         unchanged "marker $marker: $(kv_field "$marker" id)"
     else
@@ -648,9 +547,7 @@ do_provision() {
         fi
     fi
 
-    # 2. The permanent half of quieting; `wk quiesce` does the per-run half.
-    #    Read back rather than trusted: `softwareupdate --schedule off` does
-    #    not stick in a guest.
+    # The permanent half of quieting, read back rather than trusted: `softwareupdate --schedule off` does not stick in a guest.
     info "quieting the install permanently"
     run sudo mdutil -i off -a          >/dev/null 2>&1 || warn "  spotlight: could not turn indexing off"
     run sudo softwareupdate --schedule off >/dev/null 2>&1 || warn "  updates: could not turn the schedule off"
@@ -664,14 +561,8 @@ do_provision() {
     log "    updates:   $(softwareupdate --schedule 2>&1 | tail -1)"
     log "    lowpower:  $(pmset -g 2>/dev/null | awk '/lowpowermode/{print $2}')"
     log "    filevault: $(fdesetup status 2>/dev/null | head -1)"
-    # `grep -c` prints 0 and exits 1 when it counts nothing, so `|| echo 0`
-    # would append a second zero on its own line.
-    log "    timemachine destinations: $(tmutil destinationinfo 2>/dev/null | grep -c '^Name' || true)"
+    log "    timemachine destinations: $(tmutil destinationinfo 2>/dev/null | grep -c '^Name' || true)"   # `|| echo 0` would print a second zero: grep -c prints 0 and exits 1
 
-    # 2b. The scanner check above can only report; this is the fix. The same
-    #     function mac-bench-firstboot.sh calls at first boot. It never calls
-    #     sudo itself, so it also runs under a plain test as a non-root user
-    #     against a temp file.
     . "$WK_ROOT/bench/mac-quiet-hosts.sh"
     if [ -n "$DRY" ]; then
         info "software-update endpoint denial in /etc/hosts"
@@ -686,15 +577,13 @@ do_provision() {
         fi
     fi
 
-    # 3. Apple's /usr/bin/python3 has pyobjc; a Homebrew python3 does not.
-    if /usr/bin/python3 -c 'import objc' 2>/dev/null; then
+    if /usr/bin/python3 -c 'import objc' 2>/dev/null; then   # Apple's python3 has pyobjc; a Homebrew one does not
         unchanged "/usr/bin/python3 has pyobjc"
     else
         warn "/usr/bin/python3 cannot 'import objc' -- run-benchmark's prepare_env will fail"
         log  "  xcode-select --install   (Command Line Tools; it is a GUI prompt)"
     fi
 
-    # 4. scipy is only for `wk bench compare` here; host mode can compare too.
     if /usr/bin/python3 -c 'import scipy' 2>/dev/null; then
         unchanged "scipy present (wk bench compare works here)"
     else
@@ -712,9 +601,6 @@ do_provision() {
     log ""
     log "  then, from the driving machine:  wk bench mac <ws> --preflight"
 }
-
-# --- dispatch ----------------------------------------------------------------
-# --dry-run is parsed out independently of the action, so it composes with all.
 
 ACTION=""
 VER=""
@@ -753,10 +639,7 @@ case "${ACTION:---report}" in
         fi
         do_install
 
-        # Not a no-op when everything exists: three steps that each say
-        # "nothing to do" can leave a machine with no tailnet identity.
-        # Re-arming first boot is the one route left that can still lay down
-        # the tailscale payload; --install refuses to run twice.
+        # Three steps that each say "nothing to do" can still leave a machine with no tailnet identity, and re-arming first boot is the one route left that can lay down the payload.
         if volume_exists && volume_is_system; then
             info "the volume is installed; completing provisioning"
             log  "  (--install cannot run twice, so anything still missing is"

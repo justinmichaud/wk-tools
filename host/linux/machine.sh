@@ -1,18 +1,12 @@
-# The workstation itself: storage, identity, and the few things that need root.
-# On Linux the workstation is the machine, so this does what the macOS playbook
-# does to its podman VM. Root is needed once; after this, no wk command is.
-
 . "$WK_ROOT/lib/store.sh"
 
 _uid=$(id -u)
 _gid=$(id -g)
 _user=$(id -un)
 
-# Under the user's own data directory (lib/store.sh), so it is unprivileged.
 info "store: $WK_STORE"
 store_init
 
-# Read back by the egress proxy after `wk pi setup`. Empty is correct here.
 if [ -f "$WK_STORE/pi-hosts" ]; then
     unchanged "pi allowlist"
 else
@@ -20,7 +14,6 @@ else
     changed "created $WK_STORE/pi-hosts"
 fi
 
-# The headless marker selects a 2 GB reserve instead of 12 GB: wrong here.
 _hm=$(headless_marker)
 if [ -f "$_hm" ]; then
     warn "$_hm exists on a workstation -- removing it"
@@ -48,8 +41,7 @@ case " $_deleg " in
        log  "  expected 'memory' in /sys/fs/cgroup/user.slice/user-$_uid.slice/user@$_uid.service/cgroup.controllers" ;;
 esac
 
-# /dev/dri/renderD128 is root:render 0660 and logind grants an ACL only to the
-# active seat, so the same user over ssh cannot open it. Group membership can.
+# renderD128 is root:render 0660 and logind's ACL covers only the active seat.
 _want_groups=""
 for g in render video; do
     getent group "$g" >/dev/null 2>&1 || continue
@@ -62,7 +54,6 @@ done
 if [ -z "$_want_groups" ]; then
     unchanged "render/video group membership"
 else
-    # Not fatal: what it buys is GPU access from an ssh session.
     if sudo -n true 2>/dev/null || [ -t 0 ]; then
         info "adding $_user to:$_want_groups (needs root once)"
         if sudo usermod -aG "$(echo $_want_groups | tr ' ' ',')" "$_user"; then
@@ -77,7 +68,6 @@ else
     fi
 fi
 
-# Without lingering the systemd --user egress proxy dies with the last login.
 if [ "$(loginctl show-user "$_user" -p Linger --value 2>/dev/null)" = yes ]; then
     unchanged "systemd lingering for $_user"
 else
@@ -91,7 +81,6 @@ fi
 
 unset _uid _gid _user _deleg _want_groups g _missing_keys _remote _repo _alias
 
-# Workspaces share this read-write, so re-seeding every run destroys their edits.
 if [ -n "$(ls -A "$WK_STORE/skills" 2>/dev/null)" ]; then
     unchanged "shared skills present (not overwritten)"
     diff -rq "$WK_ROOT/claude/skills" "$WK_STORE/skills" >/dev/null 2>&1 \
@@ -102,11 +91,9 @@ else
 fi
 
 # One deploy key per fork: GitHub refuses the same key on a second repository.
-# Reported, never generated: `wk key register` needs a token and a decision.
 _missing_keys=""
 while read -r _remote _repo _alias; do
     [ -n "$_remote" ] || continue
-    # The private half, in the directory nothing mounts (wk_push_held_dir).
     [ -f "$(wk_push_held_dir)/build_key_$_remote" ] || _missing_keys="$_missing_keys $_repo"
 done <<EOF
 $(wk_push_forks)

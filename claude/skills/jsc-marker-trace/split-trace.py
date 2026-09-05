@@ -1,25 +1,9 @@
 #!/usr/bin/env python3
-"""
-Split a samply profile into one profile per section, keyed by JSC text markers.
+"""Split a samply profile into one profile per section, keyed by JSC text markers.
 
-The instrumented build emits interval text markers (JSC_useTextMarkers=1), each a
-span covering the wall-clock time a named section ran. This tool selects markers
-whose name starts with --prefix (default "GC "), and for each distinct name writes
-a new profile keeping only the samples whose timestamp falls inside one of that
-name's spans. Because the section repeats (e.g. once per GC), the per-section
-profile pools samples from every occurrence, so its call tree is built from far
-more samples than any single occurrence provides -- trading wall-clock spread for
-statistical depth.
+The instrumented build (JSC_useTextMarkers=1) emits an interval text marker spanning the wall-clock time each named section ran. Markers whose name starts with --prefix (default "GC ") select the sections, and each distinct name gets a profile keeping only the samples whose timestamp falls inside one of that name's spans. The section repeats -- once per GC in the worked example, "GC ParallelMarking" / "GC Sweeping" / "GC Finalizers" from Heap::recordGCPhaseMarker, though any prefix works -- so the per-section profile pools every occurrence and its call tree rests on far more samples than one occurrence provides, trading wall-clock spread for statistical depth. The shared stack/frame/func/string tables, carrying the JIT-symbolicated frames from JSC_useJITDump, are kept verbatim, so the split profiles keep full symbolication.
 
-The worked example is the GC ("GC ParallelMarking" / "GC Sweeping" /
-"GC Finalizers" from Heap::recordGCPhaseMarker), but any prefix works. The shared
-stack/frame/func/string tables (which carry the JIT-symbolicated frames from
-JSC_useJITDump) are kept verbatim, so the split profiles retain full symbolication.
-
-Usage:
-  split-trace.py PROFILE.json.gz [-o OUTDIR] [--prefix "GC "] [--summary] [--top N]
-                                 [--all-threads] [--drop-idle]
-"""
+Usage:  split-trace.py PROFILE.json.gz [-o OUTDIR] [--prefix "GC "] [--summary] [--top N] [--all-threads] [--drop-idle]"""
 
 import argparse
 import gzip
@@ -41,17 +25,14 @@ def dump_profile(profile, path):
         json.dump(profile, f, separators=(",", ":"))
 
 
-def string_array_for(profile, thread):
-    # Newer samply keeps the string array in the shared block; older keeps it per thread.
+def string_array_for(profile, thread):   # newer samply keeps it in the shared block, older per thread
     shared = profile.get("shared")
     if shared and "stringArray" in shared:
         return shared["stringArray"]
     return thread["stringArray"]
 
 
-def marker_name(markers, j, strings):
-    # samply writes these as SimpleMarker, whose display name is in data.name (a
-    # string index); the top-level name column is just the marker type "SimpleMarker".
+def marker_name(markers, j, strings):   # samply writes these as SimpleMarker, whose display name is the string index in data.name; the top-level name column is only the marker type
     data = markers.get("data")
     if isinstance(data, list):
         d = data[j]
@@ -72,8 +53,7 @@ def merge_intervals(intervals):
     return merged
 
 
-def collect_sections(profile, prefix):
-    """Return ({section_name: merged [start,end] list}, {pids that emitted them})."""
+def collect_sections(profile, prefix):   # -> ({section name: merged [start, end] list}, {pids that emitted them})
     sections = {}
     marker_pids = set()
     for thread in profile["threads"]:
@@ -93,9 +73,7 @@ def collect_sections(profile, prefix):
     return {name: merge_intervals(iv) for name, iv in sections.items()}, marker_pids
 
 
-# Threads that actually run GC work; everything else in the GC window (audio render,
-# web workers, unrelated processes) is just noise sampled during the pause. Linux
-# truncates thread names to 15 chars (prctl PR_SET_NAME), so match by shared prefix.
+# The threads that run GC work; everything else awake in the GC window -- audio render, web workers, unrelated processes -- is noise sampled during the pause. Linux truncates a thread name to 15 chars (prctl PR_SET_NAME), so these match by shared prefix.
 GC_THREAD_NAMES = ("Heap Helper Thread", "JSC Heap Collector Thread")
 
 
@@ -118,13 +96,7 @@ def empty_samples(samples):
 
 
 def filter_samples(samples, merged, hit_spans, time_range, is_idle=None):
-    """Keep samples whose absolute time is inside a merged interval; recompute deltas.
-
-    hit_spans: set updated with the merged-interval indices that received a sample.
-    time_range: [min, max] of all sample absolute times, updated in place.
-    is_idle: optional predicate on a stack index; matching samples (parked threads)
-             are dropped so the split profile shows only active GC work.
-    """
+    """Keep samples whose absolute time is inside a merged interval, recomputing deltas. hit_spans gains the merged-interval indices a sample landed in and time_range the [min, max] of all sample absolute times, both in place; is_idle, an optional predicate on a stack index, drops parked-thread samples so only active GC work is left."""
     n = samples["length"]
     deltas = samples["timeDeltas"]
     stack = samples["stack"]
@@ -187,8 +159,7 @@ def leaf_name(profile, stack_index):
     return shared["stringArray"][fu["name"][func]]
 
 
-def leaf_name_line(profile, stack_index):
-    """Leaf function name plus the source line of that frame's address (from DWARF)."""
+def leaf_name_line(profile, stack_index):   # leaf function name plus that frame address's source line, from DWARF
     shared = profile["shared"]
     st, fr, fu = shared["stackTable"], shared["frameTable"], shared["funcTable"]
     frame = st["frame"][stack_index]
@@ -197,8 +168,7 @@ def leaf_name_line(profile, stack_index):
     return name, line
 
 
-# Leaf frames that mean "this thread was parked/idle", not doing GC work.
-# Covers both macOS (mach/psynch) and Linux (futex/poll/nanosleep) wait primitives.
+# Leaf frames that mean the thread was parked rather than doing GC work: the macOS mach/psynch and the Linux futex/poll/nanosleep wait primitives.
 IDLE_LEAVES = {
     # macOS
     "__psynch_cvwait", "__psynch_cvsignal", "__psynch_mutexwait", "semaphore_wait_trap",
@@ -236,8 +206,7 @@ def summarize(profile, section, new_threads, top):
             counts[name] = counts.get(name, 0) + 1
     active = total - idle
     idle_pct = 100.0 * idle / total if total else 0.0
-    # Line-level self time: key by (function, source line) so hot lines are visible.
-    line_counts = {}
+    line_counts = {}   # keyed by (function, source line), so a hot line is visible
     for thread in new_threads:
         for stack_index in thread["samples"]["stack"]:
             if stack_index is None:
@@ -329,8 +298,7 @@ def main():
         print(f"{section:24s} spans={len(merged):5d} hit={len(hit_spans):5d} "
               f"span_time={span_ms/1000:8.2f}s samples={kept:8d} ({pct:5.2f}% of total) "
               f"~{per_span:5.1f}/span  -> {os.path.basename(out_path)}")
-        # Sanity: markers must fall inside the sampled time window, else the time
-        # bases disagree and the split is meaningless.
+        # A marker outside the sampled time window means the two time bases disagree and the split is meaningless.
         m_lo = min(s for s, _ in merged)
         m_hi = max(e for _, e in merged)
         if time_range[0] != float("inf") and (m_hi < time_range[0] or m_lo > time_range[1]):

@@ -1,13 +1,4 @@
-# The fetch builder: downloads a pinned image somebody else built, verified
-# against a pinned hash (image_fetch_base, lib/image.sh). Used for Jumpdrive,
-# the PinePhone's service image, which boots from a card and exports the
-# phone's eMMC as USB mass storage -- how the eMMC gets written at all.
-# A fetch profile sets:
-#
-#   FET_URL       where it is published, pinned to a release rather than latest
-#   FET_SHA256    pins it by content too, since a release tag can be moved
-#   FET_XZ        1 if the artifact is xz-compressed (decompressed on write either way)
-#   FET_NOTE      one line: what it does
+# Downloads a prebuilt image a profile pins by FET_URL and FET_SHA256 (FET_XZ marks xz, FET_NOTE describes it).
 
 fetch_build() {
     local profile="$1"; shift

@@ -3,23 +3,13 @@
 # wk version -- which wk-tools this machine is running
 # wk: where=local name=none readonly group=hosts
 #
-# Every machine in the fleet runs its own copy of this repository: a git
-# checkout on a build box or a macOS guest (lib/tools.sh puts a commit there),
-# a file copy inside the podman VM. Either goes stale silently.
+# Prints two fields, derived on every call:
 #
-# One identity: the commit, plus whether tracked files have been changed
-# since. `sha` is `-` where the copy is not a checkout (the podman VM); dirty
-# is judged on tracked files only, since untracked and ignored files (a
-# .DS_Store, a __pycache__, a per-machine conf) differ legitimately between
-# two checkouts of the same commit.
-#
-# Derived on every call; nothing is written down.
+#   sha     the commit HEAD is at, or `-` where the copy is not a git checkout
+#   dirty   yes/no/unknown, judged on tracked files only
 
 set -euo pipefail
-# lib/common.sh is always this script's own, sourced by its own location;
-# WK_ROOT -- the tree reported on -- keeps whatever the caller already set
-# (lib/common.sh's own default), which lets a test point it at a scratch
-# checkout with no lib/ of its own.
+# WK_ROOT -- the tree reported on -- keeps whatever the caller already set.
 . "$(cd "$(dirname "$0")/.." && pwd)/lib/common.sh"
 
 git_sha() {

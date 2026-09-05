@@ -1,8 +1,5 @@
 #!/sbin/openrc-run
-# dnsmasq for the bridge segment, with one conf file named explicitly and
-# nothing else read: the packaged service also reads /etc/dnsmasq.conf and a
-# conf *directory*, so `port=0` in our file never reaches the daemon and it
-# fights the system resolver for port 53.
+# One conf file named explicitly, because the packaged service also reads /etc/dnsmasq.conf and a conf directory, so `port=0` never reaches the daemon and it fights the resolver for port 53. `after net`, not `need net`: `bind-dynamic` binds the interface when it appears; the board's DHCPDISCOVER lands 134 s after boot whatever userspace does, and wk-bridge-netwatch flapping the link is what makes a backed-off client ask again.
 description="DHCP (and the NTP hand-off) for the bridge segment"
 
 supervisor=supervise-daemon
@@ -12,16 +9,5 @@ respawn_delay=5
 respawn_max=0
 
 depend() {
-    # `after net`, not `need net`: `bind-dynamic` lets dnsmasq start before its
-    # interface exists and bind when it appears, and the DNS half re-reads
-    # /etc/resolv.conf on change by inotify.
-    #
-    # Starting early does not shorten the wait for the board's segment address
-    # after a phone reboot: the board asks for DHCP when the *kernel*
-    # enumerates the adapter, its DHCPDISCOVER lands 134 s after boot, and no
-    # userspace start is early enough. wk-bridge-netwatch flapping the link
-    # once the server is up is what makes a backed-off client ask again.
-    # Starting ahead of syslog costs only dnsmasq's banner; the DHCP exchanges
-    # are logged normally.
     after net wk-bridge-usb-host
 }

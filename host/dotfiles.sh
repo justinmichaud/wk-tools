@@ -1,23 +1,16 @@
-# Deploy host dotfiles, shared by macOS and Linux. Symlinked, not copied, so
-# anything already present and not a symlink moves to <name>.wk-backup once.
-
 link_config "$WK_ROOT/dotfiles/zed"     "$HOME/.config/zed"
 link_config "$WK_ROOT/dotfiles/lldbinit" "$HOME/.lldbinit"
 
-# ssh: config.d/wk-tools is this repo, config.d/wk is `wk new`, config.d/local
-# is the machine; ~/.ssh/config is an Include and owns nothing.
+# config.d/wk-tools is this repo, config.d/wk is `wk new`, config.d/local the machine.
 ensure_dir "$HOME/.ssh" 0700
 ensure_dir "$HOME/.ssh/config.d" 0700
 link_config "$WK_ROOT/dotfiles/ssh/config" "$HOME/.ssh/config.d/wk-tools"
 
-# A hand-written stanza reusing a fleet name (boot/machines.sh) would shadow the
-# fleet's own and silently redirect wk verbs that take an ssh destination, `wk
-# sysimage write` included, so those are dropped; the rest moves to config.d/local.
+# A stanza reusing a fleet name would silently redirect wk verbs, so it is dropped.
 _ssh_conf="$HOME/.ssh/config"
 _ssh_local="$HOME/.ssh/config.d/local"
 _ssh_include='Include config.d/*'
 
-# grep -vxF, not sed: a person's own Include is content to migrate, not syntax.
 _ssh_body() { grep -vxF "$_ssh_include" "$_ssh_conf" 2>/dev/null | grep -vE '^[[:space:]]*(#|$)' || true; }
 
 if [ -f "$_ssh_conf" ] && grep -qxF "$_ssh_include" "$_ssh_conf" && [ -z "$(_ssh_body)" ]; then
@@ -29,15 +22,13 @@ else
 
         [ -e "$_ssh_conf.wk-backup" ] || cp -p "$_ssh_conf" "$_ssh_conf.wk-backup"
 
-        # ssh takes a keyword's first value, so an older copy of a migrated
-        # stanza is dropped rather than kept below it.
+        # ssh takes a keyword's first value, so the older copy has to go.
         _ssh_new=$(mktemp)
         grep -vxF "$_ssh_include" "$_ssh_conf" | awk -v fleet="$_ssh_fleet" '
                 BEGIN {
                     n = split(fleet, f, "\n")
                     for (i = 1; i <= n; i++) if (f[i] != "") is_fleet[f[i]] = 1
                 }
-                # A stanza runs from its Host line to the next one.
                 tolower($1) == "host" {
                     drop = 0
                     for (i = 2; i <= NF; i++) if ($i in is_fleet) drop = 1
@@ -76,8 +67,6 @@ else
         } | write_file "$_ssh_local" 0600
         rm -f "$_ssh_new"; unset _ssh_new
 
-        # Reported, not removed: config.d/local reads first, and some of those
-        # are deliberate (`moose` resolving to localhost *on* moose).
         _ssh_owned=$(awk 'tolower($1) == "host" { for (i = 2; i <= NF; i++) print $i }' \
                         "$WK_ROOT/dotfiles/ssh/config" 2>/dev/null)
         awk -v owned="$_ssh_owned" '
@@ -99,7 +88,6 @@ fi
 unset -f _ssh_body
 unset _ssh_conf _ssh_local _ssh_include _ssh_fleet
 
-# git: same pattern, so credentials and per-machine settings stay out of git.
 if [ -f "$HOME/.gitconfig" ] && grep -q 'wk-tools/dotfiles/gitconfig' "$HOME/.gitconfig" 2>/dev/null; then
     unchanged "gitconfig include"
 else
@@ -107,9 +95,7 @@ else
     changed "gitconfig includes $WK_ROOT/dotfiles/gitconfig"
 fi
 
-# An include is not the last word: git takes a key's *last* value, so a [user]
-# section written after it wins, invisibly, until a commit is already pushed --
-# hence removed, not reported. Another identity means editing dotfiles/gitconfig.
+# git takes a key's *last* value, so a [user] after the include wins invisibly.
 for _id in name email; do
     _want=$(git config --file "$WK_ROOT/dotfiles/gitconfig" --get "user.$_id" || true)
     [ -n "$_want" ] || continue
@@ -117,7 +103,6 @@ for _id in name email; do
     if [ "$_have" = "$_want" ]; then
         unchanged "git user.$_id ($_want)"
     elif [ -z "$_have" ]; then
-        # The include is in place and yet nothing resolves: a broken include path.
         warn "git user.$_id resolves to nothing although the include is in place"
         log  "  check:  git config --show-origin --get user.$_id"
     else
@@ -145,7 +130,6 @@ _rc_line=". \"$WK_ROOT/shell/bashrc\""
 for _rc in "$HOME/.zshrc" "$HOME/.bashrc" "$HOME/.bash_profile"; do
     [ -f "$_rc" ] || touch "$_rc"
 
-    # register-sdk-on-host.sh is stale: the SDK runs in the VM, not the host.
     if grep -qE 'wk-tools/bashrc|register-sdk-on-host\.sh' "$_rc"; then
         _tmp="$(mktemp)"
         # || true: an all-stale file makes grep exit 1, aborting under set -e.

@@ -1,15 +1,10 @@
 #!/bin/bash
-# probe-sets.sh "a,b" "a,b,c" ...
-# Each arg is a comma-separated set of JetStream2.2 subtests. Runs each SET together
-# (browserbench ?report=true&test=a&test=b...) and reports crash/OOM vs pass + peak RSS.
-# Used to bisect a cumulative-OOM down to a minimal multi-test repro on the rpi3.
-# Requires /tmp/run-cog.sh and the fake seat.
+# probe-sets.sh "a,b" "a,b,c" ... -- runs each comma-separated set of JetStream2.2 subtests together and reports crash/OOM against pass with peak RSS, bisecting a cumulative OOM down to a minimal multi-test repro. Needs /tmp/run-cog.sh and the fake seat.
 set -u
 RESULTS=/tmp/probe_sets_results.txt
 : > "$RESULTS"
 for SET in "$@"; do
   pkill -9 -f "cog -P wl" 2>/dev/null; pkill -9 -f WPEWebProcess 2>/dev/null; sleep 3
-  # build URL
   URL="https://browserbench.org/JetStream2.2/?report=true"
   IFS=',' read -ra TESTS <<< "$SET"
   for t in "${TESTS[@]}"; do URL="${URL}&test=${t}"; done

@@ -1,12 +1,4 @@
-# Run a long command so that its state is never in doubt. Of the three ways a build
-# ends -- finished, died, hung -- only the hang needs machinery, so this watches the
-# log for progress, not the process for existence. All of it goes to stderr, so it
-# interleaves with but never corrupts the command's own output.
-
-# WK_POLL_SECONDS, WK_STALL_SECONDS, WK_ABORT_SECONDS and WK_HEARTBEAT_SECONDS
-# are all overridable. The last two share a name and a default with
-# lib/detach.sh's remote poll loop. The defaults are a build's: cmd/bench and cmd/pi
-# set 900/5400, since a benchmark reports per subtest rather than streaming output.
+# A build's defaults; cmd/bench and cmd/pi set 900/5400, a benchmark reporting per subtest rather than streaming. The last two are shared with lib/detach.sh's remote poll loop.
 WK_POLL_SECONDS="${WK_POLL_SECONDS:-15}"      # how often to check for progress
 WK_STALL_SECONDS="${WK_STALL_SECONDS:-300}"   # silence before warning
 WK_ABORT_SECONDS="${WK_ABORT_SECONDS:-1800}"  # silence before giving up
@@ -15,8 +7,7 @@ WK_HEARTBEAT_SECONDS="${WK_HEARTBEAT_SECONDS:-300}"  # how often to say "still g
 _now() { date +%s; }
 _fsize() { stat -c %s "$1" 2>/dev/null || stat -f %z "$1" 2>/dev/null || echo 0; }
 
-# ninja gives a counter; xcodebuild gives none, so the fallback names the most
-# recent action. Both read only the tail: a verbose xcodebuild log is hundreds of MB.
+# ninja gives a counter, xcodebuild none, so the fallback names the most recent action. Only the tail is read: a verbose xcodebuild log is hundreds of MB.
 _progress_line() {
     local tail_bytes=65536 out
 
@@ -53,10 +44,7 @@ _stall_report() {
     log  "  tail: $(tr '\r' '\n' < "$log" 2>/dev/null | grep -v '^$' | tail -1 | cut -c1-100)"
 }
 
-# run_watched <logfile> -- <command...>; returns the command's status, or 124 if it
-# was killed for stalling. The watched command is a foreground child, so INT/TERM
-# here means stop it, not merely stop watching; `on_interrupt` (lib/common.sh)
-# covers a terminal whose process-group delivery does not reach the child.
+# run_watched <logfile> -- <command...>: the command's status, or 124 killed for stalling. A hang is found in the log's progress, not the process's existence. The child is in the foreground, so INT/TERM here stops it; `on_interrupt` (lib/common.sh) covers a terminal whose process-group delivery misses it.
 run_watched() {
     local log="$1"; shift
     [ "${1:-}" = -- ] && shift
@@ -113,11 +101,7 @@ run_watched() {
     wait "$pid"
 }
 
-# Pull the first real error out of a build log: compilers keep going after the
-# first error, so the interesting line is buried near neither end. Anchored, since
-# bare `error:` matches inside message text (unarchivedObjectOfClass:fromData:error:
-# appears in every deprecation warning naming it); warnings are dropped -- Xcode
-# emits hundreds of "warning: llvmcas://...: No such file or directory" when fine.
+# Anchored, since a bare `error:` matches selector text (unarchivedObjectOfClass:fromData:error:) in every deprecation warning; warnings are dropped because Xcode emits hundreds of harmless "warning: llvmcas://...: No such file or directory".
 first_error() {
     tr '\r' '\n' < "$1" 2>/dev/null \
         | grep -nE '(^FAILED:|^error:|: error:|: fatal error:|ninja: build stopped|No such file or directory)' \

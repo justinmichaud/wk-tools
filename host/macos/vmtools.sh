@@ -1,5 +1,3 @@
-# Install what depends on wk-tools inside the VM: the SDK and the egress proxy.
-# Provisioning goes first: it is what holds the mounts read-only.
 . "$WK_ROOT/lib/store.sh"
 . "$WK_ROOT/host/units.sh"
 
@@ -19,8 +17,6 @@ _ssh_port=$(podman machine inspect "$WK_MACHINE" --format '{{.SSHConfig.Port}}')
 _ssh_key=$(podman machine inspect "$WK_MACHINE" --format '{{.SSHConfig.IdentityPath}}')
 _ssh_user=$(podman machine inspect "$WK_MACHINE" --format '{{.SSHConfig.RemoteUsername}}')
 
-# A podman machine is recreated by ./setup, not upgraded, so its host key is
-# disposable (_unpinned_host_key_opts, lib/reach.sh).
 command -v _unpinned_host_key_opts >/dev/null 2>&1 || . "$WK_ROOT/lib/reach.sh"
 
 _rsh() {
@@ -30,14 +26,13 @@ _rsh() {
         "$_ssh_user@localhost" "$@"
 }
 
-# A playbook that dies at its third task also reports changed=0.
 debug "re-applying machine provisioning"
 scp -q -P "$_ssh_port" -i "$_ssh_key" \
     -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
     "$WK_ROOT/host/macos/playbook.yaml" "$_ssh_user@localhost:/home/core/playbook.yaml"
 
-# `<verdict> <changed-count>` first, then the failing tasks. ansible-core 2.16
-# ships no machine-readable callback, so the recap line is what there is to read.
+# ansible-core 2.16 has no machine-readable callback, so the recap line is all
+# there is: a playbook that dies at its third task also reports changed=0.
 _playbook_verdict() {
     python3 -c '
 import re, sys
@@ -75,7 +70,6 @@ $(printf '%s\n' "$_pb" | tail -n +2 | sed 's/^/    /')" ;;
         podman machine ssh $WK_MACHINE -- ansible-playbook /home/core/playbook.yaml" ;;
 esac
 
-# From inside: what is asked for at creation and what the machine has differ.
 _verify_mounts() {
     if _rsh 'test -x /opt/wk-tools/wk'; then
         unchanged "this checkout is mounted at /opt/wk-tools"
@@ -93,7 +87,6 @@ _verify_mounts() {
     there when it is created:  ./setup --stage machine"
     fi
 
-    # The Claude CLI rewrites the credential in place when it spends the token.
     if ! _rsh "findmnt -no TARGET $(sh_quote "$WK_STORE/agent-rw")" >/dev/null 2>&1; then
         die "$WK_STORE/agent-rw is not a mount inside '$WK_MACHINE', so the claude.ai
     login this host holds ($(wk_agent_rw_dir)) reaches no workspace. The machine
@@ -107,7 +100,6 @@ _verify_mounts() {
     is created:  ./setup --stage machine"
     fi
 
-    # podman takes `--volume src:target:ro` and mounts it read-write anyway.
     local target
     for target in /opt/wk-tools "$WK_STORE/secrets"; do
         if _rsh "findmnt -no TARGET -O ro $(sh_quote "$target")" >/dev/null 2>&1; then
@@ -140,13 +132,7 @@ else
     warn "no build key; workspaces will not be able to push"
 fi
 
-# Everything below is reapplied every run; these are data, and are left alone:
-#   /var/lib/wk/git      the mirror        /var/lib/wk/ws       workspaces
-#   /var/lib/wk/base     snapshots         /var/lib/wk/cache    ccache et al
-#   /var/lib/wk/skills   mutable skills
-
-# Without --additional-flags the overlay mount cannot be attached, and without a
-# selectable --network the container shares the host namespace.
+# Without --additional-flags no overlay mount; without --network, the host's.
 if _rsh 'test -d /opt/webkit-container-sdk/.git'; then
     unchanged "webkit-container-sdk present"
 else
@@ -180,8 +166,6 @@ else
     changed "SDK patches re-applied (result differs from before)"
 fi
 
-# In place of nftables, which requires rootful podman, the proxy needs no
-# privilege and expresses policy in hostnames.
 debug "installing the egress proxy in the machine"
 
 # %t in a unit body expands to /run/user/501: the machine's `core` is uid 501.
@@ -192,18 +176,12 @@ _unit_journal="podman machine ssh $WK_MACHINE -- "
 unit_start wk-proxy.service "$_unit_root" "$_unit_store" \
     "workspaces will have no egress" "$_unit_journal" _rsh
 
-# Its socket is in %t/wk, which every container bind-mounts at /run/wk, so a
-# workspace uses a key it never reads. `wk push on|off` fills and empties it.
 unit_start wk-ssh-agent.service "$_unit_root" "$_unit_store" \
     "no workspace here can push" "$_unit_journal" _rsh
 
-# Terminates TLS for api.github.com and puts the real token in the Authorization
-# header. Its socket is under the store, not %t/wk: reached through the policy.
 unit_start wk-github-inject.service "$_unit_root" "$_unit_store" \
     "'git-webkit pr' in a workspace will fail" "$_unit_journal" _rsh
 
-# The standing read token goes in beside it, from what this device holds:
-# reading is open whatever position `wk push` is in.
 if push_agent_pat_sync push_agent_exec "$(push_agent_machine_read_pat)"; then
     debug "GitHub read token converged on the machine"
 else

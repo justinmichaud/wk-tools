@@ -1,14 +1,8 @@
-# Reaching the fleet from inside a workspace, which has no route to it: three
-# host-only verbs (wk boot, wk pi deploy, wk pi bench) become *requests* that
-# container/broker/wk-broker.py performs and validates on the workstation.
-
-# `/run/wk` is the one host directory a container bind-mounts (targets/container.sh).
-# WK_BROKER_SOCKET: where the broker listens, inside a workspace.
+# /run/wk, the one host directory a container bind-mounts, is where wk-broker.py listens.
 WK_BROKER_SOCKET="${WK_BROKER_SOCKET:-/run/wk/broker.sock}"
 
 broker_present() { [ -S "$WK_BROKER_SOCKET" ]; }
 
-# Exits with the brokered command's own status.
 broker_call() {
     local client="$WK_ROOT/container/broker/wk-broker-client.py"
     [ -f "$client" ] || die "this workspace's copy of wk-tools has no broker client

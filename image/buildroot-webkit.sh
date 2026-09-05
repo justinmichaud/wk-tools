@@ -1,34 +1,11 @@
 #!/usr/bin/env bash
-#
-# The in-workspace half of `wk sysimage webkit`: build one WebKit commit into
-# a *slot* beside a finished buildroot image, so a board running that image
-# carries several WebKits and an A/B alternates between them without a
-# reflash (`wk pi bench --ab`). Driven by image/buildroot.sh
-# (buildroot_webkit) via t_spawn from /opt/wk-tools, the same host/worker
-# split as buildroot-build.sh. Runs detached: nothing here may fail silently.
-#
-# Built with buildroot's own developer workflow (buildroot manual, "Using
-# Buildroot during development"): local.mk's WPEWEBKIT_OVERRIDE_SRCDIR points
-# the wpewebkit package at the workspace checkout, `make wpewebkit-rebuild`
-# rebuilds it, `make target-finalize` strips and drops development files, and
-# packages-file-list.txt records which files the package installed -- the slot
-# is those files.
-#
-# output/target keeps the slot's WebKit until the next image build, which drops
-# local.mk and rebuilds from the pinned tarball first, so an image never ships
-# the last slot built. A slot is told apart by the build-id its linker wrote
-# (BR2_TARGET_LDFLAGS, set by the image build).
-
+# The in-workspace half of `wk sysimage webkit`: one WebKit commit into a slot, detached.
 set -euo pipefail
 
-# The build wall (container/bin/wk-build-wall) lets ninja/cmake/make through
-# for wk's own builds and refuses them to an agent's shell.
 export WK_BUILD=1
 
 SRC=/src/WebKit
-# t_spawn (targets/container.sh) execs this with no WK_ROOT and no
-# lib/target.sh sourced, so there is no t_mirror_dir to ask: this is the fixed
-# bind mount that driver names (tests/test_mirror_path.py's named exception).
+# t_spawn execs this with no WK_ROOT and no lib/target.sh, so there is no t_mirror_dir to ask: this is the fixed bind mount that driver names (tests/test_mirror_path.py's named exception).
 MIRROR=/mirror/WebKit.git
 NAME=""; COMMIT=""; SLOT=""; JOBS=""
 
@@ -70,14 +47,11 @@ grep -q -- '--build-id' "$TCF" 2>/dev/null || fail "the image's toolchain file c
     against; the image build sets it (BR2_TARGET_LDFLAGS) and regenerates the
     file:  wk sysimage build $NAME   (incremental)"
 
-# BR2_EXTERNAL must be passed on every make: buildroot records it in
-# output/.br-external.mk, and a later make without it fails on the recorded path.
+# Every make needs BR2_EXTERNAL: buildroot records it, and a make without it then fails.
 BR_EXT=""
 [ -f /opt/wk-tools/image/buildroot/external/external.desc ] \
     && BR_EXT="BR2_EXTERNAL=/opt/wk-tools/image/buildroot/external"
 
-# --- the source ------------------------------------------------------------------
-# Refused dirty: a slot must be reproducible from its sha alone.
 dirty=$(git -C "$SRC" status --porcelain 2>/dev/null | wc -l | tr -d ' ')
 [ "$dirty" = 0 ] || fail "$SRC has $dirty uncommitted change(s); a slot is built from a
     commit and nothing else. Commit or discard them in the workspace first."
@@ -94,10 +68,6 @@ say "source      $SRC @ $(git -C "$SRC" rev-parse --short HEAD) ($(git -C "$SRC"
 say "slot        $SLOT -> $SLOTDIR"
 say "jobs        -j$JOBS"
 
-# --- the override ----------------------------------------------------------------
-# BR2_PACKAGE_OVERRIDE_FILE is $(CONFIG_DIR)/local.mk on this tree. The rsync
-# exclusions keep buildroot's copy to what a build reads: WebKitBuild is this
-# very tree, LayoutTests is a gigabyte no compiler opens.
 cat > "$WORKDIR/local.mk" <<EOF
 # Written by wk (image/buildroot-webkit.sh) for slot '$SLOT'; dropped by the
 # next image build. Points the wpewebkit package at the workspace checkout.
@@ -105,15 +75,11 @@ WPEWEBKIT_OVERRIDE_SRCDIR = $SRC
 WPEWEBKIT_OVERRIDE_SRCDIR_RSYNC_EXCLUSIONS = --exclude WebKitBuild --exclude LayoutTests --exclude JSTests --exclude ManualTests --exclude WebDriverTests --exclude Websites
 EOF
 
-# --- the build -------------------------------------------------------------------
 . /opt/wk-tools/build/guard.sh
 build_start=$(date +%s)
 say "building (make wpewebkit-rebuild; the output below is the whole account of it)"
 # shellcheck disable=SC2086
-# BR2_JLEVEL on make's command line, not in the environment: it is a kconfig
-# symbol read from .config, and an environment value loses to that include. It
-# is what buildroot's ninja packages size themselves by, and its default is
-# nproc+1 -- five times the guard's 2 GB/job budget.
+# BR2_JLEVEL is a kconfig symbol, so it goes on the command line, not the environment.
 WK_MB_PER_JOB=2048 guard_run "$JOBS" -- env FORCE_UNSAFE_CONFIGURE=1 \
     make -C "$WORKDIR" $BR_EXT BR2_JLEVEL="$JOBS" wpewebkit-rebuild \
     || fail "the WebKit build failed. The last lines above are the failing step."
@@ -122,10 +88,6 @@ say "finalising the root filesystem (strip, development files) the way an image 
 # shellcheck disable=SC2086
 make -C "$WORKDIR" $BR_EXT target-finalize >/dev/null || fail "target-finalize failed"
 
-# --- the slot --------------------------------------------------------------------
-# The files buildroot recorded installing for wpewebkit, as they are in
-# output/target after target-finalize. A fresh root every time: an install over
-# a previous one keeps files the new commit no longer produces.
 rm -rf "$ROOT"; mkdir -p "$ROOT"
 sed -n 's/^wpewebkit,//p' "$OUT/build/packages-file-list.txt" > "$SLOTDIR/files.txt"
 [ -s "$SLOTDIR/files.txt" ] || fail "packages-file-list.txt records nothing for wpewebkit"
@@ -133,7 +95,6 @@ sed -n 's/^wpewebkit,//p' "$OUT/build/packages-file-list.txt" > "$SLOTDIR/files.
     | tar --null -T - -cf - ) | tar -C "$ROOT" -xf - \
     || fail "could not copy wpewebkit's installed files into $ROOT"
 
-# --- proof ----------------------------------------------------------------------
 lib=$(find "$ROOT/usr/lib" -maxdepth 1 -name 'libWPEWebKit-*.so.*.*.*' | head -1)
 [ -n "$lib" ] || fail "the slot has no libWPEWebKit under $ROOT/usr/lib"
 execdir=$(find "$ROOT/usr/libexec" -maxdepth 1 -mindepth 1 -type d -name 'wpe-webkit-*' | head -1)
@@ -141,7 +102,6 @@ execdir=$(find "$ROOT/usr/libexec" -maxdepth 1 -mindepth 1 -type d -name 'wpe-we
 bundledir=$(find "$ROOT/usr/lib" -mindepth 2 -maxdepth 2 -type d -name injected-bundle | head -1)
 [ -f "$bundledir/libWPEInjectedBundle.so" ] || fail "no injected bundle under $ROOT/usr/lib"
 
-# The toolchain's own readelf reads the build-id; its prefix is the compiler's.
 readelf="$OUT/host/bin/$(sed -n 's/^set(CMAKE_C_COMPILER .*bin\/\(.*\)-gcc")$/\1/p' "$TCF")-readelf"
 python3 /opt/wk-tools/lib/wkslot.py manifest --readelf "$readelf" "$ROOT" "$SLOTDIR/slot.json" \
     slot="$SLOT" profile="$NAME" commit="$COMMIT" \
