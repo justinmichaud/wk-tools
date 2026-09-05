@@ -71,13 +71,13 @@ _cfg_use_libbacktrace() { # <kind: container|vm|local|remote> -> _CFG_LIBBACKTRA
 # libc++ over the system libstdc++ for every Linux CMake config. Apart from _CFG_DEFAULT_CMAKE because -D takes the last repeated value, so a host setting its own CMAKE_CXX_FLAGS (buildbox4's -Wno-invalid-constexpr) would drop this one; _config_merge_cxx_flags merges them instead.
 _CFG_LIBCXX_CMAKE='-DCMAKE_CXX_FLAGS=-stdlib=libc++ -DCMAKE_EXE_LINKER_FLAGS=-stdlib=libc++ -DCMAKE_SHARED_LINKER_FLAGS=-stdlib=libc++ -DCMAKE_MODULE_LINKER_FLAGS=-stdlib=libc++'
 
-_cfg_libcxx() { # <WK_TARGET_LIBCXX> -> _CFG_LIBCXX. `1` on, `0` off, unset on, read rather than compared against 0 so a typo (`WK_TARGET_LIBCXX=yes`) is named instead of silently meaning the default
+_cfg_libcxx() { # <WK_TARGET_LIBCXX> -> _CFG_LIBCXX. Opt-in: only a machine whose conf says `1` gets it. A container, a guest and this workstation name no conf, and the wkdev SDK image carries no libc++ at all -- an `unset means on` default put `-stdlib=libc++` on every container build and failed CMake's own compiler check. Read rather than compared, so a typo (`WK_TARGET_LIBCXX=yes`) is named instead of silently meaning the default
     case "$1" in
-        1|"") _CFG_LIBCXX=ON ;;
-        0)    _CFG_LIBCXX=OFF ;;
-        *)    die "WK_TARGET_LIBCXX='$1' in $(target_registry_conf "${WK_TARGET:-<target>}")
+        1)     _CFG_LIBCXX=ON ;;
+        0|"")  _CFG_LIBCXX=OFF ;;
+        *)     die "WK_TARGET_LIBCXX='$1' in $(target_registry_conf "${WK_TARGET:-<target>}")
     is neither 1 nor 0. It says whether that machine has libc++:
-    1 (or unset) to build with -stdlib=libc++, 0 to leave it out." ;;
+    1 to build with -stdlib=libc++, 0 (or unset) to leave it out." ;;
     esac
 }
 

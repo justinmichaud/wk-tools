@@ -289,10 +289,11 @@ Two build defaults are the machine's, not the config's. `USE_LIBBACKTRACE` is
 `ON` in a container, a guest or on this workstation -- this repo makes those
 and puts the library in them -- and `OFF` on a `remote` target, which is
 someone else's machine, where an absent package is a configure failure rather
-than a missing feature. And every Linux CMake config builds with
-`-stdlib=libc++` unless the machine's conf sets `WK_TARGET_LIBCXX=0`
-(buildbox4's does: measured there, no libc++ package). `1` and an unset field
-both mean libc++; any other value is refused, naming the conf.
+than a missing feature. And a Linux CMake config builds with `-stdlib=libc++`
+only where a machine's conf sets `WK_TARGET_LIBCXX=1`: a container, a guest
+and this workstation name no conf, and the wkdev SDK image has no libc++ in
+it. `0` and an unset field both mean the platform's own C++ library; any
+other value is refused, naming the conf.
 
 A build box is provisioned once and used for months, so it records the same
 thing the golden base does: `wk remote setup` writes the hash of what

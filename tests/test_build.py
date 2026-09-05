@@ -473,9 +473,11 @@ done
 
 class TestLibcxxDefault(unittest.TestCase):
     """The four -stdlib=libc++ flags (build/configs.sh, _CFG_LIBCXX_CMAKE):
-    the default for every Linux CMake config built with clang, switched off
-    per machine by WK_TARGET_LIBCXX=0 (targets/hosts/<name>.conf --
-    buildbox4.conf does, measured there: no libc++ package installed)."""
+    opt-in per machine with WK_TARGET_LIBCXX=1 in targets/hosts/<name>.conf.
+    A container, a guest and this workstation name no conf, and the wkdev SDK
+    image has no libc++ in it -- as a default the flags failed CMake's own
+    compiler check (`cannot find -lc++`) before a single WebKit file was
+    compiled."""
 
     def _cmake(self, config, os="linux", kind="container", env=None):
         cp = bash(f'''
@@ -489,23 +491,29 @@ echo "$CFG_CMAKE"
         assert cp.returncode == 0, cp.stdout + cp.stderr
         return cp.stdout.strip()
 
-    def test_present_by_default_for_a_linux_clang_config(self):
-        cmake = self._cmake("jsc-release")
-        for flag in ("-DCMAKE_CXX_FLAGS=-stdlib=libc++",
-                     "-DCMAKE_EXE_LINKER_FLAGS=-stdlib=libc++",
-                     "-DCMAKE_SHARED_LINKER_FLAGS=-stdlib=libc++",
-                     "-DCMAKE_MODULE_LINKER_FLAGS=-stdlib=libc++"):
-            self.assertIn(flag, cmake)
+    def test_absent_by_default_for_a_container(self):
+        """The case that has no conf to read: a container build must come out
+        with none of the four flags, or it fails at CMake's compiler check."""
+        self.assertNotIn("-stdlib=libc++", self._cmake("jsc-release"))
+
+    def test_absent_by_default_for_a_guest_and_for_this_workstation(self):
+        for kind in ("vm", "local"):
+            with self.subTest(kind=kind):
+                self.assertNotIn("-stdlib=libc++",
+                                 self._cmake("jsc-release", kind=kind))
 
     def test_absent_with_WK_TARGET_LIBCXX_0(self):
         cmake = self._cmake("jsc-release", env={"WK_TARGET_LIBCXX": "0"})
         self.assertNotIn("-stdlib=libc++", cmake)
 
     def test_present_with_WK_TARGET_LIBCXX_1(self):
-        """The value is read, not compared against 0: every conf in
-        targets/hosts carries the field, and `1` has to mean what it says."""
-        self.assertIn("-stdlib=libc++",
-                      self._cmake("jsc-release", env={"WK_TARGET_LIBCXX": "1"}))
+        """The one thing that turns them on, and all four of them at once."""
+        cmake = self._cmake("jsc-release", env={"WK_TARGET_LIBCXX": "1"})
+        for flag in ("-DCMAKE_CXX_FLAGS=-stdlib=libc++",
+                     "-DCMAKE_EXE_LINKER_FLAGS=-stdlib=libc++",
+                     "-DCMAKE_SHARED_LINKER_FLAGS=-stdlib=libc++",
+                     "-DCMAKE_MODULE_LINKER_FLAGS=-stdlib=libc++"):
+            self.assertIn(flag, cmake)
 
     def test_anything_else_is_refused_and_names_the_conf(self):
         """A typo in a conf would otherwise be indistinguishable from `1`, and
@@ -533,10 +541,10 @@ echo SURVIVED
         self.assertEqual(cmake, "")
 
     def test_the_cxx_flags_merge_keeps_both_values(self):
-        """buildbox4's own -DCMAKE_CXX_FLAGS=-Wno-invalid-constexpr
-        (WK_TARGET_CMAKE) must not silently drop the libc++ default under
-        cmake's last-D-wins rule -- config_build_env's
-        _config_merge_cxx_flags folds the two into one flag instead."""
+        """A machine whose conf carries both WK_TARGET_LIBCXX=1 and its own
+        -DCMAKE_CXX_FLAGS: under cmake's last-D-wins rule one would silently
+        drop the other, so config_build_env's _config_merge_cxx_flags folds
+        the two into one flag instead."""
         cp = bash(f'''
 set -euo pipefail
 . "{REPO}/lib/common.sh"
@@ -545,7 +553,7 @@ set -euo pipefail
 config_load jsc-release linux remote
 WK_TARGET_CMAKE="-DCMAKE_CXX_FLAGS=-Wno-invalid-constexpr" config_build_env /src/WebKit 4 10 native
 for e in "${{CFG_ENV[@]}}"; do case "$e" in WK_BUILD_CMAKE=*) echo "$e" ;; esac; done
-''')
+''', env={"WK_TARGET_LIBCXX": "1"})
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
         self.assertEqual(cp.stdout.count("-DCMAKE_CXX_FLAGS="), 1,
                          f"the two CMAKE_CXX_FLAGS did not merge into one: {cp.stdout}")
