@@ -22,47 +22,42 @@ a `report-<board>-speedometer2.1.html` beside the runs.
 
 ## rpi5, 2.46 32-bit userspace vs 2.46 64-bit
 
-Both systems are on `/dev/sda` (`sda1/2` 64-bit, `sda3/4` 32-bit), built from
-`6977eef7cd9ab01506bf0ff131dc169e8cfac601`, widths confirmed from the slots.
-The board is D0 silicon and needs the device tree named after its stepping;
-`image/boards/rpi5/local.conf.append` states the fault and asks for it.
+Both systems are on `/dev/sda` (`sda1/2` = `wpewebkit-2.46-yocto-rpi5-64-f3e2d8d0a46c`,
+`sda3/4` = `wpewebkit-2.46-yocto-rpi5-32-9e58345f6a25`), written 2026-09-04 from
+images carrying the D0 overlay, both built from
+`6977eef7cd9ab01506bf0ff131dc169e8cfac601`.
 
-- [ ] rebuild both rpi5 images with the D0 tree, rewrite both pairs of
-      `/dev/sda`, arm, and take the measurement. Rewriting the primary pair
-      erases the whole disk, so the 32-bit system is written again after it
-      (`--disk rpi5:/dev/sda@second`). Then `wk boot rpi5 --keep` inside the
-      300s watchdog, `wk pi deploy wpewebkit-2.46-yocto-rpi5-<width> rpi5
-      --slot base` per system, then `wk pi bench rpi5 speedometer2.1
-      --ab-systems <64-id>,<32-id> --slot base --rounds 5`
-- [ ] the image ships 52 of the kernel's 367 overlays and no
-      `overlays/overlay_map.dtb`, which is what makes the firmware substitute
-      a Pi 5 variant for an overlay that has one — and the image's config.txt
-      asks for `dtoverlay=vc4-kms-v3d`, whose Pi 5 variant is
-      `vc4-kms-v3d-pi5`. Unmeasured: check it when the board boots and the
-      browser has to render, not before [needs the board booted]
-- [ ] confirm on the booted board that the process measured is the slot's
-      binary and not the image's own browser (`/proc/<pid>/exe` of the running
-      WPEWebProcess). The slots' widths are settled; which one the board loads
-      is not [needs the board booted]
-- [ ] `NODE_DTB` (boot/machines/rpi5.conf) is a stored copy of a fact the
-      board can be asked for: the firmware picks the tree from the board
-      revision, which is one read of `/proc/cpuinfo` on a machine that has to
-      be up for `boot-check` to run at all. Derive it in `image_dtb_for`
-      instead, and the class of "boot-check passed a card that cannot boot"
-      goes with it [no hardware needed]
-- [ ] `cmdline_append_text` (cmd/sysimage) reads only the profile's
-      `cmdline.txt.append`; it needs the board-level half `config.txt.append`
-      and now `local.conf.append` have. What the rpi5 wants in it is
-      `panic=10` and a bounded `rootwait=30` — this kernel takes a value there
-      (`rootwait_timeout_setup`, init/do_mounts.c), so a root that never
-      appears panics and the one-shot returns the board to its NVMe instead of
-      costing a power cycle [no hardware for the change; a cycle to test]
+**The 64-bit system is done and needs nothing.** It boots in ~42s, joins as
+`rpi5-bench`, holds `wk boot --keep`, returns on `--back`, has its `base` slot
+deployed (WebKit `6977eef7cd9a`, build-id `2f19338d5dadf7a5a8fa11bd150cd745e85b8672`)
+and a connected DRM output (`card0-HDMI-A-2`). The board's own silicon needs
+`overlays/bcm2712d0.dtbo`, which `image/boards/rpi5/local.conf.append` states
+and asks for.
+
+- [ ] **the 32-bit system does not reach userspace.** Armed at 2026-09-04
+      23:53:00Z, it never appeared under either name and the 300s watchdog
+      never returned the board, so it stopped before the userspace that runs
+      the watchdog -- the same shape the 64-bit had before the overlay, but
+      not the same cause: the two systems are on one card, share a kernel and
+      a device tree, and the 64-bit one boots. What differs is the userspace
+      (poky multilib, `YOC_MULTILIB=lib32`) and the pair (3, selected by
+      `[tryboot]`, armed here for the first time). Read the console over HDMI
+      on one boot: an init that dies says so, and separates a broken 32-bit
+      rootfs from a pair-3 selection that landed somewhere unintended
+      [needs the board, a monitor, and a power cycle]
+- [ ] then `wk pi deploy wpewebkit-2.46-yocto-rpi5-32 rpi5 --slot base`, and
+      `wk pi bench rpi5 speedometer2.1 --ab-systems
+      wpewebkit-2.46-yocto-rpi5-64-f3e2d8d0a46c,wpewebkit-2.46-yocto-rpi5-32-9e58345f6a25
+      --slot base --rounds 5`
+- [ ] `wk boot --status` printed a boot time taken from the arming record
+      while the board was mid-reboot, which reads as a machine that has been
+      up since a boot it has already left. The fallback is deliberate; what is
+      owed is that a fallback value says it is one [no hardware needed]
 - [ ] rpi5's installed card helper predates the read-a-mounted-partition fix,
-      and its desktop session automounts both boot partitions, so every
-      marker read fails and `wk boot rpi5 --system <id>` refuses. Clearing the
-      mounts is a workaround, not the fix: `./setup --stage quiesce` from a
-      terminal on rpi5, which is the only thing that can replace a helper
-      [needs the rpi5]
+      and its desktop session automounts both boot partitions, so every marker
+      read fails and each write and arm needs the mounts cleared first:
+      `./setup --stage quiesce` from a terminal on rpi5, the only thing that
+      can replace a helper [needs the rpi5]
 
 ## Constraints that bound all of the above
 

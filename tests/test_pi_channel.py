@@ -163,10 +163,17 @@ echo "ARGS:$*"
 
 
 class TestISshLoginRule(WkTest):
-    """i_ssh (boot/machines.sh) logs in the way m_ssh does: root on a
-    bench-device (the driving key lives in root's authorized_keys, since a
-    bench system's host key -- and, on this channel, its whole install --
-    regenerates every reflash), the caller's own user everywhere else.
+    """i_ssh (boot/machines.sh) logs in as root whatever NODE_ROLE says: this
+    channel reaches the *bench system*, which is a wk image either way -- the
+    driving key lives in root's authorized_keys (disk_install_fleet), and its
+    whole install regenerates every reflash.
+
+    NODE_ROLE is about host mode, and asking it here left a board whose host
+    mode is a workstation unreachable in bench mode: jmichaud@rpi5-bench
+    answers "Permission denied (publickey,password)" where root@rpi5-bench
+    gives a shell (rpi5, 2026-09-04). Every i_ssh caller is cmd/pi; the macOS
+    drivers override m_ssh with their own user and never come here.
+
     WK_IMAGE_HOST short-circuits image_addr's tailnet lookup (see
     tests/test_wk_overrides_lib.py's TestBootMachines)."""
 
@@ -200,9 +207,11 @@ i_ssh true
         self.assertIn("-l root", out, out)
         self.assertIn("192.0.2.9", out, out)
 
-    def test_workstation_passes_no_dash_l(self):
+    def test_a_workstations_bench_system_is_root_too(self):
+        """The machine is a workstation in host mode; the system it boots for
+        a measurement is not, and only root accepts the driving key."""
         out = self._i_ssh_args("workstation")
-        self.assertNotIn("-l root", out, out)
+        self.assertIn("-l root", out, out)
         self.assertIn("192.0.2.9", out, out)
 
     def test_i_ssh_no_longer_logs_in_as_the_caller(self):

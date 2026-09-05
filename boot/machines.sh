@@ -123,9 +123,24 @@ m_ssh() {
 
 # -l root: the driving key is in root's authorized_keys. A bench-device's
 # system is replaced on demand and boots with its own fresh host key each time
-# (_unpinned_host_key_opts, shared with i_ssh).
+# (_unpinned_host_key_opts).
+#
+# Host mode is what this answers for, so the role is the right question: a
+# bench-device's host mode is its rescue, driven as root; a workstation's is a
+# person. The bench system is a different channel and asks i_ssh_opts.
 m_ssh_opts() {
     [ "${NODE_ROLE:-}" = bench-device ] || return 0
+    printf '%s' "-l root $(_unpinned_host_key_opts)"
+}
+
+# The bench system, which is a wk image whatever the machine is in host mode:
+# the driving key is in root's authorized_keys (disk_install_fleet) and it
+# boots with a fresh host key every time it is written. So this asks nothing
+# about NODE_ROLE. Reading the role here instead left every board whose host
+# mode is a workstation unreachable in bench mode -- `wk boot --keep`,
+# `wk pi deploy` and `wk pi bench` all sshed as the driving user and were
+# refused (rpi5, 2026-09-04).
+i_ssh_opts() {
     printf '%s' "-l root $(_unpinned_host_key_opts)"
 }
 
@@ -151,16 +166,30 @@ image_addr() {
 i_ssh() {
     # shellcheck disable=SC2046
     ssh -o BatchMode=yes -o ConnectTimeout="$(wk_ssh_timeout)" \
-        $(m_ssh_opts) $(_unpinned_host_key_opts) \
+        $(i_ssh_opts) \
         "$(image_addr)" "$@"
 }
 
-# Privileged, on whichever channel answered: already root on a bench-device
-# (m_ssh_opts), which a BusyBox system has no sudo for anyway; this user's sudo
-# on a workstation. `sudo -n` and never a bare `sudo`: every channel here is a
+# Whether the channel that answered is one wk is already root on. Two ways to
+# be: a *bench system* is a wk image driven as root whatever the machine is in
+# host mode (i_ssh_opts), and a bench-device's host mode is its rescue, also
+# root. Only a workstation in host mode is driven as a person.
+#
+# The channel and not NODE_ROLE, which describes host mode alone: asking the
+# role sent `wk boot --back` at a workstation-role board's bench system looking
+# for a helper only its host mode has, and it answered "wk-boot-priv: command
+# not found" with the board stuck in bench mode (rpi5, 2026-09-04).
+r_is_root() {
+    [ "${MODE_CHANNEL:-}" = bench ] && return 0
+    [ "${NODE_ROLE:-}" = bench-device ]
+}
+
+# Privileged, on whichever channel answered: already root where r_is_root says
+# so, which a BusyBox system has no sudo for anyway; this user's sudo on a
+# workstation. `sudo -n` and never a bare `sudo`: every channel here is a
 # BatchMode ssh with no terminal, so a sudo that prompts cannot be answered.
 r_sudo() { # <command string>
-    if [ "${NODE_ROLE:-}" = bench-device ]; then r_ssh "$@"; else r_ssh "sudo -n $*"; fi
+    if r_is_root; then r_ssh "$@"; else r_ssh "sudo -n $*"; fi
 }
 
 # The privileged half of arming a board that boots itself: one firmware
@@ -175,7 +204,7 @@ r_sudo() { # <command string>
 # order the helper checks for itself.
 BOOT_PRIV=/usr/local/libexec/wk-boot-priv
 boot_priv() { # <verb> [order]
-    if [ "${NODE_ROLE:-}" = bench-device ]; then
+    if r_is_root; then
         case "$1" in
             order)          r_ssh "vcmailbox 0x0003808b 4 4 $(sh_quote "$2")" ;;
             reboot)         r_ssh "setsid sh -c 'sleep 3; reboot' </dev/null >/dev/null 2>&1 &" ;;
@@ -190,7 +219,7 @@ boot_priv() { # <verb> [order]
 # Asked before the first refusal that would otherwise blame the firmware for a
 # missing helper, the same shape card_priv_require has (boot/disk.sh).
 boot_priv_require() {
-    [ "${NODE_ROLE:-}" = bench-device ] && return 0
+    r_is_root && return 0
     boot_priv status >/dev/null 2>&1 && return 0
     die "$NODE_NAME cannot be armed: its boot helper is missing, or its sudoers
     rule is not in force. A workstation is driven as a person and wk takes no

@@ -271,7 +271,7 @@ _pi_tunnel_cleanup() { [ -n "$PI_TUNNEL_PID" ] && kill "$PI_TUNNEL_PID" 2>/dev/n
 # The same options i_ssh applies, spelled out because the driver is python.
 pi_ssh_cmd() {
     # shellcheck disable=SC2046
-    printf 'ssh -o BatchMode=yes -o ConnectTimeout=%s %s %s' "$(wk_ssh_timeout)" "$(m_ssh_opts)" "$(image_addr)"
+    printf 'ssh -o BatchMode=yes -o ConnectTimeout=%s %s %s' "$(wk_ssh_timeout)" "$(i_ssh_opts)" "$(image_addr)"
 }
 
 # One number on both ends keeps the URL rewrite to a host swap.

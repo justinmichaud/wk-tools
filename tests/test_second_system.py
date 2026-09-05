@@ -589,12 +589,22 @@ class TestTailnetIdentityAcrossARewrite(WkTest):
         stood down when it was, put back once the new partitions are there."""
         body = re.search(r"(?ms)^cmd_write_from\(\).*?^}", (REPO / "cmd" / "sysimage").read_text()).group(0)
         save = body.index("disk_tailnet_save")
-        self.assertLess(save, body.index("disk_unmount"), "the identity is saved after the card is touched")
+        self.assertLess(save, body.index("disk_write_source"),
+                        "the identity is saved after the card is erased")
         self.assertLess(save, body.index("_tailnet_name_preflight"))
         self.assertIn('if [ "$kept" = yes ]; then', body)
         restore = body.index("disk_tailnet_restore")
         self.assertGreater(restore, body.index("disk_parts_present"))
         self.assertLess(restore, body.index("disk_seed_tailnet"))
+
+    def test_the_identity_is_read_off_an_unmounted_card(self):
+        """disk_tailnet_save *dies* if the helper refuses, and the helper's
+        gate refuses a medium with a mounted filesystem -- so on a machine
+        whose desktop session automounts the card, keeping the node depends on
+        the write having unmounted it first."""
+        body = re.search(r"(?ms)^cmd_write_from\(\).*?^}", (REPO / "cmd" / "sysimage").read_text()).group(0)
+        self.assertLess(body.index("disk_unmount"), body.index("disk_tailnet_save"),
+                        "the identity is read off a card the write has not unmounted")
 
 
 class TestUnitsForABusyBoxInit(WkTest):

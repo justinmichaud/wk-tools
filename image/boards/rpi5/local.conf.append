@@ -3,24 +3,23 @@
 # takes it. What belongs here is what the *board* requires of any image built
 # for it; what a measurement wants belongs to the profile.
 
-# The Pi 5 exists in two steppings and they need different device trees. The
-# 16 GB and later boards are D0, where the GPIO banks are narrower (32/4 and
-# 15/6 against C0's) and the pinctrl registers are laid out differently, so the
-# kernel selects the pin data by compatible: `brcm,bcm2712d0-pinctrl` against
-# `brcm,bcm2712c0-pinctrl`.
+# The Pi 5 exists in two steppings and the firmware adapts one device tree to
+# both: it loads broadcom/bcm2712-rpi-5-b.dtb, whose pinctrl nodes carry the C0
+# layout, and on D0 silicon applies overlays/bcm2712d0.dtbo over it -- narrower
+# GPIO banks (32/4 and 15/6), the two pinctrl nodes moved to
+# `brcm,bcm2712d0-pinctrl` with a smaller register window, and vc4 to
+# `brcm,bcm2712d0-vc6`.
 #
-# meta-raspberrypi at the rev these branches pin lists one Pi 5 device tree,
-# broadcom/bcm2712-rpi-5-b.dtb, whose pinctrl nodes carry the stepping-agnostic
-# `brcm,bcm2712-pinctrl` -- which that same kernel's driver maps to the *C0*
-# pin data (bcm2712_c0_plat_data, drivers/pinctrl/bcm/pinctrl-bcm2712.c). On a
-# D0 board the firmware asks for bcm2712d0-rpi-5-b.dtb, does not find it, falls
-# back to that one, and the first pull-config write lands at a C0 offset the
-# SoC aborts: an uncontainable SError, and a kernel panic in
-# bcm2712_pull_config_set before rootfs (measured on the rpi5's HDMI console,
-# 2026-09-04).
+# Without that overlay the kernel drives D0 hardware with C0 pin data
+# (`brcm,bcm2712-pinctrl` maps to bcm2712_c0_plat_data,
+# drivers/pinctrl/bcm/pinctrl-bcm2712.c), and the first pull-config write lands
+# outside the window: an uncontainable SError, and a panic in
+# bcm2712_pull_config_set before rootfs.
 #
-# The pinned kernel already builds the right tree -- the dts is in the rev, and
-# the driver already matches d0 -- so this asks for it by name rather than
-# moving the pin. Both trees ship: which one a board gets is the firmware's
-# choice from the board revision, not this image's.
-RPI_KERNEL_DEVICETREE:append = " broadcom/bcm2712d0-rpi-5-b.dtb"
+# The pinned kernel builds the overlay already -- its overlays Makefile lists
+# bcm2712d0.dtbo -- and meta-raspberrypi's RPI_KERNEL_DEVICETREE_OVERLAYS is a
+# hand-curated 52 of the 367 it compiles, which is the whole of what was
+# missing. Shipping the D0 *base* tree instead does nothing: the firmware
+# never asks for it by name (measured -- a card carrying
+# bcm2712d0-rpi-5-b.dtb panics identically, rpi5, 2026-09-04).
+RPI_KERNEL_DEVICETREE_OVERLAYS:append = " overlays/bcm2712d0.dtbo"

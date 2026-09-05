@@ -55,34 +55,45 @@ class TestTheBoardHalfIsWired(unittest.TestCase):
         self.assertIn('[ -n "${BOARD:-}" ] && [ -f "$_board_conf" ]', body)
 
 
-class TestTheRpi5NeedsItsOwnDeviceTree(unittest.TestCase):
+class TestTheRpi5NeedsTheD0Overlay(unittest.TestCase):
+    """The firmware loads one base tree for both steppings and adapts it on
+    D0 silicon with overlays/bcm2712d0.dtbo. meta-raspberrypi installs a
+    hand-curated 52 of the 367 overlays the kernel compiles, and that one is
+    not among them."""
+
     APPEND = BOARDS / "rpi5" / "local.conf.append"
 
     def test_the_file_exists(self):
         self.assertTrue(self.APPEND.exists())
 
-    def test_it_asks_for_the_d0_device_tree(self):
+    def test_it_asks_for_the_d0_overlay(self):
         active = [l.strip() for l in self.APPEND.read_text().splitlines()
                   if l.strip() and not l.strip().startswith("#")]
         self.assertEqual(
-            ['RPI_KERNEL_DEVICETREE:append = " broadcom/bcm2712d0-rpi-5-b.dtb"'],
-            active, "the rpi5 board append says something other than the D0 tree")
+            ['RPI_KERNEL_DEVICETREE_OVERLAYS:append = " overlays/bcm2712d0.dtbo"'],
+            active, "the rpi5 board append says something other than the D0 overlay")
 
     def test_it_appends_rather_than_replaces(self):
-        """Both trees ship: which one a board gets is the firmware's choice
-        from the board revision, not the image's."""
-        self.assertIn("RPI_KERNEL_DEVICETREE:append", self.APPEND.read_text())
-        self.assertNotIn('RPI_KERNEL_DEVICETREE = ', self.APPEND.read_text())
+        """The other 52 overlays are the branch's own choice; this adds one."""
+        text = self.APPEND.read_text()
+        self.assertIn("RPI_KERNEL_DEVICETREE_OVERLAYS:append", text)
+        self.assertNotIn("RPI_KERNEL_DEVICETREE_OVERLAYS = ", text)
 
-    def test_the_machine_conf_names_the_tree_the_firmware_asks_for(self):
+    def test_it_does_not_ship_a_per_stepping_base_tree(self):
+        """Measured: a card carrying bcm2712d0-rpi-5-b.dtb panics identically,
+        so the firmware does not ask for it by name and shipping it is weight
+        nothing loads."""
+        self.assertNotIn("bcm2712d0-rpi-5-b.dtb",
+                         [l.strip() for l in self.APPEND.read_text().splitlines()
+                          if l.strip() and not l.strip().startswith("#")])
+
+    def test_the_machine_conf_names_the_tree_the_firmware_loads(self):
         """NODE_DTB is what boot-check verifies resolves on the card, so a
-        stale one passes a card that cannot boot."""
+        name the firmware never requests passes a card that cannot boot."""
         conf = (REPO / "boot" / "machines" / "rpi5.conf").read_text()
         m = re.search(r"^NODE_DTB=(\S+)", conf, re.M)
         self.assertIsNotNone(m)
-        self.assertEqual("bcm2712d0-rpi-5-b.dtb", m.group(1))
-        self.assertIn(m.group(1).replace(".dtb", ""), self.APPEND.read_text(),
-                      "the board builds one device tree and boot-check verifies another")
+        self.assertEqual("bcm2712-rpi-5-b.dtb", m.group(1))
 
 
 if __name__ == "__main__":

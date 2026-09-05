@@ -33,13 +33,16 @@
 #   ls | list                    every image a workspace here has built, its
 #                                slots, and where it is
 #   disks <machine>             removable disks attached to that machine
-#   write --from <path> --disk <machine>:<device>[@second|@third]
+#   write --from <configuration|path> --disk <machine>:<device>[@second|@third]
 #                                write that image to that disk and make it a
-#                                fleet system on the card. --from takes a path
-#                                'wk sysimage ls' printed (or vm:<path>, inside
-#                                this machine's podman VM). Never touches a
-#                                machine's own system disk, and writing does not
-#                                make anything boot it ('wk boot' does).
+#                                fleet system on the card. --from takes a
+#                                configuration name and finds the image the
+#                                workspace built, or a path 'wk sysimage ls'
+#                                printed (or vm:<path>, inside this machine's
+#                                podman VM). An automounted card is unmounted
+#                                first. Never touches a machine's own system
+#                                disk, and writing does not make anything boot
+#                                it ('wk boot' does).
 #                                @second / @third write the image in beside the
 #                                system on partitions 1-2; the card helper
 #                                resolves which partitions each name is.
@@ -435,7 +438,7 @@ ROWS
     log ""
     log "$n image$([ "$n" = 1 ] || printf s), each in the workspace that built it."
     log "  There is no image store: the workspace is the name (wk help)."
-    log "  To write one:  wk sysimage write --from <path above> --disk <machine>:<device>"
+    log "  To write one:  wk sysimage write --from <configuration above> --disk <machine>:<device>"
     log "                 add --rescue for the system a board falls back to"
     return 0
 }
@@ -618,6 +621,43 @@ _resolve_disk_dev() { # <image machine>
     DISK_DEV="$dev"
 }
 
+# What `--from` was given: a path, `vm:<path>`, or a profile this checkout
+# defines. Resolved once, here, so every step below sees a path.
+_from_resolve() { # <spec> -- prints a path or vm:<path>
+    local spec="$1" path
+    case "$spec" in
+        vm:*|/*|./*|../*) printf '%s' "$spec"; return 0 ;;
+    esac
+    if path=$(_profile_image_path "$spec"); then
+        info "'$spec' is a configuration; its image is at $path"
+        printf '%s' "$path"
+        return 0
+    fi
+    if image_profile_load "$spec" >/dev/null 2>&1; then
+        die "'$spec' is a configuration this checkout defines, but no workspace here
+    has built it yet:
+        wk sysimage build $spec"
+    fi
+    die "'$spec' is neither a path nor a configuration this checkout defines.
+    Configurations with an image on this machine:
+$(_built_profiles | sed 's/^/      /')
+    'wk sysimage ls' prints them with their paths and sizes."
+}
+
+# The names `--from` accepts, which is the same question as "what has been
+# built here": one line each, for a refusal.
+_built_profiles() {
+    local builder ws path bytes mtime prof
+    while IFS="$(printf '\t')" read -r builder ws path bytes mtime; do
+        [ -n "${builder:-}" ] || continue
+        [ "$path" = - ] && continue
+        prof=$(_ws_profile "$ws" 2>/dev/null || printf '')
+        [ -n "$prof" ] && printf '%s\n' "$prof"
+    done <<EOF
+$(image_workspace_scan)
+EOF
+}
+
 # The source's own bytes, untouched: whatever compression they carry is undone
 # on the card machine, the only one here that has to own the tool for it.
 _from_reader() { # <spec> -- prints a command that emits the source bytes on stdout
@@ -634,6 +674,24 @@ _from_reader() { # <spec> -- prints a command that emits the source bytes on std
     esac
 }
 
+# The reverse of `_profile_from_path`, and the same one scan `wk sysimage ls`
+# prints: a profile names exactly one built image, so `--from <profile>` finds
+# its bytes rather than making somebody copy a path out of `ls`. Recomputed,
+# never recorded -- a rebuild moves nothing but changes these bytes.
+_profile_image_path() { # <profile> -- the path to its image, if it has one
+    local builder ws path bytes mtime
+    while IFS="$(printf '\t')" read -r builder ws path bytes mtime; do
+        [ -n "${builder:-}" ] || continue
+        [ "$path" = - ] && continue
+        [ "$(_ws_profile "$ws" 2>/dev/null || printf '')" = "$1" ] || continue
+        printf '%s' "$path"
+        return 0
+    done <<EOF
+$(image_workspace_scan)
+EOF
+    return 1
+}
+
 # The image sits under `$WK_STORE/ws/<workspace>/`, so the path carries what
 # `_ws_profile` derives from a bare workspace name.
 _profile_from_path() { # <path>
@@ -644,6 +702,7 @@ cmd_write_from() { # <from-spec> <disk-spec> <dry> <grow> <profile> <role> <mach
     local from="$1" spec="$2" dry="$3" grow="$4" profile="$5" role="$6" mach="${7:-}"
     local reader filter marker base fleet_edit="" bytes="" sha="" cmdline_add="" config_add=""
 
+    from=$(_from_resolve "$from")
     reader=$(_from_reader "$from")
     filter=$(_from_filter "${from#vm:}")
 
@@ -699,6 +758,17 @@ $(machine_list | sed 's/^/      /')"
     base=$(basename "${from#vm:}")
     base=${base%.xz}; base=${base%.zst}; base=${base%.gz}
     base=${base%.wic}; base=${base%.img}
+
+    # The card helper refuses a medium with a mounted filesystem on it, and a
+    # workstation with a desktop session automounts every card it is handed --
+    # so on such a machine every write refused, naming an unmount the write's
+    # own next step performs. Unmounted here instead, before the question is
+    # asked: the refusal that matters (a disk the machine runs from) is a
+    # different check in the same gate, and is never skipped.
+    #
+    # Not on a dry run, which changes nothing: there the refusal stands, and
+    # says what would be cleared.
+    [ -n "$dry" ] || disk_unmount "$DISK_DEV"
 
     # Asked before anything is erased, and the last question this end can answer
     # about the disk on its own.
@@ -758,7 +828,9 @@ EOF
     fi
 
     # --- the card, from here down --------------------------------------------
-    disk_unmount "$DISK_DEV"
+    # Reported rather than done again: the real write unmounted before the
+    # safety check above, and a dry run says so here.
+    [ -z "$dry" ] || disk_unmount "$DISK_DEV"
 
     WRITE_META=$(mktemp)
     wk_atexit _disk_cleanup
@@ -899,10 +971,10 @@ cmd_write() {
             --dry-run) dry=1; shift ;;
             --grow)    grow=1; grow_set=1; shift ;;
             --no-grow) grow=0; grow_set=1; shift ;;
-            -*) die "usage: wk sysimage write --from <path|vm:path> --disk <machine>:<device>[@second|@third]
+            -*) die "usage: wk sysimage write --from <configuration|path|vm:path> --disk <machine>:<device>[@second|@third]
     [--profile <name>] [--machine <name>] [--rescue] [--grow|--no-grow] [--dry-run]
     unknown option: $1" ;;
-            *)  die "usage: wk sysimage write --from <path|vm:path> --disk <machine>:<device>[@second|@third]
+            *)  die "usage: wk sysimage write --from <configuration|path|vm:path> --disk <machine>:<device>[@second|@third]
     unexpected argument: $1
     An image is bytes a workspace produced, not an id in a catalogue
     (wk help), so what identifies one is its path -- pass it to --from.
@@ -916,7 +988,7 @@ cmd_write() {
     machines:
 $(machine_list | sed 's/^/      /')"
 
-    [ -n "$from" ] || die "usage: wk sysimage write --from <path|vm:path> --disk <machine>:<device>[@second|@third]
+    [ -n "$from" ] || die "usage: wk sysimage write --from <configuration|path|vm:path> --disk <machine>:<device>[@second|@third]
     An image is bytes a workspace produced, not an id in a catalogue
     (wk help), so what identifies one is its path.
     'wk sysimage ls' lists every image a workspace here has built, with the
