@@ -41,6 +41,19 @@ if [ -f "$f" ]; then cat "$f"; fi
     return cp.stdout
 
 
+
+
+def resolved_cmdline(profile):
+    """What cmdline_append_text hands the card for that configuration."""
+    script = (
+        'set -euo pipefail\n'
+        '. "%s/lib/common.sh"\n. "%s/image/profiles.sh"\n. "%s/lib/image.sh"\n'
+        'eval "$(sed -n \'/^cmdline_append_text()/,/^}/p\' "%s/cmd/sysimage")"\n'
+        'image_profile_load %s >/dev/null 2>&1\n'
+        'cmdline_append_text\n'
+    ) % (REPO, REPO, REPO, REPO, profile)
+    return subprocess.run(["bash", "-c", script], capture_output=True, text=True).stdout
+
 def machine_of(conf):
     m = re.search(r"^IMG_MACHINE=(\S+)", conf.read_text(), re.M)
     return m.group(1) if m else None
@@ -87,6 +100,28 @@ class TestTheSplitIsKept(unittest.TestCase):
         rpi4 = resolved_append("webkit-2.52-yocto-rpi4-64")
         self.assertIn("force_turbo=1", rpi4)
         self.assertNotIn("force_turbo", (BOARDS / "rpi5" / "config.txt.append").read_text())
+
+    def test_the_kernel_command_line_has_the_same_two_sources(self):
+        """cmdline.txt.append is the config.txt.append of the kernel: a board
+        fact first, then the profile's. Held per profile, a board with no
+        console had no way to report a boot that stopped, and each one cost a
+        trip to the power supply (rpi5, 2026-09-04)."""
+        body = (REPO / "cmd" / "sysimage").read_text()
+        fn = body[body.index("cmdline_append_text()"):]
+        fn = fn[:fn.index("\n}\n")]
+        self.assertIn("image/boards/", fn, "the kernel command line has no board-level half")
+        self.assertLess(fn.index("image/boards/"), fn.index("IMG_SPEC_DIR"),
+                        "the profile's arguments come first, so a board fact could be lost")
+
+    def test_the_rpi5_makes_a_stopped_boot_report_itself(self):
+        """The pair, not either alone: without a bounded wait a missing root
+        never panics, and without panic= the panic never reboots."""
+        out = resolved_cmdline("wpewebkit-2.46-yocto-rpi5-64")
+        self.assertIn("panic=10", out)
+        self.assertIn("rootwait=30", out)
+
+    def test_a_board_with_nothing_to_say_appends_no_command_line(self):
+        self.assertEqual("", resolved_cmdline("webkit-2.52-yocto-rpi4-64").strip())
 
     def test_a_board_with_nothing_to_say_appends_nothing(self):
         out = resolved_append("webkit-2.52-yocto-rpi3-32")

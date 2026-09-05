@@ -237,15 +237,19 @@ class TestNoDriverReachesOnlyTheRescue(unittest.TestCase):
 
         for path, fn in (("boot/machines.sh", "b_device_image()"),
                          ("boot/machines.sh", "b_diag()"),
-                         ("boot/rpi5-usb.sh", "rpi5_check_autoboot()")):
+                         ("boot/rpi5-usb.sh", "rpi5_select_pair()")):
             src = (REPO / path).read_text()
             caller = src[src.index(fn):]
             caller = caller[:caller.index("\n}\n")]
             with self.subTest(fn=fn):
                 self.assertIn("b_medium_read", caller,
                               f"{fn} reads the medium itself instead of through the one reader")
-                self.assertNotIn("mount ", caller,
-                                 f"{fn} mounts the medium itself; only b_medium_read does")
+                # A hand-rolled `mount`, not the shared `disk_unmount` a
+                # caller that writes to the medium has to run first: the
+                # helper refuses a mounted one, and a desktop session
+                # automounts every card it is handed.
+                self.assertIsNone(re.search(r"(?<!un)(?<!disk_un)\bmount\s", caller),
+                                  f"{fn} mounts the medium itself; only b_medium_read does")
 
 
 if __name__ == "__main__":
@@ -276,33 +280,50 @@ load_driver rpi5-usb
         cp = bash(self.LOAD + 'echo "$B_SYSTEM_PARTS"')
         self.assertEqual(cp.stdout.strip(), "1 3", cp.stdout + cp.stderr)
 
-    def test_arming_the_second_pair_carries_the_flag(self):
-        """...and checks the selector is there first: absent, the flag is
-        ignored and pair 1 boots -- the wrong system, silently."""
-        cp = bash(self.LOAD + '''
-rpi5_check_autoboot() { echo "checked" >&2; }
+    STUBS = '''
 boot_priv_require() { :; }
-boot_priv() { echo "0x0 0x80000000"; }
-b_reboot_tryboot() { echo "tryboot reboot" >&2; }
+boot_priv() { case "$1" in order) echo "0x0 0x80000000" ;; reboot) echo "plain reboot" >&2 ;; esac; }
+card_priv() { echo "autoboot $*" >&2; }
+b_medium_read() { echo "[all]"; echo "boot_partition=$WANT"; }
+'''
+
+    def test_arming_the_second_pair_writes_the_selector(self):
+        """Pair 3 is selected by autoboot.txt and a plain reboot. The tryboot
+        flag selects it too, on paper -- and on this board it boots nothing:
+        dark, no kernel, no panic, where this path runs to userspace
+        (2026-09-05)."""
+        cp = bash(self.LOAD + self.STUBS + '''
+WANT=3
 ARM_SYS_PART=/dev/sda3 b_arm 0xf64
 b_reboot
 ''')
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertIn("checked", cp.stderr, "it armed pair 3 without checking the selector")
-        self.assertIn("tryboot reboot", cp.stderr, "the arming reboot did not carry the flag")
+        self.assertIn("autoboot /dev/sda 3", cp.stderr, "it did not select pair 3")
+        self.assertIn("plain reboot", cp.stderr, "the arming reboot was not a plain one")
+        self.assertNotIn("tryboot", cp.stderr, "the arming still carries the tryboot flag")
 
-    def test_arming_the_first_pair_is_a_plain_reboot(self):
-        cp = bash(self.LOAD + '''
-rpi5_check_autoboot() { echo "MUST NOT check" >&2; }
-boot_priv_require() { :; }
-boot_priv() { case "$1" in order) echo "0x0 0x80000000" ;; reboot) echo "plain reboot" >&2 ;; esac; }
-b_reboot_tryboot() { echo "MUST NOT carry the flag" >&2; }
+    def test_arming_the_first_pair_selects_it_too(self):
+        """Explicitly, not by leaving whatever the last arm wrote: the medium
+        keeps its selection, so an unstated pair is the previous run's."""
+        cp = bash(self.LOAD + self.STUBS + '''
+WANT=1
 ARM_SYS_PART=/dev/sda1 b_arm 0xf64
 b_reboot
 ''')
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertIn("autoboot /dev/sda 1", cp.stderr)
         self.assertIn("plain reboot", cp.stderr)
-        self.assertNotIn("MUST NOT", cp.stderr, cp.stderr)
+
+    def test_a_selector_that_did_not_take_is_refused(self):
+        """An older helper ignores the pair argument and writes partition 1;
+        the board would then boot the other system under this one's name."""
+        cp = bash(self.LOAD + self.STUBS + '''
+WANT=1
+ARM_SYS_PART=/dev/sda3 b_arm 0xf64
+''')
+        self.assertNotEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertIn("does not select pair 3", cp.stderr)
+        self.assertIn("./setup --stage quiesce", cp.stderr)
 
     def test_a_partition_this_stick_does_not_select_is_refused(self):
         cp = bash(self.LOAD + 'boot_priv_require() { :; }\nboot_priv() { echo "0x0 0x80000000"; }\nARM_SYS_PART=/dev/sda5 b_arm 0xf64\n')

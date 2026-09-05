@@ -1,0 +1,5 @@
+# --- wk sysimage: every image written for the rpi5 -----------------------------
+# Appended to the card's kernel command line by `wk sysimage write`, ahead of the profile's. What the board needs of any image; a measurement's own arguments belong to the profile.
+
+# This board has no cable and no console anyone reads, so a boot that stops is a boot nobody can diagnose and a trip to the power supply. The pair makes a failure report itself: a root that never appears stops waiting after 30s instead of forever, the panic that follows reboots after 10s, and the one-shot is spent -- so the board lands back on its NVMe and says so, rather than sitting dark. Measured: panic=10 returned it in ~40s where the same failure had cost a power cycle each time (2026-09-04). rootwait= takes a value in this kernel (rootwait_timeout_setup, init/do_mounts.c) and a later assignment wins over the bare rootwait the image ships.
+rootwait=30 panic=10

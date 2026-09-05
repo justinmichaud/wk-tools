@@ -241,10 +241,12 @@ WantedBy=multi-user.target
 "
 }
 
+# Two sources, the board's first, as config_append_text has; the helper refuses a second line.
 cmdline_append_text() {
+    local b="$WK_ROOT/image/boards/${IMG_MACHINE:-}/cmdline.txt.append"
     local f="${IMG_SPEC_DIR:-}/cmdline.txt.append"
-    [ -f "$f" ] || return 0
-    grep -vE '^\s*(#|$)' "$f" | tr '\n' ' ' | sed 's/ *$//' || true
+    { [ -f "$b" ] && cat "$b"; [ -f "$f" ] && cat "$f"; true; } \
+        | grep -vE '^\s*(#|$)' | tr '\n' ' ' | sed 's/  */ /g; s/^ //; s/ *$//' || true
 }
 
 # Two sources, the board's first: `os_check=0` is a fact about a Pi 5's firmware
@@ -543,6 +545,55 @@ _from_reader() { # <spec> -- prints a command that emits the source bytes on std
     that is inside this machine's podman VM, say so: --from vm:$1"
               printf 'cat %s' "$(sh_quote "$1")" ;;
     esac
+}
+
+# The reverse of `_profile_from_path`, off the one scan `wk sysimage ls` prints: a configuration names exactly one built image, so `--from <configuration>` finds its bytes rather than making somebody copy a path out of `ls`. Recomputed, never recorded.
+_profile_image_path() { # <profile> -- the path to its image, if it has one
+    local builder ws path bytes mtime
+    while IFS="$(printf '\t')" read -r builder ws path bytes mtime; do
+        [ -n "${builder:-}" ] || continue
+        [ "$path" = - ] && continue
+        [ "$(_ws_profile "$ws" 2>/dev/null || printf '')" = "$1" ] || continue
+        printf '%s' "$path"
+        return 0
+    done <<EOF
+$(image_workspace_scan)
+EOF
+    return 1
+}
+
+_built_profiles() {
+    local builder ws path bytes mtime prof
+    while IFS="$(printf '\t')" read -r builder ws path bytes mtime; do
+        [ -n "${builder:-}" ] || continue
+        [ "$path" = - ] && continue
+        prof=$(_ws_profile "$ws" 2>/dev/null || printf '')
+        [ -n "$prof" ] && printf '%s\n' "$prof"
+    done <<EOF
+$(image_workspace_scan)
+EOF
+}
+
+# What `--from` was given: a path, `vm:<path>`, or a configuration this checkout defines. Resolved once, here, so every step below sees a path.
+_from_resolve() { # <spec> -- prints a path or vm:<path>
+    local spec="$1" path
+    case "$spec" in
+        vm:*|/*|./*|../*) printf '%s' "$spec"; return 0 ;;
+    esac
+    if path=$(_profile_image_path "$spec"); then
+        info "'$spec' is a configuration; its image is at $path"
+        printf '%s' "$path"
+        return 0
+    fi
+    if image_profile_load "$spec" >/dev/null 2>&1; then
+        die "'$spec' is a configuration this checkout defines, but no workspace here
+    has built it yet:
+        wk sysimage build $spec"
+    fi
+    die "'$spec' is neither a path nor a configuration this checkout defines.
+    Configurations with an image on this machine:
+$(_built_profiles | sed 's/^/      /')
+    'wk sysimage ls' prints them with their paths and sizes."
 }
 
 _profile_from_path() { # <path>

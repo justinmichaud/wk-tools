@@ -1,25 +1,8 @@
 # --- wk sysimage: every image built for the rpi5 -------------------------------
-# Appended to the target's local.conf by `wk sysimage build`, last, so bitbake
-# takes it. What belongs here is what the *board* requires of any image built
-# for it; what a measurement wants belongs to the profile.
+# Appended to the target's local.conf by `wk sysimage build`, last, so bitbake takes it. What the board requires of any image built for it; what a measurement wants belongs to the profile.
 
-# The Pi 5 exists in two steppings and the firmware adapts one device tree to
-# both: it loads broadcom/bcm2712-rpi-5-b.dtb, whose pinctrl nodes carry the C0
-# layout, and on D0 silicon applies overlays/bcm2712d0.dtbo over it -- narrower
-# GPIO banks (32/4 and 15/6), the two pinctrl nodes moved to
-# `brcm,bcm2712d0-pinctrl` with a smaller register window, and vc4 to
-# `brcm,bcm2712d0-vc6`.
-#
-# Without that overlay the kernel drives D0 hardware with C0 pin data
-# (`brcm,bcm2712-pinctrl` maps to bcm2712_c0_plat_data,
-# drivers/pinctrl/bcm/pinctrl-bcm2712.c), and the first pull-config write lands
-# outside the window: an uncontainable SError, and a panic in
-# bcm2712_pull_config_set before rootfs.
-#
-# The pinned kernel builds the overlay already -- its overlays Makefile lists
-# bcm2712d0.dtbo -- and meta-raspberrypi's RPI_KERNEL_DEVICETREE_OVERLAYS is a
-# hand-curated 52 of the 367 it compiles, which is the whole of what was
-# missing. Shipping the D0 *base* tree instead does nothing: the firmware
-# never asks for it by name (measured -- a card carrying
-# bcm2712d0-rpi-5-b.dtb panics identically, rpi5, 2026-09-04).
+# The firmware loads one base tree for both Pi 5 steppings and adapts D0 with this overlay: narrower GPIO banks, both pinctrl nodes moved to brcm,bcm2712d0-* with a smaller register window, vc4 to brcm,bcm2712d0-vc6. Without it the kernel drives D0 through bcm2712_c0_plat_data and the first pull-config write aborts -- an SError, and a panic in bcm2712_pull_config_set before rootfs. The pinned kernel builds it; meta-raspberrypi installs a hand-curated 52 of the 367 overlays it compiles and this is not among them. Shipping the D0 *base* tree instead does nothing: the firmware never asks for it by name (measured, 2026-09-04).
 RPI_KERNEL_DEVICETREE_OVERLAYS:append = " overlays/bcm2712d0.dtbo"
+
+# A 4K-page kernel, not the 16K one meta-raspberrypi picks for this machine. arm64 COMPAT executes an AArch32 binary only when its segments are aligned to the kernel's page size, and the lib32 userspace is 4K aligned: under CONFIG_ARM64_16K_PAGES every 32-bit binary segfaults, init included, so the board panics with no init (measured -- a chroot into the lib32 root SIGSEGVs on `busybox echo`, as does its static-pie loader, 2026-09-04). bcm2711_defconfig names no page size, so it takes the 4K default, and already carries this silicon (PINCTRL_BCM2712, MFD_RP1, PINCTRL_RP1, COMMON_CLK_RP1); it is what Raspberry Pi OS ships as kernel8.img. The kernel_2712.img filename the firmware asks for is unchanged -- a name is not a page size. Both widths get this kernel, so the comparison varies userspace width and nothing else.
+KBUILD_DEFCONFIG:raspberrypi5 = "bcm2711_defconfig"

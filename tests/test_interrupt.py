@@ -27,6 +27,25 @@ def _env():
     return env
 
 
+def _kill_group_and_drain(proc, grace=5):
+    """Kill the process group and read what is left, without waiting forever.
+
+    The group, not the process: a grandchild holding the stdout pipe is
+    exactly why the read blocked. A second timeout still gives up rather than
+    hanging -- a test that cannot clean up must fail, not stall the suite.
+    """
+    try:
+        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        proc.kill()
+    try:
+        out, _ = proc.communicate(timeout=grace)
+    except subprocess.TimeoutExpired:
+        proc.stdout.close()
+        out = "(output unreadable: the pipe was still held open after the group was killed)"
+    return out
+
+
 def _run_and_interrupt(script, sig=signal.SIGINT, delay=1.0, timeout=10, ready_file=None):
     """Start `bash -c script`, wait until it is ready to be interrupted, signal
     the bash pid alone, and return (returncode, elapsed_seconds, stdout+stderr).
@@ -37,6 +56,12 @@ def _run_and_interrupt(script, sig=signal.SIGINT, delay=1.0, timeout=10, ready_f
     long enough for bash to even finish sourcing lib/common.sh yet. Otherwise
     a plain <delay>s sleep, matching "send SIGINT after ~1s".
     """
+    # Its own session, so cleanup can kill the whole group. The signal below
+    # still goes to the bash pid alone -- that is the behaviour under test --
+    # but a script that spawns a grandchild (`wk logs` leaves a `tail -f`)
+    # leaves it holding the stdout pipe when bash exits, and communicate()
+    # then waits for an EOF that never comes. `wk selftest` hung there for
+    # 2h52m with a defunct bash and an orphaned tail (2026-09-05).
     proc = subprocess.Popen(
         ["bash", "-c", script],
         cwd=str(REPO),
@@ -44,6 +69,7 @@ def _run_and_interrupt(script, sig=signal.SIGINT, delay=1.0, timeout=10, ready_f
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
+        start_new_session=True,
     )
     if ready_file:
         deadline = time.monotonic() + timeout
@@ -62,8 +88,7 @@ def _run_and_interrupt(script, sig=signal.SIGINT, delay=1.0, timeout=10, ready_f
     try:
         out, _ = proc.communicate(timeout=timeout)
     except subprocess.TimeoutExpired:
-        proc.kill()
-        out, _ = proc.communicate()
+        out = _kill_group_and_drain(proc)
         raise AssertionError(f"did not exit within {timeout}s of the signal; output so far:\n{out}")
     return proc.returncode, time.monotonic() - sent_at, out
 

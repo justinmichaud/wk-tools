@@ -66,12 +66,27 @@ class TestTheRpi5NeedsTheD0Overlay(unittest.TestCase):
     def test_the_file_exists(self):
         self.assertTrue(self.APPEND.exists())
 
+    def _active(self):
+        return [l.strip() for l in self.APPEND.read_text().splitlines()
+                if l.strip() and not l.strip().startswith("#")]
+
     def test_it_asks_for_the_d0_overlay(self):
-        active = [l.strip() for l in self.APPEND.read_text().splitlines()
-                  if l.strip() and not l.strip().startswith("#")]
-        self.assertEqual(
-            ['RPI_KERNEL_DEVICETREE_OVERLAYS:append = " overlays/bcm2712d0.dtbo"'],
-            active, "the rpi5 board append says something other than the D0 overlay")
+        self.assertIn('RPI_KERNEL_DEVICETREE_OVERLAYS:append = " overlays/bcm2712d0.dtbo"',
+                      self._active(),
+                      "the rpi5 board append does not ask for the D0 overlay")
+
+    def test_it_asks_for_a_4k_page_kernel(self):
+        """arm64 COMPAT executes an AArch32 binary only when its segments are
+        aligned to the kernel's page size, and the lib32 userspace is 4K
+        aligned: under the 16K default every 32-bit binary segfaults, init
+        included. bcm2711_defconfig names no page size, so it takes the 4K
+        default, and it already carries this silicon."""
+        self.assertIn('KBUILD_DEFCONFIG:raspberrypi5 = "bcm2711_defconfig"',
+                      self._active(),
+                      "the board would build the 16K kernel its 32-bit userspace cannot run on")
+
+    def test_it_says_nothing_else(self):
+        self.assertEqual(2, len(self._active()), self._active())
 
     def test_it_appends_rather_than_replaces(self):
         """The other 52 overlays are the branch's own choice; this adds one."""

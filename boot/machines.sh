@@ -96,20 +96,11 @@ m_ssh() {
     ssh -o BatchMode=yes -o ConnectTimeout="$(wk_ssh_timeout)" \
         $(m_ssh_opts) "$NODE_SSH" "$@"
 }
-
-# -l root: the driving key is in root's authorized_keys, and a bench-device's system is replaced on demand and boots with a fresh host key each time.
+# -l root on both channels: the driving key is in root's authorized_keys and a written system's host key regenerates every time. Host mode asks NODE_ROLE; the bench system is a wk image whatever the role says, and reading the role there left every workstation-role board unreachable in bench mode (rpi5, 2026-09-04).
 m_ssh_opts() {
     [ "${NODE_ROLE:-}" = bench-device ] || return 0
     printf '%s' "-l root $(_unpinned_host_key_opts)"
 }
-
-# The bench system, which is a wk image whatever the machine is in host mode:
-# the driving key is in root's authorized_keys (disk_install_fleet) and it
-# boots with a fresh host key every time it is written. So this asks nothing
-# about NODE_ROLE. Reading the role here instead left every board whose host
-# mode is a workstation unreachable in bench mode -- `wk boot --keep`,
-# `wk pi deploy` and `wk pi bench` all sshed as the driving user and were
-# refused (rpi5, 2026-09-04).
 i_ssh_opts() {
     printf '%s' "-l root $(_unpinned_host_key_opts)"
 }
@@ -134,8 +125,11 @@ i_ssh() {
         $(i_ssh_opts) \
         "$(image_addr)" "$@"
 }
-
-# `sudo -n` and never a bare `sudo`: every channel here is a BatchMode ssh with no terminal, so a sudo that prompts cannot be answered.
+r_is_root() {
+    [ "${MODE_CHANNEL:-}" = bench ] && return 0
+    [ "${NODE_ROLE:-}" = bench-device ]
+}
+# Privilege follows the channel, not NODE_ROLE: asking the role sent `wk boot --back` at a bench system looking for a helper only its host mode has (2026-09-04). `sudo -n`, never a bare `sudo` -- BatchMode ssh has no terminal to prompt on.
 r_sudo() { # <command string>
     if r_is_root; then r_ssh "$@"; else r_ssh "sudo -n $*"; fi
 }

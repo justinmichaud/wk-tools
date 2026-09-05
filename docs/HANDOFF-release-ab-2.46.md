@@ -22,42 +22,69 @@ a `report-<board>-speedometer2.1.html` beside the runs.
 
 ## rpi5, 2.46 32-bit userspace vs 2.46 64-bit
 
-Both systems are on `/dev/sda` (`sda1/2` = `wpewebkit-2.46-yocto-rpi5-64-f3e2d8d0a46c`,
-`sda3/4` = `wpewebkit-2.46-yocto-rpi5-32-9e58345f6a25`), written 2026-09-04 from
-images carrying the D0 overlay, both built from
-`6977eef7cd9ab01506bf0ff131dc169e8cfac601`.
+**Done.** `$WK_STORE/bench/20260905T040613Z-rpi5-systems`, 10/10 runs, 5 usable
+rounds of 5, `report-rpi5-speedometer2.1.html` beside them.
+A=`wpewebkit-2.46-yocto-rpi5-64-a88fba47e77d` 46.680+-2.365,
+B=`wpewebkit-2.46-yocto-rpi5-32-15c9b77bde09` 46.294+-1.758, B 0.83% slower,
+**p=0.0645 -- not significant**. Every leg verified that the reporting
+WPEWebProcess was the slot's own binary (build-ids 2f19338d5dad and
+ae181e9f0629).
 
-**The 64-bit system is done and needs nothing.** It boots in ~42s, joins as
-`rpi5-bench`, holds `wk boot --keep`, returns on `--back`, has its `base` slot
-deployed (WebKit `6977eef7cd9a`, build-id `2f19338d5dadf7a5a8fa11bd150cd745e85b8672`)
-and a connected DRM output (`card0-HDMI-A-2`). The board's own silicon needs
-`overlays/bcm2712d0.dtbo`, which `image/boards/rpi5/local.conf.append` states
-and asks for.
+The totals are indistinguishable and the headline is one run wide: round 1's
+A leg scored 51.048 where A's other four sit at 45.17-45.85, and dropping
+round 1 from both arms turns B 0.83% slower into B 1.4% faster. What the
+subtests show instead is a redistribution, and it is not subtle -- of 48 Sync
+measurements, 44 significant, 32-bit is slower in 33 (median +12.9%); of 48
+Async, 40 significant, 32-bit is faster in 30 (median -8.9%).
 
-- [ ] **the 32-bit system does not reach userspace.** Armed at 2026-09-04
-      23:53:00Z, it never appeared under either name and the 300s watchdog
-      never returned the board, so it stopped before the userspace that runs
-      the watchdog -- the same shape the 64-bit had before the overlay, but
-      not the same cause: the two systems are on one card, share a kernel and
-      a device tree, and the 64-bit one boots. What differs is the userspace
-      (poky multilib, `YOC_MULTILIB=lib32`) and the pair (3, selected by
-      `[tryboot]`, armed here for the first time). Read the console over HDMI
-      on one boot: an init that dies says so, and separates a broken 32-bit
-      rootfs from a pair-3 selection that landed somewhere unintended
-      [needs the board, a monitor, and a power cycle]
-- [ ] then `wk pi deploy wpewebkit-2.46-yocto-rpi5-32 rpi5 --slot base`, and
-      `wk pi bench rpi5 speedometer2.1 --ab-systems
-      wpewebkit-2.46-yocto-rpi5-64-f3e2d8d0a46c,wpewebkit-2.46-yocto-rpi5-32-9e58345f6a25
-      --slot base --rounds 5`
+That bears on the rpi3 question above. The rpi3's 2.46-vs-2.52 regression was
+nine times the rpi4's and concentrated in *Sync* time -- and width alone, at
+one release on one board, moves Sync by a median +12.9%. Same signature, so a
+32-bit userspace is the suspect the rpi5 pair was built to identify. It is not
+proof: this measures width at fixed release, and the rpi3 result is release at
+fixed width. The measurement that would close it is 2.46-vs-2.52 run on both
+widths of this board, which the lane can now do.
+
+- [ ] the rpi5's scores drift between rounds by more than their within-run
+      stdev and the cause is not established: A scored 51.048 then 45.756,
+      45.171, 45.571, 45.854, against a within-run stdev of 1.8%, while B held
+      46.494, 46.505, 46.330, 46.892, 45.249. Round 1 looks like a first-run
+      effect rather than a decline. Throttling is not the evidence -- 56.8C
+      between runs with the clock at 2400MHz, well under the 85C the SoC
+      throttles at, and the image pins the performance governor. What is
+      certainly missing is clock pinning: the rpi4 profile sets
+      `force_turbo=1`, `arm_freq=1500`, `arm_freq_min=1500`, `arm_boost=0`,
+      and the rpi5 has no profile `config.txt.append` at all. Find the cause
+      before pinning anything [no hardware for a change; a rewrite and re-run
+      to use it]
+
+- [ ] a comment-trimming pass over the tree has twice deleted a function body
+      and left its callers: `r_is_root` (boot/machines.sh), and
+      `_from_resolve` / `_profile_image_path` / `_built_profiles`
+      (cmd/sysimage). Both broke only at run time -- `wk boot --back` and
+      `wk sysimage write` answered "command not found" -- and both were found
+      by running the command, not by a test. `wk selftest` has no check that
+      every function a shell file calls is defined somewhere it sources; a
+      naive scan for it is swamped by variables and by shell snippets sent to
+      other machines, so what is owed is a check narrow enough to be worth
+      having [no hardware needed]
+
+- [ ] `NODE_DTB` (boot/machines/rpi5.conf) is a stored copy of a fact the board
+      can be asked for: the firmware picks its tree from the board revision,
+      one read of `/proc/cpuinfo` on a machine that must be up for
+      `boot-check` to run at all. Derive it in `image_dtb_for` and the class
+      of "boot-check passed a card that cannot boot" goes with it
+      [no hardware needed]
+
 - [ ] `wk boot --status` printed a boot time taken from the arming record
-      while the board was mid-reboot, which reads as a machine that has been
-      up since a boot it has already left. The fallback is deliberate; what is
-      owed is that a fallback value says it is one [no hardware needed]
-- [ ] rpi5's installed card helper predates the read-a-mounted-partition fix,
-      and its desktop session automounts both boot partitions, so every marker
-      read fails and each write and arm needs the mounts cleared first:
-      `./setup --stage quiesce` from a terminal on rpi5, the only thing that
-      can replace a helper [needs the rpi5]
+      while the board was mid-reboot, which reads as a machine up since a boot
+      it has already left. The fallback is deliberate; what is owed is that a
+      fallback value says it is one [no hardware needed]
+
+- [ ] both of the stick's boot partitions are labelled `boot`, so the
+      automounter's `/run/media/<user>/boot` and `boot1` swap between boots.
+      Anything addressing them by path rather than by partition number is
+      addressing whichever mounted first [no hardware needed]
 
 ## Constraints that bound all of the above
 

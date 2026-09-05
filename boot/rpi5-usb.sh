@@ -7,26 +7,23 @@ BOOT_ORDER_NORMAL=0xf461   # the EEPROM's own order: SD -> NVMe -> USB -> restar
 
 B_SYSTEM_PARTS="1 3"
 
-# The firmware's own A/B: on the stick's first boot partition it sets `boot_partition=1` under `[all]` and `=3` under `[tryboot]`, so pair 3 is one `reboot "0 tryboot"` away.
+# The firmware's own A/B, and the only selector this board has: `boot_partition=<pair>` under `[all]` on the stick's first boot partition, written before each arm. Not the firmware's tryboot flag -- this board's tryboot belongs to flash-kernel's staging on its NVMe (boot/machines/rpi5.conf), and a pair selected with it does not boot at all: dark, no kernel, no panic, where the same pair selected here runs to userspace (measured, 2026-09-05).
 RPI5_AUTOBOOT=autoboot.txt
 
 b_medium_selects_by_partition() { return 0; }
 
-RPI5_TRYBOOT=""
-
 b_arm() {
-    local order="$1" reply word2
+    local order="$1" reply word2 pair
 
     boot_priv_require
 
-    RPI5_TRYBOOT=""
     case "${ARM_SYS_PART:-}" in
-        "") ;;                                  # no selection: pair 1, the [all] default
-        *[!0-9]1|*1) ;;                         # pair 1 is what every plain boot lands on
-        *[!0-9]3|*3) rpi5_check_autoboot; RPI5_TRYBOOT=1 ;;
+        ""|*[!0-9]1|*1) pair=1 ;;
+        *[!0-9]3|*3)    pair=3 ;;
         *) die "'$ARM_SYS_PART' is not a boot partition this stick selects between
     (partition 1 or 3, the two pairs of a dedicated bench medium)" ;;
     esac
+    rpi5_select_pair "$pair"
 
     reply=$(boot_priv order "$order") \
         || die "the firmware mailbox call failed on $NODE_NAME"
@@ -38,26 +35,25 @@ b_arm() {
     debug "mailbox reply: $reply"
 }
 
-rpi5_check_autoboot() {
-    local out
+rpi5_select_pair() { # <pair>
+    local want="$1" out
+    disk_unmount "$NODE_DEVICE"
+    card_priv autoboot "$NODE_DEVICE" "$want" >/dev/null \
+        || die "could not write $NODE_DEVICE's pair selector on $NODE_NAME"
     out=$(b_medium_read "$(disk_part "$NODE_DEVICE" 1)" "$RPI5_AUTOBOOT") || out=""
     case "$out" in
-        *boot_partition=3*) return 0 ;;
+        *"boot_partition=$want"*) return 0 ;;
     esac
-    die "$NODE_DEVICE on $NODE_NAME has no [tryboot] boot_partition=3 in its
-    $RPI5_AUTOBOOT, so the firmware has no way to boot the second pair: the flag
-    would be ignored and pair 1 would boot instead -- the wrong system, with
-    nothing to say so. The file is written when the second pair is made, so
-    rewrite it:
-        wk sysimage write --from <path> --disk $NODE_NAME:$NODE_DEVICE@second"
+    die "$NODE_DEVICE on $NODE_NAME does not select pair $want after being told to,
+    so the board would boot the other system and it would be measured under this
+    one's name. Its card helper is older than the pair argument and ignores it.
+    The remedy, from a terminal on $NODE_NAME:  ./setup --stage quiesce
+    what its $RPI5_AUTOBOOT says now:
+$(printf '%s' "$out" | sed 's/^/      /')"
 }
 
 b_reboot() {
-    if [ -n "$RPI5_TRYBOOT" ]; then
-        b_reboot_tryboot
-    else
-        boot_priv reboot >/dev/null
-    fi
+    boot_priv reboot >/dev/null
 }
 
 # The one-shot order is write-only from userspace (no get_reboot_order tag), so the EEPROM's persistent order is the only evidence.
