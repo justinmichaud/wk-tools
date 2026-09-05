@@ -224,7 +224,7 @@ i_ssh true
 
 BENCH_CHANNEL_FUNCTIONS = (
     "pi_deploy_slot", "cmd_bench", "pi_bench_once", "pi_session_rdk",
-    "pi_session_weston", "pi_browsers_dead", "pi_display", "pi_pin_governor", "pi_ssh_cmd",
+    "pi_session_weston", "pi_browsers_dead", "pi_display", "pi_pin_clock", "pi_ssh_cmd",
 )
 
 

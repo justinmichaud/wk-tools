@@ -24,6 +24,14 @@
 #                                                build a WebKit for the image
 #   wk pi deploy <profile> <machine> --slot <name>   put it on the board
 #   wk pi bench <machine> <plan>                 run a benchmark
+#
+# A subtest one arm cannot run is dropped from both (bench/subtest-exclusions.conf,
+# applied when either arm's image is that width; --subtests overrides).
+#
+# An A/B (--ab, --ab-systems) opens with a warmup round: a discarded leg per
+# arm that measures the renderer, the GPU's engine time, the width and the JIT
+# tier reached off the live web process, and profiles it, into <task>/warmup/.
+# What it finds refuses the A/B.
 
 set -euo pipefail
 WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -36,6 +44,7 @@ WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 . "$WK_ROOT/boot/rpi-eeprom.sh"
 . "$WK_ROOT/lib/detach.sh"
 . "$WK_ROOT/lib/target.sh"
+. "$WK_ROOT/lib/profiler.sh"
 . "$WK_ROOT/lib/bench.sh"
 # Raised before lib/watchdog.sh is sourced: see its header.
 WK_STALL_SECONDS="${WK_STALL_SECONDS:-900}"
@@ -247,15 +256,22 @@ pi_display() {
     return 1
 }
 
-pi_pin_governor() {
+pi_pin_clock() {
     i_ssh 'for p in /sys/devices/system/cpu/cpufreq/policy*; do
-               [ -w "$p/scaling_governor" ] && echo performance > "$p/scaling_governor"
-           done 2>/dev/null; cat /sys/devices/system/cpu/cpufreq/policy0/scaling_governor 2>/dev/null' \
+               [ -w "$p/scaling_governor" ]  && echo performance > "$p/scaling_governor"
+               [ -w "$p/scaling_min_freq" ]  && cat "$p/scaling_max_freq" > "$p/scaling_min_freq"
+           done 2>/dev/null
+           p=/sys/devices/system/cpu/cpufreq/policy0
+           printf "%s %s %s\n" "$(cat $p/scaling_governor 2>/dev/null)" \
+                               "$(cat $p/scaling_min_freq 2>/dev/null)" \
+                               "$(cat $p/scaling_max_freq 2>/dev/null)"' \
         2>/dev/null | tr -d '\r' | tail -1
 }
 
 # The Pi 4 has no firmware GL, so its 2.38 browser renders through wayland+mesa.
 PI_RENDERER=""; PI_SESSION=""
+PI_WARMUP=""; PI_PROFILER=""; PI_PARANOID=""
+PI_SETTLE=""; PI_FREQ_MIN=""; PI_FREQ_MAX=""
 pi_session_up() { # <display evidence, or empty>
     if i_ssh 'command -v weston >/dev/null' >/dev/null 2>&1; then
         pi_session_weston "$1"
@@ -366,6 +382,9 @@ pi_launch_cmd() { # <slot> <slot.json> <cores wrap>
     local slot="$1" json="$2" cores="$3" root env browser wenv=""
     root="$(pi_slot_dir "$slot")/root"
     env=$(wkslot env "$json" "$root" | tr '\n' ' ')
+    # One line per optimizing compile: only the discarded leg pays for the printing.
+    [ -z "${PI_WARMUP:-}" ] \
+        || env="$env JSC_reportDFGCompileTimes=1 JSC_reportFTLCompileTimes=1"
     browser=$(wkslot get "$json" browser)
     # rdk's cmake claims the libWPEBackend-default.so symlink, so the default backend
     # would be the stub. POSIX sh: this runs through the board's /bin/sh, busybox ash included.
@@ -415,7 +434,8 @@ pi_bench_record() { # <out dir> <slot> <slot.json>
         runner_sha="$BENCH_RUNNER_SHA" local_copy="$PI_SEEDED" \
         host.kernel="$kernel" host.kernel_arch="$karch" host.governor="$gov" \
         host.throttled="$throttled" host.root_device="$root_dev" \
-        cores.set="$cores" \
+        host.cpu_khz="$PI_FREQ_MIN" --bool host.dvfs_pinned="$([ "$PI_FREQ_MIN" = "$PI_FREQ_MAX" ] && echo 1)" \
+        cores.set="$cores" subtests_excluded="$PI_EXCLUDED" \
         "${task_args[@]}" \
         ${BENCH_CFG_ARGS[@]+"${BENCH_CFG_ARGS[@]}"} \
         --bool forced="${WK_FORCE:-}" --bool software="$software" --bool cores.pinned="$cores"
@@ -471,7 +491,16 @@ pi_leg_prepare() { # <expected system id, or empty>
     fi
 
     kernel=$(i_ssh 'uname -r' 2>/dev/null | tr -d '\r')
-    gov=$(pi_pin_governor)
+    local _clk
+    _clk=$(pi_pin_clock); gov=$(printf '%s' "$_clk" | awk '{print $1}')
+    PI_FREQ_MIN=$(printf '%s' "$_clk" | awk '{print $2}')
+    PI_FREQ_MAX=$(printf '%s' "$_clk" | awk '{print $3}')
+    if [ -z "$PI_FREQ_MIN" ] || [ "$PI_FREQ_MIN" != "$PI_FREQ_MAX" ]; then
+        barrier "$machine's CPU clock is not pinned (min ${PI_FREQ_MIN:-unknown},
+    max ${PI_FREQ_MAX:-unknown}): DVFS is free to move the clock under the
+    measurement, and a number taken that way is not comparable with one that
+    was not."
+    fi
     # From sysfs rather than vcgencmd: the same bits, with no rpi-userland on the board.
     throttled=$(i_ssh 'cat /sys/devices/platform/soc/soc:firmware/get_throttled 2>/dev/null || true' 2>/dev/null | tr -d '\r ')
     [ -z "$throttled" ] || throttled="throttled=0x$throttled"
@@ -481,6 +510,7 @@ pi_leg_prepare() { # <expected system id, or empty>
     log "  root        $root_dev"
     log "  display     ${PI_DISPLAY:-none}"
     log "  governor    ${gov:-unknown}$([ "$gov" = performance ] || echo '   <-- not pinned; the score is not a perf result')"
+    log "  clock       ${PI_FREQ_MIN:-unknown} kHz$([ "$PI_FREQ_MIN" = "$PI_FREQ_MAX" ] && echo ' (dvfs pinned min=max)' || echo "   <-- scales up to ${PI_FREQ_MAX:-?}")"
     log "  throttled   ${throttled:-unknown}$(case "$throttled" in ''|throttled=0x0) ;; *) echo '   <-- non-zero: thermally or voltage limited' ;; esac)"
 
     i_ssh 'mkdir -p /run && touch /run/wk-keep-running' \
@@ -489,6 +519,95 @@ pi_leg_prepare() { # <expected system id, or empty>
     mid-run; a run that long is wasted rather than measured."
 
 }
+
+PI_PROF_REMOTE=/tmp/wk-prof
+PI_SUBTESTS=""; PI_EXCLUDED=""
+
+# A system id is <profile>-<hash>; the profile declares the image's word size.
+pi_profile_bits() { # <system id or profile>
+    local profile="$1" 
+    case "$profile" in *-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]*) profile="${profile%-*}" ;; esac
+    ( image_profile_load "$profile" >/dev/null 2>&1
+      case "${IMG_ARCH:-}" in armhf|armv7l|i686) echo 32 ;; *) echo 64 ;; esac ) 2>/dev/null
+}
+
+# One arm that cannot run a subtest disqualifies it for both arms.
+pi_resolve_subtests() { # <profile-or-system-id>...
+    local bits want="" line lp lb ls why
+    for want in "$@"; do
+        [ "$(pi_profile_bits "$want")" = 32 ] && bits=32
+    done
+    [ -n "$bits" ] || bits=64
+    while read -r lp lb ls why; do
+        case "$lp" in ''|\#*) continue ;; esac
+        [ "$lp" = "$plan" ] && [ "$lb" = "$bits" ] || continue
+        PI_EXCLUDED="${PI_EXCLUDED:+$PI_EXCLUDED,}$ls"
+        log "  excluded    $ls -- $why"
+    done < "$WK_ROOT/bench/subtest-exclusions.conf"
+    [ -z "$EXCLUDE_SUBTESTS" ] || PI_EXCLUDED="${PI_EXCLUDED:+$PI_EXCLUDED,}$EXCLUDE_SUBTESTS"
+    if [ -n "$SUBTESTS" ]; then
+        PI_SUBTESTS="$(printf '%s' "$SUBTESTS" | tr ',' ' ')"
+        return 0
+    fi
+    [ -n "$PI_EXCLUDED" ] || return 0
+    PI_SUBTESTS=$(bench_plan_read "webkitpy/benchmark_runner/data/plans/${plan}.plan" \
+        | wkdata subtests --exclude "$PI_EXCLUDED") \
+        || die "could not work out which subtests to run for $plan"
+    log "  subtests    $(printf '%s' "$PI_SUBTESTS" | wc -w) of the plan's own list; $PI_EXCLUDED dropped"
+}
+
+# A lib32 image reports aarch64 from `uname -m` and has no 64-bit loader, so a
+# profiler is chosen by the measured process's ABI, never the kernel's.
+PI_ARCH_PY='import sys
+h = open(sys.argv[1], "rb").read(20)
+print({(1, 40): "armv7l", (2, 183): "aarch64", (2, 62): "x86_64", (1, 3): "i686"}.get(
+    (h[4], int.from_bytes(h[18:20], "little")), "unknown"))'
+
+pi_userspace_arch() { # <a binary on the board>
+    i_ssh "python3 -c $(sh_quote "$PI_ARCH_PY") $(sh_quote "$1")" 2>/dev/null | tr -d '\r'
+}
+
+# A reboot empties /tmp, so every warmup leg stages again.
+pi_profiler_stage() { # <slot> <slot.json>
+    local karch have=no answer tool binary
+    PI_PROFILER=""; PI_PARANOID=""
+    karch=$(pi_userspace_arch "$(pi_slot_dir "$1")/root/$(wkslot get "$2" lib_file)")
+    [ -n "$karch" ] && [ "$karch" != unknown ] \
+        || { barrier "could not read the word size of the slot's own library on $machine,
+    so which profiler can run there is unknown."; return 0; }
+    i_ssh 'command -v sysprof-cli >/dev/null' >/dev/null 2>&1 && have=yes
+
+    if ! answer=$(profiler_resolve "$karch" "$have"); then
+        barrier "$answer
+    A warmup round exists to profile the arm it measures."
+        return 0
+    fi
+    tool="${answer%% *}"
+
+    i_ssh "mkdir -p $PI_PROF_REMOTE" >/dev/null 2>&1 \
+        || { barrier "could not make $PI_PROF_REMOTE on $machine."; return 0; }
+    if [ "$tool" = samply ]; then
+        binary=$(samply_fetch "$karch") \
+            || { barrier "samply $SAMPLY_VER for $karch could not be fetched to this host."; return 0; }
+        gzip -1 < "$binary" \
+            | i_ssh "gzip -dc > $PI_PROF_REMOTE/samply && chmod 755 $PI_PROF_REMOTE/samply" \
+            || { barrier "could not stage samply onto $machine ($PI_PROF_REMOTE)."; return 0; }
+    fi
+
+    PI_PARANOID=$(i_ssh 'cat /proc/sys/kernel/perf_event_paranoid 2>/dev/null' 2>/dev/null | tr -d '\r ')
+    if [ -z "$PI_PARANOID" ]; then
+        barrier "$machine's kernel has no /proc/sys/kernel/perf_event_paranoid, so it was
+    built without perf events and neither profiler can sample on it."
+        return 0
+    fi
+    [ "$PI_PARANOID" -le 1 ] 2>/dev/null \
+        || i_ssh 'echo 1 > /proc/sys/kernel/perf_event_paranoid' >/dev/null 2>&1 || true
+
+    PI_PROFILER="$tool"
+    log "  profiler    $tool (${answer#* }); perf_event_paranoid was $PI_PARANOID"
+}
+
+pi_profile_ext() { [ "$PI_PROFILER" = sysprof ] && printf 'syscap' || printf 'json'; }
 
 # A system A/B's reboot severs the previous leg's tunnel, so every leg opens its own.
 pi_tunnel_up() {
@@ -566,12 +685,19 @@ pi_system_boot() { # <system id>
     return 1
 }
 
+# Every leg here is a fresh boot, and a first run after one is not like the
+# rest: it is thrown away rather than allowed to land on whichever arm rebooted.
 pi_system_leg() { # <system id>
     pi_system_boot "$1" || return 1
     pi_tunnel_up
     pi_leg_prepare "$1"
     info "bringing up the session on $machine"
     pi_session_up "$PI_DISPLAY"
+    if [ -z "$PI_WARMUP" ]; then
+        PI_SETTLE=1
+        pi_bench_once "$slot" || warn "the settle run for this leg did not complete"
+        PI_SETTLE=""
+    fi
     pi_bench_once "$slot"
 }
 
@@ -595,21 +721,31 @@ pi_bench_ab_systems() { # <sysA,sysB> <rounds>
         PI_TASK_OWNED=1
     fi
     log "  task        $PI_TASK ($(bench_task_dir "$PI_TASK"))"
-    log "interleaving $n round(s), a boot per leg -- $((n * 2)) boots and runs"
+    log "interleaving $n round(s) after a warmup round, a boot per leg -- $((n * 2 + 2)) boots and runs"
     log "  A: $a"
     log "  B: $b"
 
+    pi_resolve_subtests "$a" "$b"
     PI_AB_A="$a"; PI_AB_B="$b"
+    pi_warmup_round pi_system_leg "$a" "$b"
     i=1
     while [ "$i" -le "$n" ]; do
         log ""
-        log "round $i/$n -- system $a"
         ra=""; rb=""
-        PI_AB_ROUND="$i"; PI_AB_ARM=a
-        if pi_system_leg "$a"; then ra=1; fi
-        log "round $i/$n -- system $b"
-        PI_AB_ARM=b
-        if pi_system_leg "$b"; then rb=1; fi
+        PI_AB_ROUND="$i"
+        # Counterbalanced, not merely alternated: a round that always led with A
+        # would put every round's drift on B (lib/wkdata.py checks for it).
+        if [ $((i % 2)) -eq 1 ]; then
+            log "round $i/$n -- system $a (first)"
+            PI_AB_ARM=a; pi_system_leg "$a" && ra=1
+            log "round $i/$n -- system $b"
+            PI_AB_ARM=b; pi_system_leg "$b" && rb=1
+        else
+            log "round $i/$n -- system $b (first)"
+            PI_AB_ARM=b; pi_system_leg "$b" && rb=1
+            log "round $i/$n -- system $a"
+            PI_AB_ARM=a; pi_system_leg "$a" && ra=1
+        fi
 
         if [ -n "$ra" ] && [ -n "$rb" ]; then
             kept=$((kept + 1))
@@ -634,13 +770,14 @@ pi_bench_ab_systems() { # <sysA,sysB> <rounds>
 }
 
 PI_TASK=""; PI_TASK_OWNED=""
+SUBTESTS=""; EXCLUDE_SUBTESTS=""
 PI_AB_ROUND=""; PI_AB_ARM=""; PI_AB_A=""; PI_AB_B=""
 cmd_bench() {
     local machine="${1:-}" plan="${2:-}"; shift $(( $# < 2 ? $# : 2 ))
     local count="" timeout_s="" slot=a ab="" ab_systems="" rounds=3 cores="" task=""
     local stamp; stamp=$(bench_task_stamp)
     # --count N is iterations per run, --timeout S the seconds one iteration may take (default: the plan's own).
-    local usage="usage: wk pi bench <machine> <plan> [--slot NAME | --ab A,B | --ab-systems A,B] [--rounds N] [--count N] [--timeout S] [--cores <set>] [--task NAME]; see wk pi -h"
+    local usage="usage: wk pi bench <machine> <plan> [--slot NAME | --ab A,B | --ab-systems A,B] [--rounds N] [--count N] [--timeout S] [--cores <set>] [--subtests LIST | --exclude-subtests LIST] [--task NAME]; see wk pi -h"
     while [ $# -gt 0 ]; do
         case "$1" in
             --count)   count="${2:-}"; shift ;;
@@ -648,6 +785,8 @@ cmd_bench() {
             --task)    task="${2:-}"; shift ;;
             --slot)    slot="${2:-}"; image_check_slot_name "$slot"; shift ;;
             --cores)   cores="${2:-}"; shift ;;
+            --subtests)         SUBTESTS="${2:-}"; shift ;;
+            --exclude-subtests) EXCLUDE_SUBTESTS="${2:-}"; shift ;;
             --ab)      ab="${2:-}"
                        case "$ab" in
                            *,*) ;;
@@ -732,6 +871,7 @@ cmd_bench() {
     fi
     log "  task        $PI_TASK ($(bench_task_dir "$PI_TASK"))"
 
+    pi_resolve_subtests "$sysid"
     if [ -n "$ab" ]; then
         pi_bench_ab "$ab" "$rounds"
         return $?
@@ -747,6 +887,18 @@ pi_bench_once() {
     local id="$(date -u +%Y%m%dT%H%M%SZ)-$plan-$machine-$slot"
     local out="$(bench_task_dir "$PI_TASK")/runs/$id"
     ensure_dir "$out/diagnose"
+    local warmdir="" remote_capture=""
+    if [ -n "$PI_SETTLE" ]; then
+        id="$id-settle"
+        out="$(bench_task_dir "$PI_TASK")/runs/$id"
+        ensure_dir "$out/diagnose"
+    fi
+    if [ -n "$PI_WARMUP" ]; then
+        warmdir="$(bench_task_dir "$PI_TASK")/warmup"
+        ensure_dir "$warmdir" >/dev/null
+        pi_profiler_stage "$slot" "$json"
+        [ -z "$PI_PROFILER" ] || remote_capture="$PI_PROF_REMOTE/$machine-$PI_AB_ARM.profile.$(pi_profile_ext)"
+    fi
     local cores_wrap=""
     [ -z "$cores" ] || cores_wrap=$(wkdata cores-wrap "$cores")
 
@@ -759,6 +911,7 @@ pi_bench_once() {
     [ -z "$count" ]     || args="$args --count $(sh_quote "$count")"
     [ -z "$timeout_s" ] || args="$args --timeout $(sh_quote "$timeout_s")"
     [ -z "$PI_SEEDED" ] || args="$args --local-copy $(sh_quote "$PI_SEEDED")"
+    [ -z "$PI_SUBTESTS" ] || args="$args --subtests $PI_SUBTESTS"
 
     info "running $plan on $machine from slot '$slot' (WebKit $(wkslot get "$json" commit | cut -c1-12))"
     log  "  results: $out"
@@ -772,6 +925,9 @@ pi_bench_once() {
             WK_BOARD_URL="127.0.0.1:$port" \
             WK_BOARD_EXPECT="$(wkslot expect "$json" "$(pi_slot_dir "$slot")/root")" \
             WK_BOARD_EVIDENCE="$out/verify.jsonl" \
+            WK_BOARD_WARMUP="${warmdir:+$warmdir/$machine-$PI_AB_ARM.evidence.json}" \
+            WK_BOARD_CLASS="$(wkdata bench-class "$plan")" \
+            WK_BOARD_PROFILE="${remote_capture:+$PI_PROFILER:$remote_capture}" \
         bash -c "cd $(sh_quote "$BENCH_RUNNER") && exec python3 Tools/Scripts/run-benchmark $args"
     local rc=$?
     set -e
@@ -780,6 +936,25 @@ pi_bench_once() {
     i_ssh 'cat /tmp/wk-browser.log 2>/dev/null; rm -f /tmp/wk-browser.log' > "$out/browser.log" 2>/dev/null || true
     i_ssh 'tail -n 300 /tmp/messages 2>/dev/null' > "$out/board.log" 2>/dev/null || true
     wkdata env-record "$out/env.json" --update wall_time_s="$(( $(date +%s) - wall_start ))"
+    if [ -n "$PI_SETTLE" ]; then
+        wkdata env-record "$out/env.json" --update --bool warmup=1
+        wkdata env-record "$out/env.json" --update warmup_kind=settle
+    fi
+    if [ -n "$PI_WARMUP" ]; then
+        wkdata env-record "$out/env.json" --update --bool warmup=1
+        wkdata env-record "$out/env.json" --update warmup_kind=evidence
+        wkdata env-record "$out/env.json" --update \
+            profiler="${PI_PROFILER:-none}" host.perf_event_paranoid="$PI_PARANOID"
+        if [ -n "$remote_capture" ]; then
+            i_ssh "cat $(sh_quote "$remote_capture")" > "$warmdir/$machine-$PI_AB_ARM.profile.$(pi_profile_ext)" 2>/dev/null || true
+            if [ -s "$warmdir/$machine-$PI_AB_ARM.profile.$(pi_profile_ext)" ]; then
+                log "  profile     $warmdir/$machine-$PI_AB_ARM.profile.$(pi_profile_ext) ($PI_PROFILER)"
+            else
+                rm -f "$warmdir/$machine-$PI_AB_ARM.profile.$(pi_profile_ext)"
+                barrier "the warmup leg for arm $PI_AB_ARM produced no $PI_PROFILER capture on $machine."
+            fi
+        fi
+    fi
 
     local verified
     verified=$(wkslot verified "$out/verify.jsonl" 2>/dev/null) || verified=""
@@ -799,6 +974,31 @@ pi_bench_once() {
     return 0
 }
 
+# Round 0: one leg per arm, taken exactly as a measured round is and then
+# discarded. It answers what the measured rounds cannot -- which GL driver the
+# web process resolved to, how wide it is, whether it JITted -- and carries the
+# profile. It also absorbs the first-run effect the boards show.
+pi_warmup_round() { # <leg-fn> <a> <b> [--same-width]
+    local leg="$1" a="$2" b="$3" width="${4:-}" dir problems
+    dir="$(bench_task_dir "$PI_TASK")/warmup"
+
+    log ""
+    log "warmup round -- not measured; it establishes what the arms are and profiles them"
+    PI_WARMUP=1; PI_AB_ROUND=0
+    PI_AB_ARM=a; "$leg" "$a" || warn "the warmup leg for A did not complete"
+    PI_AB_ARM=b; "$leg" "$b" || warn "the warmup leg for B did not complete"
+    PI_WARMUP=""; PI_AB_ROUND=""; PI_AB_ARM=""
+
+    problems=$(wkdata warmup-check "$dir/$machine-a.evidence.json" \
+                                   "$dir/$machine-b.evidence.json" $width) || {
+        barrier "the warmup round says these two arms are not what the A/B claims:
+$(printf '%s' "$problems" | sed 's/^/    /')"
+        return 0
+    }
+    [ -z "$problems" ] || printf '%s\n' "$problems" | sed 's/^/  /' >&2
+    log "  warmup      both arms confirmed; evidence in $dir"
+}
+
 # Interleaved A B A B, not AAA then BBB: these boards drift monotonically over the
 # tens of minutes an A/B takes, and blocking would put all of that drift on B.
 pi_bench_ab() {
@@ -806,21 +1006,28 @@ pi_bench_ab() {
     a="${spec%%,*}"; b="${spec##*,}"
     [ "$n" -ge 1 ] || die "--rounds needs to be at least 1"
 
-    log "interleaving $n round(s) of $a vs $b -- $((n * 2)) runs"
+    log "interleaving $n round(s) of $a vs $b after a warmup round -- $((n * 2 + 2)) runs"
     log "  alternated rather than blocked, so thermal drift lands on both arms"
 
     PI_AB_A="$a"; PI_AB_B="$b"
+    pi_warmup_round pi_bench_once "$a" "$b" --same-width
     local ra rb kept=0 lost=0
     i=1
     while [ "$i" -le "$n" ]; do
         log ""
-        log "round $i/$n -- slot $a"
         ra=""; rb=""
-        PI_AB_ROUND="$i"; PI_AB_ARM=a
-        if pi_bench_once "$a"; then ra=1; fi
-        log "round $i/$n -- slot $b"
-        PI_AB_ARM=b
-        if pi_bench_once "$b"; then rb=1; fi
+        PI_AB_ROUND="$i"
+        if [ $((i % 2)) -eq 1 ]; then
+            log "round $i/$n -- slot $a (first)"
+            PI_AB_ARM=a; pi_bench_once "$a" && ra=1
+            log "round $i/$n -- slot $b"
+            PI_AB_ARM=b; pi_bench_once "$b" && rb=1
+        else
+            log "round $i/$n -- slot $b (first)"
+            PI_AB_ARM=b; pi_bench_once "$b" && rb=1
+            log "round $i/$n -- slot $a"
+            PI_AB_ARM=a; pi_bench_once "$a" && ra=1
+        fi
 
         if [ -n "$ra" ] && [ -n "$rb" ]; then
             kept=$((kept + 1))

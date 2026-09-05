@@ -105,25 +105,24 @@ _install_profilers() {                  # wrapped: not load-bearing
         log "samply already present"
         return 0
     fi
-    local ver=0.13.1 sarch sum tmp got  # samply ships no .deb
-    case "$(uname -m)" in
-        x86_64)  sarch=x86_64-unknown-linux-gnu
-                 sum=61875daad67888798690dea3cb2748279df6ac299c5c6a857d67eed7642473d9 ;;
-        aarch64) sarch=aarch64-unknown-linux-gnu
-                 sum=aa465162b62830168775b7ff4804bc35049436dcbc29bb3d1ea9f580380ea06a ;;
-        *)       warn "samply: no linux/$(uname -m) release published upstream (github.com/mstange/samply), skipping"
-                 return 0 ;;
-    esac
+    # One version and one set of checksums for the fleet: lib/profiler.sh.
+    . "$WK_TOOLS/lib/profiler.sh"
+    local sarch sum tmp got  # samply ships no .deb
+    sarch=$(samply_triple "$(uname -m)")
+    if [ -z "$sarch" ]; then
+        warn "samply: no linux/$(uname -m) release published upstream (github.com/mstange/samply), skipping"
+        return 0
+    fi
+    sum=$(samply_sha256 "$sarch")
     tmp=$(mktemp -d)
-    if curl -fsSL -o "$tmp/samply.tar.xz" \
-           "https://github.com/mstange/samply/releases/download/samply-v${ver}/samply-${sarch}.tar.xz"; then
+    if curl -fsSL -o "$tmp/samply.tar.xz" "$(samply_url "$sarch")"; then
         got=$(sha256sum "$tmp/samply.tar.xz" | awk '{print $1}')
         if [ "$got" = "$sum" ] \
            && tar -xJf "$tmp/samply.tar.xz" -C "$tmp" \
            && sudo install -m 0755 "$tmp/samply-${sarch}/samply" /usr/local/bin/samply; then
-            log "samply $ver installed (github.com/mstange/samply, sha256 verified)"
+            log "samply $SAMPLY_VER installed (github.com/mstange/samply, sha256 verified)"
         else
-            warn "samply $ver download did not verify (expected sha256 $sum) -- not installed"
+            warn "samply $SAMPLY_VER download did not verify (expected sha256 $sum) -- not installed"
         fi
     else
         warn "samply download failed -- check egress. 'wk profile --mode samply' will refuse by name."

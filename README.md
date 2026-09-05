@@ -485,8 +485,54 @@ wk sysimage webkit wpewebkit-2.38-buildroot-rpi3-32 --commit <sha> --slot base -
 wk pi deploy wpewebkit-2.38-buildroot-rpi3-32 rpi3 --slot base   # onto the booted board, verified byte for byte
 wk pi bench rpi3 speedometer3 --slot base
 wk pi bench rpi3 speedometer3 --ab base,pr1725 --rounds 5   # interleaved A/B between two deployed slots:
-                                                 # its own task, reported at the end
+                                                 # a warmup round, then 5 measured; its own task,
+                                                 # reported at the end
 ```
+
+Rounds are **counterbalanced, not merely alternated**: round 1 leads with A,
+round 2 with B, and so on. Simple ABAB puts every round's drift on B, which the
+report now checks for and says out loud. Every leg that follows a reboot throws
+away a **settle run** first, because a first run after boot is not like the
+rest. The CPU clock is **pinned, not merely governed** -- the performance
+governor still lets the clock fall, so `scaling_min_freq` is raised to
+`scaling_max_freq` and a board whose clock will not pin refuses the run.
+
+The report also checks the harness against itself: the headline score and the
+subtest times it is built from must move opposite ways, and when they disagree
+in sign it says so and tells you to quote neither.
+
+Every A/B opens with a **warmup round**: one leg per arm, taken exactly as a
+measured round is and then discarded. A measured round records what the run
+*claimed* -- `gpu_renderer=gl` is written the moment weston reports an enabled
+output -- and that is not evidence about the process that produced the score.
+The warmup leg measures the live web process instead. Which mesa driver it
+mapped (`v3d_dri.so` or `swrast_dri.so`) and how wide its ELF is come off
+`/proc/<pid>/maps`; **whether the GPU did any work** comes off the DRM
+`fdinfo` engine counters, sampled either side of the run and attributed per
+process, because a driver being loaded is not the same as a frame going
+through it. The JIT is confirmed the same way: the leg runs with
+`JSC_reportDFGCompileTimes` and `JSC_reportFTLCompileTimes` on -- printing a
+line per optimizing compile, which only a discarded leg can afford -- and a
+64-bit arm that reached no FTL compilation, or a 32-bit arm that reached no
+DFG one, refuses. Executable-memory mappings say the JIT allocated; a tier
+count says it arrived. It also carries a profile, and it absorbs the first-run
+effect the boards show. The evidence lands in `<task>/warmup/<arm>.json` and at
+the top of the report; a software rasterizer, an un-JITted process, two arms on
+different drivers, or no profile at all refuses the A/B, and `--force` crosses
+that with the refusal recorded. Profiling is samply where upstream publishes a
+binary (x86_64, aarch64) and the image's own `sysprof-cli` where it does not
+(armv7); only when neither can run does the warmup refuse on that count.
+
+**Subtests one arm cannot run are dropped from both.** JSC disables wasm SIMD
+below 64 bits outright -- `Source/JavaScriptCore/runtime/Options.cpp`, `#if
+!CPU(X86_64) && !CPU(ARM64)`, which also clears `useWasmIPInt`, `useBBQJIT` and
+`useConcurrentGC` -- so a SIMD-built module cannot run on a 32-bit engine at
+all. `bench/subtest-exclusions.conf` declares those, per plan and word size,
+each with the reason from the payload's own build; `wk pi bench` applies a row
+when *either* arm's image declares that width, passes the reduced set to both
+arms, and records what it dropped in every run's `env.json`. The report then
+says so, and says it louder if the two arms somehow differed. `--subtests` and
+`--exclude-subtests` override by hand.
 
 The image is the runtime and is built once; a *slot* is one WebKit
 (`/var/wk/slots/<name>/` on the board), and a board carries as many as an A/B
@@ -538,8 +584,8 @@ wk sysimage write --from <2.52 wic.xz>     --disk rpi3:/dev/mmcblk0@third  --pro
 # a slot of the same name deployed into each (boot one, deploy, boot the other, deploy)
 wk boot rpi3 --system <2.38 id>   # then: wk pi deploy wpewebkit-2.38-buildroot-rpi3-32 rpi3 --slot base
 wk boot rpi3 --system <2.52 id>   # then: wk pi deploy webkit-2.52-yocto-rpi3-32 rpi3 --slot base
-# the A/B: A B A B, one boot per leg; every leg is verified from the running
-# system's own marker -- the rescue or the wrong leg is refused, not recorded
+# the A/B: a warmup round, then A B A B, one boot per leg; every leg is verified
+# from the running system's own marker -- the rescue or the wrong leg is refused
 wk pi bench rpi3 speedometer3 --ab-systems <2.38 id>,<2.52 id> --slot base --rounds 5
 wk bench report <task> --html                            # paired like any A/B; each run records system= and its proof
 ```

@@ -264,7 +264,7 @@ i_ssh() {{
 pi_display() {{ printf 'drm:card0-HDMI-A-1'; }}
 pi_tmp() {{ PI_TMP=$(mktemp -d); }}
 pi_slot_dir() {{ printf '/var/wk/slots/%s' "$1"; }}
-pi_pin_governor() {{ printf 'performance'; }}
+pi_pin_clock() {{ printf 'performance 2400000 2400000'; }}
 slot=base; ab=""; cores=""
 ''' + lift("pi_leg_prepare") + f'''
 pi_leg_prepare "{expected}"

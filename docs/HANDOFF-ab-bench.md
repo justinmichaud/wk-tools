@@ -2,6 +2,76 @@
 
 What is owed to get from "both boards run a rescue" to "two arms compared".
 
+- [ ] `test_build_wall.py`'s `test_it_strips_the_wall_and_keeps_everything_else`
+      hands `bash -c` a fixed `env={"PATH": ...}` but not `--noprofile
+      --norc`, so a startup file that prepends to PATH makes it fail with
+      entries the test never set (seen 2026-09-05: the assertion got
+      `/home/jmichaud/Development/wk-tools/bin:/.local/bin:...`). It passes
+      alone and fails under `unittest discover`, which reads as a regression
+      in whatever change happens to be in the tree. Give the subprocess a
+      shell that reads no rc [no hardware needed]
+
+- [ ] v3d on kernel 6.6.22 publishes no fdinfo `drm-engine-*` counters, so GPU
+      engine time is unreadable on both rpi5 images (measured 2026-09-05, task
+      `20260905T200814Z`: the web process holds `/dev/dri/renderD128` and maps
+      `v3d_dri.so`, and `gpu.measured` is still false). The warmup now records
+      that as a note and refuses only when no render node is held either.
+      Whether a newer kernel publishes them, or whether v3d exposes usage
+      somewhere else worth reading, is unanswered [needs a board]
+
+- [ ] the warmup round's probes are read off a board for the 32-bit arm only
+      (`20260905T200814Z`, arm B: 32-bit ARM, `v3d_dri.so` + renderD128, DFG
+      38406/FTL 0, 32 MB executable). Arm A's evidence was overwritten by the
+      samply capture that shared its name, so the 64-bit probe output has still
+      never been seen; a re-run with the split names settles it.
+      The earlier run (2026-09-05, `20260905T152355Z-rpi5-systems`) proved the boot,
+      the marker check, the session, the samply fetch/stage/attach, the
+      `perf_event_paranoid` read and the JSC tier report (64-bit arm: FTL 1465,
+      DFG 7317; 32-bit arm: DFG 40, FTL 0), but both legs ended without a
+      result, so `record_warmup_evidence` never ran and no `warmup/*.json` was
+      written. What is still unread on hardware: `_WARMUP_SH`'s `od`/`awk`
+      under the image's shell, whether the web process maps a `*_dri.so` at all
+      (the samply profile's lib list says it maps `v3d_dri.so`, which is
+      evidence but not the same probe), and whether v3d publishes
+      `drm-engine-*` in fdinfo on 6.6.22 [needs one leg that completes]
+- [ ] why the rpi5's JetStream3 warmup leg ran 40 minutes without finishing is
+      not established (2026-09-05, `20260905T152355Z-rpi5-systems`, leg A,
+      `--count 1 --timeout 2400`). That leg carried samply at ~49 Hz *and*
+      `JSC_reportDFGCompileTimes`/`reportFTLCompileTimes`, so it is not a
+      measured leg's timing and says nothing about how long a plain run takes;
+      2.46 is reported to complete JS3 on 64-bit. It was progressing, not stuck
+      -- every fetch done inside 45 s, the profile flat, no function over 0.95%
+      self time, and it had reached `source-map-wtb`. Time an unprofiled leg
+      before changing the plan or the timeout [needs the rpi5]
+- [ ] the warmup round's instrumentation makes its leg slower than the rounds
+      it precedes, which is fine for evidence and wrong for the elapsed-time
+      figure printed beside it. Either say the leg is instrumented where the
+      time is reported, or time the arms without it [no hardware needed]
+- [ ] a warmup leg that times out yields a profile but no evidence file: the
+      driver writes the record from `add_additional_results`, which
+      run-benchmark never calls without a result. The tier counts and the GPU
+      delta are both readable at that moment regardless, and the run.log and
+      browser.log survive -- so a timed-out leg could still say what the arm
+      was, instead of only refusing [no hardware needed]
+- [ ] samply profiles come back unsymbolicated: 0 of 66,122 functions carried a
+      name in the first real capture, because samply resolves symbols when it
+      loads a profile and the board is no symbol server. The host holds the
+      byte-identical unstripped binaries in the slot dir
+      (`build/wk-slots/<slot>/root`), so the fix is to record that path beside
+      the capture and hand it to `samply load`, or symbolicate on the way out
+      [no hardware needed]
+- [ ] neither profiler has been run to completion on a board. samply publishes only
+      x86_64 and aarch64 (checked against the release, 2026-09-05). aarch64
+      samply is proven on the rpi5's 64-bit image -- fetched, staged, attached
+      (`attached=samply pid=1434`), 25 MB captured, and that kernel reports
+      `perf_event_paranoid=-1`. Every *armhf userspace* falls to the image's
+      `sysprof-cli`, which the rpi5-32 sysroot does carry; whether it is in the
+      deployed image, and whether its flags match `bench/wk_board_driver.py`'s
+      `_PROFILE_START_SH`, is still unmeasured [needs a board up]
+- [ ] `bench/board-profile.sh` invokes `sysprof-cli --force --pid <pid> <out>`
+      from the flag set of no particular sysprof version. Check it against the
+      version an image actually ships before relying on the capture
+      [needs a board with sysprof-cli]
 - [ ] rpi3, second launch at a cached URL: with the browser's disk cache warm for the benchmark's URL, the page loads from disk (only `index.html` and `benchmark-report.js` reach the server), `load` fires and the benchmark never starts -- web process asleep at 0.4 s CPU until the timeout (2026-08-30: task `20260830T142104Z-wpe-pr1725` rounds 1-2, both slots; `wk pi bench --count 2` iteration 2; a fresh invocation right after completes in 7.3 min). `wk pi bench` now clears the cache before every launch (WK_BOARD_RESET); what in a cache-served load stops `startBenchmark` from running is not known [needs the rpi3 in bench mode; optional]
 - [ ] the rpi3 bench system carries two `while true; do free -m ...` loops and a cog left from earlier sessions (pids 1213, 1579, 12057 on 2026-08-30); nothing in `wk pi bench` ends a shell loop, so decide whether a run should refuse a board with foreign processes on it [decision]
 - [ ] rpi4: the 32-bit kernel still does not come up -- serial console next. Ledger (2026-08-31): tryboot lane proven (the rescue's arm64 kernel boots through it, chosen/bootloader/tryboot=1); the image rebuilt with the tree's own bcm2711 defconfig (all 2711 essentials verified in .config, gcc plugins off for the 9.2 host toolchain), stick rewritten and sha-verified; boots tried and silent before 75 s (no wk-diag.txt, no watchdog return): fork rpi34-config zImage, bcm2711-config zImage, bcm2711-config zImage with explicit arm_64bit=0 (the driver now states bitness from the kernel magic -- the SD's 2024 firmware defaults 64-bit). Working vs hanging differ only in: 32-bit-ness/armstub path, the image cmdline (console=ttyS0 vs the rescue's), the kernel-built dtb. Blind permutations cost a power cycle each; attach a serial cable (BOOT_UART=1, or enable_uart is already in the image config.txt) and read where it dies. Both 2.38 slots are built and deploy in minutes once it boots. Alternative for an rpi4 datapoint today: the 2.46/2.52 or a 64-bit lane whose kernel is proven [needs serial at the board]

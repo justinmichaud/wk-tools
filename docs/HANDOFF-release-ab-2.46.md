@@ -45,12 +45,51 @@ proof: this measures width at fixed release, and the rpi3 result is release at
 fixed width. The measurement that would close it is 2.46-vs-2.52 run on both
 widths of this board, which the lane can now do.
 
+- [ ] the rpi5 pair's score and its own subtest times disagree in sign, and
+      nothing has reconciled them. Summing every leaf step's mean gives A
+      10485.2 ms and B 9997.6 ms -- B does **4.7% less measured work** (Sync
+      -3.8%, Async -12.9%) -- while the reported Score has B 0.83% *slower*.
+      The per-subtest median (+12.9% Sync) points the third way again, because
+      32-bit wins on the expensive suites (EmberJS-Debug -15.2% of 2924 ms,
+      AngularJS -17.2%, Angular2 -27.6%, Inferno -18.8%) and loses on the cheap
+      ones (Preact +26.0% of 90 ms, BackboneJS +24.8%, Flight +22.6%). Which
+      aggregate the lane should report turns on how Speedometer 2.1 weights its
+      suites; until that is settled, every Speedometer A/B here can be read
+      three ways [no hardware needed]
+- [ ] nothing establishes that the rpi5 pair's 64-bit arm ever reached FTL. If
+      it did not, both arms ran Baseline+DFG and the one real engine difference
+      between them was inert -- which would explain a width comparison coming
+      out flat. The warmup round now refuses a 64-bit arm with no FTL
+      compilation and a 32-bit arm with no DFG one, so a re-run answers it
+      [needs the rpi5]
+
+- [ ] the rpi5 pair's two arms are not the same engine, and the report does not
+      say so. Build-side: `ENABLE_FTL_JIT` is 1 on the 64-bit arm and 0 on the
+      32-bit one, as are `ENABLE_WEBASSEMBLY_BBQJIT` and `_OMGJIT`. Runtime-side,
+      `Options.cpp`'s `#if !CPU(X86_64) && !CPU(ARM64)` also clears
+      `useConcurrentGC`, `useWasmIPInt` and `useWasmSIMD` -- so the 32-bit arm
+      collects garbage on the main thread, which bears directly on a
+      DOM-allocation benchmark. FTL is not merely compiled in on the 64-bit
+      arm, it is reached: 1465 FTL and 7317 DFG compilations in one JetStream3
+      leg (2026-09-05), against 0 FTL on the 32-bit arm. Those four lines and `HAVE_INT128_T` vs `USE_CAPSTONE` are
+      the *only* differences in the two `cmakeconfig.h` files. "32-bit is
+      barely a regression" is therefore a claim about a build with one fewer
+      JIT tier, which the report should state before anyone reads a conclusion
+      off it [no hardware needed]
+- [ ] the rpi5 pair has no evidence about which GL driver either arm resolved
+      to: `gpu_renderer=gl` is written when weston reports an output, and
+      `browser.log` and `board.log` are 0 bytes in all 10 runs. Both arms'
+      sysroots carry `v3d_dri.so` and `swrast_dri.so`. The warmup round now
+      records this per arm, so a re-run answers it; the saved task cannot
+      [needs the rpi5]
+
 - [ ] the rpi5's scores drift between rounds by more than their within-run
       stdev and the cause is not established: A scored 51.048 then 45.756,
       45.171, 45.571, 45.854, against a within-run stdev of 1.8%, while B held
       46.494, 46.505, 46.330, 46.892, 45.249. Round 1 looks like a first-run
-      effect rather than a decline. Throttling is not the evidence -- 56.8C
-      between runs with the clock at 2400MHz, well under the 85C the SoC
+      effect rather than a decline, which the warmup round now absorbs.
+      Throttling is not the evidence -- 56.8C between runs with the clock at
+      2400MHz, well under the 85C the SoC
       throttles at, and the image pins the performance governor. What is
       certainly missing is clock pinning: the rpi4 profile sets
       `force_turbo=1`, `arm_freq=1500`, `arm_freq_min=1500`, `arm_boost=0`,

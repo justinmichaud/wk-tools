@@ -49,6 +49,10 @@
 # not booted into the image is named with the commands that put it there;
 # this command does not write cards.
 #
+# Every board opens with a warmup round -- a discarded leg per arm that reads
+# the renderer, the width and the JIT off the live web process and profiles it.
+# What it finds refuses the A/B; --force crosses, recorded.
+#
 # A/A: give the same commit as --base and the spec, and the two slots differ
 # in nothing but their build-ids -- the noise floor of the lane.
 

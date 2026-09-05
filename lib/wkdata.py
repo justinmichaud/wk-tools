@@ -15,7 +15,8 @@ DEFAULT_CONFIGURATION = {"aslr": "unset", "path_len": 0, "shared_cache": None, "
 
 def _load(path):
     try:
-        return json.load(open(path))
+        with open(path) as f:
+            return json.load(f)
     except Exception:
         return {}
 
@@ -208,6 +209,14 @@ def _axis_check_lines(a, b):
         )
     if bool(a.get("software")) != bool(b.get("software")):
         lines.append("warning: one run is software-rendered and the other is not -- these are not comparable")
+    # A restricted run is a different measurement from a whole one, and the number carries no mark of it otherwise.
+    ex_a, ex_b = a.get("subtests_excluded") or "", b.get("subtests_excluded") or ""
+    if ex_a != ex_b:
+        lines.append("warning: the arms ran different subtest sets (%s vs %s)"
+                     % (ex_a or "none excluded", ex_b or "none excluded"))
+    elif ex_a:
+        lines.append("note: %d subtest(s) excluded from both arms -- %s"
+                     % (len(ex_a.split(",")), ex_a))
     if a.get("forced") or b.get("forced"):
         lines.append("warning: at least one run was taken with failing preflight checks (--force)")
 
@@ -442,7 +451,65 @@ def _config_label(key):
     return ", ".join("%s=%s" % (k, v) for k, v in key)
 
 
-def _build_report(a_paths, b_paths, header=()):
+# Two things a person kept re-deriving by hand, so the report derives them.
+def _consistency_lines(rows):
+    """A score and the subtest times it is built from must move opposite ways:
+    less work, higher score. When they do not, one of the two is wrong and
+    neither should be quoted."""
+    tops = [r for r in rows if r["Score"]["a_mean"] and r["Score"]["b_mean"]
+            and "/" not in r["name"]]
+    leaves = [r for r in rows if r["Time"]["a_mean"] and r["Time"]["b_mean"]
+              and "/" in r["name"]]
+    if len(tops) != 1 or len(leaves) < 8:
+        return []
+    sa, sb = tops[0]["Score"]["a_mean"], tops[0]["Score"]["b_mean"]
+    ta = sum(r["Time"]["a_mean"] for r in leaves)
+    tb = sum(r["Time"]["b_mean"] for r in leaves)
+    if not (sa and ta):
+        return []
+    score_delta = (sb - sa) / sa * 100.0
+    time_delta = (tb - ta) / ta * 100.0
+    lines = ["note: B scores %+.2f%% on %+.2f%% subtest time (%d subtests, A %.0f ms, B %.0f ms)"
+             % (score_delta, time_delta, len(leaves), ta, tb)]
+    if abs(score_delta) < 0.2 and abs(time_delta) < 0.2:
+        return lines
+    if (score_delta > 0) == (time_delta > 0):
+        lines.append(
+            "warning: the score and the subtest times it is made of disagree in "
+            "SIGN -- B does %+.2f%% work and scores %+.2f%%. One of the two is "
+            "wrong; do not quote either until they are reconciled."
+            % (time_delta, score_delta))
+    elif abs(score_delta + time_delta) > 5.0:
+        lines.append(
+            "warning: the score moved %+.2f%% where the subtest times imply about "
+            "%+.2f%% -- the aggregate weights subtests very differently from their "
+            "cost, so the headline and the table answer different questions."
+            % (score_delta, -time_delta))
+    return lines
+
+
+def _order_lines(a_runs, b_runs):
+    """Alternating is not the same as counterbalanced: if one arm always goes
+    first, monotonic drift lands on the other."""
+    order = sorted([(os.path.basename(os.path.dirname(p)), "A") for p, _, _ in a_runs]
+                   + [(os.path.basename(os.path.dirname(p)), "B") for p, _, _ in b_runs])
+    if len(order) < 4:
+        return []
+    pos = {"A": [], "B": []}
+    for i, (_, arm) in enumerate(order, 1):
+        pos[arm].append(i)
+    ma = sum(pos["A"]) / len(pos["A"])
+    mb = sum(pos["B"]) / len(pos["B"])
+    if abs(ma - mb) < 0.25:
+        return []
+    late, gap = ("B", mb - ma) if mb > ma else ("A", ma - mb)
+    return ["warning: the arms alternate but are not counterbalanced -- %s runs "
+            "%.1f position(s) later on average (A at %s, B at %s), so monotonic "
+            "drift lands on %s rather than cancelling"
+            % (late, gap, pos["A"], pos["B"], late)]
+
+
+def _build_report(a_paths, b_paths, header=(), warmup=()):
     a_runs, b_runs = _side_runs(a_paths), _side_runs(b_paths)
     if not a_runs:
         sys.exit("report: no result files for A")
@@ -482,6 +549,7 @@ def _build_report(a_paths, b_paths, header=()):
             r[key]["significant"] = sig.get(r["name"], False)
 
     axis_lines = _axis_check_lines(a_runs[0][2], b_runs[0][2])
+    axis_lines += _order_lines(a_runs, b_runs)
 
     # A patch that makes a machine noisier under one configuration is a regression even where the mean does not move, so B's spread exceeding A's by 20% is flagged.
     def by_config(runs):
@@ -505,7 +573,9 @@ def _build_report(a_paths, b_paths, header=()):
             "a_n": len(a_vals), "b_n": len(b_vals), "flagged": asd > 0 and bsd > asd * 1.2,
         })
 
-    return {"rows": rows, "axis_lines": axis_lines, "variance": variance, "header": list(header)}
+    axis_lines += _consistency_lines(rows)
+    return {"rows": rows, "axis_lines": axis_lines, "variance": variance,
+            "header": list(header), "warmup_lines": list(warmup)}
 
 
 def _row_primary(row):
@@ -565,6 +635,10 @@ def _svg_histogram(name, a_vals, b_vals, width=420, height=140, buckets=12):
 def _render_text(report):
     out = list(report.get("header", []))
     if out:
+        out.append("")
+    if report.get("warmup_lines"):
+        out.append("warmup round (not measured):")
+        out += ["  " + l for l in report["warmup_lines"]]
         out.append("")
     out.append("axis check:")
     out += ["  " + l for l in report["axis_lines"]] or ["  (no warnings)"]
@@ -645,6 +719,11 @@ def _render_html(report, title="wk bench report"):
     header_html = "".join("<li>%s</li>" % _xml_escape(l) for l in report.get("header", []))
     if header_html:
         header_html = "<ul>%s</ul>" % header_html
+
+    warmup_html = ""
+    if report.get("warmup_lines"):
+        warmup_html = "<h2>warmup round (not measured)</h2><ul>%s</ul>" % "".join(
+            "<li>%s</li>" % _xml_escape(l) for l in report["warmup_lines"])
     return """<!doctype html>
 <html><head><meta charset="utf-8"><title>%s</title>
 <style>
@@ -660,6 +739,7 @@ def _render_html(report, title="wk bench report"):
 </style></head><body>
 <h1>%s</h1>
 %s
+%s
 <h2>axis check</h2>
 <ul>%s</ul>
 <h2>subtests</h2>
@@ -673,9 +753,115 @@ def _render_html(report, title="wk bench report"):
 <tbody>%s</tbody></table>
 </body></html>
 """ % (
-        _xml_escape(title), _xml_escape(title), header_html, axis_html,
+        _xml_escape(title), _xml_escape(title), header_html, warmup_html, axis_html,
         "".join(rows_html), "".join(hist_html), "".join(var_rows),
     )
+
+
+# The warmup round's evidence, and the judgement on it. What counts as a problem
+# within one arm is decided where it is measured (bench/wk_board_driver.py) and
+# recorded in the file; this adds only what needs both arms side by side.
+def warmup_load(taskdir, device):
+    out = {}
+    for arm in ("a", "b"):
+        doc = _load(os.path.join(taskdir, "warmup",
+                                "%s-%s.evidence.json" % (device, arm)))
+        if doc:
+            out[arm] = doc
+    return out
+
+
+def warmup_cross_problems(a, b, same_width_expected):
+    problems = []
+    ga, gb = a.get("gl", {}), b.get("gl", {})
+    if ga.get("driver") and gb.get("driver") and ga["driver"] != gb["driver"]:
+        problems.append("the arms rendered through different drivers (%s vs %s)"
+                        % (ga["driver"], gb["driver"]))
+    ea, eb = a.get("elf", {}), b.get("elf", {})
+    if same_width_expected and ea.get("bits") and eb.get("bits") and ea["bits"] != eb["bits"]:
+        problems.append("the arms are %d-bit and %d-bit, and this A/B varies neither the "
+                        "image nor the width" % (ea["bits"], eb["bits"]))
+    return problems
+
+
+def warmup_lines(evidence):
+    """One line per arm, for the report: what the arm actually was."""
+    lines = []
+    for arm in ("a", "b"):
+        rec = evidence.get(arm)
+        if not rec:
+            lines.append("%s: no warmup evidence" % arm.upper())
+            continue
+        elf, gl, jit = rec.get("elf", {}), rec.get("gl", {}), rec.get("jit", {})
+        gpu = rec.get("gpu") or {}
+        lines.append("%s: %s-bit %s, renderer %s%s" % (
+            arm.upper(), elf.get("bits", "?"), elf.get("machine", "?"),
+            os.path.basename(gl.get("driver") or "unknown"),
+            " [SOFTWARE]" if gl.get("software") else ""))
+        lines.append("   GPU busy %s ms on %s%s" % (
+            gpu.get("busy_ms", "?"), gpu.get("driver") or "unknown",
+            (" (" + ", ".join("%s %d ms" % kv for kv in
+                              list((gpu.get("by_process_ms") or {}).items())[:3]) + ")")
+            if gpu.get("by_process_ms") else ""))
+        lines.append("   JIT %s, %s executable in %d mapping(s)%s" % (
+            jit.get("verdict", "?"), _bytes_label(jit.get("exec_bytes", 0)),
+            jit.get("exec_mappings", 0),
+            ("; compiles " + ", ".join("%s=%d" % kv for kv in sorted(
+                (jit.get("tiers") or {}).items()))) if jit.get("tiers") else ""))
+        for note in rec.get("notes", []):
+            lines.append("   %s" % note)
+        if rec.get("problems"):
+            lines.extend("   %s" % p for p in rec["problems"])
+        if rec.get("profile"):
+            lines.append("   profile: %s (%s)" % (rec["profile"].get("file", "?"),
+                                                  rec["profile"].get("tool", "?")))
+    return lines
+
+
+def _bytes_label(n):
+    for unit in ("B", "KB", "MB", "GB"):
+        if n < 1024 or unit == "GB":
+            return "%d %s" % (n, unit)
+        n //= 1024
+
+
+def cmd_warmup_check(args):
+    a, b = _load(args.a), _load(args.b)
+    problems = []
+    for arm, rec, path in (("A", a, args.a), ("B", b, args.b)):
+        if not rec:
+            problems.append("arm %s produced no warmup evidence (%s)" % (arm, path))
+            continue
+        missing = [k for k in ("elf", "gl", "jit", "problems") if k not in rec]
+        if missing:
+            problems.append(
+                "arm %s's evidence file is not warmup evidence -- it parses as JSON but "
+                "has no %s (%s)" % (arm, "/".join(missing), path))
+            continue
+        problems.extend("arm %s: %s" % (arm, p) for p in rec.get("problems", []))
+    if a and b:
+        problems.extend(warmup_cross_problems(a, b, args.same_width))
+    for line in problems:
+        print(line)
+    sys.exit(1 if problems else 0)
+
+
+def cmd_subtests(args):
+    """The subtests a run should ask for: the plan's own list minus the
+    exclusions, so both arms of an A/B cover the same set."""
+    plan = json.load(sys.stdin)
+    listed = []
+    for group in (plan.get("subtests") or {}).values():
+        listed.extend(group)
+    drop = {x for x in (args.exclude or "").split(",") if x}
+    unknown = drop - set(listed)
+    if unknown:
+        sys.exit("subtests: %s names no subtest of this plan" % ", ".join(sorted(unknown)))
+    keep = [s for s in listed if s not in drop]
+    if not keep:
+        sys.exit("subtests: every subtest of this plan is excluded")
+    print(" ".join(keep))
+
 
 
 def _split_paths(spec):
@@ -763,7 +949,7 @@ def _task_runs(taskdir):
     for name in sorted(os.listdir(root)):
         rundir = os.path.join(root, name)
         env = _load(os.path.join(rundir, "env.json"))
-        if not env:
+        if not env or env.get("warmup"):
             continue
         runs.append({"id": name, "dir": rundir, "env": env, "state": _run_state(rundir, env)})
     return runs
@@ -961,7 +1147,8 @@ def cmd_task_report(args):
         if not a_paths:
             print("no round has both arms yet; nothing to compare")
             continue
-        report = _build_report(a_paths, b_paths, header=lines + [""] + header)
+        report = _build_report(a_paths, b_paths, header=lines + [""] + header,
+                               warmup=warmup_lines(warmup_load(taskdir, device)))
         if args.html:
             out = os.path.join(taskdir, "report-%s-%s.html" % (device, plan))
             with open(out, "w") as f:
@@ -1005,6 +1192,13 @@ def main(argv):
     p.add_argument("--text", action="store_true", help="print the text tables (default when --html is not given)")
     p.set_defaults(func=cmd_task_report)
 
+    p = sub.add_parser("warmup-check", help="judge a warmup round's two arms; exit 1 and print why if they refuse the A/B")
+    p.add_argument("a")
+    p.add_argument("b")
+    p.add_argument("--same-width", action="store_true",
+                   help="the two arms are meant to be the same word size (a slot A/B, not an image one)")
+    p.set_defaults(func=cmd_warmup_check)
+
     p = sub.add_parser("cores-valid", help="exit 0 if <set> is a valid taskset -c cpu list, 1 otherwise")
     p.add_argument("set")
     p.set_defaults(func=cmd_cores_valid)
@@ -1015,6 +1209,10 @@ def main(argv):
 
     p = sub.add_parser("plan-spec", help="a plan's fetchable source, read from stdin")
     p.set_defaults(func=cmd_plan_spec)
+
+    p = sub.add_parser("subtests", help="the plan's subtests minus --exclude, read from stdin")
+    p.add_argument("--exclude", default="", help="comma-separated subtests to drop")
+    p.set_defaults(func=cmd_subtests)
 
     p = sub.add_parser("bench-class", help="cpu or gpu -- what a plan measures")
     p.add_argument("plan")
