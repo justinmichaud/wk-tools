@@ -586,6 +586,48 @@ t_exec() {{
         self.assertIn("nothing to run in 'probe-ws' yet", out)
         self.assertIn("wk sync probe-ws", out)
 
+    def _freshen_dying(self, on):
+        """new_freshen with a `t_exec` that dies the way a real driver's
+        does -- targets/vm.sh calls `die` when the guest is not running, and
+        a guest is not running when `wk new` has just cloned it. <on> picks
+        which call dies: the mirror probe, or the checkout read after it."""
+        probe_body = ('die "\'probe-ws\' is not running (wk vm start probe-ws)"'
+                      if on == "probe" else "echo no")
+        read_body = ('die "\'probe-ws\' is not running (wk vm start probe-ws)"'
+                     if on == "read" else 'sh -c "$3"')
+        return bash(NEW_FUNCS + f'''
+t_src() {{ echo {str(self.ws)!r}; }}
+t_mirror_dir() {{ echo /mirror/WebKit.git; }}
+t_exec() {{
+    shift
+    case "$*" in
+        *"/mirror/WebKit.git"*) {probe_body} ;;
+        *) {read_body} ;;
+    esac
+}}
+new_freshen probe-ws
+''')
+
+    def test_a_target_that_cannot_be_reached_at_all_is_not_fatal(self):
+        """The defect: `wk new --target vm` died here with nothing printed.
+        The probe runs under `set -e` with pipefail, so t_exec's `die`
+        status propagated out of the assignment and ended the driver --
+        creation reported "failed" at stage `fetch` and the log said why
+        nowhere. No answer is the `unreachable` arm, not a failure."""
+        cp = self._freshen_dying("probe")
+        out = cp.stdout + cp.stderr
+        self.assertEqual(cp.returncode, 0, out)
+        self.assertIn("nothing to run in 'probe-ws' yet", out)
+
+    def test_a_checkout_that_cannot_be_read_is_not_fatal_either(self):
+        """The same hazard one line down: the workspace answered the probe
+        and then went away (a guest stopped, a container killed). There is
+        nothing to say about the checkout, and still a made workspace."""
+        cp = self._freshen_dying("read")
+        out = cp.stdout + cp.stderr
+        self.assertEqual(cp.returncode, 0, out)
+        self.assertIn("could not read the checkout in 'probe-ws'", out)
+
     def test_a_detached_checkout_names_what_puts_it_on_a_branch(self):
         _git("checkout", "-q", "--detach", "HEAD", cwd=self.ws)
         cp = self._freshen("no")

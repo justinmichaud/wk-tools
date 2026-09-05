@@ -76,11 +76,11 @@ EOF
 new_freshen() { # <name>
     local name="$1" probe out b u moved head detached mirror
     mirror=$(t_mirror_dir "$name")
-    # A subshell: t_exec dies when there is nothing to run in, and `die` from a function would end this driver.
-    probe=$( ( t_exec "$name" sh -c \
-                   "[ -n $(sh_quote "$mirror") ] && [ -d $(sh_quote "$mirror") ] \
-                    && echo yes || echo no" ) \
-                 2>/dev/null | tr -d '\r' | tail -1 )
+    # `|| probe=""`: t_exec dies when there is nothing to run in -- a guest is stopped when it is made -- and under `set -e` with pipefail that status would end this driver with nothing printed.
+    probe=$(t_exec "$name" sh -c \
+                "[ -n $(sh_quote "$mirror") ] && [ -d $(sh_quote "$mirror") ] \
+                 && echo yes || echo no" \
+                2>/dev/null | tr -d '\r' | tail -1) || probe=""
     case "$(new_fetch_from "$probe")" in
     mirror)
         "$WK_ROOT/wk" sync "$name" \
@@ -95,8 +95,8 @@ new_freshen() { # <name>
         return 0 ;;
     esac
 
-    out=$( ( t_exec "$name" sh -c "$(new_checkout_script "$(t_src "$name")")" ) \
-               2>/dev/null | tr -d '\r' )
+    out=$(t_exec "$name" sh -c "$(new_checkout_script "$(t_src "$name")")" \
+              2>/dev/null | tr -d '\r') || out=""
     detached=$(kv_get detached <<<"$out")
     if [ -n "$detached" ]; then
         warn "'$name' is not on a branch (detached at $detached), so 'git status',

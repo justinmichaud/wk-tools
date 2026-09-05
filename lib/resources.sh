@@ -146,8 +146,9 @@ build_reserved_jobs() { builds_running | awk -F'\t' '{ s += $2 } END { print s +
 # A build that fills the filesystem does not fail cleanly: bitbake halts hours in and a container's overlay ENOSPCs mid-link. A builder that unpacks a whole distribution declares its own figure.
 WK_BUILD_DISK_GB="${WK_BUILD_DISK_GB:-25}"
 
-store_free_gb() {  # the filesystem that fills is the one under the store: overlays, build trees, cache
-    df -B1G --output=avail "${WK_STORE:-$HOME}" 2>/dev/null | tail -1 | tr -dc '0-9'
+store_free_gb() {  # the filesystem that fills is the one under the store: overlays, build trees, cache. `df -Pk` is the one spelling both dfs have: BSD df has neither -B nor --output and exits 64 on them, which under pipefail ended every macOS build before it started
+    df -Pk "${WK_STORE:-$HOME}" 2>/dev/null \
+        | awk 'NR == 2 { printf "%d\n", ($4 + 1048575) / 1048576 }' || true
 }
 
 disk_admit() {

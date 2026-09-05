@@ -57,6 +57,43 @@ kill $live
         self.assertIn("reserved=0", cp.stdout)
 
 
+class TestStoreFreeGb(WkTest):
+    """store_free_gb (lib/resources.sh), run for real on the machine the
+    test is on. Every other disk test stubs it, which is how a GNU-only
+    `df -B1G --output=avail` survived: BSD df exits 64 on those options, and
+    under `set -euo pipefail` that status came out of the assignment in
+    disk_admit and ended `wk build` with no message at all -- every macOS
+    build, container and guest alike."""
+
+    def _bash(self, script, store=None):
+        env = {"XDG_STATE_HOME": str(self.tmp / "state")}
+        if store is not None:
+            env["WK_STORE"] = str(store)
+        return bash(f'set -euo pipefail\n. "{REPO}/lib/common.sh"\n'
+                    f'. "{REPO}/lib/resources.sh"\n' + script, env=env, timeout=60)
+
+    def test_it_answers_a_number_and_does_not_end_its_caller(self):
+        cp = self._bash('free=$(store_free_gb); echo "free=[$free]"; echo alive',
+                        store=self.tmp)
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertIn("alive", cp.stdout, "the caller did not survive store_free_gb")
+        free = cp.stdout.split("free=[")[1].split("]")[0]
+        self.assertRegex(free, r"^[0-9]+$", f"not a plain integer: {free!r}")
+        avail_k = int(subprocess.run(["df", "-Pk", str(self.tmp)], capture_output=True,
+                                     text=True, check=True).stdout.splitlines()[1].split()[3])
+        self.assertEqual(int(free), -(-avail_k // 1048576))
+
+    def test_a_store_path_df_cannot_answer_for_is_not_a_refusal(self):
+        """The contract disk_admit states: no answer is not evidence of a
+        full disk. It has to hold as a *return*, not only as an empty
+        string -- a failing df must not take the build with it."""
+        cp = self._bash('free=$(store_free_gb); echo "free=[$free]"\n'
+                        'disk_admit "this build" 60 && echo admitted',
+                        store=self.tmp / "no" / "such" / "path")
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertIn("admitted", cp.stdout)
+
+
 class TestDiskAdmit(WkTest):
     """disk_admit (lib/resources.sh): a build refuses before it starts when
     the store's filesystem cannot take it, so nobody has to read `wk disk`
