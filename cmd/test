@@ -113,6 +113,22 @@ else
     RENDER_DESC="software rendering"
 fi
 
+if [ "$SUITE" = layout ] && [ $# -gt 0 ] && [ -z "$DRY" ]; then
+    _missing=$(t_exec "$NAME" sh -c "$(
+        printf 'for t in %s; do\n' "$(sh_quote "$@")"
+        printf '  p=${t%%%%\\?*}\n'
+        printf '  [ -e %s/LayoutTests/"$p" ] || [ -e %s/"$p" ] || printf "%%s\\n" "$t"\n' \
+               "$(sh_quote "$SRC")" "$(sh_quote "$SRC")"
+        printf 'done\n'
+    )" 2>/dev/null | tr -d '\r') || _missing=""
+    [ -z "$_missing" ] || die "no such test in '$NAME':
+$(printf '%s\n' "$_missing" | sed 's/^/      /')
+    A path run-webkit-tests cannot find is not a failure to it -- it runs
+    nothing and exits 0. Paths are relative to LayoutTests/ (or to the
+    checkout): 'wk enter $NAME', then look under $SRC/LayoutTests."
+    unset _missing
+fi
+
 if [ -n "$LLDB" ]; then
     [ "$SUITE" = layout ] || die "--lldb debugs a layout test; for jsc use 'wk run --lldb'"
     case "$LLDB" in
@@ -120,14 +136,8 @@ if [ -n "$LLDB" ]; then
         ui)  ATTACH=$(config_test_runner_name) ;;
     esac
     [ -n "$ATTACH" ] || die "'$CONFIG' builds no layout-test binaries to debug -- use a wpe-*, gtk-* or mac-* config"
-    [ $# -gt 0 ] || die "--lldb needs a test to debug, e.g. fast/dom/Element/id-attribute.html"
+    [ $# -gt 0 ] || die "--lldb needs a test to debug, e.g. fast/dom/Comment"
     JOBS=1  # one driver, so exactly one process of either kind to catch
-
-    for _t in "$@"; do
-        t_exec "$NAME" test -e "$SRC/LayoutTests/${_t%%\?*}" -o -e "$SRC/${_t%%\?*}" 2>/dev/null \
-            || die "no such test in $NAME: $_t"
-    done
-    unset _t
 fi
 
 # mac-release-asan builds into Release-asan/, and only WEBKIT_OUTPUTDIR tells webkitdirs so.
