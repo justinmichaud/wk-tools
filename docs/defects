@@ -40,6 +40,8 @@ NEEDS YOU
    pass edited the three scripts _base_inputs_hash digests, so it now reads
    stale on prose alone. A refresh clears both. [yours to run]
 
+First, confirm this will fix it. The software update screen is still on, so that needs to be fixed too.
+
 ================================================================================
 OWED, WITH THE DECISION ALREADY MADE
 ================================================================================
@@ -111,6 +113,8 @@ STILL OPEN
   would close it, at the cost of failing some legitimately long ones. Not done:
   it is a judgement about house style, not a defect. [needs a decision]
 
+There are still too many comments anyway. I am seeing 3-4 lines of comments per line of code, this is clearly over 5%
+
 - Five sites read a source file's own comment block by FIXED LINE NUMBER, so a
   comment edit above them silently changed or emptied user-visible text; two
   image configs shipped a blank description that way. Fixed 2026-09-04: the
@@ -128,6 +132,8 @@ STILL OPEN
   needs to lift a region of a script, it anchors on a statement, never on a
   comment.
 
+This seems like a very fragile way to write a test. Ensure that each test is validating the behaviour of the code it is testing, rather than being a change test. Testing means 1) test fails when there is a bug, and 2) test passes when there is no bug. If regular changes made to the code require fixing tests, then the tests check nothing.
+
 - Two podman bugs to upstream, both worked around here and both silent:
   `podman machine init --volume src:target:ro` generates a systemd .mount unit
   with no `ro` in Options (podman 5.4, applehv), so the guest mounts it
@@ -137,7 +143,7 @@ STILL OPEN
   and a machine that comes up without it. Both repros are in the TODO comments
   at host/macos/machine.sh and host/macos/playbook.yaml.
 
-  Work around this, but leave the upstream bug report so we can remove the workaround when it is fixed.
+Work around this, but leave the upstream bug report so we can remove the workaround when it is fixed.
 
 - `wk push` on a build box fails open: with no ssh-agent there it reports
   "always live, no switch on this machine" and leaves core.sshCommand pointed
