@@ -32,15 +32,70 @@ NEEDS YOU
    information."* `claude auth login` here, then
    `wk key set claude-login --replace`. [yours to run]
 
-4. `wk vm base --refresh` on the golden base. The base was rebuilt 2026-09-04
-   (90 min, prebuild 73 min, marker inputs=af1b0526cb18f6e6) and reports ok,
-   but two things want a refresh: its screen lock is probably still on, since
-   it was provisioned by the code that tried to set the password to `1` and
-   vm/desktop.sh only unlocks when `dscl . -authonly` succeeds; and the comment
-   pass edited the three scripts _base_inputs_hash digests, so it now reads
-   stale on prose alone. A refresh clears both. [yours to run]
+4. `wk vm base --rebuild`. Provisioning boots the base with a console, answers
+   Setup Assistant on it, re-settles the desktop afterwards and refuses to call
+   the base ready with a pane still up -- no click from you. Measured on a clone
+   first: the flow ran to the end unattended and every boot since has come up on
+   a clear screen. [yours to run]
 
-First, confirm this will fix it. The software update screen is still on, so that needs to be fixed too.
+   Measured 2026-09-05 on a guest destroyed and recreated for it. The screen
+   lock is **off**, and was never the problem: WK_VM_PASSWORD defaults to the
+   image's own `admin`, `dscl . -authonly` succeeds, and `sysadminctl
+   -screenLock off` takes.
+
+   **Setup Assistant's MiniBuddy pane: the way in is the console, and it is
+   most of the way automated.** The flow can be driven from outside the guest
+   and, once it finishes, it stays finished -- measured 2026-09-05: driven to
+   the end once, then four clean boots.
+
+   Why nothing written into the guest works. From Setup Assistant's own log:
+
+       Synchronously running validateUserPassword
+       mbusertrampoline: Connection error :<Error domain: NSCocoaErrorDomain, code 4099>
+       Failed to update user preferences
+       Making pane visible: iCloudLogin
+
+   It cannot record that it ran, so each login shows the next pane it has no
+   record of and rewrites `com.apple.SetupAssistant` from its own unsaved state.
+   Eight levers were tried and each was followed by the pane: the 29
+   `DidSee*`/`LastSeen*` keys read out of the binary; `PreviousBuildVersion` and
+   `PreviousSystemVersion`; `MiniBuddyLaunch`; `AccountInfo:FirstLogins`; the
+   cached update offer; `AutomaticallyInstallMacOSUpdates`; `launchctl disable`
+   on `com.apple.mbuseragent` and on `system/com.apple.mbusertrampoline`
+   (`launchctl procinfo` says the process is "submitted by runningboardd", so
+   there is no label to disable); and `/var/db/.AppleSetupDone`, already there.
+   Killing it puts the console user back to `root`.
+
+   What works is the machine's own console. `tart run --vnc-experimental` is
+   Virtualization.framework's VNC server, so a key or a click arrives as if from
+   hardware -- no Accessibility grant inside the guest, nothing loosened.
+   Measured: a keypress drops HIDIdleTime from 94s to 1.3s, the framebuffer is
+   the guest's screen 1:1, and the cursor lands exactly where it is put.
+   vm/console-keys.py is that client (RFB 3.8, DES from `openssl`), and
+   `_answer_console_panes` drives it during base provisioning, checking Setup
+   Assistant's *process* rather than its window -- the window stays for the whole
+   flow and only its content changes.
+
+   Which button is clicked is chosen by the pane's *name*, which Setup
+   Assistant logs ("Making pane visible: X"), never swept for. `iCloudLogin` is
+   the one that cannot be advanced -- its Continue stays disabled until an Apple
+   ID is typed -- so that one is skipped through the bottom-left popup and then
+   "Sign in Later in Settings", which sits just below the pane's own edge. Do
+   not sweep for these: the left of the other panes is "Only Download
+   Automatically", "Set Up Later" and, on one, "Restart", and a sweep answered
+   whichever it landed on and took a guest down. Keyboard is no help at all --
+   escape, return, space, tab and tab-tab, on a pane and on a sheet, with and
+   without full keyboard access; those buttons take no focus.
+
+   Measured end to end 2026-09-05 on a clone made for it: `_answer_console_panes`
+   drove the whole flow, reported "Setup Assistant answered and gone", and the
+   guest has come up on a clear screen every boot since.
+
+   One consent to undo afterwards, already handled: driving the flow turns
+   diagnostic submission on, so `wk_quiet_desktop_system` turns `AutoSubmit` off
+   and `_provision_base` re-settles the desktop after answering rather than
+   before.
+
 
 ================================================================================
 OWED, WITH THE DECISION ALREADY MADE
@@ -79,17 +134,95 @@ OWED, WITH THE DECISION ALREADY MADE
   old ~/.ssh/config; one `wk rm`/`wk new` converges it.
 
 - On a guest (the base itself is rebuilt; see NEEDS YOU 4): the guest mirror's
-  first fetch, the gitconfig include provisioning installs, `wk vm check`'s
-  resident shells / editor server report, which Software Update key a tahoe
-  guest obeys (TODO in vm/desktop.sh), guest egress (TODO in cmd/verify), and
-  one `claude auth login` inside a guest to confirm it lands in
-  `~/.claude-login` rather than a Keychain item.
+  first fetch, the gitconfig include provisioning installs, and one
+  `claude auth login` inside a guest to confirm it lands in `~/.claude-login`
+  rather than a Keychain item. Done 2026-09-05: `wk vm check`'s resident-shell
+  report reads (3 shells, 16 MB, 93% free); which Software Update key a tahoe
+  guest obeys (NEEDS YOU 4); and guest egress, which `wk verify` now measures
+  from inside the guest rather than warning that it does not.
   The password is no longer one of these: measured 2026-09-04, macOS Tahoe 26.5
   refuses the only change form the account itself can run (`sysadminctl
   -oldPassword` exits 0 having changed nothing), so the guest keeps the image's
-  `admin` and every command that hands a guest over states it. That also fixes
-  the screen lock, which vm/desktop.sh could never turn off while it was
-  handed a password `dscl . -authonly` refused.
+  `admin` and every command that hands a guest over states it. The screen lock
+  went with it, and is measured off (NEEDS YOU 4).
+
+- Two faults the guest egress measurement found, both fixed 2026-09-05:
+  the proxy allowlist named the whole softwareupdate scan path (swscan, swcdn,
+  updates.cdn-apple.com, mesu, gdmf), which is how a guest that cannot turn the
+  check off found macOS 26.6.2 and got the pane; nothing behind the proxy needs
+  those (`xcode-select --install` is a host step), so they are gone and
+  tests/test_egress.py refuses them. And `_inject_running` used `nc -z -U`,
+  which answers 1 for a served unix socket on macOS -- so every start reported
+  "the GitHub API injector did not start", started a second one over the live
+  one, and left api.github.com answering 000 in the guest. It connects in
+  python now.
+
+- "Is something covering the window" is asked of the window server now, not of
+  a list of application names (2026-09-05). bench/mac-window-probe.sh compiles
+  a small CGWindowListCopyWindowInfo probe in place -- owner, layer and bounds
+  need no Screen Recording permission, only window *titles* do -- and prints one
+  entry per on-screen window. `wk vm check`, `wk vm start` and `screen_blocker`
+  (lib/quiet.sh, which every bench lane already calls) all read it, so there is
+  one implementation and it is an allowlist of what wk itself puts on a screen
+  rather than a denylist of Apple's panes: something nobody has met yet is
+  caught the first time it draws. The reading taken while the update pane was
+  up is the fixture in tests/test_vm_desktop.py and
+  tests/test_wk_overrides_lib.py, so this is a regression test rather than a
+  screenshot. WK_SCREEN_BLOCKERS is gone; WK_SCREEN_EXPECTED replaces it.
+
+- **A guest is never quiesced, and that is the biggest remaining hole in a
+  guest measurement.** `wk quiesce on` pauses thirteen daemons on a bench Mac;
+  it is `where=host` and needs the privileged helper, so it refuses in a
+  workspace, and bench/mac-lane.sh forces past the quiet check for a guest with
+  "a rehearsal is not a measurement". Measured in a freshly booted guest on
+  2026-09-05, with everything bench/mac-quiet-desktop.sh does already applied,
+  all of these were running: photoanalysisd, mediaanalysisd, suggestd, parsecd,
+  bird, cloudd (x2), ReportCrash, mds, softwareupdated (x2), backupd,
+  analyticsd, triald, siriactionsd. The unprivileged half of `wk quiesce on`
+  (the `killall -STOP` list) needs nothing a guest lacks; owed is making that
+  half reachable in one, and having the lane run it instead of forcing past.
+
+- The NotificationCenter disable was a no-op and the probe reported it as
+  done (fixed 2026-09-05). `com.apple.notificationcenterui.plist` declares the
+  label `com.apple.notificationcenterui.agent`; disabling the *filename* is
+  recorded by launchd as cheerfully as the real thing, and the agent goes on
+  drawing banners. cmd/quiesce already knew and reads the Label from the plist;
+  bench/mac-quiet-desktop.sh did not, so `wk vm check` said "no banner can be
+  drawn over the window" with NotificationCenter running. The label is read from
+  the plist now, and -- the part that would have caught it -- the probe asks
+  `pgrep` rather than launchd's disabled list, because that list answers `off`
+  for whatever name it was handed.
+
+- A quiet desktop is now one file, bench/mac-quiet-desktop.sh, and a guest and
+  a bench install get the same one (2026-09-05). It is a table -- setting rows
+  and launch-agent rows -- plus an applier for an account, an applier for the
+  machine, and a probe; `wk vm check` reads the probe and vm/desktop.sh,
+  bench/mac-bench-firstboot.sh and bench/mac-bench-volume.sh call the appliers,
+  so none of them keeps its own spelling of a setting (tests/test_mac_quiet_desktop.py
+  proves that). What it turns off beyond what was already there: desktop
+  widgets and chronod, which animate and refetch on their own timers;
+  NotificationCenter, which draws a banner over the window; Setup Assistant's
+  launch agent; window animations and transparency, which are GPU work under
+  every measurement; and App Nap, which throttles a browser that loses focus.
+  Owed: none of it has run on a real bench install -- there is no bench Mac
+  reachable from here -- so the bench half is tested against stubs and measured
+  only in a guest.
+
+- `wk vm new` ended after the staleness warning, having created nothing and
+  said nothing, whenever the host had a free VM slot -- the ordinary case
+  (fixed 2026-09-05). Two `set -euo pipefail` traps, one behind the other: a
+  trailing `[ ... ] && warn` is the statement's own status, and `_running_vms`
+  ended with `_podman_running && echo`, whose 1 became the count's under
+  `pipefail`. Both are `if` now, and tests/test_vm_base.py asserts the count's
+  exit status rather than only its output, which is what missed it.
+
+- The host's VM limit counts every VM, and now wk does too (fixed 2026-09-05).
+  `_running_count` was tart's running guests alone, so with the podman machine
+  up a second guest was let through and refused by Virtualization.framework,
+  which says so in that guest's run log and nowhere else. It counts the podman
+  machine as well, the refusal names what is holding each slot and how to free
+  it, and every `tart run` failure now quotes the run log instead of pointing
+  at it.
 
 - `wk sync --tools buildbox4` and `wk sync --tools devbox-arm64-2`. The first
   clears BASE `?`. The second rebuilds devbox's mirror, which carries only
@@ -97,23 +230,33 @@ OWED, WITH THE DECISION ALREADY MADE
   anonymously from that box, so the earlier `could not read Username` was
   transient.
 
-- Confirm layout tests can run headless and with a real GPU. Not on this
-  target: measured 2026-09-04, a container here reports `wayland
-  unavailable (eglInitialize failed)`, `gbm unavailable (cannot open
-  /dev/dri/renderD128)` and `llvmpipe [SOFTWARE]`, so the GPU half needs moose
-  or a macOS guest.
+- Confirm layout tests can run headless and with a real GPU. Half measured
+  2026-09-05: a moose container answers `gbm` and `device` with an NVIDIA RTX
+  A400 and `wayland unavailable (eglInitialize failed)`, so headless GPU work
+  has a home and a wayland display in there does not. A container on this
+  workstation stays `llvmpipe [SOFTWARE]` (2026-09-04). Still owed: run the
+  layout tests on moose both ways, and say what a macOS guest gives -- its GPU
+  is Metal and the EGL probe cannot answer for it (`wk verify` says so).
 
 ================================================================================
 STILL OPEN
 ================================================================================
 
-- A line-count bar rewards cramming. Several surviving comments are now single
-  lines of 200-280 characters, because one fact per line is the cheapest shape
-  under tests/test_comment_density.py. A max comment-line length in that test
-  would close it, at the cost of failing some legitimately long ones. Not done:
-  it is a judgement about house style, not a defect. [needs a decision]
+- A line-count bar rewards cramming, and the tree is over the bar once that is
+  priced in. Measured 2026-09-05: counting each comment as the display lines it
+  occupies at 100 columns -- which is what a reader sees, and what makes a
+  280-character line stop being free -- the tree is **7.2%** (2,576/35,693) and
+  166 files are over 5%. The 4.6% the current test reports is the crammed
+  count.
 
-There are still too many comments anyway. I am seeing 3-4 lines of comments per line of code, this is clearly over 5%
+  Decided: tests/test_comment_density.py counts `ceil(len(comment)/100)` per
+  comment line instead of 1. Not landed here, because turning it on fails 166
+  files at once and this session was scoped to tart and moose. Owed: land the
+  counting change and the third comment pass together, so the tree is never
+  red. The worst offenders by that measure are small files where one long
+  comment is most of the body -- image/configs/*.conf, bridge/init.d/*,
+  claude/skills/*/scripts/* -- and claude/skills/jsc-marker-trace/capture-perf.sh
+  at 13/71.
 
 - Five sites read a source file's own comment block by FIXED LINE NUMBER, so a
   comment edit above them silently changed or emptied user-visible text; two
@@ -126,13 +269,31 @@ There are still too many comments anyway. I am seeing 3-4 lines of comments per 
 
 - Seven test modules were coupled to COMMENT TEXT -- five sliced a source file
   between `# --- banner ---` lines and executed the result, two pinned a
-  phrase. The comment pass broke 44 tests that way, none of them a behaviour
-  regression. All are re-anchored on code (`PUSH_ON=0`, `section "credentials"`,
-  `if [ -n "$RC" ]`, `local running`, `step "Battery charge limit`). If a test
-  needs to lift a region of a script, it anchors on a statement, never on a
-  comment.
+  phrase. Re-anchoring them on statements was not enough: adding a branch to
+  cmd/verify whose text contained the END anchor as a substring emptied
+  tests/test_verify_credentials.py's block into a syntax error, and 21 tests
+  failed for no behaviour reason. A statement is still a spelling somebody has
+  to keep.
+
+  Fixed 2026-09-05: cmd/verify's credential section is `credential_checks` and
+  cmd/doctor's is `credentials_section`, and both tests lift them with
+  `func_body`. A function boundary is structure the language enforces. No
+  START/END slice of a script region is left in tests/.
 
 This seems like a very fragile way to write a test. Ensure that each test is validating the behaviour of the code it is testing, rather than being a change test. Testing means 1) test fails when there is a bug, and 2) test passes when there is no bug. If regular changes made to the code require fixing tests, then the tests check nothing.
+
+- Three Apple bugs to report (Feedback Assistant), all measured on a Tahoe 26.4
+  guest and one on the 26.6.2 host, 2026-09-05; each is worked around here and
+  each is silent, which is the reportable part:
+  `sudo softwareupdate --schedule off` prints "Automatic checking for updates is
+  turned on" and exits 0 having changed nothing; `sudo defaults write
+  /Library/Preferences/com.apple.SoftwareUpdate AutomaticCheckEnabled -bool
+  false` is accepted and softwareupdated erases the key again within seconds,
+  while the other four keys in that domain stick; and `nc -z -U <path>` exits 1
+  for a unix socket that is being served (macOS 26.6.2), so every shell script
+  using the documented liveness idiom reports a live service dead. Between the
+  first two and `profiles install` being gone, a Mac with no MDM has no
+  supported way to turn automatic update checking off at all.
 
 - Two podman bugs to upstream, both worked around here and both silent:
   `podman machine init --volume src:target:ro` generates a systemd .mount unit
@@ -160,11 +321,56 @@ Work around this, but leave the upstream bug report so we can remove the workaro
   across container/remote/vm, which is the owed item in
   docs/HANDOFF-architecture-review.md.
 
-- The macOS VM limit is reachable from here and nothing says so: three VMs
-  (the podman machine and two guests) is one too many, and the guest that
-  loses answers only in its run log, `The number of VMs exceeds the system
-  limit`. `_check_guest_limit` counts guests; it does not count the podman
-  machine, and no check reads that log. Measured 2026-09-04.
+- Flaky, and not root-caused: `tests.test_build_wall`'s
+  `test_it_strips_the_wall_and_keeps_everything_else` failed once in a full run
+  on 2026-09-05 and passed in the three full runs before it, in the module on
+  its own, and in twelve repeats of the same subprocess. It runs `bash -c` with
+  `env={"PATH": ...}`, which replaces the environment outright, yet the child
+  saw `$WK_ROOT/bin` prepended -- a path that is on this workstation's own PATH
+  and in none of the strings the test passes. So something earlier in the same
+  python process is reaching that subprocess. Nothing in image/yocto-build.sh or
+  the test changed. Owed: find what leaks (a `unittest.mock` patch of
+  subprocess or of os.environ that outlives its test is the first place to
+  look), because a suite that fails one run in three teaches people to re-run it.
+  Narrowed 2026-09-05, three failures in seven full runs. Eliminated: the
+  modules that run before it (all eighteen plus it, in order, pass); an
+  environment mutation in the suite (the one `patch.dict` is scoped and runs
+  later alphabetically); a test writing into the tree (none do); the call itself
+  being non-deterministic (300 repeats of the exact `subprocess.run`, same
+  arguments and env, all identical); and `bash` resolving to a wrapper
+  (`/usr/local/bin/bash` does not exist, and Python resolves the executable
+  through the *child* env's PATH). The one `subprocess.run` patch in the suite
+  (tests/test_backup.py) is scoped and passes when run alongside it. It has only
+  ever failed inside a full ~450-second run, so what is left is in-process state
+  that only a long run accumulates. Next: run the suite with the module under
+  `-v` and dump `os.environ['PATH']` and `subprocess.run.__module__` from the
+  test itself when it fails.
+
+- Running the tests started the podman machine (fixed 2026-09-05). Two causes,
+  both measured by stopping the machine and running one module at a time.
+
+  The dispatcher started it to deliver a *refusal*: `wk verify <a name with a
+  typo in it>` resolves to the container target, a macOS host forwards a
+  container command into the podman VM, and starting the VM is part of
+  forwarding -- so 20GB of VM booted to print a usage line. Three tests depended
+  on that (test_dispatcher, test_lifecycle, test_options), one of which already
+  carried a `WK_TARGET` workaround and a comment explaining why. forward_to_vm
+  now refuses without a terminal, naming `wk start`: starting it is a
+  convenience for a person who typed the command, not something a script, a hook
+  or `wk selftest` asks for by running one. The three tests pin `WK_TARGET`, so
+  the refusal under test is this dispatcher's, which is what they are about.
+
+  And `wk bench ls`. `wk ab` and `wk pi bench` are `where=host` and write a
+  task into *this* host's store, but `wk bench ls` was left on cmd/bench's
+  `where=workspace` default, so on a macOS host the dispatcher handed it to the
+  podman VM -- reading a store with no tasks in it, and, because `ls` was not
+  declared read-only, **booting a 20GB VM to do it** (wk, the forward path).
+  tests/test_bench_task.py had been working around it with `WK_IN_VM=1` and a
+  comment saying the VM's store "names nothing"; another `wk bench ls` in the
+  same module had no such guard, which is what started the machine on every
+  `wk selftest`. `ls` now sits with `compare` and `report` in the `where=host`
+  list and is declared `readonly`; the workaround is gone, and the test fails if
+  the forward comes back.
 
 - Report to git: `git fetch <remote>` in a **bare** repository overwrites the
   local HEAD with that remote's default branch, even when HEAD names an
@@ -172,17 +378,18 @@ Work around this, but leave the upstream bug report so we can remove the workaro
   on git 2.48.1, minimal repro in the podman machine). The mirror sets HEAD
   after its fetches because of it (lib/store.sh).
 
-- wk new on moose fails:
+- moose needs `wk sync --tools moose` for the /secrets fix here to be its own
+  (it was applied there by hand on 2026-09-05 to measure it, which is not how
+  it is delivered). Re-measured 2026-09-05 with `wk verify vt-moose`: every
+  check passes and the api.github.com/user 401 is the correct state for a
+  machine whose store holds no github-pat.
 
-  FAIL  api.github.com answered '000' -- the injector is not in the path
-        (systemctl --user status wk-github-inject; the CA is /run/wk/wk-github-ca.pem)
-  FAIL  a read answered '000' rather than 200 or 401 -- the injector
-        is in the path but not answering for api.github.com/user
-  FAIL  push is off, yet POST /repos/justinmichaud/WebKit/pulls answered '000' --
-        expected 401, so a write token is still on the machine:  wk push off
-  FAIL  GITHUB_COM_TOKEN is unset in here, so nothing that reads it sends an
-        Authorization header for the injector to replace (container/proxy/ensure-bridge.sh
-        exports both, from /secrets/github-user and the injector's CA)
-  FAIL  GH_TOKEN is unset in here, so nothing that reads it sends an
-        Authorization header for the injector to replace (container/proxy/ensure-bridge.sh
-        exports both, from /secrets/github-user and the injector's CA)
+  Root cause of the one that was real: `/secrets/github-user` and
+  `/secrets/ssh_config` were written only by `wk push on|off`, so a machine
+  nobody had switched yet mounted an empty /secrets into every workspace --
+  no fork alias, and no GITHUB_COM_TOKEN placeholder for the injector to
+  replace, so `git-webkit` sent no Authorization header at all. Both are
+  public and identical in either switch position, so store_init publishes them
+  with the directory now (lib/store.sh's secrets_publish, one implementation
+  that `wk push` calls too). The other four were stale: they were 200/401/401
+  when measured, and the injector and proxy units are active on moose.

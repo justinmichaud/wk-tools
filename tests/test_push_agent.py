@@ -20,6 +20,7 @@ import shutil
 import signal
 import subprocess
 import unittest
+from pathlib import Path
 
 from tests.support import REPO, WkTest, bash, requires_podman_vm
 
@@ -669,3 +670,53 @@ class TestLivePushFromAContainer(unittest.TestCase):
                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                             text=True, timeout=180)
         self.assertEqual(0, cp.returncode, cp.stdout)
+
+
+class TestASecretsDirectoryIsPublishedWithTheStore(WkTest):
+    """A workspace reads /secrets for the fork aliases and for the account name
+    the injector's placeholder is paired with. Both are public and the same
+    whether push is on or off, so they belong to the store, not to the switch.
+    Left to `wk push`, a machine nobody had switched yet gave every workspace an
+    empty /secrets: `git-webkit` had no GITHUB_COM_TOKEN to send, so the
+    injector had no Authorization header to replace (measured on moose,
+    2026-09-05)."""
+
+    def _init(self):
+        store = self.tmp / "store"
+        cp = bash('''
+. "$WK_ROOT/lib/common.sh"
+. "$WK_ROOT/lib/resources.sh"
+. "$WK_ROOT/lib/store.sh"
+. "$WK_ROOT/lib/target.sh"
+load_target container >/dev/null 2>&1
+store_init
+printf %s "$(wk_secrets_dir)"
+''', env={"WK_STORE": str(store), "WK_STORE_DEFAULT": str(store),
+           "WK_HOST_SECRETS": str(store / "secrets")})
+        self.assertEqual(0, cp.returncode, cp.stdout + cp.stderr)
+        return Path(cp.stdout.strip())
+
+    def test_the_account_name_is_there_before_any_switch(self):
+        secrets = self._init()
+        self.assertTrue((secrets / "github-user").exists(),
+                        "a store with no /secrets/github-user leaves every "
+                        "workspace on the machine without GITHUB_COM_TOKEN")
+        self.assertTrue((secrets / "github-user").read_text().strip())
+
+    def test_the_fork_aliases_are_there_before_any_switch(self):
+        secrets = self._init()
+        cfg = (secrets / "ssh_config").read_text()
+        self.assertIn("Host github-webkit", cfg)
+
+    def test_it_holds_no_private_half(self):
+        """The switch is which private keys an agent outside holds; nothing
+        published here may be one."""
+        secrets = self._init()
+        for f in secrets.iterdir():
+            self.assertNotIn("PRIVATE KEY", f.read_text(errors="replace"), f.name)
+
+    def test_running_it_twice_converges(self):
+        first = self._init().joinpath("ssh_config").read_text()
+        self.assertEqual(first, self._init().joinpath("ssh_config").read_text())
+
+

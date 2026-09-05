@@ -2,7 +2,7 @@
 # Build the EGL probe against the image's own libEGL, then run it.
 
 set -euo pipefail
-SRC=/opt/wk-tools/container/gpu/gpu-probe.c
+SRC="$(cd "$(dirname "$0")" && pwd)/gpu-probe.c"
 BIN=${WK_GPU_PROBE_BIN:-/tmp/.wk-gpu-probe}
 
 if [ ! -x "$BIN" ] || [ "$SRC" -nt "$BIN" ]; then

@@ -283,7 +283,11 @@ class TestUnknownWorkspaceName(WkTest):
             with self.subTest(cmd=c):
                 takes = self._takes(c)
                 extra = tuple(f"arg{i}" for i in range(takes))
-                cp = run(c, name, *extra)
+                # WK_TARGET, for the reason the sibling above gives: an unknown
+                # name resolves to the container target, and this refusal is
+                # this dispatcher's to make, not one made in the podman VM by
+                # whatever copy of wk-tools was last pushed into it.
+                cp = run(c, name, *extra, env={"WK_TARGET": "vm"})
                 out = cp.stdout + cp.stderr
                 self.assertEqual(cp.returncode, 2, f"'wk {c} {name} {' '.join(extra)}' exited {cp.returncode}:\n{out}")
                 self.assertIn(f"no such workspace: {name}", out)
@@ -643,3 +647,30 @@ class TestHelpNamesEveryWhereOverride(WkTest):
         self.assertEqual(len(top), 1, lines)
         self.assertIn(self._prose("workspace"), lines[top[0]])
         self.assertTrue(lines[top[0] + 1].startswith("    stage, staged, mac, "), lines)
+
+
+class TestNothingBootsTheMachineToRefuse(WkTest):
+    """`wk verify <a name with a typo in it>` used to start the podman machine
+    -- 20GB of VM -- so that the VM's own dispatcher could print the usage line.
+    Every `wk selftest` did it too, which is how a stopped machine kept coming
+    back on a workstation.
+
+    Starting it is a convenience for a person who typed the command. A script,
+    a test suite and a hook get a refusal that names `wk start` instead."""
+
+    def test_a_forward_into_a_stopped_machine_is_refused_without_a_terminal(self):
+        src = (REPO / "wk").read_text()
+        body = src[src.index("forward_to_vm() {"):]
+        body = body[:body.index("\n}\n")]
+        start = body.index("podman machine start")
+        guard = body.index("! -t 0")
+        self.assertLess(guard, start,
+                        "forward_to_vm starts the machine before checking for a terminal")
+        self.assertIn("wk start", body[guard:start])
+
+    def test_the_read_only_refusal_is_still_there(self):
+        """Two refusals, not one: a read-only command says the store cannot be
+        read, and everything else says nothing starts it unasked."""
+        src = (REPO / "wk").read_text()
+        body = src[src.index("forward_to_vm() {"):]
+        self.assertIn("cmd_readonly", body[:body.index("podman machine start")])

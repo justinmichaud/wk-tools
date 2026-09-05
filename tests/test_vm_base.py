@@ -256,6 +256,184 @@ class TestDeletingAVMReapsWhatRanIt(WkTest):
                 self.assertEqual(1 if f is VM else 0, len(bare), bare)
 
 
+class TestSetupAssistantIsAnsweredOnTheConsole(WkTest):
+    """No preference wk writes survives the next login (docs/defects lists eight
+    that were tried), so the pane is answered where a person would answer it: on
+    the machine's own console, through the VNC server
+    Virtualization.framework gives every VM. A key or click arrives as if from
+    hardware -- measured, HIDIdleTime drops from 94s to 1.3s -- so nothing inside
+    the guest is granted anything.
+
+    Which button is clicked is chosen by the pane's *name*, which Setup
+    Assistant logs ("Making pane visible: X"), never swept for: the left of
+    these panes is "Only Download Automatically", "Set Up Later" and, on one,
+    "Restart", and a sweep answered whichever it landed on and took a guest
+    down."""
+
+    PANE = "Setup Assistant:0:800x600@240,100;Terminal:0:863x499@40,50;"
+
+    def _targets(self, pane):
+        return bash(f'''
+. "$WK_ROOT/lib/common.sh"
+. "$WK_ROOT/lib/resources.sh"
+. "$WK_ROOT/lib/store.sh"
+. "$WK_ROOT/lib/target.sh"
+load_target vm >/dev/null 2>&1
+_console_targets {self.PANE!r} {pane!r}
+''').stdout.split()
+
+    def test_an_ordinary_pane_gets_its_own_primary_button(self):
+        """89% across, 94% down is the pane's Continue; the second is the OK of
+        the sheet the account pane opens. Both measured off a console capture
+        with the cursor in it."""
+        self.assertEqual(["click", "952", "664", "click", "824", "634"],
+                         self._targets("AutoUpdate"))
+
+    def test_the_account_pane_is_skipped_rather_than_answered(self):
+        """Its Continue stays disabled until an Apple ID is typed, so no primary
+        button advances it. The way past is the bottom-left popup and then "Sign
+        in Later in Settings", which sits below the pane's own bottom edge --
+        hence a y fraction over 100%."""
+        self.assertEqual(["click", "352", "664", "click", "368", "715"],
+                         self._targets("iCloudLogin"))
+
+    def test_no_click_lands_on_the_left_of_an_ordinary_pane(self):
+        """That is where "Only Download Automatically" and "Restart" are."""
+        xs = [int(v) for i, v in enumerate(self._targets("AutoUpdate")) if i % 3 == 1]
+        for x in xs:
+            self.assertGreater(x, 240 + 800 * 0.5, "a click landed on the left of the pane")
+
+    def test_an_unreachable_guest_is_neither_up_nor_gone(self):
+        """`pgrep -c` is a Linux flag macOS refuses, and the `|| true` that hid
+        that made every answer an empty string -- which read as "still up" and
+        clicked a guest that was not answering."""
+        cp = bash('''
+. "$WK_ROOT/lib/common.sh"
+. "$WK_ROOT/lib/resources.sh"
+. "$WK_ROOT/lib/store.sh"
+. "$WK_ROOT/lib/target.sh"
+load_target vm >/dev/null 2>&1
+_ssh() { return 1; }
+echo "state=$(_setup_assistant_state 1.2.3.4)"
+_ssh() { echo 0; }
+echo "none=$(_setup_assistant_state 1.2.3.4)"
+_ssh() { echo 2; }
+echo "some=$(_setup_assistant_state 1.2.3.4)"
+''')
+        self.assertIn("state=unreachable", cp.stdout, cp.stdout + cp.stderr)
+        self.assertIn("none=gone", cp.stdout)
+        self.assertIn("some=up", cp.stdout)
+
+    def test_a_guest_that_goes_quiet_is_not_clicked_at(self):
+        body = func_body(VM.read_text(), "_answer_console_panes")
+        self.assertIn("unreachable)", body)
+
+    def test_the_base_is_booted_with_a_console_to_answer_on(self):
+        body = func_body(VM.read_text(), "_provision_base")
+        self.assertIn("--vnc-experimental", body)
+        self.assertLess(body.index("_answer_console_panes"), body.index("_check_base_screen"))
+
+    def test_the_desktop_is_settled_again_after_the_flow(self):
+        """Driving it turns diagnostic submission on; re-settling afterwards is
+        what keeps that out of every clone."""
+        body = func_body(VM.read_text(), "_provision_base")
+        self.assertLess(body.index("_answer_console_panes"), body.index("_settle_desktop"))
+        self.assertIn("AutoSubmit", (REPO / "bench" / "mac-quiet-desktop.sh").read_text())
+
+
+class TestTheBaseIsAskedWhatIsOnItsScreen(WkTest):
+    """A pane on the base's screen is a pane on every guest cloned from it, and
+    no preference a guest writes takes it away (docs/defects lists what was
+    tried). So provisioning asks once, at the end, where somebody is already
+    waiting on a build -- and it must not end the build to do it: every command
+    in this driver runs under `set -euo pipefail`, so an unanswered base would
+    otherwise abort the last step after the hours, saying nothing."""
+
+    def _check(self, ssh_body):
+        return bash(f'''
+. "$WK_ROOT/lib/common.sh"
+. "$WK_ROOT/lib/resources.sh"
+. "$WK_ROOT/lib/store.sh"
+. "$WK_ROOT/lib/target.sh"
+load_target vm >/dev/null 2>&1
+_ssh() {{ {ssh_body}; }}
+_check_base_screen 1.2.3.4 2>&1
+echo "rc=$?"
+''')
+
+    def test_a_base_that_does_not_answer_warns_and_lets_the_build_finish(self):
+        cp = self._check("return 1")
+        self.assertIn("rc=0", cp.stdout, cp.stdout + cp.stderr)
+        self.assertIn("could not ask", cp.stdout)
+
+    def test_a_clear_screen_says_so(self):
+        cp = self._check('cat >/dev/null; echo "windows=Terminal:0:800x600;"')
+        self.assertIn("rc=0", cp.stdout, cp.stdout + cp.stderr)
+        self.assertIn("screen is clear", cp.stdout)
+
+    def test_a_pane_is_named_and_sent_to_the_base_s_own_window(self):
+        cp = self._check('cat >/dev/null; echo "windows=Setup Assistant:0:800x600;Terminal:0:800x600;"')
+        self.assertIn("rc=0", cp.stdout, cp.stdout + cp.stderr)
+        self.assertIn("Setup Assistant:0:800x600", cp.stdout)
+        self.assertNotIn("Terminal", cp.stdout.split("nothing wk put there:")[1])
+
+    def test_provisioning_asks_before_it_seals_the_base(self):
+        """After the check the base is stopped and marked ready; a clone taken
+        from it carries whatever was on that screen."""
+        body = func_body(VM.read_text(), "_provision_base")
+        self.assertIn("_check_base_screen", body)
+        self.assertLess(body.index("_check_base_screen"), body.index("_base_mark_ready"))
+
+
+class TestTheVMLimitCountsEveryVMOnTheHost(WkTest):
+    """Virtualization.framework has one limit for the whole host, and the
+    podman machine that carries the container workspaces spends a slot of it.
+    Counting only `tart list` let a third VM be started and refused: the loser
+    said "The number of VMs exceeds the system limit" in its own run log and
+    nowhere a person looks (measured 2026-09-04)."""
+
+    def _count(self, tart_running, podman_state, trailer=""):
+        vms = ",".join('{"Name":"wk-g%d","Source":"local","State":"running"}' % i
+                       for i in range(tart_running))
+        tart = "case \"$1\" in list) echo '[%s]' ;; *) exit 0 ;; esac\n" % vms
+        podman = 'echo %s\n' % podman_state
+        with stub_path({"tart": tart, "podman": podman}) as binp:
+            return bash(f'{DRIVER}\necho "n=$(_running_count)"\n'
+                        f'{trailer}\n_check_guest_limit 2>&1 || true',
+                        env={"PATH": f"{binp}:/usr/bin:/bin",
+                             "WK_VM_MAX": "2"})
+
+    def test_a_running_podman_machine_is_one_of_the_two(self):
+        cp = self._count(1, "running")
+        self.assertIn("n=2", cp.stdout, cp.stdout + cp.stderr)
+
+    def test_a_stopped_podman_machine_is_not_counted(self):
+        cp = self._count(1, "stopped")
+        self.assertIn("n=1", cp.stdout, cp.stdout + cp.stderr)
+
+    def test_counting_succeeds_when_the_podman_machine_is_down(self):
+        """The count is taken under `set -euo pipefail` by every caller. A
+        stopped machine that leaves a 1 behind ends `wk vm new` right after the
+        staleness warning, having created nothing and having said nothing."""
+        cp = self._count(1, "stopped", trailer='_running_vms >/dev/null; echo "vms_rc=$?"\n'
+                                                '_running_count >/dev/null; echo "count_rc=$?"')
+        self.assertIn("vms_rc=0", cp.stdout, cp.stdout + cp.stderr)
+        self.assertIn("count_rc=0", cp.stdout, cp.stdout + cp.stderr)
+
+    def test_the_refusal_names_what_is_holding_the_slots(self):
+        """A refusal that says '2 VM(s) are already running' while `wk vm ls`
+        shows one is a refusal nobody can act on."""
+        cp = self._count(1, "running")
+        out = cp.stdout + cp.stderr
+        self.assertIn("g0", out, out)
+        self.assertIn("podman machine", out, out)
+        self.assertIn("podman machine stop", out, out)
+
+    def test_one_guest_alone_is_let_through(self):
+        cp = self._count(1, "stopped")
+        self.assertNotIn("already running on this host", cp.stdout + cp.stderr)
+
+
 class TestProvisioningOutlivesItsConnection(WkTest):
     """The base's first act is cloning all of WebKit, which is over an hour.
     Run in the foreground it dies with the ssh session (measured 2026-09-04:

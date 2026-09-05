@@ -62,7 +62,11 @@ class TestExplainStatic(unittest.TestCase):
         stripped it, so the workspace shell reported 'command not found:
         --'). No workspace is needed to see this: an absent one still fails
         past argument parsing, at 'no such workspace'."""
-        cp = run("enter", "zz-does-not-exist-xyz", "--", "true")
+        # WK_TARGET: an absent name resolves to the container target, which a
+        # macOS host forwards into the podman VM; the parsing under test is this
+        # dispatcher's and needs no machine at all.
+        cp = run("enter", "zz-does-not-exist-xyz", "--", "true",
+                 env={"WK_TARGET": "vm"})
         self.assertNotIn(
             "--: command not found",
             cp.stdout,

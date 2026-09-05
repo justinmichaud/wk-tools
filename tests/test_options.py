@@ -213,7 +213,10 @@ class TestUnknownFlagRefused(WkTest):
         self.assertIn("usage:", cp.stdout)
 
     def test_sync(self):
-        cp = run("sync", "--bogus")
+        # WK_TARGET: `wk sync` with no name is a container command, and on a
+        # macOS host that forwards into the podman VM. The refusal under test is
+        # this dispatcher's.
+        cp = run("sync", "--bogus", env={"WK_TARGET": "vm"})
         self.assertNotEqual(cp.returncode, 0)
         self.assertIn("usage:", cp.stdout)
 

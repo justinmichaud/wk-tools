@@ -1293,7 +1293,8 @@ guest's own window logs in as -- the image's, kept), `WK_VM_CPUS`,
 **Waiting, watching and reporting**
 `WK_READY_TIMEOUT`, `WK_READY_WAIT`, `WK_POLL_SECONDS`, `WK_HEARTBEAT_SECONDS`,
 `WK_STATUS_PORT`, `WK_STATUS_INTERVAL`, `WK_BROKER_SOCKET`,
-`WK_SCREEN_BLOCKERS` (what `wk quiesce` counts as holding the screen awake),
+`WK_SCREEN_EXPECTED` (the windows wk itself puts on a measured Mac's screen;
+anything else holding one is what `wk quiesce` reports as covering it),
 `WK_BENCH_RUNNER_REF` (which benchmark runner a plan checks out).
 
 ## Where the rest is

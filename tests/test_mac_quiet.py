@@ -19,8 +19,12 @@ QUIET_HOSTS = REPO / "bench" / "mac-quiet-hosts.sh"
 FIRSTBOOT = REPO / "bench" / "mac-bench-firstboot.sh"
 VOLUME_SH = REPO / "bench" / "mac-bench-volume.sh"
 
-BEGIN = "# wk-bench: software update denial -- begin"
-END = "# wk-bench: software update denial -- end"
+# The markers the script itself writes into /etc/hosts, read from it: a second
+# copy here would let the two drift and the test would still pass.
+_MARKERS = dict(re.findall(r'^(WK_BENCH_HOSTS_(?:BEGIN|END))="([^"]*)"$',
+                           QUIET_HOSTS.read_text(), re.M))
+BEGIN = _MARKERS["WK_BENCH_HOSTS_BEGIN"]
+END = _MARKERS["WK_BENCH_HOSTS_END"]
 
 EXPECTED_HOSTS = [
     "swscan.apple.com",

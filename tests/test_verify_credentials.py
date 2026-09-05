@@ -19,18 +19,16 @@ Run: python3 -m unittest tests.test_verify_credentials -v
 """
 import unittest
 
-from tests.support import REPO, WkTest, bash
+from tests.support import REPO, WkTest, bash, func_body
 
 VERIFY = (REPO / "cmd" / "verify").read_text()
 
-# The block under test, bounded by the first statement of the credential
-# section and the first of the GPU section that follows it. Sliced rather than
-# copied so that a check added to cmd/verify is a check this file runs -- and
-# one whose behaviour drifts is a failure here. Anchored on code, not on
-# comment banners: a banner is not structure, and slicing by one made this
-# suite demand that two comments keep existing.
-START = "PUSH_ON=0"
-END = "if ! arch_has_gpu"
+# The block under test is cmd/verify's own credential_checks(), lifted whole
+# rather than copied, so a check added there is a check this file runs and one
+# whose behaviour drifts is a failure here. A function boundary, not a pair of
+# statements to slice between: those have to keep being spelled that way, and
+# adding a branch elsewhere in the file that happened to contain one of them
+# emptied this block into a syntax error.
 
 # Answers for every probe the block makes, keyed by a substring of the command
 # it runs inside the workspace. The defaults are a healthy workspace with the
@@ -58,9 +56,7 @@ FORK = "wkuser/WebKit"
 
 class _Block(WkTest):
     def block(self):
-        i = VERIFY.index(START)
-        j = VERIFY.index(END)
-        return VERIFY[i:j]
+        return func_body(VERIFY, "credential_checks")
 
     def run_block(self, push_on=False, answers=None, stored_pat="ghp-stored-here",
                   agent_sock="/run/wk/ssh-agent.sock"):
@@ -348,10 +344,8 @@ class TestWhatAnAgentInHereCanSpend(WkTest):
     machine's store -- a guest holds one of its own and is never handed the
     host's (t_agent_secret_present, lib/target.sh)."""
 
-    START = 'if t_agent_secret_present "$NAME" claude-login'
-
     def run_note(self, present):
-        block = VERIFY[VERIFY.index(self.START):VERIFY.index(START)]
+        block = func_body(VERIFY, "blast_radius_note")
         harness = f'''
 set -u
 NAME=demo
@@ -386,15 +380,22 @@ class TestBothTargetsAreMeasured(unittest.TestCase):
         by t_exec -- so the credential checks are not inside the
         $WK_SANDBOX guard, which is about container properties."""
         guard = VERIFY.index('if [ "${WK_SANDBOX:-}" = rootless-proxy ]')
-        block = VERIFY.index(START)
+        block = VERIFY.index("credential_checks() {")
         self.assertGreater(block, guard)
         between = VERIFY[guard:block]
         # The guard's own `fi` closes before the block starts.
         self.assertIn("\nfi\n", between)
 
-    def test_the_vm_arm_no_longer_says_it_measures_nothing(self):
+    def test_a_guest_is_not_excluded_from_the_network_checks(self):
+        """A guest used to be told, in a warning, that its egress was somebody
+        else's business -- so `wk verify` printed "sandbox intact" for a guest
+        whose network nothing had measured. Softnet runs on this host, but what
+        it produces is measured from inside the guest like every other
+        target's."""
         self.assertNotIn("vm workspaces have no in-guest checks yet", VERIFY)
-        self.assertIn("the credential and GPU checks", VERIFY)
+        self.assertNotIn("not the network ones", VERIFY)
+        gate = VERIFY.index("github reachable through the proxy")
+        self.assertNotIn('WK_TARGET_KIND" = vm', VERIFY[:gate])
 
 
 if __name__ == "__main__":

@@ -100,7 +100,8 @@ WK_VM_DISPLAY="${WK_VM_DISPLAY:-1280x800}"
 WK_VM_DISPLAY_W="${WK_VM_DISPLAY%x*}"
 WK_VM_DISPLAY_H="${WK_VM_DISPLAY#*x}"
 
-WK_VM_PASSWORD="$WK_VM_PASSWORD" bash "$WK_TOOLS_DIR/vm/desktop.sh"
+cat "$WK_TOOLS_DIR/bench/mac-quiet-desktop.sh" "$WK_TOOLS_DIR/vm/desktop.sh" \
+    | WK_VM_PASSWORD="$WK_VM_PASSWORD" bash -s
 
 # pmset alone does not keep the display awake.
 sudo -n tee /Library/LaunchDaemons/org.wk.nosleep.plist >/dev/null <<'PLIST'

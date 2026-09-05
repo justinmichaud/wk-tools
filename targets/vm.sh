@@ -1,6 +1,7 @@
 # Target driver: a disposable macOS VM on Tart. `tart clone` is APFS copy-on-write, so a
 # golden base with Xcode and a checkout is built once and every workspace is a free clone.
-# Apple permits two *running* macOS VMs per host (a third fails with VZErrorDomain code 6).
+
+. "$WK_ROOT/bench/mac-window-probe.sh"
 
 WK_VM_IMAGE="${WK_VM_IMAGE:-ghcr.io/cirruslabs/macos-tahoe-xcode:26.5}"
 WK_VM_BASE="${WK_VM_BASE:-wk-base}"
@@ -98,8 +99,7 @@ _tart() {
 
 _vm() { echo "wk-$1"; }
 
-# `tart delete` leaves the `tart run` process alive, and a runner for a VM that no longer
-# exists still holds one of Apple's two slots (measured 2026-09-04: base.run.log said "The number of VMs exceeds the system limit").
+# `tart delete` leaves the `tart run` process alive, and a runner for a VM that no longer exists goes on spending one of the host's VM slots.
 _vm_delete() { # <vm name>
     local v="$1" rc=0 pids
     _tart stop "$v" >/dev/null 2>&1 || true
@@ -134,9 +134,9 @@ vms = [v for v in json.load(sys.stdin) if str(v.get("Source", "")).lower() == "l
 if q == "state":
     print(next((v.get("State", "absent") for v in vms if v.get("Name") == arg), "absent"))
 elif q == "running":
-    print("\n".join(v["Name"] for v in vms if v.get("State") == "running"))
-elif q == "running_count":
-    print(sum(1 for v in vms if v.get("State") == "running"))
+    for v in vms:
+        if v.get("State") == "running":
+            print(v["Name"])
 elif q == "list":
     for v in vms:
         n = v.get("Name", "")
@@ -146,7 +146,14 @@ elif q == "list":
 }
 
 _vm_state()      { _vm_query state "$1"; }
-_running_count() { _vm_query running_count; }
+
+# Virtualization.framework counts every VM on this host against one limit, and the podman machine that carries the container workspaces is one of them -- so a guest is refused by a machine tart cannot see.
+_running_vms() {
+    _vm_query running | sed 's/^wk-//'
+    # An `if`, not `&&`: a stopped podman machine is this function's last command, and under `pipefail` its 1 becomes _running_count's, which ends every caller.
+    if _podman_running; then echo "podman machine ${WK_MACHINE:-wk}"; fi
+}
+_running_count() { _running_vms | awk 'END { print NR }'; }
 
 t_src()   { echo "/Users/$WK_VM_USER/WebKit"; }
 t_tools() { echo "/Users/$WK_VM_USER/wk-tools"; }
@@ -184,6 +191,9 @@ t_ssh_user() { printf '%s' "$WK_VM_USER"; }
 # A guest cannot see a unix socket across the hypervisor, so this one is created by sshd and carried by this host's `ssh -R`.
 t_agent_sock() { printf '/Users/%s/.wk-ssh-agent.sock' "$WK_VM_USER"; }
 
+# _boot records WK_VM_UNFILTERED as a file beside the run log, because Softnet is applied at `tart run` and a guest booted without it stays open for its whole life -- the environment this is read in says nothing about it.
+t_egress_filtered() { [ ! -f "$WK_VM_DIR/$1.unfiltered" ]; }
+
 t_os() { echo macos; }
 
 t_create() {
@@ -203,8 +213,10 @@ t_create() {
     fi
 
     local running; running=$(_running_count)
-    [ "${running:-0}" -ge "$WK_VM_MAX" ] && \
-        warn "$running macOS VM(s) already running; you will have to stop one before starting '$name'"
+    if [ "${running:-0}" -ge "$WK_VM_MAX" ]; then
+        warn "$running VM(s) already running on this host; you will have to stop one before starting '$name':
+$(_running_vms | sed 's/^/      /')"
+    fi
 
     info "cloning $WK_VM_BASE -> $v (APFS copy-on-write)"
     local t0; t0=$(date +%s)
@@ -256,7 +268,6 @@ t_start() {
         _converge_guest "$name" "$ip"
     fi
 
-    # One exit, so every command that starts a guest states the login.
     vm_login_note
     echo "$ip"
 }
@@ -265,8 +276,8 @@ t_start() {
 _settle_desktop() { # <name> <ip>
     {
         printf 'WK_VM_PASSWORD=%s\n' "$(sh_quote "$WK_VM_PASSWORD")"
-        cat "$WK_ROOT/vm/desktop.sh"
-    } | _ssh "$2" "bash -s" >/dev/null 2>&1
+        cat "$WK_ROOT/bench/mac-quiet-desktop.sh" "$WK_ROOT/vm/desktop.sh"
+    } | _ssh "$2" "bash -s" >/dev/null
 }
 
 _report_desktop() { # <name>
@@ -353,7 +364,17 @@ _inject_ca()    { echo "$WK_VM_DIR/wk-github-ca.pem"; }
 _inject_pat()   { echo "$WK_VM_DIR/push-github-pat"; }
 _inject_read_pat() { echo "$WK_VM_DIR/read-github-pat"; }
 
-_inject_running() { [ -S "$(_inject_sock)" ] && nc -z -U "$(_inject_sock)" 2>/dev/null; }
+# macOS `nc -z -U` answers 1 for a socket that is being served, so the connect is made in python: a false negative here restarts a live injector and reports the guest has none.
+_inject_running() {
+    [ -S "$(_inject_sock)" ] || return 1
+    /usr/bin/python3 -c 'import socket, sys
+s = socket.socket(socket.AF_UNIX); s.settimeout(2)
+try:
+    s.connect(sys.argv[1])
+except OSError:
+    sys.exit(1)
+s.close()' "$(_inject_sock)" 2>/dev/null
+}
 
 _start_host_inject() {
     ensure_dir "$WK_VM_DIR"
@@ -476,12 +497,24 @@ _boot() {
 
     # Default dhcp resolver works behind Softnet; the arp resolver does not.
     ip=$(_tart ip "$v" --wait "$wait" 2>/dev/null | grep .) \
-        || die "$v did not come up within ${wait}s; see $runlog"
+        || die "$v did not come up within ${wait}s. Its run log says:
+$(_runlog_tail "$runlog")"
 
     _start_host_proxy || true
 
-    _wait_ssh "$ip" || die "$v is up at $ip but ssh never answered; see $runlog"
+    _wait_ssh "$ip" || die "$v is up at $ip but ssh never answered. Its run log says:
+$(_runlog_tail "$runlog")"
     echo "$ip"
+}
+
+# The only place a `tart run` states why it died -- "The number of VMs exceeds the system limit" is printed here and nowhere a person looks.
+_runlog_tail() { # <path>
+    if [ -s "$1" ]; then
+        tail -5 "$1" | sed 's/^/      /'
+        printf '    (%s)\n' "$1"
+    else
+        printf '    nothing -- %s is empty\n' "$1"
+    fi
 }
 
 t_stop() {
@@ -994,9 +1027,12 @@ _check_host_disk() {
 _check_guest_limit() {
     local running; running=$(_running_count)
     [ "${running:-0}" -lt "$WK_VM_MAX" ] && return 0
-    die "$running macOS VM(s) are already running.
-    Apple's licence permits $WK_VM_MAX per host and Virtualization.framework enforces it;
-    a third fails with VZErrorDomain code 6. Stop one first:  wk vm stop <name>"
+    die "$running VM(s) are already running on this host:
+$(_running_vms | sed 's/^/      /')
+    Virtualization.framework permits $WK_VM_MAX and refuses the next one with
+    VZErrorDomain code 6, in that guest's run log and nowhere else. Free a slot
+    with 'wk vm stop <name>', or with 'podman machine stop ${WK_MACHINE:-wk}' --
+    that machine carries the container workspaces, which survive it being down."
 }
 
 _podman_mem_mb() {
@@ -1233,12 +1269,14 @@ _provision_base() {
     local runlog="$WK_VM_DIR/base.run.log"
     local ip
     if [ "$(_vm_state "$WK_VM_BASE")" != running ]; then
-        nohup "$(_tart_bin)" run --no-graphics "$WK_VM_BASE" >"$runlog" 2>&1 &
+        # --vnc-experimental costs nothing on a headless run and is the only way to answer a Setup Assistant pane (docs/defects).
+        nohup "$(_tart_bin)" run --no-graphics --vnc-experimental "$WK_VM_BASE" >"$runlog" 2>&1 &
         disown 2>/dev/null || true
         info "booting the base VM for provisioning (log: $runlog)"
     fi
     ip=$(_tart ip "$WK_VM_BASE" --wait 300 2>/dev/null | grep .) \
-        || die "base VM did not boot; see $runlog"
+        || die "base VM did not boot. Its run log says:
+$(_runlog_tail "$runlog")"
 
     # The guest agent is how the key gets in the FIRST time, without typing the default password; `tart ip --wait` answers before the agent is listening.
     if _wait_ssh "$ip"; then
@@ -1256,7 +1294,8 @@ _provision_base() {
     key in unattended -- log in once with the image's own credentials and append
     $WK_VM_KEY.pub to ~/.ssh/authorized_keys by hand, then re-run."
 
-        _wait_ssh "$ip" || die "ssh key was installed but ssh still refuses; see $runlog"
+        _wait_ssh "$ip" || die "ssh key was installed but ssh still refuses. Its run log says:
+$(_runlog_tail "$runlog")"
     fi
 
     # Before anything here speaks TLS: provisioning's first act is an HTTPS clone, which a stale clock fails as a not-yet-valid certificate. A refusal, since a base sealed at the wrong date hands it to every clone.
@@ -1287,10 +1326,111 @@ _provision_base() {
 
     _prebuild_base "$ip"
 
+    _answer_console_panes "$ip" "$runlog"
+    # After it, not only before: the flow turns diagnostic submission on.
+    _settle_desktop "$WK_VM_BASE" "$ip" || warn "could not re-settle the base's desktop after Setup Assistant"
+    _check_base_screen "$ip"
+
     info "shutting the base VM down"
     _tart stop "$WK_VM_BASE"
     _base_mark_ready
     changed "golden base VM '$WK_VM_BASE' is ready"
+}
+
+_vnc_console() { # <runlog>
+    sed -n 's|.*vnc://:\([^@]*\)@\([0-9.]*\):\([0-9]*\).*|\2 \3 \1|p' "$1" | tail -1
+}
+
+_screen_windows() { # <ip>
+    { cat "$WK_ROOT/bench/mac-window-probe.sh"; echo wk_window_probe; } \
+        | _ssh "$1" 'bash -s' 2>/dev/null | sed -n 's/^windows=//p'
+}
+
+# Setup Assistant is answered on the machine's own console because no preference wk writes survives the next login (docs/defects). Its window stays for the whole flow and only its content changes, so the process is what says it has finished.
+_setup_assistant_state() { # <ip>
+    local n   # `pgrep -c` is Linux-only; macOS pgrep refuses it, and a `|| true` made that look like a count of nothing.
+    n=$(_ssh "$1" "pgrep -f 'Setup Assistant.app/Contents/MacOS' | grep -c . || true" 2>/dev/null \
+        | tr -d '\r') || { echo unreachable; return 0; }
+    case "$n" in
+        "")  echo unreachable ;;
+        0)   echo gone ;;
+        *)   echo up ;;
+    esac
+}
+
+# Chosen by the pane's own name rather than swept for; `iCloudLogin`'s Continue never enables, so that one is skipped through the popup below it (docs/defects has the measurements).
+_console_pane() { # <ip>
+    # Streamed, not passed as an argument: the predicate's quotes do not survive the remote shell.
+    cat <<'QUERY' | _ssh "$1" 'bash -s' 2>/dev/null | tr -d '\r'
+set -u
+log show --last 10m --predicate 'subsystem == "com.apple.macbuddy"' --style compact 2>/dev/null \
+    | sed -n 's/.*Making pane visible: //p' | tail -1
+QUERY
+}
+
+_console_targets() { # <windows reading> <pane name>
+    local entry geom w h x y
+    entry=$(printf '%s' "$1" | tr ';' '\n' | grep '^Setup Assistant:0:' | head -1)
+    [ -n "$entry" ] || return 0
+    geom=${entry#Setup Assistant:0:}
+    w=${geom%%x*}; h=${geom#*x}; h=${h%%@*}
+    x=${geom#*@}; y=${x#*,}; x=${x%%,*}
+    _at() { printf 'click %s %s ' "$((x + w * $1 / 1000))" "$((y + h * $2 / 1000))"; }
+    case "$2" in
+        iCloudLogin) _at 140 940; _at 160 1025 ;;
+        *)           _at 890 940; _at 730 890 ;;
+    esac
+    unset -f _at
+}
+
+_answer_console_panes() { # <ip> <runlog>
+    local console ip="$1" i=0 target
+    [ "$(_setup_assistant_state "$ip")" = up ] || return 0
+    console=$(_vnc_console "$2")
+    if [ -z "$console" ]; then
+        warn "Setup Assistant is on the base's screen and this run has no console to answer
+    it on ('tart run --vnc-experimental'); $2 is where the address would be"
+        return 0
+    fi
+    info "answering Setup Assistant on the base's own console"
+    while [ "$i" -lt 8 ]; do
+        target=$(_console_targets "$(_screen_windows "$ip")" "$(_console_pane "$ip")")
+        [ -n "$target" ] || break
+        # shellcheck disable=SC2086 -- host, port, password, then `click x y` repeated.
+        /usr/bin/python3 "$WK_ROOT/vm/console-keys.py" $console $target \
+            || { warn "could not reach the base's console"; return 0; }
+        sleep 3
+        case "$(_setup_assistant_state "$ip")" in
+            gone) changed "Setup Assistant answered and gone"; return 0 ;;
+            unreachable)
+                warn "the base stopped answering while its console was being clicked, so
+    what it was asked is unknown. Nothing here will click a guest that has gone
+    quiet:  wk vm base  reports what is on that screen"
+                return 0 ;;
+        esac
+        i=$((i + 1))
+    done
+    warn "Setup Assistant is still up after $i passes over the base's console;
+    'wk vm base' reports what is on that screen, and it can be answered at its window"
+}
+
+_check_base_screen() { # <ip>
+    local reading uninvited
+    reading=$( { cat "$WK_ROOT/bench/mac-quiet-desktop.sh" "$WK_ROOT/bench/mac-window-probe.sh"
+                 echo wk_window_probe
+               } | _ssh "$1" 'bash -s' 2>/dev/null | sed -n 's/^windows=//p') || reading=""
+    if [ -z "$reading" ] || [ "$reading" = '?' ]; then
+        warn "could not ask '$WK_VM_BASE' what is on its screen, so whether every guest
+    cloned from it comes up covered is unknown ('wk vm check <name>' asks a guest)"
+        return 0
+    fi
+    uninvited=$(wk_window_unexpected "$reading")
+    [ -n "$uninvited" ] || { info "the base's screen is clear, so a clone's will be too"; return 0; }
+    warn "on the base's screen, and nothing wk put there: ${uninvited%;}
+    Every guest cloned from this base comes up behind it, and no setting a guest
+    can write takes it away. Answer it once at the base's own window -- it is
+    running now, at $1 -- and then:  wk vm base --refresh
+    A benchmark measured behind it measures a throttled window."
 }
 
 # Findings, one per line, tab-separated `<state> <what> <remedy>` with state ok | wrong | note. Every renderer reads a line at a time, so a remedy wrapped over two lines loses its second half.
@@ -1323,35 +1463,53 @@ vm_desktop_findings() { # <probe output>
         && _f ok "display sleep off" \
         || _f wrong "the display sleeps after $(_v displaysleep) minutes" "$rebuild"
 
+    case "$(_v widgets_agent):$(_v widgets_desktop)" in
+        off:1) _f ok "desktop widgets off, and chronod is not running to redraw them" ;;
+        *)     _f wrong "desktop widgets are live (chronod $(_v widgets_agent), StandardHideWidgets=$(_v widgets_desktop)) -- they animate and refetch on timers of their own, under whatever is being measured" "$restart" ;;
+    esac
+
+
+    [ "$(_v notifications)" = off ] \
+        && _f ok "no banner can be drawn over the window" \
+        || _f wrong "NotificationCenter is live in there, so a banner can draw over the window mid-run" "$restart"
+
+    case "$(_v reduce_motion):$(_v reduce_transparency)" in
+        1:1) _f ok "window animations and transparency off" ;;
+        *)   _f wrong "the compositor is still doing animations and transparency (reduceMotion=$(_v reduce_motion), reduceTransparency=$(_v reduce_transparency)), which is GPU work under every measurement" "$restart" ;;
+    esac
+
+    [ "$(_v appnap)" = 1 ] \
+        && _f ok "App Nap off, so nothing backgrounded is throttled" \
+        || _f wrong "App Nap is on (NSAppSleepDisabled=$(_v appnap)): a browser that loses focus has its rAF throttled and its run stalls" "$restart"
+
+    case "$(_v spotlight)" in
+        *disabled*) _f ok "Spotlight is not indexing" ;;
+        "")         _f note "Spotlight did not answer, so whether it indexes under a build is unknown" "$restart" ;;
+        *)          _f wrong "Spotlight is indexing in there ($(_v spotlight)) -- it reads the disk the build writes" "$restart" ;;
+    esac
+
     v=$(_v setupassistant_pending)
     [ -z "$v" ] \
         && _f ok "Setup Assistant already clicked through" \
         || _f wrong "Setup Assistant will put a modal pane on the desktop:$v" "$rebuild"
 
-    # The offer that puts a panel on the desktop is the *system* one: softwareupdated acts on /Library/Preferences, while the per-user domain is what System Settings shows. `?` is "no such key", which is not off.
-    case "$(_v update_check_system)" in
-        0)  _f ok "Software Update checks off where softwareupdated reads them (/Library/Preferences)" ;;
-        "") _f note "the guest did not answer about Software Update, so what it will offer on that desktop is unknown" \
+    # softwareupdated obeys /Library/Preferences; the per-user domain is what System Settings shows a person. Neither can turn the *check* off on Tahoe (vm/desktop.sh says what was measured), so what is judged here is the two that reboot a guest under a build. `?` is "no such key", which is not off.
+    case "$(_v update_autoinstall_system)" in
+        0)  _f ok "macOS updates will not install themselves" ;;
+        "") _f note "the guest did not answer about Software Update, so whether it installs one under a build is unknown" \
                     "$restart  -- a start re-runs this probe" ;;
-        *)  _f wrong "Software Update will offer an upgrade on the desktop (system AutomaticCheckEnabled=$(_v update_check_system)) -- a guest is a clone of a pinned image and upgrading it means nothing" "$rebuild" ;;
+        *)  _f wrong "macOS updates are set to install themselves in there (AutomaticallyInstallMacOSUpdates=$(_v update_autoinstall_system)), which reboots the guest -- mid-build, if that is when one lands" "$rebuild" ;;
     esac
 
-    case "$(_v update_schedule)" in
-        off) _f ok "the scheduled update check is off" ;;
-        "")  _f note "softwareupdate did not report its schedule in there, so whether the check comes back on its own is unknown" \
-                     "$restart  -- a start re-runs this probe" ;;
-        *)   _f wrong "the scheduled update check is $(_v update_schedule) in there, so the offer comes back on its own" "$rebuild" ;;
+    case "$(_v update_download_system)" in
+        0)  _f ok "no update downloads itself in there" ;;
+        "") ;;   # the note above already says this guest answered nothing here
+        *)  _f wrong "updates download themselves in there (AutomaticDownload=$(_v update_download_system)), which takes the host's disk and the guest's bandwidth mid-build" "$rebuild" ;;
     esac
 
     case "$(_v update_check):$(_v update_download)" in
         0:0) _f ok "Software Update offers off in the login account too" ;;
         *)   _f note "the account's own Software Update settings read check=$(_v update_check), download=$(_v update_download) -- what System Settings shows at that window, not what softwareupdated obeys" "$rebuild" ;;
-    esac
-
-    case "$(_v update_autoinstall_system)" in
-        0)  _f ok "macOS updates will not install themselves" ;;
-        "") ;;   # the note above already says this guest answered nothing here
-        *)  _f wrong "macOS updates are set to install themselves in there (AutomaticallyInstallMacOSUpdates=$(_v update_autoinstall_system)), which reboots the guest -- mid-build, if that is when one lands" "$rebuild" ;;
     esac
 
     # Setup Assistant's "what is new in macOS" pane is a Software Update screen by another name: Buddy shows it whenever these keys do not already name the running system.
@@ -1365,11 +1523,26 @@ vm_desktop_findings() { # <probe output>
         _f wrong "Setup Assistant will show its 'what is new in macOS' pane (it last saw $(_v setupassistant_seen_product), this guest runs $v)" "$rebuild"
     fi
 
-    v=$(_v panels)
-    [ -z "$v" ] \
-        && _f ok "nothing modal on screen now" \
-        || _f wrong "something is on the desktop right now: $v" \
-                    "$restart  -- the settings above stop the next one, and killing this one would take the desktop session with it (vm/desktop.sh)"
+    v=$(_v windows)
+    if [ "$v" = '?' ] || [ -z "$v" ]; then
+        _f note "the window server was not asked what is on that screen (no compiler in there to build the probe with)" \
+                "$restart  -- a start builds and runs it again"
+    else
+        local uninvited; uninvited=$(wk_window_unexpected "$v")
+        [ -z "$uninvited" ] \
+            && _f ok "nothing on that screen but $(printf '%s' "$v" | tr ';' '\n' | grep -c ':0:') window(s) wk put there" \
+            || _f wrong "on that screen right now, and nothing wk runs put it there: ${uninvited%;}" \
+                        "it comes back on every boot and no setting a guest can write stops it (docs/defects): clear it on the base, once -- $rebuild"
+    fi
+
+    _f note "$(_v frontapp) has the focus" \
+            "an unfocused window is a throttled window: a benchmark measured behind one measures the throttle"
+
+    # A note, not a fault: SecurityAgent is up for a few seconds of every login, and this report is taken seconds after one. It is a fault only if it is still there when the guest is asked again, which is what the remedy asks for.
+    [ "$(_v securityagent)" = down ] \
+        && _f ok "no authentication sheet is up" \
+        || _f note "SecurityAgent is up, which the frontmost-application reading above cannot see. Every login has one for a moment" \
+                   "wk vm check <name>  -- still up means something in there is waiting for a password"
 
     _f note "the guest's own window logs in as $(_v user)" \
             "wk itself uses an ssh key; 'wk vm start' and 'wk vm enter' state that account's password"
@@ -1382,7 +1555,8 @@ vm_desktop_findings() { # <probe output>
 vm_desktop_probe() { # <name>
     local ip; ip=$(_ip "$1") || return 1
     [ -n "$ip" ] || return 1
-    _ssh "$ip" 'bash -s' < "$WK_ROOT/vm/desktop-probe.sh"
+    cat "$WK_ROOT/bench/mac-quiet-desktop.sh" "$WK_ROOT/bench/mac-window-probe.sh" \
+        "$WK_ROOT/vm/desktop-probe.sh" | _ssh "$ip" 'bash -s'
 }
 
 vm_render_findings() {

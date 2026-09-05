@@ -10,6 +10,7 @@ fi
 export WKDEV_SDK="$WK_SDK"
 
 WK_SANDBOX=rootless-proxy
+t_egress_filtered() { return 0; }
 
 _sdk() { "$@"; }
 

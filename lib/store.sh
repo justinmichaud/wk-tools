@@ -679,6 +679,14 @@ store_init() {
     ensure_dir "$WK_STORE/skills"
     ensure_dir "$(wk_secrets_dir)" 0700
     ensure_dir "$(wk_agent_rw_dir)" 0700
+    secrets_publish || warn "could not publish $(wk_secrets_dir)/ssh_config and github-user,
+    so a workspace here gets no fork alias and no GITHUB_COM_TOKEN"
+}
+
+# /secrets is what every workspace on this machine reads. What goes in it -- the fork aliases and the account name -- is public and identical whether push is on or off, so it is published with the directory. Left to `wk push`, a machine nobody had switched yet gave every workspace an empty /secrets: no fork alias, and no placeholder for the injector to replace, so `git-webkit` sent no Authorization header at all.
+secrets_publish() {
+    local sock; sock=$(t_agent_sock 2>/dev/null) || sock=""
+    push_agent_publish_config "$(wk_secrets_dir)" "$sock"
 }
 
 base_path() { echo "$(wk_base_dir)/$1/WebKit"; }

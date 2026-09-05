@@ -1,3 +1,6 @@
+# shellcheck disable=SC1090
+. "$(dirname "${BASH_SOURCE[0]}")/../bench/mac-window-probe.sh"
+
 macos_noise() {
     local bad=0 v
 
@@ -84,9 +87,6 @@ macos_noise() {
     return $bad
 }
 
-# A benchmark in a background window is throttled and times out silently (run-benchmark exit 124); `lsappinfo front` asks the window server which app owns it.
-WK_SCREEN_BLOCKERS="${WK_SCREEN_BLOCKERS:-Setup Assistant|Software Update|Installer|Migration Assistant|System Settings}"
-
 # A modal auth panel is invisible to screen_blocker; SecurityAgent runs only while one is up.
 auth_panel() {
     pgrep -x SecurityAgent >/dev/null 2>&1 && printf 'SecurityAgent'
@@ -94,15 +94,12 @@ auth_panel() {
 }
 
 screen_blocker() {
-    command -v lsappinfo >/dev/null 2>&1 || return 0
-    local asn name
-    asn=$(lsappinfo front 2>/dev/null) || return 0
-    [ -n "$asn" ] || return 0
-    name=$(lsappinfo info -only name "$asn" 2>/dev/null \
-             | sed -n 's/.*"LSDisplayName"="\([^"]*\)".*/\1/p')
-    [ -n "$name" ] || return 0
-    case "|$WK_SCREEN_BLOCKERS|" in
-        *"|$name|"*) printf '%s' "$name" ;;
-    esac
+    local reading uninvited
+    reading=$(wk_window_probe 2>/dev/null | sed -n 's/^windows=//p')
+    # `?` is "the window server was not asked", which is not "nothing is there": a caller that read it as free would say the screen is clear on every machine with no compiler to build the probe with.
+    [ -n "$reading" ] && [ "$reading" != '?' ] || { printf '?'; return 0; }
+    uninvited=$(wk_window_unexpected "$reading") || return 0
+    [ -n "$uninvited" ] || return 0
+    printf '%s' "${uninvited%;}" | tr ';' '\n' | cut -d: -f1 | sort -u | paste -sd, -
     return 0
 }

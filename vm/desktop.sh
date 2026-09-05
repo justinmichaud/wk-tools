@@ -1,5 +1,3 @@
-# Idempotent, and re-run on every boot: `defaults -currentHost` keys are per hardware UUID, and `tart clone` mints a new one.
-
 set -euo pipefail
 
 _say() { printf '==> %s\n' "$*" >&2; }
@@ -14,11 +12,7 @@ else
   'wk vm check <name>' reports the lock; a rebuilt base sets the password." >&2
 fi
 
-defaults -currentHost write com.apple.screensaver idleTime -int 0
-defaults write com.apple.screensaver askForPassword -int 0
-defaults write com.apple.screensaver askForPasswordDelay -int 0
-
-sudo -n pmset -a displaysleep 0 sleep 0 disablesleep 1 2>/dev/null || true
+wk_quiet_desktop_user || echo "warning: the guest's desktop is not fully quiet (above); 'wk vm check <name>' says which settings" >&2
 
 for _k in DidSeeCloudSetup DidSeeSiriSetup DidSeeAppearanceSetup \
           DidSeePrivacy DidSeeTrueTone DidSeeAccessibility DidSeeSyncSetup \
@@ -26,23 +20,19 @@ for _k in DidSeeCloudSetup DidSeeSiriSetup DidSeeAppearanceSetup \
           DidSeeScreenTime DidSeeiCloudLoginForStorageServices \
           DidSeeAppleIDSetup DidSeeSafariImport DidSeeSiriSetupPromptCount \
           DidSeeDevicesSetup DidSeeUpdateSetup DidSeeWelcome; do
-    defaults write com.apple.SetupAssistant "$_k" -bool true 2>/dev/null || true
+    defaults write com.apple.SetupAssistant "$_k" -bool true || true
 done
 defaults write com.apple.SetupAssistant LastSeenCloudProductVersion "$(sw_vers -productVersion)"
 defaults write com.apple.SetupAssistant LastSeenBuddyBuildVersion "$(sw_vers -buildVersion)"
 
-# TODO: measure on a tahoe (macOS 26) guest which of these keys the update offer obeys.
 defaults write com.apple.SoftwareUpdate AutomaticCheckEnabled -bool false
 defaults write com.apple.SoftwareUpdate AutomaticDownload -bool false
 defaults write com.apple.SoftwareUpdate AutomaticallyInstallMacOSUpdates -bool false
 defaults write com.apple.SoftwareUpdate CriticalUpdateInstall -bool false
 defaults write com.apple.SoftwareUpdate ConfigDataInstall -bool false
 defaults write com.apple.commerce AutoUpdate -bool false
-for _k in AutomaticCheckEnabled AutomaticDownload \
-          AutomaticallyInstallMacOSUpdates CriticalUpdateInstall ConfigDataInstall; do
-    sudo -n defaults write /Library/Preferences/com.apple.SoftwareUpdate \
-        "$_k" -bool false 2>/dev/null || true
-done
-sudo -n softwareupdate --schedule off >/dev/null 2>&1 || true
+
+sudo -n bash -c "$(declare -f wk_quiet_desktop_system); wk_quiet_desktop_system" \
+    || echo "warning: the machine-wide half did not fully take; 'wk vm check <name>' says which" >&2
 
 _say "desktop settled"

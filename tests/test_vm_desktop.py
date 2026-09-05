@@ -45,18 +45,29 @@ def _defines(func):
 
 SETTLED = """console_user=admin
 screenlock=off
-idletime=0
+widgets_desktop=1
+widgets_stage=1
+reduce_motion=1
+reduce_transparency=1
+appnap=1
 askforpassword=0
+askforpassworddelay=0
+idletime=0
+widgets_agent=off
+notifications=off
+setup_assistant=off
+spotlight=Indexing disabled.
 displaysleep=0
 setupassistant_pending=
 update_check=0
 update_download=0
-update_check_system=0
+update_download_system=0
 update_autoinstall_system=0
-update_schedule=off
 setupassistant_seen_product=26.5
 os_product=26.5
-panels=
+frontapp=com.apple.Finder
+windows=Notification Center:21:1417x805;Terminal:0:863x499;
+securityagent=down
 user=admin
 """
 
@@ -68,27 +79,37 @@ user=admin
 # reported as unknown, never as settled.
 AS_FOUND = """console_user=admin
 screenlock=off
-idletime=?
+widgets_desktop=?
+widgets_stage=?
+reduce_motion=?
+reduce_transparency=?
+appnap=?
 askforpassword=0
+askforpassworddelay=0
+idletime=?
+widgets_agent=on
+notifications=on
+setup_assistant=on
+spotlight=Indexing enabled.
 displaysleep=0
 setupassistant_pending=DidSeeTrueTone DidSeeSyncSetup
 update_check=?
 update_download=?
-panels=/System/Library/CoreServices/Setup Assistant.app/Contents/MacOS/Setup Assistant -MiniBuddyYes;
+frontapp=com.apple.SetupAssistant
+windows=Setup Assistant:0:800x600;Setup Assistant:-1:1417x805;Notification Center:21:1417x805;Terminal:0:863x499;
+securityagent=down
 user=admin
 """
 
 LOGIN_WINDOW = SETTLED.replace("console_user=admin", "console_user=root")
 
-# A guest whose base never turned Software Update off: checks on where
-# softwareupdated reads them, a schedule that brings the offer back on its own,
-# macOS updates set to install themselves -- which reboots the guest, mid-build
-# if that is when one lands -- and a Setup Assistant that has not seen this
-# macOS, so Buddy shows its "what is new" pane at login.
+# A guest whose base never turned Software Update off: an update that downloads
+# itself, macOS updates set to install themselves -- which reboots the guest,
+# mid-build if that is when one lands -- and a Setup Assistant that has not seen
+# this macOS, so Buddy shows its "what is new" pane at login.
 UPDATE_ON = (SETTLED
-             .replace("update_check_system=0", "update_check_system=1")
+             .replace("update_download_system=0", "update_download_system=1")
              .replace("update_autoinstall_system=0", "update_autoinstall_system=1")
-             .replace("update_schedule=off", "update_schedule=on")
              .replace("setupassistant_seen_product=26.5",
                       "setupassistant_seen_product=26.4"))
 
@@ -122,8 +143,8 @@ class TestTheFindings(WkTest):
         f = findings(AS_FOUND)
         wrong = [x[1] for x in f if x[0] == "wrong"]
         self.assertTrue(any("screen saver" in w for w in wrong), wrong)
-        self.assertTrue(any("Setup Assistant" in w for w in wrong), wrong)
-        self.assertTrue(any("on the desktop right now" in w for w in wrong), wrong)
+        self.assertTrue(any("Setup Assistant will put a modal pane" in w for w in wrong), wrong)
+        self.assertTrue(any("nothing wk runs put it there" in w for w in wrong), wrong)
 
     def test_a_guest_that_says_nothing_about_software_update_is_not_called_ok(self):
         """The capture above answers none of the Software Update keys. Silence
@@ -133,26 +154,88 @@ class TestTheFindings(WkTest):
         self.assertNotIn("ok", [x[0] for x in f], f)
         self.assertTrue(any("wk vm start" in x[2] for x in f), f)
 
-    def test_the_update_offer_is_judged_where_softwareupdated_reads_it(self):
+    def test_an_update_that_reboots_or_downloads_itself_is_wrong(self):
         """The per-user domain is what System Settings shows a person; the one
-        that puts a panel on the desktop is /Library/Preferences, which is
-        root's -- so a guest can read 0 in the first and 1 in the second."""
+        softwareupdated obeys is /Library/Preferences, which is root's -- so a
+        guest can read 0 in the first and 1 in the second."""
         f = findings(UPDATE_ON)
         wrong = [x[1] for x in f if x[0] == "wrong"]
-        self.assertTrue(any("Software Update will offer an upgrade" in w for w in wrong), wrong)
-        self.assertTrue(any("scheduled update check is on" in w for w in wrong), wrong)
         self.assertTrue(any("install themselves" in w for w in wrong), wrong)
+        self.assertTrue(any("download themselves" in w for w in wrong), wrong)
         self.assertTrue(any("what is new in macOS" in w for w in wrong), wrong)
         for x in f:
-            if "Software Update will offer" in x[1]:
+            if "install themselves" in x[1]:
                 self.assertIn("wk vm base --rebuild", x[2])
 
-    def test_a_panel_on_screen_is_remedied_by_a_restart_not_a_kill(self):
-        """Killing Setup Assistant ends the desktop session with it -- that is
-        how a guest ended up at its login window while this was being written."""
-        f = [x for x in findings(AS_FOUND) if "on the desktop right now" in x[1]]
+    def test_the_check_flag_is_not_judged_because_no_guest_can_set_it(self):
+        """Measured on Tahoe 26.4 and written down in vm/desktop.sh:
+        softwareupdated erases AutomaticCheckEnabled from the system domain, and
+        `softwareupdate --schedule off` exits 0 having changed nothing. A finding
+        that is wrong in every guest forever teaches a reader to skip the list,
+        so neither the probe nor the report carries it."""
+        self.assertNotIn("update_check_system", PROBE.read_text())
+        self.assertNotIn("softwareupdate --schedule", PROBE.read_text())
+        for probe in (SETTLED, AS_FOUND, UPDATE_ON):
+            for state, what, _ in findings(probe):
+                self.assertNotIn("scheduled update check", what)
+
+    def test_a_daemon_is_not_a_covered_window(self):
+        """softwareupdated and suhelperd run in every guest and draw nothing.
+        A `pgrep` for 'Software Update' called a clean desktop occluded."""
+        f = findings(SETTLED.replace("frontapp=com.apple.Finder",
+                                     "frontapp=com.apple.Terminal"))
+        self.assertEqual([], [x for x in f if x[0] == "wrong"], f)
+
+    def test_a_pane_over_the_window_is_named_with_its_size(self):
+        """The AS_FOUND capture is a real reading taken while Setup Assistant's
+        "Update Mac Automatically" pane was up. What makes this a regression
+        test rather than a screenshot: the reading comes from the window
+        server, so a pane nobody has met yet fails this the first time it
+        draws."""
+        wrong = [x[1] for x in findings(AS_FOUND) if x[0] == "wrong"]
+        named = [w for w in wrong if "nothing wk runs put it there" in w]
+        self.assertTrue(named, wrong)
+        self.assertIn("Setup Assistant:0:800x600", named[0])
+
+    def test_the_furniture_that_is_always_there_is_not_a_pane(self):
+        """Notification Centre's click-catcher is a full-screen window on every
+        macOS desktop; the backdrop Setup Assistant draws behind its own pane is
+        another. Judging by presence or by area would call every screen busy."""
+        for w in [x[1] for x in findings(AS_FOUND) if x[0] == "wrong"]:
+            self.assertNotIn("Notification Center", w)
+            self.assertNotIn(":-1:", w)
+
+    def test_a_screen_nobody_could_ask_about_is_not_reported_as_clean(self):
+        """No compiler in the guest means no probe; silence there is unknown,
+        not empty."""
+        f = [x for x in findings(SETTLED.replace(
+                "windows=Notification Center:21:1417x805;Terminal:0:863x499;", "windows=?"))
+             if "window server" in x[1]]
+        self.assertEqual(["note"], [x[0] for x in f], f)
+
+    def test_nothing_claims_to_stop_the_update_pane(self):
+        """Four levers were tried on a Tahoe 26.4 clone on 2026-09-05 and the
+        pane came up after each: `DidSeeAutoUpdatePrompt` true, the cached
+        offer deleted from /Library/Preferences, AutomaticallyInstallMacOSUpdates
+        true, and com.apple.mbuseragent disabled. None is written anywhere, and
+        the report says a pane is there rather than that a setting stops it."""
+        for f in (DESKTOP, PROBE, REPO / "bench" / "mac-quiet-desktop.sh"):
+            text = f.read_text()
+            with self.subTest(file=f.name):
+                self.assertNotIn("DidSeeAutoUpdatePrompt", text)
+                self.assertNotIn("mbuseragent", text.replace("has no launchd label", ""))
+        for _s, what, remedy in findings(AS_FOUND):
+            self.assertNotIn("stop the next one", remedy, what)
+
+    def test_a_panel_on_screen_sends_the_reader_to_the_base(self):
+        """Measured on three clones on 2026-09-05: it comes back on every boot,
+        no preference a guest writes survives the next login, and killing it
+        takes the desktop session with it. A remedy that says "restart" would
+        send someone round that loop, so it names the base instead."""
+        f = [x for x in findings(AS_FOUND) if "nothing wk runs put it there" in x[1]]
         self.assertTrue(f)
-        self.assertIn("wk vm stop", f[0][2])
+        self.assertIn("wk vm base", f[0][2])
+        self.assertNotIn("wk vm stop", f[0][2])
 
     def test_a_login_window_is_reported_as_no_desktop_at_all(self):
         f = [x for x in findings(LOGIN_WINDOW) if x[0] == "wrong"]
@@ -236,9 +319,11 @@ class TestTheWriterIsSafeToRunOnALiveGuest(WkTest):
 
     def test_it_writes_the_per_clone_settings_itself(self):
         """`defaults -currentHost` is keyed by hardware UUID and `tart clone`
-        changes it, so these cannot live only in the golden base."""
-        self.assertIn("-currentHost write com.apple.screensaver idleTime",
-                      DESKTOP.read_text())
+        changes it, so these cannot live only in the golden base. The `@` in
+        the shared table is what marks one."""
+        quiet = (REPO / "bench" / "mac-quiet-desktop.sh").read_text()
+        self.assertIn("idletime @com.apple.screensaver idleTime", quiet)
+        self.assertIn("-currentHost", quiet)
 
     def test_both_callers_run_this_file_rather_than_a_copy(self):
         base = (REPO / "vm" / "provision-base.sh").read_text()
@@ -273,7 +358,13 @@ class TestTheProbeChangesNothing(WkTest):
         """Every `_v <key>` in vm_desktop_findings is a key the probe prints,
         or the report is silently reading an empty string."""
         import re
+        quiet = (REPO / "bench" / "mac-quiet-desktop.sh").read_text()
+        table = quiet[quiet.index("wk_quiet_desktop_rows()"):quiet.index("_wk_qd_uid()")]
         probe_keys = set(re.findall(r"printf '([a-z_]+)=", PROBE.read_text()))
+        probe_keys |= set(re.findall(r"^([a-z_]+) [@A-Za-z]", table, re.M))
+        probe_keys.add("spotlight")
+        probe_keys |= set(re.findall(r"printf '([a-z_]+)=",
+                                     (REPO / "bench" / "mac-window-probe.sh").read_text()))
         driver = (REPO / "targets" / "vm.sh").read_text()
         body = driver[driver.index("vm_desktop_findings() {"):]
         body = body[:body.index("\n}\n")]
@@ -480,7 +571,7 @@ _report_desktop demo
         out = self._report(AS_FOUND)
         self.assertIn("the screen saver is armed", out)
         self.assertIn("Setup Assistant", out)
-        self.assertIn("something is on the desktop right now", out)
+        self.assertIn("nothing wk runs put it there", out)
         self.assertIn("wk vm check demo", out)
 
     def test_a_wrong_finding_brings_its_remedy_with_it(self):
@@ -492,7 +583,7 @@ _report_desktop demo
         report says, or that it ran at all."""
         out = self._report(SETTLED)
         self.assertIn("screen lock off", out)
-        self.assertIn("nothing modal on screen now", out)
+        self.assertIn("com.apple.Finder has the focus", out)
 
     def test_the_report_goes_to_stderr(self):
         """t_start's stdout is the guest's address; a report on it would be

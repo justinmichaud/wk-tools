@@ -201,11 +201,7 @@ class TestThroughWk(WkTest):
             d = make_task(bench)
             add_run(d, "base", 1, "a", "ok", (100.0, 101.0, 99.0))
             add_run(d, "pr1725", 1, "b", "ok", (95.0, 96.0, 94.0))
-            # WK_IN_VM: on a macOS host the dispatcher would otherwise hand
-            # `wk bench ls` to the podman VM, where this scratch store's path
-            # names nothing; the store here is the test's own.
-            env = {"WK_STORE": store["WK_STORE"], "WK_LOCK_DIR": str(store["path"] / "locks"),
-                   "WK_IN_VM": "1"}
+            env = {"WK_STORE": store["WK_STORE"], "WK_LOCK_DIR": str(store["path"] / "locks")}
             ls = run("bench", "ls", env=env, timeout=60)
             self.assertEqual(ls.returncode, 0, ls.stdout)
             self.assertIn(TASK, ls.stdout)
@@ -287,3 +283,46 @@ class TestThroughWk(WkTest):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestReadingTasksStartsNothing(WkTest):
+    """`wk ab` and `wk pi bench` write a task on this host, so the task store is
+    this host's. `wk bench ls` was declared `where=workspace` all the same, so on
+    a macOS host it was handed to the podman VM -- which meant reading a store
+    with no tasks in it, and, because it was not declared read-only, **booting a
+    20GB VM to do it**. Running the test suite started the machine that way.
+
+    Both halves are asserted here: where it runs, and that it changes nothing."""
+
+    def _decl(self, key):
+        import re
+        text = (REPO / "cmd" / "bench").read_text()
+        return [l for l in text.splitlines() if l.startswith("# wk:") and key in l]
+
+    def test_ls_runs_where_its_siblings_do(self):
+        """report and compare read the same store and are `where=host`."""
+        host = [l for l in self._decl("where=host") if l.startswith("# wk: sub ")]
+        self.assertTrue(host, self._decl("where=host"))
+        subs = host[0].split()[3].split(",")
+        for verb in ("ls", "report", "compare"):
+            self.assertIn(verb, subs, host[0])
+
+    def test_ls_is_declared_read_only(self):
+        """The dispatcher starts the podman machine for anything that forwards
+        and is not read-only (`wk`, the forward path). Reading a list of tasks
+        is not a reason to boot a VM."""
+        ro = self._decl("readonly")
+        self.assertTrue(ro, "cmd/bench no longer declares anything read-only")
+        self.assertIn("ls", ro[0].split()[-1].split(","), ro[0])
+
+    def test_it_reads_the_store_it_is_pointed_at(self):
+        """With the declaration wrong this needed WK_IN_VM=1 to stay on this
+        host. Nothing sets it now, so this fails if the forward comes back."""
+        with temp_store() as store:
+            bench = store["path"] / "bench"
+            bench.mkdir()
+            make_task(bench)
+            cp = run("bench", "ls", env={"WK_STORE": store["WK_STORE"]}, timeout=60)
+            self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+            self.assertIn(TASK, cp.stdout)
+            self.assertNotIn("starting podman machine", cp.stdout + cp.stderr)

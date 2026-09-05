@@ -213,15 +213,24 @@ fi
 
 cancel_pending_reboot  # again, now that the minute someone else could schedule one has passed
 
-# Whatever owns the front window would throttle MiniBrowser into a timeout with no error.
+# A window over MiniBrowser throttles it into a timeout with no error. Killing one takes the desktop session with it when it is Setup Assistant (measured 2026-09-05: the console user went back to root), so each is named and killed on its own rather than as one pattern.
 if [ -r "$TOOLS/lib/quiet.sh" ]; then
     front=$( . "$TOOLS/lib/common.sh" >/dev/null 2>&1
              . "$TOOLS/lib/quiet.sh"  >/dev/null 2>&1
              screen_blocker 2>/dev/null )
-    if [ -n "$front" ]; then
-        say "'$front' owns the front window -- closing it"
+    if [ "$front" = "?" ]; then
+        say "WARNING: could not ask the window server what is on the screen; a run that
+    times out with no error is this and nothing else"
+    elif [ -n "$front" ]; then
+        say "on the screen, and nothing this job put there: $front"
         sudo -n touch /var/db/.AppleSetupDone >/dev/null 2>&1 || true
-        sudo -n pkill -f "$front.app" >/dev/null 2>&1 || true
+        printf '%s' "$front" | tr ',' '\n' | while IFS= read -r _w; do
+            [ -n "$_w" ] || continue
+            case "$_w" in
+                "Setup Assistant") say "  leaving '$_w': killing it ends the desktop session" ;;
+                *) say "  closing '$_w'"; sudo -n pkill -f "$_w.app" >/dev/null 2>&1 || true ;;
+            esac
+        done
         sleep 10
     fi
 fi

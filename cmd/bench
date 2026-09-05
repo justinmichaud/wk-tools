@@ -3,12 +3,12 @@
 # wk bench <workspace> <plan> [options] -- run a benchmark and keep the result defensible
 #
 # wk: where=workspace name=required values=--list ready=yes group=workspaces needs python3
-# wk: sub stage,staged,mac,mac-volume,mac-ab,ab-summary,compare,report where=host
+# wk: sub stage,staged,mac,mac-volume,mac-ab,ab-summary,compare,report,ls where=host
 # wk: sub seed where=dynamic
 # wk: sub ls,compare,report name=none
 # wk: sub seed name=required@2
 # wk: flag --list where=store name=none
-# wk: readonly --list
+# wk: readonly --list,ls
 #
 # <plan> is Tools/Scripts/run-benchmark's own name; `wk bench --list` reads
 # them off the machine's WebKit mirror, no workspace needed.
@@ -1055,10 +1055,12 @@ cmd_staged() {
         check no "the console session" "the screen belongs to '${console:-nobody}', not $(id -un)"
     fi
 
-    # A process check rather than AppleScript: a window-title query needs assistive access a fresh install has not granted.
+    # The window server's own list rather than AppleScript: a window-title query needs assistive access a fresh install has not granted, and owner and bounds do not.
     local blocker; blocker=$(screen_blocker)
-    if [ -n "$blocker" ]; then
-        check no "the screen is free" "'$blocker' is running and owns the front window"
+    if [ "$blocker" = "?" ]; then
+        check no "the screen is free" "the window server was not asked -- no compiler here to build the probe with (bench/mac-window-probe.sh)"
+    elif [ -n "$blocker" ]; then
+        check no "the screen is free" "on the screen, and nothing wk put there: $blocker"
         log  "        a benchmark in a background window is throttled, so the run would"
         log  "        time out rather than fail. Answer it at the screen, or for an"
         log  "        install that should never show it:"

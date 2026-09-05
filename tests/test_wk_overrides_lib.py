@@ -145,31 +145,48 @@ echo PASS
 
 
 class TestQuietLib(WkTest):
-    def test_wk_screen_blockers_matches_the_pipe_delimited_list(self):
-        with stub_path({
-            "lsappinfo": (
-                "#!/bin/sh\n"
-                'case "$1" in\n'
-                '  front) printf "ASN:0x0-0x1:12345\\n" ;;\n'
-                '  info)  printf \'"LSDisplayName"="Software Update"\\n\' ;;\n'
-                "esac\n"
-            )
-        }) as binp:
-            cp = self.bash(
-                '''
+    """`screen_blocker` names what is covering the window, from the window
+    server's own list rather than from a list of application names: a pane
+    nobody has met yet is caught the first time it draws. WK_SCREEN_EXPECTED is
+    the other half -- what wk itself put there."""
+
+    # `windows=` as vm/desktop-probe.sh prints it. Captured from a Tahoe 26.4
+    # guest on 2026-09-05 with Setup Assistant's "Update Mac Automatically" pane
+    # up: the pane at layer 0, its own full-screen backdrop at -1, Notification
+    # Centre's click-catcher at 21, and the shell wk itself started.
+    PANE = ("Setup Assistant:0:800x600;Setup Assistant:-1:1417x805;"
+            "Notification Center:21:1417x805;Terminal:0:863x499;")
+    CLEAN = "Notification Center:21:1417x805;Terminal:0:863x499;"
+
+    def _blocker(self, reading, expected=None):
+        exp = f'WK_SCREEN_EXPECTED={expected!r}\n' if expected else ""
+        return self.bash(f'''
 . "$WK_ROOT/lib/common.sh"
 . "$WK_ROOT/lib/quiet.sh"
-WK_SCREEN_BLOCKERS="Foo|Software Update|Bar"
-out=$(screen_blocker)
-[ "$out" = "Software Update" ] || { echo "matched: got '$out'"; exit 1; }
-WK_SCREEN_BLOCKERS="Foo|Bar"
-out2=$(screen_blocker)
-[ -z "$out2" ] || { echo "unmatched: got '$out2'"; exit 1; }
-echo PASS
-''',
-                env={"PATH": f"{binp}:{os.environ['PATH']}"},
-            )
-        self.assertIn("PASS", cp.stdout, cp.stdout + cp.stderr)
+{exp}wk_window_probe() {{ printf 'windows=%s\\n' {reading!r}; }}
+printf '[%s]\\n' "$(screen_blocker)"
+''').stdout.strip()
+
+    def test_a_pane_over_the_window_is_named(self):
+        self.assertEqual("[Setup Assistant]", self._blocker(self.PANE))
+
+    def test_a_screen_with_only_wk_s_own_windows_is_free(self):
+        self.assertEqual("[]", self._blocker(self.CLEAN))
+
+    def test_the_menu_bar_and_the_dock_are_not_blockers(self):
+        """Notification Centre's click-catcher is full-screen and always there;
+        judging by size or by presence would call every clean screen busy."""
+        self.assertNotIn("Notification Center", self._blocker(self.PANE))
+
+    def test_what_wk_puts_there_is_overridable(self):
+        self.assertEqual("[Terminal]", self._blocker(self.CLEAN, "Finder|Safari"))
+
+    def test_a_screen_that_could_not_be_read_is_not_reported_as_free(self):
+        """`?` is "nobody asked the window server", which is not "nothing is
+        there". An empty answer would make every machine with no compiler read
+        as a clear screen, and a run that times out with no error is exactly
+        this and nothing else."""
+        self.assertEqual("[?]", self._blocker("?"))
 
 
 class TestReachLib(WkTest):

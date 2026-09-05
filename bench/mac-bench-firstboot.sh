@@ -203,13 +203,16 @@ if [ ! -f /etc/wk-image ]; then
     say "wrote /etc/wk-image"
 fi
 
-mdutil -i off -a >/dev/null 2>&1 || say "WARNING: spotlight still indexing"
-softwareupdate --schedule off >/dev/null 2>&1 || true
-defaults write /Library/Preferences/com.apple.SoftwareUpdate AutomaticCheckEnabled -bool false 2>/dev/null || true
-pmset -a lowpowermode 0 sleep 0 displaysleep 0 disksleep 0 >/dev/null 2>&1 || true
-tmutil disablelocal >/dev/null 2>&1 || true
-say "quieted: spotlight=$(mdutil -a -s 2>&1 | tr '\n' ' ' | sed 's/  */ /g')"
-say "updates schedule: $(softwareupdate --schedule 2>&1 | tail -1)"
+QUIET_DESKTOP=/usr/local/libexec/wk-bench-quiet-desktop.sh
+if [ -r "$QUIET_DESKTOP" ]; then
+    # shellcheck disable=SC1090
+    . "$QUIET_DESKTOP"
+    wk_quiet_desktop_system || say "WARNING: the machine-wide quieting did not fully take (above)"
+    wk_quiet_desktop_user "$BENCH_USER" || say "WARNING: $BENCH_USER's desktop is not fully quiet (above)"
+    say "quieted: $(wk_quiet_desktop_probe "$BENCH_USER" | tr '\n' ' ')"
+else
+    say "WARNING: $QUIET_DESKTOP missing from the payload; this install is not quieted"
+fi
 say "filevault: $(fdesetup status 2>&1 | head -1)"
 
 QUIET_HOSTS=/usr/local/libexec/wk-bench-quiet-hosts.sh

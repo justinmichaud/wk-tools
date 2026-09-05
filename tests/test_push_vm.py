@@ -723,6 +723,51 @@ _set_guest_egress demo 1.2.3.4 || true
         self.assertFalse((home / ".wk-ca-bundle.pem").exists())
 
 
+SETUP = """
+. "$WK_ROOT/lib/common.sh"
+. "$WK_ROOT/lib/resources.sh"
+. "$WK_ROOT/lib/store.sh"
+. "$WK_ROOT/lib/target.sh"
+load_target vm >/dev/null 2>&1
+"""
+
+
+class TestTheInjectorReadinessProbeAnswersOnThisPlatform(WkTest):
+    """`nc -z -U` answers 1 for a unix socket that is being served on macOS
+    (measured 2026-09-05, macOS 26.6.2), which is where every guest runs. That
+    false negative started a second injector over a live one: the warning said
+    the guest had no injector, and api.github.com answered 000 in the guest for
+    the rest of the session."""
+
+    def _running(self, sock):
+        return bash(
+            SETUP + "_inject_sock() { printf %s " + repr(str(sock))
+            + "; }\n_inject_running && echo YES || echo NO\n").stdout.strip()
+
+    def test_a_served_socket_reads_as_running(self):
+        import socket as sk
+        sock = self.tmp / "served.sock"
+        srv = sk.socket(sk.AF_UNIX)
+        srv.bind(str(sock))
+        srv.listen(1)
+        try:
+            self.assertEqual("YES", self._running(sock))
+        finally:
+            srv.close()
+
+    def test_a_socket_nothing_listens_on_reads_as_not_running(self):
+        """What a crashed injector leaves behind: the path is still a socket."""
+        import socket as sk
+        sock = self.tmp / "dead.sock"
+        srv = sk.socket(sk.AF_UNIX)
+        srv.bind(str(sock))
+        srv.close()
+        self.assertEqual("NO", self._running(sock))
+
+    def test_no_socket_at_all_reads_as_not_running(self):
+        self.assertEqual("NO", self._running(self.tmp / "absent.sock"))
+
+
 class TestTheGuestsInjectorGetsTheStandingReadToken(WkTest):
     """The injector a guest talks to runs on this host, so its standing read
     token is a file here. Reading is open whatever position `wk push` is in, so

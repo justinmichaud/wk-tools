@@ -142,15 +142,27 @@ class TestDevelopmentAllowlist(unittest.TestCase):
                 ok, why = p.host_allowed(host, 443)
                 self.assertTrue(ok, why)
 
-    def test_xcode_and_software_update_are_reachable(self):
+    def test_xcode_is_reachable(self):
         p = _policy()
-        for host in ("developer.apple.com", "download.developer.apple.com",
-                     "swscan.apple.com", "swcdn.apple.com",
-                     "updates.cdn-apple.com", "mesu.apple.com",
-                     "gdmf.apple.com"):
+        for host in ("developer.apple.com", "download.developer.apple.com"):
             with self.subTest(host=host):
                 ok, why = p.host_allowed(host, 443)
                 self.assertTrue(ok, why)
+
+    def test_the_software_update_scan_path_is_refused(self):
+        """Measured on a Tahoe 26.4 guest on 2026-09-05: with these reachable,
+        softwareupdated found macOS 26.6.2 and Setup Assistant put its "Update
+        Mac Automatically" pane in front of the window. No guest can turn the
+        check off (vm/desktop.sh), so the only place it can be stopped is here,
+        and a guest is a clone of a pinned image that upgrading means nothing to."""
+        p = _policy()
+        for host in ("swscan.apple.com", "swcdn.apple.com", "swdist.apple.com",
+                     "updates.cdn-apple.com", "updates-http.cdn-apple.com",
+                     "mesu.apple.com", "gdmf.apple.com", "gdmf-ados.apple.com",
+                     "xp.apple.com"):
+            with self.subTest(host=host):
+                ok, why = p.host_allowed(host, 443)
+                self.assertFalse(ok, f"{host} is reachable: {why}")
 
     def test_certificate_validation_works_on_80(self):
         """Gatekeeper will not launch a downloaded binary without a

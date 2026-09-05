@@ -179,8 +179,8 @@ on)
         return 1
     fi
 
-    # Before the keys: a workspace whose ssh config names no fork host cannot use an agent that holds one.
-    push_agent_publish_config "$LIVE" "$WS_SOCK" \
+    # Before the keys: a workspace whose ssh config names no fork host cannot use an agent that holds one. Republished here because `wk key register` may have minted new public halves since the store was made.
+    secrets_publish \
         || die "could not write $LIVE/ssh_config, which every workspace includes"
 
     rows=$(push_agent_load push_agent_exec "$MACHINE_SOCK")
@@ -219,7 +219,7 @@ off)
     push_agent_clear    push_agent_exec "$MACHINE_SOCK" || true
     push_agent_pat_clear push_agent_exec "$MACHINE_PAT" || true
     # Rewritten on `off` too: it names public halves and a socket, not a credential, and an unresolvable `github-webkit` fails with a hostname error.
-    push_agent_publish_config "$LIVE" "$WS_SOCK" \
+    secrets_publish \
         || warn "could not rewrite $LIVE/ssh_config; a push from a workspace will fail
     on the host alias rather than on the missing identity"
 

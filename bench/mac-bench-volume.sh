@@ -251,6 +251,8 @@ do_build_pkg() {
                     "$root/usr/local/libexec/wk-bench-firstboot.sh"
     install -m 0644 "$WK_ROOT/bench/mac-quiet-hosts.sh" \
                     "$root/usr/local/libexec/wk-bench-quiet-hosts.sh"
+    install -m 0644 "$WK_ROOT/bench/mac-quiet-desktop.sh" \
+                    "$root/usr/local/libexec/wk-bench-quiet-desktop.sh"
 
     # RunAtLoad with no KeepAlive, which would resurrect a job that has deleted its own script. Not a LaunchAgent: creating the user is what this does, so there is no session yet.
     cat > "$root/Library/LaunchDaemons/com.wk.bench-firstboot.plist" <<'PLIST'
@@ -436,6 +438,8 @@ do_repair() {
         "$S/usr/local/libexec/wk-bench-firstboot.sh"
     run sudo install -m 0644 "$WK_ROOT/bench/mac-quiet-hosts.sh" \
         "$S/usr/local/libexec/wk-bench-quiet-hosts.sh"
+    run sudo install -m 0644 "$WK_ROOT/bench/mac-quiet-desktop.sh" \
+        "$S/usr/local/libexec/wk-bench-quiet-desktop.sh"
 
     local pw="${WK_BENCH_PASSWORD:-benchbench}"
     local pwfile; pwfile="$(wk_state_dir)/bench-password"
@@ -547,18 +551,18 @@ do_provision() {
         fi
     fi
 
-    # The permanent half of quieting, read back rather than trusted: `softwareupdate --schedule off` does not stick in a guest.
+    # The permanent half of quieting, read back rather than trusted. The same two functions a guest gets (bench/mac-quiet-desktop.sh), so a setting is never true of one kind of measured Mac and not the other.
     info "quieting the install permanently"
-    run sudo mdutil -i off -a          >/dev/null 2>&1 || warn "  spotlight: could not turn indexing off"
-    run sudo softwareupdate --schedule off >/dev/null 2>&1 || warn "  updates: could not turn the schedule off"
-    run sudo defaults write /Library/Preferences/com.apple.SoftwareUpdate AutomaticCheckEnabled -bool false 2>/dev/null || true
-    run sudo pmset -a lowpowermode 0 sleep 0 displaysleep 0 disksleep 0 >/dev/null 2>&1 || true
-    run sudo tmutil disablelocal      >/dev/null 2>&1 || true
-    run defaults -currentHost write com.apple.screensaver idleTime 0 2>/dev/null || true
+    local qd; qd=$(sh_quote "$WK_ROOT/bench/mac-quiet-desktop.sh")
+    run sudo bash -c ". $qd; wk_quiet_desktop_system" \
+        || warn "  the machine-wide half did not fully take (above)"
+    run bash -c ". $qd; wk_quiet_desktop_user" \
+        || warn "  this account's desktop is not fully quiet (above)"
 
     log "  read back:"
-    log "    spotlight: $(mdutil -a -s 2>/dev/null | tr '\n' ' ' | sed 's/  */ /g')"
-    log "    updates:   $(softwareupdate --schedule 2>&1 | tail -1)"
+    # shellcheck disable=SC1090
+    . "$WK_ROOT/bench/mac-quiet-desktop.sh"
+    wk_quiet_desktop_probe | sed 's/^/    /' | while read -r l; do log "$l"; done
     log "    lowpower:  $(pmset -g 2>/dev/null | awk '/lowpowermode/{print $2}')"
     log "    filevault: $(fdesetup status 2>/dev/null | head -1)"
     log "    timemachine destinations: $(tmutil destinationinfo 2>/dev/null | grep -c '^Name' || true)"   # `|| echo 0` would print a second zero: grep -c prints 0 and exits 1

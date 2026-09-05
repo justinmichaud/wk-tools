@@ -35,7 +35,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from tests.support import REPO, bash
+from tests.support import REPO, bash, func_body
 
 CMD_DOCTOR = REPO / "cmd" / "doctor"
 LIB_COMMON = REPO / "lib" / "common.sh"
@@ -362,15 +362,12 @@ class TestTheCredentialsSection(unittest.TestCase):
     it is one verdict from lib/credcheck.py's rules, driven here by what is in
     a scratch store."""
 
-    # Anchored on the sections themselves, not on the comment banners above
-    # them: a banner is not structure, and slicing by one made this suite
-    # demand that two comments keep existing.
-    START = 'section "credentials"'
-    END = 'section "root access"'
-
+    # cmd/doctor's own credentials_section(), lifted whole. A function boundary,
+    # not a pair of statements to slice between: those have to keep being
+    # spelled that way, and a branch added elsewhere that happens to contain
+    # one of them empties the block into a syntax error.
     def block(self):
-        text = CMD_DOCTOR.read_text()
-        return text[text.index(self.START):text.index(self.END)]
+        return func_body(CMD_DOCTOR.read_text(), "credentials_section")
 
     def run_block(self, secrets):
         tmp = Path(tempfile.mkdtemp(prefix="wk-test-doctor-cred-"))

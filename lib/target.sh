@@ -30,6 +30,7 @@ t_ssh_user()   { return 1; }        # the account inside the workspace an editor
 t_ssh_proxy()  { return 1; }        # what to run here to reach an addressless workspace
 
 t_agent_sock() { return 1; }        # the ssh-agent socket crossing in (push_agent_load)
+t_egress_filtered() { return 1; }   # <name>; 0 when everything this workspace reaches goes through wk's allowlisting proxy
 
 t_agent_secret_present() { wk_agent_secret_present "$2"; }   # <name> <secret>
 t_agent_secret_remedy() { agent_secret_store_remedy "$2"; } # <name> <secret>
@@ -296,6 +297,10 @@ ssh_alias_remove() {
 ssh_alias_set() { # <name> <hostname> <user> [identity] [extra-line...]
     local name="$1" hostname="$2" user="$3" conf extra
     conf=$(wk_ssh_conf)
+    # An empty argument to HostName or User is not an alias that fails to resolve: ssh refuses to read the whole file and every ssh on this machine stops working, wk's and everybody else's.
+    [ -n "$hostname" ] && [ -n "$user" ] \
+        || die "no address for '$name', so no ssh alias was written: an empty HostName
+    makes ssh refuse to read $conf at all, and with it every other host in it"
     ensure_dir "$(dirname "$conf")" 0700
     ssh_alias_remove "$name"
 

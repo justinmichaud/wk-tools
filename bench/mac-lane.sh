@@ -464,12 +464,13 @@ phase_run() {
         local front
         front=$(rbench_sh 'cd ~/wk-tools && . lib/common.sh && . lib/quiet.sh && screen_blocker' 2>/dev/null | tr -d "\r") || front="?"
         if [ -n "$front" ] && [ "$front" != "?" ]; then
-            die "'$front' owns the guest's screen.
+            die "on the guest's screen, and nothing wk put there: $front
   A benchmark in a background window is throttled by the browser, so the run
   makes no progress and times out with no error -- exit 124. --force would hide
   this, which is why it is checked first.
-  Clear it:
-    wk enter $(lane_guest) bash -lc 'sudo touch /var/db/.AppleSetupDone; sudo pkill -f \"$front.app\"'"
+  Answer it at the guest's own window. Killing Setup Assistant is not a way out:
+  measured 2026-09-05, that takes the desktop session with it and the console
+  user goes back to root, which is the same 'nowhere to draw' failure."
         elif [ "$front" = "?" ]; then
             warn "  could not ask the guest whether its screen is free -- continuing,"
             warn "  but a run that times out with no error is this and nothing else"

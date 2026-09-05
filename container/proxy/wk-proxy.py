@@ -18,9 +18,7 @@ DENIED_HOSTS = {
 }
 
 # The one host whose TLS is not tunnelled: CONNECT goes to the credential injector (github-inject.py). Exact, and first, or `github.com` tunnels it.
-# SANDBOX AUDIT (docs/HANDOFF-sandboxing.md): a workspace reaches GitHub's API
-# but cannot authenticate -- under `wk push off`, which `wk ai claude` sets, the
-# injector holds no token and answers 401. `wk verify` measures both halves.
+# SANDBOX AUDIT (docs/HANDOFF-sandboxing.md): a workspace reaches GitHub's API but cannot authenticate -- under `wk push off`, which `wk ai claude` sets, the injector holds no token and answers 401. `wk verify` measures both halves.
 INJECTED_HOSTS = {
     "api.github.com": 443,
 }
@@ -106,13 +104,8 @@ ALLOWED_HOSTS = {                      # dot-boundary suffix matches
     "rust-lang.org": (443,),           # static. -- rustup's toolchains
     "rustup.rs": (443,),               # sh. -- the rustup installer
 
+    # The softwareupdate scan path -- swscan, swcdn, updates.cdn-apple.com, mesu, gdmf -- is deliberately absent: a guest is a clone of a pinned image, no guest can turn the check off (vm/desktop.sh), and an offer that arrives puts a Setup Assistant pane in front of the window a benchmark is measured in.
     "developer.apple.com": (443,),     # and download. -- Xcode + CLT
-    "swscan.apple.com": (443,),        # the softwareupdate catalog
-    "swcdn.apple.com": (443,),         # its payloads
-    "updates.cdn-apple.com": (443,),   # and theirs
-    "mesu.apple.com": (443,),          # device support packages
-    "gdmf.apple.com": (443,),          # what updates are offered at all
-    "gdmf-ados.apple.com": (443,),
     "valid.apple.com": (80, 443),      # gatekeeper: unchecked, it will not run
     "ocsp.apple.com": (80, 443),
     "ocsp2.apple.com": (80, 443),
