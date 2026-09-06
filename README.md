@@ -673,13 +673,59 @@ wk bridge status tailnet-bridge-generic
 **Quiesce and session, before any measurement**
 
 ```sh
-wk quiesce on            # pause background daemons, disable screensaver/App Nap
-wk session on             # a real compositor on the attached monitor
-wk quiesce status
+wk quiesce on            # pause every background daemon in the table, stop
+                         # Notification Center, disable App Nap, hold the display awake
+wk session on            # a real compositor on the attached monitor
+wk quiesce status        # every setting read back off the machine, not off a record
 wk session status
 wk quiesce off
 wk session off
 ```
+
+**What a measured Mac is, and where it is written down.** One file,
+`bench/mac-quiet-desktop.sh`, carries four tables and nothing else may spell a
+setting a second time:
+
+| table | what it holds | when it is applied |
+| --- | --- | --- |
+| `rows` | `defaults` keys: widgets, animations, App Nap, the screen saver, desktop icons, the Dock, the crash dialog, the quarantine and Time Machine prompts, personalised ads | provisioning, per account |
+| `agents` | per-user launchd agents that draw, animate or fetch on a timer of their own -- chronod, NotificationCenter, usernoted, Siri, Spotlight suggestions, the iCloud and photo analysers, Screen Time, Tips | provisioning, `launchctl disable` + `bootout` |
+| `daemons` | system daemons SIP will not let `launchctl disable` touch -- the update scanner, XProtect, Time Machine, the analytics and crash reporters, iCloud, background downloads | `wk quiesce on`, SIGSTOP; `off` and a reboot both undo it |
+| `power` | `pmset` keys, one call each, because pmset applies nothing at all from a command line naming a key this model does not have | provisioning |
+
+A guest and a bench install are the same kind of machine for this, so both get
+the same tables: `wk vm check <guest>` and a bench-mode preflight judge the same
+rows through the same function, and each row says what it is *for* rather than
+naming a preference key.
+
+**Nothing is assumed.** The probe reads the machine, the findings judge the
+reading against the table, and `wk bench staged` refuses a run over anything
+still wrong -- a setting at the wrong value, an agent still drawing, a daemon
+still scanning, a window on the screen that wk did not put there, a modal
+authentication panel, a machine on battery. A key the probe never answered is
+reported as unknown, never as off. On a **workstation** only the clock is
+judged: the rest is what a benchmark install is, and a red line nothing there
+can clear teaches a reader to skip the list.
+
+What is on the screen is asked of the window server itself, so a pane nobody
+has met yet fails the first time it draws. Desktop *icons* are the one thing
+that reading cannot see -- `CGWindowListCopyWindowInfo` excludes desktop
+elements -- so they are settled by `com.apple.finder CreateDesktop`, written,
+read back, and Finder restarted so the running session picks it up.
+
+**The clock.** Apple silicon has no frequency pin: `enable_skstb` binds a thread
+to a core on a development kernel and no shipping Mac runs one. So every lever
+that would take the clock down is held -- AC power, `lowpowermode 0`, sleep and
+display sleep off, `highpowermode 1` where the model has fans to raise -- and
+whether the machine took it down anyway is measured, from `pmset -g therm`'s
+`CPU_Speed_Limit`. A run on a machine already held below 100% is refused. A
+lever this model does not have is reported as absent, not as a failure.
+
+**Two daemons are deliberately left running.** `mdutil` and `pgrep` ask `mds`
+and `sysmond` over XPC and never return while those are held stopped -- measured
+in the rehearsal guest on 2026-09-05, where each deadlocked the command that
+would have undone it. Spotlight is turned off (`mdutil -i off -a`) instead of
+stopped, which is what makes mds idle, and `sysmond` is left alone.
 
 **`wk ai <agent>` in a workspace**
 
@@ -1073,7 +1119,12 @@ this machine: nothing here writes a Mac's own disks.
 
 **benchvm -- `mac-guest`.** A Tart guest standing in for a Mac in bench mode:
 `wk boot benchvm` starts the guest, and nothing measured in it is comparable
-with hardware; it rehearses the path.
+with hardware; it rehearses the path. Make one with `wk vm new wk-bench` and
+write `/etc/wk-image` in it: from then on `wk vm start` takes the workspace
+marker back off instead of writing it, because a guest that claims to be both a
+workspace and a benchmark install is refused by `wk quiesce` and `wk bench
+staged`. It is where a change to the quieting is proved before it reaches the
+install that produces numbers.
 
 **moose** has no bench driver yet (docs/Urgent/HANDOFF-moose-bench.md).
 

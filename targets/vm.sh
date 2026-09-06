@@ -2,6 +2,7 @@
 # golden base with Xcode and a checkout is built once and every workspace is a free clone.
 
 . "$WK_ROOT/bench/mac-window-probe.sh"
+. "$WK_ROOT/bench/mac-quiet-desktop.sh"
 
 WK_VM_IMAGE="${WK_VM_IMAGE:-ghcr.io/cirruslabs/macos-tahoe-xcode:26.5}"
 WK_VM_BASE="${WK_VM_BASE:-wk-base}"
@@ -237,7 +238,7 @@ $(_running_vms | sed 's/^/      /')"
 _converge_guest() { # <name> <ip>
     local name="$1" ip="$2"
     _push_tools "$name" "$ip" || warn "wk-tools in $name is not this tree's commit; 'wk sync --tools' puts it there once it is committed"
-    _write_marker "$name" "$ip" || debug "could not write the workspace marker in $name"
+    _write_marker "$name" "$ip" || debug "could not settle $name's workspace marker"
     _write_shell_rc "$name" "$ip" || warn "could not wire $name's shell; 'wk' will not be on PATH in there"
     _write_lldbinit "$name" "$ip" || debug "could not write .lldbinit in $name"
     _set_guest_clock "$name" "$ip" || warn "could not set $name's clock; TLS in there will fail as CERT_NOT_YET_VALID"
@@ -272,7 +273,6 @@ t_start() {
     echo "$ip"
 }
 
-# `defaults -currentHost` writes per hardware UUID and `tart clone` gives the clone a new one, so a screen saver the base turned off is armed again in every clone.
 _settle_desktop() { # <name> <ip>
     {
         printf 'WK_VM_PASSWORD=%s\n' "$(sh_quote "$WK_VM_PASSWORD")"
@@ -285,7 +285,7 @@ _report_desktop() { # <name>
     probe=$(vm_desktop_probe "$1" 2>/dev/null) || return 0
     [ -n "$probe" ] || return 0
     log "  the guest's desktop, as it is now ('wk vm check $1' asks again):"
-    vm_render_findings <<FINDINGS || true
+    render_findings <<FINDINGS || true
 $(vm_desktop_findings "$probe")
 FINDINGS
 }
@@ -586,9 +586,13 @@ t_enter() {
     exec ssh -t $(_ssh_opts) "$WK_VM_USER@$ip" "cd $(t_src "$name") 2>/dev/null; exec \$SHELL -l"
 }
 
-# The marker that tells the guest's own wk that it *is* a workspace, and which one. Never written into the golden base.
+# The marker that tells the guest's own wk that it *is* a workspace, and which one. Never written into the golden base, and never into a guest carrying /etc/wk-image: that one is a benchmark install standing in for a machine, and one claiming to be a workspace too is refused by `wk quiesce` and `wk bench staged` -- the two commands a rehearsal exists to run.
 _write_marker() {
     local name="$1" ip="$2"
+    if _ssh "$ip" 'test -f /etc/wk-image' 2>/dev/null; then
+        _ssh "$ip" 'rm -f $HOME/.wk-workspace'
+        return
+    fi
     _ssh "$ip" "printf '%s\n' \
         '# wk: this machine IS a workspace. Written by targets/vm.sh.' \
         $(sh_quote "name=$name") $(sh_quote "src=$(t_src "$name")") \
@@ -1433,14 +1437,13 @@ _check_base_screen() { # <ip>
     A benchmark measured behind it measures a throttled window."
 }
 
-# Findings, one per line, tab-separated `<state> <what> <remedy>` with state ok | wrong | note. Every renderer reads a line at a time, so a remedy wrapped over two lines loses its second half.
 vm_desktop_findings() { # <probe output>
     local probe="$1" v
     _f() { printf '%s\t%s\t%s\n' "$1" "$2" "${3:-}"; }
     _v() { printf '%s\n' "$probe" | sed -n "s|^$1=||p" | tail -1; }
     local rebuild="wk vm base --rebuild, then re-create this guest"
-
     local restart="wk vm stop <name> && wk vm start <name>"
+
     v=$(_v console_user)
     case "$v" in
         root|""|"?") _f wrong "nobody is logged in at the window (console user '$v') -- there is no desktop to draw on" \
@@ -1455,38 +1458,9 @@ vm_desktop_findings() { # <probe output>
         *)       _f note "screen lock could not be read (sysadminctl needs passwordless sudo in there)" ;;
     esac
 
-    [ "$(_v idletime)" = 0 ] \
-        && _f ok "screen saver off" \
-        || _f wrong "the screen saver is armed (idleTime=$(_v idletime)), and it occludes the window it covers" "$rebuild"
-
-    [ "$(_v displaysleep)" = 0 ] \
-        && _f ok "display sleep off" \
-        || _f wrong "the display sleeps after $(_v displaysleep) minutes" "$rebuild"
-
-    case "$(_v widgets_agent):$(_v widgets_desktop)" in
-        off:1) _f ok "desktop widgets off, and chronod is not running to redraw them" ;;
-        *)     _f wrong "desktop widgets are live (chronod $(_v widgets_agent), StandardHideWidgets=$(_v widgets_desktop)) -- they animate and refetch on timers of their own, under whatever is being measured" "$restart" ;;
-    esac
-
-
-    [ "$(_v notifications)" = off ] \
-        && _f ok "no banner can be drawn over the window" \
-        || _f wrong "NotificationCenter is live in there, so a banner can draw over the window mid-run" "$restart"
-
-    case "$(_v reduce_motion):$(_v reduce_transparency)" in
-        1:1) _f ok "window animations and transparency off" ;;
-        *)   _f wrong "the compositor is still doing animations and transparency (reduceMotion=$(_v reduce_motion), reduceTransparency=$(_v reduce_transparency)), which is GPU work under every measurement" "$restart" ;;
-    esac
-
-    [ "$(_v appnap)" = 1 ] \
-        && _f ok "App Nap off, so nothing backgrounded is throttled" \
-        || _f wrong "App Nap is on (NSAppSleepDisabled=$(_v appnap)): a browser that loses focus has its rAF throttled and its run stalls" "$restart"
-
-    case "$(_v spotlight)" in
-        *disabled*) _f ok "Spotlight is not indexing" ;;
-        "")         _f note "Spotlight did not answer, so whether it indexes under a build is unknown" "$restart" ;;
-        *)          _f wrong "Spotlight is indexing in there ($(_v spotlight)) -- it reads the disk the build writes" "$restart" ;;
-    esac
+    # Every setting the shared table names, judged in the one place: a second reading of the same row here is how a guest and a bench install drift apart.
+    wk_quiet_desktop_findings "$probe" "$restart"
+    wk_quiet_cpu_findings "$probe" "$restart"
 
     v=$(_v setupassistant_pending)
     [ -z "$v" ] \
@@ -1559,21 +1533,6 @@ vm_desktop_probe() { # <name>
         "$WK_ROOT/vm/desktop-probe.sh" | _ssh "$ip" 'bash -s'
 }
 
-vm_render_findings() {
-    local state what remedy bad=0
-    while IFS="$(printf '\t')" read -r state what remedy; do
-        [ -n "$state" ] || continue
-        case "$state" in
-            ok)    printf '  \033[32mok\033[0m    %s\n' "$what" >&2 ;;
-            wrong) printf '  \033[31m--\033[0m    %s\n' "$what" >&2
-                   [ -z "$remedy" ] || printf '        -> %s\n' "$remedy" >&2
-                   bad=$((bad + 1)) ;;
-            note)  printf '  \033[33m??\033[0m    %s\n' "$what" >&2
-                   [ -z "$remedy" ] || printf '        %s\n' "$remedy" >&2 ;;
-        esac
-    done
-    return "$bad"
-}
 
 # A guest holds its whole memory allocation whether or not it is busy, and nothing wk runs in one outlives its ssh session, so what accumulates keeps its own process: an editor's remote server, an agent, or a detached build.
 vm_load_probe() { # <name>

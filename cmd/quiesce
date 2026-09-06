@@ -8,15 +8,19 @@
 # Privileged actions go through the sudoers-allowlisted helper (wk-quiesce-priv);
 # everything else stays here.
 #
-#   on      quiet the machine: pause background daemons, disable the
-#           screensaver and lock screen, disable App Nap and keep MiniBrowser
-#           frontmost (macOS), stop Notification Center, keep the display
-#           awake. Settles for WK_SETTLE_SECONDS (default 30) before
-#           returning.
+#   on      quiet the machine for the length of a run and no longer: pause
+#           every background daemon in bench/mac-quiet-desktop.sh's table,
+#           stop Notification Center, disable App Nap and keep MiniBrowser
+#           frontmost (macOS), keep the display awake. Settles for
+#           WK_SETTLE_SECONDS (default 30) before returning.
 #   off     undo everything `on` did, reading this machine's one state
 #           directory.
 #   status  what is quiesced right now, plus the privileged helper's own
 #           account of what it did.
+#
+#   What a measured Mac is permanently -- its desktop settings, the per-user
+#   agents that draw on their own -- is written at provisioning time, not here:
+#   `wk bench mac-volume --provision`. `status` reports both.
 
 set -euo pipefail
 WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -24,6 +28,7 @@ WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 . "$WK_ROOT/lib/quiet.sh"
 
 PRIV=/usr/local/libexec/wk-quiesce-priv
+QUIET_DESKTOP="$WK_ROOT/bench/mac-quiet-desktop.sh"
 
 ACTION="${1:-status}"
 [ $# -le 1 ] || die "usage: wk quiesce on|off|status -- quiet the machine for benchmarking.; see wk quiesce -h"
@@ -59,37 +64,30 @@ on)
             echo $! > "$STATE/caffeinate.pid"
             info "caffeinate started"
         fi
-        killall -STOP photoanalysisd mediaanalysisd suggestd \
-            knowledgeconstructiond parsecd proactived \
-            AMPLibraryAgent bird cloudd ReportCrash 2>/dev/null || true
-        touch "$STATE/daemons_paused"
-        info "background daemons paused"
-        # `com.apple.notificationcenterui` is the plist *filename*, not its label: macOS 26 answers "could not find service" while the agent keeps running.
+        # SIGSTOP, so root: a signal needs no permission SIP can withhold, and
+        # `wk quiesce off` and a reboot both undo it.
+        if sudo -n bash -c ". $(sh_quote "$QUIET_DESKTOP"); wk_quiet_daemons_pause"; then
+            touch "$STATE/daemons_paused"
+            info "background daemons paused"
+        else
+            warn "could not pause the background daemons: this needs passwordless root,
+    which a benchmark install has and a workstation does not. 'wk quiesce status'
+    names every one still running."
+        fi
+
         if pgrep -x NotificationCenter >/dev/null 2>&1; then
-            nc_label=$(/usr/libexec/PlistBuddy -c 'Print :Label' \
-                /System/Library/LaunchAgents/com.apple.notificationcenterui.plist 2>/dev/null)
-            for lbl in "$nc_label" com.apple.notificationcenterui.agent com.apple.notificationcenterui; do
-                [ -n "$lbl" ] || continue
-                launchctl bootout "gui/$(id -u)/$lbl" >/dev/null 2>&1
-                sleep 1
-                pgrep -x NotificationCenter >/dev/null 2>&1 || break
-            done
+            nc_label=$(_wk_qd_label com.apple.notificationcenterui)
+            launchctl bootout "gui/$(id -u)/$nc_label" >/dev/null 2>&1
+            wk_sleep 1
             if pgrep -x NotificationCenter >/dev/null 2>&1; then
                 warn "NotificationCenter is still running -- a banner can appear mid-run"
             else
-                info "NotificationCenter stopped (label '${lbl}'; no banners can be drawn)"
-                printf '%s' "$lbl" > "$STATE/notifications_stopped"
+                info "NotificationCenter stopped (label '$nc_label'; no banners can be drawn)"
+                printf '%s' "$nc_label" > "$STATE/notifications_stopped"
             fi
         else
             info "NotificationCenter was not running"
         fi
-
-        # -currentHost is where idleTime actually lives.
-        defaults -currentHost write com.apple.screensaver idleTime -int 0 2>/dev/null || true
-        defaults write com.apple.screensaver askForPassword -int 0 2>/dev/null || true
-        v=$(defaults -currentHost read com.apple.screensaver idleTime 2>/dev/null || echo "?")
-        [ "$v" = 0 ] && info "screensaver disabled (idleTime=0)" \
-                     || warn "screensaver idleTime reads '$v' -- the screen can still lock mid-run"
 
         # An unfocused MiniBrowser is rAF-throttled into a stalled, silent exit-124; App Nap off stops the policy, the raiser keeps the window frontmost.
         defaults write org.webkit.MiniBrowser NSAppSleepDisabled -bool YES 2>/dev/null \
@@ -159,9 +157,8 @@ off)
             info "NotificationCenter restarted"
         fi
         if [ -f "$STATE/daemons_paused" ]; then
-            killall -CONT photoanalysisd mediaanalysisd suggestd \
-                knowledgeconstructiond parsecd proactived \
-                AMPLibraryAgent bird cloudd ReportCrash 2>/dev/null || true
+            sudo -n bash -c ". $(sh_quote "$QUIET_DESKTOP"); wk_quiet_daemons_resume" \
+                || warn "could not resume the background daemons; a reboot does it"
             rm -f "$STATE/daemons_paused"
             info "background daemons resumed"
         fi
@@ -178,7 +175,9 @@ status)
     log "  measured here, now:"
     [ -f "$STATE/caffeinate.pid" ] && kill -0 "$(cat "$STATE/caffeinate.pid")" 2>/dev/null \
         && log "  caffeinate: running" || log "  caffeinate: no"
-    [ -f "$STATE/daemons_paused" ] && log "  daemons:    paused" || log "  daemons:    running"
+    [ -f "$STATE/daemons_paused" ] \
+        && log "  daemons:    'quiesce on' paused them; each one's state is measured below" \
+        || log "  daemons:    not paused"
     [ -d "$STALE_STATE" ] && log "  stale: $STALE_STATE (an older wk-tools' state; not read -- rm -rf it)"
     if is_macos; then
         [ -f "$STATE/raiser.pid" ] && kill -0 "$(cat "$STATE/raiser.pid")" 2>/dev/null \

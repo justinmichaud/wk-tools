@@ -10,7 +10,6 @@ case "$_lock" in
 esac
 
 wk_quiet_desktop_probe
-printf 'displaysleep=%s\n' "$(pmset -g 2>/dev/null | awk '$1 == "displaysleep" { print $2 }' | tail -1)"
 
 _pending=""
 for _k in DidSeeCloudSetup DidSeeSiriSetup DidSeeAppearanceSetup \

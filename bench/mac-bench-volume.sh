@@ -559,11 +559,14 @@ do_provision() {
     run bash -c ". $qd; wk_quiet_desktop_user" \
         || warn "  this account's desktop is not fully quiet (above)"
 
-    log "  read back:"
+    log "  read back, every setting, from the machine:"
     # shellcheck disable=SC1090
     . "$WK_ROOT/bench/mac-quiet-desktop.sh"
-    wk_quiet_desktop_probe | sed 's/^/    /' | while read -r l; do log "$l"; done
-    log "    lowpower:  $(pmset -g 2>/dev/null | awk '/lowpowermode/{print $2}')"
+    local _probe; _probe=$(wk_quiet_desktop_probe)
+    render_findings <<FINDINGS || warn "  the '--' lines above are what this install still is not"
+$(wk_quiet_desktop_findings "$_probe" "re-run: wk bench mac-volume --provision")
+$(wk_quiet_cpu_findings "$_probe")
+FINDINGS
     log "    filevault: $(fdesetup status 2>/dev/null | head -1)"
     log "    timemachine destinations: $(tmutil destinationinfo 2>/dev/null | grep -c '^Name' || true)"   # `|| echo 0` would print a second zero: grep -c prints 0 and exits 1
 
@@ -601,7 +604,8 @@ do_provision() {
     log "    nobody at the screen has nowhere to draw."
     log "  * this install's own ~/.ssh/authorized_keys -- two installs, two files,"
     log "    and it is the second that gets forgotten."
-    log "  * no login items, Siri and analytics off."
+    log "  * no login items. Siri, the analytics upload and every agent that"
+    log "    draws on its own are in the table above and were just read back."
     log ""
     log "  then, from the driving machine:  wk bench mac <ws> --preflight"
 }

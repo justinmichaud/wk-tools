@@ -43,6 +43,8 @@ def _defines(func):
             if f.suffix not in (".py", ".pyc")
             and f"{func}() {{" in f.read_text(errors="replace")]
 
+# A real reading, taken from the rehearsal guest on 2026-09-05 with every
+# table row in force. A capture, so what it says is a fact about that guest.
 SETTLED = """console_user=admin
 screenlock=off
 widgets_desktop=1
@@ -50,23 +52,77 @@ widgets_stage=1
 reduce_motion=1
 reduce_transparency=1
 appnap=1
+window_anim=0
 askforpassword=0
 askforpassworddelay=0
 idletime=0
+desktop_icons=0
+dock_launchanim=0
+dock_recents=0
+crash_dialog=none
+quarantine=0
+timemachine_offer=1
+personalised_ads=0
 widgets_agent=off
 notifications=off
-setup_assistant=off
+notification_daemon=off
+spotlight_menu=off
+siri=off
+siri_knowledge=off
+siri_inference=off
+suggestions=off
+spotlight_suggestions=off
+knowledge=off
+proactive=off
+photo_analysis=off
+media_analysis=off
+icloud_drive=off
+icloud_photos=off
+music_library=off
+screentime=off
+usage_tracking=off
+experiments=off
+sharing=off
+tips=off
+spotlight_content=running
+softwareupdate=running
+softwareupdate_helper=running
+malware_scan=absent
+malware_service=absent
+malware_daemon=running
+timemachine=running
+timemachine_helper=running
+analytics_daemon=running
+analytics_helper=running
+diagnostics=absent
+crash_reporter=running
+hang_sampler=running
+power_records=absent
+process_stats=running
+icloud=running
+icloud_defaults=running
+downloads=running
+findmy=running
+experiments_system=running
+power_displaysleep=0
+power_disksleep=0
+power_sleep=0
+power_disablesleep=1
+power_lowpowermode=
+power_highpowermode=
 spotlight=Indexing disabled.
-displaysleep=0
+analytics=0
+power_source=AC Power
+cpu_speed_limit=
 setupassistant_pending=
 update_check=0
 update_download=0
 update_download_system=0
 update_autoinstall_system=0
-setupassistant_seen_product=26.5
-os_product=26.5
+setupassistant_seen_product=26.4
+os_product=26.4
 frontapp=com.apple.Finder
-windows=Notification Center:21:1417x805;Terminal:0:863x499;
+windows=Notification Center:21:1024x768@0,0;Dock:20:1024x768@0,0;Terminal:0:863x499@40,51;
 securityagent=down
 user=admin
 """
@@ -75,8 +131,8 @@ user=admin
 # because the base's ByHost setting does not survive a clone, two Setup
 # Assistant panes this macOS added, and one of them on screen. A capture, so it
 # carries only the keys the probe printed that day -- which is itself a case
-# worth keeping: a guest that answers nothing about Software Update must be
-# reported as unknown, never as settled.
+# worth keeping: a guest that answers nothing about Software Update, or about a
+# row added since, must be reported as unknown, never as settled.
 AS_FOUND = """console_user=admin
 screenlock=off
 widgets_desktop=?
@@ -89,13 +145,11 @@ askforpassworddelay=0
 idletime=?
 widgets_agent=on
 notifications=on
-setup_assistant=on
 spotlight=Indexing enabled.
 displaysleep=0
 setupassistant_pending=DidSeeTrueTone DidSeeSyncSetup
 update_check=?
 update_download=?
-frontapp=com.apple.SetupAssistant
 windows=Setup Assistant:0:800x600;Setup Assistant:-1:1417x805;Notification Center:21:1417x805;Terminal:0:863x499;
 securityagent=down
 user=admin
@@ -110,8 +164,8 @@ LOGIN_WINDOW = SETTLED.replace("console_user=admin", "console_user=root")
 UPDATE_ON = (SETTLED
              .replace("update_download_system=0", "update_download_system=1")
              .replace("update_autoinstall_system=0", "update_autoinstall_system=1")
-             .replace("setupassistant_seen_product=26.5",
-                      "setupassistant_seen_product=26.4"))
+             .replace("setupassistant_seen_product=26.4",
+                      "setupassistant_seen_product=26.3"))
 
 
 def findings(probe):
@@ -208,9 +262,9 @@ class TestTheFindings(WkTest):
     def test_a_screen_nobody_could_ask_about_is_not_reported_as_clean(self):
         """No compiler in the guest means no probe; silence there is unknown,
         not empty."""
-        f = [x for x in findings(SETTLED.replace(
-                "windows=Notification Center:21:1417x805;Terminal:0:863x499;", "windows=?"))
-             if "window server" in x[1]]
+        blind = "\n".join("windows=?" if l.startswith("windows=") else l
+                           for l in SETTLED.splitlines())
+        f = [x for x in findings(blind) if "window server" in x[1]]
         self.assertEqual(["note"], [x[0] for x in f], f)
 
     def test_nothing_claims_to_stop_the_update_pane(self):
@@ -509,14 +563,47 @@ class TestTheLoadProbeChangesNothing(WkTest):
             self.assertIn("exec ssh -t", body, fn)
 
 
+class TestARehearsalGuestIsNotAlsoAWorkspace(WkTest):
+    """A guest carrying /etc/wk-image stands in for a machine in bench mode.
+    `wk quiesce` and `wk bench staged` both refuse on a machine that says it is
+    a workspace, and every `wk vm start` writes that claim back in -- so the one
+    place that writes it is the one place that knows not to."""
+
+    def _write_marker(self, bench):
+        rc = 0 if bench else 1
+        cp = bash('\n'.join([
+            '. "$WK_ROOT/lib/common.sh"',
+            '. "$WK_ROOT/lib/resources.sh"',
+            '. "$WK_ROOT/lib/store.sh"',
+            '. "$WK_ROOT/lib/target.sh"',
+            'load_target vm >/dev/null 2>&1',
+            't_src() { echo /Users/admin/WebKit; }',
+            '_ssh() { shift; echo "SSH: $*"; case "$*" in *wk-image*) return %d ;; esac; }' % rc,
+            '_write_marker demo 10.0.0.2',
+        ]))
+        self.assertEqual(0, cp.returncode, cp.stdout + cp.stderr)
+        return cp.stdout
+
+    def test_a_benchmark_install_has_the_claim_taken_off(self):
+        out = self._write_marker(bench=True)
+        self.assertIn("rm -f $HOME/.wk-workspace", out)
+        self.assertNotIn("IS a workspace", out)
+
+    def test_an_ordinary_workspace_guest_still_gets_it(self):
+        out = self._write_marker(bench=False)
+        self.assertIn("IS a workspace", out)
+        self.assertIn("name=demo", out)
+        self.assertNotIn("rm -f", out)
+
+
 class TestOneRendererForEveryReport(unittest.TestCase):
     """`wk vm start`, `wk vm ls` and `wk vm check` print these findings, and a
     second renderer is a second voice about the same guest."""
 
     def test_the_renderer_is_defined_once(self):
-        self.assertEqual(_defines("vm_render_findings"),
-                         [REPO / "targets" / "vm.sh"],
-                         _defines("vm_render_findings"))
+        self.assertEqual(_defines("render_findings"),
+                         [REPO / "lib" / "common.sh"],
+                         _defines("render_findings"))
 
     def test_both_t_start_branches_print_the_findings(self):
         """A running guest is converged by the same start, so it gets the same
@@ -534,7 +621,7 @@ class TestOneRendererForEveryReport(unittest.TestCase):
         body = body[:body.index("\n}\n")]
         self.assertIn("vm_desktop_probe", body)
         self.assertIn("vm_desktop_findings", body)
-        self.assertIn("vm_render_findings", body)
+        self.assertIn("render_findings", body)
 
     def test_check_reports_the_base_the_desktop_and_the_load(self):
         cmd = _src("cmd", "vm")
@@ -542,7 +629,7 @@ class TestOneRendererForEveryReport(unittest.TestCase):
             self.assertIn(fn, cmd, fn)
         self.assertNotIn("printf '  \\033[32mok", cmd,
                          "cmd/vm renders findings itself instead of through "
-                         "vm_render_findings")
+                         "render_findings")
 
 
 class TestTheStartReport(WkTest):
@@ -569,7 +656,7 @@ _report_desktop demo
 
     def test_every_finding_reaches_the_console(self):
         out = self._report(AS_FOUND)
-        self.assertIn("the screen saver is armed", out)
+        self.assertIn("the screen saver is disarmed", out)
         self.assertIn("Setup Assistant", out)
         self.assertIn("nothing wk runs put it there", out)
         self.assertIn("wk vm check demo", out)

@@ -20,6 +20,23 @@ WK_CHANGES=0
 changed() { WK_CHANGES=$((WK_CHANGES + 1)); info "$*"; }
 unchanged() { debug "ok: $*"; }
 
+# Findings, tab-separated `<state> <what> <remedy>`, state ok | wrong | note, one per line -- a remedy wrapped over two lines loses its second half. Returns how many were wrong.
+render_findings() {
+    local state what remedy bad=0
+    while IFS="$(printf '\t')" read -r state what remedy; do
+        [ -n "$state" ] || continue
+        case "$state" in
+            ok)    printf '  %sok%s    %s\n' "$_c_grn" "$_c_off" "$what" >&2 ;;
+            wrong) printf '  %s--%s    %s\n' "$_c_red" "$_c_off" "$what" >&2
+                   [ -z "$remedy" ] || printf '        -> %s\n' "$remedy" >&2
+                   bad=$((bad + 1)) ;;
+            note)  printf '  %s??%s    %s\n' "$_c_yel" "$_c_off" "$what" >&2
+                   [ -z "$remedy" ] || printf '        %s\n' "$remedy" >&2 ;;
+        esac
+    done
+    return "$bad"
+}
+
 wk_os() {
     case "$(uname -s)" in
         Darwin) echo macos ;;

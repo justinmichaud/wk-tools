@@ -209,7 +209,11 @@ if [ -r "$QUIET_DESKTOP" ]; then
     . "$QUIET_DESKTOP"
     wk_quiet_desktop_system || say "WARNING: the machine-wide quieting did not fully take (above)"
     wk_quiet_desktop_user "$BENCH_USER" || say "WARNING: $BENCH_USER's desktop is not fully quiet (above)"
-    say "quieted: $(wk_quiet_desktop_probe "$BENCH_USER" | tr '\n' ' ')"
+    _probe=$(wk_quiet_desktop_probe "$BENCH_USER")
+    { wk_quiet_desktop_findings "$_probe"; wk_quiet_cpu_findings "$_probe"; } \
+        | while IFS="$(printf '\t')" read -r _state _what _rest; do
+              say "  $_state  $_what"
+          done || true
 else
     say "WARNING: $QUIET_DESKTOP missing from the payload; this install is not quieted"
 fi
@@ -228,6 +232,17 @@ if [ -r "$QUIET_HOSTS" ]; then
     fi
 else
     say "WARNING: $QUIET_HOSTS missing from the payload; update endpoints not denied"
+fi
+
+# `wk quiesce` refuses to start without it; this account's passwordless sudo is the grant, so it needs no sudoers rule of its own.
+if [ -x "$PAYLOAD/wk-tools/admin/wk-quiesce-priv" ]; then
+    install -d -o root -m 0755 /usr/local/libexec 2>/dev/null || true
+    if install -o root -m 0755 "$PAYLOAD/wk-tools/admin/wk-quiesce-priv" \
+                               /usr/local/libexec/wk-quiesce-priv; then
+        say "quiesce helper installed"
+    else
+        say "WARNING: could not install the quiesce helper; 'wk quiesce' will refuse to run"
+    fi
 fi
 
 if [ -d "$PAYLOAD/wk-tools" ]; then

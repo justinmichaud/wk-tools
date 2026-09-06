@@ -58,8 +58,8 @@ b_arm() {
     st=$( load_target vm >/dev/null 2>&1; _vm_state "$(_vm "$NODE_GUEST")" 2>/dev/null )
     [ "$st" = absent ] && die "there is no guest '$NODE_GUEST'.
     Make one from the golden base and mark it as a benchmark install:
-        wk vm new $NODE_GUEST
-        (then write /etc/wk-image in it: id=, profile=)"
+        wk vm new $NODE_GUEST && wk vm start $NODE_GUEST
+        then, in it:  sudo tee /etc/wk-image <<<'id=perf-macos-benchvm'"
     if [ "$st" != running ]; then
         info "starting guest '$NODE_GUEST'"
         ( load_target vm >/dev/null 2>&1; t_start "$NODE_GUEST" >/dev/null )

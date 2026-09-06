@@ -1080,17 +1080,11 @@ cmd_staged() {
         check yes "no auth panel" "no modal authentication dialog"
     fi
 
-    local _batt; _batt=$(pmset -g batt 2>/dev/null | head -1)
-    case "$_batt" in
-        *"AC Power"*)      check yes "power" "AC" ;;
-        *"Battery Power"*) check no  "power" "on battery -- the CPU is not the same CPU" ;;
-        *)                 check yes "power" "no battery (a desktop, or a guest)" ;;
-    esac
-
-    log "  the machine itself:"
+    log "  the machine itself -- every setting read back, not assumed:"
     local quiet=yes
     macos_noise || quiet=no
-    [ "$quiet" = yes ] || check no "quiet machine" "see above -- 'wk quiesce on' first"
+    [ "$quiet" = yes ] || check no "quiet machine" \
+        "${MACOS_NOISE_FAULTS:-?} setting(s) above are not a measured Mac's; each names its remedy"
 
     if [ "$PREFLIGHT_FAILS" -gt 0 ]; then
         if [ -n "$dry" ]; then
@@ -1159,8 +1153,6 @@ cmd_staged() {
     wkdata env-record "$out/env.json" --update wall_time_s="$(( $(date +%s) - wall_start ))" \
         configuration.aslr="$(mac_aslr_probe)"
 
-    staged_restore_desktop
-
     if [ "$rc" -ne 0 ]; then
         warn "run-benchmark exited $rc"
         # first_error knows a *build* failure; a benchmark fails with a traceback.
@@ -1181,14 +1173,6 @@ cmd_staged() {
     log "    wk boot mbp --back        reboot back into host mode"
     log "    wk bench staged --ls      list it from over there"
     log "    wk bench report <other> $out/result.json"
-}
-
-# The browser driver's restore_env does not run when the run raises, which a timed-out benchmark does.
-staged_restore_desktop() {
-    [ "$(defaults read com.apple.dock launchanim 2>/dev/null)" = 0 ] || return 0
-    defaults write com.apple.dock launchanim -bool true 2>/dev/null || return 0
-    killall Dock 2>/dev/null || true
-    info "restored the Dock's launch animation (the run left it off)"
 }
 
 staged_env_json() {

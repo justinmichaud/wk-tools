@@ -62,7 +62,7 @@ ls)
     printf '%-20s %s\n' NAME STATE
     t_list 2>/dev/null | awk -F'\t' '{printf "%-20s %s\n", $1, $2}' || true
     printf '\n%-20s %s\n' BASE "$WK_VM_BASE -- every guest above is a clone of it"
-    vm_render_findings <<FINDINGS || true
+    render_findings <<FINDINGS || true
 $(vm_base_findings)
 FINDINGS
     ;;
@@ -79,14 +79,14 @@ check)
     _load=$(vm_load_probe "$NAME" 2>/dev/null) || _load=""
     _bad=0
 
-    vm_render_findings <<FINDINGS || _bad=$?
+    render_findings <<FINDINGS || _bad=$?
 $(vm_base_findings)
 FINDINGS
-    vm_render_findings <<FINDINGS || _bad=$((_bad + $?))
+    render_findings <<FINDINGS || _bad=$((_bad + $?))
 $(vm_desktop_findings "$_probe")
 FINDINGS
     if [ -n "$_load" ]; then
-        vm_render_findings <<FINDINGS || _bad=$((_bad + $?))
+        render_findings <<FINDINGS || _bad=$((_bad + $?))
 $(vm_load_findings "$_load")
 FINDINGS
     else

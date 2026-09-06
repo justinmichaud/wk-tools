@@ -32,7 +32,7 @@ defaults write com.apple.SoftwareUpdate CriticalUpdateInstall -bool false
 defaults write com.apple.SoftwareUpdate ConfigDataInstall -bool false
 defaults write com.apple.commerce AutoUpdate -bool false
 
-sudo -n bash -c "$(declare -f wk_quiet_desktop_system); wk_quiet_desktop_system" \
+sudo -n bash -c "$(declare -f wk_quiet_desktop_system wk_quiet_desktop_power _wk_qd_pmset); wk_quiet_desktop_system" \
     || echo "warning: the machine-wide half did not fully take; 'wk vm check <name>' says which" >&2
 
 _say "desktop settled"
