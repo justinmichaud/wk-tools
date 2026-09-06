@@ -11,6 +11,32 @@ What is owed to get from "both boards run a rescue" to "two arms compared".
       in whatever change happens to be in the tree. Give the subprocess a
       shell that reads no rc [no hardware needed]
 
+- [ ] speedometer3 legs fail about two thirds of the time on the rpi5 and the
+      cause is not established (2026-09-05, `20260905T204217Z-rpi5-systems`:
+      0 usable rounds of 3, 4 of 6 measured runs failed, run abandoned after
+      three lost rounds). Every success takes 635-730 s; every failure sits on
+      a timeout ceiling (1207 s or 1704 s) having served far fewer HTTP
+      requests than a success -- 2, 11, 103, 111, 166 against 167-465 -- so the
+      page never gets going rather than stalling mid-benchmark. Ruled out by
+      the runs' own records: thermal (`throttled=0x0` on every leg, failures
+      included), DVFS (2400000 kHz pinned throughout), and display
+      (`drm:card0-HDMI-A-2` throughout). Successes cluster early and failures
+      late, but each leg reboots, so nothing obvious accumulates. Leading
+      suspects, none measured: the per-leg reverse ssh tunnel not surviving the
+      leg, and the compositor or GPU left unusable by the previous run in the
+      same boot. Diagnose from the board -- the run keeps no browser-side
+      account of a failed measured leg (see below) [needs the rpi5]
+- [ ] a failed measured leg leaves no browser-side evidence: `browser.log` is
+      0 bytes because only a warmup leg turns any browser logging on, so a
+      timeout is recorded with nothing about what the browser was doing. A
+      measured leg should still capture whatever the image writes, and the
+      tunnel's own log should survive the leg that used it [no hardware needed]
+- [ ] a settle leg leaves a stray empty run directory beside its own:
+      `pi_bench_once` calls `ensure_dir "$out/diagnose"` before the `-settle`
+      rename, so both paths get created and the un-suffixed one keeps no
+      env.json. Harmless to the report, which skips a run with no env, but it
+      is litter in every task [no hardware needed]
+
 - [ ] v3d on kernel 6.6.22 publishes no fdinfo `drm-engine-*` counters, so GPU
       engine time is unreadable on both rpi5 images (measured 2026-09-05, task
       `20260905T200814Z`: the web process holds `/dev/dri/renderD128` and maps
