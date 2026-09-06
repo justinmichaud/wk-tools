@@ -225,7 +225,7 @@ class TestDeletingAVMReapsWhatRanIt(WkTest):
             # keeps this bash's own reader open, and the test waits on it.
             pre = (f'"{runner}" run --no-graphics wk-demo >/dev/null 2>&1 & disown\n'
                    'sleep 0.3\n')
-        return bash(f'{DRIVER}\n_tart_bin() {{ printf %s "{runner}"; }}\n'
+        return bash(f'{DRIVER}\ntart_bin() {{ printf %s "{runner}"; }}\n'
                     f'{pre}{script}')
 
     def test_the_runner_is_reaped_with_the_vm(self):

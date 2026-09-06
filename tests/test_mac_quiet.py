@@ -14,6 +14,8 @@ import subprocess
 import unittest
 from pathlib import Path
 
+from tests.support import func_body
+
 REPO = Path(__file__).resolve().parent.parent
 QUIET_HOSTS = REPO / "bench" / "mac-quiet-hosts.sh"
 FIRSTBOOT = REPO / "bench" / "mac-bench-firstboot.sh"
@@ -194,12 +196,42 @@ class NoSecondWriterTest(unittest.TestCase):
         text = VOLUME_SH.read_text()
         self.assertIn("mac-quiet-hosts.sh", text, "do_provision does not source the shared file")
         self.assertIn("wk_bench_hosts_apply", text)
-        # do_build_pkg and do_repair both install the shared file next to
-        # firstboot.sh -- two install sites, the one payload file.
-        self.assertEqual(
-            text.count("wk-bench-quiet-hosts.sh"), 2,
-            "expected do_build_pkg and do_repair to each stage the shared file once",
-        )
+        # Both writers of a benchmark install -- the provisioning package and
+        # the re-arm onto one already installed -- read one payload table, so
+        # neither can be given a file the other is not.
+        self.assertIn("wk-bench-quiet-hosts.sh", func_body(text, "bench_payload_files"))
+        for writer in ("do_build_pkg", "do_repair"):
+            self.assertIn("stage_payload", func_body(text, writer), writer)
+
+    def test_the_denial_can_be_lifted_and_put_back(self):
+        """A benchmark install has to fetch the Command Line Tools once, and
+        softwareupdate cannot reach Apple through the denial."""
+        import tempfile
+        with tempfile.NamedTemporaryFile("w", suffix=".hosts", delete=False) as fh:
+            fh.write("127.0.0.1 localhost\n")
+            hosts = fh.name
+        self.addCleanup(lambda: __import__("os").unlink(hosts))
+        script = (f'. "{QUIET_HOSTS}"\n'
+                  f'wk_bench_hosts_apply {hosts} >/dev/null && echo applied\n'
+                  f'wk_bench_hosts_present {hosts} && echo present\n'
+                  f'wk_bench_hosts_remove {hosts} && echo removed\n'
+                  f'wk_bench_hosts_present {hosts} || echo gone\n'
+                  f'wk_bench_hosts_remove {hosts} && echo idempotent\n'
+                  f'cat {hosts}')
+        cp = subprocess.run(["bash", "-euo", "pipefail", "-c", script],
+                            capture_output=True, text=True)
+        for word in ("applied", "present", "removed", "gone", "idempotent"):
+            self.assertIn(word, cp.stdout, cp.stdout + cp.stderr)
+        self.assertNotIn("0.0.0.0", cp.stdout.split("idempotent")[-1])
+        self.assertIn("127.0.0.1 localhost", cp.stdout, "it kept what it did not write")
+
+    def test_first_boot_takes_the_tools_before_it_denies_the_servers(self):
+        """The order is the whole point: denied first, and the install has no
+        python3 and can measure nothing."""
+        text = FIRSTBOOT.read_text()
+        self.assertIn("wk_bench_hosts_remove", text)
+        self.assertLess(text.index("CommandLineTools"), text.index("wk_bench_hosts_apply"))
+        self.assertLess(text.index("CommandLineTools"), text.index("wk_pyobjc_install"))
 
     def test_no_second_hosts_writer_in_bench(self):
         offenders = []

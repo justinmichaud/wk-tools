@@ -693,6 +693,22 @@ utc_to_epoch() {
         || echo 0
 }
 
+tart_bin() {   # tart is a signed .app reached through a symlink no non-interactive PATH carries, so `command -v tart` is not the answer; every reader of "is tart here" calls this
+    local p
+    if command -v tart >/dev/null 2>&1; then p=$(command -v tart)
+    elif [ -x "$HOME/.local/bin/tart" ]; then p="$HOME/.local/bin/tart"
+    elif [ -x "$HOME/.local/share/tart/tart.app/Contents/MacOS/tart" ]; then
+        p="$HOME/.local/share/tart/tart.app/Contents/MacOS/tart"
+    else return 1
+    fi
+    # `readlink -f` only grew symlink-chain resolution on recent macOS, and bash 3.2 must still work.
+    if readlink -f "$p" >/dev/null 2>&1; then readlink -f "$p"
+    elif command -v python3 >/dev/null 2>&1; then
+        python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$p"
+    else echo "$p"
+    fi
+}
+
 WK_IMAGE_MARKER="${WK_IMAGE_MARKER:-/etc/wk-image}"
 
 wk_image_id() { kv_field "$WK_IMAGE_MARKER" id 2>/dev/null || true; }   # the bench system's own id, or empty in host mode

@@ -2,7 +2,7 @@
 WK_SOFTNET_VERSION="${WK_SOFTNET_VERSION:-0.23.0}"
 WK_SOFTNET_BIN="${WK_SOFTNET_BIN:-/usr/local/bin/softnet}"
 
-if ! have tart && [ ! -x "$HOME/.local/bin/tart" ]; then
+if ! tart_bin >/dev/null; then
     debug "tart not installed; skipping softnet (see README.md, Setup)"
     return 0 2>/dev/null || true
 fi

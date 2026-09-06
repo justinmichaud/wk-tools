@@ -2,6 +2,7 @@
 # image ships. Ask about the measured process's arch, never `uname -m`: a lib32
 # image runs a 64-bit kernel over a 32-bit userspace with no 64-bit loader.
 
+command -v warn >/dev/null 2>&1 || . "$(dirname "${BASH_SOURCE[0]}")/common.sh"
 SAMPLY_VER=0.13.1
 
 samply_triple() { # <uname -m> [uname -s, default Linux] -- the published release triple, or nothing. The OS is the *measured* machine's, never this one's: a Mac driving a board asks about the board.

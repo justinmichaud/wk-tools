@@ -31,13 +31,23 @@ else
     _missing=$((_missing + 1))
 fi
 
+. "$WK_ROOT/bench/mac-pyobjc.sh"
+if wk_pyobjc_have; then
+    unchanged "pyobjc $WK_PYOBJC_VERSION present (run-benchmark and the raiser)"
+elif wk_pyobjc_install; then
+    changed "pyobjc $WK_PYOBJC_VERSION installed"
+else
+    warn "pyobjc $WK_PYOBJC_VERSION did not install -- run-benchmark cannot drive a browser here"
+    _missing=$((_missing + 1))
+fi
+
 if [ "$_missing" -gt 0 ]; then
     die "$_missing required tool(s) missing; install them and re-run ./setup"
 fi
 
 # tart is not installed here: non-OSI licence (FSL-1.1-ALv2), and the binary
 # needs com.apple.security.virtualization from its signed .app bundle.
-if have tart || [ -x "$HOME/.local/bin/tart" ]; then
+if tart_bin >/dev/null; then
     unchanged "tart present (macOS VM target available)"
 elif [ -d "$HOME/.tart" ]; then
     warn "~/.tart exists but tart is not on PATH -- 'wk vm' will not work"

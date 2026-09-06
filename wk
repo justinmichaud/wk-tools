@@ -188,6 +188,9 @@ check_needs() { # <cmd> [<subverb>]
             tailnet) tailscale status >/dev/null 2>&1 \
                          || missing="$missing
     tailnet    this machine is not on the tailnet: tailscale up" ;;
+            tart)    tart_bin >/dev/null \
+                         || missing="$missing
+    tart    not installed here" ;;
             quiesce-helper)
                 [ -x /usr/local/libexec/wk-quiesce-priv ] \
                     && sudo -n /usr/local/libexec/wk-quiesce-priv status >/dev/null 2>&1 \

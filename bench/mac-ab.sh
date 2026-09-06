@@ -312,7 +312,28 @@ build_and_stage() {   # the staged id is the directory new since before the stag
     id=$(comm -13 <(printf '%s\n' "$before") <(printf '%s\n' "$after") | tail -1)
     [ -n "$id" ] || die "staging $label produced no new directory on $VOLUME"
     log "  $label staged as $id" >&2
+    reclaim_products "$label"
     printf '%s' "$id"
+}
+
+# Measured 2026-09-06: a profile-guided arm leaves 101 GB of products in the guest and the next arm wants the same room. Once an arm is staged both are spent -- the instrumented tree existed to be profiled, the measured one to be staged.
+reclaim_products() {   # <label>
+    local src dirs measured instr out
+    src=$(guest_src)
+    dirs=$( . "$WK_ROOT/lib/arch.sh" >/dev/null 2>&1
+            . "$WK_ROOT/build/configs.sh" >/dev/null 2>&1
+            . "$WK_ROOT/build/mac-pgo.sh" >/dev/null 2>&1
+            WK_TARGET_KIND=vm   # this lane builds its arms in a macOS guest and nowhere else
+            config_load "$CONFIG" macos vm >/dev/null 2>&1
+            d=$(config_build_dir "$src")
+            printf '%s\n%s\n' "$d" "$d$PGO_INSTR_SUFFIX" )
+    measured=$(printf '%s' "$dirs" | sed -n 1p)
+    instr=$(printf '%s' "$dirs" | sed -n 2p)
+    [ -n "$measured" ] && [ -n "$instr" ] || { warn "  could not name $CONFIG's products; nothing reclaimed"; return 0; }
+    out=$(guest_sh "du -sk $(sh_quote "$measured") $(sh_quote "$instr") 2>/dev/null | awk '{s+=\$1} END {print int(s/1048576)}'
+rm -rf $(sh_quote "$measured") $(sh_quote "$instr")
+df -g / | awk 'NR==2 {print \$4}'" 2>/dev/null | tr -d '\r')
+    log "  reclaimed $label's products ($(printf '%s' "$out" | sed -n 1p) GB); $(printf '%s' "$out" | sed -n 2p) GB free in the guest now" >&2
 }
 
 phase_build_ab() {

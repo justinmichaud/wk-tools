@@ -23,6 +23,7 @@ Run: python3 -m unittest tests.test_vm_desktop -v
 """
 import os
 import platform
+import re
 import unittest
 
 from tests.support import (REPO, repo_files, WkTest, assert_guest_start_converges, bash,
@@ -45,7 +46,14 @@ def _defines(func):
 
 # A real reading, taken from the rehearsal guest on 2026-09-05 with every
 # table row in force. A capture, so what it says is a fact about that guest.
-SETTLED = """console_user=admin
+# Read rather than repeated: the pin lives in bench/mac-pyobjc.sh, and a fixture
+# that spelled it again would fail on a re-pin for no behaviour reason.
+PYOBJC_VERSION = re.search(
+    r'WK_PYOBJC_VERSION="\$\{WK_PYOBJC_VERSION:-([^}]*)\}"',
+    (REPO / "bench" / "mac-pyobjc.sh").read_text()).group(1)
+
+SETTLED = f"""console_user=admin
+pyobjc={PYOBJC_VERSION}
 screenlock=off
 widgets_desktop=1
 widgets_stage=1

@@ -1,4 +1,5 @@
-# An unfocused MiniBrowser is rAF-throttled into a stalled, silent exit-124, so every macOS run that draws needs App Nap off and the window pulled to the front. Sourced by `wk quiesce on` and by build/mac-pgo.sh's collection; sources nothing itself, and the caller provides info/warn.
+# An unfocused MiniBrowser is rAF-throttled into a stalled, silent exit-124, so every macOS run that draws needs App Nap off and the window pulled to the front. Sourced by `wk quiesce on` and by build/mac-pgo.sh's collection.
+command -v warn >/dev/null 2>&1 || . "$(dirname "${BASH_SOURCE[0]}")/../lib/common.sh"
 MB_BUNDLE=org.webkit.MiniBrowser
 
 mac_raiser_on() {  # <state dir>

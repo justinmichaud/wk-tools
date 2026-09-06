@@ -45,7 +45,17 @@ wk_bench_hosts_apply() {
         return 0
     fi
 
-    local tmp
+    _wk_bench_hosts_write "$hosts" with-block
+}
+
+wk_bench_hosts_remove() {   # lifted for the one fetch a benchmark install makes -- the Command Line Tools, without which it has no python3 at all; first boot puts it back
+    local hosts="${1:-/etc/hosts}"
+    _wk_bench_hosts_write "$hosts" "" || return 1
+    ! wk_bench_hosts_present "$hosts"
+}
+
+_wk_bench_hosts_write() {   # <hosts> [with-block]
+    local hosts="$1" want_block="${2:-}" tmp
     tmp=$(mktemp "${TMPDIR:-/tmp}/wk-bench-hosts.XXXXXX") || {
         _wk_bench_hosts_say "  hosts: could not make a temp file"
         return 1
@@ -57,7 +67,7 @@ wk_bench_hosts_apply() {
             !skip { print }
         ' "$hosts" > "$tmp"
     fi
-    wk_bench_hosts_block >> "$tmp"
+    if [ -n "$want_block" ]; then wk_bench_hosts_block >> "$tmp"; fi
 
     if ! cat "$tmp" > "$hosts" 2>/dev/null; then
         rm -f "$tmp"
@@ -66,6 +76,7 @@ wk_bench_hosts_apply() {
     fi
     rm -f "$tmp"
 
+    [ -n "$want_block" ] || return 0
     if wk_bench_hosts_present "$hosts"; then
         return 0
     fi

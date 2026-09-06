@@ -380,8 +380,11 @@ say "warmup done; captures in $RUNS/warmup"
 # Interleaved (A B A B ...), not blocked (A A B B): the machine drifts, and blocking puts all of that drift on one side. The order flips every round, so a monotonic drift cancels rather than landing on whichever arm always goes second.
 any_ok=""
 
+# With no precision target (--detect 0), --rounds is the whole plan rather than the floor under one.
+if [ "$DETECT" = 0 ]; then CEILING="$ROUNDS"; else CEILING="$MAX_ROUNDS"; fi
+
 r=1
-while [ "$r" -le "$MAX_ROUNDS" ]; do
+while [ "$r" -le "$CEILING" ]; do
     for plan in $PLANS; do
         i=0
         while [ "$i" -lt "$NARMS" ]; do
@@ -414,7 +417,11 @@ while [ "$r" -le "$MAX_ROUNDS" ]; do
     fi
     r=$((r + 1))
 done
-if [ "$r" -gt "$MAX_ROUNDS" ]; then
+if [ "$r" -gt "$CEILING" ] && [ "$DETECT" = 0 ]; then
+    say "ran the $ROUNDS round(s) asked for; no precision target was set, so what"
+    say "these numbers resolve is whatever 'wk bench precision' says of them."
+    state_set outcome "rounds-done"
+elif [ "$r" -gt "$CEILING" ]; then
     say "reached the ceiling of $MAX_ROUNDS rounds without resolving ${DETECT}% on every"
     say "plan. The numbers are real; the claim they support is the one the"
     say "precision lines above allow, and not ${DETECT}%."

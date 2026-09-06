@@ -216,6 +216,21 @@ class TestTheProfileReachesTheMachineThatRunsIt(WkTest):
 
 
 class TestTheHarnessWrapper(WkTest):
+    def setUp(self):
+        self._scratch = scratch_dir()
+        self.tmp = self._scratch.__enter__()
+        cp = pgo_dry_run(self.tmp)
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.lines = [l for l in (cp.stdout + cp.stderr).splitlines() if l.strip()]
+
+    def tearDown(self):
+        self._scratch.__exit__(None, None, None)
+
+    def _line(self, needle):
+        hits = [l for l in self.lines if needle in l]
+        self.assertEqual(len(hits), 1, f"{needle!r} in {self.lines}")
+        return hits[0]
+
     def test_it_refuses_without_being_told_where_the_checkout_is(self):
         cp = subprocess.run(["python3", str(REPO / "build" / "pgo-run-benchmark.py")],
                             capture_output=True, text=True, timeout=30,
@@ -224,11 +239,13 @@ class TestTheHarnessWrapper(WkTest):
         self.assertNotEqual(cp.returncode, 0)
         self.assertIn("WK_WEBKIT_SCRIPTS", cp.stdout + cp.stderr)
 
-    def test_it_names_the_directory_the_frameworks_themselves_write_to(self):
-        """__llvm_profile_filename in Source/WebKit/Shared/Cocoa: the constant
-        is in the binary, so the driver has to agree with it."""
-        text = (REPO / "build" / "pgo-run-benchmark.py").read_text()
-        self.assertIn("/private/tmp/WebKitPGO", text)
+    def test_the_collection_goes_through_it_and_not_through_run_benchmark(self):
+        """Without it the MiniBrowser driver names no profile directory and the
+        first iteration raises. What it hands over, and to which class, is
+        tests/test_pgo_harness.py against a stubbed checkout."""
+        line = self._line("collect-pgo-profiles")
+        self.assertIn("--run-benchmark-harness", line)
+        self.assertIn("pgo-run-benchmark.py", line)
 
 
 if __name__ == "__main__":

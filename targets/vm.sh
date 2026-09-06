@@ -3,6 +3,7 @@
 
 . "$WK_ROOT/bench/mac-window-probe.sh"
 . "$WK_ROOT/bench/mac-quiet-desktop.sh"
+. "$WK_ROOT/bench/mac-pyobjc.sh"
 
 WK_VM_IMAGE="${WK_VM_IMAGE:-ghcr.io/cirruslabs/macos-tahoe-xcode:26.5}"
 WK_VM_BASE="${WK_VM_BASE:-wk-base}"
@@ -68,26 +69,9 @@ WK_STORE="${WK_VM_STORE:-$(wk_state_dir)}"
 WK_VM_DIR="$WK_STORE/vm"
 WK_VM_KEY="$WK_VM_DIR/id_ed25519"
 
-# tart needs the com.apple.security.virtualization entitlement, so it stays in the signed app bundle; launched from outside the .app it loses fullScreenPrimary.
-_tart_bin() {
-    local p
-    if command -v tart >/dev/null 2>&1; then p=$(command -v tart)
-    elif [ -x "$HOME/.local/bin/tart" ]; then p="$HOME/.local/bin/tart"
-    elif [ -x "$HOME/.local/share/tart/tart.app/Contents/MacOS/tart" ]; then
-        p="$HOME/.local/share/tart/tart.app/Contents/MacOS/tart"
-    else return 1
-    fi
-    # `readlink -f` only grew symlink-chain resolution on recent macOS, and bash 3.2 must still work.
-    if readlink -f "$p" >/dev/null 2>&1; then readlink -f "$p"
-    elif command -v python3 >/dev/null 2>&1; then
-        python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$p"
-    else echo "$p"
-    fi
-}
-
 _tart() {
     local bin
-    bin=$(_tart_bin) || die "tart is not installed.
+    bin=$(tart_bin) || die "tart is not installed.
     Install the signed bundle (it needs the virtualization entitlement, so the
     .app must stay intact):
       mkdir -p ~/.local/share/tart ~/.local/bin
@@ -123,7 +107,7 @@ _vm_runners() { # <vm name>
 # `tart list` mixes local VMs and cached OCI images, spelling Source "local" case-folded.
 _vm_json() {
     local bin
-    bin=$(_tart_bin) || { echo '[]'; return 0; }
+    bin=$(tart_bin) || { echo '[]'; return 0; }
     "$bin" list --format json 2>/dev/null || echo '[]'
 }
 
@@ -276,7 +260,8 @@ t_start() {
 _settle_desktop() { # <name> <ip>
     {
         printf 'WK_VM_PASSWORD=%s\n' "$(sh_quote "$WK_VM_PASSWORD")"
-        cat "$WK_ROOT/bench/mac-quiet-desktop.sh" "$WK_ROOT/vm/desktop.sh"
+        cat "$WK_ROOT/bench/mac-quiet-desktop.sh" "$WK_ROOT/bench/mac-pyobjc.sh" \
+            "$WK_ROOT/vm/desktop.sh"
     } | _ssh "$2" "bash -s" >/dev/null
 }
 
@@ -488,9 +473,9 @@ _boot() {
             rm -f "$WK_VM_DIR/${v#wk-}.unfiltered"
         fi
 
-        # nohup, not a bare `&`, or the VM dies with the terminal. Windowed: a macOS guest is the one workspace kind with a real GPU.
+        # nohup, not a bare `&`, or the VM dies with the terminal. Windowed: a macOS guest is the one workspace kind with a real GPU, and it is the .app's own binary that runs -- outside the bundle tart loses com.apple.security.virtualization and fullScreenPrimary.
         # shellcheck disable=SC2086 -- deliberate word splitting of the flags.
-        nohup "$(_tart_bin)" run $sflags "$v" >"$runlog" 2>&1 &
+        nohup "$(tart_bin)" run $sflags "$v" >"$runlog" 2>&1 &
         disown 2>/dev/null || true
         info "booting $v (log: $runlog)"
     fi
@@ -1163,7 +1148,7 @@ _base_ready() { _base_exists && [ -f "$(_base_marker)" ]; }
 _base_inputs_hash() {
     {
         cat "$WK_ROOT/vm/provision-base.sh" "$WK_ROOT/vm/desktop.sh" \
-            "$WK_ROOT/vm/shell-rc.sh"
+            "$WK_ROOT/vm/shell-rc.sh" "$WK_ROOT/bench/mac-pyobjc.sh"
         printf 'image=%s\nuser=%s\n' "$WK_VM_IMAGE" "$WK_VM_USER"
     } | python3 -c 'import hashlib,sys
 print(hashlib.sha256(sys.stdin.buffer.read()).hexdigest()[:16])'
@@ -1178,7 +1163,7 @@ vm_base_stale() {
         return 0
     fi
     [ "$rec" = "$(_base_inputs_hash)" ] && return 1
-    echo "vm/provision-base.sh, vm/desktop.sh, vm/shell-rc.sh, WK_VM_IMAGE or WK_VM_USER has changed since it was built"
+    echo "vm/provision-base.sh, vm/desktop.sh, vm/shell-rc.sh, bench/mac-pyobjc.sh, WK_VM_IMAGE or WK_VM_USER has changed since it was built"
     return 0
 }
 
@@ -1274,7 +1259,7 @@ _provision_base() {
     local ip
     if [ "$(_vm_state "$WK_VM_BASE")" != running ]; then
         # --vnc-experimental costs nothing on a headless run and is the only way to answer a Setup Assistant pane (docs/defects).
-        nohup "$(_tart_bin)" run --no-graphics --vnc-experimental "$WK_VM_BASE" >"$runlog" 2>&1 &
+        nohup "$(tart_bin)" run --no-graphics --vnc-experimental "$WK_VM_BASE" >"$runlog" 2>&1 &
         disown 2>/dev/null || true
         info "booting the base VM for provisioning (log: $runlog)"
     fi
@@ -1451,6 +1436,14 @@ vm_desktop_findings() { # <probe output>
         *)           _f ok "logged in at the window as $v" ;;
     esac
 
+    v=$(_v pyobjc)
+    case "$v" in
+        "$WK_PYOBJC_VERSION") _f ok "pyobjc $v: a browser can be driven and held in front here" ;;
+        ""|"?")  _f wrong "no pyobjc: run-benchmark cannot size the screen and nothing can keep MiniBrowser frontmost, so a benchmark here measures a throttled browser" \
+                          "$restart  (the settle installs it)" ;;
+        *)       _f wrong "pyobjc here is $v and this fleet measures with $WK_PYOBJC_VERSION" "$restart" ;;
+    esac
+
     case "$(_v screenlock)" in
         off)     _f ok "screen lock off" ;;
         on)      _f wrong "the screen lock is on, so this guest comes up asking for a password" \
@@ -1530,7 +1523,7 @@ vm_desktop_probe() { # <name>
     local ip; ip=$(_ip "$1") || return 1
     [ -n "$ip" ] || return 1
     cat "$WK_ROOT/bench/mac-quiet-desktop.sh" "$WK_ROOT/bench/mac-window-probe.sh" \
-        "$WK_ROOT/vm/desktop-probe.sh" | _ssh "$ip" 'bash -s'
+        "$WK_ROOT/bench/mac-pyobjc.sh" "$WK_ROOT/vm/desktop-probe.sh" | _ssh "$ip" 'bash -s'
 }
 
 

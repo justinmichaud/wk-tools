@@ -7,7 +7,7 @@
 - [ ] check `wk quiesce status` on the benchmark install before a run [needs the Mac bench volume]
 - [ ] move the A/B lane to the `bench/mac-lane.sh` shape (state on the driver, reach in per phase), replacing the planted-agent architecture [needs the Mac bench volume]
 - [ ] verify software-update scanning is denied at provision/first boot: run `wk bench mac-volume --provision` (or a first boot) on `WK Bench`, confirm `runs.tsv`'s scan-evidence column shows none across every arm [needs the Mac bench volume]
-- [ ] verify `wk quiesce`'s MiniBrowser raiser: App Nap is off and read back, but the rehearsal guest's /usr/bin/python3 has no AppKit, so the raiser has never started anywhere [needs the macOS guest with the Command Line Tools]
+- [ ] `wk quiesce`'s MiniBrowser raiser has never started anywhere. App Nap is off and read back, and a guest now carries the pyobjc it needs (`bench/mac-pyobjc.sh`); what is unread is the raiser actually holding MiniBrowser in front across a benchmark's relaunches [needs one collection or measured run]
 - [ ] enumerate every launchd job on benchvm itself (`launchctl print system` / `gui/<uid>`) and classify what the table does not already name [needs the macOS guest]
 - [ ] exercise the four daemon rows the rehearsal guest never runs -- `XProtect`, `XprotectService`, `diagnosticservicesd`, `powerdatad` -- and confirm none of them wedges a probe when stopped, the way mds and sysmond did [needs the Mac bench volume]
 - [ ] give the bench volume SIP disabled and the workstation SIP enabled, and report both in `wk doctor` [needs the Mac bench volume]
@@ -18,19 +18,22 @@
 - [ ] enumerate and classify every systemd timer/unit on the rpi4 yocto image [needs a Pi card in hand]
 - [ ] enumerate and classify every systemd timer/unit on the rpi5 yocto image [needs a Pi card in hand]
 - [ ] re-run the mbp daemon/timer classification after any macOS version bump on `WK Bench` [needs the Mac bench volume]
-- [ ] pin the three PGO collection payloads. `build/mac-pgo.sh` lets
-      run-benchmark fetch Speedometer 3, JetStream 3 and MotionMark itself, so
-      two arms built hours apart can be profiled against different revisions of
-      a benchmark. `seed_payload` (lib/bench.sh) is the one implementation, and
-      it needs a store the guest can write [needs the macOS guest]
 - [ ] upstream `pgo_profile_output_directories` onto `OSXMiniDriver`
       (Tools/Scripts/webkitpy/benchmark_runner/browser_driver/osx_minibrowser_driver.py):
       five lines, the same constant `OSXSafariDriver` already returns. Until
       then `build/pgo-run-benchmark.py` monkey-patches it, and that file exists
       only to be deleted [upstream]
-- [ ] verify a real `mac-release-pgo` build end to end: the phases, the
-      collection's GPU path, and that the measured build's dSYMs symbolicate a
-      samply capture taken on the volume [needs the Mac bench volume]
+- [ ] the measured phase of `mac-release-pgo` has never run. Measured
+      2026-09-06 in a guest, everything before it now does: the instrumented
+      build (65 min), the browser gate against that build
+      (`AppleParavirtGPU`, WebGL 2.0, 50 Hz with the raiser holding the window,
+      the instrumented build's own GPU process on the accelerator), all three
+      benchmarks collected against pinned payloads, and the merge, weighting
+      and compression (JavaScriptCore 24,129 functions / 1.8 MB, WebCore
+      33,017 / 2.2 MB, WebKit 15,266 / 0.87 MB). It stopped there for disk, not
+      for a fault [needs room on tolken]
+- [ ] that the measured build's dSYMs symbolicate a samply capture taken on the
+      volume [needs the Mac bench volume]
 - [ ] verify the warmup round's samply capture: `sudo samply record --pid` on
       the WebContent process, on a benchmark install where sudo is passwordless
       [needs the Mac bench volume]
@@ -42,23 +45,69 @@
       rounds a side for 0.3%, about 1.7 h of legs. Whether motionmark can
       reach 0.3% below the 40-round ceiling at all is unmeasured
       [needs the Mac bench volume]
-- [ ] decide what a PGO workspace does with the golden base's prebuilt
-      `WebKitBuild/Release`. A profile-guided build shares no flags with it, so
-      it is ~40 GB of dead weight in a guest that then wants ~40 GB for the
-      instrumented tree and ~40 GB for the measured one. Measured on tolken
-      2026-09-05: 127 GB free with the base build alone still running
-      [needs the macOS guest]
-- [ ] move the PGO profile collection off the build guest and onto the
-      benchmark install. Measured 2026-09-06 on a guest freshly cloned from a
-      freshly rebuilt golden base: Setup Assistant is frontmost at every boot
-      (two boots checked), `~/.skipbuddy` does not stop it, killing it takes
-      the console session with it (`/dev/console` goes admin -> root), and the
-      guest's `/usr/bin/python3` has no pyobjc so no raiser can displace it.
-      MiniBrowser launches and stays up; it is the focus that cannot be won.
-      `build/mac-pgo.sh` refuses rather than collecting a throttled profile,
-      so `wk build <ws> mac-release-pgo` stops at phase 2 in a guest. The
-      screen half of that may be fixed (docs/defects 4); the missing pyobjc,
-      and so the missing raiser, is not.
-      The shape that works is two bench-mode visits per experiment -- one
-      collecting both arms' profiles, one measuring -- which the planted-job
-      architecture already supports [needs the Mac bench volume]
+- [ ] a benchmark install has never taken the Command Line Tools by itself.
+      Without them there is no working `/usr/bin/python3` and run-benchmark
+      cannot run at all; first boot now lifts the software-update denial
+      (`wk_bench_hosts_remove`), asks `softwareupdate` for the Command Line
+      Tools label, installs it and lets the later step put the denial back.
+      Every part of that is exercised except the fetch: the volume that exists
+      already carries them, installed by hand [needs a fresh bench volume]
+- [ ] compare the two arms' `payload-pins`. A collection now profiles against a
+      copy of each benchmark pinned by upstream commit (`seed_payload`) and
+      writes what it pinned to `$WK_PGO_DIR/payload-pins`; nothing yet reads
+      the two arms' files and refuses a pair that differ, which is the case
+      speedometer3's and jetstream3's moving branches make possible
+      [no hardware needed]
+- [ ] the bench volume runs macOS 26.6.1 and this Mac's host install runs
+      26.6.2. It does not affect a number taken wholly on the bench volume, and
+      it does make the two installs not comparable with each other
+      [decision]
+- [ ] measure whether this Mac's startup volume can be selected without a person
+      at the keyboard, which is the one human action left in an A/B.
+      `boot/mac-volume.sh` states that selection goes through a LocalPolicy
+      changed only by an authenticated user action, and `bless --setBoot` alone
+      does exit 0 having done nothing -- but this macOS's bless carries `--user`
+      and `--stdinpass`, which supply exactly that authentication without a
+      prompt. Untested because it needs a volume owner's password:
+
+          sudo bless --mount '/Volumes/WK Bench' --setBoot \
+               --user <admin> --stdinpass <<<'<password>'
+          wk boot mbp            # firmware_default says what it will boot next
+
+      If the firmware's `boot-volume` then names the bench volume group, `b_arm`
+      becomes a command and `BOOT_ARMING` stops being `hands-on`; if it does
+      not, say so in the driver's own words and the claim is settled
+      [needs a volume owner's password]
+- [ ] a profile-guided build declares no disk figure, and it is the one config
+      that needs one. Measured 2026-09-06 across a whole build in a guest: the
+      instrumented products reach 56 GB, the measured ones 45 GB and
+      DerivedData 71 GB, against `WK_BUILD_DISK_GB`'s default of 25. Two
+      constraints, not one -- and `disk_admit` reads only the driver's
+      filesystem, which is the wrong one for a guest. The guest's own free space
+      is what a build hits first (`wk bench mac-ab` now reclaims a staged arm's
+      products for that reason), and the host's is what the guest's image grows
+      into. Measured on the second: a write into space the guest has already
+      freed costs the host nothing -- 8 GB written, deleted and written again
+      inside the guest moved the host's free space not at all -- so the image
+      grows with the guest's high-water mark and never shrinks
+      [needs a figure for both]
+- [ ] nothing reclaims a staged build. `wk bench stage` writes a new
+      `<stamp>-<config>` directory onto the benchmark install every time and no
+      verb removes one: six `mac-release` directories from 2026-08-23/24 were
+      still there on 2026-09-06, 8.9 GB, on a volume that shares its APFS
+      container with the running system. `wk bench staged --ls` lists them, so
+      the listing exists and the reclaim does not [no hardware needed]
+- [ ] Speedometer 3 logs `NotAllowedError, Permission was denied` once per
+      iteration under MiniBrowser: `navigator.wakeLock.request("screen")` needs
+      a user gesture. Benign -- Speedometer catches it, and `caffeinate -dimsu`
+      already holds the display -- but it is ten console errors in every
+      collection log, and worth confirming Safari does not take a different
+      path there [decision]
+- [ ] `wk bench mac-ab --patch` has not built a pair end to end. Its two halves
+      have: a `mac-release-pgo` build of the merge-base and of PR 70886's head,
+      each staged onto the benchmark install, were driven by hand on 2026-09-06
+      because the guest had room for one arm at a time and the lane's own path
+      would have staged the first arm twice. What the lane adds over that is
+      `phase_build_ab`'s checkout-build-stage-restore and `reclaim_products`,
+      which tests/test_mac_gates.py pins and no run has exercised
+      [needs a guest with room for two arms, or one more experiment]

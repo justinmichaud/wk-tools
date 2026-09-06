@@ -225,6 +225,40 @@ EOF
 
 # `startosinstall --installpackage` lays a package down before first boot, the only hook early enough to answer Setup Assistant. Account creation waits for the live system, because writing dslocal by hand on an offline volume risks an account that exists and cannot log in; wk-tools travels in the payload because the install has no network route yet.
 
+bench_payload_files() {   # <source, repo-relative> <dest under the volume root> <mode>; both writers read it, so a payload file cannot land on a fresh install and not on a repaired one
+    cat <<'ROWS'
+bench/mac-bench-firstboot.sh usr/local/libexec/wk-bench-firstboot.sh 0755
+bench/mac-quiet-hosts.sh     usr/local/libexec/wk-bench-quiet-hosts.sh 0644
+bench/mac-quiet-desktop.sh   usr/local/libexec/wk-bench-quiet-desktop.sh 0644
+bench/mac-pyobjc.sh          usr/local/libexec/wk-bench-pyobjc.sh 0644
+ROWS
+}
+
+stage_payload() {   # <volume root> [privilege prefix]
+    local root="$1"; shift
+    local src dest mode
+    run "$@" install -d -m 0755 "$root/usr/local/libexec" "$root/usr/local/share/wk-bench"
+    while read -r src dest mode; do
+        [ -n "$src" ] || continue
+        run "$@" install -m "$mode" "$WK_ROOT/$src" "$root/$dest"
+    done <<ROWS
+$(bench_payload_files)
+ROWS
+
+    if [ -f "$HOME/.ssh/authorized_keys" ]; then
+        run "$@" install -m 0644 "$HOME/.ssh/authorized_keys" \
+            "$root/usr/local/share/wk-bench/authorized_keys"
+        log "  authorized_keys: $(grep -c . "$HOME/.ssh/authorized_keys" 2>/dev/null || echo 0) key(s) from this install"
+    else
+        warn "  no ~/.ssh/authorized_keys here, so the bench install will have none"
+        warn "  -- it will boot, and nothing will be able to drive it"
+    fi
+
+    run "$@" rsync -a --delete --exclude '.git/' --exclude '__pycache__/' --exclude '*.pyc' \
+        "$WK_ROOT/" "$root/usr/local/share/wk-bench/wk-tools/" \
+        || die "could not stage wk-tools onto '$root'"
+}
+
 pkg_default_out() { echo "${TMPDIR:-/tmp}/wk-bench-provision.pkg"; }
 
 do_build_pkg() {
@@ -247,12 +281,7 @@ do_build_pkg() {
     install -d "$root/Library/User Template/English.lproj" 2>/dev/null || true
     : > "$root/Library/User Template/English.lproj/.skipbuddy"
 
-    install -m 0755 "$WK_ROOT/bench/mac-bench-firstboot.sh" \
-                    "$root/usr/local/libexec/wk-bench-firstboot.sh"
-    install -m 0644 "$WK_ROOT/bench/mac-quiet-hosts.sh" \
-                    "$root/usr/local/libexec/wk-bench-quiet-hosts.sh"
-    install -m 0644 "$WK_ROOT/bench/mac-quiet-desktop.sh" \
-                    "$root/usr/local/libexec/wk-bench-quiet-desktop.sh"
+    stage_payload "$root"
 
     # RunAtLoad with no KeepAlive, which would resurrect a job that has deleted its own script. Not a LaunchAgent: creating the user is what this does, so there is no session yet.
     cat > "$root/Library/LaunchDaemons/com.wk.bench-firstboot.plist" <<'PLIST'
@@ -320,18 +349,6 @@ PLIST
     else
         warn "  tailscale: no package staged; firstboot will say so and carry on"
     fi
-
-    if [ -f "$HOME/.ssh/authorized_keys" ]; then
-        install -m 0644 "$HOME/.ssh/authorized_keys" "$root/usr/local/share/wk-bench/authorized_keys"
-        log "  authorized_keys: $(grep -c . "$HOME/.ssh/authorized_keys" 2>/dev/null || echo 0) key(s) from this install"
-    else
-        warn "  no ~/.ssh/authorized_keys here, so the bench install will have none"
-        warn "  -- it will boot, and nothing will be able to drive it"
-    fi
-
-    rsync -a --delete --exclude '.git/' --exclude '__pycache__/' --exclude '*.pyc' \
-          "$WK_ROOT/" "$root/usr/local/share/wk-bench/wk-tools/" \
-        || die "could not stage wk-tools into the package"
 
     # `--installpackage` packages land after launchd has scanned /Library/LaunchDaemons, so a RunAtLoad daemon dropped then would wait for a next boot that nothing triggers; a postinstall bootstraps it on this one.
     local scripts="${TMPDIR:-/tmp}/wk-bench-pkgscripts"
@@ -434,12 +451,7 @@ do_repair() {
         warn "  no launchd override file at $dis -- leaving ssh to the first-boot script"
     fi
 
-    run sudo install -m 0755 "$WK_ROOT/bench/mac-bench-firstboot.sh" \
-        "$S/usr/local/libexec/wk-bench-firstboot.sh"
-    run sudo install -m 0644 "$WK_ROOT/bench/mac-quiet-hosts.sh" \
-        "$S/usr/local/libexec/wk-bench-quiet-hosts.sh"
-    run sudo install -m 0644 "$WK_ROOT/bench/mac-quiet-desktop.sh" \
-        "$S/usr/local/libexec/wk-bench-quiet-desktop.sh"
+    stage_payload "$S" sudo
 
     local pw="${WK_BENCH_PASSWORD:-benchbench}"
     local pwfile; pwfile="$(wk_state_dir)/bench-password"

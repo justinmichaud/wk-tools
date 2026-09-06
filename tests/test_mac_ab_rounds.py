@@ -131,8 +131,43 @@ done''').stdout.strip()
         self.assertIn("hit-max-rounds", text)
         self.assertIn("resolved-at-round-", text)
 
-    def test_detect_zero_runs_a_fixed_number_of_rounds(self):
-        self.assertIn('[ "$DETECT" != 0 ]', AUTORUN.read_text())
+    def _rounds_run(self, detect, rounds=2, max_rounds=40, resolves=False):
+        """The real loop, with the leg and the precision check stubbed: how
+        long an experiment is is the only thing this part of the script decides."""
+        text = AUTORUN.read_text()
+        loop = text[text.index('any_ok=""'):text.index("# No `wk quiesce off`")]
+        prelude = (
+            "DETECT=%s; ROUNDS=%s; MAX_ROUNDS=%s\n"
+            "PLANS=jetstream3; NARMS=2\n"
+            "leg() { printf 'round %%s\\n' \"$1\" >&2; return 0; }\n"
+            "say() { :; }\n"
+            "state_set() { printf 'state %%s=%%s\\n' \"$1\" \"$2\" >&2; }\n"
+            "plan_resolves() { return %s; }\n"
+        ) % (detect, rounds, max_rounds, 0 if resolves else 1)
+        return sh(prelude + loop)
+
+    @staticmethod
+    def _rounds_done(cp):
+        return [l.split("=", 1)[1] for l in cp.stderr.splitlines()
+                if l.startswith("state rounds_done=")]
+
+    def test_detect_zero_runs_exactly_the_rounds_asked_for(self):
+        """`--detect 0` turns the stopping rule off; without this the loop ran
+        to --max-rounds, so a one-round smoke test was forty rounds long."""
+        cp = self._rounds_run(detect=0, rounds=2, max_rounds=40)
+        self.assertEqual(self._rounds_done(cp), ["1", "2"], cp.stderr)
+        self.assertIn("state outcome=rounds-done", cp.stderr)
+
+    def test_a_target_it_cannot_reach_stops_at_the_ceiling(self):
+        cp = self._rounds_run(detect="0.3", rounds=2, max_rounds=4, resolves=False)
+        self.assertEqual(self._rounds_done(cp), ["1", "2", "3", "4"], cp.stderr)
+        self.assertIn("state outcome=hit-max-rounds", cp.stderr)
+
+    def test_a_target_it_reaches_stops_at_the_floor(self):
+        """--rounds is the floor: the precision check is not consulted before it."""
+        cp = self._rounds_run(detect="0.3", rounds=3, max_rounds=40, resolves=True)
+        self.assertEqual(self._rounds_done(cp), ["1", "2", "3"], cp.stderr)
+        self.assertIn("state outcome=resolved-at-round-3", cp.stderr)
 
 
 class TestOneStatistic(WkTest):

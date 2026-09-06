@@ -38,4 +38,7 @@ defaults write com.apple.commerce AutoUpdate -bool false
 sudo -n bash -c "$(declare -f wk_quiet_desktop_system wk_quiet_desktop_power _wk_qd_pmset); wk_quiet_desktop_system" \
     || echo "warning: the machine-wide half did not fully take; 'wk vm check <name>' says which" >&2
 
+wk_pyobjc_install || echo "warning: pyobjc did not install; run-benchmark cannot drive a
+  browser here and nothing can keep it frontmost. 'wk vm check <name>' says so." >&2
+
 _say "desktop settled"

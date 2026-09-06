@@ -1,6 +1,7 @@
 # Named build configurations, in one place: `config_load <name> <os> <kind>` sets CFG_PORT, CFG_TYPE, CFG_ARGS, CFG_CMAKE, CFG_CC/CXX, CFG_BUILDSYS (cmake | xcode), CFG_SCRIPT (the Tools/Scripts entry point) and CFG_JSC_ONLY. Every CMake config also starts with _CFG_DEFAULT_ARGS and _CFG_DEFAULT_CMAKE below, plus USE_LIBBACKTRACE (from <kind>) and the libc++ flags unless the target's conf says otherwise. <os> is the *target's* (t_os, lib/target.sh).
 # clang and not GCC, which fails on aarch64 in JSObject::crashDueToEmptyValueAtValidOffset. The Apple configs leave CC/CXX unset: Xcode's toolchain is the only option on macOS, and so is Xcode itself, build-webkit's CMake path needing a generator that supports Swift. So there is no JSCOnly port in a macOS guest, and the three jsc-* configs mean Tools/Scripts/build-jsc there -- Xcode's "Everything up to JavaScriptCore" scheme, in the same products directory as mac-debug/mac-release.
 
+command -v warn >/dev/null 2>&1 || . "$(dirname "${BASH_SOURCE[0]}")/../lib/common.sh"
 config_list() {   # `wk build --list` names no workspace, so it cannot know the platform
     cat <<'EOF'
 jsc-debug          JSCOnly, Debug, assertions on

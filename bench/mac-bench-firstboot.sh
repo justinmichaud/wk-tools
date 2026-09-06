@@ -203,6 +203,31 @@ if [ ! -f /etc/wk-image ]; then
     say "wrote /etc/wk-image"
 fi
 
+QUIET_HOSTS=/usr/local/libexec/wk-bench-quiet-hosts.sh
+
+# The one fetch a benchmark install makes: without the Command Line Tools there is no working /usr/bin/python3 and run-benchmark is python. softwareupdate offers them only while that in-progress file exists, and the update denial goes back on below.
+if [ -x /Library/Developer/CommandLineTools/usr/bin/python3 ]; then
+    say "command line tools present"
+elif [ -r "$QUIET_HOSTS" ]; then
+    # shellcheck disable=SC1090
+    . "$QUIET_HOSTS"
+    wk_bench_hosts_remove /etc/hosts || say "WARNING: could not lift the update denial"
+    say "installing the Command Line Tools"
+    touch /tmp/.com.apple.dt.CommandLineTools.installondemand.in-progress
+    label=$(softwareupdate -l 2>/dev/null \
+              | sed -n 's/^ *\* Label: \(Command Line Tools.*\)$/\1/p' | tail -1) || label=""
+    if [ -n "$label" ]; then
+        softwareupdate -i "$label" >/dev/null 2>&1 \
+            && say "  installed: $label" \
+            || say "  WARNING: '$label' did not install"
+    else
+        say "  WARNING: softwareupdate offers no Command Line Tools, so this install"
+        say "  has no python3 and can measure nothing. Check its network."
+    fi
+    rm -f /tmp/.com.apple.dt.CommandLineTools.installondemand.in-progress
+    xcode-select --switch /Library/Developer/CommandLineTools 2>/dev/null || true
+fi
+
 QUIET_DESKTOP=/usr/local/libexec/wk-bench-quiet-desktop.sh
 if [ -r "$QUIET_DESKTOP" ]; then
     # shellcheck disable=SC1090
@@ -219,7 +244,6 @@ else
 fi
 say "filevault: $(fdesetup status 2>&1 | head -1)"
 
-QUIET_HOSTS=/usr/local/libexec/wk-bench-quiet-hosts.sh
 if [ -r "$QUIET_HOSTS" ]; then
     # shellcheck disable=SC1090
     . "$QUIET_HOSTS"
@@ -256,12 +280,19 @@ if [ -d "$PAYLOAD/wk-tools" ]; then
     fi
 fi
 
-if /usr/bin/python3 -c 'import objc' >/dev/null 2>&1; then
-    say "pyobjc: present"
+PYOBJC=/usr/local/libexec/wk-bench-pyobjc.sh
+if [ -r "$PYOBJC" ]; then
+    # shellcheck disable=SC1090
+    . "$PYOBJC"
+    if wk_pyobjc_install; then
+        say "pyobjc $WK_PYOBJC_VERSION installed"
+    else
+        say "PYOBJC MISSING -- run-benchmark cannot size the screen or warp the cursor,"
+        say "  and nothing can keep MiniBrowser frontmost, so every number this install"
+        say "  produces is a throttled browser's. It needs a route to PyPI."
+    fi
 else
-    say "PYOBJC MISSING -- Command Line Tools are not installed on this volume."
-    say "  run-benchmark's prepare_env will fail. From a console here:"
-    say "    xcode-select --install"
+    say "WARNING: $PYOBJC missing from the payload; this install cannot run a benchmark"
 fi
 
 # Not `launchctl bootout` on this daemon's own label: that kills this script before the rm.

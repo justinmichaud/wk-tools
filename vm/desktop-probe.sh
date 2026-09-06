@@ -36,3 +36,4 @@ wk_window_probe
 printf 'securityagent=%s\n' "$(pgrep -x SecurityAgent >/dev/null 2>&1 && echo up || echo down)"
 
 printf 'user=%s\n' "$(id -un)"
+printf 'pyobjc=%s\n' "$(wk_pyobjc_version || echo '?')"

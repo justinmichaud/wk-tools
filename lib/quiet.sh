@@ -1,3 +1,4 @@
+command -v warn >/dev/null 2>&1 || . "$(dirname "${BASH_SOURCE[0]}")/common.sh"   # sourced inside a build target too, where no cmd/* has defined info/warn and `info` is a texinfo reader
 # shellcheck disable=SC1090
 . "$(dirname "${BASH_SOURCE[0]}")/../bench/mac-window-probe.sh"
 # shellcheck disable=SC1090

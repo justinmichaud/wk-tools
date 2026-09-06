@@ -98,12 +98,11 @@ b_bench_put() {
       rsync -a --delete -e "ssh $(_ssh_opts)" "$src/" "$WK_VM_USER@$ip:$dest/" )
 }
 
-# Via _tart_bin: a non-interactive ssh session's PATH lacks tart's directory, so `command -v tart` answers "no" even with tart running.
-b_probeable() { is_macos && ( load_target vm >/dev/null 2>&1; _tart_bin >/dev/null 2>&1 ); }
+b_probeable() { is_macos && ( load_target vm >/dev/null 2>&1; tart_bin >/dev/null 2>&1 ); }
 
 b_media() {
     local st
-    if ! is_macos || ! command -v tart >/dev/null 2>&1; then
+    if ! is_macos || ! tart_bin >/dev/null 2>&1; then
         printf 'a Tart guest, %s (managed on the macOS host)' "$NODE_GUEST"
         return 0
     fi

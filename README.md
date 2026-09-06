@@ -635,9 +635,27 @@ wk bench staged --ls                             # what is staged, and what ran
 wk boot mbp --status                             # which side the firmware default is on
 wk bench mac-ab mac-rel                          # stages, plants a launch agent, reboots, reads back
                                                   # needs one action at the keyboard per experiment
-wk bench mac-ab mac-rel --patch <ref> --detect 0.3
+wk bench mac-ab mac-rel --patch <ref> --base <ref> --detect 0.3
 wk bench precision <run-a> <run-b>               # what the rounds so far resolve
 ```
+
+Driven from another machine, never from the Mac: the lane reboots it, and a
+driver on that machine goes with the reboot. Making the volume itself is a
+separate command that runs *on* the Mac, because it acts on its own disk:
+
+```sh
+wk bench mac-volume                              # the container, the room, the plan
+wk bench mac-volume --all                        # create, fetch an installer, install
+wk bench mac-volume --repair                     # re-arm first boot with today's payload
+```
+
+`--repair` is what converges an install that already exists: it re-stages the
+whole payload -- the first-boot script, the quiet-desktop and quiet-hosts
+tables, the pyobjc installer, this tree, the authorized_keys, the Wi-Fi
+identity and the tailnet key -- and re-arms the daemon, so the next boot into
+bench mode finishes provisioning and comes back. One table drives both writers
+(`bench_payload_files`), so nothing can land on a fresh install and not on a
+repaired one.
 
 Every macOS number is taken from a **profile-guided build**: `mac-release-pgo`
 is the lane's default config, and the config both mac lanes refuse to be
@@ -649,10 +667,33 @@ JetStream 3 and MotionMark through it (weighted 0.6 / 0.2 / 0.2 by
 every framework, `-fprofile-use`, and real dSYMs so a capture symbolicates on
 a machine that never had the build tree. The profile is collected per build
 and never shared between two arms: one arm's profile leaves the other arm's
-new functions cold, which reads as a regression that is not there. The
-collection draws, so it runs on the console session with the raiser up
-(`bench/mac-raiser.sh`), and refuses rather than collecting a profile of a
-throttled browser.
+new functions cold, which reads as a regression that is not there. Both arms
+are profiled against the same pinned copy of each benchmark (`seed_payload`,
+keyed by the upstream commit), and what was pinned is written beside the
+profile.
+
+The collection draws, so it runs on the console session with the raiser up
+(`bench/mac-raiser.sh`), and it is gated at both ends rather than trusted. Before
+anything is profiled, the instrumented build itself is driven at a page through
+run-benchmark's own launch path (`bench/mac-browser-check.py`): a WebGL context
+at all is the acceleration -- WebKit has no software fallback on macOS -- a
+WebKit GPU process holding a client on the machine's IOAccelerator is the work
+reaching that device, and requestAnimationFrame's measured rate is the window
+not being throttled. After it, the profile is read back
+(`bench/mac-profile-check.py`): every library and every benchmark present,
+llvm-profdata reporting functions and a non-zero peak, and each benchmark
+having reached a real fraction of the functions the combined profile knows
+about -- coverage, not counts, because a rendering benchmark's count in the
+WebKit framework is hundreds of times a JavaScript benchmark's and that is the
+benchmark rather than a fault. A collection behind a throttled
+or software-rendered browser writes every file the build expects, so nothing
+downstream would notice; these two are what make it stop instead.
+
+Both gates apply wherever the build runs. A guest can collect: it presents a
+paravirtual Metal device, and `wk vm start` installs the pyobjc run-benchmark
+and the raiser need (`bench/mac-pyobjc.sh`) -- so the profile-guided build for
+both arms happens in a disposable VM and the benchmark install is only ever
+measured on, never built in.
 
 An A/B runs **three benchmarks** and stops when it has measured finely enough,
 not after a fixed count. Round 0 is a warmup -- one leg per arm, discarded,
