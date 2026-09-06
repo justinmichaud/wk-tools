@@ -268,6 +268,8 @@ pi_pin_clock() {
         2>/dev/null | tr -d '\r' | tail -1
 }
 
+PI_CACHE_DIR=/tmp/wk-webkit-cache
+
 # The Pi 4 has no firmware GL, so its 2.38 browser renders through wayland+mesa.
 PI_RENDERER=""; PI_SESSION=""
 PI_WARMUP=""; PI_PROFILER=""; PI_PARANOID=""
@@ -382,6 +384,7 @@ pi_launch_cmd() { # <slot> <slot.json> <cores wrap>
     local slot="$1" json="$2" cores="$3" root env browser wenv=""
     root="$(pi_slot_dir "$slot")/root"
     env=$(wkslot env "$json" "$root" | tr '\n' ' ')
+    env="$env XDG_CACHE_HOME=$PI_CACHE_DIR"
     # One line per optimizing compile: only the discarded leg pays for the printing.
     [ -z "${PI_WARMUP:-}" ] \
         || env="$env JSC_reportDFGCompileTimes=1 JSC_reportFTLCompileTimes=1"
@@ -408,7 +411,7 @@ pi_kill_cmd() { # <slot.json>
 }
 
 pi_reset_cmd() {
-    printf 'd="${XDG_CACHE_HOME:-$HOME/.cache}"; rm -rf "$d/WebKitCache" "$d/CacheStorage" "$d/wpe/WebKitCache" "$d/wpe/CacheStorage"'
+    printf 'rm -rf %s && mkdir -p %s' "$PI_CACHE_DIR" "$PI_CACHE_DIR"
 }
 
 pi_bench_record() { # <out dir> <slot> <slot.json>
@@ -931,6 +934,13 @@ pi_bench_once() {
         bash -c "cd $(sh_quote "$BENCH_RUNNER") && exec python3 Tools/Scripts/run-benchmark $args"
     local rc=$?
     set -e
+    if [ "$rc" -ne 0 ] || [ ! -s "$out/result.json" ]; then
+        i_ssh 'echo "--- ps"; ps -o pid,etime,time,rss,comm 2>/dev/null || ps w
+               echo "--- browser log"; tail -c 20000 /tmp/wk-browser.log 2>/dev/null
+               echo "--- weston"; tail -20 /tmp/wk-weston.log 2>/dev/null
+               echo "--- dmesg"; dmesg 2>/dev/null | tail -30' \
+            > "$out/diagnose/board-at-failure.txt" 2>&1 || true
+    fi
     # A browser that outlives a timed-out run is a second browser on the GPU and in the 623 MB.
     i_ssh "$(pi_kill_cmd "$json")" >/dev/null 2>&1 || true
     i_ssh 'cat /tmp/wk-browser.log 2>/dev/null; rm -f /tmp/wk-browser.log' > "$out/browser.log" 2>/dev/null || true

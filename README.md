@@ -527,8 +527,9 @@ binary (x86_64, aarch64) and the image's own `sysprof-cli` where it does not
 below 64 bits outright -- `Source/JavaScriptCore/runtime/Options.cpp`, `#if
 !CPU(X86_64) && !CPU(ARM64)`, which also clears `useWasmIPInt`, `useBBQJIT` and
 `useConcurrentGC` -- so a SIMD-built module cannot run on a 32-bit engine at
-all. `bench/subtest-exclusions.conf` declares those, per plan and word size,
-each with the reason from the payload's own build; `wk pi bench` applies a row
+all. `bench/subtest-exclusions.conf` declares those as
+`<plan> <bits> <subtest> <why>` rows, each carrying the reason from the
+payload's own build; `wk pi bench` applies a row
 when *either* arm's image declares that width, passes the reduced set to both
 arms, and records what it dropped in every run's `env.json`. The report then
 says so, and says it louder if the two arms somehow differed. `--subtests` and

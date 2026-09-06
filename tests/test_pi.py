@@ -96,11 +96,19 @@ wkslot() {{ python3 "{REPO}/lib/wkslot.py" "$@"; }}
 {lift("pi_slot_dir")}
 {lift("pi_launch_cmd")}
 PI_SLOTS=/var/wk/slots
+PI_CACHE_DIR=/tmp/wk-webkit-cache
 pi_launch_cmd pr "{slot}" "{cores_wrap}"
 '''
         cp = bash(script, timeout=30)
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
         return cp.stdout
+
+    def test_every_launch_names_its_own_cache_directory(self):
+        """The reset used to guess the browser's cache from $HOME and delete
+        the wrong tree, so a warm cache survived into the next launch and the
+        benchmark never posted its report (2026-09-05, task 20260905T204217Z)."""
+        out = self._launch("")
+        self.assertIn("XDG_CACHE_HOME=/tmp/wk-webkit-cache", out)
 
     def test_valid_cores_becomes_a_taskset_prefix_on_the_board(self):
         out = self._launch("taskset -c 0-3 ")
@@ -124,6 +132,7 @@ wkslot() {{ python3 "{REPO}/lib/wkslot.py" "$@"; }}
 {lift("pi_slot_dir")}
 {lift("pi_launch_cmd")}
 PI_SLOTS=/var/wk/slots
+PI_CACHE_DIR=/tmp/wk-webkit-cache
 text=$(pi_launch_cmd b "{slot}" "")
 sh=$(command -v dash || command -v sh)
 printf '%s\\n' "$text" | "$sh" -n

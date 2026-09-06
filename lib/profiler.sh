@@ -1,10 +1,5 @@
-# Which profiler a machine can run, and getting it there.
-#
-# Two tools, because neither covers the fleet: samply publishes binaries for
-# x86_64 and aarch64 only, and an armv7 userspace has to use whatever it ships.
-# A caller asks profiler_resolve and gets one answer or a refusal.
-#
-# The arch to ask about is the *measured process's*, never `uname -m`: a lib32
+# samply publishes x86_64 and aarch64 only; an armv7 userspace uses whatever the
+# image ships. Ask about the measured process's arch, never `uname -m`: a lib32
 # image runs a 64-bit kernel over a 32-bit userspace with no 64-bit loader.
 
 SAMPLY_VER=0.13.1
@@ -27,7 +22,6 @@ samply_url() { # <triple>
     printf 'https://github.com/mstange/samply/releases/download/samply-v%s/samply-%s.tar.xz' "$SAMPLY_VER" "$1"
 }
 
-# Keyed by version and triple: a downloaded artifact, not a recomputable fact.
 samply_store_dir() { printf '%s/cache/samply/%s-%s' "$WK_STORE" "$SAMPLY_VER" "$1"; }
 
 samply_fetch() { # <uname -m> -- prints the binary's path on this host
@@ -59,10 +53,6 @@ samply_fetch() { # <uname -m> -- prints the binary's path on this host
     printf '%s/samply' "$dir"
 }
 
-# `profiler_resolve <uname -m> <sysprof-present: yes|no>` prints `<tool> <reason>`
-# and returns 0, or prints the reason alone and returns 1. It decides; getting
-# the tool to the machine is the caller's, because only the caller knows the
-# channel.
 profiler_resolve() { # <uname -m> <yes|no>
     local machine="$1" have_sysprof="${2:-no}"
     if [ -n "$(samply_triple "$machine")" ]; then
