@@ -2,7 +2,7 @@ wkdata() { python3 "$WK_ROOT/lib/wkdata.py" "$@"; }
 wkslot() { python3 "$WK_ROOT/lib/wkslot.py" "$@"; }
 
 BENCH_DIR="$WK_STORE/bench"
-SEED_DIR="$WK_STORE/cache/bench"
+SEED_DIR="$(wk_artifact_dir)/bench"
 
 # A task is one benchmarking command's output: $BENCH_DIR/<task>/ holds task.json, runs/<run>/, logs and reports. A live lock bench-task-<name> is what "running" means; no progress is stored.
 bench_task_dir() { printf '%s/%s' "$BENCH_DIR" "$1"; }
@@ -33,7 +33,7 @@ bench_running_tasks() {
     done
     printf '%s' "$out"
 }
-RUNNER_DIR="$WK_STORE/cache/bench-runner"  # exported Tools/Scripts trees keyed by the WebKit commit: artifacts, never edited
+RUNNER_DIR="$(wk_artifact_dir)/bench-runner"  # exported Tools/Scripts trees keyed by the WebKit commit: artifacts, never edited
 
 plan_json() { # <plan>; the caller defines `bench_plan_read <path under Tools/Scripts>` -- a workspace's checkout for `wk bench`, the runner tree for `wk pi bench`
     local plan="$1" body seen=0

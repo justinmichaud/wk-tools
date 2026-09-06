@@ -2,6 +2,8 @@
 . "$(dirname "${BASH_SOURCE[0]}")/../bench/mac-window-probe.sh"
 # shellcheck disable=SC1090
 . "$(dirname "${BASH_SOURCE[0]}")/../bench/mac-quiet-desktop.sh"
+# shellcheck disable=SC1090
+. "$(dirname "${BASH_SOURCE[0]}")/../bench/mac-raiser.sh"
 
 # Only the clock is judged on a workstation: the rest is what a benchmark install is and a workstation never will be, and a red line nothing there can clear teaches a reader to skip the list.
 macos_noise() {

@@ -23,7 +23,7 @@ script=${WK_BUILD_SCRIPT:-Tools/Scripts/build-webkit}
 
 cmakeargs=${WK_BUILD_CMAKE:-}
 
-# CMake caches these at *configure* time, so an architecture is fixed at creation: WK_ARCH plus WK_ARCH_WRAPPER/WK_ARCH_CFLAGS/WK_ARCH_LDFLAGS for a non-native workspace, and WK_BUILDSYS, WK_BUILD_SCRIPT, WK_SRC, WK_BUILD_DIR and WK_DERIVED_DATA the config's own, exported by build/configs.sh.
+# CMake caches these at *configure* time, so an architecture is fixed at creation: WK_ARCH plus WK_ARCH_WRAPPER/WK_ARCH_CFLAGS/WK_ARCH_LDFLAGS for a non-native workspace, and WK_BUILDSYS, WK_BUILD_SCRIPT, WK_SRC, WK_BUILD_DIR, WK_DERIVED_DATA and -- for a profile-guided config -- WK_PGO and WK_PGO_DIR the config's own, exported by build/configs.sh.
 arch=${WK_ARCH:-native}
 if [ "$arch" != native ]; then
     export CFLAGS="${WK_ARCH_CFLAGS:-} ${CFLAGS:-}"
@@ -40,25 +40,36 @@ args+=(${WK_BUILD_ARGS:-})
 [ -n "${WK_NO_COMPILE_COMMANDS:-}" ] || args+=(--export-compile-commands)   # it disables the Apple ports' precompiled prefix headers, but clangd needs it
 
 # xcodebuild takes -jobs N, ignores --makeargs, and otherwise uses its own count.
-case "$buildsys" in
-xcode)
-    xc=(-jobs "$jobs")
+_xc_settings() {   # <products dir> -- fills XC with the settings every Apple-port build takes; a phase of a PGO build calls it once per products directory
+    XC=(-jobs "$jobs")
 
-    if [ -n "${WEBKIT_OUTPUTDIR:-}" ]; then   # WEBKIT_OUTPUTDIR alone disagrees with webkitdirs by one directory level, and SHARED_PRECOMPS_DIR has to be repeated or the Apple configs share a PCH dir
-        xc+=("WK_CONFIGURATION_BUILD_DIR=$WEBKIT_OUTPUTDIR")
-        xc+=("SHARED_PRECOMPS_DIR=$WEBKIT_OUTPUTDIR/PrecompiledHeaders")
+    if [ -n "$1" ]; then   # WEBKIT_OUTPUTDIR alone disagrees with webkitdirs by one directory level, and SHARED_PRECOMPS_DIR has to be repeated or the Apple configs share a PCH dir
+        XC+=("WK_CONFIGURATION_BUILD_DIR=$1")
+        XC+=("SHARED_PRECOMPS_DIR=$1/PrecompiledHeaders")
     fi
 
     if [ -n "${WK_DERIVED_DATA:-}" ]; then   # NOT -derivedDataPath: build-webkit's second xcodebuild call refuses it
-        xc+=("COMPILATION_CACHE_CAS_PATH=$WK_DERIVED_DATA/CompilationCache.noindex")
-        xc+=("MODULE_CACHE_DIR=$WK_DERIVED_DATA/ModuleCache.noindex")
+        XC+=("COMPILATION_CACHE_CAS_PATH=$WK_DERIVED_DATA/CompilationCache.noindex")
+        XC+=("MODULE_CACHE_DIR=$WK_DERIVED_DATA/ModuleCache.noindex")
     fi
 
-    [ -n "${WK_NO_COMPILATION_CACHE:-}" ] && xc+=("COMPILATION_CACHE_ENABLE_CACHING=NO")   # for debugging Swift types: with caching on, debug info lives only in the CAS
+    [ -n "${WK_NO_COMPILATION_CACHE:-}" ] && XC+=("COMPILATION_CACHE_ENABLE_CACHING=NO")   # for debugging Swift types: with caching on, debug info lives only in the CAS
+    return 0
+}
+
+case "$buildsys" in
+xcode)
+    _xc_settings "${WEBKIT_OUTPUTDIR:-}"
+
+    if [ -n "${WK_PGO:-}" ]; then   # three phases with a benchmark run between them, so it cannot be one exec
+        . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/mac-pgo.sh"
+        pgo_build ${args[@]+"${args[@]}"}
+        exit $?
+    fi
 
     case "$script" in   # build-webkit hands an unrecognised argument to xcodebuild, build-jsc appends it to a `make` line, and `ARGS=` is Makefile.shared's hole for them
-        */build-jsc) args+=("ARGS=${xc[*]}") ;;
-        *)           args+=("${xc[@]}") ;;
+        */build-jsc) args+=("ARGS=${XC[*]}") ;;
+        *)           args+=("${XC[@]}") ;;
     esac
     ;;
 *)

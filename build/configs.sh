@@ -12,6 +12,7 @@ gtk-release-asan   GTK port, Release + AddressSanitizer
 wpe-release        WPE port, Release
 mac-debug          macOS (Apple port), Debug, Xcode
 mac-release        macOS (Apple port), Release, Xcode
+mac-release-pgo    macOS (Apple port), Release + PGO and full LTO -- the perf build
 mac-release-asan   macOS (Apple port), Release + AddressSanitizer
 ios-sim-release    iOS Simulator, Release, Xcode
 
@@ -34,10 +35,7 @@ config_cmake_summary() {
 
 config_build_dir() {
     local root="${1:-/src/WebKit}"
-    local variant=""   # the `-asan` suffix is ours, the two mac-release configs otherwise sharing one tree; both spellings of "instrumented" count, build-webkit's --asan and build-jsc's ASAN=YES
-    case "$CFG_BUILDSYS:$CFG_ARGS" in
-        xcode:*--asan*|xcode:*ASAN=YES*) variant="-asan" ;;
-    esac
+    local variant="${CFG_VARIANT:-}"   # the suffix is ours: the Apple configs otherwise share one products tree, and a sanitized or profile-guided build must not land in it
     case "$CFG_BUILDSYS:$CFG_PORT" in
         xcode:--ios-simulator) echo "$root/WebKitBuild/$CFG_TYPE-iphonesimulator$variant" ;;
         xcode:--ios-device)    echo "$root/WebKitBuild/$CFG_TYPE-iphoneos$variant" ;;
@@ -98,7 +96,7 @@ config_load() { # <name> <os: linux|macos> [kind: container|vm|local|remote]
     CFG_KIND="${3:-${WK_TARGET_KIND:-}}"
     [ -n "$CFG_KIND" ] || die "config_load '$1': no target kind given. It is
     WK_TARGET_KIND, so load_target has to run first (build/configs.sh)."
-    CFG_PORT=""; CFG_TYPE=""; CFG_ARGS=""; CFG_CMAKE=""
+    CFG_PORT=""; CFG_TYPE=""; CFG_ARGS=""; CFG_CMAKE=""; CFG_VARIANT=""; CFG_PGO=""
     CFG_BUILDSYS=cmake
     CFG_SCRIPT=Tools/Scripts/build-webkit
     CFG_JSC_ONLY=""
@@ -129,6 +127,7 @@ config_load() { # <name> <os: linux|macos> [kind: container|vm|local|remote]
             CFG_TYPE=Release; CFG_JSC_ONLY=1
             if [ "$CFG_OS" = macos ]; then
                 _cfg_apple_jsc
+                CFG_VARIANT=-asan
                 CFG_ARGS="--release ASAN=YES"   # not --asan: build-jsc has no such flag, and its passthrough hands ASAN=YES to the project Makefile as set-webkit-configuration --asan
             else
                 CFG_PORT="--jsc-only"
@@ -165,10 +164,17 @@ config_load() { # <name> <os: linux|macos> [kind: container|vm|local|remote]
             CFG_ARGS="--release"
             CFG_CC=""; CFG_CXX=""
             ;;
+        mac-release-pgo)   # the build every macOS number is taken from; the three phases are build/mac-pgo.sh
+            CFG_TYPE=Release; CFG_BUILDSYS=xcode
+            CFG_ARGS="--release"
+            CFG_CC=""; CFG_CXX=""
+            CFG_VARIANT=-pgo; CFG_PGO=1
+            ;;
         mac-release-asan)
             CFG_TYPE=Release; CFG_BUILDSYS=xcode
             CFG_ARGS="--release --asan"
             CFG_CC=""; CFG_CXX=""
+            CFG_VARIANT=-asan
             ;;
         ios-sim-release)
             CFG_PORT="--ios-simulator"; CFG_TYPE=Release; CFG_BUILDSYS=xcode
@@ -280,6 +286,9 @@ config_build_env() {   # assembled into CFG_ENV, config_load first; the architec
     fi
     if [ -n "$out" ]; then   # Xcode only: WEBKIT_OUTPUTDIR on a CMake port collapses every per-port layout. Separate variables rather than WK_BUILD_ARGS, which is word-split
         CFG_ENV+=("WEBKIT_OUTPUTDIR=$out" "WK_DERIVED_DATA=$src/WebKitBuild/DerivedData")
+    fi
+    if [ -n "$CFG_PGO" ]; then   # the profile is re-collected per build: a profile taken from one arm's sources leaves the other arm's new functions cold, which reads as a regression
+        CFG_ENV+=("WK_PGO=1" "WK_PGO_DIR=$out-profile" "WK_NO_COMPILE_COMMANDS=1")
     fi
     # Carried through only when set, empty not being unset for build-in-target.sh: WK_MEM_BUDGET_MB/WK_MEM_FLOOR_MB come from --mem-budget/--mem-floor, and WK_NO_COMPILATION_CACHE and WK_NO_COMPILE_COMMANDS opt out of those two.
     [ -n "${WK_MEM_BUDGET_MB:-}" ] && CFG_ENV+=("WK_MEM_BUDGET_MB=$WK_MEM_BUDGET_MB")

@@ -336,9 +336,8 @@ class TestResolveWithoutABuild(WkTest):
         # plus a static grep for the shape that broke it
         # (`${x:+true}${x:-false}` emits the value, not a JSON literal).
         manifest = self.tmp / "stage.json"
-        payload_pinned = "true" if "/tmp/x" else "false"
         manifest.write_text(
-            f'{{\n  "payload_pinned": {payload_pinned},\n  "plan": "jetstream2.2"\n}}\n'
+            '{\n  "payloads_pinned": "jetstream2.2",\n  "plans": "jetstream2.2"\n}\n'
         )
         with open(manifest) as f:
             json.load(f)  # raises if not valid JSON
@@ -1240,7 +1239,7 @@ class TestHandsOnArmingAndBench(WkTest):
         stage = self.tmp / "bench" / "staged" / "20260101T000000Z-mac-release"
         (stage / "Tools" / "Scripts").mkdir(parents=True)
         (stage / "WebKitBuild" / "Release" / "MiniBrowser.app" / "Contents" / "MacOS").mkdir(parents=True)
-        (stage / "stage.json").write_text('{"config":"mac-release","plan":"jetstream2.2"}')
+        (stage / "stage.json").write_text('{"config":"mac-release","plans":"jetstream2.2"}')
 
         cp2 = run("bench", "staged", "--plan", "jetstream2.2", "--force", env={"WK_BENCH_ROOT": str(self.tmp / "bench")})
         self.assertNotEqual(cp2.returncode, 0, "--force ran a benchmark in host mode")

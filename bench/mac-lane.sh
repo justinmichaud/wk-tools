@@ -43,7 +43,7 @@ TOOLS="${WK_MAC_TOOLS:-}"
 BENCH_TOOLS="${WK_MAC_BENCH_TOOLS:-}"
 
 PLAN="${WK_MAC_PLAN:-speedometer3.0}"
-CONFIG="${WK_MAC_CONFIG:-mac-release}"
+CONFIG="${WK_MAC_CONFIG:-mac-release-pgo}"   # every macOS number this repo quotes is a profile-guided build's
 COUNT=""
 PAYLOAD=""
 DRY=""
@@ -61,7 +61,7 @@ usage() {
 
   <workspace>         the macOS workspace whose build is measured
   --plan <name>       which benchmark (default: speedometer3.0)
-  --config <name>     which build (default: mac-release)
+  --config <name>     which build (default: mac-release-pgo)
   --host <dest>       ssh destination for host mode (default: the machine's NODE_SSH)
   --count <n>         iterations, passed to the runner
   --payload <dir>     a pinned benchmark checkout, passed to the stage

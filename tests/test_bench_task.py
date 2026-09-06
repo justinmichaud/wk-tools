@@ -326,3 +326,44 @@ class TestReadingTasksStartsNothing(WkTest):
             self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
             self.assertIn(TASK, cp.stdout)
             self.assertNotIn("starting podman machine", cp.stdout + cp.stderr)
+
+
+class TestArtifactsLandWhereTheMachineCanReadThem(WkTest):
+    """`wk_artifact_dir` (lib/store.sh): a seeded benchmark payload, an exported
+    runner tree and a downloaded profiler are opened as files by the machine
+    that fetched them. On a Linux host that is the store; on a macOS
+    workstation the store is the podman VM's and nothing on this side can open
+    it, so they go in this machine's own state directory instead."""
+
+    def _dir(self, store, extra=None):
+        env = {"WK_STORE": str(store)}
+        env.update(extra or {})
+        cp = bash(f'''
+. "{REPO}/lib/common.sh"
+. "{REPO}/lib/store.sh"
+. "{REPO}/lib/bench.sh"
+. "{REPO}/lib/profiler.sh"
+echo "ARTIFACT=$(wk_artifact_dir)"
+echo "SEED=$SEED_DIR"
+echo "RUNNER=$RUNNER_DIR"
+echo "SAMPLY=$(samply_store_dir aarch64-apple-darwin)"
+''', env=env)
+        assert cp.returncode == 0, cp.stdout + cp.stderr
+        return dict(l.split("=", 1) for l in cp.stdout.strip().splitlines())
+
+    def test_a_writable_store_keeps_them(self):
+        with scratch_dir() as tmp:
+            f = self._dir(tmp, {"XDG_STATE_HOME": str(tmp / "state")})
+            self.assertEqual(f["ARTIFACT"], f"{tmp}/cache")
+            self.assertEqual(f["SEED"], f"{tmp}/cache/bench")
+            self.assertEqual(f["RUNNER"], f"{tmp}/cache/bench-runner")
+            self.assertTrue(f["SAMPLY"].startswith(f"{tmp}/cache/samply/"), f["SAMPLY"])
+
+    def test_they_are_all_under_the_one_directory(self):
+        """Three artifact stores, one rule -- a second answer to 'where can
+        this machine put a file' is where the macOS lane broke."""
+        with scratch_dir() as tmp:
+            f = self._dir(tmp, {"XDG_STATE_HOME": str(tmp / "state")})
+            for key in ("SEED", "RUNNER", "SAMPLY"):
+                self.assertTrue(f[key].startswith(f['ARTIFACT'] + "/"),
+                                f"{key}={f[key]} is not under {f['ARTIFACT']}")

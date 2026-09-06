@@ -48,7 +48,7 @@ class TestBenchMacDryRunOnAFreshLane(WkTest):
         self.assertEqual(cp.returncode, 0, out)
         self.assertIn("showing the plan anyway because this is --dry-run", out, out)
         want = [
-            "build: mac-release in the macOS guest",
+            "build: mac-release-pgo in the macOS guest",
             "would run [host]",
             "arm: recording the intent",
             "would wait up to",

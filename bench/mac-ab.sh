@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
-# wk bench mac-ab -- an interleaved A/B on this Mac's benchmark install, with
-# nobody in the room.
+# wk bench mac-ab -- an interleaved A/B on this Mac's benchmark install, with nobody in the room.
 #
-#   wk bench mac-ab [<workspace>] [--plan P] [--rounds N] [--count N]
+#   wk bench mac-ab [<workspace>] [--plan P]... [--rounds N] [--count N]
 #                   [--a <staged-id>] [--b <staged-id>] [--stage]
 #   wk bench mac-ab <workspace> --patch <ref|diff> [--base <ref>] [--rounds N]
 #   wk bench mac-ab --preflight | --status | --collect | --dry-run
-#
+#   --plan P repeats; the default is jetstream3, speedometer3, motionmark. --detect
+#   PCT alternates until the A/B resolves a difference that small (0.3 by default)
+#   and stops there, between --rounds and --max-rounds; --detect 0 runs --rounds
+#   exactly. Round 0 is a discarded warmup leg per arm, carrying a samply profile.
 # The benchmark install has no network (tolken is Wi-Fi only and that install joins nothing), so the job is planted rather than driven: everything it needs is written onto the volume while merely mounted, a per-user LaunchAgent starts it at autologin, and this driver waits and reads. No sudo, because /var/wk and ~bench are both uid 501.
 # Nothing here can set which volume the firmware boots -- `nvram boot-volume`, `bless --setBoot` and `systemsetup -getstartupdisk` all fail silently -- so this driver reboots and reports which mode came back: at most one human action per A/B, never one per run, since the planted job holds every round of every arm.
 
@@ -14,14 +16,17 @@ set -euo pipefail
 WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 . "$WK_ROOT/lib/common.sh"
 . "$WK_ROOT/lib/store.sh"
+. "$WK_ROOT/lib/profiler.sh"
 . "$WK_ROOT/boot/machines.sh"
 
 HOST="${WK_MAC_SSH:-}"
 MACHINE="${WK_MAC_MACHINE:-mbp}"  # static
 VOLUME="${WK_BENCH_VOLUME:-WK Bench}"
-PLAN="${WK_MAC_PLAN:-speedometer3.0}"
-CONFIG="${WK_MAC_CONFIG:-mac-release}"
-ROUNDS=2
+PLANS="${WK_MAC_PLANS:-jetstream3 speedometer3 motionmark}"
+CONFIG="${WK_MAC_CONFIG:-mac-release-pgo}"
+ROUNDS=5
+MAX_ROUNDS=40
+DETECT=0.3
 COUNT=""
 TIMEOUT=1800
 SETTLE=90
@@ -29,6 +34,7 @@ A_ID=""; B_ID=""
 PATCH=""; BASE_REF=""; ARMS_PENDING=""
 A_ARGS=""; B_ARGS=""
 WS=""
+PLANS_GIVEN=""
 DO_STAGE=""
 ALLOW_FETCH=""
 FORCE=""
@@ -227,40 +233,49 @@ preflight() {
 }
 
 
-phase_stage() {
-    [ -n "$WS" ] || die "--stage needs a workspace to stage from"
-    info "stage: $CONFIG from '$WS' onto $VOLUME"
-    [ -n "$DRY" ] && { log "  would: wk vm start $WS; wk bench seed $WS $PLAN; wk bench stage $WS --to $MACHINE"; return 0; }
-    rwk vm start "$WS" >/dev/null 2>&1 || true
-    # The payload is pinned here because a run-benchmark that clones it over there dies where nobody can see it. stdout only: `2>&1 | tail -1` would race seed's stderr progress against its stdout path.
-    local payload
-    payload=$(rwk bench seed "$WS" "$PLAN" | tr -d '\r' | tail -1) || payload=""
-    case "$payload" in /*) ;; *) payload="" ;; esac
-    if [ -n "$payload" ] && mac "test -d $(sh_quote "$payload")" 2>/dev/null; then
-        log "  payload pinned: $payload"
-    elif [ -n "$ALLOW_FETCH" ]; then
-        payload=""
-        warn "  no pinned payload, and --allow-network-fetch was given. Each run will
-  clone $PLAN itself, so the benchmark install needs a working network *and*
-  the two arms could in principle get different revisions of the benchmark."
-    else
-        die "the $PLAN payload could not be pinned, so nothing may be staged.
+# In a variable and not on stdout: a die in a command substitution kills only the subshell, and this one refuses the whole stage.
+stage_plan_args() {   # -> STAGE_PLAN_ARGS, the --plan/--payload arguments for `wk bench stage`. A benchmark install has no network, so an unpinned plan is a leg that fails after the reboot where nothing can report it.
+    local p payload out=""
+    STAGE_PLAN_ARGS=""
+    for p in $PLANS; do
+        payload=$(rwk bench seed "$WS" "$p" | tr -d '\r' | tail -1) || payload=""
+        case "$payload" in /*) ;; *) payload="" ;; esac
+        if [ -n "$payload" ] && mac "test -d $(sh_quote "$payload")" 2>/dev/null; then
+            log "  payload pinned: $p -> $payload"
+            out="$out --plan $p --payload $payload"
+        elif [ -n "$ALLOW_FETCH" ]; then
+            warn "  $p is not pinned, and --allow-network-fetch was given. That leg will
+  clone the benchmark itself, so the benchmark install needs a working network *and*
+  the two arms could in principle get different revisions of it."
+            out="$out --plan $p"
+        else
+            die "the $p payload could not be pinned, so nothing may be staged.
 
-    Each run would clone the benchmark itself, over a network the benchmark
-    install may not have -- and if it does not, every arm fails after the
+    That leg would clone the benchmark itself, over a network the benchmark
+    install may not have -- and if it does not, every $p arm fails after the
     reboot, where nothing can say so.
 
     Pin it here, where the network is:
-        wk bench seed $WS $PLAN
+        wk bench seed $WS $p
     then re-run. If that fails, its error is the thing to fix -- it reads the
     plan file out of '$WS', so the workspace has to be one that has the tree.
 
     To go ahead anyway (a benchmark install you know has a route out, and a
     revision of the benchmark you are content to have chosen for you):
         --allow-network-fetch"
-    fi
-    rwk bench stage "$WS" --to "$MACHINE" --config "$CONFIG" --plan "$PLAN" \
-        ${payload:+--payload "$payload"}
+        fi
+    done
+    STAGE_PLAN_ARGS="$out"
+}
+
+phase_stage() {
+    [ -n "$WS" ] || die "--stage needs a workspace to stage from"
+    info "stage: $CONFIG from '$WS' onto $VOLUME ($PLANS)"
+    [ -n "$DRY" ] && { log "  would: wk vm start $WS; wk bench seed $WS <each plan>; wk bench stage $WS --to $MACHINE"; return 0; }
+    rwk vm start "$WS" >/dev/null 2>&1 || true
+    stage_plan_args
+    # shellcheck disable=SC2086 -- a deliberate word list.
+    rwk bench stage "$WS" --to "$MACHINE" --config "$CONFIG" $STAGE_PLAN_ARGS
 
     info "  stopping the build guest"   # a running macOS VM competes for CPU with whatever runs next
     rwk vm stop "$WS" >/dev/null 2>&1 || warn "  could not stop '$WS'"
@@ -288,12 +303,11 @@ build_and_stage() {   # the staged id is the directory new since before the stag
     before=$(staged_ids)
     info "  building $label"
     rwk build "$WS" "$CONFIG" >&2 || die "the $label build failed"
-    local payload
-    payload=$(rwk bench seed "$WS" "$PLAN" | tr -d '\r' | tail -1) || payload=""
-    case "$payload" in /*) ;; *) die "could not pin the $PLAN payload for $label" ;; esac
+    stage_plan_args
     info "  staging $label"
-    rwk bench stage "$WS" --to "$MACHINE" --config "$CONFIG" --plan "$PLAN" \
-        --payload "$payload" >&2 || die "staging $label failed"
+    # shellcheck disable=SC2086 -- a deliberate word list.
+    rwk bench stage "$WS" --to "$MACHINE" --config "$CONFIG" $STAGE_PLAN_ARGS >&2 \
+        || die "staging $label failed"
     after=$(staged_ids)
     id=$(comm -13 <(printf '%s\n' "$before") <(printf '%s\n' "$after") | tail -1)
     [ -n "$id" ] || die "staging $label produced no new directory on $VOLUME"
@@ -365,7 +379,7 @@ $(printf '%s' "$staged" | sed 's/^/    /')"
         printf '%s\n' "$staged" | grep -qx "$B_ID" || die "no staged build '$B_ID' on $VOLUME"
     fi
 
-    info "plant: $PLAN, $ROUNDS round(s), interleaved"
+    info "plant: $PLANS, $ROUNDS-$MAX_ROUNDS round(s), interleaved, until it resolves ${DETECT}%"
     log  "  arm A: $A_ID${A_ARGS:+  args: $A_ARGS}"
     log  "  arm B: $B_ID${B_ARGS:+  args: $B_ARGS}"
     [ "$A_ID" = "$B_ID" ] && [ "$A_ARGS" = "$B_ARGS" ] && \
@@ -376,6 +390,7 @@ $(printf '%s' "$staged" | sed 's/^/    /')"
     if [ -n "$DRY" ]; then
         log "  would sync wk-tools to $root/wk-tools"
         log "  would install $root/bin/mac-bench-autorun.sh"
+        log "  would plant samply $SAMPLY_VER for the warmup round's profile"
         log "  would write $root/job.json and reset $root/autorun.state"
         log "  would install $bh/Library/LaunchAgents/com.wk.bench-ab.plist"
         return 0
@@ -415,6 +430,21 @@ $(printf '%s' "$staged" | sed 's/^/    /')"
     Nothing has been done to the machine yet. To plant anyway:  --force"
     fi
 
+    # No network over there, so the warmup round's profiler goes in now, into that install's store (bench/mac-bench-autorun.sh) where samply_fetch will look.
+    local samply triple
+    triple=$(samply_triple "$(mac_sh 'uname -m' | tr -d '\r')" Darwin)
+    if samply=$(samply_fetch "$(mac_sh 'uname -m' | tr -d '\r')" Darwin 2>/dev/null) && [ -n "$samply" ]; then
+        mac "mkdir -p $(sh_quote "$root/cache/samply/$SAMPLY_VER-$triple")"
+        if put_file "$samply" "$root/cache/samply/$SAMPLY_VER-$triple/samply"; then
+            mac "chmod 0755 $(sh_quote "$root/cache/samply/$SAMPLY_VER-$triple/samply")"
+            log "  samply $SAMPLY_VER planted for the warmup round"
+        else
+            warn "  could not plant samply -- the warmup round will carry no profile"
+        fi
+    else
+        warn "  no samply for $triple here -- the warmup round will carry no profile"
+    fi
+
     info "  installing the autorun"
     mac "mkdir -p $(sh_quote "$root/bin") $(sh_quote "$bh/Library/LaunchAgents")"
     put_file "$WK_ROOT/bench/mac-bench-autorun.sh" "$root/bin/mac-bench-autorun.sh" \
@@ -423,7 +453,8 @@ $(printf '%s' "$staged" | sed 's/^/    /')"
 
     info "  writing the job"
     # Written through python so quoting is not a shell problem: staged ids and browser arguments reach this from a command line and can contain spaces.
-    WK_JOB_PLAN="$PLAN" WK_JOB_ROUNDS="$ROUNDS" WK_JOB_TIMEOUT="$TIMEOUT" \
+    WK_JOB_PLANS="$PLANS" WK_JOB_ROUNDS="$ROUNDS" WK_JOB_TIMEOUT="$TIMEOUT" \
+    WK_JOB_MAX_ROUNDS="$MAX_ROUNDS" WK_JOB_DETECT="$DETECT" \
     WK_JOB_COUNT="$COUNT" WK_JOB_SETTLE="$SETTLE" \
     WK_JOB_A="$A_ID" WK_JOB_B="$B_ID" WK_JOB_AA="$A_ARGS" WK_JOB_BA="$B_ARGS" \
     WK_JOB_TOOLS="/var/wk/wk-tools" WK_JOB_BY="$(hostname)" \
@@ -437,8 +468,10 @@ arms = [{"label": "A", "id": g("WK_JOB_A"), "browser_args": g("WK_JOB_AA") or ""
 if g("WK_JOB_B"):
     arms.append({"label": "B", "id": g("WK_JOB_B"), "browser_args": g("WK_JOB_BA") or ""})
 print(json.dumps({
-    "plan": g("WK_JOB_PLAN"),
+    "plans": (g("WK_JOB_PLANS") or "").split(),
     "rounds": int(g("WK_JOB_ROUNDS")),
+    "max_rounds": int(g("WK_JOB_MAX_ROUNDS")),
+    "detect_pct": float(g("WK_JOB_DETECT")),
     "timeout": int(g("WK_JOB_TIMEOUT")),
     "count": g("WK_JOB_COUNT") or "",
     "settle": int(g("WK_JOB_SETTLE")),
@@ -614,9 +647,12 @@ phase_status() {
 
 while [ $# -gt 0 ]; do
     case "$1" in
-        --plan)     PLAN="${2:-}"; shift 2 ;;
+        --plan)     [ -n "$PLANS_GIVEN" ] || PLANS=""   # the first replaces the default set, the rest add
+                    PLANS_GIVEN=1; PLANS="$PLANS${PLANS:+ }${2:-}"; shift 2 ;;
         --config)   CONFIG="${2:-}"; shift 2 ;;
         --rounds)   ROUNDS="${2:-}"; shift 2 ;;
+        --max-rounds) MAX_ROUNDS="${2:-}"; shift 2 ;;
+        --detect)   DETECT="${2:-}"; shift 2 ;;
         # The first Speedometer iteration is never trimmed from a result: it is a real iteration, and dropping it would bias the comparison.
         --count)    COUNT="${2:-}"; shift 2 ;;
         --timeout)  TIMEOUT="${2:-}"; shift 2 ;;

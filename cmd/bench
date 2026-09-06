@@ -3,12 +3,12 @@
 # wk bench <workspace> <plan> [options] -- run a benchmark and keep the result defensible
 #
 # wk: where=workspace name=required values=--list ready=yes group=workspaces needs python3
-# wk: sub stage,staged,mac,mac-volume,mac-ab,ab-summary,compare,report,ls where=host
+# wk: sub stage,staged,mac,mac-volume,mac-ab,ab-summary,compare,report,precision,ls where=host
 # wk: sub seed where=dynamic
-# wk: sub ls,compare,report name=none
+# wk: sub ls,compare,report,precision name=none
 # wk: sub seed name=required@2
 # wk: flag --list where=store name=none
-# wk: readonly --list,ls
+# wk: readonly --list,ls,precision
 #
 # <plan> is Tools/Scripts/run-benchmark's own name; `wk bench --list` reads
 # them off the machine's WebKit mirror, no workspace needed.
@@ -26,10 +26,15 @@
 #   wk bench stage <ws> --to <machine>     put a build where a bare-metal role
 #                                          will find it (build in the guest,
 #                                          run on the machine itself)
-#       [--config C] [--plan P] [--payload <dir>] [--dry-run]
+#       [--config C] [--dry-run]
+#       [--plan P [--payload <dir>]]...    repeatable: one pinned copy of each
+#                                          benchmark the machine will run, since
+#                                          a benchmark install has no network
 #   wk bench staged                        run a staged build, in bench mode
 #       [--plan P] [--id <staged-id>] [--count N] [--timeout S]
 #       [--subtests "A B"] [--payload <dir>] [--browser-args "..."]
+#       --profile <file>                   record the web process with samply
+#                                          for the length of the run
 #       --ls                               what is staged here, and what ran
 #       --dry-run                          resolve everything; run nothing
 #       --force                            record it despite a preflight fail
@@ -46,6 +51,10 @@
 #                                          benchmark install, with nobody in the
 #                                          room: plant a job, reboot, read it
 #                                          back. --preflight/--status/--collect
+#   wk bench precision <run-a> <run-b>     how fine a difference the rounds so
+#       [--detect PCT]                     far resolve, and how many more it
+#                                          would take -- the rule an unattended
+#                                          A/B stops on (default 0.3%)
 #   wk bench ab-summary --runs <tsv>       the A/B's own verdict, per arm
 #   wk bench report <task> [--html] [--text]  the task's A/B: one Score+Time per
 #                                          subtest table, Welch/FDR, histograms
@@ -127,6 +136,7 @@ WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 . "$WK_ROOT/lib/resources.sh"
 . "$WK_ROOT/lib/store.sh"
 . "$WK_ROOT/lib/bench.sh"
+. "$WK_ROOT/lib/profiler.sh"
 # Raised before lib/watchdog.sh is sourced: see its header.
 WK_STALL_SECONDS="${WK_STALL_SECONDS:-900}"
 WK_ABORT_SECONDS="${WK_ABORT_SECONDS:-5400}"
@@ -722,8 +732,16 @@ cmd_compare() {
 # rsync onto a fixed path the other role finds when it boots.
 # TODO: exercise the run half end to end; only staging is tested so far.
 cmd_stage() {
-    local ws="$1" machine="" config="" plan="" payload="" dry=""
+    local ws="$1" machine="" config="" plan="" payload="" plans="" dry=""
     shift
+
+    # --plan repeats, each optionally followed by the --payload pinning that benchmark: `plans` collects them one `<plan>\t<payload>` line at a time, flushed when the next --plan starts. Lines rather than a space-separated list, a path being allowed to contain a space.
+    _stage_flush_plan() {
+        [ -n "$plan" ] || return 0
+        plans="$plans$plan	$payload
+"
+        plan=""; payload=""
+    }
 
     if in_workspace; then
         die "'wk bench stage' copies a build onto a benchmark volume attached to the
@@ -737,14 +755,18 @@ cmd_stage() {
         case "$1" in
             --to)      machine="${2:-}"; shift 2 ;;
             --config)  config="${2:-}"; shift 2 ;;
-            --plan)    plan="${2:-}"; shift 2 ;;
-            --payload) payload="${2:-}"; shift 2 ;;
+            --plan)    _stage_flush_plan
+                       plan="${2:-}"; valid_name "$plan" || die "--plan '$plan' is not a plan name"
+                       shift 2 ;;
+            --payload) [ -n "$plan" ] || die "--payload names a pinned copy of one benchmark, so it follows the --plan it is a copy of"
+                       payload="${2:-}"; shift 2 ;;
             --dry-run) dry=1; shift ;;
             *) die "unknown option: $1
-    usage: wk bench stage <workspace> --to <machine> [--config C] [--plan P]
-                          [--payload <dir>] [--dry-run]" ;;
+    usage: wk bench stage <workspace> --to <machine> [--config C]
+                          [--plan P [--payload <dir>]]... [--dry-run]" ;;
         esac
     done
+    _stage_flush_plan
     require_name "$ws"
     [ -n "$machine" ] || die "which machine is going to run it? --to <machine> (wk boot --list)"
 
@@ -789,14 +811,15 @@ cmd_stage() {
     stamp=$(date -u +%Y%m%dT%H%M%SZ)
     dest="$root/staged/$stamp-$config"
 
+    local first_plan; first_plan=$(printf '%s' "$plans" | head -1 | cut -f1)
     local arm_hint run_hint
     case "${BOOT_ARMING:-one-shot}" in
         hands-on) arm_hint="wk boot $machine        arm it; it prints the ritual (you pick the disk)"
-                  run_hint="wk bench staged${plan:+ --plan $plan}       once it has booted, over there" ;;
+                  run_hint="wk bench staged${first_plan:+ --plan $first_plan}       once it has booted, over there" ;;
         guest)    arm_hint="wk boot $machine        start the guest -- for a guest that *is* the transition"
-                  run_hint="wk enter ${NODE_GUEST:-<guest>} -- wk bench staged${plan:+ --plan $plan}" ;;
+                  run_hint="wk enter ${NODE_GUEST:-<guest>} -- wk bench staged${first_plan:+ --plan $first_plan}" ;;
         *)        arm_hint="wk boot $machine        arm the one-shot and reboot into it"
-                  run_hint="wk bench staged${plan:+ --plan $plan}       on the machine, once it is up" ;;
+                  run_hint="wk bench staged${first_plan:+ --plan $first_plan}       on the machine, once it is up" ;;
     esac
 
     if [ -n "$dry" ]; then
@@ -805,7 +828,12 @@ cmd_stage() {
         log  "          $build_dir"
         log  "          $src/Tools"
         log  "  to:     $dest   (on $machine${NODE_VOLUME:+, $NODE_VOLUME})"
-        [ -n "$payload" ] && log "  payload: $payload -- copied in, so the run needs no network"
+        while IFS="$(printf '\t')" read -r _p _d; do
+            [ -n "$_p" ] || continue
+            log "  plan:   $_p${_d:+  payload $_d -- copied in, so the run needs no network}"
+        done <<EOF
+$plans
+EOF
         log  "  then:   $arm_hint"
         return 0
     fi
@@ -819,24 +847,29 @@ cmd_stage() {
     fi
     mkdir -p "$assemble"
 
-    # Products, not the build tree: a machine that will never compile needs only what the driver launches and DYLD_FRAMEWORK_PATH resolves.
-    log  "  the build product (frameworks and MiniBrowser.app; no intermediates)"
+    # Products, not the build tree: a machine that will never compile needs what the driver launches, what DYLD_FRAMEWORK_PATH resolves, and -- since it profiles too, and never had the build tree -- the dSYMs. Only a config that asks for dwarf-with-dsym makes any (build/mac-pgo.sh).
+    log  "  the build product (frameworks, MiniBrowser.app and dSYMs; no intermediates)"
     build="$assemble/WebKitBuild/$(basename "$build_dir")"
     t_pull_dir "$ws" "$build_dir" "$build" \
         --exclude '*.build' --exclude 'XCBuildData' --exclude 'DerivedSources' \
         --exclude 'PrecompiledHeaders' --exclude 'compile_commands' \
-        --exclude '*.a' --exclude '*.dSYM' --exclude '*.noindex'
+        --exclude '*.a' --exclude '*.noindex'
     log  "  Tools/ -- run-benchmark, webkitpy and the plans"
     t_pull_dir "$ws" "$src/Tools" "$assemble/Tools"
 
-    if [ -n "$payload" ]; then
-        [ -d "$payload" ] || die "no such payload directory: $payload"
-        log  "  the benchmark itself, pinned ($(basename "$payload"))"
-        rm -rf "$assemble/payload"
-        mkdir -p "$assemble/payload"
+    local _p _d pinned=""
+    while IFS="$(printf '\t')" read -r _p _d; do
+        [ -n "$_p" ] && [ -n "$_d" ] || continue
+        [ -d "$_d" ] || die "no such payload directory: $_d"
+        log  "  the benchmark itself, pinned: $_p ($(basename "$_d"))"
+        rm -rf "$assemble/payload/$_p"
+        mkdir -p "$assemble/payload/$_p"
         # --exclude .git: a working clone can carry git's fsmonitor socket, which no copy tool can reproduce.
-        rsync -a --exclude '.git' "$payload/" "$assemble/payload/"
-    fi
+        rsync -a --exclude '.git' "$_d/" "$assemble/payload/$_p/"
+        pinned="$pinned${pinned:+, }$_p"
+    done <<EOF
+$plans
+EOF
 
     local tools_ver wk_tools=unknown
     tools_ver=$("$WK_ROOT/cmd/version" 2>/dev/null || true)
@@ -849,8 +882,8 @@ cmd_stage() {
   "workspace_target": "$t",
   "config": "$config",
   "webkit_sha": "$sha",
-  "plan": "${plan:-}",
-  "payload_pinned": $([ -n "$payload" ] && echo true || echo false),
+  "plans": "$(printf '%s' "$plans" | cut -f1 | paste -sd, -)",
+  "payloads_pinned": "$pinned",
   "machine": "$machine",
   "volume": "${NODE_VOLUME:-}",
   "wk_tools": "$wk_tools",
@@ -935,7 +968,7 @@ staged_field() {
 }
 
 cmd_staged() {
-    local id="" plan="" dry="" list="" PAYLOAD="" TIMEOUT=""
+    local id="" plan="" dry="" list="" PAYLOAD="" TIMEOUT="" PROFILE=""
     while [ $# -gt 0 ]; do
         case "$1" in
             --id)       id="${2:-}"; shift 2 ;;
@@ -944,12 +977,14 @@ cmd_staged() {
             --subtests) SUBTESTS="${2:-}"; shift 2 ;;
             --browser-args) BROWSER_ARGS="${2:-}"; shift 2 ;;
             --payload)  PAYLOAD="${2:-}"; shift 2 ;;
+            --profile)  PROFILE="${2:-}"; shift 2 ;;
             --timeout)  TIMEOUT="${2:-}"; shift 2 ;;
                 --dry-run)  dry=1; shift ;;
             --ls)       list=1; shift ;;
             *) die "unknown option: $1
     usage: wk bench staged [--plan P] [--id <staged-id>] [--count N]
-                           [--subtests \"A B\"] [--ls] [--dry-run] [--force]" ;;
+                           [--subtests \"A B\"] [--profile <file>] [--ls]
+                           [--dry-run] [--force]" ;;
         esac
     done
 
@@ -984,7 +1019,7 @@ cmd_staged() {
     config=$(staged_field "$dir" config)
     sha=$(staged_field "$dir" webkit_sha)
     ws=$(staged_field "$dir" workspace)
-    [ -n "$plan" ] || plan=$(staged_field "$dir" plan)
+    [ -n "$plan" ] || plan=$(staged_field "$dir" plans | cut -d, -f1)
     [ -n "$plan" ] || die "which benchmark? --plan <name>
     (the staged payload does not name one; 'wk bench staged --ls' shows what
     is here, and Tools/Scripts/run-benchmark --list-plans what it can run)"
@@ -1108,15 +1143,13 @@ cmd_staged() {
     [ -n "$COUNT" ] && args="$args --count $COUNT"
     [ -n "$TIMEOUT" ] && args="$args --timeout $TIMEOUT"
     [ -n "$SUBTESTS" ] && args="$args --subtests $SUBTESTS"
-    # A related plan (speedometer3.0 vs 3.1) can patch cleanly and produce a number for the wrong benchmark under the right label.
-    if [ -z "$PAYLOAD" ] && [ -d "$dir/payload" ]; then
-        local payload_plan; payload_plan=$(staged_field "$dir" plan)
-        if [ -z "$payload_plan" ] || [ "$payload_plan" = "$plan" ]; then
-            PAYLOAD="$dir/payload"
-        else
-            warn "the pinned payload in this staged tree is for '$payload_plan', not '$plan'"
-            log  "  ignoring it -- run-benchmark will fetch $plan itself, which needs the"
-            log  "  network. To pin this plan instead:"
+    # One directory per plan, named for it: a related plan (speedometer3.0 vs 3.1) patches cleanly and produces a number for the wrong benchmark under the right label.
+    if [ -z "$PAYLOAD" ]; then
+        if [ -d "$dir/payload/$plan" ]; then
+            PAYLOAD="$dir/payload/$plan"
+        elif [ -d "$dir/payload" ]; then
+            warn "nothing pinned for '$plan' in this staged tree (it holds: $(ls -1 "$dir/payload" 2>/dev/null | paste -sd, -))"
+            log  "  run-benchmark will fetch $plan itself, which needs the network. To pin it:"
             log  "    wk bench stage <ws> --to <machine> --plan $plan --payload \\"
             log  "        \"\$(wk bench seed <ws> $plan)\""
         fi
@@ -1129,6 +1162,7 @@ cmd_staged() {
         log  "  staged:  $dir"
         log  "  from:    workspace '$ws', $config${sha:+ @${sha:0:10}}"
         log  "  results: $out"
+        [ -n "$PROFILE" ] && log "  would profile the web process into $PROFILE"
         log  "  would run, in $dir:"
         printf '    %s\n' "$(sh_quote "$STAGED_PY") $(sh_quote "$runner_script") $args" >&2
         return 0
@@ -1144,12 +1178,30 @@ cmd_staged() {
     local shared_cache_env=""
     [ "${WK_BENCH_SHARED_CACHE:-}" = avoid ] && shared_cache_env="DYLD_SHARED_REGION=avoid "
 
+    local capture_pid=""
+    if [ -n "$PROFILE" ]; then
+        staged_profile_watch "$PROFILE" "$out" & capture_pid=$!
+    fi
+
     local wall_start; wall_start=$(date +%s)
     set +e
     run_watched "$out/run.log" -- \
         bash -lc "cd $(sh_quote "$dir") && ${pad_prelude}${shared_cache_env}$(sh_quote "$STAGED_PY") $(sh_quote "$runner_script") $args"
     local rc=$?
     set -e
+    if [ -n "$capture_pid" ]; then
+        # Bounded: samply ends when the process it attached to does, and a run whose browser outlived it must not take the driver with it.
+        local _w=0
+        while kill -0 "$capture_pid" 2>/dev/null && [ "$_w" -lt 60 ]; do sleep 1; _w=$((_w + 1)); done
+        kill "$capture_pid" 2>/dev/null || true
+        wait "$capture_pid" 2>/dev/null || true
+        if [ -s "$PROFILE" ]; then
+            log "  profile: $PROFILE"
+            wkdata env-record "$out/env.json" --update profile="$PROFILE"
+        else
+            warn "  no samply capture was taken -- see $out/profile.log"
+        fi
+    fi
     wkdata env-record "$out/env.json" --update wall_time_s="$(( $(date +%s) - wall_start ))" \
         configuration.aslr="$(mac_aslr_probe)"
 
@@ -1173,6 +1225,24 @@ cmd_staged() {
     log "    wk boot mbp --back        reboot back into host mode"
     log "    wk bench staged --ls      list it from over there"
     log "    wk bench report <other> $out/result.json"
+}
+
+staged_profile_watch() {   # <output file> <run directory> -- samply attaches to a pid, so this waits for the web process and records it while it lives. task_for_pid on another process is root's, which a benchmark install has without a password and a workstation does not.
+    local out_file="$1" out="$2" tries=0 pid="" samply
+    samply=$(samply_fetch "$(uname -m)" Darwin 2>/dev/null) || samply=""
+    if [ -z "$samply" ]; then
+        warn "no samply for this machine, so the warmup leg carries no profile"
+        return 0
+    fi
+    while [ "$tries" -lt 600 ]; do
+        pid=$(pgrep -n -f 'com.apple.WebKit.WebContent' 2>/dev/null | head -1) || pid=""
+        [ -n "$pid" ] && break
+        sleep 1; tries=$((tries + 1))
+    done
+    [ -n "$pid" ] || { warn "no web process appeared, so nothing was profiled"; return 0; }
+    log "  profiling the web process (pid $pid) into $out_file"
+    sudo -n "$samply" record --save-only --profile-name "wk-warmup" \
+        -o "$out_file" -p "$pid" >"$out/profile.log" 2>&1 || true
 }
 
 staged_env_json() {
@@ -1225,6 +1295,25 @@ case "${1:-}" in
     mac-volume) shift; exec "$WK_ROOT/bench/mac-bench-volume.sh" "$@" ;;
     mac-ab)  shift; exec "$WK_ROOT/bench/mac-ab.sh" "$@" ;;
     ab-summary) shift; exec "$WK_ROOT/bench/mac-ab-summary.sh" "$@" ;;
+    precision)
+        shift
+        _det=0.3; _sides=""
+        while [ $# -gt 0 ]; do
+            case "$1" in
+                --detect) _det="${2:-}"; shift 2 ;;
+                -*) die "unknown option: $1
+    usage: wk bench precision <run-a> <run-b> [--detect PCT]" ;;
+                *)  _sides="$_sides${_sides:+ }$1"; shift ;;
+            esac
+        done
+        # shellcheck disable=SC2086 -- two words, checked next.
+        set -- $_sides
+        [ $# -eq 2 ] || die "usage: wk bench precision <run-a> <run-b> [--detect PCT]
+    Either side may be comma-separated run directories, pooled."
+        wkdata ab-precision --target "$_det" \
+            --a "$(printf '%s' "$1" | sed 's#[^,]*#&/result.json#g')" \
+            --b "$(printf '%s' "$2" | sed 's#[^,]*#&/result.json#g')"
+        exit $? ;;
     stage)   shift
              [ $# -ge 1 ] || die "usage: wk bench stage <workspace> --to <machine> [--config C] [--plan P] [--payload <dir>] [--dry-run]; see wk bench -h"
              cmd_stage "$@"; exit 0 ;;

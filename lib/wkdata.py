@@ -347,6 +347,41 @@ def _welch_p(a, b):
 
 
 # Benjamini-Hochberg as compare-results spells it (computeMultipleHypothesesSignificance): ranked largest to smallest, a rank is significant once it or a larger one clears rank*0.05/n, and every smaller p-value inherits that.
+# A run stops when it can *resolve* the effect asked of it, not when it has found one: stopping on precision is a legitimate sequential design where stopping on a p-value is not. The t comes back out of the same incomplete beta the p-value goes into, by bisection, so this file holds one distribution.
+def _t_crit(df, two_tailed_area):
+    if df <= 0:
+        return None
+    lo, hi = 0.0, 1000.0
+    for _ in range(200):
+        mid = (lo + hi) / 2.0
+        if _betai(df / 2.0, 0.5, df / (df + mid * mid)) > two_tailed_area:
+            lo = mid
+        else:
+            hi = mid
+    return (lo + hi) / 2.0
+
+
+# The smallest relative difference this many rounds of this much spread resolve, at two-sided 95% confidence and 80% power, as a percentage of A's mean.
+def _mde_pct(a, b):
+    na, nb = len(a), len(b)
+    if na < 2 or nb < 2:
+        return None
+    mean_a, mean_b = sum(a) / na, sum(b) / nb
+    if mean_a <= 0:
+        return None
+    var_a = sum((x - mean_a) ** 2 for x in a) / (na - 1)
+    var_b = sum((x - mean_b) ** 2 for x in b) / (nb - 1)
+    se2 = var_a / na + var_b / nb
+    if se2 <= 0:
+        return 0.0
+    df = se2 * se2 / ((var_a / na) ** 2 / (na - 1) + (var_b / nb) ** 2 / (nb - 1))
+    t_alpha = _t_crit(df, 0.05)
+    t_beta = _t_crit(df, 0.40)   # one-tailed 0.80 is the two-tailed 0.40 point
+    if t_alpha is None or t_beta is None:
+        return None
+    return (t_alpha + t_beta) * math.sqrt(se2) / mean_a * 100.0
+
+
 def _bh_significant(pvalues):
     result = {k: False for k in pvalues}
     keys = sorted((k for k, p in pvalues.items() if p is not None), key=lambda k: pvalues[k])
@@ -846,6 +881,43 @@ def cmd_warmup_check(args):
     sys.exit(1 if problems else 0)
 
 
+def _top_scores(paths):
+    """One number per run: the plan's headline Score, the row with no '/' in it."""
+    out = []
+    for path in paths:
+        doc = _load(path)
+        tops = [entry for name, entry in _subtest_metrics(doc).items()
+                if "/" not in name and entry.get("Score")]
+        if len(tops) != 1:
+            continue
+        vals = tops[0]["Score"]
+        if vals:
+            out.append(sum(vals) / len(vals))
+    return out
+
+
+def cmd_ab_precision(args):
+    a, b = _top_scores(_split_paths(args.a)), _top_scores(_split_paths(args.b))
+    mde = _mde_pct(a, b)
+    delta = None
+    if a and b and sum(a):
+        delta = (sum(b) / len(b) - sum(a) / len(a)) / (sum(a) / len(a)) * 100.0
+    print("n_a=%d" % len(a))
+    print("n_b=%d" % len(b))
+    print("mean_a=%s" % ("%.4f" % (sum(a) / len(a)) if a else ""))
+    print("mean_b=%s" % ("%.4f" % (sum(b) / len(b)) if b else ""))
+    print("delta_pct=%s" % ("%.4f" % delta if delta is not None else ""))
+    print("mde_pct=%s" % ("%.4f" % mde if mde is not None else ""))
+    print("target_pct=%.4f" % args.target)
+    print("met=%s" % ("yes" if mde is not None and mde <= args.target else "no"))
+    # The half-width scales as 1/sqrt(n), so the rounds still owed at this spread is what the operator wants to know before committing the machine.
+    need = ""
+    if mde is not None and mde > args.target and a:
+        need = "%d" % math.ceil(len(a) * (mde / args.target) ** 2)
+    print("rounds_needed=%s" % need)
+    print("p=%s" % ("%.6f" % _welch_p(a, b) if len(a) > 1 and len(b) > 1 else ""))
+
+
 def cmd_subtests(args):
     """The subtests a run should ask for: the plan's own list minus the
     exclusions, so both arms of an A/B cover the same set."""
@@ -1209,6 +1281,12 @@ def main(argv):
 
     p = sub.add_parser("plan-spec", help="a plan's fetchable source, read from stdin")
     p.set_defaults(func=cmd_plan_spec)
+
+    p = sub.add_parser("ab-precision", help="how fine a difference the rounds so far resolve, and whether that meets --target")
+    p.add_argument("--a", required=True, help="comma-separated result.json paths for arm A")
+    p.add_argument("--b", required=True, help="comma-separated result.json paths for arm B")
+    p.add_argument("--target", type=float, default=0.3, help="the effect the A/B has to be able to detect, in percent (default 0.3)")
+    p.set_defaults(func=cmd_ab_precision)
 
     p = sub.add_parser("subtests", help="the plan's subtests minus --exclude, read from stdin")
     p.add_argument("--exclude", default="", help="comma-separated subtests to drop")

@@ -68,6 +68,11 @@ benchmark payloads, bench results. On macOS it is the podman VM's
 `/var/lib/wk`, because a Mac cannot write that path itself, and this device
 keeps its own half beside it (logs, remote build status, and the credentials
 every workspace needs, which the VM mounts read-only rather than holding).
+The artifacts the machine has to *open as files* -- a seeded benchmark
+payload, an exported runner tree, a downloaded profiler -- come from
+`wk_artifact_dir`: the store where it is this machine's, and this machine's
+own state directory where it is the VM's. One rule, so a Mac lane cannot
+find itself pointed at a path only the VM can read.
 A built system image is deliberately *not* in it: it is an artifact the
 workspace that built it already names, so a second, catalogued copy would be
 one fact kept twice.
@@ -225,6 +230,7 @@ directory without `-r` are refused rather than guessed at.
 wk new mac-rel --target vm              # builds the golden base the first time (hours, once)
 wk vm start mac-rel
 wk build mac-rel mac-release
+wk build mac-rel mac-release-pgo        # the perf build: instrument, collect, rebuild
 wk build mac-rel jsc-debug              # JavaScriptCore alone, still Xcode
 wk vm stop mac-rel
 ```
@@ -629,7 +635,37 @@ wk bench staged --ls                             # what is staged, and what ran
 wk boot mbp --status                             # which side the firmware default is on
 wk bench mac-ab mac-rel                          # stages, plants a launch agent, reboots, reads back
                                                   # needs one action at the keyboard per experiment
+wk bench mac-ab mac-rel --patch <ref> --detect 0.3
+wk bench precision <run-a> <run-b>               # what the rounds so far resolve
 ```
+
+Every macOS number is taken from a **profile-guided build**: `mac-release-pgo`
+is the lane's default config, and the config both mac lanes refuse to be
+quicker than. `wk build <ws> mac-release-pgo` is three phases in one command
+(`build/mac-pgo.sh`) -- an instrumented thin-LTO build into its own products
+directory, `Tools/Scripts/collect-pgo-profiles` driving Speedometer 3,
+JetStream 3 and MotionMark through it (weighted 0.6 / 0.2 / 0.2 by
+`Tools/Scripts/pgo-profile`), then the measured build: full LTO, `-O3` on
+every framework, `-fprofile-use`, and real dSYMs so a capture symbolicates on
+a machine that never had the build tree. The profile is collected per build
+and never shared between two arms: one arm's profile leaves the other arm's
+new functions cold, which reads as a regression that is not there. The
+collection draws, so it runs on the console session with the raiser up
+(`bench/mac-raiser.sh`), and refuses rather than collecting a profile of a
+throttled browser.
+
+An A/B runs **three benchmarks** and stops when it has measured finely enough,
+not after a fixed count. Round 0 is a warmup -- one leg per arm, discarded,
+carrying a samply capture of the web process, which is the one thing the
+measured rounds cannot say afterwards. Then it alternates A B / B A, flipping
+the order every round so a monotonic drift cancels instead of landing on
+whichever arm always goes second, and after every round asks how fine a
+difference the rounds so far resolve (`wk bench precision`, two-sided 95%
+confidence at 80% power). It stops when every plan resolves `--detect`
+(default 0.3%), and says so plainly when it hits `--max-rounds` first -- the
+numbers are still real, and the claim they support is the one the precision
+lines allow. Stopping on precision rather than on a p-value is what keeps
+repeated looking from inflating the false-positive rate.
 
 **Add a new fleet device**
 

@@ -25,6 +25,9 @@ done
 defaults write com.apple.SetupAssistant LastSeenCloudProductVersion "$(sw_vers -productVersion)"
 defaults write com.apple.SetupAssistant LastSeenBuddyBuildVersion "$(sw_vers -buildVersion)"
 
+# Measured 2026-09-06 on clones of a freshly provisioned base: the keys above are not enough on their own -- a clone comes up with Setup Assistant frontmost, and it is this file's absence that lets it. On a live guest neither this file alone nor dismissing the pane alone stops it coming back; both, then a reboot, do, twice reproduced. Provisioning already dismisses the pane, so a base that also carries this is a base whose clones come up clear.
+touch "$HOME/.skipbuddy"
+
 defaults write com.apple.SoftwareUpdate AutomaticCheckEnabled -bool false
 defaults write com.apple.SoftwareUpdate AutomaticDownload -bool false
 defaults write com.apple.SoftwareUpdate AutomaticallyInstallMacOSUpdates -bool false

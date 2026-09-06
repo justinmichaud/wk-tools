@@ -742,7 +742,7 @@ class TestJobCountNeverReachesACompilerLine(unittest.TestCase):
                  if re.search(r'\bjobs\b', l) and not l.strip().startswith("#")]
         allowed = {
             'jobs=$(guard_jobs "${WK_JOBS:-4}")',
-            'xc=(-jobs "$jobs")',
+            'XC=(-jobs "$jobs")',
             'args+=("--makeargs=-j$jobs")',
             'guard_exec "$jobs" -- $wrapper "$script" "${args[@]}" ${@+"$@"}',
         }

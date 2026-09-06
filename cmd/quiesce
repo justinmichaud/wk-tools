@@ -58,12 +58,6 @@ on)
     mkdir -p "$STATE"
 
     if is_macos; then
-        if [ ! -f "$STATE/caffeinate.pid" ]; then
-            # All three descriptors detached, or the backgrounded process keeps an ssh session open with it and `on` never returns.
-            caffeinate -dimsu </dev/null >/dev/null 2>&1 &
-            echo $! > "$STATE/caffeinate.pid"
-            info "caffeinate started"
-        fi
         # SIGSTOP, so root: a signal needs no permission SIP can withhold, and
         # `wk quiesce off` and a reboot both undo it.
         if sudo -n bash -c ". $(sh_quote "$QUIET_DESKTOP"); wk_quiet_daemons_pause"; then
@@ -89,38 +83,7 @@ on)
             info "NotificationCenter was not running"
         fi
 
-        # An unfocused MiniBrowser is rAF-throttled into a stalled, silent exit-124; App Nap off stops the policy, the raiser keeps the window frontmost.
-        defaults write org.webkit.MiniBrowser NSAppSleepDisabled -bool YES 2>/dev/null \
-            && { touch "$STATE/appnap_disabled"; info "App Nap disabled for MiniBrowser"; } \
-            || warn "could not disable App Nap for MiniBrowser -- rAF may be throttled mid-run"
-        if [ -f "$STATE/raiser.pid" ] && kill -0 "$(cat "$STATE/raiser.pid")" 2>/dev/null; then
-            info "raiser already running"
-        elif /usr/bin/python3 -c 'import AppKit' >/dev/null 2>&1; then
-            cat > "$STATE/raiser.py" <<'RAISEREOF'
-#!/usr/bin/python3
-# Picks up each round's relaunched instance by bundle id;
-# activateIgnoringOtherApps pulls it into the current Space when the driving
-# terminal is fullscreen.
-import sys, time
-from AppKit import (NSRunningApplication, NSWorkspace,
-                    NSApplicationActivateIgnoringOtherApps)
-BID = "org.webkit.MiniBrowser"
-INTERVAL = float(sys.argv[1]) if len(sys.argv) > 1 else 1.0
-while True:
-    f = NSWorkspace.sharedWorkspace().frontmostApplication()
-    if f is None or f.bundleIdentifier() != BID:
-        for a in NSRunningApplication.runningApplicationsWithBundleIdentifier_(BID):
-            a.activateWithOptions_(NSApplicationActivateIgnoringOtherApps)
-    time.sleep(INTERVAL)
-RAISEREOF
-            /usr/bin/python3 "$STATE/raiser.py" 1 </dev/null >"$STATE/raiser.log" 2>&1 &
-            echo $! > "$STATE/raiser.pid"
-            info "raiser started -- MiniBrowser is kept frontmost during runs"
-        else
-            warn "no python3 AppKit here, so no raiser: MiniBrowser can be backgrounded and
-    its rAF throttled. /usr/bin/python3 with pyobjc is what a benchmark install needs
-    anyway -- see docs/HANDOFF-mac-perf-mode.md."
-        fi
+        mac_raiser_on "$STATE"
 
         info "measured, now that both halves have run:"
         macos_noise || warn "the machine is noisier than a benchmark install should be (above)"
@@ -132,21 +95,7 @@ RAISEREOF
 
 off)
     if is_macos && [ -d "$STATE" ]; then
-        if [ -f "$STATE/caffeinate.pid" ]; then
-            kill "$(cat "$STATE/caffeinate.pid")" 2>/dev/null || true
-            rm -f "$STATE/caffeinate.pid"
-            info "caffeinate stopped"
-        fi
-        if [ -f "$STATE/raiser.pid" ]; then
-            kill "$(cat "$STATE/raiser.pid")" 2>/dev/null || true
-            rm -f "$STATE/raiser.pid"
-            info "raiser stopped"
-        fi
-        if [ -f "$STATE/appnap_disabled" ]; then
-            defaults delete org.webkit.MiniBrowser NSAppSleepDisabled 2>/dev/null || true
-            rm -f "$STATE/appnap_disabled"
-            info "App Nap restored for MiniBrowser"
-        fi
+        mac_raiser_off "$STATE"
         if [ -f "$STATE/notifications_stopped" ]; then
             nc_label=$(cat "$STATE/notifications_stopped" 2>/dev/null)
             launchctl bootstrap "gui/$(id -u)" \

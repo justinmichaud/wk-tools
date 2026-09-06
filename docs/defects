@@ -32,11 +32,24 @@ NEEDS YOU
    information."* `claude auth login` here, then
    `wk key set claude-login --replace`. [yours to run]
 
-4. `wk vm base --rebuild`. Provisioning boots the base with a console, answers
-   Setup Assistant on it, re-settles the desktop afterwards and refuses to call
-   the base ready with a pane still up -- no click from you. Measured on a clone
-   first: the flow ran to the end unattended and every boot since has come up on
-   a clear screen. [yours to run]
+4. `wk vm base --rebuild` does NOT clear Setup Assistant from a clone. Run
+   2026-09-05/06: provisioning answered the panes and the run ended with "the
+   base's screen is clear, so a clone's will be too" -- and a guest created
+   from that base came up with Setup Assistant frontmost on both boots
+   checked. The assertion holds for the base's own boot only. `~/.skipbuddy`
+   in the account's home does not stop it either, and killing it takes the
+   console session with it (`/dev/console` goes admin -> root). With the
+   guest's `/usr/bin/python3` carrying no pyobjc there is also no raiser, so
+   nothing can displace it.
+
+   The remedy, isolated on two guests: `~/.skipbuddy` alone and a reboot does
+   not stop it, dismissing the pane alone and a reboot does not stop it, and
+   both then a reboot does -- twice reproduced. `vm/desktop.sh` now writes
+   that file, so a base whose provisioning already dismisses the pane should
+   produce clones that come up clear. That last step is unverified: it needs
+   `wk vm base --rebuild` (75 min of prebuild) and a fresh clone to confirm.
+   The two guests on tolken were fixed by hand, which is how the remedy was
+   found and not how it is delivered. [open: rebuild the base and re-check]
 
    Measured 2026-09-05 on a guest destroyed and recreated for it. The screen
    lock is **off**, and was never the problem: WK_VM_PASSWORD defaults to the

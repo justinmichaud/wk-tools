@@ -6,6 +6,8 @@ set -euo pipefail
 export PATH=/usr/sbin:/usr/bin:/sbin:/bin
 
 WK_AB_ROOT="${WK_AB_ROOT:-/var/wk}"
+# On this install /var/wk *is* where wk keeps its artifacts: it is uid 501 and writable, where the Darwin default (/var/lib/wk) is root's. The planter seeds the profiler into it, this install having no network to fetch one over.
+export WK_STORE="$WK_AB_ROOT"
 JOB="$WK_AB_ROOT/job.json"
 STATE="$WK_AB_ROOT/autorun.state"
 LOG="$WK_AB_ROOT/autorun.log"
@@ -47,6 +49,20 @@ for part in sys.argv[2].split('.'):
 if v is None: sys.exit(1)
 if isinstance(v, bool): print("1" if v else "")
 else: print(v)
+PY
+}
+
+jf_list() {  # a JSON array of strings as one space-separated line
+    /usr/bin/python3 - "$JOB" "$1" <<'PY' 2>/dev/null || true
+import json, sys
+try:
+    d = json.load(open(sys.argv[1]))
+except Exception:
+    sys.exit(1)
+v = d.get(sys.argv[2])
+if not isinstance(v, list):
+    sys.exit(1)
+print(" ".join(str(x) for x in v))
 PY
 }
 
@@ -147,8 +163,10 @@ fi
 say "attempt $ATTEMPTS of $MAX_ATTEMPTS"
 
 
-PLAN=$(jf plan);         PLAN="${PLAN:-speedometer3.0}"
-ROUNDS=$(jf rounds);     ROUNDS="${ROUNDS:-2}"
+PLANS=$(jf_list plans);  PLANS="${PLANS:-speedometer3}"
+ROUNDS=$(jf rounds);     ROUNDS="${ROUNDS:-5}"
+MAX_ROUNDS=$(jf max_rounds); MAX_ROUNDS="${MAX_ROUNDS:-40}"
+DETECT=$(jf detect_pct); DETECT="${DETECT:-0.3}"
 TIMEOUT=$(jf timeout);   TIMEOUT="${TIMEOUT:-1800}"
 COUNT=$(jf count)
 TOOLS=$(jf wk_tools);    TOOLS="${TOOLS:-$HOME/Development/wk-tools}"
@@ -161,7 +179,7 @@ export WK_BENCH_ENV_PAD=$(jf env_pad)
 export WK_BENCH_PATH_PAD=$(jf path_pad)
 export WK_BENCH_SHARED_CACHE=$(jf shared_cache)
 
-say "job: plan=$PLAN rounds=$ROUNDS arms=$NARMS timeout=${TIMEOUT}s count=${COUNT:-default}${FORCE:+ FORCED}"
+say "job: plans=$PLANS rounds=$ROUNDS-$MAX_ROUNDS detect=${DETECT}% arms=$NARMS timeout=${TIMEOUT}s count=${COUNT:-default}${FORCE:+ FORCED}"
 say "     variance: aslr=${WK_BENCH_ASLR:-unset} env_pad=${WK_BENCH_ENV_PAD:-0} path_pad=${WK_BENCH_PATH_PAD:-0} shared_cache=${WK_BENCH_SHARED_CACHE:-unset}"
 say "     wk-tools=$TOOLS"
 
@@ -174,19 +192,24 @@ say "     wk-tools=$TOOLS"
 }
 
 state_set phase running
-state_set plan "$PLAN"
+state_set plans "$PLANS"
 state_set started_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
-# Generous: the first run against a freshly copied build tree is legitimately much slower than the rest, and a watchdog firing on it costs a whole cycle.
-DEADLINE=$(( (ROUNDS * NARMS + 1) * TIMEOUT + 600 ))
-say "watchdog: ${DEADLINE}s"
+# Silence, not a deadline: the round count is decided by the numbers as they arrive, so there is no total to budget. Generous, because the first run against a freshly copied build tree is legitimately much slower than the rest and a watchdog firing on it costs a whole cycle.
+STALL=$(( TIMEOUT + 900 ))
+say "watchdog: ${STALL}s of silence"
 (
-    sleep "$DEADLINE"
-    [ "$(state_get phase)" = done ] && exit 0
-    say "WATCHDOG FIRED after ${DEADLINE}s -- the run is not coming back"
-    state_set phase done
-    state_set outcome watchdog
-    sudo -n shutdown -r now >/dev/null 2>&1
+    while :; do
+        sleep 60
+        [ "$(state_get phase)" = done ] && exit 0
+        quiet=$(( $(date +%s) - $(stat -f %m "$LOG") ))
+        [ "$quiet" -lt "$STALL" ] && continue
+        say "WATCHDOG FIRED -- nothing written for ${quiet}s; the run is not coming back"
+        state_set phase done
+        state_set outcome watchdog
+        sudo -n shutdown -r now >/dev/null 2>&1
+        exit 0
+    done
 ) &
 WATCHDOG=$!
 
@@ -278,49 +301,94 @@ RUNS="$WK_AB_ROOT/ab/$(state_get job_stamp)"
 mkdir -p "$RUNS" 2>/dev/null
 newest_result() { ls -1 "$WK_AB_ROOT/results" 2>/dev/null | sort | tail -1 || true; }
 
-# Interleaved (A B A B ...), not blocked (A A B B): the machine drifts, and blocking puts all of that drift on one side of the comparison.
+leg() {   # <round> <plan> <arm index> [profile]. A software-update scan across one arm is a number to drop, not a reason to disbelieve the rest, so each row says.
+    local r="$1" plan="$2" i="$3" profile="${4:-}"
+    local label sid bargs before msu_before msu_after clean got rc
+    label=$(jf "arms.$i.label");        label="${label:-arm$i}"
+    sid=$(jf "arms.$i.id")
+    bargs=$(jf "arms.$i.browser_args")
+    say "--- round $r, $plan, arm $label (staged $sid) ---"
+    set -- bench staged --plan "$plan" --timeout "$TIMEOUT"
+    [ -n "$sid" ]   && set -- "$@" --id "$sid"
+    [ -n "$COUNT" ] && set -- "$@" --count "$COUNT"
+    [ -n "$bargs" ] && set -- "$@" --browser-args "$bargs"
+    [ -n "$profile" ] && set -- "$@" --profile "$profile"
+    [ -n "$FORCE" ] && set -- "$@" --force
+    before=$(newest_result)
+    msu_before=$(msu_stamp)
+    rc=0
+    "$TOOLS/wk" "$@" >>"$LOG" 2>&1 || rc=$?
+    if [ "$rc" -ne 0 ]; then
+        say "--- round $r, $plan, arm $label: FAILED (rc=$rc) ---"
+        state_set "fail_${plan}_${label}_$r" "$rc"
+        return 1
+    fi
+    say "--- round $r, $plan, arm $label: OK ---"
+    state_set "ok_${plan}_${label}_$r" 1
+    msu_after=$(msu_stamp)
+    clean=clean
+    if [ "$msu_before" != "$msu_after" ]; then
+        clean=scanned
+        say "    CONTAMINATED: a software-update scan ran during this arm"
+        say "      before: $msu_before"
+        say "      after:  $msu_after"
+    fi
+    got=$(newest_result)
+    if [ -n "$got" ] && [ "$got" != "$before" ]; then
+        printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$r" "$label" "$sid" "$got" "$clean" "$plan" >> "$RUNS/runs.tsv"
+        say "    -> results/$got ($clean)"
+    else
+        say "    WARNING: no new result directory appeared"
+    fi
+    return 0
+}
+
+arm_results() {  # <plan> <label> -- the result.json paths recorded for that arm, comma-separated
+    awk -F'\t' -v p="$1" -v l="$2" -v root="$WK_AB_ROOT" \
+        '$6 == p && $2 == l && $5 == "clean" { printf "%s%s/results/%s/result.json", sep, root, $4; sep="," }' \
+        "$RUNS/runs.tsv" 2>/dev/null
+}
+
+# Peeking at a p-value and stopping when it crosses inflates the false-positive rate; peeking at how fine a difference the data resolves does not.
+plan_resolves() {  # <plan> -- 0 when this plan already detects $DETECT
+    local plan="$1" a b out
+    a=$(arm_results "$plan" A) || a=""; b=$(arm_results "$plan" B) || b=""
+    [ -n "$a" ] && [ -n "$b" ] || return 1
+    out=$(/usr/bin/python3 "$TOOLS/lib/wkdata.py" ab-precision \
+            --a "$a" --b "$b" --target "$DETECT" 2>/dev/null) || return 1
+    say "  $plan: $(printf '%s' "$out" | tr '\n' ' ')"
+    printf '%s' "$out" | grep -q '^met=yes$'
+}
+
+# Not measured: it absorbs the first-run effect a freshly copied build tree has, and carries the capture the measured rounds cannot take afterwards.
+say "warmup round -- discarded; it profiles each arm and settles the machine"
+mkdir -p "$RUNS/warmup" 2>/dev/null
+warm_plan=$(printf '%s' "$PLANS" | awk '{print $1}')
+i=0
+while [ "$i" -lt "$NARMS" ]; do
+    wlabel=$(jf "arms.$i.label"); wlabel="${wlabel:-arm$i}"
+    leg 0 "$warm_plan" "$i" "$RUNS/warmup/$warm_plan-$wlabel.json.gz" \
+        || say "  the warmup leg for arm $wlabel did not complete"
+    i=$((i + 1))
+done
+if [ -f "$RUNS/runs.tsv" ]; then
+    grep -v '^0	' "$RUNS/runs.tsv" > "$RUNS/runs.tsv.tmp" 2>/dev/null || true
+    mv "$RUNS/runs.tsv.tmp" "$RUNS/runs.tsv" 2>/dev/null || true
+fi
+say "warmup done; captures in $RUNS/warmup"
+
+# Interleaved (A B A B ...), not blocked (A A B B): the machine drifts, and blocking puts all of that drift on one side. The order flips every round, so a monotonic drift cancels rather than landing on whichever arm always goes second.
 any_ok=""
 
 r=1
-while [ "$r" -le "$ROUNDS" ]; do
-    i=0
-    while [ "$i" -lt "$NARMS" ]; do
-        label=$(jf "arms.$i.label");        label="${label:-arm$i}"
-        sid=$(jf "arms.$i.id")
-        bargs=$(jf "arms.$i.browser_args")
-        say "--- round $r, arm $label (staged $sid) ---"
-        set -- bench staged --plan "$PLAN" --timeout "$TIMEOUT"
-        [ -n "$sid" ]   && set -- "$@" --id "$sid"
-        [ -n "$COUNT" ] && set -- "$@" --count "$COUNT"
-        [ -n "$bargs" ] && set -- "$@" --browser-args "$bargs"
-        [ -n "$FORCE" ] && set -- "$@" --force
-        before=$(newest_result)
-        msu_before=$(msu_stamp)
-        if "$TOOLS/wk" "$@" >>"$LOG" 2>&1; then
-            say "--- round $r, arm $label: OK ---"
-            state_set "ok_${label}_$r" 1
-            any_ok=1
-            msu_after=$(msu_stamp)  # per arm: one contaminated arm is a number to drop, not a reason to disbelieve the rest
-            clean=clean
-            if [ "$msu_before" != "$msu_after" ]; then
-                clean=scanned
-                say "    CONTAMINATED: a software-update scan ran during this arm"
-                say "      before: $msu_before"
-                say "      after:  $msu_after"
-            fi
-            got=$(newest_result)
-            if [ -n "$got" ] && [ "$got" != "$before" ]; then
-                printf '%s\t%s\t%s\t%s\t%s\n' "$r" "$label" "$sid" "$got" "$clean" >> "$RUNS/runs.tsv"
-                say "    -> results/$got ($clean)"
-            else
-                say "    WARNING: no new result directory appeared"
-            fi
-        else
-            rc=$?
-            say "--- round $r, arm $label: FAILED (rc=$rc) ---"
-            state_set "fail_${label}_$r" "$rc"
-        fi
-        i=$((i + 1))
+while [ "$r" -le "$MAX_ROUNDS" ]; do
+    for plan in $PLANS; do
+        i=0
+        while [ "$i" -lt "$NARMS" ]; do
+            if [ $((r % 2)) -eq 1 ]; then arm=$i; else arm=$((NARMS - 1 - i)); fi
+            leg "$r" "$plan" "$arm" && any_ok=1
+            i=$((i + 1))
+        done
     done
     if [ -z "$any_ok" ]; then
         say "round $r produced nothing at all -- every arm failed the same way, and"
@@ -329,8 +397,29 @@ while [ "$r" -le "$ROUNDS" ]; do
         state_set outcome "all-failed-round-$r"
         break
     fi
+    state_set rounds_done "$r"
+
+    if [ "$r" -ge "$ROUNDS" ] && [ "$DETECT" != 0 ]; then
+        say "precision after round $r (target ${DETECT}%):"
+        unresolved=""
+        for plan in $PLANS; do
+            plan_resolves "$plan" || unresolved="$unresolved $plan"
+        done
+        if [ -z "$unresolved" ]; then
+            say "every plan resolves ${DETECT}% -- stopping at round $r"
+            state_set outcome "resolved-at-round-$r"
+            break
+        fi
+        say "  still coarser than ${DETECT}%:$unresolved"
+    fi
     r=$((r + 1))
 done
+if [ "$r" -gt "$MAX_ROUNDS" ]; then
+    say "reached the ceiling of $MAX_ROUNDS rounds without resolving ${DETECT}% on every"
+    say "plan. The numbers are real; the claim they support is the one the"
+    say "precision lines above allow, and not ${DETECT}%."
+    state_set outcome "hit-max-rounds"
+fi
 
 # No `wk quiesce off`: quiet is this install's permanent state, set at provisioning time.
 say "leaving the machine quiesced (its permanent state; see the comment here)"

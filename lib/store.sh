@@ -18,6 +18,12 @@ store_is_local() { # on macOS $WK_STORE is the VM's, and such a command is forwa
     [ -d "$WK_STORE" ] && [ -w "$WK_STORE" ]
 }
 
+# Artifacts this machine opens as files -- a seeded benchmark payload, an exported runner tree, a downloaded profiler -- live in the store, except on a macOS workstation where the store is the podman VM's and nothing this side can read it.
+wk_artifact_dir() {
+    if store_is_local; then printf '%s/cache' "$WK_STORE"
+    else printf '%s/cache' "$(wk_state_dir)"; fi
+}
+
 
 WK_CCACHE_MAXSIZE="${WK_CCACHE_MAXSIZE:-40G}"   # shared by every workspace here
 

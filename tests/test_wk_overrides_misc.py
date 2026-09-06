@@ -274,7 +274,7 @@ class TestMacLaneOverrides(WkTest):
         without = self._dry_run_transcript({})
         self.assertNotIn("'--detach'", without)
         withit = self._dry_run_transcript({"WK_MAC_DETACH": "1"})
-        self.assertIn("./wk 'build' 'wk-selftest-ws' 'mac-release' '--detach'", withit)
+        self.assertIn("./wk 'build' 'wk-selftest-ws' 'mac-release-pgo' '--detach'", withit)
 
 
 class TestMacAbOverrides(WkTest):
