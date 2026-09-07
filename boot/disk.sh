@@ -590,10 +590,11 @@ $(printf '%s\n' "$joins" | sed 's/^/    /')
     reachable only over whatever LAN it lands on."
 }
 
-# In a subshell: machine_load sets NODE_* directly and every caller here already has its own machine loaded.
+# In a subshell: machine_load sets NODE_* directly and every caller already has its own machine loaded. NODE_DEVICE as well as NODE_NET, this being about what goes on a card: a machine wk writes no image for has none to seed, however it reaches the network.
 _image_wants_wifi() { # <IMG_MACHINE, which is boot/machines/<name>.conf's name>
     [ -n "${1:-}" ] || return 1
-    ( machine_load "$1" >/dev/null 2>&1 && [ "${NODE_NET:-}" = wifi ] )
+    ( machine_load "$1" >/dev/null 2>&1 \
+        && [ -n "${NODE_DEVICE:-}" ] && [ "${NODE_NET:-}" = wifi ] )
 }
 
 # There is no hand-made credential file: the card takes its credential from $DISK_MACHINE's own WiFi connection, read by the card helper as root.

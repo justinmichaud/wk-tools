@@ -289,7 +289,9 @@ config_build_env() {   # assembled into CFG_ENV, config_load first; the architec
         CFG_ENV+=("WEBKIT_OUTPUTDIR=$out" "WK_DERIVED_DATA=$src/WebKitBuild/DerivedData")
     fi
     if [ -n "$CFG_PGO" ]; then   # the profile is re-collected per build: a profile taken from one arm's sources leaves the other arm's new functions cold, which reads as a regression
-        CFG_ENV+=("WK_PGO=1" "WK_PGO_DIR=$out-profile" "WK_NO_COMPILE_COMMANDS=1")
+        # No compilation cache: the two phases compile the whole tree with different flags, so almost nothing hits and the CAS holds both worlds. Measured 2026-09-06 in a guest, it reached 101 GB beside 45 GB of products and filled the disk.
+        CFG_ENV+=("WK_PGO=1" "WK_PGO_DIR=$out-profile" "WK_NO_COMPILE_COMMANDS=1"
+                  "WK_NO_COMPILATION_CACHE=1")
     fi
     # Carried through only when set, empty not being unset for build-in-target.sh: WK_MEM_BUDGET_MB/WK_MEM_FLOOR_MB come from --mem-budget/--mem-floor, and WK_NO_COMPILATION_CACHE and WK_NO_COMPILE_COMMANDS opt out of those two.
     [ -n "${WK_MEM_BUDGET_MB:-}" ] && CFG_ENV+=("WK_MEM_BUDGET_MB=$WK_MEM_BUDGET_MB")

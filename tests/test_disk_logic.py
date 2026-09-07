@@ -24,9 +24,11 @@ class TestImageWantsWifi(WkTest):
 . "{REPO}/boot/machines.sh"
 . "{REPO}/boot/disk.sh"
 machine_load() {{
+    NODE_DEVICE=/dev/mmcblk0
     case "$1" in
         wifimach) NODE_NET=wifi; return 0 ;;
         ethmach)  NODE_NET=ethernet; return 0 ;;
+        nocard)   NODE_NET=wifi; NODE_DEVICE=""; return 0 ;;
         *) return 1 ;;
     esac
 }}
@@ -40,6 +42,13 @@ _image_wants_wifi {machine} && echo YES || echo NO
 
     def test_an_ethernet_board_does_not(self):
         cp = self.bash(self._script("ethmach"))
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertEqual(cp.stdout.strip(), "NO", cp.stdout + cp.stderr)
+
+    def test_a_machine_wk_writes_no_card_for_does_not(self):
+        """This decides what goes on a card. A Mac reaches the bench over WiFi
+        and has no card to seed, so the question does not arise for it."""
+        cp = self.bash(self._script("nocard"))
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
         self.assertEqual(cp.stdout.strip(), "NO", cp.stdout + cp.stderr)
 

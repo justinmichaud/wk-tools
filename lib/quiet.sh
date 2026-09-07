@@ -58,6 +58,30 @@ auth_panel() {  # a modal panel is invisible to screen_blocker; SecurityAgent ru
     return 0
 }
 
+# screen_blocker is an instant and a run is an hour, so anything drawing after it was read is invisible: a consent dialog sat over a whole PGO collection that way (2026-09-06). Samples every WK_SCREEN_WATCH_SECONDS while the measured thing runs.
+screen_watch_start() {   # <record file>
+    local record="$1"
+    : > "$record"
+    ( while :; do
+          local seen; seen=$(screen_blocker)
+          case "$seen" in ""|"?") ;; *) printf '%s\t%s\n' "$(date -u +%H:%M:%SZ)" "$seen" >> "$record" ;; esac
+          sleep "${WK_SCREEN_WATCH_SECONDS:-10}"
+      done ) </dev/null >/dev/null 2>&1 &
+    echo $! > "$record.pid"
+}
+
+screen_watch_stop() {   # <record file> -- prints what it saw, and succeeds only when it saw nothing
+    local record="$1" pid
+    if [ -f "$record.pid" ]; then
+        pid=$(cat "$record.pid")
+        kill "$pid" 2>/dev/null || true
+        rm -f "$record.pid"
+    fi
+    [ -s "$record" ] || return 0
+    sort -u -k2 "$record"
+    return 1
+}
+
 screen_blocker() {
     local reading uninvited
     reading=$(wk_window_probe 2>/dev/null | sed -n 's/^windows=//p')

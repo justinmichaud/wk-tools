@@ -165,6 +165,12 @@ cmd_status() {
         return 0
     fi
 
+    if [ "${BOOT_ARMING:-one-shot}" = command ]; then
+        warn "$MACHINE is ARMED for '$ARMED_IMG' (by $ARMED_BY at $ARMED_AT)"
+        log  "  the firmware was told, so a plain reboot enters bench mode."
+        log  "  cancel with: wk boot $MACHINE --disarm"
+        return 0
+    fi
     if [ "${BOOT_ARMING:-one-shot}" = hands-on ]; then
         warn "$MACHINE is ARMED for '$ARMED_IMG' (by $ARMED_BY at $ARMED_AT) and waiting for a person"
         log  "  nothing will move it on its own: the mode is chosen at the startup"
@@ -255,7 +261,7 @@ cmd_arm() {
     esac
 
     case "${BOOT_ARMING:-one-shot}" in
-    hands-on)
+    hands-on|command)
         [ -n "$IMAGE" ] || IMAGE="${NODE_VOLUME:-}"
         [ -n "$IMAGE" ] || die "$MACHINE has no benchmark volume configured (NODE_VOLUME)" ;;
     guest)
@@ -283,6 +289,15 @@ would arm $MACHINE
   record       none; the guest either answers with a marker or it does not
   then         start the guest and wait for its marker. Nothing reboots this
                machine -- the rehearsal is a VM, which is the whole point.
+EOF
+        elif [ "${BOOT_ARMING:-one-shot}" = command ]; then
+            cat >&2 <<EOF
+would arm $MACHINE
+  volume       $IMAGE $(mac_volume_present 2>/dev/null && echo "(attached)" || echo "(NOT attached -- arming would refuse)")
+  boot order   the firmware's own boot-volume, through the privileged helper
+  record       $NODE_RECORD
+  then         prove the way back, tell the firmware, read it back, and reboot.
+               Now: $(mac_firmware_default 2>/dev/null || echo "not readable from here")
 EOF
         elif [ "${BOOT_ARMING:-one-shot}" = hands-on ]; then
             cat >&2 <<EOF
@@ -329,6 +344,9 @@ EOF
     if [ "${BOOT_ARMING:-one-shot}" = one-shot ]; then
         record_write "$IMAGE" "$NODE_PROFILE" "$NODE_DEVICE" "$BOOT_ORDER_IMAGE"
         b_arm "$BOOT_ORDER_IMAGE"
+    elif [ "${BOOT_ARMING:-one-shot}" = command ]; then
+        record_write "$IMAGE" "$NODE_PROFILE" "${NODE_VOLUME:-}" ""
+        b_arm
     elif [ "${BOOT_ARMING:-one-shot}" = medium ]; then
         # The record is a claim with evidence behind it: b_evidence reads the stick, so a record that disagrees with the medium is visibly wrong.
         record_write "$IMAGE" "$NODE_PROFILE" "$NODE_DEVICE" ""

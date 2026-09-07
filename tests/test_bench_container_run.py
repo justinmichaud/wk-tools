@@ -28,7 +28,10 @@ import time
 import unittest
 
 from tests.support import (
+    REPO,
     WkTest,
+    bash,
+    func_body,
     bench_ls_runs,
     podman_vm_ssh,
     rand_suffix,
@@ -176,3 +179,35 @@ def _copy_report(src_path, dest):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestAMeasuredRunIsWatchedThroughout(WkTest):
+    """The preflight reads the screen once and a run is minutes long, so a
+    dialog that draws mid-run covers every leg after it and nothing notices.
+    Measured 2026-09-06: a consent dialog appeared 25 seconds into a collection
+    and sat there for four hours."""
+
+    def test_the_run_is_bracketed_by_the_watch(self):
+        body = func_body((REPO / "cmd" / "bench").read_text(), "cmd_run")
+        start = body.index("screen_watch_start")
+        run = body.index("Tools/Scripts/run-benchmark")
+        stop = body.index("screen_watch_stop")
+        self.assertLess(start, run, "the watch starts before the browser")
+        self.assertLess(run, stop, "and stops after it")
+
+    def test_a_covered_run_fails_unless_it_is_forced(self):
+        body = func_body((REPO / "cmd" / "bench").read_text(), "cmd_run")
+        after = body[body.index("screen_watch_stop"):]
+        self.assertIn("rc=1", after)
+        self.assertIn("FORCE", after)
+
+    def test_it_is_inert_where_there_is_no_window_server(self):
+        """Every container run goes through the same line; the probe answers
+        `?` there and the watcher must record nothing rather than refuse."""
+        cp = bash('. "$WK_ROOT/lib/quiet.sh"\n'
+                  'rec=$(mktemp)\n'
+                  'WK_SCREEN_WATCH_SECONDS=1 screen_watch_start "$rec"\n'
+                  'sleep 3\n'
+                  'if screen_watch_stop "$rec" >/dev/null; then echo CLEAN; else echo CAUGHT; fi\n'
+                  'rm -f "$rec"\n', timeout=60)
+        self.assertIn("CLEAN", cp.stdout, cp.stdout + cp.stderr)

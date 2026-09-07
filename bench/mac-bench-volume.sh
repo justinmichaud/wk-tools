@@ -223,7 +223,7 @@ EOF
     return 0
 }
 
-# `startosinstall --installpackage` lays a package down before first boot, the only hook early enough to answer Setup Assistant. Account creation waits for the live system, because writing dslocal by hand on an offline volume risks an account that exists and cannot log in; wk-tools travels in the payload because the install has no network route yet.
+# `startosinstall --installpackage` lays a package down before first boot, the only hook early enough to answer Setup Assistant. Account creation waits for the live system: writing dslocal by hand on an offline volume risks an account that exists and cannot log in.
 
 bench_payload_files() {   # <source, repo-relative> <dest under the volume root> <mode>; both writers read it, so a payload file cannot land on a fresh install and not on a repaired one
     cat <<'ROWS'
@@ -272,7 +272,7 @@ do_build_pkg() {
     install -d "$root/Library/LaunchDaemons" "$root/usr/local/libexec" \
                "$root/usr/local/share/wk-bench" "$root/private/var/db"
 
-    # Two forms of Setup Assistant: .AppleSetupDone for the system one, .skipbuddy in the User Template for the per-user one. `defaults` keys written into a live account do not survive, since autologin builds a new session first.
+    # .AppleSetupDone for the system Setup Assistant, .skipbuddy in the User Template for the per-user one; `defaults` keys written into a live account do not survive, autologin building a new session first.
     : > "$root/private/var/db/.AppleSetupDone"
     for _lproj in English.lproj Non_localized; do
         install -d "$root/System/Library/User Template/$_lproj" 2>/dev/null || true
@@ -350,7 +350,7 @@ PLIST
         warn "  tailscale: no package staged; firstboot will say so and carry on"
     fi
 
-    # `--installpackage` packages land after launchd has scanned /Library/LaunchDaemons, so a RunAtLoad daemon dropped then would wait for a next boot that nothing triggers; a postinstall bootstraps it on this one.
+    # A RunAtLoad daemon dropped by --installpackage lands after launchd scanned /Library/LaunchDaemons, so a postinstall bootstraps it on this boot.
     local scripts="${TMPDIR:-/tmp}/wk-bench-pkgscripts"
     rm -rf "$scripts"; install -d "$scripts"
     cat > "$scripts/postinstall" <<'POST'
@@ -377,30 +377,37 @@ POST
     printf '%s' "$out"
 }
 
+# The first preferred network whose passphrase this Mac holds, which is what macOS itself joins from. Not `networksetup -getairportnetwork`: measured on 26.6.2 with en0 associated, it answers "You are not associated with an AirPort network", and ipconfig and scutil redact the SSID from a caller with no Location authorisation.
 write_wifi_conf() {
-    local dest="$1" dev ssid psk
+    local dest="$1" dev ssid psk found=""
+    [ -n "${WK_BENCH_WIRED:-}" ] && { info "  WK_BENCH_WIRED: that install is on ethernet, so no Wi-Fi is copied"; return 0; }
     dev=$(networksetup -listallhardwareports 2>/dev/null \
             | awk '/Hardware Port: Wi-Fi/{getline; print $2; exit}')
     [ -n "$dev" ] || { warn "  no Wi-Fi interface here; assuming the bench install has wired network"; return 0; }
 
-    ssid=$(networksetup -getairportnetwork "$dev" 2>/dev/null | sed -n 's/^Current Wi-Fi Network: //p')
-    if [ -z "$ssid" ]; then
-        warn "  this Mac is not on a Wi-Fi network, so there is nothing to copy"
-        return 0
-    fi
+    while IFS= read -r ssid; do
+        [ -n "$ssid" ] || continue
+        psk=$(sudo security find-generic-password -D "AirPort network password" \
+                  -a "$ssid" -w /Library/Keychains/System.keychain 2>/dev/null) || psk=""
+        [ -n "$psk" ] || continue
+        found="$ssid"
+        break
+    done <<ROWS
+$(networksetup -listpreferredwirelessnetworks "$dev" 2>/dev/null | sed -n 's/^	//p')
+ROWS
 
-    psk=$(sudo security find-generic-password -D "AirPort network password" \
-              -a "$ssid" -w /Library/Keychains/System.keychain 2>/dev/null) || psk=""
-    if [ -z "$psk" ]; then
-        warn "  could not read the passphrase for '$ssid' from the System keychain"
-        warn "  the bench install will have no network unless it is on ethernet"
-        return 0
-    fi
+    [ -n "$found" ] || die "this Mac has Wi-Fi ($dev) and no preferred network whose passphrase is
+    in its System keychain, so there is nothing to give the bench install -- and
+    without a network that install joins no tailnet, installs no pyobjc and
+    cannot take the Command Line Tools, which is every reason it exists.
+      networksetup -listpreferredwirelessnetworks $dev   lists what was looked for
+    Join the network on this install first, or put the bench install on ethernet
+    and re-run with WK_BENCH_WIRED=1."
 
-    printf 'WIFI_SSID=%s\nWIFI_PSK=%s\n' "$(sh_quote "$ssid")" "$(sh_quote "$psk")" \
+    printf 'WIFI_SSID=%s\nWIFI_PSK=%s\n' "$(sh_quote "$found")" "$(sh_quote "$psk")" \
         | sudo tee "$dest" >/dev/null
     sudo chmod 0600 "$dest"
-    info "  wifi: '$ssid' written into the bench payload"
+    info "  wifi: '$found' written into the bench payload"
 }
 
 gather_secrets() {
@@ -423,7 +430,7 @@ gather_secrets() {
     log "  sudo: startosinstall needs a volume owner's password (once, at --install)"
 }
 
-# `--install` refuses once the volume carries macOS, so this re-arms first boot from host mode for provisioning that half-landed and whose daemon has already removed itself.
+# `--install` refuses once the volume carries macOS; this re-arms first boot for provisioning that half-landed and whose daemon has already removed itself.
 do_repair() {
     local S="/Volumes/$VOLUME" D="/Volumes/$VOLUME - Data"
     volume_exists   || die "'$VOLUME' is not attached"

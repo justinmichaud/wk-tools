@@ -68,6 +68,14 @@ class TestTheBrowserGate(WkTest):
         self.assertEqual(self.verdict(min_raf=10.0), [])
         self.assertNotEqual(self.verdict(min_raf=59.0), [])
 
+    def test_a_busy_but_focused_window_is_not_a_throttled_one(self):
+        """44.4 Hz was measured with the browser focused, on the GPU, on a guest
+        that had just finished a build -- and a floor of 45 refused it. What is
+        being caught is the ~1 Hz of a window that lost the focus."""
+        reading = dict(GOOD_READING, raf_hz=44.4, focused=True)
+        self.assertEqual(BROWSER.faults(reading, GOOD_CLIENTS, "AppleParavirtGPU",
+                                        BROWSER.MIN_RAF), [])
+
 
 def profile_tree(root, benchmarks=PROFILE.BENCHMARKS, libraries=PROFILE.LIBRARIES,
                  compressed=True):
@@ -223,6 +231,28 @@ class TestTheBuildIsGatedOnThem(WkTest):
         self.assertIn("_pgo_collect \"$instr\" \"$pgo\" \"$arch\" || return $?", build)
 
 
+class TestAProfileGuidedBuildDoesNotCacheCompilations(WkTest):
+    """Its two phases compile the whole tree with different flags, so the CAS
+    holds both worlds and serves almost neither. Measured 2026-09-06 in a guest:
+    101 GB of compilation cache beside 45 GB of products, and a full disk."""
+
+    def _env(self, config):
+        return bash('. "$WK_ROOT/lib/common.sh"; . "$WK_ROOT/lib/arch.sh"\n'
+                    '. "$WK_ROOT/build/configs.sh"\n'
+                    'WK_TARGET_KIND=vm; config_load %s macos vm >/dev/null 2>&1\n'
+                    'config_build_env /src/WebKit 4 10 native >/dev/null 2>&1\n'
+                    'printf "%%s\\n" "${CFG_ENV[@]}"\n' % config)
+
+    def test_the_pgo_config_turns_it_off(self):
+        cp = self._env("mac-release-pgo")
+        self.assertIn("WK_NO_COMPILATION_CACHE=1", cp.stdout, cp.stdout + cp.stderr)
+
+    def test_a_plain_release_keeps_it(self):
+        """One set of flags, so the cache is what it is for."""
+        cp = self._env("mac-release")
+        self.assertNotIn("WK_NO_COMPILATION_CACHE=1", cp.stdout, cp.stdout + cp.stderr)
+
+
 class TestBothArmsProfileAgainstOneBenchmark(WkTest):
     """speedometer3 and jetstream3 name a moving branch in their plan files, so
     an unpinned collection can profile the two arms against two revisions of the
@@ -274,6 +304,74 @@ class TestAnArmIsReclaimedOnceItIsStaged(WkTest):
         self.assertIn("PGO_INSTR_SUFFIX=", text)
         self.assertIn('"$final$PGO_INSTR_SUFFIX"', text)
         self.assertNotIn('"$final-instr"', text)
+
+
+class TestNothingMayDrawOverAMeasuredRun(WkTest):
+    """A dialog over the browser is a run to throw away, and the two ways of
+    missing one are both real: reading only layer 0, and reading once.
+
+    Measured 2026-09-06 in a guest: a consent dialog raised by run-benchmark's
+    own screenshot sat at layer 8, in the middle of the screen, for four hours
+    from the first leg of a PGO collection onward. `wk vm check` said the screen
+    held nothing but the one window wk put there."""
+
+    WITH_A_DIALOG = ("Control Center:25:42x30@837,0;Window Server:24:1024x30@0,0;"
+                     "Dock:20:1024x768@0,0;UserNotificationCenter:8:260x364@382,119;"
+                     "Terminal:0:877x499@40,51;")
+    CLEAN = ("Control Center:25:42x30@837,0;Window Server:24:1024x30@0,0;"
+             "Dock:20:1024x768@0,0;Terminal:0:877x499@40,51;")
+
+    def _uninvited(self, reading):
+        cp = bash('. "$WK_ROOT/bench/mac-window-probe.sh"; wk_window_unexpected "%s"' % reading)
+        return cp.stdout.strip()
+
+    def test_an_alert_above_the_ordinary_layer_is_reported(self):
+        """Floating above layer 0 is what makes an alert cover the browser, so
+        a layer-0-only rule is blind to the one thing this exists to catch."""
+        self.assertIn("UserNotificationCenter", self._uninvited(self.WITH_A_DIALOG))
+
+    def test_the_screens_own_furniture_is_not_a_blocker(self):
+        self.assertEqual(self._uninvited(self.CLEAN), "")
+
+    def test_the_menu_bar_and_dock_are_named_rather_than_inferred_from_a_layer(self):
+        text = (REPO / "bench" / "mac-window-probe.sh").read_text()
+        self.assertIn("wk_window_chrome", text)
+        self.assertNotIn('[ "$layer" = 0 ]', text)
+
+    WATCH = '\n'.join([
+        '. "$WK_ROOT/lib/quiet.sh"',
+        'count=$(mktemp); echo 0 > "$count"',
+        'wk_window_probe() {',
+        '    n=$(cat "$count"); n=$((n + 1)); echo "$n" > "$count"',
+        '    if [ "$n" -ge 3 ] && [ -n "$APPEARS" ]; then',
+        "        printf 'windows=Dock:20:1x1@0,0;UserNotificationCenter:8:260x364@382,119;Terminal:0:8x8@0,0;\\n'",
+        '    else',
+        "        printf 'windows=Dock:20:1x1@0,0;Terminal:0:8x8@0,0;\\n'",
+        '    fi',
+        '}',
+        'rec=$(mktemp)',
+        'WK_SCREEN_WATCH_SECONDS=1 screen_watch_start "$rec"',
+        'sleep 5',
+        'if out=$(screen_watch_stop "$rec"); then echo CLEAN; else echo "CAUGHT $out"; fi',
+        'rm -f "$rec" "$count"',
+    ])
+
+    def test_a_window_that_appears_mid_run_is_caught(self):
+        """screen_blocker is an instant and a collection is an hour; the
+        watcher is what makes the check contemporaneous with the run."""
+        cp = bash("APPEARS=1\n" + self.WATCH, timeout=60)
+        self.assertIn("CAUGHT", cp.stdout, cp.stdout + cp.stderr)
+        self.assertIn("UserNotificationCenter", cp.stdout)
+
+    def test_a_run_nothing_drew_over_passes(self):
+        cp = bash("APPEARS=\n" + self.WATCH, timeout=60)
+        self.assertIn("CLEAN", cp.stdout, cp.stdout + cp.stderr)
+
+    def test_the_collection_is_watched_from_start_to_finish(self):
+        body = func_body((REPO / "build" / "mac-pgo.sh").read_text(), "_pgo_collect")
+        self.assertLess(body.index("screen_watch_start"), body.index(RUN_COLLECTION))
+        self.assertGreater(body.index("screen_watch_stop"), body.index(RUN_COLLECTION))
+        self.assertIn("return 1", body[body.index("screen_watch_stop"):])
 
 
 class TestPyobjcIsProvisionedNotAssumed(WkTest):

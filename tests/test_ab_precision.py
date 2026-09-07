@@ -163,3 +163,32 @@ class TestThroughTheCLI(WkTest):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestAVerdictNeedsScores(WkTest):
+    """`met=no` from an empty reading looks like "not resolved yet" and means
+    "nothing was read". Measured 2026-09-06: naming each run's result.json
+    rather than its directory printed n_a=0, n_b=0, met=no -- a verdict about
+    two builds, from no evidence about either."""
+
+    def _run(self, a, b):
+        return subprocess.run(
+            ["python3", str(REPO / "lib" / "wkdata.py"), "ab-precision",
+             "--a", a, "--b", b, "--target", "0.3"],
+            capture_output=True, text=True, timeout=60)
+
+    def test_a_side_with_no_scores_is_refused(self):
+        with scratch_dir() as tmp:
+            empty = tmp / "nothing"
+            empty.mkdir()
+            cp = self._run(str(empty), str(empty))
+            self.assertNotEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+            self.assertIn("no scores", cp.stdout + cp.stderr)
+            self.assertNotIn("met=", cp.stdout)
+
+    def test_it_names_which_side_was_empty(self):
+        with scratch_dir() as tmp:
+            empty = tmp / "nothing"
+            empty.mkdir()
+            cp = self._run(str(empty), str(empty))
+            self.assertIn("side A", cp.stdout + cp.stderr)

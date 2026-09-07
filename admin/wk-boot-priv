@@ -58,11 +58,58 @@ v_reboot_tryboot() {
     say "rebooting into tryboot in 3s"
 }
 
+# macOS. Apple Silicon changes which install the firmware boots through a
+# LocalPolicy signed with a volume owner's credential, so root alone cannot do it
+# and bless reads that credential on stdin. The gate is the volume, not an
+# argument: neither verb takes one, and the only volume `boot-volume` will ever
+# bless is a mounted macOS system volume that is not the running one and carries
+# /etc/wk-image naming a perf-macos profile -- a wk benchmark install and nothing
+# else. Its credential is that install's own, from its provisioning payload,
+# which only root can read.
+BENCH_ACCOUNT=bench
+
+bench_install() {   # the one wk benchmark install mounted here, or a refusal
+    local v found="" n=0
+    for v in /Volumes/*; do
+        [ -f "$v/System/Library/CoreServices/SystemVersion.plist" ] || continue
+        [ -f "$v/etc/wk-image" ] || continue
+        grep -q '^profile=perf-macos' "$v/etc/wk-image" 2>/dev/null || continue
+        if [ "$(stat -f %d "$v" 2>/dev/null)" = "$(stat -f %d / 2>/dev/null)" ]; then continue; fi
+        found="$v"; n=$((n + 1))
+    done
+    [ "$n" -eq 1 ] || deny "$n mounted wk benchmark installs; this blesses exactly one"
+    printf '%s' "$found"
+}
+
+_bless() {   # <mount> <account> <password file>
+    command -v bless >/dev/null 2>&1 || fail "bless is not on this machine"
+    [ -r "$3" ] || fail "no credential at $3, so the firmware cannot be told"
+    bless --mount "$1" --setBoot --user "$2" --stdinpass < "$3"
+}
+
+v_boot_volume() {
+    [ $# -eq 0 ] || deny "boot-volume takes no arguments"
+    local v; v=$(bench_install)
+    _bless "$v" "$BENCH_ACCOUNT" "$v/usr/local/share/wk-bench/password"
+    say "blessed $v"
+}
+
+# The way back, and the reason `wk boot` exercises it before it arms anything:
+# --setBoot is sticky, so a machine sent to the benchmark install without a
+# proven return is a machine that boots into it forever.
+v_boot_host() {
+    [ $# -eq 0 ] || deny "boot-host takes no arguments"
+    _bless / "$(stat -f %Su /dev/console)" /usr/local/share/wk-bench/owner-password
+    say "blessed the running install"
+}
+
 verb="${1:-}"; shift || true
 case "$verb" in
     status)         v_status ;;
     order)          v_order "$@" ;;
     reboot)         v_reboot "$@" ;;
     reboot-tryboot) v_reboot_tryboot "$@" ;;
-    *) fail "usage: wk-boot-priv status|order <0xNNNN>|reboot|reboot-tryboot" ;;
+    boot-volume)    v_boot_volume "$@" ;;
+    boot-host)      v_boot_host "$@" ;;
+    *) fail "usage: wk-boot-priv status|order <0xNNNN>|reboot|reboot-tryboot|boot-volume|boot-host" ;;
 esac

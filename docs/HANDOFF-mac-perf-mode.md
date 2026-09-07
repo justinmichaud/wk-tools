@@ -111,3 +111,31 @@
       `phase_build_ab`'s checkout-build-stage-restore and `reclaim_products`,
       which tests/test_mac_gates.py pins and no run has exercised
       [needs a guest with room for two arms, or one more experiment]
+- [ ] the 2026-09-06 baseline arm of PR 70886 is not a build to measure. Its
+      whole collection ran behind a consent dialog: run-benchmark photographs
+      the screen into `--diagnose-directory` on every leg, `screencapture` needs
+      Screen Recording, and the prompt raised at the first leg (15:11:26) sat at
+      layer 8 over the browser for four hours. The collection no longer takes a
+      screenshot and the window rule no longer ignores a layer, but the staged
+      `20260906T182227Z-mac-release-pgo` predates both and is to be replaced,
+      not measured [needs one more build of the merge-base]
+- [ ] whether this Mac's startup volume can be set from software is still
+      unmeasured. `boot/mac-volume.sh` now asks the privileged helper
+      (`wk-boot-priv boot-volume`), proves the return trip first because
+      `--setBoot` is sticky on Apple Silicon, and reads the firmware's
+      `boot-volume` back rather than trusting bless -- so a Mac that cannot be
+      armed refuses instead of being trapped in bench mode. None of it has run:
+      `bless --setBoot --user --stdinpass` needs a volume owner's credential at
+      /usr/local/share/wk-bench/owner-password, which is a login password on
+      disk and the owner's decision to make [needs that file, then one arming]
+- [ ] the screen watch has never run on the benchmark install. `wk bench
+      staged` now brackets every run with it (cmd/bench), so a window that draws
+      mid-run fails the run rather than being missed by a preflight that read
+      the screen minutes earlier; it is exercised against a stubbed probe and on
+      a guest, never on the volume [needs the Mac bench volume]
+- [ ] `networksetup -getairportnetwork` answers "You are not associated with an
+      AirPort network" on macOS 26.6.2 with the interface associated, and
+      `ipconfig getsummary` and `scutil` redact the SSID from a caller with no
+      Location authorisation. Two Apple bugs worth a Feedback Assistant report;
+      `write_wifi_conf` reads the preferred-network list instead, which is not
+      redacted [upstream]

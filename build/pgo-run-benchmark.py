@@ -28,6 +28,14 @@ if WHERE in vars(minibrowser):
 else:
     setattr(minibrowser, WHERE, vars(safari)[WHERE])
 
+
+# run-benchmark photographs the screen into --diagnose-directory on every leg, and `screencapture` needs Screen Recording: asking puts a consent dialog over the browser that nothing headless answers (measured 2026-09-06, four hours from leg one). A picture is worth nothing to a profile.
+def _no_screenshot(self, output_directory, filename):
+    return None
+
+
+minibrowser._save_screenshot_to_path = _no_screenshot
+
 if __name__ == "__main__":
     format_logger(logging.getLogger())
     sys.exit(main())

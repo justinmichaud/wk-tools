@@ -105,6 +105,8 @@ _pgo_collect() {   # <instrumented products> <profile dir> <arch>
 
     rm -rf "$pgo"
 
+    screen_watch_start "$state/screen-watch"
+
     # shellcheck disable=SC2086 -- $PGO_BENCHMARKS is a deliberate word list.
     env WK_WEBKIT_SCRIPTS="$SRC/Tools/Scripts" \
         /usr/bin/python3 "$SRC/Tools/Scripts/collect-pgo-profiles" \
@@ -116,6 +118,13 @@ _pgo_collect() {   # <instrumented products> <profile dir> <arch>
             --browser minibrowser \
             ${pargs[@]+"${pargs[@]}"} || rc=$?
 
+    local seen
+    seen=$(screen_watch_stop "$state/screen-watch") || {
+        mac_raiser_off "$state"
+        echo "wk: something drew over this collection, so every leg after it profiled a covered browser:" >&2
+        printf '%s\n' "$seen" | sed 's/^/  /' >&2
+        return 1
+    }
     mac_raiser_off "$state"
     [ "$rc" -eq 0 ] || return "$rc"
 
@@ -125,6 +134,16 @@ _pgo_collect() {   # <instrumented products> <profile dir> <arch>
         --profile-dir "$pgo" --arch "$arch" --json "$state/profile-check.json" >&2 \
         || { echo "wk: the collection finished and its profile is not one to build against (above)." >&2
              return 1; }
+}
+
+# The readings that justify this build, beside the products so they are staged with it: a staged arm carries what was measured of the browser and of the profile it came from, rather than leaving that in a build log on another machine.
+_pgo_evidence() {   # <products dir>
+    local state="$HOME/.local/state/wk/pgo"
+    [ -n "${WK_DRY_RUN:-}" ] && return 0
+    mkdir -p "$1"
+    cp "$state/browser-check.json" "$1/wk-browser-check.json" 2>/dev/null || true
+    cp "$state/profile-check.json" "$1/wk-profile-check.json" 2>/dev/null || true
+    cp "$WK_PGO_DIR/payload-pins"  "$1/wk-payload-pins"       2>/dev/null || true
 }
 
 pgo_build() {
@@ -144,6 +163,8 @@ pgo_build() {
     _pgo_collect "$instr" "$pgo" "$arch" || return $?
 
     # ENABLE_USER_SCRIPT_SANDBOXING=NO: bmalloc/WTF/JavaScriptCore run "Copy Profiling Data" under Xcode's script sandbox, which declares arm64e and x86_64 and so denies reading this arch's profile.
+    _pgo_evidence "$final"
+
     _pgo_run "measured (full LTO, -O3, profile use)" "$final" \
         "${@}" --lto-mode=full \
         WK_ENABLE_PGO_USE=YES \

@@ -15,7 +15,7 @@ import json
 import subprocess
 import unittest
 
-from tests.support import REPO, WkTest, bash, run, scratch_dir, temp_store
+from tests.support import REPO, WkTest, bash, func_body, run, scratch_dir, temp_store
 
 WKDATA = REPO / "lib" / "wkdata.py"
 TASK = "20260830T120000Z-wpe-pr1725"
@@ -367,3 +367,86 @@ echo "SAMPLY=$(samply_store_dir aarch64-apple-darwin)"
             for key in ("SEED", "RUNNER", "SAMPLY"):
                 self.assertTrue(f[key].startswith(f['ARTIFACT'] + "/"),
                                 f"{key}={f[key]} is not under {f['ARTIFACT']}")
+
+
+class TestAStageThatCannotFinishLeavesNothing(WkTest):
+    """A stage delivers gigabytes and writes its manifest last, so a failure in
+    between leaves a directory that nothing can run and nothing reclaims.
+    Measured 2026-09-06: a payload path that did not exist on the staging
+    machine left 5.6 GB with no stage.json on the benchmark volume."""
+
+    def test_a_payload_that_is_not_there_is_refused_before_anything_is_copied(self):
+        body = func_body((REPO / "cmd" / "bench").read_text(), "cmd_stage")
+        refusal = body.index("no such payload directory")
+        self.assertLess(refusal, body.index("the build product"),
+                        "the payloads are checked before the products are pulled")
+        self.assertIn("Nothing has been staged", body)
+
+    def test_the_refusal_is_made_once_and_not_in_the_copy_loop(self):
+        body = func_body((REPO / "cmd" / "bench").read_text(), "cmd_stage")
+        self.assertEqual(body.count("no such payload directory"), 1)
+
+    def test_a_half_made_stage_goes_with_the_command_that_failed(self):
+        text = (REPO / "cmd" / "bench").read_text()
+        self.assertIn("wk_atexit stage_drop_half", func_body(text, "cmd_stage"))
+        drop = func_body(text, "stage_drop_half")
+        self.assertIn("stage.json", drop, "what makes it usable is what it checks for")
+        self.assertIn("rm -rf", drop)
+
+    def _drop(self, make):
+        return bash('. "$WK_ROOT/lib/common.sh"\n'
+                    + func_body((REPO / "cmd" / "bench").read_text(), "stage_drop_half")
+                    .join(["stage_drop_half() {", "}\n"])
+                    + 'd=$(mktemp -d); _WK_STAGE_HALF="$d"\n'
+                    + make +
+                    'stage_drop_half 2>/dev/null\n'
+                    '[ -d "$d" ] && echo KEPT || echo GONE\n'
+                    'rm -rf "$d"\n')
+
+    def test_the_cleanup_keeps_a_stage_that_finished(self):
+        cp = self._drop('echo "{}" > "$d/stage.json"\n')
+        self.assertIn("KEPT", cp.stdout, cp.stdout + cp.stderr)
+
+    def test_the_cleanup_removes_one_that_did_not(self):
+        cp = self._drop('mkdir -p "$d/WebKitBuild"\n')
+        self.assertIn("GONE", cp.stdout, cp.stdout + cp.stderr)
+
+
+class TestAStageWorksOnACleanTree(WkTest):
+    """It recorded which wk-tools staged the build with a trailing `&&`, whose
+    status became the assignment's. On a clean checkout that test is false, so
+    `wk bench stage` ended at exit 1 having printed nothing -- on every properly
+    deployed machine, and succeeding only where the tree happened to be dirty.
+    Measured 2026-09-06: two stages onto the benchmark volume left gigabytes of
+    products and no manifest."""
+
+    def _record(self, dirty):
+        """The real block, lifted, with cmd/version's answer stubbed."""
+        body = func_body((REPO / "cmd" / "bench").read_text(), "cmd_stage")
+        block = 'if [ -n "$tools_ver" ]; then' \
+                + body.split('if [ -n "$tools_ver" ]; then')[1].split("\n    fi")[0] \
+                + "\n    fi\n"
+        return bash('set -euo pipefail\n'
+                    'kv_get() { sed -n "s/^$1=//p"; }\n'
+                    f'tools_ver="sha=abc\ndirty={dirty}"\n'
+                    'wk_tools=unknown\n'
+                    + block
+                    + 'echo "wk_tools=$wk_tools"\n')
+
+    def test_a_clean_tree_records_its_sha_and_carries_on(self):
+        cp = self._record("no")
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertIn("wk_tools=abc", cp.stdout)
+
+    def test_a_dirty_tree_says_so(self):
+        cp = self._record("yes")
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertIn("wk_tools=abc+dirty", cp.stdout)
+
+    def test_the_record_is_not_built_by_a_trailing_and(self):
+        """The shape that caused it: a `&&` list whose status becomes the
+        assignment's, under `set -e`."""
+        body = func_body((REPO / "cmd" / "bench").read_text(), "cmd_stage")
+        for line in body.splitlines():
+            if "wk_tools=" in line and "kv_get" in line:
+                self.assertNotIn("&&", line, line)

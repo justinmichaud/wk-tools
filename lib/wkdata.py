@@ -898,6 +898,12 @@ def _top_scores(paths):
 
 def cmd_ab_precision(args):
     a, b = _top_scores(_split_paths(args.a)), _top_scores(_split_paths(args.b))
+    # `met=no` from nothing reads like "not resolved yet" and means "nothing was
+    # read": a run is a directory, and naming its result.json finds no scores.
+    if not a or not b:
+        sys.exit("ab-precision: no scores on %s -- a run is the directory a\n"
+                 "  benchmark wrote, not the result.json inside it." %
+                 ("side A" if not a else "side B"))
     mde = _mde_pct(a, b)
     delta = None
     if a and b and sum(a):

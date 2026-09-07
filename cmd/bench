@@ -620,12 +620,29 @@ cmd_run() {
     local cores_wrap; cores_wrap=$(bench_cores_wrap)
     local pad_prelude; pad_prelude=$(bench_env_pad_prelude)
 
+    # For as long as the browser is up, not once before it: a dialog that draws
+    # mid-run covers every leg after it and the preflight is long past. Inert
+    # where there is no window server to ask -- the probe answers `?` and the
+    # watcher records nothing.
+    screen_watch_start "$out/screen-watch"
+
     set +e
     run_watched "$out/run.log" -- \
         t_exec "$ws" bash -lc "cd /src/WebKit && ${pad_prelude} \
             $run_env ${cores_wrap}${aslr}Tools/Scripts/run-benchmark $args"
     local rc=$?
     set -e
+
+    local drew
+    if ! drew=$(screen_watch_stop "$out/screen-watch"); then
+        warn "something drew over this run, so its browser was covered:"
+        printf '%s\n' "$drew" | sed 's/^/    /' >&2
+        if [ -z "$FORCE" ]; then
+            rc=1
+        else
+            warn "  --force: keeping the number anyway; it is one to distrust"
+        fi
+    fi
 
     if [ "$rc" -ne 0 ]; then
         warn "run-benchmark exited $rc"
@@ -731,6 +748,14 @@ cmd_compare() {
 # Staged while this machine is in host mode with the benchmark volume mounted: an
 # rsync onto a fixed path the other role finds when it boots.
 # TODO: exercise the run half end to end; only staging is tested so far.
+# A stage that dies partway leaves a directory with no manifest: unusable, since `wk bench staged` reads the manifest to know what it is, and nothing reclaims it. A local bench root assembles in place, so that directory is on the medium; a remote one receives only at the end and never sees one.
+stage_drop_half() {
+    [ -n "${_WK_STAGE_HALF:-}" ] || return 0
+    [ -f "$_WK_STAGE_HALF/stage.json" ] && return 0
+    warn "removing the half-made stage at $_WK_STAGE_HALF"
+    rm -rf "$_WK_STAGE_HALF"
+}
+
 cmd_stage() {
     local ws="$1" machine="" config="" plan="" payload="" plans="" dry=""
     shift
@@ -840,12 +865,25 @@ EOF
 
     info "staging $config from '$ws' onto $machine${NODE_VOLUME:+ ($NODE_VOLUME)}"
 
+    local _p _d
+    while IFS="$(printf '\t')" read -r _p _d; do
+        [ -n "$_p" ] && [ -n "$_d" ] || continue
+        [ -d "$_d" ] || die "no such payload directory: $_d
+    Nothing has been staged. 'wk bench seed <ws> $_p' makes one, and it is read
+    on the machine that stages, not the one that asked."
+    done <<EOF
+$plans
+EOF
+
     local build assemble="$dest"
     if [ -n "$deliver" ]; then
         assemble="$(wk_state_dir)/bench-stage/$stamp-$config"
         rm -rf "$assemble"
     fi
     mkdir -p "$assemble"
+
+    _WK_STAGE_HALF="$assemble"
+    wk_atexit stage_drop_half
 
     # Products, not the build tree: a machine that will never compile needs what the driver launches, what DYLD_FRAMEWORK_PATH resolves, and -- since it profiles too, and never had the build tree -- the dSYMs. Only a config that asks for dwarf-with-dsym makes any (build/mac-pgo.sh).
     log  "  the build product (frameworks, MiniBrowser.app and dSYMs; no intermediates)"
@@ -857,10 +895,9 @@ EOF
     log  "  Tools/ -- run-benchmark, webkitpy and the plans"
     t_pull_dir "$ws" "$src/Tools" "$assemble/Tools"
 
-    local _p _d pinned=""
+    local pinned=""
     while IFS="$(printf '\t')" read -r _p _d; do
         [ -n "$_p" ] && [ -n "$_d" ] || continue
-        [ -d "$_d" ] || die "no such payload directory: $_d"
         log  "  the benchmark itself, pinned: $_p ($(basename "$_d"))"
         rm -rf "$assemble/payload/$_p"
         mkdir -p "$assemble/payload/$_p"
@@ -871,9 +908,15 @@ EOF
 $plans
 EOF
 
+    # `case`, not a trailing `&&`: on a clean tree that test is false, the assignment takes its status, and the stage ended with no message at all.
     local tools_ver wk_tools=unknown
     tools_ver=$("$WK_ROOT/cmd/version" 2>/dev/null || true)
-    [ -z "$tools_ver" ] || wk_tools=$(kv_get sha <<<"$tools_ver")$([ "$(kv_get dirty <<<"$tools_ver")" = yes ] && printf '+dirty')
+    if [ -n "$tools_ver" ]; then
+        wk_tools=$(kv_get sha <<<"$tools_ver")
+        case "$(kv_get dirty <<<"$tools_ver")" in
+            yes) wk_tools="$wk_tools+dirty" ;;
+        esac
+    fi
     cat > "$assemble/stage.json" <<EOF
 {
   "staged_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",

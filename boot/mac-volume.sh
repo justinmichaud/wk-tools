@@ -1,7 +1,8 @@
-# Boot driver: this Mac, into a benchmark macOS install on another volume. Apple Silicon has no volume-boot primitive over software or the wire --
-# selection goes through a LocalPolicy in the machine's own secure storage, changed only by an authenticated user action -- so arming is a person and the machine drives itself (NODE_LOCAL).
+# Boot driver: this Mac, into a benchmark macOS install on another volume. Apple Silicon signs that selection into a LocalPolicy with a volume owner's credential, which is what `bless --setBoot --user --stdinpass` supplies and why it goes through the privileged helper. NODE_LOCAL: the machine drives itself.
 
-BOOT_ARMING=hands-on   # the intent is recorded and the act is a person's; cmd/boot branches on it
+BOOT_ARMING=command    # cmd/boot branches on it: `wk boot mbp` tells the firmware and reboots
+
+BOOT_HELPER=/usr/local/libexec/wk-boot-priv
 
 BOOT_ORDER_IMAGE=""    # no order to write; named so a diff shows a difference, not an omission
 BOOT_ORDER_NORMAL=""
@@ -108,28 +109,42 @@ b_arm() {
     docs/HANDOFF-mac-perf-mode.md for what to turn off on it.
     A different name:  WK_BENCH_VOLUME='...' wk boot $NODE_NAME"
 
-    cat >&2 <<EOF
+    [ -x "$BOOT_HELPER" ] || die "the privileged boot helper is not installed, so nothing here can
+    tell the firmware which install to boot:  ./setup --stage quiesce
+    Without it this is a person at the keyboard: shut down, hold the power
+    button until 'Loading startup options', pick '$NODE_VOLUME', press Return."
 
-  This is the hands-on half, and it is two clicks:
+    # The return first: --setBoot is sticky and Apple Silicon has no one-shot form, so an unproven way back is a machine that boots into bench mode forever. Blessing the running install changes nothing and exercises the path.
+    sudo -n "$BOOT_HELPER" boot-host >/dev/null 2>&1 || die "this Mac cannot be told to boot itself again, so it must not be told to
+    boot '$NODE_VOLUME': the trip out is one way and the machine would come up
+    in bench mode every time.
+      sudo $BOOT_HELPER boot-host    says why
+    Apple Silicon signs that choice with a volume owner's credential, and this
+    one is read from /usr/local/share/wk-bench/owner-password -- an account on
+    the running install and its password, which nothing here can invent.
+    Until that file exists, the startup manager is the way: shut down, hold the
+    power button, pick '$NODE_VOLUME'."
 
-    the one-shot way (preferred)
-      shut down, then hold the power button until "Loading startup options",
-      pick "$NODE_VOLUME", and press Return. This boots it *once* and leaves
-      the default alone, which is what makes the way back a plain reboot.
+    sudo -n "$BOOT_HELPER" boot-volume >&2 \
+        || die "the firmware would not take '$NODE_VOLUME' (above), and nothing was changed."
 
-    the sticky way
-      System Settings -> General -> Startup Disk -> "$NODE_VOLUME" -> Restart.
-      This changes the default, so the machine keeps booting the benchmark
-      volume until the pane is used again. Only worth it for a long session.
-
-EOF
+    local now; now=$(mac_firmware_default)
+    case "$now" in
+        *"'$NODE_VOLUME'"*) info "the firmware will boot '$NODE_VOLUME' next" ;;
+        *) die "bless reported success and the firmware still names: $now
+    Nothing was rebooted. This is the failure the driver used to assume, and it
+    is worth reading rather than working around." ;;
+    esac
 }
 
 b_disarm_note() {
-    log "  nothing in firmware was changed, so there is nothing there to cancel."
-    log "  If you used System Settings -> Startup Disk (the sticky route), set it"
-    log "  back to the internal volume there; the startup-manager route needs no"
-    log "  undo -- the next reboot is a normal one by itself."
+    if [ -x "$BOOT_HELPER" ] && sudo -n "$BOOT_HELPER" boot-host >/dev/null 2>&1; then
+        log "  the firmware is set back to this install; a plain reboot stays here."
+        return 0
+    fi
+    log "  the firmware still names the benchmark volume, and this could not set it"
+    log "  back:  sudo $BOOT_HELPER boot-host   says why. System Settings ->"
+    log "  General -> Startup Disk is the other way."
 }
 
 b_diag() {
@@ -140,9 +155,10 @@ b_diag() {
 }
 
 b_reboot() {
-    sudo shutdown -r +1 "wk boot: returning to host mode" >/dev/null 2>&1 \
-        || die "could not schedule a reboot (this one needs sudo, and it is the
-    only part of a transition that does)."
+    sudo -n "$BOOT_HELPER" reboot >/dev/null 2>&1 && return 0
+    die "could not restart this Mac. The helper takes no password and is not
+    installed here (./setup --stage quiesce); plain sudo wants one, and an
+    unattended transition has no terminal to answer it on."
 }
 
 # The *Data* volume, the APFS system volume being sealed and read-only. `/var` firmlinks out of it, so the same bytes are `/var/wk` to the booted bench install and `/Volumes/<name> - Data/private/var/wk` here.
@@ -182,6 +198,6 @@ wk bench mac-volume --create
 wk bench mac-volume --install
 wk bench mac-volume --provision
 hold the power button and pick the volume
-    hands-on, always: firmware owns this choice, not the OS
+    by command: the helper signs the firmware's choice with a volume owner's credential
 REPROV
 }

@@ -1,26 +1,7 @@
 #!/usr/bin/env python3
-"""Can this macOS install present an accelerated, unthrottled browser?
-
-Asked of the build that is about to be measured or profiled, through the launch
-path OSXMiniDriver uses, and answered by the page itself rather than by
-inference:
-
-  webgl      WebKit has no software WebGL on macOS -- getContext returns null
-             when there is no Metal device -- so a context at all is the
-             acceleration, and the renderer string names what it got.
-  accelerator the WebKit GPU process holding a user client on the machine's
-             IOAccelerator, which is what says the work went to that device and
-             not somewhere else (the same evidence the board lane reads off DRM).
-  raf        requestAnimationFrame's measured rate. An unfocused or napped
-             window is throttled to a crawl, and a benchmark run behind one
-             measures the throttle -- silently, with a plausible-looking score.
-  screen     the dimensions run-benchmark sizes the window from.
-
-Exit 0 only when every one of those passes; a PGO collection or a measured run
-behind a failure is a number nobody can attribute.
-
-  bench/mac-browser-check.py --build-directory <products> [--json <path>]
-"""
+"""Can this macOS install present an accelerated, unthrottled browser? Asked of
+the build about to be measured, through OSXMiniDriver's own launch path.
+README.md, "The Mac lane", says what each reading proves."""
 import argparse
 import http.server
 import json
@@ -62,10 +43,12 @@ requestAnimationFrame(tick);
 </script>"""
 
 
+# What separates the two populations, not what a healthy machine reaches: a window that lost the focus is rAF-throttled to about 1 Hz and stalls, while a foreground one on a busy guest measured 44.4-57.7 Hz over five collections (2026-09-06). A floor near the healthy range refuses good runs.
+MIN_RAF = 30.0
+
+
 def accelerator_clients():
-    """Every process holding a user client on this machine's IOAccelerator, as
-    {pid: process name}. ioreg -a is a plist; the creator string truncates the
-    name at 16 characters, so the pid is resolved against ps."""
+    # ioreg -a is a plist; the creator string truncates the name at 16 characters, so the pid is resolved against ps.
     cp = subprocess.run(["ioreg", "-a", "-l", "-w0", "-r", "-c", "IOAccelerator"],
                         capture_output=True)
     if cp.returncode != 0 or not cp.stdout:
@@ -120,9 +103,7 @@ def serve(result):
 
 
 def launch(build, url):
-    """The environment OSXMiniDriver builds for a custom build directory
-    (webkitpy/benchmark_runner/browser_driver/osx_minibrowser_driver.py), so
-    what is checked is what will be run."""
+    # osx_minibrowser_driver.py's own environment, so what is checked is what will be run.
     env = dict(os.environ)
     for key in ("DYLD_FRAMEWORK_PATH", "DYLD_LIBRARY_PATH",
                 "__XPC_DYLD_FRAMEWORK_PATH", "__XPC_DYLD_LIBRARY_PATH"):
@@ -135,8 +116,6 @@ def launch(build, url):
 
 
 def faults(reading, clients, device, min_raf):
-    """The verdict, as a list of reasons -- separated from the run so it can be
-    exercised against a reading rather than against a Mac."""
     found = []
     if not reading:
         found.append("the page never reported: MiniBrowser did not load it, or it "
@@ -164,8 +143,8 @@ def main():
     parser.add_argument("--build-directory", required=True,
                         help="the products directory holding MiniBrowser.app")
     parser.add_argument("--json", help="write the whole reading here")
-    parser.add_argument("--min-raf", type=float, default=45.0,
-                        help="the rate below which the window is throttled (default 45)")
+    parser.add_argument("--min-raf", type=float, default=MIN_RAF,
+                        help=f"the rate below which the window is throttled (default {MIN_RAF})")
     parser.add_argument("--timeout", type=float, default=120.0)
     args = parser.parse_args()
 

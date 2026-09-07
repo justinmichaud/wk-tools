@@ -4,6 +4,9 @@
 #   wk bench mac-ab [<workspace>] [--plan P]... [--rounds N] [--count N]
 #                   [--a <staged-id>] [--b <staged-id>] [--stage]
 #   wk bench mac-ab <workspace> --patch <ref|diff> [--base <ref>] [--rounds N]
+#   wk bench mac-ab ... --shutdown        shut down instead of rebooting, so the
+#                                         startup manager is picked from a cold machine
+#   wk bench mac-ab --progress            every step, what does it, what proves it
 #   wk bench mac-ab --preflight | --status | --collect | --dry-run
 #   --plan P repeats; the default is jetstream3, speedometer3, motionmark. --detect
 #   PCT alternates until the A/B resolves a difference that small (0.3 by default)
@@ -41,6 +44,7 @@ FORCE=""
 AGENT_HOME=""
 DRY=""
 ACTION=run
+GO=restart   # --shutdown: the startup manager wants a cold machine, and then nothing has to be timed
 BOOT_WAIT="${WK_MAC_BOOT_WAIT:-3600}"
 
 usage() { usage_block "$0" >&2; exit 2; }
@@ -556,15 +560,27 @@ mac_boottime() {
 }
 
 phase_go() {
-    [ -n "$DRY" ] && { log "  would reboot $HOST (loginwindow restart event, no sudo)"; return 0; }
+    local verb=reboot flag=-r
+    if [ "$GO" = shutdown ]; then verb="shut down"; flag=-h; fi
+    [ -n "$DRY" ] && { log "  would $verb $HOST (loginwindow event, no sudo)"; return 0; }
     BOOT_BEFORE=$(mac_boottime)
-    info "go: rebooting $HOST (boot before: ${BOOT_BEFORE:-unknown})"
+    info "go: $verb $HOST now (boot before: ${BOOT_BEFORE:-unknown})"
 
-    # `tell application "System Events" to restart` returns 0 without rebooting: at the login screen there is no user session to run it in. The loginwindow event is what the login screen's own Restart button uses, and it needs none.
-    # The event code is guillemets, so the octal escapes go in printf's *format*, not a %s argument. Backgrounded and its status ignored, because a successful reboot kills the ssh carrying it -- `kern.boottime` below is what verifies it.
-    mac_sh 'printf "tell application \"loginwindow\" to \302\253event aevtrrst\302\273\n" > /tmp/wk-restart.scpt
-            (osascript /tmp/wk-restart.scpt >/dev/null 2>&1 &)
-            exit 0' >/dev/null 2>&1 || true
+    # The event code is guillemets, so the octal escapes go in printf's *format*, not a %s argument.
+    # Two transitions, two mechanisms, each for its own reason. A restart is asked
+    # of loginwindow, which needs no session and so works at the login screen;
+    # loginwindow answers no shutdown event at all (-1708, measured 2026-09-07),
+    # so a shutdown is asked of System Events, which host mode always has a
+    # session for. Backgrounded and its status ignored: a transition that takes
+    # kills the ssh carrying it, and `kern.boottime` below is what verifies it.
+    if [ "$GO" = shutdown ]; then
+        mac_sh '(osascript -e "tell application \"System Events\" to shut down" >/dev/null 2>&1 &)
+                exit 0' >/dev/null 2>&1 || true
+    else
+        mac_sh 'printf "tell application \"loginwindow\" to \302\253event aevtrrst\302\273\n" > /tmp/wk-restart.scpt
+                (osascript /tmp/wk-restart.scpt >/dev/null 2>&1 &)
+                exit 0' >/dev/null 2>&1 || true
+    fi
 
     local waited=0
     while [ "$waited" -lt 150 ]; do
@@ -573,8 +589,8 @@ phase_go() {
         waited=$((waited + 5))
     done
 
-    warn "  the loginwindow restart event did not take; trying sudo -n"
-    mac_sh 'sudo -n shutdown -r now >/dev/null 2>&1' >/dev/null 2>&1 || true
+    warn "  the loginwindow event did not take; trying sudo -n"
+    mac_sh "sudo -n shutdown $flag now >/dev/null 2>&1" >/dev/null 2>&1 || true
     waited=0
     while [ "$waited" -lt 60 ]; do
         mac_sh true >/dev/null 2>&1 || { info "  $HOST is going down (after sudo)"; return 0; }
@@ -582,7 +598,7 @@ phase_go() {
         waited=$((waited + 5))
     done
 
-    die "could not reboot $HOST -- it is still answering, and \`kern.boottime\` is
+    die "could not $verb $HOST -- it is still answering, and \`kern.boottime\` is
     unchanged. Both mechanisms exit 0 without acting, so this is checked rather
     than trusted; see the comment in phase_go.
 
@@ -649,6 +665,173 @@ phase_collect() {
     fi
 }
 
+# Every step of a macOS A/B, what it is, the command that does it, and the
+# command that proves it. Reads only; it takes no lock and changes nothing.
+STEP_N=0
+step() {   # <yes|no|part> <title> <detail> <do> <verify>
+    STEP_N=$((STEP_N + 1))
+    local mark
+    case "$1" in
+        yes)  mark="[x]" ;;
+        part) mark="[~]" ;;
+        *)    mark="[ ]" ;;
+    esac
+    printf '  %s %d. %s\n' "$mark" "$STEP_N" "$2" >&2
+    [ -z "$3" ] || printf '         %s\n' "$3" >&2
+    [ "$1" = yes ] || { [ -z "$4" ] || printf '         do:     %s\n' "$4" >&2; }
+    [ -z "$5" ] || printf '         verify: %s\n' "$5" >&2
+}
+
+staged_arms() {   # <id> <webkit sha> <gated yes|no> per line
+    local root; root=$(bench_root 2>/dev/null) || return 0
+    mac "for d in $(sh_quote "$root/staged")/*/; do
+             [ -f \"\$d/stage.json\" ] || continue
+             s=\$(sed -n 's/.*\"webkit_sha\": \"\\([^\"]*\\)\".*/\\1/p' \"\$d/stage.json\")
+             g=no
+             ls \"\$d\"/WebKitBuild/*/wk-profile-check.json >/dev/null 2>&1 && g=yes
+             printf '%s %s %s\n' \"\$(basename \$d)\" \"\$s\" \"\$g\"
+         done" 2>/dev/null | tr -d '\r'
+}
+
+phase_progress() {
+    info "the macOS A/B on $HOST, step by step"
+    local root mode arms narms job rounds outcome results volver
+
+    # Three states, not two: reachable in host mode, reachable in bench mode (the
+    # volume is `/` and is not under /Volumes at all), and not answering -- which
+    # is what a run in bench mode looks like from here, that install having no
+    # tailnet identity of its own.
+    if ! mac true >/dev/null 2>&1; then
+        step part "the run is under way" \
+            "$HOST does not answer. In bench mode it is a different install with no
+         tailnet identity, so this is what a running A/B looks like from here; it
+         answers again when it hands the machine back." \
+            "" "wk bench mac-ab --collect   (once it is back in host mode)"
+        log "" >&2
+        log "  the volume's own log survives the way back:" >&2
+        log "    /Volumes/$VOLUME - Data/private/var/wk/autorun.log" >&2
+        return 0
+    fi
+
+    local here; here=$(mac 'sed -n "s/^id=//p" /etc/wk-image 2>/dev/null' 2>/dev/null | tr -d '\r') || here=""
+    if [ -n "$here" ]; then
+        step yes "the Mac is in bench mode" "$here -- the A/B is running on it now" "" \
+            "wk bench mac-ab --status"
+        return 0
+    fi
+
+    volver=$(mac "/usr/libexec/PlistBuddy -c 'Print :ProductUserVisibleVersion' \
+                  '/Volumes/$VOLUME/System/Library/CoreServices/SystemVersion.plist' 2>/dev/null" 2>/dev/null | tr -d '\r') || volver=""
+    if [ -n "$volver" ]; then
+        step yes "the benchmark volume exists" "'$VOLUME', macOS $volver" \
+            "wk bench mac-volume --all   (on the Mac)" \
+            "wk bench mac-volume"
+    else
+        step no "the benchmark volume exists" "'$VOLUME' is not mounted here (a shutdown unmounts it; --all makes one that is not there at all)" \
+            "wk bench mac-volume --all   (on the Mac)" \
+            "wk bench mac-volume"
+        return 0
+    fi
+
+    local marker; marker=$(mac "sed -n 's/^id=//p' '/Volumes/$VOLUME/etc/wk-image' 2>/dev/null" 2>/dev/null | tr -d '\r') || marker=""
+    local pyobjc=no
+    mac "test -d $(sh_quote "$(bench_home)/Library/Python/3.9/lib/python/site-packages/objc")" 2>/dev/null && pyobjc=yes
+    if [ -n "$marker" ] && [ "$pyobjc" = yes ]; then
+        step yes "it is provisioned" "marker $marker, pyobjc present" \
+            "wk bench mac-volume --repair   (on the Mac), then boot it once" \
+            "wk bench mac-ab --preflight"
+    else
+        step no "it is provisioned" "marker ${marker:-none}, pyobjc $pyobjc" \
+            "wk bench mac-volume --repair   (on the Mac), then boot it once" \
+            "wk bench mac-ab --preflight"
+    fi
+
+    arms=$(staged_arms) || arms=""
+    narms=$(printf '%s' "$arms" | grep -c . || true)
+    local gated; gated=$(printf '%s' "$arms" | awk '$3 == "yes"' | grep -c . || true)
+    local shown; shown=$(printf '%s' "$arms" | awk '{printf "%s (%s) gated=%s; ", $1, substr($2,1,12), $3}')
+    case "$narms" in
+        0) step no   "two arms are built and staged" "nothing staged" \
+               "wk bench mac-ab <ws> --patch <ref> --base <ref>" \
+               "wk bench staged --ls   (on the Mac)" ;;
+        1) step part "two arms are built and staged" "${shown:-one arm}" \
+               "wk bench mac-ab <ws> --patch <ref> --base <ref>" \
+               "wk bench staged --ls   (on the Mac)" ;;
+        *) step yes  "two arms are built and staged" "$shown" "" \
+               "wk bench staged --ls   (on the Mac)" ;;
+    esac
+
+    if [ "$narms" -gt 0 ] && [ "$gated" = "$narms" ]; then
+        step yes "each arm can prove how it was collected" "$gated of $narms carry their readings" "" \
+            "cat .../staged/<id>/WebKitBuild/*/wk-profile-check.json   (on the Mac)"
+    else
+        step part "each arm can prove how it was collected" \
+            "$gated of ${narms:-0} carry their readings -- the gates ran either way, an older arm just did not keep them beside the build" \
+            "rebuild it: wk build <ws> mac-release-pgo" \
+            "cat .../staged/<id>/WebKitBuild/*/wk-profile-check.json   (on the Mac)"
+    fi
+
+    mode=$(mac 'sed -n "s/^id=//p" /etc/wk-image 2>/dev/null' 2>/dev/null | tr -d '\r') || mode=""
+    if [ -n "$mode" ]; then
+        step yes "the Mac is in bench mode" "$mode" "" "wk boot $MACHINE --status"
+    else
+        step no "the Mac is in bench mode" "it is in host mode" \
+            "wk boot $MACHINE   (arms the firmware and reboots)" \
+            "wk boot $MACHINE --status"
+    fi
+
+    root=$(bench_root 2>/dev/null) || root=""
+    # Whose arms: a job left from an earlier experiment reports rounds and
+    # results that have nothing to do with what is staged now, and a checklist
+    # that counts those is a checklist that lies.
+    local job_arms fresh=no
+    job_arms=$(mac "sed -n 's/.*\"id\": \"\([^\"]*\)\".*/\1/p' $(sh_quote "$root/job.json") 2>/dev/null" 2>/dev/null | tr -d '\r') || job_arms=""
+    job=$(mac "test -f $(sh_quote "$root/job.json") && echo yes" 2>/dev/null | tr -d '\r') || job=""
+    if [ -n "$job_arms" ]; then
+        fresh=yes
+        local _a
+        for _a in $job_arms; do
+            printf '%s' "$arms" | awk '{print $1}' | grep -qxF "$_a" || fresh=no
+        done
+    fi
+    if [ "$job" = yes ] && [ "$fresh" = yes ]; then
+        step yes "a job is planted for the staged arms" "$(printf '%s' "$job_arms" | tr '\n' ' ')" \
+            "" "wk bench mac-ab --status"
+    elif [ "$job" = yes ]; then
+        step no "a job is planted for the staged arms" \
+            "the planted job names arms that are not staged now ($(printf '%s' "$job_arms" | tr '\n' ' ')) -- it is an older experiment's, and its rounds and results below are not this one's" \
+            "wk bench mac-ab --a <id> --b <id> --detect 0.3" \
+            "wk bench mac-ab --status"
+    else
+        step no "a job is planted for the staged arms" "none" \
+            "wk bench mac-ab --a <id> --b <id> --detect 0.3" \
+            "wk bench mac-ab --status"
+    fi
+
+    rounds=$(mac "sed -n 's/^rounds_done=//p' $(sh_quote "$root/autorun.state") 2>/dev/null | tail -1" 2>/dev/null | tr -d '\r') || rounds=""
+    outcome=$(mac "sed -n 's/^outcome=//p' $(sh_quote "$root/autorun.state") 2>/dev/null | tail -1" 2>/dev/null | tr -d '\r') || outcome=""
+    results=$(mac "ls -1 $(sh_quote "$root/results") 2>/dev/null | grep -c . || true" 2>/dev/null | tr -d '\r') || results=0
+    if [ "$fresh" != yes ]; then
+        step no "the rounds are done" "nothing has run for these arms" \
+            "boot the volume; the planted job runs them" \
+            "wk bench mac-ab --status"
+    elif [ -n "$outcome" ]; then
+        step yes "the rounds are done" "${rounds:-0} round(s), outcome $outcome, ${results:-0} result(s)" \
+            "" "wk bench mac-ab --collect"
+    elif [ -n "$rounds" ]; then
+        step part "the rounds are done" "${rounds} so far, ${results:-0} result(s)" "" \
+            "wk bench mac-ab --status"
+    else
+        step no "the rounds are done" "not started" \
+            "boot the volume; the planted job runs them" \
+            "wk bench mac-ab --status"
+    fi
+
+    step no "the result is read back" "" \
+        "wk bench mac-ab --collect" \
+        "wk bench precision <run-a> <run-b>"
+}
+
 phase_status() {
     local root; root=$(bench_root 2>/dev/null) || die "'$VOLUME' is not attached on $HOST"
     local mode; mode=$(mac 'cat /etc/wk-image 2>/dev/null | sed -n "s/^id=//p"' 2>/dev/null | tr -d '\r')
@@ -673,6 +856,8 @@ while [ $# -gt 0 ]; do
         --config)   CONFIG="${2:-}"; shift 2 ;;
         --rounds)   ROUNDS="${2:-}"; shift 2 ;;
         --max-rounds) MAX_ROUNDS="${2:-}"; shift 2 ;;
+        --shutdown) GO=shutdown; shift ;;
+        --progress) ACTION=progress; shift ;;
         --detect)   DETECT="${2:-}"; shift 2 ;;
         # The first Speedometer iteration is never trimmed from a result: it is a real iteration, and dropping it would bias the comparison.
         --count)    COUNT="${2:-}"; shift 2 ;;
@@ -717,6 +902,7 @@ if is_macos && [ "$(_lc "$(hostname -s 2>/dev/null)")" = "$(_lc "$HOST")" ]; the
 fi
 
 case "$ACTION" in
+    progress) phase_progress; exit 0 ;;
     preflight) preflight; exit $? ;;
     status)    phase_status; exit 0 ;;
     collect)   phase_collect; exit 0 ;;
@@ -744,6 +930,15 @@ phase_plant >/dev/null
 }
 
 phase_go
+
+if [ "$GO" = shutdown ]; then
+    info "$HOST is powering off with the job planted."
+    log  "  start it holding the power button until 'Loading startup options',"
+    log  "  pick '$VOLUME' and press Return. Everything after that is unattended."
+    log  "  watch it:   wk bench mac-ab --progress"
+    log  "  read it:    wk bench mac-ab --collect"
+    exit 0
+fi
 
 came_back=$(phase_wait "$BOOT_WAIT") || true
 log ""

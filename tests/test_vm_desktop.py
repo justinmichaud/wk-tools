@@ -261,11 +261,20 @@ class TestTheFindings(WkTest):
 
     def test_the_furniture_that_is_always_there_is_not_a_pane(self):
         """Notification Centre's click-catcher is a full-screen window on every
-        macOS desktop; the backdrop Setup Assistant draws behind its own pane is
-        another. Judging by presence or by area would call every screen busy."""
+        macOS desktop. Judging by presence or by area would call every screen
+        busy; judging by layer would miss an alert, which floats above the
+        ordinary one. What is judged is whose window it is."""
         for w in [x[1] for x in findings(AS_FOUND) if x[0] == "wrong"]:
             self.assertNotIn("Notification Center", w)
-            self.assertNotIn(":-1:", w)
+
+    def test_a_pane_is_named_once_however_many_windows_it_draws(self):
+        """Setup Assistant draws a backdrop behind its own pane, so the same
+        owner holds two windows; it is one thing in front of the browser."""
+        reading = [l for l in AS_FOUND.splitlines() if l.startswith("windows=")][0]
+        cp = bash('. "$WK_ROOT/lib/quiet.sh"\n'
+                  'wk_window_probe() { printf "%%s\\n" "%s"; }\n'
+                  'screen_blocker\n' % reading)
+        self.assertEqual(cp.stdout.strip(), "Setup Assistant", cp.stdout + cp.stderr)
 
     def test_a_screen_nobody_could_ask_about_is_not_reported_as_clean(self):
         """No compiler in the guest means no probe; silence there is unknown,

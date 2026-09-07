@@ -138,6 +138,13 @@ def python_counts(src):
     return nonblank, prose
 
 
+def prints_its_own_usage(rel, src):
+    """Whether the leading `#` run is help text rather than commentary. Every
+    cmd/* file's is, by the dispatcher; so is any other script's that hands its
+    own path to usage_block, which reads that block and prints it."""
+    return rel.startswith("cmd/") or 'usage_block "$0"' in src
+
+
 def body_ratio(rel, path):
     """(non-blank body lines, prose lines) for one file."""
     src = path.read_text(encoding="utf-8", errors="replace")
@@ -148,7 +155,7 @@ def body_ratio(rel, path):
         return python_counts("\n".join(lines[start:]))
 
     end = start
-    if rel.startswith("cmd/"):          # the help block `wk <cmd> -h` prints
+    if prints_its_own_usage(rel, src):
         while end < len(lines) and (lines[end].lstrip().startswith("#")
                                     or not lines[end].strip()):
             end += 1

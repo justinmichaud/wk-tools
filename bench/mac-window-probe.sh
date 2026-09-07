@@ -1,27 +1,23 @@
-# What is actually on the screen, from the window server rather than from a
-# list of process names: CGWindowListCopyWindowInfo answers for every window
-# that is on screen, whether or not its owner is an application. Owner, layer
-# and bounds need no Screen Recording permission -- window *titles* do, and
-# nothing here asks for one. Sourced, never run.
+# What is on the screen, asked of the window server. Owner, layer and bounds need no Screen Recording permission; window *titles* do, and nothing here asks for one. Sourced, never run.
 
-# The windows wk itself puts on a measured Mac's screen. Anything else holding
-# a layer-0 window came up on its own and is over the thing being measured;
-# higher layers are the menu bar, the Dock and Notification Centre's own
-# click-catcher, which are always there and cover nothing.
+# WK_SCREEN_EXPECTED: the windows wk itself puts on a measured Mac's screen.
 wk_window_expected() {
     printf '%s\n' "${WK_SCREEN_EXPECTED:-Terminal|Finder|MiniBrowser|Safari}" | tr '|' '\n'
 }
 
-# Every layer-0 window in a `windows=` reading whose owner wk did not put there.
+# WK_SCREEN_CHROME: the screen's own furniture. Notification Centre is here for its click-catcher, not its banners -- a measured install is not running it at all, and wk_quiet_desktop_probe is what asks whether it is.
+wk_window_chrome() {
+    printf '%s\n' "${WK_SCREEN_CHROME:-Window Server|Dock|Control Center|Notification Center}" | tr '|' '\n'
+}
+
+# Every window in a `windows=` reading that is neither. The layer is reported and never filtered on: an alert floats *above* the ordinary layer, which is what makes it cover the browser (measured 2026-09-06, a dialog at layer 8 over a whole collection).
 wk_window_unexpected() { # <windows reading>
-    local entry owner layer expected
-    expected=$(wk_window_expected)
+    local entry owner allowed
+    allowed=$(wk_window_expected; wk_window_chrome)
     printf '%s' "$1" | tr ';' '\n' | while IFS= read -r entry; do
         [ -n "$entry" ] || continue
         owner="${entry%%:*}"
-        layer="${entry#*:}"; layer="${layer%%:*}"
-        [ "$layer" = 0 ] || continue
-        printf '%s\n' "$expected" | grep -qxF "$owner" || printf '%s;' "$entry"
+        printf '%s\n' "$allowed" | grep -qxF "$owner" || printf '%s;' "$entry"
     done
 }
 
@@ -63,7 +59,6 @@ int main(void) {
     return 0;
 }
 PROBE
-    # Only when it changed, or the rebuild is a second of every `wk vm check`.
     if cmp -s "$src.new" "$src" && [ -x "$bin" ]; then
         rm -f "$src.new"
         return 0
@@ -72,8 +67,7 @@ PROBE
     cc -O1 -o "$bin" "$src" -framework ApplicationServices 2>/dev/null
 }
 
-# `windows=<owner>:<layer>:<w>x<h>@<x>,<y>;...`, one entry per on-screen window.
-# `?` means it could not be asked, which is not "nothing on screen".
+# `windows=<owner>:<layer>:<w>x<h>@<x>,<y>;...`; `?` is "could not be asked", not "nothing there".
 wk_window_probe() {
     if [ "$(uname -s)" != Darwin ] || ! command -v cc >/dev/null 2>&1; then
         printf 'windows=?\n'

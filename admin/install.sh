@@ -147,12 +147,11 @@ _boot_sudoers=/etc/sudoers.d/zzz-wk-boot
 
 if [ ! -f "$_boot_source" ]; then
     warn "boot helper missing at $_boot_source; skipping"
-elif ! is_linux; then
-    unchanged "boot helper (linux only)"
 else
     _boot_needs=0
     if [ ! -f "$_boot_target" ] || ! cmp -s "$_boot_source" "$_boot_target"; then _boot_needs=1; fi
-    _boot_owner=$(stat -c '%U' "$_boot_target" 2>/dev/null || echo "")
+    if is_macos; then _boot_owner=$(stat -f '%Su' "$_boot_target" 2>/dev/null || echo "")
+    else _boot_owner=$(stat -c '%U' "$_boot_target" 2>/dev/null || echo ""); fi
     [ -f "$_boot_target" ] && [ "$_boot_owner" != root ] && _boot_needs=1
 
     _boot_ok=0
@@ -187,8 +186,18 @@ else
         rm -f "$_boot_tmp"
     fi
 
+    # Apple Silicon signs the startup-disk choice with a volume owner's
+    # credential, so `wk boot mbp` refuses until this Mac holds one. Whether to
+    # keep a login password on disk for that is the owner's call, not setup's:
+    # the refusal names the file and nothing here creates it.
+    if is_macos && [ ! -f /usr/local/share/wk-bench/owner-password ]; then
+        log "  this Mac cannot set its own startup disk yet -- 'wk boot mbp' says what"
+        log "  would let it, and until then the startup manager is the way."
+    fi
+
     if [ -f "$_boot_target" ]; then
-        _boot_perm=$(stat -c '%a' "$_boot_target" 2>/dev/null || echo "")
+        if is_macos; then _boot_perm=$(stat -f '%Lp' "$_boot_target" 2>/dev/null || echo "")
+        else _boot_perm=$(stat -c '%a' "$_boot_target" 2>/dev/null || echo ""); fi
         case "$_boot_perm" in
             ''|*[!0-7]*) die "could not read the mode of $_boot_target -- refusing to vouch for $_boot_sudoers" ;;
             *[2367])     die "$_boot_target is world-writable (mode $_boot_perm) -- remove $_boot_sudoers now" ;;

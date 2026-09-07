@@ -1,29 +1,7 @@
 #!/usr/bin/env python3
-"""Is the profile a PGO collection produced worth building against?
-
-A collection that ran behind a throttled browser, or whose benchmark gave up
-after one iteration, still writes every file the build expects; the measured
-build then links against a profile that names the wrong code as hot, and the
-regression it invents is indistinguishable from the patch's. So the collection
-is read back before the second phase starts.
-
-What is asked of it, per library (JavaScriptCore, WebCore, WebKit -- pgo-profile's
-own PROFILED_DYLIBS) and per benchmark:
-
-  present    the merged profile exists, and so does the weighted combination and
-             the compressed copy the measured build reads
-  populated  llvm-profdata reports functions, and a maximum function count above
-             zero -- an empty profile shows neither
-  covered    each benchmark reached a real fraction of the functions the
-             combined profile knows about, per library. Counts cannot be
-             compared across benchmarks -- measured 2026-09-06, jetstream3's
-             total count in WebKit is 545x smaller than motionmark's, because
-             one is a JavaScript benchmark and the other is a rendering one --
-             but how much of a library each one *touches* is stable, and a leg
-             that gave up early is a leg that touched little of it.
-
-  bench/mac-profile-check.py --profile-dir <dir> --arch <arch> [--json <path>]
-"""
+"""Is the profile a PGO collection produced worth building against? A collection
+behind a covered browser, or whose benchmark gave up early, still writes every
+file the build expects. README.md, "The Mac lane", says what is asked of it."""
 import argparse
 import json
 import os
@@ -34,14 +12,8 @@ import sys
 LIBRARIES = ("JavaScriptCore", "WebCore", "WebKit")
 BENCHMARKS = ("speedometer3", "jetstream3", "motionmark")
 
-# A collection that ran is orders of magnitude above this; one that died in its
-# first iteration is below it.
 MIN_FUNCTIONS = 1000
-
-# Of the combined profile's functions for that library. Measured 2026-09-06 over
-# a whole collection in a guest, the thinnest leg was motionmark's 12,783 of
-# JavaScriptCore's 24,129 -- 53%; every other one was higher.
-MIN_COVERAGE = 0.25
+MIN_COVERAGE = 0.25   # of the combined profile's, per library; the thinnest leg measured was 53%
 
 
 def profdata():
@@ -53,8 +25,7 @@ def profdata():
 
 
 def summarise(tool, path):
-    """`llvm-profdata show`'s header, as numbers. Its own summary rather than a
-    walk of the counters: the tool is the reader of its own format."""
+    # Its own summary rather than a walk of the counters: the tool reads its own format.
     cp = subprocess.run([tool, "show", path], capture_output=True, text=True)
     if cp.returncode != 0:
         return {"error": (cp.stderr or cp.stdout).strip().splitlines()[:1]}
@@ -67,8 +38,7 @@ def summarise(tool, path):
 
 
 def collect(profile_dir, arch, summary):
-    """Read every profile the collection should have written. `summary` is the
-    reader (a real llvm-profdata, or a stub in a test)."""
+    # `summary` is the reader: a real llvm-profdata, or a stub in a test.
     reading = {"profile_dir": profile_dir, "arch": arch,
                "benchmarks": {}, "combined": {}, "compressed": {}, "missing": []}
 
@@ -95,8 +65,7 @@ def collect(profile_dir, arch, summary):
 
 
 def faults(reading):
-    """The verdict, as a list of reasons -- separated from the reading so it can
-    be exercised against a profile that does not exist."""
+
     found = []
     for path in reading["missing"]:
         if path.startswith("output/"):
