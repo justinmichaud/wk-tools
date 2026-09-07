@@ -53,20 +53,25 @@ SHELL_ROOTS = ("admin", "bench", "boot", "bridge", "build", "cmd", "container",
                "host", "image", "lib", "targets", "vm")
 SHELL_SHEBANG_LINE = re.compile(r'^#!.*\b(bash|sh|dash|ksh)\b')
 
-# --- an assignment whose value comes out of a `grep` --------------------------
+# --- an assignment whose value comes out of a command that reports absence --------------------------
 #
-# `grep` exits 1 when it matches nothing, and under `set -euo pipefail` that
+# `grep` exits 1 when it matches nothing and `ls` exits nonzero when a path is
+# not there, and under `set -euo pipefail` that
 # status is the assignment's -- at any stage of the pipeline. So the very case
 # the code below then handles (`[ -z "$x" ]`, a `*)` arm, a `pass` line) is the
 # one that never arrives: the script dies at the assignment instead. The fix is
 # `|| x=""`, which is how the rest of the tree writes it.
 #
-# Only a `grep` this statement itself runs counts. One inside a quoted argument
+# The command word only, so `git ls-remote` -- whose failure a caller does mean
+# to inherit -- is not this. And only a command this statement itself runs counts. One inside a quoted argument
 # belongs to another shell -- `inside`'s own `|| true`, a remote pipeline ending
 # in `head` -- and its status never reaches here, so quoted spans are blanked
 # out the way audit 1 blanks them.
 GREP_ASSIGN_RE = re.compile(
     r'^(local\s+|export\s+|declare\s+)?[A-Za-z_][A-Za-z0-9_]*=\$\(')
+
+# At the head of the substitution or of a pipeline stage: `$(grep …`, `| ls …`.
+ABSENCE_CMD_RE = re.compile(r'(?:\$\(|\||;|^)\s*(grep|ls)\s')
 
 
 def _without_strings(s):
@@ -98,7 +103,7 @@ def _without_strings(s):
 
 def _grep_assignments_in(text):
     """The rule, over any shell text: an assignment from a substitution whose
-    own pipeline runs a grep, with nothing to absorb its status."""
+    own pipeline runs one of those, with nothing to absorb its status."""
     found = []
     for stmt in _statements(text.splitlines()):
         if not GREP_ASSIGN_RE.match(stmt):
@@ -106,7 +111,7 @@ def _grep_assignments_in(text):
         bare = _without_strings(stmt)
         if "||" in bare or "&&" in bare:
             continue
-        if re.search(r'\bgrep\b', bare):
+        if ABSENCE_CMD_RE.search(bare):
             found.append(stmt)
     return found
 
@@ -123,12 +128,13 @@ def find_grep_assignments():
 
 
 class TestGrepAssignmentAudit(unittest.TestCase):
-    def test_no_assignment_takes_an_unprotected_greps_exit_status(self):
+    def test_no_assignment_takes_an_unprotected_exit_status(self):
         found = find_grep_assignments()
         self.assertEqual(
             found, [],
             "these assignments die under `set -euo pipefail` the moment their "
-            "grep matches nothing, which is the case the code around them "
+            "grep matches nothing or their ls finds no path, which is the case "
+            "the code around them "
             f"handles: {found}. Write `|| name=\"\"`.",
         )
 
@@ -137,11 +143,14 @@ class TestGrepAssignmentAudit(unittest.TestCase):
         audit above has to be a clean tree and not a broken scan."""
         self.assertEqual(len(_grep_assignments_in(
             'blanket=$(printf "%s" "$rules" | grep -E NOPASSWD | tail -1)\n')), 1)
+        self.assertEqual(len(_grep_assignments_in(
+            'dir=$(ls -1d "$root"/WebKitBuild/*/ 2>/dev/null | head -1)\n')), 1)
 
     def test_the_two_ways_of_absorbing_it_are_not_reported(self):
         self.assertEqual(_grep_assignments_in(
             'blanket=$(printf "%s" "$rules" | grep -E NOPASSWD) || blanket=""\n'
-            'material=$(inside "grep -rl KEY $HOME | head -5")\n'), [])
+            'material=$(inside "grep -rl KEY $HOME | head -5")\n'
+            'sha=$(git ls-remote "$r" "$ref" | awk \'{print $1}\')\n'), [])
 
 
 HEREDOC_OP_RE = re.compile(r'<<(?!<)(-)?\s*([\'"]?)([A-Za-z_][A-Za-z0-9_]*)\2')

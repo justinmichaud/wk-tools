@@ -389,6 +389,29 @@ plan_resolves() {  # <plan> -- 0 when this plan already detects $DETECT
     printf '%s' "$out" | grep -q '^met=yes$'
 }
 
+# `wk bench staged` judges each leg's settings; this judges the browser those settings are for, which is the thing actually measured. Once per boot and before any round, because a window that is throttled, drawn on no Metal device, or behind something else makes every number after it a throttle's, and nothing downstream can tell. No --force crosses it: there is no number to save.
+refuse_throttled_browser() {
+    local sid dir
+    sid=$(jf "arms.0.id")
+    dir=$(ls -1d "$WK_AB_ROOT/staged/$sid"/WebKitBuild/*/ 2>/dev/null | head -1) || dir=""
+    if [ -z "$dir" ]; then
+        say "no products under $WK_AB_ROOT/staged/$sid -- nothing to check the browser with"
+        leave_bench halt "arm A is not staged"
+        exit 0
+    fi
+    say "browser check against arm A's build ($sid)"
+    if /usr/bin/python3 "$TOOLS/bench/mac-browser-check.py" \
+            --build-directory "${dir%/}" --json "$RUNS/browser-check.json" >>"$LOG" 2>&1; then
+        say "  the browser here is accelerated, unthrottled and frontmost (readings above)"
+        return 0
+    fi
+    say "  this install cannot present a browser worth measuring (faults above)."
+    say "  Every round would measure that instead of the patch, so nothing runs."
+    leave_bench halt "browser check failed"
+    exit 0
+}
+refuse_throttled_browser
+
 # Not measured: it absorbs the first-run effect a freshly copied build tree has, and carries the capture the measured rounds cannot take afterwards.
 say "warmup round -- discarded; it profiles each arm and settles the machine"
 mkdir -p "$RUNS/warmup" 2>/dev/null

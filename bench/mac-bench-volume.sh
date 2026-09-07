@@ -428,6 +428,20 @@ do_repair() {
         write_wifi_conf "$S/usr/local/share/wk-bench/wifi.conf"
     fi
 
+    # Tombstone: a volume staged before the tailnet install was refused still
+    # carries these, and a payload that holds a 21MB installer nothing reads is
+    # a volume that lies about what its first boot does.
+    local stale f
+    for f in tailscale-authkey Tailscale-macos.pkg; do
+        stale="$S/usr/local/share/wk-bench/$f"
+        [ -e "$stale" ] || continue
+        if [ -n "$DRY" ]; then
+            log "  would remove $f from the payload (no unattended install reads it)"
+        else
+            sudo rm -f "$stale" && changed "removed $f from the payload"
+        fi
+    done
+
     if [ -n "$DRY" ]; then
         log "  would write $S/Library/LaunchDaemons/com.wk.bench-firstboot.plist"
     else
@@ -539,7 +553,8 @@ FINDINGS
     # autorun, refuse a volume it does not appear in).
     local fblog=/var/log/wk-bench-firstboot.log   # the path the daemon's plist gives launchd
     if [ -n "$DRY" ]; then
-        log "  would record 'provisioning complete' in $fblog"
+        log "  would record 'provisioning complete' in $fblog -- but only on a readback"
+        log "    with no '--' line above, and this one has $(printf '%s' "$quiet_ok" | sed 's/^yes$/none/; s/^no$/some/')"
     elif [ "$quiet_ok" = yes ]; then
         printf '=== provisioning complete (wk bench mac-volume --provision, %s) ===\n' \
                "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \

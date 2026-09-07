@@ -19,31 +19,30 @@ the command that does it and the command that proves it.
 
 ## The blocker
 
-- [ ] provisioning has never completed on `WK Bench`: `grep -c "provisioning
-      complete" '/Volumes/WK Bench - Data/private/var/log/wk-bench-firstboot.log'`
-      is **0** across every attempt back to 2026-08-23, so the desktop quieting
-      has never been applied and `wk bench staged`'s preflight refuses every leg
-      with "35 setting(s) above are not a measured Mac's". Measured 2026-09-07:
-      `--repair` re-armed the daemon, the volume booted at 15:01:00Z, and the
-      log stops one second later at "installing Tailscale" -- the autorun
-      *planted* at `/var/wk/bin` killed it, removed the daemon, then saw the
-      04:22 job's `phase=done` and halted. That copy predates the fix, and only
-      a plant replaces it.
+- [ ] provisioning has never completed on `WK Bench`, and the cause is now
+      measured. On the 16:15 and 17:43 boots of 2026-09-07 it ran the whole
+      quieting (every `pmset` row `ok`, hosts denied, wk-tools placed) and then
+      died one step from the end:
 
-      So the next attempt is three commands, in this order:
+          /usr/local/libexec/wk-bench-pyobjc.sh: line 15: HOME: unbound variable
 
-          wk bench mac-volume --repair          # on the Mac: re-arm the daemon
-          wk bench mac-ab --a 20260906T233003Z-mac-release-pgo \
-                          --b 20260907T021244Z-mac-release-pgo \
-                          --rounds 1 --detect 0 --count 1 --shutdown --force
-          # hold the power button, pick WK Bench
+      A LaunchDaemon inherits no environment, so `$HOME` is unset, and under
+      `set -euo pipefail` that ends the script before it logs `provisioning
+      complete` or removes itself. `wk_pyobjc_have` also ran as root, which
+      cannot import a `pip install --user` that belongs to `bench`, so the
+      guard fell through to that line every time. Both are fixed here
+      (`${HOME:-}`, and `su -l "$BENCH_USER"`), and tests/test_mac_quiet.py
+      sources every payload script under `env -i` to hold the class.
 
-      `--force` is required and is the point: the preflight refuses an
-      unprovisioned volume, and the plant carries the autorun that lets
-      provisioning finish. That boot provisions and reboots itself to the
-      firmware default (the host install), so `wk bench mac-ab --preflight`
-      should then read `ok provisioned` -- and the A/B needs one more pick of
-      the volume [needs two boots of the volume]
+      The volume still runs the *old* payload, so this needs delivering:
+
+          # commit, then from moose:
+          wk sync --tools tolken
+          wk bench mac-volume --repair    # on the Mac, in host mode
+          # hold the power button, pick WK Bench -- it provisions and reboots
+
+      then re-plant (no `--force` this time) and pick the volume once more
+      [needs two boots of the volume]
 
 ## One A/B iteration
 
@@ -92,6 +91,21 @@ the command that does it and the command that proves it.
       `wk bench mac-ab --progress` answers from the volume in host mode, and
       the `tolken-bench` ssh stanza resolves to nothing on purpose
       [no hardware needed to build it; one boot to prove it]
+
+- [ ] `wk find` sweeps every segment but probes ssh only as the invoking
+      account, so it lists the bench install as an unnamed address and cannot
+      say what it is (measured 2026-09-07: it was identified by hand, as
+      `bench@`, after the sweep). Every fleet install whose account is not the
+      operator's is invisible to it, which is exactly the case that has no
+      tailnet name to fall back on [no hardware needed]
+
+- [ ] the browser reading is taken once, before the rounds
+      (`refuse_throttled_browser`, bench/mac-bench-autorun.sh), so a window
+      that is covered or throttled *part way through* an A/B is not caught: a
+      notification, a keychain panel or a display that sleeps mid-run lands on
+      whichever arm was running. The collection path already watches for it
+      (`screen_watch_stop`, build/mac-pgo.sh, which fails the collection and
+      names what drew); the legs could take the same watch [no hardware needed]
 
 - [ ] two readers, two definitions of provisioned: the autorun and
       `wk bench mac-ab` ask the first-boot log for a completion line, while

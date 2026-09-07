@@ -1068,7 +1068,8 @@ cmd_staged() {
     is here, and Tools/Scripts/run-benchmark --list-plans what it can run)"
 
     local build_dir runner_script out_id out
-    build_dir=$(ls -d "$dir"/WebKitBuild/* 2>/dev/null | head -1)
+    build_dir=$(ls -d "$dir"/WebKitBuild/* 2>/dev/null | head -1) || build_dir=""
+    [ -n "$build_dir" ] || die "$dir has no WebKitBuild/* -- that staged arm carries no products to run"
     runner_script="$dir/Tools/Scripts/run-benchmark"
     out_id="$(date -u +%Y%m%dT%H%M%SZ)-$plan-$(basename "$dir")"
     out="$root/results/$out_id"

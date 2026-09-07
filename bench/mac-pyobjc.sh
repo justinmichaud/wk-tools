@@ -11,8 +11,10 @@ wk_pyobjc_have() { [ "$(wk_pyobjc_version)" = "$WK_PYOBJC_VERSION" ]; }
 
 wk_pyobjc_install() {
     wk_pyobjc_have && return 0
-    # shellcheck disable=SC1091 -- a guest reaches PyPI only through this machine's proxy, and this shell reads no profile.
-    [ -r "$HOME/.wk-egress" ] && . "$HOME/.wk-egress"
+    # shellcheck disable=SC1091 -- a guest reaches PyPI only through this machine's proxy, and this shell reads no profile. `${HOME:-}` because a LaunchDaemon inherits no environment at all, and under `set -u` a bare $HOME ends the script that sourced this one.
+    if [ -r "${HOME:-}/.wk-egress" ]; then
+        . "${HOME:-}/.wk-egress"
+    fi
     "$WK_PYOBJC_PYTHON" -m pip install --user --disable-pip-version-check --no-warn-script-location \
         "pyobjc-core==$WK_PYOBJC_VERSION" \
         "pyobjc-framework-Cocoa==$WK_PYOBJC_VERSION" \

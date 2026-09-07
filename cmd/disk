@@ -90,7 +90,7 @@ probe_store() {
     local d id n
     printf '%s\t%s\t%s\n' "$(_kb "$(wk_mirror)")" "the WebKit mirror" "git/WebKit.git -- refetchable (wk sync)"
 
-    n=$(ls -1 "$(wk_base_dir)" 2>/dev/null | wc -l | tr -d ' ')
+    n=$(ls -1 "$(wk_base_dir)" 2>/dev/null | wc -l | tr -d ' ') || n=0
     printf '%s\t%s\t%s\n' "$(_kb "$(wk_base_dir)")" "base snapshots" \
         "$n of them; unreferenced ones go with wk gc"
 

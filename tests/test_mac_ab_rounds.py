@@ -283,6 +283,14 @@ class TestProvisioningIsNotSomethingToKill(WkTest):
         self.assertIn(f"FB_LOG={path}", AUTORUN.read_text())
         self.assertIn("/log/wk-bench-firstboot.log", MACAB.read_text())
 
+    def test_a_dry_provision_does_not_promise_the_record(self):
+        """The readback is what decides it, and a dry run has one: saying
+        "would record" over a probe full of `--` lines is the same overstating
+        the A/B's own dry run did."""
+        volume = (REPO / "bench" / "mac-bench-volume.sh").read_text()
+        self.assertIn("would record 'provisioning complete' in $fblog -- but only on a readback",
+                      volume)
+
     def test_provisioning_by_hand_records_what_it_verified(self):
         """`wk bench mac-volume --provision` is the by-hand equivalent of the
         daemon, and refuses to run anywhere but on the volume -- so it writes
@@ -350,3 +358,86 @@ class TestProvisioningIsNotSomethingToKill(WkTest):
         body = func_body(MACAB.read_text(), "preflight")
         self.assertIn('ck no "provisioned"', body)
         self.assertIn('ck yes "provisioned"', body)
+
+
+class TestADryRunClaimsNothing(WkTest):
+    """`--dry-run` reports the plan and then says what it did, which is
+    nothing: the shutdown path used to announce "powering off with the job
+    planted" from a run that had planted nothing and powered nothing off."""
+
+    def test_one_place_decides_what_a_dry_run_says(self):
+        text = MACAB.read_text()
+        self.assertEqual(text.count("dry run -- nothing on $HOST was changed"), 1)
+
+    def test_the_dry_exit_comes_before_every_claim_of_having_acted(self):
+        text = MACAB.read_text()
+        dry = text.index('if [ -n "$DRY" ]; then\n    [ "$ACTION" = plant ] || phase_go')
+        for claim in ('info "planted and not started.',
+                      'info "$HOST is powering off with the job planted."',
+                      "came_back=$(phase_wait"):
+            self.assertLess(dry, text.index(claim),
+                            f"a dry run reaches `{claim[:40]}`")
+
+    def test_nothing_downstream_still_expects_a_dry_answer(self):
+        """phase_wait cannot be reached in a dry run now, so neither its own
+        `dry` answer nor the arm that read it may survive."""
+        text = MACAB.read_text()
+        self.assertNotIn("printf 'dry'", text)
+        self.assertNotIn("    dry)", text)
+
+
+class TestTheBrowserIsMeasuredBeforeTheRounds(WkTest):
+    """`wk bench staged` judges 35 settings; the browser check judges the
+    window itself -- WebGL, requestAnimationFrame, the screen it is on, and
+    whether a WebKit GPU process held a client while it drew. The settings are
+    the proxy; this is the thing, and an A/B that skips it can report a
+    throttled window's numbers as the patch's."""
+
+    def _check(self, staged=True, passes=True):
+        text = AUTORUN.read_text()
+        with scratch_dir() as tmp:
+            root = tmp / "var-wk"
+            products = root / "staged" / "sid-a" / "WebKitBuild" / "Release"
+            if staged:
+                products.mkdir(parents=True)
+            runs = root / "ab" / "stamp"
+            runs.mkdir(parents=True)
+            left = tmp / "left"
+            cp = sh(
+                f'set -euo pipefail\n'
+                f'WK_AB_ROOT={root}; RUNS={runs}; TOOLS={tmp}/tools; LOG=/dev/null\n'
+                f'mkdir -p "$TOOLS/bench"\n'
+                f'printf "raise SystemExit({0 if passes else 1})\\n" '
+                f'  > "$TOOLS/bench/mac-browser-check.py"\n'
+                f'say() {{ printf "%s\\n" "$*"; }}\n'
+                f'jf() {{ printf sid-a; }}\n'
+                f'leave_bench() {{ printf "LEAVE %s: %s\\n" "$1" "$2"; : > {left}; }}\n'
+                f'refuse_throttled_browser() {{{func_body(text, "refuse_throttled_browser")}}}\n'
+                f'refuse_throttled_browser\n'
+                f'printf "RAN THE ROUNDS\\n"\n')
+            return cp.stdout + cp.stderr, left.exists()
+
+    def test_an_unthrottled_browser_lets_the_rounds_run(self):
+        out, left = self._check(passes=True)
+        self.assertIn("RAN THE ROUNDS", out, out)
+        self.assertFalse(left, out)
+
+    def test_a_throttled_browser_stops_the_job_before_round_one(self):
+        out, left = self._check(passes=False)
+        self.assertNotIn("RAN THE ROUNDS", out, "it measured anyway:\n" + out)
+        self.assertIn("LEAVE halt", out, out)
+        self.assertTrue(left, out)
+
+    def test_an_arm_with_no_products_is_not_measured_around(self):
+        out, left = self._check(staged=False)
+        self.assertNotIn("RAN THE ROUNDS", out, out)
+        self.assertIn("LEAVE halt", out, out)
+
+    def test_it_runs_before_the_warmup_and_after_the_quiescing(self):
+        text = AUTORUN.read_text()
+        self.assertLess(text.index('say "quiescing"'), text.index("refuse_throttled_browser()"))
+        self.assertLess(text.index("\nrefuse_throttled_browser\n"),
+                        text.index('say "warmup round'))
+
+    def test_the_reading_travels_with_the_experiment(self):
+        self.assertIn('--json "$RUNS/browser-check.json"', AUTORUN.read_text())

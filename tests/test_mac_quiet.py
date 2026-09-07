@@ -277,11 +277,57 @@ class TestNothingUnattendedNeedsAPerson(unittest.TestCase):
                 self.assertNotIn(command, text,
                                  f"{path.name} runs `{command}` with nobody in the room")
 
-    def test_the_payload_carries_neither_the_key_nor_the_package(self):
+    def test_the_payload_is_never_given_the_key_or_the_package(self):
+        """The only mention left is the tombstone that deletes them."""
         text = (REPO / "bench" / "mac-bench-volume.sh").read_text()
-        self.assertNotIn("tailscale-authkey", text)
-        self.assertNotIn("Tailscale-macos.pkg", text)
+        self.assertNotIn("wk_tailscale_authkey", text)
+        for line in text.splitlines():
+            if "tailscale-authkey" not in line and "Tailscale-macos.pkg" not in line:
+                continue
+            self.assertTrue(line.lstrip().startswith(("#", "for f in", "stale=", "log ")),
+                            f"the payload is still given it: {line.strip()}")
+
+    def test_a_repair_clears_what_an_earlier_one_staged(self):
+        """Crash-only: --repair converges on the declared payload, so a volume
+        staged before this carries no key and no installer either."""
+        text = (REPO / "bench" / "mac-bench-volume.sh").read_text()
+        self.assertIn("for f in tailscale-authkey Tailscale-macos.pkg; do", text)
+        self.assertIn('sudo rm -f "$stale"', text)
 
     def test_the_setup_stage_that_fed_it_is_gone(self):
         self.assertFalse((REPO / "host" / "macos" / "benchkey.sh").exists())
         self.assertNotIn("benchkey", (REPO / "setup").read_text())
+
+
+class TestTheDaemonsEnvironment(unittest.TestCase):
+    """A LaunchDaemon inherits no environment at all -- no HOME, no USER, no
+    TMPDIR -- and the first-boot script runs under `set -euo pipefail`, so one
+    bare `$HOME` in anything it sources ends provisioning where it stands. It
+    got as far as the last step that way, leaving a volume 95% provisioned
+    with no completion line and no reboot."""
+
+    SOURCED = ("mac-pyobjc.sh", "mac-quiet-desktop.sh", "mac-quiet-hosts.sh")
+
+    def test_nothing_it_sources_reads_an_environment_it_will_not_have(self):
+        for name in self.SOURCED:
+            text = (REPO / "bench" / name).read_text()
+            for var in ("$HOME", "$USER", "$LOGNAME", "$TMPDIR"):
+                for line in text.splitlines():
+                    if var in line and f"${{{var[1:]}:-" not in line:
+                        self.fail(f"bench/{name} reads {var} bare: {line.strip()}")
+
+    def test_each_one_survives_an_empty_environment_under_set_u(self):
+        for name in self.SOURCED:
+            cp = subprocess.run(
+                ["/usr/bin/env", "-i", "/bin/bash", "-c",
+                 f'set -euo pipefail; . "{REPO}/bench/{name}"; echo SOURCED-OK'],
+                capture_output=True, text=True, timeout=30)
+            self.assertIn("SOURCED-OK", cp.stdout,
+                          f"bench/{name} dies when sourced by a daemon: "
+                          f"{cp.stdout}{cp.stderr}")
+
+    def test_pyobjc_is_installed_as_the_account_that_drives_the_browser(self):
+        """`pip install --user` installs into the running user's home, and
+        root's is not where run-benchmark looks."""
+        text = FIRSTBOOT.read_text()
+        self.assertIn('su -l "$BENCH_USER" -c ". $PYOBJC; wk_pyobjc_install"', text)

@@ -1,6 +1,5 @@
 #!/bin/bash
 # The benchmark install configuring itself once, at first boot. A LaunchDaemon, not a package postinstall: startosinstall's package runs against a volume that is not running, so an account could only be made by hand-editing dslocal. Idempotent throughout.
-# A LaunchDaemon inherits no environment, so the password comes from $PAYLOAD/password; WK_BENCH_USER and WK_BENCH_PASSWORD are for running this by hand.
 
 set -euo pipefail
 export PATH=/usr/sbin:/usr/bin:/sbin:/bin
@@ -216,7 +215,6 @@ else
     say "WARNING: $QUIET_HOSTS missing from the payload; update endpoints not denied"
 fi
 
-# `wk quiesce` refuses to start without it; this account's passwordless sudo is the grant, so it needs no sudoers rule of its own.
 if [ -x "$PAYLOAD/wk-tools/admin/wk-quiesce-priv" ]; then
     install -d -o root -m 0755 /usr/local/libexec 2>/dev/null || true
     if install -o root -m 0755 "$PAYLOAD/wk-tools/admin/wk-quiesce-priv" \
@@ -242,8 +240,9 @@ PYOBJC=/usr/local/libexec/wk-bench-pyobjc.sh
 if [ -r "$PYOBJC" ]; then
     # shellcheck disable=SC1090
     . "$PYOBJC"
-    if wk_pyobjc_install; then
-        say "pyobjc $WK_PYOBJC_VERSION installed"
+    # As $BENCH_USER through `su -l`, not as root: `pip install --user` installs into the running user's home, the browser is driven as $BENCH_USER, and a LaunchDaemon has no HOME to install into anyway.
+    if su -l "$BENCH_USER" -c ". $PYOBJC; wk_pyobjc_install" >&2; then
+        say "pyobjc $WK_PYOBJC_VERSION installed for $BENCH_USER"
     else
         say "PYOBJC MISSING -- run-benchmark cannot size the screen or warp the cursor,"
         say "  and nothing can keep MiniBrowser frontmost, so every number this install"

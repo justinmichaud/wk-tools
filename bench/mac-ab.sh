@@ -631,7 +631,6 @@ phase_go() {
 
 phase_wait() {
     local limit="$1" start now mode last=""
-    [ -n "$DRY" ] && { log "  would wait up to ${limit}s for $HOST to answer again"; printf 'dry'; return 0; }
     info "wait: up to $((limit / 60)) minutes for $HOST to answer"
     start=$(date +%s)
     sleep 45   # for the first seconds the machine is still up, and an immediate poll would report host mode too soon
@@ -956,11 +955,17 @@ elif [ -n "$DO_STAGE" ]; then
 fi
 phase_plant >/dev/null
 
-[ "$ACTION" = plant ] && {
+if [ -n "$DRY" ]; then
+    [ "$ACTION" = plant ] || phase_go   # the plan is not complete without how it would leave the machine
+    info "dry run -- nothing on $HOST was changed and nothing was rebooted"
+    exit 0
+fi
+
+if [ "$ACTION" = plant ]; then
     info "planted and not started. The A/B runs the next time '$VOLUME' boots --"
     log  "  by itself if it is the firmware default, or from the startup manager."
     exit 0
-}
+fi
 
 phase_go
 
@@ -976,8 +981,6 @@ fi
 came_back=$(phase_wait "$BOOT_WAIT") || true
 log ""
 case "$came_back" in
-    dry)
-        info "dry run -- nothing on $HOST was changed and nothing was rebooted" ;;
     bench)
         info "$HOST came back in BENCH mode and is reachable -- the A/B is running there."
         log  "  'wk bench mac-ab --status' follows it." ;;

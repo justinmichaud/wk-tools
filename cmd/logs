@@ -33,7 +33,7 @@ resolve_log() {
         local stage_logs=("$WSDIR"/home/yocto-*.log "$WSDIR"/home/buildroot-*.log)
         shopt -u nullglob
         if [ "${#stage_logs[@]}" -gt 0 ]; then
-            LOG=$(ls -1t "${stage_logs[@]}" | head -1)
+            LOG=$(ls -1t "${stage_logs[@]}" | head -1) || LOG=""
             shown="$LOG"
         else
             die "no build log and no image-stage log for '$NAME' -- has it been
