@@ -198,33 +198,36 @@ class TestApplyingIt(WkTest):
             with self.subTest(setting=name):
                 self.assertRegex(calls, rf"defaults -currentHost write {domain[1:]} {key}")
 
-    def test_each_agent_is_disabled_and_booted_out(self):
-        """`disable` is what holds across logins; `bootout` is what takes it
-        away from the session that is already up."""
-        _, calls = self._run("wk_quiet_desktop_user")
+    def test_every_agent_is_on_the_list_that_gets_signalled(self):
+        """Neither `disable` nor `bootout` holds one down -- measured
+        2026-09-07, 17 of the 21 running again within the second, because
+        macOS starts them on demand. They are stopped by signal now, on the
+        one list `_wk_qd_daemons_signal` reads."""
+        stopped = bash(f'. {str(QUIET)!r}\nwk_quiet_desktop_stopped\n').stdout
+        listed = {line.split()[1] for line in stopped.splitlines() if line.split()}
         for row in _rows("agents"):
-            with self.subTest(agent=row[1]):
-                self.assertRegex(calls, rf"launchctl disable gui/\d+/{re.escape(row[1])}")
-                self.assertRegex(calls, rf"launchctl bootout gui/\d+/{re.escape(row[1])}")
+            with self.subTest(agent=row[2]):
+                self.assertIn(row[2], listed)
+        for row in _rows("daemons"):
+            with self.subTest(daemon=row[1]):
+                self.assertIn(row[1], listed)
 
-    def test_the_launchd_label_is_read_rather_than_assumed(self):
-        """com.apple.notificationcenterui.plist declares
-        com.apple.notificationcenterui.**agent**. Disabling the filename is
-        recorded by launchd as cheerfully as the real thing and the agent goes
-        on running -- measured on a Tahoe 26.4 guest, with the probe reporting
-        "no banner can be drawn" while NotificationCenter was up."""
-        src = QUIET.read_text()
-        self.assertIn("Print :Label", src)
-        body = src[src.index("wk_quiet_desktop_user()"):]
-        self.assertIn("_wk_qd_label", body[:body.index("\nwk_quiet_desktop_system")])
+    def test_applying_the_settings_signals_nothing_itself(self):
+        """One enforcement: the signal, sent by the privileged half. Writing a
+        preference must not also reach for launchd."""
+        _, calls = self._run("wk_quiet_desktop_user")
+        self.assertNotIn("bootout", calls)
+        self.assertNotRegex(calls, r"launchctl disable")
 
     def test_the_probe_asks_the_process_not_launchd(self):
-        """The same measurement: launchd's disabled list said `off` for an agent
-        that was running. What settles it is whether the process is there."""
+        """launchd's disabled list said `off` for an agent that was running,
+        and `pgrep` alone cannot tell a stopped process from a running one --
+        so every row is read as absent, stopped or running."""
         body = QUIET.read_text()
         probe = body[body.index("wk_quiet_desktop_probe()"):]
-        self.assertIn("pgrep -x", probe)
+        self.assertIn("_wk_qd_procstate", probe)
         self.assertNotIn("print-disabled", probe)
+        self.assertNotIn("pgrep -x", probe)
 
     def test_another_account_is_written_as_that_account(self):
         """A bench install's first boot runs as root before anyone has logged
@@ -296,18 +299,34 @@ class TestPausingTheDaemons(WkTest):
         self.assertIn("needs root", cp.stdout + cp.stderr)
         self.assertEqual("", calls)
 
+    def _stoppable(self):
+        skip = set(bash(f'. {str(QUIET)!r}\nwk_quiet_desktop_unstoppable\n').stdout.split())
+        return [(i, row) for i, row in enumerate(_rows("daemons")) if row[1] not in skip]
+
     def test_every_daemon_running_is_stopped(self):
         cp, calls = self._signal("wk_quiet_daemons_pause")
         self.assertIn("rc=0", cp.stdout)
-        for i, row in enumerate(_rows("daemons")):
+        for i, row in self._stoppable():
             with self.subTest(daemon=row[1]):
                 self.assertIn("kill -STOP %d\n" % (100 + i), calls)
 
     def test_resume_sends_the_other_signal_to_the_same_list(self):
         _, calls = self._signal("wk_quiet_daemons_resume")
-        for i, row in enumerate(_rows("daemons")):
+        for i, row in self._stoppable():
             with self.subTest(daemon=row[1]):
                 self.assertIn("kill -CONT %d\n" % (100 + i), calls)
+
+    def test_what_sip_refuses_is_never_signalled(self):
+        """`kill -STOP` on a platform binary answers EPERM however it is sent,
+        so trying is noise in every log a run leaves behind."""
+        _, calls = self._signal("wk_quiet_daemons_pause")
+        skip = bash(f'. {str(QUIET)!r}\nwk_quiet_desktop_unstoppable\n').stdout.split()
+        self.assertTrue(skip)
+        rows = {row[1]: 100 + i for i, row in enumerate(_rows("daemons"))}
+        for proc in skip:
+            if proc in rows:
+                with self.subTest(daemon=proc):
+                    self.assertNotIn("kill -STOP %d\n" % rows[proc], calls)
 
     def test_the_machine_is_listed_once_and_never_asked_again(self):
         """Measured in the rehearsal guest on 2026-09-05: `pgrep` never returns
@@ -397,7 +416,7 @@ P
         for name, domain, key, type_, value, _why in _rows("rows"):
             want = {"true": "1", "false": "0"}.get(value, value) if type_ == "bool" else value
             out.append(f"{name}={want}")
-        out += [f"{r[0]}=off" for r in _rows("agents")]
+        out += [f"{r[0]}=stopped" for r in _rows("agents")]
         out += [f"{r[0]}=stopped" for r in _rows("daemons")]
         out += [f"{r[0]}={r[2]}" for r in _rows("power")]
         out += ["spotlight=Indexing disabled.", "analytics=0",
@@ -419,6 +438,22 @@ P
         self.assertIn("appnap", wrong[0][1])
         self.assertEqual("the remedy", wrong[0][2])
 
+    def test_a_row_macos_will_not_set_says_what_it_costs(self):
+        """TCC drops a write to com.apple.universalaccess however it is sent,
+        and askForPasswordDelay cannot hold once askForPassword is 0. Failing
+        on them refuses every leg for ever, so they are notes that name the
+        cost -- and a note is not a fault."""
+        unsettable = bash(f'. {str(QUIET)!r}\nwk_quiet_desktop_unsettable\n').stdout.split()
+        self.assertTrue(unsettable)
+        for name in unsettable:
+            with self.subTest(row=name):
+                probe = re.sub(rf"^{name}=.*$", f"{name}=?", self._settled(), flags=re.M)
+                f = [x for x in self._judge("wk_quiet_desktop_findings", probe)
+                     if name in x[1] or x[1].startswith("not so")]
+                states = {x[0] for x in f}
+                self.assertNotIn("wrong", states, f)
+                self.assertIn("note", states, f)
+
     def test_a_key_the_probe_never_answered_is_unknown_not_off(self):
         """A machine whose copy of this file is older answers nothing for a row
         added since. Silence is not off."""
@@ -436,8 +471,8 @@ P
         self.assertEqual(["wrong"], [x[0] for x in f], f)
 
     def test_an_agent_still_running_is_wrong_and_says_what_it_does(self):
-        probe = self._settled().replace("notifications=off", "notifications=on")
-        wrong = [f for f in self._judge("wk_quiet_desktop_findings", probe)
+        probe = self._settled().replace("notifications=stopped", "notifications=running")
+        wrong = [f for f in self._judge("wk_quiet_daemons_findings", probe)
                  if f[0] == "wrong"]
         self.assertEqual(1, len(wrong), wrong)
         self.assertIn("banner", wrong[0][1])

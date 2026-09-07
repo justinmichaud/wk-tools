@@ -8,19 +8,20 @@
 # Privileged actions go through the sudoers-allowlisted helper (wk-quiesce-priv);
 # everything else stays here.
 #
-#   on      quiet the machine for the length of a run and no longer: pause
-#           every background daemon in bench/mac-quiet-desktop.sh's table,
-#           stop Notification Center, disable App Nap and keep MiniBrowser
-#           frontmost (macOS), keep the display awake. Settles for
-#           WK_SETTLE_SECONDS (default 30) before returning.
+#   on      quiet the machine for the length of a run and no longer: stop
+#           every process in bench/mac-quiet-desktop.sh's table -- the agents a
+#           login session starts and the background daemons alike -- disable
+#           App Nap, keep MiniBrowser frontmost and the display awake (macOS).
+#           In bench mode it also writes this account's desktop settings, which
+#           a first boot cannot make hold for an account with no session yet.
+#           Settles for WK_SETTLE_SECONDS (default 30) before returning.
 #   off     undo everything `on` did, reading this machine's one state
 #           directory.
 #   status  what is quiesced right now, plus the privileged helper's own
 #           account of what it did.
 #
-#   What a measured Mac is permanently -- its desktop settings, the per-user
-#   agents that draw on their own -- is written at provisioning time, not here:
-#   `wk bench mac-volume --provision`. `status` reports both.
+#   What a measured Mac is permanently is written at provisioning time
+#   (`wk bench mac-volume --provision`); `status` reports both.
 
 set -euo pipefail
 WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -58,8 +59,7 @@ on)
     mkdir -p "$STATE"
 
     if is_macos; then
-        # SIGSTOP, so root: a signal needs no permission SIP can withhold, and
-        # `wk quiesce off` and a reboot both undo it.
+        # SIGSTOP, so root, and undone by `wk quiesce off` or a reboot. SIP withholds even that for a platform binary, which is why the table names the ones it refuses.
         if sudo -n bash -c ". $(sh_quote "$QUIET_DESKTOP"); wk_quiet_daemons_pause"; then
             touch "$STATE/daemons_paused"
             info "background daemons paused"
@@ -69,18 +69,10 @@ on)
     names every one still running."
         fi
 
-        if pgrep -x NotificationCenter >/dev/null 2>&1; then
-            nc_label=$(_wk_qd_label com.apple.notificationcenterui)
-            launchctl bootout "gui/$(id -u)/$nc_label" >/dev/null 2>&1
-            wk_sleep 1
-            if pgrep -x NotificationCenter >/dev/null 2>&1; then
-                warn "NotificationCenter is still running -- a banner can appear mid-run"
-            else
-                info "NotificationCenter stopped (label '$nc_label'; no banners can be drawn)"
-                printf '%s' "$nc_label" > "$STATE/notifications_stopped"
-            fi
-        else
-            info "NotificationCenter was not running"
+        # The user half, written again where it can take: at a first boot this account has no session, and a `defaults write` for a protected domain does not survive that session starting (measured 2026-09-07 -- reduce_motion and reduce_transparency read '?' on a fully provisioned install). Bench mode only: a workstation's own accessibility settings are not this command's to rewrite.
+        if in_bench_mode; then
+            wk_quiet_desktop_user \
+                || warn "some of this account's desktop settings did not take (above)"
         fi
 
         mac_raiser_on "$STATE"
@@ -96,15 +88,6 @@ on)
 off)
     if is_macos && [ -d "$STATE" ]; then
         mac_raiser_off "$STATE"
-        if [ -f "$STATE/notifications_stopped" ]; then
-            nc_label=$(cat "$STATE/notifications_stopped" 2>/dev/null)
-            launchctl bootstrap "gui/$(id -u)" \
-                /System/Library/LaunchAgents/com.apple.notificationcenterui.plist >/dev/null 2>&1 \
-                || launchctl kickstart "gui/$(id -u)/${nc_label:-com.apple.notificationcenterui.agent}" >/dev/null 2>&1 \
-                || open -a NotificationCenter >/dev/null 2>&1 || true
-            rm -f "$STATE/notifications_stopped"
-            info "NotificationCenter restarted"
-        fi
         if [ -f "$STATE/daemons_paused" ]; then
             sudo -n bash -c ". $(sh_quote "$QUIET_DESKTOP"); wk_quiet_daemons_resume" \
                 || warn "could not resume the background daemons; a reboot does it"

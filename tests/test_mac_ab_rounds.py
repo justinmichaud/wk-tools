@@ -378,6 +378,15 @@ class TestADryRunClaimsNothing(WkTest):
             self.assertLess(dry, text.index(claim),
                             f"a dry run reaches `{claim[:40]}`")
 
+    def test_it_says_which_gate_it_did_not_evaluate(self):
+        """This dry run resolves the plant, from host mode. The gate that
+        refuses a leg reads the running bench install, so a clean dry run here
+        is not evidence that a leg would pass -- and it names the command that
+        is."""
+        text = MACAB.read_text()
+        self.assertIn("not checked here: whether a leg would pass", text)
+        self.assertIn("wk bench staged --plan jetstream3 --dry-run", text)
+
     def test_nothing_downstream_still_expects_a_dry_answer(self):
         """phase_wait cannot be reached in a dry run now, so neither its own
         `dry` answer nor the arm that read it may survive."""

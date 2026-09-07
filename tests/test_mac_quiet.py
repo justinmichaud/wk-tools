@@ -14,7 +14,7 @@ import subprocess
 import unittest
 from pathlib import Path
 
-from tests.support import func_body
+from tests.support import bash, func_body
 
 REPO = Path(__file__).resolve().parent.parent
 QUIET_HOSTS = REPO / "bench" / "mac-quiet-hosts.sh"
@@ -326,8 +326,136 @@ class TestTheDaemonsEnvironment(unittest.TestCase):
                           f"bench/{name} dies when sourced by a daemon: "
                           f"{cp.stdout}{cp.stderr}")
 
+    def test_the_reboot_it_ends_with_cannot_be_vetoed(self):
+        """`shutdown -r` asks loginwindow, and a modal dialog refuses for it.
+        The daemon has removed itself by then, so a reboot that does not
+        happen leaves the volume provisioned and idle for ever."""
+        code = [l for l in FIRSTBOOT.read_text().splitlines()
+                if not l.lstrip().startswith("#")]
+        self.assertNotIn("shutdown -r", "\n".join(code))
+        self.assertIn("/sbin/reboot", "\n".join(code))
+
     def test_pyobjc_is_installed_as_the_account_that_drives_the_browser(self):
         """`pip install --user` installs into the running user's home, and
         root's is not where run-benchmark looks."""
         text = FIRSTBOOT.read_text()
         self.assertIn('su -l "$BENCH_USER" -c ". $PYOBJC; wk_pyobjc_install"', text)
+
+
+class TestWhatIsStoppedIsWhatIsJudged(unittest.TestCase):
+    """`wk bench staged` refuses a leg for any process on the stopped list
+    that is not stopped. Measured 2026-09-07: `launchctl bootout`, and
+    `launchctl disable` in the live GUI domain followed by `bootout`, both
+    left 17 of the 21 agents running within the second -- macOS starts them on
+    demand -- so every leg was refused and no A/B could run at all. One list,
+    stopped by signal and judged by process state, is what is left."""
+
+    QUIESCE = REPO / "cmd" / "quiesce"
+    TABLE = REPO / "bench" / "mac-quiet-desktop.sh"
+
+    def test_one_list_is_signalled_and_one_list_is_judged(self):
+        text = self.TABLE.read_text()
+        signal = text[text.index("_wk_qd_daemons_signal()"):]
+        self.assertIn("$(wk_quiet_desktop_stopped)",
+                      signal[:signal.index("wk_quiet_daemons_pause")])
+        probe = text[text.index("wk_quiet_desktop_probe()"):]
+        self.assertIn("$(wk_quiet_desktop_stopped)",
+                      probe[:probe.index("_wk_qf()")])
+        judge = text[text.index("wk_quiet_daemons_findings()"):]
+        self.assertIn("$(wk_quiet_desktop_stopped)", judge)
+
+    def test_that_list_holds_both_halves_of_the_machine(self):
+        cp = bash(f'. "{self.TABLE}"\nwk_quiet_desktop_stopped\n')
+        listed = {l.split()[1] for l in cp.stdout.splitlines() if l.split()}
+        for proc in ("NotificationCenter", "usernoted", "chronod"):
+            self.assertIn(proc, listed, "an agent is missing from the list")
+        for proc in ("softwareupdated", "backupd", "ReportCrash"):
+            self.assertIn(proc, listed, "a daemon is missing from the list")
+
+    def test_the_user_half_is_applied_where_it_can_take(self):
+        """A first boot writes it for an account with no session, and a
+        protected domain does not survive that session starting. Quiesce runs
+        in the session -- and only in bench mode, since a workstation's
+        accessibility settings are not this command's to rewrite."""
+        text = self.QUIESCE.read_text()
+        body = text[text.index("if is_macos; then"):text.index("mac_raiser_on")]
+        self.assertIn("wk_quiet_desktop_user", body)
+        self.assertIn("if in_bench_mode; then", body)
+
+    def test_a_leg_stops_them_again_before_it_judges_them(self):
+        """`wk quiesce on` runs once per boot; the gate runs per leg. macOS
+        restarts a stopped daemon on demand in between -- spindump was absent
+        at the quiesce and running at all 16 legs after it -- so the leg that
+        is about to measure stops them again first. A dry run must not."""
+        text = (REPO / "cmd" / "bench").read_text()
+        body = text[text.index("the machine itself -- every setting read back") - 700:
+                    text.index("the machine itself -- every setting read back")]
+        self.assertIn("wk_quiet_daemons_pause", body)
+        self.assertIn('if in_bench_mode && [ -z "$dry" ]; then', body)
+
+    def test_the_findings_renderer_still_changes_nothing(self):
+        """`wk quiesce status` renders the same findings, and a reporting
+        command mutates nothing."""
+        text = (REPO / "lib" / "quiet.sh").read_text()
+        self.assertNotIn("wk_quiet_daemons_pause", text)
+        self.assertNotIn("kill -", text)
+        for line in text.splitlines():          # it may read with sudo; it may not write
+            if "sudo" in line:
+                self.assertIn("defaults read", line, line.strip())
+
+    def test_nothing_reaches_for_launchd_any_more(self):
+        """Two mechanisms is how the enforced set and the judged set drifted
+        apart in the first place."""
+        for path in (self.QUIESCE, self.TABLE):
+            text = path.read_text()
+            code = "\n".join(l for l in text.splitlines()
+                              if not l.lstrip().startswith("#"))
+            self.assertNotIn("launchctl bootout", code, f"{path.name} boots out")
+            self.assertNotIn("launchctl disable", code, f"{path.name} disables")
+
+
+class TestASweepCanNameABenchInstall(unittest.TestCase):
+    """A bench install has no tailnet identity, so a sweep is the only way to
+    find it -- and it runs as `bench`, not as whoever is sweeping. Probing
+    only the invoking account lists it as an unnamed address and says nothing
+    about what it is (measured 2026-09-07: identified by hand instead)."""
+
+    FIND = REPO / "cmd" / "find"
+
+    def test_the_sweep_tries_the_bench_account(self):
+        text = self.FIND.read_text()
+        self.assertIn('for who in "$(id -un)" "$WK_BENCH_ACCOUNT"', text)
+
+    def test_it_says_which_account_answered(self):
+        text = self.FIND.read_text()
+        self.assertIn("account=%s", text)
+        self.assertIn('${acct:+ (as $acct)}', text)
+
+    def test_one_spelling_of_that_account(self):
+        """cmd/find and the first-boot script cannot disagree about it."""
+        common = (REPO / "lib" / "common.sh").read_text()
+        self.assertIn('WK_BENCH_ACCOUNT="${WK_BENCH_USER:-bench}"', common)
+        self.assertIn('BENCH_USER="${WK_BENCH_USER:-bench}"', FIRSTBOOT.read_text())
+
+
+class TestBothLegPathsWatchTheScreen(unittest.TestCase):
+    """The preflight reads the screen at an instant and a leg is minutes: a
+    banner that draws after it covers the browser for the rest of the run and
+    nothing downstream can tell. `screen_watch_start`/`_stop` is how this tree
+    catches that -- and a staged leg, which is the one every A/B runs, did not
+    have it while the workspace leg did."""
+
+    BENCH = REPO / "cmd" / "bench"
+
+    def test_every_run_is_bracketed_by_the_watch(self):
+        text = self.BENCH.read_text()
+        starts = text.count("screen_watch_start")
+        stops = text.count("screen_watch_stop")
+        runs = text.count('run_watched "$out/run.log" --')
+        self.assertEqual(runs, starts, "a run-benchmark call is not watched")
+        self.assertEqual(starts, stops, "a watch is started and never read")
+
+    def test_what_drew_fails_the_leg_unless_forced(self):
+        text = self.BENCH.read_text()
+        self.assertEqual(2, text.count("something drew over this run"))
+        self.assertEqual(2, text.count('--force: keeping the number anyway; it is one to distrust'))

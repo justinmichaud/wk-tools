@@ -220,6 +220,8 @@ status_default_mode() {
 WK_STATUS_DEFAULT_MODE=text
 
 # macOS keeps the hostname's capitalisation; ssh aliases and confs are lower.
+WK_BENCH_ACCOUNT="${WK_BENCH_USER:-bench}"
+
 wk_machine_name() {
     { hostname -s 2>/dev/null || echo here; } | tr '[:upper:]' '[:lower:]'
 }

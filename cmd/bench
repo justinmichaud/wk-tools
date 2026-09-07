@@ -1159,6 +1159,11 @@ cmd_staged() {
         check yes "no auth panel" "no modal authentication dialog"
     fi
 
+    if in_bench_mode && [ -z "$dry" ]; then
+        sudo -n bash -c ". $(sh_quote "$WK_ROOT/bench/mac-quiet-desktop.sh"); wk_quiet_daemons_pause" \
+            || warn "  could not stop what has started since 'wk quiesce on' (above)"
+    fi
+
     log "  the machine itself -- every setting read back, not assumed:"
     local quiet=yes
     macos_noise || quiet=no
@@ -1228,11 +1233,23 @@ cmd_staged() {
     fi
 
     local wall_start; wall_start=$(date +%s)
+    screen_watch_start "$out/screen-watch"
     set +e
     run_watched "$out/run.log" -- \
         bash -lc "cd $(sh_quote "$dir") && ${pad_prelude}${shared_cache_env}$(sh_quote "$STAGED_PY") $(sh_quote "$runner_script") $args"
     local rc=$?
     set -e
+
+    local drew
+    if ! drew=$(screen_watch_stop "$out/screen-watch"); then
+        warn "something drew over this run, so its browser was covered:"
+        printf '%s\n' "$drew" | sed 's/^/    /' >&2
+        if [ -z "$FORCE" ]; then
+            rc=1
+        else
+            warn "  --force: keeping the number anyway; it is one to distrust"
+        fi
+    fi
     if [ -n "$capture_pid" ]; then
         # Bounded: samply ends when the process it attached to does, and a run whose browser outlived it must not take the driver with it.
         local _w=0

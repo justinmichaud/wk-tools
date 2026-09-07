@@ -247,7 +247,8 @@ preflight() {
         log "    $grp  = the host install" >&2
         log "    so a plain reboot returns here, and entering bench mode is the one" >&2
         log "    human step: hold the power button, pick '$VOLUME'. Everything" >&2
-        log "    after that, including coming back, is unattended." >&2
+        log "    after that is unattended until it hands the machine back, which" >&2
+        log "    lands at this Mac's own login window and wants a password." >&2
     else
         log "    ${grp:-<unreadable>}  (matches neither install)" >&2
     fi
@@ -958,6 +959,9 @@ phase_plant >/dev/null
 if [ -n "$DRY" ]; then
     [ "$ACTION" = plant ] || phase_go   # the plan is not complete without how it would leave the machine
     info "dry run -- nothing on $HOST was changed and nothing was rebooted"
+    log  "  not checked here: whether a leg would pass on '$VOLUME'. That gate reads"
+    log  "  the running system, and this one is not running. In bench mode, ask it:"
+    log  "    wk bench staged --plan jetstream3 --dry-run"
     exit 0
 fi
 
@@ -972,7 +976,8 @@ phase_go
 if [ "$GO" = shutdown ]; then
     info "$HOST is powering off with the job planted."
     log  "  start it holding the power button until 'Loading startup options',"
-    log  "  pick '$VOLUME' and press Return. Everything after that is unattended."
+    log  "  pick '$VOLUME' and press Return. The run is unattended; unlocking the"
+    log  "  host install when it hands the machine back is yours."
     log  "  watch it:   wk bench mac-ab --progress"
     log  "  read it:    wk bench mac-ab --collect"
     exit 0

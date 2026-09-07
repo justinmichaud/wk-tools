@@ -48,6 +48,30 @@ tips com.apple.tipsd tipsd posts a Tips notification over the window
 ROWS
 }
 
+# One list of processes that must not run during a measurement, whichever half of the machine starts them, held by signal and judged by process state. Measured 2026-09-07: `launchctl disable` then `bootout` left 17 of the 21 agents running within the second, because macOS starts them on demand; and `kill -STOP` answers EPERM for a platform binary however it is sent, so the five the kernel refuses are named above, skipped, and reported for what they can still do rather than failing every leg for ever.
+# Rows no script can set on this macOS: com.apple.universalaccess is TCC-protected, so a `defaults write` for it is dropped however it is sent -- measured 2026-09-07, written at a first boot as root and again in the account's own session, still reading '?'. Demanding them refuses every leg for ever, so what they cost is said instead.
+wk_quiet_desktop_unsettable() {
+    printf '%s\n' reduce_motion reduce_transparency
+}
+
+_wk_qd_unsettable() { wk_quiet_desktop_unsettable | grep -qxF "$1"; }
+
+wk_quiet_desktop_unstoppable() {
+    printf '%s\n' ScreenTimeAgent UsageTrackingAgent suhelperd XprotectService xprotectd
+}
+
+_wk_qd_unstoppable() { wk_quiet_desktop_unstoppable | grep -qxF "$1"; }
+
+wk_quiet_desktop_stopped() {
+    while read -r name plist proc why; do
+        [ -n "$plist" ] || continue
+        printf '%s %s %s\n' "$name" "$proc" "$why"
+    done <<ROWS
+$(wk_quiet_desktop_agents)
+ROWS
+    wk_quiet_desktop_daemons
+}
+
 # Not mds and not sysmond: `mdutil` and `pgrep` ask those two over XPC and never return while they are held stopped -- measured in the rehearsal guest, 2026-09-05, where each deadlocked the command that would have undone it. `mdutil -i off` is what makes mds idle instead.
 wk_quiet_desktop_daemons() {
     cat <<'ROWS'
@@ -84,12 +108,6 @@ power_disablesleep disablesleep 1 SleepDisabled
 power_lowpowermode lowpowermode 0 lowpowermode
 power_highpowermode highpowermode 1 highpowermode
 ROWS
-}
-
-# launchd's own Label, which is not always the plist's name: com.apple.notificationcenterui.plist declares com.apple.notificationcenterui.agent, and disabling the filename is recorded happily while the agent keeps running.
-_wk_qd_label() { # <plist basename>
-    /usr/libexec/PlistBuddy -c 'Print :Label' \
-        "/System/Library/LaunchAgents/$1.plist" 2>/dev/null || printf '%s' "$1"
 }
 
 _wk_qd_uid() { id -u "${1:-$(id -un)}" 2>/dev/null; }
@@ -145,18 +163,7 @@ wk_quiet_desktop_user() { # [user] -- 0 when every setting above took
 $(wk_quiet_desktop_rows)
 ROWS
 
-    [ -n "$uid" ] || { echo "wk: no such account '$u', so no agent was turned off" >&2; return 1; }
-    local plist proc
-    while read -r name plist proc why; do
-        [ -n "$plist" ] || continue
-        label=$(_wk_qd_label "$plist")
-        # `disable` is recorded in launchd's own per-user store and holds across logins; `bootout` needs a live GUI domain, and a first boot has none.
-        launchctl disable "gui/$uid/$label" 2>/dev/null \
-            || { echo "wk: could not disable $label for $u" >&2; bad=1; }
-        launchctl bootout "gui/$uid/$label" >/dev/null 2>&1 || true
-    done <<ROWS
-$(wk_quiet_desktop_agents)
-ROWS
+    [ -n "$uid" ] || { echo "wk: no such account '$u'" >&2; return 1; }
 
     [ -z "$moved" ] || killall -u "$u" Finder Dock >/dev/null 2>&1 || true
     return "$bad"
@@ -200,6 +207,7 @@ _wk_qd_daemons_signal() { # <STOP|CONT>
     listing=$(ps -Ao pid=,comm=)   # taken once, before anything is signalled: asking a machine again after stopping part of it is how a stopper stops itself
     while read -r name proc why; do
         [ -n "$proc" ] || continue
+        _wk_qd_unstoppable "$proc" && continue
         pids=$(printf '%s\n' "$listing" | awk -v p="$proc" \
             '{ pid = $1; $1 = ""; sub(/^ +/, ""); sub(/.*\//, ""); if ($0 == p) print pid }')
         [ -n "$pids" ] || continue
@@ -207,7 +215,7 @@ _wk_qd_daemons_signal() { # <STOP|CONT>
         kill -"$sig" $pids 2>/dev/null \
             || { echo "wk: could not send $sig to $proc" >&2; bad=1; }
     done <<ROWS
-$(wk_quiet_desktop_daemons)
+$(wk_quiet_desktop_stopped)
 ROWS
     return "$bad"
 }
@@ -231,25 +239,11 @@ ROWS
 
     uid=$(_wk_qd_uid "$u") || uid=""
     # By the process, not by launchd's disabled list: disabling the wrong label is recorded there as cheerfully as the right one, and the agent goes on running.
-    local plist proc
-    while read -r name plist proc why; do
-        [ -n "$plist" ] || continue
-        if [ -z "$uid" ]; then
-            printf '%s=?\n' "$name"
-        elif pgrep -x "$proc" >/dev/null 2>&1; then
-            printf '%s=on\n' "$name"
-        else
-            printf '%s=off\n' "$name"
-        fi
-    done <<ROWS
-$(wk_quiet_desktop_agents)
-ROWS
-
     while read -r name proc why; do
         [ -n "$proc" ] || continue
         printf '%s=%s\n' "$name" "$(_wk_qd_procstate "$proc")"
     done <<ROWS
-$(wk_quiet_desktop_daemons)
+$(wk_quiet_desktop_stopped)
 ROWS
 
     while read -r name key value shown; do
@@ -292,18 +286,17 @@ wk_quiet_desktop_findings() { # <probe output> [remedy]
 
     while read -r name domain key type value why; do
         [ -n "$domain" ] || continue
+        if _wk_qd_unsettable "$name" \
+           && [ "$(_wk_qf_read "$probe" "$name")" != "$(_wk_qd_want "$type" "$value")" ]; then
+            _wk_qf note "$why is what a measured Mac would be, and macOS lets no script set it ($name reads '$(_wk_qf_read "$probe" "$name")')" ""
+            continue
+        fi
         _wk_qf_judge "$probe" "$name" "$(_wk_qd_want "$type" "$value")" \
             "$why" "$fix"
     done <<ROWS
 $(wk_quiet_desktop_rows)
 ROWS
 
-    while read -r name plist proc why; do
-        [ -n "$plist" ] || continue
-        _wk_qf_judge "$probe" "$name" off "$proc is not running, and it $why" "$fix"
-    done <<ROWS
-$(wk_quiet_desktop_agents)
-ROWS
 
     case "$(_wk_qf_read "$probe" spotlight)" in
         *disabled*) _wk_qf ok "Spotlight is not indexing" ;;
@@ -351,9 +344,13 @@ wk_quiet_daemons_findings() { # <probe output> [remedy]
         case "$state" in
             stopped|absent) _wk_qf ok "$proc is $state" ;;
             "")             _wk_qf note "$proc was not answered by this machine's probe" "$fix" ;;
-            *)              _wk_qf wrong "$proc is running, and it $why" "$fix" ;;
+            *)              if _wk_qd_unstoppable "$proc"; then
+                                _wk_qf note "$proc is running and cannot be stopped (SIP refuses the signal); it $why" ""
+                            else
+                                _wk_qf wrong "$proc is running, and it $why" "$fix"
+                            fi ;;
         esac
     done <<ROWS
-$(wk_quiet_desktop_daemons)
+$(wk_quiet_desktop_stopped)
 ROWS
 }

@@ -99,6 +99,47 @@ the command that does it and the command that proves it.
       operator's is invisible to it, which is exactly the case that has no
       tailnet name to fall back on [no hardware needed]
 
+- [ ] nothing in the lane can tell a person it wants them. `lib/wknotify.py`
+      is `sd_notify` for the systemd services and no-ops elsewhere, so the only
+      signal that a plant is waiting for a pick, or that a run has handed the
+      machine back, is a line in a terminal nobody is watching. Both moments
+      are known exactly -- `phase_go` returns when the machine goes down, and
+      the driver sees ssh answer again [no hardware needed]
+
+- [ ] two human actions per iteration, not one: the pick at the startup
+      manager, and this Mac's password at the host install's login window when
+      the run hands the machine back. That is what makes each failed cycle
+      expensive, and it is why a refusal that arrives in bench mode has to
+      carry everything a reader needs in the volume's own log
+
+- [ ] **the agent half of the quiet gate is unsatisfiable on this hardware.**
+      Measured twice, 2026-09-07: `launchctl bootout` alone, and `launchctl
+      disable gui/<uid>/<label>` in the live GUI domain followed by `bootout`,
+      both leave the same 17 of 21 rows of `wk_quiet_desktop_agents` running
+      within the second -- macOS starts them on demand. So `wk bench staged`
+      refuses every leg with "23 setting(s) above are not a measured Mac's" and
+      an A/B cannot run at all. The table was validated in a guest, where
+      nothing connects to those agents and they never start; a real login
+      session starts them.
+
+      What is left is the mechanism the daemons half already uses: SIGSTOP,
+      judged by `_wk_qd_procstate` (stopped/running/absent) rather than by
+      `pgrep`, which cannot tell a stopped process from a running one. Then the
+      two tables merge into one list of processes that must not run during a
+      measurement, with one enforcement and one judgement. The hazard is named
+      in that file already -- `mds` and `sysmond` deadlock the very commands
+      that would undo the stop -- and none of these 17 has been measured for
+      it, so a stop that wedges the session costs a hard power cycle
+      [needs the volume]
+
+- [ ] `focused` is read by bench/mac-browser-check.py and judged by nothing.
+      Measured 2026-09-07 on a run whose other readings were all clean:
+      `raf_hz=58.6`, `accelerator=AGXAcceleratorG16G`, a real WebKit GPU
+      client -- and `focused=False`. Either the page legitimately loses focus
+      to the harness that drove it, in which case the reading should go, or
+      the raiser had not taken and every leg after it measured a background
+      window. One run with the raiser watched settles which [needs the volume]
+
 - [ ] the browser reading is taken once, before the rounds
       (`refuse_throttled_browser`, bench/mac-bench-autorun.sh), so a window
       that is covered or throttled *part way through* an A/B is not caught: a

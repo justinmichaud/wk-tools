@@ -402,7 +402,7 @@ refuse_throttled_browser() {
     say "browser check against arm A's build ($sid)"
     if /usr/bin/python3 "$TOOLS/bench/mac-browser-check.py" \
             --build-directory "${dir%/}" --json "$RUNS/browser-check.json" >>"$LOG" 2>&1; then
-        say "  the browser here is accelerated, unthrottled and frontmost (readings above)"
+        say "  the browser here is accelerated and unthrottled (readings above)"
         return 0
     fi
     say "  this install cannot present a browser worth measuring (faults above)."

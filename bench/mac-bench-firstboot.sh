@@ -53,7 +53,6 @@ if [ ! -f /etc/sudoers.d/wk-bench ]; then
     fi
 fi
 
-# A browser driven over ssh with no console session has nowhere to draw.
 if [ -n "$PW" ]; then
     # `dscl . -passwd` needs the old password and drifts the account from the login keychain, whose unlock panel can sit on screen through an entire A/B; both tools exit 0 unacted.
     sysadminctl -resetPasswordFor "$BENCH_USER" -newPassword "$PW" >/dev/null 2>&1 \
@@ -262,6 +261,8 @@ else
 fi
 say "=== first boot provisioning complete ==="
 
+# `/sbin/reboot`, not `shutdown -r`: the latter asks loginwindow, and any modal dialog on the screen vetoes it -- measured 2026-09-07, a first boot that finished cleanly then sat for ten minutes behind an SSO panel with the job planted and this daemon gone. Nothing here can dismiss a dialog, so it does not ask.
 say "rebooting so autologin takes effect"
-shutdown -r +1 &
+sync
+/sbin/reboot
 exit 0
