@@ -128,11 +128,11 @@ Host tolken
 # So: no HostName here, and the address comes from the machine-local
 # config.d/local (or WK_MAC_BENCH_SSH), because the bench install's address is
 # exactly the kind of thing this repository cannot know -- a DHCP lease on
-# somebody's LAN. The proper fix is to give that install its own tailnet
-# identity, at which point `HostName tolken-bench` becomes true and belongs
-# here; until then a hand-written stanza in config.d/local is the honest
-# arrangement, and a missing one fails to resolve instead of silently
-# succeeding against the wrong computer.
+# somebody's LAN. It cannot take a tailnet identity of its own either: every
+# macOS Tailscale build tunnels through NetworkExtension, whose approval panel
+# only a person can answer, and no unattended install may need one. A missing
+# stanza fails to resolve instead of silently succeeding against the wrong
+# computer, which is why this one carries no HostName.
 Host tolken-bench
   HostKeyAlias tolken-bench
   User bench

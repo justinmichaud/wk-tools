@@ -76,15 +76,9 @@ report() {
     log  "  container:      $cont  (the same one the running system is on)"
     log  "  free in it:     $(gb "$free") GB   (need $NEED_GB GB to proceed)"
     log  "  volume name:    $VOLUME"
-    local _k="${WK_TS_AUTHKEY:-$HOME/.config/wk/tailscale-authkey}"
-    if [ -s "$_k" ]; then
-        log  "  tailscale key:  present ($_k)"
-    else
-        log  "  tailscale key:  MISSING -- the bench install will have no tailnet"
-        log  "                  identity, so 'wk bench mac-ab' cannot watch a run"
-        log  "                  or collect it without the startup manager."
-        log  "                  './setup --stage benchkey' asks for one."
-    fi
+    log  "  reachable:      not while it runs -- an unattended install can carry no"
+    log  "                  tailnet identity (see bench/mac-bench-firstboot.sh), so a"
+    log  "                  run is read off this volume once it hands the machine back"
     if volume_exists; then
         if volume_is_system; then
             local v
@@ -310,46 +304,6 @@ PLIST
     chmod 0600 "$root/usr/local/share/wk-bench/password"
     log "  bench account password: '$pw' (constant; also at $pwfile)"
 
-    local akey
-    if akey=$(wk_tailscale_authkey); then
-        install -m 0600 "$akey" "$root/usr/local/share/wk-bench/tailscale-authkey"
-        log "  tailscale: auth key staged into the package"
-    else
-        warn "  no tailscale auth key, so the bench install will have no tailnet"
-        warn "  identity: reachable only at whatever DHCP address it gets, and not"
-        warn "  at all from a driver that reaches this Mac over the tailnet."
-    fi
-
-    local tspkg_cache="$HOME/.config/wk/Tailscale-macos.pkg"
-    if [ ! -s "$tspkg_cache" ]; then
-        log "  tailscale: fetching the macOS package (once)"
-        # Scraped off the index because the JSON's `TarballsVersion` names the Linux artefacts and has no macOS version field.
-        local tsname tsver
-        tsname=$(curl -fsS 'https://pkgs.tailscale.com/stable/' 2>/dev/null \
-                 | grep -oE 'Tailscale-[0-9.]+-macos\.pkg' | sort -u | tail -1) || tsname=""
-        if [ -z "$tsname" ]; then
-            tsver=$(curl -fsS 'https://pkgs.tailscale.com/stable/?mode=json' 2>/dev/null \
-                    | sed -n 's/.*"TarballsVersion": *"\([^"]*\)".*/\1/p' | head -1)
-            if [ -n "$tsver" ]; then tsname="Tailscale-$tsver-macos.pkg"; fi
-        fi
-        if [ -n "$tsname" ]; then
-            mkdir -p "$(dirname "$tspkg_cache")"
-            curl -fsSL -o "$tspkg_cache.part" \
-                "https://pkgs.tailscale.com/stable/$tsname" \
-                && mv "$tspkg_cache.part" "$tspkg_cache" \
-                || { rm -f "$tspkg_cache.part"; warn "  tailscale: download failed"; }
-        else
-            warn "  tailscale: could not determine which package to fetch"
-        fi
-    fi
-    if [ -s "$tspkg_cache" ]; then
-        install -m 0644 "$tspkg_cache" \
-            "$root/usr/local/share/wk-bench/Tailscale-macos.pkg"
-        log "  tailscale: package staged ($(du -h "$tspkg_cache" | awk '{print $1}'))"
-    else
-        warn "  tailscale: no package staged; firstboot will say so and carry on"
-    fi
-
     # A RunAtLoad daemon dropped by --installpackage lands after launchd scanned /Library/LaunchDaemons, so a postinstall bootstraps it on this boot.
     local scripts="${TMPDIR:-/tmp}/wk-bench-pkgscripts"
     rm -rf "$scripts"; install -d "$scripts"
@@ -413,20 +367,6 @@ ROWS
 gather_secrets() {
     info "what this needs from you, before anything is created or downloaded"
 
-    if [ -s "${WK_TS_AUTHKEY:-$HOME/.config/wk/tailscale-authkey}" ]; then
-        log "  tailscale auth key: already stored"
-    else
-        log "  The benchmark install needs its own tailnet identity. It is a"
-        log "  different OS from this one, so it does not inherit this Mac's."
-        log "  Without it the install is reachable only at a DHCP address on this"
-        log "  LAN -- and not at all from a driver that reaches this Mac by its"
-        log "  tailnet name, which is how 'wk bench mac-ab' is driven. That is the"
-        log "  difference between an A/B you can watch and one you have to walk"
-        log "  over and collect."
-        wk_tailscale_authkey >/dev/null \
-            || warn "  continuing without a tailnet identity for the bench install"
-    fi
-
     log "  sudo: startosinstall needs a volume owner's password (once, at --install)"
 }
 
@@ -486,33 +426,6 @@ do_repair() {
         log "  would copy this Mac's Wi-Fi identity into the bench payload"
     else
         write_wifi_conf "$S/usr/local/share/wk-bench/wifi.conf"
-    fi
-
-    local akey
-    if akey=$(wk_tailscale_authkey); then
-        if [ -n "$DRY" ]; then
-            log "  would stage the tailscale auth key into the volume payload"
-        else
-            sudo install -m 0600 "$akey" "$S/usr/local/share/wk-bench/tailscale-authkey" \
-                && changed "tailscale auth key staged" \
-                || warn "  could not stage the tailscale auth key"
-        fi
-    else
-        warn "  no tailscale auth key: this install will stay unobservable"
-    fi
-    local tspkg="$HOME/.config/wk/Tailscale-macos.pkg"
-    if [ -s "$tspkg" ]; then
-        if [ -n "$DRY" ]; then
-            log "  would stage $(basename "$tspkg") into the volume payload"
-        else
-            sudo install -m 0644 "$tspkg" \
-                "$S/usr/local/share/wk-bench/Tailscale-macos.pkg" \
-                && changed "tailscale package staged" \
-                || warn "  could not stage the tailscale package"
-        fi
-    elif [ -s "${WK_TS_AUTHKEY:-$HOME/.config/wk/tailscale-authkey}" ]; then
-        warn "  a key is configured but $tspkg is not cached."
-        warn "  './setup --stage benchkey' fetches it (no compiler involved)."
     fi
 
     if [ -n "$DRY" ]; then

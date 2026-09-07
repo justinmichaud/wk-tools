@@ -126,49 +126,7 @@ if [ -f "$PAYLOAD/authorized_keys" ]; then
     fi
 fi
 
-# The standalone/macsys package, whose LaunchDaemon runs before login -- not the App Store build, which is sandboxed and needs a session. Without a tailnet name the LAN address changes across reboots and the ssh alias resolves to the host install.
-TS_CLI=/Applications/Tailscale.app/Contents/MacOS/Tailscale
-TS_PKG=$(ls "$PAYLOAD"/Tailscale-*macos.pkg 2>/dev/null | head -1) || TS_PKG=""
-
-if [ -r "$PAYLOAD/tailscale-authkey" ] && [ -n "$TS_PKG" ]; then
-    say "installing Tailscale (standalone/macsys) from $(basename "$TS_PKG")"
-    if installer -pkg "$TS_PKG" -target / >/dev/null 2>&1; then
-        if launchctl print system/io.tailscale.ipn.macsys.tssentineld >/dev/null 2>&1; then  # verified by asking launchd
-            say "  tailscale system daemon is loaded"
-        else
-            say "  WARNING: the tailscale daemon did not load; giving it a moment"
-            sleep 10
-        fi
-        if [ -x "$TS_CLI" ]; then
-            # `file:` not the key itself: argv is world readable. Tagged nodes never key-expire.
-            "$TS_CLI" up --auth-key "file:$PAYLOAD/tailscale-authkey" \
-                --advertise-tags=tag:wk \
-                --hostname tolken-bench --accept-dns=false >/dev/null 2>&1 || true
-            ts_ip=$("$TS_CLI" ip -4 2>/dev/null | head -1) || ts_ip=""  # the property, not the exit status
-            if [ -n "$ts_ip" ]; then
-                say "tailscale: up as tolken-bench at $ts_ip"
-                say "  this install is now reachable by name across a reboot, which is"
-                say "  the thing that makes it observable at all"
-            else
-                say "WARNING: tailscale up did not take; no tailnet address."
-                say "  The install will only be reachable at whatever DHCP address it gets,"
-                say "  and not at all from a driver that reaches this Mac over the tailnet."
-            fi
-        else
-            say "WARNING: $TS_CLI is missing after a successful install"
-        fi
-    else
-        say "WARNING: installer failed on $TS_PKG"
-    fi
-elif [ -r "$PAYLOAD/tailscale-authkey" ]; then
-    say "WARNING: an auth key is staged but no Tailscale package is."
-    say "  Put Tailscale-<ver>-macos.pkg in the payload:"
-    say "    curl -LO https://pkgs.tailscale.com/stable/Tailscale-1.102.3-macos.pkg"
-    say "  No compiler is needed -- see the comment here."
-else
-    say "no tailscale auth key in the payload; this install will have no tailnet"
-    say "  identity, so nothing that reaches this Mac over the tailnet can reach it"
-fi
+# No tailnet identity: every macOS Tailscale build tunnels through NetworkExtension, whose "would like to add VPN configurations" panel only a person can answer, and pkgs.tailscale.com publishes no darwin daemon to run instead (measured 2026-09-07). An unattended first boot therefore installs none, and this install is unreachable while it runs: `wk bench mac-ab` reads the volume from host mode afterwards.
 
 if [ -r "$PAYLOAD/wifi.conf" ]; then
     # shellcheck disable=SC1090

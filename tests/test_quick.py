@@ -834,7 +834,9 @@ class TestTailnetHygiene(WkTest):
         """one tailscale auth key for the whole fleet"""
         # static
         bad = []
-        for f in ("cmd/pi", "cmd/bridge", "bench/mac-bench-volume.sh"):
+        # Not the Mac volume: no macOS install can join unattended, so it has
+        # no key to resolve (tests/test_mac_quiet.py holds it to that).
+        for f in ("cmd/pi", "cmd/bridge"):
             text = (REPO / f).read_text(errors="replace")
             if "wk_tailscale_authkey" not in text:
                 bad.append(f"{f} joins the tailnet without resolving the key through wk_tailscale_authkey")

@@ -255,3 +255,33 @@ class NoSecondWriterTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestNothingUnattendedNeedsAPerson(unittest.TestCase):
+    """The first boot runs with nobody in the room, so it may contain no step
+    that waits on a human. macOS grants a VPN tunnel only through a consent
+    panel (every Tailscale build for it uses NetworkExtension, and
+    pkgs.tailscale.com publishes no darwin daemon), so that install is not in
+    it -- and the payload no longer carries what it needed."""
+
+    UNATTENDED = (
+        REPO / "bench" / "mac-bench-firstboot.sh",
+        REPO / "bench" / "mac-bench-autorun.sh",
+    )
+
+    def test_no_unattended_path_installs_a_package_or_a_tunnel(self):
+        for path in self.UNATTENDED:
+            text = path.read_text()
+            for command in ("installer -pkg", "tailscale up", "Tailscale.app",
+                            "io.tailscale"):
+                self.assertNotIn(command, text,
+                                 f"{path.name} runs `{command}` with nobody in the room")
+
+    def test_the_payload_carries_neither_the_key_nor_the_package(self):
+        text = (REPO / "bench" / "mac-bench-volume.sh").read_text()
+        self.assertNotIn("tailscale-authkey", text)
+        self.assertNotIn("Tailscale-macos.pkg", text)
+
+    def test_the_setup_stage_that_fed_it_is_gone(self):
+        self.assertFalse((REPO / "host" / "macos" / "benchkey.sh").exists())
+        self.assertNotIn("benchkey", (REPO / "setup").read_text())

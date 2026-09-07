@@ -79,25 +79,19 @@ the command that does it and the command that proves it.
       volume. `wk bench mac-ab --progress` is the only view, and only from host
       mode [no hardware needed]
 
-- [ ] the bench install has no network, so a run is unobservable until it hands
-      the machine back. `write_wifi_conf` failed on `networksetup
-      -getairportnetwork`, which answers "You are not associated with an AirPort
-      network" on macOS 26.6.2 with the interface associated; it reads the
-      preferred-network list now, and no `--repair` has run since. With Wi-Fi it
-      joins the tailnet as `tolken-bench` and `--progress` works mid-run
-      [rides on the `--repair` above]
-
-## The report
-
-- [ ] confirm a result can be turned into one: `wk bench mac-ab --collect`,
-      then `wk bench report` and `wk bench precision <run-a> <run-b>`. A run is
-      the *directory* a benchmark wrote; naming its result.json finds no scores
-      and is refused since 2026-09-07 [needs one completed A/B]
-
-- [ ] `wk bench report --html` has never been run against a mac-ab result
-      [needs one completed A/B]
-
-## Standing hazards
+- [ ] the bench install has no way onto the tailnet, so a run is unobservable
+      until it hands the machine back. Measured 2026-09-07: every macOS
+      Tailscale build tunnels through NetworkExtension, so `tailscale up` parks
+      the first boot on "would like to add VPN configurations" with nobody in
+      the room, and pkgs.tailscale.com publishes tarballs for nine Linux arches
+      and none for darwin -- there is no daemon to run instead. The install is
+      out of the unattended path now (bench/mac-bench-firstboot.sh), and what
+      would put it back is a `tailscaled` built for darwin from source, pinned
+      by sha256 the way image/buildroot/tailnet-overlay.sh pins the Linux one,
+      run as a root LaunchDaemon: root opens a utun with no panel. Until then
+      `wk bench mac-ab --progress` answers from the volume in host mode, and
+      the `tolken-bench` ssh stanza resolves to nothing on purpose
+      [no hardware needed to build it; one boot to prove it]
 
 - [ ] two readers, two definitions of provisioned: the autorun and
       `wk bench mac-ab` ask the first-boot log for a completion line, while
