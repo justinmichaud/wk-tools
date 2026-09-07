@@ -191,15 +191,15 @@ if __name__ == "__main__":
 
 
 class TestProvisioningIsNotSomethingToKill(WkTest):
-    """The first-boot daemon provisions the volume -- including the desktop
-    quieting every leg's preflight then requires -- and removes itself at the
-    end, so an installed daemon means provisioning is unfinished. Both sides
-    of the experiment read the one record of that: the completion line in the
-    volume's own first-boot log."""
+    """Provisioning applies the desktop quieting every leg's preflight then
+    requires, and it removes its own daemon and reboots at the end. So the
+    completion line in the volume's log -- not the daemon, which can be absent
+    either way -- is what says whether this volume can be measured on, and
+    both sides of the experiment read that one record."""
 
-    def _defuse(self, plist=True, complete=False, running=False):
-        """The function as the agent runs it: `set -e`, sudo's output
-        discarded, and the daemon's files really there to remove."""
+    def _autorun(self, func, plist=True, complete=False, running=False):
+        """One of the autorun's own functions, as the agent runs it: `set -e`,
+        sudo's output discarded, and the daemon's files really there."""
         text = AUTORUN.read_text()
         with scratch_dir() as tmp:
             log = tmp / "log"
@@ -214,44 +214,85 @@ class TestProvisioningIsNotSomethingToKill(WkTest):
                 f'FB_PLIST={fb}; FB_SELF={self_sh}; FB_LOG={log}\n'
                 f'say() {{ printf "%s\\n" "$*"; }}\n'
                 f'cancel_pending_reboot() {{ say CANCELLED; }}\n'
+                f'leave_bench() {{ say "LEAVE $1: $2"; }}\n'
                 f'pgrep() {{ return {0 if running else 1}; }}\n'
                 f'pkill() {{ : > {killed}; }}\n'
                 f'sudo() {{ shift; "$@"; }}\n'
                 f'fb_provisioned() {{{func_body(text, "fb_provisioned")}}}\n'
+                f'refuse_unprovisioned() {{{func_body(text, "refuse_unprovisioned")}}}\n'
                 f'defuse_firstboot() {{{func_body(text, "defuse_firstboot")}}}\n'
-                f'if defuse_firstboot; then ret=0; else ret=$?; fi\n'
+                f'if {func}; then ret=0; else ret=$?; fi\n'
                 f'printf "RET=%s\\n" "$ret"\n')
-            self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-            return cp.stdout + cp.stderr, fb.exists(), killed.exists()
+            return cp, cp.stdout + cp.stderr, fb.exists(), killed.exists()
 
-    def test_it_stands_aside_while_provisioning_is_unfinished(self):
-        out, still_there, killed = self._defuse(complete=False, running=True)
-        self.assertIn("RET=1", out, out)
+    def test_it_stands_aside_while_provisioning_is_running(self):
+        cp, out, still_there, killed = self._autorun(
+            "refuse_unprovisioned", complete=False, running=True)
+        self.assertEqual(cp.returncode, 0, out)
+        self.assertNotIn("RET=", out, "it ran on past provisioning:\n" + out)
+        self.assertIn("standing aside", out, out)
         self.assertTrue(still_there, "it removed a daemon that had not finished:\n" + out)
         self.assertFalse(killed, "it killed provisioning:\n" + out)
         self.assertNotIn("CANCELLED", out,
                          "it cancelled the reboot provisioning ends with:\n" + out)
+        self.assertNotIn("LEAVE", out, out)
 
-    def test_a_stopped_unfinished_daemon_names_the_repair(self):
-        out, _, _ = self._defuse(complete=False, running=False)
-        self.assertIn("mac-volume --repair", out, out)
+    def test_a_volume_nothing_will_finish_hands_the_machine_back(self):
+        """The 2026-09-07 04:20 state: never provisioned, and no daemon left
+        to do it. Eight legs ran and all eight were refused."""
+        for plist in (True, False):
+            cp, out, _, _ = self._autorun("refuse_unprovisioned",
+                                          plist=plist, complete=False, running=False)
+            self.assertEqual(cp.returncode, 0, out)
+            self.assertNotIn("RET=", out, "it went on to measure:\n" + out)
+            self.assertIn(f"daemon installed: {'yes' if plist else 'no'}", out, out)
+            self.assertIn("mac-volume --repair", out, out)
+            self.assertIn("LEAVE halt", out, "it did not hand the machine back:\n" + out)
 
-    def test_a_completed_daemon_that_could_not_remove_itself_is_defused(self):
-        out, still_there, killed = self._defuse(complete=True, running=True)
+    def test_a_provisioned_volume_is_measured_on(self):
+        cp, out, _, _ = self._autorun("refuse_unprovisioned", complete=True)
+        self.assertIn("RET=0", out, out)
+        self.assertNotIn("LEAVE", out, out)
+
+    def test_a_daemon_that_outlived_its_provisioning_is_defused(self):
+        cp, out, still_there, killed = self._autorun(
+            "defuse_firstboot", complete=True, running=True)
         self.assertIn("RET=0", out, out)
         self.assertFalse(still_there, "it left a completed daemon installed:\n" + out)
         self.assertTrue(killed, "its re-run reboots the machine mid-round:\n" + out)
         self.assertIn("CANCELLED", out, out)
 
     def test_no_daemon_at_all_is_an_ordinary_boot(self):
-        out, _, _ = self._defuse(plist=False)
+        cp, out, _, _ = self._autorun("defuse_firstboot", plist=False, complete=True)
         self.assertIn("RET=0", out, out)
         self.assertIn("CANCELLED", out, out)
 
-    def test_the_autorun_measures_nothing_on_a_boot_it_stood_aside_on(self):
+    def test_the_question_is_asked_before_the_job_is_read(self):
         text = AUTORUN.read_text()
-        self.assertIn("if ! defuse_firstboot; then", text,
-                      "defuse_firstboot's refusal is not acted on")
+        self.assertLess(text.index("refuse_unprovisioned\n"), text.index('if [ ! -f "$JOB" ]'),
+                        "the job runs before the volume is known to be measurable")
+
+    def test_one_path_names_the_log_and_the_rest_agree(self):
+        """Four readers and two writers of one record: the daemon's plist tells
+        launchd where to write, and nothing else may spell it differently."""
+        volume = (REPO / "bench" / "mac-bench-volume.sh").read_text()
+        path = "/var/log/wk-bench-firstboot.log"
+        self.assertEqual(volume.count(f"<string>{path}</string>"), 4,
+                         "the plists no longer name that log twice each")
+        self.assertIn(f"fblog={path}", volume)
+        self.assertIn(f"FB_LOG={path}", AUTORUN.read_text())
+        self.assertIn("/log/wk-bench-firstboot.log", MACAB.read_text())
+
+    def test_provisioning_by_hand_records_what_it_verified(self):
+        """`wk bench mac-volume --provision` is the by-hand equivalent of the
+        daemon, and refuses to run anywhere but on the volume -- so it writes
+        the same line, and only when the readback is clean."""
+        volume = (REPO / "bench" / "mac-bench-volume.sh").read_text()
+        self.assertIn("provisioning complete (wk bench mac-volume --provision", volume)
+        self.assertIn('elif [ "$quiet_ok" = yes ]; then', volume)
+        self.assertLess(volume.index("quiet_ok=no"),
+                        volume.index("provisioning complete (wk bench"),
+                        "the record is written before the settings are read back")
 
     def test_the_driver_reads_the_same_record(self):
         """One rule, two readers: the volume's log, not a proxy for it."""
@@ -287,6 +328,21 @@ class TestProvisioningIsNotSomethingToKill(WkTest):
     def test_a_completed_first_boot_reads_as_provisioned(self):
         self.assertEqual(
             self._provisioned("=== first boot provisioning complete ===\n"), "YES")
+
+    def test_the_refusal_can_be_crossed_to_deliver_the_fix(self):
+        """The autorun that stands aside for provisioning reaches the volume
+        only in a plant, so the refusal is a `barrier` -- forceable, recorded
+        and warned about again at the end -- and not a die."""
+        text = MACAB.read_text()
+        self.assertIn("barrier ", text, "the preflight failure is not a barrier")
+        self.assertNotIn('die "preflight failed', text)
+
+    def test_force_is_one_flag_however_it_is_spelled(self):
+        """`barrier` reads WK_FORCE, which the dispatcher sets; this command
+        parses `--force` itself as well, and both mean the one thing."""
+        text = MACAB.read_text()
+        self.assertIn('FORCE="${WK_FORCE:+1}"', text)
+        self.assertIn("--force)    FORCE=1; WK_FORCE=1; export WK_FORCE", text)
 
     def test_the_preflight_refuses_the_plant_rather_than_noting_it(self):
         """A note is read by nobody at 4am; a failed check is what stops the

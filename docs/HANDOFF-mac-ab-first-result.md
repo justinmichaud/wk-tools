@@ -19,32 +19,42 @@ the command that does it and the command that proves it.
 
 ## The blocker
 
-- [ ] provisioning has never completed on `WK Bench`. `grep -c "provisioning
-      complete" '/Volumes/WK Bench/var/log/wk-bench-firstboot.log'` is **0**
-      across every attempt back to 2026-08-23, so the desktop quieting was
-      never applied and `wk bench staged`'s preflight refuses every leg with
-      "35 setting(s) above are not a measured Mac's". Measured 2026-09-07: the
-      A/B ran 04:20:03-04:22:00 and failed all eight legs for this reason and
-      no other. The daemon and its script are gone from the volume, so it will
-      not self-provision on the next boot either
-      [needs `wk bench mac-volume --repair` on the Mac, then one boot]
+- [ ] provisioning has never completed on `WK Bench`: `grep -c "provisioning
+      complete" '/Volumes/WK Bench - Data/private/var/log/wk-bench-firstboot.log'`
+      is **0** across every attempt back to 2026-08-23, so the desktop quieting
+      has never been applied and `wk bench staged`'s preflight refuses every leg
+      with "35 setting(s) above are not a measured Mac's". Measured 2026-09-07:
+      `--repair` re-armed the daemon, the volume booted at 15:01:00Z, and the
+      log stops one second later at "installing Tailscale" -- the autorun
+      *planted* at `/var/wk/bin` killed it, removed the daemon, then saw the
+      04:22 job's `phase=done` and halted. That copy predates the fix, and only
+      a plant replaces it.
+
+      So the next attempt is three commands, in this order:
+
+          wk bench mac-volume --repair          # on the Mac: re-arm the daemon
+          wk bench mac-ab --a 20260906T233003Z-mac-release-pgo \
+                          --b 20260907T021244Z-mac-release-pgo \
+                          --rounds 1 --detect 0 --count 1 --shutdown --force
+          # hold the power button, pick WK Bench
+
+      `--force` is required and is the point: the preflight refuses an
+      unprovisioned volume, and the plant carries the autorun that lets
+      provisioning finish. That boot provisions and reboots itself to the
+      firmware default (the host install), so `wk bench mac-ab --preflight`
+      should then read `ok provisioned` -- and the A/B needs one more pick of
+      the volume [needs two boots of the volume]
 
 ## One A/B iteration
 
-- [ ] run it and get a number:
+- [ ] read the first number back, once that boot has run:
 
-          wk bench mac-volume --repair          # on the Mac, sudo once
-          # boot WK Bench; first boot provisions and reboots itself
-          wk bench mac-ab --a 20260906T233003Z-mac-release-pgo \
-                          --b 20260907T021244Z-mac-release-pgo \
-                          --rounds 1 --detect 0 --count 1 --shutdown
-          # start it holding the power button, pick WK Bench
           wk bench mac-ab --progress            # where it is
           wk bench mac-ab --collect             # the numbers
 
-      `--detect 0` runs `--rounds` exactly. Drive it from another machine:
-      the lane reboots the Mac and refuses to be driven from it
-      [needs two boots of the volume]
+      `--detect 0` above runs `--rounds` exactly. Drive it from another
+      machine: the lane reboots the Mac and refuses to be driven from it
+      [needs the boots above]
 
 - [ ] then the real one: drop `--rounds 1 --detect 0 --count 1` and let it
       alternate until every plan resolves 0.3%, between 5 and 40 rounds.
@@ -88,6 +98,15 @@ the command that does it and the command that proves it.
       [needs one completed A/B]
 
 ## Standing hazards
+
+- [ ] two readers, two definitions of provisioned: the autorun and
+      `wk bench mac-ab` ask the first-boot log for a completion line, while
+      `wk bench staged` measures the settings themselves before every leg. A
+      volume that drifts after provisioning reads as provisioned and is still
+      refused leg by leg, unobservably. `refuse_unprovisioned`
+      (bench/mac-bench-autorun.sh) runs on the install itself, so it could ask
+      `wk_quiet_desktop_probe` and report the same finding once, up front
+      [no hardware needed]
 
 - [ ] the trailing-`&&` audit (tests/test_owed_static_audits.py) skips any
       statement that also holds a `||`, so `{ … || true; } | while read -r n;

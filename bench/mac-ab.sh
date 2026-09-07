@@ -40,7 +40,7 @@ WS=""
 PLANS_GIVEN=""
 DO_STAGE=""
 ALLOW_FETCH=""
-FORCE=""
+FORCE="${WK_FORCE:+1}"
 AGENT_HOME=""
 DRY=""
 ACTION=run
@@ -899,7 +899,7 @@ while [ $# -gt 0 ]; do
         --machine)  MACHINE="${2:-}"; shift 2 ;;
         --stage)    DO_STAGE=1; shift ;;
         --allow-network-fetch) ALLOW_FETCH=1; shift ;;
-        --force)    FORCE=1; shift ;;
+        --force)    FORCE=1; WK_FORCE=1; export WK_FORCE; shift ;;
         --agent-home) AGENT_HOME="${2:-}"; shift 2 ;;
         --preflight) ACTION=preflight; shift ;;
         --status)   ACTION=status; shift ;;
@@ -934,8 +934,16 @@ case "$ACTION" in
 esac
 
 if ! preflight; then
-    [ -n "$DRY" ] || die "preflight failed -- nothing on $HOST has been changed"
-    warn "preflight failed; showing the plan anyway because this is --dry-run"
+    if [ -n "$DRY" ]; then
+        warn "preflight failed; showing the plan anyway because this is --dry-run"
+    else
+        # `barrier` (lib/common.sh) and not a die: the tooling a volume needs in
+        # order to provision itself travels in the plant, so the one operator who
+        # has to plant onto a volume that fails this is the one fixing it.
+        barrier "$PF_FAIL preflight check(s) failed on $HOST, and nothing there has been
+    changed yet. Each one is something a run discovers after the reboot, in bench
+    mode, where nothing can report it."
+    fi
 fi
 
 # --patch stages both arms itself, before the plant, which validates A_ID and B_ID against the volume.

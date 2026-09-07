@@ -108,25 +108,34 @@ fb_provisioned() {  # the daemon removes itself just before it logs this line, s
     grep -q "provisioning complete" "$FB_LOG" 2>/dev/null
 }
 
-# The first-boot daemon is what provisions this volume -- the account, autologin, remote login, the desktop quieting every leg's preflight then requires -- and it removes itself and reboots only at the end. So a daemon whose log has no completion line is provisioning right now, and killing it is killing the provisioning. Once the log records the end, all a surviving daemon does is rsync --delete an older wk-tools over ~bench/Development/wk-tools and reboot a minute into every boot, so then it is removed.
+# Provisioning applies the desktop quieting every leg's own preflight then requires, so a volume it never finished measures nothing: `wk bench staged` refuses each leg for settings that are not a measured Mac's, one leg after another, on a machine with no network to say so. Asked of the log and not of the daemon, because either can be absent: a daemon killed partway leaves the volume unprovisioned with nothing installed to finish it.
+refuse_unprovisioned() {
+    if fb_provisioned; then
+        return 0
+    fi
+    say "$FB_LOG records no 'provisioning complete', so this volume was never"
+    say "  provisioned and cannot be measured on."
+    if pgrep -f wk-bench-firstboot >/dev/null 2>&1; then
+        say "  provisioning is running right now -- standing aside so it can finish."
+        say "  It reboots at the end, and this agent starts again on that boot."
+        exit 0
+    fi
+    local installed=no
+    if [ -f "$FB_PLIST" ] || [ -f "$FB_SELF" ]; then
+        installed=yes
+    fi
+    say "  nothing is running to finish it (daemon installed: $installed), and running"
+    say "  the job now would fail every leg for the settings it applies. From host mode:"
+    say "    wk bench mac-volume --repair    then boot this volume once"
+    leave_bench halt "provisioning never completed"
+    exit 0
+}
+
+# A daemon that outlives its own provisioning runs on every boot: it rsync --deletes an older wk-tools over ~bench/Development/wk-tools and ends with `shutdown -r +1`, a minute after this agent starts. Only reached once the log records the end, so what it interrupts here is a redundant re-run and never the provisioning itself.
 defuse_firstboot() {
     [ -f "$FB_PLIST" ] || [ -f "$FB_SELF" ] || { cancel_pending_reboot; return 0; }
-    if ! fb_provisioned; then
-        say "the first-boot daemon is installed and $FB_LOG records no"
-        say "  'provisioning complete' -- it is provisioning this volume, or it stopped"
-        say "  partway. Standing aside: it applies the desktop quieting, and without"
-        say "  that every leg is refused anyway."
-        if pgrep -f wk-bench-firstboot >/dev/null 2>&1; then
-            say "  it is running; it reboots when it finishes, and this agent starts again"
-        else
-            say "  it is NOT running, so this boot will not finish it. It runs again at"
-            say "  the next boot; if it never completes, repair the volume from host mode:"
-            say "    wk bench mac-volume --repair"
-        fi
-        return 1
-    fi
-    say "the first-boot daemon is still installed and provisioning has completed -- defusing it"
-    if pgrep -f wk-bench-firstboot >/dev/null 2>&1; then  # a re-run of a completed provisioning: redundant, and it reboots at the end
+    say "the first-boot daemon outlived its provisioning -- defusing it"
+    if pgrep -f wk-bench-firstboot >/dev/null 2>&1; then
         say "  it is re-running right now -- stopping it before it schedules a reboot"
         sudo -n pkill -f wk-bench-firstboot >/dev/null 2>&1 || true
     fi
@@ -148,10 +157,8 @@ if [ ! -f /etc/wk-image ]; then
     exit 0
 fi
 say "bench mode: $(sed -n 's/^id=//p' /etc/wk-image)"
-if ! defuse_firstboot; then
-    say "nothing else runs this boot; the job stays planted and this agent stays installed"
-    exit 0
-fi
+refuse_unprovisioned
+defuse_firstboot
 
 if [ ! -f "$JOB" ]; then
     say "no job at $JOB -- nothing to run"

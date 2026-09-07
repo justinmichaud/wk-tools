@@ -582,10 +582,12 @@ do_provision() {
     # shellcheck disable=SC1090
     . "$WK_ROOT/bench/mac-quiet-desktop.sh"
     local _probe; _probe=$(wk_quiet_desktop_probe)
-    render_findings <<FINDINGS || warn "  the '--' lines above are what this install still is not"
+    local quiet_ok=yes
+    render_findings <<FINDINGS || quiet_ok=no
 $(wk_quiet_desktop_findings "$_probe" "re-run: wk bench mac-volume --provision")
 $(wk_quiet_cpu_findings "$_probe")
 FINDINGS
+    [ "$quiet_ok" = yes ] || warn "  the '--' lines above are what this install still is not"
     log "    filevault: $(fdesetup status 2>/dev/null | head -1)"
     log "    timemachine destinations: $(tmutil destinationinfo 2>/dev/null | grep -c '^Name' || true)"   # `|| echo 0` would print a second zero: grep -c prints 0 and exits 1
 
@@ -615,6 +617,25 @@ FINDINGS
     else
         log "scipy absent -- optional: /usr/bin/python3 -m pip install --user scipy"
         log "  (only needed to run 'wk bench compare' in bench mode)"
+    fi
+
+    # Nothing outside this install can read these settings back -- it is only
+    # measurable while it is the running system -- so the log the first-boot
+    # daemon writes is what a host-mode reader has, and this path records the
+    # same line behind the same reading (`wk bench mac-ab --preflight`, and the
+    # autorun, refuse a volume it does not appear in).
+    local fblog=/var/log/wk-bench-firstboot.log   # the path the daemon's plist gives launchd
+    if [ -n "$DRY" ]; then
+        log "  would record 'provisioning complete' in $fblog"
+    elif [ "$quiet_ok" = yes ]; then
+        printf '=== provisioning complete (wk bench mac-volume --provision, %s) ===\n' \
+               "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            | sudo tee -a "$fblog" >/dev/null \
+            && changed "recorded 'provisioning complete' in $fblog" \
+            || warn "  could not write $fblog, so a driver cannot tell this install was provisioned"
+    else
+        warn "  not recorded as provisioned: the settings above are not a measured Mac's,"
+        warn "  and that record is what 'wk bench mac-ab' plants a job on the strength of"
     fi
 
     log ""
