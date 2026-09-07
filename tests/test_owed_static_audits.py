@@ -1,4 +1,4 @@
-"""Static audits over the tree's shell: three shapes that are invisible in
+"""Static audits over the tree's shell: four shapes that are invisible in
 review and fatal at run time, each pinned to what the tree looks like today so
 a *new* one fails here rather than shipping quietly.
 
@@ -39,15 +39,129 @@ DELIBERATE_PREDICATES = {
     ("cmd/ab", "ab_slot_has"),
     ("cmd/push", "_in_vm_driver"),
     ("cmd/sysimage", "_ws_building"),
+    ("admin/wk-card-priv", "_slot_present"),
+    ("bench/mac-bench-volume.sh", "volume_is_system"),
+    ("boot/disk.sh", "_image_wants_wifi"),
+    ("container/proxy/ensure-bridge.sh", "bridge_alive"),
+    ("image/yocto-build.sh", "bb"),
 }
 
 
+# Every directory holding shell in this tree. Audit 3's SCRIPT_ROOTS is
+# narrower on purpose: it asks a question only a standalone script can answer.
+SHELL_ROOTS = ("admin", "bench", "boot", "bridge", "build", "cmd", "container",
+               "host", "image", "lib", "targets", "vm")
+SHELL_SHEBANG_LINE = re.compile(r'^#!.*\b(bash|sh|dash|ksh)\b')
+
+# --- an assignment whose value comes out of a `grep` --------------------------
+#
+# `grep` exits 1 when it matches nothing, and under `set -euo pipefail` that
+# status is the assignment's -- at any stage of the pipeline. So the very case
+# the code below then handles (`[ -z "$x" ]`, a `*)` arm, a `pass` line) is the
+# one that never arrives: the script dies at the assignment instead. The fix is
+# `|| x=""`, which is how the rest of the tree writes it.
+#
+# Only a `grep` this statement itself runs counts. One inside a quoted argument
+# belongs to another shell -- `inside`'s own `|| true`, a remote pipeline ending
+# in `head` -- and its status never reaches here, so quoted spans are blanked
+# out the way audit 1 blanks them.
+GREP_ASSIGN_RE = re.compile(
+    r'^(local\s+|export\s+|declare\s+)?[A-Za-z_][A-Za-z0-9_]*=\$\(')
+
+
+def _without_strings(s):
+    """The statement with quoted spans blanked and everything else -- the
+    substitution's own pipeline included -- left alone. Audit 1 wants the
+    opposite (`_without_data` blanks whole substitutions), because the
+    question there is which operators are at the *statement's* level."""
+    out, quote, i = [], None, 0
+    while i < len(s):
+        c = s[i]
+        if quote:
+            if c == "\\" and quote == '"':
+                i += 2
+                continue
+            if c == quote:
+                quote = None
+            out.append(" ")
+            i += 1
+            continue
+        if c in "'\"":
+            quote = c
+            out.append(" ")
+            i += 1
+            continue
+        out.append(c)
+        i += 1
+    return "".join(out)
+
+
+def _grep_assignments_in(text):
+    """The rule, over any shell text: an assignment from a substitution whose
+    own pipeline runs a grep, with nothing to absorb its status."""
+    found = []
+    for stmt in _statements(text.splitlines()):
+        if not GREP_ASSIGN_RE.match(stmt):
+            continue
+        bare = _without_strings(stmt)
+        if "||" in bare or "&&" in bare:
+            continue
+        if re.search(r'\bgrep\b', bare):
+            found.append(stmt)
+    return found
+
+
+def find_grep_assignments():
+    found = []
+    for path in _iter_shell_files():
+        text = path.read_text(errors="replace")
+        if "set -e" not in text:
+            continue
+        rel = str(path.relative_to(REPO))
+        found += [(rel, stmt) for stmt in _grep_assignments_in(text)]
+    return found
+
+
+class TestGrepAssignmentAudit(unittest.TestCase):
+    def test_no_assignment_takes_an_unprotected_greps_exit_status(self):
+        found = find_grep_assignments()
+        self.assertEqual(
+            found, [],
+            "these assignments die under `set -euo pipefail` the moment their "
+            "grep matches nothing, which is the case the code around them "
+            f"handles: {found}. Write `|| name=\"\"`.",
+        )
+
+    def test_the_audit_sees_the_shape_it_is_for(self):
+        """A positive control: the rule is a regex over shell, so a passing
+        audit above has to be a clean tree and not a broken scan."""
+        self.assertEqual(len(_grep_assignments_in(
+            'blanket=$(printf "%s" "$rules" | grep -E NOPASSWD | tail -1)\n')), 1)
+
+    def test_the_two_ways_of_absorbing_it_are_not_reported(self):
+        self.assertEqual(_grep_assignments_in(
+            'blanket=$(printf "%s" "$rules" | grep -E NOPASSWD) || blanket=""\n'
+            'material=$(inside "grep -rl KEY $HOME | head -5")\n'), [])
+
+
+HEREDOC_OP_RE = re.compile(r'<<(?!<)(-)?\s*([\'"]?)([A-Za-z_][A-Za-z0-9_]*)\2')
+
+
 def _iter_shell_files():
-    for p in sorted((REPO / "lib").glob("*.sh")):
-        yield p
-    for p in sorted((REPO / "cmd").iterdir()):
-        if p.is_file():
-            yield p
+    """Shell by content, not by extension: a `cmd/*` dispatch file and a
+    sourced `lib/*.sh` are both shell, and `wk` has no suffix either."""
+    for root in SHELL_ROOTS:
+        for p in sorted((REPO / root).rglob("*")):
+            if not p.is_file() or "__pycache__" in p.parts:
+                continue
+            if p.suffix in (".py", ".pyc", ".md", ".json", ".conf", ".plist"):
+                continue
+            if p.suffix == ".sh":
+                yield p
+                continue
+            with p.open(errors="replace") as handle:
+                if SHELL_SHEBANG_LINE.match(handle.readline()):
+                    yield p
 
 
 def _functions(path):
@@ -75,13 +189,63 @@ def _functions(path):
     return out
 
 
-def _last_statement(body):
-    for line in reversed(body):
-        s = line.strip()
-        if not s or s.startswith("#"):
+def _open_quote(text, quote=None):
+    """The quote still open at the end of `text`, if any. Comments are skipped
+    whole: half the apostrophes in this tree are in prose."""
+    i = 0
+    while i < len(text):
+        c = text[i]
+        if quote:
+            if c == "\\" and quote == '"':
+                i += 2
+                continue
+            if c == quote:
+                quote = None
+            i += 1
             continue
-        return s
-    return ""
+        if c == "#" and (i == 0 or text[i - 1] in " \t"):
+            break
+        if c in "'\"":
+            quote = c
+        elif c == "\\":
+            i += 1
+        i += 1
+    return quote
+
+
+def _statements(body):
+    """One entry per statement: continuations joined, a quoted span that runs
+    across lines kept whole, a heredoc body skipped. A shell script this tree
+    *prints* (boot/pi-mbr.sh's `b_self_disarm_sh`, `printf` of a whole
+    self-disarm hook) is one argument, not code at this level."""
+    out, buf, heredoc = [], "", None
+    for raw in body:
+        if heredoc is not None:
+            if raw.strip() == heredoc:
+                heredoc = None
+            continue
+        s = raw.strip()
+        if not buf and (not s or s.startswith("#")):
+            continue
+        buf = f"{buf} {s}" if buf else s
+        if buf.endswith("\\"):
+            buf = buf[:-1]
+            continue
+        if _open_quote(buf) is not None:
+            continue
+        out.append(buf)
+        m = HEREDOC_OP_RE.search(buf)
+        if m:
+            heredoc = m.group(3)
+        buf = ""
+    if buf:
+        out.append(buf)
+    return out
+
+
+def _last_statement(body):
+    stmts = _statements(body)
+    return stmts[-1] if stmts else ""
 
 
 def _without_data(s):
@@ -164,7 +328,6 @@ class TestTrailingAndChainAudit(unittest.TestCase):
         self.assertRegex(text, r"gh_authenticated\(\)\s*\{\s*\n\s*have gh && gh api user")
 
 
-HEREDOC_OP_RE = re.compile(r'<<(?!<)(-)?\s*([\'"]?)([A-Za-z_][A-Za-z0-9_]*)\2')
 SHELL_DASH_S_RE = re.compile(r'\b(bash|sh)\s+-s\b')
 
 

@@ -136,7 +136,7 @@ t_prefetch() {
     _remote_is_local && return 0
     [ -n "${WK_REMOTE_HOST:-}" ] || return 0
     out=$(_rsh_q "$(_remote_probe_cmd)" 2>/dev/null) || out=""
-    printf '%s' "$out" > "$f.tmp.$$" && mv "$f.tmp.$$" "$f"
+    printf '%s' "$out" > "$f.tmp.$$" && mv "$f.tmp.$$" "$f" || rm -f "$f.tmp.$$"
 }
 
 _remote_probe_try() {
@@ -303,7 +303,7 @@ t_store_init() {
 t_list() {
     _remote_peer && { _peer_list; return 0; }
     { _rsh_q "ls -1 $(sh_quote "$(_remote_root)/ws") 2>/dev/null" 2>/dev/null || true; } \
-        | while read -r n; do [ -n "$n" ] && printf '%s\tpresent\n' "$n"; done
+        | while read -r n; do if [ -n "$n" ]; then printf '%s\tpresent\n' "$n"; fi; done
 }
 
 # One round trip, since every extra one is a handshake through a jump host: no directory is absent, no `.wk-ready` is creating, and no answer is unreachable, never absent.

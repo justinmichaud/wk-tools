@@ -115,6 +115,18 @@ bench_root() {
     printf '%s' "$BROOT"
 }
 
+# The volume's first boot is what quiets the desktop, and it logs the completion line last -- after which it deletes itself, so the log is the only record that it ever finished.
+firstboot_log() {
+    printf '%s/log/wk-bench-firstboot.log' "$(dirname "$(bench_root)")"
+}
+
+volume_provisioned() {
+    local n
+    n=$(mac "grep -c 'provisioning complete' $(sh_quote "$(firstboot_log)")" 2>/dev/null | tr -d ' \r') || n=0
+    case "$n" in ''|*[!0-9]*) n=0 ;; esac
+    [ "$n" -gt 0 ]
+}
+
 bench_home() {
     local d; d=$(dirname "$(bench_root)")          # …/private/var
     printf '%s' "$(dirname "$(dirname "$d")")/Users/bench"
@@ -148,6 +160,16 @@ preflight() {
     local root; root=$(bench_root 2>/dev/null) || root=""
     if [ -n "$root" ]; then ck yes "bench volume" "$VOLUME at $root"
     else ck no "bench volume" "'$VOLUME' is not attached"; return 1; fi
+
+    # Everything below is something the volume's first boot creates, and the desktop quieting it applies is what `wk bench staged` requires of every leg -- so an unprovisioned volume fails them all after the reboot, where nothing can report it.
+    if volume_provisioned; then
+        ck yes "provisioned" "'$VOLUME' has finished a first boot"
+    else
+        ck no "provisioned" "no 'provisioning complete' in $(firstboot_log)"
+        log "       so the desktop was never quieted, and every leg is refused after" >&2
+        log "       the reboot as 'not a measured Mac's'. On the Mac:" >&2
+        log "         wk bench mac-volume --repair    then boot '$VOLUME' once" >&2
+    fi
 
     if mac "test -w $(sh_quote "$root")" 2>/dev/null; then
         ck yes "staging root" "writable without sudo"
@@ -191,10 +213,10 @@ preflight() {
     fi
 
     if mac "test -f $(sh_quote "$bh/../../Library/LaunchDaemons/com.wk.bench-firstboot.plist")" 2>/dev/null; then
-        log "  note the first-boot daemon is still installed on this volume. It reverts" >&2
-        log "       tooling and reboots the machine ~1 min into a boot; the autorun" >&2
-        log "       cancels the reboot and removes it, so this cycle spends its first" >&2
-        log "       boot defusing it. The cycle after this one is clean." >&2
+        log "  note the first-boot daemon is still installed on this volume. Once" >&2
+        log "       provisioning has completed the autorun removes it and cancels the" >&2
+        log "       reboot it schedules; until then the autorun stands aside and lets" >&2
+        log "       it finish, so that boot provisions rather than measures." >&2
     fi
 
     local staged
@@ -735,13 +757,16 @@ phase_progress() {
 
     local marker; marker=$(mac "sed -n 's/^id=//p' '/Volumes/$VOLUME/etc/wk-image' 2>/dev/null" 2>/dev/null | tr -d '\r') || marker=""
     local pyobjc=no
-    mac "test -d $(sh_quote "$(bench_home)/Library/Python/3.9/lib/python/site-packages/objc")" 2>/dev/null && pyobjc=yes
-    if [ -n "$marker" ] && [ "$pyobjc" = yes ]; then
-        step yes "it is provisioned" "marker $marker, pyobjc present" \
+    if mac "test -d $(sh_quote "$(bench_home)/Library/Python/3.9/lib/python/site-packages/objc")" 2>/dev/null; then
+        pyobjc=yes
+    fi
+    # The first boot's completion line, not what it leaves behind: it quiets the desktop after installing pyobjc, so a volume with both markers can still have been cut off before the settings every leg is measured against.
+    if volume_provisioned; then
+        step yes "it is provisioned" "first boot completed; marker $marker, pyobjc $pyobjc" \
             "wk bench mac-volume --repair   (on the Mac), then boot it once" \
             "wk bench mac-ab --preflight"
     else
-        step no "it is provisioned" "marker ${marker:-none}, pyobjc $pyobjc" \
+        step no "it is provisioned" "$(firstboot_log) has no completion line (marker ${marker:-none}, pyobjc $pyobjc)" \
             "wk bench mac-volume --repair   (on the Mac), then boot it once" \
             "wk bench mac-ab --preflight"
     fi

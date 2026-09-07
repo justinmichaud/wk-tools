@@ -88,9 +88,9 @@ remove_agent() {
     say "removed the launch agent ($AGENT_PLIST)"
 }
 
-# A first-boot daemon that could not remove itself runs on every boot, rsync --deletes its wk-tools copy over ~bench/Development/wk-tools, and ends with `shutdown -r +1` -- a minute after this agent starts, so it is killed first and the check repeated after the settle.
 FB_PLIST=/Library/LaunchDaemons/com.wk.bench-firstboot.plist
 FB_SELF=/usr/local/libexec/wk-bench-firstboot.sh
+FB_LOG=/var/log/wk-bench-firstboot.log
 
 cancel_pending_reboot() {
     pgrep -x shutdown >/dev/null 2>&1 || return 0
@@ -104,11 +104,30 @@ cancel_pending_reboot() {
     fi
 }
 
+fb_provisioned() {  # the daemon removes itself just before it logs this line, so the log is the only record that provisioning ever finished
+    grep -q "provisioning complete" "$FB_LOG" 2>/dev/null
+}
+
+# The first-boot daemon is what provisions this volume -- the account, autologin, remote login, the desktop quieting every leg's preflight then requires -- and it removes itself and reboots only at the end. So a daemon whose log has no completion line is provisioning right now, and killing it is killing the provisioning. Once the log records the end, all a surviving daemon does is rsync --delete an older wk-tools over ~bench/Development/wk-tools and reboot a minute into every boot, so then it is removed.
 defuse_firstboot() {
     [ -f "$FB_PLIST" ] || [ -f "$FB_SELF" ] || { cancel_pending_reboot; return 0; }
-    say "the first-boot daemon is still installed -- defusing it"
-    if pgrep -f wk-bench-firstboot >/dev/null 2>&1; then  # kill it before it schedules the reboot
-        say "  it is running right now -- stopping it before it schedules a reboot"
+    if ! fb_provisioned; then
+        say "the first-boot daemon is installed and $FB_LOG records no"
+        say "  'provisioning complete' -- it is provisioning this volume, or it stopped"
+        say "  partway. Standing aside: it applies the desktop quieting, and without"
+        say "  that every leg is refused anyway."
+        if pgrep -f wk-bench-firstboot >/dev/null 2>&1; then
+            say "  it is running; it reboots when it finishes, and this agent starts again"
+        else
+            say "  it is NOT running, so this boot will not finish it. It runs again at"
+            say "  the next boot; if it never completes, repair the volume from host mode:"
+            say "    wk bench mac-volume --repair"
+        fi
+        return 1
+    fi
+    say "the first-boot daemon is still installed and provisioning has completed -- defusing it"
+    if pgrep -f wk-bench-firstboot >/dev/null 2>&1; then  # a re-run of a completed provisioning: redundant, and it reboots at the end
+        say "  it is re-running right now -- stopping it before it schedules a reboot"
         sudo -n pkill -f wk-bench-firstboot >/dev/null 2>&1 || true
     fi
     sudo -n rm -f "$FB_PLIST" "$FB_SELF" >/dev/null 2>&1 || true
@@ -129,7 +148,10 @@ if [ ! -f /etc/wk-image ]; then
     exit 0
 fi
 say "bench mode: $(sed -n 's/^id=//p' /etc/wk-image)"
-defuse_firstboot
+if ! defuse_firstboot; then
+    say "nothing else runs this boot; the job stays planted and this agent stays installed"
+    exit 0
+fi
 
 if [ ! -f "$JOB" ]; then
     say "no job at $JOB -- nothing to run"

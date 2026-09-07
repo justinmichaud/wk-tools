@@ -142,7 +142,7 @@ _bridge_subnet() {
 # `dig +short` writes its timeout message to *stdout* on some platforms, so the answer is filtered to something that is actually an address.
 _bridge_claims_name() { # <address>  -> prints the answered address
     local got
-    got=$(_bridge_dig "$1" | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' | head -1)
+    got=$(_bridge_dig "$1" | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' | head -1) || got=""
     [ -n "$got" ] || return 1
     printf '%s' "$got"
 }

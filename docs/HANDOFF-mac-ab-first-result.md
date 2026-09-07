@@ -25,21 +25,9 @@ the command that does it and the command that proves it.
       never applied and `wk bench staged`'s preflight refuses every leg with
       "35 setting(s) above are not a measured Mac's". Measured 2026-09-07: the
       A/B ran 04:20:03-04:22:00 and failed all eight legs for this reason and
-      no other. The daemon and its script are *gone* now (see the next item),
-      so the volume will not self-provision on the next boot either
+      no other. The daemon and its script are gone from the volume, so it will
+      not self-provision on the next boot either
       [needs `wk bench mac-volume --repair` on the Mac, then one boot]
-
-- [ ] `defuse_firstboot` (bench/mac-bench-autorun.sh) kills provisioning that
-      has not finished, and then removes it. Its comment treats the first-boot
-      daemon as stale tooling to revert; it is the thing that provisions the
-      volume. Last night it killed it three seconds in, at "installing
-      Tailscale". It must defuse only a daemon whose log records
-      `provisioning complete`, and stand aside otherwise [no hardware needed]
-
-- [ ] `wk bench mac-ab` plants onto an unprovisioned volume without complaint,
-      so the refusal arrives one boot later, in bench mode, where nobody can
-      act on it. `preflight` already reads the volume; it should refuse to
-      plant when provisioning has not completed [no hardware needed]
 
 ## One A/B iteration
 
@@ -67,23 +55,14 @@ the command that does it and the command that proves it.
 
 ## What a failing run has to say for itself
 
-- [ ] `wk status <ws>` calls a full-LTO link a stall. It counts compiler
-      processes, finds zero during `Ld WebCore`, and prints "no log output for
-      301s -- likely stalled or killed / compilers: 0" while `ld` is at 99.5%
-      CPU (measured 2026-09-07). The abort is at 1800s so nothing dies, but the
-      report claims something it has not verified. Count linkers too, or report
-      the busiest process of the build [no hardware needed]
-
-- [ ] no command shows a build's gate readings. `wk build <ws> mac-release-pgo`
-      prints the browser check, the pinned payloads and the profile summary,
-      and `wk logs <ws>` is raw xcodebuild output -- finding them means
-      grepping `wk logs --all` with a pattern nobody would guess. The readings
-      are written to `~/.local/state/wk/pgo/{browser,profile}-check.json` in the
-      guest and, since 2026-09-07, copied beside the products as
-      `wk-browser-check.json`, `wk-profile-check.json` and `wk-payload-pins`, so
-      they travel with a staged arm. Neither staged arm carries them: both
-      builds predate that. Surface them from `wk status <ws>` or a flag on
-      `wk logs` [no hardware needed]
+- [ ] `wk status <ws>` still reports `state=stalled` and exit 3 for a workspace
+      whose full-LTO link has been silent past `WK_STALL_SECONDS` (300s;
+      `build_live`, lib/detach.sh), which is also the state `wk status --wait`
+      stops waiting through. The reading that settles it is `build_processes`
+      (lib/detach.sh) and `wk status` now prints it, but it counts *this
+      machine's* compilers and linkers, and a machine holding several
+      workspaces cannot say which build they belong to. Measure that
+      attribution before letting `build_live` read it [no hardware needed]
 
 - [ ] `wk status` says nothing about a macOS A/B in flight. Its `bench` section
       reads this host's own store, and a mac-ab's rounds and results live on the
@@ -110,14 +89,12 @@ the command that does it and the command that proves it.
 
 ## Standing hazards
 
-- [ ] a `[ ... ] && cmd` used as a statement takes its own status under
-      `set -euo pipefail`, and four instances cost about two hours on
-      2026-09-06: `wk bench stage` ended at exit 1 with no output on any clean
-      checkout (the `dirty=no` branch), `_wk_bench_hosts_write` mid-function,
-      and twice in `phase_progress` where `grep -c` finds nothing. The repo's
-      own defects file already records two more. Nothing scans for the shape;
-      a test that greps every `set -e` script for it would have caught all six
-      [no hardware needed]
+- [ ] the trailing-`&&` audit (tests/test_owed_static_audits.py) skips any
+      statement that also holds a `||`, so `{ … || true; } | while read -r n;
+      do [ -n "$n" ] && printf …; done` -- a loop body whose last iteration
+      decides the function's status -- passes it. Blank `{ }` and `do … done`
+      bodies the way quoted spans are blanked, or the rule only sees the shape
+      when it appears alone [no hardware needed]
 
 - [ ] `wk boot mbp` refuses to arm the firmware because
       `/usr/local/share/wk-bench/owner-password` does not exist, and whether
@@ -133,7 +110,20 @@ the command that does it and the command that proves it.
       Mode, which is why this is a question and not a fact
       [needs one sudo on the Mac]
 
-- [ ] the wk-tools tree on moose carries 27 uncommitted files and tolken runs
+- [ ] the wk-tools tree on moose carries uncommitted files and tolken runs
       from a scratch clone at `~/Development/wk-tools-wip`, deployed with
       rsync-and-commit. `wk sync --tools` refuses an uncommitted tree by
       design, so landing this work means committing it [decision]
+
+- [ ] `wk selftest` is red before any of this: 97 test ids fail at 2b35211,
+      36 of them in test_machine_mounts and 52 across test_push_agent,
+      test_key_github_pat, test_store_secrets, test_key, test_claude_login and
+      test_push_switch. One contract explains most of the credential half --
+      `wk push status` exits 4 where the tests expect 1 ("no deploy keys here
+      at all") -- so settle that exit code first and re-count
+      [no hardware needed]
+
+- [ ] `vm/console-keys.py`, `build/pgo-run-benchmark.py` and
+      `bench/mac-window-probe.sh` carry more prose than
+      tests/test_comment_density.py allows (22.7%, 13.3% and 11.9% against a
+      5% body ceiling), which is one of the 97 [no hardware needed]

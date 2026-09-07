@@ -8,6 +8,8 @@
 #
 #   --follow, -f   stream the log live
 #   --all, -a      print the full normalised log
+#   --gates, -g    the readings this build was collected under: the browser
+#                  check, the profile check, and the pinned benchmark payloads
 
 set -euo pipefail
 WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -23,27 +25,59 @@ load_target "$(ws_target "$NAME")"
 
 WSDIR="$(wk_ws_dir "$NAME")"
 LOG="$WSDIR/build.log"
-_shown=""
-if [ ! -f "$LOG" ]; then
-    shopt -s nullglob
-    _stage_logs=("$WSDIR"/home/yocto-*.log "$WSDIR"/home/buildroot-*.log)
-    shopt -u nullglob
-    if [ "${#_stage_logs[@]}" -gt 0 ]; then
-        LOG=$(ls -1t "${_stage_logs[@]}" | head -1)
-        _shown="$LOG"
-    else
-        die "no build log and no image-stage log for '$NAME' -- has it been
-    built? ('wk build', 'wk sysimage build')"
-    fi
-fi
-[ -z "$_shown" ] || info "showing $_shown"
 
-[ $# -le 1 ] || die "usage: wk logs [<workspace>] [--follow|-f|--all|-a]; see wk logs -h"
+resolve_log() {
+    local shown=""
+    if [ ! -f "$LOG" ]; then
+        shopt -s nullglob
+        local stage_logs=("$WSDIR"/home/yocto-*.log "$WSDIR"/home/buildroot-*.log)
+        shopt -u nullglob
+        if [ "${#stage_logs[@]}" -gt 0 ]; then
+            LOG=$(ls -1t "${stage_logs[@]}" | head -1)
+            shown="$LOG"
+        else
+            die "no build log and no image-stage log for '$NAME' -- has it been
+    built? ('wk build', 'wk sysimage build')"
+        fi
+    fi
+    [ -z "$shown" ] || info "showing $shown"
+}
+
+# The readings travel beside the products (build/mac-pgo.sh's `_pgo_evidence`), so they are read from the build this workspace holds now, on the machine holding it, and each verdict is re-derived by the checker that took the reading rather than remembered from the build.
+gates() {
+    local script
+    script=$(cat <<'GATES'
+set -u
+shopt -s nullglob
+seen=0
+for f in "$SRC"/WebKitBuild/*/wk-browser-check.json; do
+    seen=1; printf 'browser check %s\n' "$f"
+    python3 "$TOOLS/bench/mac-browser-check.py" --read "$f" 2>&1 | sed 's/^/  /'
+done
+for f in "$SRC"/WebKitBuild/*/wk-profile-check.json; do
+    seen=1; printf 'profile check %s\n' "$f"
+    python3 "$TOOLS/bench/mac-profile-check.py" --read "$f" 2>&1 | sed 's/^/  /'
+done
+for f in "$SRC"/WebKitBuild/*/wk-payload-pins; do
+    seen=1; printf 'benchmark payloads %s\n' "$f"
+    sed 's/^/  /' "$f"
+done
+[ "$seen" = 1 ] || printf 'no readings beside the products under %s/WebKitBuild -- only a
+PGO config collects them (build/mac-pgo.sh); every other config has no gates.\n' "$SRC"
+GATES
+)
+    t_exec "$NAME" bash -c "SRC=$(sh_quote "$(t_src "$NAME")") TOOLS=$(sh_quote "$(t_tools "$NAME")")
+$script"
+}
+
+USAGE="usage: wk logs [<workspace>] [--follow|-f|--all|-a|--gates|-g]; see wk logs -h"
+[ $# -le 1 ] || die "$USAGE"
 case "${1:-}" in
---follow|-f) exec tail -f "$LOG" ;;
---all|-a)    exec tr '\r' '\n' < "$LOG" ;;
-"") ;;
-*) die "usage: wk logs [<workspace>] [--follow|-f|--all|-a]; see wk logs -h" ;;
+--gates|-g)  gates; exit 0 ;;
+--follow|-f) resolve_log; exec tail -f "$LOG" ;;
+--all|-a)    resolve_log; exec tr '\r' '\n' < "$LOG" ;;
+"")          resolve_log ;;
+*) die "$USAGE" ;;
 esac
 
 log "errors:"
@@ -55,3 +89,4 @@ log ""
 _hint=""; in_workspace || _hint=" $NAME"
 log "  wk logs$_hint --all     full log"
 log "  wk logs$_hint --follow  live"
+log "  wk logs$_hint --gates   the readings this build was collected under"

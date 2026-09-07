@@ -71,7 +71,7 @@ probe_local() {
     # Only blanket rules count: a NOPASSWD scoped to one program is a deliberate exception, told apart by a command list that is not `ALL`.
     rules=$(printf '%s\n' "$out" | sed -n '/may run the following/,$p' \
             | grep -E '^[[:space:]]*\(.*\)' || true)
-    last=$(printf '%s\n' "$rules" | grep -E '(^|[[:space:]])(NO)?PASSWD:[[:space:]]*ALL[[:space:]]*$|\)[[:space:]]*ALL[[:space:]]*$' | tail -1)
+    last=$(printf '%s\n' "$rules" | grep -E '(^|[[:space:]])(NO)?PASSWD:[[:space:]]*ALL[[:space:]]*$|\)[[:space:]]*ALL[[:space:]]*$' | tail -1) || last=""
     case "$last" in
         *NOPASSWD:*) blanket=nopasswd ;;
         ?*)          blanket=passwd ;;   # explicit PASSWD: ALL, or an untagged rule (authenticates by default)

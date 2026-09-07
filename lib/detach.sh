@@ -32,6 +32,24 @@ log_age() { # <log> -- seconds since modified; `stat` spells this two ways (GNU 
     printf '%s' $(( now - mtime ))
 }
 
+# `-A`, not `-e`: on Darwin `-e` asks for each process's environment and reports only this user's. And `comm` is a bare name on Linux and a full path on Darwin, so the name is the last path component either way -- a pattern anchored at `^` counts zero of Xcode's linkers.
+_build_ps() {  # every compiler and linker running on this machine, busiest first, as `pcpu name`
+    ps -A -o pcpu=,comm= 2>/dev/null | awk '
+        BEGIN { split("cc1 cc1plus lto1 clang clang++ gcc g++ cc c++ ld ld-classic \
+                       ld64 ld64.lld ld.lld lld ninja xcodebuild swift-frontend", a, " ")
+                for (i in a) want[a[i]] = 1 }
+        { cpu = $1; $1 = ""; sub(/^ +/, ""); n = split($0, p, "/")
+          if (p[n] in want) printf "%s %s\n", cpu, p[n] }' \
+        | sort -rn
+}
+
+build_processes() { _build_ps | grep -c . || true; }
+
+# A full-LTO link is one process at ~100% and no log output for many minutes; what is busiest is the one reading that tells that apart from a build that was killed.
+busiest_process() {
+    _build_ps | head -1 | awk 'NF { printf "%s at %s%% CPU", $2, $1 }'
+}
+
 # A build carries no pid -- a pid on one end of an ssh is not a fact on the other -- so a `running` status file counts only while the log has moved within WK_STALL_SECONDS.
 build_live() { # <status-file> [log]
     local sf="$1" log="${2:-}" st now mtime

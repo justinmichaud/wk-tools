@@ -188,3 +188,109 @@ class TestOneStatistic(WkTest):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestProvisioningIsNotSomethingToKill(WkTest):
+    """The first-boot daemon provisions the volume -- including the desktop
+    quieting every leg's preflight then requires -- and removes itself at the
+    end, so an installed daemon means provisioning is unfinished. Both sides
+    of the experiment read the one record of that: the completion line in the
+    volume's own first-boot log."""
+
+    def _defuse(self, plist=True, complete=False, running=False):
+        """The function as the agent runs it: `set -e`, sudo's output
+        discarded, and the daemon's files really there to remove."""
+        text = AUTORUN.read_text()
+        with scratch_dir() as tmp:
+            log = tmp / "log"
+            log.write_text("[wk-bench] installing Tailscale\n"
+                           + ("=== first boot provisioning complete ===\n" if complete else ""))
+            fb, self_sh, killed = tmp / "plist", tmp / "self", tmp / "killed"
+            if plist:
+                fb.write_text("<plist/>")
+                self_sh.write_text("#!/bin/bash\n")
+            cp = sh(
+                f'set -euo pipefail\n'
+                f'FB_PLIST={fb}; FB_SELF={self_sh}; FB_LOG={log}\n'
+                f'say() {{ printf "%s\\n" "$*"; }}\n'
+                f'cancel_pending_reboot() {{ say CANCELLED; }}\n'
+                f'pgrep() {{ return {0 if running else 1}; }}\n'
+                f'pkill() {{ : > {killed}; }}\n'
+                f'sudo() {{ shift; "$@"; }}\n'
+                f'fb_provisioned() {{{func_body(text, "fb_provisioned")}}}\n'
+                f'defuse_firstboot() {{{func_body(text, "defuse_firstboot")}}}\n'
+                f'if defuse_firstboot; then ret=0; else ret=$?; fi\n'
+                f'printf "RET=%s\\n" "$ret"\n')
+            self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+            return cp.stdout + cp.stderr, fb.exists(), killed.exists()
+
+    def test_it_stands_aside_while_provisioning_is_unfinished(self):
+        out, still_there, killed = self._defuse(complete=False, running=True)
+        self.assertIn("RET=1", out, out)
+        self.assertTrue(still_there, "it removed a daemon that had not finished:\n" + out)
+        self.assertFalse(killed, "it killed provisioning:\n" + out)
+        self.assertNotIn("CANCELLED", out,
+                         "it cancelled the reboot provisioning ends with:\n" + out)
+
+    def test_a_stopped_unfinished_daemon_names_the_repair(self):
+        out, _, _ = self._defuse(complete=False, running=False)
+        self.assertIn("mac-volume --repair", out, out)
+
+    def test_a_completed_daemon_that_could_not_remove_itself_is_defused(self):
+        out, still_there, killed = self._defuse(complete=True, running=True)
+        self.assertIn("RET=0", out, out)
+        self.assertFalse(still_there, "it left a completed daemon installed:\n" + out)
+        self.assertTrue(killed, "its re-run reboots the machine mid-round:\n" + out)
+        self.assertIn("CANCELLED", out, out)
+
+    def test_no_daemon_at_all_is_an_ordinary_boot(self):
+        out, _, _ = self._defuse(plist=False)
+        self.assertIn("RET=0", out, out)
+        self.assertIn("CANCELLED", out, out)
+
+    def test_the_autorun_measures_nothing_on_a_boot_it_stood_aside_on(self):
+        text = AUTORUN.read_text()
+        self.assertIn("if ! defuse_firstboot; then", text,
+                      "defuse_firstboot's refusal is not acted on")
+
+    def test_the_driver_reads_the_same_record(self):
+        """One rule, two readers: the volume's log, not a proxy for it."""
+        text = MACAB.read_text()
+        self.assertIn("provisioning complete", text)
+        self.assertIn("wk-bench-firstboot.log", text)
+
+    def _provisioned(self, log_lines):
+        text = MACAB.read_text()
+        with scratch_dir() as tmp:
+            (tmp / "private" / "var" / "log").mkdir(parents=True)
+            (tmp / "private" / "var" / "log" / "wk-bench-firstboot.log").write_text(log_lines)
+            cp = sh(
+                f'set -euo pipefail\n'
+                f'. {REPO}/lib/common.sh\n'
+                f'mac() {{ bash -c "$1"; }}\n'
+                f'bench_root() {{ printf "%s" {tmp}/private/var/wk; }}\n'
+                f'firstboot_log() {{{func_body(text, "firstboot_log")}}}\n'
+                f'volume_provisioned() {{{func_body(text, "volume_provisioned")}}}\n'
+                f'if volume_provisioned; then echo YES; else echo NO; fi\n')
+            self.assertEqual(cp.returncode, 0,
+                             f"the reader itself failed: {cp.stdout}{cp.stderr}")
+            return cp.stdout.strip().splitlines()[-1]
+
+    def test_a_volume_that_never_finished_reads_as_unprovisioned(self):
+        self.assertEqual(self._provisioned("[wk-bench] installing Tailscale\n"), "NO")
+
+    def test_a_grep_that_finds_nothing_is_not_a_failure_of_the_reader(self):
+        """`grep -c` exits 1 with no match, and under `set -e` that would kill
+        the preflight rather than fail one check in it."""
+        self.assertEqual(self._provisioned(""), "NO")
+
+    def test_a_completed_first_boot_reads_as_provisioned(self):
+        self.assertEqual(
+            self._provisioned("=== first boot provisioning complete ===\n"), "YES")
+
+    def test_the_preflight_refuses_the_plant_rather_than_noting_it(self):
+        """A note is read by nobody at 4am; a failed check is what stops the
+        plant, and the refusal arrives while the volume is still mountable."""
+        body = func_body(MACAB.read_text(), "preflight")
+        self.assertIn('ck no "provisioned"', body)
+        self.assertIn('ck yes "provisioned"', body)

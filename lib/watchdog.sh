@@ -4,6 +4,8 @@ WK_STALL_SECONDS="${WK_STALL_SECONDS:-300}"   # silence before warning
 WK_ABORT_SECONDS="${WK_ABORT_SECONDS:-1800}"  # silence before giving up
 WK_HEARTBEAT_SECONDS="${WK_HEARTBEAT_SECONDS:-300}"  # how often to say "still going"
 
+command -v build_processes >/dev/null 2>&1 || . "$WK_ROOT/lib/detach.sh"
+
 _now() { date +%s; }
 _fsize() { stat -c %s "$1" 2>/dev/null || stat -f %z "$1" 2>/dev/null || echo 0; }
 
@@ -30,10 +32,15 @@ _progress_line() {
 }
 
 _stall_report() {
-    local log="$1" idle="$2"
-    warn "no output for ${idle}s -- possible stall"
+    local log="$1" idle="$2" n
+    n=$(build_processes)
+    if [ "${n:-0}" -gt 0 ]; then
+        warn "no output for ${idle}s, and this machine is running $n compiler/linker process(es) -- a full-LTO link is silent for minutes at a time"
+        log  "  busiest:       $(busiest_process)"
+    else
+        warn "no output for ${idle}s, and nothing here is compiling or linking"
+    fi
     log  "  last progress: $(_progress_line "$log" || echo unknown)"
-    log  "  compilers:     $(ps -eo comm= 2>/dev/null | grep -cE '^(cc1plus|clang|ld|lld|ninja)' 2>/dev/null || true)"
     if [ -r /proc/meminfo ]; then
         log  "  memory:        $(awk '/^MemAvailable:/ {printf "%d MB available", $2/1024}' /proc/meminfo)"
     fi

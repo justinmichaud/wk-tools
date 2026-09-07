@@ -332,7 +332,7 @@ report_one() {
         ;;
     stalled)
         if [ -n "$age" ]; then
-            note_warn "no log output for ${age}s -- likely stalled or killed"
+            note_warn "no log output for ${age}s"
             while IFS= read -r _l; do note "$_l"; done \
                 < <(_stall_report "$logf" "$age" 2>&1)
         else

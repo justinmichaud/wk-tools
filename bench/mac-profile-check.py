@@ -123,15 +123,29 @@ def report(reading):
 
 def main():
     parser = argparse.ArgumentParser(prog="mac-profile-check", allow_abbrev=False)
-    parser.add_argument("--profile-dir", required=True,
+    parser.add_argument("--profile-dir",
                         help="WK_PGO_DIR: what collect-pgo-profiles was given as --output-directory")
-    parser.add_argument("--arch", required=True,
+    parser.add_argument("--arch",
                         help="the compressed-profile sub path, which is the machine's arch")
+    parser.add_argument("--read", metavar="JSON",
+                        help="report a reading already taken (what --json wrote) "
+                             "instead of taking one; needs no profile and no llvm-profdata")
     parser.add_argument("--json", help="write the whole reading here")
     args = parser.parse_args()
 
-    tool = profdata()
-    reading = collect(args.profile_dir, args.arch, lambda path: summarise(tool, path))
+    if args.read:
+        with open(args.read) as handle:
+            reading = json.load(handle)
+        for key in ("benchmarks", "combined", "compressed", "missing"):
+            if key not in reading:
+                parser.error(f"{args.read} has no '{key}': it is not a profile-check reading")
+    elif args.profile_dir and args.arch:
+        tool = profdata()
+        reading = collect(args.profile_dir, args.arch, lambda path: summarise(tool, path))
+    else:
+        parser.error("--profile-dir and --arch to take a reading, or --read to report one")
+
+    # Re-derived on every report, never stored: the floors live in one place.
     found = faults(reading)
 
     if args.json:
@@ -140,6 +154,7 @@ def main():
     report(reading)
 
     if found:
+        sys.stdout.flush()  # the readings above belong before the faults, down a pipe too
         print("\nthis profile is not one to build against:", file=sys.stderr)
         for fault in found:
             print(f"  {fault}", file=sys.stderr)

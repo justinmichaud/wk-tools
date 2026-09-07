@@ -326,11 +326,11 @@ PLIST
         # Scraped off the index because the JSON's `TarballsVersion` names the Linux artefacts and has no macOS version field.
         local tsname tsver
         tsname=$(curl -fsS 'https://pkgs.tailscale.com/stable/' 2>/dev/null \
-                 | grep -oE 'Tailscale-[0-9.]+-macos\.pkg' | sort -u | tail -1)
+                 | grep -oE 'Tailscale-[0-9.]+-macos\.pkg' | sort -u | tail -1) || tsname=""
         if [ -z "$tsname" ]; then
             tsver=$(curl -fsS 'https://pkgs.tailscale.com/stable/?mode=json' 2>/dev/null \
                     | sed -n 's/.*"TarballsVersion": *"\([^"]*\)".*/\1/p' | head -1)
-            [ -n "$tsver" ] && tsname="Tailscale-$tsver-macos.pkg"
+            if [ -n "$tsver" ]; then tsname="Tailscale-$tsver-macos.pkg"; fi
         fi
         if [ -n "$tsname" ]; then
             mkdir -p "$(dirname "$tspkg_cache")"

@@ -1,4 +1,5 @@
-"""`wk logs` shows `(none)` on a good build, owed by
+"""What `wk logs` says about a build: `(none)` on a good one, and the
+readings the build was collected under. The first is owed by
 docs/HANDOFF-test-runner.md: "catches: `error:` matching inside message
 text". `first_error` (lib/watchdog.sh) greps a build.log for lines that look
 like a compiler/ninja failure; the risk this guards is a bare, unanchored
@@ -11,11 +12,28 @@ point it elsewhere).
 
 Run: python3 -m unittest tests.test_owed_logs -v
 """
+import json
 import unittest
 
-from tests.support import REPO, WkTest, bash
+from tests.support import REPO, WkTest, bash, fake_workspace
 
 CMD_LOGS = REPO / "cmd" / "logs"
+
+GOOD_BROWSER = {
+    "accelerator": "IOAccelerator", "dpr": 2, "focused": True, "raf_hz": 59.7,
+    "renderer": "Apple M1 Pro", "screen": [1512, 982], "webgl": "WebGL 2.0",
+    "webkit_gpu_clients": {"913": "com.apple.WebKit.GPU"},
+}
+LIBRARIES = ("JavaScriptCore", "WebCore", "WebKit")
+BENCHMARKS = ("speedometer3", "jetstream3", "motionmark")
+GOOD_PROFILE = {
+    "profile_dir": "/Users/wk/pgo", "arch": "arm64", "missing": [],
+    "combined": {lib: {"total_functions": 40000, "maximum_function_count": 900000}
+                 for lib in LIBRARIES},
+    "compressed": {lib: 1234567 for lib in LIBRARIES},
+    "benchmarks": {b: {lib: {"total_functions": 24000, "maximum_function_count": 4200}
+                       for lib in LIBRARIES} for b in BENCHMARKS},
+}
 
 
 class TestLogsShowsNoneOnAGoodBuild(WkTest):
@@ -60,6 +78,50 @@ class TestLogsShowsNoneOnAGoodBuild(WkTest):
         self.assertEqual(cp.returncode, 0, out)
         self.assertNotIn("(none)", out, out)
         self.assertIn("ninja: build stopped", out, out)
+
+
+class TestTheReadingsTravelWithTheBuild(WkTest):
+    """A staged arm carries the readings that justify it beside its products,
+    and `wk logs --gates` is what reads them back: the browser check, the
+    profile check, and the payload pins, each judged again as it is shown."""
+
+    def _gates(self, browser=None, profile=None, pins=None):
+        with fake_workspace() as ws:
+            products = ws.ws_dir / "WebKit" / "WebKitBuild" / "Release-mac-release-pgo"
+            products.mkdir(parents=True)
+            if browser is not None:
+                (products / "wk-browser-check.json").write_text(json.dumps(browser))
+            if profile is not None:
+                (products / "wk-profile-check.json").write_text(json.dumps(profile))
+            if pins is not None:
+                (products / "wk-payload-pins").write_text(pins)
+            cp = bash(f'exec "{CMD_LOGS}" --gates',
+                      env=ws.env({"WK_NAME": "selftest-ws", "WK_TARGET": "local"}))
+            return cp, cp.stdout + cp.stderr
+
+    def test_a_build_with_no_readings_says_which_configs_have_them(self):
+        cp, out = self._gates()
+        self.assertEqual(cp.returncode, 0, out)
+        self.assertIn("no readings beside the products", out, out)
+        self.assertIn("PGO config", out, out)
+
+    def test_the_readings_are_shown_from_beside_the_products(self):
+        cp, out = self._gates(browser=GOOD_BROWSER, profile=GOOD_PROFILE,
+                              pins="speedometer3 9f3c1a\nmotionmark 44ab02\n")
+        self.assertEqual(cp.returncode, 0, out)
+        self.assertIn("raf_hz=59.7", out, out)
+        self.assertIn("Apple M1 Pro", out, out)
+        self.assertIn("JavaScriptCore: functions=40000", out, out)
+        self.assertIn("speedometer3 9f3c1a", out, out)
+
+    def test_a_reading_that_did_not_justify_a_measurement_says_so_again(self):
+        """The verdict is re-derived from the reading, so a throttled window
+        is reported by `wk logs` in the same words the build refused it in."""
+        bad = dict(GOOD_BROWSER, raf_hz=8.0, webgl=None, webkit_gpu_clients={})
+        cp, out = self._gates(browser=bad)
+        self.assertEqual(cp.returncode, 0, out)
+        self.assertIn("this window is throttled", out, out)
+        self.assertIn("no WebGL context", out, out)
 
 
 if __name__ == "__main__":

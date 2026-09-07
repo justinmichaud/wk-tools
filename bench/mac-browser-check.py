@@ -138,16 +138,14 @@ def faults(reading, clients, device, min_raf):
     return found
 
 
-def main():
-    parser = argparse.ArgumentParser(prog="mac-browser-check", allow_abbrev=False)
-    parser.add_argument("--build-directory", required=True,
-                        help="the products directory holding MiniBrowser.app")
-    parser.add_argument("--json", help="write the whole reading here")
-    parser.add_argument("--min-raf", type=float, default=MIN_RAF,
-                        help=f"the rate below which the window is throttled (default {MIN_RAF})")
-    parser.add_argument("--timeout", type=float, default=120.0)
-    args = parser.parse_args()
+def report(reading, clients):
+    for key in ("accelerator", "renderer", "webgl", "raf_hz", "screen", "dpr", "focused"):
+        print(f"{key}={reading.get(key)}")
+    print("webkit_gpu_clients=" + ",".join(
+        f"{pid}:{name}" for pid, name in sorted(clients.items())))
 
+
+def take_reading(args):
     reading = {}
     server = serve(reading)
     port = server.server_address[1]
@@ -176,18 +174,42 @@ def main():
 
     reading["accelerator"] = device
     reading["webkit_gpu_clients"] = {str(k): v for k, v in clients_seen.items()}
+    return reading
+
+
+def main():
+    parser = argparse.ArgumentParser(prog="mac-browser-check", allow_abbrev=False)
+    parser.add_argument("--build-directory",
+                        help="the products directory holding MiniBrowser.app")
+    parser.add_argument("--read", metavar="JSON",
+                        help="report a reading already taken (what --json wrote) "
+                             "instead of taking one; needs no Mac and no browser")
+    parser.add_argument("--json", help="write the whole reading here")
+    parser.add_argument("--min-raf", type=float, default=MIN_RAF,
+                        help=f"the rate below which the window is throttled (default {MIN_RAF})")
+    parser.add_argument("--timeout", type=float, default=120.0)
+    args = parser.parse_args()
+
+    if args.read:
+        with open(args.read) as handle:
+            reading = json.load(handle)
+    elif args.build_directory:
+        reading = take_reading(args)
+    else:
+        parser.error("--build-directory to take a reading, or --read to report one")
+
+    # Derived on every report, never stored in the reading: one place holds the floors.
+    clients = {str(k): v for k, v in (reading.get("webkit_gpu_clients") or {}).items()}
+    found = faults(reading, clients, reading.get("accelerator"), args.min_raf)
+
     if args.json:
         with open(args.json, "w") as handle:
             json.dump(reading, handle, indent=2, sort_keys=True)
 
-    found = faults(reading, clients_seen, device, args.min_raf)
-
-    for key in ("accelerator", "renderer", "webgl", "raf_hz", "screen", "dpr", "focused"):
-        print(f"{key}={reading.get(key)}")
-    print("webkit_gpu_clients=" + ",".join(
-        f"{pid}:{name}" for pid, name in sorted(clients_seen.items())))
+    report(reading, clients)
 
     if found:
+        sys.stdout.flush()  # the readings above belong before the faults, down a pipe too
         print("\nthis machine cannot present an accelerated, unthrottled browser:", file=sys.stderr)
         for fault in found:
             print(f"  {fault}", file=sys.stderr)

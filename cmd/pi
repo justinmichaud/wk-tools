@@ -1145,7 +1145,7 @@ cmd_boot_order() {
     [ -n "$order" ] || order=0xf41
 
     local stripped want
-    stripped=$(printf '%s\n' "$current" | grep -vE '^(TFTP_IP|CLIENT_IP|SUBNET|GATEWAY)=')
+    stripped=$(printf '%s\n' "$current" | grep -vE '^(TFTP_IP|CLIENT_IP|SUBNET|GATEWAY)=') || stripped=""
 
     case "$order_name" in
         local)     want=$(boot_order_without_net "$order") ;;
