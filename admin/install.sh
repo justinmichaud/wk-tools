@@ -6,237 +6,196 @@ _libexec=/usr/local/libexec
 # macOS has no `root` group; root's is `wheel`. Asked of the platform, not tried and retried.
 if is_macos; then _rootgrp=wheel; else _rootgrp=root; fi
 
-# A grant is installed when it answers, not when the copy reported success: a rule that
-# parsed can still be out-ranked by a later include, or name a path character-for-character
-# different from the one being run.
-_grant_answers() { # <helper> <sudoers file> <rule written>
-    wk_priv_answers "$1" && return 0
-    warn "$2 is installed and 'sudo -n $1' still asks for a password, so nothing
-    unattended can use it. The rule written was:
-      $3
-    'sudo -l' shows which include wins: $2 has to be the last match, and the path in the
-    rule has to be the one being run, character for character."
-    return 1
-}
-_target="$_libexec/wk-quiesce-priv"
-_source="$WK_ROOT/admin/wk-quiesce-priv"
-_sudoers=/etc/sudoers.d/zzz-wk-quiesce
-# Tombstone: an out-ranked second grant of the same path still reads as in force.
-_sudoers_old=/etc/sudoers.d/wk-quiesce
+# Beside the helper under the name it knows: boot-check never runs a caller-named path.
+_check_source="$WK_ROOT/boot/check-boot-files.py"
+_check_target="$_libexec/wk-check-boot-files.py"
 
-if [ ! -f "$_source" ]; then
-    warn "quiesce helper missing at $_source; skipping"
-    return 0 2>/dev/null || true
-fi
-
-_needs_install=0
-if [ ! -f "$_target" ] || ! cmp -s "$_source" "$_target"; then
-    _needs_install=1
-fi
+# The rule is written to a fixed path, overwritten, that only this user and root can write:
+# a kill between writing it and installing it leaves one predictable file the next run
+# truncates, rather than an unpredictable mktemp name nothing will ever remove, and no
+# other account can change the bytes between `visudo -cqf` and the install that trusts it.
+_rules_dir="$(wk_state_dir)/priv"
 
 # GNU form first: Linux's `stat -f` succeeds as "filesystem status", never as an owner.
-_owner=$(stat -c '%U' "$_target" 2>/dev/null || stat -f '%Su' "$_target" 2>/dev/null || echo "")
-if [ -f "$_target" ] && [ "$_owner" != root ]; then _needs_install=1; fi
+_priv_owner() {   # <path>
+    stat -c '%U' "$1" 2>/dev/null || stat -f '%Su' "$1" 2>/dev/null || echo ""
+}
 
-_rule="$(id -un) ALL=(root) NOPASSWD: $_target"
+_priv_mode() {   # <path>
+    stat -c '%a' "$1" 2>/dev/null || stat -f '%Lp' "$1" 2>/dev/null || echo ""
+}
 
-_sudoers_ok=0
-if [ -x "$_target" ] && wk_priv_answers "$_target"; then
-    _sudoers_ok=1
-fi
+# What a helper runs beside itself, and so is part of its state rather than a step of its own.
+_priv_companions() {   # <name> -- "<source> <installed path>" per line
+    case "$1" in
+        wk-card-priv) printf '%s %s\n' "$_check_source" "$_check_target" ;;
+    esac
+    return 0
+}
 
-if [ "$_needs_install" -eq 0 ] && [ "$_sudoers_ok" -eq 1 ]; then
-    unchanged "quiesce helper and sudoers rule"
-elif ! sudo -n true 2>/dev/null && [ ! -t 0 ]; then
-    if [ "$_needs_install" -eq 0 ]; then
-        warn "the quiesce helper is installed, but its sudoers rule is not in force"
-        log  "  something later in the include order grants PASSWD over it."
-        log  "  'sudo -l' shows the order; $_sudoers has to be the last match."
-        log  "  from an interactive shell:  ./setup --stage quiesce"
+# The declared final state of one helper, both halves in one predicate: this tree's binary
+# installed root-owned and writable by nobody else, and a grant that answers. A rule is
+# never compared as text -- it can parse and still be out-ranked by a later include, or
+# name a user nobody logs in as -- so what is asked of it is whether `sudo -n` runs the
+# helper with no password, which is the only property anything unattended depends on.
+_priv_state() {   # <name> -- "<binary> <grant>"
+    local name="$1" tgt src bin grant csrc cdst
+    tgt="$(wk_priv_path "$name")"
+    src="$WK_ROOT/admin/$name"
+    if [ ! -f "$tgt" ]; then bin=absent
+    elif [ "$(_priv_owner "$tgt")" != root ]; then bin=foreign
     else
-        warn "quiesce helper not installed: sudo needs a terminal"
-        log  "  run this from an interactive shell:  ./setup --stage quiesce"
+        case "$(_priv_mode "$tgt")" in
+            ''|*[!0-7]*)      bin=nomode ;;
+            *[2367]|?[2367]?) bin=writable ;;
+            *) if cmp -s "$src" "$tgt"; then bin=ok; else bin=stale; fi ;;
+        esac
     fi
-else
-    info "installing the quiesce helper (requires sudo once)"
+    if [ "$bin" = ok ]; then
+        while read -r csrc cdst; do
+            [ -n "$cdst" ] || continue
+            if [ "$(_priv_owner "$cdst")" != root ] || ! cmp -s "$csrc" "$cdst"; then
+                bin=stale
+            fi
+        done <<COMPANIONS
+$(_priv_companions "$name")
+COMPANIONS
+    fi
+    if wk_priv_answers "$tgt"; then grant=ok; else grant=silent; fi
+    printf '%s %s\n' "$bin" "$grant"
+}
+
+_priv_explain() {   # <name> <binary> <grant>
+    local name="$1" bin="$2" grant="$3" tgt sudoers
+    tgt="$(wk_priv_path "$name")"
+    sudoers="$(wk_priv_sudoers "$name")"
+    case "$bin" in
+        absent)  log "  $tgt is not installed" ;;
+        foreign) log "  $tgt is owned by $(_priv_owner "$tgt"), not root" ;;
+        stale)   log "  $tgt is not this tree's copy of admin/$name" ;;
+    esac
+    if [ "$grant" != ok ]; then
+        log "  'sudo -n $tgt status' asks for a password, so nothing unattended can use it."
+        log "  $sudoers has to be the last match 'sudo -l' shows, and name that path"
+        log "  character for character."
+    fi
+    return 0
+}
+
+# One repair, from any starting point -- absent, stale, wrong owner, no rule, a rule naming
+# another user, a rule a later include out-ranks -- and safe to run when the state is
+# already right: it installs rather than deciding a second time what is missing, so a kill
+# anywhere in it leaves a state the next run converges from.
+_priv_repair() {   # <name> <binary verdict before>
+    local name="$1" bin="$2" src tgt sudoers old cand csrc cdst
+    src="$WK_ROOT/admin/$name"
+    tgt="$(wk_priv_path "$name")"
+    sudoers="$(wk_priv_sudoers "$name")"
+    old="${sudoers%/*}/${sudoers##*/zzz-}"
+    cand="$_rules_dir/$name.rule"
 
     sudo install -d -o root -g "$_rootgrp" -m 0755 "$_libexec"
+    sudo install -o root -m 0755 "$src" "$tgt"
+    while read -r csrc cdst; do
+        [ -n "$cdst" ] || continue
+        sudo install -o root -m 0644 "$csrc" "$cdst"
+    done <<COMPANIONS
+$(_priv_companions "$name")
+COMPANIONS
+    [ "$bin" = ok ] || changed "installed $tgt"
 
-    sudo install -o root -m 0755 "$_source" "$_target"
-    changed "installed $_target"
-
+    install -d -m 0700 "$_rules_dir"
+    printf '%s\n' "$(id -un) ALL=(root) NOPASSWD: $tgt" > "$cand"
     # An invalid sudoers file locks the account out of sudo entirely.
-    _tmp="$(mktemp)"
-    printf '%s\n' "$_rule" > "$_tmp"
-
-    if sudo visudo -cqf "$_tmp"; then
-        sudo install -o root -m 0440 "$_tmp" "$_sudoers"
-        changed "installed $_sudoers"
-        _grant_answers "$_target" "$_sudoers" \
-            "$(id -un) ALL=(root) NOPASSWD: $_target" || true
-        if [ -f "$_sudoers_old" ]; then
-            sudo rm -f "$_sudoers_old"
-            changed "removed $_sudoers_old (it sorted before zz-<user>-passwd and was dead)"
-        fi
+    if ! sudo visudo -cqf "$cand"; then
+        rm -f "$cand"
+        die "the sudoers rule generated for $name failed validation; $sudoers is unchanged"
+    fi
+    if sudo cmp -s "$cand" "$sudoers"; then
+        unchanged "$sudoers already carries this rule"
     else
-        rm -f "$_tmp"
-        die "generated sudoers rule failed validation; nothing was installed"
+        sudo install -o root -m 0440 "$cand" "$sudoers"
+        changed "installed $sudoers"
     fi
-    rm -f "$_tmp"
+    rm -f "$cand"
+    # Tombstone: an out-ranked second grant of the same path still reads as in force.
+    if [ -f "$old" ]; then
+        sudo rm -f "$old"
+        changed "removed $old (it sorted before zz-<user>-passwd and was dead)"
+    fi
+    return 0
+}
+
+_priv_converge() {   # <name> <platform> <what it is for>
+    local name="$1" where="$2" what="$3" src tgt sudoers state bin grant
+    if [ "$where" = linux ] && ! is_linux; then
+        unchanged "$name ($where only)"
+        return 0
+    fi
+    src="$WK_ROOT/admin/$name"
+    if [ ! -f "$src" ]; then
+        warn "$name is missing at $src; skipping"
+        return 0
+    fi
+    tgt="$(wk_priv_path "$name")"
+    sudoers="$(wk_priv_sudoers "$name")"
+
+    state="$(_priv_state "$name")"
+    bin="${state% *}"
+    grant="${state#* }"
+    # Writable by anyone but root is a root escalation, and the remedy is to take the grant
+    # away now rather than to install this tree's copy over whatever is there.
+    case "$bin" in
+        nomode)   die "could not read the mode of $tgt -- refusing to vouch for $sudoers" ;;
+        writable) die "$tgt is writable by more than root (mode $(_priv_mode "$tgt")) -- this is a root escalation; remove $sudoers now" ;;
+    esac
+    if [ "$bin" = ok ] && [ "$grant" = ok ]; then
+        unchanged "$name and $sudoers"
+        return 0
+    fi
+    if ! sudo -n true 2>/dev/null && [ ! -t 0 ]; then
+        warn "$name ($what) is not in force, and repairing it needs sudo on a terminal"
+        _priv_explain "$name" "$bin" "$grant"
+        log  "  run this from an interactive shell:  ./setup --stage quiesce"
+        return 0
+    fi
+    info "installing $name -- $what (requires sudo once)"
+    _priv_repair "$name" "$bin"
+
+    # Asked again, of the machine, now: a rule that copied without error can still be
+    # out-ranked or name a path character-for-character different from the one being run.
+    state="$(_priv_state "$name")"
+    bin="${state% *}"
+    grant="${state#* }"
+    if [ "$bin" = ok ] && [ "$grant" = ok ]; then
+        unchanged "$name answers"
+        return 0
+    fi
+    warn "$name is installed and its grant does not answer:"
+    _priv_explain "$name" "$bin" "$grant"
+    return 0
+}
+
+while read -r _pname _pwhere _pwhat; do
+    [ -n "$_pname" ] || continue
+    _priv_converge "$_pname" "$_pwhere" "$_pwhat"
+done <<ROWS
+$(wk_priv_helpers)
+ROWS
+unset _pname _pwhere _pwhat
+
+# Apple Silicon signs the startup-disk choice with a volume owner's credential, and `bless
+# --help` lists --user/--stdinpass under Snapshot options rather than Mount Mode, so whether
+# root alone suffices is the platform's answer: the helper blesses with a credential where
+# the machine holds one and without one where it does not, and says which it used. Keeping a
+# login password on disk stays the owner's call; nothing here creates that file.
+if is_macos && [ ! -f /usr/local/share/wk-bench/owner-password ]; then
+    log "  no volume-owner credential here, which may not be needed: 'wk boot mbp'"
+    log "  blesses with root alone and reports what bless answered."
 fi
-
-# Card gate, narrower than the capability: only a usb or mmc whole disk the machine is
-# not running from -- the boot check, not the transport one, is what makes it safe.
-_card_target="$_libexec/wk-card-priv"
-_card_source="$WK_ROOT/admin/wk-card-priv"
-# Beside the helper under the name it knows: boot-check never runs a caller-named path.
-_check_target="$_libexec/wk-check-boot-files.py"
-_check_source="$WK_ROOT/boot/check-boot-files.py"
-_card_sudoers=/etc/sudoers.d/zzz-wk-card
-_card_sudoers_old=/etc/sudoers.d/wk-card
-
-if [ ! -f "$_card_source" ]; then
-    warn "card helper missing at $_card_source; skipping"
-elif ! is_linux; then
-    unchanged "card helper (linux only)"
-else
-    _card_needs=0
-    if [ ! -f "$_card_target" ] || ! cmp -s "$_card_source" "$_card_target"; then _card_needs=1; fi
-    if [ ! -f "$_check_target" ] || ! cmp -s "$_check_source" "$_check_target"; then _card_needs=1; fi
-    _card_owner=$(stat -c '%U' "$_card_target" 2>/dev/null || echo "")
-    if [ -f "$_card_target" ] && [ "$_card_owner" != root ]; then _card_needs=1; fi
-
-    _card_ok=0
-    if [ -x "$_card_target" ] && wk_priv_answers "$_card_target"; then _card_ok=1; fi
-
-    if [ "$_card_needs" -eq 0 ] && [ "$_card_ok" -eq 1 ]; then
-        unchanged "card helper and sudoers rule"
-    elif ! sudo -n true 2>/dev/null && [ ! -t 0 ]; then
-        if [ "$_card_needs" -eq 0 ]; then
-            warn "the card helper is installed, but its sudoers rule is not in force"
-            log  "  'sudo -l' shows the order; $_card_sudoers has to be the last match."
-            log  "  from an interactive shell:  ./setup --stage quiesce"
-        else
-            warn "card helper not installed: sudo needs a terminal"
-            log  "  run this from an interactive shell:  ./setup --stage quiesce"
-        fi
-    else
-        info "installing the card helper (requires sudo once)"
-        sudo install -d -o root -g "$_rootgrp" -m 0755 "$_libexec"
-        sudo install -o root -m 0755 "$_card_source" "$_card_target"
-        sudo install -o root -m 0644 "$_check_source" "$_check_target"
-        changed "installed $_card_target and $_check_target"
-
-        _card_tmp="$(mktemp)"
-        printf '%s\n' "$(id -un) ALL=(root) NOPASSWD: $_card_target" > "$_card_tmp"
-        if sudo visudo -cqf "$_card_tmp"; then
-            sudo install -o root -m 0440 "$_card_tmp" "$_card_sudoers"
-            changed "installed $_card_sudoers"
-            _grant_answers "$_card_target" "$_card_sudoers" \
-                "$(id -un) ALL=(root) NOPASSWD: $_card_target" || true
-            if [ -f "$_card_sudoers_old" ]; then
-                sudo rm -f "$_card_sudoers_old"
-                changed "removed $_card_sudoers_old (it sorted before zz-<user>-passwd and was dead)"
-            fi
-        else
-            rm -f "$_card_tmp"
-            die "generated card sudoers rule failed validation; nothing was installed"
-        fi
-        rm -f "$_card_tmp"
-    fi
-
-    # Checked every run: writable by anyone but root is a root escalation.
-    if [ -f "$_card_target" ]; then
-        _card_perm=$(stat -c '%a' "$_card_target" 2>/dev/null || echo "")
-        case "$_card_perm" in
-            ''|*[!0-7]*) die "could not read the mode of $_card_target -- refusing to vouch for $_card_sudoers" ;;
-            *[2367])     die "$_card_target is world-writable (mode $_card_perm) -- remove $_card_sudoers now" ;;
-            ?[2367]?)    die "$_card_target is group-writable (mode $_card_perm) -- remove $_card_sudoers now" ;;
-        esac
-        unchanged "card helper permissions ($_card_perm)"
-    fi
-fi
-unset _card_target _card_source _card_sudoers _card_sudoers_old _card_needs _card_owner _card_ok _card_tmp _card_perm
-
-# Same shape: a fixed verb list, no passthrough, one validated boot order, a fixed tag.
-_boot_target="$_libexec/wk-boot-priv"
-_boot_source="$WK_ROOT/admin/wk-boot-priv"
-_boot_sudoers=/etc/sudoers.d/zzz-wk-boot
-
-if [ ! -f "$_boot_source" ]; then
-    warn "boot helper missing at $_boot_source; skipping"
-else
-    _boot_needs=0
-    if [ ! -f "$_boot_target" ] || ! cmp -s "$_boot_source" "$_boot_target"; then _boot_needs=1; fi
-    if is_macos; then _boot_owner=$(stat -f '%Su' "$_boot_target" 2>/dev/null || echo "")
-    else _boot_owner=$(stat -c '%U' "$_boot_target" 2>/dev/null || echo ""); fi
-    if [ -f "$_boot_target" ] && [ "$_boot_owner" != root ]; then _boot_needs=1; fi
-
-    _boot_ok=0
-    if [ -x "$_boot_target" ] && wk_priv_answers "$_boot_target"; then _boot_ok=1; fi
-
-    if [ "$_boot_needs" -eq 0 ] && [ "$_boot_ok" -eq 1 ]; then
-        unchanged "boot helper and sudoers rule"
-    elif ! sudo -n true 2>/dev/null && [ ! -t 0 ]; then
-        if [ "$_boot_needs" -eq 0 ]; then
-            warn "the boot helper is installed, but its sudoers rule is not in force"
-            log  "  'sudo -l' shows the order; $_boot_sudoers has to be the last match."
-            log  "  from an interactive shell:  ./setup --stage quiesce"
-        else
-            if [ -x "$_boot_target" ]; then
-                warn "the boot helper here is not this tree's copy, and updating it needs a terminal"
-            else
-                warn "boot helper not installed: sudo needs a terminal"
-            fi
-            log  "  run this from an interactive shell:  ./setup --stage quiesce"
-        fi
-    else
-        info "installing the boot helper (requires sudo once)"
-        sudo install -d -o root -g "$_rootgrp" -m 0755 "$_libexec"
-        sudo install -o root -m 0755 "$_boot_source" "$_boot_target"
-        changed "installed $_boot_target"
-
-        _boot_tmp="$(mktemp)"
-        printf '%s\n' "$(id -un) ALL=(root) NOPASSWD: $_boot_target" > "$_boot_tmp"
-        if sudo visudo -cqf "$_boot_tmp"; then
-            sudo install -o root -m 0440 "$_boot_tmp" "$_boot_sudoers"
-            changed "installed $_boot_sudoers"
-            _grant_answers "$_boot_target" "$_boot_sudoers" \
-                "$(id -un) ALL=(root) NOPASSWD: $_boot_target" || true
-        else
-            rm -f "$_boot_tmp"
-            die "generated boot sudoers rule failed validation; nothing was installed"
-        fi
-        rm -f "$_boot_tmp"
-    fi
-
-    # Apple Silicon signs the startup-disk choice with a volume owner's
-    # credential, and `bless --help` lists --user/--stdinpass under Snapshot
-    # options rather than Mount Mode, so whether root alone suffices is the
-    # platform's answer: the helper blesses with a credential where the machine
-    # holds one and without one where it does not, and says which it used.
-    # Keeping a login password on disk stays the owner's call; nothing here
-    # creates that file.
-    if is_macos && [ ! -f /usr/local/share/wk-bench/owner-password ]; then
-        log "  no volume-owner credential here, which may not be needed: 'wk boot mbp'"
-        log "  blesses with root alone and reports what bless answered."
-    fi
-
-    if [ -f "$_boot_target" ]; then
-        if is_macos; then _boot_perm=$(stat -f '%Lp' "$_boot_target" 2>/dev/null || echo "")
-        else _boot_perm=$(stat -c '%a' "$_boot_target" 2>/dev/null || echo ""); fi
-        case "$_boot_perm" in
-            ''|*[!0-7]*) die "could not read the mode of $_boot_target -- refusing to vouch for $_boot_sudoers" ;;
-            *[2367])     die "$_boot_target is world-writable (mode $_boot_perm) -- remove $_boot_sudoers now" ;;
-            ?[2367]?)    die "$_boot_target is group-writable (mode $_boot_perm) -- remove $_boot_sudoers now" ;;
-        esac
-        unchanged "boot helper permissions ($_boot_perm)"
-    fi
-fi
-unset _boot_target _boot_source _boot_sudoers _boot_needs _boot_owner _boot_ok _boot_tmp _boot_perm
 
 # Tombstones: without these an older revision's root-owned file and dead grant stay.
-_retired="${_libexec:-/usr/local/libexec}/wk-tftpd /etc/sudoers.d/wk-netboot"
+_retired="$_libexec/wk-tftpd /etc/sudoers.d/wk-netboot"
 _stale=""
 for _f in $_retired; do [ -e "$_f" ] && _stale="$_stale $_f"; done
 if [ -n "$_stale" ]; then
@@ -255,40 +214,24 @@ unset _retired _stale _f
 # Root-owned and argument-free: an argument would widen the allowlist to "as anybody".
 _sessenv="$_libexec/wk-session.env"
 _sessline="WK_SESSION_USER=$(id -un)"
+_sesscand="$_rules_dir/wk-session.env"
 
-if [ -f "$_target" ]; then
+if [ -f "$(wk_priv_path wk-quiesce-priv)" ]; then
     if sudo -n grep -qxF "$_sessline" "$_sessenv" 2>/dev/null \
        || grep -qxF "$_sessline" "$_sessenv" 2>/dev/null; then
         unchanged "session user"
     else
-        _tmp2="$(mktemp)"
-        printf '%s\n' "$_sessline" > "$_tmp2"
-        if sudo install -o root -m 0644 "$_tmp2" "$_sessenv" 2>/dev/null; then
+        install -d -m 0700 "$_rules_dir"
+        printf '%s\n' "$_sessline" > "$_sesscand"
+        if sudo install -o root -m 0644 "$_sesscand" "$_sessenv" 2>/dev/null; then
             changed "recorded the session user in $_sessenv"
         else
             warn "could not write $_sessenv; 'wk session' will refuse to start"
         fi
-        rm -f "$_tmp2"
+        rm -f "$_sesscand"
     fi
 fi
-
-if [ ! -f "$_target" ]; then
-    unset _libexec _rootgrp _target _source _sudoers _sudoers_old _needs_install _owner _rule _sudoers_ok _tmp
-    return 0 2>/dev/null || true
-fi
-_perm=$(stat -c '%a' "$_target" 2>/dev/null || stat -f '%Lp' "$_target" 2>/dev/null || echo "")
-
-case "$_perm" in
-    ''|*[!0-7]*) die "could not read the mode of $_target -- refusing to vouch for the sudoers rule" ;;
-esac
-
-case "$_perm" in
-    *[2367])  die "$_target is world-writable (mode $_perm) -- this is a root escalation; remove $_sudoers now" ;;
-esac
-case "$_perm" in
-    ?[2367]?) die "$_target is group-writable (mode $_perm) -- this is a root escalation; remove $_sudoers now" ;;
-esac
-unchanged "quiesce helper permissions ($_perm)"
+unset _sessenv _sessline _sesscand
 
 # logind auto-spawns a getty on any unused low VT and any console write unblanks it, and
 # it allocates through autovt@ -- a separate unit name to systemd's mask bookkeeping.
@@ -323,4 +266,4 @@ else
 fi
 unset _bootdir _bootowner
 
-unset _libexec _rootgrp _target _source _sudoers _sudoers_old _needs_install _owner _rule _sudoers_ok _tmp _perm _sessenv _sessline _tmp2
+unset _libexec _rootgrp _check_source _check_target _rules_dir
