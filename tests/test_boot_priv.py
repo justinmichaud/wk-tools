@@ -420,6 +420,27 @@ class TestTheDrivingEndAsksForTheOperationNotThePrivilege(unittest.TestCase):
             with self.subTest(helper=h):
                 self.assertIn(h, text)
 
+class TheHelperInstallsOnBothPlatforms(WkTest):
+    """`install -g root` is an error on macOS, which has no `root` group -- root's
+    is `wheel`. It failed there on every run, which is why tolken carried the
+    quiesce helper (whose block asked for wheel first) and not the boot one."""
+
+    INSTALL = REPO / "admin" / "install.sh"
+
+    def test_no_block_asks_for_a_group_by_name(self):
+        text = self.INSTALL.read_text()
+        self.assertNotIn('-g root', text)
+        self.assertNotIn('-g wheel', text)
+        self.assertEqual(3, text.count('-g "$_rootgrp"'), text.count('-g "$_rootgrp"'))
+
+    def test_the_group_is_asked_of_the_platform(self):
+        for os_name, want in (("macos", "wheel"), ("linux", "root")):
+            with self.subTest(os=os_name):
+                cp = bash('is_macos() { %s; }\n%s\necho "$_rootgrp"'
+                          % ("return 0" if os_name == "macos" else "return 1",
+                             'if is_macos; then _rootgrp=wheel; else _rootgrp=root; fi'))
+                self.assertEqual(want, cp.stdout.strip(), cp.stdout + cp.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()

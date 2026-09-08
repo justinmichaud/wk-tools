@@ -3,6 +3,8 @@
 # zzz-: sudo takes the LAST match in /etc/sudoers.d and zz-<user>-passwd re-imposes
 # `PASSWD: ALL` over every command, so an earlier name is a dead grant; a dot is skipped.
 _libexec=/usr/local/libexec
+# macOS has no `root` group; root's is `wheel`. Asked of the platform, not tried and retried.
+if is_macos; then _rootgrp=wheel; else _rootgrp=root; fi
 _target="$_libexec/wk-quiesce-priv"
 _source="$WK_ROOT/admin/wk-quiesce-priv"
 _sudoers=/etc/sudoers.d/zzz-wk-quiesce
@@ -45,8 +47,7 @@ elif ! sudo -n true 2>/dev/null && [ ! -t 0 ]; then
 else
     info "installing the quiesce helper (requires sudo once)"
 
-    sudo install -d -o root -g wheel -m 0755 "$_libexec" 2>/dev/null \
-        || sudo install -d -o root -g root -m 0755 "$_libexec"
+    sudo install -d -o root -g "$_rootgrp" -m 0755 "$_libexec"
 
     sudo install -o root -m 0755 "$_source" "$_target"
     changed "installed $_target"
@@ -106,7 +107,7 @@ else
         fi
     else
         info "installing the card helper (requires sudo once)"
-        sudo install -d -o root -g root -m 0755 "$_libexec"
+        sudo install -d -o root -g "$_rootgrp" -m 0755 "$_libexec"
         sudo install -o root -m 0755 "$_card_source" "$_card_target"
         sudo install -o root -m 0644 "$_check_source" "$_check_target"
         changed "installed $_card_target and $_check_target"
@@ -170,7 +171,7 @@ else
         fi
     else
         info "installing the boot helper (requires sudo once)"
-        sudo install -d -o root -g root -m 0755 "$_libexec"
+        sudo install -d -o root -g "$_rootgrp" -m 0755 "$_libexec"
         sudo install -o root -m 0755 "$_boot_source" "$_boot_target"
         changed "installed $_boot_target"
 
@@ -249,7 +250,7 @@ if [ -f "$_target" ]; then
 fi
 
 if [ ! -f "$_target" ]; then
-    unset _libexec _target _source _sudoers _sudoers_old _needs_install _owner _rule _sudoers_ok _tmp
+    unset _libexec _rootgrp _target _source _sudoers _sudoers_old _needs_install _owner _rule _sudoers_ok _tmp
     return 0 2>/dev/null || true
 fi
 _perm=$(stat -c '%a' "$_target" 2>/dev/null || stat -f '%Lp' "$_target" 2>/dev/null || echo "")
@@ -299,4 +300,4 @@ else
 fi
 unset _bootdir _bootowner
 
-unset _libexec _target _source _sudoers _sudoers_old _needs_install _owner _rule _sudoers_ok _tmp _perm _sessenv _sessline _tmp2
+unset _libexec _rootgrp _target _source _sudoers _sudoers_old _needs_install _owner _rule _sudoers_ok _tmp _perm _sessenv _sessline _tmp2
