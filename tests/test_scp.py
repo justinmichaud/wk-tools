@@ -410,7 +410,9 @@ t_push_dir demo /tmp/tree /Users/admin/WebKit/tree
                       text)
         self.assertTrue(
             any(l.startswith("scp ") for l in text.splitlines()), text)
-        self.assertIn("rsync -a --delete -e ssh", text)
+        # --chmod: a tree that crosses machines does not carry the pushing
+        # machine's umask (tests/test_owed_static_audits.py audits every one).
+        self.assertIn("rsync -a --chmod=go-w --delete -e ssh", text)
         self.assertIn("/tmp/tree/ admin@1.2.3.4:/Users/admin/WebKit/tree/", text)
         # The question is asked over ssh, and answered with one word.
         self.assertTrue(

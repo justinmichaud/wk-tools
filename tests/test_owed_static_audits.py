@@ -645,5 +645,30 @@ class TestEveryScriptSetsEuoPipefail(unittest.TestCase):
             )
 
 
+class TestEveryCrossMachinePushNormalisesTheMode(unittest.TestCase):
+    """A tree pushed with `rsync -a` carries the *pushing* machine's umask. moose
+    is jmichaud:jmichaud at umask 002, so its files are 0664; on a Mac the group
+    is the shared `staff`, and ssh refuses a config file it can reach that is
+    group-writable -- `Bad owner or permissions`, which broke `git pull` on
+    tolken via the ~/.ssh/config.d symlink into this repo (2026-09-08)."""
+
+    # `-e "ssh …"` or a remote `host:path`: a push that leaves this machine.
+    REMOTE = re.compile(r'rsync\s[^\n]*(-e\s+"ssh|\$\w+:|@\$)')
+
+    def test_no_cross_machine_rsync_carries_the_local_umask(self):
+        bad = []
+        for path in _iter_shell_files():
+            rel = str(path.relative_to(REPO))
+            for n, line in enumerate(path.read_text(errors="replace").splitlines(), 1):
+                stripped = line.strip()
+                if stripped.startswith("#") or "rsync" not in stripped:
+                    continue
+                if not self.REMOTE.search(stripped):
+                    continue
+                if "--chmod=" not in stripped:
+                    bad.append(f"{rel}:{n}: {stripped[:90]}")
+        self.assertEqual([], bad, "cross-machine rsync without --chmod:\n" + "\n".join(bad))
+
+
 if __name__ == "__main__":
     unittest.main()

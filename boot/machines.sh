@@ -200,8 +200,8 @@ machine_prepare() { # <ssh destination>
     info "syncing this tree to $dest:$MACHINE_TOOLS"
     mac_ssh "$dest" "mkdir -p $(sh_quote "$MACHINE_TOOLS")" \
         || { warn "could not make $MACHINE_TOOLS on $dest"; return 1; }
-    rsync -a --delete --exclude '.git/' --exclude '__pycache__/' --exclude '*.pyc' \
-        --exclude 'WebKitBuild/' -e "ssh -o BatchMode=yes" \
+    rsync -a --chmod=go-w --delete --exclude '.git/' --exclude '__pycache__/' \
+        --exclude '*.pyc' --exclude 'WebKitBuild/' -e "ssh -o BatchMode=yes" \
         "$WK_ROOT/" "$dest:$MACHINE_TOOLS/" \
         || { warn "could not sync this tree to $dest"; return 1; }
 

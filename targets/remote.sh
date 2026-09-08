@@ -401,7 +401,7 @@ t_pull_dir() {
         rsync -a --delete ${_T_PULL_EXCLUDES[@]+"${_T_PULL_EXCLUDES[@]}"} "$src/" "$dest/"; return
     fi
     # shellcheck disable=SC2046 -- deliberate word splitting of the option list.
-    rsync -a --delete ${_T_PULL_EXCLUDES[@]+"${_T_PULL_EXCLUDES[@]}"} -e "ssh $(_ssh_opts)" \
+    rsync -a --chmod=go-w --delete ${_T_PULL_EXCLUDES[@]+"${_T_PULL_EXCLUDES[@]}"} -e "ssh $(_ssh_opts)" \
         "$WK_REMOTE_HOST:$src/" "$dest/"
 }
 
@@ -419,7 +419,7 @@ t_push_dir() {
         rsync -a --delete "$src/" "$dest/"; return
     fi
     # shellcheck disable=SC2046 -- deliberate word splitting of the option list.
-    rsync -a --delete -e "ssh $(_ssh_opts)" "$src/" "$WK_REMOTE_HOST:$dest/"
+    rsync -a --chmod=go-w --delete -e "ssh $(_ssh_opts)" "$src/" "$WK_REMOTE_HOST:$dest/"
 }
 
 t_path_kind() {

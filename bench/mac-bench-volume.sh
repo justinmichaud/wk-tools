@@ -253,7 +253,7 @@ ROWS
         warn "  -- it will boot, and nothing will be able to drive it"
     fi
 
-    run "$@" rsync -a --delete --exclude '.git/' --exclude '__pycache__/' --exclude '*.pyc' \
+    run "$@" rsync -a --chmod=go-w --delete --exclude '.git/' --exclude '__pycache__/' --exclude '*.pyc' \
         "$WK_ROOT/" "$root/usr/local/share/wk-bench/wk-tools/" \
         || die "could not stage wk-tools onto '$root'"
 

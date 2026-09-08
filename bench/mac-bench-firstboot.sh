@@ -239,7 +239,7 @@ if [ -d "$PAYLOAD/wk-tools" ]; then
     home=$(dscl . -read "/Users/$BENCH_USER" NFSHomeDirectory 2>/dev/null | awk '{print $2}') || home=""
     if [ -n "$home" ] && [ -d "$home" ]; then
         install -d -o "$BENCH_USER" "$home/Development" \
-            && /usr/bin/rsync -a --delete "$PAYLOAD/wk-tools/" "$home/Development/wk-tools/" \
+            && /usr/bin/rsync -a --chmod=go-w --delete "$PAYLOAD/wk-tools/" "$home/Development/wk-tools/" \
             && chown -R "$BENCH_USER" "$home/Development/wk-tools" \
             && say "wk-tools placed at $home/Development/wk-tools" \
             || say "WARNING: could not place wk-tools"

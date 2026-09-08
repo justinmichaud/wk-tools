@@ -95,7 +95,7 @@ b_bench_put() {
         || die "could not make $dest in '$NODE_GUEST'"
     ( load_target vm >/dev/null 2>&1
       # shellcheck disable=SC2046 -- deliberate word splitting of the options.
-      rsync -a --delete -e "ssh $(_ssh_opts)" "$src/" "$WK_VM_USER@$ip:$dest/" )
+      rsync -a --chmod=go-w --delete -e "ssh $(_ssh_opts)" "$src/" "$WK_VM_USER@$ip:$dest/" )
 }
 
 b_probeable() { is_macos && ( load_target vm >/dev/null 2>&1; tart_bin >/dev/null 2>&1 ); }

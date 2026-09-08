@@ -531,7 +531,7 @@ t_pull_dir() {
     local ip; ip=$(_ip "$name") || die "'$name' is not running (wk vm start $name)"
     mkdir -p "$dest"
     # shellcheck disable=SC2046 -- deliberate word splitting of the option list.
-    rsync -a --delete ${_T_PULL_EXCLUDES[@]+"${_T_PULL_EXCLUDES[@]}"} -e "ssh $(_ssh_opts)" \
+    rsync -a --chmod=go-w --delete ${_T_PULL_EXCLUDES[@]+"${_T_PULL_EXCLUDES[@]}"} -e "ssh $(_ssh_opts)" \
         "$WK_VM_USER@$ip:$src/" "$dest/"
 }
 
@@ -546,7 +546,7 @@ t_push_dir() {
     local name="$1" src="$2" dest="$3"
     local ip; ip=$(_ip "$name") || die "'$name' is not running (wk vm start $name)"
     # shellcheck disable=SC2046 -- deliberate word splitting of the option list.
-    rsync -a --delete -e "ssh $(_ssh_opts)" "$src/" "$WK_VM_USER@$ip:$dest/"
+    rsync -a --chmod=go-w --delete -e "ssh $(_ssh_opts)" "$src/" "$WK_VM_USER@$ip:$dest/"
 }
 
 t_path_kind() {
