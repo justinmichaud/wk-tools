@@ -23,37 +23,81 @@ reserve_mb()    { is_headless && echo "$WK_HEADLESS_RESERVE_MB"    || echo "$WK_
 WK_MB_PER_JOB_EXPLICIT="${WK_MB_PER_JOB:+1}"
 WK_MB_PER_JOB="${WK_MB_PER_JOB:-1536}"
 
+# A reading the machine did not give sizes nothing, and fed into arithmetic instead it is a syntax error frames away from what could not be read. A caller reads one into a variable: a die inside a command substitution kills only that subshell.
+_require_reading() { # <value> <what>
+    case "$1" in
+        ''|*[!0-9]*) die "cannot read $2 on this $(wk_os) machine.
+    Every job count and memory envelope is sized from it, so there is no
+    parallelism wk can defend; it builds nothing from a guess." ;;
+    esac
+}
+
+# Which spelling reads this machine is $(wk_os)'s answer and not is_macos's: a caller defines is_macos to drive a macOS *stage* on another platform.
 host_cores() {
-    if is_macos; then sysctl -n hw.ncpu
-    else nproc
-    fi
+    local v
+    case "$(wk_os)" in
+        macos) v=$(sysctl -n hw.ncpu 2>/dev/null || true)
+               _require_reading "$v" "the core count (sysctl hw.ncpu)" ;;
+        *)     v=$(nproc 2>/dev/null || true)
+               _require_reading "$v" "the core count (nproc)" ;;
+    esac
+    printf '%s\n' "$v"
 }
 
 host_mem_mb() {
-    if is_macos; then echo $(( $(sysctl -n hw.memsize) / 1024 / 1024 ))
-    else awk '/^MemTotal:/ {print int($2/1024)}' /proc/meminfo
-    fi
+    local v
+    case "$(wk_os)" in
+        macos) v=$(sysctl -n hw.memsize 2>/dev/null || true)
+               _require_reading "$v" "total memory (sysctl hw.memsize)"
+               echo $(( v / 1024 / 1024 )) ;;
+        *)     v=$(awk '/^MemTotal:/ {print int($2)}' /proc/meminfo 2>/dev/null || true)
+               _require_reading "$v" "total memory (/proc/meminfo MemTotal)"
+               echo $(( v / 1024 )) ;;
+    esac
 }
+
+host_load() {   # whole cores, which is what build_jobs polite subtracts
+    local v
+    case "$(wk_os)" in
+        macos) v=$(sysctl -n vm.loadavg 2>/dev/null | awk '{print int($2)}' || true)   # `{ 1.23 1.20 1.10 }`: the average is second
+               _require_reading "$v" "the load average (sysctl vm.loadavg)" ;;
+        *)     v=$(awk '{print int($1)}' /proc/loadavg 2>/dev/null || true)
+               _require_reading "$v" "the load average (/proc/loadavg)" ;;
+    esac
+    printf '%s\n' "$v"
+}
+
+wk_load() {   # a remote target's, measured by whoever can reach it, else this machine's
+    if [ -n "${WK_LOAD:-}" ]; then printf '%s\n' "$WK_LOAD"; else host_load; fi
+}
+
+wk_cores() {  # a cgroup or vCPU count the caller measured wins over this machine's
+    if [ -n "${WK_CGROUP_CORES:-}" ]; then printf '%s\n' "$WK_CGROUP_CORES"; else host_cores; fi
+}
+
+_cgroup_mem_max() { echo /sys/fs/cgroup/memory.max; }   # a function, so a test can reach the branch that reads it
 
 # A cgroup limit, when present, wins over MemAvailable, which inside a container reports the whole machine's free memory and can size a job count the cgroup kills.
 avail_mem_mb() {
-    local cg=/sys/fs/cgroup/memory.max avail=""
+    local avail="" cg limit total
 
     if [ -n "${WK_AVAIL_MB:-}" ]; then echo "$WK_AVAIL_MB"; return 0; fi  # this host's free memory says nothing about a build over ssh
 
-    if is_linux && [ -r /proc/meminfo ]; then
-        avail=$(awk '/^MemAvailable:/ {print int($2/1024)}' /proc/meminfo)
-    else
-        avail=$(( $(host_mem_mb) - $(reserve_mb) ))
-    fi
+    case "$(wk_os)" in
+        linux) avail=$(awk '/^MemAvailable:/ {print int($2/1024)}' /proc/meminfo 2>/dev/null || true)
+               _require_reading "$avail" "free memory (/proc/meminfo MemAvailable)" ;;
+        *)     total=$(host_mem_mb); avail=$(( total - $(reserve_mb) )) ;;
+    esac
 
     if [ -n "${WK_CGROUP_MB:-}" ] && [ "$WK_CGROUP_MB" -lt "$avail" ]; then  # what the caller measured of the target's own cgroup, which cmd/build knows from outside it
         avail=$WK_CGROUP_MB
     fi
 
+    cg=$(_cgroup_mem_max)
     if [ -r "$cg" ]; then
-        local limit; limit=$(cat "$cg")
+        limit=$(cat "$cg" 2>/dev/null || true)
         if [ "$limit" != max ]; then
+            _require_reading "$limit" "the cgroup memory limit ($cg)"
             limit=$(( limit / 1024 / 1024 ))
             [ "$limit" -lt "$avail" ] && avail=$limit
         fi
@@ -63,26 +107,32 @@ avail_mem_mb() {
 }
 
 envelope_cores() {  # the cap on the VM (macOS) or container (Linux)
-    local c
-    c=$(( $(host_cores) - $(reserve_cores) ))
+    local c cores
+    cores=$(host_cores)
+    c=$(( cores - $(reserve_cores) ))
     [ "$c" -lt 1 ] && c=1
     echo "$c"
 }
 
 describe_cores() {
-    if is_macos && [ -n "$(sysctl -n hw.perflevel0.logicalcpu 2>/dev/null)" ]; then
-        printf '%s P + %s E' \
-            "$(sysctl -n hw.perflevel0.logicalcpu)" \
-            "$(sysctl -n hw.perflevel1.logicalcpu)"
-    else
-        printf '%s cores' "$(host_cores)"
+    local p e
+    if [ "$(wk_os)" = macos ]; then
+        p=$(sysctl -n hw.perflevel0.logicalcpu 2>/dev/null || true)   # absent on an Intel Mac, which has one core kind
+        if [ -n "$p" ]; then
+            e=$(sysctl -n hw.perflevel1.logicalcpu 2>/dev/null || true)
+            _require_reading "$e" "the efficiency core count (sysctl hw.perflevel1.logicalcpu)"
+            printf '%s P + %s E' "$p" "$e"
+            return 0
+        fi
     fi
+    printf '%s cores' "$(host_cores)"
 }
 
 envelope_mem_mb() {
-    local m
-    m=$(( $(host_mem_mb) - $(reserve_mb) ))
-    [ "$m" -lt 2048 ] && m=$(( $(host_mem_mb) / 2 ))  # 12G could leave nothing
+    local m mem
+    mem=$(host_mem_mb)
+    m=$(( mem - $(reserve_mb) ))
+    [ "$m" -lt 2048 ] && m=$(( mem / 2 ))  # 12G could leave nothing
     echo "$m"
 }
 
@@ -178,16 +228,18 @@ build_jobs() {  # from the memory not already spoken for -- running out of RAM d
     local polite="${1:-}"
     local by_mem by_cpu jobs cores avail
 
-    cores=$(( ${WK_CGROUP_CORES:-$(host_cores)} - $(build_reserved_jobs) ))  # the container is limited to envelope_cores, fewer than nproc, which would oversubscribe
+    cores=$(wk_cores)
+    cores=$(( cores - $(build_reserved_jobs) ))  # the container is limited to envelope_cores, fewer than nproc, which would oversubscribe
     [ "$cores" -lt 1 ] && cores=1
-    avail=$(( $(avail_mem_mb) - $(build_reserved_mb) ))
+    avail=$(avail_mem_mb)
+    avail=$(( avail - $(build_reserved_mb) ))
     [ "$avail" -lt 0 ] && avail=0
     by_mem=$(( avail / WK_MB_PER_JOB ))
     by_cpu=$cores
 
     if [ -n "$polite" ]; then
         local load
-        load=${WK_LOAD:-$(awk '{print int($1)}' /proc/loadavg 2>/dev/null || echo 0)}  # caller-supplied for a remote target; /proc/loadavg here answers for the wrong machine
+        load=$(wk_load)
 
         # A load average decays over its window, so a killed build's cores stay spoken for a minute: memory-idle with load still high means a stale average, and it is halved.
         [ "$by_mem" -ge "$cores" ] && [ "$load" -gt $(( cores / 2 )) ] && load=$(( load / 2 ))
@@ -208,20 +260,22 @@ build_jobs() {  # from the memory not already spoken for -- running out of RAM d
 }
 
 explain_jobs() {
-    local polite="${1:-}" jobs cores by_mem
+    local polite="${1:-}" jobs cores by_mem avail reserved load=""
     jobs=$(build_jobs "$polite")
-    cores=${WK_CGROUP_CORES:-$(host_cores)}  # not the host's, when capped
-    local reserved; reserved=$(build_reserved_mb)
-    log "resources: ${jobs} jobs (cores=${cores} avail=$(avail_mem_mb)MB${reserved:+ minus ${reserved}MB other builds} @ ${WK_MB_PER_JOB}MB/job${polite:+, polite, load=${WK_LOAD:-0}}${WK_MAX_JOBS:+, max $WK_MAX_JOBS})"
+    cores=$(wk_cores)
+    avail=$(avail_mem_mb)
+    reserved=$(build_reserved_mb)
+    [ -z "$polite" ] || load=$(wk_load)
+    log "resources: ${jobs} jobs (cores=${cores} avail=${avail}MB${reserved:+ minus ${reserved}MB other builds} @ ${WK_MB_PER_JOB}MB/job${polite:+, polite, load=${load}}${WK_MAX_JOBS:+, max $WK_MAX_JOBS})"
 
     if [ -z "${WK_MAX_JOBS:-}" ] && [ "$jobs" -lt $(( cores / 2 )) ]; then
-        by_mem=$(( $(avail_mem_mb) / WK_MB_PER_JOB ))
+        by_mem=$(( avail / WK_MB_PER_JOB ))
         if [ "$by_mem" -le "$jobs" ]; then
             warn "parallelism: ${jobs} jobs is under half of ${cores} cores -- the memory
-  envelope only fits $by_mem at ${WK_MB_PER_JOB}MB/job ($(avail_mem_mb)MB available)."
+  envelope only fits $by_mem at ${WK_MB_PER_JOB}MB/job (${avail}MB available)."
         elif [ -n "$polite" ]; then
             warn "parallelism: ${jobs} jobs is under half of ${cores} cores -- load average
-  ${WK_LOAD:-0} is treated as that many cores already spoken for on this shared machine."
+  ${load} is treated as that many cores already spoken for on this shared machine."
         else
             warn "parallelism: ${jobs} jobs is under half of ${cores} cores -- ${cores} is
   this target's own ceiling (a reserve held back for the host, or a fixed vCPU/cgroup count)."

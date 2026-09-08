@@ -22,14 +22,16 @@ $(wk_quiet_daemons_findings "$probe" "wk quiesce on")
 FINDINGS
     fi
 
-    v=$(tmutil destinationinfo 2>&1 | head -1)
+    v=$(_wk_qd_read -e "$_WK_QD_READ_SECS" tmutil destinationinfo | head -1)   # -e: "No destinations configured" is what it says on stderr
     case "$v" in
+        "$_WK_QD_TIMEOUT") warn "  timemachine: backupd did not answer inside its bound (this preflight holds it stopped), so whether a backup can start mid-run is unknown" ;;
         *"No destinations"*) log "  timemachine: no destination configured" ;;
         *) warn "  timemachine: a destination is configured; a backup can start mid-run"; bad=$((bad + 1)) ;;
     esac
 
-    v=$(sudo -n defaults read /Library/Preferences/com.apple.SoftwareUpdate AutomaticCheckEnabled 2>/dev/null) || v=""   # not `softwareupdate --schedule`, which says "on" with AutomaticCheckEnabled 0 in the same plist
+    v=$(_wk_qd_read "$_WK_QD_READ_SECS" sudo -n defaults read /Library/Preferences/com.apple.SoftwareUpdate AutomaticCheckEnabled)   # not `softwareupdate --schedule`, which says "on" with AutomaticCheckEnabled 0 in the same plist
     case "$v" in
+        "$_WK_QD_TIMEOUT") warn "  updates:    softwareupdated did not answer inside its bound (this preflight holds it stopped), so whether automatic checking is on is unknown" ;;
         0)  log  "  updates:    automatic checking off" ;;
         1)  warn "  updates:    automatic checking is on"; bad=$((bad + 1)) ;;
         *)  log  "  updates:    AutomaticCheckEnabled unset, where softwareupdated leaves it -- a scan is stopped by the endpoint denial and the paused scanner, not by this key" ;;

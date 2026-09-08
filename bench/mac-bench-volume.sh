@@ -199,6 +199,11 @@ EOF
         confirm "start the install onto '$VOLUME' now?" || { log "nothing done"; return 0; }
     fi
 
+    # The node identity, before startosinstall erases the volume: without it a
+    # reinstall joins as a second node and the tailnet renames it '<name>-1'.
+    run "$WK_ROOT/bench/mac-tailnet.sh" remember "$target" sudo \
+        || warn "  could not take the bench install's tailnet identity aside -- it will rejoin as a new node"
+
     # --user/--passprompt are not optional: on Apple Silicon the installer cannot personalise a volume without a volume owner's credential, and --nointeraction would suppress the prompt --passprompt needs.
     local admin="${WK_BENCH_ADMIN:-$(id -un)}"
     log "  authorising as '$admin' -- it must be a volume owner on this Mac"
@@ -251,6 +256,9 @@ ROWS
     run "$@" rsync -a --delete --exclude '.git/' --exclude '__pycache__/' --exclude '*.pyc' \
         "$WK_ROOT/" "$root/usr/local/share/wk-bench/wk-tools/" \
         || die "could not stage wk-tools onto '$root'"
+
+    run "$WK_ROOT/bench/mac-tailnet.sh" stage "$root" "$@" \
+        || die "could not stage tailscaled onto '$root' -- the run would be unobservable"
 }
 
 pkg_default_out() { echo "${TMPDIR:-/tmp}/wk-bench-provision.pkg"; }
@@ -428,9 +436,9 @@ do_repair() {
         write_wifi_conf "$S/usr/local/share/wk-bench/wifi.conf"
     fi
 
-    # Tombstone: a volume staged before the tailnet install was refused still
-    # carries these, and a payload that holds a 21MB installer nothing reads is
-    # a volume that lies about what its first boot does.
+    # Tombstone: the packaged Tailscale client, whose NetworkExtension panel only a
+    # person can answer, and the key beside it. tailscaled is a root LaunchDaemon now
+    # (bench/mac-tailnet.sh) and reads its key from /etc/wk, so these are dead weight.
     local stale f
     for f in tailscale-authkey Tailscale-macos.pkg; do
         stale="$S/usr/local/share/wk-bench/$f"

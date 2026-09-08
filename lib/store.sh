@@ -274,6 +274,8 @@ wk_secrets_dir() {
 
 wk_push_held_dir() { printf '%s/push-keys' "$(dirname "$(wk_secrets_dir)")"; }
 
+wk_ntfy_topic_path() { printf '%s/notify/ntfy-topic' "$(dirname "$(wk_secrets_dir)")"; }
+
 wk_push_key() { # <fork> -- read only by push_agent_load, into `ssh-add -`
     _wk_secret_read "$(wk_push_held_dir)/build_key_$1"
 }
@@ -775,11 +777,9 @@ unreferenced_bases() {
     done
 }
 
-# A closed set: each is delivered and read by name (container/firstrun.sh,
-# shell/bashrc, cmd/key; bound back here by tests/test_pi_agent.py). A `value`
-# row is one line, exported into its variable; a `file` row the agent rewrites
-# in place, so it lives in wk_agent_rw_dir and goes only to a workspace seeing
-# these same bytes.  <name> <file here> <file in the home> <variable> <kind>
+# A `value` row is one line, exported into its variable; a `file` row the agent
+# rewrites in place, so it lives in wk_agent_rw_dir and goes only to a workspace
+# seeing these same bytes.  <name> <file here> <file in the home> <variable> <kind>
 wk_agent_secrets() {
     cat <<'EOF'
 claude        claude-token        .wk-agent-token             CLAUDE_CODE_OAUTH_TOKEN  value
@@ -815,9 +815,6 @@ wk_agent_secret() { # <name> -- its first line; a file row is read whole by wk_c
     _wk_secret_read "$p" | sed -n '1p'
 }
 
-# The two names this layer reads and writes a workspace's credential by; the
-# one implementation is wk_cred_present/wk_cred_store, which every credential
-# on this machine goes through.
 wk_agent_secret_present() { # <name>
     wk_cred_present "$1"
 }
@@ -831,19 +828,27 @@ wk_cred_path() { # <name> -- where this machine keeps it
         github-pat)  wk_github_pat_path ;;
         tailnet)     wk_tailscale_authkey_path ;;
         tailnet-api) wk_tailscale_api_path ;;
+        ntfy)        wk_ntfy_topic_path ;;
         *)           wk_agent_secret_path "$1" ;;
     esac
 }
 
 wk_cred_names() { python3 "$WK_ROOT/lib/credcheck.py" names; }
 
-# The deploy keys are generated here rather than stored, so every command that walks the credentials a person supplies walks this list.
 wk_cred_settable() { wk_cred_names | grep -vxF deploy-key; }
 
 wk_cred_rule() { # <name> <field> -- one line of lib/credcheck.py's row for it
     python3 "$WK_ROOT/lib/credcheck.py" rule "$1" \
             --repos "$(wk_push_forks | awk 'NF {printf "%s ", $2}')" \
         | awk -F'\t' -v f="$2" '$1 == f { print $2; exit }'
+}
+
+wk_cred_mints() { # <name> -- one wk makes itself rather than one it is handed
+    python3 "$WK_ROOT/lib/credcheck.py" minted | grep -qxF "$1"
+}
+
+wk_cred_mint() { # <name> -- a fresh one on stdout, for wk_cred_store to take
+    python3 "$WK_ROOT/lib/credcheck.py" mint "$1"
 }
 
 wk_cred_present() { # <name> -- is there one here at all; its rule judges what it can do

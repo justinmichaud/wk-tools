@@ -185,9 +185,11 @@ WK_STORE={store}
 
         Two spellings of one directory, and neither follows a driver: on a
         macOS host it is this device's own path, and where the store is this
-        machine's own it is the store recorded before the override."""
+        machine's own it is the store recorded before the override. `is_macos`
+        is the one predicate that chooses, so stubbing it puts both arms under
+        test on whichever platform this runs on."""
         for extra, want in (
-            ('WK_HOST_SECRETS=/this/device/secrets\n',
+            ('WK_HOST_SECRETS=/this/device/secrets\nis_macos() { return 0; }\n',
              "path=/this/device/secrets/claude-token"),
             ('WK_IN_VM=1\n', "path=/the/machine/store/secrets/claude-token"),
         ):
@@ -195,8 +197,8 @@ WK_STORE={store}
                 cp = bash('''
 . "$WK_ROOT/lib/common.sh"
 WK_STORE=/the/machine/store
-''' + extra + '''
 . "$WK_ROOT/lib/store.sh"
+''' + extra + '''
 # What load_target records before a driver overrides $WK_STORE.
 WK_STORE_DEFAULT=/the/machine/store
 WK_STORE=/some/drivers/own/state
@@ -207,11 +209,13 @@ printf "path=%s\\n" "$(wk_agent_secret_path claude)"
     def test_the_vm_driver_itself_still_finds_it(self):
         """The same thing through the real driver rather than a stand-in: the
         driver moves $WK_STORE to its own state directory and the credential
-        is still read from this device's."""
+        is still read from this device's. The driver only ever runs on a macOS
+        host, so `is_macos` is stubbed to put it under test here too."""
         cp = bash('''
 . "$WK_ROOT/lib/common.sh"
 WK_STORE=/the/machine/store
 . "$WK_ROOT/lib/store.sh"
+is_macos() { return 0; }
 WK_STORE_DEFAULT=/the/machine/store
 WK_VM_STORE=/some/vm/state
 . "$WK_ROOT/targets/vm.sh"

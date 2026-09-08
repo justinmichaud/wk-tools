@@ -208,17 +208,23 @@ WK_STORE={store}
         Two spellings of one directory (wk_secrets_dir, lib/store.sh): on a
         macOS host it is this device's own path (WK_HOST_SECRETS), never
         $WK_STORE; where the store is this machine's own it is the store
-        recorded before the override."""
-        cp = bash('''
+        recorded before the override. `is_macos` is the one predicate that
+        chooses between them, so stubbing it puts both arms under test on
+        whichever platform this runs on."""
+        for macos, want in ((0, "path=/the/machine/store/secrets/litellm-key"),
+                            (1, "path=/this/device/secrets/litellm-key")):
+            with self.subTest(macos=macos):
+                cp = bash('''
 . "$WK_ROOT/lib/common.sh"
 WK_STORE=/the/machine/store
 . "$WK_ROOT/lib/store.sh"
+is_macos() { return %d; }
 WK_STORE_DEFAULT=/the/machine/store
 WK_STORE=/some/drivers/own/state
-printf "path=%s\\n" "$(wk_agent_secret_path litellm)"
-''', env={"WK_HOST_SECRETS": "/this/device/secrets"})
-        self.assertIn("path=/this/device/secrets/litellm-key",
-                      cp.stdout, cp.stdout + cp.stderr)
+printf "path=%%s\\n" "$(wk_agent_secret_path litellm)"
+''' % (0 if macos else 1),
+                          env={"WK_HOST_SECRETS": "/this/device/secrets"})
+                self.assertIn(want, cp.stdout, cp.stdout + cp.stderr)
 
 
 class TestWkKeySet(WkTest):

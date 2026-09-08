@@ -660,7 +660,7 @@ cmd_run() {
 }
 
 # One path per line, never space-joined: the benchmark volume is named `WK Bench` by default, so a result path on it contains spaces.
-_compare_files() {
+_compare_runs() {
     local spec="$1" which="$2" n=0 one d
     local IFS=,
     for one in $spec; do
@@ -668,7 +668,7 @@ _compare_files() {
         d="$one"
         [ -d "$d" ] || d="$BENCH_DIR/$one"
         [ -f "$d/result.json" ] || die "no such run in $which: $one (a run directory, from 'wk bench ls')"
-        printf '%s\n' "$d/result.json"
+        printf '%s\n' "$d"
         n=$((n + 1))
     done
     [ "$n" -gt 0 ] || die "no runs given for $which"
@@ -720,13 +720,13 @@ cmd_report() {
     [ "$html" != 1 ] || die "the two-run form writes where it is told: --html out.html"
 
     local ca_s cb_s ca cb
-    ca_s=$(_compare_files "$aspec" "-a"); cb_s=$(_compare_files "$bspec" "-b")
+    ca_s=$(_compare_runs "$aspec" "-a"); cb_s=$(_compare_runs "$bspec" "-b")
     _lines_into ca "$ca_s"; _lines_into cb "$cb_s"
 
     local r
     for r in "${ca[0]}" "${cb[0]}"; do
-        if [ "$(wkdata get "$(dirname "$r")/env.json" count 2>/dev/null)" = 1 ]; then
-            warn "run '$(basename "$(dirname "$r")")' has count=1: no p-value can be computed"
+        if [ "$(wkdata get "$r/env.json" count 2>/dev/null)" = 1 ]; then
+            warn "run '$(basename "$r")' has count=1: no p-value can be computed"
             log  "  re-run with --count 2 or more for a comparison with statistics"
         fi
     done
@@ -1371,9 +1371,7 @@ case "${1:-}" in
         set -- $_sides
         [ $# -eq 2 ] || die "usage: wk bench precision <run-a> <run-b> [--detect PCT]
     Either side may be comma-separated run directories, pooled."
-        wkdata ab-precision --target "$_det" \
-            --a "$(printf '%s' "$1" | sed 's#[^,]*#&/result.json#g')" \
-            --b "$(printf '%s' "$2" | sed 's#[^,]*#&/result.json#g')"
+        wkdata ab-precision --target "$_det" --a "$1" --b "$2"
         exit $? ;;
     stage)   shift
              [ $# -ge 1 ] || die "usage: wk bench stage <workspace> --to <machine> [--config C] [--plan P] [--payload <dir>] [--dry-run]; see wk bench -h"

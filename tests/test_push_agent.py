@@ -46,15 +46,18 @@ def have_ssh_agent():
 class _Agent(WkTest):
     """A real ssh-agent in a scratch directory, and a key pair for each fork
     laid out the way this machine lays them out: private halves in the
-    never-mounted directory, public halves in the mounted one."""
+    never-mounted directory, public halves in the mounted one.
+
+    wk_secrets_dir (lib/store.sh) reads WK_HOST_SECRETS on a macOS host and
+    $WK_STORE/secrets everywhere else, so the two names are one directory."""
 
     def setUp(self):
         super().setUp()
-        self.secrets = self.tmp / "secrets"
-        self.held = self.tmp / "push-keys"
         self.store = self.tmp / "store"
-        self.secrets.mkdir()
-        self.held.mkdir()
+        self.secrets = self.store / "secrets"
+        self.held = self.store / "push-keys"
+        self.secrets.mkdir(parents=True)
+        self.held.mkdir(parents=True)
         (self.store / "ws").mkdir(parents=True)
         self.log = self.tmp / "exec.log"
         self.log.write_text("")

@@ -2,6 +2,8 @@
 """Every credential wk holds, what it must be able to do, and what it must not.
 
     credcheck.py names
+    credcheck.py minted
+    credcheck.py mint  <name>
     credcheck.py rule  <name> [--repos "<owner/repo> ..."]
     credcheck.py check <name> [--repos "<owner/repo> ..."] [--path <file>]
                               [--evidence <key>=<value>]...
@@ -30,14 +32,15 @@ OK, WIDE, BAD, UNVERIFIED, ABSENT = ("ok", "wide", "bad",
 GITHUB_API = os.environ.get("WK_GITHUB_API", "https://api.github.com")
 TIMEOUT = 20
 
-# `what` is the noun phrase a prompt asks for, `url` the page that mints one
-# with everything that page takes from a link already filled in, and `remedy`
-# what is left to choose there; `url` and `remedy` may each be a function of
-# the fork list. `wk key` asks for these rather than carrying prose of its own.
+# `url` is the page that mints one with everything a link can carry already filled in, `remedy` what is left to choose there; either may be a function of the fork list.
 Rule = collections.namedtuple(
-    "Rule", "spent_by needs forbids what url remedy store_with check")
+    "Rule", "spent_by needs forbids what url remedy store_with check mint",
+    defaults=(None,))
 
-FIELDS = tuple(f for f in Rule._fields if f != "check")
+FIELDS = tuple(f for f in Rule._fields if f not in ("check", "mint"))
+
+WKNOTIFY = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                        "wknotify.py")
 
 TAILSCALE_KEYS = "https://login.tailscale.com/admin/settings/keys"
 
@@ -47,8 +50,6 @@ def _resolved(value, repos):
 
 
 def fix_of(rule, repos):
-    """The one line that says how to get one: the page first, then the choices
-    the page cannot carry."""
     return " -- ".join(x for x in (_resolved(rule.url, repos),
                                    _resolved(rule.remedy, repos)) if x)
 
@@ -190,7 +191,6 @@ def _github_pat_can_open_a_pr(token, repo):
                         "not known." % (repo, status))
 
 
-# What an agent in a workspace spends this on: inference, and the profile fetch remote control decides eligibility from.
 LOGIN_SCOPES = ("user:profile", "user:inference")
 
 
@@ -362,6 +362,31 @@ def _deploy_key(value, repos, path, evidence):
                         % repo)
 
 
+def _ntfy_mint():
+    return subprocess.run([sys.executable, WKNOTIFY, "mint"],
+                          capture_output=True, text=True,
+                          check=True).stdout.strip()
+
+
+def _ntfy_topic(value, repos, path, evidence):
+    topic = value.strip()
+    if not topic:
+        return BAD, "there is nothing there."
+    probe = subprocess.run([sys.executable, WKNOTIFY, "check"],
+                           input=topic, capture_output=True, text=True)
+    detail = (probe.stdout + probe.stderr).strip().splitlines()
+    detail = detail[-1] if detail else "no answer"
+    if probe.returncode == 0:
+        return OK, ("%s\n    It is never written to a card and no workspace "
+                    "holds it: a notification a person acts on must not be "
+                    "forgeable from inside one." % detail)
+    if probe.returncode == 3:
+        return WIDE, detail
+    if probe.returncode == 6:
+        return UNVERIFIED, "could not ask ntfy.sh: %s" % detail
+    return BAD, detail
+
+
 RULES = collections.OrderedDict((
     ("github-pat", Rule(
         spent_by="container/proxy/github-inject.py -- the Authorization header "
@@ -448,7 +473,21 @@ RULES = collections.OrderedDict((
         remedy="wk key deploy  (it registers with read_only=false)",
         store_with="wk key deploy",
         check=_deploy_key)),
-
+    ("ntfy", Rule(
+        spent_by="lib/wknotify.py -- the topic `wk notify` publishes a "
+                 "headline to",
+        needs="publish a notification a person sees",
+        forbids="be a name someone could arrive at by guessing: the topic is "
+                "the whole credential, so anyone holding it reads every "
+                "notification and can send one",
+        what="the ntfy.sh topic this machine's notifications go to, so the "
+             "fleet can tell you it wants you",
+        url="https://ntfy.sh/",
+        remedy="subscribe ntfy's iOS or Android app to the topic URL that "
+               "`wk key set ntfy` prints",
+        store_with="wk key set ntfy",
+        check=_ntfy_topic,
+        mint=_ntfy_mint)),
 ))
 
 
@@ -472,6 +511,20 @@ def check(name, repos, path, evidence):
     return 0
 
 
+def mint(name):
+    r = RULES.get(name)
+    if r is None or not r.mint:
+        sys.stderr.write("credcheck: nothing here mints a '%s' credential; "
+                         "wk mints: %s\n" % (name, " ".join(_minted())))
+        return 2
+    sys.stdout.write(r.mint() + "\n")
+    return 0
+
+
+def _minted():
+    return [n for n, r in RULES.items() if r.mint]
+
+
 def rule(name, repos):
     r = RULES.get(name)
     if r is None:
@@ -487,6 +540,11 @@ def main(argv):
     if len(argv) >= 2 and argv[1] == "names":
         sys.stdout.write("".join(n + "\n" for n in RULES))
         return 0
+    if len(argv) == 2 and argv[1] == "minted":
+        sys.stdout.write("".join(n + "\n" for n in _minted()))
+        return 0
+    if len(argv) == 3 and argv[1] == "mint":
+        return mint(argv[2])
     if len(argv) >= 3 and argv[1] in ("rule", "check"):
         verb, name, repos, path, evidence = argv[1], argv[2], [], "", {}
         rest = argv[3:]

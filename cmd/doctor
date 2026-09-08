@@ -254,9 +254,13 @@ done
 unset _sname
 local_state "${WK_TS_AUTHKEY:-$HOME/.config/wk/tailscale-authkey}" re-authable "wk key set tailnet asks for one (tag:wk, reusable, not ephemeral, longest expiry); joined nodes are unaffected"
 local_state "$(wk_tailscale_api_path)" re-authable "wk key set tailnet-api asks for one; only this machine holds it, and only writes that must retire a stale node need it"
+local_state "$(wk_ntfy_topic_path)" re-authable "wk key set ntfy mints the ntfy.sh topic 'wk notify' publishes to; only this machine holds it, and a new one is one subscription away"
 local_state "$(wk_state_dir)/broker"               regenerable "request records (argv, log, status) the fleet-request broker writes; the next request makes new ones"
 local_state "$HOME/.ssh/config.d/local"            backed-up   "hand-written ssh entries (host/dotfiles.sh moves them here and owns the rest)"
 local_state "$(wk_state_dir)/ssh/zed_ed25519"      regenerable "wk zed makes a new one and re-authorises it in the workspace"
+if is_macos; then
+    local_state "$(wk_state_dir)/mac-tailnet/tolken-bench.state" regenerable "the bench install's tailnet node identity, kept on the host install the way a board keeps its bench node on its rescue; lost, it rejoins under a new name"
+fi
 if [ "$(wk_os)" = linux ]; then
     # "This machine is rpi5" is read off the registry (NODE_SSH), not a literal here.
     . "$WK_ROOT/boot/machines.sh"

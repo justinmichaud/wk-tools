@@ -76,6 +76,9 @@ class TestTheRunMap(WkTest):
         self.assertIn("$6 == p", body)
 
     def test_arm_results_selects_by_plan_and_arm(self):
+        """A run is named by its directory, the way `wk bench report` and
+        `wk bench precision` name one: `wkdata ab-precision` appends the file
+        inside it, so a caller that appends one too names nothing."""
         with scratch_dir() as tmp:
             runs = tmp / "runs.tsv"
             runs.write_text(
@@ -86,7 +89,7 @@ class TestTheRunMap(WkTest):
             body = func_body(AUTORUN.read_text(), "arm_results")
             out = sh(f'WK_AB_ROOT=/var/wk\nRUNS={tmp}\n'
                      f'arm_results() {{{body}}}\narm_results jetstream3 A').stdout
-            self.assertEqual(out, "/var/wk/results/r1/result.json")
+            self.assertEqual(out, "/var/wk/results/r1")
 
     def test_the_warmup_round_is_removed_before_anything_is_compared(self):
         text = AUTORUN.read_text()
@@ -192,34 +195,37 @@ if __name__ == "__main__":
 
 
 class TestProvisioningIsNotSomethingToKill(WkTest):
-    """Provisioning applies the desktop quieting every leg's preflight then
-    requires, and it removes its own daemon and reboots at the end. So the
-    completion line in the volume's log -- not the daemon, which can be absent
-    either way -- is what says whether this volume can be measured on, and
-    both sides of the experiment read that one record."""
+    """Provisioning is the settings every leg's preflight then measures, and
+    it removes its own daemon and reboots at the end. So what says whether
+    this volume can be measured on is the settings themselves, read here by
+    the one probe and judged by the one set of findings -- and a daemon still
+    in flight is a different question from a volume that drifted."""
 
-    def _autorun(self, func, plist=True, complete=False, running=False):
+    def _autorun(self, func, plist=True, settled=True, running=False):
         """One of the autorun's own functions, as the agent runs it: `set -e`,
         sudo's output discarded, and the daemon's files really there."""
         text = AUTORUN.read_text()
         with scratch_dir() as tmp:
-            log = tmp / "log"
-            log.write_text("[wk-bench] installing Tailscale\n"
-                           + ("=== first boot provisioning complete ===\n" if complete else ""))
             fb, self_sh, killed = tmp / "plist", tmp / "self", tmp / "killed"
             if plist:
                 fb.write_text("<plist/>")
                 self_sh.write_text("#!/bin/bash\n")
+            rows = ("ok\tthe screen does not lock\t\n" if settled
+                    else "wrong\tnot so: the screen does not lock "
+                         "(askforpassword reads '1')\tfix\n")
+            quiet = tmp / "quiet.sh"
+            quiet.write_text(
+                "wk_quiet_desktop_probe() { printf 'askforpassword=1\\n'; }\n"
+                "wk_quiet_desktop_findings() { cat <<'ROWS'\n" + rows + "ROWS\n}\n")
             cp = sh(
                 f'set -euo pipefail\n'
-                f'FB_PLIST={fb}; FB_SELF={self_sh}; FB_LOG={log}\n'
+                f'FB_PLIST={fb}; FB_SELF={self_sh}; QUIET_DESKTOP={quiet}\n'
                 f'say() {{ printf "%s\\n" "$*"; }}\n'
                 f'cancel_pending_reboot() {{ say CANCELLED; }}\n'
-                f'leave_bench() {{ say "LEAVE $1: $2"; }}\n'
+                f'leave_bench() {{ say "LEAVE: $1"; }}\n'
                 f'pgrep() {{ return {0 if running else 1}; }}\n'
                 f'pkill() {{ : > {killed}; }}\n'
                 f'sudo() {{ shift; "$@"; }}\n'
-                f'fb_provisioned() {{{func_body(text, "fb_provisioned")}}}\n'
                 f'refuse_unprovisioned() {{{func_body(text, "refuse_unprovisioned")}}}\n'
                 f'defuse_firstboot() {{{func_body(text, "defuse_firstboot")}}}\n'
                 f'if {func}; then ret=0; else ret=$?; fi\n'
@@ -228,7 +234,7 @@ class TestProvisioningIsNotSomethingToKill(WkTest):
 
     def test_it_stands_aside_while_provisioning_is_running(self):
         cp, out, still_there, killed = self._autorun(
-            "refuse_unprovisioned", complete=False, running=True)
+            "refuse_unprovisioned", settled=False, running=True)
         self.assertEqual(cp.returncode, 0, out)
         self.assertNotIn("RET=", out, "it ran on past provisioning:\n" + out)
         self.assertIn("standing aside", out, out)
@@ -239,32 +245,34 @@ class TestProvisioningIsNotSomethingToKill(WkTest):
         self.assertNotIn("LEAVE", out, out)
 
     def test_a_volume_nothing_will_finish_hands_the_machine_back(self):
-        """The 2026-09-07 04:20 state: never provisioned, and no daemon left
-        to do it. Eight legs ran and all eight were refused."""
+        """A setting that is not a measured Mac's refuses every leg, one leg
+        after another, on a machine with no network to say so -- so it refuses
+        the job instead, once, and says whether a daemon is there to fix it."""
         for plist in (True, False):
             cp, out, _, _ = self._autorun("refuse_unprovisioned",
-                                          plist=plist, complete=False, running=False)
+                                          plist=plist, settled=False, running=False)
             self.assertEqual(cp.returncode, 0, out)
             self.assertNotIn("RET=", out, "it went on to measure:\n" + out)
             self.assertIn(f"daemon installed: {'yes' if plist else 'no'}", out, out)
+            self.assertIn("the screen does not lock", out, out)
             self.assertIn("mac-volume --repair", out, out)
-            self.assertIn("LEAVE halt", out, "it did not hand the machine back:\n" + out)
+            self.assertIn("LEAVE: ", out, "it did not hand the machine back:\n" + out)
 
     def test_a_provisioned_volume_is_measured_on(self):
-        cp, out, _, _ = self._autorun("refuse_unprovisioned", complete=True)
+        cp, out, _, _ = self._autorun("refuse_unprovisioned", settled=True)
         self.assertIn("RET=0", out, out)
         self.assertNotIn("LEAVE", out, out)
 
     def test_a_daemon_that_outlived_its_provisioning_is_defused(self):
         cp, out, still_there, killed = self._autorun(
-            "defuse_firstboot", complete=True, running=True)
+            "defuse_firstboot", running=True)
         self.assertIn("RET=0", out, out)
         self.assertFalse(still_there, "it left a completed daemon installed:\n" + out)
         self.assertTrue(killed, "its re-run reboots the machine mid-round:\n" + out)
         self.assertIn("CANCELLED", out, out)
 
     def test_no_daemon_at_all_is_an_ordinary_boot(self):
-        cp, out, _, _ = self._autorun("defuse_firstboot", plist=False, complete=True)
+        cp, out, _, _ = self._autorun("defuse_firstboot", plist=False)
         self.assertIn("RET=0", out, out)
         self.assertIn("CANCELLED", out, out)
 
@@ -274,15 +282,17 @@ class TestProvisioningIsNotSomethingToKill(WkTest):
                         "the job runs before the volume is known to be measurable")
 
     def test_one_path_names_the_log_and_the_rest_agree(self):
-        """Four readers and two writers of one record: the daemon's plist tells
-        launchd where to write, and nothing else may spell it differently."""
+        """Three readers and two writers of one record: the daemon's plist
+        tells launchd where to write, and nothing else may spell it
+        differently. The autorun is not among them -- it runs on the volume,
+        where the settings themselves can be read."""
         volume = (REPO / "bench" / "mac-bench-volume.sh").read_text()
         path = "/var/log/wk-bench-firstboot.log"
         self.assertEqual(volume.count(f"<string>{path}</string>"), 4,
                          "the plists no longer name that log twice each")
         self.assertIn(f"fblog={path}", volume)
-        self.assertIn(f"FB_LOG={path}", AUTORUN.read_text())
         self.assertIn("/log/wk-bench-firstboot.log", MACAB.read_text())
+        self.assertNotIn(path, AUTORUN.read_text())
 
     def test_a_dry_provision_does_not_promise_the_record(self):
         """The readback is what decides it, and a dry run has one: saying
@@ -348,9 +358,11 @@ class TestProvisioningIsNotSomethingToKill(WkTest):
 
     def test_force_is_one_flag_however_it_is_spelled(self):
         """`barrier` reads WK_FORCE, which the dispatcher sets; this command
-        parses `--force` itself as well, and both mean the one thing."""
+        parses `--force` itself as well, and both mean the one thing. Spelt
+        `:-`, because `${WK_...:+}` is `wk_forwarded_env`'s alone (tests/
+        test_peer.py) and every use of FORCE here is an emptiness test."""
         text = MACAB.read_text()
-        self.assertIn('FORCE="${WK_FORCE:+1}"', text)
+        self.assertIn('FORCE="${WK_FORCE:-}"', text)
         self.assertIn("--force)    FORCE=1; WK_FORCE=1; export WK_FORCE", text)
 
     def test_the_preflight_refuses_the_plant_rather_than_noting_it(self):
@@ -416,12 +428,13 @@ class TestTheBrowserIsMeasuredBeforeTheRounds(WkTest):
             cp = sh(
                 f'set -euo pipefail\n'
                 f'WK_AB_ROOT={root}; RUNS={runs}; TOOLS={tmp}/tools; LOG=/dev/null\n'
+                f'DISPLAY_EXPECT="builtin 1470x956"\n'
                 f'mkdir -p "$TOOLS/bench"\n'
                 f'printf "raise SystemExit({0 if passes else 1})\\n" '
                 f'  > "$TOOLS/bench/mac-browser-check.py"\n'
                 f'say() {{ printf "%s\\n" "$*"; }}\n'
                 f'jf() {{ printf sid-a; }}\n'
-                f'leave_bench() {{ printf "LEAVE %s: %s\\n" "$1" "$2"; : > {left}; }}\n'
+                f'leave_bench() {{ printf "LEAVE: %s\\n" "$1"; : > {left}; }}\n'
                 f'refuse_throttled_browser() {{{func_body(text, "refuse_throttled_browser")}}}\n'
                 f'refuse_throttled_browser\n'
                 f'printf "RAN THE ROUNDS\\n"\n')
@@ -435,13 +448,13 @@ class TestTheBrowserIsMeasuredBeforeTheRounds(WkTest):
     def test_a_throttled_browser_stops_the_job_before_round_one(self):
         out, left = self._check(passes=False)
         self.assertNotIn("RAN THE ROUNDS", out, "it measured anyway:\n" + out)
-        self.assertIn("LEAVE halt", out, out)
+        self.assertIn("LEAVE: browser check failed", out, out)
         self.assertTrue(left, out)
 
     def test_an_arm_with_no_products_is_not_measured_around(self):
         out, left = self._check(staged=False)
         self.assertNotIn("RAN THE ROUNDS", out, out)
-        self.assertIn("LEAVE halt", out, out)
+        self.assertIn("LEAVE: arm A is not staged", out, out)
 
     def test_it_runs_before_the_warmup_and_after_the_quiescing(self):
         text = AUTORUN.read_text()

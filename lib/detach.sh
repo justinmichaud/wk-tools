@@ -43,16 +43,16 @@ _build_ps() {  # every compiler and linker running on this machine, busiest firs
         | sort -rn
 }
 
+# A full-LTO link is one process at ~100% and no log output for many minutes, which these two tell apart from an idle machine. Machine-wide, though: a container build's compilers name their workspace only in their cgroup, a macOS guest's run in another kernel. So they are report text (_stall_report, lib/watchdog.sh), never a verdict.
 build_processes() { _build_ps | grep -c . || true; }
 
-# A full-LTO link is one process at ~100% and no log output for many minutes; what is busiest is the one reading that tells that apart from a build that was killed.
 busiest_process() {
     _build_ps | head -1 | awk 'NF { printf "%s at %s%% CPU", $2, $1 }'
 }
 
 # A build carries no pid -- a pid on one end of an ssh is not a fact on the other -- so a `running` status file counts only while the log has moved within WK_STALL_SECONDS.
 build_live() { # <status-file> [log]
-    local sf="$1" log="${2:-}" st now mtime
+    local sf="$1" log="${2:-}" st
     [ -f "$sf" ] || return 1
     st=$(status_field "$sf" state)
     case " $st " in

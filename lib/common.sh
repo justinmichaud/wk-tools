@@ -268,8 +268,7 @@ wk_forwarded_env() {
     printf '%s' "${WK_DEBUG:+WK_DEBUG=1 }${WK_QUIET:+WK_QUIET=1 }${WK_YES:+WK_YES=1 }${WK_FORCE:+WK_FORCE=1 }"
 }
 
-# A candidate is run, not found: the wkdev image puts /opt/swift/usr/bin first
-# on PATH and that lldb links libxml2.so.2 while the image ships libxml2.so.16.
+# A candidate is run, not found: the wkdev image's /opt/swift/usr/bin lldb comes first on PATH and links libxml2.so.2, while the image ships libxml2.so.16.
 lldb_prelude() {
     cat <<'EOF'
 LLDB=""
@@ -358,9 +357,7 @@ wk_tailnet_retire() { # <name>
         python3 "$WK_ROOT/lib/tailnet.py" retire "$1"
 }
 
-# The file to read the key out of, never a prompt: one command asks for a
-# credential (`wk key set`), so a write that finds none refuses instead of
-# stopping halfway to ask for one.
+# The file to read the key out of, never a prompt: `wk key set` is the one command that asks for a credential, so a write that finds none refuses.
 wk_tailscale_authkey() {
     local p why
     p=$(wk_tailscale_authkey_path)
@@ -449,8 +446,7 @@ capped() { # <seconds> <cmd...>
     return "$rc"
 }
 
-# A forced barrier is warned about again at the end: one line atop a long build
-# is never seen.
+# A forced barrier is warned about again at the end: one line atop a long build is never seen.
 _WK_FORCED=""
 
 _forced_summary() {
@@ -489,8 +485,7 @@ commit_wall_prefix() { # <checkout-dir> -- prints the bwrap argv prefix
 # and macOS ships none. Keyed by hostname: NFS homes.
 wk_state_dir() { echo "${XDG_STATE_HOME:-$HOME/.local/state}/wk"; }
 
-# Mounted into the podman machine at /var/lib/wk/secrets, so `wk key set` works
-# with no VM running and a container reads the same bytes live.
+# Mounted into the podman machine at /var/lib/wk/secrets, so `wk key set` works with no VM running and a container reads the same bytes live.
 wk_host_secrets() { echo "${WK_HOST_SECRETS:-${XDG_CONFIG_HOME:-$HOME/.config}/wk/secrets}"; }
 
 wk_lock_dir() { echo "${WK_LOCK_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/wk/locks}"; }
@@ -533,8 +528,7 @@ _lock_release_all() {
     return 0
 }
 
-# "Is it dead" then "replace it" races every other taker, so the replacement is
-# a compare-and-swap made atomic by a short-lived breaker lock.
+# "Is it dead" then "replace it" races every other taker, so the replacement is a compare-and-swap made atomic by a short-lived breaker lock.
 _lock_break() {
     local f="$1" seen="$2" bf="$f.breaking" tmp bpid rc=1
 
@@ -690,8 +684,7 @@ wk_image_id() { kv_field "$WK_IMAGE_MARKER" id 2>/dev/null || true; }   # the be
 wk_image_profile() { kv_field "$WK_IMAGE_MARKER" profile 2>/dev/null || true; }
 in_bench_mode() { [ -f "$WK_IMAGE_MARKER" ]; }
 
-# The compositor's start modes are indistinguishable at the Wayland socket, and
-# only one of them makes a meaningful number.
+# The compositor's start modes are indistinguishable at the Wayland socket, and only one of them makes a meaningful number.
 WK_SESSION_MODE_FILE="${WK_SESSION_MODE_FILE:-/run/wk-session-mode}"
 
 session_mode() { # gpu | bmc | off | none

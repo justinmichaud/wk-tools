@@ -187,12 +187,15 @@ else
     fi
 
     # Apple Silicon signs the startup-disk choice with a volume owner's
-    # credential, so `wk boot mbp` refuses until this Mac holds one. Whether to
-    # keep a login password on disk for that is the owner's call, not setup's:
-    # the refusal names the file and nothing here creates it.
+    # credential, and `bless --help` lists --user/--stdinpass under Snapshot
+    # options rather than Mount Mode, so whether root alone suffices is the
+    # platform's answer: the helper blesses with a credential where the machine
+    # holds one and without one where it does not, and says which it used.
+    # Keeping a login password on disk stays the owner's call; nothing here
+    # creates that file.
     if is_macos && [ ! -f /usr/local/share/wk-bench/owner-password ]; then
-        log "  this Mac cannot set its own startup disk yet -- 'wk boot mbp' says what"
-        log "  would let it, and until then the startup manager is the way."
+        log "  no volume-owner credential here, which may not be needed: 'wk boot mbp'"
+        log "  blesses with root alone and reports what bless answered."
     fi
 
     if [ -f "$_boot_target" ]; then

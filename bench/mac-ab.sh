@@ -12,6 +12,10 @@
 #   PCT alternates until the A/B resolves a difference that small (0.3 by default)
 #   and stops there, between --rounds and --max-rounds; --detect 0 runs --rounds
 #   exactly. Round 0 is a discarded warmup leg per arm, carrying a samply profile.
+#   --count N iterations of the benchmark per leg, 2 by default. One iteration
+#   per leg leaves that leg with no within-leg variance, so no p-value can be
+#   computed for it; each further iteration costs its own run time and buys
+#   fewer rounds to reach --detect.
 # The benchmark install has no network (tolken is Wi-Fi only and that install joins nothing), so the job is planted rather than driven: everything it needs is written onto the volume while merely mounted, a per-user LaunchAgent starts it at autologin, and this driver waits and reads. No sudo, because /var/wk and ~bench are both uid 501.
 # Nothing here can set which volume the firmware boots -- `nvram boot-volume`, `bless --setBoot` and `systemsetup -getstartupdisk` all fail silently -- so this driver reboots and reports which mode came back: at most one human action per A/B, never one per run, since the planted job holds every round of every arm.
 
@@ -20,6 +24,7 @@ WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 . "$WK_ROOT/lib/common.sh"
 . "$WK_ROOT/lib/store.sh"
 . "$WK_ROOT/lib/profiler.sh"
+. "$WK_ROOT/lib/bench.sh"
 . "$WK_ROOT/boot/machines.sh"
 
 HOST="${WK_MAC_SSH:-}"
@@ -30,7 +35,7 @@ CONFIG="${WK_MAC_CONFIG:-mac-release-pgo}"
 ROUNDS=5
 MAX_ROUNDS=40
 DETECT=0.3
-COUNT=""
+COUNT=2
 TIMEOUT=1800
 SETTLE=90
 A_ID=""; B_ID=""
@@ -40,7 +45,7 @@ WS=""
 PLANS_GIVEN=""
 DO_STAGE=""
 ALLOW_FETCH=""
-FORCE="${WK_FORCE:+1}"
+FORCE="${WK_FORCE:-}"
 AGENT_HOME=""
 DRY=""
 ACTION=run
@@ -60,15 +65,90 @@ mac_hw_uuid() {   # what macOS names ByHost preferences by; either install answe
 }
 
 TOOLS="${WK_MAC_TOOLS:-}"
+# The one path boot/machines.sh declares, never a search: tolken carries two clones, and
+# whichever a search reached first would be the tree driving the lane.
 host_tools() {
     [ -n "$TOOLS" ] && { printf '%s' "$TOOLS"; return 0; }
-    TOOLS=$(mac_sh 'for d in ~/Development/wk-tools ~/wk-tools; do [ -x "$d/wk" ] && { echo "$d"; exit 0; }; done' 2>/dev/null | tr -d '\r' | head -1)
-    [ -n "$TOOLS" ] || die "cannot find wk-tools on $HOST"
+    TOOLS=$(machine_tools_dir)
+    machine_tools_present "$HOST" || die "no wk-tools at $HOST:$TOOLS, so nothing over there
+    can run a leg. One command puts it there, with the privileged helpers:
+      wk boot $MACHINE --prepare"
     printf '%s' "$TOOLS"
 }
 rwk() { mac_sh "cd $(sh_quote "$(host_tools)") && ./wk $*"; }
 
 bwk() { mac_sh "cd $(sh_quote "$(bench_root)/wk-tools") && ./wk $*"; }   # the planted copy, the same age as the job
+
+# wkmac.py travels on stdin rather than being read out of the Mac's own checkout: one implementation of every disk, firmware and display fact, and no tree over there to keep in step with this one.
+mac_wkmac() {  # <subcommand> [args...]
+    local a q=""
+    for a in "$@"; do q="$q $(sh_quote "$a")"; done
+    mac "python3 -$q" < "$WK_ROOT/lib/wkmac.py" 2>/dev/null | tr -d '\r'
+}
+
+# The firmware's own default has to BE the bench volume: that is what lets this lane restart the machine and have benchmarking begin with nobody at the keyboard.
+FW_DETAIL=""
+firmware_default_is_bench() {
+    local bv grp bench_grp host_grp
+    bv=$(mac_wkmac boot-volume)
+    grp="${bv##*:}"
+    bench_grp=$(mac_wkmac volume-group "/Volumes/$VOLUME")
+    host_grp=$(mac_wkmac volume-group /)
+    if [ -z "$grp" ]; then
+        FW_DETAIL="the firmware publishes no boot-volume, so what a restart enters cannot be read"
+        return 1
+    fi
+    if [ -n "$bench_grp" ] && [ "$grp" = "$bench_grp" ]; then
+        FW_DETAIL="$grp = '$VOLUME', so the restart below needs no human"
+        return 0
+    fi
+    if [ -n "$host_grp" ] && [ "$grp" = "$host_grp" ]; then
+        FW_DETAIL="$grp = the host install, so a restart comes back here and the A/B never runs"
+    else
+        FW_DETAIL="$grp matches neither install on this disk"
+    fi
+    return 1
+}
+
+# One ONLINE display and it the built-in panel. An external monitor changes the compositing, the refresh rate and which GPU the window lands on, and MotionMark's score is a function of the area it draws.
+DISPLAY_READ=""
+mac_display_check() {
+    local out st
+    DISPLAY_READ=""
+    out=$(mac_wkmac displays)
+    if [ -z "$out" ]; then
+        DISPLAY_READ="'wkmac.py displays' answered nothing on $HOST -- CoreGraphics could not be asked"
+        return 1
+    fi
+    st=$(printf '%s' "$out" | python3 -c '
+import json, sys
+def one(d):
+    p = d.get("points") or []
+    w = p[0] if len(p) > 0 else "?"
+    h = p[1] if len(p) > 1 else "?"
+    return "%s %sx%s" % ("builtin" if d.get("builtin") else "external", w, h)
+try:
+    doc = json.load(sys.stdin)
+except ValueError:
+    print("ok=no"); print("detail=wkmac.py displays did not print JSON"); raise SystemExit(0)
+on = [d for d in (doc.get("displays") or []) if d.get("online")]
+shown = ", ".join(one(d) for d in on) or "none"
+if len(on) != 1:
+    print("ok=no"); print("detail=%d online display(s): %s" % (len(on), shown))
+elif not on[0].get("builtin"):
+    print("ok=no"); print("detail=the one online display is not the built-in panel (%s)" % shown)
+else:
+    print("ok=yes"); print("detail=%s alone, as the install that answers here reads it" % shown)
+')
+    DISPLAY_READ=$(kv_get detail <<<"$st")
+    [ "$(kv_get ok <<<"$st")" = yes ]
+}
+
+# `wk notify` publishes off this machine; a notification that did not go out must never cost a measurement, so every failure here is a warning and nothing else.
+notify() {  # <headline> <detail>
+    "$WK_ROOT/wk" notify "$1" --detail "$2" --tag mac-ab >/dev/null \
+        || warn "  could not send the notification '$1' (above)"
+}
 
 # openrsync, which this Mac ships, sends `/Volumes/WK Bench - Data/...` with its escaping intact and fails with `open: No such file or directory`; over ssh the remote path appears once, inside a command this side quotes.
 put_file() {  # $1 = local file, $2 = remote path
@@ -229,28 +309,44 @@ preflight() {
         ck no "staged builds" "nothing on the volume, and no workspace given to stage from"
     fi
 
-    # Reported, never asserted: the startup manager can override the firmware's own variable without updating it.
-    local bv grp
-    bv=$(mac "python3 $(sh_quote "$(host_tools)/lib/wkmac.py") boot-volume" 2>/dev/null | tr -d '\r')
-    grp="${bv##*:}"
-    local bench_grp host_grp
-    bench_grp=$(mac "python3 $(sh_quote "$(host_tools)/lib/wkmac.py") volume-group $(sh_quote "/Volumes/$VOLUME")" 2>/dev/null | tr -d '\r')
-    host_grp=$(mac "python3 $(sh_quote "$(host_tools)/lib/wkmac.py") volume-group /" 2>/dev/null | tr -d '\r')
-    log "" >&2
-    log "  the firmware's boot-volume names:" >&2
-    if [ -n "$grp" ] && [ "$grp" = "$bench_grp" ]; then
-        log "    $grp  = '$VOLUME'" >&2
-        log "    so a plain reboot is expected to land in BENCH mode, and this A/B" >&2
-        log "    needs no human at all. If it lands in host mode instead, the" >&2
-        log "    startup manager is the one step -- the job stays planted for it." >&2
-    elif [ -n "$grp" ] && [ "$grp" = "$host_grp" ]; then
-        log "    $grp  = the host install" >&2
-        log "    so a plain reboot returns here, and entering bench mode is the one" >&2
-        log "    human step: hold the power button, pick '$VOLUME'. Everything" >&2
-        log "    after that is unattended until it hands the machine back, which" >&2
-        log "    lands at this Mac's own login window and wants a password." >&2
+    if mac_display_check; then
+        ck yes "one display" "$DISPLAY_READ"
     else
-        log "    ${grp:-<unreadable>}  (matches neither install)" >&2
+        ck no "one display" "$DISPLAY_READ"
+        log "       Disconnect it. An external monitor changes the compositing, the" >&2
+        log "       refresh rate and which GPU the window lands on, and MotionMark's" >&2
+        log "       score is the area it draws. Refused rather than warned, and no" >&2
+        log "       --force crosses it: there is no number to save." >&2
+    fi
+
+    if firmware_default_is_bench; then
+        ck yes "firmware default" "$FW_DETAIL"
+    else
+        ck no "firmware default" "$FW_DETAIL"
+        log "       This lane restarts $HOST and expects benchmarking to begin with" >&2
+        log "       nobody at the keyboard, which only the firmware default gives." >&2
+        log "         wk boot $MACHINE            arms it (on $HOST)" >&2
+        log "       Where the boot helper is not installed, the startup manager is the" >&2
+        log "       way: shut down, hold the power button until 'Loading startup" >&2
+        log "       options', pick '$VOLUME'. 'wk bench mac-ab --shutdown' leaves the" >&2
+        log "       machine off with the job planted for exactly that." >&2
+    fi
+
+    if ! mv_reboot_ready && [ -t 0 ] && [ -z "$DRY" ]; then
+        info "  $HOST cannot be restarted unattended yet -- preparing it now"
+        machine_prepare "$HOST" || true
+    fi
+    if mv_reboot_ready; then
+        ck yes "restartable" "the boot helper answers sudo -n, so this lane restarts $HOST itself"
+    else
+        ck no "restartable" "no boot helper on $HOST, and plain sudo there wants a password"
+        log "       A graceful restart is refusable -- any application that will not quit" >&2
+        log "       declines it -- so an unattended lane cannot use one. One command puts" >&2
+        log "       this tree and the helpers on that Mac, and asks for a password once:" >&2
+        log "         wk boot $MACHINE --prepare" >&2
+        log "       It runs by itself from a terminal; this session had none, or it would" >&2
+        log "       have been done above. Crossing this leaves the job planted and correct:" >&2
+        log "       reboot $HOST by any means and the A/B runs by itself." >&2
     fi
 
     log "" >&2
@@ -411,9 +507,21 @@ phase_build_ab() {
 }
 
 phase_plant() {
-    local root bh stamp
+    # An unpinned display means two runs at different resolutions compare as if they matched, so it is declared per machine and refused here rather than discovered in the numbers.
+    case "${NODE_DISPLAY:-}" in
+        "") die "boot/machines/$MACHINE.conf declares no NODE_DISPLAY, so nothing here knows
+    what display the measured install must read.
+
+    Add the bench install's own mode, in points:
+        NODE_DISPLAY=\"builtin 1470x956\"
+    ('python3 lib/wkmac.py displays' on that install prints it.)" ;;
+    esac
+
+    local root bh stamp task task_dir cmd p
     root=$(bench_root); bh=$(bench_home)
     stamp=$(date -u +%Y%m%dT%H%M%SZ)
+    task="$stamp-$MACHINE-mac-ab"
+    task_dir=$(bench_task_dir "$task")
 
     # Defaulting B to A is the A/A control; skipped for a --patch dry run's placeholder arms.
     if [ -z "$ARMS_PENDING" ]; then
@@ -427,7 +535,12 @@ $(printf '%s' "$staged" | sed 's/^/    /')"
         printf '%s\n' "$staged" | grep -qx "$B_ID" || die "no staged build '$B_ID' on $VOLUME"
     fi
 
-    info "plant: $PLANS, $ROUNDS-$MAX_ROUNDS round(s), interleaved, until it resolves ${DETECT}%"
+    # `--detect 0` makes --rounds the whole plan, not the floor under one; the autorun reads the same 0 the same way.
+    if awk -v d="${DETECT:-0}" 'BEGIN { exit !(d + 0 == 0) }'; then
+        info "plant: $PLANS, exactly $ROUNDS round(s), interleaved; no precision target, so what these resolve is what 'wk bench precision' says of them"
+    else
+        info "plant: $PLANS, $ROUNDS-$MAX_ROUNDS round(s), interleaved, until it resolves ${DETECT}%"
+    fi
     log  "  arm A: $A_ID${A_ARGS:+  args: $A_ARGS}"
     log  "  arm B: $B_ID${B_ARGS:+  args: $B_ARGS}"
     [ "$A_ID" = "$B_ID" ] && [ "$A_ARGS" = "$B_ARGS" ] && \
@@ -439,10 +552,18 @@ $(printf '%s' "$staged" | sed 's/^/    /')"
         log "  would sync wk-tools to $root/wk-tools"
         log "  would install $root/bin/mac-bench-autorun.sh"
         log "  would plant samply $SAMPLY_VER for the warmup round's profile"
-        log "  would write $root/job.json and reset $root/autorun.state"
+        log "  would record the task $task in $BENCH_DIR and write its job.json"
+        log "  would copy that job to $root/job.json and reset $root/autorun.state"
         log "  would install $bh/Library/LaunchAgents/com.wk.bench-ab.plist"
         return 0
     fi
+
+    # Recorded before the Mac is touched, and in the store `wk status` already lists, so a run killed halfway is still a task that names what was asked for.
+    cmd="wk bench mac-ab --a $A_ID --b $B_ID --rounds $ROUNDS --max-rounds $MAX_ROUNDS --detect $DETECT --count $COUNT"
+    for p in $PLANS; do cmd="$cmd --plan $p"; done
+    bench_task_new "$task" devices="$MACHINE=$CONFIG" \
+        plans="$(printf '%s' "$PLANS" | tr ' ' ',')" rounds="$ROUNDS" \
+        slots="$A_ID,$B_ID" --command "$cmd"
 
     # /var/wk, not ~bench/Development/wk-tools: the first-boot daemon `rsync --delete`s over that directory on every boot it runs, replacing a planted tree with an older one.
     info "  syncing wk-tools onto the volume"
@@ -506,10 +627,11 @@ $(printf '%s' "$staged" | sed 's/^/    /')"
     WK_JOB_COUNT="$COUNT" WK_JOB_SETTLE="$SETTLE" \
     WK_JOB_A="$A_ID" WK_JOB_B="$B_ID" WK_JOB_AA="$A_ARGS" WK_JOB_BA="$B_ARGS" \
     WK_JOB_TOOLS="/var/wk/wk-tools" WK_JOB_BY="$(hostname)" \
-    WK_JOB_STAMP="$stamp" WK_JOB_FORCE="$FORCE" \
+    WK_JOB_STAMP="$stamp" \
     WK_JOB_ASLR="${WK_BENCH_ASLR:-}" WK_JOB_ENVPAD="${WK_BENCH_ENV_PAD:-}" \
     WK_JOB_PATHPAD="${WK_BENCH_PATH_PAD:-}" WK_JOB_SHARED="${WK_BENCH_SHARED_CACHE:-}" \
-    python3 - <<'PYEOF' > "$(wk_state_dir)/mac-ab-job.json"
+    WK_JOB_DISPLAY="$NODE_DISPLAY" \
+    python3 - <<'PYEOF' > "$task_dir/job.json"
 import json, os
 g = os.environ.get
 arms = [{"label": "A", "id": g("WK_JOB_A"), "browser_args": g("WK_JOB_AA") or ""}]
@@ -522,6 +644,7 @@ print(json.dumps({
     "detect_pct": float(g("WK_JOB_DETECT")),
     "timeout": int(g("WK_JOB_TIMEOUT")),
     "count": g("WK_JOB_COUNT") or "",
+    "display": g("WK_JOB_DISPLAY"),
     "settle": int(g("WK_JOB_SETTLE")),
     "n_arms": len(arms),
     "arms": arms,
@@ -529,14 +652,13 @@ print(json.dumps({
     "created_at": __import__("time").strftime("%Y-%m-%dT%H:%M:%SZ", __import__("time").gmtime()),
     "created_by": g("WK_JOB_BY"),
     "stamp": g("WK_JOB_STAMP"),
-    "force": bool(g("WK_JOB_FORCE")),
     "aslr": g("WK_JOB_ASLR") or "",
     "env_pad": g("WK_JOB_ENVPAD") or "",
     "path_pad": g("WK_JOB_PATHPAD") or "",
     "shared_cache": g("WK_JOB_SHARED") or "",
 }, indent=2))
 PYEOF
-    put_file "$(wk_state_dir)/mac-ab-job.json" "$root/job.json" \
+    put_file "$task_dir/job.json" "$root/job.json" \
         || die "could not write the job onto the volume"
 
     # Reset here and nowhere else: the autorun only advances this state, so a fresh job needs a fresh one or the run is skipped as already done.
@@ -569,6 +691,7 @@ PLIST
     mac "chmod 0644 $(sh_quote "$bh/Library/LaunchAgents/com.wk.bench-ab.plist")"
 
     info "planted: $stamp"
+    log  "  task   $task_dir   ('wk status' lists it; 'wk bench report $task' reads it)"
     log  "  job    $root/job.json"
     log  "  agent  $bh/Library/LaunchAgents/com.wk.bench-ab.plist"
     log  "  log    $root/autorun.log   (readable from host mode afterwards)"
@@ -583,40 +706,38 @@ mac_boottime() {
 }
 
 phase_go() {
-    local verb=reboot flag=-r
-    if [ "$GO" = shutdown ]; then verb="shut down"; flag=-h; fi
-    [ -n "$DRY" ] && { log "  would $verb $HOST (loginwindow event, no sudo)"; return 0; }
+    local verb=reboot
+    [ "$GO" = shutdown ] && verb="shut down"
+    [ -n "$DRY" ] && { log "  would re-check that the built-in panel is the only display, then $verb $HOST (loginwindow event, no sudo)"; return 0; }
+
+    # Asked again seconds before the transition, not only at preflight: a monitor plugged in between the two costs a whole cycle of numbers nobody can trust. No --force crosses it -- there is no number to save.
+    mac_display_check || die "the display on $HOST does not read as one built-in panel: $DISPLAY_READ
+
+    Nothing has been rebooted, and the job stays planted. Disconnect the monitor
+    and re-run, or reboot $HOST by hand once it reads right -- the planted job
+    runs by itself either way."
+
     BOOT_BEFORE=$(mac_boottime)
     info "go: $verb $HOST now (boot before: ${BOOT_BEFORE:-unknown})"
+    [ "$GO" = shutdown ] || log "  '$VOLUME' is the firmware default (preflight asserted it), so this restart
+  enters bench mode by itself and nobody has to be at the keyboard."
 
-    # The event code is guillemets, so the octal escapes go in printf's *format*, not a %s argument.
-    # Two transitions, two mechanisms, each for its own reason. A restart is asked
-    # of loginwindow, which needs no session and so works at the login screen;
-    # loginwindow answers no shutdown event at all (-1708, measured 2026-09-07),
-    # so a shutdown is asked of System Events, which host mode always has a
-    # session for. Backgrounded and its status ignored: a transition that takes
-    # kills the ssh carrying it, and `kern.boottime` below is what verifies it.
+    # One implementation of "restart this Mac", the boot driver's: it goes through the
+    # privileged helper, whose reboot no application can decline. A shutdown has no
+    # helper verb, and loginwindow answers no shutdown event at all (-1708, measured
+    # 2026-09-07), so that one is asked of System Events, which host mode has a session
+    # for. Backgrounded and its status ignored: the transition kills the ssh carrying it,
+    # and `kern.boottime` below is what verifies it.
     if [ "$GO" = shutdown ]; then
         mac_sh '(osascript -e "tell application \"System Events\" to shut down" >/dev/null 2>&1 &)
                 exit 0' >/dev/null 2>&1 || true
     else
-        mac_sh 'printf "tell application \"loginwindow\" to \302\253event aevtrrst\302\273\n" > /tmp/wk-restart.scpt
-                (osascript /tmp/wk-restart.scpt >/dev/null 2>&1 &)
-                exit 0' >/dev/null 2>&1 || true
+        b_reboot || true
     fi
 
     local waited=0
     while [ "$waited" -lt 150 ]; do
         mac_sh true >/dev/null 2>&1 || { info "  $HOST is going down (after ${waited}s)"; return 0; }
-        sleep 5
-        waited=$((waited + 5))
-    done
-
-    warn "  the loginwindow event did not take; trying sudo -n"
-    mac_sh "sudo -n shutdown $flag now >/dev/null 2>&1" >/dev/null 2>&1 || true
-    waited=0
-    while [ "$waited" -lt 60 ]; do
-        mac_sh true >/dev/null 2>&1 || { info "  $HOST is going down (after sudo)"; return 0; }
         sleep 5
         waited=$((waited + 5))
     done
@@ -659,6 +780,32 @@ phase_wait() {
 }
 
 
+# The volume's result directories carry the env.json `wk bench staged` wrote beside each one, so they are copied rather than recomposed; runs.tsv adds the only thing they do not know, which round and arm each belongs to. Contaminated legs are left where they are: the lane refuses to compare them, so the store does not carry them either.
+collect_runs_into_task() {  # <task dir> <bench root> <runs.tsv on the volume>
+    local task_dir="$1" root="$2" runs="$3" tsv dirs n=0 d
+    tsv=$(mac "cat $(sh_quote "$runs")" 2>/dev/null | tr -d '\r') || return 1
+    dirs=""
+    for d in $(printf '%s\n' "$tsv" | awk -F'\t' '$1 != 0 && $5 == "clean" { print $4 }'); do
+        dirs="$dirs $(sh_quote "$d")"
+    done
+    [ -n "$dirs" ] || { warn "  no clean leg after the warmup round -- nothing to record on the task"; return 0; }
+    ensure_dir "$task_dir/runs" >/dev/null
+    mac "cd $(sh_quote "$root/results") && tar -cf -$dirs" | tar -xf - -C "$task_dir/runs" \
+        || { warn "  could not copy the results onto the task"; return 1; }
+    local round label sid rid clean plan
+    while IFS="$(printf '\t')" read -r round label sid rid clean plan; do
+        [ -n "$rid" ] && [ "$round" != 0 ] && [ "$clean" = clean ] || continue
+        wkdata env-record "$task_dir/runs/$rid/env.json" --update \
+            machine="$MACHINE" plan="$plan" ab.round="$round" ab.staged="$sid" \
+            ab.arm="$(printf '%s' "$label" | tr '[:upper:]' '[:lower:]')" \
+            || { warn "  could not pair $rid with round $round arm $label"; continue; }
+        n=$((n + 1))
+    done <<EOF
+$tsv
+EOF
+    log "  recorded $n clean leg(s) onto $task_dir"
+}
+
 phase_collect() {
     local root; root=$(bench_root)
     info "collect: reading the A/B off $VOLUME"
@@ -673,11 +820,19 @@ phase_collect() {
 
     local stamp; stamp=$(kv_get job_stamp <<<"$st")
     local runs="$root/ab/$stamp/runs.tsv"
+    local task_dir=""
+    [ -z "$stamp" ] || task_dir=$(bench_task_dir "$stamp-$MACHINE-mac-ab")
     if [ -n "$stamp" ] && mac "test -f $(sh_quote "$runs")" 2>/dev/null; then
         log ""
         log "  runs:"
         mac "cat $(sh_quote "$runs")" 2>/dev/null | sed 's/^/    /' >&2
         log ""
+        if [ -d "$task_dir" ]; then
+            printf '%s\n' "$st" > "$task_dir/autorun.state"
+            collect_runs_into_task "$task_dir" "$root" "$runs" || true
+        else
+            warn "  job $stamp has no task in $BENCH_DIR, so 'wk status' cannot list it"
+        fi
         bwk bench ab-summary --root "$(sh_quote "$root")" --runs "$(sh_quote "$runs")" || \
             warn "  the summary could not be produced; the results are still on the volume"
     else
@@ -913,12 +1068,12 @@ while [ $# -gt 0 ]; do
     esac
 done
 
-# Deferred until MACHINE is final, so `--machine benchvm` picks up benchvm's own conf.
-if [ -z "$HOST" ]; then
-    machine_load "$MACHINE" >/dev/null 2>&1 || die "no such machine: $MACHINE (wk boot --list)"
-    HOST="${NODE_SSH:-}"
-    [ -n "$HOST" ] || die "$MACHINE (boot/machines/$MACHINE.conf) sets no NODE_SSH"
-fi
+# Deferred until MACHINE is final, so `--machine benchvm` picks up benchvm's own conf. Loaded whether or not --host was given: NODE_DISPLAY is read from the same conf.
+machine_load "$MACHINE" >/dev/null 2>&1 || die "no such machine: $MACHINE (wk boot --list)"
+[ -n "$HOST" ] || HOST="${NODE_SSH:-}"
+[ -n "$HOST" ] || die "$MACHINE (boot/machines/$MACHINE.conf) sets no NODE_SSH"
+NODE_SSH="$HOST"   # one address for both halves, so --host moves the reads and the restart together
+load_driver "$NODE_DRIVER" || die "$MACHINE names no boot driver this lane can restart it with"
 
 _lc() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
 if is_macos && [ "$(_lc "$(hostname -s 2>/dev/null)")" = "$(_lc "$HOST")" ]; then
@@ -973,6 +1128,13 @@ fi
 
 phase_go
 
+GOING="$HOST has gone down to measure, and answers again when it hands the machine back."
+if [ "$GO" = shutdown ]; then
+    GOING="$HOST is off with the job planted: hold the power button and pick '$VOLUME' to start it."
+fi
+notify "mac-ab planted on $HOST" \
+    "$PLANS, $ROUNDS-$MAX_ROUNDS rounds, count $COUNT. Arms $A_ID / $B_ID. $GOING"
+
 if [ "$GO" = shutdown ]; then
     info "$HOST is powering off with the job planted."
     log  "  start it holding the power button until 'Loading startup options',"
@@ -990,16 +1152,22 @@ case "$came_back" in
         info "$HOST came back in BENCH mode and is reachable -- the A/B is running there."
         log  "  'wk bench mac-ab --status' follows it." ;;
     host)
+        notify "mac-ab: $HOST is back in host mode" \
+            "the result is collectable now: wk bench mac-ab --collect"
         phase_collect ;;   # the state file tells "ran it and came back" from "never left" apart
     noreboot)
         warn "$HOST never rebooted, so the A/B has not run."
         log  "  The job is planted and still valid -- nothing needs re-staging."
         log  "  Reboot the machine by any means (the startup manager works too)"
-        log  "  and it runs by itself; 'wk bench mac-ab --collect' reads it after." ;;
+        log  "  and it runs by itself; 'wk bench mac-ab --collect' reads it after."
+        notify "mac-ab: $HOST never rebooted" \
+            "the A/B has not run. The job is planted and still valid: reboot $HOST by any means, including the startup manager, and it runs by itself." ;;
     *)
         warn "$HOST is not answering."
         log  "  If it went to bench mode, that is expected: that install has no"
         log  "  network. The job carries a watchdog and its own hand-back, so it"
         log  "  returns on its own; 'wk bench mac-ab --collect' reads the result"
-        log  "  once it does." ;;
+        log  "  once it does."
+        notify "mac-ab: $HOST has gone silent" \
+            "expected if it entered bench mode -- that install has no network. The job carries a watchdog and its own hand-back, so it returns on its own; wk bench mac-ab --collect reads the result then." ;;
 esac

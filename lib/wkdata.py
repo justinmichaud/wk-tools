@@ -471,9 +471,32 @@ def _sd(vals):
     return (sum((v - m) ** 2 for v in vals) / (n - 1)) ** 0.5
 
 
-# env.json comes from the result's own directory, empty where missing, so an older run reads as unknown rather than refusing the report.
-def _side_runs(paths):
-    return [(p, _load(p), _load(os.path.join(os.path.dirname(p), "env.json"))) for p in paths]
+# A run is named by the directory a benchmark wrote; the files inside it are derived here and nowhere else.
+def _run_result(rundir):
+    path = os.path.join(rundir, "result.json")
+    if not os.path.isfile(path):
+        return path, None, "%s: no result.json in this directory" % rundir
+    doc = _load(path)
+    return path, doc, None if doc else "%s: empty, or not JSON" % path
+
+
+# env.json is read from the same directory, empty where missing, so an older run reads as unknown rather than refusing the report.
+def _side_runs(dirs, side):
+    runs, missing = [], []
+    for d in dirs:
+        d = os.path.normpath(d)
+        _path, doc, why = _run_result(d)
+        if why:
+            missing.append(why)
+            continue
+        runs.append((d, doc, _load(os.path.join(d, "env.json"))))
+    if not runs:
+        sys.exit("report: no results on side %s:\n%s"
+                 % (side, "\n".join("  " + l for l in missing)
+                    or "  no run directories given"))
+    for line in missing:
+        print("warning: side %s: %s" % (side, line), file=sys.stderr)
+    return runs
 
 
 def _config_key(env):
@@ -526,8 +549,8 @@ def _consistency_lines(rows):
 def _order_lines(a_runs, b_runs):
     """Alternating is not the same as counterbalanced: if one arm always goes
     first, monotonic drift lands on the other."""
-    order = sorted([(os.path.basename(os.path.dirname(p)), "A") for p, _, _ in a_runs]
-                   + [(os.path.basename(os.path.dirname(p)), "B") for p, _, _ in b_runs])
+    order = sorted([(os.path.basename(p), "A") for p, _, _ in a_runs]
+                   + [(os.path.basename(p), "B") for p, _, _ in b_runs])
     if len(order) < 4:
         return []
     pos = {"A": [], "B": []}
@@ -544,12 +567,8 @@ def _order_lines(a_runs, b_runs):
             % (late, gap, pos["A"], pos["B"], late)]
 
 
-def _build_report(a_paths, b_paths, header=(), warmup=()):
-    a_runs, b_runs = _side_runs(a_paths), _side_runs(b_paths)
-    if not a_runs:
-        sys.exit("report: no result files for A")
-    if not b_runs:
-        sys.exit("report: no result files for B")
+def _build_report(a_dirs, b_dirs, header=(), warmup=()):
+    a_runs, b_runs = _side_runs(a_dirs, "A"), _side_runs(b_dirs, "B")
 
     def merged_subtests(runs):
         merged = {}
@@ -881,47 +900,123 @@ def cmd_warmup_check(args):
     sys.exit(1 if problems else 0)
 
 
-def _top_scores(paths):
-    """One number per run: the plan's headline Score, the row with no '/' in it."""
+# A metric holds either its values or a declaration of how to aggregate its
+# subtests' -- ["Geometric"] for JetStream3 and MotionMark, whose overall score is
+# never written into the file at all. The list's first name is the primary one.
+_AGGREGATORS = {
+    "Arithmetic": lambda vals: sum(vals) / len(vals),
+    "Geometric": lambda vals: math.exp(sum(math.log(v) for v in vals) / len(vals)),
+    "Total": sum,
+}
+
+
+def _iteration_values(metric):
+    """One value per iteration: `current` holds an entry per iteration, and
+    Speedometer's entry is itself that iteration's internal repeats."""
+    cur = _first_current(metric)
+    if not isinstance(cur, list):
+        return None
     out = []
-    for path in paths:
-        doc = _load(path)
-        tops = [entry for name, entry in _subtest_metrics(doc).items()
-                if "/" not in name and entry.get("Score")]
-        if len(tops) != 1:
-            continue
-        vals = tops[0]["Score"]
+    for item in cur:
+        vals = _flatten(item)
+        if not vals:
+            return None
+        out.append(sum(vals) / len(vals))
+    return out or None
+
+
+# Aggregated per iteration and then averaged: pooling every subtest's every
+# iteration mixes the iterations into one number that is nobody's score.
+def _declared_aggregate(suite, node, metric):
+    name = metric[0] if metric else ""
+    if name not in _AGGREGATORS:
+        sys.exit("ab-precision: %s declares its Score as '%s', which this file does not "
+                 "aggregate. Implemented: %s." % (suite, name, ", ".join(sorted(_AGGREGATORS))))
+    children = (node.get("tests") or {}) if isinstance(node.get("tests"), dict) else {}
+    per_child, silent = {}, []
+    for child, cnode in children.items():
+        vals = _iteration_values((cnode.get("metrics") or {}).get("Score")) if isinstance(cnode, dict) else None
         if vals:
-            out.append(sum(vals) / len(vals))
-    return out
+            per_child[str(child)] = vals
+        else:
+            silent.append(str(child))
+    if silent or not per_child:
+        sys.exit("ab-precision: %s's Score is the %s of its subtests' Scores, and %d of "
+                 "%d first-level tests report no Score (%s). Re-run the plan; a partial suite "
+                 "has no headline score."
+                 % (suite, name, len(silent), len(children), ", ".join(sorted(silent)) or "none ran"))
+    counts = sorted({len(v) for v in per_child.values()})
+    if len(counts) != 1:
+        sys.exit("ab-precision: %s's subtests report %s iterations -- one aggregate per "
+                 "iteration needs the same count from every subtest."
+                 % (suite, "/".join(str(c) for c in counts)))
+    fn = _AGGREGATORS[name]
+    try:
+        scores = [fn([v[i] for v in per_child.values()]) for i in range(counts[0])]
+    except ValueError:
+        sys.exit("ab-precision: %s reports a subtest Score of zero or less, and its %s mean "
+                 "is undefined." % (suite, name))
+    return sum(scores) / len(scores)
+
+
+def _headline_score(doc):
+    roots = [(str(k), v) for k, v in doc.items()
+             if isinstance(v, dict) and isinstance(v.get("metrics"), dict)
+             and "Score" in v["metrics"]]
+    if len(roots) != 1:
+        return None
+    suite, node = roots[0]
+    metric = node["metrics"]["Score"]
+    if isinstance(metric, list):
+        return _declared_aggregate(suite, node, metric)
+    vals = _iteration_values(metric)
+    return sum(vals) / len(vals) if vals else None
+
+
+def _headline_scores(dirs):
+    scores, empty = [], []
+    for d in dirs:
+        path, doc, why = _run_result(d)
+        if why:
+            empty.append(why)
+            continue
+        score = _headline_score(doc)
+        if score is None:
+            empty.append("%s: no single suite carrying a Score metric" % path)
+            continue
+        scores.append(score)
+    return scores, empty
 
 
 def cmd_ab_precision(args):
-    a, b = _top_scores(_split_paths(args.a)), _top_scores(_split_paths(args.b))
-    # `met=no` from nothing reads like "not resolved yet" and means "nothing was
-    # read": a run is a directory, and naming its result.json finds no scores.
-    if not a or not b:
-        sys.exit("ab-precision: no scores on %s -- a run is the directory a\n"
-                 "  benchmark wrote, not the result.json inside it." %
-                 ("side A" if not a else "side B"))
+    a, a_empty = _headline_scores(_split_paths(args.a))
+    b, b_empty = _headline_scores(_split_paths(args.b))
+    for scores, empty, side in ((a, a_empty, "A"), (b, b_empty, "B")):
+        if scores:
+            for line in empty:
+                print("warning: side %s: %s" % (side, line), file=sys.stderr)
+        else:
+            sys.exit("ab-precision: no scores on side %s:\n%s" % (
+                side, "\n".join("  " + l for l in empty)
+                or "  no run directories given"))
     mde = _mde_pct(a, b)
-    delta = None
-    if a and b and sum(a):
-        delta = (sum(b) / len(b) - sum(a) / len(a)) / (sum(a) / len(a)) * 100.0
+    mean_a, mean_b = sum(a) / len(a), sum(b) / len(b)
+    delta = (mean_b - mean_a) / mean_a * 100.0 if mean_a else None
+    p = _welch_p(a, b)
     print("n_a=%d" % len(a))
     print("n_b=%d" % len(b))
-    print("mean_a=%s" % ("%.4f" % (sum(a) / len(a)) if a else ""))
-    print("mean_b=%s" % ("%.4f" % (sum(b) / len(b)) if b else ""))
+    print("mean_a=%.4f" % mean_a)
+    print("mean_b=%.4f" % mean_b)
     print("delta_pct=%s" % ("%.4f" % delta if delta is not None else ""))
     print("mde_pct=%s" % ("%.4f" % mde if mde is not None else ""))
     print("target_pct=%.4f" % args.target)
     print("met=%s" % ("yes" if mde is not None and mde <= args.target else "no"))
     # The half-width scales as 1/sqrt(n), so the rounds still owed at this spread is what the operator wants to know before committing the machine.
     need = ""
-    if mde is not None and mde > args.target and a:
+    if mde is not None and mde > args.target:
         need = "%d" % math.ceil(len(a) * (mde / args.target) ** 2)
     print("rounds_needed=%s" % need)
-    print("p=%s" % ("%.6f" % _welch_p(a, b) if len(a) > 1 and len(b) > 1 else ""))
+    print("p=%s" % ("%.6f" % p if p is not None else ""))
 
 
 def cmd_subtests(args):
@@ -947,12 +1042,7 @@ def _split_paths(spec):
 
 
 def cmd_report(args):
-    a, b = _split_paths(args.a), _split_paths(args.b)
-    if not a:
-        sys.exit("report: no result files for A")
-    if not b:
-        sys.exit("report: no result files for B")
-    report = _build_report(a, b)
+    report = _build_report(_split_paths(args.a), _split_paths(args.b))
     want_text = args.text or not args.html
     if args.html:
         with open(args.html, "w") as f:
@@ -1204,12 +1294,12 @@ def cmd_task_report(args):
     rounds = _task_rounds(doc, st["runs"])
     want_text = args.text or not args.html
     for (device, plan), byround in sorted(rounds.items()):
-        a_paths, b_paths, dropped = [], [], []
+        a_dirs, b_dirs, dropped = [], [], []
         for rnd in sorted(byround):
             arms = byround[rnd]
             if all(arms.get(x, {}).get("state") == "ok" for x in ("a", "b")):
-                a_paths.append(os.path.join(arms["a"]["dir"], "result.json"))
-                b_paths.append(os.path.join(arms["b"]["dir"], "result.json"))
+                a_dirs.append(arms["a"]["dir"])
+                b_dirs.append(arms["b"]["dir"])
             else:
                 why = ", ".join("%s: %s" % (arm_names[0] if x == "a" else arm_names[1],
                                             arms[x]["state"] if x in arms else "not run")
@@ -1218,14 +1308,14 @@ def cmd_task_report(args):
         header = ["%s on %s" % (plan, device),
                   "A = %s %s, B = %s %s" % (arm_kind, arm_names[0], arm_kind, arm_names[1]),
                   "rounds: %d usable of %d attempted (%d planned)%s" % (
-                      len(a_paths), len(byround), doc.get("rounds", 1),
+                      len(a_dirs), len(byround), doc.get("rounds", 1),
                       ("; dropped " + ", ".join(dropped)) if dropped else "")]
         print("\n" + "=" * 72)
         print("\n".join(header))
-        if not a_paths:
+        if not a_dirs:
             print("no round has both arms yet; nothing to compare")
             continue
-        report = _build_report(a_paths, b_paths, header=lines + [""] + header,
+        report = _build_report(a_dirs, b_dirs, header=lines + [""] + header,
                                warmup=warmup_lines(warmup_load(taskdir, device)))
         if args.html:
             out = os.path.join(taskdir, "report-%s-%s.html" % (device, plan))
@@ -1289,8 +1379,8 @@ def main(argv):
     p.set_defaults(func=cmd_plan_spec)
 
     p = sub.add_parser("ab-precision", help="how fine a difference the rounds so far resolve, and whether that meets --target")
-    p.add_argument("--a", required=True, help="comma-separated result.json paths for arm A")
-    p.add_argument("--b", required=True, help="comma-separated result.json paths for arm B")
+    p.add_argument("--a", required=True, help="comma-separated run directories for arm A")
+    p.add_argument("--b", required=True, help="comma-separated run directories for arm B")
     p.add_argument("--target", type=float, default=0.3, help="the effect the A/B has to be able to detect, in percent (default 0.3)")
     p.set_defaults(func=cmd_ab_precision)
 
@@ -1321,8 +1411,8 @@ def main(argv):
     p.set_defaults(func=cmd_axis_check)
 
     p = sub.add_parser("report", help="a score+time+variance report for two saved runs, as text or one self-contained html file")
-    p.add_argument("a", help="comma-separated result.json paths for the A side")
-    p.add_argument("b", help="comma-separated result.json paths for the B side")
+    p.add_argument("a", help="comma-separated run directories for the A side")
+    p.add_argument("b", help="comma-separated run directories for the B side")
     p.add_argument("--html", metavar="FILE", help="write a self-contained html report to FILE")
     p.add_argument("--text", action="store_true", help="print the text table (default when --html is not given)")
     p.set_defaults(func=cmd_report)

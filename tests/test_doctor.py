@@ -382,6 +382,7 @@ class TestTheCredentialsSection(unittest.TestCase):
                   f'. "{REPO}/lib/common.sh"\n. "{REPO}/lib/store.sh"\n'
                   + harness + self.block(),
                   env={"WK_HOST_SECRETS": str(tmp / "secrets"),
+                       "WK_STORE": str(tmp),
                        "WK_TS_AUTHKEY": str(tmp / "tailscale-authkey"),
                        "WK_TS_API_SECRET": str(tmp / "tailscale-api-key"),
                        "WK_GITHUB_API": "http://127.0.0.1:1",

@@ -25,20 +25,26 @@ PODMAN_TRAP = '#!/bin/sh\necho "podman was called" >&2\nexit 1\n'
 class _KeyRun(WkTest):
     """cmd/key against a scratch secrets directory, with the trap on PATH."""
 
-    def key(self, *args, env=None, stubs=None):
+    def key(self, *args, env=None, stubs=None, input=None):
         # wk_secrets_dir (lib/store.sh) reads WK_HOST_SECRETS on a macOS host
         # and $WK_STORE/secrets everywhere else. Pointing both at one directory
         # is what a real machine looks like, and is what makes these tests read
         # the directory the command actually wrote on either platform.
+        #
+        # WK_NTFY_API: the ntfy rule asks ntfy.sh whether it serves the topic,
+        # and port 1 refuses at once -- the same answer a machine with no
+        # network gives, and the branch that reports one unverified. No test
+        # here reaches ntfy.sh.
         store = self.tmp / "store"
         secrets = store / "secrets"
-        e = {"WK_HOST_SECRETS": str(secrets), "WK_STORE": str(store)}
+        e = {"WK_HOST_SECRETS": str(secrets), "WK_STORE": str(store),
+             "WK_NTFY_API": "http://127.0.0.1:1"}
         if env:
             e.update(env)
         with stub_path({"podman": PODMAN_TRAP, **(stubs or {})}) as binp:
             e["PATH"] = f"{binp}:/usr/bin:/bin:/usr/sbin:/sbin"
             cp = subprocess.run([str(KEY), *args], cwd=str(REPO), env={**self._base_env(), **e},
-                                capture_output=True, text=True, timeout=120)
+                                input=input, capture_output=True, text=True, timeout=120)
         return cp, secrets
 
     def _base_env(self):
@@ -146,7 +152,7 @@ class TestCheckAsksAboutEveryCredential(_KeyRun):
         cp, _secrets = self.key("check")
         self.assertIn("credentials:", cp.stdout)
         for name in ("github-pat", "claude", "litellm", "claude-login",
-                     "tailnet", "tailnet-api"):
+                     "tailnet", "tailnet-api", "ntfy"):
             with self.subTest(name=name):
                 self.assertIn(name, cp.stdout)
         self.assertIn("nothing stored", cp.stdout)
@@ -199,7 +205,7 @@ class TestSetupDoesWhateverIsMissing(_KeyRun):
         self.assertNotEqual(0, cp.returncode, cp.stdout + cp.stderr)
         self.assertIn("credentials:", cp.stdout)
         for name in ("github-pat", "claude", "litellm", "claude-login",
-                     "tailnet", "tailnet-api"):
+                     "tailnet", "tailnet-api", "ntfy"):
             with self.subTest(name=name):
                 self.assertIn(name, cp.stdout)
 
@@ -208,12 +214,28 @@ class TestSetupDoesWhateverIsMissing(_KeyRun):
         table still gets its turn and the report still comes out."""
         cp, _secrets = self.setup_run()
         self.assertIn("Re-run interactively", cp.stderr)
-        self.assertIn("tailnet-api", cp.stdout)
+        last = subprocess.run(["bash", "-c",
+                               '. "%s/lib/common.sh"; . "%s/lib/store.sh"; '
+                               'wk_cred_settable | tail -1' % (REPO, REPO)],
+                              capture_output=True, text=True).stdout.strip()
+        self.assertIn(last, cp.stdout)
 
     def test_it_makes_the_push_keys_on_the_way(self):
         cp, secrets = self.setup_run()
         self.assertTrue((secrets.parent / "push-keys" / "build_key_fork").exists(),
                         cp.stdout + cp.stderr)
+
+    def test_a_credential_wk_mints_is_made_rather_than_asked_for(self):
+        """The walk ends with every credential this machine can hold: one it is
+        given is asked for, one it mints is simply made, so a new machine has a
+        working ntfy topic without anybody inventing a name."""
+        cp, secrets = self.setup_run()
+        topic = secrets.parent / "notify" / "ntfy-topic"
+        self.assertTrue(topic.exists(), cp.stdout + cp.stderr)
+        self.assertTrue(topic.read_text().strip())
+        self.assertIn("minted here and printed once", cp.stdout + cp.stderr)
+        self.assertNotIn("ntfy.sh topic this machine's notifications go to",
+                         cp.stdout + cp.stderr, "it asked for one instead")
 
     def test_one_already_stored_is_left_exactly_as_it_is(self):
         _cp, secrets = self.key("ensure")
@@ -226,6 +248,100 @@ class TestSetupDoesWhateverIsMissing(_KeyRun):
         self.assertNotIn("GitHub personal access token", cp.stderr,
                          "asked for one it already has")
         self.assertIn("github-pat", cp.stdout)
+
+
+class TestTheTopicIsMintedNotAsked(_KeyRun):
+    """`wk key set ntfy` mints the topic, the way `wk key deploy` generates a
+    deploy key rather than asking for one: a name a person invents is short and
+    guessable, which lib/credcheck.py's rule can report and never prevent.
+
+    The topic name is the whole credential, so the mint is the one moment it is
+    shown -- a phone has to be pointed at it once. Every reader of the stored
+    one reports on it without printing it (lib/wknotify.py's _out), which is
+    what makes printing it here safe to do exactly once."""
+
+    SHARED = "a-topic-minted-on-the-first-machine"
+
+    def topic_path(self, secrets):
+        return secrets.parent / "notify" / "ntfy-topic"
+
+    def test_a_machine_with_no_topic_ends_up_with_one(self):
+        cp, secrets = self.key("set", "ntfy")
+        self.assertEqual(0, cp.returncode, cp.stdout + cp.stderr)
+        path = self.topic_path(secrets)
+        self.assertTrue(path.exists(), cp.stdout + cp.stderr)
+        self.assertTrue(path.read_text().strip())
+        self.assertEqual(0o600, path.stat().st_mode & 0o777)
+
+    def test_nothing_asks_a_person_for_a_name(self):
+        cp, _secrets = self.key("set", "ntfy")
+        self.assertNotIn("paste it", cp.stdout + cp.stderr)
+
+    def test_it_prints_the_subscribe_url_once(self):
+        cp, secrets = self.key("set", "ntfy")
+        topic = self.topic_path(secrets).read_text().strip()
+        out = cp.stdout + cp.stderr
+        self.assertEqual(1, out.count(topic), out)
+        self.assertIn("https://ntfy.sh/" + topic, out)
+        for fact in ("app", "iOS", "Android"):
+            with self.subTest(fact=fact):
+                self.assertIn(fact, out)
+
+    def test_nothing_prints_it_a_second_time(self):
+        """`wk key check` and a re-run of `set` report on the stored topic;
+        neither is the moment a phone is pointed at it."""
+        _cp, secrets = self.key("set", "ntfy")
+        topic = self.topic_path(secrets).read_text().strip()
+        for args in (("check",), ("set", "ntfy")):
+            cp, _ = self.key(*args)
+            with self.subTest(args=args):
+                self.assertNotIn(topic, cp.stdout + cp.stderr)
+
+    def test_replacing_it_mints_a_different_one(self):
+        _cp, secrets = self.key("set", "ntfy")
+        first = self.topic_path(secrets).read_text().strip()
+        cp, _ = self.key("set", "ntfy", "--replace")
+        self.assertEqual(0, cp.returncode, cp.stdout + cp.stderr)
+        second = self.topic_path(secrets).read_text().strip()
+        self.assertNotEqual(first, second)
+        self.assertIn(second, cp.stdout + cp.stderr)
+
+    def test_a_topic_from_another_machine_is_taken_on_stdin(self):
+        """A maintainer moving a topic between machines: the second machine
+        holds the first's, so one phone subscription covers both. On stdin,
+        because an argument is visible in `ps`."""
+        cp, secrets = self.key("set", "ntfy", "--paste",
+                               input=self.SHARED + "\n")
+        self.assertEqual(0, cp.returncode, cp.stdout + cp.stderr)
+        self.assertEqual(self.SHARED,
+                         self.topic_path(secrets).read_text().strip())
+        self.assertNotIn(self.SHARED, cp.stdout + cp.stderr)
+
+    def test_a_topic_from_another_machine_is_put_to_the_same_rule(self):
+        cp, secrets = self.key("set", "ntfy", "--paste",
+                               input="not one word\n")
+        self.assertNotEqual(0, cp.returncode, cp.stdout)
+        self.assertIn("one word of letters", cp.stdout + cp.stderr)
+        self.assertFalse(self.topic_path(secrets).exists())
+
+    def test_nothing_on_stdin_stores_nothing_and_names_the_mint(self):
+        cp, secrets = self.key("set", "ntfy", "--paste", input="")
+        self.assertNotEqual(0, cp.returncode, cp.stdout)
+        self.assertIn("wk key set ntfy", cp.stdout + cp.stderr)
+        self.assertFalse(self.topic_path(secrets).exists())
+
+    def test_paste_is_refused_for_a_credential_wk_does_not_mint(self):
+        cp, _secrets = self.key("set", "github-pat", "--paste",
+                                input="ghp_notarealtoken\n")
+        self.assertNotEqual(0, cp.returncode, cp.stdout)
+        self.assertIn("--paste is for a credential wk mints itself",
+                      cp.stdout + cp.stderr)
+
+    def test_an_unknown_flag_is_refused(self):
+        cp, secrets = self.key("set", "ntfy", "--bogus")
+        self.assertNotEqual(0, cp.returncode, cp.stdout)
+        self.assertIn("usage:", cp.stdout + cp.stderr)
+        self.assertFalse(self.topic_path(secrets).exists())
 
 
 class TestTheOldNamesSayWhatReplacedThem(_KeyRun):

@@ -140,7 +140,7 @@ class TestCoresAxisWarning(WkTest):
         b_extra = [f"cores.set={b_cores}"] if b_cores is not None else []
         env_record(a_dir / "env.json", *base, *a_extra)
         env_record(b_dir / "env.json", *base, *b_extra)
-        return a_dir / "result.json", b_dir / "result.json"
+        return a_dir, b_dir
 
     def test_different_core_sets_warn(self):
         with scratch_dir() as tmp:

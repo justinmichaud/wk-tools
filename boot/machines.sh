@@ -61,7 +61,7 @@ machine_load() {
     NODE_NAME="$1"
     NODE_SSH=""; NODE_DRIVER=""; NODE_DEVICE=""; NODE_ROOT=""; NODE_PROFILE=""
     NODE_NOTE=""; NODE_MAC=""; NODE_LOCAL=""; NODE_VOLUME=""; NODE_DTB=""
-    NODE_BENCH_SSH=""; NODE_NET=""
+    NODE_BENCH_SSH=""; NODE_NET=""; NODE_DISPLAY=""
     NODE_BRIDGE=""  # declared, not discovered: readable when unreachable
     NODE_ROLE=workstation
     NODE_OS=any  # or an OS name for a machine that answers only for itself
@@ -185,6 +185,40 @@ b_medium_read() { # <boot partition> <fixed file name>
 mac_ssh() {
     local dest="$1"; shift
     ssh -o BatchMode=yes -o ConnectTimeout="$(wk_ssh_timeout)" "$dest" "$@"
+}
+
+# One declared path, not a search: the same spelling targets/hosts/*.conf gives WK_REMOTE_TOOLS. A machine carrying two clones otherwise has whichever a search reaches first driving the lane.
+MACHINE_TOOLS=Development/wk-tools
+machine_tools_dir() { printf '%s' "$MACHINE_TOOLS"; }
+
+machine_tools_present() { # <ssh destination>
+    mac_ssh "$1" "test -x $(sh_quote "$MACHINE_TOOLS/wk")" >/dev/null 2>&1
+}
+
+machine_prepare() { # <ssh destination>
+    local dest="$1"
+    info "syncing this tree to $dest:$MACHINE_TOOLS"
+    mac_ssh "$dest" "mkdir -p $(sh_quote "$MACHINE_TOOLS")" \
+        || { warn "could not make $MACHINE_TOOLS on $dest"; return 1; }
+    rsync -a --delete --exclude '.git/' --exclude '__pycache__/' --exclude '*.pyc' \
+        --exclude 'WebKitBuild/' -e "ssh -o BatchMode=yes" \
+        "$WK_ROOT/" "$dest:$MACHINE_TOOLS/" \
+        || { warn "could not sync this tree to $dest"; return 1; }
+
+    # Nothing can bootstrap the first authenticated sudo from a session with no terminal.
+    [ -t 0 ] || { warn "the tree is in place on $dest. Installing its privileged helpers
+    puts a NOPASSWD rule in /etc/sudoers.d, and that sudo authenticates once; this
+    session has no terminal to answer on. From one:
+      wk boot $NODE_NAME --prepare
+    or on $dest itself, where Touch ID answers it if that Mac has it enabled:
+      cd $MACHINE_TOOLS && ./setup --stage quiesce"; return 1; }
+
+    info "installing the privileged helpers on $dest (it asks for a password once)"
+    ssh -t "$dest" "cd $(sh_quote "$MACHINE_TOOLS") && ./setup --stage quiesce" || {
+        warn "./setup --stage quiesce did not finish on $dest"
+        return 1
+    }
+    return 0
 }
 
 # No probe can derive the intent half: once armed, the firmware register and the running system look unchanged.

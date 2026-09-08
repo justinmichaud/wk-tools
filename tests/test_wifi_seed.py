@@ -445,10 +445,10 @@ _tailnet_name_preflight {name!r}
 
 
 class TestTailnetNameCollision(WkTest):
-    PEERS = '''{"Self":{"HostName":"driver-mac","TailscaleIPs":["100.1.1.1"],"Online":true},
+    PEERS = '''{"Self":{"HostName":"driver-mac","DNSName":"driver-mac.tail0.ts.net.","TailscaleIPs":["100.1.1.1"],"Online":true},
  "Peer":{
-   "a":{"HostName":"rpi3-1","TailscaleIPs":["100.1.1.2"],"Online":false},
-   "b":{"HostName":"rpi4","TailscaleIPs":["100.1.1.3"],"Online":true}
+   "a":{"HostName":"rpi3-1","DNSName":"rpi3-1.tail0.ts.net.","TailscaleIPs":["100.1.1.2"],"Online":false},
+   "b":{"HostName":"rpi4","DNSName":"rpi4.tail0.ts.net.","TailscaleIPs":["100.1.1.3"],"Online":true}
  }}'''
 
     def test_exact_match_refuses_with_remedy(self):
@@ -474,9 +474,27 @@ class TestTailnetNameCollision(WkTest):
 
     def test_case_insensitive_match_refuses(self):
         """RPI4 on the tailnet still blocks a write for 'rpi4'"""
-        peers = self.PEERS.replace('"rpi4"', '"RPI4"')
+        peers = self.PEERS.replace('"rpi4.tail0', '"RPI4.tail0')
         cp = _run_tailnet_preflight("rpi4", self.tmp, peers)
         self.assertNotEqual(cp.returncode, 0, cp.stdout)
+
+    def test_a_peer_is_keyed_by_its_magicdns_label_not_its_os_hostname(self):
+        """A macOS peer keeps its hostname's capitalisation ('Tolken') and two
+        phones both answer 'localhost', so keying on HostName loses the Mac and
+        collapses the phones onto one name. Measured on this tailnet."""
+        peers = self.PEERS.replace(
+            '"b":{"HostName":"rpi4","DNSName":"rpi4.tail0.ts.net."',
+            '"b":{"HostName":"Tolken","DNSName":"rpi4.tail0.ts.net."')
+        cp = _run_tailnet_preflight("rpi4", self.tmp, peers)
+        self.assertNotEqual(cp.returncode, 0, cp.stdout)
+        self.assertIn("already on the tailnet", cp.stdout + cp.stderr)
+
+    def test_a_peer_with_no_magicdns_name_is_no_name_at_all(self):
+        """MagicDNS off means there is no name to dial, so the peer yields no
+        row and the board is found by enumeration instead of by a guess."""
+        peers = self.PEERS.replace('"DNSName":"rpi4.tail0.ts.net.",', "")
+        cp = _run_tailnet_preflight("rpi4", self.tmp, peers)
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
 
     def test_empty_or_invalid_json_refuses_the_check_cannot_be_skipped(self):
         """empty/invalid tailscale output refuses -- the check cannot be skipped"""

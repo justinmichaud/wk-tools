@@ -58,15 +58,15 @@ v_reboot_tryboot() {
     say "rebooting into tryboot in 3s"
 }
 
-# macOS. Apple Silicon changes which install the firmware boots through a
-# LocalPolicy signed with a volume owner's credential, so root alone cannot do it
-# and bless reads that credential on stdin. The gate is the volume, not an
-# argument: neither verb takes one, and the only volume `boot-volume` will ever
+# macOS. Which install the firmware boots is signed into a LocalPolicy. `bless
+# --help` (26.6.2, tolken) lists --user/--stdinpass under Snapshot options and
+# not under Mount Mode, so this blesses with root alone and quotes what bless
+# answered: whether that suffices is the platform's answer, and one run has it.
+# The gate is the volume, not an argument: neither verb takes one, no credential
+# is read and nothing reaches stdin, and the only volume `boot-volume` will ever
 # bless is a mounted macOS system volume that is not the running one and carries
-# /etc/wk-image naming a perf-macos profile -- a wk benchmark install and nothing
-# else. Its credential is that install's own, from its provisioning payload,
-# which only root can read.
-BENCH_ACCOUNT=bench
+# /etc/wk-image naming a perf-macos profile -- a wk benchmark install and
+# nothing else.
 
 bench_install() {   # the one wk benchmark install mounted here, or a refusal
     local v found="" n=0
@@ -81,16 +81,18 @@ bench_install() {   # the one wk benchmark install mounted here, or a refusal
     printf '%s' "$found"
 }
 
-_bless() {   # <mount> <account> <password file>
+_bless() {   # <mount>
     command -v bless >/dev/null 2>&1 || fail "bless is not on this machine"
-    [ -r "$3" ] || fail "no credential at $3, so the firmware cannot be told"
-    bless --mount "$1" --setBoot --user "$2" --stdinpass < "$3"
+    local out rc=0
+    out=$(bless --mount "$1" --setBoot 2>&1) || rc=$?
+    say "bless said: ${out:-nothing}"
+    [ "$rc" -eq 0 ] || fail "bless exited $rc, so the firmware was not told"
 }
 
 v_boot_volume() {
     [ $# -eq 0 ] || deny "boot-volume takes no arguments"
-    local v; v=$(bench_install)
-    _bless "$v" "$BENCH_ACCOUNT" "$v/usr/local/share/wk-bench/password"
+    local v; v=$(bench_install) || exit $?   # bench_install's deny is a subshell's
+    _bless "$v"
     say "blessed $v"
 }
 
@@ -99,7 +101,7 @@ v_boot_volume() {
 # proven return is a machine that boots into it forever.
 v_boot_host() {
     [ $# -eq 0 ] || deny "boot-host takes no arguments"
-    _bless / "$(stat -f %Su /dev/console)" /usr/local/share/wk-bench/owner-password
+    _bless /
     say "blessed the running install"
 }
 

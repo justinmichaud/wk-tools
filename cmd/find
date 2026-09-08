@@ -70,6 +70,7 @@ fleet_macs() {
         mac=$(kv_field "$f" NODE_MAC | tr -d '"'"'"' ' | tr 'A-Z' 'a-z')
         [ -n "$mac" ] && printf '%s %s\n' "$mac" "$m"
     done
+    return 0   # the last conf read decides nothing: a machine with no NODE_MAC is not a failure
 }
 
 bridge_leases() {

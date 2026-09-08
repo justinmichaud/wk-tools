@@ -113,8 +113,10 @@ class TestNoFalseClaim(WkTest):
     def test_on_without_an_agent_fails_and_claims_nothing(self):
         """With no agent answering there is nowhere to put the keys, so `on`
         must not report a switch it did not throw."""
-        secrets = self.tmp / "secrets"
-        held = self.tmp / "push-keys"
+        # wk_secrets_dir (lib/store.sh) reads WK_HOST_SECRETS on a macOS host
+        # and $WK_STORE/secrets everywhere else; one directory under both names.
+        secrets = self.tmp / "store" / "secrets"
+        held = self.tmp / "store" / "push-keys"
         held.mkdir(parents=True)
         secrets.mkdir(parents=True)
         (held / "build_key_fork").write_text("placeholder-not-a-key\n")
@@ -170,8 +172,8 @@ report_health testmachine
 '''
 
     def _rows(self, keys=(), pat=False, env=None):
-        secrets = self.tmp / "secrets"
-        held = self.tmp / "push-keys"
+        secrets = self.tmp / "store" / "secrets"
+        held = self.tmp / "store" / "push-keys"
         for d in (secrets, held, self.tmp / "store"):
             d.mkdir(parents=True, exist_ok=True)
         for k in keys:

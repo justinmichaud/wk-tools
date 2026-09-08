@@ -142,6 +142,7 @@ def read_doc(path):
 
 GOOD = ("ok", "present", "running", "host mode", "up", "bench", "open", "complete")
 BUSY = ("creating", "starting", "building", "fixing", "no", "empty", "held",
+        "silent",
         # A board on its base image is not a bench system.
         "base", "role")
 BAD = (
@@ -903,8 +904,8 @@ function tiles(m) {
 const VERDICT = {
   0: ["good", "idle, or the last build succeeded"],
   1: ["bad",  "a build failed"],
-  2: ["busy", "a build is running, or a workspace is being created"],
-  3: ["bad",  "a build stalled and was killed"],
+  2: ["busy", "a build is running or silent, or a workspace is being created"],
+  3: ["bad",  "a build stalled and was killed by its own watchdog"],
   4: ["bad",  "a workspace needs a person"],
 };
 // Only what is wrong, and only when it is: a listing with nothing to say shows
@@ -918,7 +919,7 @@ function summary(doc) {
       if (["creating","broken","unreachable"].includes(w.ws)) attn++;
       if (w.unpushed) unpushed += parseInt(w.unpushed, 10) || 0;
       for (const s of w.subs || []) {
-        if (s.state === "running" || s.state === "building") running++;
+        if (["running","building","silent"].includes(s.state)) running++;
         if (["failed","oom","stalled","gave-up","error"].includes(s.state)) failed++;
       }
     }

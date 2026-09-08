@@ -148,6 +148,7 @@ _card_paths() {
     for p in "/sys/class/drm/$card" "/sys/class/drm/$card"-*; do
         [ -e "$p" ] && echo "$p"
     done
+    return 0   # a card whose connectors are not enumerated leaves the glob literal, which is not a failure
 }
 
 # "change" is enough for logind to recompute the seat on every systemd tested.

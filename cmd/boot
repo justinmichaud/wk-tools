@@ -7,6 +7,9 @@
 #
 #   wk boot <machine> [--system <id>] [--dry-run]  arm the one-shot and reboot
 #   wk boot <machine> --status                     what mode it is in, and why
+#   wk boot <machine> --prepare                    put this tree and the privileged
+#                                                  helpers on it, so nothing here has
+#                                                  to be typed over there again
 #   wk boot <machine> --keep                       cancel the self-return watchdog
 #   wk boot <machine> --back                       reboot back to host mode
 #   wk boot <machine> --disarm                     cancel an arming not yet spent
@@ -44,6 +47,7 @@ ACTION=arm; IMAGE=""; DRY=""
 while [ $# -gt 0 ]; do
     case "$1" in
         --status)  ACTION=status ;;
+        --prepare) ACTION=prepare ;;
         --diag)    ACTION=diag ;;
         --keep)    ACTION=keep ;;
         --back)    ACTION=back ;;
@@ -52,9 +56,9 @@ while [ $# -gt 0 ]; do
         --system)  IMAGE="${2:-}"; shift ;;
         --image)   die "renamed: --system <id> (a bootable artifact is a system, never bare
     'image' -- wk help images)" ;;
-        -*) die "usage: wk boot <machine> [--status|--diag|--keep|--back|--disarm|--system <id>|--dry-run]; see wk boot -h
+        -*) die "usage: wk boot <machine> [--status|--diag|--keep|--back|--disarm|--prepare|--system <id>|--dry-run]; see wk boot -h
     unknown option: $1" ;;
-        *)  die "usage: wk boot <machine> [--status|--diag|--keep|--back|--disarm|--system <id>|--dry-run]; see wk boot -h
+        *)  die "usage: wk boot <machine> [--status|--diag|--keep|--back|--disarm|--prepare|--system <id>|--dry-run]; see wk boot -h
     unexpected argument: $1" ;;
     esac
     shift
@@ -82,16 +86,20 @@ fi
 
 machine_load "$MACHINE" || die "unknown machine '$MACHINE' (wk boot --list)"
 
-# Probing a NODE_LOCAL machine from the wrong host reads the *driving* machine's marker and answers confidently about the wrong computer.
-case "$NODE_OS" in
-    any) ;;
-    macos) is_macos || die "$MACHINE is driven from a macOS host only (os=macos in
-    boot/machines/$MACHINE.conf) -- run this over there." ;;
-    linux) ! is_macos || die "$MACHINE is driven from a Linux host only (os=linux in
-    boot/machines/$MACHINE.conf) -- run this over there." ;;
-esac
-
 load_driver "$NODE_DRIVER"
+
+# Probing a machine its driver cannot reach reads the *driving* host's marker and answers confidently about the wrong computer; `b_probeable` is where a driver declares which it is.
+if ! b_probeable; then
+    case "$NODE_OS" in
+        any) ;;
+        macos) is_macos || die "$MACHINE is driven from a macOS host only (os=macos in
+    boot/machines/$MACHINE.conf), and its driver cannot reach it from here -- run this
+    over there." ;;
+        linux) ! is_macos || die "$MACHINE is driven from a Linux host only (os=linux in
+    boot/machines/$MACHINE.conf), and its driver cannot reach it from here -- run this
+    over there." ;;
+    esac
+fi
 
 read_state() {
     b_probe
@@ -361,11 +369,30 @@ EOF
     log  "  if it never appears, the stick's own /boot/firmware/wk-diag.txt says why."
 }
 
+cmd_prepare() {
+    [ -n "${NODE_SSH:-}" ] || die "$MACHINE (boot/machines/$MACHINE.conf) sets no NODE_SSH,
+    so there is nowhere to put anything. A machine wk reaches only by its own medium
+    has nothing to prepare."
+    if [ -n "$DRY" ]; then
+        log "would sync this tree to $NODE_SSH:$(machine_tools_dir) and run"
+        log "  ./setup --stage quiesce there (one password prompt, in your terminal)"
+        return 0
+    fi
+    machine_prepare "$NODE_SSH" || die "$MACHINE is not prepared, and nothing was armed."
+    if mv_reboot_ready 2>/dev/null; then
+        info "$MACHINE is prepared: the boot helper answers sudo -n, so wk restarts it itself"
+    else
+        warn "the helper did not answer sudo -n afterwards -- 'sudo -l' on $NODE_SSH shows
+    whether something later in the include order re-imposes a password over it."
+    fi
+}
+
 case "$ACTION" in
-    arm)    cmd_arm ;;
-    status) cmd_status ;;
-    keep)   cmd_keep ;;
-    back)   cmd_back ;;
-    disarm) cmd_disarm ;;
-    diag)   cmd_diag ;;
+    arm)     cmd_arm ;;
+    status)  cmd_status ;;
+    keep)    cmd_keep ;;
+    back)    cmd_back ;;
+    disarm)  cmd_disarm ;;
+    diag)    cmd_diag ;;
+    prepare) cmd_prepare ;;
 esac

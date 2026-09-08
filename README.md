@@ -630,15 +630,50 @@ wk bench staged --ls                             # what is staged, and what ran
 **The Mac lane**
 
 ```sh
+wk boot mbp --prepare                            # puts this tree and the privileged
+                                                  # helpers on that Mac; one password, once
 wk boot mbp --status                             # which side the firmware default is on
-wk bench mac-ab mac-rel                          # stages, plants a launch agent, reboots, reads back
-                                                  # needs one action at the keyboard per experiment
+wk bench mac-ab mac-rel                          # stages, plants a launch agent, restarts, reads back
 wk bench mac-ab mac-rel --patch <ref> --base <ref> --detect 0.3
 wk bench precision <run-a> <run-b>               # what the rounds so far resolve
 ```
 
 Driven from another machine, never from the Mac: the lane reboots it, and a
-driver on that machine goes with the reboot. Making the volume itself is a
+driver on that machine goes with the reboot.
+
+**Starting it needs nobody, and it ends with the Mac off.** The benchmark
+volume is the firmware default, so the restart enters bench mode by itself --
+`wk bench mac-ab` asserts that in preflight rather than reporting it, because a
+restart that lands back in host mode costs a whole cycle. When the job ends,
+for any reason, the install powers the machine off: a reboot would land on the
+same volume and run again. So the one human action per experiment comes after
+the numbers are safely on the volume -- hold the power button, pick the host
+install, `wk bench mac-ab --collect`.
+
+**Nothing is typed on the Mac.** A machine wk drives needs this tree and the
+privileged helpers `admin/install.sh` puts behind a NOPASSWD rule, and
+`wk boot <machine> --prepare` is what puts them there: it rsyncs this tree to
+the one path `boot/machines.sh` declares (never a search -- a machine carrying
+two clones would otherwise have whichever a search reached first driving a
+measurement) and runs `./setup --stage quiesce` over `ssh -t`. That sudo is the
+one password the lane ever asks for, so it wants a terminal, and
+`wk bench mac-ab` runs the prepare itself when it finds a Mac it cannot restart
+and has one. Without the helper the only restart available is
+`«event aevtrrst»`, which any application that will not quit declines.
+
+`NODE_OS` holds a machine to one kind of host only where its driver cannot
+reach it from anywhere else, which is what `b_probeable` declares: mac-volume
+reads *and* arms over ssh, so `wk boot mbp` works from any machine on the
+tailnet, while mac-guest needs `tart` on the Mac itself and still refuses.
+
+**The lane says when it wants a person.** `wk notify` publishes to ntfy.sh
+under a topic held as this machine's `ntfy` credential -- `wk key set ntfy`
+mints one (it is a secret wk makes, like a deploy key, not one a service
+issues) and prints the URL to subscribe a phone to, once, the only time it is
+ever shown; `wk key setup` mints it with nothing to type. The
+driver calls it when the machine goes down to measure and when it comes back or
+does not. A notification that did not go out is a warning and never costs a
+measurement. Making the volume itself is a
 separate command that runs *on* the Mac, because it acts on its own disk:
 
 ```sh
@@ -692,6 +727,22 @@ paravirtual Metal device, and `wk vm start` installs the pyobjc run-benchmark
 and the raiser need (`bench/mac-pyobjc.sh`) -- so the profile-guided build for
 both arms happens in a disposable VM and the benchmark install is only ever
 measured on, never built in.
+
+**What the screen is doing is part of the measurement.** run-benchmark sizes
+its window from the screen and MotionMark's score is a function of the area it
+draws, so two runs at different resolutions are not comparable. The declared
+mode is `NODE_DISPLAY` in `boot/machines/<machine>.conf` -- one line, in points
+-- and it is checked three times: in preflight, again immediately before the
+restart (a monitor plugged in between the two costs a cycle, and `--force` does
+not cross it), and in the bench install itself against the job's own copy of
+the declaration. Exactly one display, and it is the built-in panel. A run that
+is compared with nothing -- a PGO collection in the build guest -- passes
+`--expect-display any` and has its display recorded and judged on nothing;
+that word cannot come from a default, and the plant refuses it.
+
+The display is also driven to **minimum brightness** before any round, read
+back, and left there: brightness is power, power is thermal headroom, and a
+brightness that will not move is a refusal rather than a number.
 
 An A/B runs **three benchmarks** and stops when it has measured finely enough,
 not after a fixed count. Round 0 is a warmup -- one leg per arm, discarded,
@@ -802,6 +853,16 @@ and `sysmond` over XPC and never return while those are held stopped -- measured
 in the rehearsal guest on 2026-09-05, where each deadlocked the command that
 would have undone it. Spotlight is turned off (`mdutil -i off -a`) instead of
 stopped, which is what makes mds idle, and `sysmond` is left alone.
+
+**Every reading of a paused daemon is bounded.** Leaving those two alone is not
+enough: a Spotlight daemon that *is* held stopped answered no XPC request on
+one leg out of 153 and wedged it for 2727s, until the watchdog rebooted the
+machine and a whole evening's remaining rounds were lost. macOS ships no
+`timeout(1)`, so `_wk_qd_read` (`bench/mac-quiet-desktop.sh`, which sources
+nothing so it can be streamed into a guest) is the one bounded reader in the
+tree: a temp file rather than a pipe, since a grandchild the kill cannot reach
+holds a pipe open, and a reading that timed out is reported as unknown with the
+daemon named -- never as clean, and never as a fault that would refuse a leg.
 
 **`wk ai <agent>` in a workspace**
 
@@ -1432,6 +1493,11 @@ guest's own window logs in as -- the image's, kept), `WK_VM_CPUS`,
 `WK_VM_DISPLAY`, `WK_VM_SUBNET`, `WK_VM_PROXY_ADDR`, `WK_VM_PROXY_PORT`,
 `WK_HOST_FREE_WARN_GB`, `WK_VM_SHELLS_WARN`, `WK_VM_MEM_FREE_WARN_PCT`,
 `WK_VM_SWAP_WARN_MB` (the thresholds `wk vm check` reports against).
+
+**The Mac's benchmark install**
+`WK_BENCH_USER` (the local account on the measured Mac that the planted
+benchmark job runs as; `bench` unless that install names it otherwise),
+`WK_BENCH_VOLUME` (the benchmark volume's name; `WK Bench`).
 
 **Credentials and the tailnet**
 `WK_PUSH_AGENT_SOCK`, `WK_PUSH_PAT_FILE`, `WK_PUSH_READ_PAT_FILE`,

@@ -1,0 +1,55 @@
+#!/usr/bin/env bash
+#
+# wk notify <headline> [--detail <text>] [--tag <name>] -- tell a person the fleet wants them
+# wk: where=host name=none group=hosts
+#
+#   <headline>       the one line a phone shows
+#   --detail <text>  the body under the headline
+#   --tag <name>     an ntfy tag, which the app draws as an icon: warning,
+#                    white_check_mark, robot
+#
+# Published to ntfy.sh, to the topic this machine holds as its `ntfy`
+# credential, which `wk key set ntfy` mints. The topic name is the whole
+# credential, so nothing here prints it, and no workspace holds it: a
+# notification a person acts on must not be forgeable from inside one.
+#
+# One attempt and one short timeout, no retry. Every caller treats a failure as
+# a warning and never as a reason to abandon a run, so a notification that did
+# not go out cannot cost a measurement.
+#
+#   0  ntfy.sh accepted it
+#   1  it did not go out -- no topic here, no network, or ntfy.sh carries no
+#      topic by that name; the reason on stderr says which
+
+set -euo pipefail
+WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+. "$WK_ROOT/lib/common.sh"
+. "$WK_ROOT/lib/store.sh"
+
+USAGE="usage: wk notify <headline> [--detail <text>] [--tag <name>]; see wk notify -h"
+
+HEADLINE=""
+BODY=()
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --detail|--tag)
+            [ -n "${2:-}" ] || die "$1 needs a value
+    $USAGE"
+            BODY+=("$1" "$2"); shift 2 ;;
+        *)  [ -z "$HEADLINE" ] || die "$USAGE"
+            case "$1" in -*) die "$USAGE" ;; esac
+            HEADLINE="$1"; shift ;;
+    esac
+done
+[ -n "$HEADLINE" ] || die "$USAGE"
+
+wk_cred_present ntfy \
+    || die "no ntfy topic on this machine: wk key set ntfy
+    (it mints one and keeps it at $(wk_cred_path ntfy))"
+
+# Down a pipe: an argument would be in `ps` for everyone on the machine.
+wk_cred_read ntfy \
+    | python3 "$WK_ROOT/lib/wknotify.py" publish "$HEADLINE" ${BODY[@]+"${BODY[@]}"} \
+    || die "the notification did not go out; the line above says why"
+
+info "notified: $HEADLINE"

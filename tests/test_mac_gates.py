@@ -25,19 +25,36 @@ def load(name):
 BROWSER = load("mac-browser-check")
 PROFILE = load("mac-profile-check")
 
-GOOD_READING = {"webgl": "WebGL 2.0", "renderer": "Apple GPU",
-                "raf_hz": 57.2, "screen": [1024, 768]}
+GOOD_DISPLAY = {"id": 1, "builtin": True, "main": True, "active": True,
+                "online": True, "mirrored": False, "asleep": False,
+                "points": [1024, 768], "vendor": 1552, "model": 41058,
+                "unit": 0, "brightness": 0.0}
+GOOD_READING = {"webgl": "WebGL 2.0", "renderer": "Apple GPU", "raf_hz": 57.2,
+                "screen": [1024, 768], "dpr": 2, "focused": True,
+                "frontmost": "org.webkit.MiniBrowser", "brightness": 0.0,
+                "displays": [GOOD_DISPLAY]}
 GOOD_CLIENTS = {1732: "com.apple.WebKit.GPU.Development"}
+GOOD_EXPECT = [1024, 768]
+
+# The guest that builds draws on a paravirtual panel, which is not a built-in one.
+GUEST_DISPLAY = dict(GOOD_DISPLAY, builtin=False, points=[1920, 1080],
+                     vendor=0, model=0, brightness=None)
 
 # The real invocation, not the dry run's printf of the same command.
 RUN_COLLECTION = "env WK_WEBKIT_SCRIPTS="
 
 
+_DEFAULT = object()
+
+
 class TestTheBrowserGate(WkTest):
-    def verdict(self, reading=None, clients=None, min_raf=45.0):
+    # None is a real value for `expect` -- "no display to be comparable with" --
+    # so the default has its own sentinel.
+    def verdict(self, reading=None, clients=None, min_raf=45.0, expect=_DEFAULT):
         return BROWSER.faults(dict(GOOD_READING if reading is None else reading),
                               GOOD_CLIENTS if clients is None else clients,
-                              "AppleParavirtGPU", min_raf)
+                              "AppleParavirtGPU", min_raf,
+                              GOOD_EXPECT if expect is _DEFAULT else expect)
 
     def test_an_accelerated_unthrottled_run_passes(self):
         self.assertEqual(self.verdict(), [])
@@ -60,9 +77,25 @@ class TestTheBrowserGate(WkTest):
         found = self.verdict(reading={}, clients={})
         self.assertTrue(any("never reported" in f for f in found))
 
-    def test_a_screen_run_benchmark_cannot_use_is_refused(self):
-        reading = dict(GOOD_READING, screen=[0, 0])
-        self.assertTrue(any("size a window from" in f for f in self.verdict(reading)))
+    def test_a_display_mode_other_than_the_declared_one_is_refused(self):
+        """run-benchmark sizes its window from the screen, so the same patch at
+        two modes is two measurements and neither says so."""
+        reading = dict(GOOD_READING, displays=[dict(GOOD_DISPLAY, points=[1470, 956])])
+        found = self.verdict(reading)
+        self.assertTrue(any("points, not [1024, 768]" in f for f in found), found)
+
+    def test_a_run_compared_with_nothing_is_not_judged_on_its_display(self):
+        """Display identity is a comparability requirement, and a PGO collection
+        produces training profiles rather than a number: its guest panel has no
+        counterpart. Everything a throttle shows up in still refuses it."""
+        guest = dict(GOOD_READING, displays=[GUEST_DISPLAY])
+        self.assertEqual([], self.verdict(guest, expect=None))
+        self.assertTrue(any("built-in panel" in f for f in self.verdict(guest)))
+
+        throttled = dict(guest, raf_hz=8.0)
+        found = self.verdict(throttled, expect=None)
+        self.assertTrue(any("throttle" in f for f in found), found)
+        self.assertEqual([], [f for f in found if "display" in f or "panel" in f])
 
     def test_the_bar_is_the_callers_to_set(self):
         self.assertEqual(self.verdict(min_raf=10.0), [])
@@ -74,7 +107,7 @@ class TestTheBrowserGate(WkTest):
         being caught is the ~1 Hz of a window that lost the focus."""
         reading = dict(GOOD_READING, raf_hz=44.4, focused=True)
         self.assertEqual(BROWSER.faults(reading, GOOD_CLIENTS, "AppleParavirtGPU",
-                                        BROWSER.MIN_RAF), [])
+                                        BROWSER.MIN_RAF, GOOD_EXPECT), [])
 
 
 def profile_tree(root, benchmarks=PROFILE.BENCHMARKS, libraries=PROFILE.LIBRARIES,
@@ -208,6 +241,15 @@ class TestTheBuildIsGatedOnThem(WkTest):
         self.assertIn('--build-directory "$instr"', body)
         self.assertLess(body.index("mac-browser-check.py"), body.index(RUN_COLLECTION),
                         "the browser is checked before anything is profiled")
+
+    def test_the_collection_names_no_display_to_be_comparable_with(self):
+        """A collection trains a profile rather than producing a number, so it
+        passes no expectation and its display is recorded and judged on nothing.
+        A measured run gets one from the machine conf, and the plant refuses a
+        conf that declares none."""
+        body = func_body((REPO / "build" / "mac-pgo.sh").read_text(), "_pgo_collect")
+        self.assertIn("mac-browser-check.py", body)
+        self.assertNotIn("--expect-display", body)
 
     def test_a_failed_browser_check_stops_the_build(self):
         body = func_body((REPO / "build" / "mac-pgo.sh").read_text(), "_pgo_collect")

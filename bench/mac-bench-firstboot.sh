@@ -124,8 +124,6 @@ if [ -f "$PAYLOAD/authorized_keys" ]; then
     fi
 fi
 
-# No tailnet identity: every macOS Tailscale build tunnels through NetworkExtension, whose "would like to add VPN configurations" panel only a person can answer, and pkgs.tailscale.com publishes no darwin daemon to run instead (measured 2026-09-07). An unattended first boot therefore installs none, and this install is unreachable while it runs: `wk bench mac-ab` reads the volume from host mode afterwards.
-
 if [ -r "$PAYLOAD/wifi.conf" ]; then
     # shellcheck disable=SC1090
     . "$PAYLOAD/wifi.conf"
@@ -148,6 +146,19 @@ if [ -r "$PAYLOAD/wifi.conf" ]; then
 else
     say "WARNING: no wifi.conf in the payload; if this Mac is on Wi-Fi it will"
     say "  have no network and nothing will be able to drive it"
+fi
+
+# After the network, because joining needs one. `join` starts the staged daemon and spends the auth key; the com.wk.tailnet-join LaunchDaemon retries it on every later boot, so a first boot that could not reach the tailnet is not a machine lost for the rest of the run.
+TAILNET="$PAYLOAD/wk-tools/bench/mac-tailnet.sh"
+if [ ! -x "$TAILNET" ]; then
+    say "WARNING: no $TAILNET in the payload, so this install has no tailnet"
+    say "  identity: nothing can watch it measure and nothing sees it finish"
+elif "$TAILNET" join; then
+    say "tailnet: on, as $(/usr/local/bin/tailscale ip -4 2>/dev/null | head -1)"
+else
+    say "WARNING: this install is NOT on the tailnet. It will measure and power"
+    say "  itself off, and from outside 'still measuring' and 'finished' look the"
+    say "  same. See /var/log/wk-tailnet-join.log and /var/log/wk-tailscaled.log."
 fi
 
 install -d -o "$BENCH_USER" -g staff -m 0755 /var/wk 2>/dev/null \

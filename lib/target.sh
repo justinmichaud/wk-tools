@@ -139,7 +139,7 @@ t_far_side()  { echo none; }        # answering | unreachable | no-wk | none (no
 t_wk()        { return 1; }         # t_wk <args...>, its exit status is the answer
 t_wk_tty()    { t_wk "$@"; }        # t_wk with a terminal, for far-side commands that prompt a human
 
-t_load() { awk '{print int($1)}' /proc/loadavg 2>/dev/null || echo 0; }   # whole cores; build_jobs polite subtracts it
+t_load() { host_load; }             # <name>; whole cores, which build_jobs polite subtracts
 
 ws_on_target() { # <target> <name>
     ( command -v wk_ws_dir >/dev/null 2>&1 || . "$WK_ROOT/lib/store.sh"

@@ -46,6 +46,70 @@ requestAnimationFrame(tick);
 # What separates the two populations, not what a healthy machine reaches: a window that lost the focus is rAF-throttled to about 1 Hz and stalls, while a foreground one on a busy guest measured 44.4-57.7 Hz over five collections (2026-09-06). A floor near the healthy range refuses good runs.
 MIN_RAF = 30.0
 
+BUNDLE = "org.webkit.MiniBrowser"
+WKMAC = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                      os.pardir, "lib", "wkmac.py"))
+
+
+def display_list():
+    cp = subprocess.run([sys.executable, WKMAC, "displays"],
+                        capture_output=True, text=True)
+    if cp.returncode != 0:
+        return None
+    return json.loads(cp.stdout)["displays"]
+
+
+def builtin_display(displays):
+    return next((d for d in (displays or []) if d.get("builtin")), None)
+
+
+def frontmost_bundle():
+    try:
+        from AppKit import NSWorkspace
+    except ImportError:
+        return "?"
+    app = NSWorkspace.sharedWorkspace().frontmostApplication()
+    ident = app.bundleIdentifier() if app else None
+    return str(ident) if ident else None
+
+
+def parse_expect_display(spec):
+    words = (spec or "").split()
+    points = words[1].split("x") if len(words) == 2 else []
+    if len(words) != 2 or words[0] != "builtin" or len(points) != 2 \
+            or not all(p.isdigit() for p in points):
+        raise ValueError(f"--expect-display {spec!r} is not 'builtin <w>x<h>', "
+                         "as in 'builtin 1470x956'")
+    return [int(p) for p in points]
+
+
+def display_faults(displays, expect):
+    # No expectation: the display is recorded and nothing is compared against it.
+    if expect is None:
+        return []
+    if displays is None:
+        return ["the display list could not be read, so what run-benchmark sized its "
+                "window from is unknown and this score compares with nothing"]
+    found = []
+    online = [d for d in displays if d.get("online")]
+    builtin = builtin_display(online)
+    if len(online) != 1:
+        found.append(f"{len(online)} displays are online, not one: run-benchmark sizes "
+                     "its window from the screen, so a second panel -- or none at all "
+                     "-- moves the number for a reason that is not the patch")
+    elif not builtin:
+        found.append(f"the one online display (id {online[0].get('id')}) is not the "
+                     "built-in panel: only the built-in one is declared and measured, "
+                     "so this reading compares with no other run")
+    if any(d.get("mirrored") for d in displays):
+        found.append("a display is in a mirror set: the window is composited for two "
+                     "panels at once, and the frames that costs are charged to the patch")
+    if builtin and list(builtin.get("points") or []) != expect:
+        found.append(f"the built-in display reads {builtin.get('points')} points, not "
+                     f"{expect}: MotionMark's score is a function of the area it draws, "
+                     "so this run is not comparable with one at the declared mode")
+    return found
+
 
 def accelerator_clients():
     # ioreg -a is a plist; the creator string truncates the name at 16 characters, so the pid is resolved against ps.
@@ -115,7 +179,7 @@ def launch(build, url):
                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
-def faults(reading, clients, device, min_raf):
+def faults(reading, clients, device, min_raf, expect):
     found = []
     if not reading:
         found.append("the page never reported: MiniBrowser did not load it, or it "
@@ -131,16 +195,38 @@ def faults(reading, clients, device, min_raf):
         found.append(f"requestAnimationFrame ran at {raf if raf is None else round(raf, 1)} Hz, "
                      f"below {min_raf}: this window is throttled, and a benchmark behind "
                      "one measures the throttle")
-    width, height = ((reading.get("screen") or [0, 0]) + [0, 0])[:2]
-    if width < 640 or height < 480:
-        found.append(f"the screen reports {width}x{height}, which run-benchmark cannot "
-                     "size a window from")
+    if not reading.get("focused"):
+        found.append("the page did not have the focus: the measured window is not the key "
+                     "one, so what draws in it is rAF-throttled and the benchmark measures "
+                     "the throttle")
+    found += display_faults(reading.get("displays"), expect)
+    frontmost = reading.get("frontmost")
+    if frontmost == "?":
+        found.append("nothing here could say which application was frontmost -- AppKit did "
+                     "not import, and the bench account needs pyobjc: an unfocused window "
+                     "is rAF-throttled and a benchmark behind one measures the throttle")
+    elif frontmost != BUNDLE:
+        found.append(f"the frontmost application was {frontmost}, not {BUNDLE}: the window "
+                     "about to be measured is behind something, and a window that is not "
+                     "frontmost is rAF-throttled")
     return found
 
 
+def display_summary(displays):
+    if displays is None:
+        return "?"
+    builtin = builtin_display(displays)
+    return (f"count={len(displays)} builtin={builtin.get('id') if builtin else None} "
+            f"points={builtin.get('points') if builtin else None} "
+            f"mirrored={any(d.get('mirrored') for d in displays)} "
+            f"asleep={any(d.get('asleep') for d in displays)}")
+
+
 def report(reading, clients):
-    for key in ("accelerator", "renderer", "webgl", "raf_hz", "screen", "dpr", "focused"):
+    for key in ("accelerator", "renderer", "webgl", "raf_hz", "screen", "dpr",
+                "focused", "frontmost", "brightness"):
         print(f"{key}={reading.get(key)}")
+    print("displays=" + display_summary(reading.get("displays")))
     print("webkit_gpu_clients=" + ",".join(
         f"{pid}:{name}" for pid, name in sorted(clients.items())))
 
@@ -166,6 +252,11 @@ def take_reading(args):
             break
         time.sleep(0.5)
 
+    reading["frontmost"] = frontmost_bundle()
+    reading["displays"] = display_list()
+    builtin = builtin_display(reading["displays"])
+    reading["brightness"] = builtin.get("brightness") if builtin else None
+
     browser.terminate()
     try:
         browser.wait(timeout=15)
@@ -184,11 +275,26 @@ def main():
     parser.add_argument("--read", metavar="JSON",
                         help="report a reading already taken (what --json wrote) "
                              "instead of taking one; needs no Mac and no browser")
+    parser.add_argument("--expect-display", metavar="SPEC",
+                        help="the display this reading must be taken on, as "
+                             "'builtin <w>x<h>' (boot/machines/<node>.conf's "
+                             "NODE_DISPLAY). Display identity is what makes two runs "
+                             "comparable; without it the display is recorded and "
+                             "judged against nothing, which is what a run compared "
+                             "with nothing -- a PGO collection -- wants")
     parser.add_argument("--json", help="write the whole reading here")
     parser.add_argument("--min-raf", type=float, default=MIN_RAF,
                         help=f"the rate below which the window is throttled (default {MIN_RAF})")
     parser.add_argument("--timeout", type=float, default=120.0)
     args = parser.parse_args()
+
+    # Parsed before the browser is launched: two minutes of a run is the wrong place
+    # to discover that the argument saying what it has to match is malformed.
+    if args.expect_display:
+        try:
+            parse_expect_display(args.expect_display)
+        except ValueError as exc:
+            parser.error(str(exc))
 
     if args.read:
         with open(args.read) as handle:
@@ -198,9 +304,16 @@ def main():
     else:
         parser.error("--build-directory to take a reading, or --read to report one")
 
+    # A reading carries what it was judged against, so re-deriving its verdict later
+    # reaches the same one with no argument.
+    spec = args.expect_display or reading.get("expect_display")
+    expect = parse_expect_display(spec) if spec else None
+    if spec:
+        reading["expect_display"] = spec
+
     # Derived on every report, never stored in the reading: one place holds the floors.
     clients = {str(k): v for k, v in (reading.get("webkit_gpu_clients") or {}).items()}
-    found = faults(reading, clients, reading.get("accelerator"), args.min_raf)
+    found = faults(reading, clients, reading.get("accelerator"), args.min_raf, expect)
 
     if args.json:
         with open(args.json, "w") as handle:

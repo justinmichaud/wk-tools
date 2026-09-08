@@ -124,10 +124,13 @@
       (`wk-boot-priv boot-volume`), proves the return trip first because
       `--setBoot` is sticky on Apple Silicon, and reads the firmware's
       `boot-volume` back rather than trusting bless -- so a Mac that cannot be
-      armed refuses instead of being trapped in bench mode. None of it has run:
-      `bless --setBoot --user --stdinpass` needs a volume owner's credential at
-      /usr/local/share/wk-bench/owner-password, which is a login password on
-      disk and the owner's decision to make [needs that file, then one arming]
+      armed refuses instead of being trapped in bench mode. None of it has run.
+      Whether a credential is needed at all is now the platform's answer rather
+      than an assumption: `bless --help` on 26.6.2 lists `--user`/`--stdinpass`
+      under Snapshot options and not under Mount Mode, and the helper blesses
+      with root alone where the machine holds no credential, saying which form
+      it used. So the owed work is one run: `wk boot mbp --prepare`, then
+      `wk boot mbp`, then read which form it took [needs the Mac]
 - [ ] the screen watch has never run on the benchmark install. `wk bench
       staged` now brackets every run with it (cmd/bench), so a window that draws
       mid-run fails the run rather than being missed by a preflight that read

@@ -61,13 +61,13 @@ Host rpi5
 #
 # The tailnet name and no HostName, for the same reason the bridges have none:
 # the Mac is on the house LAN with no reservation, and it is the one machine in
-# the fleet that reboots into a *different macOS install* on purpose. MagicDNS
-# follows it across a lease and across that reboot.
+# the fleet that reboots into a *different macOS install* on purpose. Each
+# install is its own tailnet node, so MagicDNS distinguishes them and follows
+# each across a lease.
 #
 # The host key is pinned normally. Unlike the rpi4, both installs on this
-# machine are long-lived and personalised, so each has one stable key -- two
-# known-hosts entries for one name, added once. An unexpected key here is worth
-# looking at.
+# machine are long-lived and personalised, so each has one stable key. An
+# unexpected key here is worth looking at.
 #
 # ServerAliveInterval: a bench run is driven over this connection and is
 # legitimately silent for minutes at a time, and the session has to outlive
@@ -86,63 +86,41 @@ Host tolken
   ServerAliveInterval 30
   ServerAliveCountMax 6
 
-# The same Mac, in the other mode. One address, two macOS installs, and
-# therefore two host keys for one name -- which without this stanza is not a
-# nuisance but a hard mid-run failure: ssh refuses a *changed* key outright
-# (`StrictHostKeyChecking=accept-new` accepts an unknown host and still refuses
-# a changed one), so the lane would arm the machine, wait for it to come back,
-# and then be unable to talk to what came back.
+# The same Mac, in the other mode: the benchmark install.
 #
-# HostKeyAlias is what that is for. The two installs get separate identities in
-# known_hosts while sharing the address, so each is pinned normally and neither
-# can masquerade as the other. Putting the bench install on a name of its own
-# also makes the mode explicit at the call site: `ssh tolken` is host mode and
-# `ssh tolken-bench` is bench mode, and a command aimed at the wrong one fails
-# on the key rather than doing the wrong thing quietly.
+# Two macOS installs on one machine, and each is its own tailnet node --
+# `tolken` is the host install, `tolken-bench` the benchmark one, which builds
+# tailscaled from source and joins on first boot (bench/mac-tailnet.sh). So no
+# HostName, for the reason the rest of this file gives: a node this repo owns is
+# reached by its tailnet name and the name is the whole address. MagicDNS follows
+# the bench install across a lease and across a reinstall, because
+# bench/mac-tailnet.sh keeps that node's identity aside and puts it back, the way
+# a board's rescue keeps its bench node's.
 #
-# HostName rather than an address for the same reason as the plain entry: the
-# Mac has no DHCP reservation, and the tailnet name follows it. Note the
-# tailnet identity belongs to the *machine*, not the install -- the bench
-# install has its own tailscale state or none at all, so if it is not on the
-# tailnet, set WK_MAC_BENCH_SSH to a .local or LAN name for it instead.
-# User: `bench`, and deliberately not a person's name -- not the host install's
-# `justinmichaud`, and not the fleet's `jmichaud` either.
+# There is no packaged macOS Tailscale here on purpose: every one of them tunnels
+# through NetworkExtension, whose "would like to add VPN configurations" panel
+# only a person can answer, and no unattended install may need one. The daemon
+# built from source opens a utun directly, which is root's to do and raises
+# nothing.
 #
-# A benchmark install is cattle (CLAUDE.md): it is meant to be
-# reproducible from nothing, by anyone, on any machine. Whose laptop it happens
-# to be attached to is not a property of the measurement, so an operator's
-# account name inside the artifact is exactly the hidden state that document
-# forbids -- it makes the rebuild recipe depend on who is running it, which is
-# a dependency only discovered by somebody else trying to follow the runbook.
+# HostKeyAlias, because the two installs must not be able to masquerade as each
+# other: each gets its own known_hosts identity, so a command aimed at the wrong
+# one fails on the key rather than doing the wrong thing quietly. WK_MAC_BENCH_SSH
+# overrides the destination for a Mac whose benchmark install is not on the
+# tailnet yet.
 #
-# `bench` rather than `user`: `user` already means something specific in this
-# file -- pmbootstrap's default account on the tailnet bridges -- and a second
-# meaning for it on a different kind of machine is how a stanza gets copied to
-# the wrong place. `bench` says what the install is for.
+# ServerAliveInterval: a bench run is driven over this connection and is
+# legitimately silent for minutes at a time.
 #
-# Same reasoning as the Pi bench images logging in as `root` rather than as
-# anybody: an impersonal account is the point, and macOS just has no usable
-# root login to be the impersonal one.
-# HostName is deliberately NOT `tolken`.
-#
-# `tolken` resolves through MagicDNS to the tailnet address of the *host*
-# install. The bench install is a different operating system with its own
-# network stack and no tailscale, so it has no tailnet identity at all -- that
-# address reaches host mode or nothing, never bench mode. Every "the bench
-# volume is unreachable" that evening was this: ssh, authorized_keys, Remote
-# Login and the network were all working, and the connection was being aimed at
-# the wrong machine. The paragraph above predicted it in as many words, was
-# written before the volume existed, and was not read again until the volume was
-# found by scanning the LAN for it.
-#
-# So: no HostName here, and the address comes from the machine-local
-# config.d/local (or WK_MAC_BENCH_SSH), because the bench install's address is
-# exactly the kind of thing this repository cannot know -- a DHCP lease on
-# somebody's LAN. It cannot take a tailnet identity of its own either: every
-# macOS Tailscale build tunnels through NetworkExtension, whose approval panel
-# only a person can answer, and no unattended install may need one. A missing
-# stanza fails to resolve instead of silently succeeding against the wrong
-# computer, which is why this one carries no HostName.
+# User `bench`, deliberately not a person's name -- not the host install's
+# `justinmichaud`, not the fleet's `jmichaud`. A benchmark install is cattle
+# (CLAUDE.md): reproducible from nothing, by anyone, on any machine. Whose laptop
+# it is attached to is not a property of the measurement, so an operator's
+# account name inside the artifact is hidden state -- it makes the rebuild recipe
+# depend on who runs it, which only the next person discovers. Same reasoning as
+# the Pi bench images logging in as `root`; macOS just has no usable root login
+# to be the impersonal one. `bench` rather than `user`, which in this file already
+# means pmbootstrap's account on the bridges.
 Host tolken-bench
   HostKeyAlias tolken-bench
   User bench

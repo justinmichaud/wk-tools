@@ -90,8 +90,7 @@ for plan in $plans; do
     emit "  precision:"   # the statistic the run stopped on, so the two cannot disagree
     while IFS= read -r line; do emit "    $line"; done <<PRECEOF
 $("$PY" "$WK_ROOT/lib/wkdata.py" ab-precision \
-      --a "$(arm_paths "$plan" "$A" | sed 's#\([^,]*\)#\1/result.json#g')" \
-      --b "$(arm_paths "$plan" "$B" | sed 's#\([^,]*\)#\1/result.json#g')" 2>&1)
+      --a "$(arm_paths "$plan" "$A")" --b "$(arm_paths "$plan" "$B")" 2>&1)
 PRECEOF
     emit "    mde_pct is the smallest difference these rounds resolve; below it,"
     emit "    'not significant' means 'under this threshold', not 'absent'."

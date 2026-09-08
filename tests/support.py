@@ -47,6 +47,7 @@ atexit.register(shutil.rmtree, NO_SECRETS, True)
 NO_GITHUB = "http://127.0.0.1:1"
 os.environ["WK_GITHUB_API"] = NO_GITHUB
 os.environ["WK_TAILNET_API"] = NO_GITHUB
+os.environ["WK_NTFY_API"] = NO_GITHUB
 
 # The tailnet keys are the two credentials whose paths are not under
 # wk_secrets_dir (lib/common.sh reads them from ~/.config/wk), so without these
@@ -114,6 +115,7 @@ def _clean_env(extra=None, wk_root=False):
     env["WK_HOST_SECRETS"] = NO_SECRETS
     env["WK_GITHUB_API"] = NO_GITHUB
     env["WK_TAILNET_API"] = NO_GITHUB
+    env["WK_NTFY_API"] = NO_GITHUB
     env["WK_TS_AUTHKEY"] = os.environ["WK_TS_AUTHKEY"]
     env["WK_TS_API_SECRET"] = os.environ["WK_TS_API_SECRET"]
     if wk_root:

@@ -135,10 +135,11 @@ TOOLS = [
     {
         "name": "workspace_status",
         "description": (
-            "State of a workspace and its last build: running, ok, failed or "
-            "stalled, with the first error if it failed. Use this instead of "
-            "inspecting processes -- a build between phases has no compiler "
-            "running while being perfectly healthy."
+            "State of a workspace and its last build: running, silent, ok, "
+            "failed or stalled, with the first error if it failed. Use this "
+            "instead of inspecting processes -- a build between phases has no "
+            "compiler running while being perfectly healthy, which is what "
+            "silent means: still building, nothing written lately."
         ),
         "inputSchema": {
             "type": "object",

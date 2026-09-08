@@ -86,7 +86,8 @@ _pgo_collect() {   # <instrumented products> <profile dir> <arch>
     mac_raiser_on "$state"
 
     if ! /usr/bin/python3 "$tools/bench/mac-browser-check.py" \
-            --build-directory "$instr" --json "$state/browser-check.json" >&2; then
+            --build-directory "$instr" \
+            --json "$state/browser-check.json" >&2; then
         echo "wk: the instrumented build cannot present an accelerated, unthrottled browser here," >&2
         echo "  so every profile it collected would be of the wrong code (above)." >&2
         mac_raiser_off "$state"

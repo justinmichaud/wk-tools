@@ -31,12 +31,16 @@ exit 1
 
 
 class _Here(WkTest):
-    """A scratch secrets directory, a scratch store, and the witness."""
+    """A scratch secrets directory, a scratch store, and the witness.
+
+    wk_secrets_dir (lib/store.sh) reads WK_HOST_SECRETS on a macOS host and
+    $WK_STORE/secrets everywhere else, so the two names below are one
+    directory and every assertion holds on either platform."""
 
     def setUp(self):
         super().setUp()
-        self.secrets = self.tmp / "secrets"
         self.store = self.tmp / "store"
+        self.secrets = self.store / "secrets"
         self.witness = self.tmp / "podman-was-called"
         (self.store / "ws").mkdir(parents=True)
 
@@ -97,8 +101,6 @@ class TestTheStoreFunctionsReadAndWriteHere(_Here):
                      'printf "keys=%s\\n" "$(wk_secrets_dir)"\n'
                      'printf "held=%s\\n" "$(wk_push_held_dir)"\n')
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        if os.uname().sysname != "Darwin":
-            self.skipTest("the two spellings are one path where the store is this machine's")
         self.assertIn(f"path={self.secrets}/claude-token", cp.stdout)
         self.assertIn(f"keys={self.secrets}", cp.stdout)
         self.assertIn(f"held={self.secrets.parent}/push-keys", cp.stdout)

@@ -1,6 +1,4 @@
 #!/usr/bin/env python3
-# `collect-pgo-profiles --browser minibrowser` raises NotImplementedError at the first iteration: OSXMiniDriver names no profile directory. Both drivers load the same frameworks, whose __llvm_profile_filename fixes the path, so Safari's own answer is handed over rather than copied.
-# The class patched is the one BrowserDriverFactory registered: measured 2026-09-06, the factory loads each driver module by file path, so a dotted import gives a different class object and patching that one is a no-op a collection discovers an hour into a build.
 # TODO: upstream the property onto OSXMiniDriver and delete this file.
 
 import logging
@@ -29,7 +27,6 @@ else:
     setattr(minibrowser, WHERE, vars(safari)[WHERE])
 
 
-# run-benchmark photographs the screen into --diagnose-directory on every leg, and `screencapture` needs Screen Recording: asking puts a consent dialog over the browser that nothing headless answers (measured 2026-09-06, four hours from leg one). A picture is worth nothing to a profile.
 def _no_screenshot(self, output_directory, filename):
     return None
 

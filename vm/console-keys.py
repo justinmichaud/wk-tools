@@ -1,27 +1,11 @@
 #!/usr/bin/env python3
-"""Type into a guest's own virtual keyboard, through the VNC server
-Virtualization.framework gives every VM (`tart run --vnc-experimental`).
-
-This is the machine's console, not macOS automation: the key arrives at the
-guest as if it came from a keyboard plugged into the VM, so nothing inside the
-guest has to be granted Accessibility and nothing about the guest is loosened.
-That matters because the one thing a guest cannot be told any other way is
-"yes, I have seen this Setup Assistant pane" -- every preference that records it
-is rewritten at the next login (docs/defects).
-
-    console-keys.py <host> <port> <password> (<key> | click <x> <y>)...
-
-Keys are names (`return`, `tab`, `space`, `escape`, `down`, `up`, `left`,
-`right`) or a single character. Exits non-zero if the console refuses.
-
-DES for the VNC challenge comes from `openssl`, which every macOS ships;
-implementing it here would be a hundred lines of cipher to review.
-"""
 import socket
 import struct
 import subprocess
 import sys
 import time
+
+USAGE = "console-keys.py <host> <port> <password> (<key> | click <x> <y>)..."
 
 KEYSYMS = {
     "return": 0xFF0D, "enter": 0xFF0D, "tab": 0xFF09, "space": 0x0020,
@@ -38,9 +22,7 @@ def keysym(name):
     raise SystemExit(f"console-keys: no key named {name!r}")
 
 
-def _des_key(password):
-    """VNC authentication reverses the bits of each byte of the password, which
-    is a quirk of the original implementation and not of DES."""
+def _des_key(password):  # VNC reverses each byte's bits, a quirk of RFB, not of DES
     raw = password.encode()[:8].ljust(8, b"\0")
     return bytes(int(f"{b:08b}"[::-1], 2) for b in raw)
 
@@ -105,7 +87,6 @@ def announce(sock):
 
 
 def _finish_init(sock):
-    """ServerInit: 2+2 size, 16 pixel format, then a 4-byte length and a name."""
     name_len = struct.unpack(">I", _recv(sock, 4))[0]
     _recv(sock, name_len)
 
@@ -116,9 +97,8 @@ def press(sock, sym):
         time.sleep(0.05)
 
 
-# Setup Assistant's buttons take no keyboard focus, with or without full
-# keyboard access: measured on a Tahoe 26.4 pane, escape, return, space, tab and
-# tab-tab each left it up. The pointer is the only thing it answers.
+# Measured on a Tahoe 26.4 Setup Assistant pane: escape, return, space, tab and
+# tab-tab each left it up; its buttons take no keyboard focus, only the pointer.
 def click(sock, x, y):
     sock.sendall(struct.pack(">BBHH", 5, 0, x, y))
     time.sleep(0.2)
@@ -129,7 +109,7 @@ def click(sock, x, y):
 
 def main():
     if len(sys.argv) < 5:
-        raise SystemExit(__doc__.strip().splitlines()[6].strip())
+        raise SystemExit(USAGE)
     host, port, password = sys.argv[1], int(sys.argv[2]), sys.argv[3]
     sock = connect(host, port, password)
     _finish_init(sock)

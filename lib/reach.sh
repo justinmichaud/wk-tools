@@ -25,8 +25,11 @@ try:
 except Exception:
     raise SystemExit(0)
 def row(p, online):
+    name = (p.get("DNSName") or "").split(".")[0].lower()  # not HostName: macOS capitalises it, both phones answer localhost
+    if not name:
+        return
     ips = p.get("TailscaleIPs") or [""]
-    print("\t".join([p.get("HostName", ""), ips[0], "up" if online else "down"]))
+    print("\t".join([name, ips[0], "up" if online else "down"]))
 self = d.get("Self")
 if self:
     row(self, True)

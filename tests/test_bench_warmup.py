@@ -413,7 +413,7 @@ class TestRunOrderAndSettling(WkTest):
         """order is the arm of each run in time order, e.g. 'ABBA'."""
         a, b = [], []
         for i, arm in enumerate(order):
-            entry = ("/t/runs/2026090%d/result.json" % i, {}, {})
+            entry = ("/t/runs/2026090%d" % i, {}, {})   # a run is named by its directory
             (a if arm == "A" else b).append(entry)
         return a, b
 

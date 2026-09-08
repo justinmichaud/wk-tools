@@ -175,10 +175,11 @@ class TestCommentDensity(unittest.TestCase):
             if prose > allowed:
                 over.append(f"  {rel}: {prose}/{body} = "
                             f"{100 * prose / body:.1f}% (allowed {allowed})")
-        self.assertEqual(
-            over, [],
-            "these bodies carry more than 5% prose -- delete what the code already\n"
-            "says, or rename so that the code says it:\n" + "\n".join(over))
+        if over:
+            self.fail(
+                f"{len(over)} bodies carry more than 5% prose -- delete what the "
+                "code already says, or rename so that the code says it:\n"
+                + "\n".join(over))
 
     def test_the_tree_as_a_whole_is_under_5_percent(self):
         body_total = prose_total = 0

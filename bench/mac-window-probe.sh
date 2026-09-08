@@ -1,16 +1,13 @@
-# What is on the screen, asked of the window server. Owner, layer and bounds need no Screen Recording permission; window *titles* do, and nothing here asks for one. Sourced, never run.
+# Owner, layer and bounds need no Screen Recording permission; window *titles* do, and nothing here asks for one. Sourced, never run.
 
-# WK_SCREEN_EXPECTED: the windows wk itself puts on a measured Mac's screen.
 wk_window_expected() {
     printf '%s\n' "${WK_SCREEN_EXPECTED:-Terminal|Finder|MiniBrowser|Safari}" | tr '|' '\n'
 }
 
-# WK_SCREEN_CHROME: the screen's own furniture. Notification Centre is here for its click-catcher, not its banners -- a measured install is not running it at all, and wk_quiet_desktop_probe is what asks whether it is.
 wk_window_chrome() {
     printf '%s\n' "${WK_SCREEN_CHROME:-Window Server|Dock|Control Center|Notification Center}" | tr '|' '\n'
 }
 
-# Every window in a `windows=` reading that is neither. The layer is reported and never filtered on: an alert floats *above* the ordinary layer, which is what makes it cover the browser (measured 2026-09-06, a dialog at layer 8 over a whole collection).
 wk_window_unexpected() { # <windows reading>
     local entry owner allowed
     allowed=$(wk_window_expected; wk_window_chrome)
@@ -67,8 +64,7 @@ PROBE
     cc -O1 -o "$bin" "$src" -framework ApplicationServices 2>/dev/null
 }
 
-# `windows=<owner>:<layer>:<w>x<h>@<x>,<y>;...`; `?` is "could not be asked", not "nothing there".
-wk_window_probe() {
+wk_window_probe() { # windows=<owner>:<layer>:<w>x<h>@<x>,<y>;...  `?` is "could not be asked", not "nothing there"
     if [ "$(uname -s)" != Darwin ] || ! command -v cc >/dev/null 2>&1; then
         printf 'windows=?\n'
         return 0

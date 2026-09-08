@@ -142,6 +142,33 @@ _wk_qd_procstate() { # <process>
     case "$st" in T*) printf stopped ;; *) printf running ;; esac
 }
 
+# A daemon wk_quiet_daemons_pause holds stopped answers no XPC request ever, and macOS ships no timeout(1): every reading below that asks one is asked through here, or the leg hangs at that reading for as long as the machine stays up.
+_WK_QD_TIMEOUT='!timeout'   # not a value any of those readings can answer
+_WK_QD_READ_SECS=20         # a healthy `mdutil -s /` answers in under a second
+
+_wk_qd_read() { # [-e: what it says on stderr is part of the reading] <seconds> <command...> -- its stdout, or $_WK_QD_TIMEOUT
+    local err=drop out pid killer rc=0 secs
+    [ "$1" = -e ] && { err=keep; shift; }
+    secs="$1"
+    shift
+    out=$(mktemp "${TMPDIR:-/tmp}/wk-qd.XXXXXX" 2>/dev/null) || return 0   # nowhere to write is a reading that did not answer, which is not a bound that expired
+    if [ "$err" = keep ]; then "$@" >"$out" 2>&1 & else "$@" >"$out" 2>/dev/null & fi   # a file and not a pipe, either way: a grandchild the kill below cannot reach holds a pipe open for as long as it hangs
+    pid=$!
+    ( t=0
+      while [ "$t" -lt "$secs" ]; do
+          sleep 1
+          kill -0 "$pid" 2>/dev/null || exit 0
+          t=$((t + 1))
+      done
+      kill -9 "$pid" 2>/dev/null || true ) >/dev/null 2>&1 &
+    killer=$!
+    wait "$pid" || rc=$?
+    kill "$killer" 2>/dev/null || true
+    wait "$killer" 2>/dev/null || true
+    if [ "$rc" -eq 137 ]; then printf '%s' "$_WK_QD_TIMEOUT"; else cat "$out"; fi   # 128 + SIGKILL
+    rm -f "$out"
+}
+
 wk_quiet_desktop_user() { # [user] -- 0 when every setting above took
     local u="${1:-$(id -un)}" bad=0 name domain key type value why host uid label
     uid=$(_wk_qd_uid "$u") || uid=""
@@ -224,7 +251,7 @@ wk_quiet_daemons_pause()  { _wk_qd_daemons_signal STOP; }
 wk_quiet_daemons_resume() { _wk_qd_daemons_signal CONT; }
 
 wk_quiet_desktop_probe() { # [user] -- `<name>=<value>`; `?` is "no such key", which is not off
-    local u="${1:-$(id -un)}" name domain key type value why host uid label shown proc
+    local u="${1:-$(id -un)}" name domain key type value why host uid label shown proc md an
 
     while read -r name domain key type value why; do
         [ -n "$domain" ] || continue
@@ -253,10 +280,12 @@ ROWS
 $(wk_quiet_desktop_power)
 ROWS
 
-    printf 'spotlight=%s\n' "$(mdutil -s / 2>/dev/null | sed -n '2s/^[[:space:]]*//p')"
-    printf 'analytics=%s\n' "$(sudo -n defaults read \
-        "/Library/Application Support/CrashReporter/DiagnosticMessagesHistory" \
-        AutoSubmit 2>/dev/null || echo '?')"   # 0600 root: an unprivileged read answers "does not exist" whatever it holds
+    md=$(_wk_qd_read "$_WK_QD_READ_SECS" mdutil -s /)
+    case "$md" in "$_WK_QD_TIMEOUT") ;; *) md=$(printf '%s\n' "$md" | sed -n '2s/^[[:space:]]*//p') ;; esac
+    printf 'spotlight=%s\n' "$md"
+    an=$(_wk_qd_read "$_WK_QD_READ_SECS" sudo -n defaults read \
+        "/Library/Application Support/CrashReporter/DiagnosticMessagesHistory" AutoSubmit)
+    printf 'analytics=%s\n' "${an:-?}"   # 0600 root: an unprivileged read answers "does not exist" whatever it holds
     printf 'power_source=%s\n' "$(pmset -g batt 2>/dev/null | sed -n "s/.*'\\(.*\\)'.*/\\1/p" | head -1)"
     printf 'cpu_speed_limit=%s\n' \
         "$(pmset -g therm 2>/dev/null | sed -n 's/.*CPU_Speed_Limit *= *//p' | head -1)"
@@ -274,7 +303,9 @@ _wk_qf_judge() { # <probe> <key> <want> <what> <remedy>
         return 0
     fi
     got=$(_wk_qf_read "$1" "$2")
-    if [ "$got" = "$3" ]; then
+    if [ "$got" = "$_WK_QD_TIMEOUT" ]; then
+        _wk_qf note "unknown whether $4: reading '$2' did not answer inside its bound, which is a daemon held stopped answering no XPC request" "$5"
+    elif [ "$got" = "$3" ]; then
         _wk_qf ok "$4"
     else
         _wk_qf wrong "not so: $4 ($2 reads '$got', wanted '$3')" "$5"
@@ -300,6 +331,7 @@ ROWS
 
     case "$(_wk_qf_read "$probe" spotlight)" in
         *disabled*) _wk_qf ok "Spotlight is not indexing" ;;
+        "$_WK_QD_TIMEOUT") _wk_qf note "Spotlight did not answer inside its bound: a Spotlight daemon held stopped answers no XPC request, so whether it indexes under a run is unknown" "$fix" ;;
         "")         _wk_qf note "Spotlight did not answer, so whether it indexes under a run is unknown" "$fix" ;;
         *)          _wk_qf wrong "Spotlight is indexing ($(_wk_qf_read "$probe" spotlight)) -- it reads the disk the run writes" "$fix" ;;
     esac

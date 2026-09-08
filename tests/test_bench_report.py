@@ -1,10 +1,10 @@
 """`wk bench report` / `wkdata.py report`: the unified score+time+variance
 report (lib/wkdata.py `_subtest_metrics`, `_welch_p`, `cmd_report`).
 
-Unit tests build two synthetic result.json+env.json pairs and drive
-`lib/wkdata.py report` exactly as documented -- as a subprocess, the same way
-`wk bench report` invokes it -- and check the text and html outputs agree.
-No workspace, no podman VM.
+Unit tests build two synthetic run directories -- a result.json and an
+env.json in each -- and drive `lib/wkdata.py report` exactly as documented: as
+a subprocess, naming the directories, the same way `wk bench report` invokes
+it. The text and html outputs are checked to agree. No workspace, no podman VM.
 
 The integration test is podman-gated (see requires_podman_vm in
 tests/support.py) and self-skips when there is no already-built jsc-release
@@ -46,6 +46,8 @@ class TestReportWalkerAndStats(WkTest):
     """Two synthetic runs, every shape `wk bench report` has to read."""
 
     def _write_pair(self, tmp, a_doc, b_doc, a_extra=(), b_extra=()):
+        """Two run directories. A run is named by the directory a benchmark
+        wrote; result.json and env.json are derived from it inside wkdata.py."""
         a_dir, b_dir = tmp / "a", tmp / "b"
         a_dir.mkdir()
         b_dir.mkdir()
@@ -55,7 +57,12 @@ class TestReportWalkerAndStats(WkTest):
                     "count=6", "class=cpu", "runner=jsc", "bench_host=container", *a_extra)
         env_record(b_dir / "env.json", "plan=jetstream3", "config=jsc-release",
                     "count=6", "class=cpu", "runner=jsc", "bench_host=container", *b_extra)
-        return a_dir / "result.json", b_dir / "result.json"
+        return a_dir, b_dir
+
+    @staticmethod
+    def _one_subtest():
+        return {"JetStream3.0": {"tests": {"t": {"metrics": {
+            "Score": {"current": [99.0, 100.0, 101.0, 100.0]}}}}}}
 
     def test_report_html_has_every_subtest_both_metrics_and_one_svg_each(self):
         """the shape a merged jsc-shell log and run-benchmark's own JetStream
@@ -206,6 +213,46 @@ class TestReportWalkerAndStats(WkTest):
             cp = wkdata("report", str(a), str(b), "--text")
             self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
             self.assertIn("different runners", cp.stdout)
+
+    def test_a_run_directory_with_no_result_json_is_refused_by_name(self):
+        with scratch_dir() as tmp:
+            a, b = self._write_pair(tmp, self._one_subtest(), self._one_subtest())
+            (a / "result.json").unlink()
+            cp = wkdata("report", str(a), str(b), "--text")
+            self.assertNotEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+            out = cp.stdout + cp.stderr
+            self.assertIn("no result.json in this directory", out)
+            self.assertIn(str(a), out)
+            self.assertIn("side A", out)
+
+    def test_naming_no_run_directory_at_all_is_refused(self):
+        cp = wkdata("report", "", "", "--text")
+        self.assertNotEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertIn("no run directories given", cp.stdout + cp.stderr)
+
+    def test_one_missing_run_among_several_is_warned_about_not_hidden(self):
+        """A side that still has evidence reports on it, and says which round
+        it could not read -- a shorter side must not go unremarked."""
+        with scratch_dir() as tmp:
+            a, b = self._write_pair(tmp, self._one_subtest(), self._one_subtest())
+            gone = tmp / "a-gone"
+            gone.mkdir()
+            cp = wkdata("report", "%s,%s" % (a, gone), str(b), "--text")
+            self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+            self.assertIn("warning: side A", cp.stderr)
+            self.assertIn("no result.json in this directory", cp.stderr)
+
+    def test_a_run_with_no_env_json_reads_as_unknown_rather_than_refusing(self):
+        """Deliberate: env.json is how the axis check knows what a run was, and
+        a run predating a field has to report rather than refuse."""
+        with scratch_dir() as tmp:
+            a, b = self._write_pair(tmp, self._one_subtest(), self._one_subtest())
+            (a / "env.json").unlink()
+            (b / "env.json").unlink()
+            cp = wkdata("report", str(a), str(b), "--text")
+            self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+            self.assertIn("t", cp.stdout)
+            self.assertIn("no warnings", cp.stdout)
 
     def test_env_record_defaults_configuration_for_untouched_runs(self):
         """A run that never sets any configuration.* field still gets a full

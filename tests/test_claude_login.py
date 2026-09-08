@@ -66,7 +66,10 @@ class _Capture(WkTest):
 
     def setUp(self):
         super().setUp()
-        self.secrets = self.tmp / "secrets"
+        # wk_secrets_dir (lib/store.sh) reads WK_HOST_SECRETS on a macOS host
+        # and $WK_STORE/secrets everywhere else; one directory under both names.
+        self.store = self.tmp / "store"
+        self.secrets = self.store / "secrets"
         self.secrets.mkdir(parents=True)
         self.home = self.tmp / "home"
         (self.home / ".claude").mkdir(parents=True)
@@ -76,7 +79,7 @@ class _Capture(WkTest):
         self.seclog.write_text("")
 
     def stored(self):
-        return store_path(self.tmp, ROW)
+        return store_path(self.store, ROW)
 
     def hold(self, text):
         """What `claude auth login` left on this machine."""
@@ -93,7 +96,7 @@ class _Capture(WkTest):
             "WK_TEST_KEYCHAIN": str(self.keychain),
             "WK_TEST_SECURITY_LOG": str(self.seclog),
             # A store of its own, so nothing here goes near the real one.
-            "WK_STORE": str(self.tmp / "store"),
+            "WK_STORE": str(self.store),
         }
         env.update(over)
         return env

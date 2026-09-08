@@ -1,6 +1,6 @@
 #!/bin/bash
 # The benchmark install running an A/B by itself: planted by `wk bench mac-ab` from host mode, started by a per-user LaunchAgent at autologin. It drives itself, unlike bench/mac-lane.sh, because this machine has no network in bench mode (tolken is Wi-Fi only).
-# There is no software boot-volume switch on Apple Silicon, so it reboots and sees where it lands. THE ORDER OF OPERATIONS IS THE SAFETY: the state file is advanced before the run so a power cut cannot repeat the attempt, the watchdog is armed before the first run, and the hand-back runs from a trap.
+# The bench volume is the firmware default, so the job ends with the machine powered off however it ends: a reboot would land back here and run it again. THE ORDER OF OPERATIONS IS THE SAFETY: the state file is advanced before the run so a power cut cannot repeat the attempt and before the summary so a power cut in that cannot either, the watchdog is armed before the first run, and the power-off runs from a trap.
 
 set -euo pipefail
 export PATH=/usr/sbin:/usr/bin:/sbin:/bin
@@ -66,19 +66,18 @@ print(" ".join(str(x) for x in v))
 PY
 }
 
+TOOLS=$(jf wk_tools); TOOLS="${TOOLS:-$HOME/Development/wk-tools}"   # read here because the settings this volume is judged by are read out of the tree, before the job is
+QUIET_DESKTOP="$TOOLS/bench/mac-quiet-desktop.sh"
+
 _left=""
-leave_bench() {
-    local how="$1" why="$2"
+leave_bench() {   # the way from a powered-off bench volume to host mode is the startup manager, once
+    local why="$1"
     [ -n "$_left" ] && return 0
     _left=1
-    say "leaving bench mode ($how): $why"
+    say "powering off: $why"
     state_set left_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-    state_set left_how "$how"
     sync 2>/dev/null || true
-    case "$how" in  # halt where a reboot would loop back to this volume; sudo -n logs rather than hangs if NOPASSWD is gone
-        halt)   sudo -n shutdown -h now >/dev/null 2>&1 || say "WARNING: could not halt" ;;
-        *)      sudo -n shutdown -r now >/dev/null 2>&1 || say "WARNING: could not reboot" ;;
-    esac
+    sudo -n shutdown -h now >/dev/null 2>&1 || say "WARNING: could not power off"   # -n logs rather than hangs if NOPASSWD is gone
 }
 
 # The file only: `launchctl bootout` would kill this script, its own child.
@@ -90,7 +89,6 @@ remove_agent() {
 
 FB_PLIST=/Library/LaunchDaemons/com.wk.bench-firstboot.plist
 FB_SELF=/usr/local/libexec/wk-bench-firstboot.sh
-FB_LOG=/var/log/wk-bench-firstboot.log
 
 cancel_pending_reboot() {
     pgrep -x shutdown >/dev/null 2>&1 || return 0
@@ -104,30 +102,30 @@ cancel_pending_reboot() {
     fi
 }
 
-fb_provisioned() {  # the daemon removes itself just before it logs this line, so the log is the only record that provisioning ever finished
-    grep -q "provisioning complete" "$FB_LOG" 2>/dev/null
-}
-
-# Provisioning applies the desktop quieting every leg's own preflight then requires, so a volume it never finished measures nothing: `wk bench staged` refuses each leg for settings that are not a measured Mac's, one leg after another, on a machine with no network to say so. Asked of the log and not of the daemon, because either can be absent: a daemon killed partway leaves the volume unprovisioned with nothing installed to finish it.
+# Provisioning is the settings, and `wk bench staged` measures them again before every leg: judged here by the same probe and the same findings, so a volume that drifted is refused once and up front rather than leg by leg on a machine with no network to say so.
 refuse_unprovisioned() {
-    if fb_provisioned; then
-        return 0
-    fi
-    say "$FB_LOG records no 'provisioning complete', so this volume was never"
-    say "  provisioned and cannot be measured on."
+    local probe wrong installed=no
     if pgrep -f wk-bench-firstboot >/dev/null 2>&1; then
-        say "  provisioning is running right now -- standing aside so it can finish."
+        say "provisioning is running right now -- standing aside so it can finish."
         say "  It reboots at the end, and this agent starts again on that boot."
         exit 0
     fi
-    local installed=no
-    if [ -f "$FB_PLIST" ] || [ -f "$FB_SELF" ]; then
-        installed=yes
+    if [ ! -r "$QUIET_DESKTOP" ]; then
+        say "no $QUIET_DESKTOP, so nothing here can judge what this volume is set to."
+        leave_bench "no quiet-desktop table to judge this volume by"
+        exit 0
     fi
-    say "  nothing is running to finish it (daemon installed: $installed), and running"
-    say "  the job now would fail every leg for the settings it applies. From host mode:"
+    # shellcheck disable=SC1090
+    . "$QUIET_DESKTOP"
+    probe=$(wk_quiet_desktop_probe)
+    wrong=$(wk_quiet_desktop_findings "$probe" "" | awk -F'\t' '$1 == "wrong" { print $2 }')
+    [ -n "$wrong" ] || return 0
+    if [ -f "$FB_PLIST" ] || [ -f "$FB_SELF" ]; then installed=yes; fi
+    say "this volume is not set up as a measured Mac (first-boot daemon installed: $installed):"
+    printf '%s\n' "$wrong" | while IFS= read -r _w; do say "  $_w"; done
+    say "  Every leg would be refused for these. From host mode:"
     say "    wk bench mac-volume --repair    then boot this volume once"
-    leave_bench halt "provisioning never completed"
+    leave_bench "this volume is not set up as a measured Mac"
     exit 0
 }
 
@@ -163,7 +161,7 @@ defuse_firstboot
 if [ ! -f "$JOB" ]; then
     say "no job at $JOB -- nothing to run"
     remove_agent
-    leave_bench reboot "no job"
+    leave_bench "no job"
     exit 0
 fi
 
@@ -172,10 +170,9 @@ ATTEMPTS=$(state_get attempts); ATTEMPTS=${ATTEMPTS:-0}
 
 if [ "$PHASE" = done ]; then
     say "the job is already finished, and this volume booted again -- so it is the"
-    say "firmware default. Halting rather than looping; the way to host mode is"
-    say "the startup manager, once."
+    say "firmware default. Powering off rather than looping."
     remove_agent
-    leave_bench halt "job already complete"
+    leave_bench "job already complete"
     exit 0
 fi
 
@@ -186,7 +183,7 @@ if [ "$ATTEMPTS" -gt "$MAX_ATTEMPTS" ]; then
     state_set phase done
     state_set outcome abandoned
     remove_agent
-    leave_bench reboot "too many attempts"
+    leave_bench "too many attempts"
     exit 0
 fi
 say "attempt $ATTEMPTS of $MAX_ATTEMPTS"
@@ -197,53 +194,78 @@ ROUNDS=$(jf rounds);     ROUNDS="${ROUNDS:-5}"
 MAX_ROUNDS=$(jf max_rounds); MAX_ROUNDS="${MAX_ROUNDS:-40}"
 DETECT=$(jf detect_pct); DETECT="${DETECT:-0.3}"
 TIMEOUT=$(jf timeout);   TIMEOUT="${TIMEOUT:-1800}"
-COUNT=$(jf count)
-TOOLS=$(jf wk_tools);    TOOLS="${TOOLS:-$HOME/Development/wk-tools}"
+COUNT=$(jf count);       COUNT="${COUNT:-2}"   # one run of one count carries no within-run p-value
 NARMS=$(jf n_arms);      NARMS="${NARMS:-2}"
 SETTLE=$(jf settle);     SETTLE="${SETTLE:-90}"
-FORCE=$(jf force)  # for the guest rehearsal, which cannot pass the quiet check; empty on the real volume
+DISPLAY_EXPECT=$(jf display)
 
 export WK_BENCH_ASLR=$(jf aslr)
 export WK_BENCH_ENV_PAD=$(jf env_pad)
 export WK_BENCH_PATH_PAD=$(jf path_pad)
 export WK_BENCH_SHARED_CACHE=$(jf shared_cache)
 
-say "job: plans=$PLANS rounds=$ROUNDS-$MAX_ROUNDS detect=${DETECT}% arms=$NARMS timeout=${TIMEOUT}s count=${COUNT:-default}${FORCE:+ FORCED}"
+say "job: plans=$PLANS rounds=$ROUNDS-$MAX_ROUNDS detect=${DETECT}% arms=$NARMS timeout=${TIMEOUT}s count=$COUNT"
 say "     variance: aslr=${WK_BENCH_ASLR:-unset} env_pad=${WK_BENCH_ENV_PAD:-0} path_pad=${WK_BENCH_PATH_PAD:-0} shared_cache=${WK_BENCH_SHARED_CACHE:-unset}"
-say "     wk-tools=$TOOLS"
+say "     wk-tools=$TOOLS  display=${DISPLAY_EXPECT:-unpinned}"
 
 [ -x "$TOOLS/wk" ] || {
     say "FATAL: no wk at $TOOLS/wk -- cannot run anything"
     state_set phase done; state_set outcome "no-wk-tools"
     remove_agent
-    leave_bench reboot "no wk-tools"
+    leave_bench "no wk-tools"
     exit 1
 }
+
+refuse_unpinned_display() {   # unpinned is two runs at different resolutions compared as if they matched, with nothing downstream to say so
+    [ -z "$DISPLAY_EXPECT" ] || return 0
+    say "the job names no display, so what a round would be measured at is unknown."
+    say "  From host mode: set NODE_DISPLAY in boot/machines/mbp.conf, then plant again."
+    state_set phase done
+    state_set outcome "no-display-expectation"
+    remove_agent
+    leave_bench "the job names no display"
+    exit 0
+}
+refuse_unpinned_display
 
 state_set phase running
 state_set plans "$PLANS"
 state_set started_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
+RUNS="$WK_AB_ROOT/ab/$(state_get job_stamp)"
+[ -n "$(state_get job_stamp)" ] || RUNS="$WK_AB_ROOT/ab/unstamped"
+mkdir -p "$RUNS" 2>/dev/null
+
+summarise() {
+    say "summarising"
+    "$TOOLS/wk" bench ab-summary --root "$WK_AB_ROOT" --runs "$RUNS/runs.tsv" \
+        --out "$RUNS/summary.txt" >>"$LOG" 2>&1 \
+        || say "(no summary -- 'wk bench ab-summary' failed; the results are still on the volume)"
+}
+
 # Silence, not a deadline: the round count is decided by the numbers as they arrive, so there is no total to budget. Generous, because the first run against a freshly copied build tree is legitimately much slower than the rest and a watchdog firing on it costs a whole cycle.
 STALL=$(( TIMEOUT + 900 ))
-say "watchdog: ${STALL}s of silence"
-(
+watchdog() {
+    local quiet
     while :; do
         sleep 60
-        [ "$(state_get phase)" = done ] && exit 0
+        [ "$(state_get phase)" = done ] && return 0
         quiet=$(( $(date +%s) - $(stat -f %m "$LOG") ))
         [ "$quiet" -lt "$STALL" ] && continue
         say "WATCHDOG FIRED -- nothing written for ${quiet}s; the run is not coming back"
-        state_set phase done
+        state_set phase done      # before the summary, so a power cut in it cannot repeat the attempt
         state_set outcome watchdog
-        sudo -n shutdown -r now >/dev/null 2>&1
-        exit 0
+        summarise                 # the rounds that did land are a measurement, and this is the only machine that can say what they resolve
+        leave_bench "watchdog: nothing written for ${quiet}s"
+        return 0
     done
-) &
+}
+say "watchdog: ${STALL}s of silence"
+watchdog &
 WATCHDOG=$!
 
-# A trap, so a `set -e` death cannot leave the machine in bench mode.
-trap 'kill "$WATCHDOG" 2>/dev/null; leave_bench reboot "run finished or failed"' EXIT INT TERM
+# A trap, so a `set -e` death cannot leave the machine up in bench mode.
+trap 'kill "$WATCHDOG" 2>/dev/null; leave_bench "run finished or failed"' EXIT INT TERM
 
 # The agent starts at login, the moment the machine is least quiet.
 say "settling for ${SETTLE}s"
@@ -297,7 +319,7 @@ if pgrep -x SecurityAgent >/dev/null 2>&1; then
         || say "  dismissed"
 fi
 
-# The preference reads back false yet a scan can still run, so the daemon is booted out; self-reversing, since this install reboots when the job ends.
+# The preference reads back false yet a scan can still run, so the daemon is booted out; self-reversing, since this install goes off when the job ends.
 say "stopping the software-update scanner"
 for svc in system/com.apple.softwareupdated system/com.apple.mobile.softwareupdated; do
     if sudo -n launchctl bootout "$svc" >/dev/null 2>&1; then
@@ -325,9 +347,6 @@ say "  scan stamp before the job: $(msu_stamp)"
 say "quiescing"
 "$TOOLS/wk" quiesce on >>"$LOG" 2>&1 || say "WARNING: quiesce reported a problem; the runner will judge it"
 
-RUNS="$WK_AB_ROOT/ab/$(state_get job_stamp)"
-[ -n "$(state_get job_stamp)" ] || RUNS="$WK_AB_ROOT/ab/unstamped"
-mkdir -p "$RUNS" 2>/dev/null
 newest_result() { ls -1 "$WK_AB_ROOT/results" 2>/dev/null | sort | tail -1 || true; }
 
 leg() {   # <round> <plan> <arm index> [profile]. A software-update scan across one arm is a number to drop, not a reason to disbelieve the rest, so each row says.
@@ -339,10 +358,9 @@ leg() {   # <round> <plan> <arm index> [profile]. A software-update scan across 
     say "--- round $r, $plan, arm $label (staged $sid) ---"
     set -- bench staged --plan "$plan" --timeout "$TIMEOUT"
     [ -n "$sid" ]   && set -- "$@" --id "$sid"
-    [ -n "$COUNT" ] && set -- "$@" --count "$COUNT"
+    set -- "$@" --count "$COUNT"
     [ -n "$bargs" ] && set -- "$@" --browser-args "$bargs"
     [ -n "$profile" ] && set -- "$@" --profile "$profile"
-    [ -n "$FORCE" ] && set -- "$@" --force
     before=$(newest_result)
     msu_before=$(msu_stamp)
     rc=0
@@ -372,9 +390,9 @@ leg() {   # <round> <plan> <arm index> [profile]. A software-update scan across 
     return 0
 }
 
-arm_results() {  # <plan> <label> -- the result.json paths recorded for that arm, comma-separated
+arm_results() {  # <plan> <label> -- the run directories recorded for that arm, comma-separated
     awk -F'\t' -v p="$1" -v l="$2" -v root="$WK_AB_ROOT" \
-        '$6 == p && $2 == l && $5 == "clean" { printf "%s%s/results/%s/result.json", sep, root, $4; sep="," }' \
+        '$6 == p && $2 == l && $5 == "clean" { printf "%s%s/results/%s", sep, root, $4; sep="," }' \
         "$RUNS/runs.tsv" 2>/dev/null
 }
 
@@ -401,20 +419,33 @@ refuse_throttled_browser() {
     dir=$(ls -1d "$WK_AB_ROOT/staged/$sid"/WebKitBuild/*/ 2>/dev/null | head -1) || dir=""
     if [ -z "$dir" ]; then
         say "no products under $WK_AB_ROOT/staged/$sid -- nothing to check the browser with"
-        leave_bench halt "arm A is not staged"
+        leave_bench "arm A is not staged"
         exit 0
     fi
     say "browser check against arm A's build ($sid)"
     if /usr/bin/python3 "$TOOLS/bench/mac-browser-check.py" \
-            --build-directory "${dir%/}" --json "$RUNS/browser-check.json" >>"$LOG" 2>&1; then
+            --build-directory "${dir%/}" --expect-display "$DISPLAY_EXPECT" \
+            --json "$RUNS/browser-check.json" >>"$LOG" 2>&1; then
         say "  the browser here is accelerated and unthrottled (readings above)"
         return 0
     fi
     say "  this install cannot present a browser worth measuring (faults above)."
     say "  Every round would measure that instead of the patch, so nothing runs."
-    leave_bench halt "browser check failed"
+    leave_bench "browser check failed"
     exit 0
 }
+dim_display() {   # the panel is a load on the package the browser is measured on, and nothing restores it: this install is left dark
+    local got rc=0
+    got=$(python3 "$TOOLS/lib/wkmac.py" brightness --set 0) || rc=$?
+    if [ "$rc" -ne 0 ]; then
+        say "the display would not go to minimum brightness (rc=$rc, read back '${got:-nothing}')."
+        say "  A backlight that varies is a load that varies, so nothing runs."
+        leave_bench "the display would not dim"
+        exit 0
+    fi
+    say "display at minimum brightness (reads $got)"
+}
+dim_display
 refuse_throttled_browser
 
 # Not measured: it absorbs the first-run effect a freshly copied build tree has, and carries the capture the measured rounds cannot take afterwards.
@@ -488,42 +519,14 @@ fi
 # No `wk quiesce off`: quiet is this install's permanent state, set at provisioning time.
 say "leaving the machine quiesced (its permanent state; see the comment here)"
 
-say "summarising"
-"$TOOLS/wk" bench ab-summary --root "$WK_AB_ROOT" --runs "$RUNS/runs.tsv" \
-    --out "$RUNS/summary.txt" >>"$LOG" 2>&1 \
-    || say "(no summary -- 'wk bench ab-summary' failed; the results are still on the volume)"
-
 state_set phase done
 state_set outcome ran
 state_set finished_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+summarise
 say "=== job finished ==="
 
 kill "$WATCHDOG" 2>/dev/null  # and reaped below, or bash logs "Terminated: 15" as if it failed
 wait "$WATCHDOG" 2>/dev/null || true
 trap - EXIT INT TERM
 
-# `boot-volume` is three colon-separated UUIDs, only the last naming anything on disk.
-booted_is_default() {
-    local nv grp
-    nv=$(python3 "$TOOLS/lib/wkmac.py" boot-volume 2>/dev/null) || true
-    nv="${nv##*:}"
-    [ -n "$nv" ] || return 1
-    grp=$(python3 "$TOOLS/lib/wkmac.py" volume-group / 2>/dev/null | tr -d ' \r') || true
-    [ -n "$grp" ] || return 1
-    [ "$nv" = "$grp" ]
-}
-
-if booted_is_default; then
-    say "this volume is the firmware default, so a reboot would land back here and"
-    say "halt -- leaving a finished A/B on a machine nothing can reach. Staying up"
-    say "instead. The agent is removed, so nothing runs again; the numbers are"
-    say "collectable over the network now, and the way back to workstation mode is"
-    say "a plain reboot whenever it suits."
-    remove_agent
-    state_set left_how stayed-up
-    state_set left_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-    say "=== staying up in bench mode; nothing further will run ==="
-    exit 0
-fi
-
-leave_bench reboot "job finished"
+leave_bench "job finished"

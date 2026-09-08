@@ -252,13 +252,11 @@ def _statements(body):
     return out
 
 
-def _last_statement(body):
-    stmts = _statements(body)
-    return stmts[-1] if stmts else ""
 
 
 def _without_data(s):
-    """The statement with quoted spans and command substitutions blanked out.
+    """The statement with quoted spans and command substitutions blanked out,
+    length preserved so an offset into the result still points into `s`.
 
     An `&&` inside a string wk hands to another shell, or inside `$( )`, is not
     a chain at this statement's level: its falsiness never becomes the
@@ -266,11 +264,13 @@ def _without_data(s):
     """
     # Substitutions first, by paren depth: inside `$( )` quoting restarts, so a
     # single left-to-right pass over quotes closes the outer one too early.
-    out = []
+    out = list(s)
     depth = 0
     i = 0
     while i < len(s):
         if s.startswith("$(", i):
+            out[i] = " "
+            out[i + 1] = " "
             depth += 1
             i += 2
             continue
@@ -279,24 +279,118 @@ def _without_data(s):
                 depth -= 1
             elif s[i] == "(":
                 depth += 1
-            i += 1
-            continue
-        out.append(s[i])
+            out[i] = " "
         i += 1
 
     # Then quoted spans in what is left.
-    kept = []
     quote = None
-    for c in "".join(out):
+    for i, c in enumerate(out):
         if quote:
+            out[i] = " "
             if c == quote:
                 quote = None
-            continue
-        if c in "'\"":
+        elif c in "'\"":
             quote = c
-            continue
-        kept.append(c)
-    return "".join(kept)
+            out[i] = " "
+    return "".join(out)
+
+
+# The compounds whose exit status is their body's last statement. A group's `{`
+# is a word of its own, so `${x}` and `find … {} \;` are not one, and its `}`
+# follows a space or a `;`.
+BODY_TOKEN_RE = re.compile(
+    r'(?<![\w$])\{(?=\s)|(?<=[\s;])\}|\bdo\b|\bdone\b|\bthen\b|\bfi\b')
+TAIL_CLOSER_RE = re.compile(r'(\}|\bdone\b|\bfi\b)\s*;?\s*$')
+BODY_SPLIT_RE = re.compile(BODY_TOKEN_RE.pattern + r'|;')
+
+
+def _last_statement(body):
+    """The statement whose exit status the body returns. `_statements` splits a
+    compound at its line breaks, so the `while …; do` and the `done` come back
+    as separate entries; joining them back from the tail leaves a statement
+    whose end is the group or the loop rather than a bare `done`."""
+    stmts = _statements(body)
+    depth = 0
+    for i in range(len(stmts) - 1, -1, -1):
+        tokens = [m.group(0) for m in BODY_TOKEN_RE.finditer(_without_data(stmts[i]))]
+        depth += sum(1 for t in tokens if t in ("}", "done", "fi"))
+        depth -= sum(1 for t in tokens if t in ("{", "do", "then"))
+        if depth <= 0:
+            return "; ".join(stmts[i:])
+    return stmts[-1] if stmts else ""
+
+
+def _last_in_body(body, masked):
+    """The body's last statement: what follows the last `;` that is outside any
+    compound nested in it."""
+    depth, cut = 0, 0
+    for m in BODY_SPLIT_RE.finditer(masked):
+        tok = m.group(0)
+        if tok in ("{", "do", "then"):
+            depth += 1
+        elif tok in ("}", "done", "fi"):
+            depth -= 1
+        elif depth == 0 and masked[m.end():].strip():
+            cut = m.end()
+    return body[cut:].strip().rstrip(";").strip()
+
+
+def _without_bodies(masked):
+    """`masked` with every compound body blanked out, leaving the statement's
+    own tail: an `&&` inside a body decides that body's status and reaches the
+    function only if the body is what the statement ends with."""
+    out = list(masked)
+    stack = []
+    for m in BODY_TOKEN_RE.finditer(masked):
+        if m.group(0) in ("{", "do", "then"):
+            stack.append(m.end())
+        elif stack:
+            for i in range(stack.pop(), m.start()):
+                out[i] = " "
+    return "".join(out)
+
+
+def _tail_body(stmt):
+    """The last statement of the compound that closes at the end of `stmt`, or
+    None when the tail is an ordinary command."""
+    masked = _without_data(stmt)
+    if not TAIL_CLOSER_RE.search(masked):
+        return None
+    span, stack = None, []
+    for m in BODY_TOKEN_RE.finditer(masked):
+        if m.group(0) in ("{", "do", "then"):
+            stack.append(m.end())
+        elif stack:
+            span = (stack.pop(), m.start())
+    if span is None:
+        return None
+    return _last_in_body(stmt[span[0]:span[1]], masked[span[0]:span[1]])
+
+
+def _decisive(stmt):
+    """The statement whose exit status the function returns. A compound at the
+    tail -- whatever pipeline it ends -- hands out the status of the last
+    statement of its own body, so a `||` anywhere else in the statement absorbs
+    nothing: the last iteration's condition is what `set -e` reads."""
+    while True:
+        inner = _tail_body(stmt)
+        if inner is None:
+            return stmt
+        stmt = inner
+
+
+def deciding_and_chain(body):
+    """The unguarded `&&` chain this function body returns the status of, or ""."""
+    last = _last_statement(body)
+    if not last or last.endswith("\\"):
+        return ""
+    stmt = _decisive(last)
+    bare = _without_bodies(_without_data(stmt))
+    if "&&" not in bare or "||" in bare:
+        return ""
+    if stmt.startswith(("return", "exit")):
+        return ""
+    return stmt
 
 
 def find_offenders():
@@ -304,15 +398,9 @@ def find_offenders():
     for f in _iter_shell_files():
         rel = str(f.relative_to(REPO))
         for name, body in _functions(f):
-            last = _last_statement(body)
-            bare = _without_data(last)
-            if not last or "&&" not in bare or "||" in bare:
-                continue
-            if last.startswith(("return", "exit")):
-                continue
-            if last.endswith("\\"):
-                continue  # a continued line; not really the last statement
-            offenders.append((rel, name, last))
+            stmt = deciding_and_chain(body)
+            if stmt:
+                offenders.append((rel, name, stmt))
     return offenders
 
 
@@ -329,6 +417,33 @@ class TestTrailingAndChainAudit(unittest.TestCase):
             f"`return 0` or belongs in DELIBERATE_PREDICATES -- "
             f"full detail: {offenders}",
         )
+
+    def test_a_loop_body_decides_the_status_a_stray_or_does_not_absorb(self):
+        """The hole a statement-level scan leaves: the `||` belongs to another
+        part of the statement, while the last iteration's condition is what the
+        function returns."""
+        self.assertEqual(deciding_and_chain([
+            '{ have gh || true; } | while read -r n; do',
+            '    [ -n "$n" ] && printf \'%s\\n\' "$n"',
+            'done']), '[ -n "$n" ] && printf \'%s\\n\' "$n"')
+        self.assertEqual(deciding_and_chain([
+            'if [ -n "$mac" ]; then',
+            '    [ -e "$p" ] && echo "$p"',
+            'fi']), '[ -e "$p" ] && echo "$p"')
+
+    def test_a_body_the_statement_does_not_end_with_is_not_the_status(self):
+        """The negative controls that keep the rule from firing on every `&&`
+        anywhere in a compound: a pipeline stage after `done` and a statement
+        after the chain are what the function actually returns."""
+        self.assertEqual(deciding_and_chain([
+            'for app in /Applications/Install\\ macOS*.app; do',
+            '    [ -x "$app/Contents/Resources/startosinstall" ] && printf %s "$app"',
+            'done | tail -1']), "")
+        self.assertEqual(deciding_and_chain([
+            'while :; do',
+            '    [ "$mode" != "$last" ] && { log "waiting"; last="$mode"; }',
+            '    sleep 10',
+            'done']), "")
 
     def test_gh_authenticated_is_a_deliberate_predicate(self):
         # A concrete example that the pattern is not automatically a bug:
