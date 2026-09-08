@@ -13,6 +13,13 @@ WK_ROOT="$(cd "$(dirname "$0")" && pwd)"
 STAGE=all
 export WK_DRY_RUN=""
 
+[ "$(id -u)" -eq 0 ] && die "run ./setup as yourself, not as root or under sudo.
+
+    It writes sudoers grants for whoever runs it -- as root they grant root, which is
+    nobody who logs in -- and it owns dotfiles, credentials and state in that user's
+    home. The stages that need root call sudo themselves and ask for a password once.
+    ${SUDO_USER:+You are here through sudo from '$SUDO_USER'; run it as $SUDO_USER.}"
+
 while [ $# -gt 0 ]; do
     case "$1" in
         --stage) STAGE="${2:-}"; shift 2 ;;

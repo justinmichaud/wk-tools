@@ -441,6 +441,48 @@ class TheHelperInstallsOnBothPlatforms(WkTest):
                              'if is_macos; then _rootgrp=wheel; else _rootgrp=root; fi'))
                 self.assertEqual(want, cp.stdout.strip(), cp.stdout + cp.stderr)
 
+class SetupRefusesRoot(WkTest):
+    """Every grant is written for `id -un`. Run under sudo they all name root,
+    which grants nothing to the person who logs in and leaves root-owned
+    dotfiles, credentials and state in that user's home. Measured 2026-09-08:
+    /etc/sudoers.d/zzz-wk-boot on tolken is 58 bytes, which is
+    `<4-char user> ALL=(root) NOPASSWD: /usr/local/libexec/wk-boot-priv`."""
+
+    SETUP = REPO / "setup"
+
+    def test_it_refuses_and_says_why(self):
+        cp = bash('id() { [ "$1" = -u ] && echo 0 || echo root; }\n'
+                  'die() { echo "DIE $*"; exit 1; }\n'
+                  'export SUDO_USER=justinmichaud\n'
+                  '%s' % self._guard())
+        out = cp.stdout + cp.stderr
+        self.assertIn("DIE", out, out)
+        self.assertIn("as yourself", out, out)
+        self.assertIn("justinmichaud", out, "it does not name who to run as")
+
+    def test_it_says_nothing_when_run_as_a_person(self):
+        cp = bash('id() { [ "$1" = -u ] && echo 1000 || echo someone; }\n'
+                  'die() { echo "DIE $*"; exit 1; }\n'
+                  '%s\necho PASSED' % self._guard())
+        out = cp.stdout + cp.stderr
+        self.assertIn("PASSED", out, out)
+        self.assertNotIn("DIE", out, out)
+
+    def test_every_grant_is_built_from_the_running_user(self):
+        """So the guard is the only thing standing between a sudo'd setup and a
+        sudoers file that grants nobody."""
+        text = (REPO / "admin" / "install.sh").read_text()
+        self.assertEqual(6, text.count('$(id -un) ALL=(root) NOPASSWD:'),
+                         text.count('$(id -un) ALL=(root) NOPASSWD:'))
+
+    def _guard(self):
+        """The die message contains a blank line of its own, so the lift ends at
+        the closing quote rather than at the first paragraph break."""
+        text = self.SETUP.read_text()
+        start = text.index('[ "$(id -u)" -eq 0 ]')
+        end = text.index('SUDO_USER.}"', start) + len('SUDO_USER.}"')
+        return text[start:end]
+
 
 if __name__ == "__main__":
     unittest.main()
