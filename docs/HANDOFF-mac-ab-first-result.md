@@ -93,6 +93,19 @@
       the transport. The deploy model for that Mac is rsync-and-commit, so this
       is a real decision and not a cleanup
 
+- [ ] `./setup` is absent from crash-only coverage. `tests/test_crash_only.py`
+      drives `wk new`, `wk rm`, `wk gc` and `build_live` and never mentions
+      `setup` — so CLAUDE.md rule 2 has never been applied to the one command
+      that provisions a machine's privileged state, its dotfiles, its
+      credentials and its units. One instance of the gap is measured and being
+      fixed (a sudoers rule naming the wrong user read as "already installed",
+      because the helper's "needs" was computed from the binary alone). The
+      remaining stages — dotfiles, claude, mcp, sharing, machine, vmtools,
+      softnet, sdk, broker — have no convergence test between them. Each wants
+      the same question asked: killed at any point, does a re-run reach the
+      declared final state, or is "already exists" the answer to a half-made
+      thing [no hardware needed for most of them]
+
 ## Owed, needs the Mac
 
 - [ ] **the one thing between here and a measured A/B**:

@@ -36,7 +36,7 @@ fi
 
 # GNU form first: Linux's `stat -f` succeeds as "filesystem status", never as an owner.
 _owner=$(stat -c '%U' "$_target" 2>/dev/null || stat -f '%Su' "$_target" 2>/dev/null || echo "")
-[ -f "$_target" ] && [ "$_owner" != root ] && _needs_install=1
+if [ -f "$_target" ] && [ "$_owner" != root ]; then _needs_install=1; fi
 
 _rule="$(id -un) ALL=(root) NOPASSWD: $_target"
 
@@ -104,7 +104,7 @@ else
     if [ ! -f "$_card_target" ] || ! cmp -s "$_card_source" "$_card_target"; then _card_needs=1; fi
     if [ ! -f "$_check_target" ] || ! cmp -s "$_check_source" "$_check_target"; then _card_needs=1; fi
     _card_owner=$(stat -c '%U' "$_card_target" 2>/dev/null || echo "")
-    [ -f "$_card_target" ] && [ "$_card_owner" != root ] && _card_needs=1
+    if [ -f "$_card_target" ] && [ "$_card_owner" != root ]; then _card_needs=1; fi
 
     _card_ok=0
     if [ -x "$_card_target" ] && wk_priv_answers "$_card_target"; then _card_ok=1; fi
@@ -170,7 +170,7 @@ else
     if [ ! -f "$_boot_target" ] || ! cmp -s "$_boot_source" "$_boot_target"; then _boot_needs=1; fi
     if is_macos; then _boot_owner=$(stat -f '%Su' "$_boot_target" 2>/dev/null || echo "")
     else _boot_owner=$(stat -c '%U' "$_boot_target" 2>/dev/null || echo ""); fi
-    [ -f "$_boot_target" ] && [ "$_boot_owner" != root ] && _boot_needs=1
+    if [ -f "$_boot_target" ] && [ "$_boot_owner" != root ]; then _boot_needs=1; fi
 
     _boot_ok=0
     if [ -x "$_boot_target" ] && wk_priv_answers "$_boot_target"; then _boot_ok=1; fi
