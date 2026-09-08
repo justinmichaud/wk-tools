@@ -414,3 +414,5 @@ Work around this, but leave the upstream bug report so we can remove the workaro
 - wk status should always give the status of everything wk can do. In the middle of a build, an A/B task, etc. should all be reported as in-progress with checkboxes next to them including the future next steps the running script will take, instructions to kill the task, and enough info to debug failures in wk-tools or in the task.
 
 - wk push fails open on remote targets.
+
+- zsh alt+arrow keys not wokring from zed terminal

@@ -71,24 +71,54 @@
       carries and the browser check refuses on. Finding the setter is what
       would let the lane hold the setting rather than decline the machine
 
-- [ ] the guest rehearsal has never run, and cannot: `tart` is not on tolken's
-      PATH, so `benchvm` is unstartable there, on top of the `NODE_DISPLAY`
-      refusal above. Worth knowing what it could prove even once it runs — a
-      paravirtual panel and no ambient light sensor mean it exercises the plant,
-      the autologin, the legs and the hand-back, but neither the display pin nor
-      the brightness gate [needs tart on that Mac]
+- [ ] two tests fail only under the full suite and pass in isolation and in
+      pairs: `test_build_wall.TestBitbakeGetsTheRealTools.
+      test_it_strips_the_wall_and_keeps_everything_else` and
+      `test_vm_clock.TestGuestClock.test_a_stale_guest_is_set_from_the_host`.
+      Two of three full `wk selftest --quick` runs on 2026-09-08 showed the
+      first, one showed neither. Its evidence: the test hands `bash -c` an
+      explicit `env={"PATH": …}` and the output comes back with
+      `/home/jmichaud/Development/wk-tools/bin:/.local/bin:/.local/bin:` prepended
+      — `shell/bashrc`'s own additions with `HOME` unset — so something made a
+      non-interactive bash source a profile. `BASH_ENV` appears nowhere in the
+      tree, `/usr/bin/bash` is not a wrapper, and neither file has been touched
+      since `f53e308` / `1fbdb30`. Root cause unknown; do not theorise, reproduce
+      it under the full suite first
+
+- [ ] `machine_prepare` (boot/machines.sh) rsyncs an **uncommitted** working tree
+      into a git checkout the operator also pulls into, and the two fight: a
+      later `git pull` replaces what was pushed, which is how tolken silently
+      lost a synced fix on 2026-09-08. Either refuse to rsync over a checkout
+      whose HEAD differs, or push only committed content and let `git pull` be
+      the transport. The deploy model for that Mac is rsync-and-commit, so this
+      is a real decision and not a cleanup
 
 ## Owed, needs the Mac
 
-- [ ] `wk boot mbp --prepare` has not been run, so the boot helper is not on
-      tolken and `wk bench mac-ab` refuses in preflight ("restartable"). One
-      command from a terminal does it — it rsyncs this tree and runs
-      `./setup --stage quiesce` there, asking for a password once, and the lane
-      does it itself when it has a terminal. Measured 2026-09-08: with a console
-      user logged in and osascript automation working, `«event aevtrrst»` was
-      declined, because a graceful restart is refusable by any application that
-      will not quit; `sudo -n` there wants a password. Until it is prepared the
-      job stays planted and correct and any reboot runs it
+- [ ] **the one thing between here and a measured A/B**:
+      `sudo -n /usr/local/libexec/wk-boot-priv status` on tolken still answers
+      "a password is required", so nothing can restart that Mac unattended and
+      `wk bench mac-ab` refuses in preflight ("restartable"). `wk doctor` there
+      reports it. The helper binary is correct (root:wheel 0755) and
+      `/etc/sudoers.d/zzz-wk-boot` exists at 0440 root:wheel, but it is **58
+      bytes** where the rule `<user> ALL=(root) NOPASSWD:
+      /usr/local/libexec/wk-boot-priv` is `len(user) + 54`; 58 means a 4-character
+      user, i.e. `root`. That is arithmetic, not evidence — the file is 0440 and
+      unreadable, and tolken's sudoers sets `!log_allowed` so nothing was logged.
+      `sudo cat /etc/sudoers.d/zzz-wk-boot` settles it in one line.
+      If it does say `root`, `./setup` ran under sudo; it now refuses that, and
+      re-running it as the logged-in user rewrites the rule and reports whether
+      the grant answers [needs one read or one re-run on the Mac]
+
+- [ ] the 1-round jetstream3/speedometer3/motionmark confirmation run has never
+      executed. Everything for it is in place: `20260908T145813Z` is planted on
+      the volume (`phase=planted`, `attempts=0`, `rounds 1`, `count 2`,
+      `display builtin 1470x956`, no `force` field), and every bench-side file on
+      the volume was verified byte-for-byte against the tree at plant time. It
+      runs on the next boot of that volume, which is the firmware default — so
+      the grant above, or any reboot by hand, starts it. Re-plant first if the
+      tree has moved since: `wk bench mac-ab --a 20260906T233003Z-mac-release-pgo
+      --b 20260907T021244Z-mac-release-pgo --rounds 1 --detect 0 --count 2`
 
 - [ ] `wk bench mac-ab --shutdown` still hand-rolls its transition through
       System Events: `admin/wk-boot-priv` has no halt verb, and loginwindow
