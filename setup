@@ -122,6 +122,32 @@ else
 fi
 log "wk doctor shows what is provisioned and what still needs a manual step"
 
+# Whatever ran, and whether one stage or all: an unattended command depends on these
+# answering, so the run says which do rather than leaving it to `wk doctor`.
+_priv_bad=""
+while read -r _pn _pwhere _pwhat; do
+    [ -n "$_pn" ] || continue
+    [ "$_pwhere" != linux ] || is_linux || continue
+    _pp=$(wk_priv_path "$_pn")
+    if [ ! -x "$_pp" ]; then
+        _priv_bad="$_priv_bad\n  - $_pn is not installed at $_pp"
+    elif ! wk_priv_answers "$_pp"; then
+        _priv_bad="$_priv_bad\n  - $_pn is installed and 'sudo -n $_pp' still asks for a"
+        _priv_bad="$_priv_bad\n    password: $(wk_priv_sudoers "$_pn") has to be the last match"
+        _priv_bad="$_priv_bad\n    'sudo -l' shows, and name that path character for character"
+    fi
+done <<ROWS
+$(wk_priv_helpers)
+ROWS
+if [ -n "$_priv_bad" ]; then
+    echo >&2
+    warn "privileged grants that do not answer -- nothing unattended can use these:"
+    printf "%b\n" "$_priv_bad" >&2
+else
+    info "every privileged grant answers"
+fi
+unset _priv_bad _pn _pwhere _pwhat _pp
+
 if is_macos && [ "$STAGE" = all ]; then
     _todo=""
     if ! have tart && [ ! -x "$HOME/.local/bin/tart" ]; then

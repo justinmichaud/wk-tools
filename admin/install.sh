@@ -183,7 +183,11 @@ else
             log  "  'sudo -l' shows the order; $_boot_sudoers has to be the last match."
             log  "  from an interactive shell:  ./setup --stage quiesce"
         else
-            warn "boot helper not installed: sudo needs a terminal"
+            if [ -x "$_boot_target" ]; then
+                warn "the boot helper here is not this tree's copy, and updating it needs a terminal"
+            else
+                warn "boot helper not installed: sudo needs a terminal"
+            fi
             log  "  run this from an interactive shell:  ./setup --stage quiesce"
         fi
     else
