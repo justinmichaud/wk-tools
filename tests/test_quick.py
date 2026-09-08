@@ -1075,7 +1075,7 @@ grep -q 'b_system_kind' "{REPO}/cmd/pi" || bad="$bad wk-pi-bench-does-not-check"
         if not case_m or "*) fail" not in case_m.group(0):
             bad.append("the verb dispatcher has a default that is not a refusal")
         install_sh = (REPO / "admin" / "install.sh").read_text(errors="replace")
-        if 'install -o root -m 0755 "$_card_source" "$_card_target"' not in install_sh:
+        if 'install -o root -m 0755 "$src" "$tgt"' not in install_sh:
             bad.append("admin/install.sh does not install the card helper root-owned")
         self.assertEqual(bad, [], "; ".join(bad))
 

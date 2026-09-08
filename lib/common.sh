@@ -501,7 +501,11 @@ wk_priv_path() { printf '/usr/local/libexec/%s' "$1"; }
 
 wk_priv_sudoers() { local n="${1#wk-}"; printf '/etc/sudoers.d/zzz-wk-%s' "${n%-priv}"; }
 
-wk_priv_answers() { sudo -n "$1" status >/dev/null 2>&1; }   # <helper path>
+wk_priv_answers() { # <helper path> -- the rule, never a run: `sudo -n <helper>` succeeds for anything while a timestamp is cached, and `./setup` holds that window open on purpose (2026-09-08: it reported a helper working whose rule granted `root`)
+    sudo -n -l 2>/dev/null \
+        | awk -v p="$1" '/NOPASSWD:/ { for (i = 1; i <= NF; i++) if ($i == p) found = 1 }
+                         END { exit !found }'
+}
 
 wk_host_secrets() { echo "${WK_HOST_SECRETS:-${XDG_CONFIG_HOME:-$HOME/.config}/wk/secrets}"; }
 

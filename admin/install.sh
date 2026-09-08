@@ -34,10 +34,10 @@ _priv_companions() {   # <name> -- "<source> <installed path>" per line
 }
 
 # The declared final state of one helper, both halves in one predicate: this tree's binary
-# installed root-owned and writable by nobody else, and a grant that answers. A rule is
-# never compared as text -- it can parse and still be out-ranked by a later include, or
-# name a user nobody logs in as -- so what is asked of it is whether `sudo -n` runs the
-# helper with no password, which is the only property anything unattended depends on.
+# installed root-owned and writable by nobody else, and a grant sudo reports. Both halves
+# are read off the machine and neither can be true for the wrong reason -- the binary from
+# the filesystem, the grant from the rule sudo lists rather than from a run of the helper,
+# which succeeds for anything while a sudo timestamp is cached.
 _priv_state() {   # <name> -- "<binary> <grant>"
     local name="$1" tgt src bin grant csrc cdst
     tgt="$(wk_priv_path "$name")"
@@ -75,7 +75,7 @@ _priv_explain() {   # <name> <binary> <grant>
         stale)   log "  $tgt is not this tree's copy of admin/$name" ;;
     esac
     if [ "$grant" != ok ]; then
-        log "  'sudo -n $tgt status' asks for a password, so nothing unattended can use it."
+        log "  'sudo -l' lists no NOPASSWD rule for $tgt, so nothing unattended can use it."
         log "  $sudoers has to be the last match 'sudo -l' shows, and name that path"
         log "  character for character."
     fi
@@ -83,15 +83,14 @@ _priv_explain() {   # <name> <binary> <grant>
 }
 
 # One repair, from any starting point -- absent, stale, wrong owner, no rule, a rule naming
-# another user, a rule a later include out-ranks -- and safe to run when the state is
-# already right: it installs rather than deciding a second time what is missing, so a kill
-# anywhere in it leaves a state the next run converges from.
+# a user nobody logs in as -- and safe to run when the state is already right: it installs
+# rather than deciding a second time what is missing, so a kill anywhere in it leaves a
+# state the next run converges from.
 _priv_repair() {   # <name> <binary verdict before>
-    local name="$1" bin="$2" src tgt sudoers old cand csrc cdst
+    local name="$1" bin="$2" src tgt sudoers cand csrc cdst
     src="$WK_ROOT/admin/$name"
     tgt="$(wk_priv_path "$name")"
     sudoers="$(wk_priv_sudoers "$name")"
-    old="${sudoers%/*}/${sudoers##*/zzz-}"
     cand="$_rules_dir/$name.rule"
 
     sudo install -d -o root -g "$_rootgrp" -m 0755 "$_libexec"
@@ -118,11 +117,6 @@ COMPANIONS
         changed "installed $sudoers"
     fi
     rm -f "$cand"
-    # Tombstone: an out-ranked second grant of the same path still reads as in force.
-    if [ -f "$old" ]; then
-        sudo rm -f "$old"
-        changed "removed $old (it sorted before zz-<user>-passwd and was dead)"
-    fi
     return 0
 }
 
@@ -162,8 +156,8 @@ _priv_converge() {   # <name> <platform> <what it is for>
     info "installing $name -- $what (requires sudo once)"
     _priv_repair "$name" "$bin"
 
-    # Asked again, of the machine, now: a rule that copied without error can still be
-    # out-ranked or name a path character-for-character different from the one being run.
+    # Asked again, of the machine, now: a rule that copied without error can still name a
+    # path character-for-character different from the one being run, or be out-ranked.
     state="$(_priv_state "$name")"
     bin="${state% *}"
     grant="${state#* }"
@@ -175,6 +169,47 @@ _priv_converge() {   # <name> <platform> <what it is for>
     _priv_explain "$name" "$bin" "$grant"
     return 0
 }
+
+# What an older revision leaves behind: its root-owned file, and the pre-zzz name of each
+# grant.
+_priv_retired() {
+    local name sud
+    printf '%s\n' "$_libexec/wk-tftpd" /etc/sudoers.d/wk-netboot
+    while read -r name _; do
+        [ -n "$name" ] || continue
+        sud="$(wk_priv_sudoers "$name")"
+        printf '%s\n' "${sud%/*}/${sud##*/zzz-}"
+    done <<ROWS
+$(wk_priv_helpers)
+ROWS
+    return 0
+}
+
+# Swept before any helper is judged: zz-<user>-passwd out-ranks a pre-zzz grant of the same
+# path, so it grants nothing, and `sudo -l` lists it all the same -- left in place it reads
+# as the helper being in force and suppresses the repair that installs the rule that is.
+_priv_sweep_retired() {
+    local f stale=""
+    while read -r f; do
+        [ -n "$f" ] || continue
+        [ -e "$f" ] && stale="$stale $f"
+    done <<RETIRED
+$(_priv_retired)
+RETIRED
+    [ -n "$stale" ] || return 0
+    if ! sudo -n true 2>/dev/null && [ ! -t 0 ]; then
+        warn "retired privileged file(s) present:$stale"
+        log  "  removing them needs sudo; run:  ./setup --stage quiesce"
+        return 0
+    fi
+    info "removing retired privileged file(s) (requires sudo once)"
+    # shellcheck disable=SC2086
+    sudo rm -f $stale
+    changed "removed$stale"
+    return 0
+}
+
+_priv_sweep_retired
 
 while read -r _pname _pwhere _pwhat; do
     [ -n "$_pname" ] || continue
@@ -193,23 +228,6 @@ if is_macos && [ ! -f /usr/local/share/wk-bench/owner-password ]; then
     log "  no volume-owner credential here, which may not be needed: 'wk boot mbp'"
     log "  blesses with root alone and reports what bless answered."
 fi
-
-# Tombstones: without these an older revision's root-owned file and dead grant stay.
-_retired="$_libexec/wk-tftpd /etc/sudoers.d/wk-netboot"
-_stale=""
-for _f in $_retired; do [ -e "$_f" ] && _stale="$_stale $_f"; done
-if [ -n "$_stale" ]; then
-    if ! sudo -n true 2>/dev/null && [ ! -t 0 ]; then
-        warn "retired privileged file(s) present:$_stale"
-        log  "  removing them needs sudo; run:  ./setup --stage quiesce"
-    else
-        info "removing retired privileged file(s) (requires sudo once)"
-        # shellcheck disable=SC2086
-        sudo rm -f $_stale
-        changed "removed$_stale"
-    fi
-fi
-unset _retired _stale _f
 
 # Root-owned and argument-free: an argument would widen the allowlist to "as anybody".
 _sessenv="$_libexec/wk-session.env"

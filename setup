@@ -42,7 +42,8 @@ run_stage() {
     info "stage: $name"
 
     local tmp rc sub
-    tmp="$(mktemp)"
+    tmp="$(wk_state_dir)/setup-stage.changes"   # fixed and overwritten: a killed mktemp leaves a name nothing can find again
+    ensure_dir "$(wk_state_dir)" >/dev/null
 
     set +e
     # shellcheck disable=SC1090

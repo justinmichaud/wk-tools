@@ -24,7 +24,10 @@ pinned below.
 
 Run: python3 -m unittest tests.test_boot_priv -v
 """
+import os
+import pwd
 import re
+import shutil
 import subprocess
 import unittest
 
@@ -32,6 +35,7 @@ from tests.support import REPO, WkTest, bash, func_body, stub_path
 
 HELPER = REPO / "admin" / "wk-boot-priv"
 DRIVER = REPO / "boot" / "mac-volume.sh"
+INSTALL = REPO / "admin" / "install.sh"
 
 # The helper minus the privilege: its own shell options, and `deny` and `fail`
 # exiting as they really do, so a refusal is a status a test can assert on.
@@ -45,14 +49,22 @@ fail() { printf 'wk-boot-priv: %s\\n' "$*" >&2; exit 1; }
 _VCMAILBOX = '#!/bin/sh\necho "vcmailbox $*"\n'
 
 
-def _lift(*funcs):
+def _lift_from(path, *funcs):
     out = []
     for func in funcs:
-        text = subprocess.run(["sed", "-n", f"/^{func}()/,/^}}/p", str(HELPER)],
+        text = subprocess.run(["sed", "-n", f"/^{func}()/,/^}}/p", str(path)],
                               capture_output=True, text=True).stdout
-        assert text.strip(), f"could not lift {func} from {HELPER}"
+        assert text.strip(), f"could not lift {func} from {path}"
         out.append(text)
     return "\n".join(out)
+
+
+def _lift(*funcs):
+    return _lift_from(HELPER, *funcs)
+
+
+def _lift_install(*funcs):
+    return _lift_from(INSTALL, *funcs)
 
 
 def _q(word):
@@ -408,10 +420,16 @@ class TestTheDrivingEndAsksForTheOperationNotThePrivilege(unittest.TestCase):
         self.assertIn("./setup --stage quiesce", fn)
 
     def test_setup_installs_it_with_its_own_sudoers_rule(self):
-        text = (REPO / "admin" / "install.sh").read_text()
-        self.assertIn("wk-boot-priv", text)
-        self.assertIn("zzz-wk-boot", text)
+        """One installer for all three, so the boot helper's name and the name of its
+        rule are the shared table's answers rather than literals in the installer."""
+        text = INSTALL.read_text()
+        self.assertIn("$(wk_priv_helpers)", text)
+        self.assertIn("wk_priv_sudoers", text)
         self.assertIn("visudo -cqf", text)
+        for literal in ("zzz-wk-boot", "zzz-wk-card", "zzz-wk-quiesce"):
+            with self.subTest(literal=literal):
+                self.assertNotIn(literal, text,
+                                 "a rule's name is a literal in the installer again")
 
     def test_claude_md_names_all_three_carve_outs(self):
         """The rule is only worth anything if it lists what actually exists."""
@@ -421,17 +439,17 @@ class TestTheDrivingEndAsksForTheOperationNotThePrivilege(unittest.TestCase):
                 self.assertIn(h, text)
 
 class TheHelperInstallsOnBothPlatforms(WkTest):
-    """`install -g root` is an error on macOS, which has no `root` group -- root's
-    is `wheel`. It failed there on every run, which is why tolken carried the
-    quiesce helper (whose block asked for wheel first) and not the boot one."""
+    """`install -g root` is an error on macOS, which has no `root` group -- root's is
+    `wheel`. One install line asks the platform for the name, so no helper can be the one
+    that gets it wrong."""
 
-    INSTALL = REPO / "admin" / "install.sh"
+    INSTALL = INSTALL
 
     def test_no_block_asks_for_a_group_by_name(self):
         text = self.INSTALL.read_text()
         self.assertNotIn('-g root', text)
         self.assertNotIn('-g wheel', text)
-        self.assertEqual(3, text.count('-g "$_rootgrp"'), text.count('-g "$_rootgrp"'))
+        self.assertEqual(1, text.count('-g "$_rootgrp"'), text.count('-g "$_rootgrp"'))
 
     def test_the_group_is_asked_of_the_platform(self):
         for os_name, want in (("macos", "wheel"), ("linux", "root")):
@@ -471,8 +489,8 @@ class SetupRefusesRoot(WkTest):
     def test_every_grant_is_built_from_the_running_user(self):
         """So the guard is the only thing standing between a sudo'd setup and a
         sudoers file that grants nobody."""
-        text = (REPO / "admin" / "install.sh").read_text()
-        self.assertEqual(6, text.count('$(id -un) ALL=(root) NOPASSWD:'),
+        text = INSTALL.read_text()
+        self.assertEqual(1, text.count('$(id -un) ALL=(root) NOPASSWD:'),
                          text.count('$(id -un) ALL=(root) NOPASSWD:'))
 
     def _guard(self):
@@ -482,6 +500,439 @@ class SetupRefusesRoot(WkTest):
         start = text.index('[ "$(id -u)" -eq 0 ]')
         end = text.index('SUDO_USER.}"', start) + len('SUDO_USER.}"')
         return text[start:end]
+
+
+# admin/install.sh, minus the privilege and minus the real machine's paths. Every path it
+# writes comes from wk_priv_path/wk_priv_sudoers/$_libexec/$_rules_dir, so redefining those
+# four moves the whole installer into a scratch directory; `sudo` becomes a function that
+# runs its argv under this user (nothing here is root) and refuses any path outside it.
+_FAKE = '''set -euo pipefail
+. "$WK_ROOT/lib/common.sh"
+FAKE=%(fake)s
+NOSUDO=%(nosudo)d
+VISUDO=%(visudo)d
+_libexec="$FAKE/libexec"
+_check_source="$WK_ROOT/boot/check-boot-files.py"
+_check_target="$_libexec/wk-check-boot-files.py"
+_rules_dir="$FAKE/rules"
+_rootgrp="$(id -gn)"
+is_linux() { return %(notlinux)d; }
+is_macos() { return %(notmacos)d; }
+wk_priv_path() { printf '%%s/%%s' "$_libexec" "$1"; }
+wk_priv_sudoers() { local n="${1#wk-}"; printf '%%s/sudoers.d/zzz-wk-%%s' "$FAKE" "${n%%%%-priv}"; }
+
+sudo() {
+    local a args=()
+    if [ "${1:-}" = -n ]; then
+        shift
+        if [ "${1:-}" = true ]; then return "$NOSUDO"; fi
+        # `sudo -n -l`: the rules sudo would apply to this user, which is the only thing
+        # lib/common.sh's wk_priv_answers reads. A run under a cached credential succeeds
+        # below whatever this lists, so the two cannot stand in for one another.
+        if [ "${1:-}" = -l ]; then
+            grep -h "^$(id -un) " "$FAKE"/sudoers.d/* 2>/dev/null || true
+            return 0
+        fi
+    fi
+    if [ "${1:-}" = visudo ]; then return "$VISUDO"; fi
+    for a in "$@"; do
+        case "$a" in
+            root) args+=("$(id -un)") ;;
+            "$FAKE"/*|"$WK_ROOT"/*) args+=("$a") ;;
+            /*) printf 'OUTSIDE %%s\\n' "$a" >&2; return 0 ;;
+            *) args+=("$a") ;;
+        esac
+    done
+    "${args[@]}"
+}
+'''
+
+_PRIV_FUNCS = ("_priv_owner", "_priv_mode", "_priv_companions", "_priv_state",
+               "_priv_explain", "_priv_repair", "_priv_converge", "_priv_retired",
+               "_priv_sweep_retired")
+
+
+class TestOneConvergentInstallForAllThreeHelpers(WkTest):
+    """The installer's declared final state for a helper is two halves at once: the binary
+    this tree ships, installed root-owned and writable by nobody else, and a grant that
+    answers `sudo -n`. Measured on tolken 2026-09-08: a byte-identical root-owned
+    wk-boot-priv and /etc/sudoers.d/zzz-wk-boot reading `root ALL=(root) NOPASSWD:
+    /usr/local/libexec/wk-boot-priv` -- a right binary, a rule naming nobody who logs in,
+    and every check that looks at the binary alone reporting done.
+
+    Nothing here is root: `sudo` is a function (see _FAKE) that runs its argv as this user
+    inside a scratch directory and refuses any absolute path outside it.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.fake = self.tmp / "fake"
+        (self.fake / "libexec").mkdir(parents=True)
+        (self.fake / "sudoers.d").mkdir(parents=True)
+        self.me = pwd.getpwuid(os.getuid()).pw_name
+
+    # --- the machine's state before the run -------------------------------------------
+
+    def target(self, name="wk-boot-priv"):
+        return self.fake / "libexec" / name
+
+    def sudoers(self, name="wk-boot-priv"):
+        short = name[len("wk-"):]
+        if short.endswith("-priv"):
+            short = short[:-len("-priv")]
+        return self.fake / "sudoers.d" / ("zzz-wk-" + short)
+
+    def rule(self, name="wk-boot-priv", user=None):
+        return "%s ALL=(root) NOPASSWD: %s\n" % (user or self.me, self.target(name))
+
+    def plant_binary(self, name="wk-boot-priv", stale=False, mode=0o755, companion=True):
+        tgt = self.target(name)
+        shutil.copyfile(REPO / "admin" / name, tgt)
+        if stale:
+            with tgt.open("a") as f:
+                f.write("# an older revision\n")
+        tgt.chmod(mode)
+        if companion and name == "wk-card-priv":
+            comp = self.fake / "libexec" / "wk-check-boot-files.py"
+            shutil.copyfile(REPO / "boot" / "check-boot-files.py", comp)
+            comp.chmod(0o644)
+        return tgt
+
+    def plant_rule(self, name="wk-boot-priv", user=None, text=None):
+        p = self.sudoers(name)
+        if p.exists():
+            p.unlink()        # 0440, as sudo wants it
+        p.write_text(text if text is not None else self.rule(name, user))
+        p.chmod(0o440)
+        return p
+
+    # --- the run ----------------------------------------------------------------------
+
+    def drive(self, script, nosudo=0, visudo=0, granted=None, macos=False,
+              owner="root"):
+        """The lifted installer, run against that state. nosudo=1 is a machine with no
+        passwordless sudo, which with no terminal (this harness has none) is the branch
+        that reports rather than installs. The grant half is lib/common.sh's real
+        wk_priv_answers reading the stub `sudo -l` listing, unless `granted` forces the
+        answer. Nothing here can be owned by root, so the one function that reads an owner
+        off the filesystem answers `owner`; the real one is asked of a real file below."""
+        pre = _FAKE % {"fake": _q(str(self.fake)), "nosudo": nosudo, "visudo": visudo,
+                       "notlinux": 1 if macos else 0, "notmacos": 0 if macos else 1}
+        if granted is not None:
+            pre += "wk_priv_answers() { return %d; }\n" % (0 if granted else 1)
+        cp = bash(pre + _lift_install(*_PRIV_FUNCS)
+                  + "\n_priv_owner() { printf '%%s' %s; }\n" % _q(owner) + script
+                  + '\necho "CHANGES=$WK_CHANGES"\n', env={"WK_DEBUG": "1"})
+        return cp
+
+    def converge(self, name="wk-boot-priv", platform="any", **kw):
+        cp = self.drive('_priv_converge %s %s "what it is for" </dev/null'
+                        % (_q(name), platform), **kw)
+        m = re.search(r"CHANGES=(\d+)", cp.stdout)
+        cp.changes = int(m.group(1)) if m else -1
+        cp.said = cp.stdout + cp.stderr
+        return cp
+
+    def state(self, name="wk-boot-priv", **kw):
+        cp = self.drive('_priv_state %s </dev/null' % _q(name), **kw)
+        self.assertEqual(0, cp.returncode, cp.stdout + cp.stderr)
+        return cp.stdout.splitlines()[0].strip()
+
+    # --- the state tolken is in -------------------------------------------------------
+
+    def test_a_rule_that_names_another_user_is_detected(self):
+        """The half nothing looked at. The binary is this tree's, root-owned, 0755."""
+        self.plant_binary()
+        self.plant_rule(user="root")
+        self.assertEqual("ok silent", self.state())
+
+    def test_a_rule_that_names_another_user_is_rewritten(self):
+        self.plant_binary()
+        self.plant_rule(user="root")
+        cp = self.converge()
+        self.assertEqual(0, cp.returncode, cp.said)
+        self.assertEqual(self.rule(), self.sudoers().read_text())
+        self.assertIn("installed %s" % self.sudoers(), cp.said)
+        self.assertGreaterEqual(cp.changes, 1, cp.said)
+
+    def test_the_rewritten_rule_is_the_grant_and_nothing_wider(self):
+        self.plant_binary()
+        self.plant_rule(user="root")
+        self.converge()
+        text = self.sudoers().read_text()
+        self.assertEqual("%s ALL=(root) NOPASSWD: %s" % (self.me, self.target()),
+                         text.strip())
+        self.assertNotIn("NOPASSWD: ALL", text)
+        self.assertEqual("440", oct(self.sudoers().stat().st_mode)[-3:])
+
+    def test_the_installed_binary_is_a_copy_and_never_a_symlink_into_this_repo(self):
+        cp = self.converge()
+        self.assertEqual(0, cp.returncode, cp.said)
+        self.assertFalse(self.target().is_symlink())
+        self.assertEqual((REPO / "admin" / "wk-boot-priv").read_bytes(),
+                         self.target().read_bytes())
+
+    # --- the other half, and the state that is already right --------------------------
+
+    def test_a_stale_binary_with_a_working_grant_is_detected_and_replaced(self):
+        self.plant_binary(stale=True)
+        self.plant_rule()
+        self.assertEqual("stale ok", self.state())
+        cp = self.converge()
+        self.assertEqual(0, cp.returncode, cp.said)
+        self.assertEqual((REPO / "admin" / "wk-boot-priv").read_bytes(),
+                         self.target().read_bytes())
+        self.assertIn("installed %s" % self.target(), cp.said)
+
+    def test_a_binary_owned_by_anyone_but_root_is_detected(self):
+        self.plant_binary()
+        self.plant_rule()
+        cp = self.drive('_priv_state wk-boot-priv', owner="someone")
+        self.assertEqual("foreign ok", cp.stdout.splitlines()[0].strip())
+        self.assertIn("owned by someone, not root",
+                      self.converge(owner="someone", nosudo=1).said)
+
+    def test_a_correct_state_is_left_alone_and_reports_no_change(self):
+        self.plant_binary()
+        self.plant_rule()
+        before = self.sudoers().stat().st_mtime_ns, self.target().stat().st_mtime_ns
+        self.assertEqual("ok ok", self.state())
+        cp = self.converge()
+        self.assertEqual(0, cp.returncode, cp.said)
+        self.assertEqual(0, cp.changes, cp.said)
+        self.assertIn("ok: wk-boot-priv and %s" % self.sudoers(), cp.said)
+        self.assertNotIn("installing", cp.said)
+        self.assertEqual(before,
+                         (self.sudoers().stat().st_mtime_ns, self.target().stat().st_mtime_ns))
+
+    def test_the_repair_is_idempotent(self):
+        """Twice in a row: one change, then none. What ./setup's own contract asks of
+        every stage."""
+        self.plant_binary()
+        self.plant_rule(user="root")
+        first = self.converge()
+        self.assertGreaterEqual(first.changes, 1, first.said)
+        second = self.converge()
+        self.assertEqual(0, second.changes, second.said)
+
+    # --- every state a kill can leave behind ------------------------------------------
+
+    def test_a_kill_between_the_binary_and_its_rule_converges(self):
+        """The order the repair installs in, so this is the state a kill in the middle
+        leaves: the helper on disk with no grant at all."""
+        self.plant_binary()
+        self.assertEqual("ok silent", self.state())
+        cp = self.converge()
+        self.assertEqual(0, cp.returncode, cp.said)
+        self.assertEqual(self.rule(), self.sudoers().read_text())
+        self.assertEqual("ok ok", self.state())
+
+    def test_a_kill_after_validation_and_before_the_install_converges(self):
+        """`visudo -cqf` passed and the install never ran, so the candidate rule is on
+        disk at its fixed path and the grant is still whatever it was."""
+        cand = self.fake / "rules" / "wk-boot-priv.rule"
+        cand.parent.mkdir(parents=True)
+        cand.write_text("half-written garbage\n")
+        self.plant_binary()
+        self.plant_rule(user="root")
+        cp = self.converge()
+        self.assertEqual(0, cp.returncode, cp.said)
+        self.assertEqual(self.rule(), self.sudoers().read_text())
+        self.assertFalse(cand.exists(), "the candidate rule is left behind")
+
+    def test_the_candidate_rule_is_a_fixed_path_and_not_an_unpredictable_one(self):
+        """A mktemp name a kill leaves behind is a file nothing will ever find again."""
+        code = "\n".join(l for l in INSTALL.read_text().splitlines()
+                         if not l.lstrip().startswith("#"))
+        self.assertNotIn("mktemp", code)
+        self.plant_binary()
+        cp = self.converge()
+        self.assertEqual(0, cp.returncode, cp.said)
+        self.assertEqual([], sorted((self.fake / "rules").glob("*")))
+
+    def test_a_kill_before_the_companion_leaves_a_state_that_converges(self):
+        """The card helper's boot-file checker is installed beside it, so a helper that
+        is byte-identical with no checker beside it is a half-made install."""
+        self.plant_binary("wk-card-priv", companion=False)
+        self.plant_rule("wk-card-priv")
+        self.assertEqual("stale ok", self.state("wk-card-priv"))
+        cp = self.converge("wk-card-priv", "linux")
+        self.assertEqual(0, cp.returncode, cp.said)
+        self.assertEqual((REPO / "boot" / "check-boot-files.py").read_bytes(),
+                         (self.fake / "libexec" / "wk-check-boot-files.py").read_bytes())
+        self.assertEqual("ok ok", self.state("wk-card-priv"))
+
+    def test_a_pre_zzz_grant_reads_as_the_helper_being_in_force(self):
+        """Which is why it cannot be left for the repair to remove: it grants nothing
+        (zz-<user>-passwd out-ranks it) and `sudo -l` lists it all the same."""
+        self.plant_binary()
+        (self.fake / "sudoers.d" / "wk-boot").write_text(self.rule())
+        self.assertEqual("ok ok", self.state())
+
+    def test_the_pre_zzz_grant_is_swept_before_any_helper_is_judged(self):
+        self.plant_binary()
+        old = self.fake / "sudoers.d" / "wk-boot"
+        old.write_text(self.rule())
+        cp = self.drive('_priv_sweep_retired </dev/null\n'
+                        '_priv_converge wk-boot-priv any "what it is for" </dev/null')
+        said = cp.stdout + cp.stderr
+        self.assertEqual(0, cp.returncode, said)
+        self.assertFalse(old.exists(), said)
+        self.assertIn("removed %s" % old, said)
+        self.assertEqual(self.rule(), self.sudoers().read_text())
+
+    def test_every_retired_name_is_derived_and_the_sweep_comes_first(self):
+        cp = self.drive('_priv_retired </dev/null')
+        self.assertEqual(0, cp.returncode, cp.stdout + cp.stderr)
+        listed = cp.stdout.split()
+        for short in ("wk-quiesce", "wk-card", "wk-boot"):
+            with self.subTest(retired=short):
+                self.assertIn(str(self.fake / "sudoers.d" / short), listed)
+        self.assertIn(str(self.fake / "libexec" / "wk-tftpd"), listed)
+        code = INSTALL.read_text()
+        self.assertLess(code.index("\n_priv_sweep_retired\n"),
+                        code.index("while read -r _pname"),
+                        "a helper is judged before the dead grants are swept")
+
+    # --- the refusals -----------------------------------------------------------------
+
+    def test_visudo_refusing_installs_no_rule(self):
+        """An invalid sudoers file locks the account out of sudo entirely."""
+        self.plant_binary()
+        cp = self.converge(visudo=1)
+        self.assertEqual(1, cp.returncode, cp.said)
+        self.assertIn("failed validation", cp.said)
+        self.assertFalse(self.sudoers().exists(), cp.said)
+        self.assertFalse((self.fake / "rules" / "wk-boot-priv.rule").exists())
+
+    def test_visudo_refusing_leaves_an_existing_rule_alone(self):
+        self.plant_binary()
+        self.plant_rule(user="root")
+        cp = self.converge(visudo=1)
+        self.assertEqual(1, cp.returncode, cp.said)
+        self.assertEqual(self.rule(user="root"), self.sudoers().read_text())
+
+    def test_a_group_or_world_writable_helper_refuses_and_names_the_remedy(self):
+        for mode in (0o775, 0o757, 0o777):
+            with self.subTest(mode=oct(mode)):
+                self.plant_binary(mode=mode)
+                self.plant_rule()
+                cp = self.converge()
+                self.assertEqual(1, cp.returncode, cp.said)
+                self.assertIn("root escalation", cp.said)
+                self.assertIn("remove %s" % self.sudoers(), cp.said)
+
+    def test_a_mode_that_cannot_be_read_refuses_to_vouch_for_the_grant(self):
+        self.plant_binary()
+        self.plant_rule()
+        cp = self.drive('_priv_mode() { printf ""; }\n'
+                        '_priv_converge wk-boot-priv any "what it is for"')
+        self.assertEqual(1, cp.returncode, cp.stdout + cp.stderr)
+        self.assertIn("could not read the mode", cp.stdout + cp.stderr)
+
+    def test_a_helper_missing_from_this_tree_is_named_and_skipped(self):
+        cp = self.converge("wk-nothing-priv")
+        self.assertEqual(0, cp.returncode, cp.said)
+        self.assertEqual(0, cp.changes, cp.said)
+        self.assertIn("missing at", cp.said)
+
+    def test_the_card_helper_is_skipped_on_macos(self):
+        """macOS has no card lane, and a helper held to is_linux was how the boot helper
+        went unchecked there."""
+        cp = self.converge("wk-card-priv", "linux", macos=True)
+        self.assertEqual(0, cp.returncode, cp.said)
+        self.assertEqual(0, cp.changes, cp.said)
+        self.assertFalse(self.target("wk-card-priv").exists())
+        self.assertFalse(self.sudoers("wk-card-priv").exists())
+        self.assertIn("linux only", cp.said)
+
+    def test_the_other_two_are_installed_on_macos(self):
+        cp = self.drive('while read -r n w rest; do _priv_converge "$n" "$w" "$rest"; done'
+                        ' <<ROWS\n$(wk_priv_helpers)\nROWS', macos=True)
+        self.assertEqual(0, cp.returncode, cp.stdout + cp.stderr)
+        for name in ("wk-quiesce-priv", "wk-boot-priv"):
+            with self.subTest(helper=name):
+                self.assertEqual(self.rule(name), self.sudoers(name).read_text())
+        self.assertFalse(self.target("wk-card-priv").exists())
+
+    def test_a_grant_sudo_does_not_report_is_never_claimed_done(self):
+        """The rule on disk is already byte-for-byte the one this would write and sudo
+        still reports no grant -- an include after it, or a `sudo -l` this machine will
+        not answer without a password. Nothing here can repair that, so the run says
+        which half is wrong and claims no change it did not make, now or next time."""
+        self.plant_binary()
+        self.plant_rule()
+        first = self.converge(granted=False)
+        self.assertEqual(0, first.returncode, first.said)
+        self.assertIn("does not answer", first.said)
+        self.assertIn("last match", first.said)
+        self.assertIn("sudo -l", first.said)
+        self.assertEqual(0, first.changes, first.said)
+        second = self.converge(granted=False)
+        self.assertEqual(0, second.changes, second.said)
+
+    def test_without_sudo_or_a_terminal_it_reports_which_half_is_wrong(self):
+        self.plant_binary()
+        self.plant_rule(user="root")
+        cp = self.converge(nosudo=1)
+        self.assertEqual(0, cp.returncode, cp.said)
+        self.assertEqual(0, cp.changes, cp.said)
+        self.assertIn("lists no NOPASSWD rule", cp.said)
+        self.assertIn("./setup --stage quiesce", cp.said)
+        self.assertEqual(self.rule(user="root"), self.sudoers().read_text())
+
+    def test_without_sudo_or_a_terminal_it_names_a_missing_binary(self):
+        cp = self.converge(nosudo=1)
+        self.assertEqual(0, cp.returncode, cp.said)
+        self.assertIn("%s is not installed" % self.target(), cp.said)
+
+    def test_a_cached_sudo_credential_cannot_make_a_missing_grant_read_as_done(self):
+        """What masked this on tolken: ./setup authenticates once and holds the sudo
+        timestamp open for its whole run, so the old `sudo -n <helper> status` succeeded
+        for every helper while it was open -- including the one whose rule granted `root`
+        -- and the repair was suppressed by the check meant to trigger it. Here the stub
+        `sudo` runs anything (a credential is cached) while its `-l` listing names no rule
+        for this path, which is that machine exactly."""
+        self.plant_binary()
+        self.plant_rule(user="root")
+        proof = self.drive('sudo %s status && echo "A RUN SUCCEEDS"\n'
+                           '_priv_state wk-boot-priv </dev/null' % _q(str(self.target())))
+        self.assertIn("A RUN SUCCEEDS", proof.stdout, proof.stdout + proof.stderr)
+        self.assertIn("ok silent", proof.stdout)
+        cp = self.converge()
+        self.assertEqual(self.rule(), self.sudoers().read_text())
+        self.assertGreaterEqual(cp.changes, 1, cp.said)
+
+    def test_no_privileged_run_decides_whether_a_grant_is_in_force(self):
+        """The rule above as a property of the file: every `sudo -n` in the installer is
+        `true` (is there a credential at all) or `grep` (reading a root-owned config), and
+        the grant half of the state is the shared predicate that reads the rule."""
+        code = "\n".join(l for l in INSTALL.read_text().splitlines()
+                         if not l.lstrip().startswith("#"))
+        self.assertIn('wk_priv_answers "$tgt"', code)
+        for m in re.finditer(r"sudo -n (\S+)", code):
+            with self.subTest(call=m.group(0)):
+                self.assertIn(m.group(1), ("true", "grep"), m.group(0))
+
+    # --- the two facts read off the filesystem ----------------------------------------
+
+    def test_the_owner_and_mode_are_read_by_the_form_this_platform_answers(self):
+        """`stat -c` on Linux, `stat -f` on macOS: the GNU form is asked first because
+        Linux's `stat -f` succeeds as "filesystem status" and never as an owner."""
+        f = self.tmp / "a-file"
+        f.write_text("x\n")
+        f.chmod(0o640)
+        cp = bash('. "$WK_ROOT/lib/common.sh"\n' + _lift_install("_priv_owner", "_priv_mode")
+                  + '\n_priv_owner %s\n_priv_mode %s\n' % (_q(str(f)), _q(str(f))))
+        self.assertEqual(0, cp.returncode, cp.stdout + cp.stderr)
+        self.assertEqual([self.me, "640"], cp.stdout.split())
+
+    def test_an_absent_file_answers_neither(self):
+        cp = bash('. "$WK_ROOT/lib/common.sh"\nset -euo pipefail\n'
+                  + _lift_install("_priv_owner", "_priv_mode")
+                  + '\necho "owner=[$(_priv_owner /nope)] mode=[$(_priv_mode /nope)]"\n')
+        self.assertEqual(0, cp.returncode, cp.stdout + cp.stderr)
+        self.assertIn("owner=[] mode=[]", cp.stdout)
 
 
 if __name__ == "__main__":

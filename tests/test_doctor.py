@@ -35,7 +35,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from tests.support import REPO, WkTest, bash, func_body
+from tests.support import REPO, WkTest, bash, func_body, stub_path
 
 CMD_DOCTOR = REPO / "cmd" / "doctor"
 LIB_COMMON = REPO / "lib" / "common.sh"
@@ -483,6 +483,54 @@ class EveryPrivilegedHelperIsAsked(WkTest):
         out = cp.stdout + cp.stderr
         self.assertIn("OK wk-boot-priv", out, out)
         self.assertNotIn("MISS", out, out)
+
+class ACachedCredentialIsNotAGrant(WkTest):
+    """`./setup` authenticates once and holds the sudo window open for its whole
+    run, so `sudo -n <helper>` succeeds for anything while it runs. Asked that
+    way the check reported every helper working on a Mac whose zzz-wk-boot rule
+    granted `root` -- and because it read as working, the repair was suppressed
+    and three runs changed nothing (measured 2026-09-08). The rule is the
+    evidence, so `sudo -l` is what is read."""
+
+    HELPER = "/usr/local/libexec/wk-boot-priv"
+
+    def _answers(self, listing, run_succeeds=True):
+        """`sudo` stubbed twice over: `-l` prints `listing`, and running the
+        helper succeeds -- which is what a cached credential looks like."""
+        with stub_path({"sudo": '#!/bin/sh\n'
+                                'for a in "$@"; do [ "$a" = -l ] && { cat <<EOF\n'
+                                + listing + '\nEOF\nexit 0; }; done\n'
+                                'exit %d\n' % (0 if run_succeeds else 1)}) as binp:
+            cp = bash('. "$WK_ROOT/lib/common.sh"; wk_priv_answers %s && echo GRANT || echo NONE'
+                      % self.HELPER,
+                      env=dict(os.environ, PATH="%s:%s" % (binp, os.environ["PATH"])))
+        return (cp.stdout + cp.stderr).strip().splitlines()[-1]
+
+    def test_a_listing_without_the_path_is_no_grant_even_though_it_runs(self):
+        listing = ("User justinmichaud may run the following commands on Tolken:\n"
+                   "    (ALL) ALL\n"
+                   "    (root) NOPASSWD: /usr/local/libexec/wk-quiesce-priv")
+        self.assertEqual("NONE", self._answers(listing, run_succeeds=True))
+
+    def test_a_listing_with_the_path_is_a_grant(self):
+        listing = ("User justinmichaud may run the following commands on Tolken:\n"
+                   "    (ALL) ALL\n"
+                   "    (root) NOPASSWD: /usr/local/libexec/wk-boot-priv")
+        self.assertEqual("GRANT", self._answers(listing))
+
+    def test_a_blanket_all_is_not_a_grant(self):
+        """`(ALL) ALL` lets the helper run with a password, which is exactly what
+        an unattended lane cannot do."""
+        self.assertEqual("NONE", self._answers("    (ALL) ALL"))
+
+    def test_the_path_must_match_exactly(self):
+        listing = "    (root) NOPASSWD: /usr/local/libexec/wk-boot-priv-old"
+        self.assertEqual("NONE", self._answers(listing))
+
+    def test_no_listing_at_all_is_reported_as_no_grant(self):
+        """A sudo that will not list is unknown, and unknown must not read as
+        working -- the safe direction is to refuse."""
+        self.assertEqual("NONE", self._answers(""))
 
 
 if __name__ == "__main__":
