@@ -10,7 +10,7 @@ Remember the goal: everything should be reproducable. It should be easy to reset
 NEEDS YOU
 ================================================================================
 
-1. `wk key register` writes two deploy keys to your forks through `gh`, which
+1. `wk key deploy` writes two deploy keys to your forks through `gh`, which
    this session does not use. The machine recreate regenerated both keys on
    2026-09-03; measured 2026-09-04, GitHub answers `Permission denied
    (publickey)` for each. Nothing in a workspace can push until they are
@@ -133,7 +133,7 @@ OWED, WITH THE DECISION ALREADY MADE
         tests.test_machine_mounts tests.test_push_agent tests.test_build
   The machine has carried no mirror and no base snapshot since it was
   recreated, which is what `wk new`'s "no base snapshot yet" is. The deploy
-  keys went with it, so both forks need `wk key register` and the new public
+  keys went with it, so both forks need `wk key deploy` and the new public
   keys on GitHub before anything can push. One assumption is still unmeasured:
   that a container's own uid can write and rename inside the agent-rw virtiofs
   mount (tests/test_machine_mounts.py measures it and skips with no image). If

@@ -85,7 +85,7 @@ class TestTheStoreFunctionsReadAndWriteHere(_Here):
         cp = self.sh(
             f'printf "%s\\n" {PLACEHOLDER} | wk_agent_secret_store claude\n'
             'printf "stored=[%s]\\n" "$(wk_agent_secret claude)"\n'
-            'wk_agent_secret_clear claude\n'
+            'wk_cred_clear claude\n'
             'printf "cleared=[%s]\\n" "$(wk_agent_secret claude)"\n')
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
         self.assertIn(f"stored=[{PLACEHOLDER}]", cp.stdout)

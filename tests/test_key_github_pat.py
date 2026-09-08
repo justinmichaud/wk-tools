@@ -46,15 +46,20 @@ TOKEN = "ghp_thisisnotarealtoken0123456789"
 class _PatRun(WkTest):
     def setUp(self):
         super().setUp()
-        self.secrets = self.tmp / "secrets"
-        self.held = self.tmp / "push-keys"
-        self.store = self.tmp / "store"
-        self.secrets.mkdir()
-        self.held.mkdir()
         # A store this process can write is a machine `push_agent_exec` runs
         # on directly (store_is_local, lib/store.sh), which is what makes the
         # read token's delivery observable here without a podman machine.
+        #
+        # wk_secrets_dir (lib/store.sh) reads WK_HOST_SECRETS on a macOS host
+        # and $WK_STORE/secrets everywhere else; one directory under both names
+        # is what a real machine looks like, and is what makes these tests read
+        # the path the command actually wrote on either platform.
+        self.store = self.tmp / "store"
+        self.secrets = self.store / "secrets"
+        self.held = self.store / "push-keys"
         self.store.mkdir()
+        self.secrets.mkdir()
+        self.held.mkdir()
         self.extra_env = {}
 
     def _env(self, binp):
@@ -116,7 +121,7 @@ class TestNothingStoredYet(_PatRun):
     def test_replace_with_nothing_to_replace_names_the_path(self):
         cp = self.key("set", "github-pat", "--replace")
         self.assertNotEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertIn("no GitHub token here to replace", cp.stderr)
+        self.assertIn("no github-pat credential here to replace", cp.stderr)
         self.assertIn(str(self.pat()), cp.stderr)
 
     def test_an_unknown_flag_is_the_usage(self):
@@ -129,7 +134,7 @@ class TestNothingStoredYet(_PatRun):
         rc, out = self.key_tty("set", "github-pat", paste="")
         self.assertNotEqual(rc, 0, out)
         self.assertIn("nothing stored", out)
-        self.assertIn("401", out)
+        self.assertIn("open a pull request", out)
         self.assertFalse(self.pat().exists())
 
     def test_with_no_terminal_it_says_to_re_run_interactively(self):
@@ -164,12 +169,12 @@ class TestStoringOne(_PatRun):
         self.assertNotIn(TOKEN, out)
 
     def test_the_value_is_never_an_argument(self):
-        """An argument is in `ps` for everyone on the machine, so the value is
-        written by a redirect inside a subshell that sets the umask first --
-        never handed to a command."""
+        """An argument is in `ps` for everyone on the machine, so the value
+        goes down a pipe into the one writer (lib/secretfile.py, through
+        wk_cred_store) -- never handed to a command."""
         text = (REPO / "cmd" / "key").read_text()
-        written = r'''( umask 077; printf '%s\n' "$_val" > "$(wk_github_pat_path)" )'''
-        self.assertIn(written, text)
+        self.assertIn(r'''printf '%s\n' "$_val" | wk_cred_store "$_name"''', text)
+        self.assertNotIn('wk_cred_store "$_name" "$_val"', text)
 
 
 class TestReplacingOne(_PatRun):
@@ -196,7 +201,7 @@ class TestReplacingOne(_PatRun):
         left the old one live would be a credential nobody is tracking."""
         rc, out = self.key_tty("set", "github-pat", "--replace", paste=TOKEN)
         self.assertEqual(rc, 0, out)
-        self.assertIn("revoke it on GitHub", out)
+        self.assertIn("revoke it too if it is still live", out)
         self.assertEqual(TOKEN, self.pat().read_text().strip())
 
     def test_replace_with_an_empty_answer_leaves_none(self):
@@ -249,7 +254,10 @@ class TestTheStandingReadTokenReachesTheMachine(_PatRun):
         """Best effort: the token is stored either way, and ./setup converges
         the machine. A `die` here would refuse to keep a credential the person
         has already pasted."""
-        self.extra_env = {"WK_STORE": str(self.tmp / "not-a-store")}
+        # The token's own directory is untouched; what cannot be written is
+        # the standing copy on the machine that reads GitHub.
+        self.extra_env = {
+            "WK_PUSH_READ_PAT_FILE": str(self.tmp / "not-a-store" / "read-pat")}
         rc, out = self.key_tty("set", "github-pat", paste=TOKEN)
         self.assertEqual(rc, 0, out)
         self.assertEqual(TOKEN, self.pat().read_text().strip())

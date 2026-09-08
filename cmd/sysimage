@@ -430,12 +430,11 @@ _tailnet_key_preflight() { # <IMG_MACHINE> <role>
     its fleet name.
     Give it one:  --machine <name>"
     wk_tailscale_authkey_present && return 0
-    wk_tailscale_authkey >/dev/null 2>&1 && return 0
     die "there is no tailnet auth key on this machine, so the card this is about
     to write would boot with no tailnet identity -- reachable only over whatever
     LAN it lands on, unreachable by its fleet name, which is the state the fleet
     rule exists to end.
-    Set one first:  wk key tailnet"
+    Set one first:  wk key set tailnet"
 }
 
 _wifi_creds_preflight() { # <IMG_MACHINE>
@@ -508,10 +507,10 @@ _tailnet_name_preflight() { # <name> <bench|rescue>
     tailnet name, so a card that joins renamed is a card nothing here can find.
     There is no --force: the one exception is a board's own rescue replacing
     itself, and this write is not that. Two remedies:
-      wk key tailnet-api    store a token, and this command retires the stale
-                            node itself on the re-run
-      the admin console     remove '$name' by hand at
-                            https://login.tailscale.com/admin/machines"
+      wk key set tailnet-api  store a token, and this command retires the
+                              stale node itself on the re-run
+      the admin console       remove '$name' by hand at
+                              https://login.tailscale.com/admin/machines"
     fi
     if disk_would "retire the stale tailnet node '$name' so this card can join under it"; then
         return 0
@@ -672,7 +671,7 @@ would write
                 || echo "written as built -- not a fleet board build (${IMG_BUILDER:-unknown profile}); identity marker and driving key only")
   tailnet   $(wk_tailscale_authkey_present \
                 && printf 'auth key present -- the card joins as this board on first boot' \
-                || printf 'NO auth key -- the real write refuses here (wk key tailnet)')
+                || printf 'NO auth key -- the real write refuses here (wk key set tailnet)')
   wifi      $(_image_wants_wifi "${IMG_MACHINE:-}" \
                 && { card_priv wifi-host 2>&1 | grep -q 'wifi-host: yes' \
                        && printf '%s is on WiFi -- the card brings up WiFi on every boot, from its credential' "$DISK_MACHINE" \

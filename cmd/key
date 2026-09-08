@@ -1,44 +1,51 @@
 #!/usr/bin/env bash
 #
-# wk key register|check|show|ensure|set|claude|tailnet|tailnet-api -- the credentials a workspace needs
+# wk key setup|set|deploy|check|show|ensure -- the credentials this machine holds
 # wk: where=host name=none group=sources needs gh,gh-auth
-# wk: sub show,ensure,pub,sshtest,fingerprints,set,claude,tailnet,tailnet-api needs=
+# wk: sub show,ensure,pub,sshtest,fingerprints,set,register,claude,tailnet,tailnet-api needs=
+#
+#   wk key setup      store every credential this machine has not got yet, and
+#                     report what each one can do. The one command a new
+#                     machine needs: it asks for the missing ones in turn,
+#                     leaves the ones already here alone, and can be re-run
+#   wk key set <name> [--replace]
+#                     one credential by name, or the report on it when it is
+#                     already here. <name> is a row of lib/credcheck.py:
+#
+#                       github-pat    what `git-webkit pr` opens a pull request
+#                                     with. The one credential that never
+#                                     enters a workspace: only the credential
+#                                     injector reads it, which reads GitHub
+#                                     with it whatever position `wk push` is in
+#                                     and writes only while it is on
+#                       claude        the Claude Code token every workspace
+#                                     this machine makes starts authenticated
+#                                     with (`claude setup-token` prints one)
+#                       claude-login  the claude.ai account credential `claude
+#                                     auth login` leaves on this machine -- the
+#                                     second of Claude's two, read from where
+#                                     the CLI put it and never pasted, and what
+#                                     `wk ai claude <ws> --rc` needs
+#                       litellm       the API key `wk ai pi` reaches your
+#                                     LiteLLM endpoint with
+#                       tailnet       the fleet's tailnet auth key, seeded onto
+#                                     every card written here
+#                       tailnet-api   the tailnet API token this machine
+#                                     retires a stale fleet node with; never
+#                                     written to a card
+#
+#   wk key deploy     the push keys: one deploy key per fork, on every machine
+#                     that pushes, registered on GitHub with write access
+#   wk key check      what every credential this machine holds can do and how
+#                     far it reaches, each one asked again at that moment
+#   wk key show       print the public halves
+#   wk key ensure     create missing push keys without registering them
 #
 # One key per fork, shared by every workspace: GitHub deploy keys are scoped to a
 # single repository and refuse the same key on a second one, so a compromised
 # workspace can push to the forks in wk_push_forks and nowhere else. Registration
 # goes through the GitHub API, which takes the title, key and read_only=false
 # directly.
-#
-#   wk key register   create the keys and register them (idempotent)
-#   wk key check      what every credential this machine holds can do and how far
-#                     it reaches, each one asked again at that moment
-#   wk key show       print the public keys
-#   wk key ensure     create missing keys without registering them
-#   wk key set <name> [--replace]
-#                     an agent's own credential, for every workspace this machine
-#                     makes: `claude` is the Claude Code token a workspace starts
-#                     authenticated with (`claude setup-token` prints one),
-#                     `litellm` is the API key `wk ai pi` reaches your LiteLLM
-#                     endpoint with, and `claude-login` is the claude.ai account
-#                     credential `claude auth login` leaves on this machine --
-#                     read from where the Claude CLI put it, never pasted, and
-#                     what `wk ai claude <ws> --rc` refuses to start without. The
-#                     names are wk_agent_secrets (lib/store.sh). `github-pat` is
-#                     the one name not in that table and never enters a
-#                     workspace: it is what `git-webkit pr` opens a pull request
-#                     with, read only by the credential injector, which reads
-#                     GitHub with it whatever position 'wk push' is in and writes
-#                     only while it is on
-#   wk key claude [--replace]
-#                     `wk key set claude`, the same arm and the same store
-#   wk key tailnet-api [--replace]
-#                     the tailnet API access token this machine administers with:
-#                     retiring a fleet node whose name a new card needs. Never
-#                     written to a card.
-#   wk key tailnet [--replace]
-#                     the fleet's tailnet auth key: report it, ask for it, or
-#                     (--replace) rotate it
 #
 # Three more, addressed to one fork rather than every one of them, meant for
 # another machine or `wk status` to call rather than to type by hand:
@@ -51,19 +58,20 @@
 #
 # Every credential is put to a rule before it is stored, and to the same rule
 # again whenever one is reported (`wk key check`, `wk doctor`): the rules are
-# lib/credcheck.py, one row each. One that cannot do its job is refused and
-# nothing is stored; one that reaches further than wk spends it is kept with that
-# reach named; one no network could be reached to judge is kept and reported
-# unverified.
+# lib/credcheck.py, one row each, and that row is also what a prompt here asks
+# for and where it sends you to mint one. One that cannot do its job is refused
+# and nothing is stored; one that reaches further than wk spends it is kept with
+# that reach named; one no network could be reached to judge is kept and
+# reported unverified.
 #
 # Runs on the machine that holds the keys: the secrets directory is this device's
 # (wk_secrets_dir), and on macOS the podman machine reads it as a mount, so every
 # subverb here is ssh-keygen, a file and `gh`, with no VM in the path.
 #
-# `register` and `check` are the only two that call the GitHub API, which is why
-# the rest clear `needs`: that is what lets `wk key ensure` run over ssh on a
-# build machine with no `gh` on it, and `wk key tailnet` store a key on a machine
-# whose gh login has expired.
+# `setup`, `deploy` and `check` are the only ones that call the GitHub API, which
+# is why the rest clear `needs`: that is what lets `wk key ensure` run over ssh
+# on a build machine with no `gh` on it, and `wk key set tailnet` store a key on
+# a machine whose gh login has expired.
 
 set -euo pipefail
 WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -73,9 +81,9 @@ WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
 load_target "$(default_target)" 2>/dev/null || true
 
-ACTION="${1:-register}"
+ACTION="${1:-setup}"
 
-USAGE="usage: wk key register|check|show|ensure|set|claude|tailnet|tailnet-api; see wk key -h"
+USAGE="usage: wk key setup|set|deploy|check|show|ensure; see wk key -h"
 
 ensure_keys() { "$0" ensure 2>&1 | sed 's/^/  /'; }
 
@@ -166,6 +174,109 @@ cred_print() { # <name>  non-zero when it cannot do its job
     esac
 }
 
+cred_known() { wk_cred_settable | grep -qxF "$1"; }
+
+# What this machine does with it once it is here -- the same lines whether it
+# was just stored or was already there.
+cred_notes() { # <name>
+    local var; var=$(wk_agent_secret_field "$1" 4)
+    [ -z "$var" ] || [ "$var" = - ] \
+        || log "  every workspace this machine makes gets it as \$$var"
+    case "$1" in
+        github-pat)
+            log  "  the injector reads GitHub with it whatever position 'wk push' is in;"
+            log  "  a write spends it only while 'wk push on'"
+            log  "  no workspace ever holds it: the injector puts it in the Authorization"
+            log  "  header, and the workspace sends a placeholder ('wk verify' measures that)" ;;
+        claude)
+            log  "  a container reads it live from the read-only /secrets mount"
+            log  "  a macOS guest and a build box are handed a copy at start" ;;
+        litellm)
+            log  "  a container reads it live from the read-only /secrets mount"
+            log  "  (a macOS guest and a build box carry the Claude token only)"
+            log  "  pi finds the endpoint itself in ~/.pi/agent/models.json, whose"
+            log  "  apiKey is the string \$LITELLM_API_KEY -- so the key is in one"
+            log  "  place and the URL and model list are in that file. 'wk ai pi'"
+            log  "  prints the file to write when a workspace has none." ;;
+        claude-login)
+            log  "  one shared file, not a copy each: every container on this"
+            log  "  machine reads and rewrites it. A macOS guest is never given"
+            log  "  a copy -- a refresh in one would invalidate this file -- so"
+            log  "  it runs 'claude auth login' in there for itself, once." ;;
+        tailnet)
+            log  "  'wk sysimage write' seeds it onto every card it writes" ;;
+        tailnet-api)
+            log  "  a write that needs a stale fleet node retired can do it itself" ;;
+    esac
+    [ -z "$(wk_agent_secret_field "$1" 1)" ] \
+        || log "  the workspaces that already exist pick it up on their next 'wk start'"
+}
+
+# Deliberately not delivered into a workspace like the wk_agent_secrets rows: only the credential injector, on the machine that runs the workspaces, ever reads the token.
+cred_deliver() { # <name> -- carry a stored, rotated or withdrawn one to where it is read
+    [ "$1" = github-pat ] || return 0
+    push_agent_pat_sync push_agent_exec "$(push_agent_machine_read_pat)" \
+        && return 0
+    warn "the machine that runs the workspaces did not take the read token,
+    so a read from a workspace answers 401 until it does. './setup' converges it
+    (the vmtools stage on macOS, sdk on Linux); start that machine and re-run it."
+}
+
+# Asked again at this moment, never read back from a record.
+cred_report() { # <name> -- non-zero when what is stored cannot do its job
+    local rc=0
+    info "$1: present ($(wk_cred_path "$1"))"
+    cred_look "$1"
+    cred_print "$1" || rc=1
+    cred_notes "$1"
+    log  "  'wk key set $1 --replace' rotates it"
+    return $rc
+}
+
+deploy_keys() {
+    local machine label title pub body
+    local failed=0
+    for machine in $(key_machines); do
+        label=$(m_label "$machine")
+        info "keys for $label"
+        m_ensure "$machine"
+
+        while read -r remote repo alias; do
+            [ -n "$remote" ] || continue
+            pub=$(m_pub "$machine" "$remote")
+            [ -n "$pub" ] || { warn "no key for $repo on $label"; failed=1; continue; }
+
+            # The machine's name: a deploy-key list on GitHub with three identical titles cannot be revoked selectively.
+            title="wk build key ($label)"
+
+            body=$(printf '%s' "$pub" | awk '{print $1" "$2}')
+            if gh api "repos/$repo/keys" --jq '.[].key' </dev/null 2>/dev/null \
+                 | awk '{print $1" "$2}' | grep -qxF "$body"; then
+                unchanged "$repo: $label's key already registered"
+                continue
+            fi
+
+            info "registering $label's deploy key on $repo"
+            # read_only=false: a key registered read-only looks fine until the first push fails.
+            if gh api "repos/$repo/keys" \
+                 -f "title=$title" \
+                 -f "key=$pub" \
+                 -F read_only=false </dev/null >/dev/null 2>&1; then
+                changed "$repo: $label's deploy key registered with write access"
+            else
+                warn "$repo: could not register $label's key automatically"
+                log  "  add it by hand at https://github.com/$repo/settings/keys/new"
+                log  "  (tick 'Allow write access')"
+                printf '%s\n' "$pub"
+                failed=1
+            fi
+        done <<EOF
+$(wk_push_forks)
+EOF
+    done
+    return "$failed"
+}
+
 if [ "$ACTION" = ensure ]; then
     [ -z "${2:-}" ] || die "$USAGE"
     ensure_dir "$(wk_secrets_dir)" 0700
@@ -191,244 +302,86 @@ if [ "$ACTION" = ensure ]; then
 fi
 
 case "$ACTION" in
-set|claude)
-    if [ "$ACTION" = set ]; then
-        _name="${2:-}"; _flag="${3:-}"; _tail="${4:-}"
-        [ -n "$_name" ] || die "usage: wk key set <name> [--replace]
-    names: $(wk_agent_secret_names | tr '\n' ' ')github-pat"
-    else
-        _name=claude; _flag="${2:-}"; _tail="${3:-}"
-    fi
-    [ -z "$_tail" ] || die "$USAGE"
-
-    # Deliberately *not* a row in wk_agent_secrets: every row there is delivered into the workspace, and this one must never be. Only the credential injector reads it.
-    if [ "$_name" = github-pat ]; then
-        _deliver_read_pat() {
-            push_agent_pat_sync push_agent_exec "$(push_agent_machine_read_pat)" \
-                && return 0
-            warn "the machine that runs the workspaces did not take the read token,
-    so a read from a workspace answers 401 until it does. './setup' converges it
-    (the vmtools stage on macOS, sdk on Linux); start that machine and re-run it."
-        }
-
-        case "$_flag" in
-            --replace)
-                [ -n "$(wk_github_pat)" ] \
-                    || die "there is no GitHub token here to replace ($(wk_github_pat_path)).
-    'wk key set github-pat' asks for one."
-                rm -f "$(wk_github_pat_path)"
-                _deliver_read_pat
-                info "removed the old token -- revoke it on GitHub too if it is still live"
-                ;;
-            "") ;;
-            *) die "$USAGE" ;;
-        esac
-
-        if [ -n "$(wk_github_pat)" ]; then
-            info "github-pat: present ($(wk_github_pat_path))"
-            log  "  the injector reads GitHub with it whatever position 'wk push' is in;"
-            log  "  a write spends it only while 'wk push on'"
-            log  "  no workspace ever holds it: the injector puts it in the Authorization"
-            log  "  header, and the workspace sends a placeholder ('wk verify' measures that)"
-            cred_look github-pat
-            cred_print github-pat || { log "  'wk key set github-pat --replace' rotates it"; exit 1; }
-            log  "  'wk key set github-pat --replace' rotates it"
-            exit 0
+setup)
+    [ -z "${2:-}" ] || die "$USAGE"
+    deploy_keys || true
+    for _name in $(wk_cred_settable); do
+        if wk_cred_present "$_name"; then
+            unchanged "$_name: already stored ($(wk_cred_path "$_name"))"
+            continue
         fi
+        echo >&2
+        # A credential declined, or one that cannot be asked for without a
+        # terminal, is not a reason to leave the rest of them unset.
+        "$0" set "$_name" || true
+    done
+    echo >&2
+    "$0" check
+    ;;
 
-        _val=$(prompt_secret_value \
-            "a GitHub personal access token, so 'git-webkit pr' in a workspace can open a pull request" \
-            "https://github.com/settings/personal-access-tokens/new: a fine-grained token, Repository access limited to $(wk_push_forks | awk 'NF {printf "%s ", $2}')and Permissions: Contents read and write, Pull requests read and write") || _val=""
-        [ -n "$_val" ] || die "nothing stored, so 'git-webkit pr' in a workspace gets 401.
-    To store one:  wk key set github-pat"
-
-        # Before anything is written, so a token GitHub refuses is refused here rather than hours later by `git-webkit pr`.
-        cred_admit github-pat "$_val"
-
-        ensure_dir "$(wk_push_held_dir)" 0700
-        # Down a pipe into a file this shell creates under umask 077: an argument would be in `ps` for everyone on the machine.
-        ( umask 077; printf '%s\n' "$_val" > "$(wk_github_pat_path)" ) \
-            || die "could not write $(wk_github_pat_path)"
-        unset _val
-        _deliver_read_pat
-        info "stored -- a workspace can read GitHub with it now, and 'wk push on'
-    is what lets one write; no workspace ever holds it"
-        cred_print github-pat || true
-        exit 0
-    fi
-
-    wk_agent_secret_known "$_name" \
-        || die "there is no agent credential called '$_name'.
-    This checkout knows: $(wk_agent_secret_names | tr '\n' ' ')github-pat
-    Each but the last is a row in wk_agent_secrets (lib/store.sh), which is
-    also what delivers it to a workspace and names the variable its agent
-    reads; github-pat is the one that never enters a workspace at all."
-
-    case "$_name" in
-        claude)
-            _what="a Claude Code token, so a workspace starts authenticated instead of asking for /login"
-            _how="run 'claude setup-token' here and paste what it prints"
-            ;;
-        litellm)
-            _what="your LiteLLM API key, so 'wk ai pi' in a workspace can reach that endpoint"
-            _how="a virtual key from your own LiteLLM deployment (its web UI, or POST /key/generate)"
-            ;;
-        claude-login)
-            _what="your claude.ai login credential, so remote control works in a workspace"
-            _how="run 'claude auth login' here; this reads what it stored, nothing is pasted"
-            ;;
-    esac
+set)
+    _name="${2:-}"; _flag="${3:-}"; _tail="${4:-}"
+    [ -n "$_name" ] || die "usage: wk key set <name> [--replace]
+    names: $(wk_cred_settable | tr '\n' ' ')"
+    [ -z "$_tail" ] || die "$USAGE"
+    [ "$_name" != deploy-key ] \
+        || die "a deploy key is generated here and never pasted:  wk key deploy"
+    cred_known "$_name" \
+        || die "there is no credential called '$_name'.
+    This checkout knows: $(wk_cred_settable | tr '\n' ' ')
+    Each is a row of lib/credcheck.py, which is also what says where to mint
+    one and what it must be able to do."
 
     case "$_flag" in
         --replace)
-            wk_agent_secret_present "$_name" \
-                || die "there is no $_name credential here to replace ($(wk_agent_secret_path "$_name")).
+            wk_cred_present "$_name" \
+                || die "there is no $_name credential here to replace ($(wk_cred_path "$_name")).
     'wk key set $_name' asks for one."
             # Cleared before asking, so an abandoned replace leaves nothing behind.
-            wk_agent_secret_clear "$_name"
+            wk_cred_clear "$_name"
+            cred_deliver "$_name"
             info "removed the old $_name credential -- revoke it too if it is still live"
             ;;
         "") ;;
         *) die "$USAGE" ;;
     esac
 
-    if wk_agent_secret_present "$_name"; then
-        info "$_name: present ($(wk_agent_secret_path "$_name"))"
-        [ "$(wk_agent_secret_kind "$_name")" = file ] \
-            || log "  every workspace this machine makes gets it as \$$(wk_agent_secret_field "$_name" 4)"
-        cred_look "$_name"
-        cred_print "$_name" || _rc=1
-        case "$_name" in
-            claude)
-                log  "    a container reads it live from the read-only /secrets mount"
-                log  "    a macOS guest and a build box are handed a copy at start"
-                ;;
-            litellm)
-                log  "    a container reads it live from the read-only /secrets mount"
-                log  "    (a macOS guest and a build box carry the Claude token only)"
-                log  "  pi finds the endpoint itself in ~/.pi/agent/models.json, whose"
-                log  "  apiKey is the string \$LITELLM_API_KEY -- so the key is in one"
-                log  "  place and the URL and model list are in that file. 'wk ai pi'"
-                log  "  prints the file to write when a workspace has none."
-                ;;
-            claude-login)
-                log  "    one shared file, not a copy each: every container on this"
-                log  "    machine reads and rewrites it. A macOS guest is never given"
-                log  "    a copy -- a refresh in one would invalidate this file -- so"
-                log  "    it runs 'claude auth login' in there for itself, once."
-                ;;
-        esac
-        log  "  'wk key set $_name --replace' rotates it"
-        exit "${_rc:-0}"
+    if wk_cred_present "$_name"; then
+        cred_report "$_name" || exit 1
+        exit 0
     fi
 
     # A value row is pasted; a file row is read out of where its own tool keeps it and goes in byte for byte. Both are put to the rule first.
     if [ "$(wk_agent_secret_kind "$_name")" = file ]; then
         _claude_login_refuse_relocated_store
         _val=$(_claude_login_read)
-        [ -n "$_val" ] || die "there is no claude.ai login on this machine to read.
-    $_how
+        [ -n "$_val" ] || die "there is nothing on this machine to read it from, so
+    nothing here can $(wk_cred_rule "$_name" needs).
+    $(wk_cred_rule "$_name" remedy)
     Then:  wk key set $_name"
     else
-        _val=$(prompt_secret_value "$_what" "$_how") || _val=""
-        [ -n "$_val" ] || die "nothing stored for '$_name', so no workspace has it.
+        _val=$(prompt_secret_value "$(wk_cred_rule "$_name" what)" \
+                   "$(wk_cred_rule "$_name" url)" \
+                   "$(wk_cred_rule "$_name" remedy)") || _val=""
+        [ -n "$_val" ] || die "nothing stored, so nothing here can $(wk_cred_rule "$_name" needs).
     To store one:  wk key set $_name"
     fi
 
+    # Before anything is written, so a credential the far side refuses is refused here rather than hours later by whatever spends it.
     cred_admit "$_name" "$_val"
+    # Down a pipe: an argument would be in `ps` for everyone on the machine. A file row goes in byte for byte, a value row as one line.
     if [ "$(wk_agent_secret_kind "$_name")" = file ]; then
-        printf '%s' "$_val" | wk_agent_secret_store "$_name" \
-            || die "could not write $(wk_agent_secret_path "$_name")"
-        unset _val
-        info "stored -- every workspace this machine makes can use it; the ones"
-        log  "  that already exist pick it up on their next 'wk start'"
+        printf '%s' "$_val" | wk_cred_store "$_name" \
+            || die "could not write $(wk_cred_path "$_name")"
     else
-        printf '%s\n' "$_val" | wk_agent_secret_store "$_name" \
-            || die "could not write $(wk_agent_secret_path "$_name")"
-        unset _val
-        info "stored -- every workspace made from now on has \$$(wk_agent_secret_field "$_name" 4)"
-        log  "  the ones that already exist pick it up on their next 'wk start'"
+        printf '%s\n' "$_val" | wk_cred_store "$_name" \
+            || die "could not write $(wk_cred_path "$_name")"
     fi
+    unset _val
+    cred_deliver "$_name"
+    info "stored in $(wk_cred_path "$_name")"
     cred_print "$_name" || true
-    ;;
-
-# Host-local like the auth key, and unlike it never seeded onto a card -- it administers the whole tailnet (wk_tailscale_key_reject).
-tailnet-api)
-    [ -z "${3:-}" ] || die "$USAGE"
-    _tsapi=$(wk_tailscale_api_path)
-    case "${2:-}" in
-        --replace)
-            wk_tailscale_api_present \
-                || die "there is no tailnet API token here to replace ($_tsapi).
-    'wk key tailnet-api' asks for one."
-            rm -f "$_tsapi"
-            info "removed the old token; nothing on the tailnet is affected"
-            ;;
-        "") ;;
-        *) die "$USAGE" ;;
-    esac
-
-    if wk_tailscale_api_present; then
-        info "tailnet API token: present ($_tsapi)"
-        log  "  starts $(head -c 10 "$_tsapi")…, mode $(file_mode "$_tsapi")"
-        cred_look tailnet-api
-        cred_print tailnet-api || { log "  'wk key tailnet-api --replace' rotates it"; exit 1; }
-        log  "  'wk key tailnet-api --replace' rotates it"
-        exit 0
-    fi
-
-    if wk_tailscale_api_key >/dev/null; then
-        info "stored -- a write that needs a stale fleet node retired can now do it itself"
-        cred_look tailnet-api
-        cred_print tailnet-api || exit 1
-        exit 0
-    fi
-    die "no tailnet API token, so retiring a stale fleet node is a person's job at
-    https://login.tailscale.com/admin/machines -- a hand step in the middle of a
-    lane built to be repeatable (CLAUDE.md, 'Cattle, not pets').
-    Make one (tag:wk devices scope is enough):
-        https://login.tailscale.com/admin/settings/keys"
-    ;;
-
-# Host-local, and deliberately not in the VM with the deploy keys: the machine that writes a card is the machine that needs it.
-tailnet)
-    [ -z "${3:-}" ] || die "$USAGE"
-    _tspath=$(wk_tailscale_authkey_path)
-    case "${2:-}" in
-        --replace)
-            wk_tailscale_authkey_present \
-                || die "there is no tailnet key here to replace ($_tspath).
-    'wk key tailnet' asks for one."
-            # Removed before asking: prompt_secret returns an existing file untouched, so a replace that did not clear first would change nothing.
-            rm -f "$_tspath"
-            info "removed the old key; the nodes already on the tailnet are unaffected"
-            log  "  a tagged node does not key-expire, so rotating this costs nothing"
-            ;;
-        "") ;;
-        *) die "$USAGE" ;;
-    esac
-
-    if wk_tailscale_authkey_present; then
-        info "tailnet auth key: present ($_tspath)"
-        log  "  starts $(head -c 16 "$_tspath")…, mode $(file_mode "$_tspath")"
-        cred_look tailnet
-        cred_print tailnet || { log "  'wk key tailnet --replace' rotates it"; exit 1; }
-        log  "  'wk key tailnet --replace' rotates it"
-        exit 0
-    fi
-
-    if wk_tailscale_authkey >/dev/null; then
-        info "stored -- 'wk sysimage write' will seed it onto the cards it writes"
-        cred_look tailnet
-        cred_print tailnet || exit 1
-        exit 0
-    fi
-    die "no tailnet auth key, so a card written now would boot with no tailnet
-    identity -- reachable only over whatever LAN it lands on, which is the state
-    the fleet rule exists to end (CLAUDE.md, 'Cattle, not pets').
-    It must be tagged tag:wk, reusable and NOT ephemeral, longest expiry:
-        https://login.tailscale.com/admin/settings/keys
-    Then run this again, from a terminal."
+    cred_notes "$_name"
     ;;
 
 pub)
@@ -476,48 +429,9 @@ show)
     done
     ;;
 
-register)
+deploy)
     [ -z "${2:-}" ] || die "$USAGE"
-    failed=0
-    for machine in $(key_machines); do
-        label=$(m_label "$machine")
-        info "keys for $label"
-        m_ensure "$machine"
-
-    while read -r remote repo alias; do
-        [ -n "$remote" ] || continue
-        pub=$(m_pub "$machine" "$remote")
-        [ -n "$pub" ] || { warn "no key for $repo on $label"; failed=1; continue; }
-
-        # The machine's name: a deploy-key list on GitHub with three identical titles cannot be revoked selectively.
-        title="wk build key ($label)"
-
-        body=$(printf '%s' "$pub" | awk '{print $1" "$2}')
-        if gh api "repos/$repo/keys" --jq '.[].key' </dev/null 2>/dev/null \
-             | awk '{print $1" "$2}' | grep -qxF "$body"; then
-            unchanged "$repo: $label's key already registered"
-            continue
-        fi
-
-        info "registering $label's deploy key on $repo"
-        # read_only=false: a key registered read-only looks fine until the first push fails.
-        if gh api "repos/$repo/keys" \
-             -f "title=$title" \
-             -f "key=$pub" \
-             -F read_only=false </dev/null >/dev/null 2>&1; then
-            changed "$repo: $label's deploy key registered with write access"
-        else
-            warn "$repo: could not register $label's key automatically"
-            log  "  add it by hand at https://github.com/$repo/settings/keys/new"
-            log  "  (tick 'Allow write access')"
-            printf '%s\n' "$pub"
-            failed=1
-        fi
-    done <<EOF
-$(wk_push_forks)
-EOF
-    done
-
+    deploy_keys || true
     echo >&2
     "$0" check
     ;;
@@ -533,7 +447,7 @@ check)
         [ -n "$section_printed" ] || { printf '  %s\n' "$label:"; section_printed=1; }
         printf '    %-28s ' "$repo"
         pub=$(m_pub "$machine" "$remote")
-        [ -n "$pub" ] || { echo "no key -- run: wk key register"; rc=1; continue; }
+        [ -n "$pub" ] || { echo "no key -- run: wk key deploy"; rc=1; continue; }
 
         # Matched on the base64 body, which is unique and jq-safe. `|| ro=""` keeps this a report: pipefail would end it on a refused API call.
         b64=$(printf '%s' "$pub" | awk '{print $2}')
@@ -550,15 +464,24 @@ EOF
     done
 
     printf '  credentials:\n'
-    for _cname in $(wk_cred_names); do
-        if [ "$_cname" != deploy-key ]; then
-            printf '    %-28s ' "$_cname"
-            cred_look "$_cname"
-            printf '%s\n' "$(wk_cred_detail "$CRED_VERDICT")"
-            case "$(wk_cred_verdict "$CRED_VERDICT")" in bad) rc=1 ;; esac
-        fi
+    for _cname in $(wk_cred_settable); do
+        printf '    %-28s ' "$_cname"
+        cred_look "$_cname"
+        printf '%s\n' "$(wk_cred_detail "$CRED_VERDICT")"
+        case "$(wk_cred_verdict "$CRED_VERDICT")" in bad) rc=1 ;; esac
     done
     exit $rc
+    ;;
+
+# Tombstones: one command asks for a credential now, and one asks for the keys.
+register|claude|tailnet|tailnet-api)
+    case "$ACTION" in
+        register) _now="wk key deploy" ;;
+        claude)   _now="wk key set claude   (the account login beside it is 'wk key set claude-login')" ;;
+        *)        _now="wk key set $ACTION" ;;
+    esac
+    die "'wk key $ACTION' is now:  $_now
+    'wk key setup' does every credential this machine has not got yet."
     ;;
 
 *)

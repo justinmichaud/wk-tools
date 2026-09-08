@@ -133,24 +133,22 @@ check "jq (claude hook)" "./setup --stage tools" have jq
 check "gh"               "install gh, then: gh auth login" have gh
 if have gh; then
     # gh_authenticated, not `gh auth status`: the latter passes a configured account whose token has expired.
-    check "gh authenticated" "gh auth login   (then: wk key register)" gh_authenticated
+    check "gh authenticated" "gh auth login   (then: wk key deploy)" gh_authenticated
 fi
 
 credentials_section() {
     section "credentials"
-    for _cname in $(wk_cred_names); do
-        if [ "$_cname" != deploy-key ]; then
-            _line=$(wk_cred_check "$_cname" --stored)
-            _why=$(wk_cred_detail "$_line" | sed -n '1p')
-            _fix=$(wk_cred_detail "$_line" | sed -n 's/^    fix: //p')
-            case "$(wk_cred_verdict "$_line")" in
-                ok)     ok   "$_cname -- $_why" ;;
-                wide)   unk  "$_cname reaches further than wk spends it" "$_why" ;;
-                bad)    miss "$_cname: $_why" "${_fix:-wk key check}" ;;
-                absent) unk  "$_cname: $_why" "wk key check" ;;
-                *)      unk  "$_cname: $_why" "wk key check" ;;
-            esac
-        fi
+    for _cname in $(wk_cred_settable); do
+        _line=$(wk_cred_check "$_cname" --stored)
+        _why=$(wk_cred_detail "$_line" | sed -n '1p')
+        _fix=$(wk_cred_detail "$_line" | sed -n 's/^    fix: //p')
+        case "$(wk_cred_verdict "$_line")" in
+            ok)     ok   "$_cname -- $_why" ;;
+            wide)   unk  "$_cname reaches further than wk spends it" "$_why" ;;
+            bad)    miss "$_cname: $_why" "${_fix:-wk key check}" ;;
+            absent) unk  "$_cname: $_why" "wk key setup" ;;
+            *)      unk  "$_cname: $_why" "wk key check" ;;
+        esac
     done
     unset _cname _line _why _fix
 }
@@ -246,16 +244,16 @@ local_state() { # <path> <kind> <how to get it back>
     fi
 }
 local_state "$WK_STORE/bench"                      backed-up   "benchmark runs and their provenance -- not regenerable at any price; a rerun is a different measurement"
-local_state "$(wk_secrets_dir)"                    regenerable "wk key register makes new deploy keys (revoke the old ones on GitHub)"
-local_state "$(wk_push_held_dir)"                  regenerable "wk key register makes new deploy keys; wk key set github-pat stores a new token (revoke the old ones on GitHub)"
+local_state "$(wk_secrets_dir)"                    regenerable "wk key deploy makes new deploy keys (revoke the old ones on GitHub)"
+local_state "$(wk_push_held_dir)"                  regenerable "wk key deploy makes new deploy keys; wk key set github-pat stores a new token (revoke the old ones on GitHub)"
 local_state "$(push_agent_machine_read_pat)"       regenerable "./setup and wk key set github-pat both write it from the token in $(wk_push_held_dir)"
 for _sname in $(wk_agent_secret_names); do
     local_state "$(wk_agent_secret_path "$_sname")" re-authable \
         "wk key set $_sname stores one; every workspace this machine makes starts authenticated with it"
 done
 unset _sname
-local_state "${WK_TS_AUTHKEY:-$HOME/.config/wk/tailscale-authkey}" re-authable "wk key tailnet asks for one (tag:wk, reusable, not ephemeral, longest expiry); joined nodes are unaffected"
-local_state "$(wk_tailscale_api_path)" re-authable "wk key tailnet-api asks for one; only this machine holds it, and only writes that must retire a stale node need it"
+local_state "${WK_TS_AUTHKEY:-$HOME/.config/wk/tailscale-authkey}" re-authable "wk key set tailnet asks for one (tag:wk, reusable, not ephemeral, longest expiry); joined nodes are unaffected"
+local_state "$(wk_tailscale_api_path)" re-authable "wk key set tailnet-api asks for one; only this machine holds it, and only writes that must retire a stale node need it"
 local_state "$(wk_state_dir)/broker"               regenerable "request records (argv, log, status) the fleet-request broker writes; the next request makes new ones"
 local_state "$HOME/.ssh/config.d/local"            backed-up   "hand-written ssh entries (host/dotfiles.sh moves them here and owns the rest)"
 local_state "$(wk_state_dir)/ssh/zed_ed25519"      regenerable "wk zed makes a new one and re-authorises it in the workspace"
@@ -276,7 +274,7 @@ report_store() { # <probe output> [container-machine git remedy]
     [ "$(v base)" = ok ]   && ok "base snapshot"          || miss "base snapshot" "wk sync"
     # Read here, not in the probe: the deploy keys are this machine's own, which on macOS is the directory the podman machine mounts.
     [ -f "$(wk_push_held_dir)/build_key_fork" ] \
-        && ok "fork push key" || miss "fork push key" "wk key register  (needs gh auth)"
+        && ok "fork push key" || miss "fork push key" "wk key deploy  (needs gh auth)"
     [ "$(v skills)" = ok ] && ok "shared skills seeded"   || miss "shared skills seeded" "wk skills push"
     [ "$(v proxy)" = ok ]  && ok "egress proxy running"   || miss "egress proxy running" "./setup --stage sdk, then systemctl --user status wk-proxy"
     [ "$(v pihosts)" = ok ] && ok "pi-hosts populated"    || miss "pi-hosts populated" "wk pi setup rpi5 / rpi4  (skip if no Pi devices)"
@@ -480,6 +478,6 @@ if [ "$missing" -eq 0 ]; then
 fi
 warn "$missing item(s) missing -- each line above names its fix; the order that"
 log  "works from bare metal: ./setup -> the interactive stages it lists ->"
-log  "gh auth login -> wk key register -> wk sync -> (optional) wk pi setup,"
-log  "wk vm base -> claude setup-token and wk key set claude. See README.md."
+log  "gh auth login -> claude setup-token and claude auth login -> wk key setup"
+log  "-> wk sync -> (optional) wk pi setup, wk vm base. See README.md."
 exit 1

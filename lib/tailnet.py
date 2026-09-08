@@ -37,7 +37,7 @@ def call(method, path, key):
     except urllib.error.HTTPError as e:
         detail = e.read().decode(errors="replace").strip()
         if e.code in (401, 403):
-            fail(5, "the tailnet refused this credential (HTTP %d). Rotate it: wk key tailnet-api --replace"
+            fail(5, "the tailnet refused this credential (HTTP %d). Rotate it: wk key set tailnet-api --replace"
                  % e.code)
         fail(5, "the tailnet API said HTTP %d for %s %s: %s" % (e.code, method, path, detail[:200]))
     except Exception as e:                                  # network, DNS, timeout

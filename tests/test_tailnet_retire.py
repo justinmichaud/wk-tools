@@ -1,4 +1,4 @@
-"""Retiring a fleet node (lib/tailnet.py, `wk key tailnet-api`): the one
+"""Retiring a fleet node (lib/tailnet.py, `wk key set tailnet-api`): the one
 administrative act wk asks of the tailnet's control plane.
 
 A board is reached by its tailnet name and nothing about how to reach it is
@@ -140,7 +140,7 @@ class TestRetire(unittest.TestCase):
         FakeTailnet.auth_fails = True
         cp = self._run("check")
         self.assertEqual(cp.returncode, 5, cp.stdout + cp.stderr)
-        self.assertIn("wk key tailnet-api --replace", cp.stderr)
+        self.assertIn("wk key set tailnet-api --replace", cp.stderr)
 
     def test_an_auth_key_is_not_an_api_token(self):
         """the two credentials are spelled alike and do very different
@@ -160,7 +160,7 @@ class TestWiring(unittest.TestCase):
     def test_the_write_retires_rather_than_naming_the_console(self):
         text = (REPO / "cmd" / "sysimage").read_text()
         self.assertIn("wk_tailnet_retire", text)
-        self.assertIn("wk key tailnet-api", text,
+        self.assertIn("wk key set tailnet-api", text,
                       "the refusal without a token must name the remedy that ends the hand step")
 
     def test_the_api_token_is_refused_where_an_auth_key_is_wanted(self):

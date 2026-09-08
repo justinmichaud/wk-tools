@@ -201,7 +201,7 @@ if podman machine inspect "$WK_MACHINE" >/dev/null 2>&1; then
         log  "  /var/lib/wk/bench, which is measurements. Copy those out first:"
         log  "    podman machine ssh $WK_MACHINE -- tar -C /var/lib/wk -cf - bench > bench.tar"
         log  "  The deploy keys and agent tokens are not in this list: they are"
-        log  "  already on this host ('wk key register' and 'wk key set claude'"
+        log  "  already on this host ('wk key deploy' and 'wk key set claude'"
         log  "  put them back if this machine still holds the only copies)."
         if [ -n "${WK_DRY_RUN:-}" ]; then
             warn "dry run: '$WK_MACHINE' would be destroyed and recreated; nothing was touched"

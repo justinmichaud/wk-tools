@@ -193,7 +193,7 @@ WK_STORE={store}
         cp = self._sh(
             f'printf "%s\\n" a-{PLACEHOLDER} | wk_agent_secret_store claude\n'
             f'printf "%s\\n" b-{PLACEHOLDER} | wk_agent_secret_store litellm\n'
-            'wk_agent_secret_clear litellm\n'
+            'wk_cred_clear litellm\n'
             'printf "claude=[%s] litellm=[%s]\\n" "$(wk_agent_secret claude)" "$(wk_agent_secret litellm)"',
 
             store)
@@ -222,8 +222,9 @@ printf "path=%s\\n" "$(wk_agent_secret_path litellm)"
 
 
 class TestWkKeySet(WkTest):
-    """`wk key set <name>` is the one way in, and `wk key claude` is the same
-    arm with the name filled in."""
+    """`wk key set <name>` is the one way in for every credential a person
+    supplies, and `wk key setup` is what walks the ones this machine has
+    not got."""
 
     def _store(self, **secrets):
         d = self.tmp / "store"
@@ -265,20 +266,27 @@ class TestWkKeySet(WkTest):
         self.assertIn("LITELLM_API_KEY", cp.stdout)
         self.assertNotIn(PLACEHOLDER, cp.stdout)
 
-    def test_wk_key_claude_is_the_same_arm(self):
+    def test_a_stored_token_is_reported_by_name(self):
         store = self._store(claude=CLAUDE_SHAPED)
-        cp = self._key("claude", store=store)
+        cp = self._key("set", "claude", store=store)
         self.assertEqual(0, cp.returncode, cp.stdout)
         self.assertIn("CLAUDE_CODE_OAUTH_TOKEN", cp.stdout)
         self.assertNotIn(PLACEHOLDER, cp.stdout)
-        self.assertIn("set|claude)", KEY)
+
+    def test_claudes_two_credentials_are_two_names_of_the_one_arm(self):
+        """`wk key claude` never said which of the two it meant, so it is gone
+        and the tombstone names both."""
+        cp = self._key("claude")
+        self.assertNotEqual(0, cp.returncode, cp.stdout)
+        self.assertIn("wk key set claude", cp.stdout)
+        self.assertIn("claude-login", cp.stdout)
 
     def test_a_stored_credential_that_breaks_its_rule_is_reported_non_zero(self):
         """A report that a credential cannot do its job is a failure, not a
         line of prose: the Console API key pasted where a setup token belongs
         would bill the organization from every workspace."""
         store = self._store(claude="sk-ant-api03-" + PLACEHOLDER)
-        cp = self._key("claude", store=store)
+        cp = self._key("set", "claude", store=store)
         self.assertEqual(1, cp.returncode, cp.stdout)
         self.assertIn("Console API key", cp.stdout)
         self.assertNotIn(PLACEHOLDER, cp.stdout)
@@ -298,9 +306,9 @@ class TestWkKeySet(WkTest):
     def test_the_value_is_never_an_argument(self):
         """An argument is in `ps` for everyone on the machine. The one writer
         takes it on stdin, and nothing hands it on as a parameter."""
-        self.assertIn('printf \'%s\\n\' "$_val" | wk_agent_secret_store "$_name"', KEY)
+        self.assertIn('printf \'%s\\n\' "$_val" | wk_cred_store "$_name"', KEY)
         self.assertNotIn("--token", KEY)
-        self.assertNotIn('wk_agent_secret_store "$_name" "$_val"', KEY)
+        self.assertNotIn('wk_cred_store "$_name" "$_val"', KEY)
         # The writer is lib/secretfile.py, which takes the value on stdin and
         # is handed only the path (it refuses a path that is not a plain file
         # of this user's; see the file).

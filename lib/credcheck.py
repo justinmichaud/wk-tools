@@ -2,7 +2,7 @@
 """Every credential wk holds, what it must be able to do, and what it must not.
 
     credcheck.py names
-    credcheck.py rule  <name>
+    credcheck.py rule  <name> [--repos "<owner/repo> ..."]
     credcheck.py check <name> [--repos "<owner/repo> ..."] [--path <file>]
                               [--evidence <key>=<value>]...
 
@@ -21,6 +21,7 @@ import subprocess
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 
 OK, WIDE, BAD, UNVERIFIED, ABSENT = ("ok", "wide", "bad",
@@ -29,8 +30,40 @@ OK, WIDE, BAD, UNVERIFIED, ABSENT = ("ok", "wide", "bad",
 GITHUB_API = os.environ.get("WK_GITHUB_API", "https://api.github.com")
 TIMEOUT = 20
 
+# `what` is the noun phrase a prompt asks for, `url` the page that mints one
+# with everything that page takes from a link already filled in, and `remedy`
+# what is left to choose there; `url` and `remedy` may each be a function of
+# the fork list. `wk key` asks for these rather than carrying prose of its own.
 Rule = collections.namedtuple(
-    "Rule", "spent_by needs forbids remedy store_with check")
+    "Rule", "spent_by needs forbids what url remedy store_with check")
+
+FIELDS = tuple(f for f in Rule._fields if f != "check")
+
+TAILSCALE_KEYS = "https://login.tailscale.com/admin/settings/keys"
+
+
+def _resolved(value, repos):
+    return value(repos) if callable(value) else value
+
+
+def fix_of(rule, repos):
+    """The one line that says how to get one: the page first, then the choices
+    the page cannot carry."""
+    return " -- ".join(x for x in (_resolved(rule.url, repos),
+                                   _resolved(rule.remedy, repos)) if x)
+
+
+# GitHub takes the name, the expiry and every permission as query parameters and
+# validates the combination; the repository list is the one field it does not.
+def _github_pat_url(repos):
+    q = [("name", "wk"),
+         ("description", "opens pull requests from a wk workspace")]
+    if repos:
+        q.append(("target_name", repos[0].split("/")[0]))
+    q += [("expires_in", "none"), ("contents", "write"),
+          ("pull_requests", "write")]
+    return ("https://github.com/settings/personal-access-tokens/new?"
+            + urllib.parse.urlencode(q))
 
 
 class Unreachable(Exception):
@@ -248,8 +281,7 @@ def _tailnet_authkey(value, repos, path, evidence):
         return OK, (
             "an auth key, so it can enroll a node and nothing else.\n    Tagged "
             "tag:wk, reusable, NOT ephemeral and its expiry cannot be read from "
-            "the key; check those at "
-            "https://login.tailscale.com/admin/settings/keys")
+            "the key; check those at " + TAILSCALE_KEYS)
     return BAD, _tailscale_wrong(key, "an auth key",
                                  "an auth key can only enroll a node.",
                                  "tskey-auth-<id>-<secret>")
@@ -337,10 +369,14 @@ RULES = collections.OrderedDict((
         needs="open a pull request on each fork wk pushes to",
         forbids="delete a repository, or administer a repository, an "
                 "organization or the site",
-        remedy="https://github.com/settings/personal-access-tokens/new -- a "
-               "fine-grained token, Repository access: only the forks above, "
-               "Permissions: Contents read and write, Pull requests read and "
-               "write. Then: wk key set github-pat --replace",
+        what="a GitHub personal access token, so `git-webkit pr` in a "
+             "workspace can open a pull request",
+        url=_github_pat_url,
+        remedy=lambda repos: (
+            "that page arrives with the name, the expiry and both permissions "
+            "already set; the repository list is the one field a link cannot "
+            "carry, so choose 'Only select repositories' and pick %s"
+            % (", ".join(repos) or "the forks wk pushes to")),
         store_with="wk key set github-pat",
         check=_github_pat)),
     ("claude", Rule(
@@ -349,6 +385,9 @@ RULES = collections.OrderedDict((
         needs="authenticate Claude Code for inference",
         forbids="read the account, bill the organization, or mint further "
                 "credentials",
+        what="a Claude Code token, so a workspace starts authenticated "
+             "instead of asking for /login",
+        url="",
         remedy="run `claude setup-token` here and paste what it prints",
         store_with="wk key set claude",
         check=_claude_token)),
@@ -357,7 +396,10 @@ RULES = collections.OrderedDict((
                  "`wk ai pi` reaches your endpoint with",
         needs="reach your own LiteLLM endpoint",
         forbids="reach the upstream provider account directly",
-        remedy="a virtual key from your LiteLLM deployment (its web UI, or "
+        what="your LiteLLM API key, so `wk ai pi` in a workspace can reach "
+             "that endpoint",
+        url="",
+        remedy="a virtual key from your own LiteLLM deployment (its web UI, or "
                "POST /key/generate)",
         store_with="wk key set litellm",
         check=_litellm_key)),
@@ -367,35 +409,46 @@ RULES = collections.OrderedDict((
         needs="run inference and fetch the account profile (user:inference, "
               "user:profile), and still be renewable",
         forbids="be an inference-only setup token, which cannot fetch a profile",
-        remedy="run `claude auth login` here, then: wk key set claude-login "
-               "--replace",
+        what="your claude.ai login credential, so remote control works in a "
+             "workspace",
+        url="",
+        remedy="run `claude auth login` here; this reads what it stored, "
+               "nothing is pasted",
         store_with="wk key set claude-login",
         check=_claude_login)),
     ("tailnet", Rule(
         spent_by="cmd/sysimage -- seeded onto every card written from here",
         needs="enroll a node on the tailnet",
         forbids="administer the tailnet or mint further keys",
-        remedy="https://login.tailscale.com/admin/settings/keys -- tagged "
-               "tag:wk, reusable, NOT ephemeral, longest expiry",
-        store_with="wk key tailnet",
+        what="the fleet's tailnet auth key, so a card written here boots onto "
+             "the tailnet under its own name",
+        url=TAILSCALE_KEYS,
+        remedy="Generate auth key: tagged tag:wk, Reusable on, Ephemeral OFF, "
+               "longest expiry",
+        store_with="wk key set tailnet",
         check=_tailnet_authkey)),
     ("tailnet-api", Rule(
         spent_by="lib/tailnet.py -- retiring the offline fleet node whose name "
                  "a new card needs",
         needs="list and delete devices on this tailnet",
         forbids="leave this machine: it is never written to a card",
-        remedy="https://login.tailscale.com/admin/settings/keys -- an access "
-               "token, tag:wk devices scope is enough",
-        store_with="wk key tailnet-api",
+        what="the tailnet API access token this machine retires a stale fleet "
+             "node with",
+        url=TAILSCALE_KEYS,
+        remedy="Generate access token: the tag:wk devices scope is enough",
+        store_with="wk key set tailnet-api",
         check=_tailnet_api)),
     ("deploy-key", Rule(
         spent_by="lib/store.sh push_agent_load -- loaded into the ssh-agent a "
                  "workspace reaches while `wk push` is on",
         needs="push to exactly one fork",
         forbids="reach any other repository, or be read-only",
-        remedy="wk key register  (it registers with read_only=false)",
-        store_with="wk key register",
+        what="an ed25519 key per fork, generated here and never pasted",
+        url="",
+        remedy="wk key deploy  (it registers with read_only=false)",
+        store_with="wk key deploy",
         check=_deploy_key)),
+
 ))
 
 
@@ -413,19 +466,20 @@ def check(name, repos, path, evidence):
     if verdict == BAD:
         detail = ("%s\n    it must be able to: %s\n    it must not be able to: "
                   "%s\n    fix: %s\n    then: %s"
-                  % (detail, rule.needs, rule.forbids, rule.remedy,
+                  % (detail, rule.needs, rule.forbids, fix_of(rule, repos),
                      rule.store_with))
     sys.stdout.write("%s\t%s\n" % (verdict, detail))
     return 0
 
 
-def rule(name):
+def rule(name, repos):
     r = RULES.get(name)
     if r is None:
         return 2
-    for field in r._fields:
-        if field != "check":
-            sys.stdout.write("%s\t%s\n" % (field, getattr(r, field)))
+    for field in FIELDS:
+        sys.stdout.write("%s\t%s\n" % (field, _resolved(getattr(r, field),
+                                                         repos)))
+    sys.stdout.write("fix\t%s\n" % fix_of(r, repos))
     return 0
 
 
@@ -433,10 +487,8 @@ def main(argv):
     if len(argv) >= 2 and argv[1] == "names":
         sys.stdout.write("".join(n + "\n" for n in RULES))
         return 0
-    if len(argv) == 3 and argv[1] == "rule":
-        return rule(argv[2])
-    if len(argv) >= 3 and argv[1] == "check":
-        name, repos, path, evidence = argv[2], [], "", {}
+    if len(argv) >= 3 and argv[1] in ("rule", "check"):
+        verb, name, repos, path, evidence = argv[1], argv[2], [], "", {}
         rest = argv[3:]
         while rest:
             flag, rest = rest[0], rest[1:]
@@ -454,6 +506,8 @@ def main(argv):
             else:
                 sys.stderr.write("credcheck: unknown option %s\n" % flag)
                 return 2
+        if verb == "rule":
+            return rule(name, repos)
         return check(name, repos, path, evidence)
     sys.stderr.write(__doc__.split("\n\n")[1] + "\n")
     return 2

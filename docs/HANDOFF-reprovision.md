@@ -10,4 +10,4 @@
 - [ ] confirm no FileVault on the bench install [needs the Mac bench volume]
 - [ ] confirm 120 GB free in the APFS container before `wk bench mac-volume` (both installs share it) [needs the Mac bench volume]
 - [ ] confirm a rebuild restores `$WK_STORE/pi-hosts` and the rpi5 tuning tree (`host/linux/rpi5/rpi5.conf`, gitignored) [needs a machine to reprovision]
-- [ ] confirm `gh auth login` then `wk key register` after a rebuild ([maintainer] for the auth step)
+- [ ] confirm `gh auth login` then `wk key deploy` after a rebuild ([maintainer] for the auth step)

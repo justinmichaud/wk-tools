@@ -15,6 +15,7 @@ Run: python3 -m unittest tests.test_credcheck -v
 """
 import json
 import os
+import urllib.parse
 import subprocess
 import tempfile
 import threading
@@ -387,7 +388,7 @@ class TestADeployKey(_Rules):
         verdict, detail = self.key("Hi %s!" % self.REPO_NAME, "true")
         self.assertEqual("bad", verdict, detail)
         self.assertIn("READ-ONLY", detail)
-        self.assertIn("wk key register", detail)
+        self.assertIn("wk key deploy", detail)
 
     def test_a_key_github_does_not_know_is_refused(self):
         verdict, detail = self.key("Permission denied (publickey).", "")
@@ -436,17 +437,53 @@ class TestOneTableForEveryCredential(_Rules):
         for name in ("github-pat", "tailnet", "tailnet-api", "deploy-key"):
             self.assertIn(name, self.names())
 
+    def rule(self, name, repos=FORKS):
+        cp = subprocess.run(["python3", str(CREDCHECK), "rule", name,
+                             "--repos", repos], capture_output=True, text=True)
+        self.assertEqual(0, cp.returncode, cp.stdout + cp.stderr)
+        return dict(l.split("\t", 1) for l in cp.stdout.splitlines())
+
     def test_every_rule_names_where_the_credential_is_spent(self):
         """The evidence for a rule is the code that spends it, so each row
         carries that file rather than leaving it to a reader to find."""
         for name in self.names():
-            cp = subprocess.run(["python3", str(CREDCHECK), "rule", name],
-                                capture_output=True, text=True)
-            fields = dict(l.split("\t", 1) for l in cp.stdout.splitlines())
-            self.assertEqual({"spent_by", "needs", "forbids", "remedy",
-                              "store_with"}, set(fields), name)
+            fields = self.rule(name)
+            self.assertEqual({"spent_by", "needs", "forbids", "what", "url",
+                              "remedy", "store_with", "fix"}, set(fields), name)
             self.assertRegex(fields["spent_by"], r"[\w.-]+/[\w.-]+",
                              "%s: spent_by names no file" % name)
+
+    def test_every_rule_says_what_to_ask_for_and_where_to_get_it(self):
+        """`wk key` carries no prose of its own: the prompt, the page and the
+        choices left to make all come from here, so a credential nobody
+        described is a credential nobody can be asked for."""
+        for name in self.names():
+            fields = self.rule(name)
+            with self.subTest(name=name):
+                self.assertTrue(fields["what"].strip(), "%s: no `what`" % name)
+                self.assertTrue(fields["remedy"].strip(), name)
+                if fields["url"]:
+                    self.assertTrue(fields["url"].startswith("https://"),
+                                    fields["url"])
+                    self.assertIn(fields["url"], fields["fix"])
+                self.assertIn(fields["remedy"], fields["fix"])
+
+    def test_the_token_page_arrives_with_the_permissions_filled_in(self):
+        """GitHub takes the name, the expiry and each permission as query
+        parameters, so the only thing left to choose is the repository list --
+        which a link cannot carry, and which the remedy therefore names."""
+        fields = self.rule("github-pat")
+        url = fields["url"]
+        self.assertTrue(url.startswith(
+            "https://github.com/settings/personal-access-tokens/new?"), url)
+        query = urllib.parse.parse_qs(urllib.parse.urlparse(url).query)
+        self.assertEqual(["write"], query["contents"])
+        self.assertEqual(["write"], query["pull_requests"])
+        self.assertEqual(["none"], query["expires_in"])
+        self.assertEqual(["wkuser"], query["target_name"])
+        self.assertNotIn("repositories", query)
+        for repo in FORKS.split():
+            self.assertIn(repo, fields["remedy"])
 
     def test_this_machine_knows_where_each_one_is_kept(self):
         """One path table (wk_cred_path), so `wk key set`, `wk key check` and

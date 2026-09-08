@@ -383,7 +383,7 @@ class TestNothingElseLearnedTheShape(unittest.TestCase):
 
     def test_the_store_is_written_on_stdin(self):
         """An argument is in `ps` for everyone on the machine."""
-        self.assertIn('printf \'%s\' "$_val" | wk_agent_secret_store "$_name"', self.KEY)
+        self.assertIn('printf \'%s\' "$_val" | wk_cred_store "$_name"', self.KEY)
 
 
 if __name__ == "__main__":

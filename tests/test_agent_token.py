@@ -113,7 +113,7 @@ class TestTheShellExportsIt(WkTest):
                 self.assertEqual(self._value(shell, args, home), "")
 
     def test_a_dangling_symlink_means_no_token(self):
-        """What a container has before `wk key claude` is ever run: firstrun
+        """What a container has before `wk key set claude` is ever run: firstrun
         makes the link unconditionally so that storing a token later needs no
         rebuild, which means the link spends that time pointing at nothing."""
         home = self._home()
@@ -225,7 +225,7 @@ printf "store=%s path=%s\\n" "$WK_STORE" "$(wk_agent_secret_path claude)"
         store = self._store()
         cp = self._sh(
             f'printf "%s\\n" {PLACEHOLDER} | wk_agent_secret_store claude\n'
-            'wk_agent_secret_clear claude\n'
+            'wk_cred_clear claude\n'
             'printf "[%s]\\n" "$(wk_agent_secret claude)"',
             store)
         self.assertIn("[]", cp.stdout, cp.stdout + cp.stderr)
@@ -261,8 +261,9 @@ class TestEveryTargetDeliversIt(unittest.TestCase):
         and injector, never a secret file."""
         text = (REPO / "lib" / "store.sh").read_text()
         self.assertEqual(1, text.count("_wk_secret_read() {"))
-        for fn in ("_wk_secret_read", "wk_agent_secret_store",
-                   "wk_agent_secret_clear", "wk_push_key"):
+        for fn in ("_wk_secret_read", "wk_cred_store", "wk_cred_present",
+                   "wk_agent_secret_store", "wk_cred_clear",
+                   "wk_push_key"):
             with self.subTest(no_hop_in=fn):
                 self.assertNotIn("podman machine ssh", func_body(text, fn))
         self.assertEqual(1, text.count("podman machine ssh"))

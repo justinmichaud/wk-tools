@@ -179,7 +179,7 @@ on)
         return 1
     fi
 
-    # Before the keys: a workspace whose ssh config names no fork host cannot use an agent that holds one. Republished here because `wk key register` may have minted new public halves since the store was made.
+    # Before the keys: a workspace whose ssh config names no fork host cannot use an agent that holds one. Republished here because `wk key deploy` may have minted new public halves since the store was made.
     secrets_publish \
         || die "could not write $LIVE/ssh_config, which every workspace includes"
 
@@ -194,11 +194,11 @@ on)
         return 1
     fi
     if [ "$loaded" -eq 0 ]; then
-        warn "no deploy key here to load -- 'wk key register' makes them"
+        warn "no deploy key here to load -- 'wk key deploy' makes them"
         return 4
     fi
     changed "push is ON -- $loaded deploy key(s) in the agent outside every workspace"
-    [ "$nokey" -eq 0 ] || log "  $nokey fork(s) have no key here ('wk key register')"
+    [ "$nokey" -eq 0 ] || log "  $nokey fork(s) have no key here ('wk key deploy')"
     log "  every workspace can push to the forks now, including any agent in one."
     log "  'wk push off' when you are done; 'wk ai claude' turns it off by itself."
 
@@ -247,7 +247,7 @@ status)
             loaded) loaded=$((loaded + 1)); printf '%-10s %s\n' "$r" "push allowed (in the agent)" ;;
             held)   held=$((held + 1));     printf '%-10s %s\n' "$r" "held back ($HELD)" ;;
             live)   live=$((live + 1));     printf '%-10s %s\n' "$r" "always live ($HELD) -- no switch on this machine" ;;
-            absent) absent=$((absent + 1)); printf '%-10s %s\n' "$r" "no key ('wk key register')" ;;
+            absent) absent=$((absent + 1)); printf '%-10s %s\n' "$r" "no key ('wk key deploy')" ;;
         esac
     done
 
@@ -291,7 +291,7 @@ status)
         info "push is OFF -- 'wk push on' to allow it"
         return 1
     fi
-    warn "there are no deploy keys here at all -- 'wk key register' makes them"
+    warn "there are no deploy keys here at all -- 'wk key deploy' makes them"
     return 4
     ;;
 

@@ -156,16 +156,14 @@ cd ~/Development/wk-tools
 ```sh
 ./setup --stage quiesce        # one sudo prompt; installs the quiesce/session helper
 wk sudo setup                  # closes sudo's 5-minute timestamp and NOPASSWD
-gh auth login                  # wk key register calls the GitHub API with this
-wk key register                # a deploy key per fork, registered with write access
-wk key set github-pat          # the token 'git-webkit pr' opens a pull request with
+gh auth login                  # wk key setup calls the GitHub API with this
+claude setup-token             # a token to paste when wk key setup asks for one
+claude auth login              # the account login wk key setup reads for itself
+wk key setup                   # the deploy keys, then every credential this machine
+                               # has not got, then what each one can do and how far
+                               # it reaches -- one credential at a time, re-runnable,
+                               # and Enter skips one you do not want
 wk push on                     # loads the keys into the agent and gives the injector a write token
-claude setup-token             # then paste it into the next line
-wk key set claude              # every workspace this machine makes starts authenticated
-claude auth login              # then the next line reads what it stored -- nothing to paste
-wk key set claude-login        # the account login; Claude Code Remote Control needs it
-wk key set litellm             # the API key `wk ai pi` reaches your endpoint with
-wk key check                   # what each credential can do and how far it reaches, now
 wk sync                        # clones WebKit into the mirror, publishes a snapshot
 eval "$(wk completion bash)"   # shell/bashrc does this for you; zsh: wk completion zsh
 ```
@@ -857,6 +855,27 @@ GitHub or the tailnet stores the credential and reports it *unverified*: being
 offline is a state, and refusing there would leave the machine with nothing at
 all. Nothing degrades silently -- the next `wk doctor` asks again.
 
+**`wk key setup`: one command, every credential**
+
+`wk key setup` is the whole of it on a new machine: the deploy keys first (they
+are the one step that needs `gh`), then every credential this machine has not
+got, asked for one at a time, then `wk key check`. A credential already stored
+is left exactly as it is, an empty answer skips one, and the run can be killed
+and repeated. `wk key set <name>` is the same thing for one of them by name --
+`github-pat`, `claude`, `claude-login`, `litellm`, `tailnet`, `tailnet-api` --
+and with nothing to store it reports what the stored one can do instead.
+`--replace` is how a credential is rotated, and it is the only arm that removes
+one. The deploy keys are generated here rather than pasted, so they have a verb
+of their own: `wk key deploy`.
+
+Every prompt is built from the credential's own row in `lib/credcheck.py`: what
+to paste, the page that mints one with everything that page will take from a
+link already filled in, and the choices the link cannot carry. For a GitHub
+token that means the name, a non-expiring lifetime and `Contents: read and
+write` plus `Pull requests: read and write` arrive selected, and the one thing
+left to do is set *Repository access* to the forks the prompt lists. Tailscale's
+console takes no parameters, so those two say exactly which switches to set.
+
 **`wk key set`: what a workspace is already logged in to**
 
 A workspace starts already authenticated, so nothing has to answer `/login` in
@@ -977,7 +996,7 @@ stopped guest is converged when it next starts, before anything in it can run.
 
 Nothing moves on disk in either direction, so there is no half-thrown position
 to crash into: a killed `wk push on` re-run converges. The credentials are this
-device's, so `wk key set` and `wk key register` need no VM; reaching the agent
+device's, so `wk key set` and `wk key deploy` need no VM; reaching the agent
 and the injector inside the podman machine is one `podman machine ssh`, and
 `wk push status` never starts it.
 

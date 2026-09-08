@@ -302,39 +302,26 @@ confirm() {
     case "$reply" in [yY]*) return 0 ;; *) return 1 ;; esac
 }
 
-prompt_secret_value() {  # $1 = human description, $2 = optional URL or command
-    local what="$1" url="${2:-}" val=""
+prompt_secret_value() {  # $1 = what to ask for, $2 = the page that mints one, $3 = what is left to choose there
+    local what="$1" url="${2:-}" how="${3:-}" val=""
 
     if [ ! -t 0 ]; then
-        warn "$what is needed and is not stored yet."
+        warn "wk needs $what, and there is none stored here."
         warn "  No terminal, so it cannot be asked for here. Re-run interactively."
         return 1
     fi
 
     printf '\n' >&2
-    info "$what is needed, and this repository must not contain it."
+    info "wk needs $what."
     [ -n "$url" ] && log "  get one here: $url" >&2
-    log "  it is stored 0600 and asked for only once" >&2
+    [ -n "$how" ] && log "  $how" >&2
+    log "  this repository must not contain it: it is stored 0600, and asked for once" >&2
     printf '  paste it (input hidden, empty to skip): ' >&2
     read -rs val || return 1
     printf '\n' >&2
 
     [ -n "$val" ] || { warn "nothing entered; skipping"; return 1; }
     printf '%s' "$val"
-}
-
-prompt_secret() {  # $1 = path to store at, $2 = human description, $3 = optional URL
-    local path="$1" what="$2" url="${3:-}" val=""
-
-    [ -s "$path" ] && { printf '%s' "$path"; return 0; }
-
-    val=$(prompt_secret_value "$what" "$url") || return 1
-
-    mkdir -p "$(dirname "$path")" || return 1
-    ( umask 077; printf '%s\n' "$val" > "$path" ) || return 1
-    chmod 0600 "$path" 2>/dev/null || true
-    info "stored in $path"
-    printf '%s' "$path"
 }
 
 wk_tailscale_authkey_path() { printf '%s' "${WK_TS_AUTHKEY:-$HOME/.config/wk/tailscale-authkey}"; }
@@ -352,11 +339,7 @@ wk_cred_reject() { # <rule name> <value> -- exit 0 if accepted, else print why
     return 0
 }
 
-wk_tailscale_authkey_present() {
-    local p; p=$(wk_tailscale_authkey_path)
-    [ -s "$p" ] || return 1
-    wk_tailscale_key_reject "$(head -1 "$p" 2>/dev/null)" >/dev/null
-}
+wk_tailscale_authkey_present() { wk_tailscale_authkey >/dev/null 2>&1; }
 
 wk_tailscale_api_path() { printf '%s' "${WK_TS_API_SECRET:-$HOME/.config/wk/tailscale-api-key}"; }
 
@@ -370,31 +353,21 @@ wk_tailscale_api_present() { # presence only; whether the tailnet accepts it is 
     wk_tailscale_api_reject "$(head -1 "$p" 2>/dev/null)" >/dev/null
 }
 
-wk_tailscale_api_key() {
-    local path; path=$(wk_tailscale_api_path)
-    local p why
-    p=$(prompt_secret "$path" \
-        "A tailscale API access token -- it stays on this machine and is never written to a card" \
-        "https://login.tailscale.com/admin/settings/keys") || return 1
-    if why=$(wk_tailscale_api_reject "$(head -1 "$p" 2>/dev/null)"); then
-        printf '%s' "$p"; return 0
-    fi
-    warn "$p is not usable: $why"
-    warn "  Leaving it in place rather than deleting it -- check it and re-run."
-    return 1
-}
-
 wk_tailnet_retire() { # <name>
     WK_TS_API_SECRET_FILE="$(wk_tailscale_api_path)" \
         python3 "$WK_ROOT/lib/tailnet.py" retire "$1"
 }
 
+# The file to read the key out of, never a prompt: one command asks for a
+# credential (`wk key set`), so a write that finds none refuses instead of
+# stopping halfway to ask for one.
 wk_tailscale_authkey() {
-    local path="${WK_TS_AUTHKEY:-$HOME/.config/wk/tailscale-authkey}"
     local p why
-    p=$(prompt_secret "$path" \
-        "A tailscale auth key -- tagged tag:wk, reusable, NOT ephemeral, longest expiry" \
-        "https://login.tailscale.com/admin/settings/keys") || return 1
+    p=$(wk_tailscale_authkey_path)
+    if [ ! -s "$p" ]; then
+        warn "no tailnet auth key on this machine ($p) -- store one: wk key set tailnet"
+        return 1
+    fi
     if why=$(wk_tailscale_key_reject "$(head -1 "$p" 2>/dev/null)"); then
         printf '%s' "$p"; return 0
     fi

@@ -2,7 +2,7 @@
 
 `wk selftest` runs the stdlib unittest suite under `tests/`; below is the behaviour that has no test yet, most of it writable with a stub/fake target driver and no hardware.
 
-- [ ] test: one kill-point test class per command for crash-only convergence: `wk build --babysit`, `wk test`, `wk bench` (seed and run), `wk vm base`/`--refresh`, `wk vm start`/`stop`/`start`, `wk remote setup`/`rm`, `wk pi setup`, `wk key register`, `wk skills pull`/`push`, `wk backup`, `./setup`, `wk quiesce on`/`off`, `wk session`, `wk ai claude`
+- [ ] test: one kill-point test class per command for crash-only convergence: `wk build --babysit`, `wk test`, `wk bench` (seed and run), `wk vm base`/`--refresh`, `wk vm start`/`stop`/`start`, `wk remote setup`/`rm`, `wk pi setup`, `wk key deploy`, `wk skills pull`/`push`, `wk backup`, `./setup`, `wk quiesce on`/`off`, `wk session`, `wk ai claude`
 - [ ] test: two `wk build` on one workspace serialize on the workspace lock
 - [ ] test: `wk vm base --refresh` is refused while one is already running
 - [ ] test: two `wk vm start` do not corrupt `~/.ssh/config.d/wk`

@@ -1,12 +1,21 @@
 # The company gateway, and the jump host for all three shared build boxes below.
 #
-# StrictHostKeyChecking and ConnectTimeout are here because it is a *jump* host:
-# options on an ssh command line are not passed to the ProxyJump child, so
-# `wk status`'s walk of devbox-arm64-2 runs its first hop with whatever this
-# stanza says and with the defaults for the rest. The defaults are `ask` and no
-# timeout, which is a fleet listing that stops dead on a question about the
-# gateway -- the same failure the bridge stanzas at the bottom of this file
-# carry the long version of.
+# BatchMode, StrictHostKeyChecking and ConnectTimeout are here because it is a
+# *jump* host: options on an ssh command line are not passed to the ProxyJump
+# child, so `wk status`'s walk of devbox-arm64-2 runs its first hop with
+# whatever this stanza says and with the defaults for the rest. The defaults
+# are `ask`, no timeout and password authentication, which is a fleet listing
+# that stops dead on a question about the gateway -- the same failure the
+# bridge stanzas at the bottom of this file carry the long version of.
+#
+# BatchMode: this gateway offers `publickey,password`, so a hop whose key it
+# does not hold falls through to asking, three times, on the terminal --
+# measured as `Permission denied, please try again.` under an `ssh -o
+# BatchMode=yes` that the child never saw. `wk status` is read-only and asks no
+# questions, so the hop must refuse instead: `Permission denied (publickey)`,
+# at once. A person who does need to type a password here says so --
+# `ssh -o BatchMode=no igalia.com` -- and the fix for the probe is a key the
+# gateway accepts, not an answerable prompt inside a report.
 #
 # accept-new, for the reason `wk bridge ls` gives: it accepts a key never seen
 # before and still refuses one that has *moved*, and the refusal is the half
@@ -17,6 +26,7 @@ Host igalia.com
   ForwardAgent yes
   User jmichaud
   Port 6789
+  BatchMode yes
   StrictHostKeyChecking accept-new
   ConnectTimeout 10
 

@@ -315,7 +315,7 @@ class TestAMachineWithAnyOtherMountSetIsRecreated(_Stage):
         self.assertIn("/var/lib/wk/bench", out)
         self.assertIn("tar -C /var/lib/wk -cf - bench", out)
         # The keys are not in the loss list: they are on this host already.
-        self.assertIn("wk key register", out)
+        self.assertIn("wk key deploy", out)
 
     def test_it_reads_the_losses_off_a_stopped_machine_by_starting_it(self):
         cp = self._run("none")

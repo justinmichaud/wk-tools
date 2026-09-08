@@ -581,7 +581,7 @@ $(printf '%s\n' "$joins" | sed 's/^/    /')
     esac
 
     keyfile=$(wk_tailscale_authkey) || die "the tailnet auth key present moments ago at the write preflight is
-    gone now, and $dev is already erased. Set one and retry:  wk key tailnet"
+    gone now, and $dev is already erased. Set one and retry:  wk key set tailnet"
 
     info "seeding the tailnet identity onto $dev -- it joins as '$name' ($tag) on first boot"
     card_priv tailnet "$dev" "$name" "$tag" < "$keyfile" >/dev/null \

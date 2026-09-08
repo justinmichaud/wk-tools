@@ -103,5 +103,5 @@ if [ -z "$_missing_keys" ]; then
     unchanged "push keys"
 else
     warn "no push key for:$_missing_keys"
-    log  "  workspaces can fetch but not push until:  wk key register"
+    log  "  workspaces can fetch but not push until:  wk key deploy"
 fi

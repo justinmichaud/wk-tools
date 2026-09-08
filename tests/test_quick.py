@@ -847,7 +847,7 @@ class TestTailnetHygiene(WkTest):
             capture_output=True, text=True,
         )
         if cp.stdout.strip():
-            bad.append(f"an auth key is read outside prompt_secret: {cp.stdout}")
+            bad.append(f"an auth key is read outside `wk key set tailnet`: {cp.stdout}")
         self.assertEqual(bad, [], "; ".join(bad))
 
     def test_no_authkey_in_argv(self):
@@ -1111,6 +1111,28 @@ t0=$(date +%s); capped 20 true; d=$(( $(date +%s) - t0 ))
         cp = bash(script, timeout=40)
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
 
+    @staticmethod
+    def _no_batchmode_by_design(conf):
+        """A stanza may leave password authentication on only by saying so: the
+        comment block above `Host <name>` names the phone that is not a
+        provisioned bridge yet. Read out of the file rather than listed here,
+        so a second exception has to argue for itself where a reader will see
+        it."""
+        allowed, block = set(), []
+        for line in conf.read_text().splitlines():
+            if line.startswith("#"):
+                block.append(line)
+            elif line.startswith("Host "):
+                # Joined, not searched line by line: the phrase is prose and
+                # wraps wherever the paragraph does.
+                prose = " ".join(l.lstrip("#").strip() for l in block)
+                if "No BatchMode" in prose:
+                    allowed.update(line.split()[1:])
+                block = []
+            elif not line.strip():
+                block = []
+        return allowed
+
     def test_ssh_jump_hosts_are_bounded(self):
         """a jump host's stanza carries the bounds its jump cannot inherit"""
         if not _have("ssh"):
@@ -1130,6 +1152,7 @@ t0=$(date +%s); capped 20 true; d=$(( $(date +%s) - t0 ))
             opts = cp2.stdout
             mode = ""
             timeout = ""
+            batch = ""
             for line in opts.splitlines():
                 parts = line.split()
                 if not parts:
@@ -1138,10 +1161,18 @@ t0=$(date +%s); capped 20 true; d=$(( $(date +%s) - t0 ))
                     mode = parts[1] if len(parts) > 1 else ""
                 if parts[0] == "connecttimeout":
                     timeout = parts[1] if len(parts) > 1 else ""
+                if parts[0] == "batchmode":
+                    batch = parts[1] if len(parts) > 1 else ""
             if mode not in ("accept-new", "no", "false", "off"):
                 bad.append(f"{j}: StrictHostKeyChecking is '{mode or 'unset'}'")
             if timeout in ("", "none", "0"):
                 bad.append(f"{j}: no ConnectTimeout")
+            # A hop that can still ask for a password is a read-only report
+            # that stops on a question nothing can answer: `wk status` walks
+            # every build box through one of these.
+            if batch != "yes" and j not in self._no_batchmode_by_design(conf):
+                bad.append(f"{j}: BatchMode is '{batch or 'unset'}', so the hop "
+                           f"can ask for a password inside a probe")
         self.assertEqual(bad, [], "; ".join(bad))
 
     def test_no_fleet_probe_can_outlive_its_ceiling(self):

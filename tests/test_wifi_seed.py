@@ -543,10 +543,10 @@ class TestTailnetKeyPreflight(WkTest):
         self.assertIn("--machine", cp.stdout + cp.stderr)
 
     def test_refuses_with_no_key_and_names_the_remedy(self):
-        """no tailnet auth key on this machine refuses, and names 'wk key tailnet'"""
+        """no tailnet auth key on this machine refuses, and names 'wk key set tailnet'"""
         cp = _tailnet_key_preflight("rpi3", str(self.tmp / "no-such-key"))
         self.assertNotEqual(cp.returncode, 0, "wrote nothing, but did not refuse")
-        self.assertIn("wk key tailnet", cp.stdout + cp.stderr)
+        self.assertIn("wk key set tailnet", cp.stdout + cp.stderr)
 
     def test_wk_force_does_not_cross_the_missing_machine_name_refusal(self):
         """WK_FORCE=1 changes nothing -- there is no --force past this"""

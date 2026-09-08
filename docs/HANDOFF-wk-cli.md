@@ -25,7 +25,7 @@ The audit is tests/test_owed_dispatch_audit.py; each line is one of its
 
 Each a `kill -9` mid-command plus a re-run that must converge:
 
-- [ ] `wk sync`, `wk new --target vm`, `wk new --target <remote>` (mid-clone / ssh cut), `wk rm` (each target), `wk build`, `wk test`, `wk gc`, `wk vm base`/`--refresh` (host-side kill), `wk vm start`/`stop`, `wk remote setup`, `wk remote rm`, `wk key register`, `wk skills pull/push`, `wk ai claude` [needs every target]
+- [ ] `wk sync`, `wk new --target vm`, `wk new --target <remote>` (mid-clone / ssh cut), `wk rm` (each target), `wk build`, `wk test`, `wk gc`, `wk vm base`/`--refresh` (host-side kill), `wk vm start`/`stop`, `wk remote setup`, `wk remote rm`, `wk key deploy`, `wk skills pull/push`, `wk ai claude` [needs every target]
 - [ ] two `wk sync` at once: the second waits or refuses, naming the first [needs two concurrent runs]
 - [ ] two `wk build` on one workspace serialise on every target (only exercised on one target so far); `wk vm base --refresh` while one runs is refused [needs every target]
 - [ ] two `wk vm start` do not corrupt `~/.ssh/config.d/wk` [needs a macOS VM]
@@ -70,7 +70,7 @@ Each a `kill -9` mid-command plus a re-run that must converge:
 - [ ] `wk backup` → `./setup` round-trip (`docs/HANDOFF-settings-audit.md`) [needs a machine to reprovision]
 - [ ] `wk skills` status/diff/pull/push; pull refuses over uncommitted repo edits [needs a workspace]
 - [ ] the skills are workspace-true: an agent started by `wk ai claude` in a container and in a macOS guest can follow every skill it can trigger without hitting a host-only instruction [needs a container and a macOS VM]
-- [ ] `wk key register` / `wk key check`, confirmed end to end [needs a workspace]
+- [ ] `wk key deploy` / `wk key check`, confirmed end to end [needs a workspace]
 - [ ] `wk key` reaches the store through its own `in_vm` (cmd/key) rather than the dispatcher's `where=store`; one hop into the podman VM, not two [needs the podman VM]
 - [ ] `wk enter <ws>` lands in a shell; `wk enter <ws> <cmd>` runs the command [needs a workspace]
 - [ ] `wk status <ws> --wait` blocks while busy and reports once when not, same exit code as a bare `wk status`; `--timeout S` stops waiting and says so without claiming the work stopped [needs a workspace]

@@ -815,20 +815,15 @@ wk_agent_secret() { # <name> -- its first line; a file row is read whole by wk_c
     _wk_secret_read "$p" | sed -n '1p'
 }
 
+# The two names this layer reads and writes a workspace's credential by; the
+# one implementation is wk_cred_present/wk_cred_store, which every credential
+# on this machine goes through.
 wk_agent_secret_present() { # <name>
-    local p; p=$(wk_agent_secret_path "$1") || return 1
-    python3 "$WK_ROOT/lib/secretfile.py" present "$p"
+    wk_cred_present "$1"
 }
 
 wk_agent_secret_store() { # <name> -- from stdin: an argument is visible in `ps`
-    local p; p=$(wk_agent_secret_path "$1") || return 1
-    ensure_dir "$(dirname "$p")" 0700
-    python3 "$WK_ROOT/lib/secretfile.py" write "$p"
-}
-
-wk_agent_secret_clear() { # <name>
-    local p; p=$(wk_agent_secret_path "$1") || return 1
-    rm -f "$p"
+    wk_cred_store "$1"
 }
 
 wk_cred_path() { # <name> -- where this machine keeps it
@@ -841,6 +836,31 @@ wk_cred_path() { # <name> -- where this machine keeps it
 }
 
 wk_cred_names() { python3 "$WK_ROOT/lib/credcheck.py" names; }
+
+# The deploy keys are generated here rather than stored, so every command that walks the credentials a person supplies walks this list.
+wk_cred_settable() { wk_cred_names | grep -vxF deploy-key; }
+
+wk_cred_rule() { # <name> <field> -- one line of lib/credcheck.py's row for it
+    python3 "$WK_ROOT/lib/credcheck.py" rule "$1" \
+            --repos "$(wk_push_forks | awk 'NF {printf "%s ", $2}')" \
+        | awk -F'\t' -v f="$2" '$1 == f { print $2; exit }'
+}
+
+wk_cred_present() { # <name> -- is there one here at all; its rule judges what it can do
+    local p; p=$(wk_cred_path "$1") || return 1
+    python3 "$WK_ROOT/lib/secretfile.py" present "$p"
+}
+
+wk_cred_store() { # <name> -- from stdin: an argument is visible in `ps`
+    local p; p=$(wk_cred_path "$1") || return 1
+    ensure_dir "$(dirname "$p")" 0700
+    python3 "$WK_ROOT/lib/secretfile.py" write "$p"
+}
+
+wk_cred_clear() { # <name> -- this machine holds it no longer
+    local p; p=$(wk_cred_path "$1") || return 1
+    rm -f "$p"
+}
 
 wk_cred_read() { # <name> -- every byte of it, nothing when it is absent
     _wk_secret_read "$(wk_cred_path "$1")"
