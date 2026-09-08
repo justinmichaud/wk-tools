@@ -59,6 +59,25 @@
       `NODE_LOCAL` set, `mbp` and `benchvm`, and neither is exercised by a test
       that could catch a mistake — hence not done here
 
+- [ ] nothing can turn auto-brightness *off*, only refuse a run under it.
+      Measured 2026-09-08 on tolken (MacBook Air `Mac16,12`, M4, macOS 26.6.2):
+      DisplayServices exports no auto-brightness symbol —
+      `DisplayServicesGet/SetBrightnessAutoEnabled` and four other plausible
+      names are all absent — and neither install has
+      `com.apple.iokit.AmbientLightSensor.plist` or
+      `com.apple.CoreBrightness.plist`, so there is no file to write either.
+      The only reading is `system_profiler`'s runtime
+      `spdisplays_ambient_brightness`, which `lib/wkmac.py displays` now
+      carries and the browser check refuses on. Finding the setter is what
+      would let the lane hold the setting rather than decline the machine
+
+- [ ] the guest rehearsal has never run, and cannot: `tart` is not on tolken's
+      PATH, so `benchvm` is unstartable there, on top of the `NODE_DISPLAY`
+      refusal above. Worth knowing what it could prove even once it runs — a
+      paravirtual panel and no ambient light sensor mean it exercises the plant,
+      the autologin, the legs and the hand-back, but neither the display pin nor
+      the brightness gate [needs tart on that Mac]
+
 ## Owed, needs the Mac
 
 - [ ] `wk boot mbp --prepare` has not been run, so the boot helper is not on
@@ -122,6 +141,16 @@
       [needs the Mac, after --prepare]
 
 ## Decision
+
+- [ ] the measured mode is a scaled mode *above* the panel. The built-in panel
+      is 2560x1664 (`Mac16,12`, 13-inch MacBook Air); the bench install's
+      `com.apple.windowserver.displays.plist` declares one display at
+      `Wide 1470, High 956, Scale 2, Hz 60`, so macOS renders a 2940x1912
+      backing store and downsamples every frame. That costs fill rate and adds
+      a scaling pass, and MotionMark's score is a function of the area drawn.
+      `1280x832` at scale 2 is the pixel-exact mode. Changing `NODE_DISPLAY`
+      breaks comparability with the 16-round numbers already taken at
+      1470x956, so it is a choice rather than a fix
 
 - [ ] the wk-tools tree on moose carries this work uncommitted, and tolken runs
       from a scratch clone at `~/Development/wk-tools-wip` (5f2848c), deployed

@@ -200,6 +200,11 @@ def faults(reading, clients, device, min_raf, expect):
                      "one, so what draws in it is rAF-throttled and the benchmark measures "
                      "the throttle")
     found += display_faults(reading.get("displays"), expect)
+    # Judged whatever the expectation: brightness ambient light can raise again is not a held setting, and power is thermal headroom. Absent is unknown and reported, never refused -- a guest panel has no sensor to ask.
+    if (builtin_display(reading.get("displays")) or {}).get("auto_brightness"):
+        found.append("the built-in display is under ambient-light control, so the "
+                     "brightness this run pinned can rise again mid-measurement and the "
+                     "thermal headroom with it")
     frontmost = reading.get("frontmost")
     if frontmost == "?":
         found.append("nothing here could say which application was frontmost -- AppKit did "
@@ -219,7 +224,8 @@ def display_summary(displays):
     return (f"count={len(displays)} builtin={builtin.get('id') if builtin else None} "
             f"points={builtin.get('points') if builtin else None} "
             f"mirrored={any(d.get('mirrored') for d in displays)} "
-            f"asleep={any(d.get('asleep') for d in displays)}")
+            f"asleep={any(d.get('asleep') for d in displays)} "
+            f"auto_brightness={builtin.get('auto_brightness') if builtin else None}")
 
 
 def report(reading, clients):
@@ -235,8 +241,7 @@ def take_reading(args):
     reading = {}
     server = serve(reading)
     port = server.server_address[1]
-    # A WebKit GPU process left behind by an earlier browser holds a client of its
-    # own; without this the check would pass on somebody else's evidence.
+    # A WebKit GPU process left behind by an earlier browser holds a client of its own, and the check would pass on somebody else's evidence.
     device, before = accelerator_clients()
     stale = set(webkit_gpu_holders(before))
     browser = launch(args.build_directory, f"http://127.0.0.1:{port}/")
@@ -288,8 +293,7 @@ def main():
     parser.add_argument("--timeout", type=float, default=120.0)
     args = parser.parse_args()
 
-    # Parsed before the browser is launched: two minutes of a run is the wrong place
-    # to discover that the argument saying what it has to match is malformed.
+    # Parsed before the browser is launched: two minutes into a run is the wrong place to find the argument malformed.
     if args.expect_display:
         try:
             parse_expect_display(args.expect_display)
@@ -304,8 +308,7 @@ def main():
     else:
         parser.error("--build-directory to take a reading, or --read to report one")
 
-    # A reading carries what it was judged against, so re-deriving its verdict later
-    # reaches the same one with no argument.
+    # A reading carries what it was judged against, so re-deriving its verdict reaches the same one with no argument.
     spec = args.expect_display or reading.get("expect_display")
     expect = parse_expect_display(spec) if spec else None
     if spec:

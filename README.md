@@ -742,7 +742,17 @@ that word cannot come from a default, and the plant refuses it.
 
 The display is also driven to **minimum brightness** before any round, read
 back, and left there: brightness is power, power is thermal headroom, and a
-brightness that will not move is a refusal rather than a number.
+brightness that will not move is a refusal rather than a number. Ambient-light
+control would undo that mid-run, so it is read too and refuses the machine --
+read, not set: macOS 26.6.2 exposes no setter for it that this tree could find,
+and `system_profiler`'s runtime `spdisplays_ambient_brightness` is the only
+reading there is.
+
+The declared mode is in *points*, which is what the window server and
+`screen.width` report. `NODE_DISPLAY="builtin 1470x956"` on a 2560x1664 panel
+is a scaled mode: the compositor renders 2940x1912 and downsamples. That is a
+choice about what to measure rather than a mistake, and the pixel-exact mode
+for that panel is `builtin 1280x832`.
 
 An A/B runs **three benchmarks** and stops when it has measured finely enough,
 not after a fixed count. Round 0 is a warmup -- one leg per arm, discarded,

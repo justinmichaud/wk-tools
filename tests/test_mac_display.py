@@ -44,7 +44,7 @@ EXTERNAL = dict(PANEL, id=2, builtin=False, main=False, points=[2560, 1440],
 UNSET = object()
 
 ROW_KEYS = {"id", "builtin", "main", "active", "online", "mirrored", "asleep",
-            "points", "vendor", "model", "unit", "brightness"}
+            "points", "vendor", "model", "unit", "brightness", "auto_brightness"}
 
 
 class FakeCG:
@@ -387,6 +387,50 @@ class TheScreenTheReadingWasTakenOn(WkTest):
                      "this machine is a Mac: CoreGraphics loads here")
     def test_a_display_list_nothing_could_answer_reads_as_none(self):
         self.assertIsNone(BROWSER.display_list())
+
+class AmbientLightControl(WkTest):
+    """Minimum brightness that ambient light can raise again is not a held
+    setting, and power is thermal headroom. Neither CoreGraphics nor
+    DisplayServices exposes the control on 26.6.2 and the old plist does not
+    exist, so it is read and refused rather than set."""
+
+    def check(self, auto, **overrides):
+        panel = dict(PANEL, auto_brightness=auto)
+        reading = dict(GOOD, displays=[panel], **overrides)
+        path = self.tmp / "reading.json"
+        path.write_text(json.dumps(reading))
+        return subprocess.run(
+            [sys.executable, str(REPO / "bench" / "mac-browser-check.py"),
+             "--read", str(path), "--expect-display", EXPECT],
+            capture_output=True, text=True)
+
+    def test_auto_brightness_on_is_refused(self):
+        cp = self.check(True)
+        self.assertEqual(1, cp.returncode, cp.stdout + cp.stderr)
+        self.assertIn("ambient-light control", cp.stderr)
+
+    def test_auto_brightness_off_raises_nothing(self):
+        cp = self.check(False)
+        self.assertEqual(0, cp.returncode, cp.stdout + cp.stderr)
+
+    def test_a_panel_with_no_sensor_to_ask_is_reported_not_refused(self):
+        """A guest panel answers nothing; absent is not the same as off, so it
+        is printed for a reader and does not refuse the run."""
+        cp = self.check(None)
+        self.assertEqual(0, cp.returncode, cp.stdout + cp.stderr)
+        self.assertIn("auto_brightness=None", cp.stdout)
+
+    def test_it_is_judged_even_where_no_display_is_pinned(self):
+        """It is a property of the machine, not of comparability, so a run
+        compared with nothing is still refused for it."""
+        panel = dict(PANEL, auto_brightness=True)
+        path = self.tmp / "r.json"
+        path.write_text(json.dumps(dict(GOOD, displays=[panel])))
+        cp = subprocess.run(
+            [sys.executable, str(REPO / "bench" / "mac-browser-check.py"),
+             "--read", str(path)], capture_output=True, text=True)
+        self.assertEqual(1, cp.returncode, cp.stdout + cp.stderr)
+        self.assertIn("ambient-light control", cp.stderr)
 
 
 if __name__ == "__main__":
