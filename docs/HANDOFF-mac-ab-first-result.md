@@ -1,66 +1,58 @@
 # HANDOFF — one A/B iteration on PR 70886, and the reporting around it
 
-Three things are owed: an A/B that produces a number, a `wk status` that says
-enough to debug one that does not, and a report generated from the result.
-Everything below is on `tolken` (the `mbp` machine) and its `WK Bench` volume.
+The A/B produces a number now; what is owed is a `wk status` that says enough
+to debug one that does not, a report generated from the result, and the faults
+that number exposed. Everything below is on `tolken` (the `mbp` machine) and
+its `WK Bench` volume.
 
-## What exists
+## The result
 
-Both arms are built, gated and staged on the volume, from the same wk-tools,
-the same pinned benchmark payloads, and profiles collected with the GPU,
-throttle, payload and screen gates all passing:
+PR 70886 (WTF spin locks, bmalloc) measured on `tolken`'s `WK Bench` volume,
+2026-09-07, job `20260907T214716Z` -- 16 rounds a side, interleaved, warmup
+discarded, 96 of 97 legs `clean`:
 
-    A  20260906T233003Z-mac-release-pgo   b8e586fe8c30  merge-base of PR 70886
-    B  20260907T021244Z-mac-release-pgo   7d6c5149ef3e  PR 70886 head
+    A  20260906T233003Z-mac-release-pgo   b8e586fe8c30  merge-base
+    B  20260907T021244Z-mac-release-pgo   7d6c5149ef3e  PR head
 
-They differ by exactly the patch (one commit, 12 files, WTF spin locks and
-bmalloc). `wk bench mac-ab --progress` lists every step of the experiment with
-the command that does it and the command that proves it.
+    speedometer3   mean_a=58.9816  mean_b=58.9853  delta=+0.0063%  p=0.94
+                   mde_pct=0.2254  target=0.30  met=yes
 
-## The blocker
+    taken through: accelerator AGXAcceleratorG16G, webgl 2.0, raf_hz 54.4,
+    focused, screen 1470x956 dpr 2
 
-- [ ] provisioning has never completed on `WK Bench`, and the cause is now
-      measured. On the 16:15 and 17:43 boots of 2026-09-07 it ran the whole
-      quieting (every `pmset` row `ok`, hosts denied, wk-tools placed) and then
-      died one step from the end:
+Those rounds resolve 0.23%, so that is a null and not an absence of evidence:
+a difference larger than 0.23% is not there on speedometer3. jetstream3 and
+motionmark ran the same 16 rounds -- subtests are in
+`/var/wk/ab/20260907T214716Z/` on the volume -- and neither has a precision
+figure, for the first reason below.
 
-          /usr/local/libexec/wk-bench-pyobjc.sh: line 15: HOME: unbound variable
+## Owed by that run
 
-      A LaunchDaemon inherits no environment, so `$HOME` is unset, and under
-      `set -euo pipefail` that ends the script before it logs `provisioning
-      complete` or removes itself. `wk_pyobjc_have` also ran as root, which
-      cannot import a `pip install --user` that belongs to `bench`, so the
-      guard fell through to that line every time. Both are fixed here
-      (`${HOME:-}`, and `su -l "$BENCH_USER"`), and tests/test_mac_quiet.py
-      sources every payload script under `env -i` to hold the class.
+- [ ] **the stopping rule cannot fire for two of three plans.**
+      `arm_results` (bench/mac-bench-autorun.sh) builds
+      `…/results/<dir>/result.json`, and `ab-precision` refuses exactly that:
+      "a run is the directory a benchmark wrote, not the result.json inside
+      it". speedometer3 survives it; jetstream3 and motionmark answer "no
+      scores on side A", so `plan_resolves` always fails, `unresolved` is never
+      empty, and no run can stop early on precision. Drop the `/result.json`
+      [no hardware needed]
 
-      The volume still runs the *old* payload, so this needs delivering:
+- [ ] **the run ended on its watchdog, not on itself**: `outcome=watchdog`
+      after `rounds_done=16` -- nothing written for 2700s, so it rebooted
+      itself, `ab-summary` never ran and there is no `summary.txt`. What hung
+      after round 16 is unmeasured; the volume's `autorun.log` ends where it
+      stopped [needs the volume]
 
-          # commit, then from moose:
-          wk sync --tools tolken
-          wk bench mac-volume --repair    # on the Mac, in host mode
-          # hold the power button, pick WK Bench -- it provisions and reboots
+- [ ] **`--count 1` gives up the within-run statistics.** Every leg warns "run
+      … has count=1: no p-value can be computed", so the p-values in the report
+      are across rounds only. The real run wants `--count 2` or more, which
+      also shortens how many rounds a target takes [needs the volume]
 
-      then re-plant (no `--force` this time) and pick the volume once more
-      [needs two boots of the volume]
-
-## One A/B iteration
-
-- [ ] read the first number back, once that boot has run:
-
-          wk bench mac-ab --progress            # where it is
-          wk bench mac-ab --collect             # the numbers
-
-      `--detect 0` above runs `--rounds` exactly. Drive it from another
-      machine: the lane reboots the Mac and refuses to be driven from it
-      [needs the boots above]
-
-- [ ] then the real one: drop `--rounds 1 --detect 0 --count 1` and let it
-      alternate until every plan resolves 0.3%, between 5 and 40 rounds.
-      Measured off this volume's own 2026-08-24 A/B, speedometer3 needs ~29
-      rounds a side for 0.3%; whether motionmark reaches it below the 40-round
-      ceiling at all is unmeasured, so expect the ceiling on at least one plan
-      [needs the volume]
+- [ ] the real measurement, once those land: no `--detect 0`, `--count 2` or
+      more, alternating until every plan resolves 0.3%. speedometer3 reached
+      0.23% in 16 rounds at `--count 1`, so the earlier ~29-round estimate was
+      pessimistic; whether motionmark resolves at all below the 40-round
+      ceiling is still unmeasured [needs the volume]
 
 ## What a failing run has to say for itself
 
@@ -73,10 +65,43 @@ the command that does it and the command that proves it.
       workspaces cannot say which build they belong to. Measure that
       attribution before letting `build_live` read it [no hardware needed]
 
-- [ ] `wk status` says nothing about a macOS A/B in flight. Its `bench` section
-      reads this host's own store, and a mac-ab's rounds and results live on the
-      volume. `wk bench mac-ab --progress` is the only view, and only from host
-      mode [no hardware needed]
+- [ ] **a run in flight is invisible in the one place that lists runs.** Both
+      halves are the Mac lane sitting beside the fleet's models rather than
+      inside them, and `wk status` says so itself:
+
+          mbp    workstation   unknown from here
+                 reached       tolken not a node; tolken-bench not a node
+          rpi3   bench-device  bench mode
+                 reached       rpi3-rescue …(down); rpi3-bench …(up)
+
+      1. `b_probeable` for the mac-volume driver is `is_macos`, so from any
+         other machine the answer is "unknown from here" -- while a board's
+         driver probes over the tailnet from anywhere. The evidence is already
+         in that output: `tolken not a node` means it is not in host mode, and
+         with a job planted that *is* "measuring". Make the driver answer from
+         elsewhere: `NODE_SSH` on the tailnet means host mode; absent, with a
+         planted job, means measuring since `planted_at`.
+      2. A mac-ab is a bench run that is not a bench *task*. `wk status`'s
+         bench section lists `$WK_STORE/bench/*/task.json`; the plant writes a
+         job onto the volume and `mac-ab-job.json` into this host's state dir
+         instead, so a section built to show exactly this cannot see it. Have
+         the plant record a task in that store and `wk status` lists it with no
+         new display code [no hardware needed]
+
+- [ ] **nothing checks the screen this Mac is measuring on.**
+      bench/mac-browser-check.py reads `screen` and `dpr` and faults only below
+      640x480, so a display mode change or an external monitor passes -- and
+      neither is a detail: run-benchmark sizes its window from the screen,
+      MotionMark's score is a function of the area it draws, and a second
+      display changes the compositing, the refresh rate and which GPU the
+      window lands on. Two runs at different resolutions are not comparable,
+      and nothing would say so. Measured on the 2026-09-07 runs, for whatever a
+      later one should match: `screen=[1470, 956]`, `dpr=2`, the built-in panel
+      alone. The check should read the display list (one display, and the
+      built-in one), pin the expected mode, and refuse a mismatch the way it
+      refuses a throttled window -- with the reading in `browser-check.json`,
+      where it already travels with the result [no hardware needed to write; one
+      run to pin the numbers]
 
 - [ ] the bench install has no way onto the tailnet, so a run is unobservable
       until it hands the machine back. Measured 2026-09-07: every macOS
@@ -92,13 +117,6 @@ the command that does it and the command that proves it.
       the `tolken-bench` ssh stanza resolves to nothing on purpose
       [no hardware needed to build it; one boot to prove it]
 
-- [ ] `wk find` sweeps every segment but probes ssh only as the invoking
-      account, so it lists the bench install as an unnamed address and cannot
-      say what it is (measured 2026-09-07: it was identified by hand, as
-      `bench@`, after the sweep). Every fleet install whose account is not the
-      operator's is invisible to it, which is exactly the case that has no
-      tailnet name to fall back on [no hardware needed]
-
 - [ ] nothing in the lane can tell a person it wants them. `lib/wknotify.py`
       is `sd_notify` for the systemd services and no-ops elsewhere, so the only
       signal that a plant is waiting for a pick, or that a run has handed the
@@ -112,26 +130,6 @@ the command that does it and the command that proves it.
       expensive, and it is why a refusal that arrives in bench mode has to
       carry everything a reader needs in the volume's own log
 
-- [ ] **the agent half of the quiet gate is unsatisfiable on this hardware.**
-      Measured twice, 2026-09-07: `launchctl bootout` alone, and `launchctl
-      disable gui/<uid>/<label>` in the live GUI domain followed by `bootout`,
-      both leave the same 17 of 21 rows of `wk_quiet_desktop_agents` running
-      within the second -- macOS starts them on demand. So `wk bench staged`
-      refuses every leg with "23 setting(s) above are not a measured Mac's" and
-      an A/B cannot run at all. The table was validated in a guest, where
-      nothing connects to those agents and they never start; a real login
-      session starts them.
-
-      What is left is the mechanism the daemons half already uses: SIGSTOP,
-      judged by `_wk_qd_procstate` (stopped/running/absent) rather than by
-      `pgrep`, which cannot tell a stopped process from a running one. Then the
-      two tables merge into one list of processes that must not run during a
-      measurement, with one enforcement and one judgement. The hazard is named
-      in that file already -- `mds` and `sysmond` deadlock the very commands
-      that would undo the stop -- and none of these 17 has been measured for
-      it, so a stop that wedges the session costs a hard power cycle
-      [needs the volume]
-
 - [ ] `focused` is read by bench/mac-browser-check.py and judged by nothing.
       Measured 2026-09-07 on a run whose other readings were all clean:
       `raf_hz=58.6`, `accelerator=AGXAcceleratorG16G`, a real WebKit GPU
@@ -139,14 +137,6 @@ the command that does it and the command that proves it.
       to the harness that drove it, in which case the reading should go, or
       the raiser had not taken and every leg after it measured a background
       window. One run with the raiser watched settles which [needs the volume]
-
-- [ ] the browser reading is taken once, before the rounds
-      (`refuse_throttled_browser`, bench/mac-bench-autorun.sh), so a window
-      that is covered or throttled *part way through* an A/B is not caught: a
-      notification, a keychain panel or a display that sleeps mid-run lands on
-      whichever arm was running. The collection path already watches for it
-      (`screen_watch_stop`, build/mac-pgo.sh, which fails the collection and
-      names what drew); the legs could take the same watch [no hardware needed]
 
 - [ ] two readers, two definitions of provisioned: the autorun and
       `wk bench mac-ab` ask the first-boot log for a completion line, while
@@ -156,6 +146,14 @@ the command that does it and the command that proves it.
       (bench/mac-bench-autorun.sh) runs on the install itself, so it could ask
       `wk_quiet_desktop_probe` and report the same finding once, up front
       [no hardware needed]
+
+## The report
+
+- [ ] `wk bench report --html` has never been run against a mac-ab result.
+      `wk bench mac-ab --collect` is proven (it produced the numbers above)
+      [needs no new run -- 20260907T214716Z is on the volume]
+
+## Standing hazards
 
 - [ ] the trailing-`&&` audit (tests/test_owed_static_audits.py) skips any
       statement that also holds a `||`, so `{ … || true; } | while read -r n;

@@ -137,6 +137,7 @@ done''').stdout.strip()
         text = AUTORUN.read_text()
         loop = text[text.index('any_ok=""'):text.index("# No `wk quiesce off`")]
         prelude = (
+            "detect_off() { awk -v d=\"${DETECT:-0}\" 'BEGIN { exit !(d + 0 == 0) }'; }\n"
             "DETECT=%s; ROUNDS=%s; MAX_ROUNDS=%s\n"
             "PLANS=jetstream3; NARMS=2\n"
             "leg() { printf 'round %%s\\n' \"$1\" >&2; return 0; }\n"
@@ -450,3 +451,33 @@ class TestTheBrowserIsMeasuredBeforeTheRounds(WkTest):
 
     def test_the_reading_travels_with_the_experiment(self):
         self.assertIn('--json "$RUNS/browser-check.json"', AUTORUN.read_text())
+
+
+class TestDetectZeroMeansZero(WkTest):
+    """`--detect 0` is documented as running `--rounds` exactly. The job is
+    JSON, so the driver writes it through `float()` and the install reads
+    `0.0`; a string test against `0` read that as "stopping rule on" and a run
+    asked for one round took forty (measured 2026-09-07)."""
+
+    def _off(self, value):
+        body = func_body(AUTORUN.read_text(), "detect_off")
+        return sh(f'DETECT={value}\ndetect_off() {{{body}}}\n'
+                  f'if detect_off; then echo OFF; else echo ON; fi').stdout.strip()
+
+    def test_every_spelling_of_zero_turns_the_rule_off(self):
+        for value in ("0", "0.0", "0.00", ".0"):
+            with self.subTest(detect=value):
+                self.assertEqual("OFF", self._off(value))
+
+    def test_a_real_target_leaves_it_on(self):
+        for value in ("0.3", "0.05", "1"):
+            with self.subTest(detect=value):
+                self.assertEqual("ON", self._off(value))
+
+    def test_the_ceiling_and_the_check_ask_the_same_question(self):
+        text = AUTORUN.read_text()
+        self.assertIn("if detect_off; then CEILING=", text)
+        self.assertIn('&& ! detect_off; then', text)
+        stale = [l.strip() for l in text.splitlines()
+                 if '"$DETECT" = 0' in l or '"$DETECT" != 0' in l]
+        self.assertEqual([], stale, "a string test against 0 is left")

@@ -379,6 +379,11 @@ arm_results() {  # <plan> <label> -- the result.json paths recorded for that arm
 }
 
 # Peeking at a p-value and stopping when it crosses inflates the false-positive rate; peeking at how fine a difference the data resolves does not.
+# The job carries this as JSON, so `--detect 0` arrives as `0.0` and a string test against `0` reads it as "stopping rule on" -- measured 2026-09-07, a run asked for one round and took forty.
+detect_off() {
+    awk -v d="${DETECT:-0}" 'BEGIN { exit !(d + 0 == 0) }'
+}
+
 plan_resolves() {  # <plan> -- 0 when this plan already detects $DETECT
     local plan="$1" a b out
     a=$(arm_results "$plan" A) || a=""; b=$(arm_results "$plan" B) || b=""
@@ -433,7 +438,7 @@ say "warmup done; captures in $RUNS/warmup"
 any_ok=""
 
 # With no precision target (--detect 0), --rounds is the whole plan rather than the floor under one.
-if [ "$DETECT" = 0 ]; then CEILING="$ROUNDS"; else CEILING="$MAX_ROUNDS"; fi
+if detect_off; then CEILING="$ROUNDS"; else CEILING="$MAX_ROUNDS"; fi
 
 r=1
 while [ "$r" -le "$CEILING" ]; do
@@ -454,7 +459,7 @@ while [ "$r" -le "$CEILING" ]; do
     fi
     state_set rounds_done "$r"
 
-    if [ "$r" -ge "$ROUNDS" ] && [ "$DETECT" != 0 ]; then
+    if [ "$r" -ge "$ROUNDS" ] && ! detect_off; then
         say "precision after round $r (target ${DETECT}%):"
         unresolved=""
         for plan in $PLANS; do
@@ -469,7 +474,7 @@ while [ "$r" -le "$CEILING" ]; do
     fi
     r=$((r + 1))
 done
-if [ "$r" -gt "$CEILING" ] && [ "$DETECT" = 0 ]; then
+if [ "$r" -gt "$CEILING" ] && detect_off; then
     say "ran the $ROUNDS round(s) asked for; no precision target was set, so what"
     say "these numbers resolve is whatever 'wk bench precision' says of them."
     state_set outcome "rounds-done"
