@@ -35,7 +35,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from tests.support import REPO, bash, func_body
+from tests.support import REPO, WkTest, bash, func_body
 
 CMD_DOCTOR = REPO / "cmd" / "doctor"
 LIB_COMMON = REPO / "lib" / "common.sh"
@@ -425,6 +425,64 @@ class TestSyntax(unittest.TestCase):
     def test_cmd_doctor_parses(self):
         cp = subprocess.run(["bash", "-n", str(CMD_DOCTOR)], capture_output=True, text=True)
         self.assertEqual(cp.returncode, 0, cp.stderr)
+
+
+def _lift_helper_loop():
+    text = (REPO / "cmd" / "doctor").read_text()
+    start = text.index("while read -r _pname _pwhere _pwhat; do")
+    end = text.index("unset _pname _pwhere _pwhat _ppath")
+    # `-x` on a real path would ask this machine, so the fixture answers for it.
+    return text[start:end].replace('[ ! -x "$_ppath" ]', 'false')
+
+class EveryPrivilegedHelperIsAsked(WkTest):
+    """A helper whose sudoers rule is out-ranked is installed, executable and
+    useless, so the property asked is whether it answers -- and it is asked of
+    all three, on the platform each applies to. Held to `is_linux`, the whole
+    block was skipped on macOS and the boot helper was never checked anywhere."""
+
+    def test_the_table_names_all_three(self):
+        cp = bash('. "$WK_ROOT/lib/common.sh"; wk_priv_helpers')
+        names = [l.split()[0] for l in cp.stdout.splitlines() if l.strip()]
+        self.assertEqual(["wk-quiesce-priv", "wk-card-priv", "wk-boot-priv"], names)
+
+    def test_only_the_card_helper_is_platform_bound(self):
+        cp = bash('. "$WK_ROOT/lib/common.sh"; wk_priv_helpers')
+        bound = {l.split()[0]: l.split()[1] for l in cp.stdout.splitlines() if l.strip()}
+        self.assertEqual("linux", bound["wk-card-priv"])
+        self.assertEqual("any", bound["wk-boot-priv"])
+        self.assertEqual("any", bound["wk-quiesce-priv"])
+
+    def test_the_sudoers_name_is_derived_from_the_helper(self):
+        for name, want in (("wk-boot-priv", "/etc/sudoers.d/zzz-wk-boot"),
+                           ("wk-quiesce-priv", "/etc/sudoers.d/zzz-wk-quiesce"),
+                           ("wk-card-priv", "/etc/sudoers.d/zzz-wk-card")):
+            cp = bash('. "$WK_ROOT/lib/common.sh"; wk_priv_sudoers %s' % name)
+            self.assertEqual(want, cp.stdout.strip())
+
+    def test_doctor_reports_a_helper_whose_grant_does_not_answer(self):
+        """The state tolken was in: the file installed, sudo -n still asking."""
+        cp = bash('. "$WK_ROOT/lib/common.sh"\n'
+                  'wk_priv_answers() { return 1; }\n'
+                  'miss() { echo "MISS $1 -> $2"; }\n'
+                  'ok() { echo "OK $1"; }\n'
+                  'is_linux() { return 1; }\n'
+                  '%s' % _lift_helper_loop())
+        out = cp.stdout + cp.stderr
+        self.assertIn("MISS wk-boot-priv", out, out)
+        self.assertIn("still asks for a password", out, out)
+        self.assertIn("zzz-wk-boot", out, out)
+        self.assertNotIn("wk-card-priv", out, "the card helper is linux-only")
+
+    def test_doctor_reports_one_that_does(self):
+        cp = bash('. "$WK_ROOT/lib/common.sh"\n'
+                  'wk_priv_answers() { return 0; }\n'
+                  'miss() { echo "MISS $1"; }\n'
+                  'ok() { echo "OK $1"; }\n'
+                  'is_linux() { return 1; }\n'
+                  '%s' % _lift_helper_loop())
+        out = cp.stdout + cp.stderr
+        self.assertIn("OK wk-boot-priv", out, out)
+        self.assertNotIn("MISS", out, out)
 
 
 if __name__ == "__main__":

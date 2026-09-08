@@ -708,7 +708,15 @@ mac_boottime() {
 phase_go() {
     local verb=reboot
     [ "$GO" = shutdown ] && verb="shut down"
-    [ -n "$DRY" ] && { log "  would re-check that the built-in panel is the only display, then $verb $HOST (loginwindow event, no sudo)"; return 0; }
+    [ -n "$DRY" ] && {
+        log "  would re-check that the built-in panel is the only display, then $verb $HOST"
+        if [ "$GO" = shutdown ]; then
+            log "  through System Events, which host mode has a session for"
+        else
+            log "  through $BOOT_HELPER, whose reboot no application can decline"
+        fi
+        return 0
+    }
 
     # Asked again seconds before the transition, not only at preflight: a monitor plugged in between the two costs a whole cycle of numbers nobody can trust. No --force crosses it -- there is no number to save.
     mac_display_check || die "the display on $HOST does not read as one built-in panel: $DISPLAY_READ

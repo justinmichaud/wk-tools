@@ -5,6 +5,19 @@
 _libexec=/usr/local/libexec
 # macOS has no `root` group; root's is `wheel`. Asked of the platform, not tried and retried.
 if is_macos; then _rootgrp=wheel; else _rootgrp=root; fi
+
+# A grant is installed when it answers, not when the copy reported success: a rule that
+# parsed can still be out-ranked by a later include, or name a path character-for-character
+# different from the one being run.
+_grant_answers() { # <helper> <sudoers file> <rule written>
+    wk_priv_answers "$1" && return 0
+    warn "$2 is installed and 'sudo -n $1' still asks for a password, so nothing
+    unattended can use it. The rule written was:
+      $3
+    'sudo -l' shows which include wins: $2 has to be the last match, and the path in the
+    rule has to be the one being run, character for character."
+    return 1
+}
 _target="$_libexec/wk-quiesce-priv"
 _source="$WK_ROOT/admin/wk-quiesce-priv"
 _sudoers=/etc/sudoers.d/zzz-wk-quiesce
@@ -28,7 +41,7 @@ _owner=$(stat -c '%U' "$_target" 2>/dev/null || stat -f '%Su' "$_target" 2>/dev/
 _rule="$(id -un) ALL=(root) NOPASSWD: $_target"
 
 _sudoers_ok=0
-if [ -x "$_target" ] && sudo -n "$_target" status >/dev/null 2>&1; then
+if [ -x "$_target" ] && wk_priv_answers "$_target"; then
     _sudoers_ok=1
 fi
 
@@ -59,6 +72,8 @@ else
     if sudo visudo -cqf "$_tmp"; then
         sudo install -o root -m 0440 "$_tmp" "$_sudoers"
         changed "installed $_sudoers"
+        _grant_answers "$_target" "$_sudoers" \
+            "$(id -un) ALL=(root) NOPASSWD: $_target" || true
         if [ -f "$_sudoers_old" ]; then
             sudo rm -f "$_sudoers_old"
             changed "removed $_sudoers_old (it sorted before zz-<user>-passwd and was dead)"
@@ -92,7 +107,7 @@ else
     [ -f "$_card_target" ] && [ "$_card_owner" != root ] && _card_needs=1
 
     _card_ok=0
-    if [ -x "$_card_target" ] && sudo -n "$_card_target" status >/dev/null 2>&1; then _card_ok=1; fi
+    if [ -x "$_card_target" ] && wk_priv_answers "$_card_target"; then _card_ok=1; fi
 
     if [ "$_card_needs" -eq 0 ] && [ "$_card_ok" -eq 1 ]; then
         unchanged "card helper and sudoers rule"
@@ -117,6 +132,8 @@ else
         if sudo visudo -cqf "$_card_tmp"; then
             sudo install -o root -m 0440 "$_card_tmp" "$_card_sudoers"
             changed "installed $_card_sudoers"
+            _grant_answers "$_card_target" "$_card_sudoers" \
+                "$(id -un) ALL=(root) NOPASSWD: $_card_target" || true
             if [ -f "$_card_sudoers_old" ]; then
                 sudo rm -f "$_card_sudoers_old"
                 changed "removed $_card_sudoers_old (it sorted before zz-<user>-passwd and was dead)"
@@ -156,7 +173,7 @@ else
     [ -f "$_boot_target" ] && [ "$_boot_owner" != root ] && _boot_needs=1
 
     _boot_ok=0
-    if [ -x "$_boot_target" ] && sudo -n "$_boot_target" status >/dev/null 2>&1; then _boot_ok=1; fi
+    if [ -x "$_boot_target" ] && wk_priv_answers "$_boot_target"; then _boot_ok=1; fi
 
     if [ "$_boot_needs" -eq 0 ] && [ "$_boot_ok" -eq 1 ]; then
         unchanged "boot helper and sudoers rule"
@@ -180,6 +197,8 @@ else
         if sudo visudo -cqf "$_boot_tmp"; then
             sudo install -o root -m 0440 "$_boot_tmp" "$_boot_sudoers"
             changed "installed $_boot_sudoers"
+            _grant_answers "$_boot_target" "$_boot_sudoers" \
+                "$(id -un) ALL=(root) NOPASSWD: $_boot_target" || true
         else
             rm -f "$_boot_tmp"
             die "generated boot sudoers rule failed validation; nothing was installed"

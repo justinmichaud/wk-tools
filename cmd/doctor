@@ -321,18 +321,27 @@ else
     report_store "$(probe_store)"
 fi
 
+section "privileged helpers"
+# Every one, on the platform it applies to, and the property rather than the file.
+while read -r _pname _pwhere _pwhat; do
+    [ -n "$_pname" ] || continue
+    [ "$_pwhere" != linux ] || is_linux || continue
+    _ppath=$(wk_priv_path "$_pname")
+    if [ ! -x "$_ppath" ]; then
+        miss "$_pname ($_pwhat)" "./setup --stage quiesce  (interactive sudo)"
+    elif wk_priv_answers "$_ppath"; then
+        ok "$_pname ($_pwhat)"
+    else
+        miss "$_pname: installed, and sudo -n still asks for a password" \
+             "$(wk_priv_sudoers "$_pname") has to be the last match 'sudo -l' shows, and name $_ppath character for character -- ./setup --stage quiesce"
+    fi
+done <<ROWS
+$(wk_priv_helpers)
+ROWS
+unset _pname _pwhere _pwhat _ppath
+
 if is_linux; then
     section "benchmarking"
-    # The property, not the file: a helper whose sudoers rule is out-ranked is installed, executable and useless.
-    if [ ! -x /usr/local/libexec/wk-quiesce-priv ]; then
-        miss "privileged helper (wk quiesce / wk session)" \
-             "./setup --stage quiesce  (interactive sudo)"
-    elif sudo -n /usr/local/libexec/wk-quiesce-priv status >/dev/null 2>&1; then
-        ok "privileged helper (wk quiesce / wk session)"
-    else
-        miss "privileged helper: installed, but its sudoers rule is not in force" \
-             "sudo -l shows the include order; /etc/sudoers.d/zzz-wk-quiesce must be the last match -- ./setup --stage quiesce"
-    fi
     case " $(id -nG "$(id -un)" 2>/dev/null) " in
         *" render "*) ok "render group configured" ;;
         *) miss "render group configured" "./setup --stage tools, then log out and in" ;;

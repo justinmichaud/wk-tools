@@ -486,6 +486,23 @@ commit_wall_prefix() { # <checkout-dir> -- prints the bwrap argv prefix
 wk_state_dir() { echo "${XDG_STATE_HOME:-$HOME/.local/state}/wk"; }
 
 # Mounted into the podman machine at /var/lib/wk/secrets, so `wk key set` works with no VM running and a container reads the same bytes live.
+# The privileged helpers, one row each: <name> <platform> <what it is for>. A helper whose
+# sudoers rule is out-ranked is installed, executable and useless, so what is ever asked of
+# one is whether it answers.
+wk_priv_helpers() {
+    cat <<'ROWS'
+wk-quiesce-priv any wk quiesce / wk session
+wk-card-priv linux wk sysimage (writing a card)
+wk-boot-priv any wk boot (arming the firmware, restarting a machine)
+ROWS
+}
+
+wk_priv_path() { printf '/usr/local/libexec/%s' "$1"; }
+
+wk_priv_sudoers() { local n="${1#wk-}"; printf '/etc/sudoers.d/zzz-wk-%s' "${n%-priv}"; }
+
+wk_priv_answers() { sudo -n "$1" status >/dev/null 2>&1; }   # <helper path>
+
 wk_host_secrets() { echo "${WK_HOST_SECRETS:-${XDG_CONFIG_HOME:-$HOME/.config}/wk/secrets}"; }
 
 wk_lock_dir() { echo "${WK_LOCK_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/wk/locks}"; }
