@@ -54,16 +54,18 @@ for f in "$SRC"/WebKitBuild/*/wk-browser-check.json; do
     seen=1; printf 'browser check %s\n' "$f"
     python3 "$TOOLS/bench/mac-browser-check.py" --read "$f" 2>&1 | sed 's/^/  /'
 done
-for f in "$SRC"/WebKitBuild/*/wk-profile-check.json; do
+for f in "$SRC"/WebKitBuild/*/wk-profile-check.json "$SRC"/WebKitBuild/wk-pgo/*/profile-check.json; do
+    [ -f "$f" ] || continue
     seen=1; printf 'profile check %s\n' "$f"
-    python3 "$TOOLS/bench/mac-profile-check.py" --read "$f" 2>&1 | sed 's/^/  /'
+    python3 "$TOOLS/lib/wkpgo.py" check --read "$f" 2>&1 | sed 's/^/  /'
 done
 for f in "$SRC"/WebKitBuild/*/wk-payload-pins; do
     seen=1; printf 'benchmark payloads %s\n' "$f"
     sed 's/^/  /' "$f"
 done
-[ "$seen" = 1 ] || printf 'no readings beside the products under %s/WebKitBuild -- only a
-PGO config collects them (build/mac-pgo.sh); every other config has no gates.\n' "$SRC"
+[ "$seen" = 1 ] || printf 'no readings under %s/WebKitBuild -- only a profile-guided build
+collects them (build/mac-pgo.sh beside the products, image/pgo.sh under
+wk-pgo/); every other build has no gates.\n' "$SRC"
 GATES
 )
     t_exec "$NAME" bash -c "SRC=$(sh_quote "$(t_src "$NAME")") TOOLS=$(sh_quote "$(t_tools "$NAME")")

@@ -498,6 +498,10 @@ wk pi bench rpi3 speedometer3 --ab base,pr1725 --rounds 5   # interleaved A/B be
                                                  # reported at the end
 ```
 
+That profile is 2.38, so its slot is one cross build. At 2.52 and later the
+same command is a profile-guided build in three phases, the middle one on the
+board -- "The boards' profile-guided build" below.
+
 Rounds are **counterbalanced, not merely alternated**: round 1 leads with A,
 round 2 with B, and so on. Simple ABAB puts every round's drift on B, which the
 report now checks for and says out loud. Every leg that follows a reboot throws
@@ -756,7 +760,7 @@ at all is the acceleration -- WebKit has no software fallback on macOS -- a
 WebKit GPU process holding a client on the machine's IOAccelerator is the work
 reaching that device, and requestAnimationFrame's measured rate is the window
 not being throttled. After it, the profile is read back
-(`bench/mac-profile-check.py`): every library and every benchmark present,
+(`lib/wkpgo.py check`): every library and every benchmark present,
 llvm-profdata reporting functions and a non-zero peak, and each benchmark
 having reached a real fraction of the functions the combined profile knows
 about -- coverage, not counts, because a rendering benchmark's count in the
@@ -828,6 +832,63 @@ confidence at 80% power). It stops when every plan resolves `--detect`
 numbers are still real, and the claim they support is the one the precision
 lines allow. Stopping on precision rather than on a p-value is what keeps
 repeated looking from inflating the false-positive rate.
+
+**The boards' profile-guided build**
+
+**A board's WebKit at release 2.52 or later is profile-guided too**, and it is
+the same lane seen from the other end. 2.52 is where WebKit's own CMake support
+for one lands (`USE_PGO_PROFILE`, `ENABLE_LLVM_PROFILE_GENERATION`,
+310954@main); before it there is nothing to turn on, and from it on there is no
+plain build of such a profile to fall back to -- every number a 2.52+ board
+produces is a profile-guided build's. `wk sysimage webkit <profile> --commit
+<sha> --slot <name>` is still one command producing one slot, and behind it are
+three phases (`image/pgo.sh`):
+
+```sh
+wk sysimage webkit webkit-2.52-yocto-rpi5-64 --commit <sha> --slot pr --dry-run   # the phases, nothing run
+wk sysimage webkit webkit-2.52-yocto-rpi5-64 --commit <sha> --slot pr --detach
+```
+
+1. **the collection build** (`wpe-cross-pgo-collect`): the cross build with
+   clang and `-DENABLE_LLVM_PROFILE_GENERATION=ON`, packed as the slot
+   `<name>-instr`;
+2. **the collection**, on the board that carries the image: the instrumented
+   slot is deployed and each of the three benchmarks is run against it with
+   `wk pi bench --pgo`, which is not a measurement and belongs to no bench
+   task. The instrumented library writes one `.profraw` per process as that
+   process exits, into `/var/wk/pgo` on the board, and the run-benchmark driver
+   clears that directory before each leg and pulls it back after
+   (`bench/wk_board_driver.py`, upstream's own
+   `prepare_pgo_profile_collection` / `collect_pgo_profile` hooks). Then
+   `--stage pgo-mix` merges each leg and combines the three at WebKit's own
+   0.6 / 0.2 / 0.2 -- `Tools/Scripts/pgo-profile`, imported rather than
+   reimplemented, told only that a GLib port carries its profile in one shared
+   library where the Apple ports carry three;
+3. **the measured build** (`wpe-cross-pgo-use`): the cross build again with
+   `-DUSE_PGO_PROFILE=ON` and that one `.profdata`, packed as the slot the
+   benchmark actually runs.
+
+So `wk ab` on a 2.52 profile costs two collections, one per arm: a profile
+taken from one arm's sources leaves the other arm's new functions cold, which
+reads as a regression that is not there. That is the same rule the Mac lane
+follows, and it is why nothing here shares a profile between arms.
+
+The mixing runs **inside the cross toolchain**, not on the workstation: a
+`.profraw` is readable only by the toolchain that wrote it, and that clang is
+the SDK's. The collection lands in the workspace's own build directory
+(`WebKitBuild/wk-pgo/<slot>/`), which the host writes over the bind mount and
+the builder reads back, so nothing is copied between the two. The same reader
+that judges a Mac collection judges this one (`lib/wkpgo.py check`), and its
+reading is written beside the profile.
+
+Two refusals stand where the mistake would otherwise be silent. A collection
+runs only on the board whose `NODE_PROFILE` names the image, and only while
+that board is actually running a bench system built from it -- otherwise the
+build stops and names the write and boot that would fix it, rather than
+profiling the wrong code. And a slot built to collect is refused as a
+measurement: `wk pi bench` reads `build_config` out of the slot's manifest and
+will not take a number from an instrumented build, which runs several times
+slower for the profile it is writing.
 
 **Add a new fleet device**
 
@@ -1446,7 +1507,8 @@ your own buildroot configuration:
 
 ```sh
 wk sysimage webkit <profile> --commit <base-sha> --slot base --detach      # one WebKit build at a time
-wk sysimage webkit <profile> --commit <patched-sha> --slot pr --detach
+wk sysimage webkit <profile> --commit <patched-sha> --slot pr --detach      # at 2.52+ each of these is
+                                                                           # instrument, collect on the board, rebuild
 wk sysimage ls                                                             # both slots listed under the image
 wk boot rpi3 && wk boot rpi3 --keep                                        # bench mode, claimed
 wk pi deploy <profile> rpi3 --slot base                                    # verified byte for byte on the board
@@ -1539,7 +1601,10 @@ user looks for them, and because a knob nobody can find is a knob nobody uses.
 CMake flags), `WK_EXTRA_ENV` (extra build environment), `WK_CCACHE_DIR` and
 `WK_CCACHE_MAXSIZE` (the shared ccache and its ceiling), `WK_TARGET_KIND`
 (which driver a config resolves against), `WK_REMOTE_MAX_JOBS` (job ceiling on
-a shared build box), `WK_MB_PER_JOB` (memory the job-count derivation assumes).
+a shared build box), `WK_MB_PER_JOB` (memory the job-count derivation assumes),
+`WK_PGO_COLLECT_TIMEOUT` (seconds one leg of a PGO collection may take; the
+plan's own is sized for a measured run and an instrumented build is several
+times slower).
 
 **How much of the machine a job may take**
 `WK_MAX_JOBS`, `WK_MIN_JOBS`, `WK_LOAD`, `WK_AVAIL_MB`, `WK_RESERVE_CORES`,

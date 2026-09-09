@@ -102,8 +102,10 @@ class TestTheReadingsTravelWithTheBuild(WkTest):
     def test_a_build_with_no_readings_says_which_configs_have_them(self):
         cp, out = self._gates()
         self.assertEqual(cp.returncode, 0, out)
-        self.assertIn("no readings beside the products", out, out)
-        self.assertIn("PGO config", out, out)
+        self.assertIn("no readings under", out, out)
+        self.assertIn("profile-guided build", out, out)
+        for lane in ("build/mac-pgo.sh", "image/pgo.sh"):
+            self.assertIn(lane, out, out)
 
     def test_the_readings_are_shown_from_beside_the_products(self):
         cp, out = self._gates(browser=GOOD_BROWSER, profile=GOOD_PROFILE,

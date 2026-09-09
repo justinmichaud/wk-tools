@@ -250,7 +250,7 @@ pi_system_boot {want}
 
 
 class TestLegVerification(unittest.TestCase):
-    def _leg(self, answered, expected):
+    def _leg(self, answered, expected, pgo=""):
         return bash(PRELUDE + f'''
 image_addr() {{ printf 'rpi3-bench'; }}
 i_ssh() {{
@@ -265,8 +265,9 @@ pi_display() {{ printf 'drm:card0-HDMI-A-1'; }}
 pi_tmp() {{ PI_TMP=$(mktemp -d); }}
 pi_slot_dir() {{ printf '/var/wk/slots/%s' "$1"; }}
 pi_pin_clock() {{ printf 'performance 2400000 2400000'; }}
-slot=base; ab=""; cores=""
-''' + lift("pi_leg_prepare") + f'''
+wkslot() {{ python3 "{REPO}/lib/wkslot.py" "$@"; }}
+slot=base; ab=""; cores=""; PI_PGO_DIR="{pgo}"
+''' + lift("pi_check_instrumented") + lift("pi_leg_prepare") + f'''
 pi_leg_prepare "{expected}"
 echo "prepared sysid=$sysid"
 ''')
@@ -281,6 +282,14 @@ echo "prepared sysid=$sysid"
         cp = self._leg(answered="sys-a", expected="sys-a")
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
         self.assertIn("prepared sysid=sys-a", cp.stdout)
+
+    def test_a_collection_needs_an_instrumented_slot_and_this_one_is_not(self):
+        """the slot the stub hands back names no build_config, so it is a
+        measured build -- a collection against it would write no profile."""
+        cp = self._leg(answered="sys-a", expected="sys-a", pgo="/tmp/pgo")
+        self.assertNotEqual(cp.returncode, 0)
+        self.assertIn("would write no profile", cp.stderr)
+        self.assertNotIn("prepared", cp.stdout)
 
 
 class TestParse(unittest.TestCase):

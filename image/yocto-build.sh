@@ -24,6 +24,7 @@ export PATH
 
 TARGET=""; IMAGE=""; STAGE=image; JOBS=""; RM_WORK=1; SRC=/src/WebKit; COMMIT=""; SLOT=""; PROFILE=""
 MULTILIB=""; MULTILIB_TUNE=""
+CROSS_CONFIG=""; CROSS_CC=""; CROSS_CXX=""; CROSS_CMAKE=""; PGO_DIR=""; PGO_LIB=""
 CHROMIUM=0; SSTATE_NS=""
 PORT_TARGET_FROM=""; PORT_MACHINE=""; BOARD=""
 
@@ -45,6 +46,12 @@ while [ $# -gt 0 ]; do
         --local-layer) LOCAL_LAYER="${2:-}"; shift 2 ;;
         --tailnet) TAILNET="${2:-}"; shift 2 ;;
         --webkit-jobs) WEBKIT_JOBS="${2:-}"; shift 2 ;;
+        --cross-config) CROSS_CONFIG="${2:-}"; shift 2 ;;
+        --cross-cc)     CROSS_CC="${2:-}"; shift 2 ;;
+        --cross-cxx)    CROSS_CXX="${2:-}"; shift 2 ;;
+        --cross-cmake)  CROSS_CMAKE="${2:-}"; shift 2 ;;
+        --pgo-dir) PGO_DIR="${2:-}"; shift 2 ;;
+        --pgo-lib) PGO_LIB="${2:-}"; shift 2 ;;
         --commit)  COMMIT="${2:-}"; shift 2 ;;
         --slot)    SLOT="${2:-}"; shift 2 ;;
         --profile) PROFILE="${2:-}"; shift 2 ;;
@@ -448,8 +455,14 @@ PYEOF
         tgt_cmake=$(printf '%s\n' "$tgt_args" | sed -n 2p)
         tgt_args=$(printf '%s\n' "$tgt_args" | sed -n 1p)
         extra="-DENABLE_WPE_PLATFORM=ON -DENABLE_WPE_1_1_API=OFF"
+        extra="$extra${CROSS_CMAKE:+ $CROSS_CMAKE}"   # what the cross config adds (build/configs.sh), after the branch's own so it wins
+        say "  config:       ${CROSS_CONFIG:-wpe-cross}"
         say "  target flags: ${tgt_args:-none}"
         say "  cmakeargs:    $tgt_cmake $extra"
+        if [ -n "$CROSS_CC" ]; then
+            export CC="$CROSS_CC" CXX="$CROSS_CXX"   # the SDK's environment-setup exports its clang only when CC/CXX name one
+            say "  compiler:     $CC / $CXX"
+        fi
 
         # build-webkit's own `-j$(numberOfCPUs)` OOMs on WebCore's unified sources, and bitbake never sees this stage, so its PARALLEL_MAKE cap does not reach it.
         webkit_makeargs="-j${WEBKIT_JOBS:-8}"
@@ -469,6 +482,7 @@ PYEOF
             cp -a "$b/bin" "$b/lib" "$slotdir/root/" || fail "could not copy the build into $slotdir"
             python3 /opt/wk-tools/lib/wkslot.py manifest "$slotdir/root" "$slotdir/slot.json" \
                 slot="$SLOT" profile="$PROFILE" commit="$COMMIT" target="$TARGET" \
+                build_config="${CROSS_CONFIG:-wpe-cross}" \
                 browser=minibrowser lib_dir=lib exec_dir=bin bundle_dir=lib \
                 jobs="${WEBKIT_JOBS:-8}" built_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
                 wk_tools="$(git -C /opt/wk-tools rev-parse --short HEAD 2>/dev/null || echo unknown)" \
@@ -477,7 +491,21 @@ PYEOF
             say "slot ready: $slotdir ($(du -sh "$slotdir/root" | cut -f1), build-id $(python3 /opt/wk-tools/lib/wkslot.py get "$slotdir/slot.json" build_id))"
         fi
         ;;
-    *)  fail "unknown stage '$STAGE' (layers, fetch, image, toolchain, webkit)" ;;
+    pgo-mix)   # in the cross environment and nowhere else: a .profraw is readable only by the toolchain that wrote it, and that clang is the SDK's rather than this container's
+        [ -n "$PGO_DIR" ] && [ -n "$PGO_LIB" ] \
+            || fail "the pgo-mix stage needs --pgo-dir and --pgo-lib"
+        [ -d "$PGO_DIR" ] || fail "no collection at $PGO_DIR; 'wk pi bench --pgo' puts one there"
+        init_workdir
+        say "mixing $PGO_LIB profiles from $PGO_DIR at WebKit's own weights"
+        run_helper "mix the collected profiles" --cross-toolchain-run-cmd \
+            python3 /opt/wk-tools/lib/wkpgo.py mix \
+                --scripts "$SRC/Tools/Scripts" --dir "$PGO_DIR" --lib "$PGO_LIB"
+        run_helper "read the mixed profile back" --cross-toolchain-run-cmd \
+            python3 /opt/wk-tools/lib/wkpgo.py check \
+                --scripts "$SRC/Tools/Scripts" --dir "$PGO_DIR" --lib "$PGO_LIB" \
+                --json "$PGO_DIR/profile-check.json"
+        ;;
+    *)  fail "unknown stage '$STAGE' (layers, fetch, image, toolchain, webkit, pgo-mix)" ;;
 esac
 
 say "stage '$STAGE' done"

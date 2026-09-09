@@ -25,6 +25,11 @@
 #   wk pi deploy <profile> <machine> --slot <name>   put it on the board
 #   wk pi bench <machine> <plan>                 run a benchmark
 #
+# `wk pi bench --pgo <dir>` is not a measurement: it runs the plan against an
+# instrumented slot and keeps what the run wrote, into <dir>/<plan>/. The whole
+# collection -- every plan, the mixing and the two builds around it -- is
+# `wk sysimage webkit` on a 2.52+ yocto profile (image/pgo.sh).
+#
 # A subtest one arm cannot run is dropped from both (bench/subtest-exclusions.conf,
 # applied when either arm's image is that width; --subtests overrides).
 #
@@ -46,6 +51,7 @@ WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 . "$WK_ROOT/lib/target.sh"
 . "$WK_ROOT/lib/profiler.sh"
 . "$WK_ROOT/lib/bench.sh"
+. "$WK_ROOT/build/pgo.sh"
 # Raised before lib/watchdog.sh is sourced: see its header.
 WK_STALL_SECONDS="${WK_STALL_SECONDS:-900}"
 WK_ABORT_SECONDS="${WK_ABORT_SECONDS:-5400}"
@@ -385,6 +391,7 @@ pi_launch_cmd() { # <slot> <slot.json> <cores wrap>
     root="$(pi_slot_dir "$slot")/root"
     env=$(wkslot env "$json" "$root" | tr '\n' ' ')
     env="$env XDG_CACHE_HOME=$PI_CACHE_DIR"
+    [ -z "${PI_PGO_DIR:-}" ] || env="$env LLVM_PROFILE_FILE=$PGO_BOARD_FILE"
     # One line per optimizing compile: only the discarded leg pays for the printing.
     [ -z "${PI_WARMUP:-}" ] \
         || env="$env JSC_reportDFGCompileTimes=1 JSC_reportFTLCompileTimes=1"
@@ -433,6 +440,7 @@ pi_bench_record() { # <out dir> <slot> <slot.json>
         software_reason="$software_reason" \
         session_mode="$PI_SESSION" gpu_renderer="$PI_RENDERER" display="$PI_DISPLAY" \
         machine="$machine" system="$sysid" build_slot="$slot" \
+        build_config="$(wkslot get "$json" build_config)" \
         webkit_sha="$(wkslot get "$json" commit)" build_id="$(wkslot get "$json" build_id)" \
         runner_sha="$BENCH_RUNNER_SHA" local_copy="$PI_SEEDED" \
         host.kernel="$kernel" host.kernel_arch="$karch" host.governor="$gov" \
@@ -444,6 +452,20 @@ pi_bench_record() { # <out dir> <slot> <slot.json>
         --bool forced="${WK_FORCE:-}" --bool software="$software" --bool cores.pinned="$cores"
 }
 
+
+pi_check_instrumented() { # <slot>; an instrumented build writes a profile as every process exits and runs several times slower for it, so the two uses of a slot are exclusive -- a collection needs one, a measurement must never get one
+    local was; was=$(wkslot get "$PI_TMP/slot-$1.json" build_config 2>/dev/null) || was=""
+    if [ -n "$PI_PGO_DIR" ]; then
+        [ "$was" = wpe-cross-pgo-collect ] || die "--pgo collects from an instrumented build and slot '$1' is '${was:-not one}',
+    so it would write no profile at all. The instrumented slot is the middle
+    phase of 'wk sysimage webkit' and is named <slot>-instr."
+    else
+        [ "$was" != wpe-cross-pgo-collect ] || die "slot '$1' on $machine is an instrumented build: it writes a profile as it
+    runs and is several times slower for it, so a number taken from it is not
+    this engine's. It exists to be collected from, not measured. The measured
+    slot is the one without '-instr'."
+    fi
+}
 
 pi_leg_prepare() { # <expected system id, or empty>
     probe=$(i_ssh "$_b_probe_sh" 2>/dev/null | tr -d '\r') \
@@ -485,6 +507,7 @@ pi_leg_prepare() { # <expected system id, or empty>
             || die "$machine has no slot '$_s' ($(pi_slot_dir "$_s")).
     The image is the runtime and a slot is what is measured; deploy one:
         wk pi deploy <image-profile|yocto-workspace> $machine --slot $_s"
+        pi_check_instrumented "$_s"
     done
     if [ -n "$cores" ]; then
         i_ssh 'command -v taskset >/dev/null' 2>/dev/null \
@@ -772,7 +795,7 @@ pi_bench_ab_systems() { # <sysA,sysB> <rounds>
     [ "$kept" -ge 1 ] || die "no round produced both halves on $machine; nothing to compare."
 }
 
-PI_TASK=""; PI_TASK_OWNED=""
+PI_TASK=""; PI_TASK_OWNED=""; PI_PGO_DIR=""
 SUBTESTS=""; EXCLUDE_SUBTESTS=""
 PI_AB_ROUND=""; PI_AB_ARM=""; PI_AB_A=""; PI_AB_B=""
 cmd_bench() {
@@ -780,13 +803,14 @@ cmd_bench() {
     local count="" timeout_s="" slot=a ab="" ab_systems="" rounds=3 cores="" task=""
     local stamp; stamp=$(bench_task_stamp)
     # --count N is iterations per run, --timeout S the seconds one iteration may take (default: the plan's own).
-    local usage="usage: wk pi bench <machine> <plan> [--slot NAME | --ab A,B | --ab-systems A,B] [--rounds N] [--count N] [--timeout S] [--cores <set>] [--subtests LIST | --exclude-subtests LIST] [--task NAME]; see wk pi -h"
+    local usage="usage: wk pi bench <machine> <plan> [--slot NAME | --ab A,B | --ab-systems A,B] [--rounds N] [--count N] [--timeout S] [--cores <set>] [--subtests LIST | --exclude-subtests LIST] [--task NAME] [--pgo DIR]; see wk pi -h"
     while [ $# -gt 0 ]; do
         case "$1" in
             --count)   count="${2:-}"; shift ;;
             --timeout) timeout_s="${2:-}"; shift ;;
             --task)    task="${2:-}"; shift ;;
             --slot)    slot="${2:-}"; image_check_slot_name "$slot"; shift ;;
+            --pgo)     PI_PGO_DIR="${2:-}"; [ -n "$PI_PGO_DIR" ] || die "--pgo needs a directory"; shift ;;
             --cores)   cores="${2:-}"; shift ;;
             --subtests)         SUBTESTS="${2:-}"; shift ;;
             --exclude-subtests) EXCLUDE_SUBTESTS="${2:-}"; shift ;;
@@ -829,6 +853,13 @@ cmd_bench() {
         bench_task_attach "$task"
         PI_TASK="$task"
     fi
+    if [ -n "$PI_PGO_DIR" ]; then
+        [ -z "$ab$ab_systems$task" ] || die "$usage; --pgo collects a profile from one slot,
+    so it is neither arm of a comparison and belongs to no bench task. What
+    chains a collection to the builds around it is 'wk sysimage webkit'."
+        count=1   # what upstream collects per benchmark (Tools/Scripts/collect-pgo-profiles), and every extra iteration overwrites the last one's files
+        [ -n "$timeout_s" ] || timeout_s="$PGO_COLLECT_TIMEOUT"   # a plan's own is sized for a measured run, and an instrumented build is several times slower
+    fi
 
     machine_load "$machine" || die "no such machine '$machine' (boot/machines.sh)"
     hold_lock "pi-bench-$machine" -w 5 \
@@ -854,7 +885,9 @@ cmd_bench() {
     info "bringing up the session on $machine"
     pi_session_up "$PI_DISPLAY"
 
-    if [ -z "$PI_TASK" ]; then
+    if [ -n "$PI_PGO_DIR" ]; then
+        log "  collecting  $plan into $PI_PGO_DIR/$plan (not a measurement)"
+    elif [ -z "$PI_TASK" ]; then
         local _first="$slot"; [ -z "$ab" ] || _first="${ab%%,*}"
         local profile; profile=$(wkslot get "$PI_TMP/slot-$_first.json" profile)
         if [ -n "$ab" ]; then
@@ -872,7 +905,7 @@ cmd_bench() {
         fi
         PI_TASK_OWNED=1
     fi
-    log "  task        $PI_TASK ($(bench_task_dir "$PI_TASK"))"
+    [ -n "$PI_PGO_DIR" ] || log "  task        $PI_TASK ($(bench_task_dir "$PI_TASK"))"
 
     pi_resolve_subtests "$sysid"
     if [ -n "$ab" ]; then
@@ -889,6 +922,7 @@ pi_bench_once() {
     local json="$PI_TMP/slot-$slot.json"
     local id="$(date -u +%Y%m%dT%H%M%SZ)-$plan-$machine-$slot"
     local out="$(bench_task_dir "$PI_TASK")/runs/$id"
+    [ -z "$PI_PGO_DIR" ] || { out="$PI_PGO_DIR/$plan"; rm -rf "$out"; }   # a collection belongs to no task: it is one leg of the profile the next build reads, and lands where lib/wkpgo.py mixes from
     ensure_dir "$out/diagnose"
     local warmdir="" remote_capture=""
     if [ -n "$PI_SETTLE" ]; then
@@ -915,6 +949,7 @@ pi_bench_once() {
     [ -z "$timeout_s" ] || args="$args --timeout $(sh_quote "$timeout_s")"
     [ -z "$PI_SEEDED" ] || args="$args --local-copy $(sh_quote "$PI_SEEDED")"
     [ -z "$PI_SUBTESTS" ] || args="$args --subtests $PI_SUBTESTS"
+    [ -z "$PI_PGO_DIR" ] || args="$args --generate-pgo-profiles"
 
     info "running $plan on $machine from slot '$slot' (WebKit $(wkslot get "$json" commit | cut -c1-12))"
     log  "  results: $out"
@@ -931,6 +966,7 @@ pi_bench_once() {
             WK_BOARD_WARMUP="${warmdir:+$warmdir/$machine-$PI_AB_ARM.evidence.json}" \
             WK_BOARD_CLASS="$(wkdata bench-class "$plan")" \
             WK_BOARD_PROFILE="${remote_capture:+$PI_PROFILER:$remote_capture}" \
+            WK_BOARD_PGO="${PI_PGO_DIR:+$PGO_BOARD_DIR}" \
         bash -c "cd $(sh_quote "$BENCH_RUNNER") && exec python3 Tools/Scripts/run-benchmark $args"
     local rc=$?
     set -e

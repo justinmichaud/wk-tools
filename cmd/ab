@@ -67,6 +67,7 @@ WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 . "$WK_ROOT/lib/resources.sh"
 . "$WK_ROOT/lib/bench.sh"
 . "$WK_ROOT/lib/detach.sh"
+. "$WK_ROOT/image/pgo.sh"
 
 USAGE="usage: wk ab <pr-spec|sha> --devices <a,b> [--release X.Y] [--builder B] [--bits N] [--base <sha>] [--plan P]... [--rounds N] [--count N] [--timeout S] [--yes] [--dry-run] [--detach]; see wk ab -h"
 
@@ -244,11 +245,25 @@ ab_image_path() { # <profile>
           yocto)     echo "$(wk_ws_dir "yocto-$1")/build/CrossToolChains/$YOC_TARGET/build/image/$YOC_IMAGE.wic.xz" ;;
       esac )
 }
-ab_slot_json() { ( image_profile_load "$1" >/dev/null 2>&1 && echo "$(image_slot_dir "$1" "$2")/slot.json" ); }
 ab_slot_has()  { # <profile> <slot> <sha>
-    local sj; sj=$(ab_slot_json "$1" "$2")
-    [ -f "$sj" ] && [ "$(wkslot get "$sj" commit)" = "$3" ]
+    ( image_profile_load "$1" >/dev/null 2>&1 || exit 1
+      if image_pgo_wanted; then
+          image_pgo_slot_is "$1" "$2" "$3" wpe-cross-pgo-use
+      else
+          local sj="$(image_slot_dir "$1" "$2")/slot.json"
+          [ -f "$sj" ] && [ "$(wkslot get "$sj" commit)" = "$3" ]
+      fi )
 }
+_ab_build_note() { # <profile> <device>
+    ( image_profile_load "$1" >/dev/null 2>&1
+      if image_pgo_wanted; then
+          printf 'profile-guided: each slot is instrument, collect on %s, rebuild --' "$2"
+          printf ' so %s has to be in this image before the builds, not just before the deploys' "$2"
+      else
+          printf 'plain: %s predates upstream cmake PGO support' "${CFG_RELEASE:-this release}"
+      fi )
+}
+
 # A function, not a `$(case ...)` inside the string: bash 3.2 does not parse one there.
 _board_mode_note() { # <i>
     case "${BOARD_MODE[$1]}" in
@@ -294,6 +309,7 @@ for ((i = 0; i < NDEV; i++)); do
     log "        $(printf 'slot %-7s' base) $(ab_slot_has "${PROFILE[$i]}" base "$BASE_SHA" && echo "holds $(sha12 "$BASE_SHA")" || echo 'to build')"
     log "        $(printf 'slot %-7s' "$PR_SLOT") $(ab_slot_has "${PROFILE[$i]}" "$PR_SLOT" "$HEAD_SHA" && echo "holds $(sha12 "$HEAD_SHA")" || echo 'to build')"
     log "        board      ${BOARD_MODE[$i]}$(_board_mode_note "$i")"
+    log "        build      $(_ab_build_note "${PROFILE[$i]}" "${DEV[$i]}")"
 done
 log ""
 log "commands -- the builds in this order, one at a time; then every board's deploy and bench at once:"
@@ -313,7 +329,7 @@ for ((i = 0; i < NDEV; i++)); do
     machine_load "${DEV[$i]}"
     case "${BOARD_MODE[$i]}" in
         "bench ${PROFILE[$i]}-"*) ;;
-        *) log "  # ${DEV[$i]} is not booted into ${PROFILE[$i]} -- by hand, before the deploy below:"
+        *) log "  # ${DEV[$i]} is not booted into ${PROFILE[$i]} -- by hand, before the commands above:"
            log "  #   wk sysimage write --from $(ab_image_path "${PROFILE[$i]}") --disk ${DEV[$i]}:<device>"
            log "  #   wk boot ${DEV[$i]}" ;;
     esac

@@ -1,9 +1,7 @@
 # `wk build <ws> mac-release-pgo`: the three phases README.md describes, sourced by build/build-in-target.sh inside the guest that builds (bash 3.2, macOS). The flags are `make release`'s (WebKit's Makefile.shared) as build-webkit arguments, and $(inherited) is not optional -- OTHER_LDFLAGS and OTHER_CFLAGS replace a framework's own flags without it.
 
-PGO_BENCHMARKS="speedometer3 jetstream3 motionmark"
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/pgo.sh"   # PGO_BENCHMARKS and PGO_COLLECT_TIMEOUT: what this lane shares with the board one
 PGO_INSTR_SUFFIX=-instr
-# WK_PGO_COLLECT_TIMEOUT: a plan's own timeout is sized for a measured run of an ordinary build, and an instrumented one under thin LTO is several times slower. A collection is not timed, so it may take as long as it needs.
-PGO_COLLECT_TIMEOUT="${WK_PGO_COLLECT_TIMEOUT:-7200}"
 
 _pgo_run() {   # <phase label> <products dir> ; the remaining arguments are build-webkit's
     local label="$1" products="$2"; shift 2
@@ -131,8 +129,9 @@ _pgo_collect() {   # <instrumented products> <profile dir> <arch>
 
     cp "$pins" "$pgo/payload-pins" 2>/dev/null || true
 
-    /usr/bin/python3 "$tools/bench/mac-profile-check.py" \
-        --profile-dir "$pgo" --arch "$arch" --json "$state/profile-check.json" >&2 \
+    /usr/bin/python3 "$tools/lib/wkpgo.py" check --dir "$pgo" \
+        --scripts "$SRC/Tools/Scripts" --compressed "$arch" \
+        --json "$state/profile-check.json" >&2 \
         || { echo "wk: the collection finished and its profile is not one to build against (above)." >&2
              return 1; }
 }

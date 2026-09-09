@@ -196,10 +196,19 @@ class TestItIsThePolicyAndNotAnOption(WkTest):
 
     def test_the_collection_weights_are_webkits_own(self):
         """0.6 / 0.2 / 0.2 lives in Tools/Scripts/pgo-profile; naming the three
-        benchmarks is all this repo may decide."""
-        text = (REPO / "build" / "mac-pgo.sh").read_text()
-        self.assertNotIn("0.6", text)
-        self.assertIn("PGO_BENCHMARKS=", text)
+        benchmarks is all this repo may decide, and it names them once."""
+        shared = (REPO / "build" / "pgo.sh").read_text()
+        self.assertNotIn("0.6", shared)
+        self.assertIn("PGO_BENCHMARKS=", shared)
+        lane = (REPO / "build" / "mac-pgo.sh").read_text()
+        self.assertNotIn("PGO_BENCHMARKS=", lane)
+        self.assertIn("/pgo.sh", lane)
+
+    def test_the_two_lanes_take_the_list_from_the_one_place(self):
+        for rel in ("build/mac-pgo.sh", "image/pgo.sh"):
+            text = (REPO / rel).read_text()
+            self.assertIn("$PGO_BENCHMARKS", text, rel)
+            self.assertNotIn("speedometer3 jetstream3", text, rel)
 
 
 class TestTheProfileReachesTheMachineThatRunsIt(WkTest):

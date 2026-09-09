@@ -168,6 +168,29 @@ class WkBoardDriver(BrowserDriver):
         self._remote(self._kill, check=False)
         time.sleep(1)
 
+    # A profile is written on the board, one file per process at LLVM_PROFILE_FILE
+    # (build/pgo.sh), so the two upstream hooks below are a clear over ssh and a pull.
+    def prepare_pgo_profile_collection(self):
+        directory = _need('WK_BOARD_PGO')
+        self._remote('rm -rf %s && mkdir -p %s' % (shlex.quote(directory), shlex.quote(directory)))
+
+    def collect_pgo_profile(self, destination):
+        directory = _need('WK_BOARD_PGO')
+        os.makedirs(destination, exist_ok=True)
+        packed = subprocess.run(
+            self._ssh + ['cd %s && tar -cf - . 2>/dev/null | gzip -1' % shlex.quote(directory)],
+            stdout=subprocess.PIPE)
+        if packed.returncode != 0 or not packed.stdout:
+            raise RuntimeError('nothing came back from %s on the board: an instrumented '
+                               'build writes a .profraw per process as it exits, so a run '
+                               'that wrote none either was not instrumented or never '
+                               'started the browser' % directory)
+        subprocess.run(['tar', '-xzf', '-', '-C', destination], input=packed.stdout, check=True)
+        pulled = [n for n in os.listdir(destination) if n.endswith('.profraw')]
+        if not pulled:
+            raise RuntimeError('%s held no .profraw, only %s' % (directory, os.listdir(destination)))
+        _log.info('pgo: pulled %d profile(s) from %s' % (len(pulled), directory))
+
     def verify_running_binary(self):
         out = self._remote(_VERIFY_SH % self._expect, capture=True)
         got = dict(line.split('=', 1) for line in out.splitlines() if '=' in line)

@@ -159,6 +159,10 @@ image_slot_dir() { # <profile> <slot> -- host path. A slot is one built WebKit b
     esac
 }
 
+IMAGE_PGO_SUBDIR=wk-pgo   # the collection the next build reads, beside the slots and in the same bind mount: the host writes it (`wk pi bench --pgo`) and the builder reads it back through the cross toolchain (image/yocto-build.sh's pgo-mix)
+image_pgo_dir()    { echo "$(wk_ws_dir "yocto-$1")/build/$IMAGE_PGO_SUBDIR/$2"; }        # <profile> <slot>, host side
+image_pgo_dir_in() { echo "/src/WebKit/WebKitBuild/$IMAGE_PGO_SUBDIR/$1"; }              # <slot>, as the builder sees it (targets/container.sh binds the one at the other)
+
 image_check_slot_name() {
     case "${1:-}" in
         ''|*[!a-zA-Z0-9_.-]*|-*|.*) die "slot '${1:-}' is not usable: letters, digits, '_', '.' and '-',

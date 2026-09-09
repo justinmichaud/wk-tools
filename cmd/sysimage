@@ -17,8 +17,10 @@
 #                                --stop, --keep-work, --chromium,
 #                                --local-layer|--no-local-layer,
 #                                --tailnet|--no-tailnet and --stage
-#                                <layers|fetch|image|toolchain|webkit> (default
-#                                image); buildroot takes --workspace, --detach,
+#                                <layers|fetch|image|toolchain|webkit|pgo-mix>
+#                                (default image; pgo-mix takes --slot, and mixes
+#                                what 'wk pi bench --pgo' collected for it);
+#                                buildroot takes --workspace, --detach,
 #                                --stop; pmos takes --detach and --resume and
 #                                builds on a Linux aarch64 machine over ssh;
 #                                fetch takes only --dry-run
@@ -27,7 +29,15 @@
 #                                beside the image, the way its builder builds
 #                                WebKit. A board carries any number of slots and
 #                                'wk pi bench --ab' alternates two of them with
-#                                no reflash and no reboot
+#                                no reflash and no reboot.
+#                                On a yocto profile at release 2.52 or later this
+#                                is a profile-guided build and takes three
+#                                phases, not one: an instrumented slot, a
+#                                collection on the board that carries the image,
+#                                and the measured build against the mixed
+#                                profile. There is no plain build of such a
+#                                profile -- every number one produces is a
+#                                profile-guided build's
 #   ls | list                    every image a workspace here has built, its
 #                                slots, and where it is
 #   disks <machine>             removable disks attached to that machine
@@ -72,6 +82,7 @@ WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 wkslot() { python3 "$WK_ROOT/lib/wkslot.py" "$@"; }
 . "$WK_ROOT/boot/disk.sh"
 . "$WK_ROOT/image/yocto.sh"
+. "$WK_ROOT/image/pgo.sh"
 . "$WK_ROOT/image/buildroot.sh"
 . "$WK_ROOT/image/pmos.sh"
 . "$WK_ROOT/image/fetch.sh"
@@ -299,7 +310,11 @@ cmd_webkit() {
     shift
     case "${IMG_BUILDER:-}" in
         buildroot) load_target "${WK_TARGET:-$(default_target)}"; buildroot_webkit "$profile" "$@"; return $? ;;
-        yocto)     load_target "${WK_TARGET:-$(default_target)}"; yocto_build "$profile" --stage webkit "$@"; return $? ;;
+        yocto)     load_target "${WK_TARGET:-$(default_target)}"
+                   # 2.52 onwards the perf build *is* the profile-guided one, so one command is still one slot and three phases sit behind it (image/pgo.sh).
+                   if image_pgo_wanted; then image_pgo_webkit "$profile" "$@"
+                   else yocto_build "$profile" --stage webkit "$@"; fi
+                   return $? ;;
         *) die "'$profile' is built by ${IMG_BUILDER:-no builder}, and only a buildroot or yocto image takes WebKit slots" ;;
     esac
 }
@@ -358,8 +373,9 @@ cmd_ls() {
         local sj
         for sj in $( [ -n "$prof" ] && ( image_profile_load "$prof" >/dev/null 2>&1 && dirname "$(image_slot_dir "$prof" x)" ) )/*/slot.json; do
             [ -f "$sj" ] || continue
-            printf '    slot %-12s %s  built %s  (%s)\n' \
+            printf '    slot %-12s %s  %s  built %s  (%s)\n' \
                 "$(wkslot get "$sj" slot)" "$(wkslot get "$sj" commit | cut -c1-12)" \
+                "$(wkslot get "$sj" build_config --default '?')" \
                 "$(wkslot get "$sj" built_at)" "$(dirname "$sj")"
         done
         [ -z "$note" ] || printf '    %s\n' "$note"

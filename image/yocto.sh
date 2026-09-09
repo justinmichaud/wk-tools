@@ -2,6 +2,8 @@
 # the release branch, so an image pins the same commits as the WebKit that runs on the board. Under
 # `podman exec` a detached process does not survive its client even under `setsid`, hence `t_spawn`.
 
+command -v config_cross_load >/dev/null 2>&1 || . "$WK_ROOT/build/configs.sh"
+
 yocto_ws_default() { echo "yocto-$1"; }  # per profile: two branches cannot both be checked out in one workspace
 
 yocto_workdir()  { echo "/src/WebKit/WebKitBuild/CrossToolChains/$1"; }  # cross-toolchain-helper's layout, not ours
@@ -145,7 +147,7 @@ yocto_running() {  # the pid means something only in the workspace's own namespa
 }
 
 # The stages share one build directory, so `--stage fetch` on top of a live `--stage image` reaches two cookers.
-YOCTO_STAGES="layers fetch image toolchain webkit"
+YOCTO_STAGES="layers fetch image toolchain webkit pgo-mix"
 yocto_any_running() {
     local ws="$1" s
     for s in $YOCTO_STAGES; do
@@ -283,7 +285,7 @@ EOF
 yocto_build() { # <profile> <args...>
     local profile="$1"; shift
     local dry="" ws="" stage="" detach="" keep_work="" stop=""
-    local chromium="" commit="" slot=""
+    local chromium="" commit="" slot="" cross_config="" pgo_profile=""
 
     while [ $# -gt 0 ]; do
         case "$1" in
@@ -300,9 +302,11 @@ yocto_build() { # <profile> <args...>
             --tailnet)        YOC_TAILNET=1 ;;
             --commit)         commit="${2:-}"; shift ;;
             --slot)           slot="${2:-}"; image_check_slot_name "$slot"; shift ;;
+            --config)         cross_config="${2:-}"; shift ;;
+            --pgo-profile)    pgo_profile="${2:-}"; shift ;;
             *) die "usage: wk sysimage build $profile [--dry-run|--workspace <name>|--stage <name>|
     --detach|--stop|--keep-work|--chromium|--no-local-layer|--no-tailnet]; unknown option: $1
-    'wk sysimage webkit $profile' adds --commit and --slot." ;;
+    'wk sysimage webkit $profile' adds --commit, --slot, --config and --pgo-profile." ;;
         esac
         shift
     done
@@ -316,14 +320,20 @@ yocto_build() { # <profile> <args...>
 
     # One stage per invocation: the wrapper syncs layers and writes local.conf before whatever it was asked for.
     stage="${stage:-image}"
-    if [ -n "$commit$slot" ]; then
+    if [ "$stage" = pgo-mix ]; then
+        [ -n "$slot" ] || die "the pgo-mix stage mixes one slot's collection: --slot <name>"
+    fi
+    if [ -n "$slot" ] && [ "$stage" = pgo-mix ]; then
+        [ -z "$commit" ] || die "--commit builds; the pgo-mix stage builds nothing, it mixes
+    what 'wk pi bench --pgo' collected from the slot named by --slot"
+    elif [ -n "$commit$slot" ]; then
         [ "$stage" = webkit ] || die "--commit/--slot belong to the webkit stage (wk sysimage webkit $profile)"
         [ -n "$commit" ] && [ -n "$slot" ] || die "a slot needs both --commit <sha> and --slot <name>"
         case "$commit" in *[!0-9a-f]*) die "--commit takes a full sha (40 hex digits), got '$commit'" ;; esac
         [ "${#commit}" -eq 40 ] || die "--commit takes a full sha (40 hex digits), got '$commit'"
     fi
     case "$stage" in
-        layers|fetch|image|toolchain|webkit) ;;
+        layers|fetch|image|toolchain|webkit|pgo-mix) ;;
         *) die "unknown stage '$stage'. One of, each including the ones above it:
       layers     sync the Yocto layers only (minutes; the network-bound part)
       fetch      ... and fetch every source, without building -- one pass that
@@ -332,10 +342,22 @@ yocto_build() { # <profile> <args...>
       image      bitbake the image -- rootfs, kernel, wic  (the default; hours)
       toolchain  bitbake populate_sdk, the cross toolchain (hours)
       webkit     cross-build WebKit against that toolchain
+      pgo-mix    mix a collection (wk pi bench --pgo) into the one profile the
+                 measured build reads, with the toolchain that wrote it
     They are separate commands rather than one because they fail differently:
     'layers' is egress, the rest is compilation, and a run that mixed them
     would report every network failure as a build failure." ;;
     esac
+
+    [ -n "$cross_config" ] || cross_config=wpe-cross
+    [ "$stage" = webkit ] || [ -z "$cross_config$pgo_profile" ] || [ "$cross_config" = wpe-cross ] \
+        || die "--config and --pgo-profile belong to the webkit stage; '$stage' builds no WebKit"
+    config_cross_load "$cross_config" "$pgo_profile" \
+        || die "no such cross config '$cross_config'. They are:
+$(config_cross_list | sed 's/^/      /')"
+    [ -z "$pgo_profile" ] || [ "$XCFG_PGO" = use ] \
+        || die "--pgo-profile names a profile to build against, and '$cross_config' does not
+    build against one. That is 'wpe-cross-pgo-use'."
 
     local kind="$WK_TARGET_KIND"
     [ "$kind" = container ] || die "the Yocto builder needs a container workspace, and this target is '$kind'.
@@ -344,11 +366,23 @@ yocto_build() { # <profile> <args...>
     Yocto cache to build against (targets/vm.sh)."
 
     if [ -n "$dry" ]; then
+        if [ "$stage" = pgo-mix ]; then
+            log "would mix the collection for slot '$slot' of $profile"
+            log "  collection  $(image_pgo_dir "$profile" "$slot")"
+            log "              $(image_pgo_dir_in "$slot") as the builder sees it -- one directory, two sides of the bind mount"
+            log "  benchmarks  $PGO_BENCHMARKS, at WebKit's own weights (Tools/Scripts/pgo-profile)"
+            log "  into        $(image_pgo_dir_in "$slot")/output/$PGO_GLIB_LIB.profdata"
+            log "  where       inside $ws's cross toolchain -- the clang that wrote the profiles is the only one that reads them"
+            log "dry run -- nothing was mixed."
+            return 0
+        fi
         yocto_dry_run "$ws" "$stage"
         [ -z "$slot" ] || {
             log "  commit      $commit"
             log "  slot        $slot -> $(image_slot_dir "$profile" "$slot")"
             log "              WebKit's build-webkit --cross-target of that commit, packed as a slot"
+            log "  config      $cross_config -- $(config_cross_list | sed -n "s/^$cross_config  *//p")"
+            [ -z "$pgo_profile" ] || log "              against $pgo_profile"
         }
         return 0
     fi
@@ -364,6 +398,9 @@ yocto_build() { # <profile> <args...>
     # image build unpacks every recipe in the distribution, the webkit stage is one ninja tree.
     local need_gb what
     case "$stage" in
+        pgo-mix)
+            need_gb=2
+            what="mixing this collection (llvm-profdata reads every leg at once)" ;;
         webkit)
             need_gb="$WK_BUILD_DISK_GB"
             what="this WebKit cross build" ;;
@@ -383,6 +420,9 @@ yocto_build() { # <profile> <args...>
     id="$profile-$(date -u +%Y%m%dT%H%M%SZ)"
     cores=$(envelope_cores)
     webkit_jobs=$(WK_MB_PER_JOB=2560 build_jobs)
+
+    local pgo_args=""
+    [ "$stage" != pgo-mix ] || pgo_args="--pgo-dir $(image_pgo_dir_in "$slot") --pgo-lib $PGO_GLIB_LIB"
 
     hold_lock "ws-$ws" -w "${WK_BUILD_LOCK_WAIT:-3600}"  # two builds in one checkout corrupt both
 
@@ -410,6 +450,10 @@ EOF
         ${YOC_MULTILIB:+--multilib "$YOC_MULTILIB"} \
         ${YOC_MULTILIB_TUNE:+--multilib-tune "$YOC_MULTILIB_TUNE"} \
         --chromium "$chromium" \
+        --cross-config "$cross_config" \
+        ${XCFG_CC:+--cross-cc "$XCFG_CC" --cross-cxx "$XCFG_CXX"} \
+        ${XCFG_CMAKE:+--cross-cmake "$XCFG_CMAKE"} \
+        $pgo_args \
         --local-layer "${YOC_LOCAL_LAYER:-1}" \
         --tailnet "${YOC_TAILNET:-1}" \
         --webkit-jobs "$webkit_jobs" \
@@ -433,6 +477,13 @@ EOF
         die "  full log: $(yocto_log "$ws" "$stage")"
     fi
     info "stage '$stage' ok"
+
+    if [ "$stage" = pgo-mix ]; then
+        sed -i 's/^state=running/state=built/' "$(yocto_status "$ws")"
+        info "the collection is mixed; the measured build reads it as
+    $(image_pgo_dir_in "$slot")/output/$PGO_GLIB_LIB.profdata"
+        return 0
+    fi
 
     if [ "$stage" != image ]; then
         sed -i 's/^state=running/state=built/' "$(yocto_status "$ws")"

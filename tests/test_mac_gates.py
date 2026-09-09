@@ -1,5 +1,5 @@
 """The two gates that stand between a PGO collection and a number nobody can
-attribute (build/mac-pgo.sh, bench/mac-browser-check.py, bench/mac-profile-check.py).
+attribute (build/mac-pgo.sh, bench/mac-browser-check.py, lib/wkpgo.py).
 
 Both refuse on evidence taken from the run itself, so both are exercised here
 against readings rather than against a Mac: a throttled window, a machine with
@@ -14,16 +14,21 @@ import unittest
 from tests.support import REPO, WkTest, bash, func_body, scratch_dir
 
 
-def load(name):
-    path = REPO / "bench" / f"{name}.py"
-    spec = importlib.util.spec_from_file_location(name.replace("-", "_"), path)
+def load(path):
+    spec = importlib.util.spec_from_file_location(path.stem.replace("-", "_"), path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
 
 
-BROWSER = load("mac-browser-check")
-PROFILE = load("mac-profile-check")
+BROWSER = load(REPO / "bench" / "mac-browser-check.py")
+PROFILE = load(REPO / "lib" / "wkpgo.py")
+
+# What the Apple lane reads back: three frameworks and a compressed copy per
+# arch. The board lane's one library goes through the same code from the other
+# direction, in tests/test_board_pgo.py.
+LIBRARIES = ("JavaScriptCore", "WebCore", "WebKit")
+BENCHMARKS = ("speedometer3", "jetstream3", "motionmark")
 
 GOOD_DISPLAY = {"id": 1, "builtin": True, "main": True, "active": True,
                 "online": True, "mirrored": False, "asleep": False,
@@ -110,7 +115,7 @@ class TestTheBrowserGate(WkTest):
                                         BROWSER.MIN_RAF, GOOD_EXPECT), [])
 
 
-def profile_tree(root, benchmarks=PROFILE.BENCHMARKS, libraries=PROFILE.LIBRARIES,
+def profile_tree(root, benchmarks=BENCHMARKS, libraries=LIBRARIES,
                  compressed=True):
     for benchmark in benchmarks:
         os.makedirs(root / benchmark, exist_ok=True)
@@ -139,7 +144,7 @@ class TestTheProfileGate(WkTest):
             key = "/".join(str(path).split(os.sep)[-2:])
             return summaries.get(key, {"total_functions": 40000,
                                        "maximum_function_count": 900000})
-        return PROFILE.collect(str(self.root), "arm64", summary)
+        return PROFILE.collect(str(self.root), LIBRARIES, BENCHMARKS, "arm64", summary)
 
     def real_reading(self):
         """The shape a whole collection really has (measured in a guest,
@@ -186,7 +191,7 @@ class TestTheProfileGate(WkTest):
         found = PROFILE.faults(self.read(
             {f"output/{lib}.profdata": {"total_functions": 40000,
                                         "maximum_function_count": 0}
-             for lib in PROFILE.LIBRARIES}))
+             for lib in LIBRARIES}))
         self.assertTrue(any("every counter in it is zero" in f for f in found), found)
 
     def test_a_profile_with_almost_no_functions_is_refused(self):
@@ -265,8 +270,8 @@ class TestTheBuildIsGatedOnThem(WkTest):
     def test_the_profile_is_read_back_before_the_measured_phase(self):
         text = (REPO / "build" / "mac-pgo.sh").read_text()
         body = func_body(text, "_pgo_collect")
-        self.assertGreater(body.index("mac-profile-check.py"), body.index(RUN_COLLECTION))
-        self.assertIn("return 1", body[body.index("mac-profile-check.py"):])
+        self.assertGreater(body.index("wkpgo.py"), body.index(RUN_COLLECTION))
+        self.assertIn("return 1", body[body.index("wkpgo.py"):])
         # and pgo_build runs the measured phase only after _pgo_collect succeeded
         build = func_body(text, "pgo_build")
         self.assertLess(build.index("_pgo_collect"), build.index("WK_ENABLE_PGO_USE=YES"))

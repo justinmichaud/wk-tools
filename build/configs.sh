@@ -22,6 +22,37 @@ JavaScriptCore with Xcode instead: there is no JSCOnly port there.
 EOF
 }
 
+# A board's WebKit is not built by any of the above: `wk sysimage webkit` cross-builds it with build-webkit --cross-target against a Yocto SDK, and its port and flags are the release branch's own (Tools/yocto/targets.conf). So the cross configs are named here, beside the rest, and what each one adds is the PGO phase and the toolchain that phase requires. GCC is not one of them -- upstream's own PGO support is clang-only (WebKitCommon.cmake).
+config_cross_list() {
+    cat <<'EOF'
+wpe-cross              the release branch's own flags and nothing else
+wpe-cross-pgo-collect  clang and LLVM profile generation -- the collection
+                       build, which nothing measures
+wpe-cross-pgo-use      clang and a collected profile -- the build every number
+                       from a 2.52+ board is taken from
+EOF
+}
+
+[ -n "${PGO_BOARD_DIR:-}" ] || . "$(dirname "${BASH_SOURCE[0]}")/pgo.sh"
+
+config_cross_load() {   # <name> [merged .profdata, as the builder sees it] -> XCFG_PGO, XCFG_CC/CXX, XCFG_CMAKE. The two PGO configs share one build directory, so each states both options: cmake refuses the pair (WEBKIT_OPTION_CONFLICT), and leaving the other's cached value in place is how that happens
+    XCFG_NAME="$1"; XCFG_PGO=""; XCFG_CC=""; XCFG_CXX=""; XCFG_CMAKE=""
+    case "$1" in
+        wpe-cross) ;;
+        wpe-cross-pgo-collect)
+            XCFG_PGO=collect; XCFG_CC=clang; XCFG_CXX=clang++
+            XCFG_CMAKE="-DENABLE_LLVM_PROFILE_GENERATION=ON -DUSE_PGO_PROFILE=OFF -DPGO_PROFILE_DIR=$PGO_BOARD_DIR" ;;
+        wpe-cross-pgo-use)
+            [ -n "${2:-}" ] || die "config_cross_load wpe-cross-pgo-use: no profile given.
+    The measured build reads one merged .profdata, and cmake refuses without
+    it (PGO_PROFILE_PATH); image/pgo.sh collects one first."
+            XCFG_PGO=use; XCFG_CC=clang; XCFG_CXX=clang++
+            XCFG_CMAKE="-DENABLE_LLVM_PROFILE_GENERATION=OFF -DUSE_PGO_PROFILE=ON -DPGO_PROFILE_PATH=$2" ;;
+        *) return 1 ;;
+    esac
+    return 0
+}
+
 WK_CC="${WK_CC:-clang}"   # clang everywhere, WK_CC / WK_CXX overriding what a config asks for; architecture flags live in lib/arch.sh and not in a config
 WK_CXX="${WK_CXX:-clang++}"
 

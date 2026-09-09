@@ -36,7 +36,7 @@ DELIBERATE_PREDICATES = {
     ("cmd/sync", "snapshot_current"),
     ("cmd/doctor", "podman_machine_running"),
     ("cmd/doctor", "git_speed_ok"),
-    ("cmd/ab", "ab_slot_has"),
+    ("image/pgo.sh", "image_pgo_slot_is"),
     ("cmd/push", "_in_vm_driver"),
     ("cmd/sysimage", "_ws_building"),
     ("admin/wk-card-priv", "_slot_present"),
