@@ -547,9 +547,7 @@ if [ "$SHAPE" = volume ] && [ -z "$BENCH_HOST" ]; then
     [ -n "$BENCH_HOST" ] || die "$MACHINE (boot/machines/$MACHINE.conf) sets no NODE_BENCH_SSH -- needed to reach its bench-mode install"
 fi
 
-# Case-folded with `tr`, not ${v,,} (macOS ships bash 3.2): `hostname -s` says `Tolken` where the conf says `tolken`.
-_lc() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
-if [ "$SHAPE" = volume ] && is_macos && [ "$(_lc "$(hostname -s 2>/dev/null)")" = "$(_lc "$HOST")" ]; then
+if [ "$SHAPE" = volume ] && NODE_SSH="$HOST" m_here; then
     die "this lane cannot be driven from the machine it measures -- the reboot
   in the middle would take the driver with it. Run it from another machine
   (rpi5, moose); it reaches this one over ssh."

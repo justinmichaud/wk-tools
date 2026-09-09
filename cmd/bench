@@ -35,6 +35,9 @@
 #       [--subtests "A B"] [--payload <dir>] [--browser-args "..."]
 #       --profile <file>                   record the web process with samply
 #                                          for the length of the run
+#       --expect-display "builtin <w>x<h>" the display this leg must be measured
+#                                          on; refuses any other, and refuses a
+#                                          second panel or a mirror set
 #       --ls                               what is staged here, and what ran
 #       --dry-run                          resolve everything; run nothing
 #       --force                            record it despite a preflight fail
@@ -551,6 +554,12 @@ cmd_run() {
               done)
     cpu_model=$(awk -F: '/Model name/ {gsub(/^ +/,"",$2); print $2; exit}' <(lscpu) 2>/dev/null || true)
 
+    # Each on its own line: these refuse (lib/resources.sh), and a die inside a command substitution kills only that subshell -- interpolated, the refusal prints and the record is written with the field empty.
+    local cores env_cores env_mem
+    cores=$(host_cores)
+    env_cores=$(envelope_cores)
+    env_mem=$(envelope_mem_mb)
+
     # host.kernel_arch is the kernel's width beside the build's arch: an armhf build on an armhf kernel and one on an arm64 kernel are different measurements.
     bench_configuration_args
     wkdata env-record "$out/env.json" \
@@ -560,12 +569,12 @@ cmd_run() {
         class="$class" runner="$runner" arch="$arch" bench_host="$BENCH_HOST" \
         preflight_notes="$PREFLIGHT_NOTES" gpu_renderer="${GPU_RENDERER:-}" \
         session_mode="${SESSION_MODE:-$(session_mode)}" display="$display" \
-        host.kernel="$(uname -r)" host.cpu="$cpu_model" host.cores="$(host_cores)" \
+        host.kernel="$(uname -r)" host.cpu="$cpu_model" host.cores="$cores" \
         host.kernel_arch="$(uname -m)" \
         host.governor="$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor 2>/dev/null || echo unknown)" \
         host.nvidia_driver="$(nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null | head -1 || true)" \
         host.root_device="$(bench_root_device "$WK_STORE")" \
-        host.container_cpus="$(envelope_cores)" host.container_mem_mb="$(envelope_mem_mb)" \
+        host.container_cpus="$env_cores" host.container_mem_mb="$env_mem" \
         cores.set="$CORES" \
         ${BENCH_CFG_ARGS[@]+"${BENCH_CFG_ARGS[@]}"} \
         --bool forced="$FORCE" --bool software="$SOFTWARE" --bool cores.pinned="$CORES"
@@ -635,7 +644,8 @@ cmd_run() {
 
     local drew
     if ! drew=$(screen_watch_stop "$out/screen-watch"); then
-        warn "something drew over this run, so its browser was covered:"
+        warn "the machine did not stay quiet under this run -- something drew over the
+  browser, or a process that must not run came back while it measured:"
         printf '%s\n' "$drew" | sed 's/^/    /' >&2
         if [ -z "$FORCE" ]; then
             rc=1
@@ -1011,11 +1021,12 @@ staged_field() {
 }
 
 cmd_staged() {
-    local id="" plan="" dry="" list="" PAYLOAD="" TIMEOUT="" PROFILE=""
+    local id="" plan="" dry="" list="" PAYLOAD="" TIMEOUT="" PROFILE="" EXPECT_DISPLAY=""
     while [ $# -gt 0 ]; do
         case "$1" in
             --id)       id="${2:-}"; shift 2 ;;
             --plan)     plan="${2:-}"; shift 2 ;;
+            --expect-display) EXPECT_DISPLAY="${2:-}"; shift 2 ;;
             --count)    COUNT="${2:-}"; shift 2 ;;
             --subtests) SUBTESTS="${2:-}"; shift 2 ;;
             --browser-args) BROWSER_ARGS="${2:-}"; shift 2 ;;
@@ -1027,6 +1038,7 @@ cmd_staged() {
             *) die "unknown option: $1
     usage: wk bench staged [--plan P] [--id <staged-id>] [--count N]
                            [--subtests \"A B\"] [--profile <file>] [--ls]
+                           [--expect-display \"builtin <w>x<h>\"]
                            [--dry-run] [--force]" ;;
         esac
     done
@@ -1148,6 +1160,16 @@ cmd_staged() {
         check yes "the screen is free" "no onboarding or installer pane in front"
     fi
 
+    # Asked per leg, not once per boot: a panel attached between two legs resizes run-benchmark's window, and MotionMark's score is the area it draws. The rule lives in one place, bench/mac-browser-check.py, which the once-per-boot browser check asks with the same expectation.
+    local dfaults
+    if dfaults=$("$STAGED_PY" "$WK_ROOT/bench/mac-browser-check.py" --displays-only \
+                    ${EXPECT_DISPLAY:+--expect-display "$EXPECT_DISPLAY"} 2>&1); then
+        check yes "the display" "${dfaults#displays=}${EXPECT_DISPLAY:+  (declared: $EXPECT_DISPLAY)}"
+    else
+        check no "the display" "not the declared one${EXPECT_DISPLAY:+ ($EXPECT_DISPLAY)}"
+        printf '%s\n' "$dfaults" | sed 's/^/        /' >&2
+    fi
+
     # macOS draws an authentication sheet from SecurityAgent, which never becomes the frontmost application.
     local panel; panel=$(auth_panel)
     if [ -n "$panel" ]; then
@@ -1242,7 +1264,8 @@ cmd_staged() {
 
     local drew
     if ! drew=$(screen_watch_stop "$out/screen-watch"); then
-        warn "something drew over this run, so its browser was covered:"
+        warn "the machine did not stay quiet under this run -- something drew over the
+  browser, or a process that must not run came back while it measured:"
         printf '%s\n' "$drew" | sed 's/^/    /' >&2
         if [ -z "$FORCE" ]; then
             rc=1
@@ -1319,6 +1342,7 @@ staged_env_json() {
     wkdata env-record "$f" \
         plan="$plan" workspace="$ws" config="$config" browser="minibrowser" \
         webkit_sha="$sha" count="$COUNT" preflight_notes="$PREFLIGHT_NOTES" \
+        display_declared="$EXPECT_DISPLAY" \
         class="$(bench_class "$plan")" runner="browser" arch="native" \
         bench_host="image" role="$role" system="$role" \
         profile="$(wk_image_profile)" staged_from="$dir" display="$disp" \

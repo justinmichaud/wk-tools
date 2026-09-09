@@ -89,7 +89,8 @@ class Refusals(WkTest):
         return root
 
     def call(self, root, *args, env=None):
-        e = {"XDG_STATE_HOME": str(root.parent / "state")}
+        e = {"XDG_STATE_HOME": str(root.parent / "state"),
+             "WK_STORE": str(root.parent / "store")}
         e.update(env or {})
         return support.bash(
             "bash %s %s" % (root / "bench" / "mac-tailnet.sh",
@@ -133,7 +134,8 @@ class Refusals(WkTest):
             cp = support.bash(
                 'bash %s stage "%s"' % (SCRIPT, tmp),
                 env={"WK_TS_AUTHKEY": str(tmp / "absent"),
-                     "XDG_STATE_HOME": str(tmp / "state")})
+                     "XDG_STATE_HOME": str(tmp / "state"),
+                     "WK_STORE": str(tmp / "store")})
             self.assertNotEqual(cp.returncode, 0)
             self.assertIn("wk key set tailnet", cp.stderr)
             self.assertFalse((tmp / "state").exists(),
@@ -144,7 +146,8 @@ class Refusals(WkTest):
             cp = support.bash(
                 'bash %s stage "%s"' % (SCRIPT, tmp),
                 env={"WK_MAC_MACHINE": "no-such-machine",
-                     "XDG_STATE_HOME": str(tmp / "state")})
+                     "XDG_STATE_HOME": str(tmp / "state"),
+                     "WK_STORE": str(tmp / "store")})
             self.assertNotEqual(cp.returncode, 0)
             self.assertIn("NODE_BENCH_SSH", cp.stderr)
 
@@ -193,7 +196,11 @@ class Stage(WkTest):
 
     def volume(self, tmp):
         state = tmp / "state"
-        out = state / "wk" / "mac-tailnet" / ("darwin-arm64-%s" % field(REL, "TS_VERSION"))
+        # The pre-placed build goes where cmd_build looks: the artifact store,
+        # not the state directory. Planted anywhere else, `stage` finds no build
+        # and fetches a Go toolchain to make one.
+        store = tmp / "store"
+        out = store / "cache" / "mac-tailnet" / ("darwin-arm64-%s" % field(REL, "TS_VERSION"))
         out.mkdir(parents=True)
         for name in ("tailscaled", "tailscale"):
             (out / name).write_bytes(MACHO_ARM64)
@@ -201,7 +208,8 @@ class Stage(WkTest):
         key.write_text(FAKE_KEY)
         root = tmp / "vol"
         root.mkdir()
-        env = {"XDG_STATE_HOME": str(state), "WK_TS_AUTHKEY": str(key)}
+        env = {"XDG_STATE_HOME": str(state), "WK_TS_AUTHKEY": str(key),
+               "WK_STORE": str(tmp / "store")}
         return root, env, state
 
     def stage(self, root, env, sub="stage"):
@@ -305,8 +313,83 @@ class Stage(WkTest):
                 cp = support.bash('bash %s stage "%s" fakesudo' % (SCRIPT, root), env=e)
             self.assertEqual(cp.returncode, 0, cp.stderr)
             seen = log.read_text()
-            for verb in ("install -d", "install -m 0755", "install -m 0600", "tee", "chmod"):
+            for verb in ("install -d", "install -m 0755", "install -m 0600",
+                         "install -m 0644"):
                 self.assertIn(verb, seen, verb)
+            # The intent, not a verb list: no write may reach the volume except
+            # through the prefix, so every logged line is a write and every
+            # write in the function is prefixed.
+            self.assertTrue(seen.strip())
+            for line in seen.splitlines():
+                self.assertTrue(line.startswith("install "), line)
+            body = support.func_body(SCRIPT.read_text(), "cmd_install")
+            for write in ("install ", "tee ", "chmod ", "cp ", "mv ", "rm "):
+                for line in body.splitlines():
+                    stripped = line.strip()
+                    if stripped.startswith(write):
+                        self.fail(f"unprefixed write in cmd_install: {stripped}")
+
+
+class TheTwoHalvesSplitOnPrivilegeAndNetwork(unittest.TestCase):
+    """`collect` needs a network, a Go toolchain and this machine's auth key,
+    and no root. `install` needs root and none of those. That is the whole
+    reason the benchmark install can stage itself -- it has passwordless root
+    over its own paths and neither a network nor credentials -- and so no step
+    of the mac lane asks for a password on the host install."""
+
+    def test_collect_takes_no_privilege_prefix(self):
+        """A prefix here would be a root operation on the machine that has the
+        credentials, which is the thing being avoided."""
+        body = support.func_body(SCRIPT.read_text(), "cmd_collect")
+        self.assertNotIn('"$@"', body)
+        self.assertNotIn("sudo", body)
+
+    def test_install_reads_no_credential_and_no_network(self):
+        body = support.func_body(SCRIPT.read_text(), "cmd_install")
+        for forbidden in ("wk_tailscale_authkey", "cmd_build", "bench_node_name",
+                          "curl", "go_toolchain", "remembered_state"):
+            self.assertNotIn(forbidden, body, forbidden)
+
+    def test_install_refuses_a_directory_that_is_not_a_payload(self):
+        """Laying half a payload down is an install that comes up unreachable
+        with nothing to say why."""
+        with scratch_dir() as tmp:
+            (tmp / "empty").mkdir()
+            cp = support.bash('bash %s install "%s" "%s"'
+                              % (SCRIPT, tmp, tmp / "empty"))
+            self.assertNotEqual(0, cp.returncode)
+            self.assertIn("not a collected tailnet payload", cp.stderr)
+
+    def test_install_refuses_a_binary_the_bench_install_cannot_run(self):
+        with scratch_dir() as tmp:
+            d = tmp / "payload"; d.mkdir()
+            for name in ("tailscaled", "tailscale"):
+                (d / name).write_bytes(b"#!/bin/sh\necho not mach-o\n")
+            for name in ("authkey", "tailnet.conf",
+                         "com.wk.tailscaled.plist", "com.wk.tailnet-join.plist"):
+                (d / name).write_text("x")
+            cp = support.bash('bash %s install "%s" "%s"' % (SCRIPT, tmp, d))
+            self.assertNotEqual(0, cp.returncode)
+            self.assertIn("Mach-O arm64", cp.stderr)
+
+    def test_stage_is_the_two_of_them_and_not_a_third_path(self):
+        body = support.func_body(SCRIPT.read_text(), "cmd_stage")
+        self.assertIn("cmd_collect", body)
+        self.assertIn("cmd_install", body)
+
+    def test_the_autorun_installs_and_joins_with_its_own_sudo(self):
+        text = (REPO / "bench" / "mac-bench-autorun.sh").read_text()
+        body = support.func_body(text, "converge_self")
+        self.assertIn('mac-tailnet.sh" install /', body)
+        self.assertIn('mac-tailnet.sh" join', body)
+        self.assertIn("sudo -n", body)
+        # It must not try the half that needs a network it does not have.
+        self.assertNotIn("collect", body)
+
+    def test_the_plant_collects_it_where_the_credentials_are(self):
+        body = support.func_body((REPO / "bench" / "mac-ab.sh").read_text(), "phase_plant")
+        self.assertIn('mac-tailnet.sh" collect', body)
+        self.assertNotIn('mac-tailnet.sh" install', body)
 
 
 class Firstboot(unittest.TestCase):
@@ -350,9 +433,12 @@ class SshConfig(unittest.TestCase):
 
 
 def built_here():
-    out = os.path.join(os.environ.get("XDG_STATE_HOME",
-                                      os.path.expanduser("~/.local/state")),
-                       "wk", "mac-tailnet",
+    """Where a real build lands: the artifact store, beside ccache and yocto's
+    sstate -- not the state directory, which holds records and is walked file by
+    file by whatever fingerprints it."""
+    out = os.path.join(os.environ.get("WK_STORE",
+                                      os.path.expanduser("~/.local/share/wk")),
+                       "cache", "mac-tailnet",
                        "darwin-arm64-%s" % field(REL, "TS_VERSION"), "tailscaled")
     return out if os.path.exists(out) else None
 
@@ -379,10 +465,17 @@ class WiredIntoTheVolume(WkTest):
         self.assertTrue(body, "%s() is gone from %s" % (name, VOLUME.name))
         return body
 
-    def test_stage_payload_stages_the_daemon(self):
-        """Both writers -- a fresh install and --repair -- go through
-        stage_payload, so one call covers both."""
-        self.assertIn("mac-tailnet.sh\" stage", self._func("stage_payload"))
+    def test_both_host_side_writers_stage_the_daemon(self):
+        """A fresh install and --repair each stage it, and neither may be the
+        one that forgets. It is no longer inside stage_payload: the benchmark
+        install shares that writer and cannot collect a tailnet payload, having
+        neither a network nor credentials -- so each caller does its own half."""
+        volume = (REPO / "bench" / "mac-bench-volume.sh").read_text()
+        for writer in ("do_build_pkg", "do_repair"):
+            with self.subTest(writer=writer):
+                body = support.func_body(volume, writer)
+                self.assertIn("stage_payload", body)
+                self.assertIn('mac-tailnet.sh" stage', body)
 
     def test_the_identity_is_taken_aside_before_the_volume_is_erased(self):
         """startosinstall erases the volume; a reinstall that has not kept the

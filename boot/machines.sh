@@ -1,5 +1,6 @@
 command -v reach_tailnet >/dev/null 2>&1 || . "$WK_ROOT/lib/reach.sh"
 command -v disk_part >/dev/null 2>&1 || . "$WK_ROOT/boot/disk.sh"
+command -v tools_push >/dev/null 2>&1 || . "$WK_ROOT/lib/tools.sh"
 
 # vcgencmd is on every Pi image; rpi4 lacks rpi-eeprom-config, tried second.
 EEPROM_CONFIG_CMD='vcgencmd bootloader_config 2>/dev/null || sudo rpi-eeprom-config 2>/dev/null || true'
@@ -60,7 +61,7 @@ machine_load() {
     [ -f "$f" ] || return 1
     NODE_NAME="$1"
     NODE_SSH=""; NODE_DRIVER=""; NODE_DEVICE=""; NODE_ROOT=""; NODE_PROFILE=""
-    NODE_NOTE=""; NODE_MAC=""; NODE_LOCAL=""; NODE_VOLUME=""; NODE_DTB=""
+    NODE_NOTE=""; NODE_MAC=""; NODE_VOLUME=""; NODE_DTB=""
     NODE_BENCH_SSH=""; NODE_NET=""; NODE_DISPLAY=""
     NODE_BRIDGE=""  # declared, not discovered: readable when unreachable
     NODE_ROLE=workstation
@@ -87,11 +88,16 @@ load_driver() {
     . "$d"
 }
 
-m_ssh() {
-    if [ -n "${NODE_LOCAL:-}" ]; then
-        bash -c "$*"
-        return $?
-    fi
+m_here() { # am I the machine NODE_SSH names? Case-insensitively: a machine's own spelling of its name need not be the conf's
+    local me
+    [ -n "${NODE_SSH:-}" ] || return 1
+    me=$(hostname -s 2>/dev/null) || return 1
+    [ "$(printf '%s' "$me" | tr '[:upper:]' '[:lower:]')" \
+        = "$(printf '%s' "$NODE_SSH" | tr '[:upper:]' '[:lower:]')" ]
+}
+
+m_ssh() { # the one way to run a command on a machine, whichever machine this is
+    if m_here; then bash -c "$*"; return $?; fi   # standing on it, and not a flag a conf declares: a machine drives itself only from its own keyboard, and from anywhere else that answers about the wrong computer
     # shellcheck disable=SC2086
     ssh -o BatchMode=yes -o ConnectTimeout="$(wk_ssh_timeout)" \
         $(m_ssh_opts) "$NODE_SSH" "$@"
@@ -134,14 +140,14 @@ r_sudo() { # <command string>
     if r_is_root; then r_ssh "$@"; else r_ssh "sudo -n $*"; fi
 }
 
-# On a workstation the only password-free root is the named helper: `sudo -n vcmailbox` there answers "interactive authentication is required", and the arming died before the mailbox call (rpi5, 2026-09-03).
+# On a workstation the only password-free root is the named helper: `sudo -n vcmailbox` there answers "interactive authentication is required", and the arming died before the mailbox call (rpi5, 2026-09-03). The detach is `nohup`, which is POSIX and on both platforms; `setsid` is util-linux, so on a Mac the verb exits 0 having rebooted nothing.
 BOOT_PRIV=/usr/local/libexec/wk-boot-priv
 boot_priv() { # <verb> [order]
     if r_is_root; then
         case "$1" in
             order)          r_ssh "vcmailbox 0x0003808b 4 4 $(sh_quote "$2")" ;;
-            reboot)         r_ssh "setsid sh -c 'sleep 3; reboot' </dev/null >/dev/null 2>&1 &" ;;
-            reboot-tryboot) r_ssh "setsid sh -c 'sleep 3; printf \"0 tryboot\" > /run/systemd/reboot-param && systemctl reboot' </dev/null >/dev/null 2>&1 &" ;;
+            reboot)         r_ssh "nohup sh -c 'sleep 3; reboot' </dev/null >/dev/null 2>&1 &" ;;
+            reboot-tryboot) r_ssh "nohup sh -c 'sleep 3; printf \"0 tryboot\" > /run/systemd/reboot-param && systemctl reboot' </dev/null >/dev/null 2>&1 &" ;;
             status)         return 0 ;;
         esac
         return $?
@@ -195,15 +201,19 @@ machine_tools_present() { # <ssh destination>
     mac_ssh "$1" "test -x $(sh_quote "$MACHINE_TOOLS/wk")" >/dev/null 2>&1
 }
 
+machine_tools_path() { # <ssh destination> -- MACHINE_TOOLS resolved against that machine's own home, which tools_push needs absolute
+    local home
+    home=$(mac_ssh "$1" 'printf "%s" "$HOME"' 2>/dev/null | tr -d '\r') || return 1
+    [ -n "$home" ] || return 1
+    printf '%s/%s' "$home" "$MACHINE_TOOLS"
+}
+
 machine_prepare() { # <ssh destination>
-    local dest="$1"
-    info "syncing this tree to $dest:$MACHINE_TOOLS"
-    mac_ssh "$dest" "mkdir -p $(sh_quote "$MACHINE_TOOLS")" \
-        || { warn "could not make $MACHINE_TOOLS on $dest"; return 1; }
-    rsync -a --chmod=go-w --delete --exclude '.git/' --exclude '__pycache__/' \
-        --exclude '*.pyc' --exclude 'WebKitBuild/' -e "ssh -o BatchMode=yes" \
-        "$WK_ROOT/" "$dest:$MACHINE_TOOLS/" \
-        || { warn "could not sync this tree to $dest"; return 1; }
+    local dest="$1" path
+    path=$(machine_tools_path "$dest") \
+        || { warn "could not read \$HOME on $dest, so there is nowhere to put this tree"; return 1; }
+    info "pushing this tree to $dest:$path"
+    tools_push "$path" mac_ssh "$dest" || return 1
 
     # Nothing can bootstrap the first authenticated sudo from a session with no terminal.
     [ -t 0 ] || { warn "the tree is in place on $dest. Installing its privileged helpers
@@ -211,10 +221,10 @@ machine_prepare() { # <ssh destination>
     session has no terminal to answer on. From one:
       wk boot $NODE_NAME --prepare
     or on $dest itself, where Touch ID answers it if that Mac has it enabled:
-      cd $MACHINE_TOOLS && ./setup --stage quiesce"; return 1; }
+      cd $path && ./setup --stage quiesce"; return 1; }
 
     info "installing the privileged helpers on $dest (it asks for a password once)"
-    ssh -t "$dest" "cd $(sh_quote "$MACHINE_TOOLS") && ./setup --stage quiesce" || {
+    ssh -t "$dest" "cd $(sh_quote "$path") && ./setup --stage quiesce" || {
         warn "./setup --stage quiesce did not finish on $dest"
         return 1
     }

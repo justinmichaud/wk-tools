@@ -2,62 +2,72 @@
 
 ## Owed, no hardware needed
 
-- [ ] `wk bench report` shows no headline row for jetstream3 or motionmark.
-      Those plans write `{"Score": ["Geometric"]}` on the suite root — an
-      aggregator declaration carrying no values — and `_subtest_metrics`
-      (lib/wkdata.py) drops the suite prefix from first-level children, so
-      jetstream3's 77 subtests and motionmark's 8 are indistinguishable from
-      the suite by its `"/" not in name` test. `ab-precision` computes the
-      declared aggregate; `report` does not, so a report of either plan is
-      subtests and no total. Changing `_subtest_metrics`' row set or naming is
-      what it takes, and tests/test_bench_report.py pins both
+- [ ] `wk bench mac-ab --machine benchvm` — the guest rehearsal — cannot start:
+      `error: benchvm (boot/machines/benchvm.conf) sets no NODE_SSH`, before it
+      reaches any other check. A tart guest's address is in no ssh config and
+      changes every boot, which is why `boot/mac-guest.sh` defines its own
+      `m_ssh`; `bench/mac-ab.sh` now routes through `m_ssh` so that override
+      wins, but four things still assume the measured machine, the machine that
+      holds the tools, and the machine that can see the staging root are one
+      ssh destination:
+        - `host_tools` / `rwk` run `./wk build|bench stage|vm start` and belong
+          to the machine that *manages* the target — tolken for both mbp and
+          benchvm, so for a guest they are local, not `$HOST`
+        - `put_file` / `put_tree` are a fourth implementation of staging;
+          `wk bench stage` already goes through the driver's
+          `b_bench_local` / `b_bench_put` / `b_bench_put_file`, and mac-guest
+          implements all three while mac-volume deliberately implements none
+        - `bench_home` derives the measured account's home from the volume's
+          path (`…/private/var` → `…/Users/bench`); a guest's is its own user's
+        - `[ -n "$HOST" ] || die` and the ~50 uses of `$HOST` as both label and
+          ssh destination
+      A driver hook for "run this on the machine that manages the target" is the
+      shape that fits: `m_ssh` for mac-volume, local for mac-guest. This is why
+      a rehearsal matters at all: `--dry-run` returns from `phase_go` before
+      `b_reboot`, so no bench-side path is reachable from host mode — which is
+      how a `reboot` verb that rebooted nothing survived every dry run there has
+      ever been (see the `setsid` note below)
 
-- [ ] `cmd/build` does not record its abort deadline, so nothing can tell a
-      build that is merely `silent` from one whose watchdog was killed with -9
-      — a live `cmd/build` would have written `stalled` by the deadline. It is
-      a record of a choice and not a cached fact: `WK_ABORT_SECONDS` is a
-      per-run override and `cmd/bench` passes 5400. Wants `abort_after=` in
-      `build.status` and a reader in `cmd/status`; a field with no reader is
-      dead data
+- [ ] the rehearsal needs a display it can be judged on, and must not gain a
+      `NODE_DISPLAY` in its conf: the guest's is declared by `WK_VM_DISPLAY`
+      (targets/vm.sh, `1280x800`), so the plant should read it from the target
+      that sets it rather than store a second copy. Two things block that:
+      a tart guest's panel reports `builtin=False`
+      (tests/test_mac_gates.py `GUEST_DISPLAY`), so the topology rule —
+      exactly one online display and it the built-in panel — refuses a guest
+      outright; and `parse_expect_display` (bench/mac-browser-check.py) accepts
+      only the literal word `builtin`. Generalising the declaration to
+      `<kind> <w>x<h>`, kind being what `CGDisplayIsBuiltin` answers, makes a
+      guest representable without weakening tolken. README.md's
+      "The Mac lane" says the declared mode lives in the machine conf and would
+      need the same edit
 
-- [ ] between the plant and `--collect`, a mac-ab task has no runs, so
-      `task-status` reads `incomplete` and `wk status` warns "stopped before
-      every planned run ended". Accurate for a task, wrong for this one, and it
-      clears on collect. The state a planted job is in — measuring, or powered
-      off with the result on the volume — is the same one `b_probe`
-      (boot/mac-volume.sh) declines to guess between, so the note should say
-      that instead
-
-- [ ] five callers interpolate a `lib/resources.sh` reading into a word instead
-      of assigning it, so a refusal prints its message and the caller continues
-      with an empty value: `setup:58`, `image/yocto.sh:396,405`,
-      `targets/container.sh:156-157`, `targets/vm.sh:46-47`,
-      `cmd/bench:563,568`. Each wants `v=$(...)` on its own line;
-      `cmd/status:539-541` already does it
-
-- [ ] `wk bench mac-ab --machine benchvm` (the guest rehearsal) has lost two
-      things it needed and should be rebuilt or dropped. It refuses for want of
-      a `NODE_DISPLAY`, and must not gain one: the guest's display is declared
-      by `WK_VM_DISPLAY` in targets/vm.sh, so a copy in
-      `boot/machines/benchvm.conf` would be a stored copy of a recomputable
-      fact — the plant should read it from the target that sets it. And the
-      job's `force` field is gone: it was the rehearsal's way past the quiet
-      check, but one `--force` meant both "cross the driver's barriers" and
-      "pass `--force` to every leg", so crossing a preflight barrier silently
-      disabled each leg's own quiet-machine gate. Whatever the rehearsal gets
+- [ ] the rehearsal's way past a guest's quiet-machine gate is gone. It was the
+      job's `force` field, and it went because one `--force` meant both "cross
+      the driver's barriers" and "pass `--force` to every leg", so crossing a
+      preflight barrier silently disabled each leg's own gate. Whatever it gets
       instead must not be reachable from the flag that crosses a barrier
 
-- [ ] two implementations of "run this on that machine": `m_ssh`
-      (boot/machines.sh) branches on `NODE_LOCAL`, and `mv_sh`
-      (boot/mac-volume.sh) branches on `is_macos`. `mv_sh`'s condition is the
-      right one — `NODE_LOCAL=1` claims "the machine drives itself", which is
-      only true when the caller is standing on it, so from moose `m_ssh` for
-      `mbp` would run the command on moose and answer about the wrong computer.
-      Folding `m_ssh` onto the same test ("am I the machine NODE_SSH names",
-      which bench/mac-ab.sh already spells with `hostname -s`) would retire
-      `mv_sh` and `NODE_LOCAL` together. It touches only the two machines with
-      `NODE_LOCAL` set, `mbp` and `benchvm`, and neither is exercised by a test
-      that could catch a mistake — hence not done here
+- [ ] `bench/mac-ab.sh` preflight auto-prepares (`machine_prepare "$HOST" || true`)
+      when it finds a Mac it cannot restart and has a terminal. `machine_prepare`
+      now pushes a commit rather than rsyncing, so on a dirty tree it surfaces
+      `tools_committed`'s "commit first" refusal inside preflight and then
+      reports `restartable no`. Correct, but it is new text in a preflight that
+      nothing pins
+
+- [ ] `lib/wkdata.py`'s `_declared_aggregate` resolves the suite root's `Score`
+      only. A first-level jetstream3 child declares `Time: ["Geometric"]` over
+      its First/Worst/Average and Speedometer's root declares
+      `Time: ["Total","Geometric"]`; neither becomes a row. No behaviour is
+      lost — it matches `_headline_score`'s scope — but it is a declaration the
+      file reads and does not resolve
+
+- [ ] `tests/test_resources.py`'s static rule derives its reader set from
+      `lib/resources.sh` alone, so it does not guard a *wrapper* over a reading
+      (`_vm_cpus`, `t_cores`, `_base_mem_mb`) being interpolated. Those sites
+      are correct in code today; a sixth added tomorrow would fail no test.
+      Extending the closure tree-wide is not the answer — measured, it flags
+      248 sites
 
 - [ ] nothing can turn auto-brightness *off*, only refuse a run under it.
       Measured 2026-09-08 on tolken (MacBook Air `Mac16,12`, M4, macOS 26.6.2):
@@ -67,138 +77,115 @@
       `com.apple.iokit.AmbientLightSensor.plist` or
       `com.apple.CoreBrightness.plist`, so there is no file to write either.
       The only reading is `system_profiler`'s runtime
-      `spdisplays_ambient_brightness`, which `lib/wkmac.py displays` now
-      carries and the browser check refuses on. Finding the setter is what
-      would let the lane hold the setting rather than decline the machine
-
-- [ ] two tests fail only under the full suite and pass in isolation and in
-      pairs: `test_build_wall.TestBitbakeGetsTheRealTools.
-      test_it_strips_the_wall_and_keeps_everything_else` and
-      `test_vm_clock.TestGuestClock.test_a_stale_guest_is_set_from_the_host`.
-      Two of three full `wk selftest --quick` runs on 2026-09-08 showed the
-      first, one showed neither. Its evidence: the test hands `bash -c` an
-      explicit `env={"PATH": …}` and the output comes back with
-      `/home/jmichaud/Development/wk-tools/bin:/.local/bin:/.local/bin:` prepended
-      — `shell/bashrc`'s own additions with `HOME` unset — so something made a
-      non-interactive bash source a profile. `BASH_ENV` appears nowhere in the
-      tree, `/usr/bin/bash` is not a wrapper, and neither file has been touched
-      since `f53e308` / `1fbdb30`. Root cause unknown; do not theorise, reproduce
-      it under the full suite first
-
-- [ ] `machine_prepare` (boot/machines.sh) rsyncs an **uncommitted** working tree
-      into a git checkout the operator also pulls into, and the two fight: a
-      later `git pull` replaces what was pushed, which is how tolken silently
-      lost a synced fix on 2026-09-08. Either refuse to rsync over a checkout
-      whose HEAD differs, or push only committed content and let `git pull` be
-      the transport. The deploy model for that Mac is rsync-and-commit, so this
-      is a real decision and not a cleanup
+      `spdisplays_ambient_brightness`, which `lib/wkmac.py displays` carries and
+      the display rule refuses on. Finding the setter is what would let the lane
+      hold the setting rather than decline the machine
 
 - [ ] `./setup` is absent from crash-only coverage. `tests/test_crash_only.py`
       drives `wk new`, `wk rm`, `wk gc` and `build_live` and never mentions
       `setup` — so CLAUDE.md rule 2 has never been applied to the one command
       that provisions a machine's privileged state, its dotfiles, its
-      credentials and its units. One instance of the gap is measured and being
-      fixed (a sudoers rule naming the wrong user read as "already installed",
-      because the helper's "needs" was computed from the binary alone). The
-      remaining stages — dotfiles, claude, mcp, sharing, machine, vmtools,
-      softnet, sdk, broker — have no convergence test between them. Each wants
-      the same question asked: killed at any point, does a re-run reach the
-      declared final state, or is "already exists" the answer to a half-made
-      thing [no hardware needed for most of them]
+      credentials and its units. The stages — dotfiles, claude, mcp, sharing,
+      machine, vmtools, softnet, sdk, broker — have no convergence test between
+      them. Each wants the same question asked: killed at any point, does a
+      re-run reach the declared final state, or is "already exists" the answer
+      to a half-made thing
 
 ## Owed, needs the Mac
 
-- [ ] **the one thing between here and a measured A/B**:
-      `sudo -n /usr/local/libexec/wk-boot-priv status` on tolken still answers
-      "a password is required", so nothing can restart that Mac unattended and
-      `wk bench mac-ab` refuses in preflight ("restartable"). `wk doctor` there
-      reports it. The helper binary is correct (root:wheel 0755) and
-      `/etc/sudoers.d/zzz-wk-boot` exists at 0440 root:wheel, but it is **58
-      bytes** where the rule `<user> ALL=(root) NOPASSWD:
-      /usr/local/libexec/wk-boot-priv` is `len(user) + 54`; 58 means a 4-character
-      user, i.e. `root`. That is arithmetic, not evidence — the file is 0440 and
-      unreadable, and tolken's sudoers sets `!log_allowed` so nothing was logged.
-      `sudo cat /etc/sudoers.d/zzz-wk-boot` settles it in one line.
-      If it does say `root`, `./setup` ran under sudo; it now refuses that, and
-      re-running it as the logged-in user rewrites the rule and reports whether
-      the grant answers [needs one read or one re-run on the Mac]
+- [ ] **the 1-round jetstream3/speedometer3/motionmark confirmation run.**
+      `20260908T201232Z` is planted and armed on the volume (`phase=planted`,
+      `attempts=0`, arms `20260906T233003Z-mac-release-pgo` /
+      `20260907T021244Z-mac-release-pgo`, `display builtin 1280x832`), the
+      launch agent is installed, and `WK Bench` is the firmware default — so any
+      boot of that volume runs it. It has not started because the restart is
+      still one human action: see the next item
 
-- [ ] the 1-round jetstream3/speedometer3/motionmark confirmation run has never
-      executed. Everything for it is in place: `20260908T145813Z` is planted on
-      the volume (`phase=planted`, `attempts=0`, `rounds 1`, `count 2`,
-      `display builtin 1470x956`, no `force` field), and every bench-side file on
-      the volume was verified byte-for-byte against the tree at plant time. It
-      runs on the next boot of that volume, which is the firmware default — so
-      the grant above, or any reboot by hand, starts it. Re-plant first if the
-      tree has moved since: `wk bench mac-ab --a 20260906T233003Z-mac-release-pgo
-      --b 20260907T021244Z-mac-release-pgo --rounds 1 --detect 0 --count 2`
+- [ ] the fixed `wk-boot-priv` is not installed on tolken. `v_reboot` detached
+      with `setsid`, which **macOS does not ship** (`command -v setsid` answers
+      nothing on 26.6.2), so the verb printed `rebooting in 3s`, rebooted
+      nothing, and exited 0 — for as long as it existed. `bench/mac-ab.sh`
+      caught it only because `phase_go` verifies against `kern.boottime` rather
+      than trusting the helper. Both verbs now use `nohup`, and so does
+      `boot_priv` in boot/machines.sh, but the copy at
+      `/usr/local/libexec/wk-boot-priv` over there is the old one and replacing
+      it needs root on that Mac:
+        wk boot mbp --prepare        (one password prompt, in a terminal there)
+      Until then the lane restarts nothing and the planted job waits for a
+      reboot by any means
 
-- [ ] `wk bench mac-ab --shutdown` still hand-rolls its transition through
-      System Events: `admin/wk-boot-priv` has no halt verb, and loginwindow
-      answers no shutdown event at all (-1708, measured 2026-09-07). So "one
-      implementation of restarting this Mac" is true of the restart and not of
-      the shutdown. A `halt` verb on the helper is the shape that would fix it
-      — a fixed verb, no argument — and whether `--shutdown` is still wanted at
-      all now that a cold start enters bench mode by itself is the prior question
+- [ ] the prose still says the benchmark install "joins nothing" and "has no
+      network" in six places (bench/mac-ab.sh:17,374,803,
+      bench/mac-bench-autorun.sh:2,9,106, boot/mac-volume.sh:238), which was
+      the unprovisioned state and is no longer the design. One sweep, once the
+      boot below has shown the join works
 
-- [ ] one boot proves the darwin `tailscaled` (bench/mac-tailnet.sh). Everything
-      above and below it is proven: the binary cross-builds pure-Go and runs on
-      tolken, `cmd/tailscaled/tailscaled.go:280-282` gates on nothing but uid 0,
-      and the utun path is `com.apple.net.utun_control`. What the boot has to
-      show is that `launchctl bootstrap system` opens that utun as root with no
-      panel on macOS 26.6.2, that `tailscale up --auth-key file:` joins
-      unattended and spends the key, that `ssh tolken-bench` reaches the install
-      *while it measures*, that `--accept-dns=false` wrote no `/etc/resolver`,
-      and that a `--repair` restage rejoins on the same tailnet IP with no `-1`.
-      A relayed rather than direct connection is the expected symptom of macOS
-      local-network privacy, not a fault
+- [ ] one boot proves the darwin `tailscaled` (bench/mac-tailnet.sh). The
+      transport is now built and on the volume: `collect` cross-built
+      tailscaled 1.102.2 for darwin/arm64 from Linux (56 MB, and that Mac's own
+      `file` reads both binaries as Mach-O arm64), and the plant put them,
+      the auth key, `tailnet.conf` naming `tolken-bench`/`tag:wk` and both
+      LaunchDaemons at `/var/wk/tailnet` with no privilege at all. The autorun's
+      `converge_self` installs them into that install and joins with its own
+      passwordless sudo. What the boot has to show is that `launchctl bootstrap
+      system` opens the utun as root with no panel on macOS 26.6.2, that
+      `tailscale up --auth-key file:` joins unattended and spends the key, that
+      `ssh tolken-bench` reaches the install *while it measures*, that
+      `--accept-dns=false` wrote no `/etc/resolver`, and that a restage rejoins
+      on the same tailnet IP with no `-1`. A relayed rather than direct
+      connection is the expected symptom of macOS local-network privacy, not a
+      fault
 
-- [ ] whether `bless --setBoot` needs a volume-owner credential is now measured
-      by running it rather than asserted: the helper blesses with a credential
-      where the machine holds one and with root alone where it does not, and
-      each verb says which form it used and what bless answered. Read on tolken
-      2026-09-08: `bless --help` lists `--user`/`--stdinpass` under *Snapshot
-      options* only — Mount Mode names neither — and
-      `/usr/local/share/wk-bench/` does not exist there. So the owed work is one
-      run: `wk boot mbp --prepare`, then `wk boot mbp`, then read the form it
-      took. If root alone suffices, the credential drops out of `boot-host`
-      entirely [needs the Mac]
+- [ ] whether `bless --setBoot` needs a volume-owner credential is measured by
+      running it rather than asserted: the helper blesses with root alone and
+      each verb says what bless answered. Read on tolken 2026-09-08:
+      `bless --help` lists `--user`/`--stdinpass` under *Snapshot options* only.
+      The owed work is one run — `wk boot mbp --prepare`, then `wk boot mbp` —
+      and reading the form it took. Do not run it while a job is planted: it
+      blesses the host install first, which is the way back it proves, and that
+      changes which volume the next boot enters
 
-- [ ] a `wk_quiet_desktop_probe` row reporting `tailscaled` as expected-running.
-      It must never join `wk_quiet_desktop_stopped`: pausing it drops the
-      tailnet mid-leg, which is the thing it exists to fix, and leaves a live
-      utun with nothing draining it. Measured on moose, the fleet's busiest
-      node: 1.78% of one core over 3.7 days, RSS 71 MB
+- [ ] the hand-back has never run. `leave_bench` now blesses the host install,
+      reads the firmware back, and reboots only if it names that install --
+      halting otherwise, because this volume is the firmware default and a
+      reboot would land back here. Whether `bless --setBoot` succeeds for a
+      volume the bench account does not own is the platform's answer and this
+      boot has it; if it halts, the log says what the firmware read back and
+      the power button is still the way
 
-- [ ] collecting a result still needs a finger on the power button, and one
-      chain removes it. The bench install powers the Mac off; the firmware
-      default is the bench volume, so the next boot measures again rather than
-      coming back to host mode. If `bless --setBoot` turns out to need no
-      credential (above), the bench install could bless the host install before
-      it halts, and then a wake — `pmset -a womp 1` on that install, plus a
-      magic packet from moose — reaches host mode with nobody in the room. Two
-      things are unbuilt for that: `wk-boot-priv` is installed only on the host
-      install, so `stage_payload` would have to put it on the volume too and
-      `bench_install`'s gate would have to be re-read from the other side; and
-      whether a Mac halted by `shutdown -h` wakes on LAN at all is unmeasured
-      [needs the Mac, after --prepare]
+- [ ] superseded by the hand-back above, and kept only until one boot shows
+      which way it went: collecting a result needed a finger on the power button. The bench
+      install powers the Mac off; the firmware default is the bench volume, so
+      the next boot measures again rather than coming back to host mode. If
+      `bless --setBoot` needs no credential (above), the bench install could
+      bless the host install before it halts, and then a wake — `pmset -a womp 1`
+      on that install, plus a magic packet from moose — reaches host mode with
+      nobody in the room. Two things are unbuilt for that: `wk-boot-priv` is
+      installed only on the host install, so `stage_payload` would have to put it
+      on the volume too and `bench_install`'s gate would have to be re-read from
+      the other side; and whether a Mac halted by `halt` wakes on LAN at all is
+      unmeasured
 
-## Decision
+- [ ] the display-mode convergence has never run. The bench install comes up at
+      `1470x956` and the job now declares `1280x832`, so the first boot of
+      `20260908T201232Z` writes the WindowServer configuration and restarts
+      once. What it has to show: that WindowServer adopts a mode written into
+      `com.apple.windowserver.displays.plist` while the volume was merely
+      mounted and the machine rebooted with `/sbin/reboot` (which is what makes
+      the write survive — an orderly shutdown lets WindowServer save the old
+      configuration back), and that the `mode_declared` guard refuses rather
+      than looping if it does not
 
-- [ ] the measured mode is a scaled mode *above* the panel. The built-in panel
-      is 2560x1664 (`Mac16,12`, 13-inch MacBook Air); the bench install's
-      `com.apple.windowserver.displays.plist` declares one display at
-      `Wide 1470, High 956, Scale 2, Hz 60`, so macOS renders a 2940x1912
-      backing store and downsamples every frame. That costs fill rate and adds
-      a scaling pass, and MotionMark's score is a function of the area drawn.
-      `1280x832` at scale 2 is the pixel-exact mode. Changing `NODE_DISPLAY`
-      breaks comparability with the 16-round numbers already taken at
-      1470x956, so it is a choice rather than a fix
+## Decisions taken
 
-- [ ] the wk-tools tree on moose carries this work uncommitted, and tolken runs
-      from a scratch clone at `~/Development/wk-tools-wip` (5f2848c), deployed
-      by rsync-and-commit. `wk sync --tools` refuses an uncommitted tree by
-      design, so landing this means committing it. The 2026-09-07 A/B was
-      planted from a tree older than moose's HEAD — its planted copy of the
-      autorun carries no `detect_off` — which is why `--rounds 1 --detect 0`
-      ran seventeen rounds
+- the measured mode is `builtin 1280x832`, pixel-exact at scale 2 on the
+  2560x1664 panel. The 16 rounds taken at `1470x956` — a scaled mode above the
+  panel, rendered 2940x1912 and downsampled — are not comparable with anything
+  taken after this
+- `wk bench mac-ab --shutdown` is gone. The firmware default is the bench
+  volume and the helper's reboot is the one transition; `--plant` leaves the job
+  on the volume and reboots nothing, which is what the startup-manager path
+  wanted
+- `machine_prepare` pushes a commit rather than rsyncing an uncommitted tree, so
+  a later `git pull` on the far side has nothing of anyone's to replace. An
+  uncommitted tree is refused, naming `git commit -a`

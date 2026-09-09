@@ -43,8 +43,8 @@ esac
 command -v envelope_mem_mb >/dev/null 2>&1 || . "$WK_ROOT/lib/resources.sh"
 WK_VM_BASE_CPUS="${WK_VM_BASE_CPUS:-}"
 WK_VM_BASE_MEM_MB="${WK_VM_BASE_MEM_MB:-}"
-_base_cpus()   { echo "${WK_VM_BASE_CPUS:-$(envelope_cores)}"; }
-_base_mem_mb() { echo "${WK_VM_BASE_MEM_MB:-$(envelope_mem_mb)}"; }
+_base_cpus()   { [ -n "$WK_VM_BASE_CPUS" ] && echo "$WK_VM_BASE_CPUS" || envelope_cores; }
+_base_mem_mb() { [ -n "$WK_VM_BASE_MEM_MB" ] && echo "$WK_VM_BASE_MEM_MB" || envelope_mem_mb; }
 
 WK_VM_BASE_PREBUILD="${WK_VM_BASE_PREBUILD-mac-release}"
 
@@ -205,9 +205,12 @@ $(_running_vms | sed 's/^/      /')"
 
     info "cloning $WK_VM_BASE -> $v (APFS copy-on-write)"
     local t0; t0=$(date +%s)
+    local cpus mem
+    cpus=$(_vm_cpus)
+    mem=$(_vm_mem_mb)
     _tart clone "$WK_VM_BASE" "$v"
     # Set.swift assigns displayRefit unconditionally, so a `tart set` omitting --display-refit clears it.
-    _tart set "$v" --cpu "$(_vm_cpus)" --memory "$(_vm_mem_mb)" --random-mac --random-serial \
+    _tart set "$v" --cpu "$cpus" --memory "$mem" --random-mac --random-serial \
         --display "$WK_VM_DISPLAY" --display-refit
     debug "clone took $(( $(date +%s) - t0 ))s"
 
@@ -246,7 +249,8 @@ t_start() {
         _converge_guest "$name" "$ip"
     else
         _check_guest_limit
-        _check_memory_budget "$name" "$(t_mem_mb "$name")"
+        local mem; mem=$(t_mem_mb "$name")
+        _check_memory_budget "$name" "$mem"
         _check_host_disk
 
         ip=$(_boot "$v" 180)
@@ -1041,8 +1045,8 @@ _podman_containers_running() {
         </dev/null 2>/dev/null | tr -dc '0-9' | grep . || echo 1
 }
 
-_vm_cpus()   { echo "${WK_VM_CPUS:-$(envelope_cores)}"; }
-_vm_mem_mb() { echo "${WK_VM_MEM_MB:-$(envelope_mem_mb)}"; }
+_vm_cpus()   { [ -n "${WK_VM_CPUS:-}" ] && echo "$WK_VM_CPUS" || envelope_cores; }
+_vm_mem_mb() { [ -n "${WK_VM_MEM_MB:-}" ] && echo "$WK_VM_MEM_MB" || envelope_mem_mb; }
 
 _vm_get() {
     _tart get "$1" --format json 2>/dev/null | python3 -c '
@@ -1076,7 +1080,7 @@ t_mem_mb() {
 }
 
 _check_memory_budget() {
-    local name="$1" mine="$2" podman_mb guests total budget spare
+    local name="$1" mine="$2" podman_mb guests total budget spare total_mb
     podman_mb=0
     _podman_running && podman_mb=$(_podman_mem_mb)
     guests=$(_committed_mem_mb "$name")
@@ -1103,6 +1107,7 @@ _check_memory_budget() {
     fi
 
     spare=$(( budget - podman_mb - guests ))
+    total_mb=$(host_mem_mb)
 
     local advice
     if [ "$spare" -ge 4096 ]; then
@@ -1121,7 +1126,7 @@ _check_memory_budget() {
     rows="$rows
       $(printf '%-26s %6s MB   requested' "macOS VM '$name'" "$mine")
       $(printf '%-26s %6s MB   (%s MB total, %s MB kept for the desktop)' \
-            'host envelope' "$budget" "$(host_mem_mb)" "$WK_RESERVE_MB")"
+            'host envelope' "$budget" "$total_mb" "$WK_RESERVE_MB")"
 
     die "not enough memory to start '$name'.
 $rows
@@ -1228,16 +1233,22 @@ sys.exit(0 if any(v.get("Name") == sys.argv[1] for v in json.load(sys.stdin)) el
     fi
 
     info "creating the golden base VM '$WK_VM_BASE'"
+    local cpus mem
+    cpus=$(_base_cpus)
+    mem=$(_base_mem_mb)
     _tart clone "$WK_VM_IMAGE" "$WK_VM_BASE"
-    _tart set "$WK_VM_BASE" --cpu "$(_base_cpus)" --memory "$(_base_mem_mb)"
+    _tart set "$WK_VM_BASE" --cpu "$cpus" --memory "$mem"
 
     _provision_base
 }
 
 _provision_base() {
+    local cpus mem
+    cpus=$(_base_cpus)
+    mem=$(_base_mem_mb)
     _check_prebuild_config
     _check_guest_limit
-    _check_memory_budget "$WK_VM_BASE" "$(_base_mem_mb)"
+    _check_memory_budget "$WK_VM_BASE" "$mem"
     ensure_dir "$WK_VM_DIR" 0700
 
     # tart can only grow a disk while the VM is off.
@@ -1246,7 +1257,7 @@ _provision_base() {
         info "growing the base disk ${cur}GB -> ${WK_VM_DISK_GB}GB"
         _tart set "$WK_VM_BASE" --disk-size "$WK_VM_DISK_GB"
     fi
-    _tart set "$WK_VM_BASE" --cpu "$(_base_cpus)" --memory "$(_base_mem_mb)"
+    _tart set "$WK_VM_BASE" --cpu "$cpus" --memory "$mem"
     _check_host_disk
 
     if [ ! -f "$WK_VM_KEY" ]; then

@@ -8,8 +8,15 @@ workspace only in their cgroup, and a macOS guest's run in another kernel. So
 `silent` rather than `stalled` for a quiet `running` record, and `stalled`
 stays what cmd/build and cmd/test write when a watchdog killed the job.
 
+The one thing the log's age settles by itself is how long a build has been
+quiet, so the `running` record carries `abort_after` -- the deadline the
+watchdog arming it gives up at. Past that deadline a live `wk build` would have
+killed the job and written `stalled`, so a record still saying running is one
+whose watchdog is gone too.
+
 The exit codes that follow: `silent` is busy (2), so `wk status --wait` waits
-through it; `stalled` is 3, and `--wait` returns.
+through it; `stalled` is 3, and `--wait` returns; `silent` past `abort_after`
+is 4, a record with no writer left.
 
 Run: python3 -m unittest tests.test_build_liveness -v
 """
@@ -40,6 +47,15 @@ if [ "$*" = "-A -o pcpu=,comm=" ]; then
 fi
 exec {REAL_PS} "$@"
 '''
+
+def write_status_source():
+    """cmd/build's one writer for build.status, by name rather than by line
+    number, so it is the shipped function that gets called."""
+    lines = (REPO / "cmd" / "build").read_text().splitlines()
+    start = next(i for i, l in enumerate(lines) if l.startswith("write_status() {"))
+    end = next(i for i in range(start, len(lines)) if lines[i] == "}")
+    return "\n".join(lines[start:end + 1])
+
 
 STUB_PS = '''ps() {
 cat <<'PSOUT'
@@ -223,6 +239,148 @@ exec {REAL_PS} "$@"
         self.assertEqual(sub["state"], "silent", cp.stdout)
         self.assertEqual(cp.returncode, 2, cp.stdout)
         self.assertIn("there is no log at", self.notes(rec))
+
+
+class TestTheRecordedDeadlineTellsSilenceFromADeadWatchdog(_FakeWalk):
+    def _silent(self, age, **fields):
+        f = {"state": "running", "config": "jsc-release"}
+        f.update(fields)
+        return self.workspace(f, log="[1/4200] cc\n", log_age=age)
+
+    def test_silence_inside_the_recorded_deadline_is_still_busy(self):
+        name = self._silent(600, abort_after="1800")
+        cp = self.walk("--records")
+        rec, sub = self.build_sub(cp, name)
+        self.assertEqual(sub["state"], "silent", cp.stdout)
+        self.assertEqual(cp.returncode, 2, cp.stdout)
+        self.assertIn("keeps waiting", self.notes(rec))
+        self.assertNotIn("watchdog is gone", self.notes(rec))
+
+    def test_silence_past_the_recorded_deadline_says_the_watchdog_is_gone(self):
+        name = self._silent(4000, abort_after="1800")
+        cp = self.walk("--records")
+        rec, sub = self.build_sub(cp, name)
+        self.assertEqual(sub["state"], "silent", cp.stdout)
+        self.assertEqual(cp.returncode, 4, cp.stdout)
+        text = self.notes(rec)
+        self.assertIn("past the 1800s", text)
+        self.assertIn("watchdog is gone", text)
+        self.assertIn("wk build", text)
+        self.assertNotIn("keeps waiting", text)
+
+    def test_a_record_with_no_deadline_cannot_be_past_one(self):
+        """One reader, and absence is one state: nothing here says when this
+        build gives up on itself, so silence stays silence."""
+        name = self._silent(4000)
+        cp = self.walk("--records")
+        rec, sub = self.build_sub(cp, name)
+        self.assertEqual(sub["state"], "silent", cp.stdout)
+        self.assertEqual(cp.returncode, 2, cp.stdout)
+        self.assertIn("keeps waiting", self.notes(rec))
+
+    def test_wait_returns_on_a_build_past_its_deadline(self):
+        self._silent(4000, abort_after="1800")
+        cp = self.walk("--wait", "--timeout=2",
+                       env={"WK_WAIT_INTERVAL": "1"}, timeout=180)
+        self.assertNotIn("wk status says busy", cp.stdout)
+        self.assertEqual(cp.returncode, 4, cp.stdout)
+
+
+class TestTheRecordCarriesTheDeadlineTheWatchdogIsArmedWith(WkTest):
+    """cmd/build's `write_status`, lifted out and called on its own."""
+
+    def _record(self, state, env=None):
+        out = self.tmp / "out.status"
+        cp = bash(f'''
+set -euo pipefail
+. "{REPO}/lib/watchdog.sh"
+ensure_dir() {{ mkdir -p "$1"; }}
+t_status_put() {{ cat > "{out}"; }}
+NAME=ws; WS="{self.tmp}"; LOG="{self.tmp}/build.log"
+CONFIG=jsc-release; ARCH=native
+STARTED=2026-01-01T00:00:00Z; START_EPOCH=$(date +%s)
+{write_status_source()}
+write_status {state} 0
+''', env=env)
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        return dict(line.split("=", 1)
+                    for line in out.read_text().splitlines() if "=" in line)
+
+    def test_a_running_record_carries_the_watchdogs_default_deadline(self):
+        self.assertEqual(self._record("running")["abort_after"], "1800")
+
+    def test_a_per_run_override_is_what_the_record_says(self):
+        rec = self._record("running", env={"WK_ABORT_SECONDS": "5400"})
+        self.assertEqual(rec["abort_after"], "5400")
+
+    def test_a_finished_record_carries_no_deadline(self):
+        self.assertNotIn("abort_after", self._record("ok"))
+
+    def test_the_record_and_the_watchdog_read_one_variable(self):
+        self.assertIn("abort_after=$WK_ABORT_SECONDS",
+                      (REPO / "cmd" / "build").read_text())
+        self.assertIn('[ "$idle" -ge "$WK_ABORT_SECONDS" ]',
+                      (REPO / "lib" / "watchdog.sh").read_text())
+
+
+class TestATestRunKeepsTheSameRecordAsABuild(_FakeWalk):
+    """`report_one` serves both kinds off one reader, so a test run that lost
+    its watchdog has to be tellable from a quiet one too -- and the remedy it
+    prints has to name the command that would rewrite the record, which is
+    `wk test` and not `wk build`."""
+
+    def _test_status(self, name, fields):
+        wsdir = self.xdg / "wk" / "remote" / "remote" / "ws" / name
+        logf = wsdir / "test.log"
+        logf.write_text("ran 3 tests\n")
+        past = time.time() - fields.pop("_age")
+        os.utime(logf, (past, past))
+        fields["log"] = str(logf)
+        (wsdir / "test.status").write_text(
+            "".join(f"{k}={v}\n" for k, v in fields.items()))
+
+    def _sub(self, cp, name):
+        for line in cp.stdout.splitlines():
+            if not line.startswith("{"):
+                continue
+            rec = json.loads(line)
+            if rec.get("kind") == "workspace" and rec.get("name") == name:
+                for sub in rec.get("subs", []):
+                    if sub.get("kind") == "test":
+                        return rec, sub
+        raise AssertionError(f"no test record for {name}:\n{cp.stdout}")
+
+    def _walk_with(self, **fields):
+        name = self.workspace({"state": "ok", "config": "jsc-release", "exit": "0"})
+        self._test_status(name, dict({"state": "running", "suite": "jsc",
+                                      "config": "jsc-release"}, **fields))
+        return name, self.walk("--records")
+
+    def test_a_silent_test_past_its_deadline_names_wk_test(self):
+        name, cp = self._walk_with(_age=4000, abort_after="1800")
+        rec, sub = self._sub(cp, name)
+        self.assertEqual(sub["state"], "silent", cp.stdout)
+        text = self.notes(rec)
+        self.assertIn("past the 1800s", text)
+        self.assertIn("watchdog is gone", text)
+        self.assertIn("wk test", text)
+        self.assertNotIn("wk build", text)
+
+    def test_a_silent_test_inside_its_deadline_is_still_busy(self):
+        name, cp = self._walk_with(_age=600, abort_after="1800")
+        rec, sub = self._sub(cp, name)
+        self.assertEqual(sub["state"], "silent", cp.stdout)
+        self.assertIn("keeps waiting", self.notes(rec))
+        self.assertNotIn("watchdog is gone", self.notes(rec))
+
+    def test_the_running_record_cmd_test_writes_carries_the_deadline(self):
+        """The shipped printf, not a copy of it: one substitution list, so a
+        field added to the format and not to the arguments is caught."""
+        line = [l for l in (REPO / "cmd" / "test").read_text().splitlines()
+                if "state=running" in l and "printf" in l]
+        self.assertEqual(1, len(line), line)
+        self.assertIn("abort_after=%s", line[0])
+        self.assertIn("$WK_ABORT_SECONDS", (REPO / "cmd" / "test").read_text())
 
 
 class TestTheStalledStateIsOnlyAKill(_FakeWalk):

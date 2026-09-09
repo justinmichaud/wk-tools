@@ -22,8 +22,17 @@ import subprocess
 import unittest
 
 from tests.support import REPO, WkTest, bench_ls_runs, requires_podman_vm, run, scratch_dir
+from tests.test_ab_precision import (
+    JETSTREAM3_CHILDREN, JETSTREAM3_HEADLINE, MOTIONMARK_CHILDREN, MOTIONMARK_HEADLINE,
+    SPEEDOMETER3_HEADLINE, aggregate_doc, fields, speedometer_doc,
+)
 
 WKDATA = REPO / "lib" / "wkdata.py"
+
+# The text table's name column is as wide as its widest name, so a name is
+# whatever precedes the metric word.
+ROW = re.compile(r"^(?P<name>\S.*?) +(?P<metric>Score|Time) +"
+                 r"(?P<a>-?[0-9.]+)\+-[0-9.]+ +(?P<b>-?[0-9.]+)\+-[0-9.]+ ")
 
 
 def wkdata(*args, timeout=30):
@@ -34,6 +43,16 @@ def wkdata(*args, timeout=30):
         text=True,
         timeout=timeout,
     )
+
+
+def report_means(stdout):
+    """{(subtest, metric): (A mean, B mean)} out of the text table."""
+    out = {}
+    for line in stdout.splitlines():
+        m = ROW.match(line)
+        if m:
+            out[(m.group("name"), m.group("metric"))] = (float(m.group("a")), float(m.group("b")))
+    return out
 
 
 def env_record(path, *fields):
@@ -154,7 +173,7 @@ class TestReportWalkerAndStats(WkTest):
         the total Score at the suite root, descriptor lists (metrics.Time ==
         ["Total"]) in the middle, and the numbers three levels down under
         Sync/Async -- every level with numbers becomes a row, named by its
-        path, and the descriptor levels do not."""
+        path from the suite down, and the descriptor levels do not."""
         def doc(base):
             return {"debugOutput": [None], "Speedometer-2": {
                 "metrics": {"Score": {"current": [[base, base + 1.0, base + 0.5]]},
@@ -171,13 +190,15 @@ class TestReportWalkerAndStats(WkTest):
             a, b = self._write_pair(tmp, doc(11.0), doc(10.5))
             cp = wkdata("report", str(a), str(b), "--text")
             self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-            self.assertIn("Speedometer-2", cp.stdout)
-            self.assertIn("VanillaJS-TodoMVC/Adding100Items/Sync", cp.stdout)
-            self.assertIn("VanillaJS-TodoMVC/Adding100Items/Async", cp.stdout)
-            # The descriptor-only middle levels hold no numbers and are not rows.
-            for line in cp.stdout.splitlines():
-                self.assertFalse(line.startswith("VanillaJS-TodoMVC ") or line.startswith("VanillaJS-TodoMVC/Adding100Items "),
-                                 f"a descriptor-only level became a row: {line}")
+            names = {name for name, _metric in report_means(cp.stdout)}
+            self.assertEqual(
+                names,
+                {"Speedometer-2",
+                 "Speedometer-2/VanillaJS-TodoMVC/Adding100Items/Sync",
+                 "Speedometer-2/VanillaJS-TodoMVC/Adding100Items/Async"},
+                "a row is named by its whole path, so the suite is the one row "
+                "with no '/' in its name -- and the descriptor-only middle "
+                "levels hold no numbers and are not rows at all")
 
     def test_variance_by_configuration_groups_matching_tuples(self):
         """Two runs sharing a `configuration` tuple land in one variance
@@ -308,6 +329,97 @@ class TestReportWalkerAndStats(WkTest):
             cp = wkdata("env-record", str(tmp / "env.json"), "--nosuch")
             self.assertNotEqual(cp.returncode, 0, cp.stdout + cp.stderr)
             self.assertIn("not a key=value: --nosuch", cp.stdout + cp.stderr)
+
+
+class TestTheHeadlineRow(WkTest):
+    """JetStream3 and MotionMark never write their overall score into the file:
+    each declares itself the geometric mean of its first-level children's
+    Scores. The report resolves the declaration into a row, and it is the same
+    number `wk bench precision` stops on -- one implementation, read by both."""
+
+    def _pair(self, tmp, doc):
+        a_dir, b_dir = tmp / "a", tmp / "b"
+        for d in (a_dir, b_dir):
+            d.mkdir()
+            (d / "result.json").write_text(json.dumps(doc))
+            env_record(d / "env.json", "plan=mac-ab", "runner=browser")
+        return a_dir, b_dir
+
+    def _headline_row(self, tmp, doc, suite):
+        a, b = self._pair(tmp, doc)
+        cp = wkdata("report", str(a), str(b), "--text")
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        means = report_means(cp.stdout)
+        self.assertIn((suite, "Score"), means,
+                      f"no headline row for {suite}:\n{cp.stdout}")
+        precision = wkdata("ab-precision", "--a", str(a), "--b", str(b))
+        self.assertEqual(precision.returncode, 0, precision.stdout + precision.stderr)
+        return means[(suite, "Score")][0], float(fields(precision.stdout)["mean_a"])
+
+    def test_jetstream3_reports_the_geometric_mean_of_its_seventy_seven_children(self):
+        with scratch_dir() as tmp:
+            doc = aggregate_doc("JetStream3.0", "Geometric", JETSTREAM3_CHILDREN)
+            row, precision = self._headline_row(tmp, doc, "JetStream3.0")
+            self.assertAlmostEqual(row, JETSTREAM3_HEADLINE, places=3)
+            self.assertAlmostEqual(row, precision, places=3)
+
+    def test_motionmark_reports_the_geometric_mean_of_its_eight_children(self):
+        with scratch_dir() as tmp:
+            doc = aggregate_doc("MotionMark-1.3.1", "Geometric", MOTIONMARK_CHILDREN)
+            row, precision = self._headline_row(tmp, doc, "MotionMark-1.3.1")
+            self.assertAlmostEqual(row, MOTIONMARK_HEADLINE, places=2)
+            self.assertAlmostEqual(row, precision, places=2)
+
+    def test_speedometer3_reports_the_score_it_writes_itself(self):
+        """The third shape materialises its suite Score, and reads the same
+        way it did before either of the other two got a row."""
+        with scratch_dir() as tmp:
+            row, precision = self._headline_row(tmp, speedometer_doc(), "Speedometer-3")
+            self.assertAlmostEqual(row, SPEEDOMETER3_HEADLINE, places=3)
+            self.assertAlmostEqual(row, precision, places=3)
+
+    def test_the_declared_row_is_the_suite_and_its_children_are_below_it(self):
+        """A first-level child and the suite are two rows, not one: the child
+        carries its own Score and the suite the aggregate of every child."""
+        with scratch_dir() as tmp:
+            doc = aggregate_doc("JetStream3.0", "Geometric", {"x": [1.0], "y": [4.0]})
+            a, b = self._pair(tmp, doc)
+            cp = wkdata("report", str(a), str(b), "--text")
+            self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+            means = report_means(cp.stdout)
+            self.assertEqual(means[("JetStream3.0", "Score")][0], 2.0)
+            self.assertEqual(means[("JetStream3.0/x", "Score")][0], 1.0)
+            self.assertEqual(means[("JetStream3.0/y", "Score")][0], 4.0)
+
+    def test_a_partial_suite_still_reports_its_subtests_and_says_why_it_has_no_total(self):
+        """`ab-precision` refuses a partial suite -- a stopping rule cannot run
+        on a score that is not the plan's. A report is what the operator reads
+        to find out which subtest went silent, so it reports and names it."""
+        with scratch_dir() as tmp:
+            doc = aggregate_doc("JetStream3.0", "Geometric", {"x": [1.0], "y": [4.0]})
+            doc["JetStream3.0"]["tests"]["y"] = {"metrics": {"Time": {"current": [9.0]}}}
+            a, b = self._pair(tmp, doc)
+            cp = wkdata("report", str(a), str(b), "--text")
+            self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+            means = report_means(cp.stdout)
+            self.assertNotIn(("JetStream3.0", "Score"), means,
+                             "a partial suite has no headline score")
+            self.assertIn(("JetStream3.0/x", "Score"), means)
+            self.assertIn("1 of 2 first-level tests report no Score", cp.stdout)
+            self.assertIn("(y)", cp.stdout)
+            self.assertIn("side A", cp.stdout)
+            precision = wkdata("ab-precision", "--a", str(a), "--b", str(b))
+            self.assertNotEqual(precision.returncode, 0,
+                                "the stopping rule refuses what the report warns about")
+
+    def test_an_aggregator_the_report_cannot_take_is_named_rather_than_dropped(self):
+        with scratch_dir() as tmp:
+            doc = aggregate_doc("JetStream3.0", "Harmonic", {"x": [1.0], "y": [4.0]})
+            a, b = self._pair(tmp, doc)
+            cp = wkdata("report", str(a), str(b), "--text")
+            self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+            self.assertIn("Harmonic", cp.stdout)
+            self.assertNotIn(("JetStream3.0", "Score"), report_means(cp.stdout))
 
 
 @requires_podman_vm()

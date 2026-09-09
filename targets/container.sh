@@ -137,6 +137,10 @@ t_create() {
 
     local build_mount="$ws/build:/src/WebKit/WebKitBuild"
 
+    local mem cpus
+    mem=$(envelope_mem_mb)
+    cpus=$(envelope_cores)
+
     local -a flags
     flags=(
         --additional-flags
@@ -153,8 +157,8 @@ t_create() {
          --volume $WK_STORE/skills:/skills
          --volume $WK_STORE/secrets:/secrets:ro
          --volume $WK_STORE/agent-rw:/agent-rw
-         --memory $(envelope_mem_mb)m
-         --cpus $(envelope_cores)
+         --memory ${mem}m
+         --cpus $cpus
          --env CCACHE_DIR=/ccache
          --env CCACHE_MAXSIZE=$WK_CCACHE_MAXSIZE
          --env CCACHE_BASEDIR=/src/WebKit

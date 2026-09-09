@@ -175,7 +175,7 @@ fi
 
 t_sync_tools "$NAME"
 
-# The watchdog kills a silent job after WK_ABORT_SECONDS, and a process at a breakpoint is silent by definition.
+# The watchdog kills a silent job after WK_ABORT_SECONDS, and a process at a breakpoint is silent by definition. The running record carries that deadline, so cmd/status can tell a quiet run from one whose watchdog is gone.
 if [ -n "$LLDB" ]; then
     info "debugging $* ($CONFIG) in '$NAME', lldb waiting for $ATTACH"
     log  "  it attaches as that process starts; 'continue' runs the test"
@@ -192,8 +192,8 @@ STATUS="$WS/test.status"
 STARTED=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 START_EPOCH=$(date +%s)
 
-printf 'state=running\nsuite=%s\nconfig=%s\nstarted=%s\nlog=%s\n' \
-    "$SUITE" "$CONFIG" "$STARTED" "$LOG" > "$STATUS"
+printf 'state=running\nsuite=%s\nconfig=%s\nstarted=%s\nlog=%s\nabort_after=%s\n' \
+    "$SUITE" "$CONFIG" "$STARTED" "$LOG" "$WK_ABORT_SECONDS" > "$STATUS"
 
 write_status() {
     cat > "$STATUS" <<EOF

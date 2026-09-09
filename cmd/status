@@ -11,12 +11,16 @@
 #   2  a build is running or silent, or a workspace is still being created
 #      (`silent`: the record says running and the log has said nothing for
 #      WK_STALL_SECONDS. A full-LTO link is silent for minutes, so this is
-#      busy and `--wait` waits through it)
+#      busy and `--wait` waits through it, as far as the `abort_after` the
+#      build recorded)
 #   3  a build stalled and was killed by its own watchdog
-#   4  a workspace needs a person: a creation whose driver is gone, an
-#      environment removed from under the record, or a machine that will not
-#      answer (3 is a build to re-run; 4 is a workspace to repair -- don't
-#      conflate them). Also what a fleet walk reports for an unreachable peer.
+#   4  a workspace needs a person: a creation whose driver is gone, a build
+#      silent past its own `abort_after` (its watchdog would have written
+#      `stalled` there, so the watchdog is gone too), an environment removed
+#      from under the record, or a machine that will not answer (3 is a build
+#      whose watchdog reported; 4 is a workspace whose record no longer has a
+#      writer -- don't conflate them). Also what a fleet walk reports for an
+#      unreachable peer.
 #
 # At a terminal, with nothing else said, this opens the page (`--web`).
 # Anything else (a pipe, CI, an agent) gets the plain table; `--text` asks
@@ -293,7 +297,7 @@ report_babysit() {
 
 report_one() {
     local ws="$1" kind="$2" status_file="$3"
-    local state=none config="" arch="" secs="" rc="" logf=""
+    local state=none config="" arch="" secs="" rc="" logf="" abort=""
 
     local peak=""
     if [ -f "$status_file" ]; then
@@ -305,6 +309,7 @@ report_one() {
         secs=$(awk -F= '/^seconds=/{print $2}' "$status_file")
         rc=$(awk -F= '/^exit=/{print $2}' "$status_file")
         logf=$(awk -F= '/^log=/{print $2}' "$status_file")
+        abort=$(awk -F= '/^abort_after=/{print $2}' "$status_file")
     fi
 
     # A 'running' status file is a claim, and the log's age is the only evidence here: a build carries no pid, and this machine's compiler count belongs to no workspace in particular. So silence is reported as silence -- `stalled` is what cmd/build and cmd/test write when they killed the job.
@@ -334,19 +339,29 @@ report_one() {
         bump 1
         ;;
     silent)
-        if [ -n "$age" ]; then
+        if [ -n "$age" ] && [ -n "$abort" ] && [ "$age" -gt "$abort" ]; then
+            note_warn "silent for ${age}s, past the ${abort}s this $kind recorded as its watchdog's deadline"
+            while IFS= read -r _l; do note "$_l"; done \
+                < <(_stall_report "$logf" "$age" 2>&1)
+            note "so the watchdog is gone as well: a live 'wk $kind' would have killed the
+      job and written 'stalled' at that deadline, and this record still says
+      running. Nothing is driving it, so '--wait' returns rather than
+      waiting. Re-run it to rewrite the record:  wk $kind $ws"
+            bump 4
+        elif [ -n "$age" ]; then
             note_warn "no log output for ${age}s"
             while IFS= read -r _l; do note "$_l"; done \
                 < <(_stall_report "$logf" "$age" 2>&1)
             note "counted as busy, so 'wk status $ws --wait' keeps waiting: nothing here
       is evidence it stopped, and any count above is this machine's, not this
       workspace's. Follow it:  tail -f $logf"
+            bump 2
         else
             note_warn "the record says running and there is no log at $logf"
             note "so there is nothing to follow, and no evidence either way.
       Re-run the build to rewrite the record:  wk build $ws"
+            bump 2
         fi
-        bump 2
         ;;
     stalled)
         note_warn "killed after no output; see $logf"

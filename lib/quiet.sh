@@ -60,13 +60,28 @@ auth_panel() {  # a modal panel is invisible to screen_blocker; SecurityAgent ru
     return 0
 }
 
-# screen_blocker is an instant and a run is an hour, so anything drawing after it was read is invisible: a consent dialog sat over a whole PGO collection that way (2026-09-06). Samples every WK_SCREEN_WATCH_SECONDS while the measured thing runs.
+# Every reading a preflight takes is an instant and a run is an hour, so anything that starts after it was read is invisible: a consent dialog sat over a whole PGO collection that way (2026-09-06), and macOS restarts a paused agent on demand, so the banner-drawing pair -- NotificationCenter and usernoted -- can come back inside a leg that began with both held stopped. Samples every WK_SCREEN_WATCH_SECONDS while the measured thing runs.
+# One `ps` for all forty-odd of them, not a `pgrep` each: this samples beside the thing being measured, and forty forks every ten seconds is a load of its own.
+_watch_restarted() {   # the must-not-run processes that are running again, comma-separated
+    is_macos || return 0
+    local listing want
+    listing=$(ps -Ao stat=,comm= 2>/dev/null) || return 0
+    want=$(wk_quiet_desktop_stopped | awk '{print $2}' | grep -vxF -f <(wk_quiet_desktop_unstoppable))
+    printf '%s\n' "$listing" | awk -v want="$want" '
+        BEGIN { n = split(want, w, "\n"); for (i = 1; i <= n; i++) if (w[i] != "") keep[w[i]] = 1 }
+        { state = $1; $1 = ""; sub(/^ +/, ""); sub(/.*\//, "")
+          if ($0 in keep && state !~ /^T/) seen[$0] = 1 }
+        END { sep = ""; for (p in seen) { printf "%s%s", sep, p; sep = "," } }'
+}
+
 screen_watch_start() {   # <record file>
     local record="$1"
     : > "$record"
     ( while :; do
           local seen; seen=$(screen_blocker)
           case "$seen" in ""|"?") ;; *) printf '%s\t%s\n' "$(date -u +%H:%M:%SZ)" "$seen" >> "$record" ;; esac
+          local back; back=$(_watch_restarted)
+          [ -z "$back" ] || printf '%s\trunning again: %s\n' "$(date -u +%H:%M:%SZ)" "$back" >> "$record"
           sleep "${WK_SCREEN_WATCH_SECONDS:-10}"
       done ) </dev/null >/dev/null 2>&1 &
     echo $! > "$record.pid"

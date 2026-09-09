@@ -373,10 +373,80 @@ class TestProvisioningIsNotSomethingToKill(WkTest):
         self.assertIn('ck yes "provisioned"', body)
 
 
+class TestEveryLegIsJudgedOnTheDeclaredDisplay(WkTest):
+    """The once-per-boot browser check cannot see a panel attached between two
+    legs, and MotionMark's score is the area it draws. So the expectation the
+    job carries reaches every leg, not just the check at the top of the boot."""
+
+    BENCH = REPO / "cmd" / "bench"
+
+    def test_the_leg_passes_the_jobs_display_to_the_runner(self):
+        body = func_body(AUTORUN.read_text(), "leg")
+        self.assertIn('--expect-display "$DISPLAY_EXPECT"', body)
+
+    def test_the_runner_takes_it_and_judges_it(self):
+        text = self.BENCH.read_text()
+        self.assertIn('--expect-display) EXPECT_DISPLAY="${2:-}"', text)
+        self.assertIn("--displays-only", text)
+        self.assertIn('check no "the display"', text)
+
+    def test_the_rule_is_not_reimplemented_in_the_runner(self):
+        """One implementation: the runner asks bench/mac-browser-check.py, the
+        same file the once-per-boot check asks, rather than counting panels
+        itself."""
+        text = self.BENCH.read_text()
+        self.assertNotIn("CGGetOnlineDisplayList", text)
+        self.assertNotIn("displays are online, not one", text)
+
+    def test_the_result_records_what_it_was_judged_against(self):
+        """A stored run says which display it was compared on, so re-reading it
+        reaches the same verdict with no argument."""
+        self.assertIn('display_declared="$EXPECT_DISPLAY"', self.BENCH.read_text())
+
+    def test_the_declared_mode_reaches_the_job_from_the_machine_conf(self):
+        text = MACAB.read_text()
+        self.assertIn('WK_JOB_DISPLAY="$NODE_DISPLAY"', text)
+
+
+class TestTheBenchSideRefusesBeforeItActs(WkTest):
+    """Order is the safety here. The display is judged before the mode is
+    written, because with a second panel attached there is no single built-in
+    mode to converge to; and neither refusal spends an attempt, because a boot
+    that measured nothing is not a try."""
+
+    def test_the_display_is_judged_before_the_mode_is_written(self):
+        text = AUTORUN.read_text()
+        self.assertLess(text.index("\nrefuse_wrong_displays\n"),
+                        text.index("\nconverge_display_mode\n"))
+
+    def test_it_asks_the_one_file_that_holds_the_rule_about_the_topology_only(self):
+        """The mode is converge_display_mode's job. Asking for it here would
+        refuse the very state that function exists to fix, and the install
+        would power off instead of converging."""
+        body = func_body(AUTORUN.read_text(), "refuse_wrong_displays")
+        self.assertIn("mac-browser-check.py", body)
+        self.assertIn("--displays-only", body)
+        self.assertNotIn("--expect-display", body)
+
+    def test_neither_refusal_spends_an_attempt(self):
+        text = AUTORUN.read_text()
+        for func in ("refuse_wrong_displays", "converge_display_mode"):
+            with self.subTest(func=func):
+                self.assertIn('state_set attempts "$((ATTEMPTS - 1))"',
+                              func_body(text, func))
+
+    def test_a_wrong_display_powers_off_rather_than_rebooting(self):
+        """A reboot lands back on this volume, and a monitor is not unplugged by
+        one: it would be a loop that spends the machine and measures nothing."""
+        body = func_body(AUTORUN.read_text(), "refuse_wrong_displays")
+        self.assertIn("leave_bench", body)
+        self.assertNotIn("reboot", body)
+
+
 class TestADryRunClaimsNothing(WkTest):
     """`--dry-run` reports the plan and then says what it did, which is
-    nothing: the shutdown path used to announce "powering off with the job
-    planted" from a run that had planted nothing and powered nothing off."""
+    nothing: no claim of having planted, notified or rebooted may sit above the
+    exit a dry run takes."""
 
     def test_one_place_decides_what_a_dry_run_says(self):
         text = MACAB.read_text()
@@ -386,7 +456,7 @@ class TestADryRunClaimsNothing(WkTest):
         text = MACAB.read_text()
         dry = text.index('if [ -n "$DRY" ]; then\n    [ "$ACTION" = plant ] || phase_go')
         for claim in ('info "planted and not started.',
-                      'info "$HOST is powering off with the job planted."',
+                      'notify "mac-ab planted on $HOST"',
                       "came_back=$(phase_wait"):
             self.assertLess(dry, text.index(claim),
                             f"a dry run reaches `{claim[:40]}`")

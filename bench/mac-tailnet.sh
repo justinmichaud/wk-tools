@@ -4,6 +4,13 @@
 set -euo pipefail
 WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 . "$WK_ROOT/lib/common.sh"
+. "$WK_ROOT/lib/store.sh"
+
+# A Go toolchain, a module cache and a build cache: rebuildable artifacts keyed by
+# content, so they belong in the artifact store beside ccache and yocto's sstate,
+# not in the state directory -- which holds records, is expected to be small, and
+# is walked file by file by whatever fingerprints it.
+ts_artifacts() { printf '%s/cache/mac-tailnet' "$WK_STORE"; }
 
 PIN="$WK_ROOT/bench/mac-tailnet-pin.inc"
 REL="$WK_ROOT/image/yocto/meta-wk-tailnet/recipes-network/tailscale/tailscale-release.inc"
@@ -22,6 +29,8 @@ MACHINE="${WK_MAC_MACHINE:-mbp}"   # static; this lane runs on the one Mac
 usage() {
     cat >&2 <<'EOF'
 usage: mac-tailnet.sh build
+       mac-tailnet.sh collect <dir>
+       mac-tailnet.sh install <volume-root> <collected-dir> [privilege-prefix...]
        mac-tailnet.sh stage <volume-root> [privilege-prefix...]
        mac-tailnet.sh remember <volume-root> [privilege-prefix...]
        mac-tailnet.sh join
@@ -29,9 +38,14 @@ usage: mac-tailnet.sh build
   build      fetch the pinned tailscale source and Go toolchain, verify both
              against bench/mac-tailnet-pin.inc, build tailscaled and tailscale
              for darwin/arm64, and print the directory holding them
-  stage      install those onto a benchmark volume, with the LaunchDaemons that
-             start and join it, the fleet's tailnet auth key, and the node
-             identity this machine remembers
+  collect    gather everything a benchmark install needs into one directory --
+             the binaries, this machine's auth key, the node name and tag, the
+             LaunchDaemons and the remembered identity. Needs a network and
+             credentials; needs no root
+  install    lay a collected directory down on a volume root. Needs root; needs
+             neither network nor credentials, so the benchmark install can run
+             it against itself with its own passwordless sudo
+  stage      collect and then install, for a caller standing on the host install
   remember   take a benchmark volume's tailnet node identity aside, so the next
              volume written rejoins as the same node rather than a new one
   join       (on the benchmark install, as root) start the daemon and join
@@ -97,7 +111,7 @@ go_toolchain() { # prints the go binary, fetching and verifying it once
     Remedy: add $key to $PIN with go.dev's published checksum for
       go$ver.${host%_*}-${host#*_}.tar.gz, or stage the volume from a host that has one."
 
-    art="$(wk_state_dir)/mac-tailnet"
+    art=$(ts_artifacts)
     if [ -x "$art/go-$ver/go/bin/go" ]; then
         printf '%s' "$art/go-$ver/go/bin/go"; return 0
     fi
@@ -123,7 +137,7 @@ ts_source() { # prints the extracted module directory
     local ver sha art zip src
     ver="$1"; sha=$(pin_field TS_SRC_SHA256)
     [ -n "$sha" ] || die "no TS_SRC_SHA256 in $PIN"
-    art="$(wk_state_dir)/mac-tailnet"
+    art=$(ts_artifacts)
     src="$art/src-$ver/tailscale.com@v$ver"
     [ -f "$src/go.mod" ] && { printf '%s' "$src"; return 0; }
 
@@ -152,7 +166,7 @@ PY
 cmd_build() {
     local ver art out go src
     ver=$(ts_version)
-    art="$(wk_state_dir)/mac-tailnet"
+    art=$(ts_artifacts)
     out="$art/darwin-arm64-$ver"
     if _is_darwin_arm64 "$out/tailscaled" && _is_darwin_arm64 "$out/tailscale"; then
         printf '%s\n' "$out"; return 0
@@ -239,11 +253,11 @@ join_plist() {
 PLIST
 }
 
-cmd_stage() {
-    local root="${1:-}"; root="${root%/}"; shift || true
-    [ -n "$root" ] && [ -d "$root" ] \
-        || die "usage: mac-tailnet.sh stage <volume-root> [privilege-prefix...]"
-    local name keyfile out state
+# Split where the privilege and the network split: `collect` needs a Go toolchain, a route to the module proxy, this machine's auth key and its remembered node identity, and no root; `install` needs root and nothing else. That is what lets the benchmark install stage itself -- it has passwordless root and neither network nor credentials -- and `stage` is still the two of them for a caller standing on the host install.
+cmd_collect() {
+    local dir="${1:-}"
+    [ -n "$dir" ] || die "usage: mac-tailnet.sh collect <dir>"
+    local name keyfile out kept
     name=$(bench_node_name)
     keyfile=$(wk_tailscale_authkey) \
         || die "there is no tailnet auth key on this machine, so the benchmark
@@ -251,30 +265,57 @@ cmd_stage() {
     from the moment it reboots until it powers itself off.
     Set one first:  wk key set tailnet"
     out=$(cmd_build)
-    state=$(volume_state "$root")
+
+    rm -rf "$dir.part"; mkdir -p "$dir.part" || die "could not make $dir.part"
+    install -m 0755 "$out/tailscaled" "$out/tailscale" "$dir.part/"
+    install -m 0600 "$keyfile" "$dir.part/authkey"
+    printf 'hostname=%s\ntag=%s\n' "$name" "${WK_TAILNET_TAG:-tag:wk}" > "$dir.part/tailnet.conf"
+    daemon_plist "$TS_STATE_DIR/tailscaled.state" > "$dir.part/$DAEMON_LABEL.plist"
+    join_plist > "$dir.part/$JOIN_LABEL.plist"
+    kept=$(remembered_state)
+    if [ -s "$kept" ]; then
+        install -m 0600 "$kept" "$dir.part/tailscaled.state"
+        info "  tailnet: '$name' will rejoin as the node this machine remembers"
+    else
+        info "  tailnet: '$name' will join fresh; its identity is kept from then on"
+    fi
+    rm -rf "$dir"; mv "$dir.part" "$dir"
+    printf '%s\n' "$dir"
+}
+
+cmd_install() {
+    local root="${1:-}"; root="${root%/}"; shift || true
+    local dir="${1:-}"; shift || true
+    [ -d "$dir" ] || die "usage: mac-tailnet.sh install <volume-root> <collected-dir> [privilege-prefix...]"
+    for f in tailscaled tailscale authkey tailnet.conf "$DAEMON_LABEL.plist" "$JOIN_LABEL.plist"; do
+        [ -f "$dir/$f" ] || die "$dir carries no $f, so it is not a collected tailnet payload"
+    done
+    _is_darwin_arm64 "$dir/tailscaled" && _is_darwin_arm64 "$dir/tailscale" \
+        || die "$dir holds something that is not a Mach-O arm64 executable.
+    Refusing to install it: a binary the benchmark install cannot run is a
+    machine that comes back unreachable."
 
     "$@" install -d -m 0755 "$root$TS_BIN" "$root$LAUNCHD"
-    "$@" install -m 0755 "$out/tailscaled" "$out/tailscale" "$root$TS_BIN/"
+    "$@" install -m 0755 "$dir/tailscaled" "$dir/tailscale" "$root$TS_BIN/"
     # BSD install -d applies -m to every directory it creates, so the parents are made at 0755 first: a package payload carrying /private/var/db at 0700 breaks the install it lands on.
     "$@" install -d -m 0755 "$root/private$(dirname "$TS_STATE_DIR")" "$root/private/etc/wk"
     "$@" install -d -m 0700 "$root/private$TS_STATE_DIR"
-    "$@" install -m 0600 "$keyfile" "$root/private$TS_KEY"
-    printf 'hostname=%s\ntag=%s\n' "$name" "${WK_TAILNET_TAG:-tag:wk}" \
-        | "$@" tee "$root/private$TS_CONF" >/dev/null
-    "$@" chmod 0644 "$root/private$TS_CONF"
-    daemon_plist "$TS_STATE_DIR/tailscaled.state" \
-        | "$@" tee "$root$LAUNCHD/$DAEMON_LABEL.plist" >/dev/null
-    join_plist | "$@" tee "$root$LAUNCHD/$JOIN_LABEL.plist" >/dev/null
-    "$@" chmod 0644 "$root$LAUNCHD/$DAEMON_LABEL.plist" "$root$LAUNCHD/$JOIN_LABEL.plist"
-
-    local kept; kept=$(remembered_state)
-    if [ -s "$kept" ]; then
-        "$@" install -m 0600 "$kept" "$state"
-        info "  tailnet: '$name' rejoins as the node this machine remembers"
-    else
-        info "  tailnet: '$name' joins fresh; its identity is kept from then on"
+    "$@" install -m 0600 "$dir/authkey" "$root/private$TS_KEY"
+    "$@" install -m 0644 "$dir/tailnet.conf" "$root/private$TS_CONF"
+    "$@" install -m 0644 "$dir/$DAEMON_LABEL.plist" "$dir/$JOIN_LABEL.plist" "$root$LAUNCHD/"
+    if [ -s "$dir/tailscaled.state" ]; then
+        "$@" install -m 0600 "$dir/tailscaled.state" "$(volume_state "$root")"
     fi
-    info "  tailnet: tailscaled staged on '$root', joining as '$name'"
+    info "  tailnet: tailscaled installed on '${root:-/}'"
+}
+
+cmd_stage() {
+    local root="${1:-}"; root="${root%/}"; shift || true
+    [ -n "$root" ] && [ -d "$root" ] \
+        || die "usage: mac-tailnet.sh stage <volume-root> [privilege-prefix...]"
+    local dir; dir="$(ts_artifacts)/collected"
+    dir=$(cmd_collect "$dir" | tail -1) || return 1
+    cmd_install "$root" "$dir" "$@"
 }
 
 cmd_remember() {
@@ -337,6 +378,8 @@ cmd_join() {
 
 case "${1:-}" in
     build)    cmd_build ;;
+    collect)  shift; cmd_collect "$@" ;;
+    install)  shift; cmd_install "$@" ;;
     stage)    shift; cmd_stage "$@" ;;
     remember) shift; cmd_remember "$@" ;;
     join)     cmd_join ;;

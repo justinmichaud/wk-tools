@@ -10,6 +10,7 @@ decision here is exercised without a Mac.
 Run: python3 -m unittest tests.test_mac_autorun -v
 """
 import json
+import shlex
 import re
 import subprocess
 import time
@@ -212,39 +213,103 @@ class TestTheMachineEndsUpOff(WkTest):
     and starts the agent again. Every way this script can end ends with the
     machine powered off."""
 
-    def _leave(self):
+    def _leave(self, host="/Volumes/Macintosh HD", group="HOSTGRP", firmware=None):
+        """`leave_bench` with the firmware, the host install and sudo all faked.
+        `firmware` is what `wkmac.py boot-volume` answers after the bless --
+        None means the bless took."""
         with scratch_dir() as tmp:
             calls = tmp / "sudo"
-            cp = sh(f'set -euo pipefail\n_left=""\nSTATE={tmp}/state\n'
+            answers = "HOSTGRP:%s" % (group if firmware is None else firmware)
+            hostfn = ('host_install() { printf %s; }\n' % (shlex.quote(host))
+                      if host else 'host_install() { return 1; }\n')
+            cp = sh(f'set -euo pipefail\n_left=""\nSTATE={tmp}/state\nTOOLS={tmp}\n'
                     f'say() {{ printf "%s\\n" "$*"; }}\n'
                     f'state_set() {{ printf "state %s=%s\\n" "$1" "$2"; }}\n'
                     f'sudo() {{ printf "%s\\n" "$*" >> {calls}; }}\n'
+                    f'{hostfn}'
+                    # wkmac.py stands in for both readings: the group of the host
+                    # install, and what the firmware names after the bless.
+                    f'python3() {{ case "$*" in *volume-group*) printf %s {shlex.quote(group)} ;;'
+                    f' *boot-volume*) printf %s {shlex.quote(answers)} ;; esac; }}\n'
                     f'leave_bench() {{{func_body(AUTORUN.read_text(), "leave_bench")}}}\n'
                     f'leave_bench "the reason"\nleave_bench "a second reason"\n')
             return cp.stdout + cp.stderr, calls.read_text() if calls.exists() else ""
 
-    def test_it_halts_and_never_reboots(self):
+    def test_a_bless_that_took_hands_the_machine_back(self):
+        """The only human step should be a login, so it reboots into host mode
+        rather than halting and waiting for a power button."""
         out, calls = self._leave()
-        self.assertEqual(["-n shutdown -h now"], calls.splitlines(), out)
+        self.assertIn("-n /sbin/reboot", calls, out)
+        self.assertNotIn("/sbin/halt", calls, out)
+        self.assertIn("comes up in host mode", out)
+
+    def test_it_blesses_before_it_reads_the_firmware_back(self):
+        out, calls = self._leave()
+        lines = calls.splitlines()
+        self.assertTrue(lines[0].startswith("-n bless --mount"), lines)
+        self.assertIn("--setBoot", lines[0])
+
+    def test_a_bless_that_did_not_take_halts_instead(self):
+        """This volume is the firmware default: rebooting with it still default
+        lands back here and measures again, so a reboot is taken only once the
+        firmware reads back as the host install."""
+        out, calls = self._leave(firmware="STILL-THE-BENCH-VOLUME")
+        self.assertIn("-n /sbin/halt", calls, out)
+        self.assertNotIn("/sbin/reboot", calls, out)
+        self.assertIn("would land back here", out)
+
+    def test_no_host_install_to_hand_back_to_halts(self):
+        out, calls = self._leave(host="")
+        self.assertIn("-n /sbin/halt", calls, out)
+        self.assertNotIn("/sbin/reboot", calls, out)
+        self.assertIn("nothing to hand back to", out)
+
+    def test_the_host_install_is_the_one_with_no_bench_marker(self):
+        """The mirror of wk-boot-priv's gate, and exactly one: two candidates is
+        not a machine this may guess about."""
+        body = func_body(AUTORUN.read_text(), "host_install")
+        self.assertIn('[ -f "$v/etc/wk-image" ] && continue', body)
+        self.assertIn('[ "$n" -eq 1 ] || return 1', body)
+        self.assertIn("stat -f %d", body)
 
     def test_the_first_reason_is_the_one_recorded(self):
         """A trap runs after whatever already decided to leave, and the second
-        caller must not turn one power-off into two."""
+        caller must not turn one departure into two. Counted in transitions,
+        not sudo calls: handing the machine back is a bless and then a reboot."""
         out, calls = self._leave()
         self.assertIn("the reason", out)
         self.assertNotIn("a second reason", out)
-        self.assertEqual(1, len(calls.splitlines()), calls)
+        leaving = [l for l in calls.splitlines()
+                   if "/sbin/reboot" in l or "/sbin/halt" in l]
+        self.assertEqual(1, len(leaving), calls)
 
-    def test_no_path_through_the_script_reboots(self):
-        """The only `shutdown` this script runs is the halt; the reboot the
+    def test_every_reboot_is_guarded_against_landing_back_here(self):
+        """This volume is the firmware default, so a reboot lands back here and
+        measures again unless something changed first. Exactly two paths reboot,
+        and each is guarded by a different thing being true: the display-mode
+        write, bounded by the state it records, and the hand-back, taken only
+        once the firmware reads back as naming the host install. The reboot the
         first-boot daemon schedules is what cancel_pending_reboot cancels."""
-        code = [l for l in AUTORUN.read_text().splitlines()
-                if not l.lstrip().startswith("#")]
-        self.assertEqual(["    sudo -n shutdown -h now >/dev/null 2>&1 "
-                          '|| say "WARNING: could not power off"   '
-                          "# -n logs rather than hangs if NOPASSWD is gone"],
-                         [l for l in code if "shutdown -" in l], code)
         text = AUTORUN.read_text()
+        code = [l for l in text.splitlines() if not l.lstrip().startswith("#")]
+        self.assertEqual(2, len([l for l in code if "/sbin/reboot" in l]), code)
+        mode = func_body(text, "converge_display_mode")
+        back = func_body(text, "leave_bench")
+        self.assertIn("/sbin/reboot", mode)
+        self.assertIn("/sbin/reboot", back)
+        # The mode path's guard is its record; the hand-back's is the read-back.
+        self.assertIn('state_get mode_declared', mode)
+        self.assertIn('[ "$grp" = "$want" ]', back)
+        self.assertIn("/sbin/halt", back)
+        block = text[text.index("converge_display_mode() {"):
+                     text.index("converge_display_mode\n")]
+        self.assertIn('[ "$(state_get mode_declared)" = "$want" ]', block)
+        self.assertIn('state_set mode_declared "$want"', block)
+        self.assertIn('state_set attempts "$((ATTEMPTS - 1))"', block)
+        # The bounded arm leaves rather than looping.
+        self.assertIn('leave_bench "the declared display mode cannot be set"', block)
+        self.assertLess(block.index("leave_bench \"the declared display mode cannot be set\""),
+                        block.index('state_set mode_declared'), block)
         self.assertNotIn("leave_bench reboot", text)
         self.assertNotIn("leave_bench halt", text)
 

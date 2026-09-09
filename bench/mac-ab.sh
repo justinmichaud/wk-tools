@@ -4,8 +4,6 @@
 #   wk bench mac-ab [<workspace>] [--plan P]... [--rounds N] [--count N]
 #                   [--a <staged-id>] [--b <staged-id>] [--stage]
 #   wk bench mac-ab <workspace> --patch <ref|diff> [--base <ref>] [--rounds N]
-#   wk bench mac-ab ... --shutdown        shut down instead of rebooting, so the
-#                                         startup manager is picked from a cold machine
 #   wk bench mac-ab --progress            every step, what does it, what proves it
 #   wk bench mac-ab --preflight | --status | --collect | --dry-run
 #   --plan P repeats; the default is jetstream3, speedometer3, motionmark. --detect
@@ -49,13 +47,14 @@ FORCE="${WK_FORCE:-}"
 AGENT_HOME=""
 DRY=""
 ACTION=run
-GO=restart   # --shutdown: the startup manager wants a cold machine, and then nothing has to be timed
-BOOT_WAIT="${WK_MAC_BOOT_WAIT:-3600}"
+# The bench install powers the Mac off when it is done, so nothing comes back to be waited for: this is the window in which a machine that never left, or came back to host mode, gives itself away by answering.
+BOOT_WAIT="${WK_MAC_BOOT_WAIT:-600}"
 
 usage() { usage_block "$0" >&2; exit 2; }
 
+# m_ssh (boot/machines.sh) and never an ssh of this file's own, so a driver whose machine is reached some other way -- a guest, whose address is in no ssh config -- overrides it and this lane follows.
 mac() {
-    mac_ssh "$HOST" "$@"
+    m_ssh "$@"
 }
 mac_sh() { mac bash -lc "$(sh_quote "$*")"; }
 
@@ -162,31 +161,41 @@ put_file() {  # $1 = local file, $2 = remote path
     }
 }
 
-# $1 = local dir, $2 = remote dir, replaced wholesale. Verified by a sentinel only this tree carries plus a byte count, because a stale or truncated tree is otherwise discovered after the reboot, where nothing can report it.
+# $1 = local dir, $2 = remote dir, replaced wholesale. Every file is verified and not a sentinel: a tree that is stale in one file looks right and behaves as an older lane, which is otherwise discovered after the reboot where nothing can report it -- a planted `refuse_wrong_displays` one edit behind its own rule would have powered the machine off instead of converging the display mode.
+TREE_SKIP=".git __pycache__"
 put_tree() {
-    local src="$1" dst="$2"
-    tar -cf - --exclude '.git' -C "$src" . \
+    local src="$1" dst="$2" x skip=""
+    for x in $TREE_SKIP; do skip="$skip --exclude $(sh_quote "$x")"; done
+    # shellcheck disable=SC2086 -- a deliberate word list.
+    tar -cf - $skip -C "$src" . \
         | mac "rm -rf $(sh_quote "$dst") && mkdir -p $(sh_quote "$dst") && tar -xf - -C $(sh_quote "$dst")" \
         || return 1
 
-    local probe="bench/mac-ab.sh" want got
-    want=$(wc -c < "$src/$probe" | tr -d ' ')
-    got=$(mac "wc -c < $(sh_quote "$dst/$probe") 2>/dev/null" 2>/dev/null | tr -d ' \r')
-    if [ -z "$got" ]; then
-        warn "put_tree: $dst/$probe is not there -- the tree did not land"
+    # An array here and a quoted string there: unquoted, `$(sh_quote .git)` word-splits to `'.git'` with the quotes still in it, so the local side excludes a name no file has while the remote shell removes them and excludes it -- two digests of two file sets.
+    local want got remote=""
+    local -a local_args=()
+    for x in $TREE_SKIP; do
+        local_args+=(--exclude "$x")
+        remote="$remote --exclude $(sh_quote "$x")"
+    done
+    want=$(python3 "$WK_ROOT/lib/treehash.py" "$src" "${local_args[@]}") || want=""
+    got=$(mac "python3 - $(sh_quote "$dst")$remote" < "$WK_ROOT/lib/treehash.py" 2>/dev/null | tr -d '\r' | tail -1)
+    if [ -z "$want" ] || [ -z "$got" ]; then
+        warn "put_tree: could not digest $src ($want) or $dst ($got), so what landed is unknown"
         return 1
     fi
     [ "$want" = "$got" ] || {
-        warn "put_tree: $dst/$probe is $got bytes, expected $want"
+        warn "put_tree: $dst hashes $got, this tree hashes $want -- what landed is not this tree"
         return 1
     }
-    log "  verified: $dst carries this lane's own tree ($probe, $got bytes)"
+    log "  verified: $dst is this tree file for file (${want:0:16})"
 }
 
 BROOT=""
+# The driver's own, called here rather than through the copy of wk-tools over there: every reading it takes goes through m_ssh, so it answers from anywhere and depends on no tree but this one.
 bench_root() {
     [ -n "$BROOT" ] && { printf '%s' "$BROOT"; return 0; }
-    BROOT=$(mac_sh "cd $(sh_quote "$(host_tools)") && . lib/common.sh && . boot/machines.sh && machine_load $(sh_quote "$MACHINE") && load_driver \"\$NODE_DRIVER\" && b_bench_root" 2>/dev/null | tr -d '\r' | tail -1)
+    BROOT=$(b_bench_root 2>/dev/null | tr -d '\r' | tail -1)
     [ -n "$BROOT" ] || die "'$VOLUME' is not visible from $HOST right now.
     Either it is not attached, or $HOST is *in* bench mode -- that install's own
     root is the volume, so it is not mounted under /Volumes and every verb here
@@ -328,8 +337,8 @@ preflight() {
         log "         wk boot $MACHINE            arms it (on $HOST)" >&2
         log "       Where the boot helper is not installed, the startup manager is the" >&2
         log "       way: shut down, hold the power button until 'Loading startup" >&2
-        log "       options', pick '$VOLUME'. 'wk bench mac-ab --shutdown' leaves the" >&2
-        log "       machine off with the job planted for exactly that." >&2
+        log "       options', pick '$VOLUME'. '--plant' leaves the job on the volume" >&2
+        log "       and reboots nothing, for exactly that." >&2
     fi
 
     if ! mv_reboot_ready && [ -t 0 ] && [ -z "$DRY" ]; then
@@ -339,7 +348,12 @@ preflight() {
     if mv_reboot_ready; then
         ck yes "restartable" "the boot helper answers sudo -n, so this lane restarts $HOST itself"
     else
-        ck no "restartable" "no boot helper on $HOST, and plain sudo there wants a password"
+        # Which of the two: an absent helper is a machine never prepared, and one that answers without naming its detach is older than this tree, whose reboot exits 0 having done nothing.
+        if mv_priv status 2>/dev/null | grep -q '^wk-boot-priv: ok'; then
+            ck no "restartable" "the boot helper on $HOST answers, but names no detach mechanism, so it is older than this tree -- its reboot exits 0 having rebooted nothing"
+        else
+            ck no "restartable" "no boot helper on $HOST, and plain sudo there wants a password"
+        fi
         log "       A graceful restart is refusable -- any application that will not quit" >&2
         log "       declines it -- so an unattended lane cannot use one. One command puts" >&2
         log "       this tree and the helpers on that Mac, and asks for a password once:" >&2
@@ -554,7 +568,11 @@ $(printf '%s' "$staged" | sed 's/^/    /')"
         log "  would plant samply $SAMPLY_VER for the warmup round's profile"
         log "  would record the task $task in $BENCH_DIR and write its job.json"
         log "  would copy that job to $root/job.json and reset $root/autorun.state"
+        log "  would turn Do Not Disturb on for the bench account and read it back"
         log "  would install $bh/Library/LaunchAgents/com.wk.bench-ab.plist"
+        log "  on that boot the install would hold ${NODE_DISPLAY#builtin } -- writing it and"
+        log "  restarting once if it comes up at another mode -- dim the panel, check the"
+        log "  browser, then measure and power the machine off"
         return 0
     fi
 
@@ -599,6 +617,26 @@ $(printf '%s' "$staged" | sed 's/^/    /')"
     Nothing has been done to the machine yet. To plant anyway:  --force"
     fi
 
+    # A banner draws over the browser and no check downstream can see one: NotificationCenter never becomes the frontmost *application*, so `screen_blocker` and the browser check both pass with one on the screen. Turned on here, in the account that gets measured, and read back; every leg judges the same row afterwards (bench/mac-quiet-desktop.sh). Sourced from the tree just planted, so the rule is this lane's own and not whatever age the Mac's checkout is.
+    local dnd
+    dnd=$(mac_sh "cd $(sh_quote "$root/wk-tools") && . bench/mac-quiet-desktop.sh && wk_quiet_dnd_on $(sh_quote "$bh")" 2>/dev/null | tr -d '\r' | tail -1)
+    if [ "$dnd" = on ]; then
+        log "  notifications: Do Not Disturb on for the bench account (verified)"
+    elif [ -n "$FORCE" ]; then
+        warn "  notifications: Do Not Disturb reads '${dnd:-unreadable}' for the bench account.
+  --force given, so planting anyway: a banner may be drawn over a measured browser."
+    else
+        die "could not turn Do Not Disturb on for the bench account -- it reads '${dnd:-unreadable}'.
+
+    Refused here rather than discovered in the numbers. A notification banner is
+    drawn over whatever is on the screen, and nothing downstream sees one:
+    NotificationCenter is not a frontmost application, so the window probe, the
+    browser check and every per-leg gate pass with a banner up. The leg that got
+    one is a covered browser's number with nothing to mark it.
+
+    Nothing has been rebooted. To plant anyway:  --force"
+    fi
+
     # No network over there, so the warmup round's profiler goes in now, into that install's store (bench/mac-bench-autorun.sh) where samply_fetch will look.
     local samply triple
     triple=$(samply_triple "$(mac_sh 'uname -m' | tr -d '\r')" Darwin)
@@ -612,6 +650,21 @@ $(printf '%s' "$staged" | sed 's/^/    /')"
         fi
     else
         warn "  no samply for $triple here -- the warmup round will carry no profile"
+    fi
+
+    # The half that needs a network, a Go toolchain and this machine's auth key, done here where all three are; the install half needs root and none of them, so it runs on the other side under that account's own sudo. Both halves are bench/mac-tailnet.sh's, so nothing about the payload is described twice.
+    info "  collecting the tailnet payload"
+    local tnet
+    tnet=$("$WK_ROOT/bench/mac-tailnet.sh" collect "$(wk_state_dir)/mac-tailnet/collected" 2>/dev/null | tail -1) || tnet=""
+    if [ -n "$tnet" ] && [ -d "$tnet" ]; then
+        if put_tree "$tnet" "$root/tailnet"; then
+            log "  tailnet: payload on the volume; that install joins as '$(sed -n "s/^hostname=//p" "$tnet/tailnet.conf")' on its next boot"
+        else
+            warn "  tailnet: the payload did not land, so that install stays unreachable while it measures"
+        fi
+    else
+        warn "  tailnet: nothing collected (needs 'wk key set tailnet' and a network here),
+  so that install cannot be watched while it measures. The A/B still runs."
     fi
 
     info "  installing the autorun"
@@ -700,21 +753,12 @@ PLIST
 
 BOOT_BEFORE=""
 
-mac_boottime() {
-    mac_sh 'sysctl -n kern.boottime 2>/dev/null' 2>/dev/null \
-        | tr -d '\r' | sed -n 's/.*sec *= *\([0-9]*\).*/\1/p' | head -1
-}
-
 phase_go() {
-    local verb=reboot
-    [ "$GO" = shutdown ] && verb="shut down"
     [ -n "$DRY" ] && {
-        log "  would re-check that the built-in panel is the only display, then $verb $HOST"
-        if [ "$GO" = shutdown ]; then
-            log "  through System Events, which host mode has a session for"
-        else
-            log "  through $BOOT_HELPER, whose reboot no application can decline"
-        fi
+        log "  would re-check that the built-in panel is the only display, then reboot $HOST"
+        log "  through $BOOT_HELPER, whose reboot no application can decline"
+        log "  the bench install would then measure and power the machine off, so nothing"
+        log "  comes back here: the result is read off the volume after a power-on"
         return 0
     }
 
@@ -725,23 +769,12 @@ phase_go() {
     and re-run, or reboot $HOST by hand once it reads right -- the planted job
     runs by itself either way."
 
-    BOOT_BEFORE=$(mac_boottime)
-    info "go: $verb $HOST now (boot before: ${BOOT_BEFORE:-unknown})"
-    [ "$GO" = shutdown ] || log "  '$VOLUME' is the firmware default (preflight asserted it), so this restart
+    BOOT_BEFORE=$(b_boot_id)
+    info "go: reboot $HOST now (boot before: ${BOOT_BEFORE:-unknown})"
+    log "  '$VOLUME' is the firmware default (preflight asserted it), so this restart
   enters bench mode by itself and nobody has to be at the keyboard."
 
-    # One implementation of "restart this Mac", the boot driver's: it goes through the
-    # privileged helper, whose reboot no application can decline. A shutdown has no
-    # helper verb, and loginwindow answers no shutdown event at all (-1708, measured
-    # 2026-09-07), so that one is asked of System Events, which host mode has a session
-    # for. Backgrounded and its status ignored: the transition kills the ssh carrying it,
-    # and `kern.boottime` below is what verifies it.
-    if [ "$GO" = shutdown ]; then
-        mac_sh '(osascript -e "tell application \"System Events\" to shut down" >/dev/null 2>&1 &)
-                exit 0' >/dev/null 2>&1 || true
-    else
-        b_reboot || true
-    fi
+    b_reboot || true   # its status is ignored: the transition kills the ssh carrying it, and `kern.boottime` below is what verifies the restart happened
 
     local waited=0
     while [ "$waited" -lt 150 ]; do
@@ -750,9 +783,9 @@ phase_go() {
         waited=$((waited + 5))
     done
 
-    die "could not $verb $HOST -- it is still answering, and \`kern.boottime\` is
-    unchanged. Both mechanisms exit 0 without acting, so this is checked rather
-    than trusted; see the comment in phase_go.
+    die "could not reboot $HOST -- it is still answering, and \`kern.boottime\` is
+    unchanged. The helper exits 0 without acting when the reboot is refused, so
+    this is checked rather than trusted.
 
     Nothing has been lost: the job is planted, so rebooting the machine by hand
     -- or booting '$VOLUME' from the startup manager -- runs the A/B and needs
@@ -767,7 +800,7 @@ phase_wait() {
     while :; do
         if mode=$(mac 'cat /etc/wk-image 2>/dev/null | sed -n "s/^id=//p"; echo READY' 2>/dev/null); then
             mode=$(printf '%s' "$mode" | tr -d '\r' | head -1)
-            local bt; bt=$(mac_boottime)   # the same boot as before means it never rebooted
+            local bt; bt=$(b_boot_id)   # the same boot as before means it never rebooted
             if [ -n "$BOOT_BEFORE" ] && [ "$bt" = "$BOOT_BEFORE" ]; then
                 warn "  $HOST is answering on the SAME boot ($bt) -- it never rebooted"
                 printf 'noreboot'; return 1
@@ -963,9 +996,25 @@ phase_progress() {
     if [ -n "$mode" ]; then
         step yes "the Mac is in bench mode" "$mode" "" "wk boot $MACHINE --status"
     else
-        step no "the Mac is in bench mode" "it is in host mode" \
-            "wk boot $MACHINE   (arms the firmware and reboots)" \
-            "wk boot $MACHINE --status"
+        # Read now rather than named in advance: with the volume already the firmware default a plain reboot is the whole of it, and `wk boot` would re-arm what is armed.
+        local armed="" can=""
+        firmware_default_is_bench && armed=1
+        mv_reboot_ready && can=1
+        if [ -n "$armed" ] && [ -n "$can" ]; then
+            step no "the Mac is in bench mode" \
+                "it is in host mode, and '$VOLUME' is the firmware default with a helper that answers -- so this needs no arming, only the restart" \
+                "wk bench mac-ab --a <id> --b <id>   (plants and restarts)" \
+                "wk boot $MACHINE --status"
+        elif [ -n "$armed" ]; then
+            step no "the Mac is in bench mode" \
+                "it is in host mode. '$VOLUME' is the firmware default, so any reboot enters it; what is missing is a restart this lane can make -- $HOST takes no passwordless sudo for the boot helper" \
+                "wk boot $MACHINE --prepare   (installs it; one password prompt over there)" \
+                "sudo -n $BOOT_HELPER status   (on $HOST)"
+        else
+            step no "the Mac is in bench mode" "it is in host mode, and $FW_DETAIL" \
+                "wk boot $MACHINE   (arms the firmware and reboots)" \
+                "wk boot $MACHINE --status"
+        fi
     fi
 
     root=$(bench_root 2>/dev/null) || root=""
@@ -1044,7 +1093,6 @@ while [ $# -gt 0 ]; do
         --config)   CONFIG="${2:-}"; shift 2 ;;
         --rounds)   ROUNDS="${2:-}"; shift 2 ;;
         --max-rounds) MAX_ROUNDS="${2:-}"; shift 2 ;;
-        --shutdown) GO=shutdown; shift ;;
         --progress) ACTION=progress; shift ;;
         --detect)   DETECT="${2:-}"; shift 2 ;;
         # The first Speedometer iteration is never trimmed from a result: it is a real iteration, and dropping it would bias the comparison.
@@ -1083,8 +1131,7 @@ machine_load "$MACHINE" >/dev/null 2>&1 || die "no such machine: $MACHINE (wk bo
 NODE_SSH="$HOST"   # one address for both halves, so --host moves the reads and the restart together
 load_driver "$NODE_DRIVER" || die "$MACHINE names no boot driver this lane can restart it with"
 
-_lc() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
-if is_macos && [ "$(_lc "$(hostname -s 2>/dev/null)")" = "$(_lc "$HOST")" ]; then
+if m_here; then
     die "this lane reboots $HOST, so it cannot be driven from $HOST -- the reboot
   would take the driver with it. Run it from another machine (rpi5, moose)."
 fi
@@ -1136,33 +1183,23 @@ fi
 
 phase_go
 
-GOING="$HOST has gone down to measure, and answers again when it hands the machine back."
-if [ "$GO" = shutdown ]; then
-    GOING="$HOST is off with the job planted: hold the power button and pick '$VOLUME' to start it."
-fi
 notify "mac-ab planted on $HOST" \
-    "$PLANS, $ROUNDS-$MAX_ROUNDS rounds, count $COUNT. Arms $A_ID / $B_ID. $GOING"
+    "$PLANS, $ROUNDS-$MAX_ROUNDS rounds, count $COUNT. Arms $A_ID / $B_ID. $HOST has gone down to measure and powers itself off at the end, so it does not come back by itself: press the power button, then 'wk bench mac-ab --collect'."
 
-if [ "$GO" = shutdown ]; then
-    info "$HOST is powering off with the job planted."
-    log  "  start it holding the power button until 'Loading startup options',"
-    log  "  pick '$VOLUME' and press Return. The run is unattended; unlocking the"
-    log  "  host install when it hands the machine back is yours."
-    log  "  watch it:   wk bench mac-ab --progress"
-    log  "  read it:    wk bench mac-ab --collect"
-    exit 0
-fi
-
+# A bounded window, not a wait for a return: the bench install powers the machine off however the job ends, so silence is expected and all that is left to catch is a machine that never left or came back to host mode. Bounded rather than watchful only while that install has no tailnet identity -- with one, reachable as NODE_BENCH_SSH is the difference between measuring and finished.
 came_back=$(phase_wait "$BOOT_WAIT") || true
 log ""
 case "$came_back" in
     bench)
-        info "$HOST came back in BENCH mode and is reachable -- the A/B is running there."
-        log  "  'wk bench mac-ab --status' follows it." ;;
+        info "$HOST answers in BENCH mode -- the A/B is running there."
+        log  "  'wk bench mac-ab --status' follows it, and the machine powers itself"
+        log  "  off when the job ends." ;;
     host)
-        notify "mac-ab: $HOST is back in host mode" \
-            "the result is collectable now: wk bench mac-ab --collect"
-        phase_collect ;;   # the state file tells "ran it and came back" from "never left" apart
+        warn "$HOST rebooted and came back in HOST mode, so the A/B has not run."
+        log  "  The firmware default is not '$VOLUME' after all, whatever preflight read."
+        log  "  The job is planted and still valid:  wk boot $MACHINE   arms it."
+        notify "mac-ab: $HOST came back to host mode" \
+            "the A/B has not run -- the reboot did not enter '$VOLUME'. The job is planted and still valid; 'wk boot $MACHINE' arms the firmware." ;;
     noreboot)
         warn "$HOST never rebooted, so the A/B has not run."
         log  "  The job is planted and still valid -- nothing needs re-staging."
@@ -1171,11 +1208,14 @@ case "$came_back" in
         notify "mac-ab: $HOST never rebooted" \
             "the A/B has not run. The job is planted and still valid: reboot $HOST by any means, including the startup manager, and it runs by itself." ;;
     *)
-        warn "$HOST is not answering."
-        log  "  If it went to bench mode, that is expected: that install has no"
-        log  "  network. The job carries a watchdog and its own hand-back, so it"
-        log  "  returns on its own; 'wk bench mac-ab --collect' reads the result"
-        log  "  once it does."
-        notify "mac-ab: $HOST has gone silent" \
-            "expected if it entered bench mode -- that install has no network. The job carries a watchdog and its own hand-back, so it returns on its own; wk bench mac-ab --collect reads the result then." ;;
+        info "$HOST is silent, which is what a run in bench mode looks like from here:"
+        log  "  that install has not joined the tailnet, so nothing here can watch it. It"
+        log  "  measures every round and then powers the"
+        log  "  machine off -- a reboot would land back on '$VOLUME' and measure again."
+        log  "  So nothing comes back here, and the last step is a person's:"
+        log  "    press the power button (the host install is the firmware default"
+        log  "    only after 'wk boot $MACHINE --back'; from off, hold it and pick"
+        log  "    'Macintosh HD')"
+        log  "    wk bench mac-ab --collect     reads the result off the volume"
+        log  "  Nothing is lost while it stays off: the result is on the volume." ;;
 esac

@@ -374,7 +374,7 @@ cmd_prepare() {
     so there is nowhere to put anything. A machine wk reaches only by its own medium
     has nothing to prepare."
     if [ -n "$DRY" ]; then
-        log "would sync this tree to $NODE_SSH:$(machine_tools_dir) and run"
+        log "would push this tree, as a commit, to $NODE_SSH:$(machine_tools_dir) and run"
         log "  ./setup --stage quiesce there (one password prompt, in your terminal)"
         return 0
     fi

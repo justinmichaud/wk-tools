@@ -419,10 +419,71 @@ def _first_current(node):
     return None
 
 
-# The one result walker, {name: {"Score": [floats], "Time": [floats]}}, because the shapes disagree about depth: a merged jsc log and run-benchmark's JetStream keep numbers one "tests" level down, while Speedometer-2 on a board keeps the total at the suite root and the numbers three down (<suite>/<test>/Sync|Async), with bare descriptor lists between.
-# So a node is recorded only where a metric has a "current" array, and named by its path below the suite.
+# A metric holds either its values or a declaration of how to aggregate its subtests' -- ["Geometric"] for JetStream3 and MotionMark, whose overall score is never written into the file at all -- and the list's first name is the primary one.
+_AGGREGATORS = {
+    "Arithmetic": lambda vals: sum(vals) / len(vals),
+    "Geometric": lambda vals: math.exp(sum(math.log(v) for v in vals) / len(vals)),
+    "Total": sum,
+}
+
+
+def _iteration_values(metric):
+    """One value per iteration: `current` holds an entry per iteration, and
+    Speedometer's entry is itself that iteration's internal repeats."""
+    cur = _first_current(metric)
+    if not isinstance(cur, list):
+        return None
+    out = []
+    for item in cur:
+        vals = _flatten(item)
+        if not vals:
+            return None
+        out.append(sum(vals) / len(vals))
+    return out or None
+
+
+def _declared_score(node):
+    metrics = node.get("metrics")
+    score = metrics.get("Score") if isinstance(metrics, dict) else None
+    return score if isinstance(score, list) else None
+
+
+# One aggregate per iteration, because pooling every subtest's every iteration mixes them into one number that is nobody's score. Returns the per-iteration aggregates, or the reason there are none -- a reader that refuses and one that reports both need it, and neither computes it twice.
+def _declared_aggregate(suite, node, metric):
+    name = metric[0] if metric else ""
+    if name not in _AGGREGATORS:
+        return None, ("%s declares its Score as '%s', which this file does not "
+                      "aggregate. Implemented: %s." % (suite, name, ", ".join(sorted(_AGGREGATORS))))
+    children = (node.get("tests") or {}) if isinstance(node.get("tests"), dict) else {}
+    per_child, silent = {}, []
+    for child, cnode in children.items():
+        vals = _iteration_values((cnode.get("metrics") or {}).get("Score")) if isinstance(cnode, dict) else None
+        if vals:
+            per_child[str(child)] = vals
+        else:
+            silent.append(str(child))
+    if silent or not per_child:
+        return None, ("%s's Score is the %s of its subtests' Scores, and %d of "
+                      "%d first-level tests report no Score (%s). Re-run the plan; a partial suite "
+                      "has no headline score."
+                      % (suite, name, len(silent), len(children), ", ".join(sorted(silent)) or "none ran"))
+    counts = sorted({len(v) for v in per_child.values()})
+    if len(counts) != 1:
+        return None, ("%s's subtests report %s iterations -- one aggregate per "
+                      "iteration needs the same count from every subtest."
+                      % (suite, "/".join(str(c) for c in counts)))
+    fn = _AGGREGATORS[name]
+    try:
+        return [fn([v[i] for v in per_child.values()]) for i in range(counts[0])], None
+    except ValueError:
+        return None, ("%s reports a subtest Score of zero or less, and its %s mean "
+                      "is undefined." % (suite, name))
+
+
+# The one result walker, ({name: {"Score": [floats], "Time": [floats]}}, [why a row is absent]), because the shapes disagree about depth: a merged jsc log and run-benchmark's JetStream keep numbers one "tests" level down, while Speedometer-2 on a board keeps the total at the suite root and the numbers three down, with bare descriptor lists between.
+# A node becomes a row where a metric has a "current" array, or where the suite declares an aggregate instead of writing one; either way it is named by its full path, so the suite is the only row whose name holds no "/".
 def _subtest_metrics(doc):
-    out = {}
+    out, absent = {}, []
 
     def metric_vals(metrics):
         entry = {}
@@ -443,20 +504,22 @@ def _subtest_metrics(doc):
         tests = node.get("tests")
         if isinstance(tests, dict):
             for child, cnode in tests.items():
-                walk("%s/%s" % (name, child) if name else str(child), cnode)
+                walk("%s/%s" % (name, child), cnode)
 
     if isinstance(doc, dict):
         for suite, node in doc.items():
             if not isinstance(node, dict):
                 continue
-            entry = metric_vals(node.get("metrics"))
-            if entry:
-                out[str(suite)] = entry
-            tests = node.get("tests")
-            if isinstance(tests, dict):
-                for child, cnode in tests.items():
-                    walk(str(child), cnode)
-    return out
+            walk(str(suite), node)
+            declared = _declared_score(node)
+            if declared is None:
+                continue
+            vals, why = _declared_aggregate(str(suite), node, declared)
+            if why:
+                absent.append(why)
+            else:
+                out.setdefault(str(suite), {})["Score"] = vals
+    return out, absent
 
 
 def _mean(vals):
@@ -570,16 +633,19 @@ def _order_lines(a_runs, b_runs):
 def _build_report(a_dirs, b_dirs, header=(), warmup=()):
     a_runs, b_runs = _side_runs(a_dirs, "A"), _side_runs(b_dirs, "B")
 
-    def merged_subtests(runs):
-        merged = {}
+    def merged_subtests(runs, side):
+        merged, absent = {}, []
         for _, doc, _env in runs:
-            for name, entry in _subtest_metrics(doc).items():
+            rows, why = _subtest_metrics(doc)
+            absent += ["warning: side %s: %s" % (side, w) for w in why]
+            for name, entry in rows.items():
                 dest = merged.setdefault(name, {})
                 for key, vals in entry.items():
                     dest.setdefault(key, []).extend(vals)
-        return merged
+        return merged, absent
 
-    a_sub, b_sub = merged_subtests(a_runs), merged_subtests(b_runs)
+    a_sub, a_absent = merged_subtests(a_runs, "A")
+    b_sub, b_absent = merged_subtests(b_runs, "B")
     rows = []
     for name in sorted(set(a_sub) | set(b_sub)):
         row = {"name": name}
@@ -604,6 +670,7 @@ def _build_report(a_dirs, b_dirs, header=(), warmup=()):
 
     axis_lines = _axis_check_lines(a_runs[0][2], b_runs[0][2])
     axis_lines += _order_lines(a_runs, b_runs)
+    axis_lines += sorted(set(a_absent + b_absent))
 
     # A patch that makes a machine noisier under one configuration is a regression even where the mean does not move, so B's spread exceeding A's by 20% is flagged.
     def by_config(runs):
@@ -619,8 +686,8 @@ def _build_report(a_dirs, b_dirs, header=(), warmup=()):
     a_by_cfg, b_by_cfg = by_config(a_runs), by_config(b_runs)
     variance = []
     for cfg_key in sorted(set(a_by_cfg) & set(b_by_cfg), key=_config_label):
-        a_vals = [v for d in a_by_cfg[cfg_key] for e in _subtest_metrics(d).values() for v in primary_vals(e)]
-        b_vals = [v for d in b_by_cfg[cfg_key] for e in _subtest_metrics(d).values() for v in primary_vals(e)]
+        a_vals = [v for d in a_by_cfg[cfg_key] for e in _subtest_metrics(d)[0].values() for v in primary_vals(e)]
+        b_vals = [v for d in b_by_cfg[cfg_key] for e in _subtest_metrics(d)[0].values() for v in primary_vals(e)]
         asd, bsd = _sd(a_vals), _sd(b_vals)
         variance.append({
             "config": _config_label(cfg_key), "a_sd": asd, "b_sd": bsd,
@@ -697,7 +764,9 @@ def _render_text(report):
     out.append("axis check:")
     out += ["  " + l for l in report["axis_lines"]] or ["  (no warnings)"]
     out.append("")
-    header = "%-28s %-6s %14s %14s %10s %9s %5s" % ("subtest", "metric", "A mean+-sd", "B mean+-sd", "delta %", "p", "sig")
+    fmt = "%%-%ds %%-6s %%14s %%14s %%10s %%9s %%5s" % max(
+        [len("subtest")] + [len(r["name"]) for r in report["rows"]])
+    header = fmt % ("subtest", "metric", "A mean+-sd", "B mean+-sd", "delta %", "p", "sig")
     out += ["subtests:", header, "-" * len(header)]
     for row in report["rows"]:
         for key in ("Score", "Time"):
@@ -705,7 +774,7 @@ def _render_text(report):
             if m["a_mean"] is None and m["b_mean"] is None:
                 continue
             out.append(
-                "%-28s %-6s %14s %14s %10s %9s %5s"
+                fmt
                 % (
                     row["name"], key,
                     ("%.3f+-%.3f" % (m["a_mean"], m["a_sd"])) if m["a_mean"] is not None else "-",
@@ -900,65 +969,6 @@ def cmd_warmup_check(args):
     sys.exit(1 if problems else 0)
 
 
-# A metric holds either its values or a declaration of how to aggregate its
-# subtests' -- ["Geometric"] for JetStream3 and MotionMark, whose overall score is
-# never written into the file at all. The list's first name is the primary one.
-_AGGREGATORS = {
-    "Arithmetic": lambda vals: sum(vals) / len(vals),
-    "Geometric": lambda vals: math.exp(sum(math.log(v) for v in vals) / len(vals)),
-    "Total": sum,
-}
-
-
-def _iteration_values(metric):
-    """One value per iteration: `current` holds an entry per iteration, and
-    Speedometer's entry is itself that iteration's internal repeats."""
-    cur = _first_current(metric)
-    if not isinstance(cur, list):
-        return None
-    out = []
-    for item in cur:
-        vals = _flatten(item)
-        if not vals:
-            return None
-        out.append(sum(vals) / len(vals))
-    return out or None
-
-
-# Aggregated per iteration and then averaged: pooling every subtest's every
-# iteration mixes the iterations into one number that is nobody's score.
-def _declared_aggregate(suite, node, metric):
-    name = metric[0] if metric else ""
-    if name not in _AGGREGATORS:
-        sys.exit("ab-precision: %s declares its Score as '%s', which this file does not "
-                 "aggregate. Implemented: %s." % (suite, name, ", ".join(sorted(_AGGREGATORS))))
-    children = (node.get("tests") or {}) if isinstance(node.get("tests"), dict) else {}
-    per_child, silent = {}, []
-    for child, cnode in children.items():
-        vals = _iteration_values((cnode.get("metrics") or {}).get("Score")) if isinstance(cnode, dict) else None
-        if vals:
-            per_child[str(child)] = vals
-        else:
-            silent.append(str(child))
-    if silent or not per_child:
-        sys.exit("ab-precision: %s's Score is the %s of its subtests' Scores, and %d of "
-                 "%d first-level tests report no Score (%s). Re-run the plan; a partial suite "
-                 "has no headline score."
-                 % (suite, name, len(silent), len(children), ", ".join(sorted(silent)) or "none ran"))
-    counts = sorted({len(v) for v in per_child.values()})
-    if len(counts) != 1:
-        sys.exit("ab-precision: %s's subtests report %s iterations -- one aggregate per "
-                 "iteration needs the same count from every subtest."
-                 % (suite, "/".join(str(c) for c in counts)))
-    fn = _AGGREGATORS[name]
-    try:
-        scores = [fn([v[i] for v in per_child.values()]) for i in range(counts[0])]
-    except ValueError:
-        sys.exit("ab-precision: %s reports a subtest Score of zero or less, and its %s mean "
-                 "is undefined." % (suite, name))
-    return sum(scores) / len(scores)
-
-
 def _headline_score(doc):
     roots = [(str(k), v) for k, v in doc.items()
              if isinstance(v, dict) and isinstance(v.get("metrics"), dict)
@@ -966,10 +976,13 @@ def _headline_score(doc):
     if len(roots) != 1:
         return None
     suite, node = roots[0]
-    metric = node["metrics"]["Score"]
-    if isinstance(metric, list):
-        return _declared_aggregate(suite, node, metric)
-    vals = _iteration_values(metric)
+    declared = _declared_score(node)
+    if declared is None:
+        vals = _iteration_values(node["metrics"]["Score"])
+    else:
+        vals, why = _declared_aggregate(suite, node, declared)
+        if why:
+            sys.exit("ab-precision: " + why)
     return sum(vals) / len(vals) if vals else None
 
 

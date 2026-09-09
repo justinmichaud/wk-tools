@@ -98,6 +98,13 @@ experiments_system triald_system fetches Apple's experiment configurations
 ROWS
 }
 
+# Judged the other way round: expected running, and never a member of wk_quiet_desktop_stopped, whose every row is held stopped by signal.
+wk_quiet_desktop_expected() {
+    cat <<'ROWS'
+tailnet tailscaled is the bench install's only way to be reached while it measures, and pausing it would drop the tailnet mid-leg and leave a live utun with nothing draining it; it costs 1.78% of one core and 71 MB RSS, measured over 3.7 days on moose, the fleet's busiest node
+ROWS
+}
+
 # One key per `pmset -a` call: which keys a Mac has depends on the model (highpowermode raises the fans, so a fanless Mac has none) and pmset applies nothing at all from a command line naming one it does not know.
 wk_quiet_desktop_power() {
     cat <<'ROWS'
@@ -111,6 +118,52 @@ ROWS
 }
 
 _wk_qd_uid() { id -u "${1:-$(id -un)}" 2>/dev/null; }
+
+# Do Not Disturb, which stops a banner being drawn at all rather than stopping the process that would draw it. An assertion record in the account's own home, not a preference: `defaults write com.apple.notificationcenterui doNotDisturb` governs nothing from macOS 12 on, and a record with no end timestamp is indefinite -- read off tolken 26.6.2, whose own DND is one such record from com.apple.controlcenter.dnd. Keyed by home rather than user, so the plant can write it onto a volume that is merely mounted.
+WK_DND_MODE=com.apple.donotdisturb.mode.default
+WK_DND_CLIENT=com.apple.controlcenter.dnd
+
+wk_quiet_dnd_path() { printf '%s/Library/DoNotDisturb/DB/Assertions.json' "$1"; }
+
+# dscl even for the account this is running as: a LaunchDaemon has no HOME.
+_wk_qd_home() { # <user>
+    dscl . -read "/Users/$1" NFSHomeDirectory 2>/dev/null | awk '{print $2}'
+}
+
+wk_quiet_dnd_state() { # <home> -- on, off, or ? for a file nothing here can read
+    /usr/bin/python3 - "$(wk_quiet_dnd_path "$1")" <<'PY' 2>/dev/null || printf '?'
+import json, sys
+try:
+    doc = json.load(open(sys.argv[1]))
+except Exception:
+    print("?"); raise SystemExit(0)
+records = [r for entry in doc.get("data") or []
+           for r in entry.get("storeAssertionRecords") or []]
+# An end timestamp is an assertion that lapses, off by the time a run reaches it.
+print("on" if any("assertionEndDateTimestamp" not in r
+                  for r in records) else "off")
+PY
+}
+
+wk_quiet_dnd_on() { # <home> -- turn it on indefinitely; prints the state it reads back
+    /usr/bin/python3 - "$(wk_quiet_dnd_path "$1")" "$WK_DND_MODE" "$WK_DND_CLIENT" <<'PY' 2>/dev/null
+import json, os, sys, time, uuid
+path, mode, client = sys.argv[1], sys.argv[2], sys.argv[3]
+now = time.time() - 978307200.0   # CFAbsoluteTime
+doc = {"data": [{"storeAssertionRecords": [{
+    "assertionUUID": str(uuid.uuid4()).upper(),
+    "assertionSource": {"assertionClientIdentifier": client},
+    "assertionStartDateTimestamp": now,
+    "assertionDetails": {"assertionDetailsIdentifier": client,
+                         "assertionDetailsModeIdentifier": mode,
+                         "assertionDetailsReason": "user-action"}}]}],
+       "header": {"version": 8, "timestamp": now}}
+os.makedirs(os.path.dirname(path), exist_ok=True)
+with open(path, "w") as handle:
+    json.dump(doc, handle)
+PY
+    wk_quiet_dnd_state "$1"
+}
 
 # Run as root at a first boot, an unqualified `defaults write` lands in root's own domain and the account that gets measured never sees it.
 _wk_qd_defaults() { # <user> <args...>
@@ -191,6 +244,15 @@ $(wk_quiet_desktop_rows)
 ROWS
 
     [ -n "$uid" ] || { echo "wk: no such account '$u'" >&2; return 1; }
+
+    local home; home=$(_wk_qd_home "$u")
+    if [ -z "$home" ] || [ ! -d "$home" ]; then
+        echo "wk: no home directory for '$u', so Do Not Disturb cannot be set" >&2; bad=1
+    elif [ "$(wk_quiet_dnd_state "$home")" = on ] || [ "$(wk_quiet_dnd_on "$home")" = on ]; then
+        :
+    else
+        echo "wk: could not turn Do Not Disturb on for $u" >&2; bad=1
+    fi
 
     [ -z "$moved" ] || killall -u "$u" Finder Dock >/dev/null 2>&1 || true
     return "$bad"
@@ -280,6 +342,15 @@ ROWS
 $(wk_quiet_desktop_power)
 ROWS
 
+    printf 'notifications_dnd=%s\n' "$(wk_quiet_dnd_state "$(_wk_qd_home "$u")")"
+
+    while read -r name proc why; do
+        [ -n "$proc" ] || continue
+        printf '%s=%s\n' "$name" "$(_wk_qd_procstate "$proc")"
+    done <<ROWS
+$(wk_quiet_desktop_expected)
+ROWS
+
     md=$(_wk_qd_read "$_WK_QD_READ_SECS" mdutil -s /)
     case "$md" in "$_WK_QD_TIMEOUT") ;; *) md=$(printf '%s\n' "$md" | sed -n '2s/^[[:space:]]*//p') ;; esac
     printf 'spotlight=%s\n' "$md"
@@ -336,6 +407,8 @@ ROWS
         *)          _wk_qf wrong "Spotlight is indexing ($(_wk_qf_read "$probe" spotlight)) -- it reads the disk the run writes" "$fix" ;;
     esac
     _wk_qf_judge "$probe" analytics 0 "diagnostics are not submitted" "$fix"
+    _wk_qf_judge "$probe" notifications_dnd on \
+        "Do Not Disturb is on, so no banner is drawn over the browser" "$fix"
 }
 
 # Apple silicon has no frequency pin: `enable_skstb` binds a thread to a core on a development kernel and no shipping Mac runs one. So every lever that would take the clock down is held, and whether the machine took it down anyway is measured.
@@ -370,6 +443,19 @@ ROWS
 
 wk_quiet_daemons_findings() { # <probe output> [remedy]
     local probe="$1" fix="${2:-}" name proc why state
+    while read -r name proc why; do
+        [ -n "$proc" ] || continue
+        state=$(_wk_qf_read "$probe" "$name")
+        case "$state" in
+            running) _wk_qf ok "$proc is running, as it must be: it $why" ;;
+            stopped) _wk_qf wrong "$proc is STOPPED, and it $why" \
+                              "nothing here stops it; find what did" ;;
+            absent)  _wk_qf note "$proc is not running here, and it $why" "$fix" ;;
+            *)       _wk_qf note "$proc was not answered by this machine's probe" "$fix" ;;
+        esac
+    done <<ROWS
+$(wk_quiet_desktop_expected)
+ROWS
     while read -r name proc why; do
         [ -n "$proc" ] || continue
         state=$(_wk_qf_read "$probe" "$name")

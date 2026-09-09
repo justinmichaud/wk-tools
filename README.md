@@ -671,9 +671,30 @@ under a topic held as this machine's `ntfy` credential -- `wk key set ntfy`
 mints one (it is a secret wk makes, like a deploy key, not one a service
 issues) and prints the URL to subscribe a phone to, once, the only time it is
 ever shown; `wk key setup` mints it with nothing to type. The
-driver calls it when the machine goes down to measure and when it comes back or
-does not. A notification that did not go out is a warning and never costs a
-measurement. Making the volume itself is a
+driver calls it when the machine goes down to measure, and when a restart it
+asked for visibly did not take it into bench mode. It is not called on silence,
+*while the benchmark install has no tailnet identity of its own*: it powers the
+machine off when the job ends, so "still measuring" and "finished, and the
+result is on the volume" look the same from outside and neither may be reported
+as the answer. That is the unprovisioned state and not the design --
+`NODE_BENCH_SSH` names that install, `dotfiles/ssh/config` has a stanza for it
+and `bench/mac-tailnet.sh` joins it at first boot, and once it does the two
+states are one reachability check apart. A notification that did not go out is a
+warning and never costs a measurement.
+
+Notifications *on the measured machine* are a different thing and are refused
+rather than published: a banner is drawn over whatever is on the screen, and
+nothing else here can see one -- NotificationCenter never becomes the frontmost
+*application*, so the window probe and the browser check both pass with a
+banner up. So Do Not Disturb is held on in the account that gets measured (an
+open-ended assertion record in its own home; `defaults write
+com.apple.notificationcenterui doNotDisturb` governs nothing from macOS 12 on),
+it is a probed and judged row like every other quiet-desktop setting, and the
+plant refuses without `--force` if it does not read back on. The pair that
+draws a banner is held stopped as well -- and because macOS restarts those on
+demand, the watch that runs beside the measured thing records any of them
+coming back and fails the leg, the same record that catches a window drawing
+over it. Making the volume itself is a
 separate command that runs *on* the Mac, because it acts on its own disk:
 
 ```sh
@@ -732,11 +753,22 @@ measured on, never built in.
 its window from the screen and MotionMark's score is a function of the area it
 draws, so two runs at different resolutions are not comparable. The declared
 mode is `NODE_DISPLAY` in `boot/machines/<machine>.conf` -- one line, in points
--- and it is checked three times: in preflight, again immediately before the
+-- and it is *held*, not hoped for. WindowServer reads the mode it comes up at
+from `com.apple.windowserver.displays.plist` and no runtime call reaches a
+scaled mode on an Apple Silicon panel, so the bench install writes the declared
+mode into that file and repeats the boot when it is not already at it -- once,
+bounded by a record, spending no attempt, and refusing rather than looping if
+the write does not take (`lib/wkmac.py display-mode`).
+
+Then it is checked four times: in preflight, again immediately before the
 restart (a monitor plugged in between the two costs a cycle, and `--force` does
-not cross it), and in the bench install itself against the job's own copy of
-the declaration. Exactly one display, and it is the built-in panel. A run that
-is compared with nothing -- a PGO collection in the build guest -- passes
+not cross it), once in the bench install against the job's own copy of the
+declaration, and **again in every leg's own preflight** -- a panel attached
+between two legs resizes the window, and every once-per-boot check has already
+passed by then. Exactly one display, and it is the built-in panel; a mirror set
+is refused too. One file holds the rule (`bench/mac-browser-check.py`), asked
+with a browser at the top of the boot and with `--displays-only` per leg. A run
+that is compared with nothing -- a PGO collection in the build guest -- passes
 `--expect-display any` and has its display recorded and judged on nothing;
 that word cannot come from a default, and the plant refuses it.
 
@@ -749,10 +781,12 @@ and `system_profiler`'s runtime `spdisplays_ambient_brightness` is the only
 reading there is.
 
 The declared mode is in *points*, which is what the window server and
-`screen.width` report. `NODE_DISPLAY="builtin 1470x956"` on a 2560x1664 panel
-is a scaled mode: the compositor renders 2940x1912 and downsamples. That is a
-choice about what to measure rather than a mistake, and the pixel-exact mode
-for that panel is `builtin 1280x832`.
+`screen.width` report. `builtin 1280x832` on tolken's 2560x1664 panel is the
+pixel-exact mode at scale 2: nothing is rendered larger than the panel and
+downsampled. A scaled mode above the panel -- `builtin 1470x956`, which renders
+2940x1912 -- is measurable too, and costs fill rate and a scaling pass on both
+arms alike; which one a machine declares is a choice about what to measure, and
+changing it makes the numbers incomparable with the ones taken before it.
 
 An A/B runs **three benchmarks** and stops when it has measured finely enough,
 not after a fixed count. Round 0 is a warmup -- one leg per arm, discarded,

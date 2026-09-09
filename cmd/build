@@ -91,7 +91,7 @@ ARCH=$(t_arch "$NAME")
 WS=$(wk_ws_dir "$NAME")
 LOG="$WS/build.log"
 
-# The one writer for build.status. `running` carries no exit/finished/seconds/peak_mb and touches the log fresh, so build_live has evidence.
+# The one writer for build.status. `running` carries no exit/finished/seconds/peak_mb and touches the log fresh, so build_live has evidence. `abort_after` is the watchdog's own deadline, so a reader past it knows the watchdog is gone rather than merely quiet.
 write_status() {
     local state="$1" rc="${2:-}" content
     if [ "$state" = running ]; then
@@ -103,6 +103,7 @@ config=$CONFIG
 arch=$ARCH
 started=$STARTED
 log=$LOG
+abort_after=$WK_ABORT_SECONDS
 EOF
 )
     else

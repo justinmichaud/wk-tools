@@ -1,4 +1,4 @@
-# Boot driver: a Mac, into a benchmark macOS install on another volume. Which install the firmware boots is signed into a LocalPolicy, and only `wk-boot-priv` blesses it; every read and the arming itself go through mv_sh, so this drives that Mac from it or from anywhere else.
+# Boot driver: a Mac, into a benchmark macOS install on another volume. Which install the firmware boots is signed into a LocalPolicy, and only `wk-boot-priv` blesses it; every read and the arming itself go through m_ssh (boot/machines.sh), so this drives that Mac from it or from anywhere else.
 
 BOOT_ARMING=command    # cmd/boot branches on it: `wk boot mbp` tells the firmware and reboots
 
@@ -7,24 +7,16 @@ BOOT_HELPER=/usr/local/libexec/wk-boot-priv
 BOOT_ORDER_IMAGE=""    # no order to write; named so a diff shows a difference, not an omission
 BOOT_ORDER_NORMAL=""
 
-# On that Mac the command runs here; from anywhere else it goes to NODE_SSH over ssh, and wkmac.py travels on stdin so nothing over there has to be kept in step.
-mv_sh() { # <command string>
-    if is_macos; then bash -c "$1"; else mac_ssh "$NODE_SSH" "$1"; fi
-}
-
-mv_wkmac() { # <subcommand> [args...]
-    if is_macos; then python3 "$WK_ROOT/lib/wkmac.py" "$@" 2>/dev/null; return; fi
+mv_wkmac() { # <subcommand> [args...] -- wkmac.py travels on stdin, so nothing over there has to be kept in step
     local a q=""
     for a in "$@"; do q="$q $(sh_quote "$a")"; done
-    mac_ssh "$NODE_SSH" "python3 -$q" < "$WK_ROOT/lib/wkmac.py" 2>/dev/null
+    m_ssh "python3 -$q" < "$WK_ROOT/lib/wkmac.py" 2>/dev/null
 }
-
-mv_reachable() { mv_sh true >/dev/null 2>&1; }
 
 mac_volume_path() { printf '/Volumes/%s' "$NODE_VOLUME"; }
 
 mac_volume_present() {
-    mv_sh "test -d $(sh_quote "$(mac_volume_path)/System/Library/CoreServices")"
+    m_ssh "test -d $(sh_quote "$(mac_volume_path)/System/Library/CoreServices")"
 }
 
 # `wk bench mac-ab` records each plant as a bench task whose name opens with the UTC stamp it was planted at, so the newest is the last the glob yields.
@@ -42,13 +34,7 @@ mv_planted_stamp() { basename "$1" | cut -d- -f1; }
 
 b_probe() {
     local id
-    if is_macos; then
-        MODE_CHANNEL=host
-        id=$(wk_image_id)
-        if [ -n "$id" ]; then MODE="bench $id"; else MODE=host; fi
-        return 0
-    fi
-    if id=$(mac_ssh "$NODE_SSH" 'sed -n "s/^id=//p" /etc/wk-image 2>/dev/null; echo READY' 2>/dev/null); then  # both installs answer as NODE_SSH; the marker is how the bench one says which it is
+    if id=$(m_ssh 'sed -n "s/^id=//p" /etc/wk-image 2>/dev/null; echo READY' 2>/dev/null); then  # both installs answer as NODE_SSH; the marker is how the bench one says which it is
         MODE_CHANNEL=host
         id=$(printf '%s' "$id" | tr -d '\r' | head -1)
         if [ "$id" = READY ]; then MODE=host; else MODE="bench $id"; fi
@@ -60,7 +46,7 @@ b_probe() {
 
 # The brace is load-bearing -- `{ sec = 1786800736, usec = 451078 } Sat Aug 15 ...` -- since a pattern anchored on `sec = ` alone matches greedily to the last one and returns usec.
 _mac_boottime() {
-    mv_sh 'sysctl -n kern.boottime 2>/dev/null' 2>/dev/null \
+    m_ssh 'sysctl -n kern.boottime 2>/dev/null' 2>/dev/null \
         | sed -n 's/.*{ *sec *= *\([0-9][0-9]*\).*/\1/p'
 }
 
@@ -73,7 +59,7 @@ b_booted_at() {
 }
 
 b_evidence() {
-    if ! mv_reachable; then
+    if ! m_reachable; then
         echo "booted_volume=unknown ($NODE_SSH does not answer)"
         echo "benchmark_volume=$NODE_VOLUME (on that Mac; nothing on it is readable while it is silent)"
         echo "firmware_default=unknown (nvram answers only from a running install)"
@@ -126,7 +112,7 @@ mac_firmware_default() {
 NODE_RECORD='"${XDG_STATE_HOME:-$HOME/.local/state}/wk/boot-armed"'
 
 record_write() {
-    mv_sh "mkdir -p \"\$(dirname $NODE_RECORD)\" && cat > $NODE_RECORD" <<EOF
+    m_ssh "mkdir -p \"\$(dirname $NODE_RECORD)\" && cat > $NODE_RECORD" <<EOF
 image=$1
 profile=$2
 device=$3
@@ -139,10 +125,10 @@ EOF
 
 record_read() {
     [ "${MODE_CHANNEL:-host}" = host ] || return 0
-    mv_sh "cat $NODE_RECORD 2>/dev/null" || true
+    m_ssh "cat $NODE_RECORD 2>/dev/null" || true
 }
 
-record_clear() { mv_sh "rm -f $NODE_RECORD"; }
+record_clear() { m_ssh "rm -f $NODE_RECORD"; }
 
 b_arm() {
     mac_volume_present || die "'$NODE_VOLUME' is not attached, or is not a macOS system volume.
@@ -153,7 +139,7 @@ b_arm() {
     docs/HANDOFF-mac-perf-mode.md for what to turn off on it.
     A different name:  WK_BENCH_VOLUME='...' wk boot $NODE_NAME"
 
-    mv_sh "test -x $(sh_quote "$BOOT_HELPER")" 2>/dev/null || die "the privileged boot helper is not installed on that Mac, so nothing here
+    m_ssh "test -x $(sh_quote "$BOOT_HELPER")" 2>/dev/null || die "the privileged boot helper is not installed on that Mac, so nothing here
     can tell the firmware which install to boot:  ./setup --stage quiesce
     Without it this is a person at the keyboard: shut down, hold the power
     button until 'Loading startup options', pick '$NODE_VOLUME', press Return."
@@ -204,14 +190,15 @@ b_disarm_note() {
 b_diag() {
     local v; v=$(mac_volume_path)
     mac_volume_present || die "'$NODE_VOLUME' is not attached, so there is nothing to read."
-    mv_sh "cat $(sh_quote "$v/var/log/wk-diag.txt") 2>/dev/null" \
+    m_ssh "cat $(sh_quote "$v/var/log/wk-diag.txt") 2>/dev/null" \
         || echo "(no var/log/wk-diag.txt on '$NODE_VOLUME' -- it has not been provisioned, or has never booted)"
 }
 
 # Measured 2026-09-08: `«event aevtrrst»` is declined by any application that will not quit, so a graceful restart is refusable and only the helper's is unconditional.
-mv_priv() { mv_sh "sudo -n $(sh_quote "$BOOT_HELPER") $1 2>&1"; }  # stderr merged: every refusal it makes is quoted back to the operator
+mv_priv() { m_ssh "sudo -n $(sh_quote "$BOOT_HELPER") $1 2>&1"; }  # stderr merged: every refusal it makes is quoted back to the operator
 
-mv_reboot_ready() { mv_priv status >/dev/null 2>&1; }
+# Answering is not being able: `status` said ok for as long as the reboot verb detached with `setsid`, which macOS does not ship, so it exited 0 having rebooted nothing. The verb names its own detach mechanism, and a helper too old to name one is a helper whose reboot cannot be trusted.
+mv_reboot_ready() { mv_priv status 2>/dev/null | grep -q '^wk-boot-priv: detach='; }
 
 b_reboot() {
     mv_priv reboot >/dev/null 2>&1 && return 0
@@ -223,7 +210,7 @@ b_reboot() {
 # The *Data* volume, the APFS system volume being sealed and read-only. `/var` firmlinks out of it, so the same bytes are `/var/wk` to the booted bench install and `/Volumes/<name> - Data/private/var/wk` here.
 mac_volume_data_path() {
     local d="/Volumes/$NODE_VOLUME - Data"
-    mv_sh "test -d $(sh_quote "$d")" && { printf '%s' "$d"; return 0; }
+    m_ssh "test -d $(sh_quote "$d")" && { printf '%s' "$d"; return 0; }
     printf '%s' "$(mac_volume_path)"
 }
 
@@ -242,7 +229,7 @@ b_media() {
         printf "%s attached at %s" "$what" "$(mac_volume_path)"
         return 0
     fi
-    if mv_reachable; then
+    if m_reachable; then
         printf "%s MISSING on %s -- docs/HANDOFF-mac-perf-mode.md creates it" "$what" "$NODE_SSH"
         return 0
     fi

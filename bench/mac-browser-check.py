@@ -83,28 +83,34 @@ def parse_expect_display(spec):
     return [int(p) for p in points]
 
 
-def display_faults(displays, expect):
-    # No expectation: the display is recorded and nothing is compared against it.
-    if expect is None:
-        return []
-    if displays is None:
-        return ["the display list could not be read, so what run-benchmark sized its "
-                "window from is unknown and this score compares with nothing"]
+# Two rules, asked separately because the callers need them separately. `topology` is exactly one online display and it the built-in panel, unmirrored -- true of any install that measures, and false of a guest whose panel has no counterpart, so a PGO collection is not held to it. `expect` is the declared mode, and the bench install has to be judged on the topology *before* it can converge the mode, which is why one implies neither the other.
+def display_faults(displays, expect, topology):
     found = []
+    # Judged whatever either argument says: brightness ambient light can raise again is not a held setting, and power is thermal headroom. Absent is unknown and reported, never refused -- a guest panel has no sensor to ask.
+    if (builtin_display(displays) or {}).get("auto_brightness"):
+        found.append("the built-in display is under ambient-light control, so the "
+                     "brightness this run pinned can rise again mid-measurement and the "
+                     "thermal headroom with it")
+    if not topology and expect is None:
+        return found
+    if displays is None:
+        return found + ["the display list could not be read, so what run-benchmark sized "
+                        "its window from is unknown and this score compares with nothing"]
     online = [d for d in displays if d.get("online")]
     builtin = builtin_display(online)
-    if len(online) != 1:
-        found.append(f"{len(online)} displays are online, not one: run-benchmark sizes "
-                     "its window from the screen, so a second panel -- or none at all "
-                     "-- moves the number for a reason that is not the patch")
-    elif not builtin:
-        found.append(f"the one online display (id {online[0].get('id')}) is not the "
-                     "built-in panel: only the built-in one is declared and measured, "
-                     "so this reading compares with no other run")
-    if any(d.get("mirrored") for d in displays):
-        found.append("a display is in a mirror set: the window is composited for two "
-                     "panels at once, and the frames that costs are charged to the patch")
-    if builtin and list(builtin.get("points") or []) != expect:
+    if topology:
+        if len(online) != 1:
+            found.append(f"{len(online)} displays are online, not one: run-benchmark sizes "
+                         "its window from the screen, so a second panel -- or none at all "
+                         "-- moves the number for a reason that is not the patch")
+        elif not builtin:
+            found.append(f"the one online display (id {online[0].get('id')}) is not the "
+                         "built-in panel: only the built-in one is declared and measured, "
+                         "so this reading compares with no other run")
+        if any(d.get("mirrored") for d in displays):
+            found.append("a display is in a mirror set: the window is composited for two "
+                         "panels at once, and the frames that costs are charged to the patch")
+    if expect is not None and builtin and list(builtin.get("points") or []) != expect:
         found.append(f"the built-in display reads {builtin.get('points')} points, not "
                      f"{expect}: MotionMark's score is a function of the area it draws, "
                      "so this run is not comparable with one at the declared mode")
@@ -199,12 +205,7 @@ def faults(reading, clients, device, min_raf, expect):
         found.append("the page did not have the focus: the measured window is not the key "
                      "one, so what draws in it is rAF-throttled and the benchmark measures "
                      "the throttle")
-    found += display_faults(reading.get("displays"), expect)
-    # Judged whatever the expectation: brightness ambient light can raise again is not a held setting, and power is thermal headroom. Absent is unknown and reported, never refused -- a guest panel has no sensor to ask.
-    if (builtin_display(reading.get("displays")) or {}).get("auto_brightness"):
-        found.append("the built-in display is under ambient-light control, so the "
-                     "brightness this run pinned can rise again mid-measurement and the "
-                     "thermal headroom with it")
+    found += display_faults(reading.get("displays"), expect, topology=expect is not None)
     frontmost = reading.get("frontmost")
     if frontmost == "?":
         found.append("nothing here could say which application was frontmost -- AppKit did "
@@ -280,6 +281,13 @@ def main():
     parser.add_argument("--read", metavar="JSON",
                         help="report a reading already taken (what --json wrote) "
                              "instead of taking one; needs no Mac and no browser")
+    parser.add_argument("--displays-only", action="store_true",
+                        help="judge the displays alone, launching no browser: the "
+                             "same rule every leg's preflight is held to, asked "
+                             "again per leg because a panel plugged in between two "
+                             "legs moves the number and nothing downstream can say so. "
+                             "Exactly one online built-in panel, unmirrored, is required "
+                             "whether or not --expect-display names a mode")
     parser.add_argument("--expect-display", metavar="SPEC",
                         help="the display this reading must be taken on, as "
                              "'builtin <w>x<h>' (boot/machines/<node>.conf's "
@@ -303,10 +311,13 @@ def main():
     if args.read:
         with open(args.read) as handle:
             reading = json.load(handle)
+    elif args.displays_only:
+        reading = {"displays": display_list()}
     elif args.build_directory:
         reading = take_reading(args)
     else:
-        parser.error("--build-directory to take a reading, or --read to report one")
+        parser.error("--build-directory to take a reading, --read to report one, "
+                     "or --displays-only to judge the displays alone")
 
     # A reading carries what it was judged against, so re-deriving its verdict reaches the same one with no argument.
     spec = args.expect_display or reading.get("expect_display")
@@ -316,13 +327,20 @@ def main():
 
     # Derived on every report, never stored in the reading: one place holds the floors.
     clients = {str(k): v for k, v in (reading.get("webkit_gpu_clients") or {}).items()}
-    found = faults(reading, clients, reading.get("accelerator"), args.min_raf, expect)
+    if args.displays_only:
+        # An install that measures always owes the topology, mode or no mode.
+        found = display_faults(reading.get("displays"), expect, topology=True)
+    else:
+        found = faults(reading, clients, reading.get("accelerator"), args.min_raf, expect)
 
     if args.json:
         with open(args.json, "w") as handle:
             json.dump(reading, handle, indent=2, sort_keys=True)
 
-    report(reading, clients)
+    if args.displays_only:
+        print("displays=" + display_summary(reading.get("displays")))
+    else:
+        report(reading, clients)
 
     if found:
         sys.stdout.flush()  # the readings above belong before the faults, down a pipe too

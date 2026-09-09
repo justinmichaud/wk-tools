@@ -17,6 +17,7 @@ how, not what macOS does with them -- that is measured on a real guest by
 
 Run: python3 -m unittest tests.test_mac_quiet_desktop -v
 """
+import json
 import os
 import re
 import unittest
@@ -40,7 +41,7 @@ PGREP_ALL = '#!/bin/sh\necho 4242\nexit 0\n'
 
 # How many whitespace-separated fields each table's rows carry before the
 # free-text tail. Read by the splitter so a row's prose never becomes a field.
-FIELDS = {"rows": 6, "agents": 4, "daemons": 3, "power": 4}
+FIELDS = {"rows": 6, "agents": 4, "daemons": 3, "power": 4, "expected": 3}
 
 
 def _rows(name):
@@ -119,13 +120,81 @@ class TestTheTables(unittest.TestCase):
                          [n for n in names if names.count(n) > 1])
 
 
+class TestWhatMustKeepRunning(unittest.TestCase):
+    """One row is judged the other way round. The bench install has no other way
+    to be reached while it measures, and pausing it would drop the tailnet
+    mid-leg -- the very thing it is there to fix -- leaving a live utun with
+    nothing draining it."""
+
+    def test_it_is_not_in_the_table_that_gets_signalled(self):
+        stopped = bash('. %r\nwk_quiet_desktop_stopped\n' % str(QUIET)).stdout.split()
+        for row in _rows("expected"):
+            with self.subTest(proc=row[1]):
+                self.assertNotIn(row[1], stopped)
+
+    def test_every_row_says_what_it_costs(self):
+        """It is the one thing here allowed to burn cycles under a measurement,
+        so the row carries the measurement that says how few."""
+        for row in _rows("expected"):
+            with self.subTest(proc=row[1]):
+                self.assertRegex(row[2], r"[0-9]")
+                self.assertGreater(len(row[2].split()), 8, row)
+
+    def _judge(self, probe):
+        """A heredoc, not an argument: the probe is many lines, and one that
+        arrives as a single line matches no key at all."""
+        cp = bash(""". %r
+probe=$(cat <<'P'
+%s
+P
+)
+wk_quiet_daemons_findings "$probe" 'the remedy'
+""" % (str(QUIET), probe))
+        self.assertEqual(0, cp.returncode, cp.stdout + cp.stderr)
+        return [l.split("\t") for l in cp.stdout.splitlines() if "\t" in l]
+
+    def _probe(self, state):
+        rows = ["%s=%s" % (r[0], state) for r in _rows("expected")]
+        rows += ["%s=stopped" % r[0] for r in _rows("agents")]
+        rows += ["%s=stopped" % r[0] for r in _rows("daemons")]
+        return "\n".join(rows)
+
+    def test_running_is_the_ok_state(self):
+        states = {f[0] for f in self._judge(self._probe("running"))}
+        self.assertEqual({"ok"}, states)
+
+    def test_stopped_is_a_fault_and_names_no_wk_command_as_the_cause(self):
+        """Nothing in this tree stops it, so the remedy is to find what did."""
+        found = [f for f in self._judge(self._probe("stopped")) if f[0] == "wrong"]
+        self.assertEqual(len(_rows("expected")), len(found), found)
+        for f in found:
+            self.assertIn("STOPPED", f[1])
+            self.assertIn("find what did", f[2])
+
+    def test_absent_is_a_note_and_not_a_refusal(self):
+        """An install that never joined the tailnet still measures correctly --
+        it just cannot be watched. Refusing every leg for that measures nothing."""
+        states = {f[0] for f in self._judge(self._probe("absent"))
+                  if "tailscaled" in f[1]}
+        self.assertEqual({"note"}, states)
+
+
 class TestApplyingIt(WkTest):
+    def _dscl_stub(self):
+        """`dscl . -read /Users/<u> NFSHomeDirectory` names the home the Do Not
+        Disturb assertion is written into. A real directory, so the real python
+        writes a real file the state read can be asserted against."""
+        home = self.tmp / "home"
+        home.mkdir(exist_ok=True)
+        return home, 'printf "NFSHomeDirectory: %s\\n" %s\n' % (home, home)
+
     def _run(self, script, path_extra=("defaults", "launchctl", "mdutil",
                                        "tmutil", "pmset", "sudo", "killall",
                                        "pgrep")):
         calls = self.tmp / "calls"
         calls.write_text("")
         stubs = {n: STUB for n in path_extra}
+        stubs["dscl"] = self._dscl_stub()[1]
         with stub_path(stubs) as binp:
             cp = bash(f'. {str(QUIET)!r}\n{script}\n',
                       env={"PATH": f"{binp}:/usr/bin:/bin",
@@ -168,7 +237,8 @@ class TestApplyingIt(WkTest):
         calls.write_text("")
         env = {"PATH": "%s:/usr/bin:/bin" % self.tmp, "WK_TEST_CALLS": str(calls),
                "WK_TEST_DEFAULTS": str(store)}
-        with stub_path({n: STUB for n in ("launchctl", "killall", "sudo")}) as binp:
+        with stub_path(dict({n: STUB for n in ("launchctl", "killall", "sudo")},
+                            dscl=self._dscl_stub()[1])) as binp:
             env["PATH"] = "%s:/usr/bin:/bin" % binp
             first = bash(". %r\n%s\nwk_quiet_desktop_user\n" % (str(QUIET), fake), env=env)
             self.assertEqual(0, first.returncode, first.stdout + first.stderr)
@@ -395,6 +465,110 @@ class TestTheProbe(WkTest):
                 self.assertIn(got[row[0]], ("running", "stopped", "absent"))
 
 
+class TestOnePayloadWriterForBothSides(WkTest):
+    """The benchmark install stages itself -- it has passwordless root over its
+    own paths and neither a network nor credentials -- so the writer has to be
+    reachable from there as well as from the host install. It is a
+    sourced-never-run file for the same reason mac-quiet-desktop.sh is:
+    mac-bench-volume.sh dispatches on source."""
+
+    PAYLOAD = REPO / "bench" / "mac-bench-payload.sh"
+    AUTORUN = REPO / "bench" / "mac-bench-autorun.sh"
+
+    def test_sourcing_it_runs_nothing(self):
+        cp = bash('. %r\necho SOURCED\n' % str(self.PAYLOAD),
+                  env={"PATH": "/usr/bin:/bin"})
+        self.assertEqual(0, cp.returncode, cp.stdout + cp.stderr)
+        self.assertIn("SOURCED", cp.stdout)
+
+    def test_the_volume_writer_dispatches_on_source_so_it_is_not_the_include(self):
+        """The reason this file exists: `case "${ACTION:---report}"` at the
+        bottom of mac-bench-volume.sh runs a report on a bare source, so the
+        autorun cannot source it to reach the writer."""
+        volume = (REPO / "bench" / "mac-bench-volume.sh").read_text()
+        self.assertIn('case "${ACTION:---report}"', volume)
+        body = func_body(self.AUTORUN.read_text(), "converge_self")
+        code = [l for l in body.splitlines() if not l.lstrip().startswith("#")]
+        self.assertTrue([l for l in code if "mac-bench-payload.sh" in l], code)
+        self.assertEqual([], [l for l in code if "mac-bench-volume.sh" in l], code)
+
+    def test_both_sides_read_the_one_writer(self):
+        volume = (REPO / "bench" / "mac-bench-volume.sh").read_text()
+        self.assertIn("mac-bench-payload.sh", volume)
+        self.assertIn("stage_payload", volume)
+        self.assertNotIn("bench_payload_files() {", volume)
+
+    def test_it_writes_every_row_against_a_root_of_the_tests_own(self):
+        """Driven the way converge_self drives it: the caller supplies `run`."""
+        root = self.tmp / "root"
+        root.mkdir()
+        cp = bash('set -e\nWK_ROOT=%r\n. "$WK_ROOT/lib/common.sh" >/dev/null 2>&1\n'
+                  'run() { "$@"; }\n. "$WK_ROOT/bench/mac-bench-payload.sh"\n'
+                  'stage_payload %r\n' % (str(REPO), str(root)))
+        self.assertEqual(0, cp.returncode, cp.stdout + cp.stderr)
+        rows = [l.split() for l in bash('. %r\nbench_payload_files\n'
+                                        % str(self.PAYLOAD)).stdout.splitlines() if l.strip()]
+        self.assertTrue(rows)
+        for _src, dest, _mode in rows:
+            with self.subTest(dest=dest):
+                self.assertTrue((root / dest).is_file(), dest)
+        self.assertTrue((root / "usr/local/share/wk-bench/wk-tools/wk").is_file())
+
+    def test_the_tailnet_payload_is_not_in_it(self):
+        """Collecting it needs a network the benchmark install has not got, and
+        installing it needs root the host install would have to be asked for --
+        so each side does its own half."""
+        self.assertNotIn("mac-tailnet", self.PAYLOAD.read_text())
+
+
+class TestDoNotDisturb(WkTest):
+    """A notification banner is drawn over whatever is on the screen and no
+    other gate here can see one: NotificationCenter never becomes the frontmost
+    *application*, so the window probe and the browser check both pass with a
+    banner up. From macOS 12 on the setting is an assertion record in the
+    account's own home, not a preference, so it is written and read as one."""
+
+    def _dnd(self, script):
+        return bash('. %r\n%s\n' % (str(QUIET), script),
+                    env={"PATH": "/usr/bin:/bin", "HOME": "/nonexistent"})
+
+    def test_no_file_is_not_off(self):
+        """An unreadable file is '?', which the findings report as unknown: a
+        missing assertion database is not evidence that DND is on OR off."""
+        cp = self._dnd('wk_quiet_dnd_state %r' % str(self.tmp / "absent"))
+        self.assertEqual("?", cp.stdout.strip(), cp.stdout + cp.stderr)
+
+    def test_turning_it_on_reads_back_on(self):
+        cp = self._dnd('wk_quiet_dnd_on %r' % str(self.tmp))
+        self.assertEqual("on", cp.stdout.strip(), cp.stdout + cp.stderr)
+        doc = json.loads((self.tmp / "Library/DoNotDisturb/DB/Assertions.json").read_text())
+        record = doc["data"][0]["storeAssertionRecords"][0]
+        self.assertEqual("com.apple.donotdisturb.mode.default",
+                         record["assertionDetails"]["assertionDetailsModeIdentifier"])
+        self.assertNotIn("assertionEndDateTimestamp", record)
+
+    def test_an_assertion_that_lapses_is_off(self):
+        """An end timestamp is an assertion that stops holding, and a run is an
+        hour: only an open-ended record counts as on."""
+        path = self.tmp / "Library/DoNotDisturb/DB/Assertions.json"
+        path.parent.mkdir(parents=True)
+        path.write_text(json.dumps({"data": [{"storeAssertionRecords": [
+            {"assertionEndDateTimestamp": 1.0, "assertionDetails": {}}]}]}))
+        cp = self._dnd('wk_quiet_dnd_state %r' % str(self.tmp))
+        self.assertEqual("off", cp.stdout.strip(), cp.stdout + cp.stderr)
+
+    def test_no_records_is_off(self):
+        path = self.tmp / "Library/DoNotDisturb/DB/Assertions.json"
+        path.parent.mkdir(parents=True)
+        path.write_text(json.dumps({"data": [], "header": {}}))
+        cp = self._dnd('wk_quiet_dnd_state %r' % str(self.tmp))
+        self.assertEqual("off", cp.stdout.strip(), cp.stdout + cp.stderr)
+
+    def test_it_reads_no_home_from_the_environment(self):
+        """wk_quiet_desktop_user runs from a LaunchDaemon, which has no HOME."""
+        self.assertNotIn("$HOME", QUIET.read_text())
+
+
 class TestTheFindings(WkTest):
     """One judge for both kinds of measured Mac, driven against a written-out
     probe: what a real machine says is a fact about that machine."""
@@ -416,10 +590,12 @@ P
         for name, domain, key, type_, value, _why in _rows("rows"):
             want = {"true": "1", "false": "0"}.get(value, value) if type_ == "bool" else value
             out.append(f"{name}={want}")
+        out += [f"{r[0]}=running" for r in _rows("expected")]
         out += [f"{r[0]}=stopped" for r in _rows("agents")]
         out += [f"{r[0]}=stopped" for r in _rows("daemons")]
         out += [f"{r[0]}={r[2]}" for r in _rows("power")]
         out += ["spotlight=Indexing disabled.", "analytics=0",
+                "notifications_dnd=on",
                 "power_source=AC Power", "cpu_speed_limit=100"]
         return "\n".join(out)
 
@@ -573,7 +749,10 @@ class TestBothKindsOfMeasuredMacGetIt(unittest.TestCase):
         self.assertIn("wk_quiet_desktop_findings", (REPO / "lib" / "quiet.sh").read_text())
 
     def test_a_bench_install_gets_the_file_and_runs_it(self):
-        self.assertIn("wk-bench-quiet-desktop.sh", VOLUME.read_text(),
+        # The payload table, wherever it is read from: one file now, so both the
+        # host writer and the benchmark install's own convergence lay it down.
+        self.assertIn("wk-bench-quiet-desktop.sh",
+                      (REPO / "bench" / "mac-bench-payload.sh").read_text(),
                       "nothing installs it into the image")
         first = FIRSTBOOT.read_text()
         self.assertIn("wk_quiet_desktop_system", first)

@@ -23,7 +23,7 @@ reserve_mb()    { is_headless && echo "$WK_HEADLESS_RESERVE_MB"    || echo "$WK_
 WK_MB_PER_JOB_EXPLICIT="${WK_MB_PER_JOB:+1}"
 WK_MB_PER_JOB="${WK_MB_PER_JOB:-1536}"
 
-# A reading the machine did not give sizes nothing, and fed into arithmetic instead it is a syntax error frames away from what could not be read. A caller reads one into a variable: a die inside a command substitution kills only that subshell.
+# A reading the machine did not give sizes nothing, and fed into arithmetic instead it is a syntax error frames away from what could not be read. So a caller takes a reading into a variable of its own, never into a word: a die inside a command substitution kills only that subshell. Bash does not inherit errexit into one either, so a reading taken by a reader here carries `|| return $?`. tests/test_resources.py holds both halves over the whole tree.
 _require_reading() { # <value> <what>
     case "$1" in
         ''|*[!0-9]*) die "cannot read $2 on this $(wk_os) machine.
@@ -86,7 +86,8 @@ avail_mem_mb() {
     case "$(wk_os)" in
         linux) avail=$(awk '/^MemAvailable:/ {print int($2/1024)}' /proc/meminfo 2>/dev/null || true)
                _require_reading "$avail" "free memory (/proc/meminfo MemAvailable)" ;;
-        *)     total=$(host_mem_mb); avail=$(( total - $(reserve_mb) )) ;;
+        *)     total=$(host_mem_mb) || return $?
+               avail=$(( total - $(reserve_mb) )) ;;
     esac
 
     if [ -n "${WK_CGROUP_MB:-}" ] && [ "$WK_CGROUP_MB" -lt "$avail" ]; then  # what the caller measured of the target's own cgroup, which cmd/build knows from outside it
@@ -108,14 +109,14 @@ avail_mem_mb() {
 
 envelope_cores() {  # the cap on the VM (macOS) or container (Linux)
     local c cores
-    cores=$(host_cores)
+    cores=$(host_cores) || return $?
     c=$(( cores - $(reserve_cores) ))
     [ "$c" -lt 1 ] && c=1
     echo "$c"
 }
 
 describe_cores() {
-    local p e
+    local p e c
     if [ "$(wk_os)" = macos ]; then
         p=$(sysctl -n hw.perflevel0.logicalcpu 2>/dev/null || true)   # absent on an Intel Mac, which has one core kind
         if [ -n "$p" ]; then
@@ -125,12 +126,13 @@ describe_cores() {
             return 0
         fi
     fi
-    printf '%s cores' "$(host_cores)"
+    c=$(host_cores) || return $?
+    printf '%s cores' "$c"
 }
 
 envelope_mem_mb() {
     local m mem
-    mem=$(host_mem_mb)
+    mem=$(host_mem_mb) || return $?
     m=$(( mem - $(reserve_mb) ))
     [ "$m" -lt 2048 ] && m=$(( mem / 2 ))  # 12G could leave nothing
     echo "$m"
@@ -213,14 +215,15 @@ disk_admit() {
 }
 
 build_admit() {  # <what> <jobs> [disk-gb]: refuse a build the machine cannot fit beside those running, naming them; under WK_MIN_JOBS left over is a machine spoken for. Disk is asked here, so no build path can forget it
-    local what="$1" jobs="$2" running
+    local what="$1" jobs="$2" running avail
     disk_admit "$what" "${3:-}"
     running=$(builds_running)
     [ -n "$running" ] || return 0
     [ "$jobs" -ge "${WK_MIN_JOBS:-4}" ] && return 0
+    avail=$(avail_mem_mb) || return $?
     barrier "$(build_machine)'s memory is spoken for by the build(s) already running:
 $(printf '%s\n' "$running" | awk -F'\t' '{ printf "      %s (%s jobs, %s MB)\n", $1, $2, $3 }')
-    $what would get $jobs job(s) of the $(avail_mem_mb) MB left. Wait for them
+    $what would get $jobs job(s) of the $avail MB left. Wait for them
     ('wk status' shows a workspace's build), or --force to build that small."
 }
 
@@ -228,10 +231,10 @@ build_jobs() {  # from the memory not already spoken for -- running out of RAM d
     local polite="${1:-}"
     local by_mem by_cpu jobs cores avail
 
-    cores=$(wk_cores)
+    cores=$(wk_cores) || return $?
     cores=$(( cores - $(build_reserved_jobs) ))  # the container is limited to envelope_cores, fewer than nproc, which would oversubscribe
     [ "$cores" -lt 1 ] && cores=1
-    avail=$(avail_mem_mb)
+    avail=$(avail_mem_mb) || return $?
     avail=$(( avail - $(build_reserved_mb) ))
     [ "$avail" -lt 0 ] && avail=0
     by_mem=$(( avail / WK_MB_PER_JOB ))
@@ -239,7 +242,7 @@ build_jobs() {  # from the memory not already spoken for -- running out of RAM d
 
     if [ -n "$polite" ]; then
         local load
-        load=$(wk_load)
+        load=$(wk_load) || return $?
 
         # A load average decays over its window, so a killed build's cores stay spoken for a minute: memory-idle with load still high means a stale average, and it is halved.
         [ "$by_mem" -ge "$cores" ] && [ "$load" -gt $(( cores / 2 )) ] && load=$(( load / 2 ))
@@ -261,11 +264,11 @@ build_jobs() {  # from the memory not already spoken for -- running out of RAM d
 
 explain_jobs() {
     local polite="${1:-}" jobs cores by_mem avail reserved load=""
-    jobs=$(build_jobs "$polite")
-    cores=$(wk_cores)
-    avail=$(avail_mem_mb)
+    jobs=$(build_jobs "$polite") || return $?
+    cores=$(wk_cores) || return $?
+    avail=$(avail_mem_mb) || return $?
     reserved=$(build_reserved_mb)
-    [ -z "$polite" ] || load=$(wk_load)
+    [ -z "$polite" ] || load=$(wk_load) || return $?
     log "resources: ${jobs} jobs (cores=${cores} avail=${avail}MB${reserved:+ minus ${reserved}MB other builds} @ ${WK_MB_PER_JOB}MB/job${polite:+, polite, load=${load}}${WK_MAX_JOBS:+, max $WK_MAX_JOBS})"
 
     if [ -z "${WK_MAX_JOBS:-}" ] && [ "$jobs" -lt $(( cores / 2 )) ]; then

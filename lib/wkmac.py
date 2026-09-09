@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """One disk, firmware or display fact of a Mac, for the macOS boot and bench
-drivers, and the one way to set a display's brightness; exit 1, printing
-nothing, when the fact cannot be read or a set did not take."""
+drivers, and the one way to set a display's brightness or declare its mode;
+exit 1, printing nothing, when the fact cannot be read or a set did not take."""
 import argparse
 import ctypes
 import json
@@ -11,8 +11,16 @@ import sys
 
 CG_FRAMEWORK = "/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics"
 DS_FRAMEWORK = "/System/Library/PrivateFrameworks/DisplayServices.framework/DisplayServices"
+# CGDisplayCreateUUIDFromDisplayID is exported here and not by CoreGraphics, whose handle dlsym does not find it (26.6.2).
+CS_FRAMEWORK = "/System/Library/Frameworks/ColorSync.framework/ColorSync"
+CF_FRAMEWORK = "/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation"
 MAX_DISPLAYS = 16
 SET_TOLERANCE = 0.01
+
+# WindowServer reads the mode it comes up at from here, and it is the only way in: CGDisplayCopyAllDisplayModes lists the 1:1 modes alone on an Apple Silicon panel, with or without kCGDisplayShowDuplicateLowResolutionModes, so the scaled mode a bench install is measured at is not one CGDisplaySetDisplayMode can reach (measured 2026-09-08 on Mac16,12: five modes, none of them the running 1280x832@2).
+WINDOWSERVER_CONFIG = "/Library/Preferences/com.apple.windowserver.displays.plist"
+BUILTIN_SCALE = 2   # a scaled mode's backing store: 1280x832 points over the 2560x1664 panel
+kCFStringEncodingUTF8 = 0x08000100
 
 _FLAGS = {"builtin": "CGDisplayIsBuiltin", "main": "CGDisplayIsMain",
           "active": "CGDisplayIsActive", "online": "CGDisplayIsOnline",
@@ -169,6 +177,103 @@ def _builtin_id(cg):
     return ids[0]
 
 
+def _colorsync():
+    try:
+        cs = ctypes.CDLL(CS_FRAMEWORK)
+        cs.CGDisplayCreateUUIDFromDisplayID.argtypes = [ctypes.c_uint32]
+        cs.CGDisplayCreateUUIDFromDisplayID.restype = ctypes.c_void_p
+        cf = ctypes.CDLL(CF_FRAMEWORK)
+        cf.CFUUIDCreateString.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+        cf.CFUUIDCreateString.restype = ctypes.c_void_p
+        cf.CFStringGetCString.argtypes = [ctypes.c_void_p, ctypes.c_char_p,
+                                          ctypes.c_long, ctypes.c_uint32]
+        cf.CFStringGetCString.restype = ctypes.c_bool
+    except (OSError, AttributeError):
+        return None, None
+    return cs, cf
+
+
+def _builtin_uuid(cs, cf, ident):
+    # What keys the panel's row in the WindowServer configuration: one string per panel, the same on either install of one machine.
+    handle = cs.CGDisplayCreateUUIDFromDisplayID(ident)
+    if not handle:
+        return None
+    text = cf.CFUUIDCreateString(None, handle)
+    if not text:
+        return None
+    buf = ctypes.create_string_buffer(64)
+    if not cf.CFStringGetCString(text, buf, 64, kCFStringEncodingUTF8):
+        return None
+    return buf.value.decode()
+
+
+def _mode_rows(node, uuid):
+    """Every declared mode of one panel, wherever WindowServer keeps it. Walked rather than reached by a fixed key path, so a shape that gains a level of nesting is converged rather than silently half-written."""
+    rows = []
+    if isinstance(node, dict):
+        if node.get("UUID") == uuid:
+            rows += [node[k] for k in ("CurrentInfo", "UnmirrorInfo")
+                     if isinstance(node.get(k), dict)]
+        for value in node.values():
+            rows += _mode_rows(value, uuid)
+    elif isinstance(node, list):
+        for value in node:
+            rows += _mode_rows(value, uuid)
+    return rows
+
+
+def _points(text):
+    try:
+        wide, high = text.lower().split("x")
+        return int(wide), int(high)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"{text} is not '<wide>x<high>', as in 1280x832")
+
+
+def cmd_display_mode(args):
+    cg = _coregraphics()
+    if cg is None:
+        return 1
+    ident = _builtin_id(cg)
+    if ident is None:
+        return 1
+    if args.declare is None:
+        print("%dx%d" % (int(cg.CGDisplayPixelsWide(ident)),
+                         int(cg.CGDisplayPixelsHigh(ident))))
+        return 0
+
+    cs, cf = _colorsync()
+    if cs is None:
+        return 1
+    uuid = _builtin_uuid(cs, cf, ident)
+    if uuid is None:
+        return 1
+    try:
+        with open(WINDOWSERVER_CONFIG, "rb") as handle:
+            doc = plistlib.load(handle)
+    except (OSError, plistlib.InvalidFileException):
+        return 1
+    rows = _mode_rows(doc, uuid)
+    if not rows:
+        return 1
+    wide, high = args.declare
+    for row in rows:
+        row["Wide"], row["High"], row["Scale"] = wide, high, BUILTIN_SCALE
+    try:
+        with open(WINDOWSERVER_CONFIG, "wb") as handle:
+            plistlib.dump(doc, handle)
+        with open(WINDOWSERVER_CONFIG, "rb") as handle:
+            back = plistlib.load(handle)
+    except OSError:
+        return 1
+    rows = _mode_rows(back, uuid)
+    if not rows or any((row.get("Wide"), row.get("High"), row.get("Scale"))
+                       != (wide, high, BUILTIN_SCALE) for row in rows):
+        return 1
+    print("%dx%d" % (wide, high))
+    return 0
+
+
 def _fraction(text):
     value = float(text)
     if not 0.0 <= value <= 1.0:
@@ -231,6 +336,17 @@ def main():
                                         "main, active, online, mirrored, asleep, "
                                         "points, vendor, model, unit, brightness")
     sp.set_defaults(func=cmd_displays)
+
+    sp = sub.add_parser("display-mode", help="the built-in display's mode in points, "
+                                            "as <wide>x<high>")
+    sp.add_argument("--declare", metavar="WxH", type=_points,
+                    help="declare WxH as the mode WindowServer comes up at, by rewriting "
+                         "every row of the built-in panel in "
+                         + WINDOWSERVER_CONFIG + " (root, and it takes effect at the next "
+                         "boot -- what is printed is what the file now declares, not the "
+                         "running mode); exit 1 printing nothing when the file does not "
+                         "read back as asked")
+    sp.set_defaults(func=cmd_display_mode)
 
     sp = sub.add_parser("brightness", help="the built-in display's brightness, 0.0 to 1.0")
     sp.add_argument("--set", metavar="V", type=_fraction,

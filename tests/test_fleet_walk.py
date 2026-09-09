@@ -99,7 +99,6 @@ NODE_MAC={mac}
 NODE_BRIDGE=""
 NODE_ROLE=workstation
 NODE_OS=any
-NODE_LOCAL=""
 NODE_VOLUME=""
 NODE_DTB=bcm2712-rpi-5-b.dtb
 NODE_BENCH_SSH=""

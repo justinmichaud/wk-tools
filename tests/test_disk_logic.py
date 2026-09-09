@@ -72,7 +72,7 @@ class TestDiskRefuseUnlessSafe(WkTest):
 . "{REPO}/lib/common.sh"
 . "{REPO}/boot/machines.sh"
 . "{REPO}/boot/disk.sh"
-NODE_LOCAL=1 NODE_NAME=testmach NODE_SSH=testmach
+NODE_NAME=testmach NODE_SSH=testmach
 card_priv() {{
     [ "$1" = status ] && return 0
     printf '%s\\n' {check_output!r}

@@ -32,16 +32,19 @@ def _machine_state(machine="wk"):
 
 
 def _state_fingerprint():
-    """Mirrors cmd/selftest's _state_fingerprint(): name, mtime and size of
-    everything under this host's wk state directory, sorted."""
+    """Name, mtime and size of everything under this host's wk state directory,
+    sorted. `-exec ... +` and not `\\;`: one `stat` for the whole walk rather
+    than one per file, because an artifact store under there (a Go module cache
+    is 40,000 files) made a per-file fork take longer than the timeout, and the
+    read-only claim then failed as an error rather than a difference."""
     cp = bash(f'''
 . "{REPO}/lib/common.sh"
 d=$(wk_state_dir)
 if [ -d "$d" ]; then
     if is_macos; then
-        find "$d" -exec stat -f '%N %m %z' {{}} \\; 2>/dev/null | sort
+        find "$d" -exec stat -f '%N %m %z' {{}} + 2>/dev/null | sort
     else
-        find "$d" -exec stat -c '%n %Y %s' {{}} \\; 2>/dev/null | sort
+        find "$d" -exec stat -c '%n %Y %s' {{}} + 2>/dev/null | sort
     fi
 else
     echo "(absent)"

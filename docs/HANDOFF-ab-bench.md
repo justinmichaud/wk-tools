@@ -2,15 +2,6 @@
 
 What is owed to get from "both boards run a rescue" to "two arms compared".
 
-- [ ] `test_build_wall.py`'s `test_it_strips_the_wall_and_keeps_everything_else`
-      hands `bash -c` a fixed `env={"PATH": ...}` but not `--noprofile
-      --norc`, so a startup file that prepends to PATH makes it fail with
-      entries the test never set (seen 2026-09-05: the assertion got
-      `/home/jmichaud/Development/wk-tools/bin:/.local/bin:...`). It passes
-      alone and fails under `unittest discover`, which reads as a regression
-      in whatever change happens to be in the tree. Give the subprocess a
-      shell that reads no rc [no hardware needed]
-
 - [ ] verify on hardware that naming the browser's cache directory fixes the
       speedometer3 leg failures. Diagnosed 2026-09-05 from
       `20260905T204217Z-rpi5-systems` (0 usable rounds of 3, 4 of 6 measured

@@ -168,8 +168,12 @@ yocto_spawn() {
     Stop it:    wk sysimage build $IMG_PROFILE --stage $live --stop"
     fi
 
-    build_admit "the $stage build" "$(build_jobs)"
-    build_record "wk sysimage $stage $ws" "$(envelope_cores)" "$(envelope_mem_mb)" "ws:$ws:yocto-$stage.pid"
+    local jobs cores mem
+    jobs=$(build_jobs)
+    cores=$(envelope_cores)
+    mem=$(envelope_mem_mb)
+    build_admit "the $stage build" "$jobs"
+    build_record "wk sysimage $stage $ws" "$cores" "$mem" "ws:$ws:yocto-$stage.pid"
 
     : > "$log"  # truncated, not unlinked: `tail -f` follows an inode
     rm -f "$pid_host"
@@ -247,6 +251,10 @@ yocto_dry_run() {
     local ws="$1" stage="$2"
     local at="not created"
     [ "$(t_info "$ws")" = absent ] || at=$(t_exec "$ws" bash -c "cd /src/WebKit && git rev-parse --abbrev-ref HEAD" 2>/dev/null | tr -d '\r' | tail -1)
+    local cores mem webkit_jobs
+    cores=$(envelope_cores)
+    mem=$(envelope_mem_mb)
+    webkit_jobs=$(WK_MB_PER_JOB=2560 build_jobs)
     cat >&2 <<EOF
 would build image $IMG_PROFILE (builder: yocto)
   for machine $IMG_MACHINE ($IMG_ARCH)
@@ -255,12 +263,12 @@ would build image $IMG_PROFILE (builder: yocto)
   recipe      $YOC_IMAGE
   stage       $stage (it includes the ones before it)
   workspace   $ws ($at)
-  jobs        $(envelope_cores) cores, $(envelope_mem_mb) MB envelope
+  jobs        $cores cores, $mem MB envelope
   DL_DIR      $WK_STORE/cache/yocto/downloads ($(du -sh "$WK_STORE/cache/yocto/downloads" 2>/dev/null | cut -f1))
   SSTATE_DIR  $WK_STORE/cache/yocto/sstate ($(du -sh "$WK_STORE/cache/yocto/sstate" 2>/dev/null | cut -f1))
   rm_work     $([ "${YOC_RM_WORK:-0}" = 1 ] && echo "on (--keep-work turns it off; still peaked at 79 GB here)" || echo off)
   chromium    $([ "$chromium" = 0 ] && echo "dropped (about half the build; --chromium puts it back)" || echo "in the image (--chromium)")
-  webkit jobs $(WK_MB_PER_JOB=2560 build_jobs) (2560 MB/job -- WebCore's unified sources OOM'd at -j79)
+  webkit jobs $webkit_jobs (2560 MB/job -- WebCore's unified sources OOM'd at -j79)
   local fixes $([ "${YOC_LOCAL_LAYER:-1}" = 0 ] && echo "none -- the branch's own configuration, unmodified" || echo "image/yocto/meta-wk is added to bblayers (build-time only)")
   tailnet     $([ "${YOC_TAILNET:-1}" = 0 ] && echo "off -- the board is reachable only over whatever LAN it lands on" || echo "tailscale in the image (meta-wk-tailnet); the card carries the key")
   wifi        $(_image_wants_wifi "${IMG_MACHINE:-}" && echo "wk-wifi-join in the image (meta-wk-wifi); the card carries the credential" || echo "not needed -- $IMG_MACHINE has a cable")
@@ -370,9 +378,11 @@ yocto_build() { # <profile> <args...>
 
     yocto_ensure_ws "$ws" "$YOC_BRANCH"
 
-    local built id
+    local built id cores webkit_jobs
     built=$(date -u +%Y-%m-%dT%H:%M:%SZ)
     id="$profile-$(date -u +%Y%m%dT%H%M%SZ)"
+    cores=$(envelope_cores)
+    webkit_jobs=$(WK_MB_PER_JOB=2560 build_jobs)
 
     hold_lock "ws-$ws" -w "${WK_BUILD_LOCK_WAIT:-3600}"  # two builds in one checkout corrupt both
 
@@ -393,7 +403,7 @@ EOF
     # YOC_IMAGE names targets.conf's image_basename in the config too, so a renamed or missing section fails here rather than four hours into bitbake.
     yocto_spawn "$ws" "$stage" \
         --target "$YOC_TARGET" --image "$YOC_IMAGE" --stage "$stage" \
-        --jobs "$(envelope_cores)" --rm-work "${YOC_RM_WORK:-0}" \
+        --jobs "$cores" --rm-work "${YOC_RM_WORK:-0}" \
         ${YOC_PORT_TARGET_FROM:+--port-target-from "$YOC_PORT_TARGET_FROM"} \
         ${YOC_MACHINE:+--port-machine "$YOC_MACHINE"} \
         ${IMG_MACHINE:+--board "$IMG_MACHINE"} \
@@ -402,7 +412,7 @@ EOF
         --chromium "$chromium" \
         --local-layer "${YOC_LOCAL_LAYER:-1}" \
         --tailnet "${YOC_TAILNET:-1}" \
-        --webkit-jobs "$(WK_MB_PER_JOB=2560 build_jobs)" \
+        --webkit-jobs "$webkit_jobs" \
         --sstate-ns "$(printf '%s' "${WK_SDK_IMAGE##*/}" | tr ':/' '--')" \
         ${commit:+--commit "$commit"} ${slot:+--slot "$slot" --profile "$profile"}
 

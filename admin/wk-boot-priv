@@ -31,7 +31,19 @@ check_order() {
     esac
 }
 
-v_status() { say "ok"; say "order=yes"; say "reboot=yes"; say "tryboot=yes"; }
+# What this machine can be asked, not what the verb list holds: a Pi has no
+# `bless` and a Mac has neither vcmailbox nor /run/systemd, so a static yes for
+# every verb is a claim three of them cannot back on any one machine. `detach`
+# names the mechanism the reboot verbs use, so a caller can tell this helper from
+# one whose detach macOS does not ship and whose reboot exits 0 having done nothing.
+v_status() {
+    say "ok"
+    command -v vcmailbox >/dev/null 2>&1 && say "order=yes" || say "order=no (no vcmailbox here)"
+    say "reboot=yes"
+    say "detach=nohup"
+    [ -d /run/systemd ] && say "tryboot=yes" || say "tryboot=no (no /run/systemd, so the flag cannot ride the reboot)"
+    command -v bless >/dev/null 2>&1 && say "bless=yes" || say "bless=no (not a Mac)"
+}
 
 # One-shot: the firmware clears the register after one use.
 v_order() {
@@ -41,10 +53,13 @@ v_order() {
     vcmailbox "$MAILBOX_TAG" 4 4 "$1"
 }
 
-# Detached after a delay: the reboot kills the ssh session that asked for it.
+# Detached after a delay: the reboot kills the ssh session that asked for it, and
+# the teardown SIGHUPs the process group. `nohup` and not `setsid`, which macOS
+# does not ship -- with setsid this verb said "rebooting in 3s" and rebooted
+# nothing on every Mac, for as long as it existed.
 v_reboot() {
     [ $# -eq 0 ] || deny "reboot takes no arguments"
-    setsid sh -c 'sleep 3; reboot' </dev/null >/dev/null 2>&1 &
+    nohup sh -c 'sleep 3; reboot' </dev/null >/dev/null 2>&1 &
     say "rebooting in 3s"
 }
 
@@ -53,7 +68,7 @@ v_reboot_tryboot() {
     [ $# -eq 0 ] || deny "reboot-tryboot takes no arguments"
     [ -d /run/systemd ] \
         || fail "no /run/systemd here, so the tryboot flag cannot ride the reboot"
-    setsid sh -c 'sleep 3; printf "0 tryboot" > /run/systemd/reboot-param && systemctl reboot' \
+    nohup sh -c 'sleep 3; printf "0 tryboot" > /run/systemd/reboot-param && systemctl reboot' \
         </dev/null >/dev/null 2>&1 &
     say "rebooting into tryboot in 3s"
 }

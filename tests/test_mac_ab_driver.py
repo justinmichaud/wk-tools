@@ -101,7 +101,7 @@ else printf 'FAIL %%s' "$FW_DETAIL"; fi
         block = text[text.index('ck no "firmware default"'):text.index('log "" >&2')]
         self.assertIn("wk boot $MACHINE", block)
         self.assertIn("startup manager", block)
-        self.assertIn("--shutdown", block)
+        self.assertIn("--plant", block)
 
     def test_it_is_a_check_and_not_a_note(self):
         """A `log` line about the firmware would leave the lane restarting a
@@ -220,7 +220,9 @@ class TestThePinnedDisplayIsConfig(WkTest):
     def test_mbp_declares_the_bench_installs_measured_mode(self):
         cp = bash('. "$WK_ROOT/lib/common.sh"; . "$WK_ROOT/boot/machines.sh"\n'
                   'machine_load mbp && printf "%s" "$NODE_DISPLAY"')
-        self.assertEqual(cp.stdout, "builtin 1470x956", cp.stdout + cp.stderr)
+        # 1280x832 at scale 2 is exactly the 2560x1664 panel: no frame is
+        # rendered larger than the panel and downsampled.
+        self.assertEqual(cp.stdout, "builtin 1280x832", cp.stdout + cp.stderr)
 
     def _plant(self, node_display):
         """A machine conf of the test's own, whose NODE_SSH does not resolve:
@@ -431,7 +433,6 @@ NODE_SSH=fakemac
 NODE_VOLUME="WK Bench"
 NODE_DISPLAY="builtin 1470x956"
 . "$WK_ROOT/boot/mac-volume.sh"
-is_macos() { return 1; }
 """
 
     def _driver(self, script, env=None):
@@ -442,23 +443,23 @@ is_macos() { return 1; }
         self.assertEqual(cp.stdout.strip(), "YES", cp.stdout + cp.stderr)
 
     def test_ssh_answering_with_no_marker_is_host_mode(self):
-        cp = self._driver('mac_ssh() { printf "READY\\n"; }\n'
+        cp = self._driver('m_ssh() { printf "READY\\n"; }\n'
                           'b_probe; printf "%s|%s" "$MODE" "$MODE_CHANNEL"')
         self.assertEqual(cp.stdout, "host|host", cp.stdout + cp.stderr)
 
     def test_a_marker_on_the_answering_install_is_bench_mode(self):
-        cp = self._driver('mac_ssh() { printf "perf-macos-tolken-2026-08\\nREADY\\n"; }\n'
+        cp = self._driver('m_ssh() { printf "perf-macos-tolken-2026-08\\nREADY\\n"; }\n'
                           'b_probe; printf "%s" "$MODE"')
         self.assertEqual(cp.stdout, "bench perf-macos-tolken-2026-08",
                          cp.stdout + cp.stderr)
 
     def test_no_answer_is_unreachable_and_not_unknown(self):
-        cp = self._driver('mac_ssh() { return 255; }\n'
+        cp = self._driver('m_ssh() { return 255; }\n'
                           'b_probe; printf "%s|%s" "$MODE" "$MODE_CHANNEL"')
         self.assertEqual(cp.stdout, "unreachable|none", cp.stdout + cp.stderr)
 
     def _silent_media(self, store):
-        return self._driver('mac_ssh() { return 255; }\nmv_sh() { return 255; }\nb_media',
+        return self._driver('m_ssh() { return 255; }\nb_media',
                             env={"WK_STORE": store})
 
     def test_a_silence_with_a_planted_job_names_both_states_it_cannot_tell_apart(self):
@@ -490,7 +491,7 @@ is_macos() { return 1; }
 
     def test_evidence_off_the_mac_says_what_it_cannot_see(self):
         with temp_store() as store:
-            cp = self._driver('mv_sh() { return 255; }\nb_evidence',
+            cp = self._driver('m_ssh() { return 255; }\nb_evidence',
                               env={"WK_STORE": store["WK_STORE"]})
             self.assertIn("booted_volume=unknown", cp.stdout)
             self.assertIn("firmware_default=unknown", cp.stdout)
@@ -498,7 +499,7 @@ is_macos() { return 1; }
             self.assertIn("planted_job=none", cp.stdout)
 
     def test_evidence_over_ssh_reads_the_same_facts_as_it_does_locally(self):
-        stub = ("mv_sh() { return 0; }\n"
+        stub = ("m_ssh() { return 0; }\n"
                 "mv_wkmac() {\n"
                 "    case \"$1\" in\n"
                 "        volume-name)  printf 'Macintosh HD' ;;\n"
@@ -543,12 +544,12 @@ class TestTheRestartIsTheOneImplementation(WkTest):
     def test_the_helper_reboot_is_asked_for_through_one_reader(self):
         """b_reboot answers from the Mac and from another machine, so the lane
         and `wk boot` restart it the same way. `mv_priv` is the one spelling of
-        asking the helper, and it goes through `mv_sh`, the one reader."""
+        asking the helper, and it goes through `m_ssh`, the one reader."""
         text = (REPO / "boot" / "mac-volume.sh").read_text()
         body = func_body(text, "b_reboot")
         self.assertIn("mv_priv", body)
         self.assertNotIn("sudo -n", body)
-        self.assertIn('mv_priv() { mv_sh "sudo -n', text)
+        self.assertIn('mv_priv() { m_ssh "sudo -n', text)
         # Every ask goes through it: the path is read where mv_priv builds the
         # command and in the one is-it-installed test, and nowhere else.
         self.assertEqual(2, text.count("$BOOT_HELPER"), text.count("$BOOT_HELPER"))
@@ -609,15 +610,79 @@ printf 'rc=%%s' "$?"
                 self.assertNotIn("|| exit", line)
 
     def test_it_is_called_only_at_the_moments_the_driver_knows(self):
-        """It cannot tell "finished and powered off" from "still measuring",
-        so it never claims either."""
+        """Silence is the expected end -- the bench install powers the machine
+        off -- so nothing is notified about it: it cannot tell "finished and
+        powered off" from "still measuring". What is notified is the plant and
+        the two ways the transition can fail visibly."""
         text = MACAB.read_text()
         calls = [l.strip() for l in text.splitlines() if l.strip().startswith('notify "')]
-        self.assertEqual(len(calls), 4, calls)
+        self.assertEqual(len(calls), 3, calls)
         self.assertTrue(any("planted" in c for c in calls))
-        self.assertTrue(any("back in host mode" in c for c in calls))
+        self.assertTrue(any("came back to host mode" in c for c in calls))
         self.assertTrue(any("never rebooted" in c for c in calls))
-        self.assertTrue(any("gone silent" in c for c in calls))
+        self.assertFalse(any("gone silent" in c for c in calls), calls)
+
+class TestThePlantedTreeIsVerifiedWhole(WkTest):
+    """A sentinel is not a verification. The plant used to check one file's byte
+    count, so a tree stale in any other file landed looking right and behaved as
+    an older lane -- discovered after the reboot, in bench mode, where nothing
+    can report it."""
+
+    def test_the_probe_file_check_is_gone(self):
+        body = func_body(MACAB.read_text(), "put_tree")
+        self.assertNotIn("probe", body)
+        self.assertIn("treehash.py", body)
+
+    def test_both_sides_exclude_the_same_names(self):
+        """One list, read twice. Two lists is two file sets and two digests of
+        different things, which reads as a corrupted tree on every plant."""
+        text = MACAB.read_text()
+        self.assertIn('TREE_SKIP=', text)
+        body = func_body(text, "put_tree")
+        self.assertEqual(2, body.count("$TREE_SKIP"), body)
+
+    def test_the_local_arguments_are_an_array_and_not_a_split_string(self):
+        """`sh_quote .git` is `'.git'` with the quotes in it: word-split without
+        quote removal, the local side excludes a name no file has and hashes a
+        different file set than the far side, whose shell does remove them."""
+        body = func_body(MACAB.read_text(), "put_tree")
+        self.assertIn('local_args+=(--exclude "$x")', body)
+        self.assertIn('"${local_args[@]}"', body)
+
+
+class TestOneReaderOfTheBootTime(WkTest):
+    """"Did it actually reboot" is decided by kern.boottime, and the driver had
+    a second copy of that reading whose pattern was anchored on `sec = ` alone.
+    `.*sec *= *` matches greedily to the last one in
+    `{ sec = 1788835009, usec = 104495 }`, so that copy answered 104495 -- the
+    microseconds -- and the test for "the same boot as before" compared those."""
+
+    SYSCTL = "{ sec = 1788835009, usec = 104495 } Mon Sep  7 20:36:49 2026"
+
+    def test_the_driver_has_no_reader_of_its_own(self):
+        text = MACAB.read_text()
+        # The die message still names kern.boottime as its evidence, which is
+        # what the operator has to know; what must be gone is the reading.
+        self.assertNotIn("sysctl", text)
+        self.assertNotIn("mac_boottime", text)
+        self.assertIn("BOOT_BEFORE=$(b_boot_id)", text)
+
+    def test_the_one_reader_answers_seconds_and_not_microseconds(self):
+        """The brace is what makes it the seconds: bracketed, the pattern cannot
+        slide onto `usec`."""
+        body = func_body(DRIVER.read_text(), "_mac_boottime")
+        script = ("m_ssh() { printf '%s\\n' " + repr(self.SYSCTL).replace("'", '"')
+                  + "; }\n_mac_boottime() {" + body + "}\n_mac_boottime\n")
+        cp = bash(script)
+        self.assertEqual("1788835009", cp.stdout.strip(), cp.stdout + cp.stderr)
+
+    def test_the_pattern_the_driver_retired_answered_the_microseconds(self):
+        """The discriminating half: without this the test above passes against
+        either pattern on a machine whose usec happens to be long."""
+        cp = bash("printf '%s\\n' " + repr(self.SYSCTL).replace("'", '"')
+                  + " | sed -n 's/.*sec *= *\\([0-9]*\\).*/\\1/p'\n")
+        self.assertEqual("104495", cp.stdout.strip(), cp.stdout + cp.stderr)
+
 
 class ForceCrossesBarriersAndNothingElse(WkTest):
     """One flag, one meaning. It used to reach job.json, where the autorun

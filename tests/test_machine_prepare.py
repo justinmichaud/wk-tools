@@ -1,16 +1,18 @@
 """Getting a machine ready is a command, not a paste (boot/machines.sh,
-cmd/boot --prepare).
+cmd/boot --prepare), and it runs the command on the machine the conf names.
 
 A machine wk drives needs two things on it before `wk boot` can arm it or the
 Mac lane can restart it: this tree, and the privileged helpers admin/install.sh
 puts behind a NOPASSWD rule. Installing those is the one sudo this lane ever
 asks for, so it needs the operator's terminal -- and everything else about the
 step is derived, not typed: one declared tools path rather than a search of
-candidate directories, and a refusal that names the command instead of the
-incantation.
+candidate directories, one deploy (a commit, never a file copy), one way to
+run a command on a machine, and a refusal that names the command instead of
+the incantation.
 
-Nothing here reaches a real machine: `ssh`, `rsync` and `sudo` are stubs on
-PATH that record their argv.
+Nothing here reaches a real machine: `ssh`, `rsync`, `hostname` and `sudo` are
+stubs on PATH that record their argv, and the far side of a deploy is a
+directory in a scratch tree.
 
 Run: python3 -m unittest tests.test_machine_prepare -v
 """
@@ -48,30 +50,63 @@ class TheToolsPathIsDeclared(WkTest):
         self.assertIn("--prepare", body)
 
 
-class PreparingNeedsATerminalOnlyForTheSudo(WkTest):
-    """The sync needs nothing privileged, so it happens either way. Installing a
-    NOPASSWD rule authenticates once, and nothing can bootstrap that from a
-    session with no terminal -- so that is where it stops, having left the tree
-    in place, and it says which command finishes the job."""
+def git(cwd, *args):
+    """git in a scratch tree, with an identity of its own: the machine running
+    the suite need not have one configured."""
+    return subprocess.run(
+        ["git", "-C", str(cwd), *args], capture_output=True, text=True,
+        timeout=60, check=True,
+        env={**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+             "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"})
 
-    def _prepare(self):
-        """Stubbed ssh and rsync: no test reaches a real machine (support.py's
-        fleet-blind rule), and both are recorded so the order is checkable."""
-        with scratch_dir() as tmp:
-            with stub_path({
-                "ssh":   '#!/bin/sh\necho "$@" >> %s/ssh.argv\n' % tmp,
-                "rsync": '#!/bin/sh\necho "$@" >> %s/rsync.argv\n' % tmp,
-            }) as path:
-                cp = subprocess.run(
-                    ["bash", "-c", LIB + 'NODE_NAME=mbp\n'
-                     'machine_prepare tolken || echo "rc=$?"'],
-                    env=dict(os.environ,
-                             PATH="%s:%s" % (path, os.environ["PATH"]),
-                             WK_ROOT=str(REPO)),
-                    capture_output=True, text=True, stdin=subprocess.DEVNULL)
-            argv = {n: (tmp / f"{n}.argv").read_text() if (tmp / f"{n}.argv").exists()
-                    else "" for n in ("ssh", "rsync")}
-            return cp, cp.stdout + cp.stderr, argv
+
+# The far side: `bash -c` on the one command string, with stdin (the bundle)
+# flowing through, which is the shape tools_push hands its caller's wrapper.
+FAR_SSH = """#!/bin/sh
+for a in "$@"; do last="$a"; done
+printf '%%s\\n' "$last" >> %s
+exec bash -c "$last"
+"""
+
+
+class PreparingPushesACommitAndStopsAtTheSudo(WkTest):
+    """A machine is given a *commit*, never a file copy (`tools_push`,
+    lib/tools.sh -- the fleet's one deploy). What lands there is a checkout at
+    this tree's HEAD, so nothing over there is content that exists only over
+    there and a later `git pull` has nothing of anyone's to replace. An rsync
+    of the working tree had that backwards: it pushed uncommitted work into a
+    checkout the operator also pulls into, and the pull won silently (tolken,
+    2026-09-08).
+
+    The deploy needs nothing privileged, so it happens either way. Installing a
+    NOPASSWD rule authenticates once, and nothing can bootstrap that from a
+    session with no terminal -- so that is where it stops, having left the
+    checkout in place, and it says which command finishes the job."""
+
+    def _prepare(self, dirty=False):
+        home = self.tmp / "home"
+        src = self.tmp / "src"
+        home.mkdir()
+        src.mkdir()
+        git(src, "init", "-q", ".")
+        (src / "wk").write_text("#!/bin/sh\necho committed\n")
+        git(src, "add", "-A")
+        git(src, "commit", "-qm", "one")
+        self.sha = git(src, "rev-parse", "HEAD").stdout.strip()
+        if dirty:
+            (src / "wk").write_text("#!/bin/sh\necho uncommitted\n")
+        self.far = home / "Development" / "wk-tools"
+        log = self.tmp / "ssh.argv"
+        with stub_path({"ssh": FAR_SSH % log}) as path:
+            cp = subprocess.run(
+                ["bash", "-c", LIB + f"WK_ROOT={src}\nNODE_NAME=mbp\n"
+                 'machine_prepare tolken || echo "rc=$?"'],
+                env=dict(os.environ,
+                         PATH="%s:%s" % (path, os.environ["PATH"]),
+                         WK_ROOT=str(REPO), HOME=str(home)),
+                capture_output=True, text=True, stdin=subprocess.DEVNULL)
+        asked = log.read_text() if log.exists() else ""
+        return cp, cp.stdout + cp.stderr, asked
 
     def test_it_stops_at_the_sudo_and_names_what_finishes_it(self):
         cp, out, _ = self._prepare()
@@ -79,17 +114,33 @@ class PreparingNeedsATerminalOnlyForTheSudo(WkTest):
         self.assertIn("wk boot mbp --prepare", out, out)
         self.assertIn("sudoers.d", out, out)
 
-    def test_the_tree_is_synced_anyway(self):
+    def test_the_commit_lands_anyway_as_a_checkout_at_this_head(self):
         """Everything that needs no password is done, so the session ends with
         the machine closer to ready than it started."""
-        _, out, argv = self._prepare()
-        self.assertIn("Development/wk-tools", argv["rsync"], argv["rsync"])
-        self.assertIn("tolken:", argv["rsync"], argv["rsync"])
+        _, out, _ = self._prepare()
         self.assertIn("the tree is in place", out, out)
+        self.assertTrue((self.far / ".git").is_dir(), f"{self.far} is no checkout")
+        self.assertEqual(self.sha, git(self.far, "rev-parse", "HEAD").stdout.strip())
+        self.assertEqual("#!/bin/sh\necho committed\n", (self.far / "wk").read_text())
+
+    def test_an_uncommitted_tree_is_refused_by_name_and_nothing_is_pushed(self):
+        """The decision this end makes: a machine takes a commit, so the
+        working tree here is committed first. `tools_committed` says so and
+        names the two commands, the same refusal `wk sync --tools` makes."""
+        cp, out, _ = self._prepare(dirty=True)
+        self.assertIn("rc=1", out, out)
+        self.assertIn("uncommitted changes", out, out)
+        self.assertIn("git -C", out, out)
+        self.assertFalse(self.far.exists(), f"{self.far} was written anyway")
 
     def test_it_installs_nothing_with_no_terminal_to_authenticate_on(self):
-        _, _, argv = self._prepare()
-        self.assertNotIn("setup --stage quiesce", argv["ssh"], argv["ssh"])
+        _, _, asked = self._prepare()
+        self.assertNotIn("setup --stage quiesce", asked, asked)
+
+    def test_the_deploy_is_the_fleets_one_deploy_and_not_a_second_one(self):
+        body = func_body(MACHINES.read_text(), "machine_prepare")
+        self.assertIn("tools_push", body)
+        self.assertNotIn("rsync", body)
 
 
 class TheVerbIsWiredIn(WkTest):
@@ -117,7 +168,10 @@ class TheVerbIsWiredIn(WkTest):
                 cp = bash('exec "$WK_ROOT/cmd/boot" mbp --prepare --dry-run',
                           env={"PATH": "%s:%s" % (path, os.environ["PATH"])})
             out = cp.stdout + cp.stderr
-            self.assertIn("would sync", out, out)
+            # What it says it would do has to be what it does: it pushes a
+            # commit now, and "sync" was the rsync this no longer runs.
+            self.assertIn("would push this tree, as a commit", out, out)
+            self.assertNotIn("would sync", out, out)
             self.assertFalse((tmp / "rsync.argv").exists(), "a dry run synced")
 
 
@@ -148,6 +202,83 @@ class TheHostOsGateAsksWhetherTheDriverCanReachIt(WkTest):
         text = BOOT.read_text()
         self.assertIn("if ! b_probeable; then", text)
         self.assertNotIn("_os_bound", text)
+
+
+class TheCommandRunsOnTheMachineTheConfNames(WkTest):
+    """One way to run a command on a machine (`m_ssh`, boot/machines.sh), and
+    the test for running it here rather than over ssh is standing on that
+    machine: `hostname -s` against the destination the conf names, the same
+    comparison bench/mac-ab.sh makes before refusing to reboot the machine it
+    is driven from.
+
+    Nothing a conf declares can answer it -- whether a machine "drives itself"
+    is a property of the caller -- and a driver that asked the *platform*
+    instead said the same wrong thing: driven from another Mac, every read
+    about tolken described the Mac it was typed on.
+
+    `ssh` and `hostname` are stubs, so both branches run on any machine and
+    what is checked is the command string each machine is issued -- which
+    catches a tool that one of the two platforms does not ship without that
+    platform in hand."""
+
+    def _m_ssh(self, script, hostname="moose"):
+        with scratch_dir() as tmp:
+            with stub_path({
+                "ssh":      '#!/bin/sh\necho "$@" >> %s/ssh.argv\n' % tmp,
+                "hostname": '#!/bin/sh\necho %s\n' % hostname,
+            }) as path:
+                cp = bash(LIB + script,
+                          env={"PATH": "%s:%s" % (path, os.environ["PATH"])})
+            log = tmp / "ssh.argv"
+            return cp.stdout + cp.stderr, (log.read_text() if log.exists() else "")
+
+    def test_a_command_for_another_machine_goes_over_ssh(self):
+        out, asked = self._m_ssh('NODE_SSH=othermach\nm_ssh "echo RAN-HERE"')
+        self.assertNotIn("RAN-HERE", out, out)
+        self.assertIn("othermach echo RAN-HERE", asked, asked)
+
+    def test_a_command_for_this_machine_runs_here(self):
+        """Case-insensitively: a machine's own spelling of its name need not
+        be the one the conf reaches it by."""
+        out, asked = self._m_ssh('NODE_SSH=moose\nm_ssh "echo RAN-HERE"',
+                                 hostname="MOOSE")
+        self.assertIn("RAN-HERE", out, out)
+        self.assertEqual("", asked, asked)
+
+    def test_the_mac_is_reached_over_ssh_from_a_machine_that_is_not_it(self):
+        """mbp's conf is the case a declared flag got wrong: it said "this
+        machine drives itself", so from anywhere else the command ran on the
+        driving machine and answered about the wrong computer."""
+        out, asked = self._m_ssh('machine_load mbp\nm_ssh "echo RAN-HERE"')
+        self.assertNotIn("RAN-HERE", out, out)
+        self.assertIn("tolken echo RAN-HERE", asked, asked)
+
+    def test_the_mac_runs_it_here_when_this_is_the_mac(self):
+        out, asked = self._m_ssh('machine_load mbp\nm_ssh "echo RAN-HERE"',
+                                 hostname="tolken")
+        self.assertIn("RAN-HERE", out, out)
+        self.assertEqual("", asked, asked)
+
+    def test_a_machine_with_no_ssh_destination_is_never_this_one(self):
+        """A machine reached only through something else (benchvm, whose
+        driver overrides m_ssh) names no destination, and a hostname that
+        cannot be read is not a match for it."""
+        out, asked = self._m_ssh('NODE_SSH=""\nm_ssh "echo RAN-HERE"',
+                                 hostname="")
+        self.assertNotIn("RAN-HERE", out, out)
+
+    def test_the_reboot_it_issues_detaches_with_what_both_platforms_ship(self):
+        """`setsid` is util-linux and macOS ships none -- measured on tolken
+        (macOS 26.6.2): `command -v setsid` answers nothing, `command -v
+        nohup` answers /usr/bin/nohup. A reboot that quietly does nothing
+        exits 0, so the string is read here rather than trusted over there."""
+        for verb in ("reboot", "reboot-tryboot"):
+            with self.subTest(verb=verb):
+                _, asked = self._m_ssh(
+                    'NODE_SSH=othermach\nNODE_ROLE=bench-device\n'
+                    'MODE_CHANNEL=host\nboot_priv %s' % verb)
+                self.assertIn("nohup ", asked, asked)
+                self.assertNotIn("setsid", asked, asked)
 
 
 if __name__ == "__main__":

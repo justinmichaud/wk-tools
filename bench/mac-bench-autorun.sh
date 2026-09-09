@@ -69,15 +69,49 @@ PY
 TOOLS=$(jf wk_tools); TOOLS="${TOOLS:-$HOME/Development/wk-tools}"   # read here because the settings this volume is judged by are read out of the tree, before the job is
 QUIET_DESKTOP="$TOOLS/bench/mac-quiet-desktop.sh"
 
+# The host install: the one mounted macOS system volume that is not this one and carries no bench marker -- the mirror of wk-boot-priv's own gate, read here because this install has the sudo and the host one is not running.
+host_install() {
+    local v n=0 found=""
+    for v in /Volumes/*; do
+        [ -f "$v/System/Library/CoreServices/SystemVersion.plist" ] || continue
+        [ -f "$v/etc/wk-image" ] && continue
+        [ "$(stat -f %d "$v" 2>/dev/null)" = "$(stat -f %d / 2>/dev/null)" ] && continue
+        found="$v"; n=$((n + 1))
+    done
+    [ "$n" -eq 1 ] || return 1
+    printf '%s' "$found"
+}
+
+# Hands the machine back rather than halting on it, so the only human step is a login. Ordered so a bless that did not take cannot cost a boot loop: this volume is the firmware default, so a reboot with it still default lands back here and measures again -- the reboot is taken only once the firmware is *read back* as naming the host install, and otherwise this halts, which is always safe. Whether `bless --setBoot` succeeds for a volume this account does not own is the platform's answer and one boot has it.
 _left=""
-leave_bench() {   # the way from a powered-off bench volume to host mode is the startup manager, once
-    local why="$1"
+leave_bench() {
+    local why="$1" host grp want
     [ -n "$_left" ] && return 0
     _left=1
-    say "powering off: $why"
     state_set left_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+    if host=$(host_install); then
+        want=$(python3 "$TOOLS/lib/wkmac.py" volume-group "$host" 2>/dev/null) || want=""
+        sudo -n bless --mount "$host" --setBoot >/dev/null 2>&1 || true
+        grp=$(python3 "$TOOLS/lib/wkmac.py" boot-volume 2>/dev/null) || grp=""
+        grp="${grp##*:}"
+        if [ -n "$want" ] && [ "$grp" = "$want" ]; then
+            say "handing the machine back: $why"
+            say "  the firmware now names $host, so this reboot comes up in host mode"
+            sync 2>/dev/null || true
+            sudo -n /sbin/reboot >/dev/null 2>&1 || say "WARNING: could not reboot"
+            return 0
+        fi
+        say "  the firmware still names this volume (reads '${grp:-nothing}', wanted '${want:-unreadable}')"
+        say "  so it powers off instead: a reboot would land back here and measure again."
+    else
+        say "  no single host install is mounted, so there is nothing to hand back to"
+    fi
+
+    say "powering off: $why"
     sync 2>/dev/null || true
-    sudo -n shutdown -h now >/dev/null 2>&1 || say "WARNING: could not power off"   # -n logs rather than hangs if NOPASSWD is gone
+    # `/sbin/halt`, not `shutdown -h`, which asks loginwindow: any modal dialog on the screen vetoes that, and one sat over a finished first boot for ten minutes (2026-09-07). `-n` logs rather than hangs if NOPASSWD is gone.
+    sudo -n /sbin/halt >/dev/null 2>&1 || say "WARNING: could not power off"
 }
 
 # The file only: `launchctl bootout` would kill this script, its own child.
@@ -102,7 +136,7 @@ cancel_pending_reboot() {
     fi
 }
 
-# Provisioning is the settings, and `wk bench staged` measures them again before every leg: judged here by the same probe and the same findings, so a volume that drifted is refused once and up front rather than leg by leg on a machine with no network to say so.
+# Judged by the same probe and findings `wk bench staged` uses before every leg, so a volume that drifted is refused up front rather than leg by leg on a machine with no network to say so.
 refuse_unprovisioned() {
     local probe wrong installed=no
     if pgrep -f wk-bench-firstboot >/dev/null 2>&1; then
@@ -227,6 +261,96 @@ refuse_unpinned_display() {   # unpinned is two runs at different resolutions co
     exit 0
 }
 refuse_unpinned_display
+
+# The declared mode is held, not hoped for: WindowServer reads it at start and no runtime call reaches a scaled mode (lib/wkmac.py says why), so a mode that is not the declared one is written and this boot repeated -- the firmware default is this volume, so the repeat lands back here. Bounded by the record: a write that did not take is refused rather than tried again, and the repeat spends no attempt, having measured nothing.
+converge_display_mode() {
+    local want running
+    want=$(printf '%s' "$DISPLAY_EXPECT" | awk '{print $2}')
+    running=$(python3 "$TOOLS/lib/wkmac.py" display-mode) || running=""
+    if [ "$running" = "$want" ]; then
+        say "display mode: $running, as the job declares"
+        return 0
+    fi
+    say "display mode: running at ${running:-unreadable}, and the job declares $want"
+    if [ "$(state_get mode_declared)" = "$want" ]; then
+        say "  $want was written into the WindowServer configuration for this boot and"
+        say "  the panel still comes up at ${running:-unreadable}, so the write does not take."
+        say "  Nothing is measured at a mode that is not the declared one: MotionMark's"
+        say "  score is the area it draws. From host mode, set the mode on this install"
+        say "  by hand and re-plant, or declare the mode it does come up at:"
+        say "    NODE_DISPLAY=\"builtin ${running:-<what it reads>}\"  in boot/machines/mbp.conf"
+        state_set phase done
+        state_set outcome "display-mode-unsettable"
+        remove_agent
+        leave_bench "the declared display mode cannot be set"
+        exit 0
+    fi
+    if ! sudo -n python3 "$TOOLS/lib/wkmac.py" display-mode --declare "$want" >/dev/null 2>&1; then
+        say "  the WindowServer configuration would not take $want."
+        state_set phase done
+        state_set outcome "display-mode-unwritable"
+        remove_agent
+        leave_bench "the declared display mode could not be written"
+        exit 0
+    fi
+    state_set mode_declared "$want"
+    state_set attempts "$((ATTEMPTS - 1))"   # this boot measured nothing
+    say "  wrote it; restarting so WindowServer comes up at $want"
+    sync 2>/dev/null || true
+    sudo -n /sbin/reboot >/dev/null 2>&1 || say "WARNING: could not restart"
+    exit 0
+}
+# Asked before the mode is touched, and about the topology only -- one online panel and it the built-in one -- because with a second attached there is no single built-in mode to converge to, and the mode itself is what converge_display_mode below is for. The driver asked the same question seconds before the restart, so what this catches is a monitor plugged in between the two.
+refuse_wrong_displays() {
+    local said rc=0
+    said=$(/usr/bin/python3 "$TOOLS/bench/mac-browser-check.py" --displays-only 2>&1) || rc=$?
+    if [ "$rc" -eq 0 ]; then
+        say "displays: $said"
+        return 0
+    fi
+    say "the screen this would be measured on is not the declared one:"
+    printf '%s\n' "$said" | while IFS= read -r _l; do say "  $_l"; done
+    say "  Nothing runs and no mode is written. Disconnect the monitor and boot"
+    say "  this volume again -- the job stays planted and spends no attempt."
+    state_set attempts "$((ATTEMPTS - 1))"
+    leave_bench "the display is not the declared one"
+    exit 0
+}
+# This install provisions itself from what the plant put in /var/wk with no privilege at all: every path it writes belongs to this install, over which the bench account holds passwordless root by design, which is why no step of the lane needs a password on the host install. `stage_payload` is the host writer's own function handed this install's root, so a payload file cannot land one way and not the other.
+converge_self() {
+    local vol="$TOOLS/../tailnet"
+    [ -r "$TOOLS/bench/mac-bench-payload.sh" ] || { say "no payload writer in the planted tree, so this install cannot converge itself"; return 0; }
+    say "converging this install from the planted tree"
+    # The writer alone, never mac-bench-volume.sh: that one dispatches on source (`case "${ACTION:---report}"`), so sourcing it would run a report and its argument parsing.
+    if sudo -n bash -c "set -e
+WK_ROOT=$(printf %q "$TOOLS")
+. \"\$WK_ROOT/lib/common.sh\"
+run() { \"\$@\"; }
+. \"\$WK_ROOT/bench/mac-bench-payload.sh\"
+stage_payload /" >>"$LOG" 2>&1; then
+        say "  payload staged into this install"
+    else
+        say "  WARNING: the payload did not fully stage; the log above says which file"
+    fi
+    if [ -d "$vol" ]; then
+        if sudo -n "$TOOLS/bench/mac-tailnet.sh" install / "$vol" >>"$LOG" 2>&1; then
+            say "  tailnet payload installed"
+        else
+            say "  WARNING: the tailnet payload would not install; this install stays unreachable"
+        fi
+    else
+        say "  no tailnet payload at $vol, so this install has no tailnet identity to join with"
+    fi
+    if sudo -n "$TOOLS/bench/mac-tailnet.sh" join >>"$LOG" 2>&1; then
+        say "  tailnet: joined, so this run can be watched while it measures"
+    else
+        say "  tailnet: did not join (see the log); the run is unobservable but not affected"
+    fi
+}
+converge_self
+
+refuse_wrong_displays
+converge_display_mode
 
 state_set phase running
 state_set plans "$PLANS"
@@ -356,7 +480,7 @@ leg() {   # <round> <plan> <arm index> [profile]. A software-update scan across 
     sid=$(jf "arms.$i.id")
     bargs=$(jf "arms.$i.browser_args")
     say "--- round $r, $plan, arm $label (staged $sid) ---"
-    set -- bench staged --plan "$plan" --timeout "$TIMEOUT"
+    set -- bench staged --plan "$plan" --timeout "$TIMEOUT" --expect-display "$DISPLAY_EXPECT"
     [ -n "$sid" ]   && set -- "$@" --id "$sid"
     set -- "$@" --count "$COUNT"
     [ -n "$bargs" ] && set -- "$@" --browser-args "$bargs"

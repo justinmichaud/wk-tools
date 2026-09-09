@@ -79,6 +79,16 @@ DISPATCH_VARS = dispatch_vars()
 for _leaked in DISPATCH_VARS:
     os.environ.pop(_leaked, None)
 
+# Every subprocess a test starts inherits this process's stdin, and a bash
+# built with SSH_SOURCE_BASHRC (Debian and Ubuntu ship one) sources ~/.bashrc
+# in a *non-interactive* shell whose stdin is a connected socket and whose
+# SHLVL is below 2 -- so a `bash -c` or a `./wk` handed a hand-built env
+# (which drops SHLVL) had the machine's rc rewrite its PATH, whenever the
+# runner itself was started with a socketpair on stdin. /dev/null is not a
+# socket. A test that wants to feed a command bytes passes `input=`.
+with open(os.devnull, "rb") as _devnull:
+    os.dup2(_devnull.fileno(), 0)
+
 
 def where_values():
     """The `where=` vocabulary, read from the dispatcher that enforces it

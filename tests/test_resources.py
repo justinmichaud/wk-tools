@@ -3,13 +3,18 @@ budget record while it runs, the next build is sized against what is left,
 and a machine spoken for refuses rather than oversubscribes. Records are
 lock-shaped -- a dead holder's record is pruned on the next read.
 
+Also the rule that makes a refused reading reach the person who ran the
+command, in two halves that only work together (TestAReadingRefusalReaches
+ItsCaller and TestEveryCallSiteTakesAReadingIntoAVariable below).
+
 Run: python3 -m unittest tests.test_resources -v
 """
 import os
+import re
 import subprocess
 import unittest
 
-from tests.support import REPO, WkTest, bash
+from tests.support import REPO, WkTest, bash, shell_files, stub_path
 
 
 class TestBuildRecords(WkTest):
@@ -142,6 +147,217 @@ class TestDiskAdmit(WkTest):
         cp = self._bash('( build_admit "this build" 64 60 ) && echo admitted || echo refused', 10)
         self.assertIn("refused", cp.stdout)
         self.assertIn("10 GB free", cp.stdout + cp.stderr)
+
+
+# lib/resources.sh's readings: what a refusal has to survive.
+DEF = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)\(\)\s*\{")
+TOKEN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+PARAM = re.compile(r"\$\{[^{}]*\}")
+
+# A reading belongs on the right of an assignment and nowhere else. `local v`
+# ahead of it and a `|| ...` after it are that same shape; a case arm or a
+# second assignment on the line is still one simple command.
+ASSIGNED = re.compile(r"(?:^|[;{)]|&&|\|\||\bthen\b|\bdo\b|\belse\b)\s*"
+                      r"(?:local\s+|export\s+|declare\s+-\w+\s+)?[A-Za-z_][A-Za-z0-9_]*=$")
+SEPARATED = re.compile(r"^\s*($|;|\|\||&&|#)")
+
+
+def shell_functions(text):
+    """{name: body} for the house style -- `name() {` opening a line and a
+    closing `}` alone on one, or the whole function on one line."""
+    out, lines, i = {}, text.splitlines(), 0
+    while i < len(lines):
+        m = DEF.match(lines[i])
+        if m:
+            rest = PARAM.sub("", lines[i][m.end():])
+            if "}" in rest:
+                out[m.group(1)] = lines[i][m.end():]
+            else:
+                j = i + 1
+                while j < len(lines) and lines[j] != "}":
+                    j += 1
+                out[m.group(1)] = "\n".join(lines[i + 1:j])
+                i = j
+        i += 1
+    return out
+
+
+def readings():
+    """Every lib/resources.sh function that can refuse: the ones that die or
+    put up a barrier, and then whatever reaches one of those. Derived from
+    the file rather than listed here, so a new reading is covered the day it
+    is written."""
+    funcs = shell_functions((REPO / "lib" / "resources.sh").read_text())
+    named = {f for f, b in funcs.items()
+             if re.search(r"\b(die|barrier|_require_reading)\b", b)}
+    while True:
+        more = {f for f, b in funcs.items() if set(TOKEN.findall(b)) & named}
+        if more <= named:
+            return named
+        named |= more
+
+
+def substitutions(text):
+    """(offset, end, inner) for every `$( ... )`, nesting included."""
+    out, i = [], 0
+    while True:
+        i = text.find("$(", i)
+        if i < 0:
+            return out
+        if text[i:i + 3] == "$((":
+            i += 3
+            continue
+        depth, j = 0, i + 1
+        while j < len(text):
+            if text[j] == "(":
+                depth += 1
+            elif text[j] == ")":
+                depth -= 1
+                if depth == 0:
+                    break
+            j += 1
+        out.append((i, j + 1, text[i + 2:j]))
+        i += 2
+
+
+def strip_nested(text):
+    """The command a substitution runs, with its own substitutions removed:
+    `WK_MB_PER_JOB=2560 build_jobs` keeps build_jobs, and the build_jobs in
+    `x=$(printf %s "$(build_jobs)")` belongs to the inner one."""
+    while True:
+        cut = re.sub(r"\$\(\((?:[^()]|\([^()]*\))*\)\)|\$\([^()$]*\)", " ", text)
+        if cut == text:
+            return text
+        text = cut
+
+
+def reading_in_a_word():
+    """Every call site in the tree that takes a reading into a word."""
+    names = readings()
+    out = []
+    for path in shell_files():
+        rel = str(path.relative_to(REPO))
+        if rel.startswith("tests/"):
+            continue
+        text = path.read_text()
+        for start, end, inner in substitutions(text):
+            if not set(TOKEN.findall(strip_nested(inner))) & names:
+                continue
+            bol = text.rfind("\n", 0, start) + 1
+            eol = text.find("\n", end)
+            if ASSIGNED.search(text[bol:start]) \
+               and SEPARATED.match(text[end:eol if eol >= 0 else len(text)]):
+                continue
+            out.append(f"  {rel}:{text.count(chr(10), 0, start) + 1}: "
+                       f"{text[bol:end].strip()[:90]}")
+    return out
+
+
+class TestEveryCallSiteTakesAReadingIntoAVariable(unittest.TestCase):
+    """`die` inside a command substitution kills that subshell and nothing
+    else, so a reading taken into a word prints its refusal and hands the
+    caller an empty string -- which then sizes a build, or reaches `$(( ))`
+    as a syntax error frames away from the sysctl or /proc file that was
+    missing. Taken into a variable of its own it is a simple command, and
+    the failed assignment ends the caller.
+
+    Measured over the tree, because a caller re-deciding this is a bug even
+    while it happens to decide it correctly."""
+
+    def test_no_reading_is_taken_into_a_word(self):
+        wrong = reading_in_a_word()
+        if wrong:
+            self.fail(f"{len(wrong)} call site(s) take a reading from "
+                      "lib/resources.sh into a word, where its refusal is "
+                      "discarded. Each wants the reading on a line of its "
+                      "own -- `v=$(...)`, then use $v:\n" + "\n".join(wrong))
+
+    def test_the_readings_are_found_from_the_file_that_defines_them(self):
+        """The audit above is worth nothing if the set is empty or has lost
+        the composite readings, which is what a rename or a moved function
+        would do to it."""
+        names = readings()
+        self.assertLessEqual(
+            {"host_cores", "host_mem_mb", "host_load", "describe_cores",
+             "avail_mem_mb", "envelope_cores", "envelope_mem_mb",
+             "build_jobs", "explain_jobs", "build_admit", "disk_admit"},
+            names)
+        self.assertNotIn("store_free_gb", names,
+                         "store_free_gb answers nothing rather than refusing")
+
+
+class TestAReadingRefusalReachesItsCaller(WkTest):
+    """The other half. Bash does not inherit errexit into a command
+    substitution, so the reading envelope_cores itself takes from host_cores
+    fails without ending envelope_cores: it runs on with an empty value and
+    answers 1, 0 or a negative envelope with status 0, and no assignment at
+    the call site can tell. Every reading a reader takes therefore carries
+    `|| return $?`, and the refusal walks out through every wrapper to the
+    person who ran the command."""
+
+    # A machine that will not say how many cores or how much memory it has.
+    DEAF = {"nproc": "exit 1", "awk": "exit 1"}
+
+    COMPOSITE = ("envelope_cores", "envelope_mem_mb", "avail_mem_mb",
+                 "build_jobs", "explain_jobs", "describe_cores")
+
+    def _res(self, script, stubs=None, env=None):
+        e = {"XDG_STATE_HOME": str(self.tmp / "state"),
+             "WK_STORE": str(self.tmp / "store"),
+             "WK_TEST_CGROUP": str(self.tmp / "no-such-cgroup")}
+        e.update(env or {})
+        body = (f'set -euo pipefail\n. "{REPO}/lib/common.sh"\n'
+                f'. "{REPO}/lib/resources.sh"\n'
+                '_cgroup_mem_max() { echo "$WK_TEST_CGROUP"; }\n' + script)
+        with stub_path(stubs if stubs is not None else self.DEAF) as binp:
+            e["PATH"] = f"{binp}:{os.environ['PATH']}"
+            return bash(body, env=e)
+
+    def test_a_reader_that_reads_through_another_one_still_refuses(self):
+        for name in self.COMPOSITE:
+            with self.subTest(reading=name):
+                cp = self._res(f'v=$({name}); echo "SURVIVED [$v]"')
+                self.assertNotEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+                self.assertNotIn("SURVIVED", cp.stdout,
+                                 f"{name} answered a machine that said nothing")
+                self.assertIn("Every job count and memory envelope is sized from it",
+                              cp.stderr)
+                self.assertNotIn("syntax error", cp.stderr)
+
+    def test_the_readings_still_answer_a_machine_that_does_reply(self):
+        """The same six against the real machine: `|| return $?` must not
+        turn a reading that worked into a refusal."""
+        for name in self.COMPOSITE:
+            with self.subTest(reading=name):
+                cp = self._res(f'v=$({name}); echo "ANSWERED [$v]"', stubs={})
+                self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+                self.assertRegex(cp.stdout, r"ANSWERED \[[0-9]")
+
+    def test_it_walks_out_through_the_target_drivers_wrappers(self):
+        """The vm driver's overridable numbers (_vm_cpus, _base_mem_mb, and
+        t_cores/t_mem_mb over them) end in a reading, so a workspace is
+        never sized from a machine that would not answer."""
+        driver = (f'. "{REPO}/lib/store.sh"\n. "{REPO}/lib/target.sh"\n'
+                  'load_target vm >/dev/null 2>&1\n')
+        for name in ("_vm_cpus", "_vm_mem_mb", "_base_cpus", "_base_mem_mb",
+                     "t_cores wk-test", "t_mem_mb wk-test"):
+            with self.subTest(wrapper=name):
+                cp = self._res(driver + f'v=$({name}); echo "SURVIVED [$v]"',
+                               stubs={**self.DEAF, "tart": "echo '{}'"},
+                               env={"WK_ROOT": str(REPO)})
+                self.assertNotEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+                self.assertNotIn("SURVIVED", cp.stdout)
+
+    def test_an_override_answers_without_asking_the_machine(self):
+        """WK_VM_CPUS and friends are a person's choice, so they stand on a
+        machine whose own reading is unavailable."""
+        cp = self._res(f'. "{REPO}/lib/store.sh"\n. "{REPO}/lib/target.sh"\n'
+                       'load_target vm >/dev/null 2>&1\n'
+                       'printf "%s %s\\n" "$(_vm_cpus)" "$(_base_mem_mb)"',
+                       env={"WK_ROOT": str(REPO), "WK_VM_CPUS": "7",
+                            "WK_VM_BASE_MEM_MB": "4444"})
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertEqual("7 4444", cp.stdout.strip())
 
 
 if __name__ == "__main__":

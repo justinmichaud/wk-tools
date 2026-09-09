@@ -129,6 +129,24 @@ class TestTheGrantIsNarrow(WkTest):
                 self.assertEqual(3, cp.returncode, f"{arg}: {cp.stdout}{cp.stderr}")
                 self.assertIn("REFUSED", cp.stderr)
 
+    def test_the_detach_is_one_every_machine_it_runs_on_ships(self):
+        """`setsid` is util-linux and macOS does not ship it, so with it this
+        verb printed "rebooting in 3s" and rebooted nothing on every Mac -- and
+        exited 0 doing it, which is why `wk bench mac-ab` verifies the restart
+        against kern.boottime rather than trusting the helper. `nohup` is POSIX
+        and is on both. Measured on tolken, macOS 26.6.2: `command -v setsid`
+        answers nothing, `command -v nohup` answers /usr/bin/nohup."""
+        body = HELPER.read_text()
+        code = [l for l in body.splitlines() if not l.lstrip().startswith("#")]
+        self.assertEqual([], [l for l in code if "setsid" in l], code)
+        for fn in ("v_reboot", "v_reboot_tryboot"):
+            with self.subTest(verb=fn):
+                text = re.search(r"(?ms)^%s\(\) \{.*?^\}" % fn, body).group(0)
+                self.assertIn("nohup ", text)
+                # Detached from the ssh that asked, whose teardown SIGHUPs the group.
+                self.assertIn("&", text)
+                self.assertIn("</dev/null", text)
+
     def test_the_reboot_verbs_take_no_arguments(self):
         for fn, verb in (("v_reboot", "reboot"),
                          ("v_reboot_tryboot", "reboot-tryboot")):
@@ -157,6 +175,84 @@ class TestTheGrantIsNarrow(WkTest):
             with self.subTest(ref=ref):
                 self.assertNotIn(ref + " >", fn)
                 self.assertNotIn("printf \"%s\" " + ref, fn)
+
+
+class TestStatusReportsWhatThisMachineCanDo(unittest.TestCase):
+    """`status` is what every caller asks before it arms anything, so a static
+    yes is a claim three of its four lines cannot back: a Pi has no `bless`, a
+    Mac has neither vcmailbox nor /run/systemd."""
+
+    def _status(self, have=(), systemd=False):
+        stubs = {name: "#!/bin/sh\nexit 0\n" for name in have}
+        with stub_path(stubs) as binp:
+            script = _SAY + _lift("v_status")
+            if not systemd:
+                # `[ -d /run/systemd ]` is the reading; a real one on this host
+                # would answer for the test rather than the case under test.
+                script = script.replace("[ -d /run/systemd ]", "false")
+            return bash(script + "\nv_status\n",
+                        env={"PATH": "%s:/usr/bin:/bin" % binp})
+
+    def _lines(self, cp):
+        return dict(l.split(": ", 1)[1].split("=", 1)
+                    for l in cp.stdout.splitlines() if "=" in l)
+
+    def test_a_pi_says_it_cannot_bless(self):
+        cp = self._status(have=("vcmailbox",), systemd=True)
+        got = self._lines(cp)
+        self.assertEqual("yes", got["order"])
+        self.assertEqual("yes", got["tryboot"])
+        self.assertTrue(got["bless"].startswith("no"), got)
+
+    def test_a_mac_says_it_has_neither_an_order_nor_tryboot(self):
+        cp = self._status(have=("bless",))
+        got = self._lines(cp)
+        self.assertTrue(got["order"].startswith("no"), got)
+        self.assertTrue(got["tryboot"].startswith("no"), got)
+        self.assertEqual("yes", got["bless"])
+
+    def test_every_no_says_why(self):
+        cp = self._status()
+        for key, value in self._lines(cp).items():
+            if value == "no" or value.startswith("no ") or value.startswith("no("):
+                with self.subTest(key=key):
+                    self.assertIn("(", value, value)
+
+    def test_the_reboot_every_machine_has_is_the_one_unconditional_yes(self):
+        """It is the verb the bench lane needs, and the helper's own reboot is
+        the same on both platforms."""
+        for have in ((), ("bless",), ("vcmailbox",)):
+            with self.subTest(have=have):
+                self.assertEqual("yes", self._lines(self._status(have=have))["reboot"])
+
+    def test_it_names_the_detach_its_reboot_verbs_use(self):
+        """Answering is not being able. `status` said ok for as long as the
+        reboot verbs detached with `setsid`, which macOS does not ship, so the
+        verb exited 0 having rebooted nothing -- and every caller that read
+        "the helper answers" as "this machine can be restarted" was wrong. The
+        verb names its mechanism, so a helper too old to name one is detectable
+        from the driving end without asking its version."""
+        got = self._lines(self._status())
+        self.assertEqual("nohup", got["detach"])
+        body = HELPER.read_text()
+        for fn in ("v_reboot", "v_reboot_tryboot"):
+            with self.subTest(verb=fn):
+                text = re.search(r"(?ms)^%s\(\) \{.*?^\}" % fn, body).group(0)
+                self.assertIn(got["detach"] + " ", text)
+
+    def test_the_mac_driver_requires_that_line_and_not_merely_an_answer(self):
+        line = [l for l in (REPO / "boot" / "mac-volume.sh").read_text().splitlines()
+                if l.startswith("mv_reboot_ready()")]
+        self.assertEqual(1, len(line), line)
+        self.assertIn("detach=", line[0])
+        self.assertNotIn("status >/dev/null 2>&1; }", line[0])
+
+    def test_it_still_opens_with_ok(self):
+        """`mv_reboot_ready` reads the exit status, and `wk doctor` the first
+        line: a status that stopped saying ok would read as a broken helper."""
+        cp = self._status()
+        self.assertEqual(0, cp.returncode, cp.stdout + cp.stderr)
+        self.assertEqual("wk-boot-priv: ok", cp.stdout.splitlines()[0])
 
 
 class TestTheDispatcherHasNoDefaultThatRuns(unittest.TestCase):
@@ -290,12 +386,11 @@ NODE_NAME=mbp
 NODE_SSH=fakemac
 NODE_VOLUME="WK Bench"
 . "$WK_ROOT/boot/mac-volume.sh"
-is_macos() { return 1; }
 mac_firmware_default() {
     head -1 "$FW"
     tail -n +2 "$FW" > "$FW.rest" && mv "$FW.rest" "$FW"
 }
-mv_sh() {
+m_ssh() {
     printf '%s\\n' "$1" >> "$LOG"
     case "$1" in
         *"test -d"*|*"test -x"*) return 0 ;;
@@ -322,7 +417,7 @@ class TestTheDrivingEndProvesTheReturnBeforeItArms(WkTest):
     def _arm(self, host_rc=0, host_said="wk-boot-priv: bless said: nothing",
              vol_rc=0, vol_said="wk-boot-priv: blessed /Volumes/WK Bench",
              firmware=None):
-        log = self.tmp / "mv_sh.log"
+        log = self.tmp / "m_ssh.log"
         log.write_text("")
         fw = self.tmp / "firmware"
         fw.write_text("\n".join(firmware if firmware is not None
@@ -382,15 +477,15 @@ class TestTheDrivingEndProvesTheReturnBeforeItArms(WkTest):
         self.assertNotIn("owner-password", body)
         self.assertNotIn("volume owner", body)
 
-    def test_the_helper_is_asked_for_through_mv_sh_and_never_a_local_sudo(self):
-        """`sudo -n` rides inside the command mv_sh runs, so every verb answers
+    def test_the_helper_is_asked_for_through_m_ssh_and_never_a_local_sudo(self):
+        """`sudo -n` rides inside the command m_ssh runs, so every verb answers
         on that Mac and from any machine that can reach it."""
         text = DRIVER.read_text()
         self.assertNotIn('sudo -n "$BOOT_HELPER"', text)
         for line in text.splitlines():
             if "sudo -n" in line:
-                self.assertIn("mv_sh", line, line)
-        self.assertIn("mv_sh", func_body(text, "b_arm"))
+                self.assertIn("m_ssh", line, line)
+        self.assertIn("m_ssh", func_body(text, "b_arm"))
         _, asked = self._arm()
         self.assertRegex(asked, r"(?m)^sudo -n \S*wk-boot-priv'? boot-host 2>&1$")
 

@@ -52,12 +52,11 @@ Host rpi5
   User jmichaud
 
 # tolken -- the Apple Silicon workstation, and the fleet's `mbp`. The two names
-# are deliberately different: `mbp` is boot/machines.sh's name for the machine
-# and resolves to NODE_SSH=localhost, because that driver is NODE_LOCAL and
-# answers only for the computer it runs on. This stanza is how *another* device
-# reaches the same hardware, which is what the macOS benchmark lane needs -- the
-# build, the staging and the run all happen on tolken, driven from wherever the
-# terminal is.
+# are deliberately different: `mbp` is boot/machines.sh's name for the machine,
+# and this stanza is the destination its NODE_SSH names. One address whether the
+# lane is driven from that Mac or from another device, which is what the macOS
+# benchmark lane needs -- the build, the staging and the run all happen on
+# tolken, driven from wherever the terminal is.
 #
 # The tailnet name and no HostName, for the same reason the bridges have none:
 # the Mac is on the house LAN with no reservation, and it is the one machine in

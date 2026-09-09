@@ -63,7 +63,9 @@ run_stage() {
 }
 
 OS="$(wk_os)"
-info "wk-tools setup on $OS ($(describe_cores), $(host_mem_mb) MB)"
+CORES_DESC=$(describe_cores)
+MEM_MB=$(host_mem_mb)
+info "wk-tools setup on $OS ($CORES_DESC, $MEM_MB MB)"
 
 _sudo_keepalive_pid=""   # `wk sudo`'s 30-second window closes in the gaps between setup's privileged steps
 _sudo_keepalive_stop() {

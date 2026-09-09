@@ -199,7 +199,8 @@ class NoSecondWriterTest(unittest.TestCase):
         # Both writers of a benchmark install -- the provisioning package and
         # the re-arm onto one already installed -- read one payload table, so
         # neither can be given a file the other is not.
-        self.assertIn("wk-bench-quiet-hosts.sh", func_body(text, "bench_payload_files"))
+        payload = (REPO / "bench" / "mac-bench-payload.sh").read_text()
+        self.assertIn("wk-bench-quiet-hosts.sh", func_body(payload, "bench_payload_files"))
         for writer in ("do_build_pkg", "do_repair"):
             self.assertIn("stage_payload", func_body(text, writer), writer)
 
@@ -457,5 +458,65 @@ class TestBothLegPathsWatchTheScreen(unittest.TestCase):
 
     def test_what_drew_fails_the_leg_unless_forced(self):
         text = self.BENCH.read_text()
-        self.assertEqual(2, text.count("something drew over this run"))
+        self.assertEqual(2, text.count("the machine did not stay quiet under this run"))
         self.assertEqual(2, text.count('--force: keeping the number anyway; it is one to distrust'))
+
+
+class TestTheWatchSeesAPausedAgentComeBack(unittest.TestCase):
+    """`wk_quiet_daemons_pause` is an instant and a leg is half an hour, and the
+    file itself records that macOS restarts these on demand -- so the pair that
+    draws a notification banner, NotificationCenter and usernoted, can be back
+    inside a leg that began with both held stopped. Nothing else sees one: a
+    banner never becomes the frontmost *application*, so the window probe and
+    the browser check both pass with one on the screen."""
+
+    QUIET = REPO / "lib" / "quiet.sh"
+
+    def _restarted(self, ps_output):
+        """`_watch_restarted` against a `ps` of the test's own, so every state
+        is reachable without a Mac."""
+        body = func_body(self.QUIET.read_text(), "_watch_restarted")
+        stub = ('is_macos() { return 0; }\n'
+                'ps() { printf "%s" "$WK_TEST_PS"; }\n')
+        cp = bash(". %r\n%s\n_watch_restarted() {%s}\n_watch_restarted\n"
+                  % (str(REPO / "bench" / "mac-quiet-desktop.sh"), stub, body),
+                  env={"PATH": "/usr/bin:/bin", "WK_TEST_PS": ps_output})
+        self.assertEqual(0, cp.returncode, cp.stdout + cp.stderr)
+        return sorted(x for x in cp.stdout.strip().split(",") if x)
+
+    def test_a_machine_where_they_are_all_stopped_records_nothing(self):
+        self.assertEqual([], self._restarted(
+            "T   /System/Library/x/NotificationCenter\n"
+            "T   usernoted\n"))
+
+    def test_a_banner_daemon_running_again_is_recorded(self):
+        self.assertEqual(["NotificationCenter", "usernoted"], self._restarted(
+            "S   /System/Library/CoreServices/NotificationCenter\n"
+            "S   /usr/sbin/usernoted\n"))
+
+    def test_a_process_the_kernel_will_not_stop_is_not_a_finding(self):
+        """Running is its permanent state -- the signal answers EPERM for a
+        platform binary -- and the preflight already says what it can do. In the
+        watch it would be a finding on every leg, which is a watch nobody reads."""
+        unstoppable = bash(". %r\nwk_quiet_desktop_unstoppable\n"
+                           % str(REPO / "bench" / "mac-quiet-desktop.sh")).stdout.split()
+        self.assertTrue(unstoppable)
+        self.assertEqual([], self._restarted(
+            "".join("S   %s\n" % p for p in unstoppable)))
+
+    def test_a_process_that_is_not_on_the_list_is_not_a_finding(self):
+        self.assertEqual([], self._restarted("S   MiniBrowser\nS   bash\n"))
+
+    def test_the_watch_records_it_where_the_leg_reads_it(self):
+        """One record, so one `screen_watch_stop` fails the leg for either
+        reason rather than a second watch nothing reads."""
+        text = self.QUIET.read_text()
+        start = func_body(text, "screen_watch_start")
+        self.assertIn("_watch_restarted", start)
+        self.assertIn('>> "$record"', start.split("_watch_restarted")[1])
+
+    def test_it_costs_one_process_per_sample_and_not_forty(self):
+        """It samples beside the thing being measured."""
+        body = func_body(self.QUIET.read_text(), "_watch_restarted")
+        self.assertEqual(1, body.count("ps -A"))
+        self.assertNotIn("pgrep", body)

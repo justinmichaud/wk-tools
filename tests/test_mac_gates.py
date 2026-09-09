@@ -453,7 +453,9 @@ class TestPyobjcIsProvisionedNotAssumed(WkTest):
     def test_the_benchmark_install_is_given_it_by_both_writers(self):
         """--build-pkg and --repair write the same payload, from one table."""
         text = (REPO / "bench" / "mac-bench-volume.sh").read_text()
-        self.assertIn("bench/mac-pyobjc.sh", func_body(text, "bench_payload_files"))
+        self.assertIn("bench/mac-pyobjc.sh",
+                      func_body((REPO / "bench" / "mac-bench-payload.sh").read_text(),
+                                "bench_payload_files"))
         for name in ("do_build_pkg", "do_repair"):
             self.assertIn("stage_payload", func_body(text, name), name)
 
@@ -461,7 +463,8 @@ class TestPyobjcIsProvisionedNotAssumed(WkTest):
         """The A/B's planted job runs the copy in the payload, so a volume
         re-armed from an older wk-tools runs an older lane."""
         text = (REPO / "bench" / "mac-bench-volume.sh").read_text()
-        body = func_body(text, "stage_payload")
+        body = func_body((REPO / "bench" / "mac-bench-payload.sh").read_text(),
+                         "stage_payload")
         self.assertIn("wk-tools/", body)
         self.assertIn("authorized_keys", body)
         for name in ("do_build_pkg", "do_repair"):

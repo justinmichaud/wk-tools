@@ -42,6 +42,9 @@ esac
 is_macos || die "this runs on the Mac itself -- it acts on the machine's own disk.
   From another machine, the lane that drives it is: wk bench mac <ws>"
 
+# shellcheck disable=SC1090
+. "$WK_ROOT/bench/mac-bench-payload.sh"
+
 dk() { diskutil info -plist "$1" 2>/dev/null; }   # -plist, not the human output, whose labels differ between macOS versions and disk kinds
 
 dk_field() {  # $1 target, $2 key; empty (not an error) when the key is absent
@@ -224,43 +227,6 @@ EOF
 
 # `startosinstall --installpackage` lays a package down before first boot, the only hook early enough to answer Setup Assistant. Account creation waits for the live system: writing dslocal by hand on an offline volume risks an account that exists and cannot log in.
 
-bench_payload_files() {   # <source, repo-relative> <dest under the volume root> <mode>; both writers read it, so a payload file cannot land on a fresh install and not on a repaired one
-    cat <<'ROWS'
-bench/mac-bench-firstboot.sh usr/local/libexec/wk-bench-firstboot.sh 0755
-bench/mac-quiet-hosts.sh     usr/local/libexec/wk-bench-quiet-hosts.sh 0644
-bench/mac-quiet-desktop.sh   usr/local/libexec/wk-bench-quiet-desktop.sh 0644
-bench/mac-pyobjc.sh          usr/local/libexec/wk-bench-pyobjc.sh 0644
-ROWS
-}
-
-stage_payload() {   # <volume root> [privilege prefix]
-    local root="$1"; shift
-    local src dest mode
-    run "$@" install -d -m 0755 "$root/usr/local/libexec" "$root/usr/local/share/wk-bench"
-    while read -r src dest mode; do
-        [ -n "$src" ] || continue
-        run "$@" install -m "$mode" "$WK_ROOT/$src" "$root/$dest"
-    done <<ROWS
-$(bench_payload_files)
-ROWS
-
-    if [ -f "$HOME/.ssh/authorized_keys" ]; then
-        run "$@" install -m 0644 "$HOME/.ssh/authorized_keys" \
-            "$root/usr/local/share/wk-bench/authorized_keys"
-        log "  authorized_keys: $(grep -c . "$HOME/.ssh/authorized_keys" 2>/dev/null || echo 0) key(s) from this install"
-    else
-        warn "  no ~/.ssh/authorized_keys here, so the bench install will have none"
-        warn "  -- it will boot, and nothing will be able to drive it"
-    fi
-
-    run "$@" rsync -a --chmod=go-w --delete --exclude '.git/' --exclude '__pycache__/' --exclude '*.pyc' \
-        "$WK_ROOT/" "$root/usr/local/share/wk-bench/wk-tools/" \
-        || die "could not stage wk-tools onto '$root'"
-
-    run "$WK_ROOT/bench/mac-tailnet.sh" stage "$root" "$@" \
-        || die "could not stage tailscaled onto '$root' -- the run would be unobservable"
-}
-
 pkg_default_out() { echo "${TMPDIR:-/tmp}/wk-bench-provision.pkg"; }
 
 do_build_pkg() {
@@ -284,6 +250,8 @@ do_build_pkg() {
     : > "$root/Library/User Template/English.lproj/.skipbuddy"
 
     stage_payload "$root"
+    run "$WK_ROOT/bench/mac-tailnet.sh" stage "$root" \
+        || die "could not stage tailscaled onto '$root' -- the run would be unobservable"
 
     # RunAtLoad with no KeepAlive, which would resurrect a job that has deleted its own script. Not a LaunchAgent: creating the user is what this does, so there is no session yet.
     cat > "$root/Library/LaunchDaemons/com.wk.bench-firstboot.plist" <<'PLIST'
@@ -407,6 +375,8 @@ do_repair() {
     fi
 
     stage_payload "$S" sudo
+    run "$WK_ROOT/bench/mac-tailnet.sh" stage "$S" sudo \
+        || die "could not stage tailscaled onto '$S' -- the run would be unobservable"
 
     local pw="${WK_BENCH_PASSWORD:-benchbench}"
     local pwfile; pwfile="$(wk_state_dir)/bench-password"

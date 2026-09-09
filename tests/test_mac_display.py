@@ -9,8 +9,10 @@ here sets a brightness on a real display.
 
 Run: python3 -m unittest tests.test_mac_display -v
 """
+import argparse
 import importlib.util
 import io
+import plistlib
 import json
 import platform
 import subprocess
@@ -125,6 +127,108 @@ class WkmacHandles(WkTest):
     def brightness(self, cg, ds=UNSET, value=None):
         return self.call(WKMAC.cmd_brightness, cg, FakeDS() if ds is UNSET else ds,
                          set=value)
+
+
+class WkmacDisplayMode(WkmacHandles):
+    """The mode the bench install is measured at is held, not hoped for. It is
+    declared in boot/machines/<node>.conf, and macOS offers no runtime way to
+    reach a scaled mode on an Apple Silicon panel -- CGDisplayCopyAllDisplayModes
+    lists the 1:1 modes alone, with or without the duplicates option (measured
+    2026-09-08 on Mac16,12) -- so the WindowServer configuration is rewritten
+    and read back."""
+
+    UUID = "37D8832A-2D66-02CA-B9F7-8F30A301B230"
+
+    def mode(self, cg, declare=None, config=None):
+        with mock.patch.object(WKMAC, "_colorsync",
+                               lambda: (object(), object())), \
+             mock.patch.object(WKMAC, "_builtin_uuid",
+                               lambda cs, cf, ident: self.UUID), \
+             mock.patch.object(WKMAC, "WINDOWSERVER_CONFIG",
+                               str(config) if config else "/nonexistent"):
+            return self.call(WKMAC.cmd_display_mode, cg, FakeDS(), declare=declare)
+
+    def _config(self, wide=1470, high=956, scale=2, uuid=None):
+        """The shape tolken's bench install carries: two Configs, the built-in
+        panel's row repeated in each, and an external panel's row that must not
+        move. CurrentInfo and UnmirrorInfo both hold a mode."""
+        def row(w, h, sc, ident):
+            info = {"Wide": w, "High": h, "Scale": sc, "Hz": 60.0, "Depth": 8}
+            return {"UUID": ident, "Rotation": 0,
+                    "CurrentInfo": dict(info), "UnmirrorInfo": dict(info)}
+        panel = uuid or self.UUID
+        doc = {"DisplayAnyUserSets": {"Configs": [
+            {"DisplayConfig": [row(wide, high, scale, panel)]},
+            {"DisplayConfig": [row(wide, high, scale, panel),
+                               row(1920, 1080, 1, "AN-EXTERNAL-PANEL")]}]}}
+        path = self.tmp / "windowserver.plist"
+        with open(path, "wb") as handle:
+            plistlib.dump(doc, handle)
+        return path
+
+    @staticmethod
+    def _rows(path, uuid):
+        with open(path, "rb") as handle:
+            doc = plistlib.load(handle)
+        return WKMAC._mode_rows(doc, uuid)
+
+    def test_it_reads_the_running_mode_in_points(self):
+        rc, out = self.mode(FakeCG([dict(PANEL, points=[1280, 832])]))
+        self.assertEqual(0, rc)
+        self.assertEqual("1280x832", out.strip())
+
+    def test_a_second_display_is_refused_rather_than_guessed(self):
+        rc, out = self.mode(FakeCG([PANEL, EXTERNAL]))
+        self.assertEqual(1, rc)
+        self.assertEqual("", out)
+
+    def test_declaring_a_mode_rewrites_every_row_of_that_panel(self):
+        config = self._config(wide=1470, high=956)
+        rc, out = self.mode(FakeCG([PANEL]), declare=(1280, 832), config=config)
+        self.assertEqual(0, rc, out)
+        self.assertEqual("1280x832", out.strip())
+        rows = self._rows(config, self.UUID)
+        self.assertEqual(4, len(rows), rows)   # two Configs x CurrentInfo + UnmirrorInfo
+        for row in rows:
+            self.assertEqual((1280, 832, 2), (row["Wide"], row["High"], row["Scale"]))
+
+    def test_it_leaves_another_panels_rows_alone(self):
+        """The declared mode is the built-in panel's. A row for a monitor that
+        was once attached governs a configuration this lane refuses anyway, and
+        rewriting it would be this tool changing something it was not asked to."""
+        config = self._config()
+        self.mode(FakeCG([PANEL]), declare=(1280, 832), config=config)
+        other = self._rows(config, "AN-EXTERNAL-PANEL")
+        self.assertEqual(2, len(other), other)
+        for row in other:
+            self.assertEqual((1920, 1080, 1), (row["Wide"], row["High"], row["Scale"]))
+
+    def test_it_keeps_what_it_was_not_asked_about(self):
+        config = self._config()
+        self.mode(FakeCG([PANEL]), declare=(1280, 832), config=config)
+        for row in self._rows(config, self.UUID):
+            self.assertEqual(60.0, row["Hz"])
+            self.assertEqual(8, row["Depth"])
+
+    def test_a_configuration_naming_no_such_panel_is_refused(self):
+        """Writing nothing and reporting success would leave the autorun
+        rebooting into the same wrong mode for ever."""
+        config = self._config(uuid="SOME-OTHER-PANEL")
+        rc, out = self.mode(FakeCG([PANEL]), declare=(1280, 832), config=config)
+        self.assertEqual(1, rc)
+        self.assertEqual("", out)
+
+    def test_an_absent_configuration_is_refused(self):
+        rc, out = self.mode(FakeCG([PANEL]), declare=(1280, 832))
+        self.assertEqual(1, rc)
+        self.assertEqual("", out)
+
+    def test_the_declared_mode_is_parsed_before_anything_is_written(self):
+        for spec in ("1280", "1280x", "x832", "1280x832x2", "", "wide x high"):
+            with self.subTest(spec=spec):
+                with self.assertRaises(argparse.ArgumentTypeError):
+                    WKMAC._points(spec)
+        self.assertEqual((1280, 832), WKMAC._points("1280x832"))
 
 
 class WkmacDisplays(WkmacHandles):
@@ -387,6 +491,51 @@ class TheScreenTheReadingWasTakenOn(WkTest):
                      "this machine is a Mac: CoreGraphics loads here")
     def test_a_display_list_nothing_could_answer_reads_as_none(self):
         self.assertIsNone(BROWSER.display_list())
+
+class TheDisplayRuleAskedOnItsOwn(WkTest):
+    """`--displays-only` is the same rule with no browser launched, so a leg's
+    own preflight can ask it -- a panel attached between two legs resizes
+    run-benchmark's window, and every check that ran once per boot has already
+    passed by then."""
+
+    def test_it_needs_neither_a_build_nor_a_reading(self):
+        cp = subprocess.run([sys.executable, str(REPO / "bench" / "mac-browser-check.py")],
+                            capture_output=True, text=True)
+        self.assertEqual(2, cp.returncode)
+        self.assertIn("--displays-only", cp.stderr)
+
+    def test_it_judges_the_display_and_nothing_about_a_browser(self):
+        """The browser faults must not fire: there is no reading of one, and a
+        leg that had to launch a browser to check its display would be paying
+        for a second launch before every leg."""
+        found = BROWSER.display_faults([dict(PANEL)],
+                                       BROWSER.parse_expect_display(EXPECT), True)
+        self.assertEqual([], found)
+        full = BROWSER.faults({"displays": [dict(PANEL)]}, {}, None, 30.0,
+                              BROWSER.parse_expect_display(EXPECT))
+        self.assertTrue([f for f in full if "WebGL" in f], full)
+
+    def test_the_same_faults_are_raised_as_with_a_browser(self):
+        expect = BROWSER.parse_expect_display(EXPECT)
+        for name, displays, phrase in (
+                ("two panels", [dict(PANEL), dict(EXTERNAL)], "online, not one"),
+                ("not builtin", [dict(EXTERNAL)], "not the built-in panel"),
+                ("mirrored", [dict(PANEL, mirrored=True)], "mirror set"),
+                ("wrong mode", [dict(PANEL, points=[1280, 832])], "points, not"),
+                ("unreadable", None, "could not be read")):
+            with self.subTest(case=name):
+                found = BROWSER.display_faults(displays, expect, True)
+                self.assertTrue([f for f in found if phrase in f], found)
+
+    def test_ambient_light_is_judged_with_no_expectation_at_all(self):
+        """A brightness the sensor can raise again is a load that varies, so it
+        is a fault whether or not a mode was declared."""
+        lit = [dict(PANEL, auto_brightness=True)]
+        for expect in (None, BROWSER.parse_expect_display(EXPECT)):
+            with self.subTest(expect=expect):
+                found = BROWSER.display_faults(lit, expect, expect is not None)
+                self.assertTrue([f for f in found if "ambient-light" in f], found)
+
 
 class AmbientLightControl(WkTest):
     """Minimum brightness that ambient light can raise again is not a held

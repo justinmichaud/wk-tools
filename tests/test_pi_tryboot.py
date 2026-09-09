@@ -173,7 +173,7 @@ class TestReboot(unittest.TestCase):
         # system carries systemd is the one that stays quiet.
         cp = bash(LOAD + '''
 m_ssh() { echo "m_ssh: $*" >&2; }
-r_ssh() { case "$*" in *setsid*) echo "r_ssh: $*" >&2 ;; *) return 0 ;; esac; }
+r_ssh() { case "$*" in *nohup*) echo "r_ssh: $*" >&2 ;; *) return 0 ;; esac; }
 TRYBOOT_ARMED=1; b_reboot
 TRYBOOT_ARMED=""; MODE="bench x-1"; b_reboot
 ''')
