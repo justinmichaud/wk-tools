@@ -416,3 +416,5 @@ Work around this, but leave the upstream bug report so we can remove the workaro
 - wk push fails open on remote targets.
 
 - zsh alt+arrow keys not wokring from zed terminal
+
+- rpi has some fixes in ~ that should be incorperated into this repo

@@ -1,4 +1,4 @@
-# Boot driver: a Mac, into a benchmark macOS install on another volume. Which install the firmware boots is signed into a LocalPolicy, and only `wk-boot-priv` blesses it; every read and the arming itself go through m_ssh (boot/machines.sh), so this drives that Mac from it or from anywhere else.
+# Boot driver: a Mac, into a benchmark macOS install on another volume. Which install the firmware boots is signed into a LocalPolicy and only `wk-boot-priv` blesses it; the two installs are two tailnet nodes (NODE_SSH, NODE_BENCH_SSH), so every read goes through `r_ssh` (boot/machines.sh) and answers whichever is up, while arming and the record are host-mode verbs.
 
 BOOT_ARMING=command    # cmd/boot branches on it: `wk boot mbp` tells the firmware and reboots
 
@@ -10,7 +10,7 @@ BOOT_ORDER_NORMAL=""
 mv_wkmac() { # <subcommand> [args...] -- wkmac.py travels on stdin, so nothing over there has to be kept in step
     local a q=""
     for a in "$@"; do q="$q $(sh_quote "$a")"; done
-    m_ssh "python3 -$q" < "$WK_ROOT/lib/wkmac.py" 2>/dev/null
+    r_ssh "python3 -$q" < "$WK_ROOT/lib/wkmac.py" 2>/dev/null
 }
 
 mac_volume_path() { printf '/Volumes/%s' "$NODE_VOLUME"; }
@@ -32,13 +32,23 @@ mv_planted_task() {
 
 mv_planted_stamp() { basename "$1" | cut -d- -f1; }
 
+# The bench channel's destination and options. dotfiles/ssh/config declares this install -- user `bench`, its own pinned host key under the alias -- so the name is the whole address, where i_ssh's default of a resolved address, `-l root` and an unpinned key is a written Pi image's shape and not a personalised macOS install's.
+image_addr() { printf '%s' "${WK_MAC_BENCH_SSH:-${NODE_BENCH_SSH:-}}"; }
+i_ssh_opts() { :; }
+
+# Host mode first, and it is asked for the marker too: `--host` gives both installs one address, and then the one that answers is the one that carries it. The marker is what makes the second answer bench mode -- a node that answers without one is some other computer, and reporting it as this Mac's benchmark install is how a lane measures the wrong machine.
 b_probe() {
     local id
-    if id=$(m_ssh 'sed -n "s/^id=//p" /etc/wk-image 2>/dev/null; echo READY' 2>/dev/null); then  # both installs answer as NODE_SSH; the marker is how the bench one says which it is
+    if id=$(m_ssh 'sed -n "s/^id=//p" /etc/wk-image 2>/dev/null; echo READY' 2>/dev/null); then
         MODE_CHANNEL=host
         id=$(printf '%s' "$id" | tr -d '\r' | head -1)
         if [ "$id" = READY ]; then MODE=host; else MODE="bench $id"; fi
         return 0
+    fi
+    if [ -n "$(image_addr)" ] \
+        && id=$(i_ssh 'sed -n "s/^id=//p" /etc/wk-image 2>/dev/null' 2>/dev/null); then
+        id=$(printf '%s' "$id" | tr -d '\r' | head -1)
+        [ -n "$id" ] && { MODE_CHANNEL=bench; MODE="bench $id"; return 0; }
     fi
     MODE_CHANNEL=none; MODE=unreachable
     return 0
@@ -46,7 +56,7 @@ b_probe() {
 
 # The brace is load-bearing -- `{ sec = 1786800736, usec = 451078 } Sat Aug 15 ...` -- since a pattern anchored on `sec = ` alone matches greedily to the last one and returns usec.
 _mac_boottime() {
-    m_ssh 'sysctl -n kern.boottime 2>/dev/null' 2>/dev/null \
+    r_ssh 'sysctl -n kern.boottime 2>/dev/null' 2>/dev/null \
         | sed -n 's/.*{ *sec *= *\([0-9][0-9]*\).*/\1/p'
 }
 
@@ -59,16 +69,27 @@ b_booted_at() {
 }
 
 b_evidence() {
-    if ! m_reachable; then
-        echo "booted_volume=unknown ($NODE_SSH does not answer)"
-        echo "benchmark_volume=$NODE_VOLUME (on that Mac; nothing on it is readable while it is silent)"
-        echo "firmware_default=unknown (nvram answers only from a running install)"
-        echo "bench_display=$(b_display || echo unpinned) (the install that is measured, not the one that answers here)"
+    local root
+    if [ "${MODE_CHANNEL:-host}" = bench ]; then
+        root=$(mv_wkmac volume-name / || true)
+        echo "booted_volume=${root:-unknown (diskutil would not name it)}"
+        echo "benchmark_volume=$NODE_VOLUME (this install's own /, so it is under no /Volumes path)"
+        echo "firmware_default=$(mac_firmware_default)"
+        echo "bench_display=$(b_display || echo unpinned) (the install that answers here is the measured one)"
         echo "planted_job=$(mv_job_evidence)"
         return 0
     fi
 
-    local root; root=$(mv_wkmac volume-name / || true)
+    if ! m_reachable; then
+        echo "booted_volume=unknown (neither $NODE_SSH nor ${NODE_BENCH_SSH:-its benchmark install} answers)"
+        echo "benchmark_volume=$NODE_VOLUME (on that Mac; nothing on it is readable while both nodes are silent)"
+        echo "firmware_default=unknown (nvram answers only from a running install)"
+        echo "bench_display=$(b_display || echo unpinned) (the install that is measured)"
+        echo "planted_job=$(mv_job_evidence)"
+        return 0
+    fi
+
+    root=$(mv_wkmac volume-name / || true)
     echo "booted_volume=${root:-unknown (diskutil would not name it)}"
     if mac_volume_present; then
         echo "benchmark_volume=$NODE_VOLUME (attached at $(mac_volume_path))"
@@ -76,7 +97,7 @@ b_evidence() {
         echo "benchmark_volume=$NODE_VOLUME (not attached)"
     fi
     echo "firmware_default=$(mac_firmware_default)"
-    echo "bench_display=$(b_display || echo unpinned) (the install that is measured, not the one that answers here)"
+    echo "bench_display=$(b_display || echo unpinned) (the install that is measured)"
     echo "planted_job=$(mv_job_evidence)"
 }
 
@@ -91,18 +112,30 @@ mac_volume_group() {  # $1 = mount point
     mv_wkmac volume-group "$1" || true
 }
 
+mac_bench_group() {
+    [ "${MODE_CHANNEL:-host}" = bench ] && { mac_volume_group /; return 0; }
+    mac_volume_present || return 0
+    mac_volume_group "$(mac_volume_path)"
+}
+
+mac_host_group() {
+    [ "${MODE_CHANNEL:-host}" = host ] || return 0
+    mac_volume_group /
+}
+
 mac_firmware_default() {
     local bv grp host_grp bench_grp
     bv=$(mv_wkmac boot-volume || true)
     [ -n "$bv" ] || { printf 'unknown (the firmware publishes no boot-volume)'; return 0; }
     grp="${bv##*:}"
-    host_grp=$(mac_volume_group / || true)
-    bench_grp=""
-    mac_volume_present && bench_grp=$(mac_volume_group "$(mac_volume_path)" || true)
+    host_grp=$(mac_host_group)
+    bench_grp=$(mac_bench_group)
     if [ -n "$bench_grp" ] && [ "$grp" = "$bench_grp" ]; then
         printf "%s ('%s' -- a plain reboot is expected to enter bench mode)" "$grp" "$NODE_VOLUME"
     elif [ -n "$host_grp" ] && [ "$grp" = "$host_grp" ]; then
         printf '%s (the host install -- a plain reboot stays in host mode)' "$grp"
+    elif [ "${MODE_CHANNEL:-host}" = bench ]; then
+        printf "%s (not '%s', so a plain reboot leaves bench mode)" "$grp" "$NODE_VOLUME"
     else
         printf '%s (matches neither install on this disk)' "$grp"
     fi
@@ -201,26 +234,34 @@ mv_priv() { m_ssh "sudo -n $(sh_quote "$BOOT_HELPER") $1 2>&1"; }  # stderr merg
 mv_reboot_ready() { mv_priv status 2>/dev/null | grep -q '^wk-boot-priv: detach='; }
 
 b_reboot() {
+    [ "${MODE_CHANNEL:-host}" = bench ] && die "$NODE_NAME answers as its benchmark install, which carries no boot helper --
+    only the host install does, and it is down. What ends a run there is the job
+    itself, which blesses this install back and reboots into it.
+    Read it meanwhile:  wk bench mac-ab --status"
     mv_priv reboot >/dev/null 2>&1 && return 0
     die "could not restart this Mac. The helper takes no password and is not
     installed there; plain sudo wants one, and an unattended transition has no
     terminal to answer it on. One command installs it:  wk boot $NODE_NAME --prepare"
 }
 
-# The *Data* volume, the APFS system volume being sealed and read-only. `/var` firmlinks out of it, so the same bytes are `/var/wk` to the booted bench install and `/Volumes/<name> - Data/private/var/wk` here.
 mac_volume_data_path() {
     local d="/Volumes/$NODE_VOLUME - Data"
     m_ssh "test -d $(sh_quote "$d")" && { printf '%s' "$d"; return 0; }
     printf '%s' "$(mac_volume_path)"
 }
 
-b_bench_root() {
+# A path inside the benchmark install, as the channel that answers reaches it: its own `/` in bench mode, and in host mode a path under the volume's *Data* mount -- the APFS system volume being sealed and read-only, with `/var` firmlinked out to `private/var` there while `/Users` is at its root.
+mv_in_bench() {  # <absolute path, as that install spells it>
+    local p="$1" d
+    [ "${MODE_CHANNEL:-host}" = bench ] && { printf '%s' "$p"; return 0; }
     mac_volume_present || return 1
-    local d; d=$(mac_volume_data_path)
-    case "$d" in
-        *" - Data") printf '%s/private/var/wk' "$d" ;;
-        *)          printf '%s/var/wk' "$d" ;;
-    esac
+    d=$(mac_volume_data_path)
+    case "$d" in *" - Data") case "$p" in /var/*) p="/private$p" ;; esac ;; esac
+    printf '%s%s' "$d" "$p"
+}
+
+b_bench_root() {
+    mv_in_bench /var/wk
 }
 
 b_manage() { m_ssh "$@"; }
@@ -233,15 +274,23 @@ b_manage_tools() {
 b_manage_prepare() { machine_prepare "$NODE_SSH"; }
 
 b_bench_home() {
-    local d; d=$(b_bench_root) || return 1
-    printf '%s/Users/bench' "$(dirname "$(dirname "$(dirname "$d")")")"
+    mv_in_bench /Users/bench
 }
 
 b_bench_local() { m_here; }
 
-b_bench_put_file() { m_ssh "cat > $(sh_quote "$2")" < "$1"; }
+# Delivery is a host-mode verb: the arms and the tools it stages from are on the host install, and the same staging root read over the bench channel names the *running* install -- so a write there would land in the middle of a measurement.
+mv_put_host_mode() {
+    [ "${MODE_CHANNEL:-host}" = bench ] || return 0
+    die "$NODE_NAME answers as its benchmark install, and nothing is staged onto a
+    running measurement. The arms and the tools are on the host install, so stage
+    once it is back:  wk boot $NODE_NAME --status   says which is up."
+}
+
+b_bench_put_file() { mv_put_host_mode; m_ssh "cat > $(sh_quote "$2")" < "$1"; }
 
 b_bench_put() {   # <src dir> <dest dir>, replaced wholesale
+    mv_put_host_mode
     # openrsync, which this Mac ships, sends `/Volumes/WK Bench - Data/...` with its escaping intact and fails with `open: No such file or directory`; over ssh the remote path appears once, inside a command this side quotes.
     # shellcheck disable=SC2046 -- a deliberate word list.
     tar -cf - $(bench_put_excludes) -C "$1" . \
@@ -260,6 +309,11 @@ b_restart_detail() {
 
 b_media() {
     local what="bench volume '$NODE_VOLUME'"
+    if [ "${MODE_CHANNEL:-host}" = bench ]; then
+        printf "%s: %s is running from it, so it is / there and under no /Volumes path" \
+            "$what" "$(image_addr)"
+        return 0
+    fi
     if mac_volume_present; then
         printf "%s attached at %s" "$what" "$(mac_volume_path)"
         return 0
@@ -268,14 +322,8 @@ b_media() {
         printf "%s MISSING on %s -- docs/HANDOFF-mac-perf-mode.md creates it" "$what" "$NODE_SSH"
         return 0
     fi
-    local d
-    if d=$(mv_planted_task); then
-        # Two states, one silence: that install joins no network, so nothing here can tell them apart and neither may be reported as the answer.
-        printf "%s: %s does not answer, with a job planted %s -- it is measuring, or it has finished and halted with the result on the volume" \
-            "$what" "$NODE_SSH" "$(mv_planted_stamp "$d")"
-        return 0
-    fi
-    printf "%s: %s does not answer and no job is planted, so this is a plain outage" "$what" "$NODE_SSH"
+    printf "%s: neither %s nor %s answers, so this Mac is between its two installs or off" \
+        "$what" "$NODE_SSH" "${NODE_BENCH_SSH:-its benchmark install}"
 }
 
 b_reprovision() {

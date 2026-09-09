@@ -2,44 +2,27 @@
 
 ## Owed, no hardware needed
 
-- [ ] **one path to the measured system, and it is that system's own tailnet
-      node.** The benchmark install joins as `NODE_BENCH_SSH` (`tolken-bench`)
-      at boot and needs no password; the Mac's *host* install stops for one at
-      boot. Yet `bench_root`, `phase_plant`, `phase_status` and `phase_collect`
-      reach the volume only through host mode, and `bench_root` refuses outright
-      when the machine answers in bench mode ("read it back once the machine
-      returns"). Measured 2026-09-09: a finished run's results are unreadable
-      from the moment `leave_bench` reboots until the host install is back,
-      while the install holding them answers on the tailnet throughout.
-      The abstraction is already in boot/machines.sh -- `MODE_CHANNEL`,
-      `r_ssh` over `m_ssh`/`i_ssh`, and `image_addr` already prefers
-      `NODE_BENCH_SSH`. What is owed:
-        - mac-volume's `b_probe` sets `MODE_CHANNEL=bench` when that node
-          answers and carries `/etc/wk-image`; today it only tries `m_ssh`
-        - the bench channel reaches a macOS install as `dotfiles/ssh/config`
-          declares it -- user `bench`, host key pinned under the
-          `tolken-bench` alias -- where `i_ssh_opts` forces `-l root` and an
-          unpinned key, which is a Pi bench system's shape and not this one's
-        - `b_bench_root` answers `/var/wk` on that channel, the volume being
-          `/` there and under no `/Volumes` path at all
-        - `bench/mac-ab.sh` reaches the measured system through the
-          channel-aware reader, and the host-mode-only refusal goes with it
-      One route, not two: the host-mode path is deleted rather than kept beside
-      it (CLAUDE.md, "One path, not two")
-
 - [ ] **every gate is askable before anything reboots.** A gate asked only after
-      the transition costs a boot per defect. The measured install is reachable
-      over its own node whenever it is up, and each of these reads the running
-      system and nothing else: the quiet-desktop probe and findings,
-      `wk quiesce on` and its readback, brightness, ambient-light compensation,
-      the display topology and mode, `bench/mac-browser-check.py`, and
-      `wk bench staged --dry-run`. `wk bench mac-ab --preflight` asks host-mode
-      proxies for some of these and nothing at all for the rest -- so it reports
-      clean and a boot then refuses. What is owed is a preflight that asks the
-      real ones over that channel when the install is up, and a reboot that is
-      only the transition into bench mode. The planted tree at
-      `/var/wk/wk-tools` is what the launch agent runs, so pushing it over that
-      channel replaces the lane in place and an iteration costs seconds
+      the transition costs a boot per defect. The lane now reads the measured
+      install over its own node whenever it is up (`b_probe`, `r_ssh`), and each
+      of these reads the running system and nothing else: the quiet-desktop
+      probe and findings, `wk quiesce on` and its readback, brightness,
+      ambient-light compensation, the display topology and mode,
+      `bench/mac-browser-check.py`, and `wk bench staged --dry-run`.
+      `wk bench mac-ab --preflight` asks host-mode proxies for some of these and
+      nothing at all for the rest -- so it reports clean and a boot then
+      refuses. What is owed is a preflight that asks the real ones over that
+      channel when the install is up, and a reboot that is only the transition
+      into bench mode. The planted tree at `/var/wk/wk-tools` is what the launch
+      agent runs, so pushing it over that channel replaces the lane in place and
+      an iteration costs seconds
+
+- [ ] bench mode is readable from here and nothing more. `wk boot mbp --diag`
+      refuses in bench mode though `/var/log/wk-diag.txt` is right there on the
+      install that answers, and `--back` refuses too: `wk-boot-priv` is on the
+      host install only, so nothing from this side can hand the machine back and
+      the run's own `leave_bench` is the whole of it. Each refusal names why;
+      what is owed is deciding whether either verb should reach that side at all
 
 - [ ] **`--rounds` names something run-benchmark already has a word for.** In
       `bench/mac-ab.sh` a round is one interleaved pass over every plan and
@@ -96,10 +79,3 @@
       tasks terminated.`, and no `.json.gz` reaches `ab/<stamp>/warmup/` -- so
       a leg passes with a warning and the profile the warmup round exists to
       carry is absent
-
-- [ ] the prose still says the benchmark install "joins nothing" and "has no
-      network", in six places (bench/mac-ab.sh:21,387,834,
-      bench/mac-bench-autorun.sh:2,9,140). It joins: that install brings up the
-      darwin `tailscaled` cross-built from Linux and answers as `tolken-bench`
-      while it measures. One sweep, and `NODE_BENCH_SSH` is what tells
-      "measuring" from "finished" in place of the driver calling both silence

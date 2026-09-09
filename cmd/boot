@@ -211,6 +211,10 @@ cmd_keep() {
         *) die "$MACHINE is not in bench mode right now ($MODE), so there is no
     watchdog to cancel." ;;
     esac
+    # The watchdog is written by the same driver that writes the self-disarm, so a driver with no self-disarm has none to cancel: a Mac's benchmark install is ended by the job it runs and by nothing else.
+    command -v b_self_disarm_sh >/dev/null 2>&1 || die "$MACHINE's bench system carries no self-return watchdog, so there is nothing
+    to claim: what ends its run is the job itself. 'wk boot $MACHINE --status'
+    says what it is doing."
     [ -n "$DRY" ] && { log "would create /run/wk-keep-running on $MACHINE"; return 0; }
     r_sudo 'touch /run/wk-keep-running'
     info "$MACHINE claimed: the self-return watchdog will not reboot it"

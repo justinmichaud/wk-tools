@@ -1,12 +1,12 @@
 #!/bin/bash
-# The benchmark install running an A/B by itself: planted by `wk bench mac-ab` from host mode, started by a per-user LaunchAgent at autologin. It drives itself, unlike bench/mac-lane.sh, because this machine has no network in bench mode (tolken is Wi-Fi only).
+# The benchmark install running an A/B by itself: planted by `wk bench mac-ab` from host mode, started by a per-user LaunchAgent at autologin. It drives itself, unlike bench/mac-lane.sh, because no session on the driving machine survives the reboot into this install; the tailnet node this one brings up is how a run is watched, not how it is driven.
 # The bench volume is the firmware default, so the job ends with the machine powered off however it ends: a reboot would land back here and run it again. THE ORDER OF OPERATIONS IS THE SAFETY: the state file is advanced before the run so a power cut cannot repeat the attempt and before the summary so a power cut in that cannot either, the watchdog is armed before the first run, and the power-off runs from a trap.
 
 set -euo pipefail
 export PATH=/usr/sbin:/usr/bin:/sbin:/bin
 
 WK_AB_ROOT="${WK_AB_ROOT:-/var/wk}"
-# On this install /var/wk *is* where wk keeps its artifacts: it is uid 501 and writable, where the Darwin default (/var/lib/wk) is root's. The planter seeds the profiler into it, this install having no network to fetch one over.
+# On this install /var/wk *is* where wk keeps its artifacts: it is uid 501 and writable, where the Darwin default (/var/lib/wk) is root's. The planter seeds the profiler into it: a run that fetched its own tooling would be measuring a different one on each arm.
 export WK_STORE="$WK_AB_ROOT"
 JOB="$WK_AB_ROOT/job.json"
 STATE="$WK_AB_ROOT/autorun.state"
@@ -160,7 +160,7 @@ stand_aside_if_provisioning() {   # before defuse_firstboot, which would otherwi
     exit 0
 }
 
-# Judged by the same probe and findings `wk bench staged` uses before every leg, so a volume that drifted is refused up front rather than leg by leg on a machine with no network to say so. After `wk quiesce on`, never before it: the user half of those rows does not survive this account's session starting, so quiesce writes them again where they can take (cmd/quiesce says why), and judging first refused a volume on rows this boot was about to set -- which is what job 20260909T042343Z did, in its first minute.
+# Judged by the same probe and findings `wk bench staged` uses before every leg, so a volume that drifted is refused up front rather than leg by leg. After `wk quiesce on`, never before it: the user half of those rows does not survive this account's session starting, so quiesce writes them again where they can take (cmd/quiesce says why), and judging first refused a volume on rows this boot was about to set -- which is what job 20260909T042343Z did, in its first minute.
 refuse_unprovisioned() {
     local probe wrong installed=no
     if [ ! -r "$QUIET_DESKTOP" ]; then

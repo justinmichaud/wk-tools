@@ -641,14 +641,24 @@ wk bench precision <run-a> <run-b>               # what the rounds so far resolv
 Driven from another machine, never from the Mac: the lane reboots it, and a
 driver on that machine goes with the reboot.
 
-**Starting it needs nobody, and it ends with the Mac off.** The benchmark
-volume is the firmware default, so the restart enters bench mode by itself --
-`wk bench mac-ab` asserts that in preflight rather than reporting it, because a
-restart that lands back in host mode costs a whole cycle. When the job ends,
-for any reason, the install powers the machine off: a reboot would land on the
-same volume and run again. So the one human action per experiment comes after
-the numbers are safely on the volume -- hold the power button, pick the host
-install, `wk bench mac-ab --collect`.
+**Starting it needs nobody, and neither does ending it.** A restart enters
+bench mode by itself only where the firmware's own default is the benchmark
+volume: `wk boot mbp` arms that, and `wk bench mac-ab` asserts it in preflight
+rather than reporting it, because a restart that lands back in host mode costs
+a whole cycle, and the arming is per experiment. When the job ends, for any
+reason, that install blesses the host install, reads the firmware back and
+reboots into it; if the firmware will not take the choice it powers the machine
+off instead, a reboot with the bench volume still default being a boot that
+measures again.
+
+**One route to the measured install, and it is that install's own node.** Both
+installs are on the tailnet -- `NODE_SSH` names the host one and
+`NODE_BENCH_SSH` the benchmark one -- so `b_probe` reports which is up and every
+reading the lane takes follows that channel (`r_ssh`, boot/machines.sh). In host
+mode the volume is a mount under `/Volumes` and the staging root is a path on
+it; in bench mode that install *is* the volume, the same root is `/var/wk`, and
+`--status` and `--collect` read a run while it is still running. There is no
+second, host-mode-only way to the same bytes.
 
 **Nothing is typed on the Mac.** A machine wk drives needs this tree and the
 privileged helpers `admin/install.sh` puts behind a NOPASSWD rule, and
@@ -676,14 +686,12 @@ issues) and prints the URL to subscribe a phone to, once, the only time it is
 ever shown; `wk key setup` mints it with nothing to type. The
 driver calls it when the machine goes down to measure, and when a restart it
 asked for visibly did not take it into bench mode. It is not called on silence,
-*while the benchmark install has no tailnet identity of its own*: it powers the
-machine off when the job ends, so "still measuring" and "finished, and the
-result is on the volume" look the same from outside and neither may be reported
-as the answer. That is the unprovisioned state and not the design --
-`NODE_BENCH_SSH` names that install, `dotfiles/ssh/config` has a stanza for it
-and `bench/mac-tailnet.sh` joins it at first boot, and once it does the two
-states are one reachability check apart. A notification that did not go out is a
-warning and never costs a measurement.
+because silence is not a state a run is in: each install is its own tailnet node
+-- `NODE_BENCH_SSH` names the benchmark one, `dotfiles/ssh/config` has a stanza
+for it and `bench/mac-tailnet.sh` joins it at first boot -- so a measuring
+install answers as itself and a finished one answers as the host install.
+Neither node answering means the machine is between the two, or off. A
+notification that did not go out is a warning and never costs a measurement.
 
 Notifications *on the measured machine* are a different thing and are refused
 rather than published: a banner is drawn over whatever is on the screen, and

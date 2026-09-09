@@ -18,8 +18,8 @@
 #   per leg leaves that leg with no within-leg variance, so no p-value can be
 #   computed for it; each further iteration costs its own run time and buys
 #   fewer rounds to reach --detect.
-# The benchmark install has no network (tolken is Wi-Fi only and that install joins nothing), so the job is planted rather than driven: everything it needs is written onto the volume while merely mounted, a per-user LaunchAgent starts it at autologin, and this driver waits and reads. No sudo, because /var/wk and ~bench are both uid 501.
-# Nothing here can set which volume the firmware boots -- `nvram boot-volume`, `bless --setBoot` and `systemsetup -getstartupdisk` all fail silently -- so this driver reboots and reports which mode came back: at most one human action per A/B, never one per run, since the planted job holds every round of every arm.
+# The job is planted rather than driven: no session this side survives the reboot into bench mode, so everything the run needs is written onto the volume while it is merely mounted and a per-user LaunchAgent starts it at autologin. That install joins the tailnet as its own node while it measures, which is what this driver reads it back over. No sudo, because /var/wk and ~bench are both uid 501.
+# Which volume the firmware boots is `wk boot <machine>`'s to set, through the privileged helper's `bless --setBoot`; this lane asserts that default rather than arming it, then restarts and reports which install came up. Never one human action per run: the planted job holds every round of every arm, and the install hands the machine back when it ends.
 
 set -euo pipefail
 WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -52,14 +52,14 @@ AGENT_HOME=""
 DRY=""
 REHEARSE=""
 ACTION=run
-# The bench install powers the Mac off when it is done, so nothing comes back to be waited for: this is the window in which a machine that never left, or came back to host mode, gives itself away by answering.
+# How long to wait for the machine to answer on either node after the restart. The run itself outlives this: what is being waited for is which install came up, not the result.
 BOOT_WAIT="${WK_MAC_BOOT_WAIT:-600}"
 
 usage() { usage_block "$0" >&2; exit 2; }
 
-# m_ssh (boot/machines.sh) and never an ssh of this file's own, so a driver whose machine is reached some other way -- a guest, whose address is in no ssh config -- overrides it and this lane follows.
+# r_ssh (boot/machines.sh) and never an ssh of this file's own: it follows the channel b_probe answered on, so the measured install is read in host mode off the volume it mounts and in bench mode over its own tailnet node, and a driver whose machine is reached some other way -- a guest, whose address is in no ssh config -- overrides the channel and this lane follows.
 mac() {
-    m_ssh "$@"
+    r_ssh "$@"
 }
 mac_sh() { mac bash -lc "$(sh_quote "$*")"; }
 
@@ -197,15 +197,13 @@ put_tree() {
 }
 
 BROOT=""
-# The driver's own, called here rather than through the copy of wk-tools over there: every reading it takes goes through m_ssh, so it answers from anywhere and depends on no tree but this one.
+# The driver's own, called here rather than through the copy of wk-tools over there: it answers on whichever channel the machine is up on, so it depends on no tree but this one.
 bench_root() {
     [ -n "$BROOT" ] && { printf '%s' "$BROOT"; return 0; }
     BROOT=$(b_bench_root 2>/dev/null | tr -d '\r' | tail -1)
-    [ -n "$BROOT" ] || die "'$VOLUME' is not visible from $MACHINE right now.
-    Either it is not attached, or $MACHINE is *in* bench mode -- that install's own
-    root is the volume, so it is not mounted under /Volumes and every verb here
-    is a host-mode verb. 'wk boot $MACHINE --status' over there says which.
-    In bench mode the run drives itself; read it back once the machine returns."
+    [ -n "$BROOT" ] || die "nothing on $MACHINE is readable right now: it answers on neither its host
+    node nor '$VOLUME''s own, or it is in host mode with that volume not attached.
+    'wk boot $MACHINE --status' says which."
     printf '%s' "$BROOT"
 }
 
@@ -241,22 +239,23 @@ preflight() {
     info "preflight for an unattended A/B on $MACHINE${NODE_SSH:+ ($NODE_SSH)}"
     PF_FAIL=0
 
-    local mode
-    if mode=$(mac 'cat /etc/wk-image 2>/dev/null | sed -n "s/^id=//p"' 2>/dev/null); then
-        mode=$(printf '%s' "$mode" | tr -d '\r')
-        # A guest is the measured install itself and carries the marker while it answers; a Mac answers as its host install, and the one that carries the marker is the one being measured, which cannot plant for itself.
-        if [ "${BOOT_ARMING:-}" = guest ]; then
-            if [ -n "$mode" ]; then ck yes "a benchmark install" "$MACHINE answers and is marked ($mode)"
-            else ck no "a benchmark install" "$MACHINE answers but carries no /etc/wk-image, so every leg would be refused"; fi
-        elif [ -n "$mode" ]; then
-            ck no "host mode" "$MACHINE is in BENCH mode ($mode) -- plant from host mode"
-        else
-            ck yes "host mode" "$MACHINE answers and carries no bench marker"
-        fi
-    else
-        ck no "reachable" "$MACHINE does not answer ssh with a key"
+    # b_probe's answer, not a read of this file's own: it is what chose the channel every reading below travels on.
+    if [ "${MODE:-unreachable}" = unreachable ]; then
+        ck no "reachable" "$MACHINE does not answer ssh with a key, on its host node or its benchmark install's"
         log "  everything below needs the machine, so nothing else was checked." >&2
         return 1
+    fi
+    # A guest is the measured install itself and carries the marker while it answers; a Mac's two installs are two nodes, and the one carrying the marker is the one being measured, which cannot plant for itself.
+    if [ "${BOOT_ARMING:-}" = guest ]; then
+        case "$MODE" in
+            bench*) ck yes "a benchmark install" "$MACHINE answers and is marked (${MODE#bench })" ;;
+            *)      ck no  "a benchmark install" "$MACHINE answers but carries no /etc/wk-image, so every leg would be refused" ;;
+        esac
+    else
+        case "$MODE" in
+            bench*) ck no  "host mode" "$MACHINE is in BENCH mode (${MODE#bench }) -- the arms and the tools are on the host install, so a plant needs it" ;;
+            *)      ck yes "host mode" "$MACHINE answers and carries no bench marker" ;;
+        esac
     fi
 
     local root; root=$(bench_root 2>/dev/null) || root=""
@@ -384,7 +383,7 @@ preflight() {
 
 
 # In a variable and not on stdout: a die in a command substitution kills only the subshell, and this one refuses the whole stage.
-stage_plan_args() {   # -> STAGE_PLAN_ARGS, the --plan/--payload arguments for `wk bench stage`. A benchmark install has no network, so an unpinned plan is a leg that fails after the reboot where nothing can report it.
+stage_plan_args() {   # -> STAGE_PLAN_ARGS, the --plan/--payload arguments for `wk bench stage`. An unpinned plan clones the benchmark on the measured install at the moment each leg runs, so the two arms can be compared against two revisions of it.
     local p payload out=""
     STAGE_PLAN_ARGS=""
     for p in $PLANS; do
@@ -763,7 +762,7 @@ PLIST
     log  "  task   $task_dir   ('wk status' lists it; 'wk bench report $task' reads it)"
     log  "  job    $root/job.json"
     log  "  agent  $bh/Library/LaunchAgents/com.wk.bench-ab.plist"
-    log  "  log    $root/autorun.log   (readable from host mode afterwards)"
+    log  "  log    $root/autorun.log   ('wk bench mac-ab --status' tails it, in either mode)"
     printf '%s' "$stamp"
 }
 
@@ -808,30 +807,34 @@ phase_go() {
     nothing further from here."
 }
 
+# Both nodes, every poll (b_probe): the benchmark install answers as its own while it measures, so bench mode is a positive reading here and not the absence of one.
 phase_wait() {
-    local limit="$1" start now mode last=""
-    info "wait: up to $((limit / 60)) minutes for $MACHINE to answer"
+    local limit="$1" start now last=""
+    info "wait: up to $((limit / 60)) minutes for $MACHINE to answer on either node"
     start=$(date +%s)
     sleep 45   # for the first seconds the machine is still up, and an immediate poll would report host mode too soon
     while :; do
-        if mode=$(mac 'cat /etc/wk-image 2>/dev/null | sed -n "s/^id=//p"; echo READY' 2>/dev/null); then
-            mode=$(printf '%s' "$mode" | tr -d '\r' | head -1)
-            local bt; bt=$(b_boot_id)   # the same boot as before means it never rebooted
-            if [ -n "$BOOT_BEFORE" ] && [ "$bt" = "$BOOT_BEFORE" ]; then
-                warn "  $MACHINE is answering on the SAME boot ($bt) -- it never rebooted"
-                printf 'noreboot'; return 1
-            fi
-            case "$mode" in
-                READY) info "  $MACHINE is back in HOST mode"; printf 'host'; return 0 ;;
-                *)     info "  $MACHINE answers in BENCH mode ($mode)"; printf 'bench'; return 0 ;;
-            esac
-        fi
+        b_probe
+        case "${MODE:-unreachable}" in
+            bench*)
+                info "  $MACHINE answers in BENCH mode (${MODE#bench })"
+                printf 'bench'; return 0 ;;
+            host)
+                # Asked only here: in bench mode it is another install's boot time, which says nothing about whether this one restarted.
+                local bt; bt=$(b_boot_id)
+                if [ -n "$BOOT_BEFORE" ] && [ "$bt" = "$BOOT_BEFORE" ]; then
+                    warn "  $MACHINE is answering on the SAME boot ($bt) -- it never rebooted"
+                    printf 'noreboot'; return 1
+                fi
+                info "  $MACHINE is back in HOST mode"
+                printf 'host'; return 0 ;;
+        esac
         now=$(date +%s)
         if [ $((now - start)) -ge "$limit" ]; then
-            warn "  $MACHINE has not answered in ${limit}s"
+            warn "  $MACHINE has answered on neither node in ${limit}s"
             printf 'silent'; return 1
         fi
-        [ "$last" != waiting ] && { log "  no answer yet (this is the reboot, or bench mode, which has no network)"; last=waiting; }
+        [ "$last" != waiting ] && { log "  no answer on either node yet -- this is the reboot itself"; last=waiting; }
         sleep 20
     done
 }
@@ -929,30 +932,26 @@ staged_arms() {   # <id> <webkit sha> <gated yes|no> per line
 
 phase_progress() {
     info "the macOS A/B on $MACHINE, step by step"
-    local root mode arms narms job rounds outcome results volver
+    local root arms narms job rounds outcome results volver
 
-    # Three states, not two: reachable in host mode, reachable in bench mode (the
-    # volume is `/` and is not under /Volumes at all), and not answering -- which
-    # is what a run in bench mode looks like from here, that install having no
-    # tailnet identity of its own.
-    if ! mac true >/dev/null 2>&1; then
+    # Each install is its own tailnet node, so silence is neither of them: the machine is between the two, or off.
+    if [ "${MODE:-unreachable}" = unreachable ]; then
         step part "the run is under way" \
-            "$MACHINE does not answer. In bench mode it is a different install with no
-         tailnet identity, so this is what a running A/B looks like from here; it
-         answers again when it hands the machine back." \
-            "" "wk bench mac-ab --collect   (once it is back in host mode)"
+            "$MACHINE answers on neither node -- not as its host install and not as
+         '$VOLUME''s. It is restarting, or it is off." \
+            "" "wk bench mac-ab --status   (once one of them answers)"
         log "" >&2
-        log "  the volume's own log survives the way back:" >&2
+        log "  the volume's own log survives either way:" >&2
         log "    /Volumes/$VOLUME - Data/private/var/wk/autorun.log" >&2
         return 0
     fi
 
-    local here; here=$(mac 'sed -n "s/^id=//p" /etc/wk-image 2>/dev/null' 2>/dev/null | tr -d '\r') || here=""
-    if [ -n "$here" ]; then
-        step yes "the Mac is in bench mode" "$here -- the A/B is running on it now" "" \
-            "wk bench mac-ab --status"
-        return 0
-    fi
+    case "$MODE" in
+        bench*)
+            step yes "the Mac is in bench mode" "${MODE#bench } -- the A/B is on it now" "" \
+                "wk bench mac-ab --status"
+            return 0 ;;
+    esac
 
     volver=$(mac "/usr/libexec/PlistBuddy -c 'Print :ProductUserVisibleVersion' \
                   '/Volumes/$VOLUME/System/Library/CoreServices/SystemVersion.plist' 2>/dev/null" 2>/dev/null | tr -d '\r') || volver=""
@@ -1008,29 +1007,24 @@ phase_progress() {
             "cat .../staged/<id>/WebKitBuild/*/wk-profile-check.json   (on the Mac)"
     fi
 
-    mode=$(mac 'sed -n "s/^id=//p" /etc/wk-image 2>/dev/null' 2>/dev/null | tr -d '\r') || mode=""
-    if [ -n "$mode" ]; then
-        step yes "the Mac is in bench mode" "$mode" "" "wk boot $MACHINE --status"
+    # Bench mode returned above, so this is host mode: what is missing is the transition. Read now rather than named in advance -- with the volume already the firmware default a plain reboot is the whole of it, and `wk boot` would re-arm what is armed.
+    local armed="" can=""
+    firmware_default_is_bench && armed=1
+    b_restart_ready && can=1
+    if [ -n "$armed" ] && [ -n "$can" ]; then
+        step no "the Mac is in bench mode" \
+            "it is in host mode, and '$VOLUME' is the firmware default with a helper that answers -- so this needs no arming, only the restart" \
+            "wk bench mac-ab --a <id> --b <id>   (plants and restarts)" \
+            "wk boot $MACHINE --status"
+    elif [ -n "$armed" ]; then
+        step no "the Mac is in bench mode" \
+            "it is in host mode. '$VOLUME' is the firmware default, so any reboot enters it; what is missing is a restart this lane can make -- $MACHINE takes no passwordless sudo for the boot helper" \
+            "wk boot $MACHINE --prepare   (installs it; one password prompt over there)" \
+            "sudo -n $BOOT_HELPER status   (on $MACHINE)"
     else
-        # Read now rather than named in advance: with the volume already the firmware default a plain reboot is the whole of it, and `wk boot` would re-arm what is armed.
-        local armed="" can=""
-        firmware_default_is_bench && armed=1
-        b_restart_ready && can=1
-        if [ -n "$armed" ] && [ -n "$can" ]; then
-            step no "the Mac is in bench mode" \
-                "it is in host mode, and '$VOLUME' is the firmware default with a helper that answers -- so this needs no arming, only the restart" \
-                "wk bench mac-ab --a <id> --b <id>   (plants and restarts)" \
-                "wk boot $MACHINE --status"
-        elif [ -n "$armed" ]; then
-            step no "the Mac is in bench mode" \
-                "it is in host mode. '$VOLUME' is the firmware default, so any reboot enters it; what is missing is a restart this lane can make -- $MACHINE takes no passwordless sudo for the boot helper" \
-                "wk boot $MACHINE --prepare   (installs it; one password prompt over there)" \
-                "sudo -n $BOOT_HELPER status   (on $MACHINE)"
-        else
-            step no "the Mac is in bench mode" "it is in host mode, and $FW_DETAIL" \
-                "wk boot $MACHINE   (arms the firmware and reboots)" \
-                "wk boot $MACHINE --status"
-        fi
+        step no "the Mac is in bench mode" "it is in host mode, and $FW_DETAIL" \
+            "wk boot $MACHINE   (arms the firmware and reboots)" \
+            "wk boot $MACHINE --status"
     fi
 
     root=$(bench_root 2>/dev/null) || root=""
@@ -1086,10 +1080,11 @@ phase_progress() {
 }
 
 phase_status() {
-    local root; root=$(bench_root 2>/dev/null) || die "'$VOLUME' is not attached on $MACHINE"
-    local mode; mode=$(mac 'cat /etc/wk-image 2>/dev/null | sed -n "s/^id=//p"' 2>/dev/null | tr -d '\r')
-    if [ -n "$mode" ]; then info "$MACHINE is in bench mode ($mode)"
-    else                   info "$MACHINE is in host mode"; fi
+    local root; root=$(bench_root)
+    case "$MODE" in
+        bench*) info "$MACHINE is in bench mode (${MODE#bench }) -- this is the run itself, read over its own node" ;;
+        *)      info "$MACHINE is in host mode, and this is read off the volume it mounts" ;;
+    esac
     mac "cat $(sh_quote "$root/job.json") 2>/dev/null" 2>/dev/null | sed 's/^/  /' >&2 \
         || log "  no job planted"
     log ""
@@ -1146,6 +1141,8 @@ machine_load "$MACHINE" >/dev/null 2>&1 || die "no such machine: $MACHINE (wk bo
 [ -z "$SSH_HOST" ] || NODE_SSH="$SSH_HOST"   # one address for both halves, so --host moves the reads and the restart together
 load_driver "$NODE_DRIVER" || die "$MACHINE names no boot driver this lane can restart it with"
 
+b_probe   # MODE and MODE_CHANNEL: which install is up, and so which channel every reading below travels on
+
 if m_here; then
     die "this lane reboots $MACHINE, so it cannot be driven from $MACHINE -- the reboot
   would take the driver with it. Run it from another machine (rpi5, moose)."
@@ -1201,7 +1198,7 @@ phase_go
 notify "mac-ab planted on $MACHINE" \
     "$PLANS, $ROUNDS-$MAX_ROUNDS rounds, count $COUNT. Arms $A_ID / $B_ID. $MACHINE has gone down to measure; the bench install hands it back to host mode when the job ends. Then 'wk bench mac-ab --collect'."
 
-# A bounded window, not a wait for a return: the run outlives it, and all this can still catch is a machine that never left or came straight back to host mode. Bounded rather than watchful only while the bench install has no tailnet identity -- with one, reachable as NODE_BENCH_SSH is the difference between measuring and finished.
+# A bounded window, not a wait for the result: the run outlives it. What it settles is which install came up.
 came_back=$(phase_wait "$BOOT_WAIT") || true
 log ""
 case "$came_back" in
@@ -1223,16 +1220,11 @@ case "$came_back" in
         notify "mac-ab: $MACHINE never rebooted" \
             "the A/B has not run. The job is planted and still valid: reboot $MACHINE by any means, including the startup manager, and it runs by itself." ;;
     *)
-        info "$MACHINE is silent. Three states look like this from here, and this"
-        log  "  end cannot tell them apart:"
-        log  "    it is measuring -- the bench install has no tailnet identity of its"
-        log  "      own until its join works, so a run in progress is silence"
-        log  "    it is finished and back in host mode, with that install's own"
-        log  "      tailnet identity not up (measured on tolken 2026-09-09: the"
-        log  "      Tailscale app starts at login, and the hand-back logs nobody in)"
-        log  "    it halted, because the bless in the hand-back did not take"
-        log  "  Nothing is lost in any of them: the result is on the volume, and the"
-        log  "  volume is mounted by the install that answers here."
-        log  "    wk bench mac-ab --status      once it answers again"
+        info "$MACHINE answers on neither node. A measuring install answers as its own,"
+        log  "  so this is not the run: it is still restarting, it halted, or its join"
+        log  "  did not come up."
+        log  "  Nothing is lost in any of them -- the result is written to the volume as"
+        log  "  each leg ends, and either install can read it back."
+        log  "    wk bench mac-ab --status      once one of them answers"
         log  "    wk bench mac-ab --collect     reads the result off the volume" ;;
 esac
