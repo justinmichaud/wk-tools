@@ -268,6 +268,11 @@ hardware UUID, so anything `defaults -currentHost` holds does not survive
 cloning) and then **prints what it actually found**: who is logged in at the
 window, the screen lock, the screen saver, display sleep, Setup Assistant's
 panes, the Software Update offer, and anything modal on screen right now.
+Whatever is *in front of* that desktop is a refusal rather than a line in a
+report -- an uninvited window, an authentication sheet, nobody logged in, the
+screen lock -- so a guest you cannot use is never handed to you as one you can;
+`wk new --target vm` refuses a stale base for the same reason, before the clone
+exists. `WK_VM_FORCE=1` crosses either and records that it did.
 `wk vm check <name>` asks again on demand, read-only, and adds what is resident
 in the guest -- the shells, the editor remote server that outlives its window,
 the agents, the memory left -- because a guest holds its whole allocation

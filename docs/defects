@@ -79,38 +79,60 @@ NEEDS YOU
    there is no label to disable); and `/var/db/.AppleSetupDone`, already there.
    Killing it puts the console user back to `root`.
 
-   What works is the machine's own console. `tart run --vnc-experimental` is
-   Virtualization.framework's VNC server, so a key or a click arrives as if from
-   hardware -- no Accessibility grant inside the guest, nothing loosened.
-   Measured: a keypress drops HIDIdleTime from 94s to 1.3s, the framebuffer is
-   the guest's screen 1:1, and the cursor lands exactly where it is put.
-   vm/console-keys.py is that client (RFB 3.8, DES from `openssl`), and
-   `_answer_console_panes` drives it during base provisioning, checking Setup
-   Assistant's *process* rather than its window -- the window stays for the whole
-   flow and only its content changes.
+   What works is the Accessibility API, from this end, over a plain ssh
+   session: the guest runs with SIP disabled, so `AXIsProcessTrusted()` is
+   already true there and no TCC grant is needed and nothing is loosened.
+   vm/desktop-unblock.py walks Setup Assistant's AX tree and presses elements by
+   `AXIdentifier`, and `_unblock_desktop` runs it during base provisioning,
+   checking Setup Assistant's *process* rather than its window -- the window
+   stays for the whole flow and only its content changes.
 
-   Which button is clicked is chosen by the pane's *name*, which Setup
-   Assistant logs ("Making pane visible: X"), never swept for. `iCloudLogin` is
-   the one that cannot be advanced -- its Continue stays disabled until an Apple
-   ID is typed -- so that one is skipped through the bottom-left popup and then
-   "Sign in Later in Settings", which sits just below the pane's own edge. Do
-   not sweep for these: the left of the other panes is "Only Download
-   Automatically", "Set Up Later" and, on one, "Restart", and a sweep answered
-   whichever it landed on and took a guest down. Keyboard is no help at all --
-   escape, return, space, tab and tab-tab, on a pane and on a sheet, with and
-   without full keyboard access; those buttons take no focus.
+   Nothing is chosen by coordinate and nothing is swept for. Every pane names
+   its own controls: `Next Button` is the primary, `Alternate Button` the
+   secondary, `action-button-1`/`action-button-2` the Skip/Don't Skip of a
+   confirmation sheet, and `userDeclinediCloud` the decline inside the account
+   pane's popup. A disabled control reads `AXEnabled` false and is passed over,
+   which is what makes `iCloudLogin` -- whose Continue never enables -- take its
+   popup instead. `Previous Button` and `action-button-2` are never pressed:
+   they walk the flow backwards.
 
-   Measured end to end 2026-09-05 on a clone made for it: `_answer_console_panes`
-   drove the whole flow, reported "Setup Assistant answered and gone", and the
-   guest has come up on a clear screen every boot since.
+   Measured 2026-09-09 on a clone: pressing `Next Button` on the AutoUpdate pane
+   left `AutomaticallyInstallMacOSUpdates` at 0, so answering it does not turn
+   updates on. The account pane spins for good once declined (`AXBusyIndicator`
+   true, with full network); the driver quits Setup Assistant there, and whether
+   the flow is really finished is settled by the login after it, not by that
+   process -- `_provision_base` reboots the base and judges the screen it comes
+   up with.
 
    One consent to undo afterwards, already handled: driving the flow turns
    diagnostic submission on, so `wk_quiet_desktop_system` turns `AutoSubmit` off
    and `_provision_base` re-settles the desktop after answering rather than
    before.
 
+*** Answered: by `AXIdentifier`, not by name and not by position. The
+    identifiers above are the pane's own, they are stable across panes rather
+    than per-pane, and a pane added in a future macOS is driven by the same four
+    without a new process check -- it is only its *primary* and *secondary* that
+    have to be identified, which every pane in this flow labels identically.
 
-*** How do you find the button by name? I need something progromatic and reproducable, without an LLM. Each new pane would require a new process check here. We need something that will notify us of this problem even if new setup panes get added in the future, and we need a good way to verify that the browser is front and foremost nad not being thottled.
+    A pane that offers no identifier the driver knows is not guessed at: it is
+    reported with everything it did offer, and the run fails. That is the
+    notification you asked for, and it does not depend on anyone predicting the
+    pane.
+
+    Separately, and this is the part that had been missing: nothing is ever
+    handed over behind a pane. `vm_desktop_blockers` names what is in front of
+    the desktop -- an uninvited window, a SecurityAgent sheet, no console user,
+    the screen lock -- and `_report_desktop` refuses on it, so `wk new --target
+    vm` and `wk vm start` fail loudly instead of returning a guest you have to
+    go and look at. `_check_base_screen` refuses to seal a base the same way,
+    and `t_create` refuses to clone a base that is stale. `WK_VM_FORCE=1`
+    crosses any of them and says so.
+
+    Frontmost-and-not-throttled is still owed: `frontapp` and the window list
+    are reported, and a guest is now refused over them, but nothing yet fails a
+    *benchmark* that starts behind another window, and the raiser that would
+    hold MiniBrowser in front has never run. docs/HANDOFF-mac-perf-mode.md.
 
 ================================================================================
 OWED, WITH THE DECISION ALREADY MADE

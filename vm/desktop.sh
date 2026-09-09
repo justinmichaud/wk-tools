@@ -14,18 +14,18 @@ fi
 
 wk_quiet_desktop_user || echo "warning: the guest's desktop is not fully quiet (above); 'wk vm check <name>' says which settings" >&2
 
-for _k in DidSeeCloudSetup DidSeeSiriSetup DidSeeAppearanceSetup \
-          DidSeePrivacy DidSeeTrueTone DidSeeAccessibility DidSeeSyncSetup \
-          DidSeeApplePaySetup DidSeeAvatarSetup DidSeeTouchIDSetup \
-          DidSeeScreenTime DidSeeiCloudLoginForStorageServices \
-          DidSeeAppleIDSetup DidSeeSafariImport DidSeeSiriSetupPromptCount \
-          DidSeeDevicesSetup DidSeeUpdateSetup DidSeeWelcome; do
+# The DidSee keys Setup Assistant's binary reads (what `strings` finds in it), less the ones measured not to work -- the key the update pane is gated on is deliberately absent, tried and beaten, and tests/test_vm_desktop.py holds this file to that. Measured 2026-09-09: a clone carrying every key here plus .skipbuddy still drew the AutoUpdate pane, so each of these only shortens Buddy's flow and none of them ends it. Ending it is vm/desktop-unblock.py, on the base.
+for _k in DidSeeAccessibility DidSeeActivationLock DidSeeAppearance \
+          DidSeeAppearanceSetup DidSeeApplePaySetup DidSeeAppStore \
+          DidSeeCloudSetup DidSeeLockdownMode DidSeePrivacy DidSeeScreenTime \
+          DidSeeSiriSetup DidSeeSyncSetup DidSeeSyncSetup2 \
+          DidSeeTermsOfAddress DidSeeTouchIDSetup \
+          DidSeeiCloudLoginForStorageServices; do
     defaults write com.apple.SetupAssistant "$_k" -bool true || true
 done
 defaults write com.apple.SetupAssistant LastSeenCloudProductVersion "$(sw_vers -productVersion)"
 defaults write com.apple.SetupAssistant LastSeenBuddyBuildVersion "$(sw_vers -buildVersion)"
 
-# Measured 2026-09-06 on clones of a freshly provisioned base: the keys above are not enough on their own -- a clone comes up with Setup Assistant frontmost, and it is this file's absence that lets it. On a live guest neither this file alone nor dismissing the pane alone stops it coming back; both, then a reboot, do, twice reproduced. Provisioning already dismisses the pane, so a base that also carries this is a base whose clones come up clear.
 touch "$HOME/.skipbuddy"
 
 defaults write com.apple.SoftwareUpdate AutomaticCheckEnabled -bool false

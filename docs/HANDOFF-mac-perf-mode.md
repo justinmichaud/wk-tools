@@ -8,6 +8,7 @@
 - [ ] move the A/B lane to the `bench/mac-lane.sh` shape (state on the driver, reach in per phase), replacing the planted-agent architecture [needs the Mac bench volume]
 - [ ] verify software-update scanning is denied at provision/first boot: run `wk bench mac-volume --provision` (or a first boot) on `WK Bench`, confirm `runs.tsv`'s scan-evidence column shows none across every arm [needs the Mac bench volume]
 - [ ] `wk quiesce`'s MiniBrowser raiser has never started anywhere. App Nap is off and read back, and a guest now carries the pyobjc it needs (`bench/mac-pyobjc.sh`); what is unread is the raiser actually holding MiniBrowser in front across a benchmark's relaunches [needs one collection or measured run]
+- [ ] fail a measured run that starts behind another window, rather than only reporting it: `vm_desktop_blockers` refuses a *guest* at start, and the same reading is what a bench run needs at its own gate [needs the macOS guest]
 - [ ] enumerate every launchd job on benchvm itself (`launchctl print system` / `gui/<uid>`) and classify what the table does not already name [needs the macOS guest]
 - [ ] exercise the four daemon rows the rehearsal guest never runs -- `XProtect`, `XprotectService`, `diagnosticservicesd`, `powerdatad` -- and confirm none of them wedges a probe when stopped, the way mds and sysmond did [needs the Mac bench volume]
 - [ ] give the bench volume SIP disabled and the workstation SIP enabled, and report both in `wk doctor` [needs the Mac bench volume]

@@ -153,16 +153,20 @@ rm -rf "$tmp"
         self.assertIn("matches its provisioning inputs", what)
 
 
-class TestCloningAStaleBaseWarns(WkTest):
-    """t_create warns and clones anyway: a rebuild is hours, so the choice is
-    the person's -- but it is made with the consequence in front of them."""
+class TestCloningAStaleBaseIsRefused(WkTest):
+    """A rebuild is hours, so the choice stays the person's -- but it is made
+    before the clone exists, not after. A guest cloned from a base known to be
+    wrong comes up behind Setup Assistant, and nothing in the guest can clear
+    it, so creating one silently is handing over work that cannot be finished."""
 
-    def _create(self, mark_ready):
+    def _create(self, mark_ready, force=False, rc=0):
         store = self.tmp / "store"
         store.mkdir(exist_ok=True)
         with stub_path({"tart": TART_WITH_BASE}) as binp:
             env = {"WK_VM_STORE": str(store),
                    "PATH": f"{binp}:{os.environ['PATH']}"}
+            if force:
+                env["WK_VM_FORCE"] = "1"
             marker = "_base_mark_ready" if mark_ready else '''
 ensure_dir "$WK_VM_DIR" 0700 >/dev/null
 printf 'image=x\\nfinished=old\\n' > "$(_base_marker)"
@@ -176,17 +180,25 @@ load_target vm >/dev/null 2>&1
 {marker}
 t_create demo-{rand_suffix()}
 ''', env=env)
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertEqual(cp.returncode, rc, cp.stdout + cp.stderr)
         return cp.stdout + cp.stderr
 
-    def test_a_stale_base_warns_and_names_the_rebuild(self):
-        out = self._create(mark_ready=False)
+    def test_a_stale_base_is_refused_and_the_rebuild_named(self):
+        out = self._create(mark_ready=False, rc=1)
         self.assertIn("predates its own provisioning inputs", out, out)
         self.assertIn("wk vm base --rebuild", out, out)
         # What a clone actually inherits from a stale base. Not the password:
         # the guest keeps the one its image ships, so it cannot go stale.
         self.assertIn("desktop settings", out, out)
-        self.assertIn("wk vm check", out, out)
+
+    def test_the_refusal_names_what_crosses_it(self):
+        out = self._create(mark_ready=False, rc=1)
+        self.assertIn("WK_VM_FORCE=1", out, out)
+
+    def test_a_forced_clone_still_says_what_it_is_cloning(self):
+        """Crossing the barrier is a choice, not a way to stop being told."""
+        out = self._create(mark_ready=False, force=True)
+        self.assertIn("predates its own provisioning inputs", out, out)
 
     def test_a_current_base_clones_without_a_word(self):
         out = self._create(mark_ready=True)

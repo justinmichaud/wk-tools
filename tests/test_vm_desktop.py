@@ -655,7 +655,7 @@ class TestTheStartReport(WkTest):
     canned probe: `_ssh` answers with a capture and `_ip` with an address, so
     the real function runs with no guest anywhere."""
 
-    def _report(self, sample):
+    def _report(self, sample, rc=0):
         canned = self.tmp / "probe.txt"
         canned.write_text(sample)
         cp = bash(f'''
@@ -668,18 +668,18 @@ _ip()  {{ echo 10.0.0.2; }}
 _ssh() {{ cat {str(canned)!r}; }}
 _report_desktop demo
 ''')
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertEqual(cp.returncode, rc, cp.stdout + cp.stderr)
         return cp.stdout + cp.stderr
 
     def test_every_finding_reaches_the_console(self):
-        out = self._report(AS_FOUND)
+        out = self._report(AS_FOUND, rc=1)
         self.assertIn("the screen saver is disarmed", out)
         self.assertIn("Setup Assistant", out)
         self.assertIn("nothing wk runs put it there", out)
         self.assertIn("wk vm check demo", out)
 
     def test_a_wrong_finding_brings_its_remedy_with_it(self):
-        out = self._report(AS_FOUND)
+        out = self._report(AS_FOUND, rc=1)
         self.assertIn("wk vm base --rebuild", out)
 
     def test_a_settled_guest_still_gets_the_report(self):
@@ -709,7 +709,8 @@ _report_desktop demo
 
     def test_a_guest_that_does_not_answer_does_not_fail_the_start(self):
         """A guest that came up is up; a probe that did not answer is not a
-        reason to refuse to report the address."""
+        reason to refuse to report the address. A probe that answers and says
+        something is in front of the desktop is -- that is the next test."""
         cp = bash('''
 . "$WK_ROOT/lib/common.sh"
 . "$WK_ROOT/lib/resources.sh"
@@ -721,6 +722,45 @@ _ssh() { return 1; }
 _report_desktop demo && echo "rc=0"
 ''')
         self.assertIn("rc=0", cp.stdout + cp.stderr, cp.stdout + cp.stderr)
+
+    def test_a_guest_behind_a_pane_is_refused_rather_than_handed_over(self):
+        """The whole point: nobody should have to look at the screen to find out
+        that the guest they were just handed is unusable."""
+        out = self._report(AS_FOUND, rc=1)
+        self.assertIn("not usable", out)
+        self.assertIn("Setup Assistant", out)
+        self.assertIn("wk vm base --rebuild", out)
+
+    def test_a_guest_with_nobody_at_the_window_is_refused_too(self):
+        """There is no desktop to draw on, so nothing in there can be measured."""
+        out = self._report(LOGIN_WINDOW, rc=1)
+        self.assertIn("not usable", out)
+        self.assertIn("nobody is logged in", out)
+
+    def test_a_settled_guest_is_handed_over(self):
+        """The refusal is for what blocks the desktop, not for every fault: a
+        guest with the wrong pyobjc still builds."""
+        self._report(SETTLED, rc=0)
+
+    def test_the_refusal_can_be_crossed_on_purpose(self):
+        """A barrier that can be crossed is crossed by something that records
+        itself, never by the command deciding on its own that it does not
+        matter."""
+        canned = self.tmp / "probe.txt"
+        canned.write_text(AS_FOUND)
+        cp = bash(f'''
+. "$WK_ROOT/lib/common.sh"
+. "$WK_ROOT/lib/resources.sh"
+. "$WK_ROOT/lib/store.sh"
+. "$WK_ROOT/lib/target.sh"
+load_target vm >/dev/null 2>&1
+export WK_VM_FORCE=1
+_ip()  {{ echo 10.0.0.2; }}
+_ssh() {{ cat {str(canned)!r}; }}
+_report_desktop demo && echo "rc=0"
+''')
+        self.assertIn("rc=0", cp.stdout, cp.stdout + cp.stderr)
+        self.assertIn("WK_VM_FORCE=1", cp.stderr)
 
 
 # `tart` answering about a base and one running guest, and `ssh` answering with

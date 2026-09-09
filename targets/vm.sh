@@ -54,6 +54,9 @@ WK_VM_DISK_GB="${WK_VM_DISK_GB:-320}"
 # Not zero: the reading is taken over ssh, so a round trip is in every compare.
 WK_VM_CLOCK_SKEW="${WK_VM_CLOCK_SKEW:-30}"
 
+# WK_VM_LOGIN_SETTLE: seconds a base's login is watched before its screen is called clear. Measured: Setup Assistant is up 4s after boot, and ssh answers before that.
+WK_VM_LOGIN_SETTLE="${WK_VM_LOGIN_SETTLE:-45}"
+
 # Twelve shells measured as nothing wrong; macOS pages below 15% free (memory_pressure).
 WK_VM_SHELLS_WARN="${WK_VM_SHELLS_WARN:-12}"
 WK_VM_MEM_FREE_WARN_PCT="${WK_VM_MEM_FREE_WARN_PCT:-15}"
@@ -190,11 +193,16 @@ t_create() {
     _ensure_base
 
     if why=$(vm_base_stale); then
-        warn "'$WK_VM_BASE' predates its own provisioning inputs: $why.
-  '$name' is a clone of it, so it carries what that base was built with -- the
-  desktop settings of the day it was sealed included. 'wk vm check $name' says
-  which of them are still wrong.
-      wk vm base --rebuild     hours; existing guests are unaffected"
+        [ -z "${WK_VM_FORCE:-}" ] \
+            || warn "WK_VM_FORCE=1 -- '$name' is cloned from a base that
+  predates its own provisioning inputs: $why"
+        [ -n "${WK_VM_FORCE:-}" ] \
+            || die "'$WK_VM_BASE' predates its own provisioning inputs: $why.
+  '$name' would be a clone of it, carrying the desktop settings of the day it
+  was sealed -- which is how a guest comes up behind Setup Assistant, where
+  nothing in the guest can clear it:
+      wk vm base --rebuild     hours; existing guests are unaffected
+  WK_VM_FORCE=1 clones it anyway."
     fi
 
     local running; running=$(_running_count)
@@ -269,14 +277,30 @@ _settle_desktop() { # <name> <ip>
     } | _ssh "$2" "bash -s" >/dev/null
 }
 
+# Read once and judged once, so what is shown is what the refusal was decided on.
 _report_desktop() { # <name>
-    local probe
+    local probe blocked
     probe=$(vm_desktop_probe "$1" 2>/dev/null) || return 0
     [ -n "$probe" ] || return 0
     log "  the guest's desktop, as it is now ('wk vm check $1' asks again):"
     render_findings <<FINDINGS || true
 $(vm_desktop_findings "$probe")
 FINDINGS
+
+    blocked=$(vm_desktop_blockers "$probe")
+    [ -n "$blocked" ] || return 0
+    if [ -n "${WK_VM_FORCE:-}" ]; then
+        warn "WK_VM_FORCE=1 -- '$1' is handed over with this in front of its desktop:
+$(printf '%s' "$blocked" | sed 's/^/      /')"
+        return 0
+    fi
+    die "'$1' is not usable: something is in front of its desktop.
+$(printf '%s' "$blocked" | sed 's/^/      /')
+    A clone cannot clear this itself -- Setup Assistant's account pane needs
+    Apple's servers, and a guest's egress filter refuses them. It is cleared
+    once, on the base every guest is cloned from:
+      wk vm base --rebuild     hours; then re-create this guest
+    WK_VM_FORCE=1 hands the guest over anyway."
 }
 
 # --net-softnet-block=0.0.0.0/0 is default-deny, and longest-prefix-match makes the single --net-softnet-allow "nothing except the proxy".
@@ -1269,8 +1293,7 @@ _provision_base() {
     local runlog="$WK_VM_DIR/base.run.log"
     local ip
     if [ "$(_vm_state "$WK_VM_BASE")" != running ]; then
-        # --vnc-experimental costs nothing on a headless run and is the only way to answer a Setup Assistant pane (docs/defects).
-        nohup "$(tart_bin)" run --no-graphics --vnc-experimental "$WK_VM_BASE" >"$runlog" 2>&1 &
+        nohup "$(tart_bin)" run --no-graphics "$WK_VM_BASE" >"$runlog" 2>&1 &
         disown 2>/dev/null || true
         info "booting the base VM for provisioning (log: $runlog)"
     fi
@@ -1326,9 +1349,22 @@ $(_runlog_tail "$runlog")"
 
     _prebuild_base "$ip"
 
-    _answer_console_panes "$ip" "$runlog"
+    _unblock_desktop "$ip" || die "Setup Assistant is still on '$WK_VM_BASE''s screen.
+    What it printed is above; the base is not sealed behind a pane, because
+    every guest cloned from it would come up behind one too. It is running at
+    $ip -- answer it at its own window, then  wk vm base --refresh"
     # After it, not only before: the flow turns diagnostic submission on.
     _settle_desktop "$WK_VM_BASE" "$ip" || warn "could not re-settle the base's desktop after Setup Assistant"
+
+    # A dismissed pane comes back at the next login, so the base is judged on the screen it boots into, never on the one the flow left behind.
+    info "rebooting the base to prove its screen comes up clear"
+    _tart stop "$WK_VM_BASE"
+    ip=$(_boot "$WK_VM_BASE" 300)
+    _wait_login_settled "$ip" \
+        || die "Setup Assistant came back at '$WK_VM_BASE''s next login, so the flow
+    that answered it did not finish -- every guest cloned from this base would
+    come up behind it. The base is running at $ip: answer it at its own window,
+    then  wk vm base --refresh"
     _check_base_screen "$ip"
 
     info "shutting the base VM down"
@@ -1337,16 +1373,7 @@ $(_runlog_tail "$runlog")"
     changed "golden base VM '$WK_VM_BASE' is ready"
 }
 
-_vnc_console() { # <runlog>
-    sed -n 's|.*vnc://:\([^@]*\)@\([0-9.]*\):\([0-9]*\).*|\2 \3 \1|p' "$1" | tail -1
-}
-
-_screen_windows() { # <ip>
-    { cat "$WK_ROOT/bench/mac-window-probe.sh"; echo wk_window_probe; } \
-        | _ssh "$1" 'bash -s' 2>/dev/null | sed -n 's/^windows=//p'
-}
-
-# Setup Assistant is answered on the machine's own console because no preference wk writes survives the next login (docs/defects). Its window stays for the whole flow and only its content changes, so the process is what says it has finished.
+# Driven over the Accessibility API: no preference the guest can write stops the pane (vm/desktop.sh), and the API answers a plain ssh session because the guest runs with SIP disabled.
 _setup_assistant_state() { # <ip>
     local n   # `pgrep -c` is Linux-only; macOS pgrep refuses it, and a `|| true` made that look like a count of nothing.
     n=$(_ssh "$1" "pgrep -f 'Setup Assistant.app/Contents/MacOS' | grep -c . || true" 2>/dev/null \
@@ -1358,60 +1385,21 @@ _setup_assistant_state() { # <ip>
     esac
 }
 
-# Chosen by the pane's own name rather than swept for; `iCloudLogin`'s Continue never enables, so that one is skipped through the popup below it (docs/defects has the measurements).
-_console_pane() { # <ip>
-    # Streamed, not passed as an argument: the predicate's quotes do not survive the remote shell.
-    cat <<'QUERY' | _ssh "$1" 'bash -s' 2>/dev/null | tr -d '\r'
-set -u
-log show --last 10m --predicate 'subsystem == "com.apple.macbuddy"' --style compact 2>/dev/null \
-    | sed -n 's/.*Making pane visible: //p' | tail -1
-QUERY
+_unblock_desktop() { # <ip>
+    [ "$(_setup_assistant_state "$1")" = up ] || return 0
+    info "driving Setup Assistant off the screen over the Accessibility API"
+    _ssh "$1" '/usr/bin/python3 -' < "$WK_ROOT/vm/desktop-unblock.py" || return 1
+    [ "$(_setup_assistant_state "$1")" = gone ]
 }
 
-_console_targets() { # <windows reading> <pane name>
-    local entry geom w h x y
-    entry=$(printf '%s' "$1" | tr ';' '\n' | grep '^Setup Assistant:0:' | head -1)
-    [ -n "$entry" ] || return 0
-    geom=${entry#Setup Assistant:0:}
-    w=${geom%%x*}; h=${geom#*x}; h=${h%%@*}
-    x=${geom#*@}; y=${x#*,}; x=${x%%,*}
-    _at() { printf 'click %s %s ' "$((x + w * $1 / 1000))" "$((y + h * $2 / 1000))"; }
-    case "$2" in
-        iCloudLogin) _at 140 940; _at 160 1025 ;;
-        *)           _at 890 940; _at 730 890 ;;
-    esac
-    unset -f _at
-}
-
-_answer_console_panes() { # <ip> <runlog>
-    local console ip="$1" i=0 target
-    [ "$(_setup_assistant_state "$ip")" = up ] || return 0
-    console=$(_vnc_console "$2")
-    if [ -z "$console" ]; then
-        warn "Setup Assistant is on the base's screen and this run has no console to answer
-    it on ('tart run --vnc-experimental'); $2 is where the address would be"
-        return 0
-    fi
-    info "answering Setup Assistant on the base's own console"
-    while [ "$i" -lt 8 ]; do
-        target=$(_console_targets "$(_screen_windows "$ip")" "$(_console_pane "$ip")")
-        [ -n "$target" ] || break
-        # shellcheck disable=SC2086 -- host, port, password, then `click x y` repeated.
-        /usr/bin/python3 "$WK_ROOT/vm/console-keys.py" $console $target \
-            || { warn "could not reach the base's console"; return 0; }
-        sleep 3
-        case "$(_setup_assistant_state "$ip")" in
-            gone) changed "Setup Assistant answered and gone"; return 0 ;;
-            unreachable)
-                warn "the base stopped answering while its console was being clicked, so
-    what it was asked is unknown. Nothing here will click a guest that has gone
-    quiet:  wk vm base  reports what is on that screen"
-                return 0 ;;
-        esac
-        i=$((i + 1))
+# ssh answers before the login has drawn anything and Setup Assistant arrives seconds later, so a screen read straight after boot reads clear whatever is coming.
+_wait_login_settled() { # <ip>
+    local i=0
+    while [ "$i" -lt "$WK_VM_LOGIN_SETTLE" ]; do
+        [ "$(_setup_assistant_state "$1")" != up ] || return 1
+        sleep 3; i=$((i + 3))
     done
-    warn "Setup Assistant is still up after $i passes over the base's console;
-    'wk vm base' reports what is on that screen, and it can be answered at its window"
+    return 0
 }
 
 _check_base_screen() { # <ip>
@@ -1419,18 +1407,36 @@ _check_base_screen() { # <ip>
     reading=$( { cat "$WK_ROOT/bench/mac-quiet-desktop.sh" "$WK_ROOT/bench/mac-window-probe.sh"
                  echo wk_window_probe
                } | _ssh "$1" 'bash -s' 2>/dev/null | sed -n 's/^windows=//p') || reading=""
-    if [ -z "$reading" ] || [ "$reading" = '?' ]; then
-        warn "could not ask '$WK_VM_BASE' what is on its screen, so whether every guest
-    cloned from it comes up covered is unknown ('wk vm check <name>' asks a guest)"
-        return 0
-    fi
+    [ -n "$reading" ] && [ "$reading" != '?' ] \
+        || die "could not ask '$WK_VM_BASE' what is on its screen, and a base is not
+    sealed unread: every guest cloned from it would come up behind whatever is
+    there. The base is still running at $1 -- 'wk vm base --refresh' re-runs this."
     uninvited=$(wk_window_unexpected "$reading")
     [ -n "$uninvited" ] || { info "the base's screen is clear, so a clone's will be too"; return 0; }
-    warn "on the base's screen, and nothing wk put there: ${uninvited%;}
-    Every guest cloned from this base comes up behind it, and no setting a guest
-    can write takes it away. Answer it once at the base's own window -- it is
-    running now, at $1 -- and then:  wk vm base --refresh
-    A benchmark measured behind it measures a throttled window."
+    die "on the base's screen, and nothing wk put there: ${uninvited%;}
+    Every guest cloned from this base comes up behind it, and a clone cannot
+    clear it itself. The base is running now, at $1: answer it at its own
+    window, then  wk vm base --refresh"
+}
+
+# What is in front of the desktop, one reason per line -- the faults a guest is refused over. A guest with the wrong pyobjc still builds; one behind Setup Assistant does not.
+vm_desktop_blockers() { # <probe output>
+    local probe="$1" v
+    _v() { printf '%s\n' "$probe" | sed -n "s|^$1=||p" | tail -1; }
+
+    v=$(_v windows)
+    if [ -n "$v" ] && [ "$v" != '?' ]; then
+        v=$(wk_window_unexpected "$v")
+        [ -z "$v" ] || printf 'a window nothing here put there: %s\n' "${v%;}"
+    fi
+    [ "$(_v securityagent)" != up ] || printf 'an authentication sheet (SecurityAgent) is up\n'
+    case "$(_v console_user)" in
+        root|""|"?") printf 'nobody is logged in at the window, so there is no desktop\n' ;;
+    esac
+    [ "$(_v screenlock)" != on ] || printf 'the screen lock is on, so the guest comes up asking for a password\n'
+
+    unset -f _v
+    return 0
 }
 
 vm_desktop_findings() { # <probe output>

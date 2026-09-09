@@ -256,90 +256,126 @@ class TestDeletingAVMReapsWhatRanIt(WkTest):
                 self.assertEqual(1 if f is VM else 0, len(bare), bare)
 
 
-class TestSetupAssistantIsAnsweredOnTheConsole(WkTest):
-    """No preference wk writes survives the next login (docs/defects lists eight
-    that were tried), so the pane is answered where a person would answer it: on
-    the machine's own console, through the VNC server
-    Virtualization.framework gives every VM. A key or click arrives as if from
-    hardware -- measured, HIDIdleTime drops from 94s to 1.3s -- so nothing inside
-    the guest is granted anything.
+class TestSetupAssistantIsDrivenOverAccessibility(WkTest):
+    """No preference the guest can write stops Setup Assistant drawing: measured
+    2026-09-09 on a clone carrying every DidSee key its own binary reads plus
+    ~/.skipbuddy, Buddy still launched and still drew its AutoUpdate pane. So it
+    is driven, over the Accessibility API, which answers a plain ssh session
+    because the guest runs with SIP disabled.
 
-    Which button is clicked is chosen by the pane's *name*, which Setup
-    Assistant logs ("Making pane visible: X"), never swept for: the left of
-    these panes is "Only Download Automatically", "Set Up Later" and, on one,
-    "Restart", and a sweep answered whichever it landed on and took a guest
-    down."""
+    Elements are chosen by AXIdentifier, never by where they draw: the panes put
+    "Only Download Automatically" and "Restart" where a coordinate sweep would
+    land, and answering one of those takes a guest down."""
 
-    PANE = "Setup Assistant:0:800x600@240,100;Terminal:0:863x499@40,50;"
+    def _unblock(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "wk_unblock", REPO / "vm" / "desktop-unblock.py")
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
 
-    def _targets(self, pane):
-        return bash(f'''
-. "$WK_ROOT/lib/common.sh"
-. "$WK_ROOT/lib/resources.sh"
-. "$WK_ROOT/lib/store.sh"
-. "$WK_ROOT/lib/target.sh"
-load_target vm >/dev/null 2>&1
-_console_targets {self.PANE!r} {pane!r}
-''').stdout.split()
+    def _pick(self, pairs):
+        mod = self._unblock()
+        return mod._pick([(i, t, object()) for i, t in pairs])[0]
 
-    def test_an_ordinary_pane_gets_its_own_primary_button(self):
-        """89% across, 94% down is the pane's Continue; the second is the OK of
-        the sheet the account pane opens. Both measured off a console capture
-        with the cursor in it."""
-        self.assertEqual(["click", "952", "664", "click", "824", "634"],
-                         self._targets("AutoUpdate"))
+    def test_a_confirmation_sheet_outranks_the_pane_behind_it(self):
+        """Declining the account pane opens a Skip/Don't Skip sheet over it. The
+        sheet has to be answered first or the press lands on the dead pane."""
+        self.assertEqual("action-button-1", self._pick([
+            ("Next Button", "Continue"), ("action-button-1", "Skip"),
+            ("action-button-2", "Don’t Skip")]))
 
-    def test_the_account_pane_is_skipped_rather_than_answered(self):
-        """Its Continue stays disabled until an Apple ID is typed, so no primary
-        button advances it. The way past is the bottom-left popup and then "Sign
-        in Later in Settings", which sits below the pane's own bottom edge --
-        hence a y fraction over 100%."""
-        self.assertEqual(["click", "352", "664", "click", "368", "715"],
-                         self._targets("iCloudLogin"))
+    def test_the_decline_is_never_the_dont_skip_button(self):
+        """Both sit in the same sheet and only their identifiers tell them
+        apart; pressing Don't Skip walks straight back into the pane."""
+        self.assertNotEqual("action-button-2", self._pick([
+            ("action-button-2", "Don’t Skip"), ("action-button-1", "Skip")]))
 
-    def test_no_click_lands_on_the_left_of_an_ordinary_pane(self):
-        """That is where "Only Download Automatically" and "Restart" are."""
-        xs = [int(v) for i, v in enumerate(self._targets("AutoUpdate")) if i % 3 == 1]
-        for x in xs:
-            self.assertGreater(x, 240 + 800 * 0.5, "a click landed on the left of the pane")
+    def test_the_account_pane_is_declined_through_its_own_menu_item(self):
+        """Its Continue never enables -- measured, AXEnabled False -- so the way
+        past is the alternate button's popup and the decline inside it."""
+        self.assertEqual("userDeclinediCloud", self._pick([
+            ("Alternate Button", "Other Sign-In Options"),
+            ("userDeclinediCloud", "Sign in Later in Settings")]))
 
-    def test_an_unreachable_guest_is_neither_up_nor_gone(self):
-        """`pgrep -c` is a Linux flag macOS refuses, and the `|| true` that hid
-        that made every answer an empty string -- which read as "still up" and
-        clicked a guest that was not answering."""
+    def test_an_ordinary_pane_takes_its_primary_button(self):
+        self.assertEqual("Next Button", self._pick([
+            ("Next Button", "Continue"),
+            ("Alternate Button", "Only Download Automatically")]))
+
+    def test_the_flow_is_never_walked_backwards(self):
+        self.assertIsNone(self._pick([("Previous Button", "Back")]))
+
+    def test_a_pane_offering_nothing_is_not_guessed_at(self):
+        """Every control is disabled while a pane settles the last answer. A
+        press picked out of that reading lands on whatever happens to be there."""
+        self.assertIsNone(self._pick([("", "")]))
+
+    def test_a_guest_that_goes_quiet_is_not_driven(self):
+        body = func_body(VM.read_text(), "_unblock_desktop")
+        self.assertIn("_setup_assistant_state", body)
+
+    def test_the_base_is_driven_before_it_is_judged(self):
+        body = func_body(VM.read_text(), "_provision_base")
+        self.assertLess(body.index("_unblock_desktop"), body.index("_check_base_screen"))
+
+    def test_the_desktop_is_settled_again_after_the_flow(self):
+        """Driving it turns diagnostic submission on; re-settling afterwards is
+        what keeps that out of every clone."""
+        body = func_body(VM.read_text(), "_provision_base")
+        self.assertLess(body.index("_unblock_desktop"), body.index("_settle_desktop"))
+        self.assertIn("AutoSubmit", (REPO / "bench" / "mac-quiet-desktop.sh").read_text())
+
+    def test_the_base_is_judged_on_the_screen_a_login_brings_up(self):
+        """A pane that was only dismissed comes back at the next login, so the
+        screen the flow leaves behind proves nothing."""
+        body = func_body(VM.read_text(), "_provision_base")
+        self.assertLess(body.index("_unblock_desktop"), body.index("_boot"))
+        self.assertLess(body.index("_boot"), body.index("_check_base_screen"))
+
+    def test_a_base_is_never_sealed_behind_a_pane(self):
+        body = func_body(VM.read_text(), "_check_base_screen")
+        self.assertIn("die", body)
+        self.assertNotIn("warn", body)
+
+    def test_a_pane_that_comes_back_at_the_next_login_is_not_sealed(self):
+        """The one reading that proves the flow finished. A base sealed on the
+        screen the flow left behind is how every clone inherited a pane."""
         cp = bash('''
 . "$WK_ROOT/lib/common.sh"
 . "$WK_ROOT/lib/resources.sh"
 . "$WK_ROOT/lib/store.sh"
 . "$WK_ROOT/lib/target.sh"
 load_target vm >/dev/null 2>&1
-_ssh() { return 1; }
-echo "state=$(_setup_assistant_state 1.2.3.4)"
-_ssh() { echo 0; }
-echo "none=$(_setup_assistant_state 1.2.3.4)"
-_ssh() { echo 2; }
-echo "some=$(_setup_assistant_state 1.2.3.4)"
+WK_VM_LOGIN_SETTLE=6
+_setup_assistant_state() { echo up; }
+_wait_login_settled 1.2.3.4 && echo "SEALED" || echo "REFUSED"
 ''')
-        self.assertIn("state=unreachable", cp.stdout, cp.stdout + cp.stderr)
-        self.assertIn("none=gone", cp.stdout)
-        self.assertIn("some=up", cp.stdout)
+        self.assertIn("REFUSED", cp.stdout, cp.stdout + cp.stderr)
 
-    def test_a_guest_that_goes_quiet_is_not_clicked_at(self):
-        body = func_body(VM.read_text(), "_answer_console_panes")
-        self.assertIn("unreachable)", body)
+    def test_a_login_that_stays_clear_seals(self):
+        cp = bash('''
+. "$WK_ROOT/lib/common.sh"
+. "$WK_ROOT/lib/resources.sh"
+. "$WK_ROOT/lib/store.sh"
+. "$WK_ROOT/lib/target.sh"
+load_target vm >/dev/null 2>&1
+WK_VM_LOGIN_SETTLE=6
+_setup_assistant_state() { echo gone; }
+_wait_login_settled 1.2.3.4 && echo "SEALED" || echo "REFUSED"
+''')
+        self.assertIn("SEALED", cp.stdout, cp.stdout + cp.stderr)
 
-    def test_the_base_is_booted_with_a_console_to_answer_on(self):
+    def test_the_base_is_watched_across_the_login_before_it_is_judged(self):
         body = func_body(VM.read_text(), "_provision_base")
-        self.assertIn("--vnc-experimental", body)
-        self.assertLess(body.index("_answer_console_panes"), body.index("_check_base_screen"))
+        self.assertLess(body.index("_wait_login_settled"), body.index("_check_base_screen"))
 
-    def test_the_desktop_is_settled_again_after_the_flow(self):
-        """Driving it turns diagnostic submission on; re-settling afterwards is
-        what keeps that out of every clone."""
-        body = func_body(VM.read_text(), "_provision_base")
-        self.assertLess(body.index("_answer_console_panes"), body.index("_settle_desktop"))
-        self.assertIn("AutoSubmit", (REPO / "bench" / "mac-quiet-desktop.sh").read_text())
-
+    def test_the_rfb_console_client_is_gone(self):
+        """One implementation per behaviour: the coordinate clicker it drove is
+        what AXIdentifier replaced."""
+        self.assertFalse((REPO / "vm" / "console-keys.py").exists())
+        self.assertNotIn("vnc", VM.read_text().lower())
 
 class TestTheBaseIsAskedWhatIsOnItsScreen(WkTest):
     """A pane on the base's screen is a pane on every guest cloned from it, and
@@ -361,9 +397,11 @@ _check_base_screen 1.2.3.4 2>&1
 echo "rc=$?"
 ''')
 
-    def test_a_base_that_does_not_answer_warns_and_lets_the_build_finish(self):
+    def test_a_base_that_does_not_answer_is_not_sealed(self):
+        """An unread screen is not a clear one, and the base is the one artifact
+        whose mistakes every clone inherits."""
         cp = self._check("return 1")
-        self.assertIn("rc=0", cp.stdout, cp.stdout + cp.stderr)
+        self.assertNotIn("rc=0", cp.stdout, cp.stdout + cp.stderr)
         self.assertIn("could not ask", cp.stdout)
 
     def test_a_clear_screen_says_so(self):
@@ -371,9 +409,9 @@ echo "rc=$?"
         self.assertIn("rc=0", cp.stdout, cp.stdout + cp.stderr)
         self.assertIn("screen is clear", cp.stdout)
 
-    def test_a_pane_is_named_and_sent_to_the_base_s_own_window(self):
+    def test_a_pane_is_named_and_the_base_is_not_sealed_behind_it(self):
         cp = self._check('cat >/dev/null; echo "windows=Setup Assistant:0:800x600;Terminal:0:800x600;"')
-        self.assertIn("rc=0", cp.stdout, cp.stdout + cp.stderr)
+        self.assertNotIn("rc=0", cp.stdout, cp.stdout + cp.stderr)
         self.assertIn("Setup Assistant:0:800x600", cp.stdout)
         self.assertNotIn("Terminal", cp.stdout.split("nothing wk put there:")[1])
 
