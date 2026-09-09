@@ -48,6 +48,12 @@ recovery-pinephone
 EOF
 }
 
+image_pgo_wanted() {   # of the loaded profile. 2.52 is where upstream's cmake support for a profile-guided build arrives (Source/cmake/WebKitFeatures.cmake's USE_PGO_PROFILE, 310954@main); before it there is nothing to turn on, after it every number a board produces is a profile-guided build's (image/pgo.sh)
+    [ "${IMG_BUILDER:-}" = yocto ] || return 1
+    [ -n "${CFG_RELEASE:-}" ] || return 1
+    [ "$(printf '%s\n2.52\n' "$CFG_RELEASE" | sort -V | head -1)" = 2.52 ]
+}
+
 image_profile_load() {
     IMG_PROFILE="$1"
     IMG_SPEC_DIR="$WK_ROOT/image/$1"

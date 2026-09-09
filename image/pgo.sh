@@ -3,12 +3,6 @@
 command -v config_cross_load >/dev/null 2>&1 || . "$WK_ROOT/build/configs.sh"
 command -v detach_run >/dev/null 2>&1 || . "$WK_ROOT/lib/detach.sh"
 
-image_pgo_wanted() {   # the profile is loaded. 2.52 is where upstream's cmake support for a profile-guided build arrives (Source/cmake/WebKitFeatures.cmake's USE_PGO_PROFILE); before it there is nothing to turn on, after it every number a board produces is a profile-guided build's
-    [ "${IMG_BUILDER:-}" = yocto ] || return 1
-    [ -n "${CFG_RELEASE:-}" ] || return 1
-    [ "$(printf '%s\n2.52\n' "$CFG_RELEASE" | sort -V | head -1)" = 2.52 ]
-}
-
 image_pgo_machine() {   # <profile> -- the board that carries this image, read off the fleet rather than given as a flag: a collection has to run on the hardware the profile is measured on
     local f n
     for f in "$(machines_dir)"/*.conf; do

@@ -24,11 +24,16 @@ Each of these is a distinct way the cycle itself can stop:
       the fix is the SDK's package list (`nativesdk-clang`), not a fallback to
       the workstation's: the workstation has clang 18/19 and meta-clang pins
       20, and a `.profraw` is read by the toolchain that wrote it.
-- [ ] **The target's clang profile runtime.** `-DENABLE_LLVM_PROFILE_GENERATION=ON`
-      configure-checks for `libclang_rt.profile` and stops with a FATAL_ERROR
-      when the toolchain cannot link `-fprofile-generate`. Whether the SDK
-      installs the aarch64 profile runtime is unverified; if it does not, that
-      is a `TOOLCHAIN_TARGET_TASK` line, again in the image's own configuration.
+- [ ] **The target's clang profile runtime resolves.**
+      `image/yocto-build.sh` puts `compiler-rt-sanitizers-staticdev` into
+      `TOOLCHAIN_TARGET_TASK` for a profile-guided profile, because that is
+      where meta-clang ships `libclang_rt.profile-<arch>.a` (its
+      `compiler-rt-sanitizers` recipe builds with `COMPILER_RT_BUILD_PROFILE=ON`
+      and packages `lib/linux/*.a` into `-staticdev`). Unverified against a
+      real `populate_sdk`: if the name is wrong, `do_populate_sdk` says
+      "Nothing RPROVIDES", and if the package is right but the archive is not
+      in it, the instrumented configure stops at
+      `HAVE_CLANG_PROFILE_RUNTIME` instead.
 - [ ] **`CC=clang` reaching the SDK's clang.** `image/yocto-build.sh` exports
       `CC`/`CXX` because `cross-toolchain-helper` writes an `environment-setup`
       that branches on them. Confirm the cross build actually compiles with
@@ -49,6 +54,17 @@ Each of these is a distinct way the cycle itself can stop:
       handler (310954@main). Measure whether one second is enough for a
       `.profraw` on the board's medium; if it is not, the number belongs
       beside the kill and not in a retry.
+
+## Decisions not taken
+
+- [ ] **No LTO.** The Mac lane's perf build is thin LTO for the instrumented
+      phase and full LTO for the measured one; the board's cross configs set
+      no `LTO_MODE` at all, so the two lanes do not agree on what a perf build
+      is. WebKit's CMake takes `-DLTO_MODE=thin|full`
+      (`WebKitCompilerFlags.cmake`, straight to `-flto=`), and upstream's PGO
+      patch already handles the `__llvm_profile_filename` clash LTO causes.
+      What is missing is a measurement: what full LTO costs a cross link on
+      the SDK toolchain, and what it buys on a board.
 
 ## Owed upstream
 

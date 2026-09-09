@@ -421,8 +421,8 @@ $(config_cross_list | sed 's/^/      /')"
     cores=$(envelope_cores)
     webkit_jobs=$(WK_MB_PER_JOB=2560 build_jobs)
 
-    local pgo_args=""
-    [ "$stage" != pgo-mix ] || pgo_args="--pgo-dir $(image_pgo_dir_in "$slot") --pgo-lib $PGO_GLIB_LIB"
+    local pgo_args="--pgo-runtime $(image_pgo_wanted && echo 1 || echo 0)"
+    [ "$stage" != pgo-mix ] || pgo_args="$pgo_args --pgo-dir $(image_pgo_dir_in "$slot") --pgo-lib $PGO_GLIB_LIB"
 
     hold_lock "ws-$ws" -w "${WK_BUILD_LOCK_WAIT:-3600}"  # two builds in one checkout corrupt both
 

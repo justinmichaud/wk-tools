@@ -873,6 +873,12 @@ taken from one arm's sources leaves the other arm's new functions cold, which
 reads as a regression that is not there. That is the same rule the Mac lane
 follows, and it is why nothing here shares a profile between arms.
 
+ccache stays on across the two builds. Measured here (ccache 4.9.1, clang 18):
+changing the content of a `-fprofile-use` file at an unchanged path is a cache
+*miss*, so the measured build cannot be served objects compiled against an
+earlier collection -- which is the trap a bitbake recipe has to solve by
+putting the profile in `SRC_URI`.
+
 The mixing runs **inside the cross toolchain**, not on the workstation: a
 `.profraw` is readable only by the toolchain that wrote it, and that clang is
 the SDK's. The collection lands in the workspace's own build directory
