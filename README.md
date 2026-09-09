@@ -641,15 +641,21 @@ wk bench precision <run-a> <run-b>               # what the rounds so far resolv
 Driven from another machine, never from the Mac: the lane reboots it, and a
 driver on that machine goes with the reboot.
 
-**Starting it needs nobody, and neither does ending it.** A restart enters
-bench mode by itself only where the firmware's own default is the benchmark
-volume: `wk boot mbp` arms that, and `wk bench mac-ab` asserts it in preflight
-rather than reporting it, because a restart that lands back in host mode costs
-a whole cycle, and the arming is per experiment. When the job ends, for any
-reason, that install blesses the host install, reads the firmware back and
-reboots into it; if the firmware will not take the choice it powers the machine
-off instead, a reboot with the bench volume still default being a boot that
-measures again.
+**Starting it needs nobody; getting the workstation back needs a person.** A
+restart enters bench mode by itself only where the firmware's own default is
+the benchmark volume: `wk boot mbp` arms that, and `wk bench mac-ab` asserts it
+in preflight rather than reporting it, because a restart that lands back in
+host mode costs a whole cycle, and the arming is per experiment. When the job
+ends, for any reason, that install blesses the host install, reads the firmware
+back and reboots into it; if the firmware will not take the choice it powers
+the machine off instead, a reboot with the bench volume still default being a
+boot that measures again. That reboot is where the one human step is: the
+benchmark install comes up and joins the tailnet with no password, and the host
+install stops for one at boot -- so the Mac is *measuring* unattended and
+*back at its desktop* only once somebody types it. Which is why a result is
+read over the benchmark install's own node and not off the volume the host
+install mounts: the numbers are readable the moment a leg ends, rather than
+whenever the room is next occupied.
 
 **One route to the measured install, and it is that install's own node.** Both
 installs are on the tailnet -- `NODE_SSH` names the host one and

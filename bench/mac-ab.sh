@@ -82,14 +82,18 @@ mgr_tools() {
 }
 rwk() { mgr_sh "cd $(sh_quote "$(mgr_tools)") && ./wk $*"; }
 
-bwk() { mac_sh "cd $(sh_quote "$(bench_root)/wk-tools") && ./wk $*"; }   # the planted copy, the same age as the job
+bwk() {
+    mac_sh "cd $(sh_quote "$(bench_root)/wk-tools") && ./wk $*"   # the planted copy, the same age as the job, on whichever install answers
+}
 
-# wkmac.py travels on stdin rather than being read out of the Mac's own checkout: one implementation of every disk, firmware and display fact, and no tree over there to keep in step with this one.
-mac_wkmac() {  # <subcommand> [args...]
+# A lib/*.py travels on stdin rather than being read out of the Mac's own checkout: one implementation of every fact it reads, and no tree over there to keep in step with this one.
+mac_py() {  # <lib file> <subcommand> [args...]
+    local f="$1"; shift
     local a q=""
     for a in "$@"; do q="$q $(sh_quote "$a")"; done
-    mac "python3 -$q" < "$WK_ROOT/lib/wkmac.py" 2>/dev/null | tr -d '\r'
+    mac "python3 -$q" < "$WK_ROOT/lib/$f" 2>/dev/null | tr -d '\r'
 }
+mac_wkmac() { mac_py wkmac.py "$@"; }
 
 # The firmware's own default has to BE the bench volume: that is what lets this lane restart the machine and have benchmarking begin with nobody at the keyboard.
 FW_DETAIL=""
@@ -1090,6 +1094,10 @@ phase_status() {
     log ""
     mac "cat $(sh_quote "$root/autorun.state") 2>/dev/null" 2>/dev/null | sed 's/^/  /' >&2 \
         || log "  no autorun state"
+    log ""
+    log "  legs:"
+    mac_py wkdata.py ab-legs "$root" | sed 's/^/    /' >&2 \
+        || log "    (unreadable)"
     log ""
     log "  last 20 lines of the autorun log:"
     mac "tail -20 $(sh_quote "$root/autorun.log") 2>/dev/null" 2>/dev/null | sed 's/^/    /' >&2 \

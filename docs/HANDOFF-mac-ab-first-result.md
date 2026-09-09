@@ -54,13 +54,37 @@
 
 ## Owed, needs the Mac
 
-- [ ] **the confirmation run of the patch, with statistics.** One A/B test of
-      speedometer3 at `--count 1` compares clean (task
-      `20260909T154515Z-mbp-mac-ab`: A 60.0993, B 60.1678, +0.11%), and one
-      iteration per leg carries no within-leg variance, so no p-value exists and
-      `wk bench precision` resolves nothing. jetstream3, speedometer3 and
-      motionmark at `--count 2` or more is the run that says something about
-      `7d6c5149` (PR 70886) against its base `b8e586fe`
+- [ ] **the confirmation run of the patch, with statistics.** All three plans
+      have now run against `7d6c5149` (PR 70886) and its base `b8e586fe`, two
+      rounds at `--count 1`, 14 legs, every one clean (task
+      `20260909T180544Z-mbp-mac-ab`). It resolves nothing: each delta is an
+      order of magnitude under the smallest difference its own rounds can
+      resolve --
+
+        speedometer3  -0.31%  p=0.83  mde 7.14%   rounds_needed 1132
+        jetstream3    +0.75%  p=0.48  mde 4.93%   rounds_needed 541
+        motionmark    +0.66%  p=0.83  mde 29.23%  rounds_needed 18981
+
+      Which lever moves that is unmeasured. Run-to-run spread is already small
+      -- `sd_a_pct` 1.40 / 0.97 / 3.49 -- so what makes `mde` large at n=2 is
+      the t-multiplier on one degree of freedom, which rounds attack and
+      iterations do not. No run has varied `--count`, so nothing here says what
+      it buys. What is owed is one run that varies it and one that varies
+      `--rounds`, read against these
+
+- [ ] two different spreads are both printed as `sd` by the same command, and
+      conflating them is easy: `wk bench report`'s table gives
+      `59.684+-4.657` -- the spread across a run's own iterations -- while
+      `wk bench precision` gives `sd_a_pct=1.4032`, the run-to-run spread the
+      A/B statistics are actually computed from. One is 5x the other on the
+      same data. Name them apart in both outputs
+
+- [ ] a leg costs what this run measured it at, on tolken (Mac16,12, M4,
+      macOS 26.6.1): speedometer3 30s, jetstream3 60s, motionmark 335s, and a
+      warmup leg with samply attached 91s. 14 legs plus a 90s settle ran in
+      34m39s (`started_at` 18:08:20Z, `finished_at` 18:42:59Z), and 37m02s from
+      the plant. Nothing derives a run's cost from those yet, so `--rounds`,
+      `--count` and a plan set are still chosen without knowing what they buy
 
 - [ ] whether the plant's Do Not Disturb record turns DND *on* in the running
       install is unproven, and it cannot be asked there:

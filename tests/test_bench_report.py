@@ -556,5 +556,44 @@ class TestBenchReportIntegration(WkTest):
         print(f"[timing] two sunspider runs + report: {bench_s:.1f}s (workspace: {ws})")
 
 
+class TestPrecisionCarriesTheNoiseFloor(WkTest):
+    """`met` answers --target; it does not say whether a run can see the
+    difference it just measured. The spread each arm carries and the delta read
+    against the resolvable one are what separate "no effect" from "cannot see",
+    and both were arithmetic a reader had to do by hand -- wrongly, if they
+    reached for the report table's per-iteration sd instead of this one."""
+
+    def _precision(self, a, b, target="0.3"):
+        with scratch_dir() as tmp:
+            dirs = {}
+            for side, vals in (("a", a), ("b", b)):
+                paths = []
+                for i, v in enumerate(vals):
+                    d = tmp / ("%s%d" % (side, i))
+                    d.mkdir()
+                    (d / "result.json").write_text(json.dumps(
+                        {"Speedometer-3": {"metrics": {"Score": {"current": [[v]]}}}}))
+                    paths.append(str(d))
+                dirs[side] = ",".join(paths)
+            cp = self.bash('python3 "$WK_ROOT/lib/wkdata.py" ab-precision --a %s --b %s --target %s'
+                           % (json.dumps(dirs["a"]), json.dumps(dirs["b"]), target))
+            self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+            return dict(l.split("=", 1) for l in cp.stdout.splitlines() if "=" in l)
+
+    def test_each_arms_spread_is_reported_against_its_own_mean(self):
+        out = self._precision([100.0, 102.0], [100.0, 100.0])
+        self.assertAlmostEqual(float(out["sd_a_pct"]), 1.4003, places=2)
+        self.assertEqual(float(out["sd_b_pct"]), 0.0)
+
+    def test_the_delta_is_read_against_what_the_rounds_resolve(self):
+        out = self._precision([100.0, 102.0], [101.0, 103.0])
+        self.assertGreater(float(out["delta_vs_mde"]), 1.0,
+                           "a delta under the resolvable difference must say so")
+
+    def test_a_delta_of_zero_leaves_the_ratio_empty_rather_than_dividing(self):
+        out = self._precision([100.0, 102.0], [100.0, 102.0])
+        self.assertEqual("", out["delta_vs_mde"])
+
+
 if __name__ == "__main__":
     unittest.main()

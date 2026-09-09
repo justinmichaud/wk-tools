@@ -665,6 +665,198 @@ NODE_VOLUME="WK Bench"
                 self.assertNotIn("host-mode verb", body)
 
 
+class TestCollectReadsARunFromBenchMode(WkTest):
+    """`--collect` with the Mac still in bench mode. The whole of phase_collect
+    runs against a stand-in for that install: the staging root is resolved by
+    the real `b_bench_root`, and the stub rewrites the prefix it answers onto a
+    directory here -- so both channels read one tree through one code path and
+    the only difference is the prefix, which is the claim."""
+
+    #  <scratch>/WK Bench - Data/private/var/wk  is the volume as host mode
+    #  reaches it, and  /var/wk  is the same bytes as the install itself does.
+    def _collect(self, channel, tsv):
+        with temp_store() as store, scratch_dir() as tmp:
+            data = tmp / "WK Bench - Data"
+            vol = data / "private" / "var" / "wk"
+            for rid in ("r1", "r2"):
+                d = vol / "results" / rid
+                d.mkdir(parents=True)
+                (d / "env.json").write_text(json.dumps(
+                    {"plan": "speedometer3", "workspace": "wk-bench",
+                     "config": "mac-release-pgo", "wall_time_s": "60"}))
+            (vol / "autorun.state").write_text(
+                "job_stamp=20260908T000000Z\nphase=done\noutcome=ran\n")
+            runs = vol / "ab" / "20260908T000000Z" / "runs.tsv"
+            runs.parent.mkdir(parents=True)
+            runs.write_text(tsv)
+            task = store["path"] / "bench" / "20260908T000000Z-mbp-mac-ab"
+            (task / "runs").mkdir(parents=True)
+            script = """set -euo pipefail
+. "$WK_ROOT/lib/common.sh"
+. "$WK_ROOT/lib/store.sh"
+. "$WK_ROOT/lib/bench.sh"
+. "$WK_ROOT/boot/machines.sh"
+NODE_NAME=mbp
+NODE_SSH=fakemac
+NODE_BENCH_SSH=fakemac-bench
+NODE_VOLUME="WK Bench"
+. "$WK_ROOT/boot/mac-volume.sh"
+MACHINE=mbp
+VOLUME="WK Bench"
+MODE_CHANNEL=%s
+MODE="bench perf-macos-tolken-2026-08"
+BROOT=""
+mac_volume_present() { [ "$MODE_CHANNEL" = host ]; }
+mac_volume_data_path() { printf '%%s' %s; }
+# ssh joins its arguments into one remote command line, and this is that shell.
+# The rewrite is the bench channel's alone: in host mode the path the driver
+# builds is already this directory, and rewriting it would nest it in itself.
+r_ssh() {
+    local c="$*"
+    if [ "$MODE_CHANNEL" = bench ]; then c="${c//\\/var\\/wk/%s}"; fi
+    bash -c "$c"
+}
+bench_root() {%s}
+mac() {%s}
+mac_sh() { mac bash -lc "$(sh_quote "$*")"; }
+bwk() {%s}
+collect_runs_into_task() {%s}
+phase_collect() {%s}
+phase_collect
+""" % (channel, shlex.quote(str(data)), vol,
+       macab_func("bench_root"), macab_func("mac"), macab_func("bwk"),
+       macab_func("collect_runs_into_task"), macab_func("phase_collect"))
+            cp = bash(script, env={"WK_STORE": store["WK_STORE"]})
+            recorded = sorted(d.name for d in (task / "runs").iterdir())
+            return cp, recorded, cp.stdout + cp.stderr
+
+    TSV = ("0\tA\tsid-a\tr0\tclean\tspeedometer3\n"
+           "1\tA\tsid-a\tr1\tclean\tspeedometer3\n"
+           "1\tB\tsid-b\tr2\tclean\tspeedometer3\n")
+
+    def test_the_result_is_read_with_the_mac_still_in_bench_mode(self):
+        cp, recorded, out = self._collect("bench", self.TSV)
+        self.assertEqual(cp.returncode, 0, out)
+        self.assertEqual(recorded, ["r1", "r2"], out)
+
+    def test_the_staging_root_it_reaches_for_is_that_installs_own(self):
+        """Not a /Volumes path: in bench mode the volume is `/` and is mounted
+        nowhere, which is what made this unreadable until the machine returned."""
+        cp = bash('. "$WK_ROOT/lib/common.sh"\n. "$WK_ROOT/boot/machines.sh"\n'
+                  'NODE_VOLUME="WK Bench"\n. "$WK_ROOT/boot/mac-volume.sh"\n'
+                  'MODE_CHANNEL=bench\nmac_volume_present() { return 1; }\n'
+                  'b_bench_root')
+        self.assertEqual("/var/wk", cp.stdout, cp.stdout + cp.stderr)
+
+    def test_the_same_collect_off_the_volume_in_host_mode_records_the_same_legs(self):
+        """One implementation, two channels."""
+        cp, recorded, out = self._collect("host", self.TSV)
+        self.assertEqual(cp.returncode, 0, out)
+        self.assertEqual(recorded, ["r1", "r2"], out)
+        self.assertIn("private/var/wk", out)
+
+    def test_the_summary_failing_over_there_does_not_lose_the_result(self):
+        """`wk bench ab-summary` runs from the planted tree on the measured
+        install; a stand-in has none, and the numbers are still recorded."""
+        cp, recorded, out = self._collect("bench", self.TSV)
+        self.assertIn("summary could not be produced", out)
+        self.assertEqual(recorded, ["r1", "r2"], out)
+
+
+class TestStatusCarriesTheLegs(WkTest):
+    """`--status` is the command that answers "how far has it got", so the
+    per-leg timings belong in it. Reaching past it with an ssh of one's own
+    leaves the gap in place for the next person."""
+
+    def _legs(self, started="2026-09-09T18:08:20Z", tsv=None, older=True):
+        with scratch_dir() as root:
+            (root / "job.json").write_text(json.dumps({
+                "plans": ["speedometer3", "jetstream3", "motionmark"],
+                "rounds": 2,
+                "arms": [{"label": "A", "id": "sid-a"}, {"label": "B", "id": "sid-b"}]}))
+            state = "job_stamp=20260909T180544Z\n"
+            if started:
+                state += "started_at=%s\n" % started
+            state += "ok_speedometer3_A_0=1\nok_speedometer3_B_0=1\nok_speedometer3_A_1=1\n"
+            (root / "autorun.state").write_text(state)
+            legs = [("20260909T181045Z-speedometer3-sid-a", 91),
+                    ("20260909T181218Z-speedometer3-sid-b", 92),
+                    ("20260909T181351Z-speedometer3-sid-a", 31),
+                    ("20260909T181500Z-motionmark-sid-b", None)]
+            if older:
+                legs.insert(0, ("20260101T000000Z-speedometer3-sid-a", 42))
+            for name, wall in legs:
+                d = root / "results" / name
+                d.mkdir(parents=True)
+                env = {"plan": name.split("-")[1]}
+                if wall is not None:
+                    env["wall_time_s"] = str(wall)
+                (d / "env.json").write_text(json.dumps(env))
+            runs = root / "ab" / "20260909T180544Z" / "runs.tsv"
+            runs.parent.mkdir(parents=True)
+            runs.write_text(tsv if tsv is not None else
+                            "1\tA\tsid-a\t20260909T181351Z-speedometer3-sid-a\tclean\tspeedometer3\n")
+            cp = bash('python3 "$WK_ROOT/lib/wkdata.py" ab-legs %s' % shlex.quote(str(root)))
+            self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+            return cp.stdout
+
+    def test_it_counts_what_ran_against_what_the_job_planned(self):
+        """Two warmup legs, then rounds x plans x arms -- the warmup round runs
+        the first plan only, one leg per arm."""
+        self.assertIn("3 of 14 planned", self._legs())
+
+    def test_an_older_experiments_results_are_not_this_jobs(self):
+        """The volume keeps every result it has ever produced."""
+        out = self._legs()
+        self.assertNotIn("20260101", out)
+        self.assertNotIn(" 42s", out)
+
+    def test_a_leg_the_map_names_carries_its_round_and_arm(self):
+        self.assertRegex(self._legs(), r"1\s+A\s+speedometer3\s+31s\s+clean")
+
+    def test_the_warmup_legs_are_the_ones_before_any_measured_round(self):
+        out = self._legs()
+        self.assertRegex(out, r"warmup\s+A\s+speedometer3\s+91s")
+        self.assertRegex(out, r"warmup\s+B\s+speedometer3\s+92s")
+
+    def test_the_leg_in_flight_is_not_called_a_warmup(self):
+        """A row reaches the map when its leg ends, so the running leg is never
+        in it -- and calling it a warmup misreports which round is under way."""
+        out = self._legs()
+        self.assertRegex(out, r"-\s+B\s+motionmark\s+running")
+        import re as _re
+        self.assertEqual(2, len([l for l in out.splitlines()
+                                 if _re.match(r"warmup\s+[AB]\s", l)]))
+
+    def test_a_job_that_has_not_started_says_so_rather_than_listing_the_volume(self):
+        out = self._legs(started="")
+        self.assertIn("no leg of this job", out)
+
+    def test_an_empty_warmup_directory_is_reported_and_not_passed_over(self):
+        """The warmup round exists to carry a profile the measured rounds
+        cannot take, so an empty capture directory is that round wasted --
+        and it is the command's job to say so, not a person's to go and look."""
+        self.assertRegex(self._legs(), r"warmup captures: none in .*/warmup")
+
+    def test_a_capture_that_landed_is_named(self):
+        with scratch_dir() as root:
+            (root / "job.json").write_text(json.dumps({"plans": ["speedometer3"], "rounds": 1, "arms": []}))
+            (root / "autorun.state").write_text("job_stamp=S\nstarted_at=2026-01-01T00:00:00Z\n")
+            leg = root / "results" / "20260101T000100Z-speedometer3-sid-a"
+            leg.mkdir(parents=True)
+            (leg / "env.json").write_text(json.dumps({"plan": "speedometer3", "wall_time_s": "30"}))
+            w = root / "ab" / "S" / "warmup"
+            w.mkdir(parents=True)
+            (w / "speedometer3-A.json.gz").write_bytes(b"")
+            cp = bash('python3 "$WK_ROOT/lib/wkdata.py" ab-legs %s' % shlex.quote(str(root)))
+            self.assertIn("warmup captures: speedometer3-A.json.gz", cp.stdout)
+
+    def test_status_asks_for_them_through_the_one_sender(self):
+        body = func_body(MACAB.read_text(), "phase_status")
+        self.assertIn("mac_py wkdata.py ab-legs", body)
+        self.assertIn('mac_wkmac() { mac_py wkmac.py "$@"; }', MACAB.read_text())
+
+
 class TestTheWaitReadsBothNodes(WkTest):
     """Bench mode is a positive reading now, not the absence of one: the
     install answers as its own node while it measures."""
@@ -704,6 +896,46 @@ class TestTheWaitReadsBothNodes(WkTest):
         cp = self._wait('b_probe() { MODE=unreachable; MODE_CHANNEL=none; }\n')
         self.assertEqual("silent", cp.stdout, cp.stdout + cp.stderr)
         self.assertIn("neither node", cp.stderr)
+
+
+class TestHowAMachineGetsBackIsTheDriversAnswer(WkTest):
+    """A one-shot is spent by the boot that took it, so a plain reboot returns
+    the board. A firmware default is sticky: the Mac's next boot enters
+    whatever the evidence above says it names, and what hands the machine back
+    is the job it was armed for. Telling an operator to reboot a Mac in bench
+    mode contradicts the `firmware_default=` line printed directly above it."""
+
+    def _status_tail(self, arming):
+        return bash('. "$WK_ROOT/lib/common.sh"\n'
+                    'MACHINE=mbp\nBOOT_ARMING=%s\nMODE="bench perf-x"\n'
+                    'BOOTED=now\nARMED_IMG=""\nNODE_ROOT=""\n'
+                    'read_state() { :; }\nb_evidence() { echo "firmware_default=x"; }\n'
+                    'machine_quiet_siblings() { printf "0 0"; }\n'
+                    'cmd_status() {%s}\ncmd_status\n'
+                    % (arming, func_body((REPO / "cmd" / "boot").read_text(), "cmd_status")))
+
+    def test_a_sticky_firmware_default_is_not_undone_by_a_reboot(self):
+        out = self._status_tail("command").stderr
+        self.assertIn("hands the machine back when it ends", out)
+        self.assertNotIn("a plain reboot returns it to host mode", out)
+
+    def test_a_spent_one_shot_still_says_a_reboot_returns_it(self):
+        out = self._status_tail("one-shot").stderr
+        self.assertIn("a plain reboot returns it to host mode", out)
+
+    def _arm_tail(self, extra):
+        return bash('. "$WK_ROOT/lib/common.sh"\n'
+                    'MACHINE=mbp\nIMAGE="WK Bench"\nARM_WATCHDOG=600\n' + extra
+                    + 'log "  ---"\n')
+
+    def test_the_arm_epilogue_offers_no_watchdog_where_none_is_written(self):
+        """`--keep` cancels a self-return watchdog, and the driver that writes
+        one is the driver that writes the self-disarm."""
+        text = (REPO / "cmd" / "boot").read_text()
+        body = func_body(text, "cmd_arm")
+        self.assertIn("command -v b_self_disarm_sh", body)
+        self.assertNotIn("/boot/firmware/wk-diag.txt", text,
+                         "a medium-specific path where the driver has a verb")
 
 
 class TestTheWatchdogBelongsToTheDriverThatWritesIt(WkTest):

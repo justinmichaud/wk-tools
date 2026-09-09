@@ -163,6 +163,97 @@ def cmd_env_record(args):
 
 
 # Three axes are recorded with every result -- class (what is measured), runner (jsc shell or browser), host (a container or a booted bench image) -- and a mismatch on any means two measurements rather than one slower run, so this is asked, as a warning, before any statistic.
+def _state_lines(path):
+    out = {}
+    try:
+        with open(path) as f:
+            for line in f:
+                if "=" in line:
+                    k, v = line.rstrip("\n").split("=", 1)
+                    out[k] = v
+    except OSError:
+        pass
+    return out
+
+
+def _elapsed(start, end=None):
+    import calendar, time as _time
+    def _epoch(t):
+        return calendar.timegm(_time.strptime(t, "%Y-%m-%dT%H:%M:%SZ"))
+    try:
+        secs = (_epoch(end) if end else _time.time()) - _epoch(start)
+    except (ValueError, TypeError):
+        return "for an unreadable span"
+    return "%dm%02ds" % (int(secs) // 60, int(secs) % 60)
+
+
+def cmd_ab_legs(args):
+    root = args.root
+    job = _load(os.path.join(root, "job.json")) or {}
+    state = _state_lines(os.path.join(root, "autorun.state"))
+    plans = job.get("plans") or []
+    arms = job.get("arms") or []
+    rounds = int(job.get("rounds") or 0)
+    # The warmup round runs the first plan only, one leg per arm (mac-bench-autorun.sh).
+    planned = len(arms) + rounds * len(plans) * len(arms)
+    done = sum(1 for k in state if k.startswith("ok_"))
+    print("%d of %d planned -- warmup %d, then %d round(s) x %d plan(s) x %d arm(s)"
+          % (done, planned, len(arms), rounds, len(plans), len(arms)))
+    began, ended = state.get("started_at"), state.get("finished_at")
+    if began:
+        span = _elapsed(began, ended)
+        print("started %s, %s" % (began, ("ran %s" % span) if ended else ("running %s so far" % span)))
+
+    stamp = state.get("job_stamp") or job.get("stamp") or ""
+    # The warmup's rows are dropped from the map once it completes, so a leg the map does not name is a warmup leg.
+    named = {}
+    try:
+        with open(os.path.join(root, "ab", stamp, "runs.tsv")) as f:
+            for line in f:
+                cols = line.rstrip("\n").split("\t")
+                if len(cols) >= 6:
+                    named[cols[3]] = (cols[0], cols[1], cols[4])
+    except OSError:
+        pass
+
+    # The volume keeps every result it ever produced and a run directory is named for the instant its leg began, so this job's are the ones at or after the moment its autorun started; with no such moment it has run none, and listing the directory would report an older experiment as this one.
+    since = re.sub(r"[-:]", "", state.get("started_at") or "")
+    results = os.path.join(root, "results")
+    rids = []
+    if since:
+        try:
+            rids = sorted(d for d in os.listdir(results) if d.split("-", 1)[0] >= since)
+        except OSError:
+            rids = []
+    if not rids:
+        print("(no leg of this job has produced a result yet)")
+        return
+    for idx, rid in enumerate(rids):
+        env = _load(os.path.join(results, rid, "env.json")) or {}
+        if rid in named:
+            rnd, label, clean = named[rid]
+        else:  # a leg reaches the map when it ends, so the one in flight is never in it; the warmup is what runs before any measured round, one leg per arm
+            rnd, label, clean = ("warmup" if idx < len(arms) else "-", "", "-")
+        if not label:
+            for arm in arms:
+                if arm.get("id") and rid.endswith(arm["id"]):
+                    label = arm.get("label", "")
+                    break
+        wall = env.get("wall_time_s")
+        print("%-7s %-3s %-14s %6s  %s" % (
+            rnd, label or "?", env.get("plan") or "?",
+            (str(wall) + "s") if wall else "running", clean))
+
+    warmup = os.path.join(root, "ab", stamp, "warmup")
+    try:
+        caps = sorted(f for f in os.listdir(warmup) if f.endswith(".json.gz"))
+    except OSError:
+        caps = []
+    if caps:
+        print("warmup captures: %s" % ", ".join(caps))
+    else:  # the round exists to carry a profile the measured rounds cannot take, so an empty directory is the whole round wasted
+        print("warmup captures: none in %s" % warmup)
+
 def cmd_axis_check(args):
     a, b = _load(args.a), _load(args.b)
     for line in _axis_check_lines(a, b):
@@ -1042,6 +1133,11 @@ def cmd_ab_precision(args):
         need = "%d" % math.ceil(len(a) * (mde / args.target) ** 2)
     print("rounds_needed=%s" % need)
     print("p=%s" % ("%.6f" % p if p is not None else ""))
+    # The noise floor each arm carries, as a share of its own mean: what says whether a delta is small or the run is loud. `rounds_needed` answers a spread this wide; it does not say the spread is what it has to be, and a per-run sd near the delta is within-leg noise that only `--count` averages down.
+    for side, vals, mean in (("a", a, mean_a), ("b", b, mean_b)):
+        print("sd_%s_pct=%s" % (side, "%.4f" % (_sd(vals) / mean * 100.0) if mean else ""))
+    print("delta_vs_mde=%s" % (  # `met` answers --target; this answers the delta just measured, which is what says whether the run could have seen it
+        "%.1f" % (mde / abs(delta)) if mde and delta else ""))
 
 
 def cmd_subtests(args):
@@ -1429,6 +1525,10 @@ def main(argv):
     p.add_argument("--update", action="store_true",
                     help="merge onto the existing file instead of overwriting it (e.g. wall_time_s, after the run)")
     p.set_defaults(func=cmd_env_record)
+
+    p = sub.add_parser("ab-legs", help="every leg an A/B has run so far, against what its job planned")
+    p.add_argument("root", help="the bench root holding job.json, autorun.state, ab/ and results/")
+    p.set_defaults(func=cmd_ab_legs)
 
     p = sub.add_parser("axis-check", help="warn where two runs are not comparable")
     p.add_argument("a")

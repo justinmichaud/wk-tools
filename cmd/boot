@@ -152,7 +152,13 @@ cmd_status() {
         bench*)
             log "$MACHINE: bench mode -- system ${MODE#bench } (booted $BOOTED)"
             b_evidence 2>/dev/null | sed 's/^/  /' || true
-            log "  a plain reboot returns it to host mode: wk boot $MACHINE --back"
+            # A one-shot is spent by the boot that took it, so the next reboot lands in host mode. A firmware default is sticky and the evidence above says which install it names, so what returns this machine is the job it was armed for.
+            if [ "${BOOT_ARMING:-one-shot}" = command ]; then
+                log "  the firmware default above is what the next boot enters; the job it was"
+                log "  armed for hands the machine back when it ends."
+            else
+                log "  a plain reboot returns it to host mode: wk boot $MACHINE --back"
+            fi
             return 0 ;;
         base*)
             log "$MACHINE: base image -- system ${MODE#base } on $NODE_ROOT (booted $BOOTED)"
@@ -211,7 +217,6 @@ cmd_keep() {
         *) die "$MACHINE is not in bench mode right now ($MODE), so there is no
     watchdog to cancel." ;;
     esac
-    # The watchdog is written by the same driver that writes the self-disarm, so a driver with no self-disarm has none to cancel: a Mac's benchmark install is ended by the job it runs and by nothing else.
     command -v b_self_disarm_sh >/dev/null 2>&1 || die "$MACHINE's bench system carries no self-return watchdog, so there is nothing
     to claim: what ends its run is the job itself. 'wk boot $MACHINE --status'
     says what it is doing."
@@ -367,10 +372,16 @@ EOF
     b_reboot
 
     info "$MACHINE is rebooting into system $IMAGE"
-    log  "  it returns by itself in ${ARM_WATCHDOG:-?}s unless claimed:"
-    log  "    wk boot $MACHINE --keep     claim it"
-    log  "    wk boot $MACHINE --back     hand it back now"
-    log  "  if it never appears, the stick's own /boot/firmware/wk-diag.txt says why."
+    # The watchdog and the claim that cancels it are written by the driver that writes the self-disarm, which is the predicate `--keep` itself asks.
+    if command -v b_self_disarm_sh >/dev/null 2>&1; then
+        log  "  it returns by itself in ${ARM_WATCHDOG:-?}s unless claimed:"
+        log  "    wk boot $MACHINE --keep     claim it"
+        log  "    wk boot $MACHINE --back     hand it back now"
+    else
+        log  "  nothing on this side returns it: the job it was armed for does, when it ends."
+        log  "    wk boot $MACHINE --status   what it is doing, over its own node"
+    fi
+    log  "  if it never appears, its own account of that boot says why: wk boot $MACHINE --diag"
 }
 
 cmd_prepare() {
