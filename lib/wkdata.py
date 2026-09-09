@@ -442,31 +442,40 @@ def _iteration_values(metric):
     return out or None
 
 
-def _declared_score(node):
-    metrics = node.get("metrics")
-    score = metrics.get("Score") if isinstance(metrics, dict) else None
-    return score if isinstance(score, list) else None
+# A declaration is a list where values would be; any metric may carry one, at any depth.
+def _declared_metric(node, key="Score"):
+    metrics = node.get("metrics") if isinstance(node, dict) else None
+    metric = metrics.get(key) if isinstance(metrics, dict) else None
+    return metric if isinstance(metric, list) else None
 
 
 # One aggregate per iteration, because pooling every subtest's every iteration mixes them into one number that is nobody's score. Returns the per-iteration aggregates, or the reason there are none -- a reader that refuses and one that reports both need it, and neither computes it twice.
-def _declared_aggregate(suite, node, metric):
+# A child that declares its own aggregate rather than writing one is resolved first: Speedometer's Time is a Total of Totals three levels deep, and a level that answered "no Time" would make every level above it silent.
+def _declared_aggregate(suite, node, metric, key="Score"):
     name = metric[0] if metric else ""
     if name not in _AGGREGATORS:
-        return None, ("%s declares its Score as '%s', which this file does not "
-                      "aggregate. Implemented: %s." % (suite, name, ", ".join(sorted(_AGGREGATORS))))
+        return None, ("%s declares its %s as '%s', which this file does not "
+                      "aggregate. Implemented: %s." % (suite, key, name, ", ".join(sorted(_AGGREGATORS))))
     children = (node.get("tests") or {}) if isinstance(node.get("tests"), dict) else {}
     per_child, silent = {}, []
     for child, cnode in children.items():
-        vals = _iteration_values((cnode.get("metrics") or {}).get("Score")) if isinstance(cnode, dict) else None
+        vals = None
+        if isinstance(cnode, dict):
+            declared = _declared_metric(cnode, key)
+            if declared is None:
+                vals = _iteration_values((cnode.get("metrics") or {}).get(key))
+            else:
+                vals = _declared_aggregate("%s/%s" % (suite, child), cnode, declared, key)[0]
         if vals:
             per_child[str(child)] = vals
         else:
             silent.append(str(child))
     if silent or not per_child:
-        return None, ("%s's Score is the %s of its subtests' Scores, and %d of "
-                      "%d first-level tests report no Score (%s). Re-run the plan; a partial suite "
+        return None, ("%s's %s is the %s of its subtests' %ss, and %d of "
+                      "%d first-level tests report no %s (%s). Re-run the plan; a partial suite "
                       "has no headline score."
-                      % (suite, name, len(silent), len(children), ", ".join(sorted(silent)) or "none ran"))
+                      % (suite, key, name, key, len(silent), len(children), key,
+                         ", ".join(sorted(silent)) or "none ran"))
     counts = sorted({len(v) for v in per_child.values()})
     if len(counts) != 1:
         return None, ("%s's subtests report %s iterations -- one aggregate per "
@@ -476,8 +485,8 @@ def _declared_aggregate(suite, node, metric):
     try:
         return [fn([v[i] for v in per_child.values()]) for i in range(counts[0])], None
     except ValueError:
-        return None, ("%s reports a subtest Score of zero or less, and its %s mean "
-                      "is undefined." % (suite, name))
+        return None, ("%s reports a subtest %s of zero or less, and its %s mean "
+                      "is undefined." % (suite, key, name))
 
 
 # The one result walker, ({name: {"Score": [floats], "Time": [floats]}}, [why a row is absent]), because the shapes disagree about depth: a merged jsc log and run-benchmark's JetStream keep numbers one "tests" level down, while Speedometer-2 on a board keeps the total at the suite root and the numbers three down, with bare descriptor lists between.
@@ -495,30 +504,33 @@ def _subtest_metrics(doc):
                         entry[key] = vals
         return entry
 
-    def walk(name, node):
+    def walk(name, node, resolve):
         if not isinstance(node, dict):
             return
         entry = metric_vals(node.get("metrics"))
+        # Only the topmost declaration that cannot be resolved is reported: the
+        # levels above a silent subtest are silent for the same one reason, and
+        # each would say so again.
+        for key in ("Score", "Time"):
+            declared = _declared_metric(node, key)
+            if declared is None or not resolve:
+                continue
+            vals, why = _declared_aggregate(name, node, declared, key)
+            if why:
+                absent.append(why)
+                resolve = False
+            else:
+                entry[key] = vals
         if entry:
             out[name] = entry
         tests = node.get("tests")
         if isinstance(tests, dict):
             for child, cnode in tests.items():
-                walk("%s/%s" % (name, child), cnode)
+                walk("%s/%s" % (name, child), cnode, resolve)
 
     if isinstance(doc, dict):
         for suite, node in doc.items():
-            if not isinstance(node, dict):
-                continue
-            walk(str(suite), node)
-            declared = _declared_score(node)
-            if declared is None:
-                continue
-            vals, why = _declared_aggregate(str(suite), node, declared)
-            if why:
-                absent.append(why)
-            else:
-                out.setdefault(str(suite), {})["Score"] = vals
+            walk(str(suite), node, True)
     return out, absent
 
 
@@ -976,7 +988,7 @@ def _headline_score(doc):
     if len(roots) != 1:
         return None
     suite, node = roots[0]
-    declared = _declared_score(node)
+    declared = _declared_metric(node)
     if declared is None:
         vals = _iteration_values(node["metrics"]["Score"])
     else:

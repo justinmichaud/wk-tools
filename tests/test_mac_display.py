@@ -83,15 +83,22 @@ class FakeCG:
 
 
 class FakeDS:
-    """The DisplayServices handle: a brightness that can be read, set, and made
-    to refuse a set or to ignore one."""
+    """The DisplayServices handle: a brightness and an ambient-light
+    compensation flag, each readable, settable, and each able to refuse a set or
+    to ignore one."""
 
-    def __init__(self, value=0.4375, can_change=True, set_rc=0, get_rc=0, sticks=True):
+    def __init__(self, value=0.4375, can_change=True, set_rc=0, get_rc=0, sticks=True,
+                 has_als=True, als=False, als_rc=0, als_set_rc=0, als_sticks=True):
         self.value = value
         self.can_change = can_change
         self.set_rc = set_rc
         self.get_rc = get_rc
         self.sticks = sticks
+        self.has_als = has_als
+        self.als = als
+        self.als_rc = als_rc
+        self.als_set_rc = als_set_rc
+        self.als_sticks = als_sticks
 
     def DisplayServicesGetBrightness(self, ident, out):
         if self.get_rc:
@@ -108,6 +115,22 @@ class FakeDS:
 
     def DisplayServicesCanChangeBrightness(self, ident):
         return self.can_change
+
+    def DisplayServicesHasAmbientLightCompensation(self, ident):
+        return self.has_als
+
+    def DisplayServicesAmbientLightCompensationEnabled(self, ident, out):
+        if self.als_rc:
+            return self.als_rc
+        out.contents.value = self.als
+        return 0
+
+    def DisplayServicesEnableAmbientLightCompensation(self, ident, enable):
+        if self.als_set_rc:
+            return self.als_set_rc
+        if self.als_sticks:
+            self.als = bool(enable)
+        return 0
 
 
 class WkmacHandles(WkTest):
@@ -392,7 +415,7 @@ class TheScreenTheReadingWasTakenOn(WkTest):
                          displays=[dict(PANEL), dict(EXTERNAL)])
 
     def test_the_one_display_not_being_the_builtin_one_is_refused(self):
-        self.assertFault("is not the built-in panel", displays=[dict(EXTERNAL)])
+        self.assertFault("is not the builtin panel", displays=[dict(EXTERNAL)])
 
     def test_a_mirror_set_is_refused(self):
         self.assertFault("mirror set", displays=[dict(PANEL, mirrored=True)])
@@ -477,12 +500,28 @@ class TheScreenTheReadingWasTakenOn(WkTest):
         self.assertNotIn("display=not judged", again.stdout)
 
     def test_a_malformed_expectation_is_refused(self):
-        for spec in ("1470x956", "builtin", "builtin 1470", "external 1470x956",
+        for spec in ("1470x956", "builtin", "builtin 1470",
                      "builtin 1470x", "builtin AxB", "builtin any", "any", "any 1470x956"):
             with self.subTest(spec=spec):
                 cp = self.check(expect=spec)
                 self.assertEqual(2, cp.returncode)
-                self.assertIn("builtin <w>x<h>", cp.stderr)
+                self.assertIn("<kind> <w>x<h>", cp.stderr)
+
+    def test_a_panel_that_is_not_a_built_in_one_is_declarable(self):
+        """A guest draws on a paravirtual panel, and the kind is what makes it
+        representable without the rule weakening for a machine whose panel is
+        built in."""
+        self.assertEqual(("external", [1470, 956]),
+                         BROWSER.parse_expect_display("external 1470x956"))
+        cp = self.check(expect="external 1470x956",
+                        displays=[dict(EXTERNAL, points=[1470, 956])])
+        self.assertEqual(0, cp.returncode, cp.stdout + cp.stderr)
+
+    def test_the_built_in_panel_is_refused_where_an_external_one_is_declared(self):
+        """The discriminating half: the kind is judged, not merely recorded."""
+        cp = self.check(expect="external 1470x956", displays=[dict(PANEL)])
+        self.assertEqual(1, cp.returncode, cp.stdout + cp.stderr)
+        self.assertIn("is not the external panel", cp.stderr)
 
     def test_the_display_list_is_read_through_the_wkmac_subcommand(self):
         self.assertEqual(str(REPO / "lib" / "wkmac.py"), BROWSER.WKMAC)
@@ -519,7 +558,7 @@ class TheDisplayRuleAskedOnItsOwn(WkTest):
         expect = BROWSER.parse_expect_display(EXPECT)
         for name, displays, phrase in (
                 ("two panels", [dict(PANEL), dict(EXTERNAL)], "online, not one"),
-                ("not builtin", [dict(EXTERNAL)], "not the built-in panel"),
+                ("not builtin", [dict(EXTERNAL)], "not the builtin panel"),
                 ("mirrored", [dict(PANEL, mirrored=True)], "mirror set"),
                 ("wrong mode", [dict(PANEL, points=[1280, 832])], "points, not"),
                 ("unreadable", None, "could not be read")):
@@ -539,9 +578,11 @@ class TheDisplayRuleAskedOnItsOwn(WkTest):
 
 class AmbientLightControl(WkTest):
     """Minimum brightness that ambient light can raise again is not a held
-    setting, and power is thermal headroom. Neither CoreGraphics nor
-    DisplayServices exposes the control on 26.6.2 and the old plist does not
-    exist, so it is read and refused rather than set."""
+    setting, and power is thermal headroom. DisplayServices does expose the
+    control -- `DisplayServicesEnableAmbientLightCompensation` to set it and
+    `DisplayServicesAmbientLightCompensationEnabled` to read it, both listed by
+    `dyld_info -exports` on tolken (26.6.2, `Mac16,12`) -- so the lane holds it
+    off and the gate below refuses only a panel that will not let go."""
 
     def check(self, auto, **overrides):
         panel = dict(PANEL, auto_brightness=auto)
@@ -568,6 +609,37 @@ class AmbientLightControl(WkTest):
         cp = self.check(None)
         self.assertEqual(0, cp.returncode, cp.stdout + cp.stderr)
         self.assertIn("auto_brightness=None", cp.stdout)
+
+    def test_the_verb_that_holds_it_off_reads_it_back(self):
+        """Held, not written and hoped for: the write is trusted no more than
+        the brightness write beside it."""
+        ds = FakeDS(als=True)
+        rc, out = WkmacHandles.call(self, WKMAC.cmd_auto_brightness,
+                                    FakeCG([PANEL]), ds, off=True)
+        self.assertEqual(0, rc, out)
+        self.assertEqual("off\n", out)
+        self.assertFalse(ds.als)
+
+    def test_a_panel_that_ignores_the_write_exits_nonzero(self):
+        rc, out = WkmacHandles.call(self, WKMAC.cmd_auto_brightness,
+                                    FakeCG([PANEL]), FakeDS(als=True, als_sticks=False),
+                                    off=True)
+        self.assertEqual(1, rc, out)
+        self.assertEqual("on\n", out)
+
+    def test_a_panel_with_no_sensor_answers_none_and_is_not_a_refusal(self):
+        rc, out = WkmacHandles.call(self, WKMAC.cmd_auto_brightness,
+                                    FakeCG([PANEL]), FakeDS(has_als=False), off=True)
+        self.assertEqual(0, rc, out)
+        self.assertEqual("none\n", out)
+
+    def test_reading_it_without_off_changes_nothing(self):
+        ds = FakeDS(als=True)
+        rc, out = WkmacHandles.call(self, WKMAC.cmd_auto_brightness,
+                                    FakeCG([PANEL]), ds, off=False)
+        self.assertEqual(0, rc, out)
+        self.assertEqual("on\n", out)
+        self.assertTrue(ds.als, "a read turned it off")
 
     def test_it_is_judged_even_where_no_display_is_pinned(self):
         """It is a property of the machine, not of comparability, so a run

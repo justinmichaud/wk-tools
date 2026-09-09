@@ -43,7 +43,12 @@ run_priv() {
     [ -x "$PRIV" ] || die "$PRIV is not installed, so the privileged half of quiesce
     cannot run.
     Remedy:  ./setup --stage quiesce"
-    sudo -n "$PRIV" "$1" || die "passwordless sudo is not set up for $PRIV.
+    sudo -n "$PRIV" "$1" && return 0   # two failures share this status: a sudo that wanted a password, and a helper that ran and did not finish. Reporting the first for both sent an operator to `./setup --stage quiesce` for a helper killed mid-verb
+
+    sudo -n true 2>/dev/null && die "$PRIV exited nonzero running '$1'. Passwordless sudo is
+    in force, so this is the helper and not the grant -- its own output above says what
+    it was doing."
+    die "passwordless sudo is not set up for $PRIV.
     Remedy:  ./setup --stage quiesce"
 }
 

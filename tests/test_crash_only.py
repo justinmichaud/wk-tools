@@ -8,11 +8,15 @@ support.podman_vm_ssh is for). A third case -- the orphaned creation record
 that `wk gc` reaps once its driver is dead and no workspace exists anywhere
 -- has no seam to exercise in isolation (see the skipped test below) and is
 left for whoever adds one. The status-files-are-claims case
-(`build_live` on a stale log) needs no hardware at all.
+(`build_live` on a stale log) needs no hardware at all, and so does `./setup`:
+its home-scoped stages are driven for real against a scratch HOME, killed with
+SIGKILL at several points, and re-run.
 
 Run: python3 -m unittest tests.test_crash_only -v
 """
+import os
 import re
+import subprocess
 import time
 import unittest
 
@@ -260,3 +264,105 @@ build_live "/nonexistent/build.status" "/nonexistent/build.log" && echo LIVE || 
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# The stages whose whole blast radius is one home directory, so a scratch HOME
+# is a whole machine for them and the tests below drive the real script.
+HOME_SCOPED = ("dotfiles", "claude")
+# The rest write sudoers rules, launchd/systemd units, packages and machine
+# defaults. Their convergence is owed work (docs/HANDOFF-mac-ab-first-result.md),
+# not something a test suite may take on this machine.
+NEEDS_THE_MACHINE = ("tools", "settings", "mcp", "sharing", "machine",
+                     "vmtools", "softnet", "sdk", "broker", "quiesce")
+
+
+class TestSetupStagesConverge(WkTest):
+    """CLAUDE.md rule 2 over ./setup: killed at any point, a re-run reaches the
+    declared final state -- which ./setup states itself, as "running it twice in
+    a row must report no changes the second time"."""
+
+    def _home(self):
+        home = self.tmp / f"home-{rand_suffix()}"
+        (home / ".config").mkdir(parents=True)
+        return home
+
+    def _env(self, home):
+        env = dict(os.environ)
+        env.update({"HOME": str(home), "XDG_STATE_HOME": str(home / ".state"),
+                    "XDG_CONFIG_HOME": str(home / ".config"),
+                    "XDG_DATA_HOME": str(home / ".data"),
+                    "CLAUDE_CONFIG_DIR": str(home / ".claude")})
+        return env
+
+    def _setup(self, home, stage, kill_after=None):
+        proc = subprocess.Popen(
+            [str(REPO / "setup"), "--stage", stage], cwd=str(REPO),
+            env=self._env(home), stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT, text=True)
+        try:
+            out, _ = proc.communicate(timeout=kill_after)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            out, _ = proc.communicate()
+        return proc.returncode, out
+
+    def test_a_stage_run_twice_reports_no_changes_the_second_time(self):
+        """The declared final state, in ./setup's own words."""
+        for stage in HOME_SCOPED:
+            with self.subTest(stage=stage):
+                home = self._home()
+                rc, first = self._setup(home, stage)
+                self.assertEqual(0, rc, first)
+                self.assertIn("change(s) applied", first, first)
+                rc, again = self._setup(home, stage)
+                self.assertEqual(0, rc, again)
+                self.assertIn("no changes", again, again)
+
+    def test_a_stage_killed_at_any_point_converges_on_a_re_run(self):
+        """SIGKILL, so no trap and no cleanup runs -- whatever the stage had
+        half-made is what the re-run meets. Several points, because the one
+        that matters is between a file's creation and its content."""
+        for stage in HOME_SCOPED:
+            for after in (0.02, 0.05, 0.1, 0.2, 0.4):
+                with self.subTest(stage=stage, killed_after=after):
+                    home = self._home()
+                    self._setup(home, stage, kill_after=after)
+                    rc, out = self._setup(home, stage)
+                    self.assertEqual(0, rc, out)
+                    rc, out = self._setup(home, stage)
+                    self.assertEqual(0, rc, out)
+                    self.assertIn("no changes", out,
+                                  f"a re-run after a kill at {after}s did not "
+                                  f"converge:\n{out}")
+
+    def test_a_half_made_link_is_replaced_rather_than_accepted(self):
+        """"Already exists" is never the answer to a half-made thing: the three
+        shapes a kill leaves where a symlink belongs."""
+        for wrong in ("dangling", "a real file", "a directory"):
+            with self.subTest(shape=wrong):
+                home = self._home()
+                rc, out = self._setup(home, "dotfiles")
+                self.assertEqual(0, rc, out)
+                link = home / ".lldbinit"
+                link.unlink()
+                if wrong == "dangling":
+                    link.symlink_to(home / "gone")
+                elif wrong == "a real file":
+                    link.write_text("someone else's\n")
+                else:
+                    link.mkdir()
+                rc, out = self._setup(home, "dotfiles")
+                self.assertEqual(0, rc, out)
+                self.assertEqual((REPO / "dotfiles" / "lldbinit").resolve(),
+                                 link.resolve(), out)
+                rc, out = self._setup(home, "dotfiles")
+                self.assertIn("no changes", out, out)
+
+    def test_every_stage_setup_runs_is_covered_or_named_as_owed(self):
+        """The audit above is worth nothing while a stage can be added and
+        covered by neither list."""
+        stages = re.findall(r"^run_stage\s+(\S+)", (REPO / "setup").read_text(),
+                            re.M)
+        self.assertTrue(stages)
+        self.assertEqual(sorted(stages),
+                         sorted(set(HOME_SCOPED) | set(NEEDS_THE_MACHINE)))

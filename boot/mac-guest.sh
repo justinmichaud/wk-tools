@@ -1,4 +1,5 @@
-# Boot driver: a macOS guest standing in for a machine in bench mode.
+# Boot driver: a macOS guest standing in for a machine in bench mode. Every reading it takes is the vm target's, so a caller that loaded only boot/machines.sh gets it here.
+command -v load_target >/dev/null 2>&1 || . "$WK_ROOT/lib/target.sh"
 
 BOOT_ARMING=guest
 
@@ -80,6 +81,8 @@ b_diag() { m_ssh 'cat /var/log/wk-diag.txt 2>/dev/null || echo "(no diag on the 
 b_bench_root() { printf '%s' "$BENCH_GUEST_ROOT"; }
 b_bench_local() { return 1; }
 
+b_bench_home() { m_ssh 'printf "%s" "$HOME"' 2>/dev/null | tr -d '\r'; }
+
 b_bench_put_file() {
     local src="$1" dest="$2" ip
     ip=$(_guest_ip) || die "'$NODE_GUEST' is not running"
@@ -94,8 +97,25 @@ b_bench_put() {
     m_ssh "sudo mkdir -p $(sh_quote "$dest") && sudo chown -R \$(id -un) $(sh_quote "$BENCH_GUEST_ROOT")" \
         || die "could not make $dest in '$NODE_GUEST'"
     ( load_target vm >/dev/null 2>&1
-      # shellcheck disable=SC2046 -- deliberate word splitting of the options.
-      rsync -a --chmod=go-w --delete -e "ssh $(_ssh_opts)" "$src/" "$WK_VM_USER@$ip:$dest/" )
+      # shellcheck disable=SC2046 -- deliberate word splitting of the options and the excludes.
+      rsync -a --chmod=go-w --delete $(bench_put_excludes) -e "ssh $(_ssh_opts)" "$src/" "$WK_VM_USER@$ip:$dest/" )
+}
+
+# tart runs on the macOS host and nowhere else, so the machine that manages this guest is the one this is running on.
+b_manage() { bash -c "$*"; }
+b_manage_name() { printf 'this machine'; }
+b_manage_tools() { printf '%s' "$WK_ROOT"; }
+b_manage_prepare() { return 0; }
+
+b_restart_ready() { return 0; }
+b_restart_detail() { printf 'unreachable: stopping a guest needs no helper'; }
+
+# The declared mode is the one the guest is built with, read from the target that sets it rather than stored a second time in this machine's conf. A paravirtual panel is not a built-in one, which is what the kind says.
+b_display() {
+    local wh
+    wh=$( load_target vm >/dev/null 2>&1; printf '%s' "$WK_VM_DISPLAY" )
+    [ -n "$wh" ] || return 1
+    printf 'external %s' "$wh"
 }
 
 b_probeable() { is_macos && ( load_target vm >/dev/null 2>&1; tart_bin >/dev/null 2>&1 ); }

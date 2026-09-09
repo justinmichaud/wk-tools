@@ -4,6 +4,14 @@ wkslot() { python3 "$WK_ROOT/lib/wkslot.py" "$@"; }
 BENCH_DIR="$WK_STORE/bench"
 SEED_DIR="$(wk_artifact_dir)/bench"
 
+# What a driver's b_bench_put never carries onto a benchmark install: a repository's history, and byte-compiled python whose source travels beside it.
+BENCH_PUT_SKIP=".git __pycache__"
+bench_put_excludes() {  # -> `--exclude X` per name, for tar and rsync alike. Unquoted, because the caller word-splits this into an argv and word splitting does not remove quotes: `--exclude '.git'` excludes a name no file has, and carries the thing it names. Safe only because the list above is fixed and holds no metacharacter.
+    local x out=""
+    for x in $BENCH_PUT_SKIP; do out="$out --exclude $x"; done
+    printf '%s' "$out"
+}
+
 # A task is one benchmarking command's output: $BENCH_DIR/<task>/ holds task.json, runs/<run>/, logs and reports. A live lock bench-task-<name> is what "running" means; no progress is stored.
 bench_task_dir() { printf '%s/%s' "$BENCH_DIR" "$1"; }
 bench_task_stamp() { date -u +%Y%m%dT%H%M%SZ; }

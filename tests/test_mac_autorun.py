@@ -223,6 +223,7 @@ class TestTheMachineEndsUpOff(WkTest):
             hostfn = ('host_install() { printf %s; }\n' % (shlex.quote(host))
                       if host else 'host_install() { return 1; }\n')
             cp = sh(f'set -euo pipefail\n_left=""\nSTATE={tmp}/state\nTOOLS={tmp}\n'
+                    f'hold_for_a_reader() {{ :; }}\n'   # its own tests below
                     f'say() {{ printf "%s\\n" "$*"; }}\n'
                     f'state_set() {{ printf "state %s=%s\\n" "$1" "$2"; }}\n'
                     f'sudo() {{ printf "%s\\n" "$*" >> {calls}; }}\n'
@@ -402,7 +403,51 @@ class TestTheWatchdogLeavesAVerdict(WkTest):
         text = AUTORUN.read_text()
         self.assertLess(text.index('RUNS="$WK_AB_ROOT/ab/'), text.index("watchdog() {"))
         self.assertLess(text.index("summarise() {"), text.index("watchdog() {"))
-        self.assertLess(text.index("\nwatchdog &\n"), text.index('say "warmup round'))
+        self.assertLess(text.index("\nwatchdog &"), text.index('say "warmup round'))
+
+    def test_the_watchdog_and_its_summary_are_defined_before_it_is_armed(self):
+        """`watchdog &` before `watchdog() {` is "command not found" in a
+        subshell: the boot goes on with no watchdog at all and $! still sets
+        WATCHDOG, so nothing says so (measured, job 20260909T132948Z)."""
+        text = AUTORUN.read_text()
+        for define in ('RUNS="$WK_AB_ROOT/ab/', "summarise() {", "watchdog() {"):
+            with self.subTest(defined=define):
+                self.assertLess(text.index(define), text.index("\nwatchdog &"))
+
+    def test_it_is_armed_before_every_step_that_can_block(self):
+        """Joining a tailnet, writing a display mode, quiescing and launching a
+        browser all wait on the system for as long as it takes. A boot that
+        reaches one of those with neither the watchdog nor the hand-back trap
+        armed is a machine left in bench mode with nothing able to report it and
+        no way back -- which is what an install whose Wi-Fi never came up did,
+        sitting in `tailscale up` with no deadline (measured 2026-09-09)."""
+        text = AUTORUN.read_text()
+        armed = text.index("\nwatchdog &")
+        trap = text.index("\ntrap 'kill \"$WATCHDOG\"")
+        self.assertLess(armed, trap, "the trap is armed with the watchdog")
+        for step in ("\nconverge_self\n", "\nhold_auto_brightness ", "\nrefuse_wrong_displays\n",
+                     "\nconverge_display_mode\n", '"$TOOLS/wk" quiesce on',
+                     "\ndim_display\n", "\nrefuse_throttled_browser\n"):
+            with self.subTest(step=step.strip()):
+                self.assertLess(trap, text.index(step))
+
+    def test_the_two_exits_that_want_the_machine_up_say_so(self):
+        """The trap hands the machine back, so the branches whose whole point is
+        a reboot of their own have to be able to opt out: the first-boot daemon's
+        provisioning, and the display-mode write that needs one boot to take."""
+        text = AUTORUN.read_text()
+        self.assertIn('[ -n "$_stay" ] || leave_bench', text)
+        self.assertEqual(2, len([l for l in text.splitlines()
+                                 if l.strip().startswith("_stay=1")]), text)
+        mode = text[text.index("converge_display_mode() {"):]
+        self.assertLess(mode.index("_stay=1"), mode.index("/sbin/reboot"),
+                        "the stay is set before the reboot, not after")
+
+    def test_the_join_cannot_wait_forever(self):
+        """`tailscale up` without --timeout waits for the backend to reach
+        Running for as long as that takes."""
+        text = (REPO / "bench" / "mac-tailnet.sh").read_text()
+        self.assertRegex(text, r"tailscale\" up --timeout=\d+s ")
 
 
 class TestTheStoppingRuleIsGivenRunDirectories(WkTest):
@@ -628,12 +673,33 @@ class TestProvisionedMeansTheSettingsThemselves(WkTest):
 
     def test_it_stands_aside_while_provisioning_is_running(self):
         """A daemon in flight is not a volume that drifted: it applies the
-        settings and reboots, and this agent starts again on that boot."""
-        cp, out = self._refuse(findings=self.WRONG, running=True)
+        settings and reboots, and this agent starts again on that boot. Its own
+        function, because it has to run before defuse_firstboot while the
+        judgment has to run after `wk quiesce on`."""
+        text = AUTORUN.read_text()
+        cp = sh('set -euo pipefail\n'
+                'say() { printf "%s\\n" "$*"; }\n'
+                'leave_bench() { printf "OFF: %s\\n" "$1"; }\n'
+                'pgrep() { return 0; }\n'
+                '_stay=""\n'
+                'stand_aside_if_provisioning() {'
+                + func_body(text, "stand_aside_if_provisioning") + '}\n'
+                'stand_aside_if_provisioning\nprintf "WENT ON\\n"\n')
+        out = cp.stdout + cp.stderr
         self.assertEqual(0, cp.returncode, out)
         self.assertIn("standing aside", out, out)
-        self.assertNotIn("RAN THE ROUNDS", out, out)
+        self.assertNotIn("WENT ON", out, out)
         self.assertNotIn("OFF: ", out, "it powered off a volume mid-provisioning:\n" + out)
+
+    def test_a_daemon_that_is_not_running_does_not_stand_aside(self):
+        cp = sh('set -euo pipefail\n'
+                'say() { printf "%s\\n" "$*"; }\n'
+                'pgrep() { return 1; }\n'
+                '_stay=""\n'
+                'stand_aside_if_provisioning() {'
+                + func_body(AUTORUN.read_text(), "stand_aside_if_provisioning") + '}\n'
+                'stand_aside_if_provisioning\nprintf "WENT ON\\n"\n')
+        self.assertIn("WENT ON", cp.stdout + cp.stderr, cp.stdout + cp.stderr)
 
     def test_a_volume_with_no_table_to_be_judged_by_measures_nothing(self):
         cp, out = self._refuse(table=False)
@@ -672,17 +738,231 @@ class TestProvisionedMeansTheSettingsThemselves(WkTest):
         self.assertIn("OFF: ", out)
         self.assertIn("not set up as a measured Mac", out, out)
 
-class NoLegIsEverForced(WkTest):
+class ADaemonThatCameBackIsPausedAgainBeforeEachLeg(WkTest):
+    """macOS restarts the daemons the lane holds stopped, on demand. One that
+    came back between the quiesce and a leg fails that leg on the gate
+    `wk bench staged` asks -- XProtect did, and took all four legs of job
+    20260909T154515Z with it, each in two seconds."""
+
+    def test_every_leg_re_pauses_first(self):
+        body = func_body(AUTORUN.read_text(), "leg")
+        self.assertIn("repause_daemons", body)
+        self.assertLess(body.index("repause_daemons"), body.index("bench staged"))
+
+    def test_it_is_the_quiesces_own_function_and_not_a_second_one(self):
+        body = func_body(AUTORUN.read_text(), "repause_daemons")
+        self.assertIn("wk_quiet_daemons_pause", body)
+        self.assertIn("$QUIET_DESKTOP", body)
+
+    def test_a_pause_that_failed_does_not_skip_the_leg(self):
+        """The gate judges what the pause left, so a daemon that cannot be
+        paused refuses the leg there and says which -- this must not become a
+        second place that decides."""
+        body = func_body(AUTORUN.read_text(), "repause_daemons")
+        self.assertIn("WARNING", body)
+        self.assertNotIn("leave_bench", body)
+        self.assertNotIn("return 1", body)
+
+
+class TheAgentRunsTheTreeThePlantVerified(WkTest):
+    """The plant verifies the whole tree onto the volume file for file. A second
+    copy of the autorun under `bin/` was a second thing to keep in step, and it
+    stopped being in step the moment anything pushed the tree without
+    re-planting -- the volume then ran an older lane than it was told it had."""
+
+    def test_the_agent_points_at_the_planted_tree(self):
+        text = (REPO / "bench" / "mac-ab.sh").read_text()
+        self.assertIn("/var/wk/wk-tools/bench/mac-bench-autorun.sh", text)
+        self.assertNotIn("/var/wk/bin/mac-bench-autorun.sh", text)
+
+    def test_no_second_copy_is_installed(self):
+        text = (REPO / "bench" / "mac-ab.sh").read_text()
+        self.assertNotIn('put_file "$WK_ROOT/bench/mac-bench-autorun.sh"', text)
+
+    def test_the_plant_refuses_a_tree_with_no_autorun_in_it(self):
+        text = (REPO / "bench" / "mac-ab.sh").read_text()
+        self.assertIn("carries no executable bench/mac-bench-autorun.sh", text)
+
+
+class ThePanelGoesDownBeforeAnythingThatCanStall(WkTest):
+    """The panel is a load on the package under measurement, and a panel left
+    lit is a panel being spent. It stayed at 0.85 for tens of minutes on
+    2026-09-09 because the dim ran after the quiesce, and the quiesce was
+    deadlocked."""
+
+    def test_it_is_dimmed_before_the_join_the_mode_the_quiesce_and_the_browser(self):
+        text = AUTORUN.read_text()
+        dim = text.index("\ndim_display\n")
+        for later in ("\nconverge_self\n", "\nhold_auto_brightness ",
+                      "\nconverge_display_mode\n", '"$TOOLS/wk" quiesce on',
+                      "\nrefuse_throttled_browser\n"):
+            with self.subTest(after=later.strip()):
+                self.assertLess(dim, text.index(later))
+
+    def test_it_is_dimmed_once_and_nothing_later_raises_it(self):
+        text = AUTORUN.read_text()
+        self.assertEqual(1, len([l for l in text.splitlines() if l.strip() == "dim_display"]))
+        after = text[text.index("\ndim_display\n") + 1:]
+        self.assertNotIn("brightness --set", after.replace("brightness --set 0", ""))
+
+    def test_it_is_armed_after_the_watchdog_so_a_refusal_can_report(self):
+        text = AUTORUN.read_text()
+        self.assertLess(text.index("\nwatchdog &"), text.index("\ndim_display\n"))
+
+
+class ANumberlessBootIsHeldWhereItCanBeRead(WkTest):
+    """Booting this Mac into *host* mode needs a password typed at the machine
+    and booting the benchmark volume does not, so handing back is exactly what
+    makes a refusal unreadable: three boots refused in their first minute and
+    each cost a trip to the keyboard to find out why (2026-09-09). A boot that
+    produced no number holds the machine, reachable, for a bounded window
+    first."""
+
+    def _leave(self, runs=None, had_job="1", hold="7"):
+        text = AUTORUN.read_text()
+        return sh(f'set -euo pipefail\n'
+                  f'_had_job={had_job!r}\nRUNS={runs or "/nonexistent"}\n'
+                  f'BENCH_HOLD={hold}\nLOG=/dev/null\nWK_AB_ROOT=/nonexistent\n'
+                  f'say() {{ printf "%s\\n" "$*"; }}\n'
+                  f'sleep() {{ printf "SLEPT %s\\n" "$1"; }}\n'
+                  f'hold_for_a_reader() {{{func_body(text, "hold_for_a_reader")}}}\n'
+                  f'hold_for_a_reader\n')
+
+    def test_a_boot_with_no_runs_is_held(self):
+        out = self._leave().stdout
+        self.assertIn("no number came out of this boot", out, out)
+        self.assertIn("SLEPT 7", out, out)
+
+    def test_a_boot_whose_legs_landed_hands_back_at_once(self):
+        with scratch_dir() as tmp:
+            (tmp / "runs.tsv").write_text("1\tA\tsid\trid\tclean\tjetstream3\n")
+            out = self._leave(runs=str(tmp)).stdout
+        self.assertNotIn("SLEPT", out, out)
+
+    def test_a_boot_that_never_reached_the_job_is_not_held(self):
+        """No job, or one already finished: nothing about this boot is a
+        refusal to read, and a fifteen-minute hold would be for nothing."""
+        out = self._leave(had_job="").stdout
+        self.assertNotIn("SLEPT", out, out)
+
+    def test_the_hold_is_the_first_thing_leave_bench_does(self):
+        """After the bless it is too late: the machine is already going."""
+        body = func_body(AUTORUN.read_text(), "leave_bench")
+        self.assertLess(body.index("hold_for_a_reader"), body.index("host_install"))
+
+    def test_it_can_be_turned_off(self):
+        self.assertNotIn("SLEPT", self._leave(hold="0").stdout)
+        self.assertIn('BENCH_HOLD="${WK_MAC_BENCH_HOLD:-', AUTORUN.read_text())
+
+
+class AmbientLightIsHeldRatherThanDeclined(WkTest):
+    """A brightness the sensor can raise again is a load that varies, and the
+    display gate refuses a run under it. macOS does expose the control -- the
+    names are `DisplayServicesEnableAmbientLightCompensation` and
+    `DisplayServicesAmbientLightCompensationEnabled`, read off `dyld_info
+    -exports` on tolken (26.6.2, `Mac16,12`) -- so the lane holds the setting
+    and only declines a machine where holding it fails."""
+
+    def test_it_is_held_before_the_gate_that_judges_it(self):
+        text = AUTORUN.read_text()
+        self.assertLess(text.index("\nhold_auto_brightness "),
+                        text.index("\nrefuse_wrong_displays\n"))
+
+    def test_a_panel_with_no_sensor_is_not_a_refusal(self):
+        """A guest's paravirtual panel has none, and "no sensor to hold" is not
+        "under ambient-light control"."""
+        text = AUTORUN.read_text()
+        cp = sh('set -euo pipefail\nTOOLS=/nonexistent\nATTEMPTS=1\n'
+                'say() { printf "%s\\n" "$*"; }\n'
+                'state_set() { :; }\n'
+                'leave_bench() { printf "OFF: %s\\n" "$1"; }\n'
+                'python3() { printf "none\\n"; }\n'
+                'hold_auto_brightness() {' + func_body(text, "hold_auto_brightness") + '}\n'
+                'hold_auto_brightness; printf "WENT ON\\n"\n')
+        out = cp.stdout + cp.stderr
+        self.assertIn("no sensor to hold", out, out)
+        self.assertIn("WENT ON", out, out)
+        self.assertNotIn("OFF: ", out, out)
+
+    def test_a_panel_that_will_not_let_go_hands_the_machine_back(self):
+        text = AUTORUN.read_text()
+        cp = sh('set -euo pipefail\nTOOLS=/nonexistent\nATTEMPTS=1\n'
+                'say() { printf "%s\\n" "$*"; }\n'
+                'state_set() { printf "state %s=%s\\n" "$1" "$2"; }\n'
+                'leave_bench() { printf "OFF: %s\\n" "$1"; }\n'
+                'python3() { printf "on\\n"; return 1; }\n'
+                'hold_auto_brightness() {' + func_body(text, "hold_auto_brightness") + '}\n'
+                'hold_auto_brightness; printf "WENT ON\\n"\n')
+        out = cp.stdout + cp.stderr
+        self.assertNotIn("WENT ON", out, "it measured under ambient-light control:\n" + out)
+        self.assertIn("OFF: ", out, out)
+        self.assertIn("state attempts=0", out, "a boot that measured nothing spent an attempt")
+
+    def test_it_reads_back_and_does_not_trust_the_write(self):
+        body = func_body(AUTORUN.read_text(), "hold_auto_brightness")
+        self.assertIn("auto-brightness --off", body)
+        self.assertIn("read back", body)
+
+
+class TheVolumeIsJudgedAfterTheQuiesceThatWritesIt(WkTest):
+    """`defaults write` for a protected domain does not survive this account's
+    session starting, so `wk quiesce on` writes the user half again where it can
+    take (cmd/quiesce says so, measured 2026-09-07). Judging those rows before
+    it refuses a volume on rows the same boot is about to set -- which is what
+    job 20260909T042343Z did, three seconds into its login, with the machine
+    handed back before a single leg ran."""
+
+    def test_the_judgment_comes_after_the_quiesce(self):
+        text = AUTORUN.read_text()
+        self.assertLess(text.index('"$TOOLS/wk" quiesce on'),
+                        text.index("\nrefuse_unprovisioned\n"))
+
+    def test_standing_aside_still_comes_before_the_daemon_is_defused(self):
+        """The other half of the old function: defusing the first-boot daemon
+        while it is provisioning is what the stand-aside exists to prevent, so
+        it cannot move to after the quiesce with the judgment."""
+        text = AUTORUN.read_text()
+        self.assertLess(text.index("\nstand_aside_if_provisioning\n"),
+                        text.index("\ndefuse_firstboot\n"))
+        self.assertLess(text.index("\ndefuse_firstboot\n"),
+                        text.index('"$TOOLS/wk" quiesce on'))
+
+    def test_each_half_asks_one_question(self):
+        text = AUTORUN.read_text()
+        aside = func_body(text, "stand_aside_if_provisioning")
+        self.assertIn("wk-bench-firstboot", aside)
+        self.assertNotIn("wk_quiet_desktop_findings", aside)
+        judge = func_body(text, "refuse_unprovisioned")
+        self.assertIn("wk_quiet_desktop_findings", judge)
+        self.assertNotIn("pgrep -f wk-bench-firstboot", judge)
+
+
+class NoLegIsForcedExceptByARehearsal(WkTest):
     """`--force` at plant time crosses the driver's own barriers. It must not
     reach a leg: `wk bench staged` judges each leg's settings, and a forced leg
-    records a number from a machine that is not a measured Mac's."""
-
-    def test_the_autorun_never_passes_force_to_a_leg(self):
-        text = AUTORUN.read_text()
-        self.assertNotIn("--force", text.replace("No --force crosses it", ""))
+    records a number from a machine that is not a measured Mac's. What forces a
+    leg is a field of its own, asked for by name -- `--rehearse`, for a machine
+    that cannot pass those gates and is proving the path rather than a number."""
 
     def test_it_reads_no_force_out_of_the_job(self):
         self.assertNotIn("jf force", AUTORUN.read_text())
+
+    def test_the_only_force_a_leg_gets_comes_from_the_rehearsal_field(self):
+        text = AUTORUN.read_text()
+        # The code half of each line: a comment naming the flag is prose about
+        # the rule, not a leg that gets it.
+        forcing = [l for l in text.splitlines() if '--force' in l.split("#", 1)[0]]
+        self.assertEqual(['    [ -z "$REHEARSAL" ] || set -- "$@" --force'], forcing, forcing)
+        self.assertIn('REHEARSAL=$(jf rehearsal)', text)
+
+    def test_the_plant_sets_that_field_from_its_own_flag_and_not_from_force(self):
+        text = (REPO / "bench" / "mac-ab.sh").read_text()
+        self.assertIn("--rehearse) REHEARSE=1; shift ;;", text)
+        self.assertIn('WK_JOB_REHEARSAL="$REHEARSE"', text)
+        for line in text.splitlines():
+            if "REHEARSE=1" in line:
+                self.assertIn("--rehearse", line,
+                              "nothing but --rehearse may set it")
 
 
 if __name__ == "__main__":

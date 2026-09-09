@@ -6,6 +6,10 @@
 #   wk bench mac-ab <workspace> --patch <ref|diff> [--base <ref>] [--rounds N]
 #   wk bench mac-ab --progress            every step, what does it, what proves it
 #   wk bench mac-ab --preflight | --status | --collect | --dry-run
+#   --rehearse forces every leg past its own preflight and records each number as
+#   forced: what a machine that cannot pass those gates -- a guest standing in for
+#   a benchmark install -- can still prove about the path. It is not what --force
+#   does, which crosses this driver's own barriers and reaches no leg.
 #   --plan P repeats; the default is jetstream3, speedometer3, motionmark. --detect
 #   PCT alternates until the A/B resolves a difference that small (0.3 by default)
 #   and stops there, between --rounds and --max-rounds; --detect 0 runs --rounds
@@ -25,7 +29,7 @@ WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 . "$WK_ROOT/lib/bench.sh"
 . "$WK_ROOT/boot/machines.sh"
 
-HOST="${WK_MAC_SSH:-}"
+SSH_HOST="${WK_MAC_SSH:-}"        # --host, for a driver that reaches its machine by address
 MACHINE="${WK_MAC_MACHINE:-mbp}"  # static
 VOLUME="${WK_BENCH_VOLUME:-WK Bench}"
 PLANS="${WK_MAC_PLANS:-jetstream3 speedometer3 motionmark}"
@@ -46,6 +50,7 @@ ALLOW_FETCH=""
 FORCE="${WK_FORCE:-}"
 AGENT_HOME=""
 DRY=""
+REHEARSE=""
 ACTION=run
 # The bench install powers the Mac off when it is done, so nothing comes back to be waited for: this is the window in which a machine that never left, or came back to host mode, gives itself away by answering.
 BOOT_WAIT="${WK_MAC_BOOT_WAIT:-600}"
@@ -58,23 +63,24 @@ mac() {
 }
 mac_sh() { mac bash -lc "$(sh_quote "$*")"; }
 
+# The other machine: the one that *manages* the measured one -- it holds wk-tools, builds the arms and can see the staging root. The two are one machine for a Mac booting its own second volume, and two for a guest, whose manager is the Mac running it.
+mgr() { b_manage "$@"; }
+mgr_sh() { mgr bash -lc "$(sh_quote "$*")"; }
+
 mac_hw_uuid() {   # what macOS names ByHost preferences by; either install answers, since they are one machine
     mac_sh 'ioreg -rd1 -c IOPlatformExpertDevice' 2>/dev/null \
         | awk -F'"' '/IOPlatformUUID/{print $4; exit}' | tr -d '\r'
 }
 
 TOOLS="${WK_MAC_TOOLS:-}"
-# The one path boot/machines.sh declares, never a search: tolken carries two clones, and
-# whichever a search reached first would be the tree driving the lane.
-host_tools() {
+mgr_tools() {
     [ -n "$TOOLS" ] && { printf '%s' "$TOOLS"; return 0; }
-    TOOLS=$(machine_tools_dir)
-    machine_tools_present "$HOST" || die "no wk-tools at $HOST:$TOOLS, so nothing over there
-    can run a leg. One command puts it there, with the privileged helpers:
+    TOOLS=$(b_manage_tools) || die "no wk-tools on $(b_manage_name), so nothing there can build or
+    stage an arm. One command puts it there, with the privileged helpers:
       wk boot $MACHINE --prepare"
     printf '%s' "$TOOLS"
 }
-rwk() { mac_sh "cd $(sh_quote "$(host_tools)") && ./wk $*"; }
+rwk() { mgr_sh "cd $(sh_quote "$(mgr_tools)") && ./wk $*"; }
 
 bwk() { mac_sh "cd $(sh_quote "$(bench_root)/wk-tools") && ./wk $*"; }   # the planted copy, the same age as the job
 
@@ -109,23 +115,27 @@ firmware_default_is_bench() {
     return 1
 }
 
-# One ONLINE display and it the built-in panel. An external monitor changes the compositing, the refresh rate and which GPU the window lands on, and MotionMark's score is a function of the area it draws.
+# One ONLINE display and it the declared kind. A second panel changes the compositing, the refresh rate and which GPU the window lands on, and MotionMark's score is a function of the area it draws. The kind is the machine's own declaration (b_display) and not a constant: a Mac is measured on its built-in panel, a guest on the paravirtual one that is all it has.
 DISPLAY_READ=""
 mac_display_check() {
-    local out st
+    local out st kind
     DISPLAY_READ=""
+    kind=$(b_display 2>/dev/null | awk '{print $1}')
     out=$(mac_wkmac displays)
     if [ -z "$out" ]; then
-        DISPLAY_READ="'wkmac.py displays' answered nothing on $HOST -- CoreGraphics could not be asked"
+        DISPLAY_READ="'wkmac.py displays' answered nothing on $MACHINE -- CoreGraphics could not be asked"
         return 1
     fi
-    st=$(printf '%s' "$out" | python3 -c '
-import json, sys
+    st=$(printf '%s' "$out" | WK_DISPLAY_KIND="${kind:-builtin}" python3 -c '
+import json, os, sys
+want = os.environ["WK_DISPLAY_KIND"]
+def kind(d):
+    return "builtin" if d.get("builtin") else "external"
 def one(d):
     p = d.get("points") or []
     w = p[0] if len(p) > 0 else "?"
     h = p[1] if len(p) > 1 else "?"
-    return "%s %sx%s" % ("builtin" if d.get("builtin") else "external", w, h)
+    return "%s %sx%s" % (kind(d), w, h)
 try:
     doc = json.load(sys.stdin)
 except ValueError:
@@ -134,8 +144,8 @@ on = [d for d in (doc.get("displays") or []) if d.get("online")]
 shown = ", ".join(one(d) for d in on) or "none"
 if len(on) != 1:
     print("ok=no"); print("detail=%d online display(s): %s" % (len(on), shown))
-elif not on[0].get("builtin"):
-    print("ok=no"); print("detail=the one online display is not the built-in panel (%s)" % shown)
+elif kind(on[0]) != want:
+    print("ok=no"); print("detail=the one online display is not the %s panel this machine declares (%s)" % (want, shown))
 else:
     print("ok=yes"); print("detail=%s alone, as the install that answers here reads it" % shown)
 ')
@@ -149,10 +159,10 @@ notify() {  # <headline> <detail>
         || warn "  could not send the notification '$1' (above)"
 }
 
-# openrsync, which this Mac ships, sends `/Volumes/WK Bench - Data/...` with its escaping intact and fails with `open: No such file or directory`; over ssh the remote path appears once, inside a command this side quotes.
-put_file() {  # $1 = local file, $2 = remote path
-    mac "cat > $(sh_quote "$2")" < "$1" || return 1
-    local want got   # a `cat >` that wrote nothing exits 0, so verify by byte count
+# The driver delivers (b_bench_put_file, b_bench_put -- the same pair `wk bench stage` uses), and this file judges what landed. A transport that wrote nothing still exits 0, so neither is trusted on its status.
+put_file() {  # $1 = local file, $2 = a path under the staging root
+    b_bench_put_file "$1" "$2" || return 1
+    local want got
     want=$(wc -c < "$1" | tr -d ' ')
     got=$(mac "wc -c < $(sh_quote "$2")" 2>/dev/null | tr -d ' \r')
     [ "$want" = "$got" ] || {
@@ -161,20 +171,15 @@ put_file() {  # $1 = local file, $2 = remote path
     }
 }
 
-# $1 = local dir, $2 = remote dir, replaced wholesale. Every file is verified and not a sentinel: a tree that is stale in one file looks right and behaves as an older lane, which is otherwise discovered after the reboot where nothing can report it -- a planted `refuse_wrong_displays` one edit behind its own rule would have powered the machine off instead of converging the display mode.
-TREE_SKIP=".git __pycache__"
+# $1 = local dir, $2 = a directory under the staging root, replaced wholesale. Every file is verified and not a sentinel: a tree that is stale in one file looks right and behaves as an older lane, which is otherwise discovered after the reboot where nothing can report it -- a planted `refuse_wrong_displays` one edit behind its own rule would have powered the machine off instead of converging the display mode.
 put_tree() {
-    local src="$1" dst="$2" x skip=""
-    for x in $TREE_SKIP; do skip="$skip --exclude $(sh_quote "$x")"; done
-    # shellcheck disable=SC2086 -- a deliberate word list.
-    tar -cf - $skip -C "$src" . \
-        | mac "rm -rf $(sh_quote "$dst") && mkdir -p $(sh_quote "$dst") && tar -xf - -C $(sh_quote "$dst")" \
-        || return 1
+    local src="$1" dst="$2" x
+    b_bench_put "$src" "$dst" || return 1
 
     # An array here and a quoted string there: unquoted, `$(sh_quote .git)` word-splits to `'.git'` with the quotes still in it, so the local side excludes a name no file has while the remote shell removes them and excludes it -- two digests of two file sets.
     local want got remote=""
     local -a local_args=()
-    for x in $TREE_SKIP; do
+    for x in $BENCH_PUT_SKIP; do
         local_args+=(--exclude "$x")
         remote="$remote --exclude $(sh_quote "$x")"
     done
@@ -196,8 +201,8 @@ BROOT=""
 bench_root() {
     [ -n "$BROOT" ] && { printf '%s' "$BROOT"; return 0; }
     BROOT=$(b_bench_root 2>/dev/null | tr -d '\r' | tail -1)
-    [ -n "$BROOT" ] || die "'$VOLUME' is not visible from $HOST right now.
-    Either it is not attached, or $HOST is *in* bench mode -- that install's own
+    [ -n "$BROOT" ] || die "'$VOLUME' is not visible from $MACHINE right now.
+    Either it is not attached, or $MACHINE is *in* bench mode -- that install's own
     root is the volume, so it is not mounted under /Volumes and every verb here
     is a host-mode verb. 'wk boot $MACHINE --status' over there says which.
     In bench mode the run drives itself; read it back once the machine returns."
@@ -216,9 +221,13 @@ volume_provisioned() {
     [ "$n" -gt 0 ]
 }
 
+BHOME=""
 bench_home() {
-    local d; d=$(dirname "$(bench_root)")          # …/private/var
-    printf '%s' "$(dirname "$(dirname "$d")")/Users/bench"
+    [ -n "$BHOME" ] && { printf '%s' "$BHOME"; return 0; }
+    BHOME=$(b_bench_home 2>/dev/null | tr -d '\r' | tail -1)
+    [ -n "$BHOME" ] || die "$MACHINE's driver cannot name the measured account's home, so the
+    launch agent has nowhere to be installed."
+    printf '%s' "$BHOME"
 }
 
 # Every check here is something that, if wrong, is discovered after the reboot on a machine that cannot be reached.
@@ -229,29 +238,35 @@ ck() {  # ck yes|no <label> <detail>
 }
 
 preflight() {
-    info "preflight for an unattended A/B on $HOST"
+    info "preflight for an unattended A/B on $MACHINE${NODE_SSH:+ ($NODE_SSH)}"
     PF_FAIL=0
 
     local mode
     if mode=$(mac 'cat /etc/wk-image 2>/dev/null | sed -n "s/^id=//p"' 2>/dev/null); then
         mode=$(printf '%s' "$mode" | tr -d '\r')
-        if [ -n "$mode" ]; then
-            ck no "host mode" "$HOST is in BENCH mode ($mode) -- plant from host mode"
+        # A guest is the measured install itself and carries the marker while it answers; a Mac answers as its host install, and the one that carries the marker is the one being measured, which cannot plant for itself.
+        if [ "${BOOT_ARMING:-}" = guest ]; then
+            if [ -n "$mode" ]; then ck yes "a benchmark install" "$MACHINE answers and is marked ($mode)"
+            else ck no "a benchmark install" "$MACHINE answers but carries no /etc/wk-image, so every leg would be refused"; fi
+        elif [ -n "$mode" ]; then
+            ck no "host mode" "$MACHINE is in BENCH mode ($mode) -- plant from host mode"
         else
-            ck yes "host mode" "$HOST answers and carries no bench marker"
+            ck yes "host mode" "$MACHINE answers and carries no bench marker"
         fi
     else
-        ck no "reachable" "$HOST does not answer ssh with a key"
+        ck no "reachable" "$MACHINE does not answer ssh with a key"
         log "  everything below needs the machine, so nothing else was checked." >&2
         return 1
     fi
 
     local root; root=$(bench_root 2>/dev/null) || root=""
-    if [ -n "$root" ]; then ck yes "bench volume" "$VOLUME at $root"
-    else ck no "bench volume" "'$VOLUME' is not attached"; return 1; fi
+    if [ -n "$root" ]; then ck yes "staging root" "$root"
+    else ck no "staging root" "$MACHINE's driver can see no staging root"; return 1; fi
 
-    # Everything below is something the volume's first boot creates, and the desktop quieting it applies is what `wk bench staged` requires of every leg -- so an unprovisioned volume fails them all after the reboot, where nothing can report it.
-    if volume_provisioned; then
+    # Everything below is something the volume's first boot creates, and the desktop quieting it applies is what `wk bench staged` requires of every leg -- so an unprovisioned volume fails them all after the reboot, where nothing can report it. A guest is provisioned as a guest (vm/provision-base.sh) and has no such boot.
+    if [ "${BOOT_ARMING:-}" = guest ]; then
+        :
+    elif volume_provisioned; then
         ck yes "provisioned" "'$VOLUME' has finished a first boot"
     else
         ck no "provisioned" "no 'provisioning complete' in $(firstboot_log)"
@@ -261,9 +276,9 @@ preflight() {
     fi
 
     if mac "test -w $(sh_quote "$root")" 2>/dev/null; then
-        ck yes "staging root" "writable without sudo"
+        ck yes "writable" "$root takes a plant without sudo"
     else
-        ck no "staging root" "$root is not writable as this account -- staging would need sudo"
+        ck no "writable" "$root is not writable as this account -- staging would need sudo"
     fi
 
     local bh; bh=$(bench_home)
@@ -328,39 +343,37 @@ preflight() {
         log "       --force crosses it: there is no number to save." >&2
     fi
 
-    if firmware_default_is_bench; then
+    # A guest has no firmware to arm: starting it is the whole transition (BOOT_ARMING, its driver).
+    if [ "${BOOT_ARMING:-}" = guest ]; then
+        ck yes "enters bench mode" "starting the guest is the transition"
+    elif firmware_default_is_bench; then
         ck yes "firmware default" "$FW_DETAIL"
     else
         ck no "firmware default" "$FW_DETAIL"
-        log "       This lane restarts $HOST and expects benchmarking to begin with" >&2
+        log "       This lane restarts $MACHINE and expects benchmarking to begin with" >&2
         log "       nobody at the keyboard, which only the firmware default gives." >&2
-        log "         wk boot $MACHINE            arms it (on $HOST)" >&2
+        log "         wk boot $MACHINE            arms it (on $MACHINE)" >&2
         log "       Where the boot helper is not installed, the startup manager is the" >&2
         log "       way: shut down, hold the power button until 'Loading startup" >&2
         log "       options', pick '$VOLUME'. '--plant' leaves the job on the volume" >&2
         log "       and reboots nothing, for exactly that." >&2
     fi
 
-    if ! mv_reboot_ready && [ -t 0 ] && [ -z "$DRY" ]; then
-        info "  $HOST cannot be restarted unattended yet -- preparing it now"
-        machine_prepare "$HOST" || true
+    if ! b_restart_ready && [ -t 0 ] && [ -z "$DRY" ]; then
+        info "  $MACHINE cannot be restarted unattended yet -- preparing it now"
+        b_manage_prepare || true
     fi
-    if mv_reboot_ready; then
-        ck yes "restartable" "the boot helper answers sudo -n, so this lane restarts $HOST itself"
+    if b_restart_ready; then
+        ck yes "restartable" "this lane restarts $MACHINE itself"
     else
-        # Which of the two: an absent helper is a machine never prepared, and one that answers without naming its detach is older than this tree, whose reboot exits 0 having done nothing.
-        if mv_priv status 2>/dev/null | grep -q '^wk-boot-priv: ok'; then
-            ck no "restartable" "the boot helper on $HOST answers, but names no detach mechanism, so it is older than this tree -- its reboot exits 0 having rebooted nothing"
-        else
-            ck no "restartable" "no boot helper on $HOST, and plain sudo there wants a password"
-        fi
+        ck no "restartable" "$(b_restart_detail)"
         log "       A graceful restart is refusable -- any application that will not quit" >&2
         log "       declines it -- so an unattended lane cannot use one. One command puts" >&2
         log "       this tree and the helpers on that Mac, and asks for a password once:" >&2
         log "         wk boot $MACHINE --prepare" >&2
         log "       It runs by itself from a terminal; this session had none, or it would" >&2
         log "       have been done above. Crossing this leaves the job planted and correct:" >&2
-        log "       reboot $HOST by any means and the A/B runs by itself." >&2
+        log "       reboot $MACHINE by any means and the A/B runs by itself." >&2
     fi
 
     log "" >&2
@@ -421,7 +434,7 @@ phase_stage() {
 # One command in the build guest, two shells away, written to a file and then run: a script on stdin is consumed by the first thing inside it that reads stdin, silently truncating the rest.
 guest_sh() {
     local b; b=$(printf '%s' "$1" | base64 | tr -d '\n')
-    mac_sh "ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new wk-$(sh_quote "$WS") 'printf %s $b | base64 -d > /tmp/wk-guest.sh && bash /tmp/wk-guest.sh'"
+    mgr_sh "ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new wk-$(sh_quote "$WS") 'printf %s $b | base64 -d > /tmp/wk-guest.sh && bash /tmp/wk-guest.sh'"
 }
 
 guest_src() {
@@ -499,7 +512,7 @@ phase_build_ab() {
 
     if [ -f "$PATCH" ]; then
         log "  applying diff $PATCH"
-        mac "cat > /tmp/wk-ab.patch" < "$PATCH" || die "could not copy the patch to $HOST"
+        mgr "cat > /tmp/wk-ab.patch" < "$PATCH" || die "could not copy the patch to $(b_manage_name)"
         guest_sh "set -e; cd $src && git apply --index /tmp/wk-ab.patch" >/dev/null 2>&1 \
             || { guest_sh "git -C $src checkout -q $orig" >/dev/null 2>&1
                  die "the patch did not apply cleanly to '$base'; the tree has been put back"; }
@@ -522,14 +535,13 @@ phase_build_ab() {
 
 phase_plant() {
     # An unpinned display means two runs at different resolutions compare as if they matched, so it is declared per machine and refused here rather than discovered in the numbers.
-    case "${NODE_DISPLAY:-}" in
-        "") die "boot/machines/$MACHINE.conf declares no NODE_DISPLAY, so nothing here knows
-    what display the measured install must read.
+    local declared
+    declared=$(b_display) || die "$MACHINE declares no display, so nothing here knows what the
+    measured install must read.
 
-    Add the bench install's own mode, in points:
+    Add its own mode to boot/machines/$MACHINE.conf, in points, kind first:
         NODE_DISPLAY=\"builtin 1470x956\"
-    ('python3 lib/wkmac.py displays' on that install prints it.)" ;;
-    esac
+    ('python3 lib/wkmac.py displays' on that install prints both.)"
 
     local root bh stamp task task_dir cmd p
     root=$(bench_root); bh=$(bench_home)
@@ -555,6 +567,9 @@ $(printf '%s' "$staged" | sed 's/^/    /')"
     else
         info "plant: $PLANS, $ROUNDS-$MAX_ROUNDS round(s), interleaved, until it resolves ${DETECT}%"
     fi
+    [ -z "$REHEARSE" ] || warn "  --rehearse: every leg will be forced past its own preflight and every
+  number recorded as forced. This rehearses the path; it measures nothing
+  comparable with a clean run."
     log  "  arm A: $A_ID${A_ARGS:+  args: $A_ARGS}"
     log  "  arm B: $B_ID${B_ARGS:+  args: $B_ARGS}"
     [ "$A_ID" = "$B_ID" ] && [ "$A_ARGS" = "$B_ARGS" ] && \
@@ -564,13 +579,13 @@ $(printf '%s' "$staged" | sed 's/^/    /')"
 
     if [ -n "$DRY" ]; then
         log "  would sync wk-tools to $root/wk-tools"
-        log "  would install $root/bin/mac-bench-autorun.sh"
+        log "  would point the launch agent at $root/wk-tools/bench/mac-bench-autorun.sh"
         log "  would plant samply $SAMPLY_VER for the warmup round's profile"
         log "  would record the task $task in $BENCH_DIR and write its job.json"
         log "  would copy that job to $root/job.json and reset $root/autorun.state"
         log "  would turn Do Not Disturb on for the bench account and read it back"
         log "  would install $bh/Library/LaunchAgents/com.wk.bench-ab.plist"
-        log "  on that boot the install would hold ${NODE_DISPLAY#builtin } -- writing it and"
+        log "  on that boot the install would hold ${declared#* } -- writing it and"
         log "  restarting once if it comes up at another mode -- dim the panel, check the"
         log "  browser, then measure and power the machine off"
         return 0
@@ -667,11 +682,11 @@ $(printf '%s' "$staged" | sed 's/^/    /')"
   so that install cannot be watched while it measures. The A/B still runs."
     fi
 
-    info "  installing the autorun"
-    mac "mkdir -p $(sh_quote "$root/bin") $(sh_quote "$bh/Library/LaunchAgents")"
-    put_file "$WK_ROOT/bench/mac-bench-autorun.sh" "$root/bin/mac-bench-autorun.sh" \
-        || die "could not install the autorun script"
-    mac "chmod 0755 $(sh_quote "$root/bin/mac-bench-autorun.sh")"
+    info "  installing the autorun"   # the tree the plant just verified file for file is the one the agent runs; a second copy under bin/ was a second thing to keep in step, and it stopped being in step the moment anything pushed the tree without re-planting -- the volume then ran an older lane than the one it was told it had
+    mac "mkdir -p $(sh_quote "$bh/Library/LaunchAgents")"
+    mac "test -x $(sh_quote "$root/wk-tools/bench/mac-bench-autorun.sh")" \
+        || die "the planted tree carries no executable bench/mac-bench-autorun.sh, so the
+    launch agent has nothing to start."
 
     info "  writing the job"
     # Written through python so quoting is not a shell problem: staged ids and browser arguments reach this from a command line and can contain spaces.
@@ -683,7 +698,7 @@ $(printf '%s' "$staged" | sed 's/^/    /')"
     WK_JOB_STAMP="$stamp" \
     WK_JOB_ASLR="${WK_BENCH_ASLR:-}" WK_JOB_ENVPAD="${WK_BENCH_ENV_PAD:-}" \
     WK_JOB_PATHPAD="${WK_BENCH_PATH_PAD:-}" WK_JOB_SHARED="${WK_BENCH_SHARED_CACHE:-}" \
-    WK_JOB_DISPLAY="$NODE_DISPLAY" \
+    WK_JOB_DISPLAY="$declared" WK_JOB_REHEARSAL="$REHEARSE" \
     python3 - <<'PYEOF' > "$task_dir/job.json"
 import json, os
 g = os.environ.get
@@ -709,6 +724,7 @@ print(json.dumps({
     "env_pad": g("WK_JOB_ENVPAD") or "",
     "path_pad": g("WK_JOB_PATHPAD") or "",
     "shared_cache": g("WK_JOB_SHARED") or "",
+    "rehearsal": g("WK_JOB_REHEARSAL") or "",
 }, indent=2))
 PYEOF
     put_file "$task_dir/job.json" "$root/job.json" \
@@ -730,7 +746,7 @@ PYEOF
   <key>ProgramArguments</key>
   <array>
     <string>/bin/bash</string>
-    <string>/var/wk/bin/mac-bench-autorun.sh</string>
+    <string>/var/wk/wk-tools/bench/mac-bench-autorun.sh</string>
   </array>
   <key>RunAtLoad</key><true/>
   <key>ProcessType</key><string>Interactive</string>
@@ -755,22 +771,22 @@ BOOT_BEFORE=""
 
 phase_go() {
     [ -n "$DRY" ] && {
-        log "  would re-check that the built-in panel is the only display, then reboot $HOST"
+        log "  would re-check that the declared panel is the only display, then reboot $MACHINE"
         log "  through $BOOT_HELPER, whose reboot no application can decline"
-        log "  the bench install would then measure and power the machine off, so nothing"
-        log "  comes back here: the result is read off the volume after a power-on"
+        log "  the bench install would then measure and hand the machine back to host"
+        log "  mode, where the result is read off the volume it mounts"
         return 0
     }
 
     # Asked again seconds before the transition, not only at preflight: a monitor plugged in between the two costs a whole cycle of numbers nobody can trust. No --force crosses it -- there is no number to save.
-    mac_display_check || die "the display on $HOST does not read as one built-in panel: $DISPLAY_READ
+    mac_display_check || die "the display on $MACHINE does not read as one panel of the declared kind: $DISPLAY_READ
 
     Nothing has been rebooted, and the job stays planted. Disconnect the monitor
-    and re-run, or reboot $HOST by hand once it reads right -- the planted job
+    and re-run, or reboot $MACHINE by hand once it reads right -- the planted job
     runs by itself either way."
 
     BOOT_BEFORE=$(b_boot_id)
-    info "go: reboot $HOST now (boot before: ${BOOT_BEFORE:-unknown})"
+    info "go: reboot $MACHINE now (boot before: ${BOOT_BEFORE:-unknown})"
     log "  '$VOLUME' is the firmware default (preflight asserted it), so this restart
   enters bench mode by itself and nobody has to be at the keyboard."
 
@@ -778,12 +794,12 @@ phase_go() {
 
     local waited=0
     while [ "$waited" -lt 150 ]; do
-        mac_sh true >/dev/null 2>&1 || { info "  $HOST is going down (after ${waited}s)"; return 0; }
+        mac_sh true >/dev/null 2>&1 || { info "  $MACHINE is going down (after ${waited}s)"; return 0; }
         sleep 5
         waited=$((waited + 5))
     done
 
-    die "could not reboot $HOST -- it is still answering, and \`kern.boottime\` is
+    die "could not reboot $MACHINE -- it is still answering, and \`kern.boottime\` is
     unchanged. The helper exits 0 without acting when the reboot is refused, so
     this is checked rather than trusted.
 
@@ -794,7 +810,7 @@ phase_go() {
 
 phase_wait() {
     local limit="$1" start now mode last=""
-    info "wait: up to $((limit / 60)) minutes for $HOST to answer"
+    info "wait: up to $((limit / 60)) minutes for $MACHINE to answer"
     start=$(date +%s)
     sleep 45   # for the first seconds the machine is still up, and an immediate poll would report host mode too soon
     while :; do
@@ -802,17 +818,17 @@ phase_wait() {
             mode=$(printf '%s' "$mode" | tr -d '\r' | head -1)
             local bt; bt=$(b_boot_id)   # the same boot as before means it never rebooted
             if [ -n "$BOOT_BEFORE" ] && [ "$bt" = "$BOOT_BEFORE" ]; then
-                warn "  $HOST is answering on the SAME boot ($bt) -- it never rebooted"
+                warn "  $MACHINE is answering on the SAME boot ($bt) -- it never rebooted"
                 printf 'noreboot'; return 1
             fi
             case "$mode" in
-                READY) info "  $HOST is back in HOST mode"; printf 'host'; return 0 ;;
-                *)     info "  $HOST answers in BENCH mode ($mode)"; printf 'bench'; return 0 ;;
+                READY) info "  $MACHINE is back in HOST mode"; printf 'host'; return 0 ;;
+                *)     info "  $MACHINE answers in BENCH mode ($mode)"; printf 'bench'; return 0 ;;
             esac
         fi
         now=$(date +%s)
         if [ $((now - start)) -ge "$limit" ]; then
-            warn "  $HOST has not answered in ${limit}s"
+            warn "  $MACHINE has not answered in ${limit}s"
             printf 'silent'; return 1
         fi
         [ "$last" != waiting ] && { log "  no answer yet (this is the reboot, or bench mode, which has no network)"; last=waiting; }
@@ -879,7 +895,7 @@ phase_collect() {
     else
         warn "  no run map at $runs -- no arm completed"
         log  "  the autorun's own log is the place to look:"
-        log  "    ssh $HOST tail -60 $(sh_quote "$root/autorun.log")"
+        log  "    $root/autorun.log   ('wk bench mac-ab --status' tails it)"
     fi
 }
 
@@ -912,7 +928,7 @@ staged_arms() {   # <id> <webkit sha> <gated yes|no> per line
 }
 
 phase_progress() {
-    info "the macOS A/B on $HOST, step by step"
+    info "the macOS A/B on $MACHINE, step by step"
     local root mode arms narms job rounds outcome results volver
 
     # Three states, not two: reachable in host mode, reachable in bench mode (the
@@ -921,7 +937,7 @@ phase_progress() {
     # tailnet identity of its own.
     if ! mac true >/dev/null 2>&1; then
         step part "the run is under way" \
-            "$HOST does not answer. In bench mode it is a different install with no
+            "$MACHINE does not answer. In bench mode it is a different install with no
          tailnet identity, so this is what a running A/B looks like from here; it
          answers again when it hands the machine back." \
             "" "wk bench mac-ab --collect   (once it is back in host mode)"
@@ -999,7 +1015,7 @@ phase_progress() {
         # Read now rather than named in advance: with the volume already the firmware default a plain reboot is the whole of it, and `wk boot` would re-arm what is armed.
         local armed="" can=""
         firmware_default_is_bench && armed=1
-        mv_reboot_ready && can=1
+        b_restart_ready && can=1
         if [ -n "$armed" ] && [ -n "$can" ]; then
             step no "the Mac is in bench mode" \
                 "it is in host mode, and '$VOLUME' is the firmware default with a helper that answers -- so this needs no arming, only the restart" \
@@ -1007,9 +1023,9 @@ phase_progress() {
                 "wk boot $MACHINE --status"
         elif [ -n "$armed" ]; then
             step no "the Mac is in bench mode" \
-                "it is in host mode. '$VOLUME' is the firmware default, so any reboot enters it; what is missing is a restart this lane can make -- $HOST takes no passwordless sudo for the boot helper" \
+                "it is in host mode. '$VOLUME' is the firmware default, so any reboot enters it; what is missing is a restart this lane can make -- $MACHINE takes no passwordless sudo for the boot helper" \
                 "wk boot $MACHINE --prepare   (installs it; one password prompt over there)" \
-                "sudo -n $BOOT_HELPER status   (on $HOST)"
+                "sudo -n $BOOT_HELPER status   (on $MACHINE)"
         else
             step no "the Mac is in bench mode" "it is in host mode, and $FW_DETAIL" \
                 "wk boot $MACHINE   (arms the firmware and reboots)" \
@@ -1070,10 +1086,10 @@ phase_progress() {
 }
 
 phase_status() {
-    local root; root=$(bench_root 2>/dev/null) || die "'$VOLUME' is not attached on $HOST"
+    local root; root=$(bench_root 2>/dev/null) || die "'$VOLUME' is not attached on $MACHINE"
     local mode; mode=$(mac 'cat /etc/wk-image 2>/dev/null | sed -n "s/^id=//p"' 2>/dev/null | tr -d '\r')
-    if [ -n "$mode" ]; then info "$HOST is in bench mode ($mode)"
-    else                   info "$HOST is in host mode"; fi
+    if [ -n "$mode" ]; then info "$MACHINE is in bench mode ($mode)"
+    else                   info "$MACHINE is in host mode"; fi
     mac "cat $(sh_quote "$root/job.json") 2>/dev/null" 2>/dev/null | sed 's/^/  /' >&2 \
         || log "  no job planted"
     log ""
@@ -1105,12 +1121,13 @@ while [ $# -gt 0 ]; do
         --b)        B_ID="${2:-}"; shift 2 ;;
         --a-args)   A_ARGS="${2:-}"; shift 2 ;;
         --b-args)   B_ARGS="${2:-}"; shift 2 ;;
-        --host)     HOST="${2:-}"; shift 2 ;;
+        --host)     SSH_HOST="${2:-}"; shift 2 ;;
         --tools)    TOOLS="${2:-}"; shift 2 ;;
         --machine)  MACHINE="${2:-}"; shift 2 ;;
         --stage)    DO_STAGE=1; shift ;;
         --allow-network-fetch) ALLOW_FETCH=1; shift ;;
         --force)    FORCE=1; WK_FORCE=1; export WK_FORCE; shift ;;
+        --rehearse) REHEARSE=1; shift ;;
         --agent-home) AGENT_HOME="${2:-}"; shift 2 ;;
         --preflight) ACTION=preflight; shift ;;
         --status)   ACTION=status; shift ;;
@@ -1124,15 +1141,13 @@ while [ $# -gt 0 ]; do
     esac
 done
 
-# Deferred until MACHINE is final, so `--machine benchvm` picks up benchvm's own conf. Loaded whether or not --host was given: NODE_DISPLAY is read from the same conf.
+# Deferred until MACHINE is final, so `--machine benchvm` picks up benchvm's own conf, its own driver and its own display declaration.
 machine_load "$MACHINE" >/dev/null 2>&1 || die "no such machine: $MACHINE (wk boot --list)"
-[ -n "$HOST" ] || HOST="${NODE_SSH:-}"
-[ -n "$HOST" ] || die "$MACHINE (boot/machines/$MACHINE.conf) sets no NODE_SSH"
-NODE_SSH="$HOST"   # one address for both halves, so --host moves the reads and the restart together
+[ -z "$SSH_HOST" ] || NODE_SSH="$SSH_HOST"   # one address for both halves, so --host moves the reads and the restart together
 load_driver "$NODE_DRIVER" || die "$MACHINE names no boot driver this lane can restart it with"
 
 if m_here; then
-    die "this lane reboots $HOST, so it cannot be driven from $HOST -- the reboot
+    die "this lane reboots $MACHINE, so it cannot be driven from $MACHINE -- the reboot
   would take the driver with it. Run it from another machine (rpi5, moose)."
 fi
 
@@ -1150,7 +1165,7 @@ if ! preflight; then
         # `barrier` (lib/common.sh) and not a die: the tooling a volume needs in
         # order to provision itself travels in the plant, so the one operator who
         # has to plant onto a volume that fails this is the one fixing it.
-        barrier "$PF_FAIL preflight check(s) failed on $HOST, and nothing there has been
+        barrier "$PF_FAIL preflight check(s) failed on $MACHINE, and nothing there has been
     changed yet. Each one is something a run discovers after the reboot, in bench
     mode, where nothing can report it."
     fi
@@ -1168,7 +1183,7 @@ phase_plant >/dev/null
 
 if [ -n "$DRY" ]; then
     [ "$ACTION" = plant ] || phase_go   # the plan is not complete without how it would leave the machine
-    info "dry run -- nothing on $HOST was changed and nothing was rebooted"
+    info "dry run -- nothing on $MACHINE was changed and nothing was rebooted"
     log  "  not checked here: whether a leg would pass on '$VOLUME'. That gate reads"
     log  "  the running system, and this one is not running. In bench mode, ask it:"
     log  "    wk bench staged --plan jetstream3 --dry-run"
@@ -1183,39 +1198,41 @@ fi
 
 phase_go
 
-notify "mac-ab planted on $HOST" \
-    "$PLANS, $ROUNDS-$MAX_ROUNDS rounds, count $COUNT. Arms $A_ID / $B_ID. $HOST has gone down to measure and powers itself off at the end, so it does not come back by itself: press the power button, then 'wk bench mac-ab --collect'."
+notify "mac-ab planted on $MACHINE" \
+    "$PLANS, $ROUNDS-$MAX_ROUNDS rounds, count $COUNT. Arms $A_ID / $B_ID. $MACHINE has gone down to measure; the bench install hands it back to host mode when the job ends. Then 'wk bench mac-ab --collect'."
 
-# A bounded window, not a wait for a return: the bench install powers the machine off however the job ends, so silence is expected and all that is left to catch is a machine that never left or came back to host mode. Bounded rather than watchful only while that install has no tailnet identity -- with one, reachable as NODE_BENCH_SSH is the difference between measuring and finished.
+# A bounded window, not a wait for a return: the run outlives it, and all this can still catch is a machine that never left or came straight back to host mode. Bounded rather than watchful only while the bench install has no tailnet identity -- with one, reachable as NODE_BENCH_SSH is the difference between measuring and finished.
 came_back=$(phase_wait "$BOOT_WAIT") || true
 log ""
 case "$came_back" in
     bench)
-        info "$HOST answers in BENCH mode -- the A/B is running there."
+        info "$MACHINE answers in BENCH mode -- the A/B is running there."
         log  "  'wk bench mac-ab --status' follows it, and the machine powers itself"
         log  "  off when the job ends." ;;
     host)
-        warn "$HOST rebooted and came back in HOST mode, so the A/B has not run."
+        warn "$MACHINE rebooted and came back in HOST mode, so the A/B has not run."
         log  "  The firmware default is not '$VOLUME' after all, whatever preflight read."
         log  "  The job is planted and still valid:  wk boot $MACHINE   arms it."
-        notify "mac-ab: $HOST came back to host mode" \
+        notify "mac-ab: $MACHINE came back to host mode" \
             "the A/B has not run -- the reboot did not enter '$VOLUME'. The job is planted and still valid; 'wk boot $MACHINE' arms the firmware." ;;
     noreboot)
-        warn "$HOST never rebooted, so the A/B has not run."
+        warn "$MACHINE never rebooted, so the A/B has not run."
         log  "  The job is planted and still valid -- nothing needs re-staging."
         log  "  Reboot the machine by any means (the startup manager works too)"
         log  "  and it runs by itself; 'wk bench mac-ab --collect' reads it after."
-        notify "mac-ab: $HOST never rebooted" \
-            "the A/B has not run. The job is planted and still valid: reboot $HOST by any means, including the startup manager, and it runs by itself." ;;
+        notify "mac-ab: $MACHINE never rebooted" \
+            "the A/B has not run. The job is planted and still valid: reboot $MACHINE by any means, including the startup manager, and it runs by itself." ;;
     *)
-        info "$HOST is silent, which is what a run in bench mode looks like from here:"
-        log  "  that install has not joined the tailnet, so nothing here can watch it. It"
-        log  "  measures every round and then powers the"
-        log  "  machine off -- a reboot would land back on '$VOLUME' and measure again."
-        log  "  So nothing comes back here, and the last step is a person's:"
-        log  "    press the power button (the host install is the firmware default"
-        log  "    only after 'wk boot $MACHINE --back'; from off, hold it and pick"
-        log  "    'Macintosh HD')"
-        log  "    wk bench mac-ab --collect     reads the result off the volume"
-        log  "  Nothing is lost while it stays off: the result is on the volume." ;;
+        info "$MACHINE is silent. Three states look like this from here, and this"
+        log  "  end cannot tell them apart:"
+        log  "    it is measuring -- the bench install has no tailnet identity of its"
+        log  "      own until its join works, so a run in progress is silence"
+        log  "    it is finished and back in host mode, with that install's own"
+        log  "      tailnet identity not up (measured on tolken 2026-09-09: the"
+        log  "      Tailscale app starts at login, and the hand-back logs nobody in)"
+        log  "    it halted, because the bless in the hand-back did not take"
+        log  "  Nothing is lost in any of them: the result is on the volume, and the"
+        log  "  volume is mounted by the install that answers here."
+        log  "    wk bench mac-ab --status      once it answers again"
+        log  "    wk bench mac-ab --collect     reads the result off the volume" ;;
 esac

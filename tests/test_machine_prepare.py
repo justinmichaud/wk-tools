@@ -17,14 +17,40 @@ directory in a scratch tree.
 Run: python3 -m unittest tests.test_machine_prepare -v
 """
 import os
+import pty
 import subprocess
 import unittest
 
 from tests.support import REPO, WkTest, bash, func_body, scratch_dir, stub_path
 
+
+def _lift_between(text, first, last):
+    a = text.index(first)
+    return text[a:text.index(last, a)]
+
+
+def macab_func(name):
+    return func_body(MACAB.read_text(), name)
+
+
+def pty_bash(script, timeout=60):
+    """bash with a terminal on stdin, for the one branch whose condition is
+    having one. Output comes back merged, as it does from a terminal."""
+    primary, secondary = pty.openpty()
+    try:
+        cp = subprocess.run(
+            ["bash", "-c", script], cwd=str(REPO),
+            env=dict(os.environ, WK_ROOT=str(REPO)), stdin=secondary,
+            capture_output=True, text=True, timeout=timeout)
+    finally:
+        os.close(primary)
+        os.close(secondary)
+    return cp
+
 MACHINES = REPO / "boot" / "machines.sh"
 BOOT = REPO / "cmd" / "boot"
 MACAB = REPO / "bench" / "mac-ab.sh"
+DRIVER = REPO / "boot" / "mac-volume.sh"
 
 LIB = '. "$WK_ROOT/lib/common.sh"; . "$WK_ROOT/boot/machines.sh"\n'
 
@@ -39,14 +65,22 @@ class TheToolsPathIsDeclared(WkTest):
         cp = bash(LIB + 'machine_tools_dir')
         self.assertEqual("Development/wk-tools", cp.stdout.strip())
 
-    def test_the_lane_reads_that_path_and_searches_for_nothing(self):
-        body = func_body(MACAB.read_text(), "host_tools")
+    def test_the_driver_reads_that_path_and_searches_for_nothing(self):
+        """It is the driver that answers where the tree is, because the machine
+        that holds it is the one *managing* the target and not always the one
+        being measured -- a guest's manager is the Mac running it."""
+        body = func_body(DRIVER.read_text(), "b_manage_tools")
         self.assertIn("machine_tools_dir", body)
         self.assertNotIn("~/wk-tools", body)
         self.assertNotIn("for d in", body)
 
+    def test_the_lane_asks_the_driver_and_reads_no_path_of_its_own(self):
+        body = func_body(MACAB.read_text(), "mgr_tools")
+        self.assertIn("b_manage_tools", body)
+        self.assertNotIn("machine_tools_dir", body)
+
     def test_an_absent_tree_names_the_command_that_puts_one_there(self):
-        body = func_body(MACAB.read_text(), "host_tools")
+        body = func_body(MACAB.read_text(), "mgr_tools")
         self.assertIn("--prepare", body)
 
 
@@ -141,6 +175,56 @@ class PreparingPushesACommitAndStopsAtTheSudo(WkTest):
         body = func_body(MACHINES.read_text(), "machine_prepare")
         self.assertIn("tools_push", body)
         self.assertNotIn("rsync", body)
+
+
+class PreflightPreparesAMacItCannotRestart(WkTest):
+    """`wk bench mac-ab`'s preflight runs the prepare itself when it finds a Mac
+    it cannot restart and has a terminal to answer the one sudo on. Since the
+    deploy is a commit, an uncommitted tree here surfaces `tools_committed`'s
+    refusal *inside* the preflight -- which then reports the machine as still
+    not restartable, rather than reporting it prepared."""
+
+    BLOCK = _lift_between(MACAB.read_text(),
+                          '    if ! b_restart_ready && [ -t 0 ]',
+                          '\n    log "" >&2')
+
+    def _preflight(self, prepare_rc, ready_after):
+        # On a pty, because "has a terminal to answer the one sudo on" is the
+        # condition under test and `[ -t 0 ]` is what asks it.
+        return pty_bash(
+            '. "$WK_ROOT/lib/common.sh"\n'
+            'PF_FAIL=0; DRY=""; MACHINE=mbp\n'
+            'ck() {%s}\n'
+            '_n=0\n'
+            'b_restart_ready() { _n=$((_n + 1)); [ "$_n" -gt 1 ] && return %d; return 1; }\n'
+            'b_restart_detail() { printf "no boot helper on tolken, and plain sudo there wants a password"; }\n'
+            'b_manage_prepare() { warn "wk-tools here has uncommitted changes, so there is no'
+            ' commit to put on a machine."; return %d; }\n'
+            '%s\n'
+            'echo "PF_FAIL=$PF_FAIL"'
+            % (macab_func("ck"), 0 if ready_after else 1, prepare_rc, self.BLOCK))
+
+    def test_a_dirty_tree_surfaces_the_commit_first_refusal_inside_preflight(self):
+        cp = self._preflight(prepare_rc=1, ready_after=False)
+        out = cp.stdout + cp.stderr
+        self.assertIn("cannot be restarted unattended yet -- preparing it now", out)
+        self.assertIn("uncommitted changes", out)
+        self.assertIn("restartable", out)
+        self.assertIn("PF_FAIL=1", out, out)
+
+    def test_a_prepare_that_worked_leaves_the_check_passing(self):
+        """The discriminating half: the prepare is run for its effect, so a
+        preflight that reported `restartable no` either way would be reporting
+        a record and not the machine."""
+        cp = self._preflight(prepare_rc=0, ready_after=True)
+        out = cp.stdout + cp.stderr
+        self.assertIn("PF_FAIL=0", out, out)
+        self.assertIn("this lane restarts mbp itself", out)
+
+    def test_a_failed_prepare_does_not_end_the_preflight(self):
+        """The rest of preflight is what the operator needs to see, and a
+        machine that cannot be restarted is a barrier and not a stop."""
+        self.assertIn("b_manage_prepare || true", self.BLOCK)
 
 
 class TheVerbIsWiredIn(WkTest):

@@ -35,7 +35,7 @@
 #       [--subtests "A B"] [--payload <dir>] [--browser-args "..."]
 #       --profile <file>                   record the web process with samply
 #                                          for the length of the run
-#       --expect-display "builtin <w>x<h>" the display this leg must be measured
+#       --expect-display "<kind> <w>x<h>" the display this leg must be measured
 #                                          on; refuses any other, and refuses a
 #                                          second panel or a mirror set
 #       --ls                               what is staged here, and what ran
@@ -1038,7 +1038,7 @@ cmd_staged() {
             *) die "unknown option: $1
     usage: wk bench staged [--plan P] [--id <staged-id>] [--count N]
                            [--subtests \"A B\"] [--profile <file>] [--ls]
-                           [--expect-display \"builtin <w>x<h>\"]
+                           [--expect-display \"<kind> <w>x<h>\"]
                            [--dry-run] [--force]" ;;
         esac
     done

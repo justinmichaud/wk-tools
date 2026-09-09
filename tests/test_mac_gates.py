@@ -34,7 +34,7 @@ GOOD_READING = {"webgl": "WebGL 2.0", "renderer": "Apple GPU", "raf_hz": 57.2,
                 "frontmost": "org.webkit.MiniBrowser", "brightness": 0.0,
                 "displays": [GOOD_DISPLAY]}
 GOOD_CLIENTS = {1732: "com.apple.WebKit.GPU.Development"}
-GOOD_EXPECT = [1024, 768]
+GOOD_EXPECT = ("builtin", [1024, 768])
 
 # The guest that builds draws on a paravirtual panel, which is not a built-in one.
 GUEST_DISPLAY = dict(GOOD_DISPLAY, builtin=False, points=[1920, 1080],
@@ -90,7 +90,7 @@ class TestTheBrowserGate(WkTest):
         counterpart. Everything a throttle shows up in still refuses it."""
         guest = dict(GOOD_READING, displays=[GUEST_DISPLAY])
         self.assertEqual([], self.verdict(guest, expect=None))
-        self.assertTrue(any("built-in panel" in f for f in self.verdict(guest)))
+        self.assertTrue(any("builtin panel" in f for f in self.verdict(guest)))
 
         throttled = dict(guest, raf_hz=8.0)
         found = self.verdict(throttled, expect=None)

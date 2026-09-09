@@ -1,11 +1,4 @@
-# Sourced, never run: the files a benchmark install needs and the one writer that
-# lays them down. Two callers with different privilege and different reach --
-# mac-bench-volume.sh standing on the host install with sudo over a mounted
-# volume, and mac-bench-autorun.sh standing on the benchmark install with
-# passwordless root over itself -- so a payload file cannot land one way and not
-# the other. The caller provides `run` and WK_ROOT; the tailnet payload is not
-# here, because collecting it needs a network the benchmark install has not got
-# and installing it needs root the host install would have to be asked for.
+# Sourced, never run: the files a benchmark install needs and the one writer that lays them down, because its two callers have different privilege and different reach -- mac-bench-volume.sh with sudo over a mounted volume, mac-bench-autorun.sh with passwordless root over itself -- and a payload file must not land one way and not the other. The caller provides `run` and WK_ROOT. Not here: the tailnet payload, whose collection needs a network this install has not got.
 
 bench_payload_files() {   # <source, repo-relative> <dest under the root> <mode>
     cat <<'ROWS'

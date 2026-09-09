@@ -84,11 +84,27 @@ host_install() {
 
 # Hands the machine back rather than halting on it, so the only human step is a login. Ordered so a bless that did not take cannot cost a boot loop: this volume is the firmware default, so a reboot with it still default lands back here and measures again -- the reboot is taken only once the firmware is *read back* as naming the host install, and otherwise this halts, which is always safe. Whether `bless --setBoot` succeeds for a volume this account does not own is the platform's answer and one boot has it.
 _left=""
+_stay=""
+_had_job=""
+
+# A boot that produced no number is a boot somebody has to read, and this log is only readable while this install is up: booting this Mac into *host* mode needs a password typed at the machine and booting the benchmark volume does not, so handing back is what makes a refusal unreadable. Held here, reachable on the tailnet, for a bounded window; a boot whose legs landed hands back at once, its numbers being on the volume either way.
+BENCH_HOLD="${WK_MAC_BENCH_HOLD:-900}"
+hold_for_a_reader() {
+    [ -n "$_had_job" ] || return 0
+    [ -s "${RUNS:-/nonexistent}/runs.tsv" ] && return 0
+    case "$BENCH_HOLD" in ''|*[!0-9]*) return 0 ;; 0) return 0 ;; esac
+    say "no number came out of this boot. Holding the machine here for ${BENCH_HOLD}s,"
+    say "  where it is reachable and host mode would not be:"
+    say "    ssh $(sed -n 's/^hostname=//p' "$WK_AB_ROOT/tailnet/tailnet.conf" 2>/dev/null || echo '<the bench node>') tail -120 $LOG"
+    sleep "$BENCH_HOLD"
+}
+
 leave_bench() {
     local why="$1" host grp want
     [ -n "$_left" ] && return 0
     _left=1
     state_set left_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    hold_for_a_reader
 
     if host=$(host_install); then
         want=$(python3 "$TOOLS/lib/wkmac.py" volume-group "$host" 2>/dev/null) || want=""
@@ -136,14 +152,17 @@ cancel_pending_reboot() {
     fi
 }
 
-# Judged by the same probe and findings `wk bench staged` uses before every leg, so a volume that drifted is refused up front rather than leg by leg on a machine with no network to say so.
+stand_aside_if_provisioning() {   # before defuse_firstboot, which would otherwise kill the daemon mid-provisioning
+    pgrep -f wk-bench-firstboot >/dev/null 2>&1 || return 0
+    say "provisioning is running right now -- standing aside so it can finish."
+    say "  It reboots at the end, and this agent starts again on that boot."
+    _stay=1
+    exit 0
+}
+
+# Judged by the same probe and findings `wk bench staged` uses before every leg, so a volume that drifted is refused up front rather than leg by leg on a machine with no network to say so. After `wk quiesce on`, never before it: the user half of those rows does not survive this account's session starting, so quiesce writes them again where they can take (cmd/quiesce says why), and judging first refused a volume on rows this boot was about to set -- which is what job 20260909T042343Z did, in its first minute.
 refuse_unprovisioned() {
     local probe wrong installed=no
-    if pgrep -f wk-bench-firstboot >/dev/null 2>&1; then
-        say "provisioning is running right now -- standing aside so it can finish."
-        say "  It reboots at the end, and this agent starts again on that boot."
-        exit 0
-    fi
     if [ ! -r "$QUIET_DESKTOP" ]; then
         say "no $QUIET_DESKTOP, so nothing here can judge what this volume is set to."
         leave_bench "no quiet-desktop table to judge this volume by"
@@ -189,7 +208,7 @@ if [ ! -f /etc/wk-image ]; then
     exit 0
 fi
 say "bench mode: $(sed -n 's/^id=//p' /etc/wk-image)"
-refuse_unprovisioned
+stand_aside_if_provisioning
 defuse_firstboot
 
 if [ ! -f "$JOB" ]; then
@@ -221,7 +240,7 @@ if [ "$ATTEMPTS" -gt "$MAX_ATTEMPTS" ]; then
     exit 0
 fi
 say "attempt $ATTEMPTS of $MAX_ATTEMPTS"
-
+_had_job=1   # from here on a refusal is something to read, so leave_bench holds the machine first
 
 PLANS=$(jf_list plans);  PLANS="${PLANS:-speedometer3}"
 ROUNDS=$(jf rounds);     ROUNDS="${ROUNDS:-5}"
@@ -232,6 +251,7 @@ COUNT=$(jf count);       COUNT="${COUNT:-2}"   # one run of one count carries no
 NARMS=$(jf n_arms);      NARMS="${NARMS:-2}"
 SETTLE=$(jf settle);     SETTLE="${SETTLE:-90}"
 DISPLAY_EXPECT=$(jf display)
+REHEARSAL=$(jf rehearsal)   # its own field and never `--force`'s: one flag meaning both "cross a driver barrier" and "force every leg" made crossing the first silently disable the second
 
 export WK_BENCH_ASLR=$(jf aslr)
 export WK_BENCH_ENV_PAD=$(jf env_pad)
@@ -241,6 +261,57 @@ export WK_BENCH_SHARED_CACHE=$(jf shared_cache)
 say "job: plans=$PLANS rounds=$ROUNDS-$MAX_ROUNDS detect=${DETECT}% arms=$NARMS timeout=${TIMEOUT}s count=$COUNT"
 say "     variance: aslr=${WK_BENCH_ASLR:-unset} env_pad=${WK_BENCH_ENV_PAD:-0} path_pad=${WK_BENCH_PATH_PAD:-0} shared_cache=${WK_BENCH_SHARED_CACHE:-unset}"
 say "     wk-tools=$TOOLS  display=${DISPLAY_EXPECT:-unpinned}"
+[ -z "$REHEARSAL" ] || say "     REHEARSAL: every leg is forced past its own preflight, and every number
+     it takes is recorded as forced. This measures the path, not the machine."
+
+RUNS="$WK_AB_ROOT/ab/$(state_get job_stamp)"
+[ -n "$(state_get job_stamp)" ] || RUNS="$WK_AB_ROOT/ab/unstamped"
+mkdir -p "$RUNS" 2>/dev/null
+
+summarise() {
+    say "summarising"
+    "$TOOLS/wk" bench ab-summary --root "$WK_AB_ROOT" --runs "$RUNS/runs.tsv" \
+        --out "$RUNS/summary.txt" >>"$LOG" 2>&1 \
+        || say "(no summary -- 'wk bench ab-summary' failed; the results are still on the volume)"
+}
+
+# Silence, not a deadline: the round count is decided by the numbers as they arrive, so there is no total to budget. Generous, because the first run against a freshly copied build tree is legitimately much slower than the rest and a watchdog firing on it costs a whole cycle.
+watchdog() {
+    local quiet
+    while :; do
+        sleep 60
+        [ "$(state_get phase)" = done ] && return 0
+        quiet=$(( $(date +%s) - $(stat -f %m "$LOG") ))
+        [ "$quiet" -lt "$STALL" ] && continue
+        say "WATCHDOG FIRED -- nothing written for ${quiet}s; the run is not coming back"
+        state_set phase done      # before the summary, so a power cut in it cannot repeat the attempt
+        state_set outcome watchdog
+        summarise                 # the rounds that did land are a measurement, and this is the only machine that can say what they resolve
+        leave_bench "watchdog: nothing written for ${quiet}s"
+        return 0
+    done
+}
+
+STALL=$(( TIMEOUT + 900 ))
+say "watchdog: ${STALL}s of silence"
+watchdog &   # armed before the first step that can block -- joining a tailnet, writing a display mode, quiescing, launching a browser all wait on the system for as long as it takes, and a boot that reaches one of those with neither this nor the trap below is a machine left in bench mode with nothing able to report it and no way back
+WATCHDOG=$!
+# `_stay` is set where an exit deliberately leaves the machine to reboot itself, and handing back would take the boot it is waiting for.
+trap 'kill "$WATCHDOG" 2>/dev/null; [ -n "$_stay" ] || leave_bench "run finished or failed"' EXIT INT TERM
+
+# The panel is a load on the package the browser is measured on, and a panel left lit is a panel being spent, so it goes down before anything that can stall -- the tailnet join, the mode write, the quiesce, a browser -- and nothing later raises it. It stayed at 0.85 for tens of minutes on 2026-09-09 while `wk quiesce on` was deadlocked, because this ran after it.
+dim_display() {
+    local got rc=0
+    got=$(python3 "$TOOLS/lib/wkmac.py" brightness --set 0) || rc=$?
+    if [ "$rc" -ne 0 ]; then
+        say "the display would not go to minimum brightness (rc=$rc, read back '${got:-nothing}')."
+        say "  A backlight that varies is a load that varies, so nothing runs."
+        leave_bench "the display would not dim"
+        exit 0
+    fi
+    say "display at minimum brightness (reads $got)"
+}
+dim_display
 
 [ -x "$TOOLS/wk" ] || {
     say "FATAL: no wk at $TOOLS/wk -- cannot run anything"
@@ -278,7 +349,7 @@ converge_display_mode() {
         say "  Nothing is measured at a mode that is not the declared one: MotionMark's"
         say "  score is the area it draws. From host mode, set the mode on this install"
         say "  by hand and re-plant, or declare the mode it does come up at:"
-        say "    NODE_DISPLAY=\"builtin ${running:-<what it reads>}\"  in boot/machines/mbp.conf"
+        say "    NODE_DISPLAY=\"${DISPLAY_EXPECT%% *} ${running:-<what it reads>}\"  in boot/machines/mbp.conf"
         state_set phase done
         state_set outcome "display-mode-unsettable"
         remove_agent
@@ -296,10 +367,26 @@ converge_display_mode() {
     state_set mode_declared "$want"
     state_set attempts "$((ATTEMPTS - 1))"   # this boot measured nothing
     say "  wrote it; restarting so WindowServer comes up at $want"
+    _stay=1   # the reboot below is the point of this branch; handing back would take it
     sync 2>/dev/null || true
     sudo -n /sbin/reboot >/dev/null 2>&1 || say "WARNING: could not restart"
     exit 0
 }
+hold_auto_brightness() {
+    local got rc=0
+    got=$(python3 "$TOOLS/lib/wkmac.py" auto-brightness --off) || rc=$?
+    case "$got" in
+        off)  say "ambient light: compensation off (read back)" ;;
+        none) say "ambient light: this panel has no sensor to hold" ;;
+        *)    say "ambient light: still reads '${got:-nothing}' (rc=$rc) after being turned off."
+              say "  A brightness the sensor can raise again is a load that varies, so"
+              say "  nothing runs. The display gate below says the same thing."
+              state_set attempts "$((ATTEMPTS - 1))"
+              leave_bench "ambient-light compensation could not be turned off"
+              exit 0 ;;
+    esac
+}
+
 # Asked before the mode is touched, and about the topology only -- one online panel and it the built-in one -- because with a second attached there is no single built-in mode to converge to, and the mode itself is what converge_display_mode below is for. The driver asked the same question seconds before the restart, so what this catches is a monitor plugged in between the two.
 refuse_wrong_displays() {
     local said rc=0
@@ -349,47 +436,14 @@ stage_payload /" >>"$LOG" 2>&1; then
 }
 converge_self
 
+
+hold_auto_brightness   # before the display gate, which refuses a panel under ambient-light control: it is a load that varies, and this is what holds it rather than declining the machine
 refuse_wrong_displays
 converge_display_mode
 
 state_set phase running
 state_set plans "$PLANS"
 state_set started_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-
-RUNS="$WK_AB_ROOT/ab/$(state_get job_stamp)"
-[ -n "$(state_get job_stamp)" ] || RUNS="$WK_AB_ROOT/ab/unstamped"
-mkdir -p "$RUNS" 2>/dev/null
-
-summarise() {
-    say "summarising"
-    "$TOOLS/wk" bench ab-summary --root "$WK_AB_ROOT" --runs "$RUNS/runs.tsv" \
-        --out "$RUNS/summary.txt" >>"$LOG" 2>&1 \
-        || say "(no summary -- 'wk bench ab-summary' failed; the results are still on the volume)"
-}
-
-# Silence, not a deadline: the round count is decided by the numbers as they arrive, so there is no total to budget. Generous, because the first run against a freshly copied build tree is legitimately much slower than the rest and a watchdog firing on it costs a whole cycle.
-STALL=$(( TIMEOUT + 900 ))
-watchdog() {
-    local quiet
-    while :; do
-        sleep 60
-        [ "$(state_get phase)" = done ] && return 0
-        quiet=$(( $(date +%s) - $(stat -f %m "$LOG") ))
-        [ "$quiet" -lt "$STALL" ] && continue
-        say "WATCHDOG FIRED -- nothing written for ${quiet}s; the run is not coming back"
-        state_set phase done      # before the summary, so a power cut in it cannot repeat the attempt
-        state_set outcome watchdog
-        summarise                 # the rounds that did land are a measurement, and this is the only machine that can say what they resolve
-        leave_bench "watchdog: nothing written for ${quiet}s"
-        return 0
-    done
-}
-say "watchdog: ${STALL}s of silence"
-watchdog &
-WATCHDOG=$!
-
-# A trap, so a `set -e` death cannot leave the machine up in bench mode.
-trap 'kill "$WATCHDOG" 2>/dev/null; leave_bench "run finished or failed"' EXIT INT TERM
 
 # The agent starts at login, the moment the machine is least quiet.
 say "settling for ${SETTLE}s"
@@ -471,7 +525,14 @@ say "  scan stamp before the job: $(msu_stamp)"
 say "quiescing"
 "$TOOLS/wk" quiesce on >>"$LOG" 2>&1 || say "WARNING: quiesce reported a problem; the runner will judge it"
 
+refuse_unprovisioned
+
 newest_result() { ls -1 "$WK_AB_ROOT/results" 2>/dev/null | sort | tail -1 || true; }
+
+repause_daemons() {   # again before every leg, not once before the rounds: macOS restarts these on demand, and one that came back between the quiesce and a leg fails that leg on the gate `wk bench staged` asks -- XProtect did, and took all four legs of job 20260909T154515Z with it. The quiesce's own function, so the rule has one implementation, and the gate still judges what this left
+    sudo -n bash -c ". $(printf %q "$QUIET_DESKTOP"); wk_quiet_daemons_pause" >>"$LOG" 2>&1 \
+        || say "    WARNING: could not re-pause the background daemons; the leg's own gate will say which came back"
+}
 
 leg() {   # <round> <plan> <arm index> [profile]. A software-update scan across one arm is a number to drop, not a reason to disbelieve the rest, so each row says.
     local r="$1" plan="$2" i="$3" profile="${4:-}"
@@ -480,7 +541,9 @@ leg() {   # <round> <plan> <arm index> [profile]. A software-update scan across 
     sid=$(jf "arms.$i.id")
     bargs=$(jf "arms.$i.browser_args")
     say "--- round $r, $plan, arm $label (staged $sid) ---"
+    repause_daemons
     set -- bench staged --plan "$plan" --timeout "$TIMEOUT" --expect-display "$DISPLAY_EXPECT"
+    [ -z "$REHEARSAL" ] || set -- "$@" --force
     [ -n "$sid" ]   && set -- "$@" --id "$sid"
     set -- "$@" --count "$COUNT"
     [ -n "$bargs" ] && set -- "$@" --browser-args "$bargs"
@@ -558,18 +621,6 @@ refuse_throttled_browser() {
     leave_bench "browser check failed"
     exit 0
 }
-dim_display() {   # the panel is a load on the package the browser is measured on, and nothing restores it: this install is left dark
-    local got rc=0
-    got=$(python3 "$TOOLS/lib/wkmac.py" brightness --set 0) || rc=$?
-    if [ "$rc" -ne 0 ]; then
-        say "the display would not go to minimum brightness (rc=$rc, read back '${got:-nothing}')."
-        say "  A backlight that varies is a load that varies, so nothing runs."
-        leave_bench "the display would not dim"
-        exit 0
-    fi
-    say "display at minimum brightness (reads $got)"
-}
-dim_display
 refuse_throttled_browser
 
 # Not measured: it absorbs the first-run effect a freshly copied build tree has, and carries the capture the measured rounds cannot take afterwards.

@@ -293,7 +293,7 @@ class TestMacAbOverrides(WkTest):
                  "WK_MAC_SSH": FAKE_SSH},
         )
         out = cp.stdout + cp.stderr
-        self.assertIn(FAKE_SSH, out)
+        self.assertIn(FAKE_SSH, out, "the preflight names the address it reached for")
         self.assertIn("does not answer ssh", out)
 
 

@@ -226,6 +226,8 @@ class TestProvisioningIsNotSomethingToKill(WkTest):
                 f'pgrep() {{ return {0 if running else 1}; }}\n'
                 f'pkill() {{ : > {killed}; }}\n'
                 f'sudo() {{ shift; "$@"; }}\n'
+                f'_stay=""\n'
+                f'stand_aside_if_provisioning() {{{func_body(text, "stand_aside_if_provisioning")}}}\n'
                 f'refuse_unprovisioned() {{{func_body(text, "refuse_unprovisioned")}}}\n'
                 f'defuse_firstboot() {{{func_body(text, "defuse_firstboot")}}}\n'
                 f'if {func}; then ret=0; else ret=$?; fi\n'
@@ -234,7 +236,7 @@ class TestProvisioningIsNotSomethingToKill(WkTest):
 
     def test_it_stands_aside_while_provisioning_is_running(self):
         cp, out, still_there, killed = self._autorun(
-            "refuse_unprovisioned", settled=False, running=True)
+            "stand_aside_if_provisioning", settled=False, running=True)
         self.assertEqual(cp.returncode, 0, out)
         self.assertNotIn("RET=", out, "it ran on past provisioning:\n" + out)
         self.assertIn("standing aside", out, out)
@@ -276,10 +278,20 @@ class TestProvisioningIsNotSomethingToKill(WkTest):
         self.assertIn("RET=0", out, out)
         self.assertIn("CANCELLED", out, out)
 
-    def test_the_question_is_asked_before_the_job_is_read(self):
+    def test_each_question_is_asked_where_its_answer_is_true(self):
+        """Standing aside comes before the job is read, because defusing a
+        daemon still provisioning is the thing it prevents. The judgment comes
+        after `wk quiesce on`, because the user half of those rows does not
+        survive this account's session starting and quiesce is what writes them
+        again -- asked first, it refused a volume on rows the same boot was
+        about to set (job 20260909T042343Z, 2026-09-09)."""
         text = AUTORUN.read_text()
-        self.assertLess(text.index("refuse_unprovisioned\n"), text.index('if [ ! -f "$JOB" ]'),
-                        "the job runs before the volume is known to be measurable")
+        self.assertLess(text.index("\nstand_aside_if_provisioning\n"),
+                        text.index('if [ ! -f "$JOB" ]'),
+                        "the job is read before the daemon in flight is noticed")
+        self.assertLess(text.index('"$TOOLS/wk" quiesce on'),
+                        text.index("\nrefuse_unprovisioned\n"),
+                        "the volume is judged before the quiesce that writes it")
 
     def test_one_path_names_the_log_and_the_rest_agree(self):
         """Three readers and two writers of one record: the daemon's plist
@@ -403,9 +415,13 @@ class TestEveryLegIsJudgedOnTheDeclaredDisplay(WkTest):
         reaches the same verdict with no argument."""
         self.assertIn('display_declared="$EXPECT_DISPLAY"', self.BENCH.read_text())
 
-    def test_the_declared_mode_reaches_the_job_from_the_machine_conf(self):
+    def test_the_declared_mode_reaches_the_job_from_the_machine(self):
+        """Through the driver, so the one machine whose mode is not in a conf
+        of its own -- a guest, whose target declares it -- reaches the job the
+        same way."""
         text = MACAB.read_text()
-        self.assertIn('WK_JOB_DISPLAY="$NODE_DISPLAY"', text)
+        self.assertIn("declared=$(b_display)", text)
+        self.assertIn('WK_JOB_DISPLAY="$declared"', text)
 
 
 class TestTheBenchSideRefusesBeforeItActs(WkTest):
@@ -450,13 +466,13 @@ class TestADryRunClaimsNothing(WkTest):
 
     def test_one_place_decides_what_a_dry_run_says(self):
         text = MACAB.read_text()
-        self.assertEqual(text.count("dry run -- nothing on $HOST was changed"), 1)
+        self.assertEqual(text.count("dry run -- nothing on $MACHINE was changed"), 1)
 
     def test_the_dry_exit_comes_before_every_claim_of_having_acted(self):
         text = MACAB.read_text()
         dry = text.index('if [ -n "$DRY" ]; then\n    [ "$ACTION" = plant ] || phase_go')
         for claim in ('info "planted and not started.',
-                      'notify "mac-ab planted on $HOST"',
+                      'notify "mac-ab planted on $MACHINE"',
                       "came_back=$(phase_wait"):
             self.assertLess(dry, text.index(claim),
                             f"a dry run reaches `{claim[:40]}`")

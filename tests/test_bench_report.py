@@ -170,10 +170,11 @@ class TestReportWalkerAndStats(WkTest):
 
     def test_report_reads_speedometer2_board_results(self):
         """the shape `wk pi bench` records from the webserver patch's POST:
-        the total Score at the suite root, descriptor lists (metrics.Time ==
+        the total Score at the suite root, declarations (metrics.Time ==
         ["Total"]) in the middle, and the numbers three levels down under
-        Sync/Async -- every level with numbers becomes a row, named by its
-        path from the suite down, and the descriptor levels do not."""
+        Sync/Async. Every level becomes a row, named by its path from the
+        suite down: the ones holding numbers from those, and the ones holding
+        a declaration from resolving it over the level below."""
         def doc(base):
             return {"debugOutput": [None], "Speedometer-2": {
                 "metrics": {"Score": {"current": [[base, base + 1.0, base + 0.5]]},
@@ -190,15 +191,25 @@ class TestReportWalkerAndStats(WkTest):
             a, b = self._write_pair(tmp, doc(11.0), doc(10.5))
             cp = wkdata("report", str(a), str(b), "--text")
             self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-            names = {name for name, _metric in report_means(cp.stdout)}
+            means = report_means(cp.stdout)
             self.assertEqual(
-                names,
+                {name for name, _metric in means},
                 {"Speedometer-2",
+                 "Speedometer-2/VanillaJS-TodoMVC",
+                 "Speedometer-2/VanillaJS-TodoMVC/Adding100Items",
                  "Speedometer-2/VanillaJS-TodoMVC/Adding100Items/Sync",
                  "Speedometer-2/VanillaJS-TodoMVC/Adding100Items/Async"},
                 "a row is named by its whole path, so the suite is the one row "
-                "with no '/' in its name -- and the descriptor-only middle "
-                "levels hold no numbers and are not rows at all")
+                "with no '/' in its name, and a level declaring how to "
+                "aggregate the one below is a row too")
+            # 110/112 and 11/12 are one iteration each, so Sync is 111 and
+            # Async 11.5, and every Total above them is their sum.
+            self.assertEqual((111.0, 106.0),
+                             means[("Speedometer-2/VanillaJS-TodoMVC/Adding100Items/Sync", "Time")])
+            for name in ("Speedometer-2",
+                         "Speedometer-2/VanillaJS-TodoMVC",
+                         "Speedometer-2/VanillaJS-TodoMVC/Adding100Items"):
+                self.assertEqual((122.5, 117.0), means[(name, "Time")], name)
 
     def test_variance_by_configuration_groups_matching_tuples(self):
         """Two runs sharing a `configuration` tuple land in one variance
@@ -390,6 +401,47 @@ class TestTheHeadlineRow(WkTest):
             self.assertEqual(means[("JetStream3.0", "Score")][0], 2.0)
             self.assertEqual(means[("JetStream3.0/x", "Score")][0], 1.0)
             self.assertEqual(means[("JetStream3.0/y", "Score")][0], 4.0)
+
+    def test_a_child_that_declares_its_own_aggregate_becomes_a_row_too(self):
+        """A declaration is not the suite root's alone: a JetStream3 subtest
+        declares its Time as the geometric mean of First/Worst/Average, and a
+        level that resolves nothing is a level the file read and dropped."""
+        with scratch_dir() as tmp:
+            doc = {"JetStream3.0": {
+                "metrics": {"Score": ["Geometric"]},
+                "tests": {"gaussian-blur": {
+                    "metrics": {"Score": {"current": [8.0]}, "Time": ["Geometric"]},
+                    "tests": {
+                        "First": {"metrics": {"Time": {"current": [2.0]}}},
+                        "Worst": {"metrics": {"Time": {"current": [8.0]}}},
+                        "Average": {"metrics": {"Time": {"current": [4.0]}}},
+                    }}}}}
+            a, b = self._pair(tmp, doc)
+            cp = wkdata("report", str(a), str(b), "--text")
+            self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+            means = report_means(cp.stdout)
+            self.assertEqual(4.0, means[("JetStream3.0/gaussian-blur", "Time")][0],
+                             "the geometric mean of 2, 8 and 4")
+            self.assertEqual(8.0, means[("JetStream3.0/gaussian-blur", "Score")][0])
+            self.assertEqual(8.0, means[("JetStream3.0", "Score")][0])
+
+    def test_only_the_topmost_declaration_that_cannot_be_resolved_says_so(self):
+        """Every level above a silent subtest is silent for that one reason,
+        and a report that says it once per level buries the subtest's name."""
+        with scratch_dir() as tmp:
+            doc = {"JetStream3.0": {
+                "metrics": {"Score": ["Geometric"]},
+                "tests": {"gaussian-blur": {
+                    "metrics": {"Score": ["Geometric"]},
+                    "tests": {"First": {"metrics": {"Score": {}}}}}}}}
+            a, b = self._pair(tmp, doc)
+            cp = wkdata("report", str(a), str(b), "--text")
+            self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+            said = [l for l in cp.stdout.splitlines() if "report no Score" in l]
+            self.assertTrue(said, cp.stdout)
+            self.assertTrue(all("JetStream3.0's Score" in l for l in said),
+                            "only the suite's own declaration is reported:\n"
+                            + "\n".join(said))
 
     def test_a_partial_suite_still_reports_its_subtests_and_says_why_it_has_no_total(self):
         """`ab-precision` refuses a partial suite -- a stopping rule cannot run

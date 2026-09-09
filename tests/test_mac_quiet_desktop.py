@@ -120,6 +120,39 @@ class TestTheTables(unittest.TestCase):
                          [n for n in names if names.count(n) > 1])
 
 
+class TestWhatSipWillNotLetGo(unittest.TestCase):
+    """A lever macOS refuses cannot be held, so the row is reported and not
+    refused on -- otherwise no modern Mac ever measures. Each name here was
+    measured answering `Operation not permitted` to `kill -STOP` as root."""
+
+    def test_the_whole_xprotect_family_is_named(self):
+        """XProtect launches the scanning that XprotectService does and
+        xprotectd schedules. The latter two were named and the first was not,
+        so `wk bench staged` refused every leg of job 20260909T154515Z on it --
+        four legs in two seconds each -- for a signal SIP refuses anyway
+        (measured on the bench install, macOS 26.6.2, 2026-09-09)."""
+        named = bash('. %s\nwk_quiet_desktop_unstoppable\n' % QUIET).stdout.split()
+        for proc in ("XProtect", "XprotectService", "xprotectd"):
+            with self.subTest(proc=proc):
+                self.assertIn(proc, named)
+
+    def test_an_unstoppable_process_is_not_signalled_at_all(self):
+        """Signalling it fails, and a failed signal made the pause report a
+        failure the caller could do nothing about."""
+        body = func_body(QUIET.read_text(), "_wk_qd_daemons_signal")
+        self.assertIn("_wk_qd_unstoppable", body)
+        self.assertLess(body.index("_wk_qd_unstoppable"), body.index("kill -"))
+
+    def test_every_name_is_a_process_the_table_asks_about(self):
+        """A name nobody looks up is an exemption that exempts nothing."""
+        rows = bash('. %s\nwk_quiet_desktop_stopped\n' % QUIET).stdout.splitlines()
+        watched = {l.split()[1] for l in rows if len(l.split()) > 1}
+        named = bash('. %s\nwk_quiet_desktop_unstoppable\n' % QUIET).stdout.split()
+        for proc in named:
+            with self.subTest(proc=proc):
+                self.assertIn(proc, watched)
+
+
 class TestWhatMustKeepRunning(unittest.TestCase):
     """One row is judged the other way round. The bench install has no other way
     to be reached while it measures, and pausing it would drop the tailnet
@@ -533,10 +566,67 @@ class TestDoNotDisturb(WkTest):
                     env={"PATH": "/usr/bin:/bin", "HOME": "/nonexistent"})
 
     def test_no_file_is_not_off(self):
-        """An unreadable file is '?', which the findings report as unknown: a
-        missing assertion database is not evidence that DND is on OR off."""
+        """An unreadable file is `?<reason>`, which the findings report as
+        unknown: a missing assertion database is not evidence that DND is on OR
+        off. The reason is part of the answer because a bare `?` refused a run
+        without saying which of "no such file", "not allowed to read it" and
+        "not the JSON this writes" it met, and each wants a different remedy
+        (measured on the bench install, 2026-09-09)."""
         cp = self._dnd('wk_quiet_dnd_state %r' % str(self.tmp / "absent"))
-        self.assertEqual("?", cp.stdout.strip(), cp.stdout + cp.stderr)
+        self.assertEqual("?nofile", cp.stdout.strip(), cp.stdout + cp.stderr)
+
+    def test_a_file_it_may_not_read_says_so(self):
+        db = self.tmp / "Library" / "DoNotDisturb" / "DB"
+        db.mkdir(parents=True)
+        (db / "Assertions.json").write_text("{}")
+        (db / "Assertions.json").chmod(0)
+        cp = self._dnd('wk_quiet_dnd_state %r' % str(self.tmp))
+        if os.geteuid() == 0:
+            self.skipTest("root reads a mode-0 file, so there is no denial to meet")
+        self.assertEqual("?denied", cp.stdout.strip(), cp.stdout + cp.stderr)
+
+    def test_a_file_that_is_not_this_json_says_so(self):
+        db = self.tmp / "Library" / "DoNotDisturb" / "DB"
+        db.mkdir(parents=True)
+        (db / "Assertions.json").write_text("not json at all")
+        cp = self._dnd('wk_quiet_dnd_state %r' % str(self.tmp))
+        self.assertEqual("?malformed", cp.stdout.strip(), cp.stdout + cp.stderr)
+
+    def test_a_denied_read_is_left_out_of_the_probe_rather_than_refused(self):
+        """`~/Library/DoNotDisturb` is TCC-protected and root does not bypass it,
+        so nothing running on the measured install can read the record -- as
+        bench or under sudo alike (`Operation not permitted`, measured on the
+        bench install 2026-09-09). A row nothing can read must not refuse every
+        leg: the probe leaves it out, the findings call it unknown, and the
+        machine that has the volume merely mounted is where it is set and read
+        back."""
+        script = (". %s\n" % QUIET
+                  + '_wk_qd_home() { printf "/nonexistent"; }\n'
+                  + 'wk_quiet_dnd_state() { printf "?denied"; }\n'
+                  + "probe() {%s}\nprobe tester\n"
+                  % func_body(QUIET.read_text(), "wk_quiet_desktop_probe"))
+        cp = bash(script, env={"PATH": "/usr/bin:/bin"})
+        self.assertNotIn("notifications_dnd", cp.stdout,
+                         "a row nothing can read refuses every leg:\n" + cp.stdout)
+
+    def test_a_reading_that_worked_is_still_judged(self):
+        """The discriminating half: leaving it out when it cannot be read must
+        not leave it out when it can."""
+        script = (". %s\n" % QUIET
+                  + '_wk_qd_home() { printf "/nonexistent"; }\n'
+                  + 'wk_quiet_dnd_state() { printf "off"; }\n'
+                  + "probe() {%s}\nprobe tester\n"
+                  % func_body(QUIET.read_text(), "wk_quiet_desktop_probe"))
+        cp = bash(script, env={"PATH": "/usr/bin:/bin"})
+        self.assertIn("notifications_dnd=off", cp.stdout, cp.stdout + cp.stderr)
+
+    def test_an_unreadable_row_is_unknown_and_not_wrong(self):
+        """What the install's own preflight then does with it."""
+        cp = bash(". %s\n" % QUIET
+                  + "probe=$(printf 'analytics=0\\nspotlight=disabled\\n')\n"
+                  + "wk_quiet_desktop_findings \"$probe\" 'the remedy' "
+                  + "| awk -F'\\t' '$2 ~ /Do Not Disturb/ { print $1 }'\n")
+        self.assertEqual("note", cp.stdout.strip(), cp.stdout + cp.stderr)
 
     def test_turning_it_on_reads_back_on(self):
         cp = self._dnd('wk_quiet_dnd_on %r' % str(self.tmp))

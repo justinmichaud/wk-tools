@@ -14,17 +14,41 @@ export PATH=/usr/sbin:/usr/bin:/sbin:/bin
 os=$(uname -s)
 action="${1:-off}"
 
+# Every verb below that asks a daemon over XPC is bounded, because the caller holds
+# some of those daemons SIGSTOPped for the whole run and a stopped daemon answers no
+# request: `tmutil stopbackup` against a stopped backupd never returns, and it hung
+# `wk quiesce on` -- and with it every later step of a benchmark boot -- for 37 minutes
+# (bench install, 2026-09-09). `|| true` does not help a call that blocks rather than
+# fails. No `timeout` binary on macOS, so the bound is here; the argument list is a
+# fixed literal at every call, never anything from argv.
+bounded() { # <seconds> <command...>
+    local secs="$1" n=0 pid; shift
+    "$@" >/dev/null 2>&1 &
+    pid=$!
+    while kill -0 "$pid" 2>/dev/null; do
+        if [ "$n" -ge "$secs" ]; then
+            kill -9 "$pid" 2>/dev/null || true
+            wait "$pid" 2>/dev/null || true
+            echo "wk-quiesce-priv: '$*' did not answer in ${secs}s (a daemon held stopped answers nothing); carrying on" >&2
+            return 0
+        fi
+        sleep 1; n=$((n + 1))
+    done
+    wait "$pid" 2>/dev/null || true
+    return 0
+}
+
 macos_on() {
-    mdutil -a -i off >/dev/null 2>&1 || true
-    tmutil stopbackup >/dev/null 2>&1 || true
-    softwareupdate --schedule off >/dev/null 2>&1 || true
+    bounded 20 mdutil -a -i off
+    bounded 20 tmutil stopbackup
+    bounded 20 softwareupdate --schedule off
     pmset -a lowpowermode 0 >/dev/null 2>&1 || true
     echo "quiesced: spotlight off, backups stopped, updates off, low-power off"
 }
 
 macos_off() {
-    mdutil -a -i on >/dev/null 2>&1 || true
-    softwareupdate --schedule on >/dev/null 2>&1 || true
+    bounded 20 mdutil -a -i on
+    bounded 20 softwareupdate --schedule on
     echo "restored: spotlight on, updates on"
 }
 

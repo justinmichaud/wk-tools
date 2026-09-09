@@ -63,7 +63,7 @@ b_evidence() {
         echo "booted_volume=unknown ($NODE_SSH does not answer)"
         echo "benchmark_volume=$NODE_VOLUME (on that Mac; nothing on it is readable while it is silent)"
         echo "firmware_default=unknown (nvram answers only from a running install)"
-        echo "bench_display=${NODE_DISPLAY:-unpinned} (the install that is measured, not the one that answers here)"
+        echo "bench_display=$(b_display || echo unpinned) (the install that is measured, not the one that answers here)"
         echo "planted_job=$(mv_job_evidence)"
         return 0
     fi
@@ -76,7 +76,7 @@ b_evidence() {
         echo "benchmark_volume=$NODE_VOLUME (not attached)"
     fi
     echo "firmware_default=$(mac_firmware_default)"
-    echo "bench_display=${NODE_DISPLAY:-unpinned} (the install that is measured, not the one that answers here)"
+    echo "bench_display=$(b_display || echo unpinned) (the install that is measured, not the one that answers here)"
     echo "planted_job=$(mv_job_evidence)"
 }
 
@@ -221,6 +221,41 @@ b_bench_root() {
         *" - Data") printf '%s/private/var/wk' "$d" ;;
         *)          printf '%s/var/wk' "$d" ;;
     esac
+}
+
+b_manage() { m_ssh "$@"; }
+b_manage_name() { printf '%s' "$NODE_SSH"; }
+b_manage_tools() {
+    local d; d=$(machine_tools_dir)
+    machine_tools_present "$NODE_SSH" || return 1
+    printf '%s' "$d"
+}
+b_manage_prepare() { machine_prepare "$NODE_SSH"; }
+
+b_bench_home() {
+    local d; d=$(b_bench_root) || return 1
+    printf '%s/Users/bench' "$(dirname "$(dirname "$(dirname "$d")")")"
+}
+
+b_bench_local() { m_here; }
+
+b_bench_put_file() { m_ssh "cat > $(sh_quote "$2")" < "$1"; }
+
+b_bench_put() {   # <src dir> <dest dir>, replaced wholesale
+    # openrsync, which this Mac ships, sends `/Volumes/WK Bench - Data/...` with its escaping intact and fails with `open: No such file or directory`; over ssh the remote path appears once, inside a command this side quotes.
+    # shellcheck disable=SC2046 -- a deliberate word list.
+    tar -cf - $(bench_put_excludes) -C "$1" . \
+        | m_ssh "rm -rf $(sh_quote "$2") && mkdir -p $(sh_quote "$2") && tar -xf - -C $(sh_quote "$2")"
+}
+
+b_restart_ready() { mv_reboot_ready; }
+
+b_restart_detail() {
+    if mv_priv status 2>/dev/null | grep -q '^wk-boot-priv: ok'; then
+        printf 'the boot helper on %s answers, but names no detach mechanism, so it is older than this tree -- its reboot exits 0 having rebooted nothing' "$NODE_SSH"
+    else
+        printf 'no boot helper on %s, and plain sudo there wants a password' "$NODE_SSH"
+    fi
 }
 
 b_media() {

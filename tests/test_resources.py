@@ -157,9 +157,12 @@ PARAM = re.compile(r"\$\{[^{}]*\}")
 # A reading belongs on the right of an assignment and nowhere else. `local v`
 # ahead of it and a `|| ...` after it are that same shape; a case arm or a
 # second assignment on the line is still one simple command.
-ASSIGNED = re.compile(r"(?:^|[;{)]|&&|\|\||\bthen\b|\bdo\b|\belse\b)\s*"
+ASSIGNED = re.compile(r"(?:^|[;{)]|&&|\|\||\bthen\b|\bdo\b|\belse\b"
+                      r"|\bif\b|\belif\b|\bwhile\b|\buntil\b)\s*"
                       r"(?:local\s+|export\s+|declare\s+-\w+\s+)?[A-Za-z_][A-Za-z0-9_]*=$")
-SEPARATED = re.compile(r"^\s*($|;|\|\||&&|#)")
+# A trailing backslash too: `if a=$(...) \` continues onto the next line, where the
+# status is still the condition's.
+SEPARATED = re.compile(r"^\s*($|;|\|\||&&|#|\\\s*$)")
 
 
 def shell_functions(text):
@@ -182,19 +185,34 @@ def shell_functions(text):
     return out
 
 
-def readings():
-    """Every lib/resources.sh function that can refuse: the ones that die or
-    put up a barrier, and then whatever reaches one of those. Derived from
-    the file rather than listed here, so a new reading is covered the day it
-    is written."""
-    funcs = shell_functions((REPO / "lib" / "resources.sh").read_text())
-    named = {f for f, b in funcs.items()
-             if re.search(r"\b(die|barrier|_require_reading)\b", b)}
+# One target driver per file, closed over on its own: every driver defines
+# `t_cores`, so a set built from all of them at once keeps whichever file was
+# read last and loses the wrappers of the rest.
+WRAPPER_FILES = ("lib/target.sh", "targets/vm.sh", "targets/container.sh",
+                 "targets/local.sh", "targets/remote.sh")
+
+
+def _closure(funcs, named):
     while True:
         more = {f for f, b in funcs.items() if set(TOKEN.findall(b)) & named}
         if more <= named:
             return named
         named |= more
+
+
+def readings():
+    """Every function that can refuse: the lib/resources.sh ones that die or
+    put up a barrier, whatever reaches one of those, and the target drivers'
+    wrappers over them -- `t_cores` is a reading as surely as `host_cores` is,
+    and a refusal it takes discards the same way. Derived from the files rather
+    than listed here, so a new reading is covered the day it is written."""
+    funcs = shell_functions((REPO / "lib" / "resources.sh").read_text())
+    named = _closure(funcs, {f for f, b in funcs.items()
+                             if re.search(r"\b(die|barrier|_require_reading)\b", b)})
+    out = set(named)
+    for rel in WRAPPER_FILES:
+        out |= _closure(shell_functions((REPO / rel).read_text()), set(named))
+    return out
 
 
 def substitutions(text):
@@ -231,15 +249,11 @@ def strip_nested(text):
         text = cut
 
 
-def reading_in_a_word():
-    """Every call site in the tree that takes a reading into a word."""
+def reading_in_a_word_in(text, rel="<text>"):
+    """The audit over one piece of shell, so the rule itself is testable."""
     names = readings()
     out = []
-    for path in shell_files():
-        rel = str(path.relative_to(REPO))
-        if rel.startswith("tests/"):
-            continue
-        text = path.read_text()
+    if True:
         for start, end, inner in substitutions(text):
             if not set(TOKEN.findall(strip_nested(inner))) & names:
                 continue
@@ -250,6 +264,17 @@ def reading_in_a_word():
                 continue
             out.append(f"  {rel}:{text.count(chr(10), 0, start) + 1}: "
                        f"{text[bol:end].strip()[:90]}")
+    return out
+
+
+def reading_in_a_word():
+    """Every call site in the tree that takes a reading into a word."""
+    out = []
+    for path in shell_files():
+        rel = str(path.relative_to(REPO))
+        if rel.startswith("tests/"):
+            continue
+        out += reading_in_a_word_in(path.read_text(), rel)
     return out
 
 
@@ -284,6 +309,26 @@ class TestEveryCallSiteTakesAReadingIntoAVariable(unittest.TestCase):
             names)
         self.assertNotIn("store_free_gb", names,
                          "store_free_gb answers nothing rather than refusing")
+
+    def test_the_drivers_wrappers_over_a_reading_are_in_the_set(self):
+        """The same rule one call away: a driver's own number ends in a
+        reading, so interpolating it discards the same refusal. The dynamic
+        half of this pair is TestAReadingRefusalReachesItsCaller's
+        test_it_walks_out_through_the_target_drivers_wrappers."""
+        self.assertLessEqual({"t_cores", "t_mem_mb", "t_load",
+                              "_vm_cpus", "_vm_mem_mb", "_base_cpus", "_base_mem_mb"},
+                             readings())
+
+    def test_a_condition_that_tests_the_assignment_is_not_flagged(self):
+        """`if v=$(reading); then` keeps the refusal: the status is the
+        condition. Flagging it would push callers into hiding it."""
+        self.assertEqual([], reading_in_a_word_in(
+            'if cores=$(t_cores) && mem=$(t_mem_mb) \\\n   && [ -n "$cores" ]; then :; fi\n'))
+
+    def test_a_reading_interpolated_into_a_word_is_flagged(self):
+        """The discriminating half: without it the audit above passes on a
+        tree where nothing is checked at all."""
+        self.assertEqual(1, len(reading_in_a_word_in('echo "jobs=$(t_cores)"\n')))
 
 
 class TestAReadingRefusalReachesItsCaller(WkTest):

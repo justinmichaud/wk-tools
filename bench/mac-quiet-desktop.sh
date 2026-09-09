@@ -56,8 +56,8 @@ wk_quiet_desktop_unsettable() {
 
 _wk_qd_unsettable() { wk_quiet_desktop_unsettable | grep -qxF "$1"; }
 
-wk_quiet_desktop_unstoppable() {
-    printf '%s\n' ScreenTimeAgent UsageTrackingAgent suhelperd XprotectService xprotectd
+wk_quiet_desktop_unstoppable() {   # SIP refuses SIGSTOP for these even as root -- `kill -STOP` answers `Operation not permitted`. XProtect is here because it was measured refusing (bench install, macOS 26.6.2, 2026-09-09), and because the two processes that do and schedule its scanning were already here: refusing every leg on the one that launches them was the odd case out
+    printf '%s\n' ScreenTimeAgent UsageTrackingAgent suhelperd XProtect XprotectService xprotectd
 }
 
 _wk_qd_unstoppable() { wk_quiet_desktop_unstoppable | grep -qxF "$1"; }
@@ -130,13 +130,19 @@ _wk_qd_home() { # <user>
     dscl . -read "/Users/$1" NFSHomeDirectory 2>/dev/null | awk '{print $2}'
 }
 
-wk_quiet_dnd_state() { # <home> -- on, off, or ? for a file nothing here can read
-    /usr/bin/python3 - "$(wk_quiet_dnd_path "$1")" <<'PY' 2>/dev/null || printf '?'
+wk_quiet_dnd_state() { # <home> -- on, off, or `?<reason>`, because a bare `?` refuses a run without saying which of "no such file", "not allowed to read it" and "not the JSON this writes" it met, and they have different remedies
+    /usr/bin/python3 - "$(wk_quiet_dnd_path "$1")" <<'PY' 2>/dev/null || printf '?nopython'
 import json, sys
 try:
     doc = json.load(open(sys.argv[1]))
-except Exception:
-    print("?"); raise SystemExit(0)
+except FileNotFoundError:
+    print("?nofile"); raise SystemExit(0)
+except PermissionError:
+    print("?denied"); raise SystemExit(0)
+except OSError as exc:
+    print("?errno%s" % (exc.errno or 0)); raise SystemExit(0)
+except ValueError:
+    print("?malformed"); raise SystemExit(0)
 records = [r for entry in doc.get("data") or []
            for r in entry.get("storeAssertionRecords") or []]
 # An end timestamp is an assertion that lapses, off by the time a run reaches it.
@@ -245,12 +251,16 @@ ROWS
 
     [ -n "$uid" ] || { echo "wk: no such account '$u'" >&2; return 1; }
 
-    local home; home=$(_wk_qd_home "$u")
+    local home dnd; home=$(_wk_qd_home "$u")
+    dnd=$(wk_quiet_dnd_state "$home")
     if [ -z "$home" ] || [ ! -d "$home" ]; then
         echo "wk: no home directory for '$u', so Do Not Disturb cannot be set" >&2; bad=1
-    elif [ "$(wk_quiet_dnd_state "$home")" = on ] || [ "$(wk_quiet_dnd_on "$home")" = on ]; then
+    elif [ "$dnd" = on ]; then
         :
-    else
+    elif [ "$dnd" = '?denied' ]; then
+        echo "wk: $u may not read its own Do Not Disturb record, so this side can" >&2
+        echo "    neither set nor judge it -- the machine that has the volume mounted does" >&2
+    elif [ "$(wk_quiet_dnd_on "$home")" != on ]; then
         echo "wk: could not turn Do Not Disturb on for $u" >&2; bad=1
     fi
 
@@ -342,7 +352,8 @@ ROWS
 $(wk_quiet_desktop_power)
 ROWS
 
-    printf 'notifications_dnd=%s\n' "$(wk_quiet_dnd_state "$(_wk_qd_home "$u")")"
+    local dnd; dnd=$(wk_quiet_dnd_state "$(_wk_qd_home "$u")")
+    case "$dnd" in on|off) printf 'notifications_dnd=%s\n' "$dnd" ;; esac   # left out rather than answered with a reason nothing can judge: ~/Library/DoNotDisturb is TCC-protected and root does not bypass it (`Operation not permitted` as bench and under sudo alike, on the bench install 2026-09-09), so nothing on this install can read the record, and _wk_qf_judge reports a key the probe did not answer as unknown -- which is what it is. The side that can read it is a machine with the volume merely mounted, where the plant sets it and reads it back
 
     while read -r name proc why; do
         [ -n "$proc" ] || continue

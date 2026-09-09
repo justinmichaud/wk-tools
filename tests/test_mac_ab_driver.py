@@ -47,7 +47,7 @@ def _lift_between(text, first, last):
 
 
 _RESTARTABLE_CK = _lift_between(
-    MACAB.read_text(), "    if mv_reboot_ready; then", "\n    log \"\" >&2")
+    MACAB.read_text(), "    if b_restart_ready; then", "\n    log \"\" >&2")
 
 
 class TestTheFirmwareDefaultIsAsserted(WkTest):
@@ -119,8 +119,13 @@ else printf 'FAIL %%s' "$FW_DETAIL"; fi
                 capture_output=True, text=True, timeout=60)
             return cp.stdout.strip()
 
-        self.assertEqual(wkmac("boot-volume").rsplit(":", 1)[-1],
-                         wkmac("volume-group", "'/Volumes/WK Bench'"))
+        # The volume is only a volume from host mode: in bench mode it *is* the
+        # root and is not mounted under /Volumes at all, so there is nothing to
+        # ask about and the reading would compare a group against nothing.
+        bench = wkmac("volume-group", "'/Volumes/WK Bench'")
+        if not bench:
+            self.skipTest("tolken answers in bench mode, where 'WK Bench' is /")
+        self.assertEqual(wkmac("boot-volume").rsplit(":", 1)[-1], bench)
 
 
 class TestOnlyTheBuiltInDisplay(WkTest):
@@ -129,7 +134,8 @@ class TestOnlyTheBuiltInDisplay(WkTest):
 
     def _check(self, answer):
         script = """. "$WK_ROOT/lib/common.sh"
-HOST=fakemac
+MACHINE=fakemac
+b_display() { printf 'builtin 1470x956'; }
 mac_wkmac() { printf '%%s' %s; }
 mac_display_check() {%s}
 if mac_display_check; then printf 'PASS %%s' "$DISPLAY_READ"
@@ -165,7 +171,7 @@ else printf 'FAIL %%s' "$DISPLAY_READ"; fi
             {"id": 7, "builtin": False, "online": True, "points": [2560, 1440]}]}
         out = self._check(json.dumps(doc))
         self.assertTrue(out.startswith("FAIL"), out)
-        self.assertIn("not the built-in panel", out)
+        self.assertIn("not the builtin panel this machine declares", out)
 
     def test_no_display_at_all_fails(self):
         out = self._check(json.dumps({"count": 0, "displays": []}))
@@ -186,7 +192,7 @@ else printf 'FAIL %%s' "$DISPLAY_READ"; fi
     def test_the_preflight_check_refuses_rather_than_warns(self):
         text = MACAB.read_text()
         self.assertIn('ck no "one display"', text)
-        block = text[text.index('ck no "one display"'):text.index('if firmware_default_is_bench')]
+        block = _lift_between(text, 'ck no "one display"', "firmware_default_is_bench")
         self.assertIn("no", block.lower())
         self.assertIn("--force crosses it", block)
 
@@ -195,7 +201,7 @@ else printf 'FAIL %%s' "$DISPLAY_READ"; fi
         no number to save by crossing it."""
         script = """. "$WK_ROOT/lib/common.sh"
 DRY=""; GO=restart; FORCE=1; WK_FORCE=1; export WK_FORCE
-HOST=fakemac; VOLUME="WK Bench"
+MACHINE=fakemac; VOLUME="WK Bench"
 mac_display_check() { DISPLAY_READ="2 online display(s)"; return 1; }
 mac_boottime() { printf 1 ; }
 mac_sh() { printf 'THE MACHINE WAS TOLD\\n'; }
@@ -246,7 +252,7 @@ class TestThePinnedDisplayIsConfig(WkTest):
     def test_a_machine_conf_with_no_node_display_refuses_the_plant(self):
         cp = self._plant("")
         self.assertNotEqual(cp.returncode, 0, cp.stdout)
-        self.assertIn("declares no NODE_DISPLAY", cp.stdout)
+        self.assertIn("declares no display", cp.stdout)
         self.assertIn("fakemac.conf", cp.stdout)
 
     def test_a_pinned_mode_gets_past_that_refusal(self):
@@ -302,9 +308,14 @@ class TestTheJobCarriesTheDisplay(WkTest):
         job = write_job(WK_JOB_DISPLAY="builtin 1470x956")
         self.assertEqual(job["display"], "builtin 1470x956")
 
-    def test_the_plant_passes_node_display_and_nothing_else(self):
+    def test_the_plant_passes_the_machines_own_declaration_and_nothing_else(self):
+        """Read once through the driver (b_display), so a machine whose mode is
+        not in its conf -- a guest's, which its target declares -- reaches the
+        job the same way."""
         body = macab_func("phase_plant")
-        self.assertIn('WK_JOB_DISPLAY="$NODE_DISPLAY"', body)
+        self.assertIn("declared=$(b_display)", body)
+        self.assertIn('WK_JOB_DISPLAY="$declared"', body)
+        self.assertNotIn("$NODE_DISPLAY", body)
 
 
 class TestTheRunIsVisibleWhereRunsAreListed(WkTest):
@@ -561,8 +572,9 @@ class TestTheRestartIsTheOneImplementation(WkTest):
                     '. "$WK_ROOT/lib/common.sh"\n'
                     'PF_FAIL=0\n'
                     'ck() {%s}\n'
-                    'mv_reboot_ready() { return %d; }\n'
-                    'HOST=tolken; MACHINE=mbp\n'
+                    'b_restart_ready() { return %d; }\n'
+                    'b_restart_detail() { printf "no boot helper on tolken"; }\n'
+                    'MACHINE=mbp\n'
                     '%s\n'
                     'echo "PF_FAIL=$PF_FAIL"'
                     % (macab_func("ck"), ready, _RESTARTABLE_CK))
@@ -574,6 +586,110 @@ class TestTheRestartIsTheOneImplementation(WkTest):
                     self.assertIn("wk boot mbp --prepare", out, out)
                     self.assertNotIn("./setup --stage quiesce", out, out)
                     self.assertIn("planted and correct", out, out)
+
+
+class TestTheTwoMachinesAreNamedApart(WkTest):
+    """The machine being measured and the machine that *manages* it are one
+    machine for a Mac booting its own second volume and two for a guest, whose
+    manager is the Mac running it. The lane had one variable for both -- an ssh
+    destination that was also every message's label -- so a driver whose target
+    has no ssh destination at all could not start."""
+
+    def test_the_lane_names_no_ssh_destination_of_its_own(self):
+        text = MACAB.read_text()
+        self.assertNotIn("$HOST", text)
+        self.assertNotIn("mac_ssh ", text, "boot/machines.sh's by-destination ssh")
+
+    def test_a_machine_with_no_ssh_destination_is_not_refused_up_front(self):
+        """benchvm sets no NODE_SSH: a tart guest's address is in no ssh config
+        and changes every boot, which is why its driver defines its own m_ssh."""
+        text = MACAB.read_text()
+        self.assertNotIn("sets no NODE_SSH", text)
+        cp = bash('"$WK_ROOT/bench/mac-ab.sh" --machine benchvm --dry-run 2>&1',
+                  env={"WK_SSH_TIMEOUT": "1"}, timeout=180)
+        out = cp.stdout + cp.stderr
+        self.assertIn("preflight for an unattended A/B on benchvm", out)
+        self.assertNotIn("NODE_SSH", out)
+
+    def test_the_measured_machine_is_reached_through_the_one_reader(self):
+        self.assertIn("mac() {\n    m_ssh \"$@\"\n}", MACAB.read_text())
+
+    def test_the_manager_is_reached_through_the_drivers_hook(self):
+        text = MACAB.read_text()
+        self.assertIn('mgr() { b_manage "$@"; }', text)
+        # The three things that belong to the manager and not to the measured
+        # machine: its wk-tools, the builds it runs, and the patch they apply.
+        self.assertIn("mgr_sh \"cd $(sh_quote \"$(mgr_tools)\") && ./wk $*\"", text)
+        self.assertIn("mgr_sh \"ssh -o BatchMode=yes", func_body(text, "guest_sh"))
+        self.assertIn('mgr "cat > /tmp/wk-ab.patch"', text)
+
+    def test_each_driver_answers_both_halves(self):
+        for rel, hooks in (
+                ("boot/mac-volume.sh", ("b_manage", "b_manage_name", "b_manage_tools",
+                                        "b_manage_prepare", "b_bench_home", "b_bench_local",
+                                        "b_bench_put", "b_bench_put_file",
+                                        "b_restart_ready", "b_restart_detail")),
+                ("boot/mac-guest.sh", ("b_manage", "b_manage_name", "b_manage_tools",
+                                       "b_manage_prepare", "b_bench_home", "b_bench_local",
+                                       "b_bench_put", "b_bench_put_file",
+                                       "b_restart_ready", "b_restart_detail", "b_display"))):
+            text = (REPO / rel).read_text()
+            for hook in hooks:
+                with self.subTest(driver=rel, hook=hook):
+                    self.assertIn(f"\n{hook}() {{", "\n" + text)
+
+    def test_a_guests_manager_is_the_machine_this_runs_on(self):
+        """tart runs on the macOS host and nowhere else, so a guest is managed
+        from here rather than over an ssh hop."""
+        self.assertIn('b_manage() { bash -c "$*"; }',
+                      (REPO / "boot" / "mac-guest.sh").read_text())
+        self.assertIn('b_manage() { m_ssh "$@"; }',
+                      (REPO / "boot" / "mac-volume.sh").read_text())
+
+
+class TestStagingIsTheDriversAndVerifiedHere(WkTest):
+    """`wk bench stage` already delivers through b_bench_put / b_bench_put_file.
+    A second delivery in the lane is a second thing to keep in step, and it was
+    the one that had to know how a volume's path escapes."""
+
+    def test_the_lane_delivers_through_the_driver_and_owns_no_transport(self):
+        text = MACAB.read_text()
+        self.assertIn("b_bench_put_file \"$1\" \"$2\"", func_body(text, "put_file"))
+        self.assertIn('b_bench_put "$src" "$dst"', func_body(text, "put_tree"))
+        for verb in ("tar -cf -", "rsync ", "scp "):
+            for fn in ("put_file", "put_tree"):
+                self.assertNotIn(verb, func_body(text, fn),
+                                 f"{fn} carries a transport of its own ({verb})")
+
+    def test_what_landed_is_still_judged_here(self):
+        """A transport that wrote nothing exits 0, and a tree stale in one file
+        looks right until the reboot, where nothing can report it."""
+        self.assertIn("wc -c <", func_body(MACAB.read_text(), "put_file"))
+        self.assertIn("treehash.py", func_body(MACAB.read_text(), "put_tree"))
+
+    def test_the_volume_is_local_only_where_the_manager_is_standing_on_it(self):
+        """`wk bench stage --to mbp` runs on that Mac, where the volume is a
+        mount and nothing is sent; the lane runs from elsewhere, where it is."""
+        self.assertIn("b_bench_local() { m_here; }",
+                      (REPO / "boot" / "mac-volume.sh").read_text())
+
+
+class TestTheMeasuredHomeIsTheDrivers(WkTest):
+    """It was derived from the volume's own path, which is a volume driver's
+    fact and no other's."""
+
+    def test_the_lane_derives_no_path_of_its_own(self):
+        body = func_body(MACAB.read_text(), "bench_home")
+        self.assertIn("b_bench_home", body)
+        self.assertNotIn("Users/bench", body)
+
+    def test_the_volume_driver_derives_it_from_the_staging_root(self):
+        cp = bash('. "$WK_ROOT/lib/common.sh"\n'
+                  'b_bench_root() { printf "/Volumes/WK Bench - Data/private/var/wk"; }\n'
+                  'b_bench_home() {%s}\nb_bench_home\n'
+                  % func_body((REPO / "boot" / "mac-volume.sh").read_text(), "b_bench_home"))
+        self.assertEqual("/Volumes/WK Bench - Data/Users/bench", cp.stdout,
+                         cp.stdout + cp.stderr)
 
 
 class TestAFailedNotifyCostsNothing(WkTest):
@@ -633,13 +749,48 @@ class TestThePlantedTreeIsVerifiedWhole(WkTest):
         self.assertNotIn("probe", body)
         self.assertIn("treehash.py", body)
 
+    def test_the_exclusions_actually_exclude(self):
+        """Word splitting does not remove quotes: `--exclude '.git'` names a
+        file that does not exist, and the transport carries the history it was
+        meant to leave behind -- while the two digests still match, because the
+        one on the far side is built for a shell, which does remove them."""
+        with scratch_dir() as tmp:
+            src, dst = tmp / "src", tmp / "dst"
+            (src / ".git").mkdir(parents=True)
+            (src / ".git" / "HEAD").write_text("ref: refs/heads/main\n")
+            (src / "__pycache__").mkdir()
+            (src / "__pycache__" / "x.pyc").write_text("x")
+            (src / "wk").write_text("#!/bin/sh\n")
+            dst.mkdir()
+            cp = bash('. "$WK_ROOT/lib/common.sh"; . "$WK_ROOT/lib/store.sh"\n'
+                      '. "$WK_ROOT/lib/bench.sh"\n'
+                      '# shellcheck disable=SC2046\n'
+                      f'tar -cf - $(bench_put_excludes) -C {shlex.quote(str(src))} . '
+                      f'| tar -xf - -C {shlex.quote(str(dst))}\n',
+                      env={"WK_STORE": str(tmp / "store")})
+            self.assertEqual(0, cp.returncode, cp.stdout + cp.stderr)
+            landed = sorted(p.name for p in dst.iterdir())
+            self.assertEqual(["wk"], landed,
+                             f"the excluded names crossed anyway: {landed}")
+
+    def test_the_exclusion_list_holds_no_metacharacter(self):
+        """What makes the unquoted list above safe, checked rather than said."""
+        cp = bash('. "$WK_ROOT/lib/common.sh"; . "$WK_ROOT/lib/store.sh"\n'
+                  '. "$WK_ROOT/lib/bench.sh"; printf "%s" "$BENCH_PUT_SKIP"')
+        names = cp.stdout.split()
+        self.assertTrue(names, cp.stdout + cp.stderr)
+        for name in names:
+            self.assertRegex(name, r"^[A-Za-z0-9_.-]+$", name)
+
     def test_both_sides_exclude_the_same_names(self):
         """One list, read twice. Two lists is two file sets and two digests of
         different things, which reads as a corrupted tree on every plant."""
         text = MACAB.read_text()
-        self.assertIn('TREE_SKIP=', text)
+        self.assertIn("BENCH_PUT_SKIP=", (REPO / "lib" / "bench.sh").read_text())
         body = func_body(text, "put_tree")
-        self.assertEqual(2, body.count("$TREE_SKIP"), body)
+        self.assertEqual(1, body.count("$BENCH_PUT_SKIP"),
+                         "the far side's list is the driver's own, from the same variable")
+        self.assertIn("bench_put_excludes", (REPO / "boot" / "mac-volume.sh").read_text())
 
     def test_the_local_arguments_are_an_array_and_not_a_split_string(self):
         """`sh_quote .git` is `'.git'` with the quotes in it: word-split without

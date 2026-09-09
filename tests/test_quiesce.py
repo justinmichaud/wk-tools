@@ -17,6 +17,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from tests.support import bash, func_body
+
 REPO = Path(__file__).resolve().parent.parent
 QUIESCE = REPO / "cmd" / "quiesce"
 
@@ -122,3 +124,47 @@ class QuiesceStatusTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class APrivilegedVerbNeverBlocksOnAStoppedDaemon(unittest.TestCase):
+    """The lane holds backupd, softwareupdated and friends SIGSTOPped for the
+    whole run, and a stopped daemon answers no XPC request. `tmutil stopbackup`
+    against one never returns -- it hung `wk quiesce on`, and with it every
+    later step of a benchmark boot, for 37 minutes (bench install, 2026-09-09).
+    `|| true` does not help a call that blocks rather than fails, and macOS
+    ships no `timeout`, so the bound is in the helper."""
+
+    PRIV = REPO / "admin" / "wk-quiesce-priv"
+
+    def _bounded(self, script, timeout=30):
+        body = func_body(self.PRIV.read_text(), "bounded")
+        return bash("set -euo pipefail\nbounded() {" + body + "}\n" + script,
+                    timeout=timeout)
+
+    def test_every_daemon_asking_verb_is_bounded(self):
+        text = self.PRIV.read_text()
+        for verb in ("tmutil stopbackup", "softwareupdate --schedule off",
+                     "softwareupdate --schedule on", "mdutil -a -i off",
+                     "mdutil -a -i on"):
+            with self.subTest(verb=verb):
+                self.assertRegex(text, r"bounded \d+ " + verb)
+
+    def test_a_call_that_never_returns_is_killed_and_reported(self):
+        cp = self._bounded('bounded 2 sleep 600\nprintf "WENT ON rc=%s\\n" "$?"\n')
+        out = cp.stdout + cp.stderr
+        self.assertIn("WENT ON rc=0", out, out)
+        self.assertIn("did not answer in 2s", out, out)
+
+    def test_a_call_that_answers_is_not_waited_out(self):
+        cp = self._bounded('bounded 30 true\nprintf "WENT ON\\n"\n', timeout=20)
+        out = cp.stdout + cp.stderr
+        self.assertIn("WENT ON", out, out)
+        self.assertNotIn("did not answer", out)
+
+    def test_the_bound_takes_no_argument_from_argv(self):
+        """The grant is bounded by shape: every command it runs is a literal in
+        the file, so this indirection must not become a passthrough."""
+        for line in self.PRIV.read_text().splitlines():
+            if line.strip().startswith("bounded "):
+                with self.subTest(line=line.strip()):
+                    self.assertNotIn("$", line, "a bounded call takes a variable")

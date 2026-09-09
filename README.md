@@ -652,10 +652,13 @@ install, `wk bench mac-ab --collect`.
 
 **Nothing is typed on the Mac.** A machine wk drives needs this tree and the
 privileged helpers `admin/install.sh` puts behind a NOPASSWD rule, and
-`wk boot <machine> --prepare` is what puts them there: it rsyncs this tree to
-the one path `boot/machines.sh` declares (never a search -- a machine carrying
-two clones would otherwise have whichever a search reached first driving a
-measurement) and runs `./setup --stage quiesce` over `ssh -t`. That sudo is the
+`wk boot <machine> --prepare` is what puts them there: it pushes this tree's
+HEAD as a commit (`tools_push`, the fleet's one deploy -- so nothing over there
+is content that exists only over there, and a later `git pull` has nothing of
+anyone's to replace) to the one path `boot/machines.sh` declares (never a search
+-- a machine carrying two clones would otherwise have whichever a search reached
+first driving a measurement), and runs `./setup --stage quiesce` over `ssh -t`.
+An uncommitted tree here is refused, naming `git commit -a`. That sudo is the
 one password the lane ever asks for, so it wants a terminal, and
 `wk bench mac-ab` runs the prepare itself when it finds a Mac it cannot restart
 and has one. Without the helper the only restart available is
@@ -752,8 +755,13 @@ measured on, never built in.
 **What the screen is doing is part of the measurement.** run-benchmark sizes
 its window from the screen and MotionMark's score is a function of the area it
 draws, so two runs at different resolutions are not comparable. The declared
-mode is `NODE_DISPLAY` in `boot/machines/<machine>.conf` -- one line, in points
--- and it is *held*, not hoped for. WindowServer reads the mode it comes up at
+mode is `<kind> <w>x<h>` in points, kind being what `CGDisplayIsBuiltin` answers
+of the panel -- `builtin` for a Mac's own, `external` for anything else, a
+guest's paravirtual panel included. A machine declares it as `NODE_DISPLAY` in
+`boot/machines/<machine>.conf`; one with no conf line of its own -- a guest,
+whose mode is `WK_VM_DISPLAY`, the one thing that sets it -- has its driver
+derive it instead (`b_display`), so it is never written down twice. It is
+*held*, not hoped for. WindowServer reads the mode it comes up at
 from `com.apple.windowserver.displays.plist` and no runtime call reaches a
 scaled mode on an Apple Silicon panel, so the bench install writes the declared
 mode into that file and repeats the boot when it is not already at it -- once,
@@ -765,12 +773,13 @@ restart (a monitor plugged in between the two costs a cycle, and `--force` does
 not cross it), once in the bench install against the job's own copy of the
 declaration, and **again in every leg's own preflight** -- a panel attached
 between two legs resizes the window, and every once-per-boot check has already
-passed by then. Exactly one display, and it is the built-in panel; a mirror set
-is refused too. One file holds the rule (`bench/mac-browser-check.py`), asked
-with a browser at the top of the boot and with `--displays-only` per leg. A run
-that is compared with nothing -- a PGO collection in the build guest -- passes
-`--expect-display any` and has its display recorded and judged on nothing;
-that word cannot come from a default, and the plant refuses it.
+passed by then. Exactly one display and it of the declared kind -- the built-in
+panel where nothing is declared; a mirror set is refused too. One file holds the
+rule (`bench/mac-browser-check.py`), asked with a browser at the top of the boot
+and with `--displays-only` per leg. A run that is compared with nothing -- a PGO
+collection in the build guest -- passes no `--expect-display` at all and has its
+display recorded and judged on nothing; the plant refuses a machine that
+declares no mode, so that silence cannot reach a measured leg.
 
 The display is also driven to **minimum brightness** before any round, read
 back, and left there: brightness is power, power is thermal headroom, and a

@@ -59,8 +59,21 @@ def display_list():
     return json.loads(cp.stdout)["displays"]
 
 
+# What CGDisplayIsBuiltin answers of a panel: a Mac's own, or anything else -- an external monitor, or the paravirtual panel a guest draws on.
+KINDS = ("builtin", "external")
+DEFAULT_KIND = "builtin"
+
+
+def display_kind(d):
+    return "builtin" if d.get("builtin") else "external"
+
+
+def of_kind(displays, kind):
+    return next((d for d in (displays or []) if display_kind(d) == kind), None)
+
+
 def builtin_display(displays):
-    return next((d for d in (displays or []) if d.get("builtin")), None)
+    return of_kind(displays, "builtin")
 
 
 def frontmost_bundle():
@@ -74,13 +87,14 @@ def frontmost_bundle():
 
 
 def parse_expect_display(spec):
+    """(kind, [w, h]); the kind is which panel the mode is declared of."""
     words = (spec or "").split()
     points = words[1].split("x") if len(words) == 2 else []
-    if len(words) != 2 or words[0] != "builtin" or len(points) != 2 \
+    if len(words) != 2 or words[0] not in KINDS or len(points) != 2 \
             or not all(p.isdigit() for p in points):
-        raise ValueError(f"--expect-display {spec!r} is not 'builtin <w>x<h>', "
-                         "as in 'builtin 1470x956'")
-    return [int(p) for p in points]
+        raise ValueError(f"--expect-display {spec!r} is not '<kind> <w>x<h>' with a "
+                         f"kind of {' or '.join(KINDS)}, as in 'builtin 1470x956'")
+    return words[0], [int(p) for p in points]
 
 
 # Two rules, asked separately because the callers need them separately. `topology` is exactly one online display and it the built-in panel, unmirrored -- true of any install that measures, and false of a guest whose panel has no counterpart, so a PGO collection is not held to it. `expect` is the declared mode, and the bench install has to be judged on the topology *before* it can converge the mode, which is why one implies neither the other.
@@ -96,23 +110,24 @@ def display_faults(displays, expect, topology):
     if displays is None:
         return found + ["the display list could not be read, so what run-benchmark sized "
                         "its window from is unknown and this score compares with nothing"]
+    kind, points = expect if expect is not None else (DEFAULT_KIND, None)
     online = [d for d in displays if d.get("online")]
-    builtin = builtin_display(online)
+    measured = of_kind(online, kind)
     if topology:
         if len(online) != 1:
             found.append(f"{len(online)} displays are online, not one: run-benchmark sizes "
                          "its window from the screen, so a second panel -- or none at all "
                          "-- moves the number for a reason that is not the patch")
-        elif not builtin:
+        elif not measured:
             found.append(f"the one online display (id {online[0].get('id')}) is not the "
-                         "built-in panel: only the built-in one is declared and measured, "
+                         f"{kind} panel: only the declared one is measured, "
                          "so this reading compares with no other run")
         if any(d.get("mirrored") for d in displays):
             found.append("a display is in a mirror set: the window is composited for two "
                          "panels at once, and the frames that costs are charged to the patch")
-    if expect is not None and builtin and list(builtin.get("points") or []) != expect:
-        found.append(f"the built-in display reads {builtin.get('points')} points, not "
-                     f"{expect}: MotionMark's score is a function of the area it draws, "
+    if points is not None and measured and list(measured.get("points") or []) != points:
+        found.append(f"the {kind} display reads {measured.get('points')} points, not "
+                     f"{points}: MotionMark's score is a function of the area it draws, "
                      "so this run is not comparable with one at the declared mode")
     return found
 
@@ -286,12 +301,15 @@ def main():
                              "same rule every leg's preflight is held to, asked "
                              "again per leg because a panel plugged in between two "
                              "legs moves the number and nothing downstream can say so. "
-                             "Exactly one online built-in panel, unmirrored, is required "
-                             "whether or not --expect-display names a mode")
+                             "Exactly one online panel of the declared kind -- the "
+                             "built-in one where nothing is declared -- unmirrored, is "
+                             "required whether or not --expect-display names a mode")
     parser.add_argument("--expect-display", metavar="SPEC",
                         help="the display this reading must be taken on, as "
-                             "'builtin <w>x<h>' (boot/machines/<node>.conf's "
-                             "NODE_DISPLAY). Display identity is what makes two runs "
+                             "'<kind> <w>x<h>', kind being builtin or external "
+                             "(boot/machines/<node>.conf's NODE_DISPLAY, or whatever "
+                             "the machine's driver derives it from). "
+                             "Display identity is what makes two runs "
                              "comparable; without it the display is recorded and "
                              "judged against nothing, which is what a run compared "
                              "with nothing -- a PGO collection -- wants")

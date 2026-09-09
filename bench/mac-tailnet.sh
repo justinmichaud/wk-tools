@@ -365,10 +365,12 @@ cmd_join() {
     which node it is. Remedy, from the host install:  wk boot mbp --repair"
 
     info "joining the tailnet as $name ($tag)"
-    "$TS_BIN/tailscale" up --auth-key "file:$TS_KEY" --advertise-tags="$tag" \
+    # --timeout, because without one `up` waits for the backend to reach Running for as long as that takes, and the caller is an unattended boot with a benchmark to run: an install whose Wi-Fi did not come up would sit here rather than measure. Failing is fine -- the key is kept and the run goes on unobserved.
+    "$TS_BIN/tailscale" up --timeout=90s --auth-key "file:$TS_KEY" --advertise-tags="$tag" \
         --hostname="$name" --accept-dns=false \
-        || die "tailscale up failed. The key is kept so the next boot retries; a key
-    that is single-use, untagged or expired fails exactly here."
+        || die "tailscale up did not reach Running inside 90s. The key is kept so the
+    next boot retries; a key that is single-use, untagged or expired fails exactly
+    here, and so does an install with no route out."
     ip=$("$TS_BIN/tailscale" ip -4 2>/dev/null | head -1) || ip=""
     [ -n "$ip" ] || die "tailscale up returned success and this node still has no address.
     The key is kept so the next boot retries."

@@ -331,6 +331,12 @@ b_probe() {
 
 b_probeable() { :; }
 
+# The display the measured install must be held at, as `<kind> <w>x<h>` in points, kind being what CGDisplayIsBuiltin answers of it. Declared per machine here; a driver whose target has no conf of its own overrides this and reads it from whatever sets it.
+b_display() {
+    [ -n "${NODE_DISPLAY:-}" ] || return 1
+    printf '%s' "$NODE_DISPLAY"
+}
+
 b_media() {
     [ -n "${NODE_DEVICE:-}" ] || { printf 'no wk-managed media declared'; return 0; }
     printf 'media %s (this driver says nothing more about it)' "$NODE_DEVICE"

@@ -120,6 +120,13 @@ def _display_services():
         ds.DisplayServicesSetBrightness.argtypes = [ctypes.c_uint32, ctypes.c_float]
         ds.DisplayServicesSetBrightness.restype = ctypes.c_int32
         _declare(ds, "DisplayServicesCanChangeBrightness", ctypes.c_bool)
+        _declare(ds, "DisplayServicesHasAmbientLightCompensation", ctypes.c_bool)
+        ds.DisplayServicesAmbientLightCompensationEnabled.argtypes = [
+            ctypes.c_uint32, ctypes.POINTER(ctypes.c_bool)]
+        ds.DisplayServicesAmbientLightCompensationEnabled.restype = ctypes.c_int32
+        ds.DisplayServicesEnableAmbientLightCompensation.argtypes = [ctypes.c_uint32,
+                                                                     ctypes.c_bool]
+        ds.DisplayServicesEnableAmbientLightCompensation.restype = ctypes.c_int32
     except (OSError, AttributeError):
         return None
     return ds
@@ -140,25 +147,19 @@ def _brightness_of(ds, ident):
     return round(value.value, 4)
 
 
-# The only reading there is: on 26.6.2 neither CoreGraphics nor DisplayServices exposes ambient-light control and com.apple.iokit.AmbientLightSensor.plist does not exist. None where it did not answer -- absent is not off.
-def _auto_brightness():
-    try:
-        out = subprocess.run(["system_profiler", "SPDisplaysDataType", "-json"],
-                             capture_output=True, check=True).stdout
-        doc = json.loads(out)
-    except Exception:
+# DisplayServices, the same private framework the brightness itself goes through: `DisplayServicesAmbientLightCompensationEnabled` reads it and `DisplayServicesEnableAmbientLightCompensation` sets it, both measured on tolken (26.6.2, `Mac16,12`) against `dyld_info -exports`. None where a panel has no sensor or the call did not answer -- absent is not off.
+def _auto_brightness(ds, ident):
+    if ds is None or ident is None:
         return None
-    for card in doc.get("SPDisplaysDataType") or []:
-        for panel in card.get("spdisplays_ndrvs") or []:
-            if panel.get("spdisplays_connection_type") != "spdisplays_internal":
-                continue
-            said = panel.get("spdisplays_ambient_brightness")
-            if said in ("spdisplays_yes", "spdisplays_no"):
-                return said == "spdisplays_yes"
-    return None
+    if not ds.DisplayServicesHasAmbientLightCompensation(ident):
+        return None
+    value = ctypes.c_bool(False)
+    if ds.DisplayServicesAmbientLightCompensationEnabled(ident, ctypes.pointer(value)) != 0:
+        return None
+    return bool(value.value)
 
 
-def _display(cg, ds, ident, auto):
+def _display(cg, ds, ident):
     row = {"id": ident, "brightness": _brightness_of(ds, ident),
            "points": [int(cg.CGDisplayPixelsWide(ident)),
                       int(cg.CGDisplayPixelsHigh(ident))]}
@@ -166,7 +167,7 @@ def _display(cg, ds, ident, auto):
         row[key] = bool(getattr(cg, call)(ident))
     for key, call in _NUMBERS.items():
         row[key] = int(getattr(cg, call)(ident))
-    row["auto_brightness"] = auto if row["builtin"] else None   # one shape for every row; system_profiler reports it for the internal panel only
+    row["auto_brightness"] = _auto_brightness(ds, ident)
     return row
 
 
@@ -289,8 +290,7 @@ def cmd_displays(args):
     if ids is None:
         return 1
     ds = _display_services()
-    auto = _auto_brightness()   # one system_profiler call, not one per display
-    rows = [_display(cg, ds, ident, auto) for ident in ids]
+    rows = [_display(cg, ds, ident) for ident in ids]
     print(json.dumps({"count": len(rows), "displays": rows}, sort_keys=True))
     return 0
 
@@ -315,6 +315,27 @@ def cmd_brightness(args):
         return 1
     print(value)
     return 0
+
+
+# Held rather than declined: a brightness ambient light can raise again is a load that varies, and the gate that refuses a run under it is the same rule either way -- this is what lets a machine pass it instead of being sent away.
+def cmd_auto_brightness(args):
+    cg = _coregraphics()
+    ds = _display_services()
+    if cg is None or ds is None:
+        return 1
+    ident = _builtin_id(cg)
+    if ident is None:
+        return 1
+    if not ds.DisplayServicesHasAmbientLightCompensation(ident):
+        print("none")   # no sensor to hold: not a refusal, and not "off" either
+        return 0
+    if args.off and ds.DisplayServicesEnableAmbientLightCompensation(ident, False) != 0:
+        return 1
+    value = _auto_brightness(ds, ident)
+    if value is None:
+        return 1
+    print("on" if value else "off")
+    return 1 if (args.off and value) else 0
 
 
 def main():
@@ -353,6 +374,14 @@ def main():
                     help="set it to V, then print the value read back; exit 1 printing "
                          "nothing when the read-back is not V")
     sp.set_defaults(func=cmd_brightness)
+
+    sp = sub.add_parser("auto-brightness", help="whether the built-in panel is under "
+                                                "ambient-light control: on, off, or none "
+                                                "for a panel with no sensor")
+    sp.add_argument("--off", action="store_true",
+                    help="turn it off first, then print what it reads back; exit 1 "
+                         "when it still reads on")
+    sp.set_defaults(func=cmd_auto_brightness)
 
     sp = sub.add_parser("physical-store", help="device identifier of the physical store backing a volume's APFS container")
     sp.add_argument("target", nargs="?", default="/")
