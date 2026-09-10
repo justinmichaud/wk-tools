@@ -144,6 +144,7 @@ report() {
     report_claude_rc "$ws"
     report_one "$ws" build "$(wk_ws_dir "$ws")/build.status"
     [ -f "$(wk_ws_dir "$ws")/test.status" ] && report_one "$ws" test "$(wk_ws_dir "$ws")/test.status"
+    report_image_stage "$ws"
     [ -f "$(wk_ws_dir "$ws")/babysit.status" ] && report_babysit "$(wk_ws_dir "$ws")/babysit.status"
     rec_json subs "[$_subs]"
     rec_emit
@@ -293,6 +294,50 @@ report_babysit() {
         [ "${attempt:-0}" -gt 0 ] 2>/dev/null && note "fixed $attempt time(s); report: $report"
         ;;
     esac
+}
+
+# An image build and a WebKit slot record their stage in <ws>/yocto.status and leave a pid file per stage, where `wk build` writes build.status and no pid -- so a workspace running one reported build=none and nothing else. Liveness is the pid, asked of the workspace (ws_busy_reason); the record only supplies the labels, the same way report_one refuses to believe a build.status that merely says running.
+report_image_stage() { # <workspace>
+    local ws="$1" dir busy="" stage="" profile="" slot="" phase="" f
+    dir=$(wk_ws_dir "$ws")
+    busy=$(ws_busy_reason "$ws" 2>/dev/null) || busy=""
+
+    f="$dir/yocto.status"
+    if [ -f "$f" ]; then
+        stage=$(awk -F= '/^stage=/{print $2}' "$f")
+        profile=$(awk -F= '/^profile=/{print $2}' "$f")
+    fi
+    f="$dir/pgo.status"
+    local cyclepid="" cyclealive=""
+    if [ -f "$f" ]; then
+        phase=$(awk -F= '/^phase=/{print $2}' "$f")
+        slot=$(awk -F= '/^slot=/{print $2}' "$f")
+        cyclepid=$(awk -F= '/^pid=/{print $2}' "$f")
+        # The driver runs here, on this host, so its pid is readable directly.
+        [ -n "$cyclepid" ] && kill -0 "$cyclepid" 2>/dev/null && cyclealive=1
+    fi
+    [ -n "$busy$phase" ] || return 0
+
+    local sub="{\"kind\":\"image\",\"state\":\"$([ -n "$busy$cyclealive" ] && echo running || echo idle)\""
+    [ -n "$profile" ] && sub="$sub,\"profile\":\"$(_jesc "$profile")\""
+    [ -n "$stage" ]   && sub="$sub,\"stage\":\"$(_jesc "$stage")\""
+    [ -n "$slot" ]    && sub="$sub,\"slot\":\"$(_jesc "$slot")\""
+    [ -n "$phase" ]   && sub="$sub,\"phase\":\"$(_jesc "$phase")\""
+    sub_add "$sub}"
+
+    if [ -n "$phase" ] && [ -n "$cyclealive" ]; then
+        note "profile-guided slot $slot: $phase (pid $cyclepid)"
+        bump 2
+    elif [ -n "$phase" ]; then
+        note_warn "a profile-guided cycle for slot $slot stopped at '$phase' -- pid ${cyclepid:-unknown} is gone"
+        note "re-run it; the phases it already finished are reused:
+      wk sysimage webkit ${profile:-<profile>} --commit <sha> --slot $slot"
+        bump 3
+    fi
+    if [ -n "$busy" ]; then
+        note "image stage${profile:+ of $profile}: $busy"
+        bump 2
+    fi
 }
 
 report_one() {

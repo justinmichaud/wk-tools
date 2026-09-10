@@ -366,10 +366,27 @@ B_SYSTEM_PARTS="1"
 
 b_system_part() { disk_part "$NODE_DEVICE" "$1"; }
 
+b_watchdog_present() {   # does the system that is running carry the self-return watchdog? A driver fact cannot answer it: cmd/sysimage stages wk-self-return with every fleet write, whether or not that driver has a self-disarm of its own -- rpi5-usb has none, its arming being one-shot in firmware, and its cards carry the watchdog all the same. Both spellings, because a BusyBox init takes /etc/init.d/S??* and nothing else.
+    r_sudo 'test -f /etc/systemd/system/wk-self-return.timer || test -f /etc/init.d/S99wk-self-return' >/dev/null 2>&1
+}
+
+b_medium_parts() {   # the partitions the medium actually has, one /dev path per line. B_SYSTEM_PARTS names the slots a medium *may* hold a system in, and a card written with one system has no second pair at all -- which is an empty slot, not a medium that cannot be read. Failing here is the medium being unreadable, which b_systems keeps fatal.
+    local out
+    if [ "${NODE_ROLE:-}" = bench-device ]; then
+        out=$(r_ssh "lsblk -lno NAME $(sh_quote "$NODE_DEVICE")" 2>/dev/null) || return 1
+    else
+        out=$(m_ssh "lsblk -lno NAME $(sh_quote "$NODE_DEVICE")" 2>/dev/null) || return 1
+    fi
+    [ -n "$out" ] || return 1
+    printf '%s\n' "$out" | tr -d '\r ' | sed -n 's#^.#/dev/&#p'
+}
+
 b_systems() {
-    local p part id
+    local p part id present
+    present=$(b_medium_parts) || return 1
     for p in $B_SYSTEM_PARTS; do
         part=$(b_system_part "$p")
+        printf '%s\n' "$present" | grep -qxF "$part" || continue
         id=$(b_device_image "$part") || return 1
         [ -n "$id" ] && printf '%s %s\n' "$part" "$id"
     done

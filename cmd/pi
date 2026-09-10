@@ -559,7 +559,7 @@ pi_profile_bits() { # <system id or profile>
 
 # One arm that cannot run a subtest disqualifies it for both arms.
 pi_resolve_subtests() { # <profile-or-system-id>...
-    local bits want="" line lp lb ls why
+    local bits="" want="" line lp lb ls why   # bits="" and not a bare `local bits`: nothing assigns it on a 64-bit board, and `set -u` then kills the run at the read below
     for want in "$@"; do
         [ "$(pi_profile_bits "$want")" = 32 ] && bits=32
     done

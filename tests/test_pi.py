@@ -20,6 +20,18 @@ from tests.support import REPO, WkTest, bash, run
 CMD_PI = REPO / "cmd" / "pi"
 
 
+def lift_pi(fn):
+    """One function's text out of cmd/pi -- the tests/test_pi_ab_systems.py
+    idiom, for calling one without running the whole command."""
+    import subprocess
+    out = subprocess.run(["sed", "-n", f"/^{fn}()/,/^}}/p", str(CMD_PI)],
+                         capture_output=True, text=True).stdout
+    assert out.strip(), f"could not lift {fn} from cmd/pi"
+    return out
+
+CMD_PI = REPO / "cmd" / "pi"
+
+
 def lift(fn_name):
     """The `sed -n '/^fn()/,/^}/p'` idiom, as a reusable fragment: prints the
     named function's body out of cmd/pi, ready to `eval`."""
@@ -210,6 +222,50 @@ class TestPiVerbList(unittest.TestCase):
         self.assertTrue(broker_verbs.issubset(self._list_verbs()),
                          f"broker names a verb wk pi --list does not: {broker_verbs}")
 
+
+
+class TestSubtestResolutionOnEveryWidth(unittest.TestCase):
+    """pi_resolve_subtests decides the width, and it declared `local bits`
+    bare: only a 32-bit board assigns it, so on a 64-bit one `set -u` killed
+    the run at the read. The lane had only ever been driven on rpi3-32 and
+    rpi4-32, so the first rpi5-64 run is what found it (2026-09-10)."""
+
+    def _resolve(self, want, plan="speedometer3"):
+        return bash(f'''
+set -euo pipefail
+. "{REPO}/lib/common.sh"
+. "{REPO}/lib/store.sh"
+. "{REPO}/lib/image.sh"
+. "{REPO}/image/profiles.sh"
+. "{REPO}/lib/bench.sh"
+plan={plan}; SUBTESTS=""; EXCLUDE_SUBTESTS=""; PI_SUBTESTS=""; PI_EXCLUDED=""
+# the plan text and the subtest arithmetic are not this test's subject
+bench_plan_read() {{ printf '{{}}'; }}
+wkdata() {{ printf 'kept-a kept-b\\n'; }}
+''' + lift_pi("pi_profile_bits") + lift_pi("pi_resolve_subtests") + f'''
+pi_resolve_subtests "{want}"
+echo "excluded=[$PI_EXCLUDED]"
+''')
+
+    def test_a_64_bit_system_resolves(self):
+        cp = self._resolve("webkit-2.52-yocto-rpi5-64-cddf63dc0d4b")
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertNotIn("unbound variable", cp.stderr)
+
+    def test_a_32_bit_system_still_resolves(self):
+        cp = self._resolve("webkit-2.52-yocto-rpi3-32-ebb646f3bf67")
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+
+    def test_the_width_still_selects_the_exclusions(self):
+        """the 32-bit board drops the wasm-simd subtests it cannot run and
+        the 64-bit one keeps them, so the fix must not have flattened the
+        distinction into one width. jetstream3 is the plan that has any."""
+        wide = self._resolve("webkit-2.52-yocto-rpi5-64-cddf63dc0d4b", "jetstream3")
+        narrow = self._resolve("webkit-2.52-yocto-rpi3-32-ebb646f3bf67", "jetstream3")
+        self.assertEqual(wide.returncode, 0, wide.stdout + wide.stderr)
+        self.assertEqual(narrow.returncode, 0, narrow.stdout + narrow.stderr)
+        self.assertIn("excluded=[]", wide.stdout)
+        self.assertIn("argon2-wasm", narrow.stdout)
 
 if __name__ == "__main__":
     unittest.main()

@@ -19,7 +19,7 @@ import textwrap
 import types
 import unittest
 
-from tests.support import REPO, WkTest, bash, func_body, scratch_dir
+from tests.support import REPO, WkTest, bash, func_body, run, scratch_dir
 
 WKPGO = REPO / "lib" / "wkpgo.py"
 
@@ -474,6 +474,115 @@ class TestAnInstrumentedSlotIsNeverMeasured(WkTest):
     def test_the_check_runs_on_every_slot_a_leg_will_use(self):
         body = func_body((REPO / "cmd" / "pi").read_text(), "pi_leg_prepare")
         self.assertIn("pi_check_instrumented", body)
+
+
+class TestTheUnprofiledSlotIsDeliberate(WkTest):
+    """A 2.52 slot has a profile by default and there is no --no-pgo. The one
+    way to an unprofiled one is naming the plain cross config, because the
+    only reason to want one is to measure it against a profiled one."""
+
+    def _webkit(self, *args):
+        return run("sysimage", "webkit", "webkit-2.52-yocto-rpi5-64",
+                   "--commit", "a" * 40, *args, timeout=240)
+
+    def test_only_the_plain_cross_config_is_accepted(self):
+        cp = self._webkit("--slot", "plain", "--config", "wpe-cross-pgo-collect")
+        self.assertNotEqual(cp.returncode, 0)
+        self.assertIn("takes 'wpe-cross' here", cp.stdout)
+
+    def test_it_builds_the_slot_with_no_profile_and_says_so(self):
+        cp = self._webkit("--slot", "plain", "--config", "wpe-cross", "--dry-run")
+        self.assertEqual(cp.returncode, 0, cp.stdout)
+        self.assertIn("WITHOUT a profile", cp.stdout)
+        self.assertIn("config      wpe-cross", cp.stdout)
+
+    def test_the_default_is_still_the_three_phases(self):
+        cp = self._webkit("--slot", "pgo", "--dry-run")
+        self.assertEqual(cp.returncode, 0, cp.stdout)
+        self.assertIn("profile-guided build", cp.stdout)
+        self.assertIn("--slot pgo-instr", cp.stdout)
+
+    def test_the_slot_records_which_of_the_two_it_is(self):
+        """`wk pi bench` and `wk sysimage ls` read build_config off the
+        manifest, so an A/B of the two arms can say which was which."""
+        self.assertIn('build_config="${CROSS_CONFIG:-wpe-cross}"',
+                      (REPO / "image" / "yocto-build.sh").read_text())
+        self.assertIn('build_config="$(wkslot get "$json" build_config)"',
+                      (REPO / "cmd" / "pi").read_text())
+
+
+STATUS_STUBS = """
+. {repo}/lib/common.sh
+. {repo}/lib/store.sh
+. {repo}/lib/target.sh
+wk_ws_dir() {{ printf '%s/ws/%s' "{tmp}" "$1"; }}
+ws_busy_reason() {{ return 1; }}
+note() {{ printf 'NOTE %s\n' "$*"; }}
+note_warn() {{ printf 'WARN %s\n' "$*"; }}
+bump() {{ :; }}
+sub_add() {{ :; }}
+_jesc() {{ printf '%s' "$1"; }}
+"""
+
+
+def report_image_stage_body():
+    """The function lifted out of cmd/status, so the test drives the real one."""
+    text = (REPO / "cmd" / "status").read_text()
+    start = text.index("report_image_stage() {")
+    return text[start:text.index("\nreport_one()", start)]
+
+
+class TestTheCycleSaysWhatItIsDoing(WkTest):
+    """`wk status` reported build=none through a whole image build and a whole
+    profile-guided cycle: it read only the build.status that `wk build`
+    writes. Two of the three phases run on the board, so no workspace pid is
+    alive through them -- the driver's own pid is what is live for the cycle,
+    and that is what liveness is read from."""
+
+    def _report(self, pid):
+        with scratch_dir() as tmp:
+            ws = tmp / "ws" / "yocto-p"
+            ws.mkdir(parents=True)
+            (ws / "pgo.status").write_text(
+                "slot=pgo\nphase=2/3 collecting jetstream3 on rpi5\nprofile=p\n"
+                "pid=%s\n" % pid)
+            script = (STATUS_STUBS.format(repo=REPO, tmp=tmp)
+                      + report_image_stage_body()
+                      + "\nreport_image_stage yocto-p\n")
+            cp = bash(script)
+            return cp.stdout + cp.stderr
+
+    def test_a_live_cycle_reports_its_phase(self):
+        out = self._report(os.getpid())
+        self.assertIn("2/3 collecting jetstream3 on rpi5", out)
+        self.assertNotIn("WARN", out)
+
+    def test_a_cycle_whose_driver_died_is_reported_as_stopped(self):
+        out = self._report(999999999)
+        self.assertIn("WARN", out)
+        self.assertIn("stopped at", out)
+
+    def test_the_driver_records_each_phase_with_its_own_pid(self):
+        text = (REPO / "image" / "pgo.sh").read_text()
+        self.assertIn('"pid=$$"', text)
+        for phase in ("1/3 instrumented build", "2/3 collecting", "2/3 mixing",
+                      "3/3 measured build"):
+            self.assertIn(phase, text, phase)
+
+    def test_the_record_is_removed_when_the_cycle_ends(self):
+        text = (REPO / "image" / "pgo.sh").read_text()
+        self.assertIn("wk_atexit _pgo_status_clear", text)
+        self.assertIn("_pgo_status_clear()", text)
+
+    def test_status_reads_liveness_from_the_pid_and_labels_from_the_record(self):
+        fn = report_image_stage_body()
+        self.assertIn("ws_busy_reason", fn)
+        self.assertIn('kill -0 "$cyclepid"', fn)
+        self.assertIn("yocto.status", fn)
+        self.assertIn("pgo.status", fn)
+
+    def test_a_workspace_row_asks_for_it(self):
+        self.assertIn('report_image_stage "$ws"', (REPO / "cmd" / "status").read_text())
 
 
 class TestTheMixRunsWhereTheProfileCanBeRead(WkTest):

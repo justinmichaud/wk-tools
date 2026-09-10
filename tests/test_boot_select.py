@@ -62,6 +62,7 @@ echo "$B_SYSTEM_PARTS"
         """one line per system, `<boot partition> <id>`; a partition with no
         id is skipped, not an error."""
         cp = bash(LOAD + '''
+b_medium_parts() { printf "/dev/sda\\n/dev/sda1\\n/dev/sda2\\n/dev/sda3\\n/dev/sda4\\n"; }
 b_device_image() {
     case "$1" in
         /dev/sda1) echo "alpha-111111111111" ;;
@@ -76,10 +77,78 @@ b_systems
     def test_b_systems_fails_when_the_machine_cannot_be_asked(self):
         """an unreachable machine is not an empty medium."""
         cp = bash(LOAD + '''
+b_medium_parts() { printf "/dev/sda\\n/dev/sda1\\n/dev/sda3\\n"; }
 b_device_image() { return 1; }
 if b_systems; then echo no-failure; else echo failed; fi
 ''')
         self.assertEqual(cp.stdout.strip(), "failed", cp.stdout + cp.stderr)
+
+    def test_a_slot_the_medium_does_not_have_is_an_empty_slot(self):
+        """rpi5's stick may hold two systems (B_SYSTEM_PARTS="1 3"), and a
+        card written with one simply has no p3. That is an empty slot, not a
+        card that cannot be read -- `wk boot rpi5` refused a perfectly good
+        single-system card until b_systems asked the medium what it has."""
+        cp = bash(LOAD + '''
+b_medium_parts() { printf "/dev/sda\\n/dev/sda1\\n/dev/sda2\\n"; }
+b_device_image() {
+    case "$1" in
+        /dev/sda1) echo "alpha-111111111111" ;;
+        *) echo "the absent slot was read anyway" >&2; return 1 ;;
+    esac
+}
+b_systems
+''')
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertEqual(cp.stdout.strip(), "/dev/sda1 alpha-111111111111",
+                         cp.stdout + cp.stderr)
+        self.assertNotIn("read anyway", cp.stderr)
+
+    def test_a_medium_that_cannot_be_enumerated_is_still_fatal(self):
+        """the distinction is the whole point: absent is empty, unreadable is
+        an error, and neither may be reported as the other."""
+        cp = bash(LOAD + '''
+b_medium_parts() { return 1; }
+b_device_image() { echo "alpha-111111111111"; }
+if b_systems; then echo no-failure; else echo failed; fi
+''')
+        self.assertEqual(cp.stdout.strip(), "failed", cp.stdout + cp.stderr)
+
+
+class TestTheWatchdogIsTheSystemsFactNotTheDriversFact(unittest.TestCase):
+    """cmd/sysimage stages wk-self-return with every fleet write; a driver's
+    b_self_disarm_sh is a separate, optional thing. rpi5-usb has no
+    self-disarm -- its arming is one-shot in firmware -- so `--keep` asked the
+    wrong question and told a board carrying a live watchdog that it had none,
+    and the watchdog then rebooted it out of bench mode mid-run (rpi5,
+    2026-09-10: bench at 02:00:03Z, host again at 02:05:33Z)."""
+
+    def test_keep_asks_the_machine_and_not_the_driver(self):
+        body = (REPO / "cmd" / "boot").read_text()
+        fn = body[body.index("cmd_keep()"):]
+        fn = fn[:fn.index("\ncmd_back()")]
+        self.assertIn("b_watchdog_present", fn)
+        self.assertNotIn("command -v b_self_disarm_sh", fn)
+
+    def test_the_predicate_looks_for_both_inits_spellings(self):
+        """a systemd image carries the timer, a BusyBox one the rcS script."""
+        text = (REPO / "boot" / "machines.sh").read_text()
+        fn = text[text.index("b_watchdog_present()"):]
+        fn = fn[:fn.index("\nb_medium_parts()")]
+        self.assertIn("wk-self-return.timer", fn)
+        self.assertIn("S99wk-self-return", fn)
+
+    def test_the_units_the_predicate_names_are_the_ones_written(self):
+        """the names are read off the writer, so a rename cannot leave the
+        predicate looking for a file nothing installs."""
+        staged = (REPO / "cmd" / "sysimage").read_text()
+        self.assertIn("wk-self-return.timer", staged)
+        self.assertIn("S99wk-self-return", staged)
+
+    def test_arming_no_longer_claims_to_know(self):
+        """the system booting may or may not carry one, and nothing can read
+        that until it answers."""
+        body = (REPO / "cmd" / "boot").read_text()
+        self.assertNotIn("nothing on this side returns it", body)
 
 
 class TestSelection(unittest.TestCase):
