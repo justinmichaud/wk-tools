@@ -585,6 +585,41 @@ class TestTheCycleSaysWhatItIsDoing(WkTest):
         self.assertIn('report_image_stage "$ws"', (REPO / "cmd" / "status").read_text())
 
 
+class TestTheProfileGateStandsBeforeTheMeasuredBuild(WkTest):
+    """A collection that died still writes files, so the measured build must
+    not be reachable unless the profile was read back and accepted. The Mac
+    lane pins the same ordering (tests/test_mac_gates.py)."""
+
+    def test_the_mix_stage_checks_after_it_merges(self):
+        text = (REPO / "image" / "yocto-build.sh").read_text()
+        stage = text[text.index("    pgo-mix)"):text.index('    *)  fail "unknown stage')]
+        self.assertLess(stage.index("wkpgo.py mix"), stage.index("wkpgo.py check"))
+
+    def test_a_failed_check_fails_the_stage(self):
+        """run_helper turns a non-zero helper into `fail`, which exits."""
+        body = (REPO / "image" / "yocto-build.sh").read_text()
+        fn = func_body(body, "run_helper")
+        self.assertIn('|| fail "$what failed"', fn)
+
+    def test_the_measured_build_comes_after_the_mix_stage(self):
+        cycle = func_body((REPO / "image" / "pgo.sh").read_text(), "image_pgo_slot")
+        self.assertLess(cycle.index("--stage pgo-mix"),
+                        cycle.index("wpe-cross-pgo-use"),
+                        "the measured build must not precede the gate")
+
+    def test_a_failed_stage_stops_the_cycle(self):
+        """yocto_build dies on a stage that did not finish, and die exits --
+        so nothing after the mix runs when the profile is refused."""
+        driver = (REPO / "image" / "yocto.sh").read_text()
+        self.assertIn('die "  full log:', driver)
+        cycle = func_body((REPO / "image" / "pgo.sh").read_text(), "image_pgo_slot")
+        # the mix is called bare: no `|| true`, no `if`, so its die propagates
+        line = [l.strip() for l in cycle.splitlines() if "--stage pgo-mix" in l]
+        self.assertEqual(len(line), 1, line)
+        self.assertNotIn("||", line[0])
+        self.assertFalse(line[0].startswith("if "), line[0])
+
+
 class TestTheMixRunsWhereTheProfileCanBeRead(WkTest):
     """A .profraw is readable only by the toolchain that wrote it, and that
     clang is the Yocto SDK's rather than the workstation's or the container's."""
