@@ -331,8 +331,9 @@ class TestSetupAssistantIsDrivenOverAccessibility(WkTest):
         """A pane that was only dismissed comes back at the next login, so the
         screen the flow leaves behind proves nothing."""
         body = func_body(VM.read_text(), "_provision_base")
-        self.assertLess(body.index("_unblock_desktop"), body.index("_boot"))
-        self.assertLess(body.index("_boot"), body.index("_check_base_screen"))
+        i = body.index("rebooting the base")
+        self.assertLess(body.index("_unblock_desktop"), i)
+        self.assertLess(i, body.index("_check_base_screen"))
 
     def test_a_base_is_never_sealed_behind_a_pane(self):
         body = func_body(VM.read_text(), "_check_base_screen")
@@ -370,6 +371,24 @@ _wait_login_settled 1.2.3.4 && echo "SEALED" || echo "REFUSED"
     def test_the_base_is_watched_across_the_login_before_it_is_judged(self):
         body = func_body(VM.read_text(), "_provision_base")
         self.assertLess(body.index("_wait_login_settled"), body.index("_check_base_screen"))
+
+    def test_the_base_boots_one_way_only(self):
+        """Measured 2026-09-09: the proof-reboot went through `_boot`, which
+        applies softnet, while provisioning boots the base open. The subnet
+        changed, `tart ip` answered with the lease from before it, and the
+        rebuild died at 90 minutes ssh-ing an address nothing was on."""
+        body = func_body(VM.read_text(), "_provision_base")
+        self.assertNotIn("_boot ", body)
+        self.assertEqual(2, body.count("_start_base"), body)
+
+    def test_the_base_is_never_booted_behind_the_egress_filter(self):
+        """Its account pane needs Apple's servers and its provisioning needs
+        PyPI and a WebKit clone; a workspace is the thing that gets the filter."""
+        self.assertNotIn("_softnet_flags", func_body(VM.read_text(), "_start_base"))
+
+    def test_a_reboot_that_never_answers_is_not_read_as_a_clear_screen(self):
+        body = func_body(VM.read_text(), "_provision_base")
+        self.assertLess(body.index("_wait_ssh"), body.index("_wait_login_settled"))
 
     def test_the_rfb_console_client_is_gone(self):
         """One implementation per behaviour: the coordinate clicker it drove is

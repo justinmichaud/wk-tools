@@ -1,10 +1,7 @@
 #!/usr/bin/env python3
-"""Press Setup Assistant's panes away over the Accessibility API.
-
-The API answers from an ssh session because the guest runs with SIP disabled;
-no TCC grant and no window server session are needed. Elements are chosen by
-AXIdentifier, so nothing here depends on where a pane draws its buttons.
-"""
+"""Press Setup Assistant's panes away over the Accessibility API, which answers
+an ssh session because the guest runs with SIP disabled. Elements are chosen by
+AXIdentifier, never by position."""
 import ctypes
 import subprocess
 import sys
@@ -39,8 +36,7 @@ AS.AXUIElementPerformAction.argtypes = [c_void_p, c_void_p]
 
 PROC = "Setup Assistant.app/Contents/MacOS"
 ACTIONABLE = ("AXButton", "AXMenuItem")
-# Highest first. A confirmation sheet's Skip settles the pane behind it, so it
-# outranks the pane's own buttons; Previous Button would walk the flow backwards.
+# Highest first: a confirmation sheet's Skip settles the pane behind it.
 BY_ID = ("action-button-1", "userDeclinediCloud", "Next Button", "Alternate Button")
 SKIP_TITLES = ("skip", "later", "not now", "continue", "set up later", "don't")
 NEVER = ("Previous Button", "action-button-2")
@@ -123,8 +119,7 @@ def main():
               file=sys.stderr)
         return 2
 
-    # A pane disables every control while it settles the last answer, so an
-    # empty reading is a wait, not a dead end. Only an unbroken run of them is.
+    # A pane disables every control while it settles the last answer, so one empty reading is a wait; only an unbroken run of them is a dead end.
     stalled, last = 0, "?"
     for _ in range(passes):
         pid = _pid()
@@ -136,10 +131,7 @@ def main():
         if el is None:
             stalled += 1
             if stalled > STALL_PASSES:
-                # Measured: the account pane spins for good once it has been
-                # declined. Quitting it there loses nothing -- every answer is
-                # already written -- and whether the flow is really finished is
-                # settled by the login after this one, not by this process.
+                # Measured: the account pane spins for good once declined. Every answer is already written, and the login after this one settles whether the flow finished.
                 print(f"desktop-unblock: pane {name or last!r} stopped responding; "
                       f"quitting Setup Assistant", file=sys.stderr)
                 subprocess.run(["/usr/bin/killall", "Setup Assistant"],

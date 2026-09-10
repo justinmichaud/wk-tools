@@ -1266,6 +1266,19 @@ sys.exit(0 if any(v.get("Name") == sys.argv[1] for v in json.load(sys.stdin)) el
     _provision_base
 }
 
+# The base boots with the open network every time, and a workspace never does: provisioning clones WebKit and installs from PyPI, and Setup Assistant's account pane needs Apple's servers. Booting it once each way changes its subnet, and `tart ip` answers with the lease it had before.
+_start_base() { # -> ip
+    local runlog="$WK_VM_DIR/base.run.log"
+    if [ "$(_vm_state "$WK_VM_BASE")" != running ]; then
+        nohup "$(tart_bin)" run --no-graphics "$WK_VM_BASE" >"$runlog" 2>&1 &
+        disown 2>/dev/null || true
+        info "booting the base VM (log: $runlog)"
+    fi
+    _tart ip "$WK_VM_BASE" --wait 300 2>/dev/null | grep . \
+        || die "base VM did not boot. Its run log says:
+$(_runlog_tail "$runlog")"
+}
+
 _provision_base() {
     local cpus mem
     cpus=$(_base_cpus)
@@ -1291,15 +1304,7 @@ _provision_base() {
 
     # A first boot has Setup Assistant work to get through, hence the longer wait than t_start uses.
     local runlog="$WK_VM_DIR/base.run.log"
-    local ip
-    if [ "$(_vm_state "$WK_VM_BASE")" != running ]; then
-        nohup "$(tart_bin)" run --no-graphics "$WK_VM_BASE" >"$runlog" 2>&1 &
-        disown 2>/dev/null || true
-        info "booting the base VM for provisioning (log: $runlog)"
-    fi
-    ip=$(_tart ip "$WK_VM_BASE" --wait 300 2>/dev/null | grep .) \
-        || die "base VM did not boot. Its run log says:
-$(_runlog_tail "$runlog")"
+    local ip; ip=$(_start_base)
 
     # The guest agent is how the key gets in the FIRST time, without typing the default password; `tart ip --wait` answers before the agent is listening.
     if _wait_ssh "$ip"; then
@@ -1359,7 +1364,10 @@ $(_runlog_tail "$runlog")"
     # A dismissed pane comes back at the next login, so the base is judged on the screen it boots into, never on the one the flow left behind.
     info "rebooting the base to prove its screen comes up clear"
     _tart stop "$WK_VM_BASE"
-    ip=$(_boot "$WK_VM_BASE" 300)
+    ip=$(_start_base)
+    _wait_ssh "$ip" || die "'$WK_VM_BASE' rebooted to $ip but ssh never answered, so
+    the screen it came up with cannot be read. Its run log says:
+$(_runlog_tail "$WK_VM_DIR/base.run.log")"
     _wait_login_settled "$ip" \
         || die "Setup Assistant came back at '$WK_VM_BASE''s next login, so the flow
     that answered it did not finish -- every guest cloned from this base would
