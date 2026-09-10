@@ -211,10 +211,16 @@ credential_checks() {
     fi
 
     code=$(inside "curl -sS -m 20 -o /dev/null -w '%{http_code}' https://api.github.com/ 2>/dev/null")
-    [ "$code" = 200 ] \
-        && pass "api.github.com reachable through the injector (HTTP $code)" \
-        || fail "api.github.com answered '${code:-nothing}' -- the injector is not in the path
-        (systemctl --user status wk-github-inject; the CA is /run/wk/wk-github-ca.pem)"
+    case "$code" in
+        200) pass "api.github.com reachable through the injector (HTTP $code)" ;;
+        # 401 is GitHub's own answer, so the tunnel and the injector both carried the request; what failed is the credential. Saying "not in the path" here sends a reader after a service that is running.
+        401) fail "api.github.com answered 401: the injector is in the path and the read
+        token it holds was refused, so nothing in a workspace can read the API
+        either. The standing token is spent, revoked or expired -- replace it
+        with 'wk key set github-pat --replace', then './setup'" ;;
+        *)   fail "api.github.com answered '${code:-nothing}' -- the injector is not in the path
+        (systemctl --user status wk-github-inject; the CA is /run/wk/wk-github-ca.pem)" ;;
+    esac
 
     code=$(inside "curl -sS -m 20 -o /dev/null -w '%{http_code}' https://api.github.com/user 2>/dev/null")
     case "$code" in
@@ -237,6 +243,11 @@ credential_checks() {
         stored PAT has no 'Pull requests: write' on $FORK, so 'git-webkit pr'
         cannot open one. Reissue it with that permission and
         'wk key set github-pat --replace'" ;;
+            401) fail "push is ON but POST /repos/$FORK/pulls answered 401, which has two
+        causes a workspace cannot tell apart: the injector has no write token
+        ('wk push on' again), or it has one GitHub refuses -- a spent, revoked
+        or expired PAT ('wk key set github-pat --replace', then './setup').
+        'wk push status' says which of the two the machine is in" ;;
             *)   fail "push is ON but POST /repos/$FORK/pulls answered '${code:-nothing}' rather
         than 422 -- the injector has no write token ('wk push on' again)" ;;
         esac

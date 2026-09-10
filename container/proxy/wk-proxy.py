@@ -76,9 +76,7 @@ ALLOWED_HOSTS = {                      # dot-boundary suffix matches
     "baidu.com": (80, 443),
 
     # bitbake fetches the Yocto source mirror first (image/yocto-build.sh); this is the remainder, from --runall=fetch over 1492 tasks.
-    # SANDBOX AUDIT: a real widening -- source-code hosts only, still by
-    # hostname, BLOCKED_NETS unchanged, so no name here becomes a route onto the
-    # LAN or the tailnet. It does let a workspace fetch distribution tarballs.
+    # SANDBOX AUDIT: a real widening -- source-code hosts only, still by hostname, BLOCKED_NETS unchanged, so no name here becomes a route onto the LAN or the tailnet. It does let a workspace fetch distribution tarballs.
     "yoctoproject.org": (80, 443),     # git. and downloads. -- layers + the mirror
     "openembedded.org": (80, 443),     # git. (manifest.xml) and sources. (a MIRROR)
     "googlesource.com": (443,),        # `repo` clones its own git-repo from here
@@ -322,7 +320,8 @@ class Proxy:
             log(f"allow {host}:{port} ({why})")
 
             if method == "CONNECT":
-                cwriter.write(b"HTTP/1.1 200 Connection established\r\n\r\n")
+                # HTTP/1.0, as Squid answers: Apple's nc -X connect rejects a 1.1 tunnel, and it is how every macOS guest reaches github.com:22.
+                cwriter.write(b"HTTP/1.0 200 Connection established\r\n\r\n")
                 await cwriter.drain()
             else:
                 uwriter.write(headers)  # the rewritten request line

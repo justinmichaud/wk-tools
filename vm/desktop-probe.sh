@@ -13,7 +13,7 @@ wk_quiet_desktop_probe
 
 _pending=""
 for _k in DidSeeCloudSetup DidSeeSiriSetup DidSeeAppearanceSetup \
-          DidSeePrivacy DidSeeTrueTone DidSeeAccessibility DidSeeSyncSetup; do
+          DidSeePrivacy DidSeeAccessibility DidSeeSyncSetup; do
     [ "$(defaults read com.apple.SetupAssistant "$_k" 2>/dev/null)" = 1 ] \
         || _pending="$_pending $_k"
 done

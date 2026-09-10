@@ -291,7 +291,11 @@ class TestTheSwitch(_Block):
         out = self.run_block(push_on=True, answers={"ssh-add -l": "1",
                                                     "/pulls": "401"})
         self.assertEqual(1, self.fails(out), out)
+        # A 401 has two causes from out here -- no write token, or one GitHub
+        # refuses -- and naming only one sent a reader after the wrong fault
+        # for a whole session. Both, or the message is guessing.
         self.assertIn("the injector has no write token", out)
+        self.assertIn("wk key set github-pat --replace", out)
 
     def test_the_probe_cannot_create_a_pull_request(self):
         """An empty body names no head or base branch, which is why a 422 is

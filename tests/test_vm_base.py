@@ -390,6 +390,24 @@ _wait_login_settled 1.2.3.4 && echo "SEALED" || echo "REFUSED"
         body = func_body(VM.read_text(), "_provision_base")
         self.assertLess(body.index("_wait_ssh"), body.index("_wait_login_settled"))
 
+    def test_a_clone_keeps_the_base_s_serial(self):
+        """The measured cause of the whole thing. A changed serial is a new
+        machine to macOS, so Buddy runs again -- and a clone is the one guest
+        that cannot answer it, its account pane needing Apple's servers that
+        the egress filter refuses. A/B on one clone of a sealed base, 2026-09-09:
+        without --random-serial the desktop is clear, and flipping only that
+        flag brings the pane back."""
+        run = [l for l in func_body(VM.read_text(), "t_create").splitlines()
+               if not l.lstrip().startswith("#")]
+        self.assertNotIn("--random-serial", "\n".join(run))
+
+    def test_a_clone_still_gets_its_own_mac(self):
+        """Two guests on one network need distinct MACs, and the A/B above
+        shows the MAC is not what moves the pane."""
+        run = [l for l in func_body(VM.read_text(), "t_create").splitlines()
+               if not l.lstrip().startswith("#")]
+        self.assertIn("--random-mac", "\n".join(run))
+
     def test_the_rfb_console_client_is_gone(self):
         """One implementation per behaviour: the coordinate clicker it drove is
         what AXIdentifier replaced."""

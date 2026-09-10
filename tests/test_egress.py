@@ -296,6 +296,17 @@ class TestTheRouteAndTheCheckReadOneSpelling(unittest.TestCase):
                 self.assertEqual([("api.github.com", 443)], seen, out)
                 self.assertIn(b"200 Connection established", out)
 
+    def test_the_tunnel_is_granted_in_http_1_0(self):
+        """Apple's nc -X connect rejects a 1.1 tunnel -- "nc: Proxy error:
+        HTTP/1.1 200 Connection established" -- and it is the ProxyCommand
+        every macOS guest reaches github.com:22 through. Measured 2026-09-09 in
+        a guest: with 1.1 no `git push` and no `ssh -T git@github-webkit` from
+        a macOS workspace can connect at all, whatever `wk push` says. Squid
+        answers 1.0 for the same reason."""
+        _seen, out = self._routed("api.github.com:443")
+        self.assertIn(b"HTTP/1.0 200 Connection established", out)
+        self.assertNotIn(b"HTTP/1.1 200", out)
+
     def test_the_injector_branch_matches_that_one_spelling(self):
         """open_upstream routes on an exact dict lookup, so the normalisation
         has to have happened before it -- this is the assertion that the two

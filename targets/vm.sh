@@ -217,8 +217,8 @@ $(_running_vms | sed 's/^/      /')"
     cpus=$(_vm_cpus)
     mem=$(_vm_mem_mb)
     _tart clone "$WK_VM_BASE" "$v"
-    # Set.swift assigns displayRefit unconditionally, so a `tart set` omitting --display-refit clears it.
-    _tart set "$v" --cpu "$cpus" --memory "$mem" --random-mac --random-serial \
+    # Set.swift assigns displayRefit unconditionally, so a `tart set` omitting --display-refit clears it. The serial is left alone: a changed one is a new machine to macOS, so it re-runs Setup Assistant, whose account pane a clone cannot answer (Apple's servers sit behind the egress filter) -- measured A/B 2026-09-09, one clone, one flag. The MAC is randomised because two guests on a network need distinct ones, and it does not move the pane.
+    _tart set "$v" --cpu "$cpus" --memory "$mem" --random-mac \
         --display "$WK_VM_DISPLAY" --display-refit
     debug "clone took $(( $(date +%s) - t0 ))s"
 

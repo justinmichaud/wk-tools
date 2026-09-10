@@ -284,6 +284,16 @@ class TestTheFindings(WkTest):
         f = [x for x in findings(blind) if "window server" in x[1]]
         self.assertEqual(["note"], [x[0] for x in f], f)
 
+    def test_the_probe_asks_only_about_keys_the_settle_writes(self):
+        """A key the probe reads and the settle never writes is a fault the
+        guest can never clear: DidSeeTrueTone was one, and every freshly
+        created guest reported a pane that was not there. Nothing in Setup
+        Assistant reads it -- it is in none of the three binaries' strings."""
+        import re
+        asked = set(re.findall(r"DidSee[A-Za-z0-9]+", PROBE.read_text()))
+        written = set(re.findall(r"DidSee[A-Za-z0-9]+", DESKTOP.read_text()))
+        self.assertEqual(set(), asked - written, sorted(asked - written))
+
     def test_nothing_claims_to_stop_the_update_pane(self):
         """Four levers were tried on a Tahoe 26.4 clone on 2026-09-05 and the
         pane came up after each: `DidSeeAutoUpdatePrompt` true, the cached
