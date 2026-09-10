@@ -24,7 +24,7 @@ export PATH
 
 TARGET=""; IMAGE=""; STAGE=image; JOBS=""; RM_WORK=1; SRC=/src/WebKit; COMMIT=""; SLOT=""; PROFILE=""
 MULTILIB=""; MULTILIB_TUNE=""
-CROSS_CONFIG=""; CROSS_CC=""; CROSS_CXX=""; CROSS_CMAKE=""; PGO_DIR=""; PGO_LIB=""; PGO_RUNTIME=0
+CROSS_CONFIG=""; CROSS_CC=""; CROSS_CXX=""; CROSS_CMAKE=""; PGO_DIR=""; PGO_LIB=""
 CHROMIUM=0; SSTATE_NS=""
 PORT_TARGET_FROM=""; PORT_MACHINE=""; BOARD=""
 
@@ -50,7 +50,6 @@ while [ $# -gt 0 ]; do
         --cross-cc)     CROSS_CC="${2:-}"; shift 2 ;;
         --cross-cxx)    CROSS_CXX="${2:-}"; shift 2 ;;
         --cross-cmake)  CROSS_CMAKE="${2:-}"; shift 2 ;;
-        --pgo-runtime) PGO_RUNTIME="${2:-0}"; shift 2 ;;
         --pgo-dir) PGO_DIR="${2:-}"; shift 2 ;;
         --pgo-lib) PGO_LIB="${2:-}"; shift 2 ;;
         --commit)  COMMIT="${2:-}"; shift 2 ;;
@@ -274,11 +273,6 @@ configure_local_conf() {
         printf 'IMAGE_INSTALL:append = " wk-wifi-join"\n\n'
 
         printf 'IMAGE_INSTALL:append = " wk-card-priv"\n\n'
-
-        if [ "${PGO_RUNTIME:-0}" = 1 ]; then
-            # -fprofile-generate links libclang_rt.profile-<arch>.a, and meta-clang ships it in compiler-rt-sanitizers-staticdev -- the *sanitizers* recipe, which builds with COMPILER_RT_BUILD_PROFILE=ON. Without it in the SDK's target sysroot the instrumented configure stops at WebKitCommon.cmake's HAVE_CLANG_PROFILE_RUNTIME check. The SDK only: the image is untouched.
-            printf 'TOOLCHAIN_TARGET_TASK:append = " compiler-rt-sanitizers-staticdev"\n\n'
-        fi
 
         if [ "$CHROMIUM" = 0 ]; then
             printf '# Chromium dropped: about half the build. --chromium puts it back.\n'

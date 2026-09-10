@@ -476,47 +476,6 @@ class TestAnInstrumentedSlotIsNeverMeasured(WkTest):
         self.assertIn("pi_check_instrumented", body)
 
 
-class TestTheProfileRuntimeReachesTheSdk(WkTest):
-    """`-fprofile-generate` links libclang_rt.profile-<arch>.a, and meta-clang
-    ships it in compiler-rt-sanitizers-staticdev -- the *sanitizers* recipe,
-    which is the counter-intuitive part. Without it in the SDK's target sysroot
-    the instrumented configure stops at HAVE_CLANG_PROFILE_RUNTIME."""
-
-    def _runtime_flag(self, profile):
-        cp = bash(f'''
-. "{REPO}/lib/common.sh"
-. "{REPO}/lib/store.sh"
-. "{REPO}/lib/image.sh"
-. "{REPO}/image/profiles.sh"
-image_profile_load {profile} >/dev/null 2>&1
-image_pgo_wanted && echo 1 || echo 0
-''')
-        return cp.stdout.strip()
-
-    def test_the_driver_asks_for_it_exactly_when_the_build_is_instrumented(self):
-        self.assertEqual(self._runtime_flag("webkit-2.52-yocto-rpi5-64"), "1")
-        self.assertEqual(self._runtime_flag("wpewebkit-2.46-yocto-rpi4-64"), "0")
-        self.assertIn("--pgo-runtime $(image_pgo_wanted && echo 1 || echo 0)",
-                      (REPO / "image" / "yocto.sh").read_text())
-
-    def test_the_builder_adds_it_to_the_sdk_and_not_to_the_image(self):
-        body = (REPO / "image" / "yocto-build.sh").read_text()
-        fn = body[body.index("configure_local_conf()"):]
-        fn = fn[:fn.index('\n    } >> "$CONF"')]
-        self.assertIn("compiler-rt-sanitizers-staticdev", fn)
-        self.assertIn("TOOLCHAIN_TARGET_TASK:append", fn)
-        # It is the SDK's target sysroot, never the image's install list.
-        line = [l for l in fn.splitlines() if "compiler-rt-sanitizers" in l and "printf" in l]
-        self.assertEqual(len(line), 1, line)
-        self.assertNotIn("IMAGE_INSTALL", line[0])
-
-    def test_a_plain_build_does_not_get_it(self):
-        body = (REPO / "image" / "yocto-build.sh").read_text()
-        fn = body[body.index("configure_local_conf()"):]
-        guard = fn[:fn.index("compiler-rt-sanitizers")]
-        self.assertIn('[ "${PGO_RUNTIME:-0}" = 1 ]', guard)
-
-
 class TestTheMixRunsWhereTheProfileCanBeRead(WkTest):
     """A .profraw is readable only by the toolchain that wrote it, and that
     clang is the Yocto SDK's rather than the workstation's or the container's."""

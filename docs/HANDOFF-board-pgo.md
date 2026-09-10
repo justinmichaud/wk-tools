@@ -16,24 +16,23 @@ does not carry it, and rpi5 is in host mode with a spent arming record for
 `wpewebkit-2.46-yocto-rpi5-32`. So the run starts at `wk sysimage build`, then
 the card, then `wk boot`.
 
-Each of these is a distinct way the cycle itself can stop:
+Two of the three things that could have stopped it are settled, measured
+against the SDK this repo built for rpi5 on 2026-09-09:
 
-- [ ] **`llvm-profdata` in the cross environment.** `--stage pgo-mix` runs
-      `lib/wkpgo.py` under `cross-toolchain-helper --cross-toolchain-run-cmd`
-      and refuses if the SDK's PATH has no `llvm-profdata`. If it has none,
-      the fix is the SDK's package list (`nativesdk-clang`), not a fallback to
-      the workstation's: the workstation has clang 18/19 and meta-clang pins
-      20, and a `.profraw` is read by the toolchain that wrote it.
-- [ ] **The target's clang profile runtime resolves.**
-      `image/yocto-build.sh` puts `compiler-rt-sanitizers-staticdev` into
-      `TOOLCHAIN_TARGET_TASK` for a profile-guided profile, because that is
-      where meta-clang ships `libclang_rt.profile-<arch>.a` (its
-      `compiler-rt-sanitizers` recipe builds with `COMPILER_RT_BUILD_PROFILE=ON`
-      and packages `lib/linux/*.a` into `-staticdev`). Unverified against a
-      real `populate_sdk`: if the name is wrong, `do_populate_sdk` says
-      "Nothing RPROVIDES", and if the package is right but the archive is not
-      in it, the instrumented configure stops at
-      `HAVE_CLANG_PROFILE_RUNTIME` instead.
+- `llvm-profdata` is in the SDK's host sysroot
+  (`sysroots/aarch64-pokysdk-linux/usr/bin`), so `--stage pgo-mix` has the
+  toolchain that wrote the profiles.
+- `libclang_rt.profile-aarch64.a` is in the SDK's target sysroot
+  (`usr/lib/clang/20.1.1/lib/linux`), so `-fprofile-generate` links. Nothing
+  here puts it there and nothing should: `compiler-rt-sanitizers-dev` RDEPENDS
+  on `compiler-rt-sanitizers-staticdev`, and `SDKIMAGE_FEATURES` carries
+  `dev-pkgs`, so the archive follows the image's own `compiler-rt-sanitizers`.
+  If an image ever drops that recipe, the instrumented configure stops at
+  `HAVE_CLANG_PROFILE_RUNTIME` and the fix is one
+  `TOOLCHAIN_TARGET_TASK:append`.
+
+What is left is a distinct way the cycle can still stop:
+
 - [ ] **`CC=clang` reaching the SDK's clang.** `image/yocto-build.sh` exports
       `CC`/`CXX` because `cross-toolchain-helper` writes an `environment-setup`
       that branches on them. Confirm the cross build actually compiles with
