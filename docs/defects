@@ -442,3 +442,5 @@ Work around this, but leave the upstream bug report so we can remove the workaro
 - rpi has some fixes in ~ that should be incorperated into this repo
 
 - wk key steup is overly verbose; Also, there should be a one-click link for all keys to generate them (or otherwise it should be done programatically). gh-pat does not fill the repo access correctly, it defaults to all repos.
+
+- liteLLM keys should be generated from: https://ai.igalia.com/ui/api-keys/. Configure pi.
