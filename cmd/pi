@@ -37,6 +37,10 @@
 # arm that measures the renderer, the GPU's engine time, the width and the JIT
 # tier reached off the live web process, and profiles it, into <task>/warmup/.
 # What it finds refuses the A/B.
+#
+# --no-warmup-profile drops the sampler from that round and keeps the rest of
+# its evidence. Sampling a small board can cost more than the run: on the rpi5,
+# speedometer3 is 153s and did not finish one iteration in 2400s under samply.
 
 set -euo pipefail
 WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -597,6 +601,8 @@ pi_userspace_arch() { # <a binary on the board>
 pi_profiler_stage() { # <slot> <slot.json>
     local karch have=no answer tool binary
     PI_PROFILER=""; PI_PARANOID=""
+    # Sampling costs what it costs, and on a small board it can cost the run: speedometer3 is 153s on the rpi5 and did not finish one iteration in 2400s under samply (measured 2026-09-10). The warmup's other evidence -- the renderer, the width, the JIT tier -- does not come from the sampler, so it is still gathered.
+    [ -z "$PI_NO_WARMUP_PROFILE" ] || { log "  profiler    off (--no-warmup-profile)"; return 0; }
     karch=$(pi_userspace_arch "$(pi_slot_dir "$1")/root/$(wkslot get "$2" lib_file)")
     [ -n "$karch" ] && [ "$karch" != unknown ] \
         || { barrier "could not read the word size of the slot's own library on $machine,
@@ -795,7 +801,7 @@ pi_bench_ab_systems() { # <sysA,sysB> <rounds>
     [ "$kept" -ge 1 ] || die "no round produced both halves on $machine; nothing to compare."
 }
 
-PI_TASK=""; PI_TASK_OWNED=""; PI_PGO_DIR=""
+PI_TASK=""; PI_TASK_OWNED=""; PI_PGO_DIR=""; PI_NO_WARMUP_PROFILE=""
 SUBTESTS=""; EXCLUDE_SUBTESTS=""
 PI_AB_ROUND=""; PI_AB_ARM=""; PI_AB_A=""; PI_AB_B=""
 cmd_bench() {
@@ -803,7 +809,7 @@ cmd_bench() {
     local count="" timeout_s="" slot=a ab="" ab_systems="" rounds=3 cores="" task=""
     local stamp; stamp=$(bench_task_stamp)
     # --count N is iterations per run, --timeout S the seconds one iteration may take (default: the plan's own).
-    local usage="usage: wk pi bench <machine> <plan> [--slot NAME | --ab A,B | --ab-systems A,B] [--rounds N] [--count N] [--timeout S] [--cores <set>] [--subtests LIST | --exclude-subtests LIST] [--task NAME] [--pgo DIR]; see wk pi -h"
+    local usage="usage: wk pi bench <machine> <plan> [--slot NAME | --ab A,B | --ab-systems A,B] [--rounds N] [--count N] [--timeout S] [--cores <set>] [--subtests LIST | --exclude-subtests LIST] [--task NAME] [--pgo DIR] [--no-warmup-profile]; see wk pi -h"
     while [ $# -gt 0 ]; do
         case "$1" in
             --count)   count="${2:-}"; shift ;;
@@ -811,6 +817,7 @@ cmd_bench() {
             --task)    task="${2:-}"; shift ;;
             --slot)    slot="${2:-}"; image_check_slot_name "$slot"; shift ;;
             --pgo)     PI_PGO_DIR="${2:-}"; [ -n "$PI_PGO_DIR" ] || die "--pgo needs a directory"; shift ;;
+            --no-warmup-profile) PI_NO_WARMUP_PROFILE=1 ;;
             --cores)   cores="${2:-}"; shift ;;
             --subtests)         SUBTESTS="${2:-}"; shift ;;
             --exclude-subtests) EXCLUDE_SUBTESTS="${2:-}"; shift ;;

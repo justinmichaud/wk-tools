@@ -224,6 +224,41 @@ class TestPiVerbList(unittest.TestCase):
 
 
 
+class TestTheWarmupSamplerCanBeDropped(unittest.TestCase):
+    """The warmup round profiles the arm it measures, and on a small board
+    that sampling can cost more than the run: speedometer3 is 153s on the
+    rpi5 uninstrumented and did not finish one iteration in 2400s under
+    samply (2026-09-10). The round's other evidence -- renderer, width, JIT
+    tier -- does not come from the sampler, so it survives dropping it."""
+
+    def test_the_flag_is_parsed_and_documented(self):
+        text = CMD_PI.read_text()
+        self.assertIn("--no-warmup-profile) PI_NO_WARMUP_PROFILE=1", text)
+        self.assertIn("--no-warmup-profile]", text)   # in the usage line
+        head = "\n".join(text.splitlines()[:60])
+        self.assertIn("--no-warmup-profile", head, "not explained where the user meets it")
+
+    def test_it_stops_the_stage_before_anything_is_fetched_or_staged(self):
+        body = lift_pi("pi_profiler_stage")
+        guard = body.index("PI_NO_WARMUP_PROFILE")
+        for later in ("samply_fetch", "profiler_resolve", "perf_event_paranoid"):
+            self.assertLess(guard, body.index(later),
+                            f"{later} runs before the flag is honoured")
+
+    def test_the_jit_evidence_does_not_depend_on_the_sampler(self):
+        """the tier counts are grepped out of the browser log, which the
+        warmup turns on separately -- so the gate still has its evidence."""
+        text = CMD_PI.read_text()
+        self.assertIn("JSC_reportDFGCompileTimes=1", text)
+        launch = lift_pi("pi_launch_cmd")
+        self.assertIn("PI_WARMUP", launch)
+        self.assertNotIn("PI_NO_WARMUP_PROFILE", launch)
+
+    def test_the_default_still_profiles(self):
+        body = lift_pi("pi_profiler_stage")
+        self.assertIn('[ -z "$PI_NO_WARMUP_PROFILE" ] ||', body)
+
+
 class TestSubtestResolutionOnEveryWidth(unittest.TestCase):
     """pi_resolve_subtests decides the width, and it declared `local bits`
     bare: only a 32-bit board assigns it, so on a 64-bit one `set -u` killed
