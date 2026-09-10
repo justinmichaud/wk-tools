@@ -534,5 +534,54 @@ class TestProfilerChoice(WkTest):
         self.assertIn("samply", cp.stdout)
 
 
+
+def pi_fn(name):
+    text = (REPO / "cmd" / "pi").read_text()
+    start = text.index(chr(10) + name + "() {")
+    return text[start:text.index(chr(10) + "}", start)]
+
+
+class TestTheJitTierProbeIsOptIn(unittest.TestCase):
+    """The tier counts come from JSC_report*CompileTimes, which dump a JS
+    function signature from the compiler thread -- and that SIGSEGVs the JIT
+    worker on WebKit 2.52/rpi5: two warmup legs, two `comm="JITWorker" sig=11`
+    audit records, against none in ~15 legs without it (2026-09-10). So the
+    probe is asked for, and its absence is a note rather than a fault."""
+
+    def test_the_options_are_only_set_when_asked(self):
+        launch = pi_fn("pi_launch_cmd")
+        self.assertIn("JSC_reportDFGCompileTimes=1", launch)
+        self.assertIn('[ -z "$PI_JIT_TIERS" ]', launch)
+
+    def test_the_flag_exists_and_is_explained(self):
+        text = (REPO / "cmd" / "pi").read_text()
+        self.assertIn("--jit-tiers) PI_JIT_TIERS=1", text)
+        self.assertIn("--jit-tiers]", text)
+        head = "\n".join(text.splitlines()[:60])
+        self.assertIn("--jit-tiers", head)
+
+    def test_not_probed_is_a_note_and_not_a_problem(self):
+        record = {"elf": {"bits": 64}, "gl": {"mapped": ["x_dri.so"], "render_nodes": ["/dev/dri/renderD128"]},
+                  "jit": {"exec_mappings": 3, "tiers": None}, "class": "jsc",
+                  "gpu": {"measured": True, "busy_ms": 5}}
+        problems = load_driver().warmup_problems(record)
+        self.assertFalse([p for p in problems if "tier" in p], problems)
+        self.assertTrue(any("not probed" in n for n in record.get("notes", [])),
+                        record.get("notes"))
+
+    def test_probed_but_empty_is_still_a_fault(self):
+        record = {"elf": {"bits": 64}, "gl": {"mapped": ["x_dri.so"], "render_nodes": ["/dev/dri/renderD128"]},
+                  "jit": {"exec_mappings": 3, "tiers": {}}, "class": "jsc",
+                  "gpu": {"measured": True, "busy_ms": 5}}
+        problems = load_driver().warmup_problems(record)
+        self.assertTrue(any("no tier" in p for p in problems), problems)
+
+    def test_probed_without_the_top_tier_is_still_a_fault(self):
+        record = {"elf": {"bits": 64}, "gl": {"mapped": ["x_dri.so"], "render_nodes": ["/dev/dri/renderD128"]},
+                  "jit": {"exec_mappings": 3, "tiers": {"DFG": 12, "FTL": 0}}, "class": "jsc",
+                  "gpu": {"measured": True, "busy_ms": 5}}
+        problems = load_driver().warmup_problems(record)
+        self.assertTrue(any("no FTL compilation" in p for p in problems), problems)
+
 if __name__ == "__main__":
     unittest.main()

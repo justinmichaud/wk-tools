@@ -180,6 +180,7 @@ b_medium_read() { # <boot partition> <fixed file name>
         return 0
     fi
     card_priv boot-read "$(disk_of_part "$part")" "$(disk_partno "$part")" "$name" && return 0
+    b_part_absent "$part" && return 0   # B_SYSTEM_PARTS names the pairs a medium *may* carry, so a slot it does not have is an empty slot rather than a medium that cannot be read (rpi5, 2026-09-10: `wk boot` refused a good card over an absent /dev/sda3). Asked after the read, so the common path costs nothing
     warn "$NODE_NAME could not read $name off $part.
     Its card helper is older than this verb, or its sudoers rule is not in
     force; a workstation has no second way to reach the medium.
@@ -370,23 +371,20 @@ b_watchdog_present() {   # does the system that is running carry the self-return
     r_sudo 'test -f /etc/systemd/system/wk-self-return.timer || test -f /etc/init.d/S99wk-self-return' >/dev/null 2>&1
 }
 
-b_medium_parts() {   # the partitions the medium actually has, one /dev path per line. B_SYSTEM_PARTS names the slots a medium *may* hold a system in, and a card written with one system has no second pair at all -- which is an empty slot, not a medium that cannot be read. Failing here is the medium being unreadable, which b_systems keeps fatal.
-    local out
+b_part_absent() {   # <partition device> -- is it simply not there?
+    local dev="$1" out
     if [ "${NODE_ROLE:-}" = bench-device ]; then
-        out=$(r_ssh "lsblk -lno NAME $(sh_quote "$NODE_DEVICE")" 2>/dev/null) || return 1
+        out=$(r_ssh "test -e $(sh_quote "$dev") && echo yes || echo no" 2>/dev/null) || return 1
     else
-        out=$(m_ssh "lsblk -lno NAME $(sh_quote "$NODE_DEVICE")" 2>/dev/null) || return 1
+        out=$(m_ssh "test -e $(sh_quote "$dev") && echo yes || echo no" 2>/dev/null) || return 1
     fi
-    [ -n "$out" ] || return 1
-    printf '%s\n' "$out" | tr -d '\r ' | sed -n 's#^.#/dev/&#p'
+    [ "$(printf '%s' "$out" | tr -d '\r ')" = no ]
 }
 
 b_systems() {
-    local p part id present
-    present=$(b_medium_parts) || return 1
+    local p part id
     for p in $B_SYSTEM_PARTS; do
         part=$(b_system_part "$p")
-        printf '%s\n' "$present" | grep -qxF "$part" || continue
         id=$(b_device_image "$part") || return 1
         [ -n "$id" ] && printf '%s %s\n' "$part" "$id"
     done

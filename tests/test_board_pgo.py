@@ -574,12 +574,25 @@ class TestTheCycleSaysWhatItIsDoing(WkTest):
         self.assertIn("wk_atexit _pgo_status_clear", text)
         self.assertIn("_pgo_status_clear()", text)
 
-    def test_status_reads_liveness_from_the_pid_and_labels_from_the_record(self):
+    def test_status_reads_liveness_from_evidence_and_labels_from_the_record(self):
         fn = report_image_stage_body()
-        self.assertIn("ws_busy_reason", fn)
+        self.assertIn("log_age", fn)
         self.assertIn('kill -0 "$cyclepid"', fn)
         self.assertIn("yocto.status", fn)
         self.assertIn("pgo.status", fn)
+
+    def test_it_never_enters_the_workspace(self):
+        """`wk status` walks every workspace in parallel; shelling into the
+        container from here emptied the entire listing (measured 2026-09-10:
+        six stale `running` records, 10 rows -> 0). The stage log's age is
+        the evidence, exactly as report_one judges a build."""
+        fn = report_image_stage_body()
+        for forbidden in ("ws_busy_reason", "t_exec", "podman"):
+            self.assertNotIn(forbidden, fn, f"{forbidden} re-entered the workspace")
+
+    def test_a_stale_running_record_is_reported_not_believed(self):
+        fn = report_image_stage_body()
+        self.assertIn("nothing here is evidence it still is", fn)
 
     def test_a_workspace_row_asks_for_it(self):
         self.assertIn('report_image_stage "$ws"', (REPO / "cmd" / "status").read_text())

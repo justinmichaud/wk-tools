@@ -67,6 +67,16 @@ What is left is a distinct way the cycle can still stop:
 
 ## Owed upstream
 
+- [ ] **`JSC_reportDFGCompileTimes` / `reportFTLCompileTimes` crash the web
+      process.** `comm="JITWorker" ... sig=11`, twice out of two warmup legs
+      on rpi5 against WebKit 64abfa28ea1c, with no such record in ~15 legs
+      without them; the browser log ends mid-line, at Speedometer 3's
+      metric-aggregation, and the results are never posted. Both options are
+      documented as dumping a JS function signature, and that dump happens on
+      the compiler thread. `wk pi bench --jit-tiers` is the only thing that
+      sets them now. Worth a bug against JSC with the audit records; if it is
+      fixed, the flag can go back to being the default.
+
 - [ ] `webkitpy.llvm_profile_utils.locate_binary_xcrun` runs `/usr/bin/xcrun`
       with `check=False`, which on any host without it raises FileNotFoundError
       instead of returning non-zero -- so `LLVMProfDataExecutable.detect_binaries`

@@ -62,7 +62,6 @@ echo "$B_SYSTEM_PARTS"
         """one line per system, `<boot partition> <id>`; a partition with no
         id is skipped, not an error."""
         cp = bash(LOAD + '''
-b_medium_parts() { printf "/dev/sda\\n/dev/sda1\\n/dev/sda2\\n/dev/sda3\\n/dev/sda4\\n"; }
 b_device_image() {
     case "$1" in
         /dev/sda1) echo "alpha-111111111111" ;;
@@ -77,41 +76,44 @@ b_systems
     def test_b_systems_fails_when_the_machine_cannot_be_asked(self):
         """an unreachable machine is not an empty medium."""
         cp = bash(LOAD + '''
-b_medium_parts() { printf "/dev/sda\\n/dev/sda1\\n/dev/sda3\\n"; }
 b_device_image() { return 1; }
 if b_systems; then echo no-failure; else echo failed; fi
 ''')
         self.assertEqual(cp.stdout.strip(), "failed", cp.stdout + cp.stderr)
 
-    def test_a_slot_the_medium_does_not_have_is_an_empty_slot(self):
+    def test_a_slot_the_medium_does_not_have_reads_as_empty_and_says_nothing(self):
         """rpi5's stick may hold two systems (B_SYSTEM_PARTS="1 3"), and a
         card written with one simply has no p3. That is an empty slot, not a
         card that cannot be read -- `wk boot rpi5` refused a perfectly good
-        single-system card until b_systems asked the medium what it has."""
+        single-system card over it (2026-09-10). It must also not warn that
+        the card helper is out of date, which is what the read says when it
+        genuinely cannot reach the medium."""
         cp = bash(LOAD + '''
-b_medium_parts() { printf "/dev/sda\\n/dev/sda1\\n/dev/sda2\\n"; }
-b_device_image() {
-    case "$1" in
-        /dev/sda1) echo "alpha-111111111111" ;;
-        *) echo "the absent slot was read anyway" >&2; return 1 ;;
-    esac
-}
-b_systems
+NODE_ROLE=workstation   # the card-helper path; a bench-device reads its own medium
+card_priv() { return 1; }
+b_part_absent() { case "$1" in */sda3) return 0 ;; *) return 1 ;; esac; }
+disk_of_part() { printf '/dev/sda'; }
+disk_partno()  { printf '3'; }
+out=$(b_medium_read /dev/sda3 wk-image.id); rc=$?
+echo "rc=$rc out=[$out]"
 ''')
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertEqual(cp.stdout.strip(), "/dev/sda1 alpha-111111111111",
-                         cp.stdout + cp.stderr)
-        self.assertNotIn("read anyway", cp.stderr)
+        self.assertIn("rc=0", cp.stdout, cp.stdout + cp.stderr)
+        self.assertIn("out=[]", cp.stdout, cp.stdout + cp.stderr)
+        self.assertNotIn("card helper is older", cp.stderr)
 
-    def test_a_medium_that_cannot_be_enumerated_is_still_fatal(self):
+    def test_a_slot_that_is_present_but_unreadable_still_warns_and_fails(self):
         """the distinction is the whole point: absent is empty, unreadable is
         an error, and neither may be reported as the other."""
         cp = bash(LOAD + '''
-b_medium_parts() { return 1; }
-b_device_image() { echo "alpha-111111111111"; }
-if b_systems; then echo no-failure; else echo failed; fi
+NODE_ROLE=workstation
+card_priv() { return 1; }
+b_part_absent() { return 1; }
+disk_of_part() { printf '/dev/sda'; }
+disk_partno()  { printf '3'; }
+if b_medium_read /dev/sda3 wk-image.id; then echo no-failure; else echo failed; fi
 ''')
-        self.assertEqual(cp.stdout.strip(), "failed", cp.stdout + cp.stderr)
+        self.assertIn("failed", cp.stdout, cp.stdout + cp.stderr)
+        self.assertIn("card helper is older", cp.stderr)
 
 
 class TestTheWatchdogIsTheSystemsFactNotTheDriversFact(unittest.TestCase):
@@ -133,7 +135,7 @@ class TestTheWatchdogIsTheSystemsFactNotTheDriversFact(unittest.TestCase):
         """a systemd image carries the timer, a BusyBox one the rcS script."""
         text = (REPO / "boot" / "machines.sh").read_text()
         fn = text[text.index("b_watchdog_present()"):]
-        fn = fn[:fn.index("\nb_medium_parts()")]
+        fn = fn[:fn.index("\nb_part_absent()")]
         self.assertIn("wk-self-return.timer", fn)
         self.assertIn("S99wk-self-return", fn)
 
@@ -148,7 +150,9 @@ class TestTheWatchdogIsTheSystemsFactNotTheDriversFact(unittest.TestCase):
         """the system booting may or may not carry one, and nothing can read
         that until it answers."""
         body = (REPO / "cmd" / "boot").read_text()
-        self.assertNotIn("nothing on this side returns it", body)
+        self.assertIn("ARM_WATCHDOG", body)
+        # It is keyed on what the arming wrote, not on the driver having a self-disarm.
+        self.assertNotIn("command -v b_self_disarm_sh", body)
 
 
 class TestSelection(unittest.TestCase):

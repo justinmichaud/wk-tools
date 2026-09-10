@@ -122,6 +122,7 @@ class WkBoardDriver(BrowserDriver):
         self._profile = os.environ.get('WK_BOARD_PROFILE', '')
         self._gpu_before = ''
         self._class = os.environ.get('WK_BOARD_CLASS', 'gpu')
+        self._jit_tiers = bool(os.environ.get('WK_BOARD_JIT_TIERS', ''))
 
     def prepare_initial_env(self, config):
         pass
@@ -225,7 +226,8 @@ class WkBoardDriver(BrowserDriver):
         record = warmup_record(probed)
         record['gpu'] = gpu_delta(self._gpu_before,
                                   self._remote(_GPU_SH, capture=True, check=False))
-        record['jit']['tiers'] = tier_counts(self._remote(_TIERS_SH, capture=True, check=False))
+        record['jit']['tiers'] = tier_counts(
+            self._remote(_TIERS_SH, capture=True, check=False)) if self._jit_tiers else None
         record['when'] = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
         record['expect'] = self._expect
         record['class'] = self._class
@@ -357,9 +359,15 @@ def warmup_problems(record):
                 problems.append('no DRM engine counters and no render node held by the '
                                 'web process -- nothing evidences a GPU path at all')
 
-    tiers = (record.get('jit') or {}).get('tiers') or {}
+    tiers = (record.get('jit') or {}).get('tiers')
     want = 'FTL' if record.get('elf', {}).get('bits') == 64 else 'DFG'
-    if not tiers:
+    if tiers is None:
+        # Not asked for: the probe's JSC options crash the web process on some
+        # builds, so `wk pi bench --jit-tiers` turns it on deliberately.
+        record.setdefault('notes', []).append(
+            'the JIT tier was not probed (--jit-tiers); an executable mapping is '
+            'still evidence the build JITted, but not of which tier it reached')
+    elif not tiers:
         problems.append('no JSC compile-time report reached the browser log, so no tier '
                         'can be confirmed')
     elif not tiers.get(want):

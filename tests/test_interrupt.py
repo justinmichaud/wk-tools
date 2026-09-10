@@ -203,5 +203,33 @@ def _pid_alive(pid):
     return True
 
 
+
+KILL_TREE_SCRIPT = '\nset -u\n. "%(repo)s/lib/common.sh" >/dev/null 2>&1\n. "%(repo)s/lib/watchdog.sh"\nmarker=$(mktemp)\nsh -c \'sleep 300 & echo $! > \'"$marker"\'; sleep 300\' &\njob=$!\nsleep 1\nkid=$(cat "$marker")\nwatched_kill "$job" TERM\nsleep 1\nkill -0 "$kid" 2>/dev/null && echo "CHILD SURVIVED" || echo "child reaped"\nkill -0 "$job" 2>/dev/null && echo "job survived" || echo "job reaped"\nrm -f "$marker"\n'
+
+
+class TestKillingAJobKillsWhatItStarted(unittest.TestCase):
+    """run_watched killed only the job's own pid, so a child outlived it: a
+    run-benchmark http server was still holding a port eleven days after its
+    driver died (measured 2026-09-10). The stall path and the interrupt path
+    both go through watched_kill now."""
+
+    def test_a_grandchild_does_not_outlive_the_job(self):
+        cp = subprocess.run(["bash", "-c", KILL_TREE_SCRIPT % {"repo": REPO}],
+                            capture_output=True, text=True, timeout=90, cwd=str(REPO))
+        self.assertIn("child reaped", cp.stdout, cp.stdout + cp.stderr)
+        self.assertIn("job reaped", cp.stdout, cp.stdout + cp.stderr)
+
+    def test_both_kill_paths_use_it(self):
+        text = (REPO / "lib" / "watchdog.sh").read_text()
+        body = text[text.index("run_watched() {"):]
+        self.assertEqual(body.count("watched_kill"), 4, "a kill site still kills only the job")
+        self.assertNotIn('kill -TERM "$pid"', body)
+        self.assertNotIn('kill -KILL "$pid"', body)
+
+    def test_it_never_signals_the_shell_running_it(self):
+        body = (REPO / "lib" / "watchdog.sh").read_text()
+        fn = body[body.index("watched_kill() {"):body.index("run_watched() {")]
+        self.assertIn('[ "$p" = "$$" ] && continue', fn)
+
 if __name__ == "__main__":
     unittest.main()

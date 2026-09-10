@@ -52,6 +52,21 @@ _stall_report() {
 }
 
 # run_watched <logfile> -- <command...>: the command's status, or 124 killed for stalling. A hang is found in the log's progress, not the process's existence. The child is in the foreground, so INT/TERM here stops it; `on_interrupt` (lib/common.sh) covers a terminal whose process-group delivery misses it.
+# Killing the job is not killing what the job started: run-benchmark spawns its own http server, and a TERM to the parent alone orphans it -- one such server was still holding a port eleven days later (measured 2026-09-10). Descendants first, so nothing is left holding a port or a device once the job is gone. (build/mem-watchdog.sh has its own, inside the target, over a pid list it already has.)
+_watched_descendants() { # <pid> -- depth first, children before parents
+    local p="$1" kid
+    for kid in $(pgrep -P "$p" 2>/dev/null); do _watched_descendants "$kid"; done
+    printf '%s\n' "$p"
+}
+
+watched_kill() { # <pid> <signal>
+    local pid="$1" sig="$2" p
+    for p in $(_watched_descendants "$pid"); do
+        [ "$p" = "$$" ] && continue
+        kill "-$sig" "$p" 2>/dev/null || true
+    done
+}
+
 run_watched() {
     local log="$1"; shift
     [ "${1:-}" = -- ] && shift
@@ -61,9 +76,9 @@ run_watched() {
     local pid=$!
 
     _run_watched_interrupted() {
-        kill -TERM "$pid" 2>/dev/null || true
+        watched_kill "$pid" TERM
         wk_sleep 2
-        kill -KILL "$pid" 2>/dev/null || true
+        watched_kill "$pid" KILL
         wait "$pid" 2>/dev/null || true
     }
     on_interrupt _run_watched_interrupted
@@ -86,9 +101,9 @@ run_watched() {
         if [ "$idle" -ge "$WK_ABORT_SECONDS" ]; then
             warn "no output for ${idle}s -- giving up and killing the job"
             _stall_report "$log" "$idle"
-            kill -TERM "$pid" 2>/dev/null
+            watched_kill "$pid" TERM
             sleep 5
-            kill -KILL "$pid" 2>/dev/null
+            watched_kill "$pid" KILL
             wait "$pid" 2>/dev/null
             return 124
         fi

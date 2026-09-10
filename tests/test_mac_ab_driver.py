@@ -929,20 +929,25 @@ class TestHowAMachineGetsBackIsTheDriversAnswer(WkTest):
                     + 'log "  ---"\n')
 
     def test_the_arm_epilogue_offers_no_watchdog_where_none_is_written(self):
-        """`--keep` cancels a self-return watchdog, and the driver that writes
-        one is the driver that writes the self-disarm."""
+        """`--keep` cancels a self-return watchdog, and what says whether one
+        was written is ARM_WATCHDOG -- this arming's own record. Not the
+        driver's self-disarm: cmd/sysimage stages the watchdog onto every
+        fleet card, including boards whose driver has no self-disarm at all,
+        and keying on the driver told rpi5 it had none while its watchdog
+        rebooted it mid-run (2026-09-10)."""
         text = (REPO / "cmd" / "boot").read_text()
         body = func_body(text, "cmd_arm")
-        self.assertIn("command -v b_self_disarm_sh", body)
+        self.assertIn('if [ -n "$ARM_WATCHDOG" ]; then', body)
+        self.assertNotIn("command -v b_self_disarm_sh", body)
         self.assertNotIn("/boot/firmware/wk-diag.txt", text,
                          "a medium-specific path where the driver has a verb")
 
 
-class TestTheWatchdogBelongsToTheDriverThatWritesIt(WkTest):
-    """`wk boot <m> --keep` cancels a self-return watchdog, which is written by
-    the same driver that writes the self-disarm. A Mac's benchmark install has
-    neither: what ends its run is the job it is running. The refusal was
-    unreachable while bench mode read as unreachable."""
+class TestTheWatchdogBelongsToTheSystemThatCarriesIt(WkTest):
+    """`wk boot <m> --keep` cancels a self-return watchdog, and whether the
+    running system carries one is asked of that system (b_watchdog_present),
+    not of its driver. A Mac's benchmark install carries none: what ends its
+    run is the job it is running."""
 
     def _keep(self, extra):
         return bash('. "$WK_ROOT/lib/common.sh"\n'
@@ -951,19 +956,19 @@ class TestTheWatchdogBelongsToTheDriverThatWritesIt(WkTest):
                     + 'cmd_keep() {%s}\ncmd_keep\n'
                     % func_body((REPO / "cmd" / "boot").read_text(), "cmd_keep"))
 
-    def test_a_driver_with_no_self_disarm_has_nothing_to_claim(self):
-        cp = self._keep('MODE="bench perf-x"\n')
+    def test_a_system_carrying_no_watchdog_has_nothing_to_claim(self):
+        cp = self._keep('MODE="bench perf-x"\nb_watchdog_present() { return 1; }\n')
         self.assertNotEqual(cp.returncode, 0, cp.stdout + cp.stderr)
         self.assertIn("no self-return watchdog", cp.stderr)
         self.assertNotIn("TOUCHED", cp.stdout)
 
-    def test_a_driver_that_writes_one_still_claims_the_board(self):
-        cp = self._keep('MODE="bench perf-x"\nb_self_disarm_sh() { :; }\n')
+    def test_a_system_that_carries_one_is_claimed(self):
+        cp = self._keep('MODE="bench perf-x"\nb_watchdog_present() { return 0; }\n')
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
         self.assertIn("TOUCHED", cp.stdout)
 
-    def test_neither_driver_is_asked_in_host_mode(self):
-        cp = self._keep("MODE=host\n")
+    def test_the_system_is_not_asked_in_host_mode(self):
+        cp = self._keep("MODE=host\nb_watchdog_present() { return 0; }\n")
         self.assertNotEqual(cp.returncode, 0)
         self.assertIn("not in bench mode", cp.stderr)
 

@@ -372,10 +372,15 @@ EOF
     b_reboot
 
     info "$MACHINE is rebooting into system $IMAGE"
-    # Whether it returns by itself is a property of the system now booting, not of this driver, and it cannot be read until that system answers -- `--keep` asks it then.
-    log  "    wk boot $MACHINE --keep     claim it, so the self-return watchdog does not cut a long run"
-    log  "    wk boot $MACHINE --back     hand it back now"
-    log  "    wk boot $MACHINE --status   what it is doing, over its own node"
+    # ARM_WATCHDOG is what this arming actually wrote, which is the honest predicate: the medium's watchdog comes from the image (cmd/sysimage stages it on every fleet write), not from whether this driver happens to have a self-disarm of its own.
+    if [ -n "$ARM_WATCHDOG" ]; then
+        log  "  it returns by itself in ${ARM_WATCHDOG}s unless claimed:"
+        log  "    wk boot $MACHINE --keep     claim it"
+        log  "    wk boot $MACHINE --back     hand it back now"
+    else
+        log  "  nothing on this side returns it: the job it was armed for does, when it ends."
+        log  "    wk boot $MACHINE --status   what it is doing, over its own node"
+    fi
     log  "  if it never appears, its own account of that boot says why: wk boot $MACHINE --diag"
 }
 

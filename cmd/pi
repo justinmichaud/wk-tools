@@ -41,6 +41,11 @@
 # --no-warmup-profile drops the sampler from that round and keeps the rest of
 # its evidence. Sampling a small board can cost more than the run: on the rpi5,
 # speedometer3 is 153s and did not finish one iteration in 2400s under samply.
+#
+# --jit-tiers adds the per-tier compile counts to that round. It is off because
+# the JSC options behind it crash the web process on some builds (SIGSEGV in
+# JITWorker, rpi5/2.52, 2026-09-10); without it the round reports the tier as
+# not probed rather than as a fault.
 
 set -euo pipefail
 WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -396,8 +401,8 @@ pi_launch_cmd() { # <slot> <slot.json> <cores wrap>
     env=$(wkslot env "$json" "$root" | tr '\n' ' ')
     env="$env XDG_CACHE_HOME=$PI_CACHE_DIR"
     [ -z "${PI_PGO_DIR:-}" ] || env="$env LLVM_PROFILE_FILE=$PGO_BOARD_FILE"
-    # One line per optimizing compile: only the discarded leg pays for the printing.
-    [ -z "${PI_WARMUP:-}" ] \
+    # One line per optimizing compile, and the line is a JS function signature dumped from the compiler thread -- which SIGSEGVs the JIT worker on this build: two warmup legs, two `comm="JITWorker" sig=11` records on the board, against none in ~15 legs without it (rpi5, WebKit 64abfa28ea1c, 2026-09-10). Off unless asked for, so the tier count costs a run rather than the whole A/B.
+    [ -z "${PI_WARMUP:-}" ] || [ -z "$PI_JIT_TIERS" ] \
         || env="$env JSC_reportDFGCompileTimes=1 JSC_reportFTLCompileTimes=1"
     browser=$(wkslot get "$json" browser)
     # rdk's cmake claims the libWPEBackend-default.so symlink, so the default backend
@@ -801,7 +806,7 @@ pi_bench_ab_systems() { # <sysA,sysB> <rounds>
     [ "$kept" -ge 1 ] || die "no round produced both halves on $machine; nothing to compare."
 }
 
-PI_TASK=""; PI_TASK_OWNED=""; PI_PGO_DIR=""; PI_NO_WARMUP_PROFILE=""
+PI_TASK=""; PI_TASK_OWNED=""; PI_PGO_DIR=""; PI_NO_WARMUP_PROFILE=""; PI_JIT_TIERS=""
 SUBTESTS=""; EXCLUDE_SUBTESTS=""
 PI_AB_ROUND=""; PI_AB_ARM=""; PI_AB_A=""; PI_AB_B=""
 cmd_bench() {
@@ -809,7 +814,7 @@ cmd_bench() {
     local count="" timeout_s="" slot=a ab="" ab_systems="" rounds=3 cores="" task=""
     local stamp; stamp=$(bench_task_stamp)
     # --count N is iterations per run, --timeout S the seconds one iteration may take (default: the plan's own).
-    local usage="usage: wk pi bench <machine> <plan> [--slot NAME | --ab A,B | --ab-systems A,B] [--rounds N] [--count N] [--timeout S] [--cores <set>] [--subtests LIST | --exclude-subtests LIST] [--task NAME] [--pgo DIR] [--no-warmup-profile]; see wk pi -h"
+    local usage="usage: wk pi bench <machine> <plan> [--slot NAME | --ab A,B | --ab-systems A,B] [--rounds N] [--count N] [--timeout S] [--cores <set>] [--subtests LIST | --exclude-subtests LIST] [--task NAME] [--pgo DIR] [--no-warmup-profile] [--jit-tiers]; see wk pi -h"
     while [ $# -gt 0 ]; do
         case "$1" in
             --count)   count="${2:-}"; shift ;;
@@ -818,6 +823,7 @@ cmd_bench() {
             --slot)    slot="${2:-}"; image_check_slot_name "$slot"; shift ;;
             --pgo)     PI_PGO_DIR="${2:-}"; [ -n "$PI_PGO_DIR" ] || die "--pgo needs a directory"; shift ;;
             --no-warmup-profile) PI_NO_WARMUP_PROFILE=1 ;;
+            --jit-tiers) PI_JIT_TIERS=1 ;;
             --cores)   cores="${2:-}"; shift ;;
             --subtests)         SUBTESTS="${2:-}"; shift ;;
             --exclude-subtests) EXCLUDE_SUBTESTS="${2:-}"; shift ;;
@@ -972,6 +978,7 @@ pi_bench_once() {
             WK_BOARD_EVIDENCE="$out/verify.jsonl" \
             WK_BOARD_WARMUP="${warmdir:+$warmdir/$machine-$PI_AB_ARM.evidence.json}" \
             WK_BOARD_CLASS="$(wkdata bench-class "$plan")" \
+            WK_BOARD_JIT_TIERS="$PI_JIT_TIERS" \
             WK_BOARD_PROFILE="${remote_capture:+$PI_PROFILER:$remote_capture}" \
             WK_BOARD_PGO="${PI_PGO_DIR:+$PGO_BOARD_DIR}" \
         bash -c "cd $(sh_quote "$BENCH_RUNNER") && exec python3 Tools/Scripts/run-benchmark $args"

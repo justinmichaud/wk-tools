@@ -21,6 +21,7 @@ Run: python3 -m unittest tests.test_vm_base -v
 import os
 import re
 import subprocess
+import platform
 import unittest
 
 from tests.support import REPO, WkTest, bash, func_body, stub_path
@@ -256,6 +257,10 @@ class TestDeletingAVMReapsWhatRanIt(WkTest):
                 self.assertEqual(1 if f is VM else 0, len(bare), bare)
 
 
+@unittest.skipUnless(platform.system() == "Darwin",
+                     "the unblocker imports pyobjc's ApplicationServices, which is a "
+                     "macOS framework -- the rule is that a test needing a machine "
+                     "skips by name when it is absent")
 class TestSetupAssistantIsDrivenOverAccessibility(WkTest):
     """No preference the guest can write stops Setup Assistant drawing: measured
     2026-09-09 on a clone carrying every DidSee key its own binary reads plus
