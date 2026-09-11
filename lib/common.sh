@@ -193,7 +193,6 @@ kv_field() {
 
 status_render() {
     local mode="$1" recs="$2"
-    [ "$mode" != records ] || { cat "$recs"; return 0; }
     require python3 "python3 renders 'wk status'; it ships with macOS and with every
     distribution here, so a machine without it is a machine with something else wrong"
     python3 "$WK_ROOT/lib/status-view.py" "$mode" "$recs" \

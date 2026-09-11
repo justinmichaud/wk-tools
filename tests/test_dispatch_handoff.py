@@ -171,10 +171,11 @@ class TestWhatIsNotToldTheTarget(unittest.TestCase):
     lifecycle command resolves each of its own names."""
 
     def test_the_forwarded_environment_carries_no_target(self):
-        text = (REPO / "wk").read_text()
-        cmd = [l for l in text.splitlines() if l.strip().startswith('_cmd="WK_IN_VM=1')]
-        self.assertEqual(len(cmd), 1, "forward_to_vm's command line moved")
-        self.assertNotIn("WK_TARGET=", cmd[0],
+        text = (REPO / "lib" / "target.sh").read_text()
+        body = text[text.index("vm_wk_cmd() {"):]
+        body = body[:body.index("\n}\n")]
+        self.assertIn("WK_IN_VM=1", body, "vm_wk_cmd builds the podman-machine command line")
+        self.assertNotIn("WK_TARGET", body,
                          "a forwarded command is told a target it must resolve itself")
 
     def test_the_export_is_on_the_running_here_path_only(self):

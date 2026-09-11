@@ -294,6 +294,16 @@ t_enter() {
     _sdk "$WK_SDK/scripts/host-only/wkdev-enter" --name "$c"
 }
 
+# From macOS the store and the containers are the podman machine's, so the machine answers for them in its own words.
+t_far_side() {
+    if [ -n "${WK_IN_VM:-}" ] || ! is_macos; then echo none
+    elif [ "$(_machine_state "${WK_MACHINE:-wk}")" = running ]; then echo answering
+    else echo stopped
+    fi
+}
+t_has_wk() { [ "$(t_far_side)" = answering ]; }
+t_wk()     { _in_machine "$(vm_wk_cmd "$@")"; }
+
 # From macOS the rootless connection is named explicitly: the default there is rootful.
 _hpodman() {
     if [ -n "${WK_IN_VM:-}" ] || ! is_macos; then

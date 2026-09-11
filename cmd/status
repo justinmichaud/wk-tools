@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # wk status [<workspace>] -- what is happening, without guessing
-# wk: where=workspace name=optional bare=merged readonly group=workspaces
+# wk: where=workspace name=optional here readonly group=workspaces
 #
 # The build records its own state, not a process list, and this reads it.
 #
@@ -425,7 +425,7 @@ report_health() {
         _bsock="$(wk_state_dir)/broker.sock"
     fi
     _brdir="$(wk_state_dir)/broker"
-    # An `if`, not a `return`: everything after is reported by both halves.
+    # An `if`, not a `return`: everything after is reported from the podman VM and from the host alike.
     if [ -z "${WK_IN_VM:-}" ] && { [ -S "$_bsock" ] || [ -d "$_brdir" ]; }; then
         if [ -d "$_brdir" ]; then
             for _brid in "$_brdir"/*; do
@@ -968,38 +968,57 @@ order_targets() {
     done | sort -k1,1 -k2,2 | awk '{print $2}'
 }
 
-# Decided before the walk forks: on Linux the container and vm targets are both this machine, so whichever answers first is not a decision.
-health_owner() {
+# Decided before the walk forks: the first target that is this machine itself reports its health. A machine of its own (a remote, the podman VM from macOS) reports its own.
+health_owner() { # <ordered targets...>
     local t
-    for t in $(order_targets "$@"); do
-        case "$(target_kind "$t" 2>/dev/null)" in
-            remote) ( load_target "$t" >/dev/null 2>&1
-                      [ -n "${WK_REMOTE_LOCAL:-}" ] ) || continue ;;
-        esac
+    for t in "$@"; do
+        ( load_target "$t" >/dev/null 2>&1; [ "$(t_far_side)" = none ] ) || continue
         printf '%s\n' "$t"
         return 0
     done
     return 0
 }
 
+plan_emit() { # <targets...> -- every job of the walk and whose block each one completes; devices and bridges complete nobody's
+    local t j=""
+    for t in "$@"; do
+        j="$j${j:+,}{\"job\":\"$(_jesc "$t")\",\"machine\":\"$(_jesc "$(machine_of_target "$t")")\"}"
+    done
+    [ -z "$DEVICES" ] || j="$j${j:+,}{\"job\":\"devices\"},{\"job\":\"bridges\"}"
+    printf '{"kind":"plan","jobs":[%s]}\n' "$j" >&3
+}
+
 # In globals because `report` is called per workspace from three places.
 _group_machine=""
 _group_method=""
 _health_owner=""
-report_target() {
+report_target() { # <target> [name]
     local t="$1" rc=0 ws
     _group_machine="$(machine_of "$t")"
     _group_method="$(method_of)"
     machine_seen "$_group_machine"
 
+    # A machine of its own answers in its own words: the podman VM reports this machine's other half in full, a remote its workspaces, with its facts asked from here.
     if t_has_wk; then
-        WK_ROW_LABEL="$t" WK_NO_DELEGATE=1 \
-            delegate status --no-fleet --records || rc=$?
-        bump "$rc"
-        if [ -n "$FLEET" ]; then
-            report_machine "$t"
-            report_capacity_remote "$_group_machine"
+        if [ "$_group_machine" = "$(this_machine)" ]; then
+            WK_ROW_LABEL="$_group_machine" WK_NO_DELEGATE=1 \
+                delegate status --no-devices --records ${2:+"$2"} || rc=$?
+        else
+            WK_ROW_LABEL="$_group_machine" WK_NO_DELEGATE=1 \
+                delegate status --no-fleet --records ${2:+"$2"} || rc=$?
+            if [ -n "$FLEET" ]; then
+                report_machine "$t"
+                report_capacity_remote "$_group_machine"
+            fi
         fi
+        bump "$rc"
+        return 0
+    fi
+    if [ "$(t_far_side)" = stopped ]; then
+        rec_start raw
+        rec_set machine "$_group_machine"
+        rec_set text    "$t: $(far_side_reason "$t")"
+        rec_emit
         return 0
     fi
 
@@ -1049,28 +1068,23 @@ collect() {
         FLEET=""
         report_target "$TARGET" "$1"
     else
-        _TARGETS=$(walk_targets)
-
-        # shellcheck disable=SC2086 -- deliberate word splitting of the target list.
+        # shellcheck disable=SC2086 -- deliberate word splitting of the target list, here and below.
+        _TARGETS=$(order_targets $(walk_targets))
         prefetch_targets $_TARGETS
         wk_atexit prefetch_done
 
         # Started after the prefetch, not beside it: the two contend for the resolver, and a wedged one serialises lookups a warm one answers instantly.
-        # shellcheck disable=SC2086 -- deliberate word splitting of the target list.
         _health_owner=$(health_owner $_TARGETS)
 
-        # shellcheck disable=SC2086 -- same, and order_targets takes them as words.
+        [ -n "$RECORDS" ] || plan_emit $_TARGETS
         par_begin
-        for TARGET in $(order_targets $_TARGETS); do
-            printf '{"kind":"probing","name":"%s","machine":"%s"}\n' \
-                "$(_jesc "$TARGET")" "$(_jesc "$(machine_of_target "$TARGET")")" >&3
-            par_run "$TARGET" _report_target_par "$TARGET"
-        done
+        for TARGET in $_TARGETS; do par_run "$TARGET" _report_target_par "$TARGET"; done
         if [ -n "$DEVICES" ]; then
             par_run devices _devices_par     # two independent probe sets, so two jobs: the bridges do not wait on the boards
             par_run bridges _bridges_par
         fi
-        par_join_stream
+        # A batch for the wk that asked for records to assemble its own listing; a stream for the renderer waiting on this one.
+        if [ -n "$RECORDS" ]; then par_join; else par_join_stream; fi
     fi
 
     # In the stream: a listing assembled from two machines carries the worst of them, not the last.
@@ -1079,7 +1093,7 @@ collect() {
     rec_emit
 }
 
-# `--records`: the stream itself, for whoever assembles a bigger listing -- the other half of a macOS run (bare_report in `wk`). Renders nothing.
+# `--records`: the records alone, for the wk that asked (report_target's delegate). Renders nothing.
 if [ -n "$RECORDS" ]; then
     exec 3>&1
     collect ${1:+"$1"}
@@ -1101,7 +1115,6 @@ wk_atexit _recs_cleanup
 ) </dev/null &
 _collect_pid=$!
 
-# As environment, not arguments: `wk` renders too (bare_report) without having parsed them.
 WK_STATUS_PORT="$WEB_PORT" WK_STATUS_INTERVAL="$WEB_INTERVAL" \
     WK_STATUS_HTML_OUT="$HTML_OUT" status_render "$MODE" "$_recs"
 

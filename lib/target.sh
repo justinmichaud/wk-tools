@@ -145,7 +145,7 @@ t_task_put()  { :; }   # <name> <task dir>; nothing to do where the record alrea
 t_has_wk()    { return 1; }         # is there a far side that can answer?
 
 t_delegates() { return 1; }         # must a command about a workspace here run there?
-t_far_side()  { echo none; }        # answering | unreachable | no-wk | none (not a machine of its own)
+t_far_side()  { echo none; }        # answering | unreachable | stopped | no-wk | none (not a machine of its own)
 t_wk()        { return 1; }         # t_wk <args...>, its exit status is the answer
 t_wk_tty()    { t_wk "$@"; }        # t_wk with a terminal, for far-side commands that prompt a human
 
@@ -406,19 +406,34 @@ for_each_machine() { # <fn> <args...> -- worst exit status wins
     return "$worst"
 }
 
-machine_answers() {
+far_side_reason() { # <target> -- why its far side is not answering, for a person
     case "$(t_far_side)" in
-        answering)   return 0 ;;
-        unreachable) printf '%-22s %s\n' "$1" "unreachable over ssh ($(wk_ssh_timeout)s) -- off, or not on the tailnet" ;;
-        no-wk)       printf '%-22s %s\n' "$1" "no wk-tools there yet -- 'wk remote setup $1'" ;;
-        *)           printf '%-22s %s\n' "$1" "not a machine of its own" ;;
+        unreachable) echo "unreachable over ssh ($(wk_ssh_timeout)s) -- off, or not on the tailnet" ;;
+        stopped)     echo "the podman machine '${WK_MACHINE:-wk}' is stopped -- 'wk start' brings it up" ;;
+        no-wk)       echo "no wk-tools there yet -- 'wk remote setup $1'" ;;
+        *)           echo "not a machine of its own" ;;
     esac
+}
+
+machine_answers() {
+    [ "$(t_far_side)" != answering ] || return 0
+    printf '%-22s %s\n' "$1" "$(far_side_reason "$1")"
     return 1
 }
 
 # podman errors on an unknown machine name, so "absent" is read off the failure.
 _machine_state() {
     podman machine inspect "$1" --format '{{.State}}' 2>/dev/null || echo absent
+}
+
+# The one command line a podman-machine child runs, for the dispatcher's forward and the container driver's delegation alike. The VM is part of this machine, so its records name this host as itself.
+vm_wk_cmd() { # <wk args...>
+    printf 'WK_IN_VM=1 %sWK_ROW_LABEL=%s WK_HOST_SELF=1 %s%s/opt/wk-tools/wk %s' \
+        "$(wk_forwarded_env)" \
+        "$(sh_quote "${WK_ROW_LABEL:-$(wk_machine_name)}")" \
+        "${WK_NO_DELEGATE:+WK_NO_DELEGATE=1 }" \
+        "${WK_CONFIG:+WK_CONFIG=$(sh_quote "$WK_CONFIG") }" \
+        "$(sh_quote "$@")"
 }
 
 # </dev/null: a caller in a `while read` loop else loses stdin to podman ssh.

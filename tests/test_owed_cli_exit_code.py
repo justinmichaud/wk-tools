@@ -5,7 +5,7 @@ found anywhere [needs a test]".
 Two things are driven:
 
   - `bump` (cmd/status) and `_bump` (the `wk` dispatcher's own copy inside
-    `bare_report`, for the macOS two-halves case): lifted with sed (the
+    `bare_report`, for the macOS `wk ls` it assembles from two machines): lifted with sed (the
     tests/test_wifi_seed.py idiom) and called directly, in and out of
     range, so this tracks the exact code that ships rather than a retyped
     copy. cmd/status's `bump` additionally folds anything outside 0-4 to 4
@@ -87,8 +87,8 @@ class TestCmdStatusBump(WkTest):
 
 
 class TestDispatcherBump(WkTest):
-    """`wk`'s own `_bump`, defined inside `bare_report` for the macOS
-    two-halves case (vm half + host half): simpler than cmd/status's --
+    """`wk`'s own `_bump`, defined inside `bare_report` for the macOS `wk ls`
+    assembled from the podman VM and the host: simpler than cmd/status's --
     no folding, just "raise worst to whichever side reported worse"."""
 
     def _fn(self):

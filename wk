@@ -348,7 +348,7 @@ where_prose() { # <where>
         local)   printf 'this machine, never forwarded' ;;
         dynamic) printf 'whichever the command itself answers for the rest of the arguments' ;;
         *)       if [ -n "$D_HERE" ]; then
-                     printf 'the machine you type it on -- it needs this device'"'"'s editor or files'
+                     printf 'the machine you type it on'
                  elif [ -n "$D_LIFECYCLE" ]; then
                      printf 'the workstation that keeps the workspace record'
                  else
@@ -419,33 +419,6 @@ machine_running() {
     [ "$(podman machine inspect "$WK_MACHINE" --format '{{.State}}' 2>/dev/null)" = running ]
 }
 
-status_view_env() {
-    local mode="${WK_STATUS_DEFAULT_MODE:-text}"
-    local out="" port="${WK_STATUS_PORT:-}" interval="${WK_STATUS_INTERVAL:-}"
-    local asked="" wait=""
-    while [ $# -gt 0 ]; do
-        case "$1" in
-            --json) mode=json; asked=1 ;;
-            --web)  mode=web;  asked=1 ;;
-            --text|--cli) mode=text; asked=1 ;;
-            --wait) wait=1 ;;
-            --records) mode=records ;;
-            --html) mode=html; asked=1
-                    case "${2:-}" in -*|"") ;; *) out="$2"; shift ;; esac ;;
-            --port)      port="${2:-}"; shift ;;
-            --port=*)    port="${1#*=}" ;;
-            --interval)  interval="${2:-}"; shift ;;
-            --interval=*) interval="${1#*=}" ;;
-        esac
-        shift
-    done
-    if [ -z "$asked" ] && [ -n "$wait" ] && [ "$mode" = web ]; then mode=text; fi
-    printf 'WK_STATUS_MODE=%s\n' "$(sh_quote "$mode")"
-    printf 'WK_STATUS_HTML_OUT=%s\n' "$(sh_quote "$out")"
-    printf 'WK_STATUS_PORT=%s\n' "$(sh_quote "$port")"
-    printf 'WK_STATUS_INTERVAL=%s\n' "$(sh_quote "$interval")"
-}
-
 bare_subject() {
     while [ $# -gt 0 ]; do
         case "$1" in
@@ -473,45 +446,6 @@ bare_report() {
     done
 
     _self=$(wk_machine_name)
-
-    if [ "$cmd" = status ]; then
-        _recs=$(mktemp)
-        status_default_mode
-        eval "$(status_view_env ${@+"$@"})"
-        _mode="$WK_STATUS_MODE"
-        export WK_STATUS_HTML_OUT WK_STATUS_PORT WK_STATUS_INTERVAL
-
-        # Stdin from /dev/null: a background job that reads the terminal is stopped by SIGTTIN, and `podman machine ssh` inherits it.
-        _recs_vm=$(mktemp)
-        _recs_host=$(mktemp)
-        _vm_pid=""
-        _host_pid=""
-
-        if machine_running; then
-            ( WK_ROW_LABEL="$_self" WK_HOST_SELF=1
-              forward_to_vm "$cmd" --records --no-devices ${@+"$@"} ) \
-                > "$_recs_vm" </dev/null &
-            _vm_pid=$!
-        elif command -v podman >/dev/null 2>&1; then
-            warn "the podman machine '$WK_MACHINE' is stopped, so container workspaces are not included"
-            log  "  'wk start' to bring it up"
-        fi
-
-        if [ -n "$hosts" ]; then
-            ( WK_TARGET="${hosts# }" WK_ROW_LABEL="$_self" WK_HOST_SELF=1 \
-                exec "$impl" --records ${@+"$@"} ) > "$_recs_host" </dev/null &
-            _host_pid=$!
-        fi
-
-        if [ -n "$_vm_pid" ];   then rc=0; wait "$_vm_pid"   || rc=$?; _bump "$rc"; fi
-        if [ -n "$_host_pid" ]; then rc=0; wait "$_host_pid" || rc=$?; _bump "$rc"; fi
-        cat "$_recs_vm" "$_recs_host" > "$_recs" 2>/dev/null || true
-        rm -f "$_recs_vm" "$_recs_host"
-
-        status_render "$_mode" "$_recs"
-        rm -f "$_recs"
-        exit "$worst"
-    fi
 
     _ls_json=""
     if [ "$cmd" = ls ]; then
@@ -586,7 +520,6 @@ delegate_run() { # <machine> <cmd> <args...>
 
 forward_to_vm() {
     require podman "podman is required; install the official pkg from podman.io"
-    local _self_name; _self_name=$(wk_machine_name)
 
     podman machine inspect "$WK_MACHINE" >/dev/null 2>&1 \
         || die "podman machine '$WK_MACHINE' does not exist -- run ./setup first"
@@ -607,14 +540,10 @@ forward_to_vm() {
         podman machine start "$WK_MACHINE" >&2
     fi
 
-    : "${WK_ROW_LABEL:=$_self_name}"
-    : "${WK_HOST_SELF:=1}"
-
-    local _cmd
-    _cmd="WK_IN_VM=1 $(wk_forwarded_env)${WK_ROW_LABEL:+WK_ROW_LABEL=$(sh_quote "${WK_ROW_LABEL:-}") }${WK_HOST_SELF:+WK_HOST_SELF=1 }${WK_CONFIG:+WK_CONFIG=$(sh_quote "${WK_CONFIG:-}") }/opt/wk-tools/wk $(sh_quote "$@")"
+    local _cmd; _cmd=$(vm_wk_cmd "$@")
 
     # `podman machine ssh` runs ssh without asking for a pty, so anything forwarded that needs to *ask* is unanswerable; when this end really is a
-    # terminal the hop is made with ssh and `-t`. Both ends checked: a pty rewrites line endings, and `wk status`'s halves redirect stdout only.
+    # terminal the hop is made with ssh and `-t`. Both ends checked: a pty rewrites line endings, and a child whose output is captured must not get one.
     if [ -t 0 ] && [ -t 1 ]; then
         local _p _k _u
         _p=$(podman machine inspect "$WK_MACHINE" --format '{{.SSHConfig.Port}}' 2>/dev/null) || _p=""

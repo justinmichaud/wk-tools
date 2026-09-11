@@ -1,10 +1,16 @@
 #!/usr/bin/env python3
 """status-view.py <text|json|html|web> <records-file> [--port N] [--interval S] [--out FILE]
 
-Input is the stream `wk status --records` writes: one JSON object per line, from
+Input is the stream `wk status` collects: one JSON object per line, from
 several processes at once -- two JSON documents cannot be concatenated where two
 streams of lines can. Every view, `--json` included, draws the one merged
 document. No third-party library, `pip install` being no trade to make here.
+
+Two records are the stream's own, not the document's. `{"kind":"plan","jobs":
+[{"job":..,"machine":..},..]}` comes first and names every job the walk runs and
+the machine each one's records belong to; `{"kind":"flush","job":..}` ends one
+job. A machine's block is drawn when the last job the plan gave it has flushed,
+so nothing decides a machine is complete from what has happened to arrive.
 """
 
 import http.server
@@ -133,7 +139,7 @@ def merge(lines):
         except ValueError as exc:
             print("wk status: unreadable record: %s" % exc, file=sys.stderr)
             continue
-        if r is None or r.get("kind") in ("probing", "flush"):
+        if r is None or r.get("kind") in ("plan", "flush"):
             continue  # stream-only markers; a one-shot read has no use for them
         merger.feed(r)
     return merger.doc
@@ -624,13 +630,12 @@ def render_text(doc, colour):
 
 def render_text_stream(fh, out, colour):
     # Arrival order: par_join_stream (cmd/status) hands back each job's records
-    # as they exist, `{"kind":"flush"}` ending one job. Re-imposing an order
-    # would buffer a fast machine behind a slow one, the wait this removes.
-    # `{"kind":"probing"}` gets a placeholder at once, never erased -- a stream,
-    # not a redrawn terminal. A block is drawn at the last flush feeding it.
+    # as they exist. Re-imposing an order would buffer a fast machine behind a
+    # slow one, the wait this removes. A planned machine gets a placeholder at
+    # once, never erased -- a stream, not a redrawn terminal.
     merger = Merger()
-    probing = {}     # target -> still waiting on a machine record to match it
-    pending = {}     # machine -> targets whose job has not flushed yet
+    owner = {}       # job -> the machine the plan gave it; a flush names only the job
+    pending = {}     # machine -> its planned jobs that have not flushed
     drawn = set()    # machines whose block is out
 
     def draw(machine):
@@ -650,24 +655,25 @@ def render_text_stream(fh, out, colour):
         if r is None:
             continue
         kind = r.get("kind")
-        if kind == "probing":
-            name = r.get("name", "?")
-            pending.setdefault(r.get("machine", name), set()).add(name)
-            if name not in merger.index and name not in probing:
-                probing[name] = True
-                out.write(paint("  probing %s…" % name, "dim", colour) + "\n")
-                out.flush()
+        if kind == "plan":
+            for j in r.get("jobs", []):
+                owner[j["job"]] = j.get("machine")
+                if j.get("machine"):
+                    pending.setdefault(j["machine"], set()).add(j["job"])
+                    out.write(paint("  probing %s…" % j["job"], "dim", colour) + "\n")
+            out.flush()
             continue
         if kind == "flush":
             job = r.get("job")
-            for machine, jobs in pending.items():
-                jobs.discard(job)
-                if not jobs:
-                    draw(machine)
+            if job not in owner:
+                print("wk status: '%s' ended without being in the plan" % job, file=sys.stderr)
+                continue
+            if owner[job]:
+                pending[owner[job]].discard(job)
+                if not pending[owner[job]]:
+                    draw(owner[job])
             continue
-        name = merger.feed(r)
-        if name is not None:
-            probing.pop(name, None)
+        merger.feed(r)
 
     for m in merger.doc["machines"]:
         draw(m["name"])
