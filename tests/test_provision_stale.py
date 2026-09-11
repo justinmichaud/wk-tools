@@ -97,7 +97,7 @@ if why=$(vm_base_stale); then echo "stale=$why"; else echo "fresh"; fi
         existed, so nothing in the marker can vouch for it."""
         cp, _ = self._drive('''
 ensure_dir "$WK_VM_DIR" 0700 >/dev/null
-printf 'image=x\\nprebuild=mac-release\\nfinished=2026-08-20T20:43:06Z\\n' > "$(_base_marker)"
+printf 'image=x\\nfinished=2026-08-20T20:43:06Z\\n' > "$(_base_marker)"
 if why=$(vm_base_stale); then echo "stale=$why"; else echo "fresh"; fi
 vm_base_findings
 ''')

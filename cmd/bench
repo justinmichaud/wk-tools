@@ -834,7 +834,7 @@ cmd_stage() {
     load_target "$t"
     wait_ready "$ws"
 
-    [ -n "$config" ] || config="${WK_CONFIG:-$(default_config)}"
+    [ -n "$config" ] || config="${WK_CONFIG:-$(default_config "$ws")}"
     config_load "$config" "$(t_os)" || die "unknown config '$config' (wk build --list)"
 
     local src build_dir

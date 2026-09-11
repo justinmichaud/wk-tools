@@ -287,7 +287,7 @@ class TestAProfileGuidedBuildDoesNotCacheCompilations(WkTest):
         return bash('. "$WK_ROOT/lib/common.sh"; . "$WK_ROOT/lib/arch.sh"\n'
                     '. "$WK_ROOT/build/configs.sh"\n'
                     'WK_TARGET_KIND=vm; config_load %s macos vm >/dev/null 2>&1\n'
-                    'config_build_env /src/WebKit 4 10 native >/dev/null 2>&1\n'
+                    'WK_CCACHE_DIR=/ccache config_build_env /src/WebKit 4 10 native >/dev/null 2>&1\n'
                     'printf "%%s\\n" "${CFG_ENV[@]}"\n' % config)
 
     def test_the_pgo_config_turns_it_off(self):

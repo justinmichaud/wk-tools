@@ -32,7 +32,7 @@
 #   --mode <m>        which profiler runs (default sampling); native picks
 #                     instruments on the Apple ports and samply everywhere
 #                     else; `wk profile --list` lists the rest
-#   --config <c>      which build to profile (default: the workspace's own);
+#   --config <c>      which build to profile (default: the last build's, else the platform's);
 #                     `wk build --list` lists every name
 #   --browser [url]   profile MiniBrowser on that page instead of the jsc shell
 #   --process <p>     which of MiniBrowser's processes: ui | web (default) |
@@ -112,7 +112,7 @@ esac
 
 require_name "$NAME"
 
-[ -n "$CONFIG" ] || CONFIG=$(default_config)
+[ -n "$CONFIG" ] || CONFIG=$(default_config "$NAME")
 # The target first: on macOS a config does not choose its own build system, so config_load needs t_os.
 TARGET="$(ws_target "$NAME")"
 load_target "$TARGET"

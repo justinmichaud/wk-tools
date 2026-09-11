@@ -256,7 +256,7 @@ the `mac-*` config of the same configuration. The reverse is refused: a
 `mac-*` config on a Linux target says so rather than running xcodebuild.
 
 Every guest is an APFS clone of one golden base, so **what the base carries is
-what every guest carries**: Xcode, a checkout, a warm build tree, and the
+what every guest carries**: Xcode, a checkout, and the
 desktop settled onto an empty screen. The base is made by scripts in this
 tree, and editing one of
 them does not change a base already built -- so the base records the hash of

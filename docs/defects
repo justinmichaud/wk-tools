@@ -41,3 +41,12 @@ Noticed, not fixed:
   and `wk remotes <ws> --fix` converges it. The one 401 is unmeasured.
 - The broker's request record is still its own shape (a Python daemon on the
   host cannot write into the podman VM's store); owed in docs/HANDOFF-status.md.
+
+- ==> pre-building 'mac-release' in the base with -j6
+  This is the slow one and it happens once. Every workspace cloned
+  from this base inherits the build tree and the compilation cache.
+
+  This makes no sense, the cache will be stale very quicly. don't do this.
+
+  Removed. The base carries Xcode and a checkout, never a build tree;
+  the marker no longer records a prebuild and WK_VM_BASE_PREBUILD is gone.

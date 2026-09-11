@@ -1,15 +1,13 @@
-"""Building the golden macOS base: the last step must not be able to throw
-away the first ones.
+"""Building the golden macOS base.
 
 `wk vm base --rebuild` is hours -- an image pull, Xcode's first launch, a
-WebKit mirror and checkout, then a full mac-release build -- and the completion
-marker is written after all of it. Anything fatal in the late steps therefore
-leaves a fully provisioned base with no marker, which the next run deletes as
-rubble (_ensure_base). So: what is knowable up front is checked up front, the
-prebuild cannot fail the provisioning it is the last step of, and the marker
-records what the base actually got.
+WebKit mirror and checkout -- and the completion marker is written after all
+of it. Anything fatal in the late steps therefore leaves a fully provisioned
+base with no marker, which the next run deletes as rubble (_ensure_base), so
+what is knowable up front is checked up front and the marker records what
+the base actually got.
 
-The password is not one of those steps any more: macOS Tahoe 26.5 refuses the
+The password is not one of those steps: macOS Tahoe 26.5 refuses the
 only change form the account itself can run, so the guest keeps the password
 its image ships and every command that hands a guest over states it.
 
@@ -19,7 +17,6 @@ helpers -- no VM, no guest, no ssh.
 Run: python3 -m unittest tests.test_vm_base -v
 """
 import os
-import re
 import subprocess
 import platform
 import unittest
@@ -45,162 +42,6 @@ DRIVER = '''
 . "$WK_ROOT/lib/target.sh"
 load_target vm >/dev/null 2>&1
 '''
-
-
-class TestThePrebuildCannotUnmakeTheBase(WkTest):
-    def _drive(self, body, env=None):
-        store = self.tmp / "store"
-        store.mkdir(exist_ok=True)
-        with stub_path({"tart": TART}) as binp:
-            e = {"WK_VM_STORE": str(store),
-                 "PATH": f"{binp}:{os.environ['PATH']}"}
-            if env:
-                e.update(env)
-            cp = bash(DRIVER + body, env=e)
-        return cp, store / "vm" / "base.ready"
-
-    def test_a_prebuild_that_cannot_start_warns_and_succeeds(self):
-        """The realistic failure: the tooling push into the base fails, and
-        with it the build. A warm build tree is an optimisation, so the base is
-        still sealed and the marker still written."""
-        cp, _ = self._drive('''
-_vm_get()     { echo 8; }
-build_jobs()  { echo 2; }
-_push_tools() { echo "push failed" >&2; return 1; }
-_prebuild_base 10.0.0.1 && echo "returned 0" || echo "returned $?"
-echo "prebuilt=${_base_prebuilt:-none}"
-''')
-        out = cp.stdout + cp.stderr
-        self.assertEqual(cp.returncode, 0, out)
-        self.assertIn("returned 0", cp.stdout, out)
-        self.assertIn("prebuilt=none", cp.stdout, out)
-        self.assertIn("every workspace will pay for a cold build", out)
-
-    def test_a_prebuild_that_will_not_launch_warns_and_succeeds(self):
-        cp, _ = self._drive('''
-_vm_get()          { echo 8; }
-build_jobs()       { echo 2; }
-_push_tools()      { :; }
-config_build_env() { CFG_ENV=(X=1); }
-detach_remote()    { return 1; }
-_prebuild_base 10.0.0.1 && echo "returned 0" || echo "returned $?"
-echo "prebuilt=${_base_prebuilt:-none}"
-''')
-        out = cp.stdout + cp.stderr
-        self.assertEqual(cp.returncode, 0, out)
-        self.assertIn("returned 0", cp.stdout, out)
-        self.assertIn("prebuilt=none", cp.stdout, out)
-
-    def test_a_prebuild_that_fails_still_leaves_the_base_marked(self):
-        """The marker is what tells a finished base from rubble, so it is
-        written whether or not the build in it worked -- and it records what
-        the base got, not what was asked for: a marker naming the config
-        would promise every workspace a warm build it will not get."""
-        cp, marker = self._drive('''
-_vm_get()     { echo 8; }
-build_jobs()  { echo 2; }
-_push_tools() { return 1; }
-_prebuild_base 10.0.0.1
-_base_mark_ready
-''')
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertIn("prebuild=none", marker.read_text())
-
-    def test_a_prebuild_that_worked_is_what_the_marker_names(self):
-        cp, marker = self._drive('''
-_vm_get()             { echo 8; }
-build_jobs()          { echo 2; }
-_push_tools()         { :; }
-config_build_env()    { CFG_ENV=(X=1); }
-detach_remote()       { :; }
-detach_wait_remote()  { echo 0; }
-scp()                 { :; }
-_prebuild_base 10.0.0.1
-_base_mark_ready
-''')
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertIn("prebuild=mac-release", marker.read_text())
-
-    def test_a_build_that_ran_and_failed_warns_and_succeeds(self):
-        """The arm that costs the most to reach for real: an hour of building
-        that ends non-zero. The base is sealed anyway -- the alternative is
-        hours of provisioning thrown away over a warm build tree."""
-        cp, _ = self._drive('''
-_vm_get()             { echo 8; }
-build_jobs()          { echo 2; }
-_push_tools()         { :; }
-config_build_env()    { CFG_ENV=(X=1); }
-detach_remote()       { :; }
-detach_wait_remote()  { echo 1; }
-scp()                 { :; }
-_prebuild_base 10.0.0.1 && echo "returned 0" || echo "returned $?"
-echo "prebuilt=${_base_prebuilt:-none}"
-''')
-        out = cp.stdout + cp.stderr
-        self.assertEqual(cp.returncode, 0, out)
-        self.assertIn("returned 0", cp.stdout, out)
-        self.assertIn("prebuilt=none", cp.stdout, out)
-        self.assertIn("base prebuild FAILED", out)
-        self.assertIn("base-build.log", out)
-
-    def test_a_failed_build_shows_the_first_error_when_that_is_loadable(self):
-        """first_error is in lib/watchdog.sh, which not every caller of this
-        driver has sourced -- so the report is the compiler's first line when
-        it is there and the warning alone when it is not, never a
-        `command not found` in place of the failure."""
-        common = '''
-_vm_get()             { echo 8; }
-build_jobs()          { echo 2; }
-_push_tools()         { :; }
-config_build_env()    { CFG_ENV=(X=1); }
-detach_remote()       { :; }
-detach_wait_remote()  { echo 1; }
-scp()                 { :; }
-'''
-        cp, _ = self._drive(common + '''
-first_error() { echo "error: no member named foo"; }
-_prebuild_base 10.0.0.1
-''')
-        out = cp.stdout + cp.stderr
-        self.assertEqual(cp.returncode, 0, out)
-        self.assertIn("no member named foo", out)
-
-        cp, _ = self._drive(common + '_prebuild_base 10.0.0.1\n')
-        out = cp.stdout + cp.stderr
-        self.assertEqual(cp.returncode, 0, out)
-        self.assertIn("base prebuild FAILED", out)
-        self.assertNotIn("command not found", out)
-
-    def test_the_prebuild_can_be_turned_off_and_nothing_is_asked_of_the_guest(self):
-        """WK_VM_BASE_PREBUILD empty: the base is provisioned and sealed with
-        a cold tree, and nothing reaches the guest at all.
-
-        Emptied after the driver loaded, because the driver's own default
-        (`${WK_VM_BASE_PREBUILD:-mac-release}`) fills an empty value back in
-        -- so this drives the arm, not the way a person would reach it."""
-        cp, _ = self._drive('''
-WK_VM_BASE_PREBUILD=""
-_push_tools() { echo "REACHED THE GUEST"; }
-_prebuild_base 10.0.0.1 && echo "returned 0" || echo "returned $?"
-echo "prebuilt=${_base_prebuilt:-none}"
-''')
-        out = cp.stdout + cp.stderr
-        self.assertEqual(cp.returncode, 0, out)
-        self.assertIn("returned 0", cp.stdout, out)
-        self.assertIn("prebuilt=none", cp.stdout, out)
-        self.assertIn("base prebuild disabled", out)
-        self.assertNotIn("REACHED THE GUEST", cp.stdout)
-
-    def test_provisioning_stops_and_marks_the_base_unconditionally(self):
-        """Source-level, because the steps between are hours of real work: the
-        prebuild is not the marker's condition. `_prebuild_base ... || die`,
-        or an `if` around what follows it, is the defect coming back."""
-        body = func_body(VM.read_text(), "_provision_base")
-        tail = body.split("_prebuild_base", 1)[1]
-        self.assertNotIn("|| die", tail.splitlines()[0])
-        for step in ('_tart stop "$WK_VM_BASE"', "_base_mark_ready"):
-            self.assertIn(step, tail, f"_provision_base no longer runs {step}")
-        self.assertNotIn("if ", tail, tail)
 
 
 class TestDeletingAVMReapsWhatRanIt(WkTest):
@@ -518,7 +359,7 @@ class TestProvisioningOutlivesItsConnection(WkTest):
     """The base's first act is cloning all of WebKit, which is over an hour.
     Run in the foreground it dies with the ssh session (measured 2026-09-04:
     "Read from remote host: Connection reset by peer" took the clone with it),
-    so it is detached and polled -- the shape _prebuild_base already uses."""
+    so it is detached and polled."""
 
     def test_provisioning_is_detached_and_waited_for(self):
         body = func_body(VM.read_text(), "_provision_base")
@@ -531,11 +372,6 @@ class TestProvisioningOutlivesItsConnection(WkTest):
         body = func_body(VM.read_text(), "_provision_base")
         self.assertIn("base-provision.log", body)
         self.assertIn("wk vm base --refresh", body)
-
-    def test_both_long_jobs_share_one_ssh_fn(self):
-        text = VM.read_text()
-        self.assertIn("_base_ssh() {", text)
-        self.assertNotIn("_prebuild_ssh", text)
 
 
 class TestAnIdlePodmanMachineIsNotAReasonToRefuse(WkTest):
@@ -576,66 +412,6 @@ class TestADirtyTreeIsRefusedBeforeTheBaseIsDestroyed(WkTest):
     def test_it_says_nothing_was_deleted(self):
         arm = self.CMD.read_text().split("--rebuild)", 1)[1].split("--rm)", 1)[0]
         self.assertIn("Nothing has been deleted", arm)
-
-
-class TestTheConfigIsCheckedBeforeTheHours(WkTest):
-    def _check(self, config):
-        store = self.tmp / "store"
-        store.mkdir(exist_ok=True)
-        with stub_path({"tart": TART}) as binp:
-            return bash(DRIVER + "_check_prebuild_config && echo accepted",
-                        env={"WK_VM_STORE": str(store),
-                             "WK_VM_BASE_PREBUILD": config,
-                             "PATH": f"{binp}:{os.environ['PATH']}"})
-
-    def test_a_config_that_builds_in_a_guest_is_accepted(self):
-        cp = self._check("mac-release")
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertIn("accepted", cp.stdout)
-
-    def test_no_prebuild_at_all_is_accepted(self):
-        cp = self._check("")
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertIn("accepted", cp.stdout)
-
-    def test_a_config_that_is_not_one_is_refused_by_name(self):
-        cp = self._check("no-such-config")
-        self.assertNotEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        out = cp.stdout + cp.stderr
-        self.assertIn("no-such-config", out)
-        self.assertIn("wk build --list", out)
-
-    def test_the_question_is_the_one_config_load_answers(self):
-        """Not a list of names kept here: the check is the same call the
-        prebuild makes hours later, with the same platform, so the two cannot
-        disagree about what is a config."""
-        body = func_body(VM.read_text(), "_check_prebuild_config")
-        self.assertIn('config_load "$WK_VM_BASE_PREBUILD" "$(t_os)"', body)
-
-    def test_both_entry_points_check_it(self):
-        """`wk vm base` reaches _ensure_base, `wk vm base --refresh` reaches
-        _provision_base directly, and each is hours of work."""
-        text = VM.read_text()
-        for func in ("_ensure_base", "_provision_base"):
-            with self.subTest(func=func):
-                self.assertIn("_check_prebuild_config", func_body(text, func))
-        # Before any work, not merely somewhere in it: the first thing
-        # _ensure_base does to a machine is delete an unfinished base and pull
-        # an image.
-        body = func_body(text, "_ensure_base")
-        self.assertLess(body.index("_check_prebuild_config"), body.index("_tart"),
-                        "the config is checked after the base is touched")
-
-    def test_every_config_load_in_the_driver_names_the_platform(self):
-        """The defect: the one call in the tree that omitted it. config_load
-        dies without a platform (build/configs.sh), and this driver's calls
-        run at the very end of provisioning."""
-        calls = re.findall(r"config_load\s+([^\n]*)", VM.read_text())
-        self.assertTrue(calls, "no config_load in targets/vm.sh")
-        for call in calls:
-            with self.subTest(call=call):
-                self.assertIn("t_os", call,
-                              "config_load without the target's platform")
 
 
 class TestTheGuestKeepsTheImagesPassword(WkTest):

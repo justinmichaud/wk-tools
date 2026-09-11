@@ -27,7 +27,7 @@ NAME="${WK_NAME:-}"
 require_name "$NAME"
 
 _gui_default_config() {
-    if in_workspace; then default_config
+    if in_workspace; then default_config "$NAME"
     elif is_macos;   then echo mac-release
     else                  echo wpe-release
     fi

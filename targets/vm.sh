@@ -1,5 +1,4 @@
-# Target driver: a disposable macOS VM on Tart. `tart clone` is APFS copy-on-write, so a
-# golden base with Xcode and a checkout is built once and every workspace is a free clone.
+# Target driver: a disposable macOS VM on Tart. `tart clone` is APFS copy-on-write, so a golden base with Xcode and a checkout is built once and every workspace is a free clone.
 
 . "$WK_ROOT/bench/mac-window-probe.sh"
 . "$WK_ROOT/bench/mac-quiet-desktop.sh"
@@ -45,8 +44,6 @@ WK_VM_BASE_CPUS="${WK_VM_BASE_CPUS:-}"
 WK_VM_BASE_MEM_MB="${WK_VM_BASE_MEM_MB:-}"
 _base_cpus()   { [ -n "$WK_VM_BASE_CPUS" ] && echo "$WK_VM_BASE_CPUS" || envelope_cores; }
 _base_mem_mb() { [ -n "$WK_VM_BASE_MEM_MB" ] && echo "$WK_VM_BASE_MEM_MB" || envelope_mem_mb; }
-
-WK_VM_BASE_PREBUILD="${WK_VM_BASE_PREBUILD-mac-release}"
 
 # The prepared image's stock 140 GB does not fit even one build. A ceiling, not an allocation: the disk is sparse and the clones are copy-on-write.
 WK_VM_DISK_GB="${WK_VM_DISK_GB:-320}"
@@ -620,7 +617,6 @@ _write_marker() {
     _ssh "$ip" "printf '%s\n' \
         '# wk: this machine IS a workspace. Written by targets/vm.sh.' \
         $(sh_quote "name=$name") $(sh_quote "src=$(t_src "$name")") \
-        $(sh_quote "config=${WK_VM_BASE_PREBUILD-mac-release}") \
         > \$HOME/.wk-workspace"
 }
 
@@ -940,63 +936,6 @@ t_destroy() {
     rm -f "$WK_VM_DIR/$name.unfiltered"
 }
 
-_base_prebuilt=""
-
-# Never fails the provisioning it is the last step of: the completion marker is written after it, so anything fatal here would leave a base the next `_ensure_base` deletes as rubble.
-_prebuild_base() {
-    local ip="$1"
-    _base_prebuilt=""
-    [ -n "$WK_VM_BASE_PREBUILD" ] || { info "base prebuild disabled"; return 0; }
-
-    # shellcheck disable=SC1090
-    . "$WK_ROOT/build/configs.sh"
-    config_load "$WK_VM_BASE_PREBUILD" "$(t_os)"
-
-    local jobs
-    jobs=$(WK_CGROUP_MB=$(_vm_get "$WK_VM_BASE" Memory) \
-           WK_CGROUP_CORES=$(_vm_get "$WK_VM_BASE" CPU) build_jobs)
-
-    info "pre-building '$WK_VM_BASE_PREBUILD' in the base with -j$jobs"
-    log  "  This is the slow one and it happens once. Every workspace cloned"
-    log  "  from this base inherits the build tree and the compilation cache."
-
-    _push_tools "$WK_VM_BASE" "$ip" || {
-        warn "the base cannot be pre-built without wk-tools in it (see above) --
-  the base is still usable, but every workspace will pay for a cold build."
-        return 0
-    }
-
-    config_build_env "$(t_src "$WK_VM_BASE")" "$jobs" 10
-    local cmd
-    cmd="env $(sh_quote "${CFG_ENV[@]}") $(sh_quote "$(t_tools "$WK_VM_BASE")/build/build-in-target.sh")"
-
-    # Detached and polled, not a foreground `ssh <long command>`: this build takes over an hour, and any blip on the connection kills it.
-    command -v detach_remote >/dev/null 2>&1 || . "$WK_ROOT/lib/detach.sh"
-    local rlog="/tmp/wk-base-build.log" rrc="/tmp/wk-base-build.rc"
-    detach_remote _base_ssh "$rlog" "$rrc" -- bash -lc "$cmd" || {
-        warn "could not start the base prebuild -- the base is still usable,
-  but every workspace will pay for a cold build."
-        return 0
-    }
-
-    local t0; t0=$(date +%s)
-    local rc; rc=$(detach_wait_remote _base_ssh "$rlog" "$rrc")
-    # shellcheck disable=SC2046 -- deliberate word splitting of the option list.
-    scp -q $(_ssh_opts) "$WK_VM_USER@$ip:$rlog" "$WK_VM_DIR/base-build.log" 2>/dev/null || true
-
-    if [ "$rc" = 0 ]; then
-        info "base prebuild finished in $(( ($(date +%s) - t0) / 60 ))m"
-        _base_prebuilt="$WK_VM_BASE_PREBUILD"
-    else
-        warn "base prebuild FAILED after $(( ($(date +%s) - t0) / 60 ))m -- the base is
-  still usable, but every workspace will pay for a cold build.
-  log: $WK_VM_DIR/base-build.log"
-        if command -v first_error >/dev/null 2>&1; then
-            first_error "$WK_VM_DIR/base-build.log" 2>/dev/null | sed 's/^/    /' || true
-        fi
-    fi
-}
-
 command -v _unpinned_host_key_opts >/dev/null 2>&1 || . "$WK_ROOT/lib/reach.sh"
 
 _ssh_opts() {
@@ -1212,7 +1151,7 @@ vm_base_findings() {
 
     if ! _base_exists; then
         _f wrong "no golden base VM '$WK_VM_BASE' -- there is nothing for a guest to be cloned from" \
-                 "wk vm base   (hours: the image pull, Xcode, a checkout, a prebuild)"
+                 "wk vm base   (hours: the image pull, Xcode, a checkout)"
     elif [ ! -f "$(_base_marker)" ]; then
         _f wrong "'$WK_VM_BASE' exists but provisioning never finished in it" \
                  "wk vm base --refresh   (re-runs provisioning; nothing is re-downloaded)"
@@ -1230,26 +1169,15 @@ vm_base_findings() {
 _base_mark_ready() {
     ensure_dir "$WK_VM_DIR" 0700 >/dev/null
     printf 'image=%s
-prebuild=%s
 inputs=%s
 finished=%s
 ' \
-        "$WK_VM_IMAGE" "${_base_prebuilt:-none}" "$(_base_inputs_hash)" \
+        "$WK_VM_IMAGE" "$(_base_inputs_hash)" \
         "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$(_base_marker)"
-}
-
-_check_prebuild_config() {
-    [ -n "$WK_VM_BASE_PREBUILD" ] || return 0
-    # shellcheck disable=SC1090
-    . "$WK_ROOT/build/configs.sh"
-    ( config_load "$WK_VM_BASE_PREBUILD" "$(t_os)" ) >/dev/null 2>&1 \
-        || die "WK_VM_BASE_PREBUILD='$WK_VM_BASE_PREBUILD' is not a build config for
-    this target.  wk build --list names them; empty disables the prebuild."
 }
 
 _ensure_base() {
     _base_ready && return 0
-    _check_prebuild_config
 
     if _base_exists; then
         warn "'$WK_VM_BASE' exists but was never finished (no completion marker)"
@@ -1293,7 +1221,6 @@ _provision_base() {
     local cpus mem
     cpus=$(_base_cpus)
     mem=$(_base_mem_mb)
-    _check_prebuild_config
     _check_guest_limit
     _check_memory_budget "$WK_VM_BASE" "$mem"
     ensure_dir "$WK_VM_DIR" 0700
@@ -1346,7 +1273,7 @@ $(_runlog_tail "$runlog")"
     _push_tools "$WK_VM_BASE" "$ip" \
         || die "the base cannot be provisioned without wk-tools in it (see above)"
     vm_login_note
-    # Detached and polled, for the reason _prebuild_base gives (measured 2026-09-04: "Read from remote host: Connection reset by peer" an hour into the clone, which died with it).
+    # Detached and polled, not a foreground `ssh <long command>`: the clone is over an hour, and the connection does not always last it (measured 2026-09-04: "Read from remote host: Connection reset by peer", which took the clone with it).
     command -v detach_remote >/dev/null 2>&1 || . "$WK_ROOT/lib/detach.sh"
     local plog="/tmp/wk-base-provision.log" prc="/tmp/wk-base-provision.rc"
     detach_remote _base_ssh "$plog" "$prc" -- \
@@ -1361,8 +1288,6 @@ $(_runlog_tail "$runlog")"
     [ "$prov_rc" = 0 ] || die "base provisioning failed (rc=$prov_rc).
     What it printed is in $WK_VM_DIR/base-provision.log; the base is rubble
     until this finishes, and a re-run starts it again:  wk vm base --refresh"
-
-    _prebuild_base "$ip"
 
     _unblock_desktop "$ip" || die "Setup Assistant is still on '$WK_VM_BASE''s screen.
     What it printed is above; the base is not sealed behind a pane, because

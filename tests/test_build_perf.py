@@ -36,7 +36,7 @@ set -euo pipefail
 . "{REPO}/lib/arch.sh"
 . "{REPO}/build/configs.sh"
 config_load {config} {os} container
-config_build_env /src/WebKit 4 10 native
+WK_CCACHE_DIR=/ccache config_build_env /src/WebKit 4 10 native
 for e in "${{CFG_ENV[@]}}"; do case "$e" in WK_USE_CCACHE=*) echo "$e" ;; esac; done
 ''')
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)

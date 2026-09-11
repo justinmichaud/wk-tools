@@ -266,7 +266,6 @@ class FakeWorkspace:
             "# written by tests/support.py\n"
             "name=selftest-ws\n"
             f"src={self.ws_dir / 'WebKit'}\n"
-            "config=jsc-release\n"
         )
 
     def env(self, extra=None):

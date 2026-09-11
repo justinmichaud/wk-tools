@@ -118,7 +118,7 @@ set -euo pipefail
 . "{REPO}/lib/arch.sh"
 . "{REPO}/build/configs.sh"
 config_load jsc-release linux container
-WK_TARGET_BUILD_ARGS="--no-fatal-warnings" config_build_env /src/WebKit 4 10 native
+WK_TARGET_BUILD_ARGS="--no-fatal-warnings" WK_CCACHE_DIR=/ccache config_build_env /src/WebKit 4 10 native
 for e in "${{CFG_ENV[@]}}"; do case "$e" in WK_BUILD_ARGS=*) echo "$e" ;; esac; done
 ''')
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
@@ -133,7 +133,7 @@ set -euo pipefail
 . "{REPO}/lib/arch.sh"
 . "{REPO}/build/configs.sh"
 config_load jsc-release linux container
-config_build_env /src/WebKit 4 10 native
+WK_CCACHE_DIR=/ccache config_build_env /src/WebKit 4 10 native
 for e in "${{CFG_ENV[@]}}"; do case "$e" in WK_BUILD_ARGS=*) echo "$e" ;; esac; done
 ''')
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
@@ -444,7 +444,7 @@ set -euo pipefail
 . "{REPO}/lib/arch.sh"
 . "{REPO}/build/configs.sh"
 config_load {config} {os} {kind}
-config_build_env /src/WebKit 4 10 native
+WK_CCACHE_DIR=/ccache config_build_env /src/WebKit 4 10 native
 for e in "${{CFG_ENV[@]}}"; do
     case "$e" in WK_BUILD_CMAKE=*) echo "$e" ;; WK_BUILD_ARGS=*) echo "$e" ;; esac
 done
@@ -552,7 +552,7 @@ set -euo pipefail
 . "{REPO}/lib/arch.sh"
 . "{REPO}/build/configs.sh"
 config_load jsc-release linux remote
-WK_TARGET_CMAKE="-DCMAKE_CXX_FLAGS=-Wno-invalid-constexpr" config_build_env /src/WebKit 4 10 native
+WK_TARGET_CMAKE="-DCMAKE_CXX_FLAGS=-Wno-invalid-constexpr" WK_CCACHE_DIR=/ccache config_build_env /src/WebKit 4 10 native
 for e in "${{CFG_ENV[@]}}"; do case "$e" in WK_BUILD_CMAKE=*) echo "$e" ;; esac; done
 ''', env={"WK_TARGET_LIBCXX": "1"})
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
@@ -863,7 +863,7 @@ set -euo pipefail
 . "{REPO}/lib/arch.sh"
 . "{REPO}/build/configs.sh"
 config_load {config} {os} {kind}
-config_build_env /src/WebKit {jobs} {nice} native
+WK_CCACHE_DIR=/ccache config_build_env /src/WebKit {jobs} {nice} native
 for e in "${{CFG_ENV[@]}}"; do echo "$e"; done
 ''')
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)

@@ -6,8 +6,8 @@
 # Runs the jsc binary a build produced, from the workspace's own build tree on
 # its target. Everything after `--` goes to jsc verbatim.
 #
-#   --config <config>   the build config to run (default: default_config;
-#                       wk build --list prints every name)
+#   --config <config>   the build config to run (default: the last build's,
+#                       else the platform's; wk build --list prints every name)
 #   --lldb              run jsc under lldb instead of directly; under
 #                       --until-crash each iteration runs under lldb, and a
 #                       crash leaves you at its prompt
@@ -28,7 +28,7 @@ WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 NAME="${WK_NAME:-}"
 require_name "$NAME"
 
-CONFIG="${WK_CONFIG:-$(default_config)}"
+CONFIG="${WK_CONFIG:-$(default_config "$NAME")}"
 DEBUGGER=""
 UNTIL_CRASH=""
 MAX=200

@@ -269,7 +269,7 @@ _config_merge_cxx_flags() { # <cmake flags string> -- every -DCMAKE_CXX_FLAGS= (
     printf '%s' "$out"
 }
 
-config_build_env() {   # assembled into CFG_ENV, config_load first; the architecture is passed in rather than read here, the golden-base prebuild using this and having no workspace
+config_build_env() {   # assembled into CFG_ENV, config_load first
     local src="$1" jobs="$2" nice="$3" arch="${4:-native}"
 
     local out=""   # Xcode's default DerivedData is one directory per *user*, shared by every workspace on the macOS remote target, so the paths below derive from $src
@@ -287,8 +287,9 @@ config_build_env() {   # assembled into CFG_ENV, config_load first; the architec
     [ -n "${WK_EXTRA_CMAKE:-}" ] && cmakeargs="$cmakeargs $WK_EXTRA_CMAKE"
     cmakeargs="$(_config_merge_cxx_flags "$cmakeargs")"
 
-    CFG_ENV=(   # WK_CCACHE_DIR is set by cmd/build (t_ccache_dir) before this runs, the /ccache default mattering only to a caller that skips that step (targets/vm.sh's base-image prebuild); the sloppiness desensitises __TIMESTAMP__ and BuildRevision.h
-        "CCACHE_DIR=${WK_CCACHE_DIR:-/ccache}"
+    [ -n "${WK_CCACHE_DIR:-}" ] || die "config_build_env: WK_CCACHE_DIR is unset -- cmd/build sets it from t_ccache_dir"
+    CFG_ENV=(   # the sloppiness desensitises __TIMESTAMP__ and BuildRevision.h
+        "CCACHE_DIR=$WK_CCACHE_DIR"
         "CCACHE_BASEDIR=$src"
         "CCACHE_SLOPPINESS=pch_defines,time_macros,include_file_mtime,include_file_ctime"
         "CCACHE_NOHASHDIR=true"

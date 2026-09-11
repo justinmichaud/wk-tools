@@ -11,8 +11,8 @@
 # workspace on macOS (the podman VM has no /dev/dri to pass through). On Linux
 # with a real seat, pass --gpu.
 #
-#   --config <config>   the build config to test (default: last built, or
-#                        default_config); `wk build --list` lists every name
+#   --config <config>   the build config to test (default: the last build's,
+#                        else the platform's); `wk build --list` lists every name
 #   --layout             run the layout-test suite instead of the JSC suite
 #   --gpu                use the real GPU for layout tests (Linux only)
 #   --lldb [web|ui]      debug one layout test: "web" (default) attaches to the
@@ -45,7 +45,6 @@ while [ $# -gt 0 ]; do
         --config)  CONFIG="${2:-}"; shift 2 ;;
         --layout)  SUITE=layout; shift ;;
         --gpu)     GPU=1; shift ;;
-        # Consumed here, or the test path below would swallow "ui"/"web".
         --lldb)    LLDB=web
                    case "${2:-}" in ui|web) LLDB="$2"; shift ;; esac
                    shift ;;
@@ -71,14 +70,7 @@ if [ -n "$KILL" ]; then   # before a config is resolved: stopping a run needs no
     exit 0
 fi
 
-if [ -z "$CONFIG" ]; then
-    CONFIG=$(last_built_config "$NAME")
-    if [ -n "$CONFIG" ]; then
-        info "config: $CONFIG -- what '$NAME' was last built with"
-    else
-        CONFIG=$(default_config)
-    fi
-fi
+[ -n "$CONFIG" ] || CONFIG=$(default_config "$NAME")
 
 config_load "$CONFIG" "$(t_os)" || die "unknown config '$CONFIG' (wk build --list)"
 

@@ -61,3 +61,43 @@ class TestTheDefaultIsNotAFallback(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestTheDefaultConfigIsDerived(unittest.TestCase):
+    """default_config (lib/target.sh): the config a command uses when none is
+    given is the last build's, from its task record, and otherwise the target
+    platform's. Neither is recorded anywhere else: the workspace marker names
+    the workspace, not a build."""
+
+    def _default(self, last_built, target):
+        cp = bash(f'''
+set -euo pipefail
+. "{REPO}/lib/common.sh"
+. "{REPO}/lib/target.sh"
+last_built_config() {{ printf '%s' "{last_built}"; }}
+ws_target() {{ echo {target}; }}
+default_config demo
+''')
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        return cp.stdout.strip(), cp.stderr
+
+    def test_the_last_build_wins_and_says_so(self):
+        config, err = self._default("mac-debug", "vm")
+        self.assertEqual(config, "mac-debug")
+        self.assertIn("last built with", err)
+
+    def test_a_macos_target_with_no_build_defaults_to_the_apple_port(self):
+        config, _ = self._default("", "vm")
+        self.assertEqual(config, "mac-release")
+
+    def test_a_linux_target_with_no_build_defaults_to_jsc(self):
+        config, _ = self._default("", "container")
+        self.assertEqual(config, "jsc-release")
+
+    def test_no_marker_records_a_config(self):
+        """The three writers of a workspace marker (targets/vm.sh,
+        container/firstrun.sh, tests/support.py) name the workspace only."""
+        for rel in ("targets/vm.sh", "container/firstrun.sh", "tests/support.py"):
+            with self.subTest(file=rel):
+                self.assertNotIn("config=", (REPO / rel).read_text())
+        self.assertNotIn("wk_marker_field config", (REPO / "lib/target.sh").read_text())

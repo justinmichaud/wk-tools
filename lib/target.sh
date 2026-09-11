@@ -275,10 +275,18 @@ default_target() { # `container` on a host, `local` inside one: nothing else is 
     echo container
 }
 
-default_config() {
-    local c=""
-    in_workspace && c=$(wk_marker_field config)
-    printf '%s' "${c:-jsc-release}"
+default_config() { # <name> -- the last build's config, else the target platform's
+    local name="$1" c
+    c=$(last_built_config "$name")
+    if [ -n "$c" ]; then
+        info "config: $c -- what '$name' was last built with"
+    else
+        case "$( load_target "$(ws_target "$name")" >/dev/null 2>&1 && t_os )" in
+            macos) c=mac-release ;;
+            *)     c=jsc-release ;;
+        esac
+    fi
+    printf '%s' "$c"
 }
 
 last_built_config() {
