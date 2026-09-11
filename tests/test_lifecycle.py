@@ -13,7 +13,63 @@ import os
 import unittest
 from pathlib import Path
 
-from tests.support import WkTest, rand_suffix, requires_podman_vm, run
+from tests.support import WkTest, rand_suffix, requires_podman_vm, run, stub_path
+
+
+# A machine that is up with nothing stopped in it, and a peer that refuses
+# every connection: `wk start` has started everything there is to start and
+# `wk status` still has an unreachable machine to report.
+STUB_PODMAN = """#!/bin/sh
+case "$1 $2" in
+  "machine inspect") echo running ;;
+  "machine ssh") ;;
+  *) ;;
+esac
+exit 0
+"""
+REFUSING_SSH = """#!/bin/sh
+echo "ssh: connect to host: Connection refused" >&2
+exit 255
+"""
+
+
+class TestStartExitsOnItsOwnResult(WkTest):
+    """`wk start` ended with `exec wk status`, so a peer that would not answer
+    -- which `wk status` reports as 4, and rightly -- became `wk start`'s own
+    exit code, about work it had finished. The status it prints is information
+    only; the code it exits with is its own."""
+
+    def _env(self, binp):
+        return {"PATH": "%s:%s" % (binp, os.environ.get("PATH", "/usr/bin:/bin")),
+                "XDG_STATE_HOME": str(self.tmp / "xdg"),
+                "WK_REMOTE_ROOT": str(self.tmp / "rr"),
+                "WK_MACHINES_DIR": str(self.tmp / "machines"),
+                "WK_TARGET": "remote",
+                "WK_REMOTE_HOST": "fake-unreachable-machine",
+                "WK_NO_CLAUDE_RC": "1"}
+
+    def setUp(self):
+        super().setUp()
+        (self.tmp / "machines").mkdir(parents=True)
+        # One workspace on the peer, so there is something the walk cannot
+        # reach: a machine with no workspaces reports nothing either way.
+        ws = self.tmp / "xdg" / "wk" / "remote" / "remote" / "ws" / "peer-ws"
+        ws.mkdir(parents=True)
+        (ws / "build.status").write_text("state=ok\nexit=0\n")
+
+    def test_an_unreachable_peer_does_not_become_wk_starts_exit_code(self):
+        with stub_path({"podman": STUB_PODMAN, "ssh": REFUSING_SSH}) as binp:
+            env = self._env(binp)
+            status = run("status", env=env, timeout=90)
+            start = run("start", env=env, timeout=90)
+        self.assertEqual(status.returncode, 4, status.stdout)
+        self.assertEqual(start.returncode, 0, start.stdout)
+        self.assertIn("status (information only)", start.stdout)
+
+    def test_it_does_not_hand_its_exit_code_to_status(self):
+        text = (Path(__file__).resolve().parent.parent / "cmd" / "start").read_text()
+        self.assertNotIn("exec \"$WK_ROOT/wk\" status", text)
+        self.assertIn("status --no-fleet", text)
 
 
 class TestExplainStatic(unittest.TestCase):

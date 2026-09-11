@@ -240,7 +240,7 @@ def requests_dir():
     return os.path.join(state_dir(), "broker")
 
 
-def status_write(path, **fields):      # the schema lib/detach.sh defines
+def status_write(path, **fields):      # one key=value per line, read with kv_field (lib/common.sh)
     tmp = f"{path}.tmp.{os.getpid()}"
     fields.setdefault("updated", time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()))
     with open(tmp, "w") as f:

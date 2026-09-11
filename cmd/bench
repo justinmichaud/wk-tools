@@ -150,6 +150,7 @@ WK_ABORT_SECONDS="${WK_ABORT_SECONDS:-5400}"
 . "$WK_ROOT/lib/target.sh"
 . "$WK_ROOT/lib/arch.sh"
 . "$WK_ROOT/lib/detach.sh"
+. "$WK_ROOT/lib/task.sh"
 
 _bench_where() { # <verb> <args...> -- prints host or workspace
     case "${1:-}" in
@@ -364,17 +365,20 @@ preflight() {
         check no  "cpu governor" "$gov -- wk quiesce on"
     fi
 
-    local load busy f
+    local load busy d
     load=$(awk '{print $1}' /proc/loadavg)
 
-    busy=0
-    for f in "$WK_STORE"/ws/*/build.status; do
-        [ -f "$f" ] || continue
-        # `build_live`: a build killed with -9 leaves `state=running` for ever.
-        if build_live "$f"; then
-            busy=$((busy + 1))
-        fi
-    done
+    busy=0   # one verdict, computed now (task_verdict): a build killed with -9 has no pid left to answer and holds no benchmark off, where a silent full-LTO link still does
+    while IFS= read -r d; do
+        [ -n "$d" ] || continue
+        [ "$(task_field "$d" kind)" = build ] || continue
+        case "$( load_target "$(ws_target "$(task_field "$d" name)")" >/dev/null 2>&1
+                 task_verdict "$d" )" in
+            running|silent|starting) busy=$((busy + 1)) ;;
+        esac
+    done <<EOF
+$(task_list)
+EOF
     if [ "$busy" != 0 ]; then
         check no "no builds running" "$busy build(s) in progress"
     elif [ "$(printf '%.0f' "$load")" -gt "${WK_BENCH_MAX_LOAD:-4}" ]; then
@@ -536,7 +540,7 @@ cmd_run() {
     [ -n "$seeded" ] && seeded_ctr="/cache/bench/$(basename "$seeded")"
 
     local id="$(date -u +%Y%m%dT%H%M%SZ)-$plan-$ws"
-    local task="$(bench_task_stamp)-$ws"
+    local task="$(task_stamp)-$ws"
     bench_task_new "$task" subject.kind=workspace subject.spec="$ws" \
         devices="container=$CONFIG" plans="$plan" rounds=1 slots="$ws" count="$COUNT" \
         --command "wk bench $ws $plan --config $CONFIG${COUNT:+ --count $COUNT}"

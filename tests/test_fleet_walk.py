@@ -171,5 +171,107 @@ ws_target demo-single
         self.assertEqual(cp.stdout.strip(), "beta", cp.stdout + cp.stderr)
 
 
+# `tailscale status --json` as lib/reach.sh reads it: DNSName and Online, one
+# peer per name this test names.
+_TAILSCALE_STATUS = '''#!/bin/sh
+cat <<'JSON'
+{"Self": {"DNSName": "here.tail.ts.net.", "TailscaleIPs": ["100.64.0.1"]},
+ "Peer": {
+   "k1": {"DNSName": "downboard.tail.ts.net.", "TailscaleIPs": ["100.64.0.2"], "Online": false},
+   "k2": {"DNSName": "upboard.tail.ts.net.",   "TailscaleIPs": ["100.64.0.3"], "Online": true}}}
+JSON
+'''
+
+# Long enough that a dial would be the whole test's runtime, which is the point.
+_HANGING_SSH = '#!/bin/sh\nsleep 30\nexit 0\n'
+
+
+class TestAnOfflineFleetMemberIsRefusedBeforeTheDial(WkTest):
+    """`ssh` to a node the tailnet already reports down spends the whole
+    ConnectTimeout learning it. The coordinator's answer is read first, once
+    per process (wk_tailscale_peers), and the refusal names the board."""
+
+    def _m_ssh(self, node, bench=""):
+        with stub_path({"tailscale": _TAILSCALE_STATUS, "ssh": _HANGING_SSH}) as binp:
+            script = f'''
+set -euo pipefail
+. "$WK_ROOT/lib/common.sh"
+. "$WK_ROOT/boot/machines.sh"
+NODE_NAME=board NODE_SSH={node} NODE_BENCH_SSH="{bench}" NODE_ROLE=workstation
+rc=0; {"i_ssh" if bench else "m_ssh"} true || rc=$?
+echo "rc=$rc"
+'''
+            return bash(script, env={"PATH": f"{binp}:{os.environ.get('PATH', '/usr/bin:/bin')}"},
+                        timeout=20)
+
+    def test_a_down_peer_is_refused_by_name_without_dialling(self):
+        cp = self._m_ssh("downboard")
+        self.assertIn("rc=255", cp.stdout, cp.stdout + cp.stderr)
+        self.assertIn("downboard", cp.stderr, cp.stderr)
+        self.assertIn("offline", cp.stderr, cp.stderr)
+
+    def test_the_bench_channel_asks_the_same_question(self):
+        cp = self._m_ssh("upboard", bench="downboard")
+        self.assertIn("rc=255", cp.stdout, cp.stdout + cp.stderr)
+        self.assertIn("downboard", cp.stderr, cp.stderr)
+
+    def test_a_peer_the_tailnet_says_is_up_is_still_dialled(self):
+        with stub_path({"tailscale": _TAILSCALE_STATUS, "ssh": "#!/bin/sh\necho dialled\n"}) as binp:
+            script = '''
+set -euo pipefail
+. "$WK_ROOT/lib/common.sh"
+. "$WK_ROOT/boot/machines.sh"
+NODE_NAME=board NODE_SSH=upboard NODE_ROLE=workstation
+m_ssh true
+'''
+            cp = bash(script, env={"PATH": f"{binp}:{os.environ.get('PATH', '/usr/bin:/bin')}"},
+                      timeout=20)
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertIn("dialled", cp.stdout, cp.stdout)
+
+    def test_a_walk_asks_the_coordinator_once_however_many_boards_it_dials(self):
+        """`tailscale status --json` is capped at 4s against a wedged
+        tailscaled, so one per dial is the walk's whole runtime. reach_offline
+        answers by exit status rather than into a command substitution, so the
+        per-process read is this shell's and the walk pays for one."""
+        counter = self.tmp / "ts-calls"
+        counting = f'''#!/bin/sh
+echo call >> "{counter}"
+''' + _TAILSCALE_STATUS.split("\n", 1)[1]
+        with stub_path({"tailscale": counting, "ssh": "#!/bin/sh\necho dialled\n"}) as binp:
+            script = '''
+set -euo pipefail
+. "$WK_ROOT/lib/common.sh"
+. "$WK_ROOT/boot/machines.sh"
+NODE_ROLE=workstation
+for NODE_SSH in upboard unlisted upboard downboard; do
+    NODE_NAME=$NODE_SSH
+    m_ssh true >/dev/null 2>&1 || true
+done
+echo WALKED
+'''
+            cp = bash(script, env={"PATH": f"{binp}:{os.environ.get('PATH', '/usr/bin:/bin')}"},
+                      timeout=30)
+        self.assertIn("WALKED", cp.stdout, cp.stdout + cp.stderr)
+        calls = counter.read_text().count("call") if counter.exists() else 0
+        self.assertEqual(calls, 1, f"the walk ran `tailscale status` {calls} times")
+
+    def test_a_machine_the_tailnet_does_not_name_is_still_dialled(self):
+        """Most of the fleet is not on the tailnet by its machine name, and
+        an answer of "not listed" is not an answer of "down"."""
+        with stub_path({"tailscale": _TAILSCALE_STATUS, "ssh": "#!/bin/sh\necho dialled\n"}) as binp:
+            script = '''
+set -euo pipefail
+. "$WK_ROOT/lib/common.sh"
+. "$WK_ROOT/boot/machines.sh"
+NODE_NAME=board NODE_SSH=unlisted NODE_ROLE=workstation
+m_ssh true
+'''
+            cp = bash(script, env={"PATH": f"{binp}:{os.environ.get('PATH', '/usr/bin:/bin')}"},
+                      timeout=20)
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertIn("dialled", cp.stdout, cp.stdout)
+
+
 if __name__ == "__main__":
     unittest.main()

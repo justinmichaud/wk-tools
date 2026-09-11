@@ -1,25 +1,22 @@
-"""The mirror's refspecs follow the mirror's own layout: origin's branches
-become the mirror's own heads, and every other upstream is namespaced --
-owed by docs/HANDOFF-wk-cli.md: "the refspecs follow the mirror's own
-layout (origin's branches are its heads; every other upstream is
-namespaced); a fifth upstream needs no change here beyond `wk_remotes`
-[needs a test]".
+"""The refspecs follow the layout of whatever a checkout fetches from:
+origin's branches are a wk mirror's own heads, every other upstream is
+namespaced under its own name, and an upstream asked directly has only
+refs/heads. A fifth upstream needs no change beyond `wk_remotes`, which is
+what the last test here asserts.
 
-Two functions are lifted and driven directly, with sed (the
+The functions are lifted and driven directly, with sed (the
 tests/test_wifi_seed.py idiom), so this tracks the exact code that ships:
 
   - `wk_remotes` (lib/store.sh): the one list of upstreams, a plain heredoc.
   - `wk_mirror_default_remotes` (lib/store.sh): `wk_remotes | awk ...`,
     read through the function rather than the heredoc directly.
-  - `mirror_refspecs` (cmd/sync): builds the fetch refspec list from
-    `wk_mirror_default_remotes`, one line per remote.
+  - `wk_fetch_refspecs` (lib/store.sh): what one remote is asked for, by the
+    source it is asked of.
+  - `wk_fetch_config` (lib/store.sh): the one writer of those specs into a
+    checkout's `remote.<r>.fetch`.
 
-The last test overrides `wk_remotes` itself (a shell function definition
-takes whatever is defined last) with a five-remote fake and re-derives
-both `wk_mirror_default_remotes` and `mirror_refspecs` from it, proving the
-refspec list is *generated* from the remotes list rather than hand-written
-to match today's four -- a fifth upstream needs no change beyond
-`wk_remotes`, exactly as the handoff item claims.
+A remote nothing here has heard of ("fifth") is answered for anyway: that is
+what "no change beyond `wk_remotes`" means.
 
 Run: python3 -m unittest tests.test_owed_cli_refspecs -v
 """
@@ -28,7 +25,6 @@ import unittest
 
 from tests.support import REPO, WkTest
 
-CMD_SYNC = REPO / "cmd" / "sync"
 LIB_STORE = REPO / "lib" / "store.sh"
 
 
@@ -39,9 +35,6 @@ def _lift_func(path, name):
     ).stdout
     assert text.strip(), f"{name}() not found in {path}"
     return text
-
-
-ORIGIN_MAP = "+refs/heads/*:refs/remotes/origin/*"
 
 
 def _namespaced(remote):
@@ -93,92 +86,100 @@ class TestMirrorDefaultRemotes(WkTest):
         self.assertEqual(cp.stdout.strip(), "origin wpe fork forkwpe fifth")
 
 
-class TestMirrorRefspecs(WkTest):
-    """cmd/sync's mirror_refspecs: origin maps refs/heads to its own
-    refs/remotes/origin (a plain clone's own layout, since origin's
-    branches become the mirror's heads); every other remote is namespaced
-    under its own name -- and the whole list is generated from
-    wk_mirror_default_remotes, not hand-listed."""
+class TestFetchRefspecs(WkTest):
+    """lib/store.sh's wk_fetch_refspecs: what one remote is asked for, and by
+    the source it is asked of. From a wk mirror, origin's branches are that
+    mirror's own heads and every other upstream is namespaced under its own
+    name; from an upstream itself, every remote's branches are refs/heads.
+    Origin is narrowed to wk_mirror_branches either way -- the whole point of
+    the pair, since WebKit/WebKit's 924 heads are what git's default refspec
+    writes a remote-tracking ref for, one by one."""
 
     def _fn(self):
         return (
             _lift_func(LIB_STORE, "wk_remotes")
             + "\n"
-            + _lift_func(LIB_STORE, "wk_mirror_default_remotes")
+            + _lift_func(LIB_STORE, "wk_mirror_branches")
             + "\n"
-            + _lift_func(CMD_SYNC, "mirror_refspecs")
+            + _lift_func(LIB_STORE, "wk_fetch_refspecs")
         )
 
-    def test_origin_maps_heads_to_its_own_remote_tracking_namespace(self):
-        cp = self.bash(self._fn() + "\nmirror_refspecs")
+    def _specs(self, remote, mirror="/mirror/WebKit.git", env=None):
+        cp = self.bash(self._fn() + f"\nwk_fetch_refspecs {remote!r} {mirror!r}", env=env)
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        specs = cp.stdout.split()
-        self.assertIn(ORIGIN_MAP, specs)
-        # Exactly once: origin's branches are the mirror's own heads, not a
-        # namespaced copy of itself as well.
-        self.assertEqual(specs.count(ORIGIN_MAP), 1)
-        self.assertNotIn(_namespaced("origin"), specs)
+        return cp.stdout.split()
 
-    def test_every_other_upstream_is_namespaced_under_its_own_name(self):
-        cp = self.bash(self._fn() + "\nmirror_refspecs")
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        specs = cp.stdout.split()
+    def test_origin_from_a_mirror_is_narrowed_to_the_mirrored_branches(self):
+        self.assertEqual(self._specs("origin"),
+                         ["+refs/heads/main:refs/remotes/origin/main"])
+
+    def test_origin_from_the_upstream_itself_is_narrowed_the_same_way(self):
+        self.assertEqual(self._specs("origin", mirror=""),
+                         ["+refs/heads/main:refs/remotes/origin/main"])
+
+    def test_wk_mirror_branches_is_the_one_list(self):
+        self.assertEqual(
+            self._specs("origin", env={"WK_MIRROR_BRANCHES": "main wpe-2.46"}),
+            ["+refs/heads/main:refs/remotes/origin/main",
+             "+refs/heads/wpe-2.46:refs/remotes/origin/wpe-2.46"])
+
+    def test_every_other_upstream_from_a_mirror_is_namespaced_on_both_sides(self):
         for remote in ("wpe", "fork", "forkwpe"):
-            self.assertIn(_namespaced(remote), specs, specs)
+            with self.subTest(remote=remote):
+                self.assertEqual(self._specs(remote), [_namespaced(remote)])
 
-    def test_a_fifth_upstream_is_namespaced_with_no_change_here(self):
-        """The handoff's exact claim: a fifth remote needs no change beyond
-        wk_remotes. This overrides only wk_remotes (a fresh function
-        definition, the same mechanism the previous class used) and
-        re-derives mirror_refspecs -- unedited -- from it."""
-        fake_remotes = (
-            'wk_remotes() { cat <<'"'"'EOF'"'"'\n'
-            'origin   https://github.com/WebKit/WebKit.git\n'
-            'wpe      https://github.com/WebPlatformForEmbedded/WPEWebKit.git\n'
-            'fork     https://github.com/justinmichaud/WebKit.git\n'
-            'forkwpe  https://github.com/justinmichaud/WPEWebKit.git\n'
-            'fifth    https://example.com/fifth/WebKit.git\n'
-            'EOF\n'
-            '}\n'
-        )
-        rest = (
-            _lift_func(LIB_STORE, "wk_mirror_default_remotes")
-            + "\n"
-            + _lift_func(CMD_SYNC, "mirror_refspecs")
-        )
-        cp = self.bash(fake_remotes + rest + "\nmirror_refspecs")
+    def test_every_other_upstream_from_itself_maps_its_heads(self):
+        for remote in ("wpe", "fork", "forkwpe"):
+            with self.subTest(remote=remote):
+                self.assertEqual(self._specs(remote, mirror=""),
+                                 [f"+refs/heads/*:refs/remotes/{remote}/*"])
+
+    def test_a_fifth_upstream_needs_no_change_here(self):
+        """A fifth remote needs no change beyond wk_remotes. Nothing about this
+        function names a remote, so the proof is that it answers for one it has
+        never heard of."""
+        self.assertEqual(self._specs("fifth"), [_namespaced("fifth")])
+        self.assertEqual(self._specs("fifth", mirror=""),
+                         ["+refs/heads/*:refs/remotes/fifth/*"])
+
+
+class TestTheWiringWritesThoseRefspecs(WkTest):
+    """And the one caller: wk_fetch_config puts exactly wk_fetch_refspecs'
+    answer into `remote.<r>.fetch`, one `--add` per spec, so a checkout's
+    configuration and a `wk sync` fetch cannot disagree about what is asked
+    for."""
+
+    def _script(self, mirror):
+        cp = self.bash(
+            '. lib/common.sh\n. lib/store.sh\n'
+            f'wk_fetch_config {mirror!r}')
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        specs = cp.stdout.split()
-        self.assertIn(_namespaced("fifth"), specs, specs)
-        # origin is still the one exception, unaffected by the new arrival.
-        self.assertIn(ORIGIN_MAP, specs)
-        self.assertEqual(specs.count(ORIGIN_MAP), 1)
+        return cp.stdout
 
-    def test_the_refspec_count_tracks_the_remote_count_not_a_fixed_number(self):
-        """Generated, not hand-listed: N remotes produce exactly N
-        refspecs (one origin mapping plus one namespaced entry per other
-        remote) for both today's four and a fifth added on top."""
-        base_fn = self._fn()
-        cp4 = self.bash(base_fn + "\nmirror_refspecs")
-        self.assertEqual(len(cp4.stdout.split()), 4, cp4.stdout)
+    def test_each_remote_gets_its_specs_and_no_tags(self):
+        out = self._script("/mirror/WebKit.git")
+        self.assertIn("git config --add remote.origin.fetch "
+                      "'+refs/heads/main:refs/remotes/origin/main'", out)
+        for remote in ("wpe", "fork", "forkwpe"):
+            self.assertIn(f"git config --add remote.{remote}.fetch "
+                          f"'{_namespaced(remote)}'", out)
+            self.assertIn(f"git config remote.{remote}.tagOpt --no-tags", out)
+        self.assertIn("git config remote.origin.tagOpt --no-tags", out)
 
-        fake_remotes = (
-            'wk_remotes() { cat <<'"'"'EOF'"'"'\n'
-            'origin   https://github.com/WebKit/WebKit.git\n'
-            'wpe      https://github.com/WebPlatformForEmbedded/WPEWebKit.git\n'
-            'fork     https://github.com/justinmichaud/WebKit.git\n'
-            'forkwpe  https://github.com/justinmichaud/WPEWebKit.git\n'
-            'fifth    https://example.com/fifth/WebKit.git\n'
-            'EOF\n'
-            '}\n'
-        )
-        rest = (
-            _lift_func(LIB_STORE, "wk_mirror_default_remotes")
-            + "\n"
-            + _lift_func(CMD_SYNC, "mirror_refspecs")
-        )
-        cp5 = self.bash(fake_remotes + rest + "\nmirror_refspecs")
-        self.assertEqual(len(cp5.stdout.split()), 5, cp5.stdout)
+    def test_every_remote_is_rewritten_to_the_mirror_given(self):
+        out = self._script("/mirror/WebKit.git")
+        for url in ("https://github.com/WebKit/WebKit.git",
+                    "https://github.com/WebPlatformForEmbedded/WPEWebKit.git",
+                    "https://github.com/justinmichaud/WebKit.git",
+                    "https://github.com/justinmichaud/WPEWebKit.git"):
+            self.assertIn(
+                f"git config --add 'url./mirror/WebKit.git.insteadOf' '{url}'", out)
+
+    def test_no_mirror_rewrites_nothing_and_asks_the_upstreams(self):
+        out = self._script("")
+        self.assertNotIn("insteadOf", out)
+        self.assertIn("git config --add remote.wpe.fetch "
+                      "'+refs/heads/*:refs/remotes/wpe/*'", out)
 
 
 if __name__ == "__main__":

@@ -19,6 +19,7 @@ Run: python3 -m unittest tests.test_machine_prepare -v
 import os
 import pty
 import subprocess
+import sys
 import unittest
 
 from tests.support import REPO, WkTest, bash, func_body, scratch_dir, stub_path
@@ -263,11 +264,13 @@ class TheHostOsGateAsksWhetherTheDriverCanReachIt(WkTest):
     """`mbp.conf` and `benchvm.conf` both say os=macos, but for different
     reasons: the mac-volume driver reads and acts over ssh, while mac-guest
     needs `tart` on the machine itself. So the gate is `b_probeable` -- what a
-    driver declares about its own reach -- and not the OS. Held to the OS alone,
-    it said 'run this over there' about a machine it had just probed."""
+    driver declares about its own reach -- and not the OS, and the refusal says
+    which of the two it is: a host of the wrong kind is told to run it over
+    there, and the right kind of host missing what the driver needs is told
+    that, since there is nowhere else to run it."""
 
-    def _boot(self, machine, *args):
-        return bash('exec "$WK_ROOT/cmd/boot" %s %s' % (machine, " ".join(args)))
+    def _boot(self, machine, *args, env=None):
+        return bash('exec "$WK_ROOT/cmd/boot" %s %s' % (machine, " ".join(args)), env=env)
 
     def test_a_driver_that_reaches_its_machine_answers_from_a_linux_host(self):
         for args in (("--status",), ("--dry-run",)):
@@ -276,11 +279,23 @@ class TheHostOsGateAsksWhetherTheDriverCanReachIt(WkTest):
                 out = cp.stdout + cp.stderr
                 self.assertNotIn("macOS host only", out, out)
 
+    @unittest.skipUnless(sys.platform == "darwin",
+                         "the host-kind-matches case needs a macOS host")
     def test_a_driver_that_cannot_reach_its_machine_still_refuses(self):
-        cp = self._boot("benchvm", "--dry-run")
+        """mac-guest's b_probeable needs tart on this machine (the class
+        docstring), so on a machine that happens to have tart installed for
+        its own wk-tools development, the refusal must not depend on that --
+        tart is hidden here the way it is genuinely absent on a Linux host."""
+        with scratch_dir() as tmp:
+            no_tart = os.pathsep.join(
+                p for p in os.environ.get("PATH", "").split(os.pathsep)
+                if "tart" not in p and ".local/bin" not in p)
+            cp = self._boot("benchvm", "--dry-run", env={"HOME": str(tmp), "PATH": no_tart})
         out = cp.stdout + cp.stderr
-        self.assertIn("macOS host only", out, out)
-        self.assertIn("cannot reach it from here", out, out)
+        self.assertIn("cannot reach benchvm from here", out, out)
+        self.assertIn("what is missing is on this host", out, out)
+        self.assertNotIn("run this over there", out,
+                         "this is over there: a macOS host and a macOS-only machine")
 
     def test_the_gate_rests_on_the_drivers_own_declaration(self):
         text = BOOT.read_text()

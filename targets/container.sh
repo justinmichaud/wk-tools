@@ -155,7 +155,7 @@ t_create() {
          --volume $WK_STORE/cache/bench:/cache/bench
          --volume $WK_STORE/bench:/bench
          --volume $WK_STORE/skills:/skills
-         --volume $WK_STORE/secrets:/secrets:ro
+         --volume $(wk_secrets_view_dir container):/secrets:ro
          --volume $WK_STORE/agent-rw:/agent-rw
          --memory ${mem}m
          --cpus $cpus
@@ -317,6 +317,15 @@ t_sdk_local() {
 t_sdk_upstream() {
     _hpodman search --list-tags "$WK_SDK_REPO" --limit 100 2>/dev/null \
         | awk 'NR > 1 {print $2}'
+}
+
+# Runs where $WK_SDK lives: locally on Linux, and locally again here once macOS
+# has forwarded `wk new` into the podman VM -- never over an extra ssh hop.
+t_sdk_refresh() {
+    bash "$WK_ROOT/container/sdk-refresh.sh" "$WK_SDK" \
+        || die "refreshing the webkit-container-sdk checkout failed (above); wkdev-create
+    would otherwise ask for whatever image tag was current when this checkout
+    was last fetched."
 }
 
 _ctr_user() {

@@ -116,9 +116,17 @@ class TestAReadingCannotHangALeg(WkTest):
             cp = sh(f'set -euo pipefail\nPATH={binp}:$PATH\n. {str(QUIET)!r}\n'
                     f'_WK_QD_READ_SECS=1\nwk_quiet_desktop_probe | grep "^spotlight="\n')
             self.assertEqual("spotlight=!timeout\n", cp.stdout, cp.stderr)
-        cp = sh(f'set -euo pipefail\n. {str(QUIET)!r}\n'
-                f'wk_quiet_desktop_probe | grep "^spotlight="\n')
-        self.assertEqual("spotlight=\n", cp.stdout, cp.stderr)
+        # Answered, nothing to say -- not a hang, and not this host's own
+        # mdutil, which has an opinion about indexing / whether it is run.
+        with scratch_dir() as tmp:
+            binp = tmp / "bin"
+            binp.mkdir()
+            silent = binp / "mdutil"
+            silent.write_text("#!/bin/sh\nexit 0\n")
+            silent.chmod(0o755)
+            cp = sh(f'set -euo pipefail\nPATH={binp}:$PATH\n. {str(QUIET)!r}\n'
+                    f'wk_quiet_desktop_probe | grep "^spotlight="\n')
+            self.assertEqual("spotlight=\n", cp.stdout, cp.stderr)
 
 
 class TestATimedOutReadingIsUnknownAndNotAFault(WkTest):

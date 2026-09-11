@@ -15,6 +15,7 @@ Run: python3 -m unittest tests.test_credcheck -v
 """
 import json
 import os
+import sys
 import urllib.parse
 import subprocess
 import tempfile
@@ -26,6 +27,9 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 CREDCHECK = REPO / "lib" / "credcheck.py"
+
+sys.path.insert(0, str(REPO / "lib"))
+import credcheck   # noqa: E402 -- the constants a verdict names are read from it
 STORE_SH = (REPO / "lib" / "store.sh").read_text()
 
 FORKS = "wkuser/WebKit wkuser/WPEWebKit"
@@ -35,13 +39,17 @@ CLASSIC = "ghp_notarealclassictoken0123456789"
 
 class FakeGitHub(BaseHTTPRequestHandler):
     """`GET /user` answers the token's identity, its classic scope list and its
-    expiry; `POST /repos/<r>/pulls` answers whether a pull request could be
-    opened. Both are what GitHub itself answers."""
+    expiry; `GET /user/repos` the repositories the token reaches, one page at a
+    time; `POST /repos/<r>/pulls` whether a pull request could be opened. All
+    three are what GitHub itself answers."""
 
     user_status = 200
     scopes = ""
     expiry = ""
     pulls = {}
+    repos = []
+    repos_status = 200
+    repos_answer = None
     seen = []
 
     def _send(self, code, body, headers=()):
@@ -57,7 +65,19 @@ class FakeGitHub(BaseHTTPRequestHandler):
     def do_GET(self):
         FakeGitHub.seen.append(("GET", self.path,
                                 self.headers.get("Authorization", "")))
-        if self.path != "/user":
+        path, _, query = self.path.partition("?")
+        if path == "/user/repos":
+            if FakeGitHub.repos_status != 200:
+                return self._send(FakeGitHub.repos_status,
+                                  {"message": "Server Error"})
+            if FakeGitHub.repos_answer is not None:
+                return self._send(200, FakeGitHub.repos_answer)
+            q = urllib.parse.parse_qs(query)
+            per = int(q.get("per_page", ["30"])[0])
+            page = int(q.get("page", ["1"])[0])
+            window = FakeGitHub.repos[(page - 1) * per:page * per]
+            return self._send(200, [{"full_name": n} for n in window])
+        if path != "/user":
             return self._send(404, {"message": "Not Found"})
         if FakeGitHub.user_status != 200:
             return self._send(FakeGitHub.user_status, {"message": "Bad credentials"})
@@ -97,6 +117,9 @@ class _Rules(unittest.TestCase):
         FakeGitHub.scopes = ""
         FakeGitHub.expiry = ""
         FakeGitHub.pulls = {}
+        FakeGitHub.repos = FORKS.split()
+        FakeGitHub.repos_status = 200
+        FakeGitHub.repos_answer = None
         FakeGitHub.seen = []
         self.tmp = Path(tempfile.mkdtemp(prefix="wk-test-credcheck-"))
         self.addCleanup(lambda: subprocess.run(["rm", "-rf", str(self.tmp)]))
@@ -133,6 +156,12 @@ class TestTheTokenCanDoTheJob(_Rules):
         self.assertIn("fine-grained", detail)
         for repo in FORKS.split():
             self.assertIn("can open a pull request on %s" % repo, detail)
+
+    def test_the_forks_are_read_from_the_repositories_the_token_reaches(self):
+        """One GET per page, and the identity call before it."""
+        self.check("github-pat", FINE)
+        self.assertEqual(["/user", "/user/repos?per_page=100&page=1"],
+                         [p[1] for p in FakeGitHub.seen if p[0] == "GET"])
 
     def test_the_probe_is_a_write_that_creates_nothing(self):
         """An empty body names no head or base branch, so an authorised call is
@@ -204,6 +233,70 @@ class TestTheTokenIsNotWiderThanTheJob(_Rules):
         self.assertEqual([], [p for p in FakeGitHub.seen if p[0] == "POST"])
 
 
+class TestTheTokenReachesTheForksAndNothingElse(_Rules):
+    """GitHub's fine-grained token form takes no repository parameter, so a
+    token minted from the link arrives on *All repositories* unless the person
+    changes that field -- and a token on all of them is the whole account's
+    reach behind one workspace boundary. There is no endpoint that enumerates a
+    token's permissions, but `GET /user/repos` answers for the token rather than
+    the account, so the reach is measured rather than assumed."""
+
+    def test_exactly_the_forks_is_what_ok_means(self):
+        verdict, detail = self.check("github-pat", FINE)
+        self.assertEqual("ok", verdict, detail)
+        self.assertIn("exactly the 2 forks", detail)
+
+    def test_a_token_on_every_repository_is_refused_with_the_count(self):
+        FakeGitHub.repos = FORKS.split() + ["wkuser/other%d" % i
+                                            for i in range(44)]
+        verdict, detail = self.check("github-pat", FINE)
+        self.assertEqual("bad", verdict, detail)
+        self.assertIn("44 repositories beyond the 2 forks", detail)
+        self.assertIn("Only select repositories", detail)
+        for repo in FORKS.split():
+            self.assertIn(repo, detail)
+
+    def test_a_fork_the_token_does_not_reach_is_refused_by_name(self):
+        FakeGitHub.repos = ["wkuser/WebKit"]
+        verdict, detail = self.check("github-pat", FINE)
+        self.assertEqual("bad", verdict, detail)
+        self.assertIn("does not reach wkuser/WPEWebKit", detail)
+
+    def test_the_list_is_read_to_its_last_page(self):
+        """100 per page: a token on a busy account whose second page held the
+        forks would otherwise be refused for not reaching them."""
+        FakeGitHub.repos = (["wkuser/r%03d" % i for i in range(150)]
+                            + FORKS.split())
+        verdict, detail = self.check("github-pat", FINE)
+        self.assertEqual("bad", verdict, detail)
+        self.assertIn("150 repositories beyond the 2 forks", detail)
+        self.assertEqual(["/user/repos?per_page=100&page=1",
+                          "/user/repos?per_page=100&page=2"],
+                         [p[1] for p in FakeGitHub.seen
+                          if p[1].startswith("/user/repos")])
+
+    def test_a_classic_token_is_not_asked_which_repositories_it_reaches(self):
+        """Its scope list already answers: `repo` reaches every repository the
+        account can write, which is the reach the verdict names."""
+        FakeGitHub.scopes = "repo"
+        verdict, detail = self.check("github-pat", CLASSIC)
+        self.assertEqual("wide", verdict, detail)
+        self.assertEqual([], [p for p in FakeGitHub.seen
+                              if p[1].startswith("/user/repos")])
+
+    def test_a_list_that_could_not_be_read_is_unverified_not_claimed(self):
+        for setup in ({"repos_status": 500},
+                      {"repos_answer": {"message": "not a list"}}):
+            with self.subTest(**setup):
+                FakeGitHub.repos_status = 200
+                FakeGitHub.repos_answer = None
+                for k, v in setup.items():
+                    setattr(FakeGitHub, k, v)
+                verdict, detail = self.check("github-pat", FINE)
+                self.assertEqual("unverified", verdict, detail)
+                self.assertIn("which repositories this token reaches", detail)
+
+
 class TestAMalformedToken(_Rules):
     def test_something_that_is_not_a_github_token(self):
         verdict, detail = self.check("github-pat", "hunter2")
@@ -235,6 +328,34 @@ class TestAnUnreachableApi(_Rules):
         self.assertEqual("unverified", verdict, detail)
         self.assertIn("could not reach", detail)
         self.assertIn("wk doctor", detail)
+
+
+class TestWhereTheseApisMayBePointed(_Rules):
+    """Both bases come from the environment so a test can stand a stub up on
+    loopback, and a credential goes to whatever they name in an Authorization
+    header. So: https, or loopback, or a refusal that names the variable."""
+
+    def _run(self, **env):
+        e = dict(os.environ)
+        e.update(env)
+        return subprocess.run(
+            ["python3", str(CREDCHECK), "names"],
+            capture_output=True, text=True, env=e, timeout=60)
+
+    def test_an_http_host_that_is_not_loopback_is_refused_by_name(self):
+        for var in ("WK_GITHUB_API", "WK_ANTHROPIC_API"):
+            with self.subTest(var=var):
+                cp = self._run(**{var: "http://evil.example/"})
+                self.assertNotEqual(0, cp.returncode, cp.stdout)
+                self.assertIn(var, cp.stderr)
+                self.assertIn("Authorization", cp.stderr)
+
+    def test_https_and_loopback_are_both_accepted(self):
+        for value in ("https://api.example.com", "http://127.0.0.1:1",
+                      "http://localhost:8080"):
+            with self.subTest(value=value):
+                cp = self._run(WK_GITHUB_API=value, WK_ANTHROPIC_API=value)
+                self.assertEqual(0, cp.returncode, cp.stdout + cp.stderr)
 
 
 # --- the claude.ai login -------------------------------------------------------
@@ -300,31 +421,120 @@ class TestTheClaudeLogin(_Rules):
 
 
 # --- the two pasted keys -------------------------------------------------------
+class FakeAnthropic(BaseHTTPRequestHandler):
+    """`GET /v1/models` is the read-only request that answers whether Anthropic
+    still accepts a token: 200 when it does, 401 when it does not, and no model
+    is inferred either way (measured against api.anthropic.com, 2026-09-10)."""
+
+    status = 200
+    seen = []
+
+    def do_GET(self):
+        FakeAnthropic.seen.append(
+            (self.command, self.path, self.headers.get("Authorization", ""),
+             self.headers.get("anthropic-version", "")))
+        body = ({"data": [{"id": "claude-x"}]} if FakeAnthropic.status == 200
+                else {"type": "error",
+                      "error": {"type": "authentication_error"}})
+        raw = json.dumps(body).encode()
+        self.send_response(FakeAnthropic.status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(raw)))
+        self.end_headers()
+        self.wfile.write(raw)
+
+    do_POST = do_GET
+
+    def log_message(self, *a):
+        pass
+
+
 class TestTheAgentKeys(_Rules):
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        cls.anthropic = HTTPServer(("127.0.0.1", 0), FakeAnthropic)
+        cls.anthropic_base = "http://127.0.0.1:%d" % cls.anthropic.server_port
+        cls.anthropic_thread = threading.Thread(
+            target=cls.anthropic.serve_forever, daemon=True)
+        cls.anthropic_thread.start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.anthropic.shutdown()
+        cls.anthropic.server_close()
+        super().tearDownClass()
+
+    def setUp(self):
+        super().setUp()
+        FakeAnthropic.status = 200
+        FakeAnthropic.seen = []
+
+    def claude(self, value, api=None):
+        return self.check("claude", value, env={
+            "WK_ANTHROPIC_API": api if api is not None else self.anthropic_base})
+
     def test_a_setup_token_is_accepted_and_its_narrowness_named(self):
-        verdict, detail = self.check("claude", "sk-ant-oat01-abc")
+        verdict, detail = self.claude("sk-ant-oat01-abc")
         self.assertEqual("ok", verdict, detail)
         self.assertIn("inference-only", detail)
 
+    def test_whether_anthropic_still_accepts_it_is_asked_and_not_assumed(self):
+        """The one request a workspace cannot make for itself before it is
+        handed the token: a stale token is otherwise discovered as a /login
+        prompt inside a workspace, hours later."""
+        _v, detail = self.claude("sk-ant-oat01-abc")
+        self.assertIn("Anthropic accepts it", detail)
+        self.assertEqual(1, len(FakeAnthropic.seen), FakeAnthropic.seen)
+        method, path, auth, version = FakeAnthropic.seen[0]
+        self.assertEqual("GET", method)
+        self.assertTrue(path.startswith("/v1/models"), path)
+        self.assertEqual("Bearer sk-ant-oat01-abc", auth)
+        self.assertEqual("2023-06-01", version)
+
+    def test_a_token_anthropic_no_longer_accepts_is_refused(self):
+        FakeAnthropic.status = 401
+        verdict, detail = self.claude("sk-ant-oat01-abc")
+        self.assertEqual("bad", verdict, detail)
+        self.assertIn("spent, revoked or expired", detail)
+        self.assertIn("wk key set claude --replace", detail)
+
+    def test_offline_leaves_the_token_usable_and_says_it_was_not_established(self):
+        verdict, detail = self.claude("sk-ant-oat01-abc",
+                                      api="http://127.0.0.1:1")
+        self.assertEqual("unverified", verdict, detail)
+        self.assertIn("could not reach", detail)
+
+    def test_a_token_refused_by_shape_costs_no_request(self):
+        for value in ("hunter2", "sk-ant-api03-abc", login()):
+            with self.subTest(value=value[:12]):
+                self.claude(value)
+        self.assertEqual([], FakeAnthropic.seen)
+
     def test_a_console_api_key_is_refused_as_wider_than_the_job(self):
-        verdict, detail = self.check("claude", "sk-ant-api03-abc")
+        verdict, detail = self.claude("sk-ant-api03-abc")
         self.assertEqual("bad", verdict, detail)
         self.assertIn("bills the organization", detail)
 
     def test_a_login_document_pasted_here_names_the_row_that_takes_one(self):
-        verdict, detail = self.check("claude", login())
+        verdict, detail = self.claude(login())
         self.assertEqual("bad", verdict, detail)
         self.assertIn("wk key set claude-login", detail)
 
     def test_anything_else_is_refused_by_shape(self):
-        verdict, detail = self.check("claude", "hunter2")
+        verdict, detail = self.claude("hunter2")
         self.assertEqual("bad", verdict, detail)
         self.assertIn("sk-ant-oat", detail)
 
-    def test_a_litellm_virtual_key_is_accepted(self):
+    def test_a_litellm_virtual_key_names_the_endpoint_it_belongs_to(self):
+        """The endpoint is one constant beside the key page (LITELLM_ENDPOINT),
+        so the verdict names it rather than leaving a reader to find it in a
+        workspace's config."""
         verdict, detail = self.check("litellm", "sk-abc123")
         self.assertEqual("ok", verdict, detail)
         self.assertIn("models.json", detail)
+        self.assertIn(credcheck.LITELLM_ENDPOINT, detail)
+        self.assertIn("unmeasured", detail)
 
     def test_the_upstream_anthropic_key_is_refused_where_a_virtual_one_belongs(self):
         verdict, detail = self.check("litellm", "sk-ant-api03-abc")

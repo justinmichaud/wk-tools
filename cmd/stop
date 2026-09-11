@@ -19,7 +19,9 @@ WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 . "$WK_ROOT/lib/resources.sh"
 . "$WK_ROOT/lib/store.sh"
 . "$WK_ROOT/lib/target.sh"
+. "$WK_ROOT/lib/task.sh"
 . "$WK_ROOT/lib/detach.sh"
+. "$WK_ROOT/lib/watchdog.sh"
 
 WK_MACHINE="${WK_MACHINE:-wk}"
 
@@ -33,15 +35,7 @@ if [ -n "$NAME" ]; then
     [ "$(t_info "$NAME")" != absent ] || die "no such workspace: $NAME"
 
     # t_stop kills claude remote-control with a container or guest, not with a checkout.
-    if [ "$WK_TARGET_KIND" = remote ]; then
-        _rc_sf="$(wk_ws_dir "$NAME")/claude-rc.status"
-        _rc_pid=$([ -f "$_rc_sf" ] && status_field "$_rc_sf" pid || true)
-        if [ -n "$_rc_pid" ] && t_exec "$NAME" kill -0 "$_rc_pid" >/dev/null 2>&1; then
-            info "stopping claude remote-control in '$NAME' (pid $_rc_pid)"
-            t_exec "$NAME" kill "$_rc_pid" >/dev/null 2>&1 || true
-            status_write "$_rc_sf" state=stopped "pid=$_rc_pid"
-        fi
-    fi
+    [ "$WK_TARGET_KIND" != remote ] || rc_stop "$NAME"
 
     t_stop "$NAME"
     exit 0

@@ -250,8 +250,125 @@ class TestPushStatusAll(WkTest):
         self.assertIn(cp.returncode, (0, 1, 4))
 
 
-if __name__ == "__main__":
-    unittest.main()
+
+
+
+
+class TestTasksOfOneWorkspace(WkTest):
+    """`wk status <ws>` reports that workspace, so the task block reports that
+    workspace's tasks: `report_tasks` (cmd/status) takes the name `collect`
+    resolved and skips every record belonging to another workspace. A bare
+    `wk status` passes no name and reports them all."""
+
+    STUBS = """. "{repo}/lib/common.sh"
+. "{repo}/lib/task.sh"
+rec_start() {{ :; }}
+rec_set()   {{ printf '  %s=%s\\n' "$1" "$2"; }}
+rec_opt()   {{ [ -z "${{2:-}}" ] || rec_set "$1" "$2"; }}
+rec_json()  {{ rec_set "$1" "$2"; }}
+rec_emit()  {{ :; }}
+note() {{ :; }}
+note_warn() {{ :; }}
+bump() {{ :; }}
+_jesc() {{ printf '%s' "$1"; }}
+_progress_line() {{ printf 'compiling\\n'; }}
+first_error() {{ :; }}
+"""
+
+    def setUp(self):
+        super().setUp()
+        self.store = str(self.tmp / "store")
+        cp = bash('. "%s/lib/common.sh"\n. "%s/lib/task.sh"\n'
+                  'task_begin build here ws1 "wk build ws1 --kill" /nolog compile >/dev/null\n'
+                  'task_begin test here ws2 "^C where it runs" /nolog jsc >/dev/null\n'
+                  % (REPO, REPO), env={"WK_STORE": self.store})
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+
+    def _names_reported(self, *args):
+        """The `name` field of every task record `report_tasks` emits, with
+        the record writer stubbed to plain lines: what is under test is which
+        records it walks, not the JSON encoder every report_* shares."""
+        lift = subprocess.run(["sed", "-n", "/^report_tasks()/,/^}/p",
+                               str(REPO / "cmd" / "status")],
+                              capture_output=True, text=True, check=True).stdout
+        self.assertIn("only=", lift, "report_tasks() moved or takes no name")
+        call = " ".join('"%s"' % a for a in args)
+        cp = bash(self.STUBS.format(repo=REPO) + lift
+                  + "\n_tasks_said=' '\nreport_tasks %s\n" % call,
+                  env={"WK_STORE": self.store})
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        return [l.split("=", 1)[1] for l in cp.stdout.splitlines()
+                if l.startswith("  name=")]
+
+    def test_a_named_workspace_reports_only_its_own_tasks(self):
+        self.assertEqual(self._names_reported("ws1"), ["ws1"])
+        self.assertEqual(self._names_reported("ws2"), ["ws2"])
+
+    def test_no_name_reports_every_task(self):
+        self.assertEqual(sorted(self._names_reported()), ["ws1", "ws2"])
+
+    def test_a_task_that_ended_as_asked_is_not_reported_at_all(self):
+        """An `ok`, `cancelled`, `stopped` or `refused` record is history: what
+        it produced is the report, so only a task still running or one that
+        ended badly gets a block."""
+        for word, reported in (("0", False), ("cancelled", False),
+                               ("stopped", False), ("refused", False),
+                               ("3", True), ("stalled", True)):
+            with self.subTest(word=word):
+                # A fresh record per word: the first verdict on a record
+                # stands (lib/task.sh task_end), and task_begin is what
+                # clears it.
+                cp = bash('. "%s/lib/common.sh"\n. "%s/lib/task.sh"\n'
+                          'task_begin build here ws1 "wk build ws1 --kill" /nolog compile >/dev/null\n'
+                          'task_end "$(task_find build ws1)" %s\n' % (REPO, REPO, word),
+                          env={"WK_STORE": self.store})
+                self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+                self.assertEqual(self._names_reported("ws1"),
+                                 ["ws1"] if reported else [])
+
+    def _lines_reported(self, stubs="", *args):
+        """Every field `report_tasks` emits, with extra stubs appended."""
+        lift = subprocess.run(["sed", "-n", "/^report_tasks()/,/^}/p",
+                               str(REPO / "cmd" / "status")],
+                              capture_output=True, text=True, check=True).stdout
+        call = " ".join('"%s"' % a for a in args)
+        cp = bash(self.STUBS.format(repo=REPO) + stubs + lift
+                  + "\n_tasks_said=' '\nreport_tasks %s\n" % call,
+                  env={"WK_STORE": self.store}, timeout=20)
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        return cp.stdout
+
+    def test_a_task_whose_pid_is_in_a_workspace_is_not_asked_through_it(self):
+        """This listing is read-only and must answer *about* a wedged
+        workspace: a `t_exec` into one has no timeout of its own, so the
+        verdict for a `target` record comes from the log's age instead
+        (task_verdict's `log` reading)."""
+        bash('. "%s/lib/common.sh"\n. "%s/lib/task.sh"\n'
+             'd=$(task_begin build target ws3 "wk build ws3 --kill" /nolog compile)\n'
+             'task_pid "$d" 4242\n' % (REPO, REPO), env={"WK_STORE": self.store})
+        marker = self.tmp / "t_exec-called"
+        out = self._lines_reported(
+            't_exec() { printf x >> "%s"; sleep 30; }\n'
+            'ws_target() { printf container; }\n'
+            'load_target() { :; }\n' % marker, "ws3")
+        self.assertIn("state=running", out, out)
+        self.assertFalse(marker.exists(), "it asked the workspace it was reporting on")
+
+    def test_a_task_is_reported_on_the_machine_its_pid_is_on(self):
+        """The record names the machine running the job (`t_task_put` rewrites
+        it for a remote target), and that is where a reader has to look for
+        the pid and the log -- not the machine whose store holds the record."""
+        bash('. "%s/lib/common.sh"\n. "%s/lib/task.sh"\n'
+             'd=$(task_begin build target ws4 "wk build ws4 --kill" /nolog compile)\n'
+             'task_pid "$d" 4242 farbox\n' % (REPO, REPO), env={"WK_STORE": self.store})
+        out = self._lines_reported("", "ws4")
+        self.assertIn("machine=farbox", out, out)
+
+    def test_the_single_workspace_path_passes_the_name(self):
+        """`report_target <target> [ws]` is the one caller that knows a name
+        was asked for, and it hands it on."""
+        self.assertIn('report_tasks "${2:-}"',
+                      (REPO / "cmd" / "status").read_text())
 
 
 class TestBenchTaskLine(unittest.TestCase):
@@ -291,3 +408,7 @@ class TestBenchTaskLine(unittest.TestCase):
         found = json.dumps(machines)
         self.assertIn("20260830T120000Z-wpe-pr1725", found)
         self.assertIn("20260830T130000Z-rpi4-base-vs-pr1725", found)
+
+
+if __name__ == "__main__":
+    unittest.main()

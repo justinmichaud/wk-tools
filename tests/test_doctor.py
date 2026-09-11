@@ -412,8 +412,11 @@ class TestTheCredentialsSection(unittest.TestCase):
         self.assertIn("could not reach", out)
 
     def test_an_acceptable_credential_reports_what_it_can_do(self):
-        out = self.run_block({"secrets/claude-token": "sk-ant-oat01-abc"})
-        self.assertIn("inference-only", out)
+        """The litellm rule, which judges the key it is given and asks nothing
+        of a network: what the claude rule reports once Anthropic has answered
+        is tests/test_credcheck.py's subject, and it has the stub for it."""
+        out = self.run_block({"secrets/litellm-key": "sk-litellm-abc"})
+        self.assertIn("LiteLLM virtual key", out)
 
     def test_nothing_stored_is_ever_printed(self):
         secret = "sk-ant-oat01-do-not-print-this"

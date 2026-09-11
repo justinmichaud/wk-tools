@@ -18,6 +18,7 @@
 #   --lldb [web|ui]      debug one layout test: "web" (default) attaches to the
 #                        web process, "ui" to WebKitTestRunner
 #   --dry-run            print the resolved run and stop
+#   --kill               stop the test run in this workspace, wherever it runs
 
 set -euo pipefail
 WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -28,6 +29,7 @@ WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 . "$WK_ROOT/lib/target.sh"
 . "$WK_ROOT/lib/arch.sh"
 . "$WK_ROOT/build/configs.sh"
+. "$WK_ROOT/lib/task.sh"
 
 NAME="${WK_NAME:-}"
 require_name "$NAME"
@@ -37,6 +39,7 @@ SUITE=jsc
 GPU=""
 DRY=""
 LLDB=""
+KILL=""
 while [ $# -gt 0 ]; do
     case "$1" in
         --config)  CONFIG="${2:-}"; shift 2 ;;
@@ -47,12 +50,26 @@ while [ $# -gt 0 ]; do
                    case "${2:-}" in ui|web) LLDB="$2"; shift ;; esac
                    shift ;;
         --dry-run) DRY=1; shift ;;
+        --kill)    KILL=1; shift ;;
         --)        shift; break ;;
         -*)        die "usage: wk test <workspace> [--config <c>] [--layout] [--gpu]
-    [--lldb [web|ui]] [--dry-run] [--] [paths...]; see wk test -h" ;;
+    [--lldb [web|ui]] [--dry-run] [--kill] [--] [paths...]; see wk test -h" ;;
         *)         break ;;
     esac
 done
+
+# The target first: on macOS a config does not choose its own build system, so config_load needs t_os.
+TARGET="$(ws_target "$NAME")"
+load_target "$TARGET"
+
+_KILL_CMD="wk test$(in_workspace || printf ' %s' "$NAME") --kill"
+
+if [ -n "$KILL" ]; then   # before a config is resolved: stopping a run needs none
+    _rc=0; job_stop "$NAME" test || _rc=$?
+    [ "$_rc" = 1 ] && die "the test run in '$NAME' outlived a TERM and a KILL.
+    Look at it:  wk enter $NAME  and then  pgrep -af run-"
+    exit 0
+fi
 
 if [ -z "$CONFIG" ]; then
     CONFIG=$(last_built_config "$NAME")
@@ -62,10 +79,6 @@ if [ -z "$CONFIG" ]; then
         CONFIG=$(default_config)
     fi
 fi
-
-# The target first: on macOS a config does not choose its own build system, so config_load needs t_os.
-TARGET="$(ws_target "$NAME")"
-load_target "$TARGET"
 
 config_load "$CONFIG" "$(t_os)" || die "unknown config '$CONFIG' (wk build --list)"
 
@@ -188,32 +201,30 @@ fi
 
 WS=$(wk_ws_dir "$NAME")
 LOG="$WS/test.log"
-STATUS="$WS/test.status"
-STARTED=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 START_EPOCH=$(date +%s)
 
-printf 'state=running\nsuite=%s\nconfig=%s\nstarted=%s\nlog=%s\nabort_after=%s\n' \
-    "$SUITE" "$CONFIG" "$STARTED" "$LOG" "$WK_ABORT_SECONDS" > "$STATUS"
+TASK=$(task_begin test here "$NAME" "$_KILL_CMD" "$LOG" "$SUITE/$CONFIG in $NAME")
+task_step "$TASK" 1
 
-write_status() {
-    cat > "$STATUS" <<EOF
-state=$1
-suite=$SUITE
-config=$CONFIG
-exit=${2:-}
-started=$STARTED
-finished=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-seconds=$(( $(date +%s) - START_EPOCH ))
-log=$LOG
-EOF
+# ^C reaches this driver and `t_exec` carries no signal, so the machine running the tests is told and the record converged.
+_test_cancelled() {
+    [ -z "${_PIDWATCH:-}" ] || kill "$_PIDWATCH" 2>/dev/null || true
+    warn "interrupted -- stopping the test run in '$NAME'"
+    job_kill "$NAME" "$TASK" cancelled || warn "it is still running; stop it with:  $_KILL_CMD"
 }
+on_interrupt _test_cancelled
 
 log "  log: $LOG"
+log "  stop: $_KILL_CMD"
+
+job_pid_watch "$TASK" "$LOG" test '*Tools/Scripts/run-*' & _PIDWATCH=$!   # the suite in the announcing shell's own -lc text
 
 set +e
-run_watched "$LOG" -- t_exec "$NAME" bash -lc "$CMD"
+run_watched "$LOG" -- t_exec "$NAME" bash -lc "echo \"wk: test pid \$\$\" >&2
+$CMD"
 rc=$?
 set -e
+kill "$_PIDWATCH" 2>/dev/null || true
 
 ELAPSED=$(( $(date +%s) - START_EPOCH ))
 MINS=$(( ELAPSED / 60 )); SECS=$(( ELAPSED % 60 ))
@@ -224,17 +235,17 @@ summary=$(tr '\r' '\n' < "$LOG" | grep -iE '^(Ran |Test suite|[0-9]+ test|All [0
 echo >&2
 case $rc in
 0)
-    write_status ok 0
+    task_end "$TASK" 0
     info "TESTS OK  $SUITE/$CONFIG in '$NAME'  (${MINS}m${SECS}s)"
     [ -n "$summary" ] && printf '%s\n' "$summary" | sed 's/^/  /' >&2
     ;;
 124)
-    write_status stalled 124
+    task_end "$TASK" stalled
     die "TESTS STALLED  $SUITE/$CONFIG in '$NAME' (killed after ${MINS}m${SECS}s with no output)
     log: $LOG"
     ;;
 *)
-    write_status failed "$rc"
+    task_end "$TASK" "$rc"
     warn "TESTS FAILED  $SUITE/$CONFIG in '$NAME'  (exit $rc after ${MINS}m${SECS}s)"
     [ -n "$summary" ] && printf '%s\n' "$summary" | sed 's/^/  /' >&2
     log "failures:"

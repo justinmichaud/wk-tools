@@ -136,8 +136,6 @@ EXPECTED_SAFE_RAW_READS = {
         "pause(): waits for Enter before a manual step with no alternative -- explicitly not confirm() (see the comment above it), since there is nothing to answer no to",
     ("cmd/remotes", '{ read -r extra_name; read -r extra_url; read -r ssh_config; } <<EOF'):
         "reads three lines from a heredoc, not a terminal",
-    ("cmd/sync", 'read -r _pick </dev/tty || _pick=""'):
-        "reads a menu number (which workspace, or --machine) -- a choice among several, not a yes/no destructive decision",
     ("admin/wk-card-priv", 'read -r type tran <<EOF'):
         "reads two fields from a heredoc, not a terminal",
     ("cmd/sysimage", 'read -r bytes sha < "$WRITE_META"'):

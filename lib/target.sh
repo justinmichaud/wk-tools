@@ -32,7 +32,16 @@ t_ssh_proxy()  { return 1; }        # what to run here to reach an addressless w
 t_agent_sock() { return 1; }        # the ssh-agent socket crossing in (push_agent_load)
 t_egress_filtered() { return 1; }   # <name>; 0 when everything this workspace reaches goes through wk's allowlisting proxy
 
-t_agent_secret_present() { wk_agent_secret_present "$2"; }   # <name> <secret>
+# The workspace's own answer, not this machine's store: given and held are different facts. A login shell, because the rc names CLAUDE_SECURESTORAGE_CONFIG_DIR -- where a `file` row's own tool rewrites it.
+t_agent_secret_present() { # <name> <secret>
+    local probe
+    if [ "$(wk_agent_secret_kind "$2")" = file ]; then
+        probe="test -s \"\$CLAUDE_SECURESTORAGE_CONFIG_DIR/$(wk_agent_secret_field "$2" 2)\""
+    else
+        probe="test -s \"\$HOME/$(wk_agent_secret_field "$2" 3)\""
+    fi
+    t_exec "$1" bash -lc "$probe" >/dev/null 2>&1
+}
 t_agent_secret_remedy() { agent_secret_store_remedy "$2"; } # <name> <secret>
 
 agent_secret_store_remedy() { # <secret>
@@ -131,7 +140,8 @@ t_lldb_opts()  { :; }               # lldb options a target needs before it can 
 
 t_exec_build() { t_exec "$@"; }   # separate: the build lock must not block `wk run`
 
-t_status_put() { local n="$1" ws; ws="$(wk_ws_dir "$n")"; cat > "$ws/build.status"; }
+t_task_put()  { :; }   # <name> <task dir>; nothing to do where the record already sits in the store the building machine reports from -- a driver whose far side is another machine copies it there
+
 t_has_wk()    { return 1; }         # is there a far side that can answer?
 
 t_delegates() { return 1; }         # must a command about a workspace here run there?
@@ -143,7 +153,6 @@ t_load() { host_load; }             # <name>; whole cores, which build_jobs poli
 
 ws_on_target() { # <target> <name>
     ( command -v wk_ws_dir >/dev/null 2>&1 || . "$WK_ROOT/lib/store.sh"
-      command -v detach_alive >/dev/null 2>&1 || . "$WK_ROOT/lib/detach.sh"
       load_target "$1" >/dev/null 2>&1 || exit 1
       [ -d "$(wk_ws_dir "$2")" ] && exit 0
       if command -v t_info >/dev/null 2>&1; then
@@ -152,8 +161,7 @@ ws_on_target() { # <target> <name>
               *) exit 0 ;;
           esac
       fi
-      sf=$(ws_status_file "$2")
-      [ -f "$sf" ] && detach_alive "$sf" )
+      ws_creating_now "$2" )
 }
 
 machine_silent() { # <target> -- 0 when the machine itself never answered
@@ -224,13 +232,14 @@ ws_target() { # <name>
     resolved; remove one, or set WK_TARGET"
 }
 
-gc_creation_records() { # drop create/<name>.status whose process and workspace are gone
-    local sf n t found
-    [ -d "$(ws_state_dir)" ] || return 0
-    for sf in "$(ws_state_dir)"/*.status; do
-        [ -f "$sf" ] || continue
-        n=$(basename "$sf" .status)
-        detach_alive "$sf" && continue
+gc_creation_records() { # drop the creation records whose process and workspace are both gone
+    local d n t found
+    _ws_task_lib
+    while IFS= read -r d; do
+        [ -n "$d" ] || continue
+        [ "$(task_field "$d" kind)" = new ] || continue
+        task_alive "$d" && continue
+        n=$(task_field "$d" name)
         found=""
         for t in $(target_all 2>/dev/null); do
             if ( load_target "$t" >/dev/null 2>&1; [ -d "$(wk_ws_dir "$n")" ] ); then
@@ -239,8 +248,10 @@ gc_creation_records() { # drop create/<name>.status whose process and workspace 
         done
         [ -z "$found" ] || continue
         info "removing orphaned creation record for '$n' (no live creation, no workspace)"
-        rm -f "$sf" "$(ws_create_log "$n")"
-    done
+        rm -rf "$d" "$(ws_create_log "$n")"
+    done <<EOF
+$(task_list)
+EOF
 }
 
 wk_marker() { echo "${WK_MARKER:-$HOME/.wk-workspace}"; }
@@ -272,9 +283,9 @@ default_config() {
 
 last_built_config() {
     local name="$1"
-    ( command -v wk_ws_dir >/dev/null 2>&1 || . "$WK_ROOT/lib/store.sh"
+    ( command -v task_find >/dev/null 2>&1 || . "$WK_ROOT/lib/task.sh"
       load_target "$(ws_target "$name")" >/dev/null 2>&1
-      kv_field "$(wk_ws_dir "$name")/build.status" config 2>/dev/null ) || true
+      task_field "$(task_find build "$name")" config 2>/dev/null ) || true
 }
 
 # Rewritten, not appended to: a VM's address changes on every boot.
@@ -488,9 +499,7 @@ ws_state() {
 
     if [ "$env" = absent ]; then
         [ -d "$ws" ] || { echo absent; return 0; }
-        command -v status_field >/dev/null 2>&1 || . "$WK_ROOT/lib/detach.sh"
-        if t_created "$name" 2>/dev/null \
-           || [ "$(status_field "$(ws_status_file "$name")" state)" = present ]; then
+        if t_created "$name" 2>/dev/null || ws_creation_finished "$name"; then
             echo broken
         else
             echo creating
@@ -510,10 +519,26 @@ ws_display_state() {   # the driver's own word, or the lifecycle state when not 
     esac
 }
 
-# Beside the workspace directory, which a re-run of `wk new` destroys first.
-ws_state_dir()   { echo "$WK_STORE/create"; }
-ws_status_file() { echo "$(ws_state_dir)/$1.status"; }
-ws_create_log()  { echo "$(ws_state_dir)/$1.log"; }
+# The creation's log outlives the workspace directory a re-run destroys first.
+ws_create_log()   { echo "$WK_STORE/log/new-$1.log"; }
+
+ws_create_task() { # <name> -- the creation record, or nothing
+    _ws_task_lib
+    task_find new "$1"
+}
+
+ws_creating_now() { # <name> -- a creation driver is running for it right now
+    local d; _ws_task_lib; d=$(ws_create_task "$1")
+    [ -n "$d" ] && task_alive "$d"
+}
+
+ws_creation_finished() { # <name> -- a creation ran to the end, whatever is there now
+    local d; _ws_task_lib; d=$(ws_create_task "$1")
+    [ -n "$d" ] && [ "$(task_field "$d" exit)" = 0 ]
+}
+
+# In the caller's shell, not a command substitution's: a reader needs task_alive as well as the dir.
+_ws_task_lib() { command -v task_find >/dev/null 2>&1 || . "$WK_ROOT/lib/task.sh"; }
 
 ws_remake_hint() { # `wk new` is a workstation command; a build box refuses it
     if in_remote_host; then
@@ -526,13 +551,11 @@ ws_remake_hint() { # `wk new` is a workstation command; a build box refuses it
 # Foreground by design: killing this waiter stops only the waiting.
 wait_ready() {
     local name="$1" timeout="${2:-${WK_READY_WAIT:-1800}}"
-    local st sf waited=0 said="" stage
-
-    command -v detach_alive >/dev/null 2>&1 || . "$WK_ROOT/lib/detach.sh"
-    sf=$(ws_status_file "$name")
+    local st waited=0 said="" stage
 
     while :; do
         st=$(ws_state "$name")
+        if [ "$st" = present ] && ws_creating_now "$name"; then st=creating; fi   # the marker goes down at the `init` stage and the driver holds the workspace lock through the stages after it, so `present` mid-creation is not ready: a build asked for now would refuse on that lock
         case "$st" in
         present)
             [ -z "$said" ] || info "'$name' is ready"
@@ -553,7 +576,7 @@ wait_ready() {
         ssh -o BatchMode=yes ${WK_REMOTE_HOST:-the machine} true"
             ;;
         creating)
-            if ! detach_alive "$sf"; then
+            if ! ws_creating_now "$name"; then
                 barrier "'$name' was never finished creating, and nothing is creating it now
     (the process that was is gone, with whatever connection started it).
     Usually there is nothing in one worth keeping, so remake it:
@@ -564,7 +587,7 @@ wait_ready() {
             fi
             if [ -z "$said" ]; then
                 said=1
-                stage=$(status_field "$sf" stage)
+                stage=$(task_stage "$(ws_create_task "$name")")
                 info "waiting for '$name' to finish being created${stage:+ (at: $stage)}"
                 log  "  follow it:  tail -f $(ws_create_log "$name")"
                 log  "  this end can be killed; creation is detached and continues"
@@ -581,10 +604,29 @@ wait_ready() {
     done
 }
 
+WS_EXCLUSIVE_KINDS=" build babysit yocto buildroot "   # the jobs that hold a workspace's checkout: two at once corrupt it, where an agent session or a benchmark in the same workspace does not
+
 # A lock says nothing about work detached into the workspace, so such a job
-# writes `$(t_home)/<job>.pid` instead.
-ws_busy_reason() {
-    local name="$1" ws p pid job
+# writes `$(t_home)/<job>.pid` instead; one with a task record is asked first, since the record names the command that stops it.
+ws_busy_reason() { # <name> [task record to ignore -- the job that started this one]
+    local name="$1" skip="${2:-}" ws p pid job d
+    _ws_task_lib
+    while IFS= read -r d; do
+        [ -n "$d" ] || continue
+        [ "$d" != "$skip" ] || continue
+        [ "$(task_field "$d" name)" = "$name" ] || continue
+        case "$WS_EXCLUSIVE_KINDS" in
+            *" $(task_field "$d" kind) "*) ;;
+            *) continue ;;
+        esac
+        task_alive "$d" || continue
+        printf '%s (pid %s, %s)  stop it: %s' "$(task_field "$d" kind)" \
+            "$(task_field "$d" pid)" "$(task_field "$d" machine)" \
+            "$(task_field "$d" kill)"
+        return 0
+    done <<EOF
+$(task_list)
+EOF
     ws=$(wk_ws_dir "$name")
     [ -d "$ws/home" ] || return 1
     for p in "$ws"/home/*.pid; do

@@ -90,15 +90,16 @@ load_driver "$NODE_DRIVER"
 
 # Probing a machine its driver cannot reach reads the *driving* host's marker and answers confidently about the wrong computer; `b_probeable` is where a driver declares which it is.
 if ! b_probeable; then
-    case "$NODE_OS" in
-        any) ;;
-        macos) is_macos || die "$MACHINE is driven from a macOS host only (os=macos in
-    boot/machines/$MACHINE.conf), and its driver cannot reach it from here -- run this
-    over there." ;;
-        linux) ! is_macos || die "$MACHINE is driven from a Linux host only (os=linux in
-    boot/machines/$MACHINE.conf), and its driver cannot reach it from here -- run this
-    over there." ;;
-    esac
+    _hostos=linux; is_macos && _hostos=macos
+    if [ "$NODE_OS" != any ] && [ "$NODE_OS" != "$_hostos" ]; then
+        die "$MACHINE is driven from a $NODE_OS host only (os=$NODE_OS in
+    boot/machines/$MACHINE.conf) and this is a $_hostos host -- run this over there."
+    fi
+    die "the '$NODE_DRIVER' driver cannot reach $MACHINE from here, so nothing about it
+    can be read (b_probeable). This host is the one boot/machines/$MACHINE.conf
+    names (os=$NODE_OS), so what is missing is on this host rather than the machine:
+    'wk doctor' names it -- a machine driven as a local guest needs tart and the
+    guest itself."
 fi
 
 read_state() {
@@ -362,8 +363,8 @@ EOF
         record_write "$IMAGE" "$NODE_PROFILE" "$NODE_DEVICE" "$BOOT_ORDER_IMAGE"
         b_arm "$BOOT_ORDER_IMAGE"
     elif [ "${BOOT_ARMING:-one-shot}" = command ]; then
+        b_arm  # before the record, as hands-on above: a bless is one nvram write, not a medium that can half-happen
         record_write "$IMAGE" "$NODE_PROFILE" "${NODE_VOLUME:-}" ""
-        b_arm
     elif [ "${BOOT_ARMING:-one-shot}" = medium ]; then
         # The record is a claim with evidence behind it: b_evidence reads the stick, so a record that disagrees with the medium is visibly wrong.
         record_write "$IMAGE" "$NODE_PROFILE" "$NODE_DEVICE" ""

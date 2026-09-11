@@ -305,21 +305,19 @@ prompt_secret_value() {  # $1 = what to ask for, $2 = the page that mints one, $
     local what="$1" url="${2:-}" how="${3:-}" val=""
 
     if [ ! -t 0 ]; then
-        warn "wk needs $what, and there is none stored here."
-        warn "  No terminal, so it cannot be asked for here. Re-run interactively."
+        warn "wk needs $what, and there is no terminal to ask on. Re-run interactively."
         return 1
     fi
 
     printf '\n' >&2
     info "wk needs $what."
-    [ -n "$url" ] && log "  get one here: $url" >&2
-    [ -n "$how" ] && log "  $how" >&2
-    log "  this repository must not contain it: it is stored 0600, and asked for once" >&2
+    [ -n "$url" ] && log "  $url"
+    [ -n "$how" ] && log "  $how"
     printf '  paste it (input hidden, empty to skip): ' >&2
     read -rs val || return 1
     printf '\n' >&2
 
-    [ -n "$val" ] || { warn "nothing entered; skipping"; return 1; }
+    [ -n "$val" ] || return 1
     printf '%s' "$val"
 }
 
@@ -392,7 +390,7 @@ wk_atexit() { # <function-name> -- run it when this process ends, whatever ends 
     return 0
 }
 
-# Ctrl-C reaches the foreground group; a supervisor signals one pid only.
+# Ctrl-C reaches the foreground group; a supervisor signals one pid only, and one with no tty sends HUP.
 _WK_INTERRUPTED=""
 _WK_ON_INTERRUPT=""
 
@@ -400,17 +398,19 @@ on_interrupt() { # <function-name>
     _WK_ON_INTERRUPT="$1 $_WK_ON_INTERRUPT"
     trap '_wk_interrupt INT'  INT
     trap '_wk_interrupt TERM' TERM
+    trap '_wk_interrupt HUP'  HUP
 }
 
 _wk_interrupt() { # <sig>
     local sig="$1" h
     [ -z "$_WK_INTERRUPTED" ] || return 0   # a second signal mid-cleanup: ignore it
     _WK_INTERRUPTED="$sig"
-    trap - INT TERM
+    trap - INT TERM HUP
     for h in $_WK_ON_INTERRUPT; do "$h" || true; done
     case "$sig" in
         INT)  exit 130 ;;
         TERM) exit 143 ;;
+        HUP)  exit 129 ;;
         *)    exit 1 ;;
     esac
 }

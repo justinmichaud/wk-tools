@@ -74,4 +74,7 @@ if is_macos && [ -z "${WK_IN_VM:-}" ]; then
     fi
 fi
 
-exec "$WK_ROOT/wk" status
+# Not `exec`: `wk start` reports its own result. `wk status` exits 4 for a peer
+# that will not answer, which says nothing about whether this started anything.
+log "status (information only)"
+"$WK_ROOT/wk" status --no-fleet || true

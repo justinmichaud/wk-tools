@@ -7,10 +7,10 @@ lib/target.sh's forward_to_vm; killing it there is what
 support.podman_vm_ssh is for). A third case -- the orphaned creation record
 that `wk gc` reaps once its driver is dead and no workspace exists anywhere
 -- has no seam to exercise in isolation (see the skipped test below) and is
-left for whoever adds one. The status-files-are-claims case
-(`build_live` on a stale log) needs no hardware at all, and so does `./setup`:
-its home-scoped stages are driven for real against a scratch HOME, killed with
-SIGKILL at several points, and re-run.
+left for whoever adds one. The records-are-claims case (a `running` record
+whose log or pid says otherwise) is tests/test_build_liveness.py's, and
+`./setup` needs no hardware either: its home-scoped stages are driven for real
+against a scratch HOME, killed with SIGKILL at several points, and re-run.
 
 Run: python3 -m unittest tests.test_crash_only -v
 """
@@ -111,6 +111,15 @@ class TestWkRmOfRubble(WkTest):
     def setUp(self):
         super().setUp()
         self.name = f"wk-test-{rand_suffix()}"
+        # Registered before anything is created: the `wk rm` below is the
+        # thing under test, so an assertion that fails first -- or that rm
+        # itself not converging -- must not leave the workspace running.
+        self.addCleanup(self._remove)
+
+    def _remove(self):
+        cp = run("rm", self.name, env={"WK_YES": "1"}, timeout=180)
+        if cp.returncode != 0 and "no such workspace" not in cp.stdout:
+            print(f"[teardown] 'wk rm {self.name}' exited {cp.returncode}: {cp.stdout}")
 
     def test_rm_converges_on_a_killed_creation(self):
         cp = run("new", self.name, "--target", "container", "--no-wait", timeout=120)
@@ -137,7 +146,7 @@ class TestWkRmOfRubble(WkTest):
 
 
 class TestGcReapsDeadCreationRecord(unittest.TestCase):
-    """cmd/gc's orphaned-creation-record reaping is a callable seam now
+    """cmd/gc's orphaned-creation-record reaping is a callable seam
     (gc_creation_records, lib/target.sh, next to ws_target/ws_exists), so
     this drives it directly against a fake WK_STORE and a stubbed
     target_all/load_target -- the way test_state.py's TestWsStateWords
@@ -147,15 +156,14 @@ class TestGcReapsDeadCreationRecord(unittest.TestCase):
     def test_gc_reaps_a_dead_creation_record(self):
         with scratch_dir(prefix="wk-test-gc-creation-") as tmp:
             store = tmp / "store"
-            create = store / "create"
-            create.mkdir(parents=True)
-            (store / "ws").mkdir()
+            (store / "ws").mkdir(parents=True)
+            (store / "log").mkdir()   # detach_run makes it in a real run
             script = f'''
 set -euo pipefail
 . "{REPO}/lib/common.sh"
 . "{REPO}/lib/store.sh"
 . "{REPO}/lib/target.sh"
-. "{REPO}/lib/detach.sh"
+. "{REPO}/lib/task.sh"
 WK_STORE="{store}"; export WK_STORE
 
 # One fake target whose store is this same WK_STORE (load_target is a
@@ -165,102 +173,112 @@ target_all() {{ echo fake; }}
 load_target() {{ :; }}
 
 # dead: a pid nothing answers to, and no workspace directory anywhere -- reaped.
-status_write "$WK_STORE/create/dead.status" state=creating pid=4194304 stage=create
-: > "$WK_STORE/create/dead.log"
+d=$(task_begin new here dead "wk new dead --kill" "$(ws_create_log dead)" checking create)
+task_pid "$d" 4194304
+: > "$(ws_create_log dead)"
 
 # alive: this very process's own pid -- kept, though its workspace directory
 # does not exist yet.
-status_write "$WK_STORE/create/alive.status" state=creating "pid=$$" stage=create
-: > "$WK_STORE/create/alive.log"
+d=$(task_begin new here alive "wk new alive --kill" "$(ws_create_log alive)" checking create)
+task_pid "$d" $$
+: > "$(ws_create_log alive)"
 
 # found: a dead pid, but a workspace directory exists on the (fake) target
 # -- kept.
-status_write "$WK_STORE/create/found.status" state=creating pid=4194304 stage=create
-: > "$WK_STORE/create/found.log"
+d=$(task_begin new here found "wk new found --kill" "$(ws_create_log found)" checking create)
+task_pid "$d" 4194304
+: > "$(ws_create_log found)"
 mkdir -p "$WK_STORE/ws/found"
 
 gc_creation_records
 
 for n in dead alive found; do
-    if [ -f "$WK_STORE/create/$n.status" ]; then echo "$n:kept"; else echo "$n:reaped"; fi
+    if [ -n "$(task_find new "$n")" ]; then echo "$n:kept"; else echo "$n:reaped"; fi
 done
 '''
             cp = bash(script)
             self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
             want = "dead:reaped\nalive:kept\nfound:kept"
             self.assertEqual(
-                cp.stdout.strip(), want,
+                cp.stdout.strip().splitlines()[-3:], want.split("\n"),
                 f"got:\n{cp.stdout}\nwant:\n{want}\nstderr:\n{cp.stderr}",
             )
 
             # The log beside a reaped record goes with it; a kept record's
             # log is untouched.
-            self.assertFalse((create / "dead.log").exists(), "dead.log survived its reaped record")
-            self.assertTrue((create / "alive.log").exists(), "alive.log was removed")
-            self.assertTrue((create / "found.log").exists(), "found.log was removed")
+            logs = store / "log"
+            self.assertFalse((logs / "new-dead.log").exists(), "the reaped record's log survived")
+            self.assertTrue((logs / "new-alive.log").exists(), "a live record's log was removed")
+            self.assertTrue((logs / "new-found.log").exists(), "a kept record's log was removed")
 
 
-class TestBuildLiveOnAStaleLog(unittest.TestCase):
-    """Status files are claims, not evidence (CLAUDE.md rule 5's cousin):
-    `state=running` alone does not mean a build is live -- lib/detach.sh's
-    build_live also demands the log have moved within WK_STALL_SECONDS."""
+class TestRmTakesTheWorkspacesRecordsWithIt(unittest.TestCase):
+    """`wk rm` converges on everything a workspace left, its task records
+    (lib/task.sh) included: a record that outlived its workspace would name a
+    kill command for a job whose checkout is gone. A record of a job still
+    running is a refusal instead -- destroying the workspace under it leaves it
+    compiling into nothing. Driven through the three functions cmd/rm defines
+    for it, lifted out of the file the way tests/test_status_base.py lifts
+    report_sdk_image."""
 
-    def _write_running(self, sf):
-        return f'''
-. "{REPO}/lib/detach.sh"
-status_write "{sf}" state=running pid=$$ stage=build
-'''
+    PRELUDE = ('set -euo pipefail\n'
+               '. "%s/lib/common.sh"\n' % REPO
+               + '. "%s/lib/task.sh"\n' % REPO)
 
-    def test_stale_log_is_not_live(self):
-        with scratch_dir(prefix="wk-test-buildlive-") as tmp:
-            sf = tmp / "build.status"
-            log = tmp / "build.log"
-            script = f'''
-{self._write_running(sf)}
-: > "{log}"
-touch -t 202001010000 "{log}"
-build_live "{sf}" "{log}" && echo LIVE || echo NOTLIVE
-'''
-            cp = bash(script)
-            self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-            self.assertEqual(cp.stdout.strip(), "NOTLIVE", cp.stdout + cp.stderr)
+    def _lift(self):
+        out = []
+        for fn in ("ws_task_records", "ws_task_live_lines", "ws_task_records_remove"):
+            cp = subprocess.run(["sed", "-n", "/^%s()/,/^}/p" % fn,
+                                 str(REPO / "cmd" / "rm")],
+                                capture_output=True, text=True, check=True)
+            self.assertTrue(cp.stdout.strip(), "%s() is not in cmd/rm" % fn)
+            out.append(cp.stdout)
+        return "".join(out)
 
-    def test_fresh_log_is_live(self):
-        with scratch_dir(prefix="wk-test-buildlive-") as tmp:
-            sf = tmp / "build.status"
-            log = tmp / "build.log"
-            script = f'''
-{self._write_running(sf)}
-: > "{log}"
-build_live "{sf}" "{log}" && echo LIVE || echo NOTLIVE
-'''
-            cp = bash(script)
-            self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-            self.assertEqual(cp.stdout.strip(), "LIVE", cp.stdout + cp.stderr)
-
-    def test_non_running_state_is_never_live_even_with_a_fresh_log(self):
-        with scratch_dir(prefix="wk-test-buildlive-") as tmp:
-            sf = tmp / "build.status"
-            log = tmp / "build.log"
-            script = f'''
-. "{REPO}/lib/detach.sh"
-status_write "{sf}" state=ok pid=$$ stage=build
-: > "{log}"
-build_live "{sf}" "{log}" && echo LIVE || echo NOTLIVE
-'''
-            cp = bash(script)
-            self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-            self.assertEqual(cp.stdout.strip(), "NOTLIVE", cp.stdout + cp.stderr)
-
-    def test_missing_status_file_is_not_live(self):
-        script = f'''
-. "{REPO}/lib/detach.sh"
-build_live "/nonexistent/build.status" "/nonexistent/build.log" && echo LIVE || echo NOTLIVE
-'''
-        cp = bash(script)
+    def _run(self, store, body):
+        cp = bash(self.PRELUDE + self._lift() + body,
+                  env={"WK_STORE": str(store)})
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertEqual(cp.stdout.strip(), "NOTLIVE", cp.stdout + cp.stderr)
+        return cp.stdout
 
+    def test_a_running_job_is_named_with_the_command_that_stops_it(self):
+        with scratch_dir(prefix="wk-test-rm-records-") as tmp:
+            out = self._run(tmp, '''
+d=$(task_begin build here ws1 "wk build ws1 --kill" /nolog compile)
+task_pid "$d" $$
+d=$(task_begin rc here ws1 "wk ai claude ws1 --rc --stop" /nolog session)
+task_pid "$d" $$
+d=$(task_begin test here ws1 "wk test ws1 --kill" /nolog jsc)
+task_pid "$d" 4194304
+ws_task_live_lines ws1
+''')
+            self.assertIn("wk build ws1 --kill", out)
+            self.assertNotIn("--rc --stop", out,
+                             "rm stops the rc session itself; it is not a refusal")
+            self.assertNotIn("wk test ws1 --kill", out,
+                             "a record whose pid is gone is not a running job")
+
+    def test_every_record_of_that_workspace_goes_and_no_others(self):
+        with scratch_dir(prefix="wk-test-rm-records-") as tmp:
+            out = self._run(tmp, '''
+task_begin build here ws1 "wk build ws1 --kill" /nolog compile >/dev/null
+task_begin rc here ws1 "wk ai claude ws1 --rc --stop" /nolog session >/dev/null
+task_begin build here ws2 "wk build ws2 --kill" /nolog compile >/dev/null
+ws_task_records_remove ws1
+task_list
+''')
+            left = [l for l in out.splitlines() if l.strip()]
+            self.assertEqual(len(left), 1, out)
+            self.assertIn("build-ws2-", left[0])
+
+    def test_rm_refuses_on_a_live_job_and_removes_the_records_when_it_is_done(self):
+        """The two call sites in cmd/rm itself: the refusal before the lock,
+        and the removal on each path that finishes."""
+        text = (REPO / "cmd" / "rm").read_text()
+        refusal = text[text.index('_live=$(ws_task_live_lines "$NAME")'):]
+        self.assertIn("has work running in it", refusal[:400])
+        self.assertEqual(text.count('ws_task_records_remove "$NAME"'), 2,
+                         "a path that finishes a removal leaves the records behind")
 
 if __name__ == "__main__":
     unittest.main()

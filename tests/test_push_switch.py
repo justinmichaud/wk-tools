@@ -166,6 +166,7 @@ set -uo pipefail
 . "$WK_ROOT/lib/resources.sh"
 eval "$(sed -n "/^_jesc() {/,/^note_warn()/p" "$WK_ROOT/cmd/status")"
 report_sdk_image() { :; }
+report_tasks() { :; }
 eval "$(sed -n "/^report_health() {/,/^}$/p" "$WK_ROOT/cmd/status")"
 exec 3>&1
 report_health testmachine

@@ -340,8 +340,10 @@ class TestAReadingRefusalReachesItsCaller(WkTest):
     `|| return $?`, and the refusal walks out through every wrapper to the
     person who ran the command."""
 
-    # A machine that will not say how many cores or how much memory it has.
-    DEAF = {"nproc": "exit 1", "awk": "exit 1"}
+    # A machine that will not say how many cores or how much memory it has:
+    # nproc/awk are what a Linux reading takes, sysctl a macOS one -- deaf on
+    # both, or the fake is only deaf on the platform the suite is not running.
+    DEAF = {"nproc": "exit 1", "awk": "exit 1", "sysctl": "exit 1"}
 
     COMPOSITE = ("envelope_cores", "envelope_mem_mb", "avail_mem_mb",
                  "build_jobs", "explain_jobs", "describe_cores")

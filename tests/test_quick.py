@@ -1113,24 +1113,19 @@ t0=$(date +%s); capped 20 true; d=$(( $(date +%s) - t0 ))
 
     @staticmethod
     def _no_batchmode_by_design(conf):
-        """A stanza may leave password authentication on only by saying so: the
-        comment block above `Host <name>` names the phone that is not a
-        provisioned bridge yet. Read out of the file rather than listed here,
-        so a second exception has to argue for itself where a reader will see
-        it."""
-        allowed, block = set(), []
+        """A stanza may leave password authentication on only by writing
+        `BatchMode no` itself. ssh's default is `no` and `ssh -G` reports an
+        omission as one, so the exception is read off the stanza rather than
+        off a comment that can be trimmed away from under it."""
+        allowed, hosts = set(), []
         for line in conf.read_text().splitlines():
-            if line.startswith("#"):
-                block.append(line)
-            elif line.startswith("Host "):
-                # Joined, not searched line by line: the phrase is prose and
-                # wraps wherever the paragraph does.
-                prose = " ".join(l.lstrip("#").strip() for l in block)
-                if "No BatchMode" in prose:
-                    allowed.update(line.split()[1:])
-                block = []
-            elif not line.strip():
-                block = []
+            parts = line.split("#", 1)[0].split()
+            if not parts:
+                continue
+            if parts[0].lower() == "host":
+                hosts = parts[1:]
+            elif parts[0].lower() == "batchmode" and parts[1:2] == ["no"]:
+                allowed.update(hosts)
         return allowed
 
     def test_ssh_jump_hosts_are_bounded(self):

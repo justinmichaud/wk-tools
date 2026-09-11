@@ -7,7 +7,7 @@
 # *detached*: a dropped connection does not take it with it, and re-running `wk
 # new` resumes it. This end refuses what should be refused, starts the driver and
 # follows its log; the driver (`--_detached`) does everything that changes
-# anything, under the workspace lock, writing `ws.status` as it goes.
+# anything, under the workspace lock, stepping its task record as it goes.
 #
 #   --target <target>   container, vm, or a machine named in
 #                        targets/hosts/<name>.conf (default: container)
@@ -18,6 +18,8 @@
 #   --zed                open the checkout in Zed once it is ready
 #   --no-wait            return once creation has started, without waiting for it;
 #                        incompatible with --pr
+#   --kill               stop the creation running for <name>; what it leaves is
+#                        half-made, and 'wk rm <name>' clears it
 #   --pr <spec>          check it out onto a PR head once ready -- the same
 #                        spec `wk pr` takes: <user>:<branch>, <n>, or wpe:<n>
 #
@@ -36,6 +38,8 @@ WK_ROOT="${WK_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
 . "$WK_ROOT/lib/target.sh"
 . "$WK_ROOT/lib/arch.sh"
 . "$WK_ROOT/lib/detach.sh"
+. "$WK_ROOT/lib/task.sh"
+. "$WK_ROOT/lib/watchdog.sh"
 
 
 new_fetch_from() {
@@ -100,10 +104,8 @@ new_freshen() { # <name>
     detached=$(kv_get detached <<<"$out")
     if [ -n "$detached" ]; then
         warn "'$name' is not on a branch (detached at $detached), so 'git status',
-    'git pull' and 'wk pr rebase' in there have no upstream to name. A
-    snapshot is published on the branch it was taken from, and this one was
-    not:  wk sync --tools    publishes one that is, for the next workspace.
-    In this one:  git checkout main"
+    'git pull' and 'wk pr rebase' in there have no upstream to name:
+        git checkout main    in the workspace"
         return 0
     fi
     b=$(kv_get branch <<<"$out")
@@ -133,6 +135,7 @@ ARCH=native
 
 ZED=""
 NO_WAIT=""
+KILL=""
 
 # Internal: this process *is* the detached driver, which is this same file, so the two halves cannot drift apart.
 DETACHED=""
@@ -149,6 +152,7 @@ while [ $# -gt 0 ]; do
         --arch)   ARCH=$(arch_canon "${2:-}"); shift 2 ;;
         --zed)    ZED=1; shift ;;
         --no-wait) NO_WAIT=1; shift ;;
+        --kill)   KILL=1; shift ;;
         --pr)     PR_SPEC="${2:-}"; [ -n "$PR_SPEC" ] || die "--pr needs a spec: <user>:<branch>, <n>, or wpe:<n>"; shift 2 ;;
         --_detached) DETACHED=1; shift ;;
         --sysroot)
@@ -158,11 +162,25 @@ while [ $# -gt 0 ]; do
     workspace and is a property of the build, so it will be 'wk build
     --sysroot', not 'wk new --sysroot'." ;;
         *) die "usage: wk new <name> [--target <target>] [--base <id>] [--arch <arch>]
-    [--zed] [--no-wait] [--pr <spec>]; unknown option: $1; see wk new -h" ;;
+    [--zed] [--no-wait] [--pr <spec>] [--kill]; unknown option: $1; see wk new -h" ;;
     esac
 done
 
 load_target "$TARGET"
+
+if [ -n "$KILL" ]; then   # the creation's own record names this command (lib/task.sh)
+    [ -z "$PR_SPEC$ZED$NO_WAIT$BASE" ] || die "'wk new $NAME --kill' stops the creation already running and takes
+    nothing with it -- no --base, --zed, --no-wait or --pr."
+    _rc=0; job_stop "$NAME" new || _rc=$?
+    case "$_rc" in
+        1) die "the process creating '$NAME' outlived a TERM and a KILL. It holds the
+    workspace lock, so nothing else can touch '$NAME' until it is gone:
+        ps -p $(task_field "$(task_find new "$NAME")" pid)" ;;
+        0) log "  what it got as far as is half-made and nothing in one is worth
+  keeping:  wk rm $NAME    (then 'wk new $NAME' to start again)" ;;
+    esac
+    exit 0
+fi
 
 if ! arch_is_native "$ARCH" && [ "$WK_TARGET_KIND" != container ]; then
     die "--arch $ARCH is a container-only capability (this is target '$TARGET').
@@ -182,44 +200,43 @@ if [ "$WK_TARGET_KIND" = local ]; then t_create "$NAME"; fi
 
 t_store_init
 
-SF=$(ws_status_file "$NAME")
 LOG=$(ws_create_log "$NAME")
 
 if [ -n "$DETACHED" ]; then
-    CUR=starting
-
-    stage() {
-        CUR="$1"
-        status_write "$SF" state=creating "pid=$$" "stage=$1" "log=$LOG" "target=$TARGET"
-    }
+    stage() { task_step_named "$TASK" "$1"; }
 
     # A failure has to leave a state behind, or a waiter sits there until its timeout deciding from the process table alone.
     _driver_exit() {
-        [ -n "${REFUSED:-}" ] && return 0
         # WK_EXIT_STATUS: published by the atexit trap (lib/common.sh) as this process's exit code before handlers run; ":-0" guards other callers.
-        [ "${WK_EXIT_STATUS:-0}" -eq 0 ] || \
-            status_write "$SF" state=failed "pid=$$" "stage=$CUR" "log=$LOG" "target=$TARGET"
+        [ -n "${REFUSED:-}" ] || [ "${WK_EXIT_STATUS:-0}" -eq 0 ] \
+            || task_end "$TASK" "${WK_EXIT_STATUS:-1}"
         release_locks
     }
 
-    # A refusal is not a failed creation. A flag rather than dropping the shared exit trap, which would drop the lock release too.
+    # A refusal is not a failed creation, and the record says which it was. A flag rather than dropping the shared exit trap, which would drop the lock release too.
     REFUSED=""
     refuse() {
         REFUSED=1
+        task_end "$TASK" refused
         release_locks
         die "$@"
     }
 
-    # This workspace, so two `wk new <same-name>` cannot both create; the store, so a create and a `wk sync` do not race a moving snapshot.
+    # The SDK lock and before the store one: the refresh is a network fetch and a `git reset --hard` over the one checkout this machine shares. Then this workspace, so two `wk new <same-name>` cannot both create, and the store, so a create and a `wk sync` do not race a moving snapshot.
+    [ "$WK_TARGET_KIND" != container ] || with_lock sdk -- t_sdk_refresh
     hold_lock "ws-$NAME"
     if t_needs_base; then hold_lock store -s; fi
 
+    # Under the lock and before the record: `task_begin` drops the ended record of the last creation, which is what says this workspace was ever finished.
+    STATE=$(ws_state "$NAME")
+    TASK=$(task_begin new here "$NAME" "wk new $NAME --kill" "$LOG" \
+        checking wipe base create init fetch register)
     wk_atexit _driver_exit
 
     stage checking
 
     # Crash-only: converge by remaking. An unfinished workspace holds nothing of value; a finished or environment-less one may still hold real work, so those refuse.
-    case "$(ws_state "$NAME")" in
+    case "$STATE" in
     present)
         refuse "workspace '$NAME' already exists (target '$TARGET').
     'wk rm $NAME' first, or pick another name." ;;
@@ -244,7 +261,9 @@ if [ -n "$DETACHED" ]; then
     if t_needs_base; then
         stage base
         [ -n "$BASE" ] || BASE=$(current_base) \
-            || die "no base snapshot yet -- run 'wk sync' first"
+            || die "no base snapshot this machine can build a workspace from:  wk sync
+    publishes one. A snapshot that is not on the branch it was published from
+    is refused here -- every workspace overlaid on it starts detached."
         _why=$(base_verify "$BASE") || die "$_why"
     fi
 
@@ -264,7 +283,7 @@ if [ -n "$DETACHED" ]; then
     # The ssh alias, last: it points at something that has to exist first. None for a container -- `wk zed` writes that alias where the editor runs.
     stage register
 
-    status_write "$SF" state=present "pid=$$" stage=ready "log=$LOG" "target=$TARGET"
+    task_end "$TASK" 0
     info "workspace '$NAME' created"
     exit 0
 fi
@@ -277,15 +296,18 @@ broken)
     die "'$NAME' is a record without an environment -- something outside wk removed
     the $TARGET side of it. 'wk status $NAME' says so; 'wk rm $NAME' clears it." ;;
 creating)
-    if detach_alive "$SF"; then
-        die "'$NAME' is already being created (pid $(status_field "$SF" pid), at stage
-    '$(status_field "$SF" stage)'). Follow it:      tail -f $LOG
+    _d=$(task_find new "$NAME")
+    if [ -n "$_d" ] && task_alive "$_d"; then
+        die "'$NAME' is already being created (pid $(task_field "$_d" pid), at stage
+    '$(task_stage "$_d")'). Follow it:      tail -f $(task_field "$_d" log)
     Or ask for it and wait:  wk enter $NAME --zed   /   wk build $NAME <config>"
     fi
     ;;
 esac
 
-_pid=$(detach_run "$SF" "$LOG" -- \
+_SINCE=$(task_stamp)   # before the spawn: until the driver writes its record, the newest one of this name is the last run's
+
+_pid=$(detach_run "$LOG" -- \
     "$WK_ROOT/wk" new "$NAME" --target "$TARGET" --arch "$ARCH" \
     ${BASE:+--base "$BASE"} --_detached)
 
@@ -297,14 +319,17 @@ if [ -n "$NO_WAIT" ]; then
     exit 0
 fi
 
-_st=$(detach_wait "$SF" "$LOG" "${WK_NEW_TIMEOUT:-3600}" "$_pid")
+_st=$(task_wait new "$NAME" "$LOG" "${WK_NEW_TIMEOUT:-3600}" "$_pid" "$_SINCE")
 case "$_st" in
-present) ;;
+ok) ;;
 crashed)
     die "the process creating '$NAME' is gone without having said how it ended.
     Whatever it left is half-made, and a re-run destroys it and starts again:
         wk new $NAME --target $TARGET
     What it managed to say is in $LOG" ;;
+refused)
+    die "'$NAME' was not created, and nothing was left half-made: the reason is
+    above, in full in $LOG" ;;
 timeout)
     die "'$NAME' is still being created after ${WK_NEW_TIMEOUT:-3600}s.
     It is detached, so it is still going: 'wk status $NAME' says where, and

@@ -387,6 +387,11 @@ class TestNothingMayDrawOverAMeasuredRun(WkTest):
 
     WATCH = '\n'.join([
         '. "$WK_ROOT/lib/quiet.sh"',
+        # _watch_restarted's other half: without this, `ps` is the real
+        # machine's, and a daemon this host never paused (nothing here ever
+        # ran wk_quiet_daemons_pause) reads as "running again" on every
+        # sample -- this test is about the window probe alone.
+        'ps() { :; }',
         'count=$(mktemp); echo 0 > "$count"',
         'wk_window_probe() {',
         '    n=$(cat "$count"); n=$((n + 1)); echo "$n" > "$count"',

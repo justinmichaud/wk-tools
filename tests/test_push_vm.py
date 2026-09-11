@@ -24,6 +24,7 @@ will not load a placeholder, and an agent is the thing under test.
 Run: python3 -m unittest tests.test_push_vm -v
 """
 import os
+import pathlib
 import re
 import shutil
 import signal
@@ -150,6 +151,21 @@ def _store(tmp, keys=()):
                        check=True)
         shutil.move(str(priv) + ".pub", str(secrets / f"build_key_{fork}.pub"))
     return d
+
+
+def _forward_record(vmstore, name="demo"):
+    """The newest agent-forward task record (lib/task.sh) for <name>, or None.
+    `wk push on` writes one per guest whose tunnel it starts, into the vm
+    target's own store, and it stays open for as long as the tunnel carries
+    that guest's push."""
+    found = sorted((pathlib.Path(vmstore) / "task").glob("agent-forward-%s-*" % name))
+    return found[-1] if found else None
+
+
+def _kill_forward(vmstore, name="demo"):
+    rec = _forward_record(vmstore, name)
+    if rec is not None:
+        _kill_pidfile(rec / "pid")
 
 
 def _kill_pidfile(path):
@@ -395,8 +411,7 @@ class TestTheGuestHalfOfTheSwitch(WkTest):
         log = self.tmp / "ssh.log"
         log.write_text("")
         self.addCleanup(_kill_pidfile, vmstore / "vm" / "ssh-agent.pid")
-        for name in ("demo",):
-            self.addCleanup(_kill_pidfile, vmstore / "vm" / f"{name}.agent-forward")
+        self.addCleanup(_kill_forward, vmstore)
         with stub_path({"ssh": ssh, "tart": tart}) as binp:
             env = {
                 "PATH": f"{binp}:{os.environ['PATH']}",
@@ -417,8 +432,9 @@ class TestTheGuestHalfOfTheSwitch(WkTest):
         self.log = log.read_text()
         return cp
 
-    def _forward_status(self, vmstore, name="demo"):
-        return vmstore / "vm" / f"{name}.agent-forward"
+    def _forward_is_up(self, vmstore, name="demo"):
+        rec = _forward_record(vmstore, name)
+        return rec is not None and not (rec / "exit").exists()
 
     @unittest.skipUnless(os.uname().sysname == "Darwin",
                          "guests are a macOS-host thing (tart)")
@@ -434,7 +450,7 @@ class TestTheGuestHalfOfTheSwitch(WkTest):
                                 env={**os.environ, "SSH_AUTH_SOCK": str(sock)},
                                 stdout=subprocess.PIPE).stdout
         self.assertIn("SHA256:", listed)
-        self.assertTrue(self._forward_status(vmstore).exists(), cp.stdout)
+        self.assertTrue(self._forward_is_up(vmstore), cp.stdout)
         self.assertRegex(self.log, r"-N .*-R /Users/admin/\.wk-ssh-agent\.sock:")
 
     @unittest.skipUnless(os.uname().sysname == "Darwin",
@@ -463,7 +479,8 @@ class TestTheGuestHalfOfTheSwitch(WkTest):
                                 stdout=subprocess.PIPE,
                                 stderr=subprocess.STDOUT).stdout
         self.assertIn("no identities", listed)
-        self.assertFalse(self._forward_status(vmstore).exists(), cp.stdout)
+        self.assertFalse(self._forward_is_up(vmstore), cp.stdout)
+        self.assertEqual((_forward_record(vmstore) / "exit").read_text().strip(), "stopped")
 
     @unittest.skipUnless(os.uname().sysname == "Darwin",
                          "guests are a macOS-host thing (tart)")
@@ -529,6 +546,35 @@ class TestTheGuestHalfOfTheSwitch(WkTest):
 
     @unittest.skipUnless(os.uname().sysname == "Darwin",
                          "guests are a macOS-host thing (tart)")
+    def test_status_is_on_while_the_guests_agent_holds_a_key_with_no_guest_up(self):
+        """The measured defect: the headline was over the container half and
+        the running guests only, so it said OFF while deploy keys sat in the
+        agent every guest reaches the moment it starts -- and `wk ai` read that
+        as a closed switch."""
+        home, vmstore = _guest(self.tmp)
+        store = _store(self.tmp, keys=("fork",))
+        self._push("on", store, home, vmstore)
+        cp = self._push("status", store, home, vmstore, tart=FAKE_TART_STOPPED)
+        self.assertIn("in the agent this host runs for them", cp.stdout)
+        self.assertIn("push is ON", cp.stdout)
+        self.assertEqual(0, cp.returncode, cp.stdout)
+
+    @unittest.skipUnless(os.uname().sysname == "Darwin",
+                         "guests are a macOS-host thing (tart)")
+    def test_off_is_not_reported_until_that_agent_is_empty(self):
+        """Evidence, not the exit status of `ssh-add -D`: an agent that
+        ignored the clear is one every guest can still push with."""
+        home, vmstore = _guest(self.tmp)
+        store = _store(self.tmp, keys=("fork",))
+        self._push("on", store, home, vmstore)
+        cp = self._push("off", store, home, vmstore)
+        self.assertNotIn("still holds", cp.stdout)
+        cp = self._push("status", store, home, vmstore, tart=FAKE_TART_STOPPED)
+        self.assertIn("holds nothing", cp.stdout)
+        self.assertEqual(1, cp.returncode, cp.stdout)
+
+    @unittest.skipUnless(os.uname().sysname == "Darwin",
+                         "guests are a macOS-host thing (tart)")
     def test_status_is_off_when_no_guest_reaches_it_either(self):
         home, vmstore = _guest(self.tmp)
         store = _store(self.tmp, keys=("fork",))
@@ -591,48 +637,65 @@ class TestTwoStartsOfOneForwardDoNotFightOverIt(WkTest):
 
     def test_a_second_start_while_one_is_alive_is_a_no_op(self):
         home, vmstore = _guest(self.tmp)
-        sf = vmstore / "vm" / "demo.agent-forward"
-        self.addCleanup(_kill_pidfile, sf)
+        self.addCleanup(_kill_forward, vmstore)
         cp = self._driver(
             "_agent_forward_start demo 1.2.3.4 &\n"
             "_agent_forward_start demo 1.2.3.4 &\n"
             "wait\n", vmstore)
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertTrue(sf.exists(),
-                        "the second start deleted the first's status file")
+        rec = _forward_record(vmstore)
+        self.assertIsNotNone(rec, "no forward record was written at all")
+        self.assertFalse((rec / "exit").exists(),
+                         "the second start ended the first's record")
         log = (self.tmp / "ssh.log").read_text()
         self.assertEqual(1, len([l for l in log.splitlines() if " -N " in l]),
                          "two forwards were started for one guest:\n" + log)
 
-    def test_a_failed_start_removes_only_its_own_record(self):
-        """The failure path's `rm -f`: with an overlapping run's pid in the
-        file, removing it is what leaves `wk push off` nothing to stop."""
+    def test_a_failed_start_ends_its_own_record(self):
+        """A forward that did not come up leaves nothing for `wk push status`
+        to believe: its own record carries the failure, and `wk push off` has
+        no dead pid to chase."""
         home, vmstore = _guest(self.tmp)
-        sf = vmstore / "vm" / "demo.agent-forward"
         cp = self._driver(
             '. "$WK_ROOT/lib/detach.sh"\n'
             'mkdir -p "$WK_VM_DIR"\n'
-            "detach_run() { echo 999001; }\n"
-            "status_write() { printf 'state=running\\npid=999002\\n' > \"$1\"; }\n"
+            "detach_run() { echo 4194304; }\n"   # a pid above every default pid_max
             "_agent_forward_start demo 1.2.3.4 && echo UNEXPECTED-OK\n", vmstore)
         self.assertNotIn("UNEXPECTED-OK", cp.stdout, cp.stdout + cp.stderr)
-        self.assertTrue(sf.exists(),
-                        "it removed a status file another run had written")
-        self.assertIn("pid=999002", sf.read_text())
+        rec = _forward_record(vmstore)
+        self.assertIsNotNone(rec, cp.stdout + cp.stderr)
+        self.assertEqual((rec / "exit").read_text().strip(), "failed",
+                         cp.stdout + cp.stderr)
 
-    def test_its_own_record_is_still_cleaned_up(self):
-        """The other side of the same rule: a forward this run started and that
-        died leaves nothing behind for `wk push status` to believe."""
+    def test_a_live_forward_is_what_a_second_start_reads(self):
+        """The liveness check is the record's pid in the process table, not a
+        word written into the record: a record whose pid is gone is started
+        again rather than trusted."""
         home, vmstore = _guest(self.tmp)
-        sf = vmstore / "vm" / "demo.agent-forward"
+        self.addCleanup(_kill_forward, vmstore)
         cp = self._driver(
-            '. "$WK_ROOT/lib/detach.sh"\n'
+            '. "$WK_ROOT/lib/task.sh"\n'
             'mkdir -p "$WK_VM_DIR"\n'
-            "detach_run() { echo 999001; }\n"
-            "status_write() { printf 'state=running\\npid=999001\\n' > \"$1\"; }\n"
-            "_agent_forward_start demo 1.2.3.4 && echo UNEXPECTED-OK\n", vmstore)
-        self.assertNotIn("UNEXPECTED-OK", cp.stdout, cp.stdout + cp.stderr)
-        self.assertFalse(sf.exists(), cp.stdout + cp.stderr)
+            'd=$(task_begin agent-forward here demo "wk push off" /nolog "start forward" verify)\n'
+            'task_pid "$d" 4194304\n'
+            "_agent_forward_start demo 1.2.3.4\n", vmstore)
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        log = (self.tmp / "ssh.log").read_text()
+        self.assertEqual(1, len([l for l in log.splitlines() if " -N " in l]),
+                         "a dead record was believed, so no forward was started:\n" + log)
+
+    def test_the_command_the_record_names_is_one_that_ends_the_forward(self):
+        """`wk vm start` starts the forward too (t_settle), not only `wk push
+        on`, so the record's kill command has to end it whoever started it:
+        `wk push off` clears the host agent and then converges every running
+        guest, and a converge with no keys in the agent stops the forward."""
+        vm = (REPO / "targets" / "vm.sh").read_text()
+        self.assertIn('task_begin agent-forward here "$name" "wk push off"', vm)
+        conv = func_body(vm, "_agent_converge_guest")
+        self.assertIn("_agent_forward_stop", conv)
+        off = func_body(vm, "vm_push_keys_converge")
+        self.assertIn("push_agent_clear", off)
+        self.assertIn('_agent_converge_guest "$g" "$ip"', off)
 
     def test_both_ends_of_the_switch_take_the_same_lock(self):
         """A stop that runs while a start is mid-flight would kill a pid the
@@ -834,6 +897,115 @@ _start_host_inject
             with self.subTest(action=action):
                 TestTheGuestHalfOfTheSwitch._push(self, action, store, home, vmstore)
                 self.assertEqual("ghp-standing\n", self.read_pat(vmstore).read_text())
+
+
+class TestEveryGuestStartConvergesTheReadToken(WkTest):
+    """The measured defect: the token the guests' injector reads is converged
+    by _start_host_inject, and the only caller of that was past
+    _start_host_proxy's "already running" return -- so a `wk start <guest>` on
+    a host whose proxy was up left a rotated token undelivered and every read
+    from a guest answered 401 (Bad credentials)."""
+
+    START_PROXY = """
+. "$WK_ROOT/lib/common.sh"
+. "$WK_ROOT/lib/store.sh"
+. "$WK_ROOT/lib/target.sh"
+load_target vm >/dev/null 2>&1
+# Both already up, which is the state a second start finds: what it still has
+# to converge is the token.
+_proxy_running() { return 0; }
+_inject_running() { return 0; }
+_start_host_proxy
+"""
+
+    def _start(self, vmstore, pat):
+        store = self.tmp / "store"
+        held = store / "push-keys"
+        held.mkdir(parents=True, exist_ok=True)
+        (store / "secrets").mkdir(parents=True, exist_ok=True)
+        (held / "github-pat").write_text(pat)
+        return bash(self.START_PROXY,
+                    env={"WK_STORE": str(store),
+                         "WK_HOST_SECRETS": str(store / "secrets"),
+                         "WK_VM_STORE": str(vmstore),
+                         "WK_VM_PROXY_ADDR": "192.168.2.1"})
+
+    def test_a_start_that_finds_the_proxy_up_still_delivers_the_token(self):
+        _, vmstore = _guest(self.tmp)
+        read_pat = vmstore / "vm" / "read-github-pat"
+        (vmstore / "vm").mkdir(parents=True, exist_ok=True)
+        read_pat.write_text("ghp-yesterdays\n")
+        cp = self._start(vmstore, "ghp-todays\n")
+        self.assertEqual(0, cp.returncode, cp.stdout + cp.stderr)
+        self.assertEqual("ghp-todays\n", read_pat.read_text())
+
+    def test_the_injector_is_converged_before_that_check_and_not_after(self):
+        """Source-level twin: the call has to be ahead of the early return, or
+        the test above only passes while the proxy happens to be down."""
+        body = func_body((REPO / "targets" / "vm.sh").read_text(),
+                         "_start_host_proxy")
+        self.assertLess(body.index("_start_host_inject"),
+                        body.index("_proxy_running"))
+
+
+@unittest.skipUnless(os.uname().sysname == "Darwin",
+                     "guests are a macOS-host thing (tart)")
+@unittest.skipUnless(shutil.which("ssh-agent"), "needs ssh-agent")
+class TestOneOffClearsEveryAgentThisMachineRuns(WkTest):
+    """Two agents run on a macOS workstation -- the one a container mounts the
+    socket of, and the one a guest reaches through a forward -- and one `wk
+    push off` empties both. A switch that clears one of them is a switch that
+    reports OFF while a workspace pushes."""
+
+    def _machine_agent(self):
+        sock = self.tmp / "machine-agent.sock"
+        out = subprocess.run(["ssh-agent", "-s", "-a", str(sock)],
+                             stdout=subprocess.PIPE, text=True,
+                             check=True).stdout
+        for part in out.split(";"):
+            if "SSH_AGENT_PID=" in part:
+                pid = int(part.split("=", 1)[1])
+                self.addCleanup(lambda: os.kill(pid, signal.SIGTERM))
+        return sock
+
+    def _identities(self, sock):
+        return subprocess.run(["ssh-add", "-l"], text=True,
+                              env={**os.environ, "SSH_AUTH_SOCK": str(sock)},
+                              stdout=subprocess.PIPE,
+                              stderr=subprocess.STDOUT).stdout
+
+    def _push(self, action, store, home, vmstore, machine_sock):
+        log = self.tmp / "ssh.log"
+        log.write_text("")
+        self.addCleanup(_kill_pidfile, vmstore / "vm" / "ssh-agent.pid")
+        self.addCleanup(_kill_forward, vmstore)
+        with stub_path({"ssh": FAKE_SSH, "tart": FAKE_TART}) as binp:
+            return self.run_wk("push", action, env={
+                "PATH": f"{binp}:{os.environ['PATH']}",
+                "WK_TEST_GUEST": str(home),
+                "WK_TEST_SSH_LOG": str(log),
+                "WK_STORE": str(store),
+                "WK_HOST_SECRETS": str(store / "secrets"),
+                "WK_VM_STORE": str(vmstore),
+                "WK_VM_PROXY_ADDR": "192.168.2.1",
+                "WK_PUSH_AGENT_SOCK": str(machine_sock),
+                "WK_PUSH_PAT_FILE": str(self.tmp / "machine-pat"),
+            })
+
+    def test_on_loads_both_and_one_off_empties_both(self):
+        home, vmstore = _guest(self.tmp)
+        store = _store(self.tmp, keys=("fork",))
+        machine = self._machine_agent()
+        guest_agent = vmstore / "vm" / "ssh-agent.sock"
+
+        cp = self._push("on", store, home, vmstore, machine)
+        self.assertIn("SHA256:", self._identities(machine), cp.stdout)
+        self.assertIn("SHA256:", self._identities(guest_agent), cp.stdout)
+
+        cp = self._push("off", store, home, vmstore, machine)
+        self.assertEqual(0, cp.returncode, cp.stdout)
+        self.assertIn("no identities", self._identities(machine))
+        self.assertIn("no identities", self._identities(guest_agent))
 
 
 class TestBothHalvesRunHere(WkTest):

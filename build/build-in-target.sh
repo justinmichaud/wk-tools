@@ -112,6 +112,8 @@ if [ -n "${WK_DRY_RUN:-}" ]; then   # printed here and not in cmd/build: this ha
     exit 0
 fi
 
+echo "wk: build pid $$" >&2   # the pid `wk build --kill` and ^C signal: down the log, the one channel back to the driver on every target kind, and kept by guard_exec's exec, so every compiler is under it
+
 set -x
 # shellcheck disable=SC2086 -- $wrapper is a deliberate list of bare words.
 guard_exec "$jobs" -- $wrapper "$script" "${args[@]}" ${@+"$@"}

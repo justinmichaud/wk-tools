@@ -165,6 +165,36 @@ class TestTheSwitchIsThrownForEveryTarget(_AiRun):
                                  self.calls)
 
 
+class TestAnUnmeasuredSwitchIsARefusal(_AiRun):
+    """`wk push status` has more answers than on and off: 3 is a machine that
+    did not answer and 5 a machine with no switch (cmd/push). Reading either as
+    "off" hands an agent a session whose push may be live -- the measured
+    defect was `push_switch status || return 0`, which treated every non-zero
+    exit as a closed switch."""
+
+    def test_a_machine_that_did_not_answer_stops_the_command(self):
+        cp = self._ai("remote", push_status=3)
+        self.assertNotEqual(cp.returncode, 0, cp.stdout)
+        out = cp.stdout + cp.stderr
+        self.assertIn("refusing to run", out)
+        self.assertIn("wk push status --target remote", out)
+        self.assertEqual(["push status --target remote"], self.calls, self.calls)
+
+    def test_a_machine_with_no_switch_stops_it_too(self):
+        cp = self._ai("container", push_status=5)
+        self.assertNotEqual(cp.returncode, 0, cp.stdout)
+        self.assertIn("refusing to run", cp.stdout + cp.stderr)
+        self.assertEqual(["push status"], self.calls, self.calls)
+
+    def test_no_keys_and_no_token_anywhere_is_a_measured_off(self):
+        """4 is `wk key deploy` never having been run here: there is nothing
+        to hold back, and refusing would stop every session on a machine that
+        cannot publish at all."""
+        cp = self._ai("container", push_status=4)
+        self.assertEqual(["push status"], self.calls, self.calls)
+        self.assertNotIn("refusing to run", cp.stdout + cp.stderr)
+
+
 class TestTheSwitchComesBackOnlyForAPerson(WkTest):
     """restore_push, driven in cmd/ai's library mode: a headless run re-enters
     this command every few minutes via the babysitter's fix loop, and leaving

@@ -234,32 +234,65 @@ echo "6:$(ws_state done)"
         self.assertEqual(cp.stdout.strip(), want, f"got:\n{cp.stdout}\nwant:\n{want}")
 
 
-class TestStatusFilesAreClaims(WkTest):
-    def test_status_files_are_claims(self):
-        """a status file written by an older schema"""
-        f = self.tmp / "ws.status"
+class TestReadyMeansTheCreationIsFinished(WkTest):
+    def test_a_workspace_whose_creation_is_still_running_is_not_ready(self):
+        """`wk new` writes the ready marker at its `init` stage and then holds
+        the workspace lock through the stages after it, so `present` alone
+        would hand a build a lock it cannot take: every `ready=yes` command
+        waits for the creation driver itself to be gone."""
         script = f'''
 set -euo pipefail
 . "{REPO}/lib/common.sh"
-. "{REPO}/lib/detach.sh"
-f="{f}"
+. "{REPO}/lib/store.sh"
+. "{REPO}/lib/target.sh"
+. "{REPO}/lib/task.sh"
+WK_STORE="{self.tmp}/store"; export WK_STORE
+mkdir -p "$WK_STORE/ws/ws1"
+t_info() {{ echo running; }}
+t_created() {{ return 0; }}
+t_needs_base() {{ return 1; }}
 
-status_write "$f" state=creating "pid=$$" stage=create
-[ "$(status_field "$f" state)" = creating ] || {{ echo "state did not round-trip"; exit 1; }}
-detach_alive "$f" || {{ echo "a live pid was read as dead"; exit 1; }}
+d=$(task_begin new here ws1 "wk new ws1 --kill" /nonexistent-log checking create)
+out=$(WK_READY_WAIT=1 wait_ready ws1 2>&1) && rc=0 || rc=$?
+printf 'rc=%s\n%s\n' "$rc" "$out"
 
-# An unknown key is ignored, and a missing key is empty rather than an error.
-status_write "$f" state=creating "pid=$$" "future_key=whatever"
-[ -z "$(status_field "$f" stage)" ] || {{ echo "a missing key was not empty"; exit 1; }}
+task_end "$d" 0
+out=$(wait_ready ws1 2>&1) && rc=0 || rc=$?
+printf 'rc2=%s\n%s\n' "$rc" "$out"
+'''
+        cp = bash(script)
+        self.assertIn("finish being created", cp.stdout, cp.stdout + cp.stderr)
+        self.assertIn("was still creating after 1s", cp.stdout, cp.stdout + cp.stderr)
+        self.assertNotIn("rc=0", cp.stdout, "it treated a live creation as ready")
+        self.assertIn("rc2=0", cp.stdout,
+                      "once the driver has ended, the same workspace is ready")
+
+
+class TestARecordIsAClaimAndThePidIsTheFact(WkTest):
+    def test_a_record_is_a_claim_and_the_pid_is_the_fact(self):
+        """a task record's fields round-trip, a missing one is empty, and
+        liveness is the process table rather than anything written down"""
+        script = f'''
+set -euo pipefail
+. "{REPO}/lib/common.sh"
+. "{REPO}/lib/task.sh"
+export WK_STORE="{self.tmp}/store"
+
+d=$(task_begin new here ws1 "wk new ws1 --kill" /nonexistent-log checking create)
+[ "$(task_field "$d" kind)" = new ] || {{ echo "kind did not round-trip"; exit 1; }}
+task_alive "$d" || {{ echo "a live pid was read as dead"; exit 1; }}
+
+# A field nothing wrote is empty rather than an error.
+[ -z "$(task_field "$d" future_field)" ] || {{ echo "a missing field was not empty"; exit 1; }}
 
 # A pid above every default pid_max on both platforms: dead by construction.
-status_write "$f" state=creating pid=4194304 stage=create
-! detach_alive "$f" || {{ echo "a dead pid was read as alive"; exit 1; }}
+task_pid "$d" 4194304
+! task_alive "$d" || {{ echo "a dead pid was read as alive"; exit 1; }}
+[ "$(task_verdict "$d")" = died ] || {{ echo "a dead pid with no exit is not 'died'"; exit 1; }}
 
-# Garbage: still readable for what is there, never a crash.
-printf 'not a status file at all' > "$f"
-got=$(status_field "$f" state) || {{ echo "a garbage file failed the reader"; exit 1; }}
-[ -z "$got" ] || {{ echo "a garbage file produced a state: $got"; exit 1; }}
+# Garbage in a field: still readable for what is there, never a crash.
+printf 'not a pid at all' > "$d/pid"
+! task_alive "$d" || {{ echo "garbage read as alive"; exit 1; }}
 '''
         cp = bash(script)
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)

@@ -181,11 +181,12 @@ _rsh_q "env WK_ROOT=$(sh_quote "$(t_tools '')") WK_CLAUDE_REMOTE=1 bash -c '
 '" && changed "linked ~/.claude on $r_host (settings-host.json + Bash(wk *))"
 
 # Copies, refreshed on every setup and removed when the store has none: this machine is shared.
-# `_rsh`, not `_rsh_q` (`ssh -n`): the value goes on stdin, never in `ps`. Value rows only --
-# a file row is the claude.ai login, whose refresh token would rotate out from under others.
-while read -r _sname _ _shome _ _skind; do
+# `_rsh`, not `_rsh_q` (`ssh -n`): the value goes on stdin, never in `ps`. Only the rows
+# the delivery column sends to a `remote` machine -- not the claude.ai login, whose refresh
+# token would rotate out from under everyone else holding it.
+while read -r _sname _ _shome _ _skind _sdelivery; do
     [ -n "$_sname" ] || continue
-    [ "$_skind" = value ] || continue
+    case ",$_sdelivery," in *,remote,*) ;; *) continue ;; esac
     _sval=$(wk_agent_secret "$_sname")
     if [ -n "$_sval" ]; then
         if printf '%s\n' "$_sval" | _rsh "umask 077 && cat > \$HOME/$(sh_quote "$_shome")"; then
@@ -200,7 +201,7 @@ while read -r _sname _ _shome _ _skind; do
 done <<EOF
 $(wk_agent_secrets)
 EOF
-unset _sname _shome _sval _skind
+unset _sname _shome _sval _skind _sdelivery
 
 if ! "$WK_ROOT/cmd/sudo" status --target "$TARGET" >/dev/null 2>&1; then
     warn "$("$WK_ROOT/cmd/sudo" status --target "$TARGET" 2>&1 | head -2)"

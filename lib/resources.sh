@@ -229,13 +229,15 @@ $(printf '%s\n' "$running" | awk -F'\t' '{ printf "      %s (%s jobs, %s MB)\n",
 
 build_jobs() {  # from the memory not already spoken for -- running out of RAM during a link is what hangs a machine -- clamped by the cores left and by load
     local polite="${1:-}"
-    local by_mem by_cpu jobs cores avail
+    local by_mem by_cpu jobs cores avail reserved
 
     cores=$(wk_cores) || return $?
-    cores=$(( cores - $(build_reserved_jobs) ))  # the container is limited to envelope_cores, fewer than nproc, which would oversubscribe
+    reserved=$(build_reserved_jobs) || return $?
+    cores=$(( cores - reserved ))  # the container is limited to envelope_cores, fewer than nproc, which would oversubscribe
     [ "$cores" -lt 1 ] && cores=1
     avail=$(avail_mem_mb) || return $?
-    avail=$(( avail - $(build_reserved_mb) ))
+    reserved=$(build_reserved_mb) || return $?
+    avail=$(( avail - reserved ))
     [ "$avail" -lt 0 ] && avail=0
     by_mem=$(( avail / WK_MB_PER_JOB ))
     by_cpu=$cores
@@ -267,7 +269,7 @@ explain_jobs() {
     jobs=$(build_jobs "$polite") || return $?
     cores=$(wk_cores) || return $?
     avail=$(avail_mem_mb) || return $?
-    reserved=$(build_reserved_mb)
+    reserved=$(build_reserved_mb) || return $?
     [ -z "$polite" ] || load=$(wk_load) || return $?
     log "resources: ${jobs} jobs (cores=${cores} avail=${avail}MB${reserved:+ minus ${reserved}MB other builds} @ ${WK_MB_PER_JOB}MB/job${polite:+, polite, load=${load}}${WK_MAX_JOBS:+, max $WK_MAX_JOBS})"
 

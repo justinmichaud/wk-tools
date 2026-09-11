@@ -348,7 +348,11 @@ class TestTheCommand(_Ntfy):
     way, published to the stub."""
 
     def env(self, extra=None):
-        e = {"WK_STORE": str(self.tmp / "store"), "WK_NTFY_API": self.url}
+        # wk_secrets_dir (lib/store.sh) reads WK_HOST_SECRETS on macOS, not
+        # WK_STORE -- store_topic below must land where wk_ntfy_topic_path
+        # (dirname of the secrets dir) actually looks.
+        e = {"WK_STORE": str(self.tmp / "store"), "WK_NTFY_API": self.url,
+             "WK_HOST_SECRETS": str(self.tmp / "store" / "secrets")}
         if extra:
             e.update(extra)
         return e

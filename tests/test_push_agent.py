@@ -715,11 +715,291 @@ printf %s "$(wk_secrets_dir)"
         """The switch is which private keys an agent outside holds; nothing
         published here may be one."""
         secrets = self._init()
-        for f in secrets.iterdir():
-            self.assertNotIn("PRIVATE KEY", f.read_text(errors="replace"), f.name)
+        for f in secrets.rglob("*"):
+            if f.is_file():
+                self.assertNotIn("PRIVATE KEY", f.read_text(errors="replace"), f.name)
 
     def test_running_it_twice_converges(self):
         first = self._init().joinpath("ssh_config").read_text()
         self.assertEqual(first, self._init().joinpath("ssh_config").read_text())
 
 
+
+
+class TestWhatAContainerMountsAtSecrets(WkTest):
+    """A container is handed its credentials by mounting a directory, so the
+    one it mounts holds exactly the rows wk_agent_secrets delivers to a
+    container plus the public files. The store above it holds every row: the
+    Claude token goes to a vm and a build box, and mounting the store whole
+    puts it one `cat /secrets/claude-token` away from every workspace here."""
+
+    SEEDED = {"claude-token": "a vm and a build box only\n",
+              "litellm-key": "every kind\n",
+              "build_key_fork.pub": "ssh-ed25519 AAAA fork\n"}
+
+    def _publish(self, extra=""):
+        store = self.tmp / "store"
+        secrets = store / "secrets"
+        secrets.mkdir(parents=True, exist_ok=True)
+        for name, text in self.SEEDED.items():
+            (secrets / name).write_text(text)
+        cp = bash('''
+. "$WK_ROOT/lib/common.sh"
+. "$WK_ROOT/lib/resources.sh"
+. "$WK_ROOT/lib/store.sh"
+. "$WK_ROOT/lib/target.sh"
+load_target container >/dev/null 2>&1
+store_init
+''' + extra + '''
+printf %s "$(wk_secrets_view_dir container)"
+''', env={"WK_STORE": str(store), "WK_STORE_DEFAULT": str(store),
+           "WK_HOST_SECRETS": str(secrets)})
+        self.assertEqual(0, cp.returncode, cp.stdout + cp.stderr)
+        return secrets, Path(cp.stdout.strip().splitlines()[-1])
+
+    def test_the_view_is_the_delivered_rows_and_the_public_files(self):
+        secrets, view = self._publish()
+        self.assertEqual(
+            {"ssh_config", "github-user", "build_key_fork.pub", "litellm-key"},
+            {p.name for p in view.iterdir()})
+        self.assertEqual("every kind\n", (view / "litellm-key").read_text())
+        self.assertTrue((secrets / "claude-token").exists(),
+                        "the store itself keeps every row")
+
+    def test_a_file_that_belongs_to_no_row_is_taken_out_again(self):
+        """Convergence: a delivery withdrawn, or a credential cleared, leaves
+        nothing readable behind."""
+        _, view = self._publish()
+        (view / "claude-token").write_text("planted\n")
+        _, view = self._publish()
+        self.assertFalse((view / "claude-token").exists())
+
+    def test_a_rotation_reaches_the_view(self):
+        """The bytes a container reads are a copy, so the one writer of a
+        credential on this machine republishes: `wk key set litellm` reaches a
+        workspace that is already running, which is the property the read-only
+        mount exists for."""
+        _, view = self._publish(
+            extra='printf "rotated\\n" | wk_cred_store litellm\n')
+        self.assertEqual("rotated\n", (view / "litellm-key").read_text())
+
+
+class TestOnlyTheOwningMachinePublishesSecrets(WkTest):
+    """/secrets has one publisher. Inside the podman VM wk_secrets_dir names
+    the macOS host's ~/.config/wk/secrets, bind-mounted read-only, so a
+    store_init in there that wrote would die on `Read-only file system` and
+    take `wk new` with it. In there it reads what the host published and says
+    so when the host has published nothing."""
+
+    def init(self, in_vm, secrets_ro=False, publish=()):
+        store = self.tmp / "store"
+        secrets = store / "secrets"
+        secrets.mkdir(parents=True)
+        for name in publish:
+            (secrets / name).parent.mkdir(parents=True, exist_ok=True)
+            (secrets / name).write_text("published by the host\n")
+        if secrets_ro:
+            secrets.chmod(0o500)
+            self.addCleanup(secrets.chmod, 0o700)
+        env = {"WK_STORE": str(store), "WK_STORE_DEFAULT": str(store),
+               "WK_HOST_SECRETS": str(secrets)}
+        if in_vm:
+            env["WK_IN_VM"] = "1"
+        cp = bash('''
+. "$WK_ROOT/lib/common.sh"
+. "$WK_ROOT/lib/resources.sh"
+. "$WK_ROOT/lib/store.sh"
+. "$WK_ROOT/lib/target.sh"
+load_target container >/dev/null 2>&1
+store_init
+''', env=env)
+        return cp, secrets
+
+    def test_in_the_vm_a_read_only_secrets_dir_is_read_and_not_written(self):
+        cp, secrets = self.init(True, secrets_ro=True,
+                                publish=("ssh_config", "github-user",
+                                         "view/container/ssh_config"))
+        self.assertEqual(0, cp.returncode, cp.stdout + cp.stderr)
+        self.assertEqual({"ssh_config", "github-user", "view"},
+                         {p.name for p in secrets.iterdir()})
+        self.assertEqual("published by the host\n",
+                         (secrets / "ssh_config").read_text())
+
+    def test_in_the_vm_a_missing_published_file_dies_with_the_remedy(self):
+        cp, _ = self.init(True, publish=("ssh_config",))
+        self.assertNotEqual(0, cp.returncode, cp.stdout + cp.stderr)
+        out = cp.stdout + cp.stderr
+        self.assertIn("github-user", out)
+        self.assertIn("./setup --stage vmtools", out)
+
+    def test_in_the_vm_a_host_that_published_no_container_view_dies_too(self):
+        """What a container mounts at /secrets is that view, so a host that has
+        not written one gives every container on the machine an empty /secrets
+        rather than a fork alias and a placeholder."""
+        cp, _ = self.init(True, publish=("ssh_config", "github-user"))
+        self.assertNotEqual(0, cp.returncode, cp.stdout + cp.stderr)
+        self.assertIn("view/container/ssh_config", cp.stdout + cp.stderr)
+
+    def test_the_owning_machine_publishes(self):
+        cp, secrets = self.init(False)
+        self.assertEqual(0, cp.returncode, cp.stdout + cp.stderr)
+        self.assertTrue((secrets / "ssh_config").exists())
+        self.assertTrue((secrets / "github-user").exists())
+
+
+# A peer, faked to the depth cmd/push's delegation reaches: a stub ssh that
+# runs the far command here (tests/test_fleet_walk.py's idiom), and a `wk` in
+# the peer's tools directory that records what it was asked for.
+PEER_SSH = '''#!/bin/sh
+for last; do :; done
+exec bash -c "$last"
+'''
+DOWN_SSH = '''#!/bin/sh
+exit 255
+'''
+PEER_WK = '''#!/bin/sh
+printf '%s\\n' "$*" >> "$WK_TEST_PEER_LOG"
+echo "fork       push allowed (in the agent)"
+exit "${WK_TEST_PEER_RC:-0}"
+'''
+
+
+class TestAskingAnotherMachine(WkTest):
+    """`wk push --target <machine>` runs this same file over there -- the
+    credentials never travel -- and what comes back is that machine's own
+    verdict. The one answer it must never invent is "off": a machine that
+    could not be asked is holding whatever it was holding, and `wk ai` reads
+    a 1 as a closed switch.
+
+    Nothing here reaches a real machine: `ssh` is a stub that runs the far
+    command here, and the far `wk` is a recorder."""
+
+    def _peer(self, ssh, rc=0):
+        reg = self.tmp / "registry"
+        reg.mkdir(exist_ok=True)
+        root = self.tmp / "peer-root"
+        (root / "tools").mkdir(parents=True, exist_ok=True)
+        wk = root / "tools" / "wk"
+        wk.write_text(PEER_WK)
+        wk.chmod(0o755)
+        # WK_REMOTE_PEER is what a machine reached by delegation is: no
+        # ~/.wk-remote marker of its own is required over there.
+        (reg / "peerbox.conf").write_text(
+            f"WK_REMOTE_HOST=fake-peerbox\nWK_REMOTE_PEER=1\n"
+            f"WK_REMOTE_ROOT={root}\n")
+        self.log = self.tmp / "peer.log"
+        self.log.write_text("")
+        binp = self.tmp / "bin"
+        binp.mkdir(exist_ok=True)
+        p = binp / "ssh"
+        p.write_text(ssh)
+        p.chmod(0o755)
+        return {
+            "PATH": f"{binp}:{os.environ['PATH']}",
+            "WK_TARGET_REGISTRY": str(reg),
+            "WK_STORE": str(self.tmp / "store"),
+            "WK_HOST_SECRETS": str(self.tmp / "secrets"),
+            "WK_TEST_PEER_LOG": str(self.log),
+            "WK_TEST_PEER_RC": str(rc),
+        }
+
+    def calls(self):
+        return [l for l in self.log.read_text().splitlines() if l.strip()]
+
+    def test_the_far_side_runs_the_same_command(self):
+        cp = self.run_wk("push", "status", "--target", "peerbox",
+                         env=self._peer(PEER_SSH))
+        self.assertEqual(["push status"], self.calls(), cp.stdout)
+        self.assertIn("peerbox", cp.stdout)
+        self.assertIn("push allowed", cp.stdout)
+        self.assertEqual(0, cp.returncode, cp.stdout)
+
+    def test_the_far_sides_own_verdict_is_this_commands_verdict(self):
+        cp = self.run_wk("push", "status", "--target", "peerbox",
+                         env=self._peer(PEER_SSH, rc=1))
+        self.assertEqual(1, cp.returncode, cp.stdout)
+
+    def test_a_machine_that_did_not_answer_is_3_and_named(self):
+        """Not 1: `wk ai`'s hold-back reads 1 as "off and nothing to do", and
+        the keys on a machine nobody could ask are wherever they were."""
+        cp = self.run_wk("push", "off", "--target", "peerbox",
+                         env=self._peer(DOWN_SSH))
+        self.assertEqual(3, cp.returncode, cp.stdout)
+        self.assertIn("peerbox", cp.stdout)
+        self.assertIn("not asked", cp.stdout)
+        self.assertEqual([], self.calls(), cp.stdout)
+
+
+class TestAMachineWithNoSwitchSaysSoWithACodeOfItsOwn(WkTest):
+    """A build box keeps its private half on disk and points core.sshCommand
+    at it (remote/provision.sh): there is no agent to empty, so `on` and `off`
+    refuse. That refusal is 5, not a die's 1 -- "there is no switch here" and
+    "the switch is off" are the two answers `wk ai` must not confuse."""
+
+    def _as_build_machine(self):
+        """What the dispatcher and lib/target.sh read on a shared build box:
+        the ~/.wk-remote marker naming the machine, that machine's conf in the
+        registry, and a store of its own holding a private half. Its commands
+        run here (WK_REMOTE_LOCAL), so nothing ssh's anywhere."""
+        marker = self.tmp / "wk-remote"
+        marker.write_text("target=buildbox4\n")
+        reg = self.tmp / "registry"
+        reg.mkdir(exist_ok=True)
+        (reg / "buildbox4.conf").write_text("WK_REMOTE_HOST=buildbox4\n")
+        store = self.tmp / "store"
+        (store / "push-keys").mkdir(parents=True, exist_ok=True)
+        (store / "secrets").mkdir(parents=True, exist_ok=True)
+        (store / "push-keys" / "build_key_fork").write_text("not-a-key\n")
+        return {"WK_REMOTE_MARKER": str(marker), "WK_STORE": str(store),
+                "WK_TARGET_REGISTRY": str(reg),
+                "WK_HOST_SECRETS": str(store / "secrets"),
+                "WK_REMOTE_LOCAL": "1"}
+
+    def test_on_and_off_refuse_with_5(self):
+        for action in ("on", "off"):
+            with self.subTest(action=action):
+                cp = self.run_wk("push", action, env=self._as_build_machine())
+                self.assertEqual(5, cp.returncode, cp.stdout)
+                self.assertIn("no ssh-agent socket", cp.stdout)
+
+    def test_status_still_reports_the_live_key_rather_than_refusing(self):
+        """Reading is not switching: the key is live and `wk pr` needs to know
+        that, so status answers ON."""
+        cp = self.run_wk("push", "status", env=self._as_build_machine())
+        self.assertEqual(0, cp.returncode, cp.stdout)
+        self.assertIn("cannot be switched off", cp.stdout)
+
+
+class TestTheReadTokenReachesEveryInjectorThisMachineRuns(_Agent):
+    """A macOS workstation runs two injectors -- one in the podman machine for
+    the containers, one here for the guests -- and a token delivered to one of
+    them is a 401 from the other. push_agent_pat_deliver (lib/store.sh) is the
+    one call every convergence point makes, so neither half can be forgotten."""
+
+    def test_the_key_command_delivers_through_it(self):
+        text = (REPO / "cmd" / "key").read_text()
+        self.assertIn("push_agent_pat_deliver", text)
+        self.assertNotIn('push_agent_pat_sync push_agent_exec', text,
+                         "cmd/key converges one injector by hand again")
+
+    def test_it_writes_the_machine_half_from_the_token_this_device_holds(self):
+        (self.held / "github-pat").write_text("ghp-not-a-real-token\n")
+        cp = self.sh("push_agent_pat_deliver")
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertEqual("ghp-not-a-real-token\n",
+                         (self.tmp / "read-pat").read_text())
+
+    def test_a_withdrawn_token_is_removed_by_the_same_call(self):
+        (self.tmp / "read-pat").write_text("ghp-the-old-one\n")
+        cp = self.sh("push_agent_pat_deliver")
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertFalse((self.tmp / "read-pat").exists())
+
+    def test_the_guests_half_is_the_vm_drivers_one_writer(self):
+        """The guest injector's copy is written by vm_push_pat_converge and by
+        nothing else, so every guest start and every key rotation converge the
+        same file the same way."""
+        vm = (REPO / "targets" / "vm.sh").read_text()
+        self.assertEqual(1, vm.count("push_agent_pat_sync"),
+                         "targets/vm.sh writes the guests' read token twice")
+        self.assertIn("vm_push_pat_converge", vm)

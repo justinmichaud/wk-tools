@@ -29,7 +29,7 @@ class Merger:
         if name not in self.index:
             m = {"name": name, "self": False, "methods": [], "facts": [], "raw": [],
                  "disk": [], "services": [], "locks": [], "switches": [],
-                 "capacity": [], "bench": [], "sdk": []}
+                 "capacity": [], "bench": [], "sdk": [], "tasks": []}
             self.index[name] = m
             self.doc["machines"].append(m)
         return self.index[name]
@@ -95,6 +95,10 @@ class Merger:
             name = r.get("machine", "?")
             self.machine(name)["bench"].append(r)
             return name
+        elif kind == "task":
+            name = r.get("machine", "?")
+            self.machine(name)["tasks"].append(r)
+            return name
         elif kind == "sdk":
             name = r.get("machine", "?")
             self.machine(name)["sdk"].append(r)
@@ -147,7 +151,8 @@ BUSY = ("creating", "starting", "building", "fixing", "no", "empty", "held",
         "base", "role")
 BAD = (
     "unhealthy",
-    "incomplete",   # a bench task that stopped before every planned run ended
+    "incomplete",   # a task that stopped before every step of its plan ended
+    "died",         # a pid that no longer answers, with no exit recorded
     "failed",
     "oom",
     "stalled",
@@ -156,7 +161,8 @@ BAD = (
     "gave-up",
     "error", "closed",
 )
-IDLE = ("absent", "none", "stopped", "exited", "-", "clean", "finished", "off")
+IDLE = ("absent", "none", "stopped", "exited", "-", "clean", "finished", "off",
+        "cancelled")
 
 
 def severity(word):
@@ -172,21 +178,10 @@ def severity(word):
     return ""
 
 
-def sub_text(sub):   # a build/test/babysit line, in one string, for a table cell
+def sub_text(sub):   # one workspace's build state, for a table cell
     out = "%s=%s" % (sub.get("kind", "?"), sub.get("state", "?"))
-    bits = [b for b in (sub.get("config"), sub.get("arch")) if b]
-    if sub.get("kind") == "babysit" and sub.get("config"):
-        bits = [sub["config"], sub.get("model", ""), "fix %s/%s" % (sub.get("attempt", "?"), sub.get("max", "?"))]
-        bits = [b for b in bits if b]
-    if bits:
-        out += " (%s)" % ", ".join(bits)
-    if sub.get("seconds") is not None:
-        secs = int(sub["seconds"])
-        out += " %dm%02ds" % (secs // 60, secs % 60)
-    if sub.get("peak_mb") is not None:
-        out += "  peak %sMB" % sub["peak_mb"]
-    if sub.get("exit") and sub.get("state") == "failed":
-        out += "  exit %s" % sub["exit"]
+    if sub.get("config"):
+        out += " (%s)" % sub["config"]
     return out
 
 
@@ -381,6 +376,39 @@ class Writer:
                                           + text.strip(), hue, self.colour))
 
 
+# The one renderer for a long-running command, whatever wrote the record: its progress against the plan it declared, what stops it, and where it says so.
+LIVE = ("running", "silent", "starting")
+
+
+def render_task(wr, t, colour):
+    state = t.get("state", "?")
+    head = "%s  %s" % (paint(state, severity(state), colour),
+                       paint("%s  since %s" % (t.get("machine", "?"), t.get("since", "?")),
+                             "dim", colour))
+    wr.kv("%s %s" % (t.get("task_kind", "task"), t.get("name", "?")), head)
+    step = int(t.get("step") or 0)
+    if state == "ok":
+        step = len(t.get("plan") or []) + 1   # every step ran, including the last: cmd/status leaves an `ok` task out of its listing, so this is for any other reader of a finished record
+    for i, line in enumerate(t.get("plan") or [], 1):
+        if i < step:
+            mark, hue = "[x]", "good"
+        elif i > step:
+            mark, hue = "[ ]", "dim"
+        elif state in LIVE:
+            mark, hue = "[>]", "busy"
+        else:
+            # Where it stopped: a plan of empty boxes hides which step ended it.
+            mark, hue = "[!]", "bad"
+        wr.out.append("      " + paint("%s %s" % (mark, line), hue, colour))
+    if state == "died":
+        rc = t.get("exit")
+        wr.out.append("      " + paint(
+            "died -- %s" % ("exit %s" % rc if rc else "no exit recorded"), "bad", colour))
+    wr.out.append("      " + paint("kill: %s" % t.get("kill", "?"),
+                                   "dim", colour))
+    wr.out.append("      " + paint("log:  %s" % t.get("log", "?"), "dim", colour))
+
+
 def render_machine_block(m, colour, widths=None):
     # widths=None is the streaming renderer, aligned within a machine only.
     w = widths
@@ -414,7 +442,7 @@ def render_machine_block(m, colour, widths=None):
             wr.notes(ws.get("notes"))
 
     # Apart from its workspaces: every line here breaks a build or costs work.
-    if any(m.get(k) for k in ("disk", "sdk", "services", "switches", "capacity", "locks")) or m.get("bench"):
+    if any(m.get(k) for k in ("disk", "sdk", "services", "switches", "capacity", "locks", "tasks")) or m.get("bench"):
         out.append("")
     for d in m.get("disk") or []:
         tail = ""
@@ -462,6 +490,8 @@ def render_machine_block(m, colour, widths=None):
                                         paint(b.get("state", "?"), severity(b.get("state")), colour),
                                         paint(b.get("summary", ""), "dim", colour)))
         wr.kv("", "%s" % paint("%s  %s" % (b.get("subject", ""), b.get("path", "")), "dim", colour))
+    for t in m.get("tasks") or []:
+        render_task(wr, t, colour)
 
     for r in m["raw"]:
         out.append("")
@@ -808,12 +838,7 @@ function sev(w) {
 const chip = (w, k) => `<span class="chip ${k === undefined ? sev(w) : k}">${ESC(w)}</span>`;
 function subText(s) {
   let out = `${s.kind}=${s.state}`;
-  let bits = [s.config, s.arch].filter(Boolean);
-  if (s.kind === "babysit" && s.config) bits = [s.config, s.model, `fix ${s.attempt}/${s.max}`].filter(Boolean);
-  if (bits.length) out += ` (${bits.join(", ")})`;
-  if (s.seconds != null) out += ` ${Math.floor(s.seconds/60)}m${String(s.seconds%60).padStart(2,"0")}s`;
-  if (s.peak_mb != null) out += `  peak ${s.peak_mb}MB`;
-  if (s.exit && s.state === "failed") out += `  exit ${s.exit}`;
+  if (s.config) out += ` (${s.config})`;
   return out;
 }
 // How a machine is reached and where it was declared -- calculated, never
@@ -896,6 +921,21 @@ function tiles(m) {
       ` <span class="sub">pid ${ESC(lk.pid || "?")} ${ESC(lk.cmd || "")}</span>`));
   for (const b of (m.bench || []))
     t.push(tile("bench", chip(b.state) + ` <span class="sub">${ESC(b.task)} — ${ESC(b.summary || "")}</span>`));
+  for (const k of (m.tasks || [])) {
+    const step = parseInt(k.step, 10) || 0;
+    const live = ["running", "silent", "starting"].includes(k.state);
+    const plan = (k.plan || []).map((line, i) => {
+      const n = i + 1;
+      const mark = n < step ? "[x]" : n > step ? "[ ]" : live ? "[&gt;]" : "[!]";
+      const hue = n < step ? "good" : n > step ? "sub" : live ? "busy" : "bad";
+      return `<div class="${hue}">${mark} ${ESC(line)}</div>`;
+    }).join("");
+    t.push(tile(`${ESC(k.task_kind || "task")} · ${ESC(k.name || "?")}`,
+      chip(k.state) + ` <span class="sub">since ${ESC(k.since || "?")}</span>` + plan +
+      (k.state === "died" ? `<div class="bad">died — ${k.exit ? "exit " + ESC(k.exit) : "no exit recorded"}</div>` : "") +
+      `<div class="sub">kill: <code>${ESC(k.kill || "?")}</code></div>` +
+      `<div class="sub">log: ${ESC(k.log || "?")}</div>`));
+  }
   return t.length ? `<div class="tiles">${t.join("")}</div>` : "";
 }
 

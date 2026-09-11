@@ -67,11 +67,21 @@ _watch_restarted() {   # the must-not-run processes that are running again, comm
     local listing want
     listing=$(ps -Ao stat=,comm= 2>/dev/null) || return 0
     want=$(wk_quiet_desktop_stopped | awk '{print $2}' | grep -vxF -f <(wk_quiet_desktop_unstoppable))
-    printf '%s\n' "$listing" | awk -v want="$want" '
-        BEGIN { n = split(want, w, "\n"); for (i = 1; i <= n; i++) if (w[i] != "") keep[w[i]] = 1 }
-        { state = $1; $1 = ""; sub(/^ +/, ""); sub(/.*\//, "")
-          if ($0 in keep && state !~ /^T/) seen[$0] = 1 }
-        END { sep = ""; for (p in seen) { printf "%s%s", sep, p; sep = "," } }'
+    # awk's `-v` reads an embedded newline in `want` as a parse error, not data; python3 takes both lists through the environment instead
+    WK_QUIET_LISTING="$listing" WK_QUIET_WANT="$want" python3 -c '
+import os
+
+want = {w for w in os.environ.get("WK_QUIET_WANT", "").split("\n") if w}
+seen = set()
+for line in os.environ.get("WK_QUIET_LISTING", "").split("\n"):
+    if not line:
+        continue
+    state, _, rest = line.partition(" ")
+    comm = rest.strip().rsplit("/", 1)[-1]
+    if comm in want and not state.startswith("T"):
+        seen.add(comm)
+print(",".join(sorted(seen)), end="")
+'
 }
 
 screen_watch_start() {   # <record file>

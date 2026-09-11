@@ -102,7 +102,8 @@ _stall_report /dev/null 301
         to the report that takes the process reading."""
         text = (REPO / "cmd" / "status").read_text()
         self.assertNotIn("likely stalled or killed", text)
-        self.assertIn('note_warn "no log output for ${age}s"', text)
+        self.assertIn('note_warn "no log output for ${_age:-?}s', text)
+        self.assertIn("counted as busy, since nothing", text)
 
 
 if __name__ == "__main__":

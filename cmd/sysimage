@@ -37,7 +37,9 @@
 #                                and the measured build against the mixed
 #                                profile. There is no plain build of such a
 #                                profile -- every number one produces is a
-#                                profile-guided build's
+#                                profile-guided build's.
+#                                --stop, with --slot and nothing else, stops the
+#                                build or cycle running for that slot
 #   ls | list                    every image a workspace here has built, its
 #                                slots, and where it is
 #   disks <machine>             removable disks attached to that machine

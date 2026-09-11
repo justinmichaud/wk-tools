@@ -288,6 +288,13 @@ class YoctoStageTest(WkTest):
 . "{REPO}/lib/store.sh"
 . "{REPO}/image/yocto.sh"
 t_exec() {{ shift; "$@"; }}
+_task() {{  # one yocto record, as yocto_build writes it
+    local d
+    d=$(task_begin yocto target "$1" "wk sysimage build demo --stage $2 --stop" \
+        "$(yocto_log "$1" "$2")" $YOCTO_STAGES)
+    [ -z "${{3:-}}" ] || task_pid "$d" "$3"
+    task_step "$d" "$(yocto_stage_index "$2")"
+}}
 '''
 
     def setUp(self):
@@ -297,14 +304,10 @@ t_exec() {{ shift; "$@"; }}
         self.home = self.store / "ws" / self.ws / "home"
         self.home.mkdir(parents=True)
 
-    def _write_status(self, state="running"):
-        (self.store / "ws" / self.ws / "yocto.status").write_text(
-            f"state={state}\nprofile=demo\nid=demo-1\ntarget=rpi3-32\n"
-            f"branch=main\nstage=image\nstarted=2026-01-01T00:00:00Z\n"
-        )
-
-    def _write_pidfile(self, stage, pid):
-        (self.home / f"yocto-{stage}.pid").write_text(f"{pid}\n")
+    def _record(self, stage, pid):
+        """One record for the workspace, written by lib/task.sh itself."""
+        cp = self._run(f'_task {self.ws} {stage} {pid}')
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
 
     def _run(self, script):
         env = dict(os.environ)
@@ -317,17 +320,48 @@ t_exec() {{ shift; "$@"; }}
             cwd=str(REPO), env=env, capture_output=True, text=True, timeout=30,
         )
 
+    def test_stopping_a_stage_goes_through_job_kill_with_no_pattern_kill(self):
+        """One implementation for stopping a job (job_kill, lib/watchdog.sh):
+        the descendants of the pid the record holds, inside the workspace. A
+        wkdev container shares the host's PID namespace, so `pkill -f <build
+        dir>` would match another workspace's cooker."""
+        execs = self.tmp / "execs"
+        termed = self.tmp / "termed"
+        cp = self._run(f'''
+t_exec() {{
+    shift
+    printf '%s\n' "$*" >> "{execs}"
+    case "$*" in
+        "kill -0 "*)     [ ! -f "{termed}" ]; return $? ;;
+        "ps -o args="*)  printf '%s\n' "bash /opt/wk-tools/image/yocto-build.sh --stage image"; return 0 ;;
+        *"kill -TERM"*)  : > "{termed}"; return 0 ;;
+    esac
+    return 0
+}}
+d=$(task_begin yocto target {self.ws} "wk sysimage build demo --stage image --stop" \
+    "$(yocto_log {self.ws} image)" $YOCTO_STAGES)
+task_set "$d" pid_match '*yocto-build.sh*'
+task_pid "$d" 4242
+task_step "$d" "$(yocto_stage_index image)"
+yocto_stop {self.ws} image
+printf 'exit=%s\n' "$(task_field "$d" exit)"
+''')
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertIn("exit=stopped", cp.stdout, cp.stdout + cp.stderr)
+        sent = execs.read_text()
+        self.assertIn("_watched_descendants 4242", sent, sent)
+        self.assertIn("kill -TERM", sent, sent)
+        self.assertNotIn("pkill", sent, sent)
+
     def test_a_dead_pid_after_kill_9_is_not_read_as_running(self):
         """the exact scenario: killed mid-build, status says running, pid is dead"""
-        self._write_status(state="running")
-        self._write_pidfile("image", DEAD_PID)
+        self._record("image", DEAD_PID)
         cp = self._run(f'yocto_running {self.ws} image && echo RUNNING || echo NOT-RUNNING')
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
         self.assertEqual(cp.stdout.strip(), "NOT-RUNNING", cp.stdout + cp.stderr)
 
     def test_a_dead_pid_means_no_stage_is_reported_running_at_all(self):
-        self._write_status(state="running")
-        self._write_pidfile("image", DEAD_PID)
+        self._record("image", DEAD_PID)
         cp = self._run(f'yocto_any_running {self.ws} && echo LIVE || echo NONE')
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
         self.assertEqual(cp.stdout.strip(), "NONE", cp.stdout + cp.stderr)
@@ -336,8 +370,7 @@ t_exec() {{ shift; "$@"; }}
         """positive control: yocto_running is not simply hard-wired to say no"""
         proc = subprocess.Popen(["sleep", "60"])
         try:
-            self._write_status(state="running")
-            self._write_pidfile("image", proc.pid)
+            self._record("image", proc.pid)
             cp = self._run(f'yocto_running {self.ws} image && echo RUNNING || echo NOT-RUNNING')
             self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
             self.assertEqual(cp.stdout.strip(), "RUNNING", cp.stdout + cp.stderr)
@@ -350,8 +383,7 @@ t_exec() {{ shift; "$@"; }}
         a workspace left by a killed build prints its plan, not a claim that
         a build is already running (yocto_build's --dry-run path never even
         asks -- it is the decision path above that a real re-run relies on)."""
-        self._write_status(state="running")
-        self._write_pidfile("image", DEAD_PID)
+        self._record("image", DEAD_PID)
         cp = self._run_wk_sysimage_dry_run()
         out = cp.stdout + cp.stderr
         self.assertEqual(cp.returncode, 0, out)
@@ -382,6 +414,13 @@ class YoctoSpawnRefusesASecondBuild(WkTest):
 . "{REPO}/lib/store.sh"
 . "{REPO}/image/yocto.sh"
 t_exec() {{ shift; "$@"; }}
+_task() {{  # one yocto record, as yocto_build writes it
+    local d
+    d=$(task_begin yocto target "$1" "wk sysimage build demo --stage $2 --stop" \
+        "$(yocto_log "$1" "$2")" $YOCTO_STAGES)
+    [ -z "${{3:-}}" ] || task_pid "$d" "$3"
+    task_step "$d" "$(yocto_stage_index "$2")"
+}}
 IMG_PROFILE=demo-profile
 '''
 
@@ -395,11 +434,13 @@ IMG_PROFILE=demo-profile
     def test_second_spawn_refuses_and_names_the_live_stage_and_log(self):
         proc = subprocess.Popen(["sleep", "60"])
         try:
-            (self.store / "ws" / self.ws / "yocto.status").write_text("state=running\n")
-            (self.home / "yocto-image.pid").write_text(f"{proc.pid}\n")
             env = dict(os.environ)
             env["WK_STORE"] = str(self.store)
             env["WK_ROOT"] = str(REPO)
+            subprocess.run(
+                ["bash", "-c", self.PRELUDE + f'_task {self.ws} image {proc.pid}'],
+                cwd=str(REPO), env=env, capture_output=True, text=True, timeout=30,
+                check=True)
             cp = subprocess.run(
                 ["bash", "-c", self.PRELUDE + f'yocto_spawn {self.ws} image'],
                 cwd=str(REPO), env=env, capture_output=True, text=True, timeout=30,

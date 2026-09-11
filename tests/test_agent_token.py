@@ -25,6 +25,7 @@ import os
 import re
 import shutil
 import subprocess
+import tempfile
 import unittest
 from pathlib import Path, PurePosixPath
 
@@ -34,6 +35,19 @@ from tests.test_pi_agent import FILE_ROWS, TABLE, VALUE_ROWS, store_path
 
 RC = REPO / "shell" / "bashrc"
 VAR = "CLAUDE_CODE_OAUTH_TOKEN"
+
+
+def delivered_to(kind, rows=TABLE):
+    """The rows the delivery column sends to one kind of target. One Claude
+    credential reaches any target -- an environment token takes precedence over
+    a stored login, and remote control refuses the token -- so the two Claude
+    rows have no target kind in common."""
+    return [r for r in rows if kind in r[5].split(",")]
+
+
+CONTAINER_ROWS = delivered_to("container", VALUE_ROWS)
+VM_ROWS = delivered_to("vm", VALUE_ROWS)
+REMOTE_ROWS = delivered_to("remote", VALUE_ROWS)
 
 # Not a token, and deliberately nothing like one.
 PLACEHOLDER = "placeholder-value-for-this-test"
@@ -236,15 +250,77 @@ printf "store=%s path=%s\\n" "$WK_STORE" "$(wk_agent_secret_path claude)"
         self.assertFalse((store / "secrets" / "claude-token").exists())
 
 
+class TestOneClaudeCredentialPerTarget(unittest.TestCase):
+    """The defect this holds shut: a container was given both, and Claude Code
+    takes $CLAUDE_CODE_OAUTH_TOKEN over a stored login, so every session
+    authenticated as an inference-only credential and remote control -- which
+    refuses that credential -- would not start at all."""
+
+    CLAUDE_ROWS = [r for r in TABLE if r[0].startswith("claude")]
+
+    def test_the_two_claude_rows_reach_no_target_in_common(self):
+        self.assertEqual(2, len(self.CLAUDE_ROWS), self.CLAUDE_ROWS)
+        first, second = (set(r[5].split(",")) for r in self.CLAUDE_ROWS)
+        self.assertEqual(set(), first & second,
+                         "both Claude credentials reach %s" % (first & second))
+
+    def test_every_kind_a_row_names_is_a_kind_that_exists(self):
+        """The delivery column is read by matching WK_TARGET_KIND, so a typo in
+        it is a credential silently delivered nowhere."""
+        kinds = set()
+        for row in TABLE:
+            kinds.update(row[5].split(","))
+        self.assertEqual(set(), kinds - {"container", "vm", "remote"}, kinds)
+
+    def test_the_login_goes_only_where_this_machines_bytes_go(self):
+        """A file row is rewritten in place by the CLI, so a copy is a second
+        holder whose first refresh invalidates every other one. A container
+        mounts the very bytes; nothing else may be sent them."""
+        for row in FILE_ROWS:
+            with self.subTest(name=row[0]):
+                self.assertEqual(["container"], row[5].split(","))
+
+    def test_the_container_is_given_no_claude_token(self):
+        """It has the login, and the token would win over it."""
+        self.assertNotIn("claude", [r[0] for r in CONTAINER_ROWS])
+
+    def test_a_row_a_container_is_not_given_is_taken_away(self):
+        """container/firstrun.sh's own loop, lifted and run against a scratch
+        home: a link an older container made is removed rather than left, so a
+        workspace converges on one credential instead of keeping two."""
+        text = (REPO / "container" / "firstrun.sh").read_text()
+        block = text.split("_agent_secrets() {", 1)[1]
+        block = "_agent_secrets() {" + block.split("\nEOF\n", 1)[0] + "\nEOF\n"
+        with tempfile.TemporaryDirectory(prefix="wk-test-firstrun-") as home:
+            home = Path(home)
+            for row in VALUE_ROWS:      # what an older container linked
+                (home / row[2]).symlink_to("/secrets/" + row[1])
+            cp = bash(f'''
+log() {{ printf '%s\\n' "$*"; }}
+WK_TOOLS="$WK_ROOT"
+HOME={home}
+{block}
+''')
+            self.assertEqual(0, cp.returncode, cp.stdout + cp.stderr)
+            for row in VALUE_ROWS:
+                with self.subTest(name=row[0]):
+                    link = home / row[2]
+                    if row in CONTAINER_ROWS:
+                        self.assertTrue(link.is_symlink(), row[2])
+                    else:
+                        self.assertFalse(link.is_symlink(), row[2])
+                        self.assertFalse(link.exists(), row[2])
+
+
 class TestEveryTargetDeliversIt(unittest.TestCase):
     """Source-level: the wiring of the three deliveries. Each is *driven*
     below, against a scratch home a fake ssh runs the real remote commands
     against; what stays here is what only the source can say."""
 
     def test_a_container_links_the_live_store_mount(self):
-        """One link per row of wk_agent_secrets, the claude token among them --
-        the table is the authority and tests/test_pi_agent.py holds every
-        reader to it."""
+        """One link per row the delivery column sends to a container -- the
+        table is the authority and tests/test_pi_agent.py holds every reader to
+        it."""
         text = (REPO / "container" / "firstrun.sh").read_text()
         self.assertIn('ln -sfn "/secrets/$_sfile"', text)
         self.assertIn("claude-token", (REPO / "lib" / "store.sh").read_text())
@@ -419,7 +495,7 @@ _write_agent_secrets demo 1.2.3.4
         home = self._home()
         cp = self._write(self._store(values=[n for n, *_ in TABLE]), home)
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        for name, _sfile, shome, _var, _kind in VALUE_ROWS:
+        for name, _sfile, shome, *_ in VM_ROWS:
             with self.subTest(name=name):
                 self.assertEqual((home / shome).read_text(),
                                  f"{PLACEHOLDER}-{name}\n")
@@ -434,12 +510,12 @@ _write_agent_secrets demo 1.2.3.4
         """The one state this must not leave behind: a guest holding a
         credential the host has taken away."""
         home = self._home()
-        for _name, _sfile, shome, _var, _kind in TABLE:
+        for _name, _sfile, shome, *_ in TABLE:
             (home / shome).parent.mkdir(parents=True, exist_ok=True)
             (home / shome).write_text("stale\n")
         cp = self._write(self._store(), home)
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        for _name, _sfile, shome, _var, _kind in TABLE:
+        for _name, _sfile, shome, *_ in TABLE:
             self.assertFalse((home / shome).exists(), shome)
 
     def test_one_absent_row_does_not_cost_the_next_one(self):
@@ -447,7 +523,7 @@ _write_agent_secrets demo 1.2.3.4
         to stream has to be given /dev/null -- otherwise it drinks the rest of
         the table and the remaining rows are never delivered."""
         home = self._home()
-        last = VALUE_ROWS[-1]
+        last = VM_ROWS[-1]
         self._write(self._store(values=[last[0]]), home)
         self.assertEqual((home / last[2]).read_text(),
                          f"{PLACEHOLDER}-{last[0]}\n")
@@ -473,7 +549,7 @@ class TestABuildBoxGetsThemAtSetup(_Delivery):
     @classmethod
     def setUpClass(cls):
         text = (REPO / "cmd" / "remote").read_text()
-        start = text.index("while read -r _sname _ _shome _ _skind; do")
+        start = text.index("while read -r _sname _ _shome _ _skind _sdelivery; do")
         end = text.index("unset _sname _shome _sval")
         cls.BLOCK = text[start:end]
 
@@ -498,7 +574,7 @@ r_host=fakebox
         home = self._home()
         cp = self._setup(self._store(values=[n for n, *_ in TABLE]), home)
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        for name, _sfile, shome, _var, _kind in VALUE_ROWS:
+        for name, _sfile, shome, *_ in REMOTE_ROWS:
             with self.subTest(name=name):
                 self.assertEqual((home / shome).read_text(),
                                  f"{PLACEHOLDER}-{name}\n",
@@ -509,7 +585,7 @@ r_host=fakebox
         result: every write hands the machine bytes."""
         self._setup(self._store(values=[n for n, *_ in TABLE]), self._home())
         writes = [l for l in self._ssh_lines() if "cat >" in l]
-        self.assertEqual(len(VALUE_ROWS), len(writes), self.log.read_text())
+        self.assertEqual(len(REMOTE_ROWS), len(writes), self.log.read_text())
         for l in writes:
             self.assertNotIn("stdin=0", l, l)
 
@@ -523,11 +599,11 @@ r_host=fakebox
         """It is a machine other people are on, so a credential left behind
         after it was withdrawn here is the state that would matter."""
         home = self._home()
-        for _name, _sfile, shome, _var, _kind in VALUE_ROWS:
+        for _name, _sfile, shome, *_ in REMOTE_ROWS:
             (home / shome).write_text("stale\n")
         cp = self._setup(self._store(), home)
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        for _name, _sfile, shome, _var, _kind in VALUE_ROWS:
+        for _name, _sfile, shome, *_ in REMOTE_ROWS:
             self.assertFalse((home / shome).exists(), shome)
 
     def test_one_absent_row_does_not_cost_the_next_one(self):
@@ -535,11 +611,11 @@ r_host=fakebox
         does not: the loop's stdin is the table, and a plain ssh would drink
         the rest of it."""
         home = self._home()
-        last = VALUE_ROWS[-1]
+        last = REMOTE_ROWS[-1]
         self._setup(self._store(values=[last[0]]), home)
         self.assertEqual((home / last[2]).read_text(),
                          f"{PLACEHOLDER}-{last[0]}\n")
-        self.assertEqual(len(VALUE_ROWS), len(self._ssh_lines()),
+        self.assertEqual(len(REMOTE_ROWS), len(self._ssh_lines()),
                          self.log.read_text())
 
     def test_the_account_login_never_reaches_a_shared_machine(self):
@@ -641,9 +717,9 @@ _write_agent_secrets demo 1.2.3.4
         self._write(self._store_with_login(), home)
         self.assertEqual(len(TABLE), len(self._ssh_lines()), self.log.read_text())
 
-    def test_the_rule_is_the_kind_column_and_not_a_name(self):
-        """So a rotating credential added to wk_agent_secrets is kept out of a
-        guest without an edit in the driver."""
+    def test_the_rule_is_the_delivery_column_and_not_a_name(self):
+        """So a credential added to wk_agent_secrets reaches the targets its
+        row names, and no others, without an edit in any driver."""
         vm = (REPO / "targets" / "vm.sh").read_text()
         for row in FILE_ROWS:
             with self.subTest(name=row[0]):
@@ -698,10 +774,9 @@ _write_agent_secrets demo 1.2.3.4
 
 class TestWhoIsAskedWhetherAWorkspaceCanAuthenticate(_Delivery):
     """t_agent_secret_present: the question is put to the machine that will run
-    the agent, not to whoever is asking. Every target reads a value row out of
-    this machine's store, so the default answers from there; a guest holds the
-    file row itself, so the vm driver asks the guest -- through its own login
-    shell, which is the one authority on where its credential store is."""
+    the agent, not to whoever is asking. One implementation, in lib/target.sh,
+    which every driver inherits: it asks the target through its own login
+    shell, the one authority on where its credential store is."""
 
     def _guest(self, login=None):
         """A guest home wired by the real vm/shell-rc.sh, so the probe and the
@@ -756,14 +831,21 @@ if {fn} demo {secret}; then echo YES; else echo NO; fi
                        "t_agent_secret_present", FILE_ROWS[0][0])
         self.assertIn("NO", cp.stdout, cp.stdout + cp.stderr)
 
-    def test_a_value_row_is_still_this_machines_store(self):
-        """A guest is handed those, so the store is where the answer is."""
-        name = VALUE_ROWS[0][0]
-        with_it = self._ask(self._store(values=[name]), self._guest(),
-                            "t_agent_secret_present", name)
+    def test_a_value_row_is_asked_of_the_guest_too(self):
+        """The host wrote it there on the last start, and the guest is what has
+        it now: a store filled since, or emptied since, is not evidence about
+        the machine the agent runs on."""
+        row = VM_ROWS[0]
+        guest = self._guest()
+        (guest / row[2]).parent.mkdir(parents=True, exist_ok=True)
+        (guest / row[2]).write_text(f"{PLACEHOLDER}-{row[0]}\n")
+        with_it = self._ask(self._store(), guest,
+                            "t_agent_secret_present", row[0])
         self.assertIn("YES", with_it.stdout, with_it.stdout + with_it.stderr)
-        without = self._ask(self._store(), self._guest(),
-                            "t_agent_secret_present", name)
+
+        (guest / row[2]).unlink()
+        without = self._ask(self._store(values=[row[0]]), guest,
+                            "t_agent_secret_present", row[0])
         self.assertIn("NO", without.stdout, without.stdout + without.stderr)
 
     def test_the_guests_remedy_is_to_log_in_in_there(self):
@@ -773,39 +855,82 @@ if {fn} demo {secret}; then echo YES; else echo NO; fi
         self.assertNotIn("wk key set", cp.stdout, cp.stdout)
 
     def test_a_value_rows_remedy_is_this_machines_store(self):
-        name = VALUE_ROWS[0][0]
+        name = VM_ROWS[0][0]
         cp = self._ask(self._store(), self._guest(), "t_agent_secret_remedy", name)
         self.assertIn(f"wk key set {name}", cp.stdout, cp.stdout + cp.stderr)
 
 
-class TestTheDefaultAsksThisMachinesStore(_Delivery):
-    """Every target but the guest hands its workspaces what `wk key set` put
-    here, so the default in lib/target.sh answers from the store -- for a file
-    row too, which is the container's live mount of it."""
+class TestTheDefaultAsksTheTarget(_Delivery):
+    """The default in lib/target.sh, which the container and remote drivers
+    inherit: a workspace is asked about its own credential, because this
+    machine's store is what it was *given* -- a container made before a key was
+    stored, or a shared machine someone cleaned up, disagrees with it. A file
+    row is read where its own tool rewrites it (the directory each target's
+    shell rc names), a value row where the driver delivered it."""
 
-    def _ask(self, store, fn, secret):
-        env = self._env(store, self._home())
+    # The driver contract, minus the hop: a real t_exec reaches the target over
+    # podman or ssh and runs the probe in a login shell, which is what decides
+    # where CLAUDE_SECURESTORAGE_CONFIG_DIR points.
+    FAKE_DRIVER = '''
+t_exec() {
+    shift
+    HOME="$WK_TEST_GUEST" CLAUDE_SECURESTORAGE_CONFIG_DIR="$WK_TEST_GUEST/.claude" "$@"
+}
+'''
+
+    def _target(self):
+        h = self.tmp / "target-home"
+        (h / ".claude").mkdir(parents=True, exist_ok=True)
+        return h
+
+    def _ask(self, store, target, fn, secret):
+        env = self._env(store, target)
         return bash(f'''
 . "$WK_ROOT/lib/common.sh"
 . "$WK_ROOT/lib/store.sh"
 . "$WK_ROOT/lib/target.sh"
+{self.FAKE_DRIVER}
 if {fn} demo {secret}; then echo YES; else echo NO; fi
 ''', env=env)
 
-    def test_a_login_in_the_store_is_a_yes(self):
+    def test_a_login_in_the_workspace_is_a_yes(self):
+        target = self._target()
+        row = FILE_ROWS[0]
+        (target / ".claude" / row[1]).write_text(FAKE_LOGIN)
+        cp = self._ask(self._store(), target, "t_agent_secret_present", row[0])
+        self.assertIn("YES", cp.stdout, cp.stdout + cp.stderr)
+
+    def test_a_full_store_the_workspace_never_got_is_a_no(self):
+        """The defect: 'present' answered from here is not evidence about
+        there, and it is there that the agent runs."""
         store = self._store()
         for row in FILE_ROWS:
             store_path(store, row).write_text(FAKE_LOGIN)
             store_path(store, row).chmod(0o600)
-        cp = self._ask(store, "t_agent_secret_present", FILE_ROWS[0][0])
-        self.assertIn("YES", cp.stdout, cp.stdout + cp.stderr)
-
-    def test_an_empty_store_is_a_no(self):
-        cp = self._ask(self._store(), "t_agent_secret_present", FILE_ROWS[0][0])
+        cp = self._ask(store, self._target(), "t_agent_secret_present",
+                       FILE_ROWS[0][0])
         self.assertIn("NO", cp.stdout, cp.stdout + cp.stderr)
 
+    def test_an_empty_credential_file_is_not_a_login(self):
+        target = self._target()
+        (target / ".claude" / FILE_ROWS[0][1]).write_text("")
+        cp = self._ask(self._store(), target, "t_agent_secret_present",
+                       FILE_ROWS[0][0])
+        self.assertIn("NO", cp.stdout, cp.stdout + cp.stderr)
+
+    def test_a_value_row_is_read_where_the_driver_delivered_it(self):
+        row = VALUE_ROWS[0]
+        target = self._target()
+        cp = self._ask(self._store(values=[row[0]]), target,
+                       "t_agent_secret_present", row[0])
+        self.assertIn("NO", cp.stdout, cp.stdout + cp.stderr)
+        (target / row[2]).write_text(f"{PLACEHOLDER}-{row[0]}\n")
+        cp = self._ask(self._store(), target, "t_agent_secret_present", row[0])
+        self.assertIn("YES", cp.stdout, cp.stdout + cp.stderr)
+
     def test_the_remedy_names_the_command_that_stores_one(self):
-        cp = self._ask(self._store(), "t_agent_secret_remedy", FILE_ROWS[0][0])
+        cp = self._ask(self._store(), self._target(), "t_agent_secret_remedy",
+                       FILE_ROWS[0][0])
         self.assertIn(f"wk key set {FILE_ROWS[0][0]}", cp.stdout,
                       cp.stdout + cp.stderr)
 
@@ -824,8 +949,11 @@ class TestAContainerSharesOneWritableFile(unittest.TestCase):
 
     def test_the_container_gets_the_directory_read_write(self):
         self.assertIn("--volume $WK_STORE/agent-rw:/agent-rw", self.CONTAINER)
-        # And the read-only one it sits beside is still read-only.
-        self.assertIn("--volume $WK_STORE/secrets:/secrets:ro", self.CONTAINER)
+        # And the read-only one it sits beside is still read-only, and what it
+        # mounts is the view of the store that holds what a container is given
+        # (secrets_publish_view, lib/store.sh) rather than the store itself.
+        self.assertIn("--volume $(wk_secrets_view_dir container):/secrets:ro",
+                      self.CONTAINER)
 
     def test_the_shell_points_the_cli_at_it_rather_than_exporting_anything(self):
         block = self.RC[self.RC.index("# --- 6b. The agents' credentials"):

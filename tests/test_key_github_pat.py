@@ -156,10 +156,17 @@ class TestStoringOne(_PatRun):
         self.assertFalse((self.secrets / "github-pat").exists(),
                          "the token is in the directory every workspace mounts")
 
-    def test_it_reports_what_the_switch_will_do_with_it(self):
+    def test_it_prints_where_it_went_then_what_the_rule_says(self):
+        """No prose of its own about the switch or the injector -- `wk key -h`
+        and the rule's own row carry that. Two lines: the one-line status, then
+        the verdict (unverified here, with no GitHub to ask)."""
         rc, out = self.key_tty("set", "github-pat", paste=TOKEN)
         self.assertEqual(rc, 0, out)
-        self.assertIn("wk push on", out)
+        lines = [l for l in out.splitlines() if l.strip()]
+        self.assertIn("github-pat", lines[-2])
+        self.assertIn("stored", lines[-2])
+        self.assertIn(str(self.pat()), lines[-2])
+        self.assertIn("unverified", lines[-1])
 
     def test_the_value_is_never_echoed_back(self):
         """`read -rs` and a redirect, not an argument and not a report: the
@@ -188,8 +195,7 @@ class TestReplacingOne(_PatRun):
         already handed to the injector is one `wk push on` is using."""
         cp = self.key("set", "github-pat")
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertIn("github-pat: present", cp.stderr)
-        self.assertIn("--replace", cp.stderr)
+        self.assertRegex(cp.stderr, r"github-pat\s+stored\s+%s" % str(self.pat()))
         self.assertEqual("ghp_theoldone", self.pat().read_text().strip())
 
     def test_the_report_never_prints_the_token(self):
@@ -284,6 +290,9 @@ class TestWhatTheTokenCanDoDecidesWhetherItIsKept(_PatRun):
         FakeGitHub.scopes = ""
         FakeGitHub.expiry = ""
         FakeGitHub.pulls = {}
+        FakeGitHub.repos = ["justinmichaud/WebKit", "justinmichaud/WPEWebKit"]
+        FakeGitHub.repos_status = 200
+        FakeGitHub.repos_answer = None
         FakeGitHub.seen = []
         self.extra_env = {
             "WK_GITHUB_API": "http://127.0.0.1:%d" % self.server.server_port}

@@ -17,6 +17,10 @@ long-running remote-control server.
 
 Run: python3 -m unittest tests.test_claude_rc -v
 """
+import json
+import os
+import shutil
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -64,6 +68,9 @@ export CLAUDE_LOG
 # pid (no setsid -- this host has none, and surviving an ssh disconnect is
 # not what these functions are tested for), t_home/t_src are fixed scratch
 # dirs standing in for the target's own filesystem.
+# A container's shell rc points the CLI at the mounted directory, which is
+# where the login lands and where t_agent_secret_present looks for it.
+export CLAUDE_SECURESTORAGE_CONFIG_DIR="$(wk_agent_rw_dir)"
 t_exec()  { local name="$1"; shift; "$@"; }
 t_home()  { printf '%s' "$TMP_HOME"; }
 t_src()   { printf '%s' "$TMP_SRC"; }
@@ -94,13 +101,16 @@ cat "$CLAUDE_LOG"
 echo "MARK:claude-argv-lines:$(wc -l < "$CLAUDE_LOG" | tr -d ' ')"
 
 echo "MARK:status-running"
-cat "$(rc_status_file "$WS")"
+_t=$(rc_task "$WS")
+printf 'verdict=%s\npid=%s\nlog=%s\nkill=%s\nplan=%s\n' \
+    "$(task_verdict "$_t")" "$(task_field "$_t" pid)" "$(task_field "$_t" log)" \
+    "$(task_field "$_t" kill)" "$(task_field "$_t" plan)"
 
 rc_stop "$WS"
 sleep 0.3
 
 echo "MARK:status-stopped"
-cat "$(rc_status_file "$WS")"
+printf 'verdict=%s\n' "$(task_verdict "$(rc_task "$WS")")"
 
 echo "MARK:alive-after-stop"
 if rc_alive "$WS"; then echo yes; else echo no; fi
@@ -168,25 +178,107 @@ class TestClaudeRcLifecycle(unittest.TestCase):
         out = self._run_probe()
         self.assertIn("MARK:claude-argv-lines:1", out, out)
 
-    def test_status_file_records_pid_and_log_while_running(self):
-        """the status file (lib/detach.sh's schema) carries state=running, pid= and log="""
+    def test_the_record_carries_the_pid_the_log_and_what_stops_it(self):
+        """One record shape for every long-running command (lib/task.sh): the
+        pid liveness is asked of, the log, and the command a person types."""
         out = self._run_probe()
         sf = _section(out, "status-running")
-        self.assertIn("state=running", sf, out)
+        self.assertIn("verdict=running", sf, out)
         self.assertRegex(sf, r"(?m)^pid=\d+$")
         self.assertRegex(sf, r"(?m)^log=.+")
+        self.assertIn("kill=wk ai claude probe-ws --rc --stop", sf, out)
+        self.assertIn("plan=claude remote-control in probe-ws", sf, out)
 
-    def test_stop_writes_state_stopped(self):
-        """rc_stop writes state=stopped, and rc_alive is false afterwards"""
+    def test_stop_ends_the_record(self):
+        """rc_stop records the end, and rc_alive is false afterwards"""
         out = self._run_probe()
-        sf = _section(out, "status-stopped")
-        self.assertIn("state=stopped", sf, out)
+        self.assertIn("verdict=stopped", _section(out, "status-stopped"), out)
         alive = _section(out, "alive-after-stop")
         self.assertEqual(alive.strip(), "no", out)
 
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestTheStartUpDialogsAreAnsweredBeforeAnythingStarts(WkTest):
+    """Three prompts of Claude Code's wait on a terminal, and a spawned
+    remote-control server has none: it is given /dev/null, answers "no" to
+    "Enable Remote Control? (y/n)" and exits 0. `wk new` has already made every
+    one of those decisions, so cmd/ai records them in the workspace
+    (claude/workspace-config.py) before either kind of session starts.
+
+    Measured against Claude Code 2.1.268: the global config keys are
+    hasCompletedOnboarding and remoteDialogSeen, and trust is per project under
+    `projects`."""
+
+    AI = (REPO / "cmd" / "ai").read_text()
+    SCRIPT = REPO / "claude" / "workspace-config.py"
+
+    def _record(self, home, checkout="/src/WebKit"):
+        return subprocess.run(["python3", str(self.SCRIPT), checkout],
+                              env=dict(os.environ, HOME=str(home)),
+                              capture_output=True, text=True, timeout=60)
+
+    def test_it_records_the_three_answers(self):
+        home = self.tmp / "ws-home"
+        home.mkdir()
+        cp = self._record(home)
+        self.assertEqual(0, cp.returncode, cp.stdout + cp.stderr)
+        doc = json.loads((home / ".claude.json").read_text())
+        self.assertIs(True, doc["hasCompletedOnboarding"])
+        self.assertIs(True, doc["remoteDialogSeen"])
+        self.assertIs(True, doc["projects"]["/src/WebKit"]["hasTrustDialogAccepted"])
+
+    def test_it_keeps_what_the_cli_already_wrote(self):
+        """~/.claude.json is the CLI's own live state, so this merges into it."""
+        home = self.tmp / "ws-home-existing"
+        home.mkdir()
+        (home / ".claude.json").write_text(json.dumps(
+            {"numStartups": 7, "projects": {"/src/WebKit": {"lastCost": 1.5}}}))
+        self._record(home)
+        doc = json.loads((home / ".claude.json").read_text())
+        self.assertEqual(7, doc["numStartups"])
+        self.assertEqual(1.5, doc["projects"]["/src/WebKit"]["lastCost"])
+        self.assertIs(True, doc["projects"]["/src/WebKit"]["hasTrustDialogAccepted"])
+
+    def test_running_it_twice_changes_nothing_the_second_time(self):
+        home = self.tmp / "ws-home-twice"
+        home.mkdir()
+        self._record(home)
+        first = (home / ".claude.json").read_text()
+        cp = self._record(home)
+        self.assertEqual(0, cp.returncode, cp.stdout + cp.stderr)
+        self.assertEqual("", cp.stdout.strip())
+        self.assertEqual(first, (home / ".claude.json").read_text())
+
+    def test_a_file_it_cannot_read_is_left_alone(self):
+        """It holds the CLI's live state, including the account: overwriting
+        one that will not parse would log the workspace out."""
+        home = self.tmp / "ws-home-corrupt"
+        home.mkdir()
+        (home / ".claude.json").write_text("{not json")
+        cp = self._record(home)
+        self.assertEqual(1, cp.returncode, cp.stdout + cp.stderr)
+        self.assertIn("not readable as JSON", cp.stderr)
+        self.assertEqual("{not json", (home / ".claude.json").read_text())
+
+    def test_both_kinds_of_session_record_them_first(self):
+        self.assertEqual(2, self.AI.count("claude_workspace_config "),
+                         "the foreground session and --rc each record them once")
+        self.assertIn("workspace-config.py", self.AI)
+
+    def test_nothing_runs_a_session_of_its_own_to_answer_a_dialog(self):
+        """The old remedy for the trust dialog: start an interactive session
+        and ask the person to accept it. There is nothing left to accept."""
+        self.assertNotIn('"$WK_ROOT/wk" ai claude "$NAME"', self.AI)
+
+    def test_a_plain_session_does_not_start_remote_control(self):
+        """`wk ai claude <ws> --rc` is the one path that starts it, and it says
+        so in argv. Shipping remoteControlAtStartup made every plain session
+        try, and fail, on a credential remote control refuses."""
+        settings = json.loads((REPO / "claude" / "settings.json").read_text())
+        self.assertNotIn("remoteControlAtStartup", settings)
 
 
 class TestRemoteControlIsOnByDefault(WkTest):
@@ -254,6 +346,9 @@ export WK_CLAUDE_LIB=1
 WS="probe-ws-dies"
 mkdir -p "$(wk_ws_dir "$WS")"
 TMP_HOME=$(mktemp -d); TMP_SRC=$(mktemp -d)
+# A container's shell rc points the CLI at the mounted directory, which is
+# where the login lands and where t_agent_secret_present looks for it.
+export CLAUDE_SECURESTORAGE_CONFIG_DIR="$(wk_agent_rw_dir)"
 t_exec()  { local name="$1"; shift; "$@"; }
 t_home()  { printf '%s' "$TMP_HOME"; }
 t_src()   { printf '%s' "$TMP_SRC"; }
@@ -272,7 +367,9 @@ chmod +x "$FAKE_CLAUDE"
 # A subshell: die exits the shell it runs in, and the probe has more to say.
 if ( rc_start "$WS" "$FAKE_CLAUDE" ) 2>"$TMP_HOME/err"; then echo "MARK:started"; else echo "MARK:refused"; fi
 echo "MARK:err"; cat "$TMP_HOME/err"
-echo "MARK:status"; cat "$(rc_status_file "$WS")"
+echo "MARK:status"
+_t=$(rc_task "$WS")
+printf 'verdict=%s\npid=%s\n' "$(task_verdict "$_t")" "$(task_field "$_t" pid)"
 '''
 
 
@@ -297,10 +394,10 @@ class TestAServerThatExitsAtOnceIsNotReportedRunning(unittest.TestCase):
         self.assertIn("exited at once", self.cp.stdout)
         self.assertIn("full-scope login token", self.cp.stdout)
 
-    def test_the_record_says_stopped(self):
+    def test_the_record_does_not_say_running(self):
         status = self.cp.stdout.split("MARK:status", 1)[1]
-        self.assertIn("state=stopped", status)
-        self.assertNotIn("pid=", status)
+        self.assertIn("verdict=failed", status)
+        self.assertRegex(status, r"(?m)^pid=$")
 
 
 # The same library-mode shape as the probe above, with the one thing rc_start
@@ -315,6 +412,9 @@ export WK_CLAUDE_LIB=1
 WS="probe-ws-nocred"
 mkdir -p "$(wk_ws_dir "$WS")"
 TMP_HOME=$(mktemp -d); TMP_SRC=$(mktemp -d)
+# A container's shell rc points the CLI at the mounted directory, which is
+# where the login lands and where t_agent_secret_present looks for it.
+export CLAUDE_SECURESTORAGE_CONFIG_DIR="$(wk_agent_rw_dir)"
 t_exec()  { local name="$1"; shift; "$@"; }
 t_home()  { printf '%s' "$TMP_HOME"; }
 t_src()   { printf '%s' "$TMP_SRC"; }
@@ -347,6 +447,9 @@ export WK_CLAUDE_LIB=1
 WS="probe-ws-target"
 mkdir -p "$(wk_ws_dir "$WS")"
 TMP_HOME=$(mktemp -d); TMP_SRC=$(mktemp -d)
+# A container's shell rc points the CLI at the mounted directory, which is
+# where the login lands and where t_agent_secret_present looks for it.
+export CLAUDE_SECURESTORAGE_CONFIG_DIR="$(wk_agent_rw_dir)"
 t_exec()  { local name="$1"; shift; "$@"; }
 t_home()  { printf '%s' "$TMP_HOME"; }
 t_src()   { printf '%s' "$TMP_SRC"; }
@@ -450,3 +553,210 @@ class TestRemoteControlRefusesWithoutTheLoginCredential(unittest.TestCase):
         """`wk key set claude` stores one, and it is the obvious wrong guess."""
         err = _section(self.cp.stdout, "err")
         self.assertIn("setup-token", err, err)
+
+
+# What stands between a pid a workspace wrote into a file in its own home and a
+# signal: the pattern the job declared (lib/watchdog.sh). The fake driver runs
+# the command here, so `ps -o args= -p <pid>` reads this machine's process
+# table -- which is what a wkdev container's shares with it anyway.
+_SIGNAL_PROBE = r'''
+set -euo pipefail
+exec 2>&1
+export WK_ROOT="__REPO__"
+export WK_CLAUDE_LIB=1
+. "__REPO__/cmd/ai"
+
+WS="probe-ws"
+mkdir -p "$(wk_ws_dir "$WS")"
+TMP=$(mktemp -d)
+
+t_exec() { local name="$1"; shift; "$@"; }
+t_home() { printf '%s' "$TMP"; }
+
+cat > "$TMP/claude" <<'EOS'
+#!/bin/sh
+sleep 20
+EOS
+chmod +x "$TMP/claude"
+"$TMP/claude" remote-control --spawn=same-dir --name "$WS" & SERVER=$!
+sleep 20 & OTHER=$!
+
+begin() { task_begin rc target "$WS" "wk ai claude $WS --rc --stop" "$TMP/log" \
+              "claude remote-control in $WS"; }
+alive() { kill -0 "$1" 2>/dev/null && echo "$2=alive" || echo "$2=gone"; }
+
+echo "MARK:adopt-wrong-argv"
+T=$(begin)
+job_pid_adopt "$WS" "$T" "$OTHER" "$RC_PID_MATCH" && echo ADOPTED || echo REFUSED
+echo "pid=$(task_field "$T" pid)"
+alive "$OTHER" other
+
+echo "MARK:signal-wrong-argv"
+T=$(begin)
+job_pid_adopt "$WS" "$T" "$SERVER" "$RC_PID_MATCH" && echo ADOPTED || echo REFUSED
+echo "pid_match=$(task_field "$T" pid_match)"
+task_pid "$T" "$OTHER"
+( rc_stop "$WS" ) && echo STOPPED || echo REFUSED
+alive "$OTHER" other
+alive "$SERVER" server
+
+echo "MARK:stop-matching-argv"
+T=$(begin)
+job_pid_adopt "$WS" "$T" "$SERVER" "$RC_PID_MATCH" && echo ADOPTED || echo REFUSED
+( rc_stop "$WS" ) && echo STOPPED || echo REFUSED
+alive "$SERVER" server
+echo "verdict=$(task_verdict "$(rc_task "$WS")")"
+
+kill "$OTHER" "$SERVER" 2>/dev/null || true
+'''
+
+
+class TestOnlyTheServerItStartedIsSignalled(unittest.TestCase):
+    """The pid rc_stop signals comes out of a file in the workspace's own home,
+    and a wkdev container shares the host's PID namespace (wkdev-create passes
+    --pid host), so an unchecked pid is a signal at another workspace's build.
+    The rc record declares the command line its pid must have (RC_PID_MATCH)
+    and lib/watchdog.sh refuses every signal at a pid that has another."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls._store = temp_store()
+        store = cls._store.__enter__()
+        cls.out = bash(_SIGNAL_PROBE.replace("__REPO__", str(REPO)),
+                       env={"WK_STORE": store["path"].as_posix()}, timeout=120).stdout
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._store.__exit__(None, None, None)
+
+    def test_a_pid_running_something_else_is_not_adopted(self):
+        s = _section(self.out, "adopt-wrong-argv")
+        self.assertIn("REFUSED", s, self.out)
+        self.assertIn("pid=\n", s + "\n", self.out)
+        self.assertIn("other=alive", s, self.out)
+
+    def test_the_server_is_adopted_with_its_pattern_recorded(self):
+        s = _section(self.out, "signal-wrong-argv")
+        self.assertIn("ADOPTED", s, self.out)
+        self.assertIn("pid_match=*claude*remote-control*", s, self.out)
+
+    def test_a_record_whose_pid_is_another_process_signals_nothing(self):
+        s = _section(self.out, "signal-wrong-argv")
+        self.assertIn("REFUSED", s, self.out)
+        self.assertIn("other=alive", s, self.out)
+        self.assertIn("server=alive", s, self.out)
+        self.assertIn("wk enter probe-ws", self.out)
+
+    def test_the_matching_server_is_stopped_and_the_record_says_so(self):
+        s = _section(self.out, "stop-matching-argv")
+        self.assertIn("STOPPED", s, self.out)
+        self.assertIn("server=gone", s, self.out)
+        self.assertIn("verdict=stopped", s, self.out)
+
+
+# `wk stop <ws>` and `wk rm <ws>` take a workspace away from a running remote
+# control, and a checkout on a build machine has no container or guest whose
+# end takes the server with it -- so both stop it themselves, through the one
+# implementation (rc_stop, lib/watchdog.sh), pid pattern and all.
+#
+# The target is a real one: a `remote` whose machine is this one
+# (WK_REMOTE_LOCAL), named by a conf in a scratch registry, so `wk` resolves
+# the name, loads the driver and runs t_exec for itself.
+_CMD_PROBE = r"""
+set -uo pipefail
+exec 2>&1
+export WK_ROOT="__REPO__"
+TMP=$(mktemp -d)
+mkdir -p "$TMP/ws/probe-ws/WebKit" "$TMP/reg"
+cat > "$TMP/reg/probehost.conf" <<EOF
+WK_TARGET_KIND=remote
+WK_REMOTE_LOCAL=1
+WK_REMOTE_ROOT=$TMP
+WK_REMOTE_HOST=localhost
+EOF
+export WK_TARGET_REGISTRY="$TMP/reg" WK_TARGET=probehost WK_STORE="$TMP" WK_YES=1
+
+. "$WK_ROOT/lib/common.sh"
+. "$WK_ROOT/lib/store.sh"
+. "$WK_ROOT/lib/task.sh"
+. "$WK_ROOT/lib/watchdog.sh"
+set +e
+t_exec() { local n="$1"; shift; "$@"; }
+
+cat > "$TMP/claude" <<'EOC'
+#!/bin/sh
+sleep 30
+EOC
+chmod +x "$TMP/claude"
+# >/dev/null, or the command substitution waits on the pipe the background
+# server holds open.
+server() { "$TMP/claude" remote-control --spawn=same-dir --name probe-ws >/dev/null 2>&1 & echo $!; }
+begin() { task_begin rc target probe-ws "wk ai claude probe-ws --rc --stop" "$TMP/log" \
+              "claude remote-control in probe-ws"; }
+alive() { kill -0 "$1" 2>/dev/null && echo "$2=alive" || echo "$2=gone"; }
+adopt() { job_pid_adopt probe-ws "$1" "$2" '*claude*remote-control*' >/dev/null \
+              || echo NOT-ADOPTED; }
+
+SERVER=$(server)
+sleep 30 & OTHER=$!
+
+echo "MARK:stop-wrong-pid"
+T=$(begin); adopt "$T" "$SERVER"; task_pid "$T" "$OTHER"
+"$WK_ROOT/wk" stop probe-ws
+alive "$OTHER" other
+alive "$SERVER" server
+
+echo "MARK:stop-matching-pid"
+T=$(begin); adopt "$T" "$SERVER"
+"$WK_ROOT/wk" stop probe-ws
+alive "$SERVER" server
+echo "verdict=$(task_verdict "$(task_find rc probe-ws)")"
+
+echo "MARK:rm-matching-pid"
+SERVER=$(server)
+T=$(begin); adopt "$T" "$SERVER"
+"$WK_ROOT/wk" rm probe-ws
+alive "$SERVER" server
+[ -d "$TMP/ws/probe-ws" ] && echo "workspace=here" || echo "workspace=gone"
+
+kill "$OTHER" "$SERVER" 2>/dev/null
+rm -rf "$TMP"
+"""
+
+
+@unittest.skipUnless(shutil.which("podman"), "wk stop needs podman on PATH")
+class TestStopAndRmStopItThroughTheOneImplementation(unittest.TestCase):
+    """A workspace that goes away takes its remote control with it, and the
+    pid it signals is checked against the pattern the record declares -- the
+    same refusal `wk ai claude <ws> --rc --stop` makes, because it is the
+    same function."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.out = bash(_CMD_PROBE.replace("__REPO__", str(REPO)), timeout=180).stdout
+
+    def test_wk_stop_refuses_a_pid_running_something_else(self):
+        s = _section(self.out, "stop-wrong-pid")
+        self.assertIn("refusing to send TERM", s, self.out)
+        self.assertIn("other=alive", s, self.out)
+        self.assertIn("server=alive", s, self.out)
+
+    def test_wk_stop_stops_the_server_it_matches(self):
+        s = _section(self.out, "stop-matching-pid")
+        self.assertIn("stopping claude remote-control", s, self.out)
+        self.assertIn("server=gone", s, self.out)
+        self.assertIn("verdict=stopped", s, self.out)
+
+    def test_wk_rm_stops_it_before_it_destroys_the_workspace(self):
+        s = _section(self.out, "rm-matching-pid")
+        self.assertIn("server=gone", s, self.out)
+        self.assertIn("workspace=gone", s, self.out)
+
+    def test_neither_command_signals_a_pid_of_its_own(self):
+        """One implementation: a second `t_exec <ws> kill <pid>` is a second
+        place the pattern can be forgotten."""
+        for rel in ("cmd/stop", "cmd/rm"):
+            text = (REPO / rel).read_text()
+            with self.subTest(cmd=rel):
+                self.assertIn('rc_stop "$NAME"', text)
+                self.assertNotIn('t_exec "$NAME" kill', text)

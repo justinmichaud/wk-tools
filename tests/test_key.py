@@ -14,6 +14,7 @@ import subprocess
 import unittest
 
 from tests.support import REPO, WkTest, stub_path
+from tests.test_credcheck import FINE, login
 
 KEY = REPO / "cmd" / "key"
 
@@ -135,6 +136,20 @@ class TestEnsureIsOneImplementation(WkTest):
         self.assertEqual(1, text.count("ssh-keygen -t ed25519"))
 
 
+# `gh` marking when it starts and when it ends, so a test can see whether two
+# rows' calls overlap; exit 1 is the read_only evidence a refused call gives.
+GH_OVERLAPS = '''#!/bin/sh
+echo start >> "$GH_LOG"
+sleep 1
+echo end >> "$GH_LOG"
+exit 1
+'''
+
+# No row may dial github.com from a test: this is the answer a key that cannot
+# authenticate gives.
+SSH_REFUSES = '#!/bin/sh\nexit 255\n'
+
+
 class TestCheckAsksAboutEveryCredential(_KeyRun):
     """`wk key check` is the one report over all of them, and every line of it
     comes from an answer taken at that moment: the deploy keys through the same
@@ -164,6 +179,35 @@ class TestCheckAsksAboutEveryCredential(_KeyRun):
         self.assertNotEqual(0, cp.returncode, cp.stdout)
         self.assertIn("does not start like a GitHub personal access token",
                       cp.stdout)
+
+    def test_every_row_is_one_line_plus_at_most_the_fix(self):
+        """`wk key check` is an aligned table, so a row is a summary line and,
+        for a credential that cannot do its job, the `fix:` line -- never the
+        whole detail wrapped across the column."""
+        cp, secrets = self.key("ensure")
+        (secrets.parent / "push-keys" / "github-pat").write_text("hunter2\n")
+        cp, _ = self.key("check")
+        rows = [l for l in cp.stdout.splitlines()
+                if l.startswith("    ") and l.strip()]
+        for line in rows:
+            with self.subTest(line=line):
+                self.assertNotIn("it must ", line)
+        self.assertTrue(any("fix:" in l for l in rows), cp.stdout)
+
+    def test_the_fork_rows_are_asked_at_once(self):
+        """Every row of the table is an independent probe -- a `gh api` call
+        per fork per machine, an ssh test beside it, an HTTPS reach per
+        credential -- so they are asked together and replayed in the table's
+        order. Proved by overlap rather than by a clock: two serial calls
+        would log start, end, start, end."""
+        calls = self.tmp / "gh-calls"
+        self.key("ensure")
+        cp, _ = self.key("check", env={"GH_LOG": str(calls)},
+                         stubs={"gh": GH_OVERLAPS, "ssh": SSH_REFUSES})
+        self.assertTrue(calls.exists(), cp.stdout + cp.stderr)
+        marks = calls.read_text().split()
+        self.assertEqual(marks[:2], ["start", "start"],
+                         f"the fork rows ran one after the other: {marks}")
 
     def test_the_switch_is_not_mistaken_for_where_the_private_half_is(self):
         """A private half is always in the directory nothing mounts, so its
@@ -233,7 +277,7 @@ class TestSetupDoesWhateverIsMissing(_KeyRun):
         topic = secrets.parent / "notify" / "ntfy-topic"
         self.assertTrue(topic.exists(), cp.stdout + cp.stderr)
         self.assertTrue(topic.read_text().strip())
-        self.assertIn("minted here and printed once", cp.stdout + cp.stderr)
+        self.assertIn("printed once", cp.stdout + cp.stderr)
         self.assertNotIn("ntfy.sh topic this machine's notifications go to",
                          cp.stdout + cp.stderr, "it asked for one instead")
 
@@ -342,6 +386,109 @@ class TestTheTopicIsMintedNotAsked(_KeyRun):
         self.assertNotEqual(0, cp.returncode, cp.stdout)
         self.assertIn("usage:", cp.stdout + cp.stderr)
         self.assertFalse(self.topic_path(secrets).exists())
+
+
+# A `gh` whose answers are GitHub's for a machine whose deploy keys are not
+# registered yet (an empty key list; every registration accepted) and for one
+# where they are (the list carries the public halves). `read_only` is in the
+# arguments of both the registration and the one query `wk key check` makes of
+# a registered key, and `false` is the answer to that query.
+GH_NO_KEYS_YET = ('#!/bin/sh\ncase "$*" in *read_only*) echo false ;; esac\nexit 0\n')
+GH_HAS_THE_KEYS = ('#!/bin/sh\ncase "$*" in\n'
+                   '  *read_only*) echo false ;;\n'
+                   '  *) cat "$WK_HOST_SECRETS"/build_key_*.pub 2>/dev/null ;;\n'
+                   'esac\nexit 0\n')
+
+# `wk key sshtest` asks github.com what a deploy key authenticates as; this is
+# that answer for a key registered on its own fork, keyed by the file ssh was
+# handed, so a line budget is measured without a network in it.
+SSH_IS_THE_FORKS_KEY = (
+    '#!/bin/sh\ncase "$*" in\n'
+    '  *build_key_forkwpe*) echo "Hi justinmichaud/WPEWebKit! You\'ve '
+    'successfully authenticated, but GitHub does not provide shell access." ;;\n'
+    '  *) echo "Hi justinmichaud/WebKit! You\'ve successfully authenticated, '
+    'but GitHub does not provide shell access." ;;\n'
+    'esac\nexit 0\n')
+
+
+class TestSetupSaysOneLinePerCredential(_KeyRun):
+    """What `wk key setup` prints is one line per credential -- name, what
+    happened to it, and the path or the one-line reason -- the prompt sequence
+    for the ones it has to ask for, and `wk key check`'s table once. The budget
+    is asserted because verbosity arrives one defensible line at a time.
+
+    Both runs are headless, so no prompt is printed; a terminal adds the three
+    lines the rule carries (what it is, the page that mints one, the field that
+    page cannot fill) per credential asked for."""
+
+    EMPTY_BUDGET = 45
+    PROVISIONED_BUDGET = 20
+
+    def stubs(self, gh):
+        return {"gh": gh, "ssh": SSH_IS_THE_FORKS_KEY,
+                "security": SECURITY_HAS_NOTHING}
+
+    def env(self):
+        home = self.tmp / "home"
+        home.mkdir(exist_ok=True)
+        return {"HOME": str(home),
+                "WK_TS_AUTHKEY": str(self.tmp / "tailscale-authkey"),
+                "WK_TS_API_SECRET": str(self.tmp / "tailscale-api-key"),
+                "WK_TAILNET_API": "http://127.0.0.1:1",
+                "WK_ANTHROPIC_API": "http://127.0.0.1:1",
+                "WK_GITHUB_API": "http://127.0.0.1:1"}
+
+    def lines(self, cp):
+        return [l for l in (cp.stdout + cp.stderr).splitlines() if l.strip()]
+
+    def test_a_machine_with_nothing_stored_stays_under_its_budget(self):
+        cp, _secrets = self.key("setup", stubs=self.stubs(GH_NO_KEYS_YET),
+                                env=self.env())
+        lines = self.lines(cp)
+        self.assertLess(len(lines), self.EMPTY_BUDGET,
+                        "\n".join(lines))
+        for name in ("github-pat", "claude", "litellm", "claude-login",
+                     "tailnet", "tailnet-api"):
+            with self.subTest(name=name):
+                self.assertRegex(cp.stderr, r"%s\s+skipped\s+\S" % name)
+
+    def provision(self, secrets):
+        """Every credential this machine can hold, each one its rule accepts."""
+        store = secrets.parent
+        (store / "push-keys" / "github-pat").write_text(FINE + "\n")
+        (secrets / "claude-token").write_text("sk-ant-oat01-notarealtoken\n")
+        (secrets / "litellm-key").write_text("sk-notarealvirtualkey\n")
+        (store / "agent-rw").mkdir(exist_ok=True)
+        (store / "agent-rw" / ".credentials.json").write_text(login())
+        (store / "notify").mkdir(exist_ok=True)
+        (store / "notify" / "ntfy-topic").write_text("a-topic-minted-here\n")
+        (self.tmp / "tailscale-authkey").write_text("tskey-auth-k1-abc\n")
+        (self.tmp / "tailscale-api-key").write_text("tskey-api-k1-abc\n")
+
+    def test_a_machine_that_holds_them_all_stays_under_its_budget(self):
+        """Nothing to ask for and nothing to register: one line each saying
+        where it is, then the table."""
+        _cp, secrets = self.key("ensure")
+        self.provision(secrets)
+        cp, _ = self.key("setup", stubs=self.stubs(GH_HAS_THE_KEYS),
+                         env=self.env())
+        lines = self.lines(cp)
+        self.assertLess(len(lines), self.PROVISIONED_BUDGET, "\n".join(lines))
+        for name in ("github-pat", "claude", "litellm", "claude-login",
+                     "tailnet", "tailnet-api", "ntfy"):
+            with self.subTest(name=name):
+                self.assertRegex(cp.stderr, r"%s\s+stored\s+/" % name)
+
+    def test_the_table_is_one_row_per_credential(self):
+        """A row is the verdict's summary line; the rest of a detail -- what the
+        credential must do, and the fix -- is what a refusal prints."""
+        _cp, secrets = self.key("ensure")
+        self.provision(secrets)
+        cp, _ = self.key("check", stubs=self.stubs(GH_HAS_THE_KEYS),
+                         env=self.env())
+        rows = [l for l in cp.stdout.splitlines()
+                if l.startswith("    ") and l.strip()]
+        self.assertEqual(9, len(rows), cp.stdout)
 
 
 class TestTheOldNamesSayWhatReplacedThem(_KeyRun):

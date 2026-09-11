@@ -176,7 +176,6 @@ t_ssh_host() {
 
 t_ssh_user() { printf '%s' "$WK_VM_USER"; }
 
-# A guest cannot see a unix socket across the hypervisor, so this one is created by sshd and carried by this host's `ssh -R`.
 t_agent_sock() { printf '/Users/%s/.wk-ssh-agent.sock' "$WK_VM_USER"; }
 
 # _boot records WK_VM_UNFILTERED as a file beside the run log, because Softnet is applied at `tart run` and a guest booted without it stays open for its whole life -- the environment this is read in says nothing about it.
@@ -329,6 +328,10 @@ _proxy_running() {
 
 _start_host_proxy() {
     [ -n "${WK_VM_UNFILTERED:-}" ] && return 0
+
+    # The injector first: the proxy hands it api.github.com's CONNECT, and one started after the proxy answers those with 502 until it is up. Ahead of the liveness check too, not only ahead of starting the proxy -- the injector's standing read token is converged in there from what this host holds, and a start that found the proxy already up would leave a rotated token undelivered and every read from a guest answering 401.
+    _start_host_inject || true
+
     _proxy_running && { debug "host proxy already running"; return 0; }
 
     ensure_dir "$WK_VM_DIR"
@@ -343,9 +346,6 @@ _start_host_proxy() {
         warn "the guest bridge never got address $addr; not starting the proxy"
         return 1
     fi
-
-    # The injector first: the proxy hands it api.github.com's CONNECT, and one started after the proxy answers those with 502 until it is up.
-    _start_host_inject || true
 
     WK_PROXY_UNIX=0 \
     WK_PROXY_TCP="$addr:$WK_VM_PROXY_PORT" \
@@ -389,10 +389,17 @@ except OSError:
 s.close()' "$(_inject_sock)" 2>/dev/null
 }
 
+# The standing read token reaches the injector that serves the guests through this one call: every guest start makes it (_start_host_inject below) and so does every `wk key set github-pat` (push_agent_pat_deliver, lib/store.sh), so a token stored, rotated or withdrawn on this host is the one a guest reads.
+vm_push_pat_converge() {
+    ensure_dir "$WK_VM_DIR"
+    push_agent_pat_sync _agent_exec "$(_inject_read_pat)" && return 0
+    warn "could not converge $(_inject_read_pat); a read from a guest answers 401"
+    return 1
+}
+
 _start_host_inject() {
     ensure_dir "$WK_VM_DIR"
-    push_agent_pat_sync _agent_exec "$(_inject_read_pat)" \
-        || warn "could not converge $(_inject_read_pat); a read from a guest answers 401"
+    vm_push_pat_converge || true
     _inject_running && return 0
     local log="$WK_VM_DIR/github-inject.log" i=0
     WK_INJECT_SOCK="$(_inject_sock)" \
@@ -438,26 +445,29 @@ _start_host_agent() {
     return 1
 }
 
-_forward_status() { echo "$WK_VM_DIR/$1.agent-forward"; }
-
 _agent_forward_start() { # <name> <ip>
     with_lock "vm-agent-forward-$1" -- _agent_forward_start_locked "$@"
 }
 
+# The tunnel is the task: its record (lib/task.sh) stays open for as long as it carries the guest's push, and `wk push off` is what ends it.
 _agent_forward_start_locked() { # <name> <ip>
-    local name="$1" ip="$2" sf log pid
+    local name="$1" ip="$2" d log pid
     command -v detach_run >/dev/null 2>&1 || . "$WK_ROOT/lib/detach.sh"
-    sf=$(_forward_status "$name")
-    detach_alive "$sf" && return 0
+    command -v task_begin >/dev/null 2>&1 || . "$WK_ROOT/lib/task.sh"
+    d=$(task_find agent-forward "$name")
+    [ -n "$d" ] && task_alive "$d" && return 0
     log="$WK_VM_DIR/$name.agent-forward.log"
     _ssh "$ip" "rm -f $(sh_quote "$(t_agent_sock)")" </dev/null || return 1
+    d=$(task_begin agent-forward here "$name" "wk push off" "$log" "start forward" verify)
+    task_step_named "$d" "start forward"
     # shellcheck disable=SC2046 -- deliberate word splitting of the option list.
-    pid=$(detach_run "$sf" "$log" -- \
+    pid=$(detach_run "$log" -- \
         ssh $(_ssh_opts) -N -R "$(t_agent_sock):$(_agent_sock)" "$WK_VM_USER@$ip")
-    status_write "$sf" state=running pid="$pid" log="$log" stage=forwarding
+    task_pid "$d" "$pid"
+    task_step_named "$d" verify
     sleep 0.5
-    detach_alive "$sf" && return 0
-    [ "$(status_field "$sf" pid)" = "$pid" ] && rm -f "$sf"
+    task_alive "$d" && return 0
+    task_end "$d" failed
     return 1
 }
 
@@ -466,12 +476,13 @@ _agent_forward_stop() { # <name>
 }
 
 _agent_forward_stop_locked() { # <name>
-    local sf pid
-    command -v detach_alive >/dev/null 2>&1 || . "$WK_ROOT/lib/detach.sh"
-    sf=$(_forward_status "$1")
-    pid=$(status_field "$sf" pid)
+    local d pid
+    command -v task_find >/dev/null 2>&1 || . "$WK_ROOT/lib/task.sh"
+    d=$(task_find agent-forward "$1")
+    [ -n "$d" ] || return 0
+    pid=$(task_field "$d" pid)
     [ -z "$pid" ] || kill "$pid" 2>/dev/null || true
-    rm -f "$sf"
+    task_end "$d" stopped
 }
 
 _agent_converge_guest() { # <name> <ip>
@@ -622,18 +633,16 @@ _write_claude_config() {
         done"
 }
 
-# One row per named secret (wk_agent_secrets, lib/store.sh), rewritten every start so a rotation converges and removed when the store has none: a guest holding a withdrawn credential is the state this must not leave behind.
-# A *file* row is a credential its own tool rewrites in place, spending a refresh token, so it is never copied in -- it is delivered as absence, and the guest authenticates into a store this host never writes (CLAUDE_SECURESTORAGE_CONFIG_DIR, vm/shell-rc.sh).
+# One row per named secret (wk_agent_secrets, lib/store.sh), rewritten every start so a rotation converges: a guest holding a withdrawn credential, or one the delivery column does not send here -- the claude.ai login, whose own tool rewrites it in place -- is the state this must not leave behind. A guest authenticates into a store this host never writes (CLAUDE_SECURESTORAGE_CONFIG_DIR, vm/shell-rc.sh).
 _write_agent_secrets() { # <name> <ip>
-    local name="$1" ip="$2" sname sfile shome svar skind val here n=0
-    while read -r sname sfile shome svar skind; do
+    local name="$1" ip="$2" sname sfile shome svar skind sdelivery val here n=0
+    while read -r sname sfile shome svar skind sdelivery; do
         [ -n "$sname" ] || continue
-        if [ "$skind" = file ]; then
-            here=1
-        else
+        here=1
+        case ",$sdelivery," in *,vm,*)
             here=0; wk_agent_secret_present "$sname" || here=$?
-            [ "$here" -lt 2 ] || return 1
-        fi
+            [ "$here" -lt 2 ] || return 1 ;;
+        esac
         if [ "$here" -ne 0 ]; then
             _ssh "$ip" "rm -f \$HOME/$(sh_quote "$shome")" </dev/null || return 1
             continue
@@ -646,14 +655,6 @@ _write_agent_secrets() { # <name> <ip>
 $(wk_agent_secrets)
 EOF
     debug "agent credentials in $name: $n"
-}
-
-t_agent_secret_present() { # <name> <secret>
-    local name="$1" sname="$2" ip probe
-    [ "$(wk_agent_secret_kind "$sname")" = file ] || { wk_agent_secret_present "$sname"; return; }
-    ip=$(_ip "$name") || return 1
-    probe="test -s \"\$CLAUDE_SECURESTORAGE_CONFIG_DIR/$(wk_agent_secret_field "$sname" 2)\""
-    _ssh "$ip" "bash -lc $(sh_quote "$probe")" </dev/null >/dev/null 2>&1
 }
 
 t_agent_secret_remedy() { # <name> <secret>
@@ -704,6 +705,12 @@ vm_push_keys_converge() { # <on|off>
     else
         push_agent_clear _agent_exec "$(_agent_sock)" || true
         push_agent_pat_clear _agent_exec "$(_inject_pat)" || true
+        local left; left=$(vm_push_agent_keys)
+        if [ "$left" != 0 ]; then
+            printf '  %-24s %s\n' "the guests' agent" \
+                "still holds $left identity/identities at $(_agent_sock)" >&2
+            rc=1
+        fi
     fi
 
     for g in $(target_workspaces); do
@@ -730,10 +737,13 @@ vm_push_keys_converge() { # <on|off>
     return "$rc"
 }
 
+vm_push_agent_keys() {
+    push_agent_list _agent_exec "$(_agent_sock)" | grep -c . || true
+}
+
 vm_push_keys_state() {
-    local g ip state keys n
-    keys=$(push_agent_list _agent_exec "$(_agent_sock)")
-    n=$(printf '%s' "$keys" | grep -c . || true)
+    local g ip state n
+    n=$(vm_push_agent_keys)
     for g in $(target_workspaces); do
         state=$(t_info "$g" 2>/dev/null) || state=unknown
         if [ "$state" != running ] || ! ip=$(_ip "$g"); then

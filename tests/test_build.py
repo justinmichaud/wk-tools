@@ -671,6 +671,7 @@ class TestAReadingTheMachineWillNotGive(WkTest):
     a variable and these cases do the same."""
 
     MACOS = 'wk_os() { echo macos; }\n'
+    LINUX = 'wk_os() { echo linux; }\n'   # drives the Linux arm on a Mac; nproc/awk are stubbed, so no /proc is read
     # A fixed path this machine may or may not have; the cases below say which.
     NO_CGROUP = '_cgroup_mem_max() { echo "$WK_TEST_CGROUP"; }\n'
 
@@ -696,6 +697,7 @@ class TestAReadingTheMachineWillNotGive(WkTest):
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
         self.assertEqual("12 16384 3", cp.stdout.strip())
 
+    @unittest.skipUnless(platform.system() == "Linux", "reads this machine's real nproc and /proc")
     def test_the_linux_arms_answer_from_proc_and_nproc(self):
         cp = self._res('printf "%s %s %s\n" "$(host_cores)" "$(host_mem_mb)" "$(host_load)"')
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
@@ -707,7 +709,7 @@ class TestAReadingTheMachineWillNotGive(WkTest):
 
     def test_a_core_count_that_did_not_come_back_refuses_and_names_it(self):
         for arm, prelude, stubs in (
-                ("nproc", "", {"nproc": "exit 1"}),
+                ("nproc", self.LINUX, {"nproc": "exit 1"}),
                 ("sysctl hw.ncpu", self.MACOS, {"sysctl": "exit 1"})):
             with self.subTest(arm=arm):
                 cp = self._res('v=$(host_cores); echo "SURVIVED $v"', prelude=prelude, stubs=stubs)
@@ -719,7 +721,7 @@ class TestAReadingTheMachineWillNotGive(WkTest):
         """Never a bash arithmetic error: the byte count is divided down, so an
         empty one is `/ 1024 / 1024 : syntax error` and nothing about memory."""
         for what, prelude, stubs in (
-                ("total memory (/proc/meminfo MemTotal)", "", {"awk": "exit 1"}),
+                ("total memory (/proc/meminfo MemTotal)", self.LINUX, {"awk": "exit 1"}),
                 ("total memory (sysctl hw.memsize)", self.MACOS, {"sysctl": "exit 1"})):
             with self.subTest(what=what):
                 cp = self._res('v=$(host_mem_mb); echo "SURVIVED $v"', prelude=prelude, stubs=stubs)
@@ -730,7 +732,7 @@ class TestAReadingTheMachineWillNotGive(WkTest):
 
     def test_a_load_average_that_did_not_come_back_refuses_and_names_it(self):
         for what, prelude, stubs in (
-                ("the load average (/proc/loadavg)", "", {"awk": "exit 1"}),
+                ("the load average (/proc/loadavg)", self.LINUX, {"awk": "exit 1"}),
                 ("the load average (sysctl vm.loadavg)", self.MACOS, {"sysctl": "exit 1"})):
             with self.subTest(what=what):
                 cp = self._res('v=$(host_load); echo "SURVIVED $v"', prelude=prelude, stubs=stubs)
@@ -756,7 +758,7 @@ class TestAReadingTheMachineWillNotGive(WkTest):
         self.assertEqual("12288", cp.stdout.strip())
 
     def test_free_memory_that_did_not_come_back_refuses_and_names_it(self):
-        cp = self._res('v=$(avail_mem_mb); echo "SURVIVED $v"', prelude=self.NO_CGROUP,
+        cp = self._res('v=$(avail_mem_mb); echo "SURVIVED $v"', prelude=self.LINUX + self.NO_CGROUP,
                        stubs={"awk": "exit 1"})
         self.assertNotEqual(cp.returncode, 0, cp.stdout + cp.stderr)
         self.assertNotIn("SURVIVED", cp.stdout)

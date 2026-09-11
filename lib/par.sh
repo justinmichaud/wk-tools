@@ -42,6 +42,16 @@ par_wait() {  # leaves `<name> <rc>` pairs in $_par_status, in start order
     return 0
 }
 
+par_rc() {  # <name>: that job's exit status, for a caller that reads the records itself
+    local want="$1"
+    set -- $_par_status
+    while [ $# -gt 0 ]; do
+        [ "$1" = "$want" ] && { printf '%s' "$2"; return 0; }
+        shift 2
+    done
+    return 1
+}
+
 par_record() { cat "$_par_dir/$1" 2>/dev/null || true; }   # one job's records, for a caller reading them itself
 
 par_join() {

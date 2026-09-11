@@ -363,8 +363,9 @@ echo PASS
 . "$WK_ROOT/lib/target.sh"
 WK_READY_WAIT=1
 ws_state() { echo creating; }
-ws_status_file() { echo /nonexistent-wk-test-status; }
-detach_alive() { return 0; }
+ws_creating_now() { return 0; }
+ws_create_task() { echo /nonexistent-wk-test-task; }
+task_stage() { echo create; }
 out=$(wait_ready somews 2>&1) && rc=0 || rc=$?
 [ "$rc" != 0 ] || { echo "expected nonzero rc, got 0: $out"; exit 1; }
 printf '%s' "$out" | grep -q "after 1s" || { echo "no WK_READY_WAIT in the message: $out"; exit 1; }

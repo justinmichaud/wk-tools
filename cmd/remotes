@@ -5,16 +5,20 @@
 # wk: readonly
 #
 # Asked of the workspace, not of a record: does `origin` mean upstream
-# (fetch-only, push URL `no-push://`), and can `fork` be pushed to over ssh
-# through its host alias? README.md has why the two are separate.
+# (fetch-only, push URL `no-push://`), can `fork` be pushed to over ssh through
+# its host alias, and does a fetch read the machine's mirror for the refs that
+# mirror carries? README.md has why the first two are separate.
 #
 #   wk remotes             every workspace this machine can see
 #   wk remotes <ws>        one of them, with its remotes printed
-#   wk remotes <ws> --fix  re-assert the wiring (idempotent)
+#   wk remotes <ws> --fix  re-assert the wiring and finish `git-webkit setup`
 #   wk remotes --fix       ...for every workspace that needs it
 #
-# --fix touches only git config -- remotes, `core.sshCommand`, the branch's
-# upstream -- never a commit or working tree.
+# --fix touches only git config -- remotes, their fetch refspecs and URL
+# rewrite, `core.sshCommand`, the branch's upstream, and what `git-webkit
+# setup --defaults` writes (commit hooks, diff drivers, `webkitscmpy.setup`) --
+# never a commit or working tree. It is idempotent: a checkout already wired
+# and already set up is left as it is.
 #
 #   0  every checkout is wired correctly (or --fix made it so)
 #   1  something is wrong (and --fix was not given)
@@ -48,7 +52,8 @@ show_remotes() {
 # Run in the target: ssh config and `core.sshCommand` only mean anything where git reads them.
 check_one() {
     local ws="$1" out rc=0
-    out=$(t_exec "$ws" sh -c "$(wk_wiring_check_script "$(t_src "$ws")")" 2>/dev/null) || rc=$?
+    out=$(t_exec "$ws" sh -c \
+        "$(wk_wiring_check_script "$(t_src "$ws")" "$(t_mirror_dir "$ws")")" 2>/dev/null) || rc=$?
 
     if [ "$rc" -eq 2 ] || { [ "$rc" -ne 0 ] && [ -z "$out" ]; }; then
         printf '%-20s %s\n' "$ws" "could not be read (is it up? 'wk status $ws')"
@@ -75,7 +80,7 @@ fix_one() {
 $(t_wiring_args)
 EOF
 
-    t_exec "$ws" sh -c "$(wk_wiring_script "$(t_src "$ws")" \
+    t_exec "$ws" sh -c "$(wk_wiring_script "$(t_src "$ws")" "$(t_mirror_dir "$ws")" \
         "$extra_name" "$extra_url" "$ssh_config")" >/dev/null 2>&1 \
         || { warn "could not re-wire '$ws'"; return 1; }
     changed "re-wired '$ws'"
@@ -83,6 +88,25 @@ EOF
     _b=$(t_exec "$ws" sh -c "$(wk_branch_upstream_fix_script "$(t_src "$ws")")" 2>/dev/null | tr -d '\r') || _b=""
     [ -z "$_b" ] || printf '%s\n' "$_b" | sed 's/^/  /' >&2
     check_one "$ws"   # say it worked, from the same check that would have said otherwise
+}
+
+# git-webkit reads the injected GitHub credential and the injector's CA: a container's exec wrapper puts both in the environment (targets/container.sh), a guest's every shell reads them from ~/.wk-egress, and a machine of the person's own carries their own credentials and their own setup.
+fix_gitwebkit() {
+    local ws="$1" out rc=0
+    case "$WK_TARGET_KIND" in container|vm) ;; *) return 0 ;; esac
+
+    out=$(t_exec "$ws" sh -c "$(wk_gitwebkit_setup_script "$(t_src "$ws")")" </dev/null \
+              | tr -d '\r' | tail -1) || rc=$?
+    if [ "$rc" -ne 0 ]; then
+        warn "'git-webkit setup' did not finish in '$ws' (${out:-no answer}); its own
+         output is above. 'wk push on' if the read token is off, then
+         'wk remotes $ws --fix' again"
+        return 1
+    fi
+    case "$out" in
+        setup=ok) changed "git-webkit is set up in '$ws' ($out)" ;;
+        *)        log "$(printf '%-20s %s' "$ws" "git-webkit: $out")" ;;
+    esac
 }
 
 one() {
@@ -95,9 +119,9 @@ one() {
         unreachable) printf '%-20s %s\n' "$ws" "the machine did not answer"; return 1 ;;
     esac
     check_one "$ws" || rc=$?
-    [ "$rc" -eq 0 ] && return 0
     [ -n "$FIX" ] || return "$rc"
-    rc=0; fix_one "$ws" || rc=$?
+    [ "$rc" -eq 0 ] || { rc=0; fix_one "$ws" || rc=$?; }
+    fix_gitwebkit "$ws" || rc=$?
     return "$rc"
 }
 
@@ -146,14 +170,14 @@ for TARGET in $_TARGETS; do
         if [ -n "$_bp" ] && [ -d "$_bp/.git" ]; then
             found=1
             rc=0
-            _out=$(sh -c "$(wk_wiring_check_script "$_bp" skip-env)" 2>/dev/null) || rc=$?
+            _out=$(sh -c "$(wk_wiring_check_script "$_bp" "$(wk_mirror)" skip-env)" 2>/dev/null) || rc=$?
             if [ "$rc" -eq 0 ]; then
                 printf '%-20s %s\n' "base:$_base" "origin is upstream, fork pushes over ssh -- ok"
             else
                 printf '%-20s %s\n' "base:$_base" "wired wrong (every new workspace starts from this):"
                 printf '%s\n' "$_out" | sed -e 's/^problem: /  - /' -e 's/^note: /  ~ /' >&2
                 if [ -n "$FIX" ]; then
-                    if sh -c "$(wk_wiring_script "$_bp")" >/dev/null 2>&1; then
+                    if sh -c "$(wk_wiring_script "$_bp" "$(wk_mirror)")" >/dev/null 2>&1; then
                         changed "re-wired the base snapshot $_base"
                         rc=0
                     else

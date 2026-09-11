@@ -2,15 +2,17 @@
 
 command -v config_cross_load >/dev/null 2>&1 || . "$WK_ROOT/build/configs.sh"
 command -v detach_run >/dev/null 2>&1 || . "$WK_ROOT/lib/detach.sh"
+command -v task_begin >/dev/null 2>&1 || . "$WK_ROOT/lib/task.sh"
+command -v job_stop >/dev/null 2>&1 || . "$WK_ROOT/lib/watchdog.sh"
 
-# Two of the three phases are not builds -- they run on the board -- so no workspace pid is alive through them and a cycle would read as idle. The driver's own pid is what is live for the whole cycle, so it goes in the record and `wk status` checks it; the phase is only a label.
-PGO_STATUS_FILE=""
-pgo_phase() {   # <what this phase is>
-    [ -n "$PGO_STATUS_FILE" ] || return 0
-    status_write "$PGO_STATUS_FILE" "slot=$PGO_STATUS_SLOT" "phase=$1" \
-        "profile=$PGO_STATUS_PROFILE" "pid=$$" || true
+# Two of the three phases are not builds -- they run on the board -- so no workspace pid is alive through them and a cycle would read as idle. The driver's own pid is what is live for the whole cycle, which is why the record is `here`.
+PGO_TASK=""
+pgo_phase() {   # <1-based phase> <what it is doing>
+    info "$2"
+    [ -n "$PGO_TASK" ] || return 0
+    task_step "$PGO_TASK" "$1"
 }
-_pgo_status_clear() { [ -z "$PGO_STATUS_FILE" ] || rm -f "$PGO_STATUS_FILE"; PGO_STATUS_FILE=""; return 0; }
+_pgo_task_end() { [ -z "$PGO_TASK" ] || task_end "$PGO_TASK" "${WK_EXIT_STATUS:-0}"; PGO_TASK=""; return 0; }
 
 image_pgo_machine() {   # <profile> -- the board that carries this image, read off the fleet rather than given as a flag: a collection has to run on the hardware the profile is measured on
     local f n
@@ -70,13 +72,14 @@ image_pgo_plan() {   # <profile> <commit> <slot> <machine> -- one line per phase
 
 image_pgo_webkit() {   # <profile> <the rest of `wk sysimage webkit`'s arguments>
     local profile="$1"; shift
-    local commit="" slot="" dry="" detach="" plain=""
+    local commit="" slot="" dry="" detach="" plain="" stop=""
     while [ $# -gt 0 ]; do
         case "$1" in
             --commit) commit="${2:-}"; shift ;;
             --slot)   slot="${2:-}"; image_check_slot_name "$slot"; shift ;;
             --dry-run) dry=1 ;;
             --detach)  detach=1 ;;
+            --stop)    stop=1 ;;
             # The one way to get an unprofiled slot of a profile-guided release, and it is not a default: it exists so the two can be measured against each other. It records itself -- the slot's manifest says wpe-cross, and every run off it carries that into its env.json.
             --config) plain="${2:-}"
                       [ "$plain" = wpe-cross ] || die "--config takes 'wpe-cross' here, not '$plain'.
@@ -84,7 +87,7 @@ image_pgo_webkit() {   # <profile> <the rest of `wk sysimage webkit`'s arguments
     the two PGO configs are theirs to choose. 'wpe-cross' is the deliberate
     exception: a slot built without a profile, for measuring against one."
                       shift ;;
-            *) die "usage: wk sysimage webkit $profile --commit <sha> --slot <name> [--detach|--dry-run]
+            *) die "usage: wk sysimage webkit $profile --commit <sha> --slot <name> [--detach|--dry-run|--stop]
     unexpected: $1
     $profile is $CFG_RELEASE, so its slots are profile-guided and built in
     three phases (image/pgo.sh); the flags that belong to one phase of an
@@ -92,6 +95,20 @@ image_pgo_webkit() {   # <profile> <the rest of `wk sysimage webkit`'s arguments
         esac
         shift
     done
+    # Before the --commit rule: stopping the cycle running for a slot is about
+    # the slot, and the record it stops names exactly this command.
+    if [ -n "$stop" ]; then
+        [ -n "$slot" ] || die "usage: wk sysimage webkit $profile --slot <name> --stop
+    --stop stops the cycle running for one slot, so it needs --slot"
+        [ -z "$commit$dry$detach$plain" ] || die "'wk sysimage webkit $profile --slot $slot --stop' stops the cycle already
+    running for that slot and takes nothing with it -- no --commit, --config,
+    --detach or --dry-run."
+        local rc=0; job_stop "$profile/$slot" pgo || rc=$?
+        [ "$rc" != 1 ] || die "the driver of '$profile/$slot' outlived a TERM and a KILL:
+        ps -p $(task_field "$(task_find pgo "$profile/$slot")" pid)"
+        return 0
+    fi
+
     [ -n "$commit" ] && [ -n "$slot" ] || die "usage: wk sysimage webkit $profile --commit <sha> --slot <name>
     a slot needs both --commit <sha> and --slot <name>"
     case "$commit" in *[!0-9a-f]*) die "--commit takes a full sha (40 hex digits), got '$commit'" ;; esac
@@ -123,7 +140,7 @@ image_pgo_webkit() {   # <profile> <the rest of `wk sysimage webkit`'s arguments
 
     if [ -n "$detach" ]; then
         local dlog; dlog="$(wk_ws_dir "$(yocto_ws_default "$profile")")/pgo-$slot.log"
-        local pid; pid=$(detach_run "" "$dlog" -- \
+        local pid; pid=$(detach_run "$dlog" -- \
             "$WK_ROOT/wk" sysimage webkit "$profile" --commit "$commit" --slot "$slot")
         info "detached as pid $pid -- this end can go away"
         log  "  follow:  tail -f $dlog"
@@ -138,9 +155,12 @@ image_pgo_slot() {   # <profile> <commit> <slot> <machine>
     local instr="$slot-instr" dir plan
     dir=$(image_pgo_dir "$profile" "$slot")
 
-    PGO_STATUS_PROFILE="$profile"; PGO_STATUS_SLOT="$slot"
-    PGO_STATUS_FILE="$(wk_ws_dir "$(yocto_ws_default "$profile")")/pgo.status"
-    wk_atexit _pgo_status_clear
+    PGO_TASK=$(task_begin pgo here "$profile/$slot" \
+        "wk sysimage webkit $profile --slot $slot --stop" \
+        "$(yocto_log "$(yocto_ws_default "$profile")" webkit)" \
+        "instrumented build" "collect $PGO_BENCHMARKS on $machine" \
+        "measured build against the profile")
+    wk_atexit _pgo_task_end
     info "profile-guided slot '$slot' of $profile: instrument, collect on $machine, rebuild"
     log  "  collection  $dir"
     log  "  benchmarks  $PGO_BENCHMARKS, mixed at WebKit's own weights (Tools/Scripts/pgo-profile)"
@@ -149,28 +169,28 @@ image_pgo_slot() {   # <profile> <commit> <slot> <machine>
     if image_pgo_slot_is "$profile" "$instr" "$commit" wpe-cross-pgo-collect; then
         info "slot '$instr' already holds ${commit:0:12} instrumented; collecting against it"
     else
-        pgo_phase "1/3 instrumented build"
+        pgo_phase 1 "instrumented build"
         yocto_build "$profile" --stage webkit --commit "$commit" --slot "$instr" \
             --config wpe-cross-pgo-collect
     fi
 
-    pgo_phase "2/3 deploying the instrumented build to $machine"
+    pgo_phase 2 "deploying the instrumented build to $machine"
     "$WK_ROOT/wk" pi deploy "$profile" "$machine" --slot "$instr" \
         || die "could not put the instrumented build on $machine; nothing was collected"
 
     rm -rf "$dir"   # a collection is every leg of one run of one build, never a mixture of two
     for plan in $PGO_BENCHMARKS; do
-        pgo_phase "2/3 collecting $plan on $machine"
+        pgo_phase 2 "collecting $plan on $machine"
         "$WK_ROOT/wk" pi bench "$machine" "$plan" --slot "$instr" --pgo "$dir" \
             || die "the $plan leg did not finish on $machine, so this profile would be
     missing a workload it is weighted for. What it did collect is in
     $dir; re-run this command once the board is well again."
     done
 
-    pgo_phase "2/3 mixing the collection"
+    pgo_phase 2 "mixing the collection"
     yocto_build "$profile" --stage pgo-mix --slot "$slot"
 
-    pgo_phase "3/3 measured build against the profile"
+    pgo_phase 3 "measured build against the profile"
     yocto_build "$profile" --stage webkit --commit "$commit" --slot "$slot" \
         --config wpe-cross-pgo-use \
         --pgo-profile "$(image_pgo_dir_in "$slot")/output/$PGO_GLIB_LIB.profdata"

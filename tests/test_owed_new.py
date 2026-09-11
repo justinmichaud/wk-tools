@@ -9,9 +9,13 @@ directly against the decision function with `t_info`/`t_needs_base`/
 
 Run: python3 -m unittest tests.test_owed_new -v
 """
+import re
 import unittest
 
-from tests.support import REPO, WkTest, scratch_dir
+from tests.support import REPO, WkTest, rand_suffix, run, scratch_dir
+
+NEW = REPO / "cmd" / "new"
+CONTAINER = REPO / "targets" / "container.sh"
 
 
 class TestWorkspaceWithNoBaseIdIsStillCreating(WkTest):
@@ -53,6 +57,79 @@ ws_state somews
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
         self.assertEqual(cp.stdout.strip(), "present", cp.stdout + cp.stderr)
 
+
+class TestNewRefreshesTheSdkBeforeCreating(unittest.TestCase):
+    """The maintainer's defect ("wk sdk should be updated for each new
+    container"): a container workspace's image tag comes from the
+    webkit-container-sdk checkout on disk (get_sdk_version), so `wk new`
+    has to refresh that checkout before handing off to wkdev-create --
+    source-level, since driving a real container create needs podman and
+    the SDK checkout this suite never touches (tests/support.py's rule)."""
+
+    def test_the_container_branch_calls_t_sdk_refresh_before_t_create(self):
+        src = NEW.read_text()
+        refresh_at = src.index("t_sdk_refresh")
+        create_at = src.index('t_create "$NAME" "$BASE" "$ARCH"')
+        self.assertLess(
+            refresh_at, create_at,
+            "cmd/new must refresh the SDK checkout before t_create, so a new "
+            "container is never built from a stale one",
+        )
+
+    def test_the_call_is_guarded_to_the_container_target_only(self):
+        """A vm or remote target has no webkit-container-sdk checkout at
+        all, so the call must not run unconditionally."""
+        src = NEW.read_text()
+        line = next(l for l in src.splitlines() if "t_sdk_refresh" in l)
+        self.assertIn("WK_TARGET_KIND", line)
+        self.assertIn("container", line)
+
+    def test_it_runs_under_the_sdk_lock_and_outside_the_store_lock(self):
+        """The refresh is a network fetch, a `git reset --hard` and a patch
+        over the one SDK checkout the machine shares: two `wk new`s serialise
+        on it, and holding the store lock across it would make every `wk sync`
+        on the machine wait out a fetch it has nothing to do with."""
+        src = NEW.read_text()
+        line = next(l for l in src.splitlines() if "t_sdk_refresh" in l)
+        self.assertIn("with_lock sdk -- t_sdk_refresh", line)
+        self.assertLess(src.index("t_sdk_refresh"), src.index("hold_lock store"),
+                        "the refresh has to happen before the store lock is taken")
+
+    def test_t_sdk_refresh_is_defined_once_in_the_container_driver(self):
+        """One function, called from cmd/new: not a second copy of the
+        fetch-and-reset logic re-typed into the target driver."""
+        src = CONTAINER.read_text()
+        defs = re.findall(r"^t_sdk_refresh\(\)\s*\{", src, re.M)
+        self.assertEqual(len(defs), 1, src)
+        self.assertIn("container/sdk-refresh.sh", src)
+
+
+class TestNewKillStopsTheCreation(unittest.TestCase):
+    """A creation outlives its terminal, so its record names the command that
+    stops it (lib/task.sh, `task_begin`), and that command is `wk new <name>
+    --kill`: the same `job_stop` every other kind of job is stopped with. What
+    it leaves is half-made, which is `wk rm`'s to clear."""
+
+    def test_the_record_names_the_command_that_stops_it(self):
+        self.assertIn('task_begin new here "$NAME" "wk new $NAME --kill"',
+                      NEW.read_text())
+
+    def test_kill_goes_through_the_one_stop_implementation(self):
+        self.assertIn('job_stop "$NAME" new', NEW.read_text())
+
+    def test_the_help_block_says_what_it_does(self):
+        cp = run("new", "-h")
+        self.assertIn("--kill", cp.stdout)
+
+    def test_it_takes_nothing_that_belongs_to_a_creation(self):
+        cp = run("new", "kill-probe-%s" % rand_suffix(), "--kill", "--no-wait")
+        self.assertNotEqual(cp.returncode, 0, cp.stdout)
+        self.assertIn("stops the creation already running", cp.stdout)
+
+    def test_with_no_creation_running_it_says_so_and_ends_well(self):
+        cp = run("new", "kill-probe-%s" % rand_suffix(), "--kill")
+        self.assertEqual(cp.returncode, 0, cp.stdout)
+        self.assertIn("no new is running", cp.stdout)
 
 if __name__ == "__main__":
     unittest.main()

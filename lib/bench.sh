@@ -14,7 +14,6 @@ bench_put_excludes() {  # -> `--exclude X` per name, for tar and rsync alike. Un
 
 # A task is one benchmarking command's output: $BENCH_DIR/<task>/ holds task.json, runs/<run>/, logs and reports. A live lock bench-task-<name> is what "running" means; no progress is stored.
 bench_task_dir() { printf '%s/%s' "$BENCH_DIR" "$1"; }
-bench_task_stamp() { date -u +%Y%m%dT%H%M%SZ; }
 
 bench_task_new() {
     local name="$1"; shift

@@ -25,11 +25,13 @@ Governor and swap-off are already baked into every system by `cmd/sysimage`.
   **Never write the overclock to the EEPROM**: `SDRAM_BANKLOW` and `BOOT_ORDER`
   are firmware state shared by both modes, so it would overclock the workstation
   too.
-- **Nothing recreates this tree.** `rpi5-setup.sh` applies fan, wifi powersave,
-  the BSSID pin, fstab and the NUMA kernel with inline `sudo`, and neither
-  `./setup` nor `wk backup` reproduces any of it — so a rebuild of this board
-  loses all of it. The sharpest live example for
-  `docs/HANDOFF-settings-audit.md` and for cattle-not-pets' obligation 2.
+- **`wk backup` does not reach this tree.** `./setup` on this board now runs
+  `rpi5-setup.sh` itself (host/linux/machine.sh detects the board from
+  `/proc/device-tree/model`), so a rebuild reapplies fan, wifi powersave, the
+  BSSID pin, fstab, the NM/regdom drop-ins and the NUMA kernel; only what
+  `wk backup` would still need to restore first (the NUMA kernel build, the
+  ssh key shipped beside the script) is manual. `docs/HANDOFF-settings-audit.md`
+  and cattle-not-pets' obligation 2 track the remaining gap.
 - **Re-flashing this board from nothing** still needs another provisioned
   machine, pending `wk sysimage flash --reader` (`docs/HANDOFF-sdcard.md`).
 - **Path A is unfiled** — the Launchpad request to enable `CONFIG_NUMA_EMU` in
@@ -44,7 +46,8 @@ Governor and swap-off are already baked into every system by `cmd/sysimage`.
 
 ## Re-applying the tuning
 
-Idempotent, run as the user, **not** with sudo:
+`./setup` on this board runs it as one of its stages. By hand, idempotent, run
+as the user, **not** with sudo:
 
 ```bash
 bash ~/rpi5-tune/rpi5-setup.sh

@@ -23,12 +23,14 @@ from tests.support import REPO, WkTest, bash, func_body
 
 VERIFY = (REPO / "cmd" / "verify").read_text()
 
-# The block under test is cmd/verify's own credential_checks(), lifted whole
-# rather than copied, so a check added there is a check this file runs and one
-# whose behaviour drifts is a failure here. A function boundary, not a pair of
-# statements to slice between: those have to keep being spelled that way, and
-# adding a branch elsewhere in the file that happened to contain one of them
-# emptied this block into a syntax error.
+# The block under test is cmd/verify's own three credential probes, lifted
+# whole rather than copied, so a check added there is a check this file runs
+# and one whose behaviour drifts is a failure here. Function boundaries, not a
+# pair of statements to slice between: those have to keep being spelled that
+# way, and adding a branch elsewhere in the file that happened to contain one
+# of them emptied this block into a syntax error.
+PROBES = ("probe_no_credentials_inside", "probe_agent_identities",
+          "probe_github_api")
 
 # Answers for every probe the block makes, keyed by a substring of the command
 # it runs inside the workspace. The defaults are a healthy workspace with the
@@ -43,11 +45,13 @@ DEFAULTS = {
     "GITHUB_COM_TOKEN": "wk-injects-this",
     "GH_TOKEN": "wk-injects-this",
     "hosts.yml": "",
+    "test -r /secrets/claude-token": "",
 }
 
 ORDER = ("PRIVATE KEY", "ssh-add -l", "api.github.com/user",
          "https://api.github.com/ ", "/pulls",
-         "GITHUB_COM_TOKEN", "GH_TOKEN", "hosts.yml")
+         "GITHUB_COM_TOKEN", "GH_TOKEN", "hosts.yml",
+         "test -r /secrets/claude-token")
 
 # The one fork the stubbed wk_push_forks names, which is what the write probe
 # addresses.
@@ -56,19 +60,16 @@ FORK = "wkuser/WebKit"
 
 class _Block(WkTest):
     def block(self):
-        return func_body(VERIFY, "credential_checks")
+        """The three probes as definitions, then the calls that run them in
+        the order cmd/verify's par_run lines do. Each totals its own findings
+        into the `fails` it declares local, and returns that count."""
+        return ("".join("%s() {%s}\n" % (n, func_body(VERIFY, n)) for n in PROBES)
+                + "".join("%s || fails=$((fails + $?))\n" % n for n in PROBES))
 
-    def run_block(self, push_on=False, answers=None, stored_pat="ghp-stored-here",
+    def run_block(self, push_on=False, answers=None,
                   agent_sock="/run/wk/ssh-agent.sock"):
         table = dict(DEFAULTS)
         table.update(answers or {})
-
-        # A `wk` that answers only `push status`: 0 is on, 1 is off, which is
-        # the command's own contract (cmd/push).
-        root = self.tmp / "root"
-        root.mkdir(exist_ok=True)
-        (root / "wk").write_text("#!/bin/sh\nexit %d\n" % (0 if push_on else 1))
-        (root / "wk").chmod(0o755)
 
         cases = "\n".join(
             '        *"%s"*) printf "%%s" "%s" ;;' % (key, table[key])
@@ -76,15 +77,17 @@ class _Block(WkTest):
 
         harness = f'''
 set -u
-WK_ROOT={root}
+. "{REPO}/lib/common.sh"
+. "{REPO}/lib/store.sh"
 TARGET=container
+WK_TARGET_KIND=container
 NAME=demo
+PUSH_ON={1 if push_on else 0}
 fails=0
 pass() {{ printf "ok    %s\\n" "$*"; }}
 fail() {{ printf "FAIL  %s\\n" "$*"; fails=$((fails + 1)); }}
 note() {{ printf "      %s\\n" "$*"; }}
 t_agent_sock() {{ {"echo " + agent_sock if agent_sock else "return 1"}; }}
-wk_github_pat() {{ printf %s "{stored_pat}"; }}
 wk_push_forks() {{ printf "%s\\n" "fork {FORK} github-webkit"; }}
 inside() {{
     case "$*" in
@@ -104,11 +107,23 @@ inside() {{
         raise AssertionError(out)
 
 
+class TestACredentialThisKindIsNotGivenIsNotThere(_Block):
+    """targets/container.sh mounts a per-kind view of the store at /secrets, so
+    a row the table sends only to a vm or a build box is not in the directory a
+    container can read: mounting the store whole hands every workspace on the
+    machine a `cat /secrets/claude-token`."""
+
+    def test_reading_one_from_inside_is_a_failure(self):
+        out = self.run_block(answers={"test -r /secrets/claude-token": "yes"})
+        self.assertEqual(1, self.fails(out), out)
+        self.assertIn("/secrets/claude-token is readable in 'demo'", out)
+        self.assertIn("secrets_publish_view", out)
+
+
 class TestAHealthyWorkspacePasses(_Block):
     def test_push_off_is_a_correct_state_and_every_check_passes(self):
         out = self.run_block(push_on=False)
         self.assertEqual(0, self.fails(out), out)
-        self.assertIn("the host says push is OFF", out)
         self.assertIn("no private key material", out)
         self.assertIn("no identity reaches this workspace", out)
         self.assertIn("reachable through the injector", out)
@@ -117,18 +132,25 @@ class TestAHealthyWorkspacePasses(_Block):
         self.assertIn("GITHUB_COM_TOKEN in the workspace is the placeholder", out)
         self.assertIn("GH_TOKEN in the workspace is the placeholder", out)
 
+    def test_a_row_this_kind_is_not_given_is_named_as_unreadable(self):
+        """The delivery table (wk_agent_secrets) sends the Claude token to a vm
+        and a build box and never to a container, and the check is what the
+        workspace answers, not what the table says."""
+        out = self.run_block()
+        self.assertIn("no credential this kind is not given is readable in here", out)
+        self.assertIn("claude", out)
+
     def test_push_on_is_the_other_correct_state(self):
         out = self.run_block(push_on=True,
                              answers={"ssh-add -l": "2", "/pulls": "422"})
         self.assertEqual(0, self.fails(out), out)
-        self.assertIn("the host says push is ON", out)
         self.assertIn("2 deploy key(s) reach this workspace", out)
         self.assertIn("a write is authenticated (HTTP 422", out)
 
     def test_a_device_with_no_token_stored_is_a_correct_state_too(self):
         """No `wk key set github-pat` anywhere: reads answer 401, which is a
         workspace on public GitHub at 60 requests an hour, not a fault."""
-        out = self.run_block(stored_pat="", answers={"api.github.com/user": "401"})
+        out = self.run_block(answers={"api.github.com/user": "401"})
         self.assertEqual(0, self.fails(out), out)
         self.assertIn("reads are unauthenticated (HTTP 401)", out)
 
@@ -213,7 +235,8 @@ class TestTheAgent(_Block):
     def test_an_identity_reaching_the_workspace_while_push_is_off_fails(self):
         out = self.run_block(push_on=False, answers={"ssh-add -l": "1"})
         self.assertEqual(1, self.fails(out), out)
-        self.assertIn("push is off, yet 1 identity", out)
+        self.assertIn("1 identity/identities reach this workspace", out)
+        self.assertIn("does not\n        say push is on", out)
         self.assertIn("wk push off", out)
 
     def test_no_identity_while_push_is_on_fails(self):
@@ -281,10 +304,28 @@ class TestAReadIsAuthenticatedFromTheStandingToken(_Block):
 
 
 class TestTheSwitch(_Block):
+    def test_the_position_is_read_once_from_the_command_that_owns_it(self):
+        """Every probe reads PUSH_ON, and PUSH_ON is `wk push status`'s exit
+        code: a probe asking the machine for itself would report a position
+        the host does not hold."""
+        self.assertIn('"$WK_ROOT/wk" push status >/dev/null 2>&1 || PUSH_RC=$?',
+                      VERIFY)
+        self.assertEqual(1, VERIFY.count("PUSH_ON=1"))
+
+    def test_only_a_measured_off_is_reported_as_off(self):
+        """`wk push status` answers 3 for a machine that did not answer and 5
+        for one with no switch (cmd/push); reading either as OFF would have the
+        probes below compare what they measure against a position nothing
+        read."""
+        block = VERIFY[VERIFY.index("PUSH_RC=0"):]
+        block = block[:block.index("wk_atexit")]
+        self.assertIn("1|4) note", block)
+        self.assertIn("could not measure the switch", block)
+
     def test_a_write_that_succeeds_while_push_is_off_fails(self):
         out = self.run_block(push_on=False, answers={"/pulls": "422"})
         self.assertEqual(1, self.fails(out), out)
-        self.assertIn("a write token is still on the machine", out)
+        self.assertIn("a write token is still on the\n        machine", out)
         self.assertIn("wk push off", out)
 
     def test_a_write_that_is_refused_while_push_is_on_fails(self):
@@ -301,7 +342,7 @@ class TestTheSwitch(_Block):
         """An empty body names no head or base branch, which is why a 422 is
         the authenticated answer and nothing is created by measuring."""
         block = self.block()
-        self.assertIn("-X POST -d '{}' https://api.github.com/repos/$FORK/pulls", block)
+        self.assertIn("-X POST -d '{}' https://api.github.com/repos/$fork/pulls", block)
 
 
 class TestThePlaceholders(_Block):
@@ -349,7 +390,8 @@ class TestWhatAnAgentInHereCanSpend(WkTest):
     host's (t_agent_secret_present, lib/target.sh)."""
 
     def run_note(self, present):
-        block = func_body(VERIFY, "blast_radius_note")
+        start = VERIFY.index('if t_agent_secret_present "$NAME" claude-login; then')
+        block = VERIFY[start:VERIFY.index("\nfi\n", start)]
         harness = f'''
 set -u
 NAME=demo
@@ -357,7 +399,7 @@ note() {{ printf "      %s\\n" "$*"; }}
 t_agent_secret_present() {{ printf "asked %s about %s\\n" "$1" "$2" >&2; [ {present} = yes ]; }}
 t_agent_secret_remedy()  {{ printf "the remedy for %s" "$2"; }}
 '''
-        cp = bash(harness + block)
+        cp = bash(harness + block + "\nfi\n")
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
         return cp.stdout + cp.stderr
 
@@ -384,11 +426,14 @@ class TestBothTargetsAreMeasured(unittest.TestCase):
         by t_exec -- so the credential checks are not inside the
         $WK_SANDBOX guard, which is about container properties."""
         guard = VERIFY.index('if [ "${WK_SANDBOX:-}" = rootless-proxy ]')
-        block = VERIFY.index("credential_checks() {")
+        block = VERIFY.index("par_run no-credentials-inside")
         self.assertGreater(block, guard)
-        between = VERIFY[guard:block]
-        # The guard's own `fi` closes before the block starts.
-        self.assertIn("\nfi\n", between)
+        # The guard's own `fi` closes before the probes are queued.
+        self.assertIn("\nfi\n", VERIFY[guard:block])
+        outside = VERIFY[block:VERIFY.index(
+            'if [ "${WK_SANDBOX:-}" = rootless-proxy ]', block)]
+        for name in ("no-credentials-inside", "agent-identities", "github-api"):
+            self.assertIn("par_run " + name, outside)
 
     def test_a_guest_is_not_excluded_from_the_network_checks(self):
         """A guest used to be told, in a warning, that its egress was somebody

@@ -125,6 +125,20 @@ address, no IP, no ssh `ProxyJump` stored anywhere in this repo. `wk ls` and
 `TARGET`/machine column, so which machine answered a command is always in the
 same output as the command's result, never left to be inferred.
 
+Every command that outlives its terminal — a build, a test run, an image
+stage, a profile-guided cycle, claude remote control — writes one record of
+the same shape (`lib/task.sh`): the plan it declared before its first step,
+the step it is on, the machine and pid liveness is asked of, its log, and the
+command a person types to stop it. `wk status` renders each the same way, with
+the steps done, running and still to come, so reading one never depends on
+knowing which command wrote it. Liveness is asked of the process table at read
+time: a pid that no longer answers with no exit recorded reads `died`. A pid
+that lives inside a workspace is asked of that workspace only by the commands
+that act on it (`--kill`); `wk status` reads the log's age instead, so a wedged
+workspace is reported and not waited on. The pid such a job announces is the
+workspace's own claim, so nothing signals it while its command line in there is
+not the job the record names.
+
 ## Setup
 
 Prerequisites:
@@ -158,7 +172,6 @@ cd ~/Development/wk-tools
 wk sudo setup                  # closes sudo's 5-minute timestamp and NOPASSWD
 gh auth login                  # wk key setup calls the GitHub API with this
 claude setup-token             # a token to paste when wk key setup asks for one
-claude auth login              # the account login wk key setup reads for itself
 wk key setup                   # the deploy keys, then every credential this machine
                                # has not got, then what each one can do and how far
                                # it reaches -- one credential at a time, re-runnable,
@@ -190,8 +203,10 @@ command for what is not.
 
 ```sh
 wk new bug-238                          # instant overlay, any checkout size
+wk new bug-238 --kill                   # stop the creation running for it; 'wk rm' clears what it left
 wk build bug-238 jsc-release            # prints the exact build line it runs
 wk build bug-238 jsc-release --no-defaults   # ignore the machine's WK_BUILD_ARGS
+wk build bug-238 --kill                 # stop the build in it, wherever it runs, and record that
 wk run   bug-238 -- -e 'print(1+1)'
 wk run   bug-238 --until-crash --max 50 -- crash.js   # repeat until it fails; keeps the log and core
 wk test  bug-238
@@ -345,10 +360,25 @@ Every target's driver names one -- a container's is this machine's own, a
 guest's lives in its golden base, beside the checkout -- but creation asks
 the workspace rather than assuming: a guest cloned from a base built before
 its mirror existed answers with none, and is told to `wk sync` it instead.
+A snapshot that is *not* on that branch is refused rather than overlaid --
+every workspace made from it would start detached, publish after publish,
+since each snapshot is a hardlinked copy of the one before -- so `wk new` names
+`wk sync`, and publishing over it puts it back on its branch.
+
+`git-webkit setup --defaults` has already run in it, too, wherever the
+checkout can reach GitHub through the credential injector (a container at
+first start, a guest's golden base): the commit hooks, the Objective-C diff
+drivers, `pull.rebase` and the fork `git-webkit pr` opens a pull request
+against are configured before the workspace is handed over. `git config
+webkitscmpy.setup` is the record of it; it is asked of `main`, because on any
+other branch that command prompts.
 
 Four remotes are wired into every checkout, always the same four, by the one
 authority every target wires from (`wk remotes <ws>` checks them, `--fix`
-re-asserts them):
+re-asserts them). `--fix` converges both halves of what a checkout needs -- the
+wiring, then `git-webkit setup --defaults`, which no-ops where
+`webkitscmpy.setup` is already `true` -- and `wk verify` reports that marker,
+so a first start whose setup did not finish is visible rather than silent:
 
 - `origin` -- WebKit/WebKit, the upstream everything rebases onto. Fetch only:
   its push URL is `no-push://`, because nobody here has write access to it.
@@ -356,29 +386,53 @@ re-asserts them):
   images are built from. Fetch only, for the same reason.
 - `fork` -- your own fork of WebKit: what a branch is pushed to and what
   `wk pr open` opens a PR from. Pushes over ssh with a per-fork deploy key
-  held in an ssh-agent outside the workspace (`wk push on`); `git-webkit pr`
+  held in an ssh-agent outside the workspace (`wk push on`) -- the remote
+  records github.com's URL and `url.git@<alias>:<owner/repo>.git.pushInsteadOf`
+  sends the push through that fork's ssh alias, because `git-webkit` reads
+  every remote URL and takes any other host for a GitHub instance of its own,
+  whose credentials it then hunts for in a keyring; `git-webkit pr`
   inside one reaches GitHub's API through the credential injector, holding a
   placeholder rather than the token: it reads with a standing token and writes
   only while `wk push` is on.
 - `forkwpe` -- your own fork of WPEWebKit, the same, for that project.
 
+Those URLs are what `git remote -v` and `git-webkit` read, and not what a fetch
+of them reads: the same wiring adds `url.<mirror>.insteadOf` for each, so
+`git fetch origin`, `git fetch fork` and `git pull` in a workspace are local
+reads of the machine's mirror. Each remote asks only for what that mirror
+carries -- `main` of origin, the namespaced branches of the other three -- and
+for no tags. Under git's own default refspec a bare `git fetch origin` asks
+WebKit/WebKit for all 924 of its heads and 8,288 tags and writes a
+remote-tracking ref for each, which is the half-minute that made a fresh
+workspace feel stale. A machine that keeps no mirror of its own (a build box
+cloning from the reference its admins refresh) is wired to the upstreams
+themselves, with origin narrowed the same way.
+
 **Sync (a workspace, a target, or the furniture a machine keeps)**
 
 A workspace goes stale in its own checkout; a machine goes stale in what it
 keeps *for* workspaces -- its copy of wk-tools, its WebKit mirror, and the
-snapshot the next `wk new` clones. The two are asked for separately. Inside a
-workspace a bare `wk sync` fetches in it, from that machine's mirror; every
-other scope is a machine's furniture and is run from the host.
+snapshot the next `wk new` clones. **`wk sync` is both, in that order**: the
+machine's furniture first, then a fetch in every workspace on it. The order is
+the point -- a workspace fetches from that mirror, so fetching before
+refreshing it hands back what the machine already had. Naming a machine is what
+says whose furniture to refresh, a peer's included; `--tools` is the furniture
+alone, and a workspace's name is that one fetch alone. Inside a workspace a
+bare `wk sync` is that one fetch; every scope is a machine's and is run from
+the host.
 
-A workspace's fetch takes everything from that mirror in one local read when
-the mirror the target names (`t_mirror_dir`) is actually there -- a
-container's own, bind-mounted at `/mirror`; a guest's or a build machine's
-own copy -- and asks the upstreams themselves only when it is not. Either
-way it fetches the refs the mirror
-carries -- `main` of `origin`, every branch of the other three -- and no tags:
-following tags re-negotiates tens of thousands of refs nothing here builds
-from, and `git fetch --tags` in the workspace asks for them when they are
-wanted.
+**A fetch, and never a checkout.** No branch is switched, merged or rebased by
+a sync, in a workspace or in the snapshot: `git rebase origin/main` in the
+workspace is a person's decision about their own work. Creation is the one
+place a checkout moves, and only by `git merge --ff-only`.
+
+A workspace's fetch is `git fetch --all --prune` as git has that checkout
+configured -- the URL rewrite and the narrowed refspecs above -- so it is one
+local read of a handful of refs from the mirror its target names
+(`t_mirror_dir`): a container's own, bind-mounted at `/mirror`; a guest's or a
+build machine's own copy. There is no second refspec list in `wk sync` to keep
+in step with the checkout's own, which is why a person's `git fetch --all` in
+there is the same fetch.
 
 The tooling reaches a machine across ssh -- a build box, a macOS guest -- as
 git and never as a file copy: this tree's HEAD goes over as a git bundle, and
@@ -407,11 +461,11 @@ directory, the machine's packages -- is *installed*, by
 runs.
 
 ```sh
-wk sync                                 # one workspace here; asked when there are several
-wk sync bug-238                         # a named one
-wk sync --target moose                  # every workspace on that target
-wk sync --all                           # every workspace on every target
-wk sync --tools                         # every machine's wk-tools, mirror and snapshot
+wk sync                                 # this machine: tooling, mirror, snapshot, then every workspace here
+wk sync bug-238                         # one workspace's fetch, and nothing else
+wk sync --target moose                  # that machine's furniture, then its workspaces
+wk sync --all                           # every target's, in turn
+wk sync --tools                         # every machine's wk-tools, mirror and snapshot, and no fetches
 wk sync --tools buildbox4               # just that machine's
 ```
 
@@ -581,7 +635,9 @@ wk ab wpe:1725 --devices rpi3-32,rpi4-32,rpi5-64         # confirm, then: both s
                                                          # every board alternated at once; a device's width is its own
 wk ab wpe:1725 --devices rpi4 --bits 32 --plan jetstream3 --rounds 8 --yes   # unattended
 wk ab wpe:1725 --devices rpi3,rpi4 --bits 32 --plan speedometer2.1 --count 1 --timeout 1200 --yes --detach
-                                                         # confirmed here, run by a process this end cannot kill
+                                                         # confirmed here, run by a process no closing terminal ends
+wk ab 20260830T140000Z-wpe-pr1725 --kill                 # stop it: the task's process group, then the record says
+                                                         # cancelled; every round already recorded stays
 wk ab <sha> --base <sha> --release 2.38 --devices rpi3   # A/A: two slots of one commit -- the lane's noise floor
 wk status                                                # the running task: which run it is on, runs ended
 wk bench ls                                              # every task, its state, each run's directory
@@ -847,6 +903,7 @@ three phases (`image/pgo.sh`):
 ```sh
 wk sysimage webkit webkit-2.52-yocto-rpi5-64 --commit <sha> --slot pr --dry-run   # the phases, nothing run
 wk sysimage webkit webkit-2.52-yocto-rpi5-64 --commit <sha> --slot pr --detach
+wk sysimage webkit webkit-2.52-yocto-rpi5-64 --slot pr --stop        # stop the cycle running for that slot
 ```
 
 1. **the collection build** (`wpe-cross-pgo-collect`): the cross build with
@@ -1021,10 +1078,12 @@ the commit wall below are the same for both, and only `--rc` is Claude Code's
 alone. `wk ai pi` installs `@earendil-works/pi-coding-agent` into the
 workspace's own `~/.local` on first use (`npm install -g --ignore-scripts`,
 which needs node >= 22.19.0 in there and refuses with the remedy without it),
-and reaches a model through an OpenAI-compatible endpoint: `wk key set litellm`
-stores the API key for every workspace this machine makes, and pi's own
-`~/.pi/agent/models.json` names the endpoint URL and the models it serves --
-`wk ai pi` prints the file to write when a workspace has none.
+and reaches a model through an OpenAI-compatible endpoint (`LITELLM_ENDPOINT`,
+`lib/credcheck.py`): `wk key set litellm` stores the API key for every
+workspace this machine makes, and `wk ai pi` writes pi's own
+`~/.pi/agent/models.json` with that endpoint and key the first time a
+workspace has none, naming the one command left to run -- setting the model
+id the endpoint serves.
 
 **Every credential is put to a rule before it is stored.** `lib/credcheck.py`
 holds one rule per credential -- what it must be able to do, and what it must
@@ -1045,9 +1104,14 @@ carrying `delete_repo` or an `admin:` scope is refused outright, and a plain
 `repo` classic token is stored with its reach named, because it is the token a
 person most likely already has working elsewhere and refusing it would refuse
 the credential that works. GitHub answers nothing about a fine-grained token's
-permission set -- there is no endpoint that enumerates one -- so its narrowness
-is established by construction: it reaches only the repositories selected for
-it, and a fork that is not one of them answers 404.
+*permission* set -- there is no endpoint that enumerates one -- but it does
+answer for its *reach*: `GET /user/repos` answers for the token rather than the
+account, so the rule pages through it and compares what comes back with
+`wk_push_forks`. A token that reaches one repository more than the two forks is
+refused with the count, because the token's form takes no repository parameter
+and so arrives on *All repositories* unless the person changes that field --
+which is one account's whole reach sitting behind a workspace boundary. A fork
+the token does not reach is refused by name.
 
 A refusal names the credential, what it can do, what it must do and the exact
 page to reissue it at, and it stores nothing. A machine that cannot reach
@@ -1059,46 +1123,66 @@ all. Nothing degrades silently -- the next `wk doctor` asks again.
 
 `wk key setup` is the whole of it on a new machine: the deploy keys first (they
 are the one step that needs `gh`), then every credential this machine has not
-got, asked for one at a time, then `wk key check`. A credential already stored
-is left exactly as it is, an empty answer skips one, and the run can be killed
-and repeated. `wk key set <name>` is the same thing for one of them by name --
+got, asked for one at a time, then `wk key check`. It prints one line per
+credential -- the name, `stored`, `minted`, `skipped` or `refused`, and the path
+or the one-line reason -- and then that table, and nothing else: a credential
+already stored is left exactly as it is, an empty answer skips one, and the run
+can be killed and repeated. `wk key set <name>` is the same thing for one of
+them by name --
 `github-pat`, `claude`, `claude-login`, `litellm`, `tailnet`, `tailnet-api` --
 and with nothing to store it reports what the stored one can do instead.
 `--replace` is how a credential is rotated, and it is the only arm that removes
 one. The deploy keys are generated here rather than pasted, so they have a verb
 of their own: `wk key deploy`.
 
-Every prompt is built from the credential's own row in `lib/credcheck.py`: what
-to paste, the page that mints one with everything that page will take from a
-link already filled in, and the choices the link cannot carry. For a GitHub
-token that means the name, a non-expiring lifetime and `Contents: read and
-write` plus `Pull requests: read and write` arrive selected, and the one thing
-left to do is set *Repository access* to the forks the prompt lists. Tailscale's
-console takes no parameters, so those two say exactly which switches to set.
+Every prompt is built from the credential's own row in `lib/credcheck.py`, and
+it is three lines and the prompt: what to paste, the page that mints one with
+everything that page will take from a link already filled in, and the one field
+the link cannot carry. For a GitHub token the name, a non-expiring lifetime and
+`Contents: read and write` plus `Pull requests: read and write` arrive selected,
+and the one thing left to do is set *Repository access* to the forks the prompt
+lists -- which the rule then measures rather than trusts. Tailscale's console
+and the LiteLLM key page take no parameters, so those rows say which switch to
+set or which button to press. The two credentials with no page are the two
+Claude ones: their remedy is the command that mints one here (`claude
+setup-token`, `claude auth login`).
 
 **`wk key set`: what a workspace is already logged in to**
 
 A workspace starts already authenticated, so nothing has to answer `/login` in
 it -- which a macOS guest reached through an editor's remote server cannot do
-anyway, having no unlocked login Keychain. One token per machine, stored by
-`wk key set claude` (from `claude setup-token`) and read by `shell/bashrc` into
-`CLAUDE_CODE_OAUTH_TOKEN`. It is kept on the machine you typed that on
-(`~/.config/wk/secrets`, which the podman VM mounts read-only), so storing one
-needs no VM running. Each target hands it over differently: a container
-symlinks the read-only `/secrets` mount, so rotating the token reaches every
-container at once; a macOS guest and a build box are given a copy when the
-workspace comes up, and lose it the same way when `wk key set claude --replace`
-withdraws one. Without a token a workspace simply asks for `/login` as before.
+anyway, having no unlocked login Keychain. Exactly one Claude credential
+reaches any target, and the table's **delivery column** (`wk_agent_secrets`,
+`lib/store.sh`) says which: `CLAUDE_CODE_OAUTH_TOKEN` takes precedence over a
+stored login wherever both arrive, and Remote Control refuses the token, so a
+target given both is a target whose agent cannot do the thing it was given the
+login for. A container gets the account login below; a macOS guest and a build
+box get the token, stored by `wk key set claude` (from `claude setup-token`)
+and read by `shell/bashrc` into `CLAUDE_CODE_OAUTH_TOKEN`. It is kept on the
+machine you typed that on (`~/.config/wk/secrets`, which the podman VM mounts
+read-only), so storing one needs no VM running; a guest and a build box are
+given a copy when the workspace comes up, and lose it the same way when
+`wk key set claude --replace` withdraws one. `wk verify` asks the workspace
+itself whether it is authenticated (`claude auth status`), and which credential
+answered. A container is given its credentials by mounting a directory rather
+than a file at a time, so what it mounts at `/secrets` is a per-kind view of
+that one -- exactly the rows the delivery column sends to a container, plus the
+public files -- written by the same publisher that writes `ssh_config` and
+converged on every rotation. The directory above it keeps every row, the
+guest's token included.
 
 **The account login, which `--rc` needs.** That token is inference-only, and
 Remote Control says so and exits: *"Remote Control requires a full-scope login
 token. Long-lived tokens (from `claude setup-token` or CLAUDE_CODE_OAUTH_TOKEN)
-are limited to inference-only."* So `wk key set claude-login` stores the
-credential `claude auth login` left on this machine -- read out of the login
-Keychain on macOS, out of `~/.claude/.credentials.json` on Linux, never pasted
-and never printed, and refused unless it really is a login with the
-`user:profile` scope. It is an *account* credential: an agent holding it can
-act as you, which is the trade `--rc` is.
+are limited to inference-only."* So `wk key set claude-login` makes a login
+of its own: it runs `claude auth login` with the CLI pointed at the directory
+the containers share, so the browser flow writes the credential straight where
+they read it -- nothing is pasted, nothing is printed, and what lands is
+refused unless it really is a login with the `user:profile` scope. It is
+separate from this machine's own login, and for the same reason a guest gets
+none: a second holder of one refresh token locks the other out (below). It is
+an *account* credential: an agent holding it can act as you, which is the trade
+`--rc` is.
 
 It is delivered differently from the token because it is not a value: the
 Claude CLI spends the refresh token in it and writes the rotated one back over
@@ -1114,14 +1198,14 @@ refresh; pointing every container at one directory also puts them all on the
 CLI's own `.storage-write` lock, so concurrent refreshes serialize.
 
 A macOS guest could be handed nothing but a copy, and a copy is a second holder
-whose first refresh invalidates the file every container shares -- so a guest
-is never given one. It logs in for itself instead: `wk enter <ws>`, then
+whose first refresh invalidates the file every container shares -- so the
+delivery column sends it to a container and nowhere else. It logs in for itself instead: `wk enter <ws>`, then
 `claude auth login` once, and what that leaves lives only in that guest, in
 `~/.claude-login` -- a directory this host never writes, which is why `wk vm
 start` can take the login's file out of `~/.claude` on every start without ever
-touching the guest's own. `wk ai claude --rc` and `wk verify` ask that guest
-rather than this machine's store, and their refusal names the login to run in
-there. A shared build box gets no login at all -- an account credential on a
+touching the guest's own. `wk ai claude --rc` and `wk verify` ask the workspace
+rather than this machine's store -- what was given is not what is there -- and
+their refusal names the login to run in it. A shared build box gets no login at all -- an account credential on a
 machine other people are root on is theirs -- so an agent there has the
 inference-only token and no remote control.
 
@@ -1191,8 +1275,11 @@ while push is on and ended by `wk push off` or `wk vm stop`. The guest is
 written its ssh config and the *public* halves on every `wk vm start` --
 never a private one -- with the same `github-webkit` / `github-wpe` aliases a
 container gets, whose `ProxyCommand` is how ssh reaches `github.com:22` past
-Softnet at all. `wk push status` reports what each guest can actually reach; a
-stopped guest is converged when it next starts, before anything in it can run.
+Softnet at all. `wk push status` reports what each guest can actually reach and
+says ON while *either* agent holds a key; a stopped guest is converged when it
+next starts, before anything in it can run. A machine that cannot be asked
+exits 3 and a machine with no agent to switch exits 5, so neither can be read
+as "off" -- `wk ai` refuses to hand over control on anything but a measured one.
 
 Nothing moves on disk in either direction, so there is no half-thrown position
 to crash into: a killed `wk push on` re-run converges. The credentials are this
@@ -1204,7 +1291,8 @@ Nothing an agent runs can publish or commit, on any target. Publishing: the
 deploy keys are out of the agent and the write token is gone for the session
 (`wk push off`, before the sandbox is verified), and `wk verify` measures all
 of it from inside the workspace -- no private key material in the home,
-`/secrets` or `/run/wk`; the agent socket holding nothing; a write answering
+`/secrets` or `/run/wk`; no credential the delivery column withholds from that
+kind readable in there; the agent socket holding nothing; a write answering
 401 rather than being authenticated; `GITHUB_COM_TOKEN` and `GH_TOKEN` being
 the placeholders, with no stored `gh` credential beside them. A read answering 200
 is the arrangement working, and is measured against whether this device holds a

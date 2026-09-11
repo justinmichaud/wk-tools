@@ -71,3 +71,36 @@ echo "worst=$worst"
         stdout, records = self._run(script)
         self.assertIn("worst=2", stdout)
         self.assertEqual(records, "A\nB\n")
+
+
+class TestParRc(WkTest):
+    """`par_rc` is how a caller that replays the records itself -- `wk key
+    check`'s table, `wk sync`'s workspace list -- asks what one row's job
+    made of it, in an order of its own rather than the order they finished."""
+
+    def _run(self, script):
+        out = self.tmp / "records"
+        cp = bash(PRELUDE + script, env={"OUT": str(out)}, timeout=30)
+        self.assertEqual(cp.returncode, 0, f"script failed: {cp.stdout}{cp.stderr}")
+        return cp.stdout
+
+    def test_each_jobs_status_is_readable_by_name(self):
+        script = '''
+slow_ok()  { sleep 0.3; echo SLOW >&3; return 0; }
+quick_bad(){ echo QUICK >&3; return 2; }
+par_begin; par_run slow slow_ok; par_run quick quick_bad; par_wait
+for n in quick slow; do printf '%s=%s:%s\\n' "$n" "$(par_rc "$n")" "$(par_record "$n")"; done
+par_end
+'''
+        stdout = self._run(script)
+        self.assertIn("quick=2:QUICK", stdout)
+        self.assertIn("slow=0:SLOW", stdout)
+
+    def test_a_name_no_job_ran_under_is_refused(self):
+        script = '''
+par_begin; par_run only true; par_wait
+rc=0; par_rc absent || rc=$?
+echo "refused=$rc"
+par_end
+'''
+        self.assertIn("refused=1", self._run(script))

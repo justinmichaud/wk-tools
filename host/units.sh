@@ -20,6 +20,14 @@ unit_program() { # <unit name>
 unit_install() { # <unit name> <tools root> <store> <run...>
     local name="$1" root="$2" store="$3"; shift 3
     local dir='~/.config/systemd/user' tmp
+    if [ -n "${WK_DRY_RUN:-}" ]; then
+        if unit_render "$name" "$root" "$store" | "$@" "cmp -s - $dir/$name"; then
+            unchanged "$name"
+        else
+            changed "would install $name into $dir and reload systemd"
+        fi
+        return 0
+    fi
     tmp=$(mktemp)
     unit_render "$name" "$root" "$store" > "$tmp"
     "$@" "mkdir -p $dir && cat > $dir/$name.new && chmod 0644 $dir/$name.new" < "$tmp"
@@ -48,15 +56,26 @@ unit_start() { # <unit name> <root> <store> <consequence> <journal prefix> <run.
     # `enable --now` is a no-op on a running service, so ask before touching it.
     "$@" "systemctl --user is-active --quiet $name" || active=no
 
-    # A unit at its start limit refuses to start until the counter is cleared.
-    "$@" "systemctl --user reset-failed $name" >/dev/null 2>&1 || true
-
     prog=$(unit_program "$name")
     if [ -n "$prog" ]; then
         stamp="$store/.${name%.service}.program"
         want=$(cksum < "$WK_ROOT/$prog" | awk '{print $1}')
         have=$("$@" "cat $stamp 2>/dev/null" || true)
     fi
+
+    if [ -n "${WK_DRY_RUN:-}" ]; then
+        if [ "$active" = no ]; then
+            changed "would start $name"
+        elif [ "$have" = "$want" ]; then
+            unchanged "$name ready"
+        else
+            changed "would restart $name (its program changed)"
+        fi
+        return 0
+    fi
+
+    # A unit at its start limit refuses to start until the counter is cleared.
+    "$@" "systemctl --user reset-failed $name" >/dev/null 2>&1 || true
 
     if ! "$@" "systemctl --user enable --now $name" >/dev/null 2>&1; then
         unit_unready "$name" "$why" "$jrn"

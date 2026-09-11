@@ -421,9 +421,16 @@ class SshConfig(unittest.TestCase):
         """This file's own rule: a node this repo owns is reached by its tailnet
         name and the name is the whole address, so no HostName is written down."""
         keys = [line.split()[0] for line in self.stanza()]
-        self.assertIn("HostKeyAlias", keys)
         self.assertIn("User", keys)
         self.assertNotIn("HostName", keys)
+
+    def test_the_bench_install_host_key_is_not_pinned(self):
+        """A rebuild or a `wk new` of the rehearsal guest mints a new ssh host
+        key under the same tailnet name, so a pinned entry can only go stale."""
+        opts = dict(line.split(None, 1) for line in self.stanza())
+        self.assertNotIn("HostKeyAlias", opts)
+        self.assertEqual("no", opts.get("StrictHostKeyChecking"))
+        self.assertEqual("/dev/null", opts.get("UserKnownHostsFile"))
 
     def test_it_no_longer_says_the_bench_install_cannot_take_a_tailnet_identity(self):
         text = SSH_CONFIG.read_text()

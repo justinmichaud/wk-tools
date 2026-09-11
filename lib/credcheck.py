@@ -29,8 +29,23 @@ import urllib.request
 OK, WIDE, BAD, UNVERIFIED, ABSENT = ("ok", "wide", "bad",
                                     "unverified", "absent")
 
-GITHUB_API = os.environ.get("WK_GITHUB_API", "https://api.github.com")
+def _api_base(var, default):
+    value = os.environ.get(var)
+    if not value:
+        return default
+    parts = urllib.parse.urlsplit(value)
+    if parts.scheme == "https" or parts.hostname in ("127.0.0.1", "localhost"):
+        return value
+    raise SystemExit(
+        "%s=%s: a credential is sent to that address in an Authorization "
+        "header, so it has to be https, or http on 127.0.0.1 or localhost "
+        "(which is what the tests stand a stub up on). Unset %s to use %s."
+        % (var, value, var, default))
+
+
+GITHUB_API = _api_base("WK_GITHUB_API", "https://api.github.com")
 TIMEOUT = 20
+PER_PAGE = 100
 
 # `url` is the page that mints one with everything a link can carry already filled in, `remedy` what is left to choose there; either may be a function of the fork list.
 Rule = collections.namedtuple(
@@ -43,6 +58,8 @@ WKNOTIFY = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                         "wknotify.py")
 
 TAILSCALE_KEYS = "https://login.tailscale.com/admin/settings/keys"
+LITELLM_KEYS = "https://ai.igalia.com/ui/api-keys/"
+LITELLM_ENDPOINT = "https://ai.igalia.com/v1"  # `wk ai pi` -- pi's OpenAI-compatible endpoint for the key above
 
 
 def _resolved(value, repos):
@@ -54,8 +71,7 @@ def fix_of(rule, repos):
                                    _resolved(rule.remedy, repos)) if x)
 
 
-# GitHub takes the name, the expiry and every permission as query parameters and
-# validates the combination; the repository list is the one field it does not.
+# GitHub takes the name, the expiry and every permission as a query parameter, and the repository list as none.
 def _github_pat_url(repos):
     q = [("name", "wk"),
          ("description", "opens pull requests from a wk workspace")]
@@ -71,11 +87,16 @@ class Unreachable(Exception):
     pass
 
 
-def _http(method, url, token, body=None):
+GITHUB_HEADERS = (("Accept", "application/vnd.github+json"),)
+ANTHROPIC_HEADERS = (("anthropic-version", "2023-06-01"),)
+
+
+def _http(method, url, token, body=None, headers=()):
     req = urllib.request.Request(url, method=method, data=body)
     req.add_header("Authorization", "Bearer " + token)
-    req.add_header("Accept", "application/vnd.github+json")
     req.add_header("User-Agent", "wk-credcheck")
+    for name, value in headers:
+        req.add_header(name, value)
     if body is not None:
         req.add_header("Content-Type", "application/json")
     try:
@@ -123,7 +144,8 @@ def _github_pat(value, repos, path, evidence):
                      "access token: it belongs to whatever minted it and is "
                      "not something to store here.")
     try:
-        status, headers, body = _http("GET", GITHUB_API + "/user", token)
+        status, headers, body = _http("GET", GITHUB_API + "/user", token,
+                                      headers=GITHUB_HEADERS)
     except Unreachable as e:
         return UNVERIFIED, ("could not reach %s (%s), so what this token can do "
                             "is not known here; 'wk doctor' asks again."
@@ -148,9 +170,9 @@ def _github_pat(value, repos, path, evidence):
 
     refused = _refused_scopes(scopes)
     if refused:
-        return BAD, ("this is a classic token carrying %s -- powers no part of "
-                     "wk ever spends, on every repository the account can "
-                     "reach.\n    %s" % (", ".join(refused), "; ".join(facts)))
+        return BAD, ("a classic token carrying %s, on every repository this "
+                     "account can reach.\n    %s"
+                     % (", ".join(refused), "; ".join(facts)))
 
     for repo in repos:
         verdict, why = _github_pat_can_open_a_pr(token, repo)
@@ -162,15 +184,59 @@ def _github_pat(value, repos, path, evidence):
                       "every repository this account can write, not only the "
                       "forks.\n    %s"
                       % (", ".join(scopes) or "none", "; ".join(facts)))
-    return OK, ("a fine-grained token, so it reaches only the repositories "
-                "selected for it.\n    %s" % "; ".join(facts))
+    try:
+        reached = _github_pat_reaches(token)
+    except Unreachable as e:
+        return UNVERIFIED, ("could not ask %s which repositories this token "
+                            "reaches (%s); 'wk doctor' asks again."
+                            % (GITHUB_API, e))
+    want = [r.lower() for r in repos]
+    got = [r.lower() for r in reached]
+    missing = [r for r in repos if r.lower() not in got]
+    extra = [r for r in reached if r.lower() not in want]
+    if missing:
+        return BAD, ("this token does not reach %s.\n    %s"
+                     % (", ".join(missing), "; ".join(facts)))
+    if extra:
+        return BAD, ("this token reaches %d repositories beyond the %d forks wk "
+                     "pushes to (%s).\n    %s"
+                     % (len(extra), len(repos), _some(extra),
+                        "; ".join(facts)))
+    return OK, ("a fine-grained token, and GitHub lists exactly the %d forks "
+                "under it.\n    %s" % (len(repos), "; ".join(facts)))
+
+
+def _some(names, n=3):
+    return ", ".join(sorted(names)[:n]) + (", ..." if len(names) > n else "")
+
+
+def _github_pat_reaches(token):
+    """Every repository the token reaches: GET /user/repos answers for the token rather than the account, so a fine-grained one lists what it was granted and one on 'All repositories' lists them all."""
+    names, page = [], 1
+    while True:
+        status, _headers, body = _http(
+            "GET", "%s/user/repos?per_page=%d&page=%d" % (GITHUB_API, PER_PAGE,
+                                                          page), token,
+            headers=GITHUB_HEADERS)
+        if status != 200:
+            raise Unreachable("GET /user/repos answered HTTP %d" % status)
+        try:
+            batch = json.loads(body)
+            names += [r["full_name"] for r in batch]
+        except (ValueError, TypeError, KeyError) as e:
+            raise Unreachable("GET /user/repos answered no repository list (%s)"
+                              % e.__class__.__name__)
+        if len(batch) < PER_PAGE:
+            return names
+        page += 1
 
 
 def _github_pat_can_open_a_pr(token, repo):
     """The write-shaped probe that creates nothing: an empty body names no head or base branch, so an authorised call is 422 and an unauthorised one 403."""
     url = "%s/repos/%s/pulls" % (GITHUB_API, repo)
     try:
-        status, _headers, _body = _http("POST", url, token, body=b"{}")
+        status, _headers, _body = _http("POST", url, token, body=b"{}",
+                                        headers=GITHUB_HEADERS)
     except Unreachable as e:
         return UNVERIFIED, ("could not reach %s (%s) to ask whether a pull "
                             "request can be opened on %s." % (GITHUB_API, e, repo))
@@ -241,6 +307,32 @@ def _when(millis):
     return time.strftime("%Y-%m-%d", time.localtime(millis / 1000.0))
 
 
+ANTHROPIC_API = _api_base("WK_ANTHROPIC_API", "https://api.anthropic.com")
+
+# The read-only request that answers whether Anthropic still accepts a token,
+# measured 2026-09-10 against api.anthropic.com: a `Bearer sk-ant-oat` token
+# with the version header answers 200, one Anthropic refuses answers 401
+# (whether or not the header is there), and no model is inferred either way.
+def _claude_token_accepted(token):
+    url = "%s/v1/models?limit=1" % ANTHROPIC_API
+    try:
+        status, _headers, _body = _http("GET", url, token,
+                                        headers=ANTHROPIC_HEADERS)
+    except Unreachable as e:
+        return UNVERIFIED, ("could not reach %s (%s) to ask whether this token "
+                            "is still accepted." % (ANTHROPIC_API, e))
+    if status == 200:
+        return OK, ""
+    if status == 401:
+        return BAD, ("Anthropic does not accept this token (HTTP 401): it is "
+                     "spent, revoked or expired, and every workspace holding it "
+                     "asks for /login. Replace it with `claude setup-token` and "
+                     "'wk key set claude --replace'.")
+    return UNVERIFIED, ("GET /v1/models answered HTTP %d rather than 200 or "
+                        "401, so whether this token is accepted is not known."
+                        % status)
+
+
 def _claude_token(value, repos, path, evidence):
     token = value.strip()
     if token.startswith("{"):
@@ -253,11 +345,12 @@ def _claude_token(value, repos, path, evidence):
     if not token.startswith("sk-ant-oat"):
         return BAD, ("a `claude setup-token` credential starts 'sk-ant-oat'; "
                      "that does not.")
+    verdict, why = _claude_token_accepted(token)
+    if verdict != OK:
+        return verdict, why
     return OK, ("a Claude Code OAuth token, which is inference-only: it cannot "
-                "read the account or mint anything.\n    Whether Claude still "
-                "accepts it is one request away and is not asked here; a "
-                "workspace reporting 'Not logged in' is the evidence that it "
-                "does not.")
+                "read the account or mint anything.\n    Anthropic accepts it "
+                "(GET /v1/models, HTTP 200).")
 
 
 def _litellm_key(value, repos, path, evidence):
@@ -269,9 +362,10 @@ def _litellm_key(value, repos, path, evidence):
                      "reaches the upstream account directly, and this one is "
                      "handed to every workspace.")
     return OK, (
-        "a LiteLLM virtual key.\n    Which endpoint it belongs to is not known "
-        "here -- a workspace's own ~/.pi/agent/models.json names that -- so "
-        "nothing was asked of it.")
+        "a LiteLLM virtual key for " + LITELLM_ENDPOINT + ", which is what\n"
+        "    `wk ai pi` writes into a workspace's ~/.pi/agent/models.json. "
+        "Nothing was asked of\n    that endpoint, so whether the key is live "
+        "there is unmeasured.")
 
 
 # Tailscale spells three very different powers with one prefix: an auth key enrolls a node, an API access token administers the tailnet, an OAuth client secret mints both.
@@ -283,17 +377,14 @@ def _tailnet_authkey(value, repos, path, evidence):
             "tag:wk, reusable, NOT ephemeral and its expiry cannot be read from "
             "the key; check those at " + TAILSCALE_KEYS)
     return BAD, _tailscale_wrong(key, "an auth key",
-                                 "an auth key can only enroll a node.",
                                  "tskey-auth-<id>-<secret>")
 
 
 def _tailnet_api(value, repos, path, evidence):
     key = value.strip()
     if not (key.startswith("tskey-api-") and len(key) > len("tskey-api-")):
-        return BAD, _tailscale_wrong(
-            key, "an API access token",
-            "retiring a node is an administrative act on the tailnet.",
-            "tskey-api-<id>-<secret>")
+        return BAD, _tailscale_wrong(key, "an API access token",
+                                     "tskey-api-<id>-<secret>")
     if not path:
         return OK, ("an API access token; whether the tailnet still accepts it "
                     "is asked as soon as it is stored.")
@@ -312,22 +403,18 @@ def _tailnet_api(value, repos, path, evidence):
     return BAD, "the tailnet refused it: %s" % detail
 
 
-def _tailscale_wrong(key, wanted, because, shape):
+def _tailscale_wrong(key, wanted, shape):
     if not key:
         return "there is nothing there."
     if key.startswith("tskey-api-"):
-        return ("that is an API access token (tskey-api-...), not %s. It "
-                "administers the whole tailnet -- it can add and delete "
-                "devices, rewrite the ACLs and mint further keys -- and %s"
-                % (wanted, because))
+        return ("that is an API access token (tskey-api-...), which administers "
+                "the whole tailnet, not %s." % wanted)
     if key.startswith("tskey-auth-"):
-        return ("that is a node auth key (tskey-auth-...), not %s. An auth key "
-                "enrolls a node and can do nothing else; %s"
-                % (wanted, because))
+        return ("that is a node auth key (tskey-auth-...), which enrolls a "
+                "node, not %s." % wanted)
     if key.startswith("tskey-client-") or key.startswith("tskey-oauth-"):
-        return ("that is an OAuth client secret. It mints auth keys and API "
-                "tokens of its own, so whatever holds it holds everything they "
-                "can do.")
+        return ("that is an OAuth client secret, which mints keys of both "
+                "kinds, not %s." % wanted)
     if key.startswith("tskey-"):
         return "that starts 'tskey-' but is not one: they are '%s'." % shape
     return "that does not look like a tailscale key at all (they start 'tskey-')."
@@ -398,20 +485,20 @@ RULES = collections.OrderedDict((
              "workspace can open a pull request",
         url=_github_pat_url,
         remedy=lambda repos: (
-            "that page arrives with the name, the expiry and both permissions "
-            "already set; the repository list is the one field a link cannot "
-            "carry, so choose 'Only select repositories' and pick %s"
+            "the one field that link cannot carry: choose 'Only select "
+            "repositories' and pick exactly %s"
             % (", ".join(repos) or "the forks wk pushes to")),
         store_with="wk key set github-pat",
         check=_github_pat)),
     ("claude", Rule(
-        spent_by="shell/bashrc -- exported as $CLAUDE_CODE_OAUTH_TOKEN into "
-                 "every workspace this machine makes",
+        spent_by="shell/bashrc -- exported as $CLAUDE_CODE_OAUTH_TOKEN in a "
+                 "macOS guest and on a build box, the two kinds of target the "
+                 "delivery column sends it to",
         needs="authenticate Claude Code for inference",
         forbids="read the account, bill the organization, or mint further "
                 "credentials",
-        what="a Claude Code token, so a workspace starts authenticated "
-             "instead of asking for /login",
+        what="a Claude Code token, so a guest or a build box starts "
+             "authenticated instead of asking for /login",
         url="",
         remedy="run `claude setup-token` here and paste what it prints",
         store_with="wk key set claude",
@@ -423,22 +510,23 @@ RULES = collections.OrderedDict((
         forbids="reach the upstream provider account directly",
         what="your LiteLLM API key, so `wk ai pi` in a workspace can reach "
              "that endpoint",
-        url="",
-        remedy="a virtual key from your own LiteLLM deployment (its web UI, or "
-               "POST /key/generate)",
+        url=LITELLM_KEYS,
+        remedy="'+ Create New Key' there; the key is shown once",
         store_with="wk key set litellm",
         check=_litellm_key)),
     ("claude-login", Rule(
-        spent_by="cmd/ai -- what `wk ai claude <ws> --rc` refuses to start "
-                 "remote control without",
+        spent_by="targets/container.sh -- mounted into every container as the "
+                 "one Claude credential it is given, and what `wk ai claude "
+                 "<ws> --rc` refuses to start remote control without",
         needs="run inference and fetch the account profile (user:inference, "
               "user:profile), and still be renewable",
         forbids="be an inference-only setup token, which cannot fetch a profile",
-        what="your claude.ai login credential, so remote control works in a "
-             "workspace",
+        what="your claude.ai login credential, so a container authenticates "
+             "and remote control works in it",
         url="",
-        remedy="run `claude auth login` here; this reads what it stored, "
-               "nothing is pasted",
+        remedy="it is `claude auth login` in a browser, run for the directory "
+               "the containers share rather than for this machine; nothing is "
+               "pasted",
         store_with="wk key set claude-login",
         check=_claude_login)),
     ("tailnet", Rule(
@@ -483,8 +571,7 @@ RULES = collections.OrderedDict((
         what="the ntfy.sh topic this machine's notifications go to, so the "
              "fleet can tell you it wants you",
         url="https://ntfy.sh/",
-        remedy="subscribe ntfy's iOS or Android app to the topic URL that "
-               "`wk key set ntfy` prints",
+        remedy="subscribe ntfy's iOS or Android app to that topic URL",
         store_with="wk key set ntfy",
         check=_ntfy_topic,
         mint=_ntfy_mint)),
@@ -503,8 +590,7 @@ def check(name, repos, path, evidence):
         return 0
     verdict, detail = rule.check(value, repos, path, evidence)
     if verdict == BAD:
-        detail = ("%s\n    it must be able to: %s\n    it must not be able to: "
-                  "%s\n    fix: %s\n    then: %s"
+        detail = ("%s\n    it must %s, and must not %s\n    fix: %s -- then: %s"
                   % (detail, rule.needs, rule.forbids, fix_of(rule, repos),
                      rule.store_with))
     sys.stdout.write("%s\t%s\n" % (verdict, detail))

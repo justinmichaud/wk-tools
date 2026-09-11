@@ -8,7 +8,9 @@
 #                     report what each one can do. The one command a new
 #                     machine needs: it asks for the ones wk is given, mints
 #                     the ones wk makes itself, leaves the ones already here
-#                     alone, and can be re-run
+#                     alone, and can be re-run. One line per credential --
+#                     stored, minted, skipped or refused, with the path or the
+#                     reason -- and then `wk key check`'s table
 #   wk key set <name> [--replace] [--paste]
 #                     one credential by name, or the report on it when it is
 #                     already here.
@@ -23,15 +25,20 @@
 #                                     enters a workspace: only the credential
 #                                     injector reads it, which reads GitHub
 #                                     with it whatever position `wk push` is in
-#                                     and writes only while it is on
+#                                     and writes only while it is on. Refused
+#                                     unless it reaches exactly the forks in
+#                                     wk_push_forks: the token page cannot
+#                                     preselect them, so its own answer to
+#                                     `GET /user/repos` is what decides
 #                       claude        the Claude Code token every workspace
 #                                     this machine makes starts authenticated
 #                                     with (`claude setup-token` prints one)
-#                       claude-login  the claude.ai account credential `claude
-#                                     auth login` leaves on this machine -- the
-#                                     second of Claude's two, read from where
-#                                     the CLI put it and never pasted, and what
-#                                     `wk ai claude <ws> --rc` needs
+#                       claude-login  the claude.ai login the containers share,
+#                                     made once here in a browser; separate
+#                                     from this machine's own login so neither
+#                                     refresh invalidates the other. The second
+#                                     of Claude's two, and what `wk ai claude
+#                                     <ws> --rc` needs
 #                       litellm       the API key `wk ai pi` reaches your
 #                                     LiteLLM endpoint with
 #                       tailnet       the fleet's tailnet auth key, seeded onto
@@ -91,6 +98,7 @@ WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 . "$WK_ROOT/lib/common.sh"
 . "$WK_ROOT/lib/store.sh"
 . "$WK_ROOT/lib/target.sh"
+. "$WK_ROOT/lib/par.sh"
 
 load_target "$(default_target)" 2>/dev/null || true
 
@@ -100,7 +108,6 @@ USAGE="usage: wk key setup|set|deploy|check|show|ensure; see wk key -h"
 
 ensure_keys() { "$0" ensure 2>&1 | sed 's/^/  /'; }
 
-# Every machine that pushes gets its own key, revocable on its own: copying one between machines would put a private key on the wire.
 key_machines() {
     echo local
     for_each_machine _key_has_wk
@@ -144,22 +151,15 @@ priv_of() { # <fork>
     return 0
 }
 
-# `claude auth login` leaves the credential where the Claude CLI keeps it: a login-Keychain item under "Claude Code-credentials" on macOS, ~/.claude/.credentials.json on Linux. Never read through an argument, which `ps` shows to everyone here.
-# CLAUDE_CONFIG_DIR set changes that Keychain service name -- the CLI appends a hash of the directory -- so the item read below is not the one it wrote. Refused before the read: a `die` in a command substitution ends only the subshell.
-_claude_login_refuse_relocated_store() {
-    is_macos || return 0
-    [ -z "${CLAUDE_CONFIG_DIR:-}" ] \
-        || die "CLAUDE_CONFIG_DIR is set here ($CLAUDE_CONFIG_DIR), and the Claude CLI
-    then keeps its login under a Keychain item named for that directory, not
-    the default one this reads. Run this in a shell without it set."
-}
-
-_claude_login_read() {
-    if is_macos; then
-        security find-generic-password -a "$USER" -w -s "Claude Code-credentials" 2>/dev/null || true
-    else
-        cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/.credentials.json" 2>/dev/null || true
-    fi
+# The CLI rotates the refresh token in the file it writes, so a copy of this machine's own login is a second holder of one token and the first refresh on either side locks the other out: the shared directory logs in for itself.
+_claude_login_run() { # <name> -- log in where the containers read it
+    have claude || die "$(cred_line "$1" skipped \
+        "the Claude CLI makes this login and is not on PATH -- install it, then: wk key set $1")"
+    [ -t 0 ] || die "$(cred_line "$1" skipped \
+        "this login opens a browser and needs a terminal -- re-run interactively: wk key set $1")"
+    ensure_dir "$(wk_agent_rw_dir)" 0700
+    CLAUDE_SECURESTORAGE_CONFIG_DIR="$(wk_agent_rw_dir)" claude auth login \
+        || die "$(cred_line "$1" skipped "'claude auth login' did not finish")"
 }
 
 CRED_VERDICT=""
@@ -167,7 +167,7 @@ CRED_VERDICT=""
 cred_admit() { # <name> <value>
     CRED_VERDICT=$(printf '%s' "$2" | wk_cred_check "$1")
     [ "$(wk_cred_verdict "$CRED_VERDICT")" != bad ] \
-        || die "$1: $(wk_cred_detail "$CRED_VERDICT")"
+        || die "$(cred_line "$1" refused "$(wk_cred_detail "$CRED_VERDICT")")"
 }
 
 cred_look() { # <name>   what the stored one can do, asked now
@@ -187,68 +187,62 @@ cred_print() { # <name>  non-zero when it cannot do its job
 
 cred_known() { wk_cred_settable | grep -qxF "$1"; }
 
-cred_notes() { # <name>
+cred_line() { # <name> <stored|minted|skipped|refused> <path or one-line reason>
     local var; var=$(wk_agent_secret_field "$1" 4)
-    [ -z "$var" ] || [ "$var" = - ] \
-        || log "  every workspace this machine makes gets it as \$$var"
-    case "$1" in
-        github-pat)
-            log  "  the injector reads GitHub with it whatever position 'wk push' is in;"
-            log  "  a write spends it only while 'wk push on'"
-            log  "  no workspace ever holds it: the injector puts it in the Authorization"
-            log  "  header, and the workspace sends a placeholder ('wk verify' measures that)" ;;
-        claude)
-            log  "  a container reads it live from the read-only /secrets mount"
-            log  "  a macOS guest and a build box are handed a copy at start" ;;
-        litellm)
-            log  "  a container reads it live from the read-only /secrets mount"
-            log  "  (a macOS guest and a build box carry the Claude token only)"
-            log  "  pi finds the endpoint itself in ~/.pi/agent/models.json, whose"
-            log  "  apiKey is the string \$LITELLM_API_KEY -- so the key is in one"
-            log  "  place and the URL and model list are in that file. 'wk ai pi'"
-            log  "  prints the file to write when a workspace has none." ;;
-        claude-login)
-            log  "  one shared file, not a copy each: every container on this"
-            log  "  machine reads and rewrites it. A macOS guest is never given"
-            log  "  a copy -- a refresh in one would invalidate this file -- so"
-            log  "  it runs 'claude auth login' in there for itself, once." ;;
-        tailnet)
-            log  "  'wk sysimage write' seeds it onto every card it writes" ;;
-        tailnet-api)
-            log  "  a write that needs a stale fleet node retired can do it itself" ;;
-        ntfy)
-            log  "  'wk notify' publishes a headline to it; a failed notify is a"
-            log  "  warning, never a reason to abandon a run" ;;
-    esac
-    [ -z "$(wk_agent_secret_field "$1" 1)" ] \
-        || log "  the workspaces that already exist pick it up on their next 'wk start'"
+    [ "$var" = - ] && var=""
+    printf '%-13s %-8s %s%s' "$1" "$2" "$3" "${var:+  (\$$var in a workspace)}"
+}
+
+# One row of `wk key check`, in a column-aligned table: the verdict's summary line, and the fix when the detail carries one (lib/credcheck.py writes it as a `fix:` line for a credential that cannot do its job). The rest of the detail -- what it must be able to do, what it must not -- is what `wk key show <name>` prints.
+cred_row() { # <verdict line>
+    printf '%s\n' "$(wk_cred_detail "$1" | sed -n '1p; /^ *fix: /p')"
+}
+
+# One row of `wk key check`, whole, in its own par job: the rows are independent probes, so they are asked at once and the table replays them in its own order.
+check_fork_row() { # <machine> <remote> <repo>
+    local machine="$1" remote="$2" repo="$3" pub b64 ro line
+    printf '    %-28s ' "$repo" >&3
+    pub=$(m_pub "$machine" "$remote")
+    [ -n "$pub" ] || { echo "no key -- run: wk key deploy" >&3; return 1; }
+
+    # Matched on the base64 body, which is unique and jq-safe. `|| ro=""` keeps this a report: pipefail would end it on a refused API call.
+    b64=$(printf '%s' "$pub" | awk '{print $2}')
+    ro=$(gh api "repos/$repo/keys" </dev/null 2>/dev/null \
+         --jq ".[] | select(.key | contains(\"$b64\")) | .read_only" | head -1) || ro=""
+    line=$(wk_cred_check deploy-key --repos "$repo" \
+               --evidence "ssh=$(m_sshtest "$machine" "$remote")" \
+               --evidence "read_only=$ro" </dev/null)
+    cred_row "$line" >&3
+    [ "$(wk_cred_verdict "$line")" = ok ]
+}
+
+check_cred_row() { # <name>
+    printf '    %-28s ' "$1" >&3
+    cred_look "$1"
+    cred_row "$CRED_VERDICT" >&3
+    [ "$(wk_cred_verdict "$CRED_VERDICT")" != bad ]
 }
 
 # Deliberately not delivered into a workspace like the wk_agent_secrets rows: only the credential injector, on the machine that runs the workspaces, ever reads the token.
 cred_deliver() { # <name> -- carry a stored, rotated or withdrawn one to where it is read
     [ "$1" = github-pat ] || return 0
-    push_agent_pat_sync push_agent_exec "$(push_agent_machine_read_pat)" \
-        && return 0
-    warn "the machine that runs the workspaces did not take the read token,
-    so a read from a workspace answers 401 until it does. './setup' converges it
-    (the vmtools stage on macOS, sdk on Linux); start that machine and re-run it."
+    push_agent_pat_deliver && return 0
+    warn "an injector on this machine did not take the read token, so a read from
+    the workspaces it serves answers 401 until it does. './setup' converges the
+    one in the podman machine (the vmtools stage on macOS, sdk on Linux) and
+    'wk vm start <guest>' the one that serves the guests."
 }
 
-# The one moment a credential wk mints is shown: every reader of a stored one redacts it, so this print is the only chance to point a phone at it.
+# Every reader of a stored credential redacts it, so this print is the only chance to point a phone at one wk mints.
 cred_minted_once() { # <name> <value>
-    log  "  minted here and printed once: $(wk_cred_rule "$1" url)$2"
+    log  "  printed once: $(wk_cred_rule "$1" url)$2"
     log  "  $(wk_cred_rule "$1" remedy)"
-    log  "  'wk key check' and 'wk doctor' report on it without printing it"
 }
 
 cred_report() { # <name> -- non-zero when what is stored cannot do its job
-    local rc=0
-    info "$1: present ($(wk_cred_path "$1"))"
+    log "$(cred_line "$1" stored "$(wk_cred_path "$1")")"
     cred_look "$1"
-    cred_print "$1" || rc=1
-    cred_notes "$1"
-    log  "  'wk key set $1 --replace' rotates it"
-    return $rc
+    cred_print "$1"
 }
 
 deploy_keys() {
@@ -283,8 +277,7 @@ deploy_keys() {
                 changed "$repo: $label's deploy key registered with write access"
             else
                 warn "$repo: could not register $label's key automatically"
-                log  "  add it by hand at https://github.com/$repo/settings/keys/new"
-                log  "  (tick 'Allow write access')"
+                log  "  add it at https://github.com/$repo/settings/keys/new, ticking 'Allow write access':"
                 printf '%s\n' "$pub"
                 failed=1
             fi
@@ -316,6 +309,7 @@ if [ "$ACTION" = ensure ]; then
             install -m 0644 "$key.pub" "$pub"
         fi
     done
+    secrets_publish_view container
     exit 0
 fi
 
@@ -325,20 +319,19 @@ setup)
     deploy_keys || true
     for _name in $(wk_cred_settable); do
         if wk_cred_present "$_name"; then
-            unchanged "$_name: already stored ($(wk_cred_path "$_name"))"
+            log "$(cred_line "$_name" stored "$(wk_cred_path "$_name")")"
             continue
         fi
-        echo >&2
         # A credential declined, or one that cannot be asked for without a
         # terminal, is not a reason to leave the rest of them unset.
         "$0" set "$_name" || true
     done
-    echo >&2
     "$0" check
     ;;
 
 set)
     _name="${2:-}"; _replace=""; _paste=""; _mints=""; _minted=""; _val=""
+    _state=stored
     [ -n "$_name" ] || die "usage: wk key set <name> [--replace] [--paste]
     names: $(wk_cred_settable | tr '\n' ' ')"
     shift 2
@@ -378,44 +371,41 @@ set)
         exit 0
     fi
 
-    # A minted row is made here; one on stdin is a minted credential a first machine already holds; a file row is read out of where its own tool keeps it and goes in byte for byte. All three are put to the rule first.
+    if [ "$_name" = claude-login ]; then
+        _claude_login_run "$_name"
+        wk_cred_present "$_name" \
+            || die "$(cred_line "$_name" skipped \
+                "'claude auth login' left nothing at $(wk_cred_path "$_name")")"
+        cred_report "$_name" || exit 1
+        exit 0
+    fi
+
+    # A minted row is made here; one on stdin is a minted credential a first machine already holds. Both are put to the rule first.
     if [ -n "$_paste" ]; then
         _val=$(cat)
         [ -n "$_val" ] || die "nothing arrived on stdin, so nothing is stored.
     To mint one here instead:  wk key set $_name"
     elif [ -n "$_mints" ]; then
         _val=$(wk_cred_mint "$_name"); _minted=1
-    elif [ "$(wk_agent_secret_kind "$_name")" = file ]; then
-        _claude_login_refuse_relocated_store
-        _val=$(_claude_login_read)
-        [ -n "$_val" ] || die "there is nothing on this machine to read it from, so
-    nothing here can $(wk_cred_rule "$_name" needs).
-    $(wk_cred_rule "$_name" remedy)
-    Then:  wk key set $_name"
     else
         _val=$(prompt_secret_value "$(wk_cred_rule "$_name" what)" \
                    "$(wk_cred_rule "$_name" url)" \
                    "$(wk_cred_rule "$_name" remedy)") || _val=""
-        [ -n "$_val" ] || die "nothing stored, so nothing here can $(wk_cred_rule "$_name" needs).
-    To store one:  wk key set $_name"
+        [ -n "$_val" ] || die "$(cred_line "$_name" skipped \
+            "nothing stored, so nothing here can $(wk_cred_rule "$_name" needs)")"
     fi
 
     # Before anything is written, so a credential the far side refuses is refused here rather than hours later by whatever spends it.
     cred_admit "$_name" "$_val"
-    # Down a pipe: an argument would be in `ps` for everyone on the machine. A file row goes in byte for byte, a value row as one line.
-    if [ "$(wk_agent_secret_kind "$_name")" = file ]; then
-        printf '%s' "$_val" | wk_cred_store "$_name" \
-            || die "could not write $(wk_cred_path "$_name")"
-    else
-        printf '%s\n' "$_val" | wk_cred_store "$_name" \
-            || die "could not write $(wk_cred_path "$_name")"
-    fi
+    # Down a pipe: an argument would be in `ps` for everyone on the machine.
+    printf '%s\n' "$_val" | wk_cred_store "$_name" \
+        || die "could not write $(wk_cred_path "$_name")"
     cred_deliver "$_name"
-    info "stored in $(wk_cred_path "$_name")"
+    [ -z "$_minted" ] || _state=minted
+    log "$(cred_line "$_name" "$_state" "$(wk_cred_path "$_name")")"
     [ -z "$_minted" ] || cred_minted_once "$_name" "$_val"
     unset _val
     cred_print "$_name" || true
-    cred_notes "$_name"
     ;;
 
 pub)
@@ -471,37 +461,42 @@ deploy)
 check)
     [ -z "${2:-}" ] || die "$USAGE"
     rc=0
-    for machine in $(key_machines); do
+    _machines=$(key_machines)
+    _forks=$(wk_push_forks)
+    _creds=$(wk_cred_settable)
+
+    wk_atexit par_cleanup
+    par_begin
+    for machine in $_machines; do
+      while read -r remote repo alias; do
+        [ -n "$remote" ] || continue
+        par_run "fork-$machine-$remote" check_fork_row "$machine" "$remote" "$repo"
+      done <<EOF
+$_forks
+EOF
+    done
+    for _cname in $_creds; do par_run "cred-$_cname" check_cred_row "$_cname"; done
+    par_wait
+
+    for machine in $_machines; do
       label=$(m_label "$machine")
       section_printed=""
       while read -r remote repo alias; do
         [ -n "$remote" ] || continue
         [ -n "$section_printed" ] || { printf '  %s\n' "$label:"; section_printed=1; }
-        printf '    %-28s ' "$repo"
-        pub=$(m_pub "$machine" "$remote")
-        [ -n "$pub" ] || { echo "no key -- run: wk key deploy"; rc=1; continue; }
-
-        # Matched on the base64 body, which is unique and jq-safe. `|| ro=""` keeps this a report: pipefail would end it on a refused API call.
-        b64=$(printf '%s' "$pub" | awk '{print $2}')
-        ro=$(gh api "repos/$repo/keys" </dev/null 2>/dev/null \
-             --jq ".[] | select(.key | contains(\"$b64\")) | .read_only" | head -1) || ro=""
-        line=$(wk_cred_check deploy-key --repos "$repo" \
-                   --evidence "ssh=$(m_sshtest "$machine" "$remote")" \
-                   --evidence "read_only=$ro" </dev/null)
-        printf '%s\n' "$(wk_cred_detail "$line")"
-        [ "$(wk_cred_verdict "$line")" = ok ] || rc=1
+        par_record "fork-$machine-$remote"
+        [ "$(par_rc "fork-$machine-$remote")" = 0 ] || rc=1
       done <<EOF
-$(wk_push_forks)
+$_forks
 EOF
     done
 
     printf '  credentials:\n'
-    for _cname in $(wk_cred_settable); do
-        printf '    %-28s ' "$_cname"
-        cred_look "$_cname"
-        printf '%s\n' "$(wk_cred_detail "$CRED_VERDICT")"
-        case "$(wk_cred_verdict "$CRED_VERDICT")" in bad) rc=1 ;; esac
+    for _cname in $_creds; do
+        par_record "cred-$_cname"
+        [ "$(par_rc "cred-$_cname")" = 0 ] || rc=1
     done
+    par_end
     exit $rc
     ;;
 

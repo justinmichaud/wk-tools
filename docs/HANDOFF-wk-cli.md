@@ -76,7 +76,6 @@ Each a `kill -9` mid-command plus a re-run that must converge:
 - [ ] `wk status <ws> --wait` blocks while busy and reports once when not, same exit code as a bare `wk status`; `--timeout S` stops waiting and says so without claiming the work stopped [needs a workspace]
 - [ ] `wk logs <ws> -f` follows a live build [needs a workspace]
 - [ ] `wk stop --keep-vm` leaves the podman machine running [needs the podman VM]
-- [ ] `build_live` (lib/detach.sh): a `state=running` file whose log has not moved for `WK_STALL_SECONDS` is not live, so a `kill -9`'d build no longer refuses every later benchmark [needs a workspace]
 - [ ] `wk vm rm` removes `<name>.unfiltered`, so a recreated guest of the same name is not refused by `wk ai claude` for the previous guest's sins [needs a macOS VM]
 - [ ] `ccache_conf_render` (lib/store.sh) renders the same ceiling for the store and for a remote machine's cache, and neither overwrites a config that is already there [needs a remote target]
 - [ ] `wk gc` prunes an unreferenced snapshot, keeps the newest, trims ccache, removes a stale bench payload seed, and reports the dirs it keeps [needs a workspace]

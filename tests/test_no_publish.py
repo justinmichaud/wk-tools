@@ -80,7 +80,7 @@ class TestVerifyMeasuresThatNothingCanPublish(unittest.TestCase):
         self.assertIn("https://github.com/", VERIFY)
         self.assertRegex(VERIFY, r"curl [^\n]*https://api\.github\.com/ ")
         self.assertIn("https://api.github.com/user", VERIFY)
-        self.assertIn("https://api.github.com/repos/$FORK/pulls", VERIFY)
+        self.assertIn("https://api.github.com/repos/$fork/pulls", VERIFY)
         self.assertIn("401", VERIFY)
         self.assertIn("422", VERIFY)
 

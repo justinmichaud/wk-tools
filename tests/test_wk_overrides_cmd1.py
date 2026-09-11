@@ -289,49 +289,33 @@ class TestBridgeAuthkey(WkTest):
             self.assertEqual(cp.stdout.strip(), "fleet-key-value", cp.stdout + cp.stderr)
 
 
-class TestBuildLockWait(WkTest):
-    """WK_BUILD_LOCK_WAIT: how long `wk build` waits for another build on
-    the same workspace before giving up (default 3600s). image/yocto.sh
-    reads the same name for its own lock, at the same 3600 default."""
+class TestTheWorkspaceLockIsRefusedNotWaitedOut(WkTest):
+    """`wk build` refuses a second build in a workspace at once and names
+    `wk build <ws> --kill`: an hour on a lock names no remedy. The one caller
+    that still waits is image/yocto.sh's stage build, whose stages queue
+    behind each other by design, at a fixed hour rather than a knob no
+    command documents.
+    """
 
-    def _expr(self):
-        return _extract_expr(BUILD, r'hold_lock "ws-\$NAME".*$')
-
-    def test_default_is_3600(self):
+    def test_build_asks_for_the_lock_with_no_wait_at_all(self):
         text = BUILD.read_text()
-        self.assertIn('hold_lock "ws-$NAME" -w "${WK_BUILD_LOCK_WAIT:-3600}"', text)
+        self.assertIn('hold_lock "ws-$NAME" -w 0', text)
+        self.assertIn('if lock_alive "ws-$NAME"; then', text,
+                      "the refusal is the named one, not hold_lock's own message")
+        self.assertNotIn("WK_BUILD_LOCK_WAIT", text)
 
-    def test_override_actually_bounds_the_wait(self):
-        """a build that cannot get the lock within WK_BUILD_LOCK_WAIT gives
-        up in that many seconds, not lib/common.sh's own 600s default"""
-        with scratch_dir(prefix="wk-test-build-lock-") as d:
-            lockdir = d / "locks"
-            holder = f'''
-set -euo pipefail
-. "{REPO}/lib/common.sh"
-export WK_LOCK_DIR="{lockdir}"
-hold_lock ws-probe -w 20
-sleep 30
-'''
-            (d / "holder.sh").write_text(holder)
-            proc = subprocess.Popen(["bash", str(d / "holder.sh")])
-            self.addCleanup(proc.kill)
-            try:
-                import time
-                time.sleep(0.5)
-                start = time.monotonic()
-                cp = bash(
-                    f'set -euo pipefail\n. "{REPO}/lib/common.sh"\nNAME=probe\n{self._expr()}',
-                    env={"WK_LOCK_DIR": str(lockdir), "WK_BUILD_LOCK_WAIT": "2"},
-                    timeout=15,
-                )
-                elapsed = time.monotonic() - start
-            finally:
-                proc.kill()
-                proc.wait(timeout=5)
-            self.assertNotEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-            self.assertIn("within 2s", cp.stdout + cp.stderr)
-            self.assertLess(elapsed, 10, "should have given up around 2s, not waited for lib/common.sh's 600s default")
+    def test_the_refusal_names_the_command_that_stops_the_other_build(self):
+        text = BUILD.read_text()
+        refusal = text[text.index('if lock_alive "ws-$NAME"; then'):]
+        refusal = refusal[:refusal.index("hold_lock")]
+        self.assertIn("already building", refusal)
+        self.assertIn("$_KILL_CMD", refusal)
+
+    def test_a_yocto_stage_still_waits_for_the_stage_ahead_of_it(self):
+        yocto = (REPO / "image" / "yocto.sh").read_text()
+        self.assertIn('hold_lock "ws-$ws" -w 3600', yocto)
+        self.assertNotIn("WK_BUILD_LOCK_WAIT", yocto,
+                         "an environment knob no -h documents is not a knob")
 
 
 class TestBuildBabysitDefaults(WkTest):
@@ -423,8 +407,7 @@ class TestHeaderDocumentsTheKnobsThisModuleTests(unittest.TestCase):
     def test_build_header_names_its_tunables(self):
         cp = run("build", "-h")
         for name in (
-            "WK_BABYSIT_MODEL", "WK_BABYSIT_ATTEMPTS", "WK_BUILD_LOCK_WAIT",
-            "WK_MEM_INTERVAL",
+            "WK_BABYSIT_MODEL", "WK_BABYSIT_ATTEMPTS", "WK_MEM_INTERVAL",
         ):
             self.assertIn(name, cp.stdout, f"{name} missing from `wk build -h`")
 

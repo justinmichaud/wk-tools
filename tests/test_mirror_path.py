@@ -20,6 +20,7 @@ asks each of them for t_os. No container, guest, machine or network.
 Run: python3 -m unittest tests.test_mirror_path -v
 """
 import os
+import shutil
 import subprocess
 import unittest
 
@@ -215,22 +216,29 @@ class TestOneMirrorLayoutEverywhere(MirrorFixture):
 
     def test_a_workspace_fetch_against_it_takes_the_mirror_arm(self):
         """The pair under test: a checkout made the way a guest's and a build
-        box's are (`--shared` off the mirror) fetches every upstream the mirror
-        carries in one local fetch, with its own remotes pointed at nothing."""
+        box's are (`--shared` off the mirror) and wired by wk_fetch_config
+        fetches every upstream the mirror carries in one local fetch. The
+        upstreams are deleted first, so a fetch that reaches one fails."""
         ws = self.tmp / "ws"
         self._git("clone", "-q", "--shared", "--branch", "main",
                   str(self.mirror), "ws", cwd=self.tmp)
-        for remote in ("origin", "fork"):
+        for remote, bare in (("origin", "up.git"), ("fork", "fk.git")):
             self._git("remote", "remove", remote, cwd=ws, check=False)
-            self._git("remote", "add", remote, str(self.tmp / "gone.git"), cwd=ws)
+            self._git("remote", "add", remote, str(self.tmp / bare), cwd=ws)
+        cp = bash('set -euo pipefail\n. "$WK_ROOT/lib/common.sh"\n'
+                  '. "$WK_ROOT/lib/store.sh"\n' + self.remotes
+                  + f'cd {str(ws)!r}\n'
+                  + f'sh -c "$(wk_fetch_config {str(self.mirror)!r})"\n')
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        for bare in ("up.git", "fk.git"):
+            shutil.rmtree(self.tmp / bare)
         cp = bash('set -euo pipefail\ncd "$WK_ROOT"\n. cmd/sync functions\n'
                   + self.remotes
-                  + f'ws_fetch_script {str(ws)!r} {str(self.mirror)!r}\n')
+                  + f'ws_fetch_script {str(ws)!r}\n')
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
         out = subprocess.run(["sh", "-c", cp.stdout], cwd=str(self.tmp),
                              capture_output=True, text=True)
         self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
-        self.assertIn("from=mirror", out.stdout)
         refs = self._git("for-each-ref", "--format=%(refname)", cwd=ws).stdout.split()
         self.assertIn("refs/remotes/origin/main", refs)
         self.assertIn("refs/remotes/fork/side", refs)

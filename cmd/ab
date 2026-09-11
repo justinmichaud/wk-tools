@@ -34,6 +34,8 @@
 #                         wk status and wk bench report <task>
 #   --task <name>         an existing task to work in -- what --detach hands
 #                         its child; every other invocation is a new task
+#   --kill                stop the A/B running under the task named in place of
+#                         the spec (wk ab <task> --kill) and record it cancelled
 #
 # Every invocation is one *task*, named for the moment it was requested and
 # what it measures (20260830T140000Z-wpe-pr1725, or <stamp>-<sha12> for a
@@ -67,18 +69,56 @@ WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 . "$WK_ROOT/lib/resources.sh"
 . "$WK_ROOT/lib/bench.sh"
 . "$WK_ROOT/lib/detach.sh"
+. "$WK_ROOT/lib/task.sh"
 . "$WK_ROOT/image/pgo.sh"
 
-USAGE="usage: wk ab <pr-spec|sha> --devices <a,b> [--release X.Y] [--builder B] [--bits N] [--base <sha>] [--plan P]... [--rounds N] [--count N] [--timeout S] [--yes] [--dry-run] [--detach]; see wk ab -h"
+USAGE="usage: wk ab <pr-spec|sha> --devices <a,b> [--release X.Y] [--builder B] [--bits N] [--base <sha>] [--plan P]... [--rounds N] [--count N] [--timeout S] [--yes] [--dry-run] [--detach]; wk ab <task> --kill stops one; see wk ab -h"
 
-STAMP=$(bench_task_stamp)
+_ab_pgid() { ps -o pgid= -p "$1" 2>/dev/null | tr -dc '0-9'; }
+
+_ab_wait_gone() { # <pid> <seconds>
+    local p="$1" left="$2"
+    while kill -0 "$p" 2>/dev/null; do
+        [ "$left" -gt 0 ] || return 1
+        wk_sleep 1; left=$((left - 1))
+    done
+}
+
+# The process group, not the pid: the plan's work is `wk sysimage` and `wk pi bench` children of the recorded process. WK_AB_KILL_WAIT is the seconds a TERM gets before the KILL.
+ab_kill() { # <task>
+    local t="$1" dir pid pgid bound="${WK_AB_KILL_WAIT:-20}"
+    dir=$(task_find ab "$t")
+    [ -n "$dir" ] || die "no A/B task '$t' was started from this machine.
+    'wk bench ls' names the tasks and 'wk status' the one running."
+    task_alive "$dir" || die "A/B task '$t' is not running: it is $(task_verdict "$dir").
+    What it measured is recorded:  wk bench report $t"
+    pid=$(task_field "$dir" pid)
+    pgid=$(_ab_pgid "$pid")
+    [ -n "$pgid" ] || die "A/B task '$t' recorded pid $pid, which the process table no longer has.
+    Ask again: 'wk status' reads the record as died."
+    [ "$pgid" != "$(_ab_pgid $$)" ] || die "A/B task '$t' runs in this command's own process group ($pgid),
+    which the kill would take with it: run 'wk ab $t --kill' from another shell."
+    info "stopping A/B task '$t' (pid $pid, process group $pgid)"
+    kill -TERM "-$pgid" 2>/dev/null || true
+    if ! _ab_wait_gone "$pid" "$bound"; then
+        warn "no exit ${bound}s after SIGTERM; killing process group $pgid"
+        kill -KILL "-$pgid" 2>/dev/null || true
+        _ab_wait_gone "$pid" 5 \
+            || die "pid $pid is still there after SIGKILL (ps -p $pid); the record stays running until it is gone."
+    fi
+    task_end "$dir" cancelled
+    info "cancelled. The rounds it recorded stay in $(bench_task_dir "$t") ('wk bench report $t');
+    re-running 'wk ab $t' picks up what is left."
+}
+
+STAMP=$(task_stamp)
 ORIG_ARGS=("$@")
 
 SPEC="${1:-}"; shift 2>/dev/null || true
 [ -n "$SPEC" ] || die "$USAGE"
 case "$SPEC" in -*) die "$USAGE" ;; esac
 
-DEVICES="" RELEASE="" BUILDER="" BITS="" BASE="" ROUNDS=5 COUNT="" TIMEOUT="" DRY="" DETACH="" TASK="" PLANS=()
+DEVICES="" RELEASE="" BUILDER="" BITS="" BASE="" ROUNDS=5 COUNT="" TIMEOUT="" DRY="" DETACH="" TASK="" KILL="" PLANS=()
 while [ $# -gt 0 ]; do
     case "$1" in
         --devices) DEVICES="${2:-}"; shift ;;
@@ -92,6 +132,7 @@ while [ $# -gt 0 ]; do
         --count)   COUNT="${2:-}"; shift ;;
         --timeout) TIMEOUT="${2:-}"; shift ;;
         --task)    TASK="${2:-}"; shift ;;
+        --kill)    KILL=1 ;;
         --yes)     WK_YES=1; export WK_YES ;;
         --dry-run) DRY=1 ;;
         --detach)  DETACH=1 ;;
@@ -100,6 +141,13 @@ while [ $# -gt 0 ]; do
     esac
     shift
 done
+if [ -n "$KILL" ]; then
+    [ "${#ORIG_ARGS[@]}" -eq 2 ] \
+        || die "--kill takes the task name and nothing else: wk ab <task> --kill"
+    ab_kill "$SPEC"
+    exit 0
+fi
+
 [ -n "$DEVICES" ] || die "$USAGE; --devices names the boards (wk boot --list)"
 case "$ROUNDS" in ''|*[!0-9]*) die "--rounds takes a number (got '$ROUNDS')" ;; esac
 [ "$ROUNDS" -ge 1 ] || die "--rounds needs to be at least 1"
@@ -378,8 +426,7 @@ info "task $TASK  ($TASK_DIR)"
 if [ -n "$DETACH" ]; then
     det=()
     for a in "${ORIG_ARGS[@]:1}"; do [ "$a" = --detach ] || det+=("$a"); done
-    status_write "$TASK_DIR/status" state=starting "stage=detaching"
-    pid=$(detach_run "" "$TASK_DIR/ab.log" -- "$WK_ROOT/wk" ab "$SPEC" "${det[@]}" --yes --task "$TASK")
+    pid=$(detach_run "$TASK_DIR/ab.log" -- "$WK_ROOT/wk" ab "$SPEC" "${det[@]}" --yes --task "$TASK")
     info "detached as pid $pid -- this end can go away"
     log "  follow:  tail -f $TASK_DIR/ab.log"
     log "  state:   wk status;  wk bench ls"
@@ -388,19 +435,31 @@ if [ -n "$DETACH" ]; then
 fi
 
 run_cmd() { info "\$ $1"; eval "$WK_ROOT/$1" || die "'${1%% *}' failed; the steps above it are done and the plan recomputes what is left: re-run wk ab $SPEC ..."; }
-task_stage() { status_write "$TASK_DIR/status" state=running "stage=$1"; }
-task_stage "starting"
 
-# Builds one at a time, then every board's pipeline at once, each to its own log.
+# The declared plan: the builds one at a time, then every board's deploy and
+# bench at once (one step, since they run together), then the report.
+declare -a PLAN
 for ((k = 0; k < n; k++)); do
-    case "${CMDS[$k]}" in "wk sysimage "*) task_stage "${CMDS[$k]}"; run_cmd "${CMDS[$k]}" ;; esac
+    case "${CMDS[$k]}" in "wk sysimage "*) PLAN+=("${CMDS[$k]}") ;; esac
+done
+PLAN+=("deploy and benchmark on ${DEVICES//,/, }" "report")
+AB_TASK=$(task_begin ab here "$TASK" "wk ab $TASK --kill" \
+    "$TASK_DIR/ab.log" "${PLAN[@]}")
+_ab_end() { task_end "$AB_TASK" "${WK_EXIT_STATUS:-0}"; }
+wk_atexit _ab_end
+
+step=0
+for ((k = 0; k < n; k++)); do
+    case "${CMDS[$k]}" in
+        "wk sysimage "*) step=$((step + 1)); task_step "$AB_TASK" "$step"; run_cmd "${CMDS[$k]}" ;;
+    esac
 done
 for ((i = 0; i < NDEV; i++)); do
     ab_slot_has "${PROFILE[$i]}" base "$BASE_SHA" && ab_slot_has "${PROFILE[$i]}" "$PR_SLOT" "$HEAD_SHA" \
         || die "${PROFILE[$i]} does not hold both slots after the builds (wk sysimage ls)"
 done
 
-task_stage "deploying and benchmarking on ${DEVICES//,/, }"
+task_step "$AB_TASK" $((step + 1))
 declare -a PIDS LOGS
 for ((i = 0; i < NDEV; i++)); do
     LOGS[$i]="$TASK_DIR/${DEV[$i]}.log"
@@ -424,11 +483,9 @@ for ((i = 0; i < NDEV; i++)); do
         tail -12 "${LOGS[$i]}" | sed 's/^/    /' >&2
     fi
 done
-task_stage "reporting"
+task_step "$AB_TASK" $((step + 2))
 "$WK_ROOT/wk" bench report "$TASK" --html --text || warn "the report did not complete; the runs are recorded:  wk bench report $TASK"
 if [ -n "$failed" ]; then
-    status_write "$TASK_DIR/status" state=failed "stage=incomplete on:$failed"
     die "A/B incomplete on:$failed. Every run that finished is in $TASK_DIR (wk bench ls); re-run wk ab $SPEC ... for what is left."
 fi
-status_write "$TASK_DIR/status" state=done "stage=complete"
 info "A/B complete: $TASK_DIR  (wk bench ls; wk bench report $TASK)"

@@ -186,10 +186,10 @@ class TestStatusReportsWhatThisMachineCanDo(unittest.TestCase):
         stubs = {name: "#!/bin/sh\nexit 0\n" for name in have}
         with stub_path(stubs) as binp:
             script = _SAY + _lift("v_status")
-            if not systemd:
-                # `[ -d /run/systemd ]` is the reading; a real one on this host
-                # would answer for the test rather than the case under test.
-                script = script.replace("[ -d /run/systemd ]", "false")
+            # `[ -d /run/systemd ]` is the reading; a real one (or its
+            # absence) on this host would answer for the test rather than
+            # the case under test, on either platform.
+            script = script.replace("[ -d /run/systemd ]", "true" if systemd else "false")
             return bash(script + "\nv_status\n",
                         env={"PATH": "%s:/usr/bin:/bin" % binp})
 

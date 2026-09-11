@@ -812,7 +812,7 @@ PI_AB_ROUND=""; PI_AB_ARM=""; PI_AB_A=""; PI_AB_B=""
 cmd_bench() {
     local machine="${1:-}" plan="${2:-}"; shift $(( $# < 2 ? $# : 2 ))
     local count="" timeout_s="" slot=a ab="" ab_systems="" rounds=3 cores="" task=""
-    local stamp; stamp=$(bench_task_stamp)
+    local stamp; stamp=$(task_stamp)
     # --count N is iterations per run, --timeout S the seconds one iteration may take (default: the plan's own).
     local usage="usage: wk pi bench <machine> <plan> [--slot NAME | --ab A,B | --ab-systems A,B] [--rounds N] [--count N] [--timeout S] [--cores <set>] [--subtests LIST | --exclude-subtests LIST] [--task NAME] [--pgo DIR] [--no-warmup-profile] [--jit-tiers]; see wk pi -h"
     while [ $# -gt 0 ]; do

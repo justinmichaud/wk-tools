@@ -39,7 +39,7 @@ replaces at the start of every build. Nothing in the tooling prevents it today.
 ## Done — the ledger
 
 Newest first. Each entry is a pointer: the detail, the defects and the
-verification live in the named handoff and in `docs/TESTING.md`, not here.
+verification live in the named handoff and in `tests/`, not here.
 
 - **2026-08-21, Linux — the rpi4 runs a Yocto bench system, and netboot is
   gone from the tree.** The whole round trip on hardware: arm → the WPE 2.48
@@ -48,8 +48,7 @@ verification live in the named handoff and in `docs/TESTING.md`, not here.
   host mode, no hands. What stood in the way was a wic image's baked-in
   `root=/dev/mmcblk0p2`, and the fix is `wk sysimage retarget` (now also part
   of the import): the two places that name a device by path become `PARTUUID=`,
-  which the kernel resolves without an initramfs. Six defects on the way, in
-  `docs/TESTING.md`, and one of them nearly passed as success — the SD rescue
+  which the kernel resolves without an initramfs. Six defects on the way, and one of them nearly passed as success — the SD rescue
   and the stick were written from the same wic, so both carried MBR signature
   `0x076c4a2a`, and the board booted the stick's kernel onto the *card's* root.
   Identity is now stamped per disk at write time (`disk_unique_identity`). The
@@ -115,15 +114,14 @@ verification live in the named handoff and in `docs/TESTING.md`, not here.
   shipped (`docs/HANDOFF-profile.md`). The macOS benchmark lane —
   `wk bench stage`/`staged`, the `hands-on` and guest arming models — was run
   **end to end on real builds between two guests**: `BENCH OK`, a record
-  carrying `bench_host=image`, eleven defects found and fixed on the way,
-  every one in `docs/TESTING.md`. A benchmark runs in bench mode or it does
+  carrying `bench_host=image`, eleven defects found and fixed on the way. A benchmark runs in bench mode or it does
   not run, and `--force` does not open that. What is left for the real machine
   is a volume and two clicks: `docs/HANDOFF-mac-perf-mode.md`.
   `wk quiesce` on macOS measures instead of trusting. (Details:
   `docs/HANDOFF-benchmarking.md` "The macOS shape",
   `docs/HANDOFF-workspace-state.md` for the locks.)
-- **2026-08-19 — a batch of reported defects**, every one recorded in
-  `docs/TESTING.md` and its owning handoff: the shared target registry
+- **2026-08-19 — a batch of reported defects**, every one recorded in its
+  owning handoff: the shared target registry
   (`targets/hosts/<name>.conf`, personal overrides beside it), peer
   workstations (`WK_REMOTE_PEER`), one concurrent probe round for all targets,
   `wk sync --target <machine>` (and `--target container` for the podman VM's
@@ -229,7 +227,7 @@ machine this lane runs on.
       restored; `git-sync-fork` and the small helpers remain.
   14. **Tailnet bridges — hardware half** — `docs/HANDOFF-bmc.md`. The
       software shipped 2026-08-20 (`wk bridge`, `bridge/`, camera streaming,
-      the watchdogs; TESTING.md §8). **`tailnet-bridge-generic` is done as of
+      the watchdogs). **`tailnet-bridge-generic` is done as of
       2026-08-22** — pmOS on the PinePhone's eMMC, route approved, `lan0` up,
       the rpi4 on its reserved 10.99.1.10 and reachable from the workstation,
       verified across a reboot. What remains of this item is the librem5
@@ -249,8 +247,8 @@ machine this lane runs on.
 1. **`wk` inside a macOS guest — DONE 2026-08-18** (the ledger).
 2. **macOS MiniBrowser DerivedData + debugging — DONE 2026-08-18** (handoff
    removed 2026-08-21; the decision record — DerivedData placement, the
-   compilation-cache findings, the lldb attach recipes — is in git history
-   and `docs/TESTING.md` §2). Two open items, moved here:
+   compilation-cache findings, the lldb attach recipes — is in git history).
+   Two open items, moved here:
    - **A9** — the golden base still carries 3.4 GB of
      `CompilationCache.noindex` and 263 MB of `ModuleCache.noindex` in
      `~/Library/Developer/Xcode/DerivedData` from builds that predate the
@@ -292,7 +290,8 @@ machine this lane runs on.
 ## Either machine / process items
 
 Three standing rules, not tasks, applied inline as work lands: every task
-above gets a line item in `docs/TESTING.md` as it is picked up; tools
+above gets a test in `tests/`, or a line in `docs/HANDOFF-verification.md`
+when only hardware can check it, as it is picked up; tools
 stranded by a workflow change are removed in the change that strands them;
 and **cattle, not pets** (`docs/HANDOFF-cattle.md`) — every machine is
 reproducible from this repo plus declared restorables, new machine-local
@@ -410,7 +409,7 @@ execute all of them — see the doc for the full list and what "done" means.
   `targets/container.sh`, `WK_SANDBOX`); no reference to the never-written
   HANDOFF-macos-proxy.md remains outside this note.
 - **2026-08-18 review pass** — a batch of fixes with no remaining task; the
-  durable ones are recorded in their owning handoffs and `docs/TESTING.md`.
+  durable ones are recorded in their owning handoffs.
 - **Git and GitHub helpers separated out** into `docs/HANDOFF-git-tools.md`
   (lane A step 13); `report` needs no action (`wk report` covers it), and
   `git-clean`/`commit-count` solve unrelated problems.

@@ -1,5 +1,4 @@
-# git/WebKit.git is the only thing ever fetched into: base/<id>/WebKit is a live
-# overlay's lower layer, and changes under a mounted overlay are undefined.
+# git/WebKit.git is the only thing ever fetched into: base/<id>/WebKit is a live overlay's lower layer, and changes under a mounted overlay are undefined.
 _wk_default_store() {
     if [ -n "${WK_IN_VM:-}" ] || [ "$(uname -s)" = Darwin ]; then
         echo /var/lib/wk
@@ -29,7 +28,13 @@ WK_CCACHE_MAXSIZE="${WK_CCACHE_MAXSIZE:-40G}"   # shared by every workspace here
 
 ccache_conf_render() { printf 'max_size = %s\n' "$WK_CCACHE_MAXSIZE"; }
 ccache_conf_write() { # <path to ccache.conf>
-    [ -f "$1" ] || ccache_conf_render > "$1"
+    [ -f "$1" ] && return 0
+    if [ -n "${WK_DRY_RUN:-}" ]; then
+        changed "would write $1 ($(ccache_conf_render))"
+        return 0
+    fi
+    ensure_dir "$(dirname "$1")" >/dev/null
+    ccache_conf_render > "$1"
 }
 
 wk_mirror()   { echo "$WK_STORE/git/WebKit.git"; }
@@ -46,6 +51,21 @@ forkwpe  https://github.com/justinmichaud/WPEWebKit.git
 EOF
 }
 
+# What a checkout asks a source for, per remote: a wk mirror keeps origin's branches as its own heads and every other upstream namespaced (mirror_refresh_script), an upstream itself only refs/heads -- and origin is narrowed either way, since WebKit/WebKit advertises 924 heads and 8,288 tags to git's default refspec.
+wk_fetch_refspecs() { # <remote> <mirror-dir, or empty for the upstream itself>
+    local b out=""
+    if [ "$1" = origin ]; then
+        for b in $(wk_mirror_branches); do
+            out="$out +refs/heads/$b:refs/remotes/origin/$b"
+        done
+    elif [ -n "$2" ]; then
+        out=" +refs/remotes/$1/*:refs/remotes/$1/*"
+    else
+        out=" +refs/heads/*:refs/remotes/$1/*"
+    fi
+    printf '%s' "${out# }"
+}
+
 wk_pr_repos() { # repositories `wk pr <user>:<branch>` tries in turn
     wk_remotes | awk '{ print $2 }' \
         | sed -E 's#(\.git)?$##; s#.*/##' \
@@ -59,8 +79,8 @@ forkwpe  justinmichaud/WPEWebKit   github-wpe
 EOF
 }
 
-wk_wiring_script() { # <src> [<extra-name> <extra-url> [<ssh-config>]]
-    local src="$1" extra_name="${2:-}" extra_url="${3:-}" ssh_config="${4:-}"
+wk_wiring_script() { # <src> <mirror-dir> [<extra-name> <extra-url> [<ssh-config>]]
+    local src="$1" mirror="${2:-}" extra_name="${3:-}" extra_url="${4:-}" ssh_config="${5:-}" _b
     printf 'set -e
 '
     printf 'cd %s
@@ -74,8 +94,8 @@ wk_wiring_script() { # <src> [<extra-name> <extra-url> [<ssh-config>]]
         printf 'git remote add %s https://github.com/%s.git 2>/dev/null || git remote set-url %s https://github.com/%s.git
 ' \
             "$remote" "$repo" "$remote" "$repo"
-        printf 'git remote set-url --push %s git@%s:%s.git
-' "$remote" "$alias" "$repo"
+        printf 'git config --unset-all remote.%s.pushurl 2>/dev/null || true
+' "$remote"
     done
     _forks=$(wk_push_forks | awk 'NF {printf " %s", $1}')
     wk_remotes | while read -r name url; do
@@ -97,16 +117,70 @@ wk_wiring_script() { # <src> [<extra-name> <extra-url> [<ssh-config>]]
             "$extra_name" "$(sh_quote "$extra_url")" "$extra_name" "$(sh_quote "$extra_url")"
         printf 'git remote set-url --push %s no-push://%s-is-a-local-copy
 ' "$extra_name" "$extra_name"
+        printf 'git config --unset-all remote.%s.fetch 2>/dev/null || true\n' "$extra_name"
+        for _b in $(wk_mirror_branches); do
+            printf 'git config --add remote.%s.fetch %s\n' "$extra_name" \
+                "$(sh_quote "+refs/heads/$_b:refs/remotes/$extra_name/$_b")"
+        done
+        printf 'git config remote.%s.tagOpt --no-tags\n' "$extra_name"
     fi
+    wk_fetch_config "$mirror"
+    wk_push_rewrite_config
 }
 
-wk_wiring_check_script() { # <src> [<skip-env>] -- a `problem:` line per fault, exit 1
-    local src="$1" skip_env="${2:-}"
+# A fork records only its github.com URL and git is told to push it through the fork's ssh alias: `git config --get-regexp 'remote.+url'` is what git-webkit's install-hooks reads, and a host that is not github.com there is taken for another GitHub instance whose credentials it then hunts for in a keyring. git ignores pushInsteadOf for a remote that has an explicit `pushurl`, so the forks have none. Written after wk_fetch_config, which clears every url.* rewrite section.
+wk_push_rewrite_config() {
+    local remote repo alias
+    wk_push_forks | while read -r remote repo alias; do
+        [ -n "$remote" ] || continue
+        printf 'git config %s %s\n' \
+            "$(sh_quote "url.git@$alias:$repo.git.pushInsteadOf")" \
+            "$(sh_quote "https://github.com/$repo.git")"
+    done
+}
+
+# The URL is rewritten rather than replaced, so a person's `git fetch <remote>` and `git pull` read the machine's mirror while `remote.<r>.url` still answers with GitHub -- which is what git-webkit reads to find the project (webkitscmpy/local/git.py).
+wk_fetch_config() { # <mirror-dir, or empty for a checkout with no mirror in reach>
+    local mirror="$1" name url spec
+    printf 'stale=$(git config --local --name-only --get-regexp %s 2>/dev/null || true)
+for k in $stale; do
+    s=${k%%.pushinsteadof}; s=${s%%.insteadof}
+    git config --local --remove-section "$s" 2>/dev/null || true
+done\n' "$(sh_quote '^url\..*\.(push)?insteadof$')"
+    wk_remotes | while read -r name url; do
+        [ -n "$name" ] || continue
+        [ -z "$mirror" ] || printf 'git config --add %s %s\n' \
+            "$(sh_quote "url.$mirror.insteadOf")" "$(sh_quote "$url")"
+        printf 'git config --unset-all remote.%s.fetch 2>/dev/null || true\n' "$name"
+        for spec in $(wk_fetch_refspecs "$name" "$mirror"); do
+            printf 'git config --add remote.%s.fetch %s\n' "$name" "$(sh_quote "$spec")"
+        done
+        printf 'git config remote.%s.tagOpt --no-tags\n' "$name"
+    done
+}
+
+# --defaults asks nothing, given GITHUB_COM_USERNAME/GITHUB_COM_TOKEN in the environment (webkitcorepy reads those before any keyring and raises rather than prompting), so this runs where the injector puts them; `webkitscmpy.setup` is the record it writes of having run.
+# On a branch other than main it prompts whatever --defaults says.
+wk_gitwebkit_setup_script() { # <src>
+    printf 'cd %s || exit 2\n' "$(sh_quote "$1")"
+    cat <<'EOF'
+if [ "$(git config --get webkitscmpy.setup 2>/dev/null)" = true ]; then
+    echo setup=already
+    exit 0
+fi
+Tools/Scripts/git-webkit setup --defaults </dev/null >&2 || { echo setup=failed; exit 1; }
+echo setup=ok
+EOF
+}
+
+# `git config remote.<r>.url`, not `git remote get-url`: that one applies the url.<mirror>.insteadOf rewrite and would report every remote as pointing at the mirror. It is also the value git-webkit reads.
+wk_wiring_check_script() { # <src> <mirror-dir> [<skip-env>] -- a `problem:` line per fault, exit 1
+    local src="$1" mirror="${2:-}" skip_env="${3:-}"
     printf 'cd %s || exit 2
 ' "$(sh_quote "$src")"
     printf 'bad=0
 '
-    printf 'u=$(git remote get-url origin 2>/dev/null || echo "")
+    printf 'u=$(git config --get remote.origin.url 2>/dev/null || echo "")
 '
     printf 'p=$(git remote get-url --push origin 2>/dev/null || echo "")
 '
@@ -127,7 +201,7 @@ fi
         [ -n "$name" ] || continue
         [ "$name" = origin ] && continue
         case "$_forks " in *" $name "*) continue ;; esac
-        printf 'u=$(git remote get-url %s 2>/dev/null || echo "")
+        printf 'u=$(git config --get remote.%s.url 2>/dev/null || echo "")
 ' "$name"
         printf 'p=$(git remote get-url --push %s 2>/dev/null || echo "")
 ' "$name"
@@ -146,7 +220,7 @@ fi
     done
     wk_push_forks | while read -r remote repo alias; do
         [ -n "$remote" ] || continue
-        printf 'u=$(git remote get-url %s 2>/dev/null || echo "")
+        printf 'u=$(git config --get remote.%s.url 2>/dev/null || echo "")
 ' "$remote"
         printf 'p=$(git remote get-url --push %s 2>/dev/null || echo "")
 ' "$remote"
@@ -156,25 +230,28 @@ fi
   *)  echo "problem: %s fetches from $u, not https://github.com/%s.git"; bad=1 ;;
 esac
 ' "$repo" "$remote" "$remote" "$repo"
-        printf 'if [ -n "$u" ]; then case "$p" in
+        printf 'r=$(git config --get remote.%s.pushurl 2>/dev/null || echo "")
+' "$remote"
+        printf 'if [ -n "$u" ]; then if [ -n "$r" ]; then
+  echo "problem: %s records $r as a push URL -- git ignores the ssh-alias rewrite for a remote that has one, and git-webkit reads every remote URL and takes a host other than github.com for a GitHub instance of its own, whose credentials it then looks for in a keyring"; bad=1
+fi
+case "$p" in
   git@%s:%s.git) ;;
   *) echo "problem: %s pushes to $p, not git@%s:%s.git -- the deploy key is chosen by that ssh alias, so no key is offered at all"; bad=1 ;;
 esac
 fi
-' "$alias" "$repo" "$remote" "$alias" "$repo"
+' "$remote" "$alias" "$repo" "$remote" "$alias" "$repo"
         [ -z "$skip_env" ] || continue
         printf 'c=$(git config core.sshCommand 2>/dev/null || echo "")
 '
-        printf 'f=${c#*-F }; f=${f%%%% *}
-'
-        printf 'if ! grep -qs "^[[:space:]]*Host[[:space:]].*%s" "$HOME/.ssh/config" "$HOME/.ssh/config.d/"* 2>/dev/null; then
-  if [ -z "$c" ]; then
-    echo "problem: nothing resolves the ssh alias %s (no Host entry, no core.sshCommand)"; bad=1
-  elif ! grep -qs "^[[:space:]]*Host[[:space:]].*%s" "$f" 2>/dev/null; then
-    echo "problem: core.sshCommand uses $f, which has no Host entry for %s"; bad=1
-  fi
+        printf 'case "$c" in
+  *"-F "*) f=${c#*-F }; f=${f%%%% *}; h=$(ssh -G -F "$f" %s 2>/dev/null | sed -n "s/^hostname //p") ;;
+  *) h=$(ssh -G %s 2>/dev/null | sed -n "s/^hostname //p") ;;
+esac
+if [ "$h" != github.com ]; then
+  echo "problem: the ssh alias %s resolves to ${h:-nothing}, not github.com -- the deploy key is chosen by that alias, so a push offers no key at all"; bad=1
 fi
-' "$alias" "$alias" "$alias" "$alias"
+' "$alias" "$alias" "$alias"
     done
     local keep='""' _u _r _f
     for _u in $(wk_remotes | awk 'NF {print $1}'); do
@@ -199,8 +276,28 @@ if [ -n "$b" ]; then
     printf '  esac
 fi
 '
+    wk_fetch_check "$mirror"
     printf 'exit $bad
 '
+}
+
+# The other half of wk_fetch_config, asked of a checkout: one wired before it fetches every branch of every upstream over the network, and `wk remotes --fix` re-asserts it.
+wk_fetch_check() { # <mirror-dir>
+    local mirror="$1" name url
+    [ -z "$mirror" ] || printf 'ins=" $(git config --get-all %s 2>/dev/null | tr "\\n" " ")"\n' \
+        "$(sh_quote "url.$mirror.insteadOf")"
+    wk_remotes | while read -r name url; do
+        [ -n "$name" ] || continue
+        printf 'w=%s\n' "$(sh_quote "$(wk_fetch_refspecs "$name" "$mirror")")"
+        printf 'g=$(git config --get-all remote.%s.fetch 2>/dev/null | tr "\\n" " "); g="${g%% }"\n' "$name"
+        printf 'if [ "$g" != "$w" ]; then echo "problem: %s asks for $g, not $w -- that is a remote-tracking ref per branch of the upstream, over the network"; bad=1; fi\n' \
+            "$name"
+        printf 't=$(git config --get remote.%s.tagOpt 2>/dev/null || echo "")\n' "$name"
+        printf 'if [ "$t" != --no-tags ]; then echo "problem: %s follows tags, so every fetch re-negotiates every tag the upstream has"; bad=1; fi\n' \
+            "$name"
+        [ -z "$mirror" ] || printf 'case "$ins" in *" %s "*) ;; *) echo "problem: %s is not rewritten to %s, so a fetch of it goes to github.com"; bad=1 ;; esac\n' \
+            "$url" "$name" "$mirror"
+    done
 }
 
 wk_branch_upstream_fix_script() { # point HEAD at the fork it can be pushed to
@@ -271,6 +368,9 @@ wk_secrets_dir() {
         printf '%s/secrets' "$(wk_machine_store)"
     fi
 }
+
+# The other half of the line above: inside the podman VM that directory is the macOS host's own ~/.config/wk/secrets, bind-mounted read-only, so the host publishes into it and the VM only reads it.
+wk_secrets_owned_here() { [ -z "${WK_IN_VM:-}" ]; }
 
 wk_push_held_dir() { printf '%s/push-keys' "$(dirname "$(wk_secrets_dir)")"; }
 
@@ -375,6 +475,18 @@ push_agent_pat_sync() { # <execfn> <path>
     fi
 }
 
+# Every injector this machine runs, in one call: the one in the podman machine that serves the containers, and on a macOS host the one here that serves the guests (targets/vm.sh). A token delivered to one of the two is a 401 from the other, so `wk key set github-pat` and any other convergence point calls this rather than picking a half.
+push_agent_pat_deliver() {
+    local rc=0
+    push_agent_pat_sync push_agent_exec "$(push_agent_machine_read_pat)" || rc=1
+    if is_macos; then
+        ( . "$WK_ROOT/lib/target.sh"
+          load_target vm >/dev/null 2>&1
+          vm_push_pat_converge ) || rc=1
+    fi
+    return "$rc"
+}
+
 push_agent_pat_present() { # <execfn> <path>
     local out
     out=$("$1" "test -s $(sh_quote "$2") && echo yes" </dev/null 2>/dev/null) || out=""
@@ -406,10 +518,7 @@ wk_mirror_branches() {
 
 wk_mirror_default_remotes() { wk_remotes | awk 'NF {printf "%s%s", sep, $1; sep=" "} END {print ""}'; }
 
-# The layout every mirror shares, so a workspace can fetch from any (see
-# mirror_refspecs): origin's branches as the mirror's OWN refs/heads, the other
-# upstreams under refs/remotes/<remote>/. gc.auto 0 or a repack breaks the
-# `--shared` clones borrowing these objects.
+# The layout every mirror shares, so a workspace can fetch from any (wk_fetch_refspecs): origin's branches as the mirror's OWN refs/heads, the other upstreams under refs/remotes/<remote>/. gc.auto 0 or a repack breaks the `--shared` clones borrowing these objects.
 mirror_refresh_script() { # <mirror-dir>, as portable `sh` -- two of three are remote
     local name url b
     printf 'set -e\nM=%s\n' "$(sh_quote "$1")"
@@ -438,9 +547,7 @@ mirror_refresh_script() { # <mirror-dir>, as portable `sh` -- two of three are r
     printf '        echo "mirror-fetch $r ok"\n'
     printf '    else echo "mirror-fetch $r FAILED"\n    fi\n'
     printf 'done\n'
-    # After the fetches: `git fetch` in a bare repository overwrites HEAD with
-    # that remote's default branch, whatever fetch.followRemoteHEAD says
-    # (measured, git 2.48.1).
+    # After the fetches: `git fetch` in a bare repository overwrites HEAD with that remote's default branch, whatever fetch.followRemoteHEAD says (measured, git 2.48.1).
     # TODO: upstream -- report the bare-repository HEAD overwrite to git.
     printf 'git -C "$M" symbolic-ref HEAD %s\n' \
         "$(sh_quote "refs/heads/$(wk_mirror_branches | awk '{print $1}')")"
@@ -651,6 +758,13 @@ $(printf '%s\n' "$found" | sed 's/^/    /')
         then git fetch --quiet $(sh_quote "$mirror_dir") $(sh_quote "$mirror_ref:refs/remotes/$remote/$branch")
         else $fetch_step
         fi"
+    elif [ -n "$mirror_dir" ]; then
+        # A PR head is not a ref any mirror carries, and this checkout's remotes are rewritten to that mirror (wk_fetch_config), so it is fetched into the mirror -- writable from where the checkout is, unlike a container's read-only /mirror above -- and read from there.
+        fetch_step="git -C $(sh_quote "$mirror_dir") fetch --quiet $(sh_quote "$url") $(sh_quote "+$src_ref:$mirror_ref")
+        git fetch --quiet $(sh_quote "$mirror_dir") $(sh_quote "$mirror_ref:refs/remotes/$remote/$branch")"
+        [ -z "$add_remote" ] || fetch_step="git remote get-url $(sh_quote "$remote") >/dev/null 2>&1 || git remote add $(sh_quote "$remote") $(sh_quote "$url")
+        git remote set-url $(sh_quote "$remote") $(sh_quote "$url")
+        $fetch_step"
     fi
 
     t_exec "$name" bash -c "
@@ -687,26 +801,86 @@ store_init() {
     ensure_dir "$WK_STORE/skills"
     ensure_dir "$(wk_secrets_dir)" 0700
     ensure_dir "$(wk_agent_rw_dir)" 0700
-    secrets_publish || warn "could not publish $(wk_secrets_dir)/ssh_config and github-user,
+    if wk_secrets_owned_here; then
+        secrets_publish || warn "could not publish $(wk_secrets_dir)/ssh_config and github-user,
     so a workspace here gets no fork alias and no GITHUB_COM_TOKEN"
+    else
+        secrets_require_published
+    fi
+}
+
+secrets_require_published() { # what the owning machine put there, read in the VM
+    local dir f; dir=$(wk_secrets_dir)
+    for f in ssh_config github-user view/container/ssh_config; do
+        [ -f "$dir/$f" ] && continue
+        die "$dir/$f is not there, and nothing in here publishes it: $dir is the
+    host's ~/.config/wk/secrets, mounted read-only. Publish it from the host:
+        ./setup --stage vmtools"
+    done
 }
 
 # /secrets is what every workspace on this machine reads. What goes in it -- the fork aliases and the account name -- is public and identical whether push is on or off, so it is published with the directory. Left to `wk push`, a machine nobody had switched yet gave every workspace an empty /secrets: no fork alias, and no placeholder for the injector to replace, so `git-webkit` sent no Authorization header at all.
 secrets_publish() {
     local sock; sock=$(t_agent_sock 2>/dev/null) || sock=""
     push_agent_publish_config "$(wk_secrets_dir)" "$sock"
+    secrets_publish_view container
+}
+
+# A container is handed its credentials by mounting a directory; every other kind is given its rows one file at a time (targets/vm.sh, targets/remote.sh) and mounts nothing. So the directory a container mounts holds exactly what wk_agent_secrets delivers to a container -- the store above it holds every row, a vm's and a build box's included.
+wk_secrets_view_dir() { # <target kind>
+    printf '%s/view/%s' "$(wk_secrets_dir)" "$1"
+}
+
+secrets_view_files() { # <target kind> -- what it may read, one name per line
+    local kind="$1" name file home var vkind deliv f
+    printf '%s\n' ssh_config github-user
+    for f in "$(wk_secrets_dir)"/build_key_*.pub; do
+        [ -f "$f" ] && printf '%s\n' "${f##*/}"
+    done
+    wk_agent_secrets | while read -r name file home var vkind deliv; do
+        [ -n "$name" ] || continue
+        [ "$vkind" = value ] || continue      # a file row is rewritten in place: wk_agent_rw_dir
+        wk_agent_secret_delivered "$name" "$kind" && printf '%s\n' "$file"
+    done
+    return 0
+}
+
+secrets_publish_view() { # <target kind> -- converge that view on the table
+    local kind="$1" src dir f want
+    wk_secrets_owned_here || return 0
+    src=$(wk_secrets_dir)
+    dir=$(wk_secrets_view_dir "$kind")
+    ensure_dir "$dir" 0700 >/dev/null || return 1
+    want=$(secrets_view_files "$kind")
+    for f in $want; do
+        if [ -f "$src/$f" ]; then
+            cp -p "$src/$f" "$dir/$f.new" || return 1
+            mv "$dir/$f.new" "$dir/$f" || return 1
+        else
+            rm -f "$dir/$f"
+        fi
+    done
+    for f in $(ls -A "$dir" 2>/dev/null); do
+        case "
+$want
+" in *"
+$f
+"*) ;; *) rm -f "$dir/$f" ;; esac
+    done
 }
 
 base_path() { echo "$(wk_base_dir)/$1/WebKit"; }
 
-# `wk sync` publishes into a hardlinked copy of the last snapshot, so a kill
-# mid-publish leaves a newer directory than any good one; the sha lands last.
+# `wk sync` publishes into a hardlinked copy of the last snapshot, so a kill mid-publish leaves a newer directory than any good one; the sha lands last.
 base_sha_file() { echo "$(wk_base_dir)/$1/sha"; }
 
 base_complete() { [ -s "$(base_sha_file "$1")" ]; }
 
 base_recorded_sha() { cat "$(base_sha_file "$1")" 2>/dev/null || true; }
 base_tree_sha()     { git -C "$(base_path "$1")" rev-parse HEAD 2>/dev/null || true; }
+
+# The remote-tracking branch it was published from, written before the completion marker (cmd/sync), so a complete snapshot always names one.
+base_recorded_branch() { cat "$(wk_base_dir)/$1/branch" 2>/dev/null || true; }
 
 base_verify() { # <id> -- 0 if publishable and untampered; else prints why not
     local id="$1" want got
@@ -728,9 +902,42 @@ base_verify() { # <id> -- 0 if publishable and untampered; else prints why not
     immutable by design -- publish a new one with 'wk sync'."
         return 1
     }
+    base_head_verify "$id"
+}
+
+# Every workspace overlays this tree and inherits its HEAD, so a snapshot left on a raw sha is a detached `git status` in every workspace made from it: refused here rather than warned about there.
+base_head_verify() { # <id>
+    local id="$1" tree branch head up
+    tree=$(base_path "$id")
+    branch=$(base_recorded_branch "$id")
+    [ -n "$branch" ] || {
+        echo "snapshot $id does not record the branch it was published from,
+    so whether its HEAD is that branch cannot be known:  wk sync    publishes
+    one that does, for the next 'wk new'."
+        return 1
+    }
+    head=$(git -C "$tree" symbolic-ref --quiet HEAD 2>/dev/null || true)
+    up=$(git -C "$tree" rev-parse --abbrev-ref --symbolic-full-name "@{u}" 2>/dev/null || true)
+    [ "$head" = "refs/heads/${branch#*/}" ] && [ "$up" = "$branch" ] || {
+        echo "snapshot $id is not on branch ${branch#*/} tracking $branch (HEAD is
+    ${head:-a raw sha}${up:+, tracking $up}), so every workspace overlaid on it starts
+    detached:  wk sync    publishes one that is."
+        return 1
+    }
 }
 
 current_base() {
+    local d
+    for d in $(ls -1 "$(wk_base_dir)" 2>/dev/null | sort -r); do
+        base_verify "$d" >/dev/null 2>&1 || continue
+        echo "$d"
+        return 0
+    done
+    return 1
+}
+
+# What `wk gc` keeps, and a weaker test than current_base's on purpose: a snapshot published before the branch record (base_verify) is one `wk new` refuses and one a machine still has nothing else to overlay on, so gc keeping the newest of them is the difference between a stale snapshot and none.
+newest_complete_base() {
     local d
     for d in $(ls -1 "$(wk_base_dir)" 2>/dev/null | sort -r); do
         base_complete "$d" || continue
@@ -766,7 +973,7 @@ unreferenced_bases() {
         used="$used $id"
     done
 
-    local keep; keep=$(current_base 2>/dev/null || true)
+    local keep; keep=$(newest_complete_base 2>/dev/null || true)
 
     for base in $(ls -1 "$(wk_base_dir)" 2>/dev/null); do
         [ "$base" = "$keep" ] && continue
@@ -779,12 +986,17 @@ unreferenced_bases() {
 
 # A `value` row is one line, exported into its variable; a `file` row the agent
 # rewrites in place, so it lives in wk_agent_rw_dir and goes only to a workspace
-# seeing these same bytes.  <name> <file here> <file in the home> <variable> <kind>
+# seeing these same bytes. Delivery keeps the two Claude credentials apart:
+# $CLAUDE_CODE_OAUTH_TOKEN takes precedence over a stored login wherever both
+# arrive, and remote control refuses the token, so a target is given one of them
+# and never both. The store's login is made in the store's own directory, so it
+# is delivered to a container and copied nowhere.
+#   <name> <file here> <file in the home> <variable> <kind> <delivery>
 wk_agent_secrets() {
     cat <<'EOF'
-claude        claude-token        .wk-agent-token             CLAUDE_CODE_OAUTH_TOKEN  value
-litellm       litellm-key         .wk-litellm-key             LITELLM_API_KEY          value
-claude-login  .credentials.json   .claude/.credentials.json   -                        file
+claude        claude-token        .wk-agent-token             CLAUDE_CODE_OAUTH_TOKEN  value  vm,remote
+litellm       litellm-key         .wk-litellm-key             LITELLM_API_KEY          value  container,vm,remote
+claude-login  .credentials.json   .claude/.credentials.json   -                        file   container
 EOF
 }
 
@@ -799,6 +1011,13 @@ wk_agent_secret_field() { # <name> <column>; empty for a name not in the table
 }
 wk_agent_secret_known() { [ -n "$(wk_agent_secret_field "$1" 1)" ]; }
 wk_agent_secret_kind() { wk_agent_secret_field "$1" 5; }
+
+wk_agent_secret_delivered() { # <name> <target kind> -- 0 when this row reaches that kind
+    case ",$(wk_agent_secret_field "$1" 6)," in
+        *",$2,"*) return 0 ;;
+    esac
+    return 1
+}
 
 wk_agent_secret_path() { # <name>
     local f; f=$(wk_agent_secret_field "$1" 2)
@@ -859,12 +1078,14 @@ wk_cred_present() { # <name> -- is there one here at all; its rule judges what i
 wk_cred_store() { # <name> -- from stdin: an argument is visible in `ps`
     local p; p=$(wk_cred_path "$1") || return 1
     ensure_dir "$(dirname "$p")" 0700
-    python3 "$WK_ROOT/lib/secretfile.py" write "$p"
+    python3 "$WK_ROOT/lib/secretfile.py" write "$p" || return 1
+    secrets_publish_view container
 }
 
 wk_cred_clear() { # <name> -- this machine holds it no longer
     local p; p=$(wk_cred_path "$1") || return 1
     rm -f "$p"
+    secrets_publish_view container
 }
 
 wk_cred_read() { # <name> -- every byte of it, nothing when it is absent

@@ -1,41 +1,43 @@
 Everything is answered inline.
 
-Focus on these defects:
+Still open (each needs a hand or a commit first):
 
-- zsh alt+arrow keys not wokring from zed terminal
+- Claude remote control inside a container: run once, in a terminal with a
+  browser, `wk key set claude-login --replace` (the container login is a
+  session of its own; a copy of this machine's credential dies at the first
+  refresh). Then measure: wk new probe; wk ai claude probe --rc; wk status
+  (an `rc` task with its kill line). Seen once on a cold container before the
+  login fix: "Remote Control is disabled by your organization's policy" with
+  growthBookFeaturesLoaded=0; re-measure after the login.
 
-- wk key steup is overly verbose; Also, there should be a one-click link for all keys to generate them (or otherwise it should be done programatically). gh-pat does not fill the repo access correctly, it defaults to all repos.
+- moose: a peer takes tooling only from origin/main. After commit + push:
+  wk sync --target moose; ssh moose wk new probe; wk status probe (the `new`
+  plan, then HEAD main tracking origin/main); ssh moose 'cd
+  ~/.local/share/wk/ws/probe/changes && time git fetch origin'. moose's
+  three snapshots predate the branch record; the first `wk sync` there
+  republishes.
 
-Making a new workspace on moose:
+- tart guests: measured on `mya` with this tree from the host side: `wk
+  remotes mya --fix` rewires (git fetch origin 7.2 s -> 0.56 s), `wk verify`
+  runs for a guest, and the guests' read token converges at `wk start`; the
+  guest's own wk-tools clone and rc files take the commit like moose does.
+  After commit: wk start mya; wk verify mya (no 401); wk push status; wk push
+  off (both agents empty).
 
-- wk new on moose still leaves head in detatched state, depsite previous claims this issue was fixed. This needs a real test  so it stops regressing. git fetch origin is very slow after new creation too.
+- GitHub PAT: `wk key check` measures the token's reach and refuses this
+  machine's (48 repositories). Reissue with "Only select repositories" =
+  justinmichaud/WebKit + justinmichaud/WPEWebKit, then
+  wk key set github-pat --replace.
 
-- wk sync says it is rebasing automatically. It shouldn't touch the current branch, since that might lose work. git fetch origin still slow af after a wk sync for some reason. wk sync should do the work to make sure that fetching all four remotes is super fast, then fetch them inside each repo.
+- rpi5: `./setup` on the board now runs host/linux/rpi5/rpi5-setup.sh (the
+  tailscale0 NetworkManager drop-in and the regulatory-domain unit are in
+  it); pull the board's wk-tools clone after the commit and run ./setup there.
+  The alt+arrow bindings ride the same pull.
 
-- wk sdk should be updated for each new container
+Noticed, not fixed:
 
-All new workspaces (tart and moose):
-
-- on both tart vms and on moose, I get that this command takes forever on a new workspace: git fetch fork; git fetch origin; git fetch wpe; git fetch forkwpe; git pull.
-
-- claude inside a wk container requires authentication still, and skips checks. Checks are too slow and should be done in parallel. Even outside, with a key, wk ai claude still doesn't authenticate.
-
-- new workspaces should have git-webkit setup already (git-webkit setup) using the pat key
-
-- wk rm should remove know_hosts entries
-
-Remember the goal: everything should be reproducable. It should be easy to reset the dev environment to a known good state. Each workflow should be tested, because we keep getting bugs that are fixed on one workflow/driver reproduce on another. Generalize fully each defect. Prefer good architure that makes bugs impossible over fiddly hacks, and use 3rd-party tools / libraries whenever you can. Whenever it is possible to upstream something, call it out.
-
-For another time:
-
-- wk build: crtl-c should cancel build. wk build should not proceed if another build is already running, and there should be a --kill option for detatched builds.
-
-- wk status should always give the status of everything wk can do. In the middle of a build, an A/B task, etc. should all be reported as in-progress with checkboxes next to them including the future next steps the running script will take, instructions to kill the task, and enough info to debug failures in wk-tools or in the task.
-
-- wk push fails open on remote targets.
-
-- rpi has some fixes in ~ that should be incorperated into this repo to set it up from scratch.
-
-- liteLLM keys should be generated from: https://ai.igalia.com/ui/api-keys/. Configure pi.
-
-- In general, commands should parallesize when they can, since wk is very slow.
+- `git-webkit setup` at container first start got one 401 43 s after the
+  bridge came up and succeeded when re-run; `wk verify` reports the marker
+  and `wk remotes <ws> --fix` converges it. The one 401 is unmeasured.
+- The broker's request record is still its own shape (a Python daemon on the
+  host cannot write into the podman VM's store); owed in docs/HANDOFF-status.md.

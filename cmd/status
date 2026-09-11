@@ -40,6 +40,7 @@ WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 . "$WK_ROOT/lib/watchdog.sh"
 . "$WK_ROOT/lib/target.sh"
 . "$WK_ROOT/lib/detach.sh"
+. "$WK_ROOT/lib/task.sh"
 . "$WK_ROOT/lib/reach.sh"
 . "$WK_ROOT/lib/resources.sh"
 . "$WK_ROOT/lib/par.sh"
@@ -141,34 +142,19 @@ report() {
     rec_set method  "$_group_method"
     rec_set name    "$ws"
     report_ws "$ws"
-    report_claude_rc "$ws"
-    report_one "$ws" build "$(wk_ws_dir "$ws")/build.status"
-    [ -f "$(wk_ws_dir "$ws")/test.status" ] && report_one "$ws" test "$(wk_ws_dir "$ws")/test.status"
-    report_image_stage "$ws"
-    [ -f "$(wk_ws_dir "$ws")/babysit.status" ] && report_babysit "$(wk_ws_dir "$ws")/babysit.status"
+    # The row keeps a one-line build state, computed from the same record the
+    # task block below renders in full (report_tasks): the plan, the command
+    # that stops it and the log are said there, once.
+    _bd=$(task_find build "$ws")
+    [ -z "$_bd" ] || sub_add "{\"kind\":\"build\",\"state\":\"$(_jesc "$(task_verdict "$_bd" log)")\",\"config\":\"$(_jesc "$(task_field "$_bd" config)")\"}"
     rec_json subs "[$_subs]"
     rec_emit
     return 0
 }
 
-# The pid names a process `t_spawn` started inside the target, so liveness is asked through `t_exec`, never a local `kill -0`.
-report_claude_rc() {
-    local ws="$1" sf pid
-    sf="$(wk_ws_dir "$ws")/claude-rc.status"
-    [ -f "$sf" ] || return 0
-    pid=$(status_field "$sf" pid)
-    [ -n "$pid" ] || return 0
-    if t_exec "$ws" kill -0 "$pid" >/dev/null 2>&1; then
-        note "claude rc: alive (pid $pid)"
-    else
-        note "claude rc: stopped"
-    fi
-}
-
 report_ws() {
-    local ws="$1" st disp sf stage pid upd
+    local ws="$1" st disp
     st=$(ws_state "$ws")
-    sf=$(ws_status_file "$ws")
 
     if [ "$st" = present ]; then disp=$(t_info "$ws"); else disp="$st"; fi
 
@@ -223,19 +209,14 @@ report_ws() {
         fi
     fi
 
-    stage=$(status_field "$sf" stage)
-    pid=$(status_field "$sf" pid)
-    upd=$(status_field "$sf" updated)
-
     case "$st" in
     creating)
-        if detach_alive "$sf"; then
-            note "creating: ${stage:-?} (pid $pid, alive${upd:+, said so $upd})"
-            note "follow:   tail -f $(ws_create_log "$ws")"
+        # How far it has got, what stops it and where its log is: the `new` task's own block says all three, once.
+        if ws_creating_now "$ws"; then
+            note "being created right now -- its 'new' task below says how far it is"
             bump 2
         else
-            note_warn "creation never finished, and nothing is creating it now${pid:+ (pid $pid is gone)}"
-            [ -z "$stage" ] || note "it got as far as: $stage${upd:+ ($upd)}"
+            note_warn "creation never finished, and nothing is creating it now"
             note "usually there is nothing in one worth keeping -- remake it:"
             note "  $(ws_remake_hint "$ws")"
             note "or, if the checkout is complete and only the marker is missing,"
@@ -259,183 +240,6 @@ report_ws() {
         ;;
     esac
     return 0
-}
-
-# The babysitter has a pid of its own on this host, so liveness is the process rather than the age of a log.
-report_babysit() {
-    local f="$1" state config model attempt max pid report
-    state=$(awk -F= '/^state=/{print $2}' "$f")
-    config=$(awk -F= '/^config=/{print $2}' "$f")
-    model=$(awk -F= '/^model=/{print $2}' "$f")
-    attempt=$(awk -F= '/^attempt=/{print $2}' "$f")
-    max=$(awk -F= '/^max=/{print $2}' "$f")
-    pid=$(awk -F= '/^pid=/{print $2}' "$f")
-    report=$(awk -F= '/^report=/{print $2}' "$f")
-
-    local sub="{\"kind\":\"babysit\",\"state\":\"$(_jesc "${state:-none}")\""
-    [ -n "$config" ] && sub="$sub,\"config\":\"$(_jesc "$config")\",\"model\":\"$(_jesc "$model")\",\"attempt\":\"$(_jesc "$attempt")\",\"max\":\"$(_jesc "$max")\""
-    sub_add "$sub}"
-
-    case "$state" in
-    starting|building|fixing)
-        if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
-            note "alive: pid $pid -- follow: tail -f $(dirname "$f")/babysit.log"
-            bump 2
-        else
-            note_warn "the babysitter died without writing an outcome -- see $(dirname "$f")/babysit.log"
-            bump 1
-        fi
-        ;;
-    gave-up|error|stalled)
-        note_warn "report: $report"
-        bump 1
-        ;;
-    ok)
-        [ "${attempt:-0}" -gt 0 ] 2>/dev/null && note "fixed $attempt time(s); report: $report"
-        ;;
-    esac
-}
-
-# An image build and a WebKit slot record their stage in <ws>/yocto.status, where `wk build` writes build.status -- so a workspace running one reported build=none and nothing else. The claim is that record; the evidence is the stage log's age, exactly as report_one judges a build (`wk status` walks every workspace in parallel and never enters one: shelling into the container from here empties the whole listing).
-report_image_stage() { # <workspace>
-    local ws="$1" dir stage="" profile="" claim="" slot="" phase="" logf age="" f
-    dir=$(wk_ws_dir "$ws")
-
-    f="$dir/yocto.status"
-    if [ -f "$f" ]; then
-        stage=$(awk -F= '/^stage=/{print $2}' "$f")
-        profile=$(awk -F= '/^profile=/{print $2}' "$f")
-        claim=$(awk -F= '/^state=/{print $2}' "$f")
-    fi
-
-    local cyclepid="" cyclealive=""
-    f="$dir/pgo.status"
-    if [ -f "$f" ]; then
-        phase=$(awk -F= '/^phase=/{print $2}' "$f")
-        slot=$(awk -F= '/^slot=/{print $2}' "$f")
-        cyclepid=$(awk -F= '/^pid=/{print $2}' "$f")
-        # The cycle driver runs on this host, not in the workspace, so its pid is readable straight off.
-        [ -n "$cyclepid" ] && kill -0 "$cyclepid" 2>/dev/null && cyclealive=1
-    fi
-    [ "$claim" = running ] || [ -n "$phase" ] || return 0
-
-    local live=""
-    if [ "$claim" = running ]; then
-        logf="$dir/home/yocto-$stage.log"
-        if [ -f "$logf" ]; then
-            age=$(log_age "$logf" 2>/dev/null) || age=""
-            [ -n "$age" ] && [ "$age" -lt "${WK_STALL_SECONDS:-900}" ] && live=1
-        fi
-    fi
-
-    local sub="{\"kind\":\"image\",\"state\":\"$([ -n "$live$cyclealive" ] && echo running || echo stale)\""
-    [ -n "$profile" ] && sub="$sub,\"profile\":\"$(_jesc "$profile")\""
-    [ -n "$stage" ]   && sub="$sub,\"stage\":\"$(_jesc "$stage")\""
-    [ -n "$slot" ]    && sub="$sub,\"slot\":\"$(_jesc "$slot")\""
-    [ -n "$phase" ]   && sub="$sub,\"phase\":\"$(_jesc "$phase")\""
-    [ -n "$age" ]     && sub="$sub,\"log_age\":$age"
-    sub_add "$sub}"
-
-    if [ -n "$phase" ] && [ -n "$cyclealive" ]; then
-        note "profile-guided slot $slot: $phase (pid $cyclepid)"
-        bump 2
-    elif [ -n "$phase" ]; then
-        note_warn "a profile-guided cycle for slot $slot stopped at '$phase' -- pid ${cyclepid:-unknown} is gone"
-        note "re-run it; the phases it already finished are reused:
-      wk sysimage webkit ${profile:-<profile>} --commit <sha> --slot $slot"
-        bump 3
-    fi
-    if [ -n "$live" ]; then
-        note "image stage '$stage'${profile:+ of $profile} running (last output ${age}s ago)"
-        note "  follow:  wk logs $ws"
-        bump 2
-    elif [ "$claim" = running ]; then
-        note_warn "the record says a '$stage' stage is running here${age:+ and its log has been silent for ${age}s}"
-        note "nothing here is evidence it still is. Re-run it to rewrite the record:
-      wk sysimage build ${profile:-<profile>} --stage $stage"
-        bump 2
-    fi
-}
-
-report_one() {
-    local ws="$1" kind="$2" status_file="$3"
-    local state=none config="" arch="" secs="" rc="" logf="" abort=""
-
-    local peak=""
-    if [ -f "$status_file" ]; then
-        # shellcheck disable=SC1090
-        state=$(awk -F= '/^state=/{print $2}' "$status_file")
-        peak=$(awk -F= '/^peak_mb=/{print $2}' "$status_file")
-        config=$(awk -F= '/^config=/{print $2}' "$status_file")
-        arch=$(awk -F= '/^arch=/{print $2}' "$status_file")
-        secs=$(awk -F= '/^seconds=/{print $2}' "$status_file")
-        rc=$(awk -F= '/^exit=/{print $2}' "$status_file")
-        logf=$(awk -F= '/^log=/{print $2}' "$status_file")
-        abort=$(awk -F= '/^abort_after=/{print $2}' "$status_file")
-    fi
-
-    # A 'running' status file is a claim, and the log's age is the only evidence here: a build carries no pid, and this machine's compiler count belongs to no workspace in particular. So silence is reported as silence -- `stalled` is what cmd/build and cmd/test write when they killed the job.
-    local age=""
-    if [ "$state" = running ]; then
-        [ -f "$logf" ] && age=$(log_age "$logf")
-        build_live "$status_file" "$logf" || state=silent
-    fi
-
-    case "$arch" in native) arch="" ;; esac
-    local sub="{\"kind\":\"$kind\",\"state\":\"$(_jesc "${state:-none}")\""
-    [ -n "$config" ] && sub="$sub,\"config\":\"$(_jesc "$config")\""
-    [ -n "$arch" ]   && sub="$sub,\"arch\":\"$(_jesc "$arch")\""
-    [ -n "$secs" ]   && sub="$sub,\"seconds\":$secs"
-    [ -n "$peak" ]   && sub="$sub,\"peak_mb\":$peak"
-    [ -n "$rc" ]     && sub="$sub,\"exit\":\"$(_jesc "$rc")\""
-    sub_add "$sub}"
-
-    case "$state" in
-    running)
-        [ -f "$logf" ] && note "alive: $(_progress_line "$logf" || echo 'running') (last output ${age}s ago)"
-        bump 2
-        ;;
-    failed)
-        note_warn "exit $rc"
-        while IFS= read -r _l; do note "  $_l"; done < <(first_error "$logf" 2>/dev/null || true)
-        bump 1
-        ;;
-    silent)
-        if [ -n "$age" ] && [ -n "$abort" ] && [ "$age" -gt "$abort" ]; then
-            note_warn "silent for ${age}s, past the ${abort}s this $kind recorded as its watchdog's deadline"
-            while IFS= read -r _l; do note "$_l"; done \
-                < <(_stall_report "$logf" "$age" 2>&1)
-            note "so the watchdog is gone as well: a live 'wk $kind' would have killed the
-      job and written 'stalled' at that deadline, and this record still says
-      running. Nothing is driving it, so '--wait' returns rather than
-      waiting. Re-run it to rewrite the record:  wk $kind $ws"
-            bump 4
-        elif [ -n "$age" ]; then
-            note_warn "no log output for ${age}s"
-            while IFS= read -r _l; do note "$_l"; done \
-                < <(_stall_report "$logf" "$age" 2>&1)
-            note "counted as busy, so 'wk status $ws --wait' keeps waiting: nothing here
-      is evidence it stopped, and any count above is this machine's, not this
-      workspace's. Follow it:  tail -f $logf"
-            bump 2
-        else
-            note_warn "the record says running and there is no log at $logf"
-            note "so there is nothing to follow, and no evidence either way.
-      Re-run the build to rewrite the record:  wk build $ws"
-            bump 2
-        fi
-        ;;
-    stalled)
-        note_warn "killed after no output; see $logf"
-        bump 3
-        ;;
-    oom)
-        note_warn "killed for memory${peak:+ (peak ${peak}MB)}; see $logf"
-        _lim=$(grep -a 'wk: MEMORY LIMIT' "$logf" 2>/dev/null | tail -1 | sed 's/^wk: //') || true
-        [ -z "${_lim:-}" ] || note "  $_lim"
-        bump 3
-        ;;
-    esac
 }
 
 # A target that is a machine of its own answers for itself: a build started from a shell over there is otherwise a confident `build=none`.
@@ -509,6 +313,81 @@ elif local in tags:
         fi
     fi
     rec_emit
+}
+
+# One record per long-running command, whatever wrote it (lib/task.sh). The
+# verdict is computed here and never stored, from the log's age rather than the
+# pid for a task inside a workspace: this listing is read-only and must answer
+# about a wedged workspace, not wait on one.
+_tasks_said=" "
+report_tasks() { # [name] -- the tasks in this target's store, once per store; only <name>'s when named
+    local only="${1:-}" d st _plan _l _abort _age
+    case "$_tasks_said" in *" $(task_root) "*) return 0 ;; esac
+    _tasks_said="$_tasks_said$(task_root) "
+    while IFS= read -r d; do
+        [ -n "$d" ] || continue
+        [ -z "$only" ] || [ "$(task_field "$d" name)" = "$only" ] || continue
+        st=$(task_verdict "$d" log)
+        # A task that ended as it was asked to leaves what it produced as the report -- the workspace row, the image, the bench run. Only one that ended badly still needs a reader.
+        case " ok cancelled stopped refused " in
+            *" $st "*) continue ;;
+        esac
+        rec_start task
+        rec_set machine   "$(task_field "$d" machine)"   # the machine the pid is on, which for a remote target is not this one
+        rec_set task      "$(basename "$d")"
+        rec_set task_kind "$(task_field "$d" kind)"
+        rec_set name      "$(task_field "$d" name)"
+        rec_set state     "$st"
+        rec_set since     "$(task_field "$d" started)"
+        rec_set step      "$(task_field "$d" step)"
+        rec_set kill      "$(task_field "$d" kill)"
+        rec_set log       "$(task_field "$d" log)"
+        rec_opt exit      "$(task_field "$d" exit)"
+        _plan=""
+        while IFS= read -r _l; do
+            _plan="$_plan${_plan:+,}\"$(_jesc "$_l")\""
+        done < "$d/plan"
+        rec_json plan "[$_plan]"
+        _abort=$(task_field "$d" abort_after)
+        _age=$(log_age "$(task_field "$d" log)" 2>/dev/null) || _age=""
+        case "$st" in
+            silent)
+                rec_opt log_age "$_age"
+                if [ -n "$_age" ] && [ -n "$_abort" ] && [ "$_age" -gt "$_abort" ]; then
+                    note_warn "silent for ${_age}s, past the ${_abort}s this $(task_field "$d" kind) recorded as its watchdog's deadline"
+                    note "so the watchdog is gone as well: a live 'wk $(task_field "$d" kind)' would have
+      killed the job and written its exit at that deadline. Re-run it to
+      rewrite the record."
+                    bump 4
+                else
+                    note_warn "no log output for ${_age:-?}s -- counted as busy, since nothing
+      here is evidence it stopped. Follow it:  tail -f $(task_field "$d" log)"
+                    bump 2
+                fi
+                ;;
+            running)        note "alive: $(_progress_line "$(task_field "$d" log)" || echo running) (last output ${_age:-?}s ago)"
+                            bump 2 ;;
+            starting)       bump 2 ;;
+            died)           note_warn "$(task_field "$d" kind) '$(task_field "$d" name)' died without recording an exit -- its log is $(task_field "$d" log)"
+                            bump 4 ;;
+            failed)         note_warn "exit $(task_field "$d" exit)"
+                            while IFS= read -r _l; do note "  $_l"; done \
+                                < <(first_error "$(task_field "$d" log)" 2>/dev/null || true)
+                            bump 1 ;;
+            stalled)        note_warn "killed after no output; see $(task_field "$d" log)"
+                            bump 3 ;;
+            gave-up|error)  note_warn "$(task_field "$d" kind) gave up -- see $(task_field "$d" log)"
+                            bump 1 ;;
+            oom)            note_warn "killed for memory; see $(task_field "$d" log)"
+                            _l=$(grep -a 'wk: MEMORY LIMIT' "$(task_field "$d" log)" 2>/dev/null | tail -1 | sed 's/^wk: //') || true
+                            [ -z "${_l:-}" ] || note "  $_l"
+                            bump 3 ;;
+        esac
+        rec_emit
+    done <<EOF
+$(task_list)
+EOF
+    return 0
 }
 
 report_health() {
@@ -689,6 +568,7 @@ report_health() {
             rec_emit
         done
     fi
+
     return 0
 }
 
@@ -1130,6 +1010,7 @@ report_target() {
         for ws in $(target_workspaces); do par_run "$ws" _report_ws_par "$ws"; done
         par_join
     fi
+    report_tasks "${2:-}"
     if [ -n "$FLEET" ]; then
         report_machine "$t"
         if [ "$_group_machine" = "$(this_machine)" ] && [ "$t" = "$_health_owner" ]; then
@@ -1152,6 +1033,10 @@ _report_target_par() {
 
 _devices_par() {
     report_fleet_devices
+    return "$worst"
+}
+
+_bridges_par() {
     report_bridges
     return "$worst"
 }
@@ -1182,7 +1067,8 @@ collect() {
             par_run "$TARGET" _report_target_par "$TARGET"
         done
         if [ -n "$DEVICES" ]; then
-            par_run devices _devices_par
+            par_run devices _devices_par     # two independent probe sets, so two jobs: the bridges do not wait on the boards
+            par_run bridges _bridges_par
         fi
         par_join_stream
     fi

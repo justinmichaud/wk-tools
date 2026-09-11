@@ -142,28 +142,15 @@ else
     changed "cloned webkit-container-sdk"
 fi
 
-# Without the reset the idempotent patcher leaves a tampered file as found.
-debug "resetting and re-patching the SDK"
-_sdk_hash() {
-    _rsh 'cat /opt/webkit-container-sdk/scripts/host-only/wkdev-create \
-              /opt/webkit-container-sdk/scripts/host-only/wkdev-enter \
-              /opt/webkit-container-sdk/scripts/container-only/.wkdev-init \
-              /opt/webkit-container-sdk/scripts/container-only/.wkdev-sync-runtime-state \
-          2>/dev/null | sha256sum | cut -d" " -f1'
-}
-_sdk_before=$(_sdk_hash)
-_rsh 'cd /opt/webkit-container-sdk && git reset --hard --quiet && git clean -qfd'
-if [ -n "${WK_DEBUG:-}" ]; then
-    _rsh 'bash /opt/wk-tools/container/sdk-patches/apply.sh /opt/webkit-container-sdk'
+_sdk_head() { _rsh 'git -C /opt/webkit-container-sdk rev-parse HEAD'; }
+_sdk_head_before=$(_sdk_head)
+_rsh 'bash /opt/wk-tools/container/sdk-refresh.sh /opt/webkit-container-sdk' \
+    || die "refreshing the webkit-container-sdk checkout failed (above)"
+_sdk_head_after=$(_sdk_head)
+if [ "$_sdk_head_before" = "$_sdk_head_after" ]; then
+    unchanged "webkit-container-sdk up to date"
 else
-    _rsh 'bash /opt/wk-tools/container/sdk-patches/apply.sh /opt/webkit-container-sdk' >/dev/null 2>&1 \
-        || die "SDK patching failed; re-run with WK_DEBUG=1"
-fi
-_sdk_after=$(_sdk_hash)
-if [ "$_sdk_before" = "$_sdk_after" ]; then
-    unchanged "SDK patches"
-else
-    changed "SDK patches re-applied (result differs from before)"
+    changed "webkit-container-sdk moved to $_sdk_head_after"
 fi
 
 debug "installing the egress proxy in the machine"

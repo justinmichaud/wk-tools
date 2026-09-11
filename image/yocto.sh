@@ -3,6 +3,10 @@
 # `podman exec` a detached process does not survive its client even under `setsid`, hence `t_spawn`.
 
 command -v config_cross_load >/dev/null 2>&1 || . "$WK_ROOT/build/configs.sh"
+command -v task_begin >/dev/null 2>&1 || . "$WK_ROOT/lib/task.sh"
+command -v job_pid_adopt >/dev/null 2>&1 || . "$WK_ROOT/lib/watchdog.sh"
+
+YOCTO_TASK=""   # the record yocto_spawn steps and yocto_build ends
 
 yocto_ws_default() { echo "yocto-$1"; }  # per profile: two branches cannot both be checked out in one workspace
 
@@ -10,8 +14,6 @@ yocto_workdir()  { echo "/src/WebKit/WebKitBuild/CrossToolChains/$1"; }  # cross
 yocto_image_dir() { echo "$(yocto_workdir "$1")/build/image"; }
 
 yocto_log()    { echo "$(wk_ws_dir "$1")/home/yocto-$2.log"; }  # a host bind mount, so `tail -f` needs no exec into the container
-yocto_pidfile() { echo "$(wk_ws_dir "$1")/home/yocto-$2.pid"; }
-yocto_status() { echo "$(wk_ws_dir "$1")/yocto.status"; }
 
 
 YOCTO_BASE_IMAGE="${WK_YOCTO_BASE:-docker.io/library/ubuntu:24.04}"  # a supported scarthgap build host, unlike the wkdev SDK image; WK_YOCTO_BASE overrides
@@ -139,19 +141,34 @@ yocto_check_target() {  # asked here: bitbake's own version of it is a config-pa
 $(t_exec "$ws" bash -c "sed -n 's/^\[\(.*\)\]/      \1/p' $conf" 2>/dev/null | tr -d '\r')"
 }
 
-yocto_running() {  # the pid means something only in the workspace's own namespace
-    local ws="$1" stage="$2" pid
-    pid=$(cat "$(yocto_pidfile "$ws" "$stage")" 2>/dev/null | tr -dc '0-9') || true
-    [ -n "$pid" ] || return 1
-    t_exec "$ws" kill -0 "$pid" >/dev/null 2>&1
+# The stages share one build directory, so `--stage fetch` on top of a live `--stage image` reaches two cookers. One record per workspace carries them all: `step` is the stage bitbake is in now.
+YOCTO_STAGES="layers fetch image toolchain webkit pgo-mix"
+
+yocto_stage_index() { # <stage> -- its 1-based place in YOCTO_STAGES
+    local s i=0
+    for s in $YOCTO_STAGES; do
+        i=$((i + 1))
+        [ "$s" = "$1" ] && { printf '%s' "$i"; return 0; }
+    done
+    die "no such stage: $1 (the stages are $YOCTO_STAGES)"
 }
 
-# The stages share one build directory, so `--stage fetch` on top of a live `--stage image` reaches two cookers.
-YOCTO_STAGES="layers fetch image toolchain webkit pgo-mix"
-yocto_any_running() {
-    local ws="$1" s
+yocto_task() { task_find yocto "$1"; }
+
+yocto_running() { # <ws> [stage]
+    local ws="$1" stage="${2:-}" dir
+    dir=$(yocto_task "$ws"); [ -n "$dir" ] || return 1
+    [ -z "$stage" ] || [ "$(task_field "$dir" step)" = "$(yocto_stage_index "$stage")" ] || return 1
+    task_alive "$dir"
+}
+
+yocto_any_running() { # <ws> -- prints the stage it is in
+    local ws="$1" dir step s i=0
+    yocto_running "$ws" || return 1
+    dir=$(yocto_task "$ws"); step=$(task_field "$dir" step)
     for s in $YOCTO_STAGES; do
-        if yocto_running "$ws" "$s"; then printf '%s' "$s"; return 0; fi
+        i=$((i + 1))
+        [ "$i" = "$step" ] && { printf '%s' "$s"; return 0; }
     done
     return 1
 }
@@ -159,7 +176,7 @@ yocto_any_running() {
 yocto_spawn() {
     local ws="$1" stage="$2"; shift 2
     local log pid_host
-    log=$(yocto_log "$ws" "$stage"); pid_host=$(yocto_pidfile "$ws" "$stage")
+    log=$(yocto_log "$ws" "$stage"); pid_host="$(wk_ws_dir "$ws")/home/yocto.pid"
 
     local live
     if live=$(yocto_any_running "$ws"); then
@@ -170,12 +187,15 @@ yocto_spawn() {
     Stop it:    wk sysimage build $IMG_PROFILE --stage $live --stop"
     fi
 
+    YOCTO_TASK=$(task_begin yocto target "$ws" \
+        "wk sysimage build $IMG_PROFILE --stage $stage --stop" "$log" $YOCTO_STAGES)
+
     local jobs cores mem
     jobs=$(build_jobs)
     cores=$(envelope_cores)
     mem=$(envelope_mem_mb)
     build_admit "the $stage build" "$jobs"
-    build_record "wk sysimage $stage $ws" "$cores" "$mem" "ws:$ws:yocto-$stage.pid"
+    build_record "wk sysimage $stage $ws" "$cores" "$mem" "ws:$ws:yocto.pid"
 
     : > "$log"  # truncated, not unlinked: `tail -f` follows an inode
     rm -f "$pid_host"
@@ -191,32 +211,29 @@ yocto_spawn() {
 $(sed 's/^/    /' "$log" 2>/dev/null | tail -5)"
         sleep 0.1
     done
-    debug "stage $stage running as pid $(cat "$pid_host") inside '$ws'"
+    # The pid file is in the workspace's home, which the workspace can write, so the pid is checked against the wrapper it must be before anything can signal it.
+    job_pid_adopt "$ws" "$YOCTO_TASK" "$(tr -dc '0-9' < "$pid_host")" '*yocto-build.sh*' \
+        || die "the '$stage' build in '$ws' did not announce a pid this end can stop
+    (above). Nothing will be signalled for it:  wk enter $ws   and stop it there."
+    task_step "$YOCTO_TASK" "$(yocto_stage_index "$stage")"
+    debug "stage $stage running as pid $(task_field "$YOCTO_TASK" pid) inside '$ws'"
 }
 
-# SIGTERM, not SIGKILL: bitbake writes its state and sstate as it goes, and closing them cleanly is the difference between resumable and corrupt.
+# Through job_kill (lib/watchdog.sh): the descendants of the pid the record holds, and no pattern kill, since a wkdev container shares the host's PID namespace. The TERM's grace is two minutes -- bitbake writes its state and sstate as it goes and shuts down slowly, and closing them cleanly is the difference between resuming and redoing the task it was in.
 yocto_stop() {
-    local ws="$1" stage="$2" pid
-    pid=$(cat "$(yocto_pidfile "$ws" "$stage")" 2>/dev/null | tr -dc '0-9') || true
+    local ws="$1" stage="$2" dir
+    local WK_KILL_WAIT=120   # read by job_kill, in this call only
+    dir=$(yocto_task "$ws")
     if ! yocto_running "$ws" "$stage"; then
         log "no '$stage' build is running in '$ws'"
         return 0
     fi
-    info "stopping the '$stage' build in '$ws' (pid $pid)"
-    # A wkdev container shares the host's PID namespace, so the pattern is this workspace's build directory, not "bitbake".
-    local pat; pat=$(yocto_workdir "$YOC_TARGET")
-    t_exec "$ws" bash -c "kill -TERM $pid 2>/dev/null
-        pkill -TERM -f $(sh_quote "$pat") 2>/dev/null
-        true" >/dev/null 2>&1 || true
-    local i=0
-    while yocto_running "$ws" "$stage"; do
-        i=$((i + 1))
-        [ "$i" -gt 24 ] && { warn "it is still running after 2 minutes; bitbake shuts down slowly.
+    info "stopping the '$stage' build in '$ws' (pid $(task_field "$dir" pid))"
+    job_kill "$ws" "$dir" stopped \
+        || { warn "it outlived a TERM and a KILL; bitbake shuts down slowly.
   Look:  wk enter $ws  and then  pgrep -af bitbake"; return 1; }
-        sleep 5
-    done
-    sed -i 's/^state=running/state=stopped/' "$(yocto_status "$ws")" 2>/dev/null || true
-    info "stopped. sstate is intact, so restarting resumes rather than starts over."
+    info "stopped. sstate is written as it goes, so restarting resumes rather than
+  starting over -- only the task it was in the middle of is redone."
 }
 
 yocto_wait() {
@@ -424,17 +441,7 @@ $(config_cross_list | sed 's/^/      /')"
     local pgo_args=""
     [ "$stage" != pgo-mix ] || pgo_args="--pgo-dir $(image_pgo_dir_in "$slot") --pgo-lib $PGO_GLIB_LIB"
 
-    hold_lock "ws-$ws" -w "${WK_BUILD_LOCK_WAIT:-3600}"  # two builds in one checkout corrupt both
-
-    cat > "$(yocto_status "$ws")" <<EOF
-state=running
-profile=$profile
-id=$id
-target=$YOC_TARGET
-branch=$YOC_BRANCH
-stage=$stage
-started=$built
-EOF
+    hold_lock "ws-$ws" -w 3600  # two builds in one checkout corrupt both, and an hour is how long a stage ahead of this one takes
 
     yocto_check_target "$ws"
 
@@ -470,7 +477,7 @@ EOF
     local rc
     set +e; yocto_wait "$ws" "$stage"; rc=$?; set -e
     if [ "$rc" != 0 ]; then
-        sed -i 's/^state=running/state=failed/' "$(yocto_status "$ws")"
+        task_end "$YOCTO_TASK" 1
         warn "stage '$stage' failed for $profile in '$ws'"
         log "last lines:"
         tail -20 "$(yocto_log "$ws" "$stage")" 2>/dev/null | sed 's/^/  /' >&2
@@ -479,20 +486,20 @@ EOF
     info "stage '$stage' ok"
 
     if [ "$stage" = pgo-mix ]; then
-        sed -i 's/^state=running/state=built/' "$(yocto_status "$ws")"
+        task_end "$YOCTO_TASK" 0
         info "the collection is mixed; the measured build reads it as
     $(image_pgo_dir_in "$slot")/output/$PGO_GLIB_LIB.profdata"
         return 0
     fi
 
     if [ "$stage" != image ]; then
-        sed -i 's/^state=running/state=built/' "$(yocto_status "$ws")"
+        task_end "$YOCTO_TASK" 0
         info "stage '$stage' builds no disk image, so there is nothing more to report"
         return 0
     fi
 
     # No import: the image stays where bitbake left it, and 'wk sysimage write --from' applies the fleet integration.
-    sed -i 's/^state=running/state=ok/' "$(yocto_status "$ws")"
+    task_end "$YOCTO_TASK" 0
     local wic; wic="$(yocto_image_dir "$YOC_TARGET")/$YOC_IMAGE.wic.xz"
     info "built $id  ($(du -h "$wic" 2>/dev/null | cut -f1))"
     log  "  $wic"

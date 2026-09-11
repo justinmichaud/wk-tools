@@ -22,15 +22,17 @@
 #   wk ai claude <ws> --rc --stop   stop it
 #
 # `wk new` and `wk start` start remote control themselves; WK_NO_CLAUDE_RC=1
-# turns that off. It needs the workspace's trust dialog accepted once, which
-# this does by running 'wk ai claude <ws>' when there is no trust record yet,
-# and the claude.ai account login rather than a `claude setup-token` token:
-# 'wk key set claude-login', or a guest logs in for itself.
+# turns that off. It needs the claude.ai account login rather than a
+# `claude setup-token` token: 'wk key set claude-login', or a guest logs in for
+# itself. Onboarding, the trust dialog and the remote-control dialog are
+# recorded in the workspace before either kind of session starts
+# (claude/workspace-config.py).
 #
 # The agents this knows:
 #
-#   claude   Claude Code. Installed by container/firstrun.sh, authenticated
-#            from the store (`wk key set claude`), and the only one with a
+#   claude   Claude Code. Installed by container/firstrun.sh, and authenticated
+#            by whichever one credential the store delivers to this kind of
+#            target (wk_agent_secrets, lib/store.sh). The only one with a
 #            remote-control server (--rc).
 #   pi       the pi coding agent. Installed per workspace from npm on first
 #            use, and pointed at an OpenAI-compatible endpoint by its own
@@ -46,7 +48,6 @@ WK_ROOT="${WK_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
 # Carried into the workspace as WK_AGENT, which the build wall reads.
 AGENT="${1:-}"
 
-# `wk push` empties the ssh-agent rather than setting a flag an agent could clear.
 PUSH_WAS_ON=""
 PUSH_TARGET=""
 
@@ -82,7 +83,15 @@ push_measure_here() {
 
 push_hold_back() { # <name>
     if in_workspace; then push_measure_here; return 0; fi
-    push_switch status || return 0
+    local rc=0
+    push_switch status || rc=$?
+    case "$rc" in
+        1|4) return 0 ;;
+        0)   ;;
+        *)   die "refusing to run: 'wk push status${PUSH_TARGET:+ --target $PUSH_TARGET}' exited $rc rather
+    than measuring the switch, so whether an agent in '$1' could publish is
+    unknown. Run that command and fix what it names." ;;
+    esac
     PUSH_WAS_ON=1
     warn "git push is ON -- turning it off while the agent runs in '$1'"
     push_switch off \
@@ -100,29 +109,35 @@ restore_push() {
     fi
 }
 
-rc_status_file() { printf '%s' "$(wk_ws_dir "$1")/claude-rc.status"; }
-rc_log()         { printf '%s' "$(t_home "$1")/claude-remote-control.log"; }
-rc_pidfile()     { printf '%s' "$(t_home "$1")/claude-remote-control.pid"; }
-
-rc_alive() {
-    local name="$1" pid
-    pid=$(status_field "$(rc_status_file "$name")" pid)
-    [ -n "$pid" ] || return 1
-    t_exec "$name" kill -0 "$pid" >/dev/null 2>&1
+claude_workspace_config() { # <name>
+    local out
+    out=$(t_exec "$1" bash -lc "python3 $(sh_quote "$(t_tools "$1")/claude/workspace-config.py") $(sh_quote "$(t_src "$1")")" 2>&1) \
+        || die "could not record Claude's start-up answers in '$1', and every
+    session there would stop at a dialog instead of starting:
+$(printf '%s' "$out" | sed 's/^/    /')"
+    [ -z "$out" ] || debug "$out"
 }
 
+command -v task_begin >/dev/null 2>&1 || . "$WK_ROOT/lib/task.sh"
+command -v job_kill   >/dev/null 2>&1 || . "$WK_ROOT/lib/watchdog.sh"
+
+rc_log()     { printf '%s' "$(t_home "$1")/claude-remote-control.log"; }
+rc_pidfile() { printf '%s' "$(t_home "$1")/claude-remote-control.pid"; }
+
+# The pid comes out of a file in the workspace's own home, and a wkdev container shares the host's PID namespace, so it is the workspace's claim about a pid rather than a fact (lib/watchdog.sh). One pattern covers both shapes the server's command line has: the `-lc` text before the exec, and the CLI itself after it.
+RC_PID_MATCH='*claude*remote-control*'
+
 rc_minutes() {
-    local upd; upd=$(status_field "$(rc_status_file "$1")" updated)
-    [ -n "$upd" ] || { printf '?'; return 0; }
-    printf '%d' $(( ( $(date -u +%s) - $(utc_to_epoch "$upd") ) / 60 ))
+    local started; started=$(task_field "$(rc_task "$1")" started)
+    [ -n "$started" ] || { printf '?'; return 0; }
+    printf '%d' $(( ( $(date -u +%s) - $(utc_to_epoch "$started") ) / 60 ))
 }
 
 rc_start() {
-    local name="$1" claude_bin="$2" sf log pidf pid i
-    sf=$(rc_status_file "$name")
+    local name="$1" claude_bin="$2" task log pidf pid i settled
 
     if rc_alive "$name"; then
-        info "'$name' claude remote-control already running, $(rc_minutes "$name") minutes, log at $(status_field "$sf" log)"
+        info "'$name' claude remote-control already running, $(rc_minutes "$name") minutes, log at $(task_field "$(rc_task "$name")" log)"
         return 0
     fi
 
@@ -135,45 +150,42 @@ rc_start() {
 
     log=$(rc_log "$name"); pidf=$(rc_pidfile "$name")
     t_exec "$name" mkdir -p "$(t_home "$name")" >/dev/null 2>&1 || true
+    task=$(task_begin rc target "$name" "wk ai claude $name --rc --stop" "$log" \
+        "claude remote-control in $name")
+    task_step "$task" 1
 
     t_spawn "$name" "$log" "$pidf" \
         env WK_AGENT="$AGENT" WK_WORKSPACE="$name" bash -lc \
         "cd $(sh_quote "$(t_src "$name")") && exec $(sh_quote "$claude_bin") remote-control --spawn=same-dir --name $(sh_quote "$name")" \
         || die "could not start claude remote-control in '$name'"
 
-    pid=""; i=0
-    while [ -z "$pid" ]; do
-        pid=$(t_exec "$name" cat "$pidf" 2>/dev/null | tr -d '\r') || pid=""
-        [ -n "$pid" ] && break
+    # Still there WK_RC_SETTLE ticks of 0.1s after it wrote its pid, within WK_RC_TICKS of them, is it having survived its start-up checks.
+    pid=""; i=0; settled=0
+    while :; do
+        if [ -z "$pid" ]; then
+            pid=$(t_exec "$name" cat "$pidf" 2>/dev/null | tr -d '\r') || pid=""
+        elif ! t_exec "$name" kill -0 "$pid" >/dev/null 2>&1; then
+            task_end "$task" 1
+            die "claude remote-control exited at once in '$name'. Its log ($log) ends:
+$(t_exec "$name" tail -n 3 "$log" 2>/dev/null | sed 's/^/    /')"
+        elif [ "$settled" -ge "${WK_RC_SETTLE:-5}" ]; then
+            break
+        else
+            settled=$((settled + 1))
+        fi
         i=$((i + 1))
-        [ "$i" -gt 50 ] && die "remote-control did not start in '$name' (no pid after 5s)"
+        [ "$i" -gt "${WK_RC_TICKS:-100}" ] \
+            && die "remote-control did not start in '$name': nothing wrote $pidf.
+    Its log ($log) ends:
+$(t_exec "$name" tail -n 3 "$log" 2>/dev/null | sed 's/^/    /')"
         sleep 0.1
     done
 
-    status_write "$sf" state=running "pid=$pid" "log=$log"
-    sleep 2
-    if ! rc_alive "$name"; then
-        status_write "$sf" state=stopped "log=$log"
-        die "claude remote-control exited at once in '$name'. Its log ($log) ends:
-$(t_exec "$name" tail -n 3 "$log" 2>/dev/null | sed 's/^/    /')"
-    fi
+    job_pid_adopt "$name" "$task" "$pid" "$RC_PID_MATCH" || {
+        task_end "$task" 1
+        die "nothing here will stop remote control in '$name'; its log is $log"
+    }
     info "claude remote-control running in '$name' (pid $pid), log at $log"
-}
-
-rc_stop() {
-    local name="$1" sf pid
-    sf=$(rc_status_file "$name")
-
-    if ! rc_alive "$name"; then
-        info "claude remote-control is not running in '$name'"
-        status_write "$sf" state=stopped
-        return 0
-    fi
-
-    pid=$(status_field "$sf" pid)
-    info "stopping claude remote-control in '$name' (pid $pid)"
-    t_exec "$name" kill "$pid" >/dev/null 2>&1 || true
-    status_write "$sf" state=stopped "pid=$pid" "log=$(status_field "$sf" log)"
 }
 
 # From https://www.npmjs.com/package/@earendil-works/pi-coding-agent -> https://github.com/earendil-works/pi (packages/coding-agent).
@@ -256,19 +268,39 @@ pi_ensure() { # <name>
     [ "$models" = no ] || return 0
     key=$(wk_agent_secret litellm)
     if [ -n "$key" ]; then
-        info "'$name' has your LiteLLM key as \$LITELLM_API_KEY and pi has no endpoint to use it on"
-        log  "  give it one, in the workspace:"
-        log  "    mkdir -p ~/.pi/agent && cat > ~/.pi/agent/models.json <<'EOF'"
-        log  "    { \"providers\": { \"litellm\": {"
-        log  "        \"baseUrl\": \"https://YOUR-LITELLM-HOST/v1\","
-        log  "        \"api\": \"openai-completions\","
-        log  "        \"apiKey\": \"\$LITELLM_API_KEY\","
-        log  "        \"models\": [ { \"id\": \"A-MODEL-THAT-ENDPOINT-SERVES\" } ] } } }"
-        log  "    EOF"
+        local endpoint; endpoint=$(pi_litellm_endpoint) \
+            || die "lib/credcheck.py has no LITELLM_ENDPOINT to read"
+        pi_write_models "$name" "$endpoint" \
+            || die "could not write ~/.pi/agent/models.json in '$name'. By hand:
+        wk enter $name
+        mkdir -p ~/.pi/agent && cat > ~/.pi/agent/models.json"
+        info "wrote ~/.pi/agent/models.json in '$name' (\$LITELLM_API_KEY, $endpoint)"
+        log  "  set the model id this endpoint serves:"
+        log  "    wk enter $name -- \${EDITOR:-vi} ~/.pi/agent/models.json"
     else
         log "no LiteLLM key on this machine ('wk key set litellm') and no"
         log "~/.pi/agent/models.json in '$name', so pi will ask you to /login"
     fi
+}
+
+pi_litellm_endpoint() {
+    python3 -c 'import sys
+sys.path.insert(0, sys.argv[1])
+import credcheck
+print(credcheck.LITELLM_ENDPOINT)' "$WK_ROOT/lib"
+}
+
+pi_write_models() { # <name> <endpoint>
+    python3 -c '
+import json, sys
+json.dump({"providers": {"litellm": {
+    "baseUrl": sys.argv[1],
+    "api": "openai-completions",
+    "apiKey": "$LITELLM_API_KEY",
+    "models": [{"id": "REPLACE-WITH-A-MODEL-THIS-ENDPOINT-SERVES"}],
+}}}, sys.stdout, indent=2)
+sys.stdout.write("\n")
+' "$2" | t_exec "$1" "mkdir -p ~/.pi/agent && umask 077 && cat > ~/.pi/agent/models.json"
 }
 
 # WK_CLAUDE_LIB=1 sources the functions above without the side effects below.
@@ -369,11 +401,18 @@ if [ "$WK_TARGET_KIND" = remote ] \
     may post as you. Remedy, on $TARGET:  gh auth logout"
 fi
 
-if [ "$WK_TARGET_KIND" = container ]; then
+case "$WK_TARGET_KIND" in
+container|vm)
     WK_NAME="$NAME" "$WK_ROOT/cmd/verify" \
         || barrier "the sandbox around '$NAME' is not intact (see above), and relaxed
     permissions are only defensible while it is."
-fi
+    ;;
+remote)
+    info "'wk verify' is not run for '$TARGET': there is no sandbox there to
+  measure (cmd/verify says so and refuses). The barrier above is the whole of
+  the boundary on this target."
+    ;;
+esac
 
 if [ "$WK_TARGET_KIND" = vm ]; then
     # A macOS guest's egress is filtered on the host by Softnet, unmeasurable from
@@ -409,12 +448,7 @@ if [ -n "$RC" ]; then
         PUSH_WAS_ON=""
     fi
 
-    if ! rc_alive "$NAME" && ! t_exec "$NAME" test -f "$(t_home "$NAME")/.claude.json" 2>/dev/null; then
-        warn "'$NAME' has no Claude trust record yet -- remote-control refuses to start
-    until the workspace trust dialog is accepted once, interactively. Running
-    'wk ai claude $NAME' now; accept the dialog, then exit it."
-        "$WK_ROOT/wk" ai claude "$NAME" || true
-    fi
+    rc_alive "$NAME" || claude_workspace_config "$NAME"
 
     if [ "$WK_TARGET_KIND" = container ]; then
         wall_available "$NAME" \
@@ -442,6 +476,7 @@ fi
 [ "$AGENT" != pi ] || { pi_ensure "$NAME"; AGENT_BIN="$PI_BIN"; }
 
 if [ "$AGENT" = claude ]; then
+    claude_workspace_config "$NAME"
     info "starting Claude in '$NAME' (permissions relaxed; the workspace is the boundary)"
 else
     info "starting $AGENT in '$NAME' ($AGENT_BIN; the workspace is the boundary)"

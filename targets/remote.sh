@@ -260,7 +260,8 @@ t_src() {
 
 t_ccache_dir() { echo "$(_remote_root)/cache/ccache"; }
 
-t_mirror_dir() { echo "$(_remote_root)/mirror"; }
+# Empty when this machine keeps a reference of its own (_remote_reference): that is a plain WebKit clone its admins refresh, carrying origin's branches and none of the other upstreams, so it is a clone source and not a mirror to fetch from -- workspaces here ask the upstreams themselves.
+t_mirror_dir() { [ -n "$(_remote_reference)" ] || printf '%s' "$(_remote_root)/mirror"; }
 
 _remote_home() { _remote_probe; printf '%s' "$_WK_REMOTE_HOME"; }
 
@@ -449,17 +450,17 @@ t_exec_build() {
           $prio $(sh_quote "$@")$tee_to"
 }
 
-t_status_put() {
-    local name="$1" ws
-    if _remote_is_local; then
-        ws="$(wk_ws_dir "$name")"
-        cat > "$ws/build.status"
-        return 0
-    fi
+t_task_put() { # <name> <task dir> -- `wk status` asks the machine that runs the build (t_has_wk delegates), so every write is copied there, with `log` and `machine` that machine's own or it loses the liveness check and names the wrong host
+    local name="$1" dir="$2" ws far
+    _remote_is_local && return 0
     ws=$(_remote_ws "$name" </dev/null)
-    # log= must name the machine's own path, or `wk status` loses its liveness check.
-    sed "s|^log=.*|log=$ws/build.log|" \
-        | _rsh "cat > $(sh_quote "$ws/build.status")" \
+    far="$(_remote_root)/task/$(basename "$dir")"
+    tar -C "$dir" -cf - . 2>/dev/null | _rsh "
+        rm -rf $(sh_quote "$far.new") && mkdir -p $(sh_quote "$far.new") &&
+        tar -C $(sh_quote "$far.new") -xf - &&
+        printf '%s\n' $(sh_quote "$ws/build.log") > $(sh_quote "$far.new/log") &&
+        printf '%s\n' $(sh_quote "$WK_REMOTE_HOST") > $(sh_quote "$far.new/machine") &&
+        rm -rf $(sh_quote "$far") && mv $(sh_quote "$far.new") $(sh_quote "$far")" \
         || warn "could not record '$name's build state on $WK_REMOTE_HOST -- 'wk status $name'
     may show stale information until it answers again"
 }
@@ -582,7 +583,7 @@ _remote_wire() {
     { read -r n; read -r u; read -r c; } <<EOF
 $(t_wiring_args)
 EOF
-    _rsh_q "$(wk_wiring_script "$src" "$n" "$u" "$c")" \
+    _rsh_q "$(wk_wiring_script "$src" "$(t_mirror_dir)" "$n" "$u" "$c")" \
         || warn "could not wire the remotes in $src"
 }
 

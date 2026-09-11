@@ -12,7 +12,11 @@
 #   --dry-run              resolve everything and print the exact command line
 #                          this build would run, prefixed `running:`; build nothing
 #   --no-defaults          skip this target's WK_BUILD_ARGS conf default
-#   --detach                hand the build to the machine that runs it, and return
+#   --detach                hand the build to the machine that runs it, and return;
+#                           a foreground build is cancelled if its terminal or
+#                           its ssh goes away (the driver takes the HUP)
+#   --kill                  stop the build running in this workspace, wherever it
+#                           runs, and record it as cancelled
 #   --babysit[=model]       run under a Claude fix loop until it builds or gives up
 #   --branch <name>         check out this branch first
 #   --mem-budget <MB>       memory ceiling for the watchdog
@@ -25,8 +29,6 @@
 #                               (default haiku)
 #   WK_BABYSIT_ATTEMPTS=<n>     fixes the babysitter tries before giving up
 #                               (default 5)
-#   WK_BUILD_LOCK_WAIT=<s>      how long a build waits for another build on
-#                               the same workspace before giving up (default 3600)
 #   WK_MEM_INTERVAL=<s>         how often the memory watchdog samples (default 30)
 
 set -euo pipefail
@@ -37,6 +39,7 @@ WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 . "$WK_ROOT/lib/watchdog.sh"
 . "$WK_ROOT/lib/target.sh"
 . "$WK_ROOT/lib/detach.sh"
+. "$WK_ROOT/lib/task.sh"
 . "$WK_ROOT/lib/arch.sh"
 . "$WK_ROOT/build/configs.sh"
 
@@ -60,6 +63,27 @@ require_name "$NAME"
 # Before any config_load: on macOS a config does not choose its own build system, so the target has to be known first (t_os).
 TARGET="$(ws_target "$NAME")"
 load_target "$TARGET"
+
+_KILL_CMD="wk build$(in_workspace || printf ' %s' "$NAME") --kill"
+
+if [ "${1:-}" = --kill ]; then   # before a config is required: stopping a build names none
+    shift
+    [ $# -eq 0 ] || die "$_KILL_CMD stops the build already running in '$NAME' and
+    takes nothing with it -- no config, and not --detach.  Unexpected: $*"
+    _stopped=0; _left=""   # the babysitter first: left alone it starts the next build itself
+    for _kind in babysit build; do
+        _rc=0; job_stop "$NAME" "$_kind" || _rc=$?
+        case "$_rc" in
+            0) _stopped=1 ;;
+            1) _left="$_left $_kind" ;;
+        esac
+    done
+    [ -z "$_left" ] || die "'$NAME's$_left outlived a TERM and a KILL.
+    Look at it:  wk enter $NAME  and then  pgrep -af ninja"
+    [ "$_stopped" = 0 ] || log "  the build directory keeps what it compiled, so
+  'wk build$(in_workspace || printf ' %s' "$NAME") <config>' resumes rather than starts over."
+    exit 0
+fi
 
 if in_workspace; then
     # A subshell, because this only asks whether the word names a config at all: config_load refuses an Apple config on a Linux target.
@@ -91,36 +115,27 @@ ARCH=$(t_arch "$NAME")
 WS=$(wk_ws_dir "$NAME")
 LOG="$WS/build.log"
 
-# The one writer for build.status. `running` carries no exit/finished/seconds/peak_mb and touches the log fresh, so build_live has evidence. `abort_after` is the watchdog's own deadline, so a reader past it knows the watchdog is gone rather than merely quiet.
-write_status() {
-    local state="$1" rc="${2:-}" content
-    if [ "$state" = running ]; then
-        ensure_dir "$WS" >/dev/null
-        : > "$LOG"
-        content=$(cat <<EOF
-state=running
-config=$CONFIG
-arch=$ARCH
-started=$STARTED
-log=$LOG
-abort_after=$WK_ABORT_SECONDS
-EOF
-)
-    else
-        content=$(cat <<EOF
-state=$state
-config=$CONFIG
-arch=$ARCH
-exit=$rc
-started=$STARTED
-finished=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-seconds=$(( $(date +%s) - START_EPOCH ))
-log=$LOG
-peak_mb=${MEM_PEAK:-}
-EOF
-)
-    fi
-    printf '%s\n' "$content" | t_status_put "$NAME"
+TASK=""
+_STEP=0
+_step() {
+    _STEP=$((_STEP + 1))
+    task_step "$TASK" "$_STEP"
+    t_task_put "$NAME" "$TASK"
+}
+
+_build_end() { # <exit status or word>
+    task_end "$TASK" "$1"
+    t_task_put "$NAME" "$TASK"
+}
+
+# ^C reaches this driver, not the build: the container path is a byte down a pty chain with no sig-proxy, the remote path an ssh the far side notices only when it writes. So the building machine is told and the record converged before this exits 130 (`on_interrupt`, lib/common.sh).
+_build_cancelled() {
+    [ -n "$TASK" ] || return 0
+    [ -z "${_PIDWATCH:-}" ] || kill "$_PIDWATCH" 2>/dev/null || true
+    warn "interrupted -- stopping the build in '$NAME'"
+    job_kill "$NAME" "$TASK" cancelled || \
+        warn "it is still running; stop it with:  $_KILL_CMD"
+    t_task_put "$NAME" "$TASK"
 }
 
 # Our own flags are taken off the argument list; everything left passes
@@ -191,15 +206,11 @@ if [ -n "$BABYSIT" ]; then
     esac
 
     WS=$(wk_ws_dir "$NAME")
-    if [ -f "$WS/babysit.status" ]; then
-        _state=$(status_field "$WS/babysit.status" state)
-        case "$_DETACH_RUNNING" in
-            *" ${_state:-none} "*)
-                _pid=$(status_field "$WS/babysit.status" pid)
-                detach_alive "$WS/babysit.status" \
-                    && die "a babysitter is already running for '$NAME' (pid $_pid, $_state).
-    Follow it:  tail -f $WS/babysit.log" ;;
-        esac
+    _dir=$(task_find babysit "$NAME")
+    if [ -n "$_dir" ] && task_alive "$_dir"; then
+        die "a babysitter is already running for '$NAME' (pid $(task_field "$_dir" pid)).
+    Follow it:  tail -f $WS/babysit.log
+    Stop it:    $_KILL_CMD"
     fi
 
     if [ -n "$DRY" ]; then
@@ -210,7 +221,8 @@ if [ -n "$BABYSIT" ]; then
     fi
 
     ensure_dir "$WS" >/dev/null
-    _pid=$(detach_run "$WS/babysit.status" "$WS/babysit.log" -- \
+    # No record from here or in the --detach arm below: the detached loop declares its own, so one job has one writer and one pid.
+    _pid=$(detach_run "$WS/babysit.log" -- \
         "$WK_ROOT/build/babysit.sh" "$NAME" "$CONFIG" "$BABYSIT" \
         "${WK_BABYSIT_ATTEMPTS:-5}" "$BRANCH" ${@+"$@"})
     info "babysitter started for $CONFIG in '$NAME' (pid $_pid, model $BABYSIT${BRANCH:+, branch $BRANCH})"
@@ -218,6 +230,7 @@ if [ -n "$BABYSIT" ]; then
     log  "  state:   wk status $NAME"
     log  "  follow:  tail -f $WS/babysit.log"
     log  "  report:  $WS/babysit.report"
+    log  "  stop it: $_KILL_CMD"
     exit 0
 fi
 
@@ -231,14 +244,12 @@ if [ -n "$DETACH" ]; then
         _det+=("$_a")
     done
 
-    STARTED=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-    write_status running
-
-    _pid=$(detach_run "" "$WS/detached.log" -- \
+    _pid=$(detach_run "$WS/detached.log" -- \
         "$WK_ROOT/wk" build ${_det[@]+"${_det[@]}"})
     info "building $CONFIG in '$NAME', detached as pid $_pid -- this end can go away"
     log "  follow:  wk logs $NAME -f"
     log "  state:   wk status $NAME"
+    log "  stop it: $_KILL_CMD"
     exit 0
 fi
 
@@ -269,7 +280,25 @@ export WK_CCACHE_DIR
 
 JOBS=$(explain_jobs "$POLITE")
 BUDGET_MB=${WK_MEM_BUDGET_MB:-$(( JOBS * ${WK_MB_PER_JOB:-1536} ))}
-[ -n "$DRY" ] || build_admit "this build" "$JOBS"
+
+# The workspace before the machine: "this one is already building" is the more specific answer, and refused rather than queued, since an hour on a lock names no remedy where this names the command that stops the other build.
+if [ -z "$DRY" ]; then
+    if lock_alive "ws-$NAME"; then
+        die "'$NAME' is already building -- its driver holds the ws-$NAME lock.
+    Follow it:  wk logs $NAME -f
+    Stop it:    $_KILL_CMD"
+    fi
+    hold_lock "ws-$NAME" -w 0
+
+    # WK_TASK_PARENT: the task record of the loop that started this build (build/babysit.sh), so its own build is not the second job.
+    if _busy=$(ws_busy_reason "$NAME" "${WK_TASK_PARENT:-}"); then
+        barrier "'$NAME' already has a job running in it: $_busy
+    Two builds in one checkout corrupt both, and this one would be the second.
+    See what it is:  wk logs $NAME --all"
+    fi
+
+    build_admit "this build" "$JOBS"
+fi
 
 if [ -n "$DRY" ]; then
     config_build_env "$(t_src "$NAME")" "$JOBS" "$NICE" "$ARCH"
@@ -308,17 +337,21 @@ if [ -n "$DRY" ]; then
     exit 0
 fi
 
-hold_lock "ws-$NAME" -w "${WK_BUILD_LOCK_WAIT:-3600}"
+ensure_dir "$WS" >/dev/null
+: > "$LOG"
+START_EPOCH=$(date +%s)
+ARCH_LABEL=$(arch_label "$ARCH")
 
-# A job detached *into* the workspace holds no lock out here (ws_busy_reason).
-if _busy=$(ws_busy_reason "$NAME"); then
-    barrier "'$NAME' already has a detached job running in it: $_busy
-    Two builds in one checkout corrupt both, and this one would be the second.
-    See what it is:  wk logs $NAME --all
-    Stop it:         wk sysimage build <profile> --stop   (for a Yocto stage)"
-fi
+TASK=$(task_begin build here "$NAME" "$_KILL_CMD" "$LOG" \
+    ${BRANCH:+"check out $BRANCH"} \
+    "sync wk-tools into '$NAME'" \
+    "compile $CONFIG${ARCH_LABEL:+ ($ARCH_LABEL)} with -j$JOBS")
+task_set "$TASK" config "$CONFIG"
+t_task_put "$NAME" "$TASK"
+on_interrupt _build_cancelled
 
 if [ -n "$BRANCH" ]; then
+    _step
     info "checking out '$BRANCH' in '$NAME'"
     t_exec "$NAME" bash -c "cd $(sh_quote "$(t_src "$NAME")") && {
         git checkout -q $(sh_quote "$BRANCH") 2>/dev/null ||
@@ -327,15 +360,13 @@ if [ -n "$BRANCH" ]; then
         || die "could not check out '$BRANCH' in '$NAME'"
 fi
 
+_step
 t_sync_tools "$NAME"
 
-STARTED=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-START_EPOCH=$(date +%s)
-write_status running
-
-ARCH_LABEL=$(arch_label "$ARCH")
+_step
 info "building $CONFIG${ARCH_LABEL:+ ($ARCH_LABEL)} in '$NAME' with -j$JOBS (nice $NICE)"
 log  "  log: $LOG"
+log  "  stop: $_KILL_CMD"
 log  "  stall warning after ${WK_STALL_SECONDS}s of silence; abort after ${WK_ABORT_SECONDS}s"
 
 config_build_env "$(t_src "$NAME")" "$JOBS" "$NICE" "$ARCH"
@@ -347,6 +378,8 @@ fi
 
 build_record "wk build $NAME ($CONFIG)" "$JOBS" "$BUDGET_MB" "pid:$$"
 
+job_pid_watch "$TASK" "$LOG" build '*build-in-target.sh* *Tools/Scripts/build-*' & _PIDWATCH=$!   # two shapes, one pid: build-in-target.sh execs the port's build script, and a PGO config stays in build-in-target.sh across its phases
+
 set +e
 # t_exec_build, not t_exec: on a shared machine the build serialises against your own others, and that lock must not sit on every small command.
 run_watched "$LOG" -- \
@@ -354,6 +387,7 @@ run_watched "$LOG" -- \
         "$(t_tools "$NAME")/build/build-in-target.sh" "$@"
 rc=$?
 set -e
+kill "$_PIDWATCH" 2>/dev/null || true
 
 # Lifted out of the log: the one channel that survives a dropped ssh.
 MEM_PEAK=$(grep -a 'wk: memory: peak' "$LOG" 2>/dev/null | tail -1 \
@@ -367,25 +401,25 @@ MINS=$(( ELAPSED / 60 )); SECS=$(( ELAPSED % 60 ))
 echo >&2
 case $rc in
 0)
-    write_status ok 0
+    _build_end 0
     info "BUILD OK  $CONFIG${ARCH_LABEL:+ ($ARCH_LABEL)} in '$NAME'  (${MINS}m${SECS}s)"
     ;;
 124)
-    write_status stalled 124
+    _build_end stalled
     die "BUILD STALLED  $CONFIG in '$NAME'  (killed after ${MINS}m${SECS}s with no output)
     log: $LOG
     A stall is usually memory pressure -- check 'wk status $NAME' for OOM kills."
     ;;
 *)
     if [ -n "$MEM_KILLED" ]; then
-        write_status oom "$rc"
+        _build_end oom
         warn "BUILD KILLED FOR MEMORY  $CONFIG in '$NAME'  (after ${MINS}m${SECS}s)"
         grep -a 'wk: MEMORY LIMIT' "$LOG" | tail -2 | sed 's/^wk: /  /' >&2
         log "  peak ${MEM_PEAK:-?}MB. Fewer jobs: WK_MB_PER_JOB=3072 wk build $NAME $CONFIG"
         log "  full log: $LOG"
         exit "$rc"
     fi
-    write_status failed "$rc"
+    _build_end "$rc"
     warn "BUILD FAILED  $CONFIG in '$NAME'  (exit $rc after ${MINS}m${SECS}s)"
     log "first error(s):"
     first_error "$LOG" | sed 's/^/  /' || true

@@ -56,9 +56,13 @@ class TestVerifyAsksTheDriver(unittest.TestCase):
         """Not on the target's name, and not on WK_SANDBOX: a fifth sandbox
         would then be verified as though it had no network at all."""
         src = (REPO / "cmd" / "verify").read_text()
-        head = src[:src.index("github reachable through the proxy")]
-        self.assertIn('if t_egress_filtered "$NAME"; then', head)
-        self.assertNotIn('WK_TARGET_KIND" = vm', head)
+        gate = src[src.index('if t_egress_filtered "$NAME"; then'):]
+        arm = gate[:gate.index('\nelif ')]
+        for probe in ("egress-github", "egress-allowlist", "egress-off-allowlist"):
+            self.assertIn(probe, arm)
+        # And nowhere else: an egress probe run outside that arm measures a
+        # target whose driver says it has no filter.
+        self.assertEqual(src.count("par_run egress-"), arm.count("par_run egress-"))
 
     def test_an_unfiltered_guest_is_a_failure_not_a_skip(self):
         """`wk verify` proves a sandbox holds. A guest with the open network

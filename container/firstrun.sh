@@ -27,8 +27,7 @@ git config --global --add safe.directory "$SRC"
 
 install -d -m 0700 "$HOME/.ssh"
 
-# ssh takes the first value it sees per keyword, hence the ProxyCommand first
-# and for every host; %h is the resolved HostName, so an alias arrives as it.
+# ssh takes the first value it sees per keyword, hence the ProxyCommand first and for every host; %h is the resolved HostName, so an alias arrives as it.
 cat > "$HOME/.ssh/config" <<'PROXYEOF'
 Host *
     ProxyCommand /opt/wk-tools/container/proxy/ssh-proxy.py %h %p
@@ -44,13 +43,36 @@ else
     log "         from here cannot resolve one -- 'wk push on' (or 'off') writes it"
 fi
 
+# stderr is kept: a lookup that failed and an answer of "nothing" are different faults, and one of them reads as the other in silence.
+_store_fn() { bash -c '. "$1/lib/common.sh"; . "$1/lib/store.sh"; . "$1/lib/target.sh"
+                       "$2" "${3:-}" "${4:-}"' _ "$WK_TOOLS" "$@"; }
+
 if [ -d "$SRC/.git" ]; then             # an old snapshot's remotes are stale
-    _wiring=$(bash -c '. "$1/lib/common.sh"; . "$1/lib/store.sh"; wk_wiring_script "$2"' \
-                  _ "$WK_TOOLS" "$SRC" 2>/dev/null) || _wiring=""
-    if [ -n "$_wiring" ] && sh -c "$_wiring"; then
-        log "remotes: origin=WebKit/WebKit (push refused), forks added"
+    if _mirror=$(_store_fn mirror_in_container); then
+        [ -n "$_mirror" ] \
+            || log "no mirror on this target, so every fetch in here reads github.com"
     else
-        log "WARNING: could not wire the checkout's remotes"
+        _mirror=""
+        warn "mirror_in_container failed, so where this machine keeps its mirror is not
+         known here and the wiring below reads github.com. 'wk remotes' in the
+         workspace says what the checkout ended up with; '--fix' re-asserts it."
+    fi
+    _wiring=$(_store_fn wk_wiring_script "$SRC" "$_mirror") \
+        || { _wiring=""; warn "wk_wiring_script failed, so it wired nothing"; }
+    if [ -n "$_wiring" ] && sh -c "$_wiring"; then
+        log "remotes: origin=WebKit/WebKit (push refused), forks added; fetches read ${_mirror:-github.com}"
+    else
+        warn "could not wire the checkout's remotes"
+    fi
+
+    # Through ensure-bridge.sh: it puts the egress proxy, the injector's CA and GITHUB_COM_* in the environment, and git-webkit needs all three.
+    _setup=$(_store_fn wk_gitwebkit_setup_script "$SRC") || _setup=""
+    if [ -n "$_setup" ] \
+        && _out=$("$WK_TOOLS/container/proxy/ensure-bridge.sh" sh -c "$_setup" </dev/null); then
+        log "git-webkit: $_out"
+    else
+        log "WARNING: 'git-webkit setup' did not finish (above) -- 'wk push on' if the"
+        log "         token is off, then 'wk remotes ${WK_WORKSPACE:-?} --fix' on the host"
     fi
 fi
 
@@ -74,11 +96,19 @@ done
 ln -sfn /skills "$HOME/.claude/skills"  # one mutable dir, shared by every ws
 
 _agent_secrets() { bash -c '. "$1/lib/store.sh"; wk_agent_secrets' _ "$WK_TOOLS" 2>/dev/null; }
-while read -r _sname _sfile _shome _svar _skind; do
+while read -r _sname _sfile _shome _svar _skind _sdelivery; do
     [ -n "$_sname" ] || continue
+    # Taken away where it is not delivered: a token beside the login wins over it.
+    _sdelivered=0
+    case ",$_sdelivery," in *,container,*) _sdelivered=1 ;; esac
     if [ "$_skind" = file ]; then       # rewritten in place: /agent-rw
+        [ "$_sdelivered" = 1 ] || continue
         [ -s "/agent-rw/$_sfile" ] \
             || log "no $_sname credential yet -- 'wk key set $_sname' on the host stores one"
+        continue
+    fi
+    if [ "$_sdelivered" = 0 ]; then
+        rm -f "$HOME/$_shome"
         continue
     fi
     ln -sfn "/secrets/$_sfile" "$HOME/$_shome"   # dangling until it exists
@@ -90,6 +120,29 @@ EOF
 
 [ -d /agent-rw ] \
     || log "no /agent-rw mount -- this container predates it; 'wk rm' and 'wk new' remake it"
+
+# Every apt below runs under sudo, whose env_reset drops http_proxy, and the sandbox has no route of its own: apt is told in config what the shell is told in the environment, read from it rather than copied.
+APT_PROXY_CONF=/etc/apt/apt.conf.d/99-wk-proxy
+apt_proxy_conf() {
+    printf 'Acquire::http::Proxy "%s";\nAcquire::https::Proxy "%s";\n' \
+        "$http_proxy" "$https_proxy"
+}
+if [ -n "${http_proxy:-}" ] && [ -n "${https_proxy:-}" ]; then
+    case "$http_proxy$https_proxy" in
+    *'"'*|*';'*)
+        warn "not writing $APT_PROXY_CONF: a proxy address here carries a quote or a
+         semicolon ('$http_proxy', '$https_proxy'), which is apt.conf's own syntax --
+         apt would read the rest of the line as further directives. Every apt step
+         below fails until the value targets/container.sh passes is fixed." ;;
+    *)
+        apt_proxy_conf | sudo tee "$APT_PROXY_CONF" >/dev/null
+        log "apt goes through the workspace proxy ($http_proxy, $APT_PROXY_CONF)" ;;
+    esac
+else
+    warn "http_proxy/https_proxy are not set in this workspace, so apt has no way
+         out and every apt step below fails. The container is started without the
+         proxy environment targets/container.sh gives it: 'wk rm' and 'wk new'."
+fi
 
 _install_profilers() {                  # wrapped: not load-bearing
     if sudo apt-get update -qq >/dev/null 2>&1 \

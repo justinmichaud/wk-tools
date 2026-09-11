@@ -548,7 +548,6 @@ class TestAToolsSweepThatLostATargetFails(unittest.TestCase):
         text = (REPO / "cmd" / "sync").read_text()
         self.assertNotIn('sync_furniture "$TARGET" || true', text)
         self.assertIn('sync_furniture "$TARGET" || FURNITURE_RC=1', text)
-        # Every exit after it carries the verdict: the no-local-store return,
-        # the podman-VM pointer, and the end of the publish.
-        self.assertEqual(3, text.count('exit "$FURNITURE_RC"'))
-        self.assertTrue(text.rstrip().endswith('exit "$FURNITURE_RC"'))
+        # One exit carries both verdicts, at the end of the run.
+        self.assertIn(
+            '[ "$FURNITURE_RC" -eq 0 ] && [ "$STORE_RC" -eq 0 ] || exit 1', text)

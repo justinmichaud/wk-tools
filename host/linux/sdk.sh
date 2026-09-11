@@ -14,15 +14,14 @@ else
     changed "cloned webkit-container-sdk"
 fi
 
-# Without the reset the idempotent patcher leaves a tampered file as found.
-_before=$(cd "$SDK" && git rev-parse HEAD)$(cd "$SDK" && git status --porcelain | wc -l)
-git -C "$SDK" reset --hard --quiet
-git -C "$SDK" clean -qfd
-
-if bash "$WK_ROOT/container/sdk-patches/apply.sh" "$SDK" >/dev/null 2>&1; then
-    unchanged "SDK patched"
+_before=$(git -C "$SDK" rev-parse HEAD)
+bash "$WK_ROOT/container/sdk-refresh.sh" "$SDK" \
+    || die "refreshing the webkit-container-sdk checkout failed (above)"
+_after=$(git -C "$SDK" rev-parse HEAD)
+if [ "$_before" = "$_after" ]; then
+    unchanged "webkit-container-sdk up to date"
 else
-    bash "$WK_ROOT/container/sdk-patches/apply.sh" "$SDK" || die "SDK patching failed"
+    changed "webkit-container-sdk moved to $_after"
 fi
 
 _unit_journal=""
@@ -43,4 +42,4 @@ else
   workspace answers 401 ('wk key set github-pat' stores a token)"
 fi
 
-unset SDK _before _unit_journal
+unset SDK _before _after _unit_journal

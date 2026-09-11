@@ -10,6 +10,7 @@ OVER_VOLTAGE_DELTA="${OVER_VOLTAGE_DELTA:-50000}"  # µV; 50mV = at the ~1.0V co
 NUMA_FAKE="${NUMA_FAKE:-auto}"            # auto = let the bootloader pick optimal N; a number forces numa=fake=N; 0/off disables
 NUMA_POLICY="${NUMA_POLICY:-interleave}"  # round-robin allocations across nodes — the actual memory-bandwidth win
 SDRAM_BANKLOW="${SDRAM_BANKLOW:-1}"       # Pi5 EEPROM memory banking (Pi4=3). Enables NUMA auto-split + best mem perf. Empty = leave EEPROM as-is
+WIFI_REGDOM="${WIFI_REGDOM:-CA}"          # kernel regulatory domain this board's radio is used under (5 GHz DFS channels need it re-asserted every reconnect)
 set -euo pipefail
 log(){ printf '\n\033[1;36m== %s\033[0m\n' "$*"; }
 ok(){  printf '   \033[32m✓\033[0m %s\n' "$*"; }
@@ -265,6 +266,59 @@ printf '[Service]\nTimeoutStartSec=20s\n' \
   | sudo tee /etc/systemd/system/plymouth-quit-wait.service.d/10-timeout.conf >/dev/null
 sudo systemctl daemon-reload
 ok "plymouth-quit-wait bounded to 20s (boot works headless AND with a display)"
+
+log "4d  NetworkManager: leave tailscale0 alone (MagicDNS survives an NM reload)"
+if [ -d /etc/NetworkManager ]; then
+  sudo install -d /etc/NetworkManager/conf.d
+  sudo tee /etc/NetworkManager/conf.d/99-tailscale-unmanaged.conf >/dev/null <<'TSCONF'
+# Keep NetworkManager away from the Tailscale tun.
+#
+# tailscale0 is created and configured by tailscaled, but NM sees it as an
+# externally-managed device and tears it down on `nmcli networking off` and
+# on an NM restart -- flushing the 100.64/10 address. tailscaled stays up
+# and logged in but never re-adds it, so MagicDNS (100.100.100.100) and
+# every tailnet peer fall through to the default route and fail to resolve.
+[keyfile]
+unmanaged-devices=interface-name:tailscale0
+TSCONF
+  ok "tailscale0 unmanaged drop-in written"
+  sudo systemctl reload NetworkManager >/dev/null 2>&1 || true
+  command -v tailscaled >/dev/null 2>&1 && sudo systemctl restart tailscaled >/dev/null 2>&1
+else
+  skip "no /etc/NetworkManager -- tailscale0 drop-in not written"
+fi
+
+log "4e  WiFi regulatory domain = $WIFI_REGDOM (5 GHz DFS survives a disconnect)"
+sudo tee /etc/modprobe.d/cfg80211.conf >/dev/null <<CFGEOF
+# Set the regulatory domain at module load, before any association.
+# wireless-regdom.service installs the matching USER hint that survives
+# the regdomain restore the kernel performs on every disconnect.
+options cfg80211 ieee80211_regdom=$WIFI_REGDOM
+CFGEOF
+sudo tee /etc/systemd/system/wireless-regdom.service >/dev/null <<REGDOMEOF
+[Unit]
+Description=Pin the 802.11 regulatory domain
+Documentation=man:iw(8)
+After=sys-subsystem-net-devices-wlan0.device
+Wants=sys-subsystem-net-devices-wlan0.device
+Before=NetworkManager.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# A USER hint is the only one restore_regulatory_settings() re-applies when
+# the kernel drops a country-IE regdomain on disconnect. Without it the
+# domain falls back to world (00), where 5170-5250 MHz is no-IR and the
+# card can hear channel 36 but never transmit on it.
+ExecStart=/usr/sbin/iw reg set $WIFI_REGDOM
+
+[Install]
+WantedBy=multi-user.target
+REGDOMEOF
+sudo systemctl daemon-reload
+sudo systemctl enable --now wireless-regdom.service >/dev/null 2>&1 \
+  && ok "wireless-regdom.service enabled (regdom=$WIFI_REGDOM)" \
+  || skip "could not enable wireless-regdom.service"
 
 log "5  apport OFF but keep core dumps (systemd-coredump)"
 sudo sed -i 's/^enabled=1/enabled=0/' /etc/default/apport 2>/dev/null || true

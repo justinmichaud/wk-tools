@@ -106,5 +106,45 @@ class TestGcSourcesTheTreeOptionally(WkTest):
                 self.assertIn(f'. "$WK_ROOT/{rel}"', text, f"{rel} is not hard-sourced")
 
 
+class TestWhatGcKeepsWhenNothingVerifies(WkTest):
+    """`wk gc` removes every snapshot no workspace is overlaid on except the
+    newest finished one. That one is the newest `base_complete`, not
+    `current_base`: current_base also requires the branch record base_verify
+    reads, and on a machine whose snapshots were published before that record
+    nothing answers -- which would make every snapshot unreferenced and leave
+    the machine with none to make a workspace from."""
+
+    STORE = ('. "$WK_ROOT/lib/common.sh"\n. "$WK_ROOT/lib/store.sh"\n')
+
+    def _bases(self, ids, complete=(), branch=()):
+        store = self.tmp / "store"
+        for i in ids:
+            d = store / "base" / i
+            (d / "WebKit").mkdir(parents=True)
+            if i in complete:
+                (d / "sha").write_text("deadbeef\n")
+            if i in branch:
+                (d / "branch").write_text("origin/main\n")
+        (store / "ws").mkdir(parents=True, exist_ok=True)
+        return store
+
+    def _unreferenced(self, store):
+        cp = bash(self.STORE + "unreferenced_bases\n",
+                  env={"WK_STORE": str(store), "WK_STORE_DEFAULT": str(store)})
+        self.assertEqual(0, cp.returncode, cp.stdout + cp.stderr)
+        return cp.stdout.split()
+
+    def test_the_newest_finished_snapshot_is_kept_though_none_verifies(self):
+        store = self._bases(["20260101", "20260202"],
+                            complete=["20260101", "20260202"])
+        self.assertEqual(["20260101"], self._unreferenced(store))
+
+    def test_an_unfinished_newest_one_protects_nothing_and_goes(self):
+        """A killed `wk sync` leaves a directory with no completion marker: it
+        is not what a machine falls back on, so the finished one below it is."""
+        store = self._bases(["20260101", "20260202"], complete=["20260101"])
+        self.assertEqual(["20260202"], self._unreferenced(store))
+
+
 if __name__ == "__main__":
     unittest.main()

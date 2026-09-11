@@ -94,6 +94,14 @@ if [ -n "$ZSH_VERSION" ]; then
   bindkey "^[[4~" end-of-line           # End, older xterm encoding
   bindkey "^[[8~" end-of-line           # End, rxvt encoding
 
+  # The emacs keymap already has `^[b`/`^[f` (Zed's own alt-arrow encoding); these cover the CSI modified-arrow form (iTerm2, Terminal.app, kitty, alacritty, wezterm, xterm) and the ESC-prefixed-arrow form (some option-as-meta terminals), for both Alt and Ctrl.
+  bindkey "^[[1;3D" backward-word   # Alt+Left
+  bindkey "^[[1;3C" forward-word    # Alt+Right
+  bindkey "^[^[[D"  backward-word   # Alt+Left, ESC-prefixed-arrow encoding
+  bindkey "^[^[[C"  forward-word    # Alt+Right, ESC-prefixed-arrow encoding
+  bindkey "^[[1;5D" backward-word   # Ctrl+Left
+  bindkey "^[[1;5C" forward-word    # Ctrl+Right
+
 fi
 
 if [ -n "$BASH_VERSION" ]; then   # reached on hosts with no zsh, or under NO_ZSH=1
@@ -101,6 +109,14 @@ if [ -n "$BASH_VERSION" ]; then   # reached on hosts with no zsh, or under NO_ZS
   shopt -s histappend   # append, don't overwrite -- without this the last shell to exit wins and clobbers every other session
   shopt -s cmdhist      # multi-line command -> one history entry
   shopt -s lithist      # ...preserving real newlines instead of semicolons
+
+  # readline's own \eb/\ef (Zed's alt-arrow encoding) already do backward-word/forward-word; these add the CSI modified-arrow and ESC-prefixed-arrow forms other terminals send, for both Alt and Ctrl.
+  bind '"\e[1;3D": backward-word'   # Alt+Left
+  bind '"\e[1;3C": forward-word'    # Alt+Right
+  bind '"\e\e[D": backward-word'    # Alt+Left, ESC-prefixed-arrow encoding
+  bind '"\e\e[C": forward-word'     # Alt+Right, ESC-prefixed-arrow encoding
+  bind '"\e[1;5D": backward-word'   # Ctrl+Left
+  bind '"\e[1;5C": forward-word'    # Ctrl+Right
 
   if [ "${BASH_VERSINFO[0]}" -gt 4 ] 2>/dev/null || \
      { [ "${BASH_VERSINFO[0]}" -eq 4 ] && [ "${BASH_VERSINFO[1]}" -ge 3 ]; } 2>/dev/null
@@ -153,9 +169,9 @@ elif [ -f /etc/wk-image ]; then
   _wk_ps_role=bench
 fi
 
-_wk_ps_build=""   # targets/local.sh keeps its build record in XDG state, and only a workspace has one
+_wk_ps_tasks=""   # the store targets/local.sh uses, and only a workspace has one
 [ "$_wk_ps_role" = ws ] && \
-  _wk_ps_build="${XDG_STATE_HOME:-$HOME/.local/state}/wk/ws/$_wk_ps_ws/build.status"
+  _wk_ps_tasks="${WK_LOCAL_STORE:-${XDG_STATE_HOME:-$HOME/.local/state}/wk}/task"
 
 if [ -n "$ZSH_VERSION" ]; then
   setopt PROMPT_SUBST
@@ -203,16 +219,12 @@ if [ -n "$ZSH_VERSION" ]; then
     print -rn -- " %F{magenta}${br}${dirty}%f"
   }
 
-  _wk_ps_buildmark() {   # `running` in the build-status file is a claim, which `wk status` verifies
-    [[ -n $_wk_ps_build && -r $_wk_ps_build ]] || return 0
-    local state="" config="" l
-    while IFS= read -r l; do
-      case $l in
-        state=*)  state=${l#state=} ;;
-        config=*) config=${l#config=} ;;
-      esac
-    done < $_wk_ps_build
-    [[ $state == running ]] || return 0
+  _wk_ps_buildmark() {   # a record with no exit yet is a claim, which `wk status` verifies
+    setopt localoptions nullglob
+    local d last="" config=""
+    for d in "$_wk_ps_tasks/build-$_wk_ps_ws"-*; do last=$d; done   # ids are timestamped, so the last is the newest
+    [[ -n $last && ! -e $last/exit ]] || return 0
+    [[ -r $last/config ]] && config=$(<$last/config)
     print -rn -- " %F{yellow}building ${config}%f"
   }
 

@@ -16,6 +16,7 @@ test is the plumbing.
 
 Run: python3 -m unittest tests.test_pi_agent -v
 """
+import json
 import shutil
 import subprocess
 import unittest
@@ -28,6 +29,14 @@ KEY = (REPO / "cmd" / "key").read_text()
 STORE = (REPO / "lib" / "store.sh").read_text()
 FIRSTRUN = (REPO / "container" / "firstrun.sh").read_text()
 RC = REPO / "shell" / "bashrc"
+
+# Read out of lib/credcheck.py rather than duplicated here: pi_litellm_endpoint
+# (cmd/ai) reads the same constant the same way.
+LITELLM_ENDPOINT = subprocess.run(
+    ["python3", "-c",
+     "import sys; sys.path.insert(0, sys.argv[1]); import credcheck; "
+     "print(credcheck.LITELLM_ENDPOINT)", str(REPO / "lib")],
+    capture_output=True, text=True, check=True).stdout.strip()
 
 PLACEHOLDER = "placeholder-value-for-this-test"
 
@@ -42,12 +51,13 @@ TOUCHED = ("cmd/ai", "cmd/key", "lib/store.sh", "container/firstrun.sh",
 
 def secret_table():
     """wk_agent_secrets, read out of the file that declares it: (name, store
-    file, home file, variable, kind) per row. Every test below compares a
-    reader against this rather than against a second copy of the list."""
+    file, home file, variable, kind, delivery) per row. Every test below
+    compares a reader against this rather than against a second copy of the
+    list."""
     body = STORE.split("wk_agent_secrets() {", 1)[1]
     body = body.split("<<'EOF'\n", 1)[1].split("EOF\n", 1)[0]
     rows = [tuple(l.split()) for l in body.splitlines() if l.strip()]
-    assert rows and all(len(r) == 5 for r in rows), rows
+    assert rows and all(len(r) == 6 for r in rows), rows
     assert all(r[4] in ("value", "file") for r in rows), rows
     return rows
 
@@ -60,6 +70,11 @@ NAMES = [r[0] for r in TABLE]
 # file row is a document its own tool rewrites in place.
 VALUE_ROWS = [r for r in TABLE if r[4] == "value"]
 FILE_ROWS = [r for r in TABLE if r[4] == "file"]
+
+# The delivery column: which target kinds a row reaches. A container is given
+# one Claude credential, so a value row it is not delivered is not linked there.
+CONTAINER_ROWS = [r for r in VALUE_ROWS if "container" in r[5].split(",")]
+NOT_CONTAINER_ROWS = [r for r in VALUE_ROWS if "container" not in r[5].split(",")]
 
 
 def store_path(store, row):
@@ -89,7 +104,8 @@ class TestTheTable(unittest.TestCase):
         """Rotating nothing: a store made before the table existed holds
         secrets/claude-token, and every container already links to that name."""
         self.assertEqual(("claude", "claude-token", ".wk-agent-token",
-                          "CLAUDE_CODE_OAUTH_TOKEN", "value"), TABLE[0])
+                          "CLAUDE_CODE_OAUTH_TOKEN", "value", "vm,remote"),
+                         TABLE[0])
 
     def test_a_file_row_names_no_variable(self):
         """Nothing exports one: the Claude CLI is pointed at the directory the
@@ -269,14 +285,17 @@ class TestWkKeySet(WkTest):
         store = self._store(litellm=PLACEHOLDER)
         cp = self._key("set", "litellm", store=store)
         self.assertEqual(0, cp.returncode, cp.stdout)
-        self.assertIn("LITELLM_API_KEY", cp.stdout)
+        self.assertRegex(
+            cp.stdout, r"litellm\s+stored\s+\S.*\(\$LITELLM_API_KEY in a workspace\)")
         self.assertNotIn(PLACEHOLDER, cp.stdout)
 
     def test_a_stored_token_is_reported_by_name(self):
         store = self._store(claude=CLAUDE_SHAPED)
         cp = self._key("set", "claude", store=store)
         self.assertEqual(0, cp.returncode, cp.stdout)
-        self.assertIn("CLAUDE_CODE_OAUTH_TOKEN", cp.stdout)
+        self.assertRegex(
+            cp.stdout,
+            r"claude\s+stored\s+\S.*\(\$CLAUDE_CODE_OAUTH_TOKEN in a workspace\)")
         self.assertNotIn(PLACEHOLDER, cp.stdout)
 
     def test_claudes_two_credentials_are_two_names_of_the_one_arm(self):
@@ -344,7 +363,7 @@ HOME={home}
 {block}
 ''')
         self.assertEqual(0, cp.returncode, cp.stdout + cp.stderr)
-        for name, file_, home_file, var, _kind in VALUE_ROWS:
+        for name, file_, home_file, var, _kind, _delivery in CONTAINER_ROWS:
             with self.subTest(name=name):
                 link = home / home_file
                 self.assertTrue(link.is_symlink(), f"{home_file} is not a link")
@@ -391,7 +410,7 @@ class TestTheShellExportsEveryName(WkTest):
     def _home(self, values=None):
         h = self.tmp / "home"
         h.mkdir(exist_ok=True)
-        for name, _file, home_file, _var, _kind in VALUE_ROWS:
+        for name, _file, home_file, _var, _kind, _delivery in VALUE_ROWS:
             if values and name in values:
                 (h / home_file).write_text(values[name] + "\n")
         return h
@@ -419,7 +438,7 @@ class TestTheShellExportsEveryName(WkTest):
             if not shutil.which(shell):
                 continue
             got = self._values(shell, args, home)
-            for name, _file, _home_file, var, _kind in VALUE_ROWS:
+            for name, _file, _home_file, var, _kind, _delivery in VALUE_ROWS:
                 with self.subTest(shell=what, name=name):
                     self.assertEqual(want[name], got.get(var))
 
@@ -552,13 +571,17 @@ export WK_STORE={store}
 
 CALLS={self.tmp}/calls
 INSTALLED={self.tmp}/installed
+MODELS_WRITTEN={self.tmp}/models-written
 
-# The workspace, faked: the probe answers from these variables, and an install
-# is recorded rather than run. Defined after the source so it wins over
-# lib/target.sh's own, the same way tests/test_claude_rc.py does it.
+# The workspace, faked: the probe answers from these variables, an install
+# is recorded rather than run, and a models.json write lands in a file this
+# test can read back rather than in a real workspace. Defined after the
+# source so it wins over lib/target.sh's own, the same way
+# tests/test_claude_rc.py does it.
 t_exec() {{
     case "$*" in
         *"npm install"*) printf 'install: %s\\n' "$*" >> "$CALLS"; : > "$INSTALLED"; return 0 ;;
+        *"cat > ~/.pi/agent/models.json"*) cat > "$MODELS_WRITTEN"; return 0 ;;
     esac
     printf 'node={node}\\n'
     printf 'npm={npm}\\n'
@@ -595,14 +618,18 @@ t_exec() {{
         self.assertIn("bin=", cp.stdout)
         self.assertIn("/.local/bin/pi", cp.stdout)
 
-    def test_it_prints_the_endpoint_file_when_a_key_is_stored(self):
+    def test_it_writes_the_models_file_when_a_key_is_stored(self):
         script = self._script()
         (self.store / "secrets" / "litellm-key").write_text(PLACEHOLDER + "\n")
         cp = bash(script)
         self.assertEqual(0, cp.returncode, cp.stdout + cp.stderr)
+        written = json.loads((self.tmp / "models-written").read_text())
+        provider = written["providers"]["litellm"]
+        self.assertEqual(LITELLM_ENDPOINT, provider["baseUrl"])
+        self.assertEqual("openai-completions", provider["api"])
+        self.assertEqual("$LITELLM_API_KEY", provider["apiKey"])
         self.assertIn("models.json", cp.stderr)
-        self.assertIn("openai-completions", cp.stderr)
-        self.assertIn("$LITELLM_API_KEY", cp.stderr)
+        self.assertIn("wk enter ws --", cp.stderr)
         # The key itself is a value in a file, not something to print.
         self.assertNotIn(PLACEHOLDER, cp.stderr + cp.stdout)
 

@@ -1,27 +1,4 @@
-# The company gateway, and the jump host for all three shared build boxes below.
-#
-# BatchMode, StrictHostKeyChecking and ConnectTimeout are here because it is a
-# *jump* host: options on an ssh command line are not passed to the ProxyJump
-# child, so `wk status`'s walk of devbox-arm64-2 runs its first hop with
-# whatever this stanza says and with the defaults for the rest. The defaults
-# are `ask`, no timeout and password authentication, which is a fleet listing
-# that stops dead on a question about the gateway -- the same failure the
-# bridge stanzas at the bottom of this file carry the long version of.
-#
-# BatchMode: this gateway offers `publickey,password`, so a hop whose key it
-# does not hold falls through to asking, three times, on the terminal --
-# measured as `Permission denied, please try again.` under an `ssh -o
-# BatchMode=yes` that the child never saw. `wk status` is read-only and asks no
-# questions, so the hop must refuse instead: `Permission denied (publickey)`,
-# at once. A person who does need to type a password here says so --
-# `ssh -o BatchMode=no igalia.com` -- and the fix for the probe is a key the
-# gateway accepts, not an answerable prompt inside a report.
-#
-# accept-new, for the reason `wk bridge ls` gives: it accepts a key never seen
-# before and still refuses one that has *moved*, and the refusal is the half
-# worth having. A first contact with this host through a probe was going to be
-# either silently accepted or an unanswerable question, and "ask" only looks
-# like the stronger of the two.
+# BatchMode/StrictHostKeyChecking/ConnectTimeout live here because ssh does not pass command-line options to a ProxyJump child, and this gateway offers publickey,password and asks three times if a hop's key is missing -- BatchMode yes refuses instead of blocking a read-only probe on a prompt.
 Host igalia.com
   ForwardAgent yes
   User jmichaud
@@ -51,183 +28,32 @@ Host devbox-armhf-2
 Host rpi5
   User jmichaud
 
-# tolken -- the Apple Silicon workstation, and the fleet's `mbp`. The two names
-# are deliberately different: `mbp` is boot/machines.sh's name for the machine,
-# and this stanza is the destination its NODE_SSH names. One address whether the
-# lane is driven from that Mac or from another device, which is what the macOS
-# benchmark lane needs -- the build, the staging and the run all happen on
-# tolken, driven from wherever the terminal is.
-#
-# The tailnet name and no HostName, for the same reason the bridges have none:
-# the Mac is on the house LAN with no reservation, and it is the one machine in
-# the fleet that reboots into a *different macOS install* on purpose. Each
-# install is its own tailnet node, so MagicDNS distinguishes them and follows
-# each across a lease.
-#
-# The host key is pinned normally. Unlike the rpi4, both installs on this
-# machine are long-lived and personalised, so each has one stable key. An
-# unexpected key here is worth looking at.
-#
-# ServerAliveInterval: a bench run is driven over this connection and is
-# legitimately silent for minutes at a time, and the session has to outlive
-# that. It must NOT outlive the reboot into bench mode, which is why the
-# orchestrator reconnects rather than holding one session across it.
-# User: `justinmichaud`, and it is the odd one out in this file -- every other
-# machine in the fleet is `jmichaud`. That is the account this Mac's *current*
-# host install happens to have been created with, not a decision, and it is
-# scheduled to be corrected the next time this install is replaced:
-# docs/HANDOFF-reprovision.md carries the change so it is not rediscovered
-# from a failed login. Do not "tidy" it to jmichaud before then -- the login
-# would break, and the failure (`Permission denied (publickey)`) reads exactly
-# like an unauthorised key, which is the wrong thing to go looking at.
+# User justinmichaud, not the fleet's jmichaud: this install's account, corrected only at the next reprovision (docs/HANDOFF-reprovision.md) -- do not tidy it, the login would break.
 Host tolken
   User justinmichaud
   ServerAliveInterval 30
   ServerAliveCountMax 6
 
-# The same Mac, in the other mode: the benchmark install.
-#
-# Two macOS installs on one machine, and each is its own tailnet node --
-# `tolken` is the host install, `tolken-bench` the benchmark one, which builds
-# tailscaled from source and joins on first boot (bench/mac-tailnet.sh). So no
-# HostName, for the reason the rest of this file gives: a node this repo owns is
-# reached by its tailnet name and the name is the whole address. MagicDNS follows
-# the bench install across a lease and across a reinstall, because
-# bench/mac-tailnet.sh keeps that node's identity aside and puts it back, the way
-# a board's rescue keeps its bench node's.
-#
-# There is no packaged macOS Tailscale here on purpose: every one of them tunnels
-# through NetworkExtension, whose "would like to add VPN configurations" panel
-# only a person can answer, and no unattended install may need one. The daemon
-# built from source opens a utun directly, which is root's to do and raises
-# nothing.
-#
-# HostKeyAlias, because the two installs must not be able to masquerade as each
-# other: each gets its own known_hosts identity, so a command aimed at the wrong
-# one fails on the key rather than doing the wrong thing quietly. WK_MAC_BENCH_SSH
-# overrides the destination for a Mac whose benchmark install is not on the
-# tailnet yet.
-#
-# ServerAliveInterval: a bench run is driven over this connection and is
-# legitimately silent for minutes at a time.
-#
-# User `bench`, deliberately not a person's name -- not the host install's
-# `justinmichaud`, not the fleet's `jmichaud`. A benchmark install is cattle
-# (CLAUDE.md): reproducible from nothing, by anyone, on any machine. Whose laptop
-# it is attached to is not a property of the measurement, so an operator's
-# account name inside the artifact is hidden state -- it makes the rebuild recipe
-# depend on who runs it, which only the next person discovers. Same reasoning as
-# the Pi bench images logging in as `root`; macOS just has no usable root login
-# to be the impersonal one. `bench` rather than `user`, which in this file already
-# means pmbootstrap's account on the bridges.
+# The same Mac in bench mode: its own tailnet node, `tolken-bench`, which
+# bench/mac-tailnet.sh keeps across a rebuild and a rehearsal guest (wk-bench) --
+# so no HostName. The ssh host key is NOT kept: every rebuild or `wk new` of the
+# guest mints one, so it is not pinned, as for the boards; the tailnet node key
+# is what identifies the machine. User `bench`: a benchmark install is cattle,
+# reproducible by anyone, so no person's account name is baked into it.
 Host tolken-bench
-  HostKeyAlias tolken-bench
   User bench
+  StrictHostKeyChecking no
+  UserKnownHostsFile /dev/null
   ServerAliveInterval 30
   ServerAliveCountMax 6
 
-# There are deliberately no entries for the fleet's boards or Macs.
-#
-# A node this repo owns is on the tailnet and its name is the whole address
-# (CLAUDE.md, "Cattle, not pets"). Every image it builds carries tailscale and
-# joins on first boot -- bench systems included -- so `rpi3`, `rpi4` and the rest
-# resolve through MagicDNS with nothing written here. An entry for one of them
-# could only be a second copy of a fact, and the copy that goes stale.
-#
-# What that leaves this file for is the machines that *cannot* be on the tailnet:
-# Igalia's shared build boxes, reached through the company gateway, and moose's
-# BMC, reached through the phone in front of it. Both are jumps, and a jump host
-# carries its own options because ssh passes a ProxyJump child none of the ones
-# on the command line.
-#
-# The login user and the host-key handling the boards need are in `m_ssh`
-# (boot/machines.sh) rather than here: a board boots a different image on demand
-# and each one brings its own key, and that is a property of the machine the tool
-# can act on, not a route anybody has to store.
-
-# The tailnet bridges: phones routing a segment that cannot join the tailnet
-# itself (moose's BMC port, the rpi3/rpi4 cable). `wk bridge` drives them over
-# these entries -- see `wk help bridge`.
-#
-# The name is the tailnet name and there is no HostName: the whole point of a
-# bridge is to be reachable when the LAN is not the way in, so resolving it
-# through MagicDNS rather than an address is the property worth keeping. It also
-# means these entries work unchanged from anywhere on the tailnet.
-#
-# ServerAliveInterval because both phones roam between two APs on one SSID, and
-# a roam stalls TCP long enough to kill an idle session while the phone itself
-# never wavered. That symptom is a keepalive's problem, not a fault to chase.
-#
-# The host key is deliberately *not* pinned away like the rpi4's: root on a
-# bridge is equivalent to whatever is behind it, so an unexpected key is
-# something to look at rather than something to shrug past. A reflash does
-# change it -- remove the old line from known_hosts when that is what happened.
-#
-# User: pmbootstrap's default account, and what a pmOS release image's first-boot
-# wizard suggests. Password auth is off on the phone (bridge/provision.sh), so
-# this is a key login or nothing.
-# The `.local` spellings are here for one moment: the first run against a
-# freshly flashed phone, which has no tailnet name yet because `wk bridge setup`
-# is what gives it one. The image carries avahi for exactly that, and cmd/bridge
-# falls back to this name on its own.
-# moose's BMC, reached through the Librem 5 that fronts its management port.
-#
-# Repo-owned rather than machine-local, because the address is not a local
-# preference: bridge/hosts/tailnet-bridge-moose-bmc.conf pins it by MAC
-# (BR_LEASES) and makes it the entire DHCP pool, so 10.99.0.2 is the only
-# address the BMC can have. A hand-written copy of this stanza is how it went
-# stale -- it pointed at 192.168.1.41, which answers nothing, and
-# config.d/local is read *before* this file, so the stale copy won every time
-# it was corrected here. host/dotfiles.sh now drops hand-written stanzas for
-# names this file defines, for that reason.
-#
-# ProxyJump rather than a route: 10.99.0.0/24 is advertised by the bridge and
-# reaching it needs --accept-routes, which is off. Jumping through the phone
-# needs nothing turned on anywhere.
 Host moosebmc
   HostName 10.99.0.2
   User root
   Port 2200
   ProxyJump librem5-oob
 
-# The tailnet bridges themselves, and -- because these two names are also the
-# jump hosts above -- the only place a jump hop's options can be written.
-#
-# What is jumped through a phone, and what is not. A node this repo owns is
-# reached by its tailnet name with nothing written down (CLAUDE.md, "Cattle, not
-# pets"), so the boards are not here: they carry tailscale and answer to their
-# names. What stays is the BMC's hop -- a BMC cannot hold a tailnet identity --
-# and `wk bridge`'s own connections to the phones, which pass their options
-# themselves.
-#
-# Options given on an ssh command line do not reach a ProxyJump child. `ssh -o
-# BatchMode=yes -o ConnectTimeout=4 moosebmc` builds the hop as `ssh -l user
-# -p 22 -W '[10.99.0.2]:2200' librem5-oob` and passes nothing else,
-# so the hop runs with whatever this file says for the bridge, and with the
-# defaults for anything it does not -- StrictHostKeyChecking=ask among them. A
-# phone whose key is in known_hosts under its `.local` name and three LAN
-# addresses, but not under its tailnet name, is a first contact -- so a fleet
-# listing whose output goes to a file printed "Are you sure you want to continue
-# connecting" onto the terminal and waited there forever. Non-interactively the
-# same hop fails with `Host key verification failed`, which reads as dead
-# hardware behind it.
-#
-# So: accept-new here, for the reason `wk bridge ls` gives for using it on the
-# phones directly -- it accepts a key never seen before and still refuses one
-# that has *moved*, and root on a bridge is equivalent to everything behind it.
-# ConnectTimeout for the same reason every wk probe carries one: a hop with no
-# bound of its own is a fleet listing with no bound at all.
-#
-# HostKeyAlias, and one stanza per phone, is the other half. A phone answers to
-# a tailnet name, a .local name and whatever address it holds, and without an
-# alias each of those is a separate first contact -- so a key that has moved is
-# silently accepted the first time it is asked for under a name that has not
-# been used before, which is precisely what accept-new is supposed to prevent.
-# One identity per phone, spanning its names, is what makes "the key changed" a
-# question somebody gets asked. Same mechanism, same reasoning as `tolken` and
-# `tolken-bench` above -- there, two installs sharing one address; here, one
-# install answering to several names. After a reflash the remedy is the one
-# `wk bridge ls` prints: `ssh-keygen -R <name>`, where the name is the alias.
+# Both bridge phones roam between two APs on one SSID, and a roam stalls TCP long enough to kill an idle session while the phone itself never wavered -- ServerAliveInterval below is the fix.
 Host tailnet-bridge-generic tailnet-bridge-generic.local
   HostKeyAlias tailnet-bridge-generic
 
@@ -241,15 +67,8 @@ Host tailnet-bridge-generic tailnet-bridge-generic.local tailnet-bridge-moose-bm
   StrictHostKeyChecking accept-new
   ConnectTimeout 10
 
-# `librem5-oob` is `moosebmc`'s jump host and is deliberately not given a
-# `User` here: it is the Librem 5 still running its hand-built PureOS install,
-# not yet reflashed into the `tailnet-bridge-moose-bmc` role that this file
-# describes (bridge/hosts/tailnet-bridge-moose-bmc.conf says so), so its
-# account is not this repository's to declare. The bounds are, and for the
-# reason above they cannot be passed on `moosebmc`'s command line. No
-# BatchMode: password authentication is off on a provisioned bridge but this
-# phone is not one yet, and a hop that refuses to ask for a password it may
-# still need is a hop that fails for the wrong reason.
+# This phone is not a provisioned bridge, so password authentication is still on it and a hop that refuses to ask fails for the wrong reason: BatchMode no, written out because ssh's default is indistinguishable from an omission.
 Host librem5-oob
   StrictHostKeyChecking accept-new
   ConnectTimeout 10
+  BatchMode no

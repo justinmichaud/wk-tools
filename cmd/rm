@@ -15,7 +15,8 @@ WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 . "$WK_ROOT/lib/resources.sh"
 . "$WK_ROOT/lib/store.sh"
 . "$WK_ROOT/lib/target.sh"
-. "$WK_ROOT/lib/detach.sh"
+. "$WK_ROOT/lib/task.sh"
+. "$WK_ROOT/lib/watchdog.sh"
 
 NAME="${WK_NAME:-}"
 require_name "$NAME"
@@ -35,10 +36,46 @@ for _n in "${NAMES[@]}"; do _list="$_list '$_n'"; done
 confirm "destroy workspace(s)${_list} and all their changes?" || die "aborted"
 export WK_YES=1
 
+ws_task_records() { # <name> -- every task record written for it (lib/task.sh)
+    local d
+    while IFS= read -r d; do
+        [ -n "$d" ] || continue
+        [ "$(task_field "$d" name)" = "$1" ] || continue
+        printf '%s\n' "$d"
+    done <<EOF
+$(task_list)
+EOF
+}
+
+# The rc task is not in here: rm stops that one itself, with the workspace it runs in.
+ws_task_live_lines() { # <name> -- one line per running job, with the command that stops it
+    local d
+    while IFS= read -r d; do
+        [ -n "$d" ] || continue
+        [ "$(task_field "$d" kind)" = rc ] && continue
+        task_alive "$d" || continue
+        printf '    %s (pid %s on %s)  stop it:  %s\n' \
+            "$(task_field "$d" kind)" "$(task_field "$d" pid)" \
+            "$(task_field "$d" machine)" "$(task_field "$d" kill)"
+    done <<EOF
+$(ws_task_records "$1")
+EOF
+}
+
+ws_task_records_remove() { # <name> -- rm's own convergence: no record outlives its workspace
+    local d
+    while IFS= read -r d; do
+        [ -n "$d" ] || continue
+        rm -rf "$d"
+    done <<EOF
+$(ws_task_records "$1")
+EOF
+}
+
 # rm_one <name> -- a subshell, so a refusal ends only this one name's attempt.
 rm_one() (
     set -euo pipefail
-    local NAME="$1" TARGET ws sf clog n rc left _t _sf _pid
+    local NAME="$1" TARGET ws clog n rc left _t _d _live _pid
 
     TARGET="$(ws_target "$NAME")"
     load_target "$TARGET"
@@ -46,14 +83,14 @@ rm_one() (
     if [ "$WK_TARGET_KIND" = local ]; then t_destroy "$NAME"; fi
 
     ws=$(wk_ws_dir "$NAME")
-
-    sf=$(ws_status_file "$NAME")
     clog=$(ws_create_log "$NAME")
 
-    if detach_alive "$sf"; then
-        warn "'$NAME' is being created right now (pid $(status_field "$sf" pid), at stage
-  '$(status_field "$sf" stage)') -- this will wait for that to finish and then
-  destroy it. Ctrl-C now if that is not what you meant."
+    # A job left writing into a destroyed workspace compiles into nothing, so this refuses rather than racing it. A name with no environment left has nothing to hold, and skips to forgetting its records.
+    if [ -d "$ws" ] || [ "$(t_info "$NAME")" != absent ]; then
+        _live=$(ws_task_live_lines "$NAME")
+        [ -z "$_live" ] || die "'$NAME' has work running in it, and destroying it under a running job
+    leaves that job compiling into a directory that is gone:
+$_live"
     fi
 
     hold_lock "ws-$NAME"
@@ -61,18 +98,20 @@ rm_one() (
 
     if [ ! -d "$ws" ] && [ "$(t_info "$NAME")" = absent ]; then
         # ws_target guesses once nothing answers for the name, so ask each target's store.
-        if [ ! -f "$sf" ]; then
+        _d=$(ws_create_task "$NAME")
+        if [ -z "$_d" ]; then
             for _t in $(target_all 2>/dev/null); do
                 [ "$_t" = "$TARGET" ] && continue
                 load_target "$_t"
-                _sf=$(ws_status_file "$NAME")
-                [ -f "$_sf" ] || continue
-                TARGET="$_t"; sf="$_sf"; clog=$(ws_create_log "$NAME")
+                _d=$(ws_create_task "$NAME")
+                [ -n "$_d" ] || continue
+                TARGET="$_t"; clog=$(ws_create_log "$NAME")
                 break
             done
         fi
-        if [ -f "$sf" ]; then
-            rm -f "$sf" "$clog"
+        if [ -n "$_d" ]; then
+            ws_task_records_remove "$NAME"
+            rm -f "$clog"
             ssh_alias_remove "$NAME"
             info "'$NAME' had nothing left but its record; forgotten"
             exit 0
@@ -89,15 +128,7 @@ rm_one() (
     confirm "destroy workspace '$NAME' and all its changes?" || die "aborted"
 
     # t_destroy kills claude remote-control with a container or guest, not with a checkout.
-    if [ "$WK_TARGET_KIND" = remote ]; then
-        _sf="$(wk_ws_dir "$NAME")/claude-rc.status"
-        _pid=$([ -f "$_sf" ] && status_field "$_sf" pid || true)
-        if [ -n "$_pid" ] && t_exec "$NAME" kill -0 "$_pid" >/dev/null 2>&1; then
-            info "stopping claude remote-control in '$NAME' (pid $_pid)"
-            t_exec "$NAME" kill "$_pid" >/dev/null 2>&1 || true
-            status_write "$_sf" state=stopped "pid=$_pid"
-        fi
-    fi
+    [ "$WK_TARGET_KIND" != remote ] || rc_stop "$NAME"
 
     rc=0
     t_destroy "$NAME" || rc=$?
@@ -112,7 +143,8 @@ rm_one() (
         exit 1
     fi
 
-    rm -f "$sf" "$clog"
+    ws_task_records_remove "$NAME"
+    rm -f "$clog"
     ssh_alias_remove "$NAME"
 
     info "workspace '$NAME' destroyed"

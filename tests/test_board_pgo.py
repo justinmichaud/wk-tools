@@ -511,91 +511,68 @@ class TestTheUnprofiledSlotIsDeliberate(WkTest):
                       (REPO / "cmd" / "pi").read_text())
 
 
-STATUS_STUBS = """
-. {repo}/lib/common.sh
-. {repo}/lib/store.sh
-. {repo}/lib/target.sh
-wk_ws_dir() {{ printf '%s/ws/%s' "{tmp}" "$1"; }}
-ws_busy_reason() {{ return 1; }}
-note() {{ printf 'NOTE %s\n' "$*"; }}
-note_warn() {{ printf 'WARN %s\n' "$*"; }}
-bump() {{ :; }}
-sub_add() {{ :; }}
-_jesc() {{ printf '%s' "$1"; }}
-"""
-
-
-def report_image_stage_body():
-    """The function lifted out of cmd/status, so the test drives the real one."""
-    text = (REPO / "cmd" / "status").read_text()
-    start = text.index("report_image_stage() {")
-    return text[start:text.index("\nreport_one()", start)]
-
-
 class TestTheCycleSaysWhatItIsDoing(WkTest):
-    """`wk status` reported build=none through a whole image build and a whole
-    profile-guided cycle: it read only the build.status that `wk build`
-    writes. Two of the three phases run on the board, so no workspace pid is
-    alive through them -- the driver's own pid is what is live for the cycle,
-    and that is what liveness is read from."""
+    """The cycle declares its three phases through lib/task.sh and steps
+    through them, so one renderer says which phase is running, which are done,
+    and what stops it. Two of the three phases run on the board and no
+    workspace pid is alive through them -- the driver's own pid is what is
+    live for the cycle, which is why the record is `here`."""
 
-    def _report(self, pid):
-        with scratch_dir() as tmp:
-            ws = tmp / "ws" / "yocto-p"
-            ws.mkdir(parents=True)
-            (ws / "pgo.status").write_text(
-                "slot=pgo\nphase=2/3 collecting jetstream3 on rpi5\nprofile=p\n"
-                "pid=%s\n" % pid)
-            script = (STATUS_STUBS.format(repo=REPO, tmp=tmp)
-                      + report_image_stage_body()
-                      + "\nreport_image_stage yocto-p\n")
-            cp = bash(script)
-            return cp.stdout + cp.stderr
-
-    def test_a_live_cycle_reports_its_phase(self):
-        out = self._report(os.getpid())
-        self.assertIn("2/3 collecting jetstream3 on rpi5", out)
-        self.assertNotIn("WARN", out)
-
-    def test_a_cycle_whose_driver_died_is_reported_as_stopped(self):
-        out = self._report(999999999)
-        self.assertIn("WARN", out)
-        self.assertIn("stopped at", out)
-
-    def test_the_driver_records_each_phase_with_its_own_pid(self):
+    def test_the_driver_declares_the_three_phases_and_steps_through_them(self):
         text = (REPO / "image" / "pgo.sh").read_text()
-        self.assertIn('"pid=$$"', text)
-        for phase in ("1/3 instrumented build", "2/3 collecting", "2/3 mixing",
-                      "3/3 measured build"):
+        self.assertIn("task_begin pgo here", text)
+        for phase in ('"instrumented build"', '"collect $PGO_BENCHMARKS on $machine"',
+                      '"measured build against the profile"'):
             self.assertIn(phase, text, phase)
+        for step in ("pgo_phase 1 ", "pgo_phase 2 ", "pgo_phase 3 "):
+            self.assertIn(step, text, step)
 
-    def test_the_record_is_removed_when_the_cycle_ends(self):
+    def test_the_record_names_a_command_a_person_types_to_stop_it(self):
+        """Every task record names the command that stops its job, and this
+        one's is real: `--stop` is an arm of the same command, through the one
+        implementation (job_stop, lib/watchdog.sh)."""
         text = (REPO / "image" / "pgo.sh").read_text()
-        self.assertIn("wk_atexit _pgo_status_clear", text)
-        self.assertIn("_pgo_status_clear()", text)
+        self.assertIn('"wk sysimage webkit $profile --slot $slot --stop"', text)
+        self.assertNotIn("kill $$ on", text)
+        self.assertIn('job_stop "$profile/$slot" pgo', text)
 
-    def test_status_reads_liveness_from_evidence_and_labels_from_the_record(self):
-        fn = report_image_stage_body()
-        self.assertIn("log_age", fn)
-        self.assertIn('kill -0 "$cyclepid"', fn)
-        self.assertIn("yocto.status", fn)
-        self.assertIn("pgo.status", fn)
+    def test_stop_with_no_cycle_running_says_so_and_exits_0(self):
+        cp = run("sysimage", "webkit", "webkit-2.52-yocto-rpi5-64",
+                 "--slot", "pgo", "--stop", timeout=240)
+        self.assertEqual(cp.returncode, 0, cp.stdout)
+        self.assertIn("no pgo is running", cp.stdout)
 
-    def test_it_never_enters_the_workspace(self):
-        """`wk status` walks every workspace in parallel; shelling into the
-        container from here emptied the entire listing (measured 2026-09-10:
-        six stale `running` records, 10 rows -> 0). The stage log's age is
-        the evidence, exactly as report_one judges a build."""
-        fn = report_image_stage_body()
-        for forbidden in ("ws_busy_reason", "t_exec", "podman"):
-            self.assertNotIn(forbidden, fn, f"{forbidden} re-entered the workspace")
+    def test_stop_takes_nothing_with_it(self):
+        cp = run("sysimage", "webkit", "webkit-2.52-yocto-rpi5-64", "--slot", "pgo",
+                 "--commit", "a" * 40, "--stop", timeout=240)
+        self.assertNotEqual(cp.returncode, 0, cp.stdout)
+        self.assertIn("takes nothing with it", cp.stdout)
 
-    def test_a_stale_running_record_is_reported_not_believed(self):
-        fn = report_image_stage_body()
-        self.assertIn("nothing here is evidence it still is", fn)
+    def test_the_phase_is_a_step_of_the_declared_plan_and_not_a_second_record(self):
+        fn = func_body((REPO / "image" / "pgo.sh").read_text(), "pgo_phase")
+        self.assertIn('task_step "$PGO_TASK"', fn)
+        self.assertNotIn("status_write", fn)
+        self.assertNotIn("pgo.status", (REPO / "image" / "pgo.sh").read_text())
 
-    def test_a_workspace_row_asks_for_it(self):
-        self.assertIn('report_image_stage "$ws"', (REPO / "cmd" / "status").read_text())
+    def test_the_record_ends_when_the_cycle_ends(self):
+        text = (REPO / "image" / "pgo.sh").read_text()
+        self.assertIn("wk_atexit _pgo_task_end", text)
+        self.assertIn('task_end "$PGO_TASK" "${WK_EXIT_STATUS:-0}"', text)
+
+    def test_status_asks_the_process_table_rather_than_believing_the_record(self):
+        """A cycle whose driver is gone reads `died`, computed at read time:
+        lib/task.sh holds no verdict and cmd/status stores none."""
+        fn = func_body((REPO / "cmd" / "status").read_text(), "report_tasks")
+        self.assertIn("task_verdict", fn)
+        self.assertIn("died", fn)
+        lib = func_body((REPO / "lib" / "task.sh").read_text(), "task_verdict")
+        self.assertIn("task_alive", lib)
+        self.assertIn("died", lib)
+
+    def test_a_workspace_walk_asks_for_it_once_per_store(self):
+        text = (REPO / "cmd" / "status").read_text()
+        self.assertIn('report_tasks "${2:-}"', text)
+        self.assertIn("_tasks_said", text)
 
 
 class TestTheProfileGateStandsBeforeTheMeasuredBuild(WkTest):

@@ -90,7 +90,7 @@ class TestNewExitStatus(unittest.TestCase):
 class TestNewTimeout(WkTest):
     """WK_NEW_TIMEOUT (cmd/new -h): how long `wk new` waits for its detached
     driver before giving up on watching it -- the driver itself is
-    unaffected. cmd/new passes it straight to lib/detach.sh's detach_wait,
+    unaffected. cmd/new passes it straight to lib/task.sh's task_wait,
     so this drives that same function the way cmd/new's own read does."""
 
     def test_h_documents_it(self):
@@ -99,23 +99,25 @@ class TestNewTimeout(WkTest):
         self.assertIn("WK_NEW_TIMEOUT", cp.stdout + cp.stderr)
 
     def test_override_shortens_the_wait(self):
-        line = _grep_line(CMD_NEW, "detach_wait.*WK_NEW_TIMEOUT")
-        self.assertIn("detach_wait", line)
+        line = _grep_line(CMD_NEW, "task_wait.*WK_NEW_TIMEOUT")
+        self.assertIn("task_wait", line)
 
         script = f'''
 set -euo pipefail
 WK_ROOT="{REPO}"
 . "{REPO}/lib/common.sh"
-. "{REPO}/lib/detach.sh"
-SF=$(mktemp)
+. "{REPO}/lib/task.sh"
+export WK_STORE=$(mktemp -d)
+NAME=somews
 LOG=/nonexistent-log
 _pid=$$
-status_write "$SF" state=creating "pid=$_pid" stage=init
+_SINCE=$(task_stamp)   # cmd/new takes one before it spawns the driver; the record below is newer
+task_pid "$(task_begin new here "$NAME" "wk new $NAME --kill" "$LOG" checking create)" "$_pid"
 t0=$(date +%s)
 {line.strip()}
 d=$(( $(date +%s) - t0 ))
 printf 'state=%s elapsed=%s\\n' "$_st" "$d"
-rm -f "$SF"
+rm -rf "$WK_STORE"
 '''
         cp = self.bash(script, env={"WK_NEW_TIMEOUT": "2"}, timeout=20)
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)

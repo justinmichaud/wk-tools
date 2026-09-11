@@ -311,7 +311,7 @@ class TestTheStartVerdictComesFromSystemd(WkTest):
         (self.binp / "systemctl").write_text(FAKE_SYSTEMCTL)
         (self.binp / "systemctl").chmod(0o755)
 
-    def _start(self, active=False, start_ok=True, restart_ok=True):
+    def _start(self, active=False, start_ok=True, restart_ok=True, dry=False):
         env = {
             "HOME": str(self.home),
             "PATH": f"{self.binp}:{os.environ['PATH']}",
@@ -320,6 +320,7 @@ class TestTheStartVerdictComesFromSystemd(WkTest):
             "WK_FAKE_START": "0" if start_ok else "1",
             "WK_FAKE_RESTART": "0" if restart_ok else "1",
             "WK_DEBUG": "1",          # so `unchanged` is visible too
+            "WK_DRY_RUN": "1" if dry else "",
         }
         cp = bash(
             f'. "$WK_ROOT/host/units.sh"; unit_start {self.UNIT} /opt/wk-tools '
@@ -388,6 +389,32 @@ class TestTheStartVerdictComesFromSystemd(WkTest):
         start = [i for i, l in enumerate(log) if "enable --now" in l]
         self.assertTrue(reset and start, log)
         self.assertLess(reset[0], start[0])
+
+    def test_a_dry_run_says_what_it_would_do_and_drives_nothing(self):
+        """`./setup --dry-run` reports the install and the start and leaves
+        the machine alone: reading `is-active` is the only systemctl it
+        runs."""
+        cp, out = self._start(active=False, dry=True)
+        self.assertEqual(0, cp.returncode, out)
+        self.assertIn(f"would install {self.UNIT}", out)
+        self.assertIn(f"would start {self.UNIT}", out)
+        log = self.log.read_text()
+        for word in ("daemon-reload", "enable --now", "reset-failed", "restart"):
+            self.assertNotIn(word, log, log)
+        self.assertFalse((self.home / ".config" / "systemd").exists(), out)
+        self.assertIsNone(self._stamp())
+
+    def test_a_dry_run_over_a_running_service_reports_only_what_changed(self):
+        """The stamp and the unit body are both read, so the report is the
+        same verdict a real run would reach."""
+        (self.store / self.STAMP).write_text(self._real_hash() + "\n")
+        cp, out = self._start(active=True, dry=True)
+        self.assertIn(f"{self.UNIT} ready", out)
+        self.assertNotIn("would start", out)
+        (self.store / self.STAMP).write_text("0 not-the-current-program\n")
+        cp, out = self._start(active=True, dry=True)
+        self.assertIn(f"would restart {self.UNIT}", out)
+        self.assertEqual("0 not-the-current-program", self._stamp())
 
     def test_a_service_with_no_program_of_ours_stamps_nothing(self):
         """ssh-agent is the system's own binary: there is no file in this tree

@@ -16,6 +16,7 @@ Run: python3 -m unittest tests.test_egress -v
 """
 import asyncio
 import contextlib
+import os
 import importlib.util
 import io
 import shutil
@@ -1188,3 +1189,127 @@ class TestNothingBakesTheAddressIn(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+FIRSTRUN = REPO / "container" / "firstrun.sh"
+CONTAINER = REPO / "targets" / "container.sh"
+
+
+def _shell_function(path, name):
+    """One function lifted out of a shell file, so a test can call it without
+    running the rest of the file (firstrun.sh installs a whole workspace)."""
+    text = path.read_text()
+    start = text.index(f"{name}() {{")
+    return text[start:text.index("\n}\n", start) + 3]
+
+
+def _sandbox_env():
+    """The proxy variables `_sandbox_flags` (targets/container.sh) starts a
+    container with, taken by running it: `_wk_runtime` writes under /run and
+    the GPU flags ask the host, neither of which a test may do."""
+    script = (f'. "{REPO}/lib/common.sh"; . "{REPO}/lib/store.sh"\n'
+              f'. "{REPO}/lib/target.sh"; . "{CONTAINER}"\n'
+              '_wk_runtime() { printf "%s" "$TMPDIR"; }\n'
+              'arch_has_gpu() { return 1; }\n'
+              '_sandbox_flags native\n')
+    cp = subprocess.run(["bash", "-c", script], cwd=str(REPO), capture_output=True,
+                        text=True, timeout=60, env={"PATH": "/usr/bin:/bin", "HOME": os.environ.get("HOME", "/tmp"),
+                             "TMPDIR": tempfile.mkdtemp(prefix="wk-test-rt-")})
+    assert cp.returncode == 0, cp.stdout + cp.stderr
+    out = {}
+    for word in cp.stdout.split():
+        if "=" in word:
+            k, v = word.split("=", 1)
+            out[k] = v
+    return out
+
+
+class TestAptGoesThroughTheProxy(unittest.TestCase):
+    """Every apt step in container/firstrun.sh runs under sudo, whose env_reset
+    drops http_proxy/https_proxy, and the container is `--network none`: apt
+    then dials the archive directly and has no route at all. apt is told in
+    config what the shell is told in the environment, from that environment."""
+
+    def _drop_in(self, **env):
+        cp = subprocess.run(
+            ["bash", "-c", _shell_function(FIRSTRUN, "apt_proxy_conf") + "\napt_proxy_conf\n"],
+            cwd=str(REPO), capture_output=True, text=True, timeout=30,
+            env={"PATH": "/usr/bin:/bin", **env})
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        return cp.stdout
+
+    def test_both_schemes_are_named(self):
+        out = self._drop_in(http_proxy="http://127.0.0.1:9", https_proxy="http://127.0.0.1:9")
+        self.assertIn('Acquire::http::Proxy "http://127.0.0.1:9";', out)
+        self.assertIn('Acquire::https::Proxy "http://127.0.0.1:9";', out)
+
+    def test_the_address_is_the_one_the_container_is_started_with(self):
+        """No drift: the drop-in carries whatever `_sandbox_flags` passed in,
+        because it reads that and nothing else."""
+        env = _sandbox_env()
+        for var in ("http_proxy", "https_proxy"):
+            self.assertIn(var, env, env)
+        out = self._drop_in(http_proxy=env["http_proxy"], https_proxy=env["https_proxy"])
+        self.assertIn('Acquire::http::Proxy "%s";' % env["http_proxy"], out)
+        self.assertIn('Acquire::https::Proxy "%s";' % env["https_proxy"], out)
+
+    def _write_step(self, **env):
+        """The block that writes the drop-in, lifted and run with `sudo` and
+        the file path made harmless."""
+        text = FIRSTRUN.read_text()
+        start = text.index('if [ -n "${http_proxy:-}"')
+        block = text[start:text.index("\nfi\n", start) + 4]
+        conf = Path(tempfile.mkdtemp(prefix="wk-test-aptconf-")) / "99-wk-proxy"
+        script = (
+            'set -euo pipefail\n'
+            'log()  { printf "LOG %s\\n" "$*"; }\n'
+            'warn() { printf "WARN %s\\n" "$*"; }\n'
+            'sudo() { "$@"; }\n'
+            + "APT_PROXY_CONF=" + str(conf) + "\n"
+            + _shell_function(FIRSTRUN, "apt_proxy_conf") + "\n" + block)
+        cp = subprocess.run(["bash", "-c", script], cwd=str(REPO), capture_output=True,
+                            text=True, timeout=30, env={"PATH": "/usr/bin:/bin", **env})
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        return cp.stdout + cp.stderr, (conf.read_text() if conf.exists() else "")
+
+    def test_an_address_carrying_apt_conf_syntax_is_refused_by_name(self):
+        """The value is interpolated into a quoted apt.conf string, where a
+        quote or a semicolon ends that string and everything after it is read
+        as further directives -- a second Proxy line among them."""
+        out, wrote = self._write_step(
+            http_proxy='http://127.0.0.1:9";Acquire::http::Proxy "http://elsewhere:8080',
+            https_proxy="http://127.0.0.1:9")
+        self.assertIn("WARN", out, out)
+        self.assertIn("apt.conf's own syntax", out, out)
+        self.assertEqual(wrote, "", "it wrote the drop-in anyway")
+        out, wrote = self._write_step(http_proxy="http://127.0.0.1:9",
+                                      https_proxy="http://127.0.0.1:9;")
+        self.assertIn("WARN", out, out)
+        self.assertEqual(wrote, "", "a semicolon in the https address was written")
+
+    def test_an_ordinary_address_is_still_written(self):
+        out, wrote = self._write_step(http_proxy="http://127.0.0.1:9",
+                                      https_proxy="http://127.0.0.1:9")
+        self.assertIn("LOG apt goes through the workspace proxy", out, out)
+        self.assertIn('Acquire::http::Proxy "http://127.0.0.1:9";', wrote)
+
+    def test_the_writer_holds_no_second_copy_of_the_address(self):
+        fn = _shell_function(FIRSTRUN, "apt_proxy_conf")
+        self.assertIn("$http_proxy", fn)
+        self.assertIn("$https_proxy", fn)
+        self.assertNotIn("://", fn)
+
+    def test_it_is_written_before_the_first_apt_call(self):
+        text = FIRSTRUN.read_text()
+        self.assertLess(text.index("apt_proxy_conf |"), text.index("sudo apt-get"), FIRSTRUN)
+
+    def test_the_apt_archives_are_in_the_allowlist(self):
+        """The drop-in only helps if the proxy carries the archive: these four
+        are what `apt-get update` and a `-dbgsym` install read."""
+        p = _policy()
+        for host in ("archive.ubuntu.com", "ports.ubuntu.com",
+                     "security.ubuntu.com", "ddebs.ubuntu.com"):
+            for port in (80, 443):
+                with self.subTest(host=host, port=port):
+                    ok, why = p.host_allowed(host, port)
+                    self.assertTrue(ok, why)

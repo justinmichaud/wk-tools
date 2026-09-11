@@ -20,21 +20,25 @@
 #          workspace can undo either.
 #
 # There is no state file to disagree with reality: `status` asks the agent what it
-# holds (`ssh-add -l`) and the machine whether the token file is there. Both
-# halves run here (where=local): a macOS guest cannot see a unix socket across the
-# hypervisor, so its ssh half is a forward this host holds open while push is on
-# (targets/vm.sh). `wk ai claude` turns it off before handing over control.
+# holds (`ssh-add -l`) and the machine whether the token file is there. A machine
+# runs an agent per kind of workspace -- one in the podman machine the containers
+# mount its socket from, and on macOS one here for the guests, which cannot see a
+# unix socket across the hypervisor and reach it through a forward (targets/vm.sh).
+# `on` and `off` switch every one of them or name the one they could not reach,
+# and `status` says ON while any of them holds a key. All of it runs here
+# (where=local). `wk ai claude` turns it off before handing over control.
 #
 #   --target <machine>   ask that fleet machine instead of this one, through
 #                        its own wk. A `remote` target names no ssh-agent
 #                        socket, so it reports that there is no switch there
 #   --all                ask everywhere: this machine and every other one
-#                        (wk boot --list names them); a machine that does not
-#                        answer is skipped, not fatal
+#                        (wk boot --list names them)
 #
 #   0  push is on (status), or the action succeeded
 #   1  push is off (status), or the action failed
+#   3  a machine did not answer, so its position is unknown -- never "off"
 #   4  there are no deploy keys on this machine at all
+#   5  this machine has no switch: its keys are live wherever they sit
 
 set -euo pipefail
 WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -60,14 +64,16 @@ while [ $# -gt 0 ]; do
     esac
 done
 
-# Each machine answers for itself, by running this same file over there -- the credentials never travel.
 if [ -n "$TARGET" ]; then
     _row() { sed "s/^/$(printf '%-22s' "$1")/"; }
+
+    UNASKED=""
 
     _one() {
         local t="$1" rc=0 out
         load_target "$t"
-        machine_answers "$t" || return 1
+        # A machine that cannot be asked may be holding keys, so it is 3 and not 1: a caller reading "could not ask" as "off" is how an agent gets a working push.
+        machine_answers "$t" || { UNASKED="$UNASKED $t"; return 3; }
         out=$(t_wk push "$ACTION" 2>&1) || rc=$?
         printf '%s\n' "$out" | _row "$t"
         return "$rc"
@@ -80,14 +86,23 @@ if [ -n "$TARGET" ]; then
         return "$rc"
     }
 
+    _unasked_verdict() { # <exit code so far>
+        if [ -n "$UNASKED" ]; then
+            warn "not asked:$UNASKED -- the keys there are wherever they were, which
+    is not 'off'. 'wk push $ACTION --target <machine>' once each one answers."
+            exit 3
+        fi
+        exit "$1"
+    }
+
     if [ "$TARGET" = --all ]; then
         rc=0; _here || rc=$?
         fan=0; for_each_machine _one || fan=$?
         [ "$fan" -gt "$rc" ] && rc="$fan"
-        exit "$rc"
+        _unasked_verdict "$rc"
     fi
-    _one "$TARGET"
-    exit $?
+    rc=0; _one "$TARGET" || rc=$?
+    _unasked_verdict "$rc"
 fi
 
 # Nothing moves between the two: HELD holds every private half and the API token and is mounted nowhere; LIVE is the mounted one, with the public halves.
@@ -112,7 +127,7 @@ agent_holds() { # <fork>
     printf '%s\n' "$AGENT_KEYS" | awk '{print $2}' | grep -qxF "$fp"
 }
 
-# loaded | held | live | absent. `live` is a key on a machine with no agent socket: remote/provision.sh points `core.sshCommand` at it directly.
+# `live` is a key on a machine with no agent socket: remote/provision.sh points `core.sshCommand` at it directly.
 where() {
     local r="$1"
     agent_holds "$r" && { echo loaded; return 0; }
@@ -154,11 +169,12 @@ EOF
 
 require_agent_target() {
     [ -n "$WS_SOCK" ] && return 0
-    die "'$WK_TARGET' workspaces name no ssh-agent socket (t_agent_sock), so the
+    warn "'$WK_TARGET' workspaces name no ssh-agent socket (t_agent_sock), so the
     deploy keys have nowhere to live outside one and there is no switch here.
     Giving this target one -- wk-ssh-agent.service, the way host/linux/sdk.sh
     installs it -- is owed work (docs/HANDOFF-sandboxing.md). Until then, push
     from the workstation that holds the keys."
+    exit 5
 }
 
 switch_half() {
@@ -251,7 +267,9 @@ status)
         esac
     done
 
+    pat_live=0
     if push_agent_pat_present push_agent_exec "$MACHINE_PAT"; then
+        pat_live=1
         printf '%-10s %s\n' "api" "'git-webkit pr' allowed (token at $MACHINE_PAT)"
     elif [ -n "$(wk_github_pat)" ]; then
         printf '%-10s %s\n' "api" "held back ($(wk_github_pat_path))"
@@ -278,13 +296,20 @@ status)
             || log "  no ssh-agent answers at $MACHINE_SOCK ('./setup' installs it there)"
     fi
 
-    # A 0 here would tell cmd/ai's `push_switch status || return 0` the fleet is shut when one box is not.
+    guest_agent_row
+    guest_rows
+
     if [ "$live" -gt 0 ]; then
         info "push is ON here and cannot be switched off -- $live key(s) are live"
         return 0
     fi
-    if [ "$loaded" -gt 0 ]; then
+    if [ "$loaded" -gt 0 ] || [ "$GUEST_LIVE" -eq 1 ]; then
         info "push is ON"
+        return 0
+    fi
+    # A key is not the only credential a publish needs: the injector's write token is one an agent could spend on a comment or a review.
+    if [ "$pat_live" -eq 1 ]; then
+        info "push is ON -- no deploy key is loaded, but the injector has the write token"
         return 0
     fi
     if [ "$held" -gt 0 ]; then
@@ -318,6 +343,19 @@ converge_guests() {
     'wk push $ACTION' again once each one answers"
 }
 
+# The guests' own agent, asked of the agent: a key in it is a push allowed from every guest holding a forward, so it decides the headline whether or not a guest is up to make one right now.
+guest_agent_row() {
+    local n
+    n=$(_in_vm_driver vm_push_agent_keys) || return 0
+    [ -n "$n" ] || return 0
+    if [ "$n" -gt 0 ]; then
+        GUEST_LIVE=1
+        printf '%-10s %s\n' "guests" "$n key(s) in the agent this host runs for them"
+    else
+        printf '%-10s %s\n' "guests" "the agent this host runs for them holds nothing"
+    fi
+}
+
 # A stopped guest is not started to find out: `wk vm start` converges it before anything in it can run.
 guest_rows() {
     local rows g state forks
@@ -343,13 +381,7 @@ switch_half || SWITCH_RC=$?
 
 case "$ACTION" in
     on|off) converge_guests ;;
-    status) guest_rows ;;
 esac
-
-if [ "$ACTION" = status ] && [ "$GUEST_LIVE" -eq 1 ] && [ "$SWITCH_RC" -ne 0 ]; then
-    info "push is ON -- a running guest above still reaches the agent ('wk push off')"
-    SWITCH_RC=0
-fi
 
 if [ "$GUEST_RC" -gt "$SWITCH_RC" ]; then
     exit "$GUEST_RC"

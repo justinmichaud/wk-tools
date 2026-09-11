@@ -98,6 +98,7 @@ m_here() { # am I the machine NODE_SSH names? Case-insensitively: a machine's ow
 
 m_ssh() { # the one way to run a command on a machine, whichever machine this is
     if m_here; then bash -c "$*"; return $?; fi   # standing on it, and not a flag a conf declares: a machine drives itself only from its own keyboard, and from anywhere else that answers about the wrong computer
+    reach_offline "$NODE_SSH" && { warn "$REACH_WHY"; return 255; }   # 255 is ssh's own "could not connect", which every caller here already reads
     # shellcheck disable=SC2086
     ssh -o BatchMode=yes -o ConnectTimeout="$(wk_ssh_timeout)" \
         $(m_ssh_opts) "$NODE_SSH" "$@"
@@ -126,6 +127,7 @@ image_addr() {
 }
 
 i_ssh() {
+    reach_offline "${NODE_BENCH_SSH:-${NODE_SSH:-$NODE_NAME}}" && { warn "$REACH_WHY"; return 255; }
     # shellcheck disable=SC2046
     ssh -o BatchMode=yes -o ConnectTimeout="$(wk_ssh_timeout)" \
         $(i_ssh_opts) \

@@ -1,5 +1,5 @@
 """INT/TERM handling: `on_interrupt`/`wk_sleep` (lib/common.sh) and the sites
-built on them (lib/detach.sh's `detach_wait`, lib/watchdog.sh's
+built on them (lib/task.sh's `task_wait`, lib/watchdog.sh's
 `run_watched`). Each docstring is the phrase of the behaviour it checks.
 
 Every test here sends the signal to the bash process's own pid, not its
@@ -93,25 +93,30 @@ def _run_and_interrupt(script, sig=signal.SIGINT, delay=1.0, timeout=10, ready_f
     return proc.returncode, time.monotonic() - sent_at, out
 
 
-class TestDetachWaitInterrupt(unittest.TestCase):
-    def test_sigint_during_detach_wait_exits_promptly_with_130_and_runs_cleanup(self):
-        """SIGINT during `detach_wait` exits promptly with 130 and runs the registered cleanup"""
+class TestTaskWaitInterrupt(unittest.TestCase):
+    """`task_wait` (lib/task.sh) waits on a detached job's task record: the
+    same signal contract as every other waiter here, and the `tail -f` it
+    started is the only thing the signal stops."""
+
+    def test_sigint_during_task_wait_exits_promptly_with_130_and_runs_cleanup(self):
+        """SIGINT during `task_wait` exits promptly with 130 and runs the registered cleanup"""
         with tempfile.TemporaryDirectory(prefix="wk-interrupt-test-") as tmp:
-            status = os.path.join(tmp, "status")
             log = os.path.join(tmp, "log")
             marker = os.path.join(tmp, "cleaned")
             ready = os.path.join(tmp, "ready")
 
             script = PRELUDE + f"""
-. lib/detach.sh
-printf 'state=running\\n' > {status!r}
+. lib/task.sh
+export WK_STORE={os.path.join(tmp, "store")!r}
 : > {log!r}
+d=$(task_begin new here ws1 "wk new ws1 --kill" {log!r} checking create)
 sleep 1000 &
 DUMMY_PID=$!
+task_pid "$d" "$DUMMY_PID"
 mark_cleaned() {{ : > {marker!r}; kill "$DUMMY_PID" 2>/dev/null || true; }}
 on_interrupt mark_cleaned
 : > {ready!r}
-detach_wait {status!r} {log!r} 0 "$DUMMY_PID"
+task_wait new ws1 {log!r} 0 "$DUMMY_PID"
 """
             rc, elapsed, out = _run_and_interrupt(script, ready_file=ready)
 
@@ -121,29 +126,29 @@ detach_wait {status!r} {log!r} 0 "$DUMMY_PID"
             self.assertLess(elapsed, 5, f"took {elapsed:.1f}s to exit after SIGINT")
             self.assertTrue(os.path.exists(marker), f"on_interrupt handler did not run; output:\n{out}")
 
-    def test_sigterm_during_detach_wait_exits_promptly_with_143(self):
-        """SIGTERM during `detach_wait` exits promptly with 143"""
+    def test_sigterm_during_task_wait_exits_promptly_with_143(self):
+        """SIGTERM during `task_wait` exits promptly with 143"""
         with tempfile.TemporaryDirectory(prefix="wk-interrupt-test-") as tmp:
-            status = os.path.join(tmp, "status")
             log = os.path.join(tmp, "log")
             ready = os.path.join(tmp, "ready")
 
             script = PRELUDE + f"""
-. lib/detach.sh
-printf 'state=running\\n' > {status!r}
+. lib/task.sh
+export WK_STORE={os.path.join(tmp, "store")!r}
 : > {log!r}
+d=$(task_begin new here ws1 "wk new ws1 --kill" {log!r} checking create)
 sleep 1000 &
 DUMMY_PID=$!
+task_pid "$d" "$DUMMY_PID"
 noop() {{ kill "$DUMMY_PID" 2>/dev/null || true; }}
 on_interrupt noop
 : > {ready!r}
-detach_wait {status!r} {log!r} 0 "$DUMMY_PID"
+task_wait new ws1 {log!r} 0 "$DUMMY_PID"
 """
             rc, elapsed, out = _run_and_interrupt(script, sig=signal.SIGTERM, ready_file=ready)
 
         self.assertEqual(rc, 143, f"exit code was {rc}, not 143 (SIGTERM); output:\n{out}")
         self.assertLess(elapsed, 5, f"took {elapsed:.1f}s to exit after SIGTERM")
-
 
 class TestRunWatchedInterrupt(unittest.TestCase):
     def test_sigint_during_run_watched_kills_the_watched_child(self):
@@ -172,6 +177,39 @@ run_watched {log!r} -- bash -c 'echo $$ > {pidfile!r}; exec sleep 1000'
         # A moment for the TERM/KILL in run_watched's cleanup to land -- fine
         # to check after the `with` exits, since this reads the process
         # table, not the temp dir it just deleted.
+        for _ in range(30):
+            if not _pid_alive(child_pid):
+                break
+            time.sleep(0.2)
+        self.assertFalse(_pid_alive(child_pid), "the watched child (sleep 1000) is still running")
+
+
+    def test_sighup_during_run_watched_runs_the_cancel_hook_and_exits_129(self):
+        """SIGHUP -- what a supervisor with no tty sends -- runs the cancel hook and exits 129"""
+        with tempfile.TemporaryDirectory(prefix="wk-interrupt-test-") as tmp:
+            log = os.path.join(tmp, "build.log")
+            pidfile = os.path.join(tmp, "child.pid")
+            marker = os.path.join(tmp, "cancelled")
+
+            # The marker stands in for what cmd/build's hook does with the
+            # signal: end the task record and kill the far-side build.
+            script = PRELUDE + f"""
+. lib/watchdog.sh
+WK_POLL_SECONDS=30
+cancel_the_far_side() {{ : > {marker!r}; }}
+on_interrupt cancel_the_far_side
+run_watched {log!r} -- bash -c 'echo $$ > {pidfile!r}; exec sleep 1000'
+"""
+            rc, elapsed, out = _run_and_interrupt(script, sig=signal.SIGHUP,
+                                                  ready_file=pidfile)
+
+            self.assertEqual(rc, 129, f"exit code was {rc}, not 129 (SIGHUP); output:\n{out}")
+            self.assertLess(elapsed, 8, f"took {elapsed:.1f}s to exit after SIGHUP")
+            self.assertTrue(os.path.exists(marker),
+                            f"the cancel hook did not run on HUP; output:\n{out}")
+            with open(pidfile) as f:
+                child_pid = int(f.read().strip())
+
         for _ in range(30):
             if not _pid_alive(child_pid):
                 break
@@ -221,7 +259,10 @@ class TestKillingAJobKillsWhatItStarted(unittest.TestCase):
 
     def test_both_kill_paths_use_it(self):
         text = (REPO / "lib" / "watchdog.sh").read_text()
-        body = text[text.index("run_watched() {"):]
+        # run_watched's own body: the interrupt hook and the stall path, two
+        # signals each. `job_kill` below it has its own site (_job_signal),
+        # which reaches the descendants inside the target instead.
+        body = text[text.index("run_watched() {"):text.index("job_pid_watch() {")]
         self.assertEqual(body.count("watched_kill"), 4, "a kill site still kills only the job")
         self.assertNotIn('kill -TERM "$pid"', body)
         self.assertNotIn('kill -KILL "$pid"', body)

@@ -203,8 +203,14 @@ class TestAMeasuredRunIsWatchedThroughout(WkTest):
 
     def test_it_is_inert_where_there_is_no_window_server(self):
         """Every container run goes through the same line; the probe answers
-        `?` there and the watcher must record nothing rather than refuse."""
+        `?` there and the watcher must record nothing rather than refuse.
+        Run against a real ps and window probe this would fail on the
+        maintainer's own desktop -- open windows and daemons this host never
+        paused are exactly what a container has none of, so both are stubbed
+        to answer the way a container actually does."""
         cp = bash('. "$WK_ROOT/lib/quiet.sh"\n'
+                  'wk_window_probe() { printf "windows=?\\n"; }\n'
+                  'ps() { :; }\n'
                   'rec=$(mktemp)\n'
                   'WK_SCREEN_WATCH_SECONDS=1 screen_watch_start "$rec"\n'
                   'sleep 3\n'

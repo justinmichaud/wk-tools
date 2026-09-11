@@ -46,6 +46,17 @@ reach_tailnet() {
     printf '%s (%s)' "$(printf '%s' "$line" | cut -f2)" "$(printf '%s' "$line" | cut -f3)"
 }
 
+REACH_WHY=""   # reach_offline's reason: by exit status and not down a command substitution, whose per-process peer read would die with it and run `tailscale status` again on every dial
+
+reach_offline() {  # <name>: 0 when the coordinator already reports it down, with why in REACH_WHY -- ssh to such a node spends the whole ConnectTimeout learning it
+    local state
+    REACH_WHY=""
+    wk_tailscale_peers >/dev/null   # fills the per-process read in this shell, not a subshell's
+    state=$(printf '%s\n' "$_WK_TS_PEERS" | awk -F'\t' -v n="$1" '$1 == n {print $3; exit}')
+    [ "$state" = down ] || return 1
+    REACH_WHY="the tailnet says $1 is offline -- power it on, or 'wk find $1'"
+}
+
 reach_ssh() {  # <name>: what `ssh <name>` would dial, `ssh -G` resolving the config without connecting
     local name="$1" g host port jump user out
     have ssh || return 0

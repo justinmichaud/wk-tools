@@ -63,11 +63,25 @@ else
     say "cloning WebKit from the mirror"
     git clone --quiet --shared --branch main "$MIRROR" "$SRC"
 fi
-_wiring=$(bash -c '. "$1/lib/common.sh"; . "$1/lib/store.sh"; wk_wiring_script "$2"' \
-              _ "$WK_TOOLS_DIR" "$SRC" 2>/dev/null) \
+_store_fn() { bash -c '. "$1/lib/common.sh"; . "$1/lib/store.sh"; "$2" "${3:-}" "${4:-}"' \
+                  _ "$WK_TOOLS_DIR" "$@" 2>/dev/null; }
+
+_wiring=$(_store_fn wk_wiring_script "$SRC" "$MIRROR") \
     && sh -c "$_wiring" \
-    && say "remotes: origin=WebKit/WebKit, forks added" \
+    && say "remotes: origin=WebKit/WebKit, forks added; fetches read $MIRROR" \
     || say "WARNING: could not wire the checkout's remotes"
+
+# In the base, so every guest cloned from it is set up already. ~/.wk-egress is where targets/vm.sh puts the proxy and the injector's CA on every start, and the credential is the placeholder that injector replaces.
+[ ! -r "$HOME/.wk-egress" ] || . "$HOME/.wk-egress"
+GITHUB_COM_USERNAME=$(_store_fn wk_github_user) || GITHUB_COM_USERNAME=""
+export GITHUB_COM_USERNAME
+export GITHUB_COM_TOKEN=wk-injects-this
+if _setup=$(_store_fn wk_gitwebkit_setup_script "$SRC") && _out=$(sh -c "$_setup" </dev/null); then
+    say "git-webkit: $_out"
+else
+    say "WARNING: 'git-webkit setup' did not finish (above); on a workspace made"
+    say "         from this base, from the host:  wk remotes <ws> --fix"
+fi
 
 say "WebKit at $(git -C "$SRC" rev-parse --short HEAD)"
 

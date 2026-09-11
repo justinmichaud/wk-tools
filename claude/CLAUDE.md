@@ -152,8 +152,10 @@ asked.
 A build here is tens of minutes and the shell running it is not guaranteed to
 last that long. `wk build <config> --detach` starts it and returns
 immediately; `wk status` and `wk logs -f` follow it. Nothing is lost if this
-session ends, and `build.status` ends up saying what actually happened rather
-than `running` forever.
+session ends, and the build's record ends up saying what actually happened
+rather than `running` forever. `wk build <config> --kill` stops one that is
+running, wherever it runs, and records it as cancelled -- which is also what
+^C does to a build you started in the foreground.
 
 Every build is watched for memory (a job count is a prediction, and a link
 step can break it). If yours is killed you will see `build=oom` in `wk status`
