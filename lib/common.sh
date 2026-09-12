@@ -201,6 +201,8 @@ status_render() {
         ${WK_STATUS_HTML_OUT:+--out "$WK_STATUS_HTML_OUT"}
 }
 
+status_records_strip() { python3 "$WK_ROOT/lib/status-view.py" strip -; }   # stdin to stdout, minus the stream's plan and flush markers
+
 # Sets a variable, not stdout: in `$(...)` fd 1 is a pipe and `[ -t 1 ]` lies.
 status_default_mode() {
     WK_STATUS_DEFAULT_MODE=text

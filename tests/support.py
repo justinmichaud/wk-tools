@@ -15,6 +15,7 @@ import re
 import shutil
 import string
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -322,6 +323,17 @@ def podman_vm_running(machine="wk"):
     except (FileNotFoundError, subprocess.TimeoutExpired):
         return False
     return cp.returncode == 0 and cp.stdout.strip() == "running"
+
+
+def requires_container_target():
+    """Skip decorator for a test that needs the real container target: on
+    macOS the podman VM this repo drives must already be up (never started
+    here), on Linux podman itself; skipped by --quick."""
+    if quick_run():
+        return unittest.skip("--quick: needs the container target")
+    if sys.platform == "darwin":
+        return requires_podman_vm()
+    return unittest.skipUnless(shutil.which("podman"), "podman is not installed")
 
 
 def quick_run():

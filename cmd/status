@@ -253,7 +253,8 @@ delegate() {
 
     out=$( t_wk "${args[@]}" 2>/dev/null ) || rc=$?
     case "$out" in
-        "{"*) printf '%s\n' "$out" >&3; return "$rc" ;;
+        # Stripped of its plan and flush markers: they end that machine's jobs, and read here they would end this walk's.
+        "{"*) printf '%s\n' "$out" | status_records_strip >&3; return "$rc" ;;
     esac
 
     # An older copy rejects `--records` as a workspace name, so it is asked again in the vocabulary it has.

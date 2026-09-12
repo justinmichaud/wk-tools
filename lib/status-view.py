@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""status-view.py <text|json|html|web> <records-file> [--port N] [--interval S] [--out FILE]
+"""status-view.py <text|json|html|web|strip> <records-file> [--port N] [--interval S] [--out FILE]
 
 Input is the stream `wk status` collects: one JSON object per line, from
 several processes at once -- two JSON documents cannot be concatenated where two
@@ -11,6 +11,8 @@ Two records are the stream's own, not the document's. `{"kind":"plan","jobs":
 the machine each one's records belong to; `{"kind":"flush","job":..}` ends one
 job. A machine's block is drawn when the last job the plan gave it has flushed,
 so nothing decides a machine is complete from what has happened to arrive.
+`strip -` (stdin to stdout) drops those two: a remote's own markers, passed
+through cmd/status's delegate, would end this walk's jobs.
 """
 
 import http.server
@@ -21,6 +23,21 @@ import sys
 import threading
 import time
 import webbrowser
+
+MARKERS = ("plan", "flush")   # the stream's own records, not the document's
+
+
+def strip_markers(fh, out):
+    for line in fh:
+        try:
+            r = parse_record(line)
+        except ValueError:
+            out.write(line)   # left for the renderer, which reports an unreadable record
+            continue
+        if r is not None and r.get("kind") in MARKERS:
+            continue
+        out.write(line)
+
 
 class Merger:
     # Records -> one document, grouped machine / method / workspace, in arrival
@@ -139,8 +156,8 @@ def merge(lines):
         except ValueError as exc:
             print("wk status: unreadable record: %s" % exc, file=sys.stderr)
             continue
-        if r is None or r.get("kind") in ("plan", "flush"):
-            continue  # stream-only markers; a one-shot read has no use for them
+        if r is None or r.get("kind") in MARKERS:
+            continue  # a one-shot read has no use for the stream's markers
         merger.feed(r)
     return merger.doc
 
@@ -1274,6 +1291,10 @@ def main(argv):
             interval = value or 20
         elif flag == "--out":
             out = value
+
+    if mode == "strip":
+        strip_markers(sys.stdin, sys.stdout)
+        return 0
 
     if mode == "text":
         # Straight off the stream `collect` is still writing: text mode gets a

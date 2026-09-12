@@ -18,7 +18,7 @@ import threading
 import time
 import unittest
 
-from tests.support import REPO, WkTest, rand_suffix, requires_podman_vm, run, scratch_dir, stub_path
+from tests.support import REPO, WkTest, rand_suffix, requires_container_target, run, scratch_dir, stub_path
 
 STATUS_VIEW = REPO / "lib" / "status-view.py"
 
@@ -273,18 +273,53 @@ class TestCollectorMarkers(WkTest):
         self.assertEqual(len([l for l in cp.stdout.splitlines() if l.startswith("remote")]), 1, cp.stdout)
 
 
-class TestEveryWorkspaceIsInTheListing(WkTest):
-    """On this macOS host the podman machine answers for the container target
-    and tart for the vm target, both as this machine: the bare listing names
-    every workspace `wk ls` names."""
+# A machine with a wk of its own whose `--records` answer still carries its
+# own walk's markers, one of them a flush for a job this walk also has.
+_MARKER_LEAKING_SSH = '''#!/bin/sh
+for last; do :; done
+case "$last" in
+    *.wk-remote*) exit 0 ;;
+    *--records*)
+        printf '%s\\n' '{"kind":"machine","name":"remote"}' \\
+            '{"kind":"flush","job":"remote"}' \\
+            '{"kind":"workspace","machine":"remote","method":"native","name":"leaky-ws","state":"running","ws":"present"}'
+        exit 0 ;;
+esac
+exec bash -c "$last"
+'''
 
-    @requires_podman_vm()
+
+class TestARemotesMarkersStayItsOwn(WkTest):
+    """A remote's plan and flush records end its jobs, not this walk's: its
+    workspace is listed even when its stream flushed the job named after it
+    before the workspace record arrived."""
+
+    def test_a_flush_in_a_remotes_records_does_not_draw_its_block_early(self):
+        with scratch_dir(prefix="wk-test-machines-") as machdir, \
+             stub_path({"ssh": _MARKER_LEAKING_SSH}) as binp:
+            cp = run("status", "--text", "--no-devices", env={
+                "WK_MACHINES_DIR": str(machdir),
+                "WK_TARGET": "remote",
+                "WK_REMOTE_HOST": "fake-leaky-" + rand_suffix(4),
+                "PATH": f"{binp}:{os.environ.get('PATH', '/usr/bin:/bin')}",
+            }, timeout=60)
+        self.assertEqual(cp.returncode, 0, cp.stdout)
+        self.assertEqual(len([l for l in cp.stdout.splitlines() if l.startswith("remote")]), 1, cp.stdout)
+        self.assertRegex(cp.stdout, r"(?m)^\s+leaky-ws\s", cp.stdout)
+
+
+class TestEveryWorkspaceIsInTheListing(WkTest):
+    """The container target answers as this machine -- the podman VM on macOS,
+    the host on Linux -- beside every peer that answers for itself: the bare
+    listing names every workspace `wk ls` names."""
+
+    @requires_container_target()
     def test_bare_status_lists_every_workspace_ls_lists(self):
         ls = run("ls", "--json", timeout=120)
         self.assertEqual(ls.returncode, 0, ls.stdout)
         names = [w["name"] for w in json.loads(ls.stdout)["workspaces"]]
         st = run("status", "--text", "--no-devices", env={"NO_COLOR": "1"}, timeout=180)
-        self.assertEqual(st.returncode & ~4, 0, st.stdout)  # 4 is an unreachable peer, not this machine
+        self.assertIn(st.returncode, (0, 2, 4), st.stdout)  # 2 is work in progress, 4 an unreachable peer: neither is the listing's fault
         for n in names:
             self.assertRegex(st.stdout, r"(?m)^\s+%s\s" % n, f"'{n}' missing from a bare 'wk status':\n{st.stdout}")
 
