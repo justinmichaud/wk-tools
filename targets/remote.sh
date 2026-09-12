@@ -128,32 +128,56 @@ _remote_probe_file() {
     printf '%s/%s.probe' "$WK_PREFETCH_DIR" "${WK_TARGET:-remote}"
 }
 
-# An *empty* file means asked-and-did-not-answer.
+# An *empty* file means asked-and-did-not-answer, with ssh's last word beside it in `.why`.
 t_prefetch() {
-    local f out
+    local f out why
     f=$(_remote_probe_file) || return 0
     [ -n "$f" ] || return 0
     _remote_is_local && return 0
     [ -n "${WK_REMOTE_HOST:-}" ] || return 0
-    out=$(_rsh_q "$(_remote_probe_cmd)" 2>/dev/null) || out=""
+    out=$(_remote_probe_ssh "$f.why") || out=""
     printf '%s' "$out" > "$f.tmp.$$" && mv "$f.tmp.$$" "$f" || rm -f "$f.tmp.$$"
+}
+
+# ssh's stderr is the measurement: "Host key verification failed" and "Connection timed out" call for different remedies, and neither is "off".
+_remote_probe_ssh() { # <why-file> -- the probe's stdout; on failure the reason is left in <why-file>
+    local why="$1" out rc=0
+    out=$(_rsh_q "$(_remote_probe_cmd)" 2>"$why") || rc=$?
+    if [ "$rc" -ne 0 ]; then
+        _ssh_last_word "$rc" < "$why" > "$why.tmp" && mv "$why.tmp" "$why"
+        return 1
+    fi
+    rm -f "$why"
+    printf '%s' "$out"
+}
+
+_ssh_last_word() { # <ssh exit status>, its stderr on stdin -- the one line a person acts on
+    local line
+    line=$(grep -v '^[[:space:]]*$' | tail -n 1 | sed -e 's/^ssh: //' -e 's/^kex_exchange_identification: //') || line=""
+    printf '%s' "${line:-ssh exited $1 and said nothing}"
 }
 
 _remote_probe_try() {
     [ -n "${_WK_REMOTE_PROBED:-}" ] && return 0
     [ -n "${_WK_REMOTE_DOWN:-}" ] && return 1
     _remote_require
-    local out f parsed
+    local out f parsed why
     f=$(_remote_probe_file) || f=""
     if [ -n "$f" ] && [ -f "$f" ]; then
         out=$(cat "$f")
         if [ -z "$out" ]; then
             _WK_REMOTE_DOWN=1
+            _WK_REMOTE_WHY=$(cat "$f.why" 2>/dev/null)
             return 1
         fi
-    elif ! out=$(_rsh_q "$(_remote_probe_cmd)" 2>/dev/null); then
-        _WK_REMOTE_DOWN=1
-        return 1
+    else
+        why=$(mktemp "${TMPDIR:-/tmp}/wk-ssh-why.XXXXXX")
+        if ! out=$(_remote_probe_ssh "$why"); then
+            _WK_REMOTE_DOWN=1
+            _WK_REMOTE_WHY=$(cat "$why" 2>/dev/null); rm -f "$why"
+            return 1
+        fi
+        rm -f "$why"
     fi
 
     _WK_REMOTE_HOME=$(printf '%s\n' "$out" | sed -n 1p)
@@ -169,10 +193,19 @@ _remote_probe_try() {
 }
 
 _remote_probe() {
-    _remote_probe_try || die "cannot reach '$WK_REMOTE_HOST' over ssh ($(wk_ssh_timeout)s).
+    _remote_probe_try || die "cannot reach '$WK_REMOTE_HOST' over ssh: $_WK_REMOTE_WHY
     This target has no way in but ssh, and it is not interactive: the key,
     the ProxyJump and the host entry all have to work non-interactively.
-    Try:  ssh -o BatchMode=yes $WK_REMOTE_HOST true"
+    What BatchMode refuses to ask -- a new host key, a passphrase -- one
+    interactive  ssh $WK_REMOTE_HOST true  asks and settles."
+}
+
+t_answers() { # by exit status, so the one probe is not paid again down a command substitution
+    WK_FAR_WHY=""
+    _remote_is_local && return 0
+    _remote_probe_try && return 0
+    WK_FAR_WHY="$_WK_REMOTE_WHY"
+    return 1
 }
 
 # Verified before use: a MOTD can outlive the WebKit repository it names.
@@ -663,11 +696,16 @@ t_sync() {
     return "$rc"
 }
 
+# The record here outlives anything the far side has not confirmed gone: a re-run finds it and retries.
 t_destroy() {
-    local name="$1"
+    local name="$1" ws
     _remote_peer && die "'$WK_REMOTE_HOST' is a workstation: its workspaces are removed there,
     by the machine that made them.  ssh $WK_REMOTE_HOST wk rm $name"
-    _rsh_q "rm -rf $(sh_quote "$(_remote_ws "$name")")"
+    _remote_probe
+    ws=$(_remote_ws "$name")
+    _rsh_q "rm -rf $(sh_quote "$ws")" \
+        || die "could not remove $ws on $WK_REMOTE_HOST; what ssh said is above.
+    The record of '$name' here is kept -- re-run 'wk rm $name' once it answers."
     rm -rf "$(wk_ws_dir "$name")"
     info "removed remote workspace '$name' from $WK_REMOTE_HOST"
 }

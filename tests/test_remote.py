@@ -75,16 +75,20 @@ machine_answers fakebox && echo "rc=0" || echo "rc=$?"
             "XDG_STATE_HOME": str(self.tmp / "state"), "WK_SSH_TIMEOUT": "3"})
 
     def test_an_unreachable_machine_is_reported_as_unreachable(self):
-        """an ssh destination nothing resolves is 'unreachable', not 'no wk-tools'"""
+        """an ssh destination nothing resolves is 'unreachable', not 'no
+        wk-tools', and the line carries ssh's own last word on why -- the
+        measurement, not a guess at 'off'"""
         # An .invalid name fails resolution at once, so this needs no route to
         # anything and cannot hang on a real machine's timeout.
         cp = self._machine_answers(
             "WK_TARGET_KIND=remote\nWK_REMOTE_HOST=wk-test-unreachable.invalid\n")
         out = cp.stdout + cp.stderr
         self.assertIn("rc=1", out, out)
-        self.assertRegex(out, r"(?m)^fakebox\s+unreachable over ssh", out)
+        self.assertRegex(out, r"(?m)^fakebox\s+unreachable over ssh: \S", out)
         self.assertNotIn("no wk-tools", out)
-        self.assertNotIn("ssh:", out, "ssh's own error text leaked through")
+        self.assertNotIn("not on the tailnet", out, "a guess where ssh's own reason belongs")
+        self.assertEqual(len([l for l in out.splitlines() if "fakebox" in l]), 1,
+                         "one line per machine, not ssh's whole stderr: " + out)
 
     def test_the_machine_itself_is_not_a_far_side(self):
         """the machine this runs on has no far side to answer for it"""

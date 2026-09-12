@@ -13,7 +13,8 @@ fi
 log()  { [ -z "${WK_QUIET:-}" ] && printf '%s\n' "$*" >&2 || true; }
 info() { [ -z "${WK_QUIET:-}" ] && printf '%s==>%s %s\n' "$_c_grn" "$_c_off" "$*" >&2 || true; }
 warn() { printf '%swarning:%s %s\n' "$_c_yel" "$_c_off" "$*" >&2; }
-die()  { printf '%serror:%s %s\n' "$_c_red" "$_c_off" "$*" >&2; exit 1; }
+err()  { printf '%serror:%s %s\n' "$_c_red" "$_c_off" "$*" >&2; }   # an error this command goes on past
+die()  { err "$*"; exit 1; }
 debug() { [ -n "${WK_DEBUG:-}" ] && printf '%s  %s%s\n' "$_c_dim" "$*" "$_c_off" >&2 || true; }
 
 WK_CHANGES=0

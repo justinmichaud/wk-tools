@@ -30,12 +30,6 @@ for _a in ${@+"$@"}; do
     NAMES+=("$_a")
 done
 
-# WK_YES=1 makes rm_one's own confirmation a no-op once this one is answered.
-_list=""
-for _n in "${NAMES[@]}"; do _list="$_list '$_n'"; done
-confirm "destroy workspace(s)${_list} and all their changes?" || die "aborted"
-export WK_YES=1
-
 ws_task_records() { # <name> -- every task record written for it (lib/task.sh)
     local d
     while IFS= read -r d; do
@@ -72,60 +66,64 @@ $(ws_task_records "$1")
 EOF
 }
 
-# rm_one <name> -- a subshell, so a refusal ends only this one name's attempt.
-rm_one() (
+# rm_plan <name> -- a subshell, mutating nothing: "<target> workspace" (an environment or its record is here), "<target> record" (only a creation record); exit 1 when there is nothing, exit 2 having said why when there is no record here and the machine did not answer.
+rm_plan() (
     set -euo pipefail
-    local NAME="$1" TARGET ws clog n rc left _t _d _live _pid
-
+    local NAME="$1" TARGET _t _d
     TARGET="$(ws_target "$NAME")"
     load_target "$TARGET"
+    if [ -d "$(wk_ws_dir "$NAME")" ]; then printf '%s workspace\n' "$TARGET"; exit 0; fi
+    t_answers || { err "'$NAME' has no record here, and $TARGET did not answer: $WK_FAR_WHY
+    Nothing this end can see is there to destroy; re-run once $TARGET answers."; exit 2; }
+    if [ "$(t_info "$NAME")" != absent ]; then printf '%s workspace\n' "$TARGET"; exit 0; fi
+    # ws_target guesses once nothing answers for the name, so ask each target's store.
+    _d=$(ws_create_task "$NAME")
+    if [ -z "$_d" ]; then
+        for _t in $(target_all 2>/dev/null); do
+            [ "$_t" = "$TARGET" ] && continue
+            load_target "$_t"
+            _d=$(ws_create_task "$NAME")
+            [ -n "$_d" ] || continue
+            TARGET="$_t"; break
+        done
+    fi
+    [ -n "$_d" ] || exit 1
+    printf '%s record\n' "$TARGET"
+)
 
-    if [ "$WK_TARGET_KIND" = local ]; then t_destroy "$NAME"; fi
+# rm_one <name> <target> <what> -- a subshell, so a refusal ends only this one name's attempt.
+rm_one() (
+    set -euo pipefail
+    local NAME="$1" TARGET="$2" WHAT="$3" ws clog n rc left _live
 
+    load_target "$TARGET"
     ws=$(wk_ws_dir "$NAME")
     clog=$(ws_create_log "$NAME")
 
-    # A job left writing into a destroyed workspace compiles into nothing, so this refuses rather than racing it. A name with no environment left has nothing to hold, and skips to forgetting its records.
-    if [ -d "$ws" ] || [ "$(t_info "$NAME")" != absent ]; then
-        _live=$(ws_task_live_lines "$NAME")
-        [ -z "$_live" ] || die "'$NAME' has work running in it, and destroying it under a running job
+    if [ "$WHAT" = record ]; then
+        hold_lock "ws-$NAME"
+        ws_task_records_remove "$NAME"
+        rm -f "$clog"
+        ssh_alias_remove "$NAME"
+        info "'$NAME' had nothing left but its record; forgotten"
+        exit 0
+    fi
+
+    if [ "$WK_TARGET_KIND" = local ]; then t_destroy "$NAME"; fi
+
+    # A job left writing into a destroyed workspace compiles into nothing, so this refuses rather than racing it.
+    _live=$(ws_task_live_lines "$NAME")
+    [ -z "$_live" ] || die "'$NAME' has work running in it, and destroying it under a running job
     leaves that job compiling into a directory that is gone:
 $_live"
-    fi
 
     hold_lock "ws-$NAME"
     if t_needs_base; then hold_lock store -s; fi
-
-    if [ ! -d "$ws" ] && [ "$(t_info "$NAME")" = absent ]; then
-        # ws_target guesses once nothing answers for the name, so ask each target's store.
-        _d=$(ws_create_task "$NAME")
-        if [ -z "$_d" ]; then
-            for _t in $(target_all 2>/dev/null); do
-                [ "$_t" = "$TARGET" ] && continue
-                load_target "$_t"
-                _d=$(ws_create_task "$NAME")
-                [ -n "$_d" ] || continue
-                TARGET="$_t"; clog=$(ws_create_log "$NAME")
-                break
-            done
-        fi
-        if [ -n "$_d" ]; then
-            ws_task_records_remove "$NAME"
-            rm -f "$clog"
-            ssh_alias_remove "$NAME"
-            info "'$NAME' had nothing left but its record; forgotten"
-            exit 0
-        fi
-        die "no such workspace: $NAME"
-    fi
-
 
     if [ -d "$ws/changes" ]; then
         n=$(find "$ws/changes" -type f 2>/dev/null | wc -l | tr -d ' ')
         if [ "$n" -gt 0 ]; then warn "$NAME has $n modified file(s) in its overlay"; fi
     fi
-
-    confirm "destroy workspace '$NAME' and all its changes?" || die "aborted"
 
     # t_destroy kills claude remote-control with a container or guest, not with a checkout.
     [ "$WK_TARGET_KIND" != remote ] || rc_stop "$NAME"
@@ -151,9 +149,26 @@ $_live"
 )
 
 worst=0
+FOUND=(); TARGETS=(); WHATS=(); _list=""
 for _n in "${NAMES[@]}"; do
+    rc=0; _p=$(rm_plan "$_n") || rc=$?
+    case "$rc" in
+        0) # shellcheck disable=SC2086 -- "<target> <what>" is two words by construction.
+           set -- $_p
+           FOUND+=("$_n"); TARGETS+=("$1"); WHATS+=("$2"); _list="$_list '$_n'" ;;
+        1) err "no such workspace: $_n"; worst=1 ;;
+        *) worst=1 ;;
+    esac
+done
+[ "${#FOUND[@]}" -gt 0 ] || exit "$worst"
+
+confirm "destroy workspace(s)${_list} and all their changes?" || die "aborted"
+
+_i=0
+for _n in "${FOUND[@]}"; do
     rc=0
-    rm_one "$_n" || rc=$?
+    rm_one "$_n" "${TARGETS[$_i]}" "${WHATS[$_i]}" || rc=$?
     [ "$rc" -gt "$worst" ] && worst=$rc
+    _i=$((_i + 1))
 done
 exit "$worst"

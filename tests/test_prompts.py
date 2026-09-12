@@ -93,7 +93,7 @@ def _raw_read_sites():
 
 
 # --- the audit's findings, as of this writing ---------------------------------
-# Every confirm() call site in the tree (24), classified by (file, exact
+# Every confirm() call site in the tree (23), classified by (file, exact
 # call text) -- see the module docstring for why not by line number. A site
 # landing in neither set below is new and unclassified -- the test that
 # compares this union against a fresh grep is what catches that.
@@ -108,7 +108,6 @@ DESTRUCTIVE_SITES = {
     ("cmd/ab", 'confirm "run these ${n} command(s), replacing those slots?" || die "not run"'),
     ("cmd/pi", 'confirm "write this configuration to $HOST\'s EEPROM?" || die "not written"'),
     ("cmd/rm", 'confirm "destroy workspace(s)${_list} and all their changes?" || die "aborted"'),
-    ("cmd/rm", 'confirm "destroy workspace \'$NAME\' and all its changes?" || die "aborted"'),
     ("cmd/skills", 'confirm "overwrite them with the shared copy?" || die "aborted; commit or stash first"'),
     ("cmd/skills", 'confirm "no git repo at $WK_ROOT -- pull cannot be undone; continue?" || die "aborted"'),
     ("cmd/skills", 'confirm "overwrite the shared skills with the repo copy?" || die "aborted"'),

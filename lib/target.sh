@@ -146,6 +146,7 @@ t_has_wk()    { return 1; }         # is there a far side that can answer?
 
 t_delegates() { return 1; }         # must a command about a workspace here run there?
 t_far_side()  { echo none; }        # answering | unreachable | stopped | no-wk | none (not a machine of its own)
+t_answers()   { WK_FAR_WHY=""; return 0; }   # 0 when the machine behind this target answers; else 1, with why in WK_FAR_WHY. By exit status in the caller's shell, so the driver's one probe is memoised for every question after it
 t_wk()        { return 1; }         # t_wk <args...>, its exit status is the answer
 t_wk_tty()    { t_wk "$@"; }        # t_wk with a terminal, for far-side commands that prompt a human
 
@@ -164,19 +165,16 @@ ws_on_target() { # <target> <name>
       ws_creating_now "$2" )
 }
 
-machine_silent() { # <target> -- 0 when the machine itself never answered
-    ( load_target "$1" >/dev/null 2>&1; [ "$(t_far_side)" = unreachable ] )
-}
-
-_ws_ask() { # <target> <name> -- here | absent | silent, on fd 3
-    if ws_on_target "$1" "$2"; then printf 'here\n'   >&3
-    elif machine_silent "$1"; then  printf 'silent\n' >&3
-    else                            printf 'absent\n' >&3
-    fi
+_ws_ask() { # <target> <name> -- here | absent | silent<TAB>why, on fd 3; its own process (par_run), so the target is loaded and probed once here
+    command -v wk_ws_dir >/dev/null 2>&1 || . "$WK_ROOT/lib/store.sh"
+    load_target "$1" >/dev/null 2>&1 || { printf 'absent\n' >&3; return 0; }
+    if [ -d "$(wk_ws_dir "$2")" ]; then printf 'here\n' >&3; return 0; fi
+    t_answers || { printf 'silent\t%s\n' "$WK_FAR_WHY" >&3; return 0; }
+    if ws_on_target "$1" "$2"; then printf 'here\n' >&3; else printf 'absent\n' >&3; fi
 }
 
 ws_locate() { # <name> -- every target that answers for it, one per line
-    local name="$1" t hits="" machines="" silent=""
+    local name="$1" t hits="" machines="" rec
     for t in $(target_here); do
         ws_on_target "$t" "$name" && hits="$hits $t"
     done
@@ -191,16 +189,14 @@ ws_locate() { # <name> -- every target that answers for it, one per line
     for t in $machines; do par_run "$t" _ws_ask "$t" "$name"; done
     par_wait
     for t in $machines; do
-        case "$(par_record "$t" | sed -n 1p)" in
+        rec=$(par_record "$t" | sed -n 1p)
+        case "$rec" in
             here)   hits="$hits $t" ;;
             absent) ;;
-            *)      silent="$silent $t" ;;
+            *)      warn "could not ask $t over ssh: ${rec#silent*	} -- what is there is not in this answer" ;;
         esac
     done
     par_end
-
-    [ -z "$silent" ] || warn "could not ask$silent over ssh ($(wk_ssh_timeout)s) --
-    off, or not on the tailnet; what is there is not in this answer"
 
     # shellcheck disable=SC2086 -- deliberate word splitting of the collected hits.
     [ -z "$hits" ] || printf '%s\n' $hits
@@ -414,18 +410,21 @@ for_each_machine() { # <fn> <args...> -- worst exit status wins
     return "$worst"
 }
 
-far_side_reason() { # <target> -- why its far side is not answering, for a person
-    case "$(t_far_side)" in
-        unreachable) echo "unreachable over ssh ($(wk_ssh_timeout)s) -- off, or not on the tailnet" ;;
+far_side_reason() { # <target> <far side> -- why it is not answering, for a person; `unreachable` reads the WK_FAR_WHY of a t_answers in this shell
+    case "$2" in
+        unreachable) echo "unreachable over ssh${WK_FAR_WHY:+: $WK_FAR_WHY}" ;;
         stopped)     echo "the podman machine '${WK_MACHINE:-wk}' is stopped -- 'wk start' brings it up" ;;
         no-wk)       echo "no wk-tools there yet -- 'wk remote setup $1'" ;;
         *)           echo "not a machine of its own" ;;
     esac
 }
 
-machine_answers() {
-    [ "$(t_far_side)" != answering ] || return 0
-    printf '%-22s %s\n' "$1" "$(far_side_reason "$1")"
+machine_answers() { # <target> -- one probe: t_answers here, then the memoised word
+    local side
+    t_answers || side=unreachable
+    [ -n "${side:-}" ] || side=$(t_far_side)
+    [ "$side" != answering ] || return 0
+    printf '%-22s %s\n' "$1" "$(far_side_reason "$1" "$side")"
     return 1
 }
 
@@ -503,7 +502,7 @@ _target_reset_vars() {
     WK_TARGET_LIBCXX=""
     unset _WK_REMOTE_PROBED _WK_REMOTE_HOME _WK_REMOTE_CORES \
           _WK_REMOTE_LOAD _WK_REMOTE_MEM _WK_REMOTE_IONICE _WK_REMOTE_OS \
-          _WK_REMOTE_REF_PROBED _WK_REMOTE_DOWN \
+          _WK_REMOTE_REF_PROBED _WK_REMOTE_DOWN _WK_REMOTE_WHY \
           _WK_PEER_LISTED _WK_PEER_ROWS \
           _WK_PEER_ROUTE_NAME _WK_PEER_ROUTE_USER _WK_PEER_ROUTE_SRC _WK_PEER_ROUTE_PROXY
 }

@@ -1015,13 +1015,16 @@ report_target() { # <target> [name]
         bump "$rc"
         return 0
     fi
-    if [ "$(t_far_side)" = stopped ]; then
+    local side   # a machine that did not answer is a line saying so, never "(no workspaces on it)"
+    if ! t_answers; then side=unreachable; bump 4; else side=$(t_far_side); fi
+    case "$side" in
+    unreachable|stopped)
         rec_start raw
         rec_set machine "$_group_machine"
-        rec_set text    "$t: $(far_side_reason "$t")"
+        rec_set text    "$t: $(far_side_reason "$t" "$side")"
         rec_emit
-        return 0
-    fi
+        return 0 ;;
+    esac
 
     if [ -n "${2:-}" ]; then
         report "$2"
