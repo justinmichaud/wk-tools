@@ -157,6 +157,7 @@ done\n' "$(sh_quote '^url\..*\.(push)?insteadof$')"
         done
         printf 'git config remote.%s.tagOpt --no-tags\n' "$name"
     done
+    printf 'git config fetch.writeCommitGraph false\ngit config gc.writeCommitGraph false\n'   # git-webkit setup fetches every remote in parallel, and two fetches writing the commit graph collide on its lock and fail the setup
 }
 
 # --defaults asks nothing, given GITHUB_COM_USERNAME/GITHUB_COM_TOKEN in the environment (webkitcorepy reads those before any keyring and raises rather than prompting), so this runs where the injector puts them; `webkitscmpy.setup` is the record it writes of having run.
@@ -493,6 +494,11 @@ push_agent_pat_sync() { # <execfn> <path>
     else
         push_agent_pat_clear "$1" "$2"
     fi
+}
+
+push_agent_pat_converge_machine() { # on every start of the podman machine, as `wk vm start` does for the guests': a token stored while it was down is otherwise a 401 from every container until './setup'
+    push_agent_pat_sync push_agent_exec "$(push_agent_machine_read_pat)" \
+        || warn "the injector in the podman machine did not take the read token; './setup' converges it"
 }
 
 # Every injector this machine runs, in one call: the one in the podman machine that serves the containers, and on a macOS host the one here that serves the guests (targets/vm.sh). A token delivered to one of the two is a 401 from the other, so `wk key set github-pat` and any other convergence point calls this rather than picking a half.

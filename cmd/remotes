@@ -118,7 +118,7 @@ one() {
     esac
     check_one "$ws" || rc=$?
     [ -n "$FIX" ] || return "$rc"
-    [ "$rc" -eq 0 ] || { rc=0; fix_one "$ws" || rc=$?; }
+    rc=0; fix_one "$ws" || rc=$?   # re-asserted even when the check passes: the wiring carries config the check does not read
     fix_gitwebkit "$ws" || rc=$?
     return "$rc"
 }

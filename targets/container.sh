@@ -447,6 +447,7 @@ t_start() {
             podman machine start "${WK_MACHINE:-wk}" >/dev/null
         fi
     fi
+    push_agent_pat_converge_machine
     c=$(_ctr "$name")
     _hpodman container exists "$c" 2>/dev/null \
         || die "no container for '$name' -- 'wk status $name' says what is left"

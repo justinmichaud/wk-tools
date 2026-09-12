@@ -43,6 +43,7 @@ if is_macos && [ -z "${WK_IN_VM:-}" ]; then
         unchanged "machine already running"
     fi
 fi
+push_agent_pat_converge_machine
 
 stopped=$(_in_machine 'podman ps -a --filter "name=^wk-" --filter "status=exited" --filter "status=created" --format "{{.Names}}"' || true)
 if [ -n "$stopped" ]; then

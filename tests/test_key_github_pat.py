@@ -417,3 +417,17 @@ class TestATokenGitHubRefusesIsReplaced(_PatRun):
         i = body.index("share_to() {")
         j = body.index("\n}\n", i)
         self.assertIn("cred_stale github-pat", body[i:j])
+
+
+class TestTheMachineTakesTheTokenOnEveryStart(unittest.TestCase):
+    """A token that arrives while the podman machine is down cannot be
+    delivered into it; both paths that bring the machine up converge the
+    injector's copy through the one function, as `wk vm start` does for the
+    guests' (targets/vm.sh)."""
+
+    def test_both_start_paths_converge_through_the_one_function(self):
+        for path in ("cmd/start", "targets/container.sh"):
+            with self.subTest(path=path):
+                self.assertIn("push_agent_pat_converge_machine", (REPO / path).read_text())
+        body = (REPO / "lib" / "store.sh").read_text()
+        self.assertEqual(1, body.count("push_agent_pat_converge_machine() {"))

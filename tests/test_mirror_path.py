@@ -214,6 +214,22 @@ class TestOneMirrorLayoutEverywhere(MirrorFixture):
         self.assertEqual(
             self._git("config", "gc.auto", cwd=self.mirror).stdout.strip(), "0")
 
+    def test_a_wired_checkout_writes_no_commit_graph_on_fetch(self):
+        """git-webkit setup fetches every remote in parallel, and two fetches
+        writing the commit graph at once collide on its lock, which failed
+        the setup in every fresh container (measured 2026-09-12)."""
+        ws = self.tmp / "ws-graph"
+        self._git("clone", "-q", "--shared", "--branch", "main",
+                  str(self.mirror), "ws-graph", cwd=self.tmp)
+        cp = bash('set -euo pipefail\n. "$WK_ROOT/lib/common.sh"\n'
+                  '. "$WK_ROOT/lib/store.sh"\n' + self.remotes
+                  + f'cd {str(ws)!r}\n'
+                  + f'sh -c "$(wk_fetch_config {str(self.mirror)!r})"\n')
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        for key in ("fetch.writeCommitGraph", "gc.writeCommitGraph"):
+            with self.subTest(key=key):
+                self.assertEqual(self._git("config", key, cwd=ws).stdout.strip(), "false")
+
     def test_a_workspace_fetch_against_it_takes_the_mirror_arm(self):
         """The pair under test: a checkout made the way a guest's and a build
         box's are (`--shared` off the mirror) and wired by wk_fetch_config
