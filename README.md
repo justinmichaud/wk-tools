@@ -1104,14 +1104,17 @@ carrying `delete_repo` or an `admin:` scope is refused outright, and a plain
 `repo` classic token is stored with its reach named, because it is the token a
 person most likely already has working elsewhere and refusing it would refuse
 the credential that works. GitHub answers nothing about a fine-grained token's
-*permission* set -- there is no endpoint that enumerates one -- but it does
-answer for its *reach*: `GET /user/repos` answers for the token rather than the
-account, so the rule pages through it and compares what comes back with
-`wk_push_forks`. A token that reaches one repository more than the two forks is
-refused with the count, because the token's form takes no repository parameter
-and so arrives on *All repositories* unless the person changes that field --
-which is one account's whole reach sitting behind a workspace boundary. A fork
-the token does not reach is refused by name.
+*permission* set -- there is no endpoint that enumerates one -- and
+`GET /user/repos` answers for the account, not the token: every public
+repository the account owns or collaborates on is listed with the account's
+`push: true`, whatever the token was granted. So the rule pages through that
+list as the set of candidates and asks each one the same `POST
+/repos/<r>/pulls` question it asked the forks; 422 anywhere beyond
+`wk_push_forks` is a repository the token reaches. A token that reaches one
+repository more than the two forks is refused with the count, because the
+token's form takes no repository parameter and so arrives on *All
+repositories* unless the person changes that field -- which is one account's
+whole reach sitting behind a workspace boundary.
 
 A refusal names the credential, what it can do, what it must do and the exact
 page to reissue it at, and it stores nothing. A machine that cannot reach
@@ -1134,6 +1137,21 @@ and with nothing to store it reports what the stored one can do instead.
 `--replace` is how a credential is rotated, and it is the only arm that removes
 one. The deploy keys are generated here rather than pasted, so they have a verb
 of their own: `wk key deploy`.
+
+**One deploy key per fork, the same on every workstation.** `wk key deploy`
+mints the key, registers it once on GitHub under a single title, and fans the
+private halves out over the tailnet to every other workstation -- a peer with a
+`wk` of its own -- so the whole fleet holds one key, not one per machine. `wk
+key share` does the fan-out alone, which is what a fresh workstation runs to
+catch up (it takes each key with `wk key adopt`, the value on stdin, never an
+argument). `wk key deploy --rotate` turns the fleet over from one command:
+it removes the old key from GitHub, mints a fresh one, and fans that out. The
+GitHub API token rides the same fan-out, so `wk key set github-pat` on one
+workstation and `wk key share` puts it everywhere. A shared build machine is
+not a workstation and holds no key at all -- it reaches the deploy key through
+an ssh-agent forwarded from whoever drives a push, so nothing private rests on
+a machine other people are root on (`remote/provision.sh` writes an ssh config
+with no `IdentityFile`).
 
 Every prompt is built from the credential's own row in `lib/credcheck.py`, and
 it is three lines and the prompt: what to paste, the page that mints one with

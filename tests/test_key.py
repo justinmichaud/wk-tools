@@ -9,6 +9,7 @@ has to be running.
 Run: python3 -m unittest tests.test_key -v
 """
 
+import json
 import os
 import subprocess
 import unittest
@@ -374,11 +375,25 @@ class TestTheTopicIsMintedNotAsked(_KeyRun):
         self.assertIn("wk key set ntfy", cp.stdout + cp.stderr)
         self.assertFalse(self.topic_path(secrets).exists())
 
-    def test_paste_is_refused_for_a_credential_wk_does_not_mint(self):
+    def test_paste_carries_a_handed_credential_too(self):
+        """--paste takes any credential's value on stdin so a second workstation
+        can hold the same one as the first -- how `wk key share` fans the API
+        token out. A malformed one is still put to the rule and refused."""
         cp, _secrets = self.key("set", "github-pat", "--paste",
-                                input="ghp_notarealtoken\n")
+                                input="not-a-token\n")
         self.assertNotEqual(0, cp.returncode, cp.stdout)
-        self.assertIn("--paste is for a credential wk mints itself",
+        self.assertNotIn("--paste is for a credential wk mints itself",
+                         cp.stdout + cp.stderr)
+        self.assertIn("does not start like a GitHub personal access token",
+                      cp.stdout + cp.stderr)
+
+    def test_paste_cannot_carry_a_claude_login(self):
+        """The one credential --paste refuses: a claude.ai login is a browser
+        flow, not a value."""
+        cp, _secrets = self.key("set", "claude-login", "--paste",
+                                input='{"claudeAiOauth":{}}\n')
+        self.assertNotEqual(0, cp.returncode, cp.stdout)
+        self.assertIn("--paste cannot carry a claude.ai login",
                       cp.stdout + cp.stderr)
 
     def test_an_unknown_flag_is_refused(self):
@@ -460,6 +475,10 @@ class TestSetupSaysOneLinePerCredential(_KeyRun):
         (secrets / "litellm-key").write_text("sk-notarealvirtualkey\n")
         (store / "agent-rw").mkdir(exist_ok=True)
         (store / "agent-rw" / ".credentials.json").write_text(login())
+        # The account record `claude auth login` writes beside the credential, in the CLI's config home (cmd/key points CLAUDE_CONFIG_DIR there); the rule reads its organization, which remote control needs.
+        (store / "agent-rw" / ".claude.json").write_text(json.dumps(
+            {"oauthAccount": {"organizationUuid": "org-1",
+                              "organizationName": "Example Org"}}))
         (store / "notify").mkdir(exist_ok=True)
         (store / "notify" / "ntfy-topic").write_text("a-topic-minted-here\n")
         (self.tmp / "tailscale-authkey").write_text("tskey-auth-k1-abc\n")

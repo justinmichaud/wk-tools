@@ -339,8 +339,9 @@ fi
 '
 }
 
-# One deploy key per repository, both forks on github.com: only an alias per
-# fork makes ssh offer the right one.
+# One deploy key per repository, both on github.com: only an alias per fork makes
+# ssh offer the right one. An empty <dir> is the agent-forward form -- no
+# IdentityFile, so ssh offers whatever a forwarded agent holds and a build machine keeps no key.
 wk_ssh_alias_blocks() { # <dir> <prefix> <suffix> <agent-sock> [<ProxyCommand>]
     local dir="$1" prefix="${2:-build_key_}" suffix="${3:-}" agent="${4:-}" proxy="${5:-}"
     wk_push_forks | while read -r remote repo alias; do
@@ -350,10 +351,11 @@ wk_ssh_alias_blocks() { # <dir> <prefix> <suffix> <agent-sock> [<ProxyCommand>]
 Host $alias
     HostName github.com
     User git
-    IdentityFile $dir/$prefix$remote$suffix
-    IdentitiesOnly yes
     StrictHostKeyChecking accept-new
 EOF
+        if [ -n "$dir" ]; then
+            printf '    IdentityFile %s\n    IdentitiesOnly yes\n' "$dir/$prefix$remote$suffix"
+        fi
         [ -z "$agent" ] || printf '    IdentityAgent %s\n' "$agent"
         [ -z "$proxy" ] || printf '    ProxyCommand %s\n' "$proxy"
     done
@@ -378,6 +380,24 @@ wk_ntfy_topic_path() { printf '%s/notify/ntfy-topic' "$(dirname "$(wk_secrets_di
 
 wk_push_key() { # <fork> -- read only by push_agent_load, into `ssh-add -`
     _wk_secret_read "$(wk_push_held_dir)/build_key_$1"
+}
+
+# The shared deploy key arrives from another workstation over the tailnet (cmd/key share). Written here, the public half re-derived from it so the two never disagree, and the container view republished so every workspace picks the new key up.
+wk_push_key_adopt() { # <fork> -- private half on stdin
+    local fork="$1" priv pub key
+    priv="$(wk_push_held_dir)/build_key_$fork"
+    pub="$(wk_secrets_dir)/build_key_$fork.pub"
+    ensure_dir "$(wk_push_held_dir)" 0700
+    ensure_dir "$(wk_secrets_dir)" 0700
+    key="$(cat)"
+    printf '%s\n' "$key" | (umask 077 && cat > "$priv.new") || return 1
+    chmod 0600 "$priv.new"
+    ssh-keygen -y -f "$priv.new" > "$pub.new" 2>/dev/null \
+        || { rm -f "$priv.new" "$pub.new"; return 1; }
+    chmod 0644 "$pub.new"
+    mv "$priv.new" "$priv"
+    mv "$pub.new" "$pub"
+    secrets_publish_view container
 }
 
 # lib/secretfile.py holds the rule "this is a file, and it is ours": agent-rw is
@@ -1082,9 +1102,13 @@ wk_cred_store() { # <name> -- from stdin: an argument is visible in `ps`
     secrets_publish_view container
 }
 
-wk_cred_clear() { # <name> -- this machine holds it no longer
-    local p; p=$(wk_cred_path "$1") || return 1
+wk_cred_clear() { # <name> -- this machine holds it no longer; a file row's login takes its config home (record, lock, backups) with it
+    local p d; p=$(wk_cred_path "$1") || return 1
     rm -f "$p"
+    if [ "$(wk_agent_secret_kind "$1")" = file ]; then
+        d=$(dirname "$p")
+        rm -rf "$d/.claude.json" "$d/.claude.json.lock" "$d/backups"
+    fi
     secrets_publish_view container
 }
 

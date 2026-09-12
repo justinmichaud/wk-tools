@@ -214,11 +214,26 @@ class TestTheStartUpDialogsAreAnsweredBeforeAnythingStarts(WkTest):
 
     AI = (REPO / "cmd" / "ai").read_text()
     SCRIPT = REPO / "claude" / "workspace-config.py"
+    ACCOUNT = {"organizationUuid": "org-1", "emailAddress": "someone@example.invalid"}
 
-    def _record(self, home, checkout="/src/WebKit"):
+    def _record(self, home, checkout="/src/WebKit", shared=None):
+        env = dict(os.environ, HOME=str(home))
+        env.pop("CLAUDE_SECURESTORAGE_CONFIG_DIR", None)
+        if shared is not None:
+            env["CLAUDE_SECURESTORAGE_CONFIG_DIR"] = str(shared)
         return subprocess.run(["python3", str(self.SCRIPT), checkout],
-                              env=dict(os.environ, HOME=str(home)),
-                              capture_output=True, text=True, timeout=60)
+                              env=env, capture_output=True, text=True, timeout=60)
+
+    def _shared(self, name, credential=True, account=ACCOUNT):
+        """The directory a container mounts read-write: the credential, and
+        the CLI's config file beside it carrying the account record."""
+        d = self.tmp / name
+        d.mkdir()
+        if credential:
+            (d / ".credentials.json").write_text('{"claudeAiOauth": {}}')
+        if account is not None:
+            (d / ".claude.json").write_text(json.dumps({"oauthAccount": account}))
+        return d
 
     def test_it_records_the_three_answers(self):
         home = self.tmp / "ws-home"
@@ -251,6 +266,55 @@ class TestTheStartUpDialogsAreAnsweredBeforeAnythingStarts(WkTest):
         self.assertEqual(0, cp.returncode, cp.stdout + cp.stderr)
         self.assertEqual("", cp.stdout.strip())
         self.assertEqual(first, (home / ".claude.json").read_text())
+
+    def test_the_account_record_is_copied_in_from_beside_the_credential(self):
+        """Measured 2026-09-11 against 2.1.269: remote control reads
+        organizationUuid from the workspace's own config and exits with
+        "Unable to determine your organization" without it. The login is
+        shared, so its record is delivered the same way, before any session."""
+        home = self.tmp / "ws-home-account"
+        home.mkdir()
+        cp = self._record(home, shared=self._shared("agent-rw"))
+        self.assertEqual(0, cp.returncode, cp.stdout + cp.stderr)
+        self.assertIn("account record", cp.stdout)
+        doc = json.loads((home / ".claude.json").read_text())
+        self.assertEqual("org-1", doc["oauthAccount"]["organizationUuid"])
+
+    def test_a_rotated_login_converges_on_the_next_start(self):
+        home = self.tmp / "ws-home-rotated"
+        home.mkdir()
+        self._record(home, shared=self._shared("agent-rw-old"))
+        new = self._shared("agent-rw-new", account={"organizationUuid": "org-2"})
+        self._record(home, shared=new)
+        doc = json.loads((home / ".claude.json").read_text())
+        self.assertEqual("org-2", doc["oauthAccount"]["organizationUuid"])
+
+    def test_a_credential_with_no_record_beside_it_is_refused_with_the_remedy(self):
+        """Rather than a server that starts and dies three lines deep in a log:
+        the remedy is the host's, and it is named."""
+        home = self.tmp / "ws-home-norecord"
+        home.mkdir()
+        for account in (None, {"emailAddress": "x"}):
+            with self.subTest(account=account):
+                shared = self._shared("agent-rw-%s" % (account is None), account=account)
+                cp = self._record(home, shared=shared)
+                self.assertEqual(1, cp.returncode, cp.stdout + cp.stderr)
+                self.assertIn("no account record", cp.stderr)
+                self.assertIn("wk key set claude-login --replace", cp.stderr)
+        self.assertFalse((home / ".claude.json").exists())
+
+    def test_a_guest_that_logged_in_for_itself_keeps_its_own_record(self):
+        """A macOS guest is handed no shared login: its directory holds no
+        credential and no record, and its own ~/.claude.json has both."""
+        home = self.tmp / "ws-home-guest"
+        home.mkdir()
+        (home / ".claude.json").write_text(json.dumps(
+            {"oauthAccount": {"organizationUuid": "org-guest"}}))
+        empty = self._shared("claude-login", credential=False, account=None)
+        cp = self._record(home, shared=empty)
+        self.assertEqual(0, cp.returncode, cp.stdout + cp.stderr)
+        doc = json.loads((home / ".claude.json").read_text())
+        self.assertEqual("org-guest", doc["oauthAccount"]["organizationUuid"])
 
     def test_a_file_it_cannot_read_is_left_alone(self):
         """It holds the CLI's live state, including the account: overwriting

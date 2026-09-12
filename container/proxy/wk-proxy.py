@@ -6,6 +6,7 @@ import asyncio
 import ipaddress
 import os
 import socket
+import ssl
 import sys
 import time
 
@@ -134,6 +135,24 @@ def normalize_host(host):
     return host.lower().rstrip(".")
 
 
+# Verified against the system trust; the proxy presents no certificate of its own (only the github injector terminates a client's TLS), so nothing here forges one.
+UPSTREAM_TLS = ssl.create_default_context()
+
+
+def parse_absolute_target(target):
+    """An absolute-form target (proxy form) as (host, port, tls, path). A client that sends `GET https://host/...` rather than `CONNECT host:443` -- axios behind a proxy, which is how the Claude CLI fetches its org policy -- wants the proxy to originate TLS; dropping the scheme sent that request in the clear to :80, a 400 from an https-only API (measured 2026-09-11)."""
+    scheme, _, rest = target.partition("://")
+    hostport, slash, tail = rest.partition("/")
+    path = "/" + tail if slash else "/"
+    host, _, port_s = hostport.rpartition(":")
+    tls = scheme.lower() == "https"
+    if not host:
+        host, port = hostport, (443 if tls else 80)
+    else:
+        port = int(port_s)
+    return host, port, tls, path
+
+
 class Policy:
     def __init__(self, store):
         self.store = store
@@ -213,7 +232,7 @@ class Proxy:
             self._denials = {k: v for k, v in self._denials.items()
                              if now - v <= DENY_LOG_INTERVAL}
 
-    async def open_upstream(self, host, port):
+    async def open_upstream(self, host, port, tls=False):
         if INJECTED_HOSTS.get(host) == port:
             return await asyncio.open_unix_connection(INJECT_SOCKET)
 
@@ -231,7 +250,11 @@ class Proxy:
                 continue
             try:
                 return await asyncio.wait_for(
-                    asyncio.open_connection(addr, port), CONNECT_TIMEOUT)
+                    asyncio.open_connection(
+                        addr, port,
+                        ssl=UPSTREAM_TLS if tls else None,
+                        server_hostname=host if tls else None),
+                    CONNECT_TIMEOUT)
             except (OSError, asyncio.TimeoutError) as exc:
                 last_error = exc
         raise last_error or OSError("no usable address")
@@ -277,27 +300,26 @@ class Proxy:
                 host, _, port_s = target.rpartition(":")
                 port = int(port_s or 443)
                 headers = b""
+                upstream_tls = False
                 # Drain the client's remaining header bytes, or they reach the server as the first TLS bytes.
                 while True:
                     line = await asyncio.wait_for(creader.readline(), 30)
                     if line in (b"\r\n", b"\n", b""):
                         break
-            else:                      # absolute-form plain HTTP, as apt sends
+            else:                      # absolute-form: apt sends http, axios https
                 if "://" not in target:
                     cwriter.write(b"HTTP/1.1 400 Bad Request\r\n\r\n")
                     await cwriter.drain()
                     return
-                rest = target.split("://", 1)[1]
-                hostport = rest.split("/", 1)[0]
-                path = "/" + (rest.split("/", 1)[1] if "/" in rest else "")
-                host, _, port_s = hostport.rpartition(":")
-                if not host:
-                    host, port = hostport, 80
-                else:
-                    port = int(port_s)
+                host, port, upstream_tls, path = parse_absolute_target(target)
                 headers = f"{method} {path} {parts[2]}\r\n".encode("latin-1")
 
             host = normalize_host(host)
+
+            if method != "CONNECT" and host in INJECTED_HOSTS:  # the injector terminates the client's TLS, so it is reached by a CONNECT tunnel, never a relayed plaintext request
+                cwriter.write(b"HTTP/1.1 400 Bad Request\r\n\r\n")
+                await cwriter.drain()
+                return
 
             allowed, why = self.policy.host_allowed(host, port)
             if not allowed:
@@ -309,7 +331,7 @@ class Proxy:
                 return
 
             try:
-                ureader, uwriter = await self.open_upstream(host, port)
+                ureader, uwriter = await self.open_upstream(host, port, upstream_tls)
             except Exception as exc:                      # noqa: BLE001
                 log(f"upstream {host}:{port} failed: {exc}")
                 cwriter.write(b"HTTP/1.1 502 Bad Gateway\r\n\r\n")

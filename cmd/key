@@ -2,7 +2,7 @@
 #
 # wk key setup|set|deploy|check|show|ensure -- the credentials this machine holds
 # wk: where=host name=none group=sources needs gh,gh-auth
-# wk: sub show,ensure,pub,sshtest,fingerprints,set,register,claude,tailnet,tailnet-api needs=
+# wk: sub show,ensure,pub,sshtest,fingerprints,set,register,claude,tailnet,tailnet-api,share,adopt needs=
 #
 #   wk key setup      store every credential this machine has not got yet, and
 #                     report what each one can do. The one command a new
@@ -34,11 +34,14 @@
 #                                     this machine makes starts authenticated
 #                                     with (`claude setup-token` prints one)
 #                       claude-login  the claude.ai login the containers share,
-#                                     made once here in a browser; separate
-#                                     from this machine's own login so neither
-#                                     refresh invalidates the other. The second
-#                                     of Claude's two, and what `wk ai claude
-#                                     <ws> --rc` needs
+#                                     made once here in a browser with the
+#                                     shared directory as the CLI's config home,
+#                                     so the credential and the account record
+#                                     remote control reads land beside each
+#                                     other; separate from this machine's own
+#                                     login so neither refresh invalidates the
+#                                     other. The second of Claude's two, and
+#                                     what `wk ai claude <ws> --rc` needs
 #                       litellm       the API key `wk ai pi` reaches your
 #                                     LiteLLM endpoint with
 #                       tailnet       the fleet's tailnet auth key, seeded onto
@@ -54,18 +57,33 @@
 #                                     never written to a card or held by a
 #                                     workspace
 #
-#   wk key deploy     the push keys: one deploy key per fork, on every machine
-#                     that pushes, registered on GitHub with write access
+#   wk key deploy     the push keys: one deploy key per fork, the same on every
+#                     workstation, registered on GitHub with write access, and
+#                     fanned out over the tailnet to the other workstations so
+#                     they all hold the one key. --rotate makes a fresh key,
+#                     removes the old one from GitHub, and fans the new one out
+#   wk key share      fan this machine's deploy keys and API token out to every
+#                     other workstation over the tailnet, without touching
+#                     GitHub -- what a new workstation runs to catch up
 #   wk key check      what every credential this machine holds can do and how
 #                     far it reaches, each one asked again at that moment
 #   wk key show       print the public halves
 #   wk key ensure     create missing push keys without registering them
 #
-# One key per fork, shared by every workspace: GitHub deploy keys are scoped to a
-# single repository and refuse the same key on a second one, so a compromised
-# workspace can push to the forks in wk_push_forks and nowhere else. Registration
-# goes through the GitHub API, which takes the title, key and read_only=false
-# directly.
+# One key per fork, the same on every workstation and shared by every workspace:
+# GitHub deploy keys are scoped to a single repository and refuse the same key on
+# a second one, so a compromised workspace can push to the forks in wk_push_forks
+# and nowhere else. The one key per fork is registered once, and the same private
+# half is held on every workstation -- fanned out over the tailnet by 'wk key
+# share', which 'deploy' calls after it registers. Rotating on any workstation
+# ('wk key deploy --rotate') removes the old key from GitHub, mints a new one,
+# and fans it out, so the whole fleet turns over from one command.
+#
+# A shared build machine holds no key at all: it reaches the deploy key through
+# an ssh-agent forwarded from the workstation that drives it, so nothing private
+# rests on a machine other people are root on (remote/provision.sh, targets/remote.sh).
+# Registration goes through the GitHub API, which takes the title, key and
+# read_only=false directly.
 #
 # Three more, addressed to one fork rather than every one of them, meant for
 # another machine or `wk status` to call rather than to type by hand:
@@ -108,25 +126,28 @@ USAGE="usage: wk key setup|set|deploy|check|show|ensure; see wk key -h"
 
 ensure_keys() { "$0" ensure 2>&1 | sed 's/^/  /'; }
 
-key_machines() {
+# Every workstation that holds the shared key: this one, and the peers. A shared build machine is not one -- it holds no key and reaches ours through a forwarded agent (build_boxes below).
+workstations() {
     echo local
-    for_each_machine _key_has_wk
+    for_each_machine _peer_workstation
     return 0
 }
 
-_key_has_wk() {
-    ( load_target "$1"; t_has_wk ) 2>/dev/null && echo "$1"
+# The shared build machines: a wk over there, but not a peer, so no key rests on them.
+build_boxes() {
+    for_each_machine _build_box
+    return 0
+}
+
+_build_box() {
+    ( load_target "$1"
+      [ -z "${WK_REMOTE_PEER:-}" ] && t_has_wk ) 2>/dev/null && echo "$1"
     return 0
 }
 
 m_label() {
     [ "$1" = local ] && { hostname -s; return 0; }
     printf '%s' "$1"
-}
-
-m_ensure() {
-    if [ "$1" = local ]; then ensure_keys; return 0; fi
-    ( load_target "$1"; t_wk key ensure ) 2>&1 | sed 's/^/  /'
 }
 
 # `|| true` on both: a machine with no key yet answers non-zero, and under `set -o pipefail` that would end the command.
@@ -151,14 +172,14 @@ priv_of() { # <fork>
     return 0
 }
 
-# The CLI rotates the refresh token in the file it writes, so a copy of this machine's own login is a second holder of one token and the first refresh on either side locks the other out: the shared directory logs in for itself.
+# The CLI rotates the refresh token in the file it writes, so a copy of this machine's own login is a second holder of one token and the first refresh on either side locks the other out: the shared directory logs in for itself. It is the config home for that login (CLAUDE_CONFIG_DIR), not only the credential store: the account record remote control reads (oauthAccount) goes into the config file, and pointed at the store alone the CLI wrote it into this machine's own ~/.claude.json (measured 2026-09-11).
 _claude_login_run() { # <name> -- log in where the containers read it
     have claude || die "$(cred_line "$1" skipped \
         "the Claude CLI makes this login and is not on PATH -- install it, then: wk key set $1")"
     [ -t 0 ] || die "$(cred_line "$1" skipped \
         "this login opens a browser and needs a terminal -- re-run interactively: wk key set $1")"
     ensure_dir "$(wk_agent_rw_dir)" 0700
-    CLAUDE_SECURESTORAGE_CONFIG_DIR="$(wk_agent_rw_dir)" claude auth login \
+    CLAUDE_CONFIG_DIR="$(wk_agent_rw_dir)" CLAUDE_SECURESTORAGE_CONFIG_DIR="$(wk_agent_rw_dir)" claude auth login \
         || die "$(cred_line "$1" skipped "'claude auth login' did not finish")"
 }
 
@@ -245,46 +266,115 @@ cred_report() { # <name> -- non-zero when what is stored cannot do its job
     cred_print "$1"
 }
 
-deploy_keys() {
-    local machine label title pub body
-    local failed=0
-    for machine in $(key_machines); do
-        label=$(m_label "$machine")
-        info "keys for $label"
-        m_ensure "$machine"
+SHARED_KEY_TITLE="wk shared deploy key"   # rotation finds the old key to remove by this one title
 
-        while read -r remote repo alias; do
-            [ -n "$remote" ] || continue
-            pub=$(m_pub "$machine" "$remote")
-            [ -n "$pub" ] || { warn "no key for $repo on $label"; failed=1; continue; }
+# The other workstations: a peer with a wk over there. A build machine is not one (build_boxes) -- it holds no key.
+peer_workstations() {
+    for_each_machine _peer_workstation
+    return 0
+}
 
-            # The machine's name: a deploy-key list on GitHub with three identical titles cannot be revoked selectively.
-            title="wk build key ($label)"
+_peer_workstation() {
+    ( load_target "$1"
+      [ -n "${WK_REMOTE_PEER:-}" ] && t_has_wk ) 2>/dev/null && echo "$1"
+    return 0
+}
 
-            body=$(printf '%s' "$pub" | awk '{print $1" "$2}')
-            if gh api "repos/$repo/keys" --jq '.[].key' </dev/null 2>/dev/null \
-                 | awk '{print $1" "$2}' | grep -qxF "$body"; then
-                unchanged "$repo: $label's key already registered"
-                continue
-            fi
-
-            info "registering $label's deploy key on $repo"
-            # read_only=false: a key registered read-only looks fine until the first push fails.
-            if gh api "repos/$repo/keys" \
-                 -f "title=$title" \
-                 -f "key=$pub" \
-                 -F read_only=false </dev/null >/dev/null 2>&1; then
-                changed "$repo: $label's deploy key registered with write access"
-            else
-                warn "$repo: could not register $label's key automatically"
-                log  "  add it at https://github.com/$repo/settings/keys/new, ticking 'Allow write access':"
-                printf '%s\n' "$pub"
-                failed=1
-            fi
-        done <<EOF
+share_to() { # <machine> -- each value on stdin, never an argument in `ps` over there
+    local machine="$1" remote repo alias pat
+    while read -r remote repo alias; do
+        [ -n "$remote" ] || continue
+        [ -n "$(wk_push_key "$remote")" ] || continue
+        if wk_push_key "$remote" | ( load_target "$machine"; t_wk key adopt "$remote" ) >/dev/null 2>&1; then
+            changed "$machine: shared the $repo deploy key"
+        else
+            warn "$machine: could not share the $repo deploy key"
+            return 1
+        fi
+    done <<EOF
 $(wk_push_forks)
 EOF
+    pat=$(wk_github_pat)
+    if [ -n "$pat" ]; then
+        if printf '%s\n' "$pat" | ( load_target "$machine"; t_wk key set github-pat --paste ) >/dev/null 2>&1; then
+            changed "$machine: shared the GitHub API token"
+        else
+            warn "$machine: could not share the GitHub API token"
+            return 1
+        fi
+    fi
+}
+
+share_keys() {
+    local machine failed=0
+    for machine in $(peer_workstations); do
+        info "sharing to $machine"
+        share_to "$machine" || failed=1
     done
+    return "$failed"
+}
+
+registered_key_body() { # <repo> -- the registered keys, matched on the jq-safe base64 body
+    gh api "repos/$1/keys" --jq '.[].key' </dev/null 2>/dev/null \
+        | awk '{print $1" "$2}'
+}
+
+# Remove every key registered under the shared title, so a rotation leaves no stale key with write access behind.
+revoke_shared_keys() { # <repo>
+    local id
+    for id in $(gh api "repos/$1/keys" </dev/null 2>/dev/null \
+                --jq ".[] | select(.title == \"$SHARED_KEY_TITLE\") | .id"); do
+        gh api -X DELETE "repos/$1/keys/$id" </dev/null >/dev/null 2>&1 \
+            && changed "$1: removed the old shared deploy key ($id)" \
+            || warn "$1: could not remove the old shared deploy key ($id)"
+    done
+}
+
+register_shared_keys() { # 0 unless a fork could not be registered
+    local remote repo alias pub body failed=0
+    while read -r remote repo alias; do
+        [ -n "$remote" ] || continue
+        pub=$(pub_of "$remote")
+        [ -n "$pub" ] || { warn "no key for $repo here -- 'wk key ensure' makes it"; failed=1; continue; }
+        body=$(printf '%s' "$pub" | awk '{print $1" "$2}')
+        if registered_key_body "$repo" | grep -qxF "$body"; then
+            unchanged "$repo: the shared deploy key is already registered"
+            continue
+        fi
+        info "registering the shared deploy key on $repo"
+        # read_only=false: a key registered read-only looks fine until the first push fails.
+        if gh api "repos/$repo/keys" \
+             -f "title=$SHARED_KEY_TITLE" -f "key=$pub" \
+             -F read_only=false </dev/null >/dev/null 2>&1; then
+            changed "$repo: the shared deploy key is registered with write access"
+        else
+            warn "$repo: could not register the shared key automatically"
+            log  "  add it at https://github.com/$repo/settings/keys/new, ticking 'Allow write access':"
+            printf '%s\n' "$pub"
+            failed=1
+        fi
+    done <<EOF
+$(wk_push_forks)
+EOF
+    return "$failed"
+}
+
+rotate_keys() {   # the old keys off GitHub first (one left there keeps write access), then deploy_keys makes and fans out fresh ones
+    local remote repo alias
+    while read -r remote repo alias; do
+        [ -n "$remote" ] || continue
+        revoke_shared_keys "$repo"
+        rm -f "$(wk_push_held_dir)/build_key_$remote" "$(wk_secrets_dir)/build_key_$remote.pub"
+    done <<EOF
+$(wk_push_forks)
+EOF
+}
+
+deploy_keys() {
+    local failed=0
+    ensure_keys
+    register_shared_keys || failed=1
+    share_keys || failed=1
     return "$failed"
 }
 
@@ -352,9 +442,10 @@ set)
     one and what it must be able to do."
 
     if wk_cred_mints "$_name"; then _mints=1; fi
-    [ -z "$_paste" ] || [ -n "$_mints" ] \
-        || die "--paste is for a credential wk mints itself, and $_name is one wk
-    is handed: 'wk key set $_name' asks for it."
+    # --paste takes any credential's value on stdin, so a second workstation holds the same one as the first (wk key share fans them out this way). The one it cannot carry is the claude.ai login: that is a browser flow, not a value.
+    [ -z "$_paste" ] || [ "$_name" != claude-login ] \
+        || die "--paste cannot carry a claude.ai login -- it is made in a browser:
+    wk key set claude-login"
 
     if [ -n "$_replace" ]; then
         wk_cred_present "$_name" \
@@ -366,7 +457,8 @@ set)
         info "removed the old $_name credential -- revoke it too if it is still live"
     fi
 
-    if wk_cred_present "$_name"; then
+    # A pasted value always overwrites: it is an explicit "hold this one", the fan-out's way of rotating a workstation onto the fleet's current credential. Otherwise a bare `set` of one already here just reports it.
+    if wk_cred_present "$_name" && [ -z "$_paste" ]; then
         cred_report "$_name" || exit 1
         exit 0
     fi
@@ -451,8 +543,34 @@ show)
     done
     ;;
 
-deploy)
+adopt)
+    remote="${2:-}"
+    [ -n "$remote" ] || die "usage: wk key adopt <fork>   (the private key on stdin)"
+    [ -z "${3:-}" ] || die "$USAGE"
+    wk_push_forks | awk 'NF {print $1}' | grep -qxF "$remote" \
+        || die "no fork called '$remote'; this checkout knows: $(wk_push_forks | awk 'NF{printf "%s ",$1}')"
+    wk_push_key_adopt "$remote" \
+        || die "what arrived on stdin is not a usable private key for $remote"
+    log "adopted the shared deploy key for $remote"
+    ;;
+
+share)
     [ -z "${2:-}" ] || die "$USAGE"
+    _peers=$(peer_workstations)
+    [ -n "$_peers" ] || { info "no other workstation to share with (a peer with wk over the tailnet)"; exit 0; }
+    share_keys || die "one or more workstations did not take the shared keys (above)"
+    info "every workstation now holds this machine's deploy keys and API token"
+    ;;
+
+deploy)
+    _rotate=""
+    case "${2:-}" in
+        --rotate) _rotate=1 ;;
+        "")       ;;
+        *)        die "usage: wk key deploy [--rotate]; see wk key -h" ;;
+    esac
+    [ -z "${3:-}" ] || die "$USAGE"
+    [ -z "$_rotate" ] || { info "rotating: removing the old shared keys from GitHub"; rotate_keys; }
     deploy_keys || true
     echo >&2
     "$0" check
@@ -461,9 +579,10 @@ deploy)
 check)
     [ -z "${2:-}" ] || die "$USAGE"
     rc=0
-    _machines=$(key_machines)
+    _machines=$(workstations)
     _forks=$(wk_push_forks)
     _creds=$(wk_cred_settable)
+    _boxes=$(build_boxes)
 
     wk_atexit par_cleanup
     par_begin
@@ -490,6 +609,13 @@ EOF
 $_forks
 EOF
     done
+
+    if [ -n "$_boxes" ]; then
+        printf '  build machines (no key at rest -- reached by forwarded agent):\n'
+        for machine in $_boxes; do
+            printf '    %-28s %s\n' "$machine" "holds no deploy key; 'wk push' forwards yours"
+        done
+    fi
 
     printf '  credentials:\n'
     for _cname in $_creds; do

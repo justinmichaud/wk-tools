@@ -41,18 +41,16 @@ root=$ROOT
 inputs=${WK_REMOTE_INPUTS:-}
 EOF
 
-# ~/.ssh/config is often shared over NFS between machines, so ssh is pointed at the key per checkout (`core.sshCommand`), `wk key ensure` generating it into `push-keys` (wk_push_held_dir, lib/store.sh). The private half and no agent: the key and the process that would use it are in one filesystem here, which is why `wk ai claude` refuses this target too (cmd/verify).
+# No key rests on a shared build machine: other people are root here, so the deploy key is reached through an ssh-agent forwarded from the workstation that drives a push, and this leaves nothing private on disk. The ssh config names the fork aliases with no IdentityFile, so ssh offers whatever the forwarded agent holds and nothing when none is (a build, or an agent session, forwards none -- only an explicit push does). ~/.ssh/config is often shared over NFS, so a checkout points at this file with core.sshCommand.
 ensure_dir "$ROOT/secrets" 0700
-ensure_dir "$ROOT/push-keys" 0700
 write_file "$ROOT/ssh/config" 0600 <<EOF
 # Written by remote/provision.sh. One ssh alias per fork, because GitHub takes
 # one deploy key per repository and both forks live on github.com -- so the key
-# is selected by alias, never by hostname.
-#
-# A checkout points at this file with core.sshCommand; nothing outside the wk
-# root is touched. A missing key file is simply "no identity".
-$(WK_ROOT="$TOOLS" bash -c '. "$1/lib/common.sh"; . "$1/lib/store.sh"; wk_ssh_alias_blocks "$2"' _ "$TOOLS" "$ROOT/push-keys")
+# is selected by alias, never by hostname. No IdentityFile: the key is a
+# forwarded agent's, never a file here.
+$(WK_ROOT="$TOOLS" bash -c '. "$1/lib/common.sh"; . "$1/lib/store.sh"; wk_ssh_alias_blocks ""' _ "$TOOLS")
 EOF
+rm -rf "$ROOT/push-keys" 2>/dev/null || true   # a box provisioned when it held keys at rest: take them away
 
 # An include, so the identity is declared once for every machine (dotfiles/gitconfig) and the settings that keep `git status` in a WebKit checkout fast reach a build box too, an editor over ssh asking on every keystroke. --replace-all, because git reads every include.path it finds.
 git config --global --replace-all include.path "$TOOLS/dotfiles/gitconfig"

@@ -49,18 +49,38 @@ def login(**over):
     return json.dumps({"claudeAiOauth": d})
 
 
-# `claude`, as far as cmd/key can tell: records its whole argv and the variable
-# that says where to store a login, then writes what the test put in
-# $WK_TEST_LOGIN there -- which is what the real one does at the end of a
-# browser login. An empty $WK_TEST_LOGIN writes nothing.
+ORG = "11111111-2222-3333-4444-555555555555"
+
+
+def record(**over):
+    """The account record the CLI writes into its config file at login: what
+    remote control reads the organization from."""
+    d = {"accountUuid": "a-" + ORG, "emailAddress": "someone@example.invalid",
+         "organizationUuid": ORG, "organizationName": "Example Org"}
+    d.update(over)
+    return json.dumps({"oauthAccount": d})
+
+
+# `claude`, as far as cmd/key can tell: records its whole argv, the variable
+# that says where to store a login and the one that says where its config home
+# is, then writes what the test put in $WK_TEST_LOGIN and $WK_TEST_RECORD to
+# the two files the real one writes at the end of a browser login -- the
+# credential into the store, the account record into the config file. An
+# empty one writes nothing.
 FAKE_CLAUDE = '''#!/bin/sh
 {
   printf 'argv: %s\\n' "$*"
   printf 'store: %s\\n' "$CLAUDE_SECURESTORAGE_CONFIG_DIR"
+  printf 'config: %s\\n' "$CLAUDE_CONFIG_DIR"
 } >> "$WK_TEST_CLAUDE_LOG"
 if [ -s "$WK_TEST_LOGIN" ]; then
     mkdir -p "$CLAUDE_SECURESTORAGE_CONFIG_DIR"
     cat "$WK_TEST_LOGIN" > "$CLAUDE_SECURESTORAGE_CONFIG_DIR/.credentials.json"
+fi
+if [ -s "$WK_TEST_LOGIN" ] && [ -s "$WK_TEST_RECORD" ] && [ -n "$CLAUDE_CONFIG_DIR" ]; then
+    mkdir -p "$CLAUDE_CONFIG_DIR/backups"
+    cat "$WK_TEST_RECORD" > "$CLAUDE_CONFIG_DIR/.claude.json"
+    : > "$CLAUDE_CONFIG_DIR/.claude.json.lock"
 fi
 exit ${WK_TEST_CLAUDE_EXIT:-0}
 '''
@@ -84,13 +104,21 @@ class _Login(WkTest):
         self.log.write_text("")
         self.answer = self.tmp / "what-the-login-leaves"
         self.answer.write_text("")
+        self.account = self.tmp / "what-the-login-records"
+        self.account.write_text(record())
 
     def stored(self):
         return store_path(self.store, ROW)
 
-    def leaves(self, text):
-        """What the browser login ends by writing."""
+    def recorded(self):
+        return self.agent_rw / ".claude.json"
+
+    def leaves(self, text, account=None):
+        """What the browser login ends by writing: the credential, and the
+        account record beside it unless a test takes that away."""
         self.answer.write_text(text)
+        if account is not None:
+            self.account.write_text(account)
 
     def _env(self, binp, **over):
         env = {
@@ -99,6 +127,7 @@ class _Login(WkTest):
             "WK_HOST_SECRETS": str(self.secrets),
             "WK_TEST_CLAUDE_LOG": str(self.log),
             "WK_TEST_LOGIN": str(self.answer),
+            "WK_TEST_RECORD": str(self.account),
             # A store of its own, so nothing here goes near the real one.
             "WK_STORE": str(self.store),
         }
@@ -133,6 +162,24 @@ class TestItLogsInWhereTheContainersRead(_Login):
         self.assertEqual(0, cp.returncode, cp.stdout)
         self.assertIn("argv: auth login", self.log.read_text())
         self.assertIn("store: %s" % self.agent_rw, self.log.read_text())
+
+    def test_the_shared_directory_is_the_config_home_for_that_login(self):
+        """The account record remote control reads (oauthAccount) goes into the
+        CLI's config file, not its credential store: pointed at the store alone,
+        the CLI wrote it into this machine's own ~/.claude.json and every
+        container read a login with no organization behind it."""
+        self.leaves(login())
+        cp = self.key("set", "claude-login")
+        self.assertEqual(0, cp.returncode, cp.stdout)
+        self.assertIn("config: %s" % self.agent_rw, self.log.read_text())
+        self.assertEqual(ORG, json.loads(self.recorded().read_text())
+                         ["oauthAccount"]["organizationUuid"])
+        self.assertFalse((self.home / ".claude.json").exists())
+
+    def test_the_report_names_the_organization_which_is_not_secret(self):
+        self.leaves(login())
+        cp = self.key("set", "claude-login")
+        self.assertIn("organization: Example Org", cp.stdout, cp.stdout)
 
     def test_the_login_lands_in_the_writable_directory_not_the_read_only_one(self):
         """The CLI rewrites this file when it spends the refresh token in it,
@@ -257,6 +304,23 @@ class TestItRefusesWhatCannotBeUsed(_Login):
         self.assertNotEqual(0, cp.returncode, cp.stdout)
         self.assertIn("user:profile", cp.stdout)
 
+    def test_a_login_with_no_account_record_beside_it_is_refused_by_name(self):
+        """The failure measured 2026-09-11: a credential the CLI accepts and a
+        remote-control server that exits at once with "Unable to determine your
+        organization". The record is judged where the credential is, so the
+        refusal is one line here and names the rotation that mends it."""
+        self.leaves(login(), account=" ")
+        cp = self.key("set", "claude-login")
+        self.assertNotEqual(0, cp.returncode, cp.stdout)
+        self.assertIn("account record", cp.stdout)
+        self.assertIn("wk key set claude-login --replace", cp.stdout)
+
+    def test_a_record_with_no_organization_in_it_is_the_same_refusal(self):
+        self.leaves(login(), account=json.dumps({"oauthAccount": {"emailAddress": "x"}}))
+        cp = self.key("set", "claude-login")
+        self.assertNotEqual(0, cp.returncode, cp.stdout)
+        self.assertIn("account record", cp.stdout)
+
 
 class TestReplace(_Login):
     def test_replacing_nothing_is_refused_and_names_the_remedy(self):
@@ -274,6 +338,19 @@ class TestReplace(_Login):
         cp = self.key("set", "claude-login", "--replace")
         self.assertNotEqual(0, cp.returncode, cp.stdout)
         self.assertFalse(self.stored().exists())
+
+    def test_the_record_and_the_clis_leftovers_go_with_the_old_file(self):
+        """A withdrawn login leaves no account record claiming to be current,
+        and none of the lock or backups the CLI wrote into its config home."""
+        self.leaves(login())
+        self.key("set", "claude-login")
+        self.assertTrue(self.recorded().exists())
+        self.assertTrue((self.agent_rw / "backups").is_dir())
+        self.answer.write_text("")
+        self.key("set", "claude-login", "--replace")
+        self.assertFalse(self.recorded().exists())
+        self.assertFalse((self.agent_rw / ".claude.json.lock").exists())
+        self.assertFalse((self.agent_rw / "backups").exists())
 
     def test_it_rotates_to_the_new_one(self):
         self.leaves(login())
@@ -302,7 +379,8 @@ class TestNothingElseLearnedTheShape(unittest.TestCase):
     def test_the_login_is_made_where_the_containers_read_it(self):
         """The variable and the directory are one expression, so no second
         idea of where a container's login lives can drift in."""
-        self.assertIn('CLAUDE_SECURESTORAGE_CONFIG_DIR="$(wk_agent_rw_dir)" '
+        self.assertIn('CLAUDE_CONFIG_DIR="$(wk_agent_rw_dir)" '
+                      'CLAUDE_SECURESTORAGE_CONFIG_DIR="$(wk_agent_rw_dir)" '
                       'claude auth login', self.KEY)
 
     def test_no_other_file_names_the_keychain_item(self):

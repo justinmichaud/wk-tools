@@ -39,9 +39,10 @@ CLASSIC = "ghp_notarealclassictoken0123456789"
 
 class FakeGitHub(BaseHTTPRequestHandler):
     """`GET /user` answers the token's identity, its classic scope list and its
-    expiry; `GET /user/repos` the repositories the token reaches, one page at a
-    time; `POST /repos/<r>/pulls` whether a pull request could be opened. All
-    three are what GitHub itself answers."""
+    expiry; `GET /user/repos` the account's repositories, one page at a time,
+    whatever the token was granted; `POST /repos/<r>/pulls` whether the token
+    can open a pull request there, 403 unless `pulls` says otherwise. All three
+    are what GitHub itself answers."""
 
     user_status = 200
     scopes = ""
@@ -91,7 +92,7 @@ class FakeGitHub(BaseHTTPRequestHandler):
         FakeGitHub.seen.append(("POST", self.path,
                                 self.headers.get("Authorization", "")))
         repo = self.path[len("/repos/"):-len("/pulls")]
-        code = FakeGitHub.pulls.get(repo, 422)
+        code = FakeGitHub.pulls.get(repo, 403)
         self._send(code, {"message": "Resource not accessible by personal "
                                      "access token" if code == 403 else "x"})
 
@@ -116,7 +117,7 @@ class _Rules(unittest.TestCase):
         FakeGitHub.user_status = 200
         FakeGitHub.scopes = ""
         FakeGitHub.expiry = ""
-        FakeGitHub.pulls = {}
+        FakeGitHub.pulls = dict.fromkeys(FORKS.split(), 422)
         FakeGitHub.repos = FORKS.split()
         FakeGitHub.repos_status = 200
         FakeGitHub.repos_answer = None
@@ -157,7 +158,7 @@ class TestTheTokenCanDoTheJob(_Rules):
         for repo in FORKS.split():
             self.assertIn("can open a pull request on %s" % repo, detail)
 
-    def test_the_forks_are_read_from_the_repositories_the_token_reaches(self):
+    def test_the_account_repositories_are_listed_once_per_page(self):
         """One GET per page, and the identity call before it."""
         self.check("github-pat", FINE)
         self.assertEqual(["/user", "/user/repos?per_page=100&page=1"],
@@ -182,7 +183,7 @@ class TestTheTokenCanDoTheJob(_Rules):
     def test_no_pull_request_permission_on_one_fork_is_refused_by_name(self):
         """The failure measured 2026-09-04: the token is spent, GitHub answers
         403, and `git-webkit pr` cannot open a pull request."""
-        FakeGitHub.pulls = {"wkuser/WPEWebKit": 403}
+        FakeGitHub.pulls["wkuser/WPEWebKit"] = 403
         verdict, detail = self.check("github-pat", FINE)
         self.assertEqual("bad", verdict, detail)
         self.assertIn("wkuser/WPEWebKit", detail)
@@ -191,7 +192,7 @@ class TestTheTokenCanDoTheJob(_Rules):
         self.assertIn("wk key set github-pat", detail)
 
     def test_a_fork_the_token_cannot_see_is_refused_by_name(self):
-        FakeGitHub.pulls = {"wkuser/WebKit": 404}
+        FakeGitHub.pulls["wkuser/WebKit"] = 404
         verdict, detail = self.check("github-pat", FINE)
         self.assertEqual("bad", verdict, detail)
         self.assertIn("cannot see wkuser/WebKit", detail)
@@ -237,18 +238,32 @@ class TestTheTokenReachesTheForksAndNothingElse(_Rules):
     """GitHub's fine-grained token form takes no repository parameter, so a
     token minted from the link arrives on *All repositories* unless the person
     changes that field -- and a token on all of them is the whole account's
-    reach behind one workspace boundary. There is no endpoint that enumerates a
-    token's permissions, but `GET /user/repos` answers for the token rather than
-    the account, so the reach is measured rather than assumed."""
+    reach behind one workspace boundary. No endpoint enumerates what a token
+    was granted, and `GET /user/repos` answers for the account (every public
+    repository it has, whatever the token reaches), so each listed repository
+    is asked the same write-shaped question as the forks."""
+
+    OTHERS = ["wkuser/other%d" % i for i in range(44)]
 
     def test_exactly_the_forks_is_what_ok_means(self):
+        FakeGitHub.repos = FORKS.split() + self.OTHERS
         verdict, detail = self.check("github-pat", FINE)
         self.assertEqual("ok", verdict, detail)
-        self.assertIn("exactly the 2 forks", detail)
+        self.assertIn("on the 2 forks and on none of the 44 other", detail)
+
+    def test_every_listed_repository_is_probed_not_counted(self):
+        """The measurement of 2026-09-11: a token granted exactly the two forks
+        is listed 48 repositories with the account's `push: true` on each, and
+        answers 422 on the forks alone."""
+        FakeGitHub.repos = FORKS.split() + self.OTHERS
+        self.check("github-pat", FINE)
+        self.assertEqual(["/repos/%s/pulls" % r
+                          for r in FORKS.split() + self.OTHERS],
+                         [p[1] for p in FakeGitHub.seen if p[0] == "POST"])
 
     def test_a_token_on_every_repository_is_refused_with_the_count(self):
-        FakeGitHub.repos = FORKS.split() + ["wkuser/other%d" % i
-                                            for i in range(44)]
+        FakeGitHub.repos = FORKS.split() + self.OTHERS
+        FakeGitHub.pulls.update(dict.fromkeys(self.OTHERS, 422))
         verdict, detail = self.check("github-pat", FINE)
         self.assertEqual("bad", verdict, detail)
         self.assertIn("44 repositories beyond the 2 forks", detail)
@@ -256,20 +271,15 @@ class TestTheTokenReachesTheForksAndNothingElse(_Rules):
         for repo in FORKS.split():
             self.assertIn(repo, detail)
 
-    def test_a_fork_the_token_does_not_reach_is_refused_by_name(self):
-        FakeGitHub.repos = ["wkuser/WebKit"]
-        verdict, detail = self.check("github-pat", FINE)
-        self.assertEqual("bad", verdict, detail)
-        self.assertIn("does not reach wkuser/WPEWebKit", detail)
-
     def test_the_list_is_read_to_its_last_page(self):
         """100 per page: a token on a busy account whose second page held the
-        forks would otherwise be refused for not reaching them."""
-        FakeGitHub.repos = (["wkuser/r%03d" % i for i in range(150)]
-                            + FORKS.split())
+        repositories it reaches would otherwise pass."""
+        others = ["wkuser/r%03d" % i for i in range(150)]
+        FakeGitHub.repos = FORKS.split() + others
+        FakeGitHub.pulls[others[-1]] = 422
         verdict, detail = self.check("github-pat", FINE)
         self.assertEqual("bad", verdict, detail)
-        self.assertIn("150 repositories beyond the 2 forks", detail)
+        self.assertIn("1 repositories beyond the 2 forks", detail)
         self.assertEqual(["/user/repos?per_page=100&page=1",
                           "/user/repos?per_page=100&page=2"],
                          [p[1] for p in FakeGitHub.seen
@@ -380,12 +390,41 @@ class TestTheClaudeLogin(_Rules):
         self.assertIn("subscription: team", detail)
         self.assertIn("renewable until", detail)
 
-    def test_the_eligibility_it_cannot_answer_is_said_rather_than_claimed(self):
-        """The document carries no organization -- measured against a real one
-        -- so nothing here can say remote control will accept it."""
-        _v, detail = self.check("claude-login", login())
-        self.assertIn("no organization", detail)
-        self.assertIn("--rc", detail)
+    def _stored(self, record):
+        """A login as the store holds it: the credential file, and beside it
+        the CLI's config file with (or without) the account record."""
+        d = self.tmp / "agent-rw"
+        d.mkdir(exist_ok=True)
+        (d / ".credentials.json").write_text(login())
+        if record is not None:
+            (d / ".claude.json").write_text(json.dumps(record))
+        return d / ".credentials.json"
+
+    def test_a_stored_login_is_judged_with_the_record_beside_it(self):
+        """Measured 2026-09-11: remote control reads organizationUuid from the
+        CLI's config file and refuses without it, so a stored login is judged
+        by the record `claude auth login` left beside the credential."""
+        path = self._stored({"oauthAccount": {"organizationUuid": "org-1",
+                                              "organizationName": "Example"}})
+        verdict, detail = self.check("claude-login", login(), path=path)
+        self.assertEqual("ok", verdict, detail)
+        self.assertIn("organization: Example", detail)
+
+    def test_a_stored_login_with_no_record_is_refused_and_names_the_rotation(self):
+        for record in (None, {}, {"oauthAccount": {"emailAddress": "x"}}):
+            with self.subTest(record=record):
+                path = self._stored(record)
+                verdict, detail = self.check("claude-login", login(), path=path)
+                self.assertEqual("bad", verdict, detail)
+                self.assertIn("no account record", detail)
+                self.assertIn("organizationUuid", detail)
+                self.assertIn("wk key set claude-login --replace", detail)
+
+    def test_a_login_on_stdin_alone_is_not_asked_for_a_record(self):
+        """Before anything is stored there is no directory to look beside."""
+        verdict, detail = self.check("claude-login", login())
+        self.assertEqual("ok", verdict, detail)
+        self.assertNotIn("organization:", detail)
 
     def test_a_login_without_the_profile_scope_is_refused(self):
         verdict, detail = self.check("claude-login",

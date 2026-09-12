@@ -203,6 +203,59 @@ class TestDevelopmentAllowlist(unittest.TestCase):
         self.assertIn("BLOCKED_NETS", text)
 
 
+class TestAbsoluteFormHonoursTheScheme(unittest.TestCase):
+    """A client that sends `GET https://host/...` instead of `CONNECT host:443`
+    -- axios behind a proxy, which is how the Claude CLI fetches its org policy
+    -- expects the proxy to originate TLS. Measured 2026-09-11: the proxy
+    dropped the scheme and connected to :80 in the clear, so an https-only API
+    answered 400 and `claude remote-control` reported "disabled by your
+    organization's policy" though nothing was."""
+
+    def setUp(self):
+        self.m = _load(PROXY, "wkproxy_abs")
+
+    def test_an_https_target_is_port_443_over_tls(self):
+        host, port, tls, path = self.m.parse_absolute_target(
+            "https://api.anthropic.com/api/claude_code/policy_limits")
+        self.assertEqual(("api.anthropic.com", 443, True,
+                          "/api/claude_code/policy_limits"), (host, port, tls, path))
+
+    def test_an_http_target_stays_port_80_in_the_clear(self):
+        host, port, tls, path = self.m.parse_absolute_target(
+            "http://archive.ubuntu.com/ubuntu/pool")
+        self.assertEqual(("archive.ubuntu.com", 80, False, "/ubuntu/pool"),
+                         (host, port, tls, path))
+
+    def test_an_explicit_port_is_kept_and_the_scheme_still_decides_tls(self):
+        self.assertEqual(("h", 8443, True, "/"),
+                         self.m.parse_absolute_target("https://h:8443/"))
+        self.assertEqual(("h", 8080, False, "/"),
+                         self.m.parse_absolute_target("http://h:8080/"))
+
+    def test_open_upstream_wraps_the_socket_in_tls_only_when_asked(self):
+        """The tls flag is what carries the scheme decision to the socket:
+        an https absolute-form request originates a verified TLS connection to
+        the real host, an http one does not."""
+        calls = []
+
+        async def fake_open_connection(addr, port, **kw):
+            calls.append(kw.get("ssl") is not None)
+            class W:
+                def close(self): pass
+            return None, W()
+
+        async def run(tls):
+            pol = self.m.Policy(tempfile.mkdtemp(dir="/tmp"))
+            proxy = self.m.Proxy(pol)
+            with unittest.mock.patch.object(self.m.asyncio, "open_connection",
+                                            fake_open_connection):
+                await proxy.open_upstream("api.anthropic.com", 443 if tls else 80, tls)
+
+        asyncio.run(run(True))
+        asyncio.run(run(False))
+        self.assertEqual([True, False], calls)
+
+
 class TestTheApiGoesToTheInjector(unittest.TestCase):
     """api.github.com is the one host whose TLS is not tunnelled: its CONNECT
     goes to the credential injector, which puts the real token in the
@@ -275,7 +328,7 @@ class TestTheRouteAndTheCheckReadOneSpelling(unittest.TestCase):
         proxy = m.Proxy(m.Policy(tempfile.mkdtemp(prefix="wk-test-store-")))
         seen = []
 
-        async def fake_open_upstream(host, port):
+        async def fake_open_upstream(host, port, tls=False):
             seen.append((host, port))
             return _reader(), FakeWriter()
 

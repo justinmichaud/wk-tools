@@ -184,34 +184,31 @@ def _github_pat(value, repos, path, evidence):
                       "every repository this account can write, not only the "
                       "forks.\n    %s"
                       % (", ".join(scopes) or "none", "; ".join(facts)))
+    want = [r.lower() for r in repos]
     try:
-        reached = _github_pat_reaches(token)
+        others = [r for r in _github_account_repos(token)
+                  if r.lower() not in want]
+        extra = [r for r in others if _pull_request_probe(token, r) == 422]
     except Unreachable as e:
         return UNVERIFIED, ("could not ask %s which repositories this token "
                             "reaches (%s); 'wk doctor' asks again."
                             % (GITHUB_API, e))
-    want = [r.lower() for r in repos]
-    got = [r.lower() for r in reached]
-    missing = [r for r in repos if r.lower() not in got]
-    extra = [r for r in reached if r.lower() not in want]
-    if missing:
-        return BAD, ("this token does not reach %s.\n    %s"
-                     % (", ".join(missing), "; ".join(facts)))
     if extra:
         return BAD, ("this token reaches %d repositories beyond the %d forks wk "
                      "pushes to (%s).\n    %s"
                      % (len(extra), len(repos), _some(extra),
                         "; ".join(facts)))
-    return OK, ("a fine-grained token, and GitHub lists exactly the %d forks "
-                "under it.\n    %s" % (len(repos), "; ".join(facts)))
+    return OK, ("a fine-grained token: it can open a pull request on the %d "
+                "forks and on none of the %d other repositories under this "
+                "account.\n    %s" % (len(repos), len(others), "; ".join(facts)))
 
 
 def _some(names, n=3):
     return ", ".join(sorted(names)[:n]) + (", ..." if len(names) > n else "")
 
 
-def _github_pat_reaches(token):
-    """Every repository the token reaches: GET /user/repos answers for the token rather than the account, so a fine-grained one lists what it was granted and one on 'All repositories' lists them all."""
+def _github_account_repos(token):
+    """Every repository the account owns or collaborates on that the token can read: the public ones whatever the token was granted, the private ones only when granted. It answers for the account (`permissions` is the account's), so what the token reaches is measured per repository by the probe below."""
     names, page = [], 1
     while True:
         status, _headers, body = _http(
@@ -231,12 +228,17 @@ def _github_pat_reaches(token):
         page += 1
 
 
+def _pull_request_probe(token, repo):
+    """The write-shaped probe that creates nothing: an empty body names no head or base branch, so an authorised call is 422 and an unauthorised one 403 (measured 2026-09-11: a fine-grained token answers 422 on exactly the repositories it was granted with 'Pull requests: write', 403 on every other repository the account has)."""
+    status, _headers, _body = _http("POST", "%s/repos/%s/pulls"
+                                    % (GITHUB_API, repo), token, body=b"{}",
+                                    headers=GITHUB_HEADERS)
+    return status
+
+
 def _github_pat_can_open_a_pr(token, repo):
-    """The write-shaped probe that creates nothing: an empty body names no head or base branch, so an authorised call is 422 and an unauthorised one 403."""
-    url = "%s/repos/%s/pulls" % (GITHUB_API, repo)
     try:
-        status, _headers, _body = _http("POST", url, token, body=b"{}",
-                                        headers=GITHUB_HEADERS)
+        status = _pull_request_probe(token, repo)
     except Unreachable as e:
         return UNVERIFIED, ("could not reach %s (%s) to ask whether a pull "
                             "request can be opened on %s." % (GITHUB_API, e, repo))
@@ -244,12 +246,12 @@ def _github_pat_can_open_a_pr(token, repo):
         return OK, ""
     if status == 403:
         return BAD, ("GitHub refused it: no 'Pull requests: write' on %s, so "
-                     "'git-webkit pr' in a workspace cannot open one (HTTP 403, "
-                     "the failure measured 2026-09-04)." % repo)
+                     "'git-webkit pr' in a workspace cannot open one (HTTP 403): "
+                     "the token was not granted that repository, or was granted "
+                     "it without that permission." % repo)
     if status == 404:
-        return BAD, ("this token cannot see %s at all (HTTP 404): a "
-                     "fine-grained token reaches only the repositories selected "
-                     "for it, and that fork is not one of them." % repo)
+        return BAD, ("this token cannot see %s at all (HTTP 404): no repository "
+                     "of that name is visible to it." % repo)
     if status == 401:
         return BAD, "GitHub does not accept this token (HTTP 401) for %s." % repo
     return UNVERIFIED, ("POST /repos/%s/pulls answered HTTP %d rather than 422 "
@@ -296,11 +298,37 @@ def _claude_login(value, repos, path, evidence):
     access_expiry = oauth.get("expiresAt")
     if isinstance(access_expiry, (int, float)) and access_expiry < now:
         facts.append("the access token has expired and the CLI will refresh it")
+    if path:
+        org = _login_organization(path)
+        if not org:
+            return BAD, ("no account record beside it: remote control reads "
+                         "the organization from the CLI's own config file "
+                         "(oauthAccount.organizationUuid in %s), which `claude "
+                         "auth login` writes into the directory CLAUDE_CONFIG_DIR "
+                         "names, and this login was made without pointing it "
+                         "there." % _login_record_path(path))
+        facts.append("organization: %s" % org)
     return OK, (
-        "%s.\n    Remote Control eligibility is the server's answer, not a "
-        "field in here: this document carries no organization, and the CLI "
-        "fetches one with user:profile at start-up. 'wk ai claude <ws> --rc' "
-        "surviving is the evidence." % "; ".join(facts))
+        "%s.\n    The account record beside it is what remote control reads "
+        "the organization from, delivered into each workspace's own config "
+        "before a session starts (claude/workspace-config.py)."
+        % "; ".join(facts))
+
+
+def _login_record_path(path):
+    return os.path.join(os.path.dirname(path), ".claude.json")
+
+
+# Measured 2026-09-11 in Claude Code 2.1.269: `claude remote-control` refuses with "Unable to determine your organization" unless its config file's oauthAccount carries organizationUuid; nothing fetches one at start-up.
+def _login_organization(path):
+    try:
+        with open(_login_record_path(path)) as f:
+            account = (json.load(f) or {}).get("oauthAccount") or {}
+    except (OSError, ValueError, AttributeError):
+        return ""
+    if not isinstance(account, dict) or not account.get("organizationUuid"):
+        return ""
+    return account.get("organizationName") or account["organizationUuid"]
 
 
 def _when(millis):
@@ -524,9 +552,10 @@ RULES = collections.OrderedDict((
         what="your claude.ai login credential, so a container authenticates "
              "and remote control works in it",
         url="",
-        remedy="it is `claude auth login` in a browser, run for the directory "
-               "the containers share rather than for this machine; nothing is "
-               "pasted",
+        remedy="it is `claude auth login` in a browser, run with the directory "
+               "the containers share as the CLI's config home rather than this "
+               "machine's, so the credential and the account record land beside "
+               "each other; nothing is pasted",
         store_with="wk key set claude-login",
         check=_claude_login)),
     ("tailnet", Rule(
@@ -590,9 +619,9 @@ def check(name, repos, path, evidence):
         return 0
     verdict, detail = rule.check(value, repos, path, evidence)
     if verdict == BAD:
-        detail = ("%s\n    it must %s, and must not %s\n    fix: %s -- then: %s"
+        detail = ("%s\n    it must %s, and must not %s\n    fix: %s -- then: %s%s"
                   % (detail, rule.needs, rule.forbids, fix_of(rule, repos),
-                     rule.store_with))
+                     rule.store_with, " --replace" if path else ""))
     sys.stdout.write("%s\t%s\n" % (verdict, detail))
     return 0
 
