@@ -25,8 +25,8 @@ class TestDeclarations(WkTest):
         seen = {}
         for line in lines:
             fields = line.split("\t")
-            self.assertEqual(len(fields), 5, f"not 5 tab-separated fields: {line!r}")
-            name, where, dname, group, syn = fields
+            self.assertGreaterEqual(len(fields), 5, f"fewer than 5 tab-separated fields: {line!r}")
+            name, where, dname, group, syn = fields[:5]
             seen[name] = (where, dname, group, syn)
             self.assertIn(where, VALID_WHERE, f"{name}: where={where!r} is not one of {VALID_WHERE}")
             # `required@2` is the same declaration with the name at another

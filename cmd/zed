@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 #
 # wk zed <workspace> -- open a workspace's checkout in Zed
-# wk: where=workspace name=optional here outside group=workspaces
-# wk: flag --tools name=none
+# wk: where=workspace name=optional here outside group=workspaces opts --tools,--url,--route
+# wk: flag --tools name=none takes=1
 #
 # Refused inside a workspace: Zed runs where the person is.
 #
@@ -31,13 +31,7 @@ while [ $# -gt 0 ]; do
         --tools) TOOLS=1; shift ;;
         --url)   URL_ONLY=1; shift ;;
         --route) ROUTE=1; shift ;;
-        -*) die "unknown option: $1
-    usage: wk zed <workspace>        the checkout
-           wk zed --tools [<machine>|<workspace>]
-           wk zed --url <workspace>  print the route instead of opening it" ;;
-        *) [ -z "$NAME" ] || die "one name at a time (got '$NAME' and '$1')
-    usage: wk zed <workspace>; see wk zed -h"
-           NAME="$1"; shift ;;
+        *) NAME="$1"; shift ;;
     esac
 done
 

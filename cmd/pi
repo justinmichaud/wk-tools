@@ -2,8 +2,12 @@
 #
 # wk pi <verb> <args> -- Raspberry Pi test boards: get one on the tailnet, then run WebKit on it
 #
-# wk: where=host name=none group=hosts broker deploy,bench needs ssh,python3 values=--list
-# wk: flag --list where=local name=none
+# wk: where=host name=none group=hosts broker deploy,bench needs ssh,python3 values=--list takes=* destructive boot-order dryrun boot-order
+# wk: flag --list where=local name=none takes=0 opts=--list
+# wk: sub setup,helper,flash takes=2
+# wk: sub boot-order takes=3 opts=--revert
+# wk: sub deploy takes=3 opts=--slot=,--skeleton,--skeleton-only,--libs-only
+# wk: sub bench takes=3 opts=--keep-session,--slot=,--ab=,--ab-systems=,--rounds=,--count=,--timeout=,--cores=,--subtests=,--exclude-subtests=,--task=,--pgo=,--no-warmup-profile,--jit-tiers
 #
 # A board runs a bench system on removable media; its own workstation install
 # is never touched. `wk help` has the per-board arrangement.
@@ -69,17 +73,14 @@ WK_ABORT_SECONDS="${WK_ABORT_SECONDS:-5400}"
 pi_verbs() {
     printf '%-10s  %s\n' setup      "put a board on the tailnet (pinned tailscale binaries, no image rebuild)"
     printf '%-10s  %s\n' helper     "install this checkout's card helper on the board"
-    printf '%-10s  %s\n' boot-order "set rpi4/rpi5 firmware boot order (--revert, --dry-run)"
+    printf '%-10s  %s\n' boot-order "set rpi4/rpi5 firmware boot order (--revert)"
     printf '%-10s  %s\n' deploy     "put a built WebKit on the board as a slot"
     printf '%-10s  %s\n' bench      "run a benchmark on a booted bench system"
 }
 
-if [ "${1:-}" = --list ]; then
-    [ $# -eq 1 ] || die "usage: wk pi --list; see wk pi -h
-    unexpected argument: $2"
-    pi_verbs
-    exit 0
-fi
+case "${1:-}" in
+    --list) pi_verbs; exit 0 ;;
+esac
 
 TS_RELEASE="$WK_ROOT/image/yocto/meta-wk-tailnet/recipes-network/tailscale/tailscale-release.inc"
 ts_release_field() { # <name> -- one `NAME = "value"` line out of the .inc
@@ -113,13 +114,6 @@ case "$ACTION" in
        pi_usage_page >&2; exit 1 ;;
 esac
 shift 2 2>/dev/null || true
-
-if [ "$ACTION" = setup ] && [ $# -gt 0 ]; then
-    case "$1" in
-        -*) die "usage: wk pi setup <ssh-host>; unknown option: $1; see wk pi -h" ;;
-        *)  die "usage: wk pi setup <ssh-host>; unexpected argument: $1; see wk pi -h" ;;
-    esac
-fi
 
 PI_FLEET=""
 case "$ACTION" in
@@ -171,21 +165,15 @@ pi_tmp() { [ -n "$PI_TMP" ] || { PI_TMP=$(mktemp -d); wk_atexit _pi_tmp_cleanup;
 cmd_deploy() {
     local profile="${1:-}" machine="${2:-}"; shift $(( $# < 2 ? $# : 2 ))
     local slot=a
-    local usage="usage: wk pi deploy <image-profile> <machine> --slot <name>; see wk pi -h"
     while [ $# -gt 0 ]; do
         case "$1" in
             --slot) slot="${2:-}"; shift ;;
-            --skeleton|--skeleton-only|--libs-only)
-                die "'$1' is gone: nothing runs out of a checkout on the board any more.
-    run-benchmark runs on this machine and drives the board's browser over ssh
-    (wk pi bench), so a board needs a slot and nothing else:
-        wk pi deploy <image-profile> $machine --slot <name>" ;;
-            -*) die "$usage; unknown option: $1" ;;
-            *)  die "$usage; unexpected argument: $1" ;;
+            --skeleton|--skeleton-only|--libs-only) die "'$1' is gone: a deploy carries the whole slot; --slot names it" ;;
         esac
         shift
     done
-    [ -n "$profile" ] && [ -n "$machine" ] || die "$usage"
+    [ -n "$profile" ] && [ -n "$machine" ] \
+        || die "usage: wk pi deploy <image-profile> <machine> --slot <name>; see wk pi -h"
     image_check_slot_name "$slot"
     case "$profile" in
         yocto-*|buildroot-*) die "'$profile' is a workspace; a slot is named by its image profile:
@@ -849,8 +837,6 @@ cmd_bench() {
                        shift ;;
             --rounds)  rounds="${2:-}"; shift ;;
             --keep-session) die "'--keep-session' is gone: nothing is torn down between runs any more" ;;
-            -*) die "$usage; unknown option: $1" ;;
-            *)  die "$usage; unexpected argument: $1" ;;
         esac
         shift
     done
@@ -1127,14 +1113,11 @@ boot_order_first() {
 }
 
 cmd_boot_order() {
-    local dry="" revert=""
-    local order_name="${ORDER_NAME:-}"
+    local dry="${WK_DRY_RUN:-}" revert="" order_name=""
     while [ $# -gt 0 ]; do
         case "$1" in
-            --dry-run)   dry=1 ;;
-            --revert)    revert=1 ;;
-            -*) die "usage: wk pi boot-order <machine> <usb-first|sd-first|local> [--revert] [--dry-run]; unknown option: $1; see wk pi -h" ;;
-            *)  die "usage: wk pi boot-order <machine> <usb-first|sd-first|local> [--revert] [--dry-run]; unexpected argument: $1; see wk pi -h" ;;
+            --revert) revert=1 ;;
+            *)        order_name="$1" ;;
         esac
         shift
     done
@@ -1312,7 +1295,6 @@ refuse_workstation() { # <what this verb cannot do there, e.g. "install the help
 # Copied to a root-owned path, never linked into a checkout -- admin/install.sh's rule.
 cmd_helper() {
     local src="$WK_ROOT/admin/wk-card-priv" check="$WK_ROOT/boot/check-boot-files.py"
-    [ $# -eq 0 ] || die "usage: wk pi helper <machine>; unexpected argument: $1; see wk pi -h"
     [ -n "$PI_FLEET" ] || die "usage: wk pi helper <machine>: '$HOST' is not a fleet machine.
     The helper goes on a board this repo drives, named as 'wk boot --list' names it."
     [ -r "$src" ] && [ -r "$check" ] || die "this checkout is missing $src or $check"
@@ -1346,16 +1328,11 @@ cmd_helper() {
 }
 
 if [ "$ACTION" = helper ]; then
-    cmd_helper "$@"
+    cmd_helper
     exit 0
 fi
 
 if [ "$ACTION" = boot-order ]; then
-    ORDER_NAME=""
-    case "${1:-}" in
-        ''|--*) ;;
-        *) ORDER_NAME="$1"; shift ;;
-    esac
     cmd_boot_order "$@"
     exit 0
 fi

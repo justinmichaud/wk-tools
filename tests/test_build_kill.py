@@ -454,9 +454,8 @@ class TestKillFromTheOutside(WkTest):
     def test_kill_takes_no_config_and_says_which_form_it_is(self):
         with fake_workspace() as ws:
             cp = ws.run("build", "--kill", "jsc-release", timeout=60)
-            self.assertNotEqual(cp.returncode, 0, cp.stdout)
-            self.assertIn("takes nothing with it", cp.stdout)
-            self.assertIn("jsc-release", cp.stdout)
+            self.assertEqual(cp.returncode, 2, cp.stdout)
+            self.assertIn("unexpected argument: jsc-release", cp.stdout)
 
     def test_kill_stops_a_recorded_build_and_records_it_cancelled(self):
         with fake_workspace() as ws:

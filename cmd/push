@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # wk push on|off|status -- whether a workspace can push to git at all
-# wk: where=local name=none group=sources
+# wk: where=local name=none group=sources takes=1 opts --target=,--all
 # wk: readonly status
 #
 # The rule this implements (docs/HANDOFF-sandboxing.md): only the person at the
@@ -58,7 +58,8 @@ TARGET=""
 while [ $# -gt 0 ]; do
     case "$1" in
         on|off|status) ACTION="$1"; shift ;;
-        --target) TARGET="${2:-}"; [ -n "$TARGET" ] || die "--target needs a name"; shift 2 ;;
+        --target) TARGET="${2:-}"; shift 2 ;;
+        --target=*) TARGET="${1#*=}"; shift ;;
         --all) TARGET=--all; shift ;;
         *) die "usage: wk push on|off|status; see wk push -h" ;;
     esac

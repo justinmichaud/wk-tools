@@ -250,7 +250,7 @@ class TheVerbIsWiredIn(WkTest):
                 "ssh":   '#!/bin/sh\necho "$@" >> %s/ssh.argv\n' % tmp,
                 "rsync": '#!/bin/sh\necho "$@" >> %s/rsync.argv\n' % tmp,
             }) as path:
-                cp = bash('exec "$WK_ROOT/cmd/boot" mbp --prepare --dry-run',
+                cp = bash('WK_DRY_RUN=1 exec "$WK_ROOT/cmd/boot" mbp --prepare',
                           env={"PATH": "%s:%s" % (path, os.environ["PATH"])})
             out = cp.stdout + cp.stderr
             # What it says it would do has to be what it does: it pushes a
@@ -270,7 +270,10 @@ class TheHostOsGateAsksWhetherTheDriverCanReachIt(WkTest):
     that, since there is nowhere else to run it."""
 
     def _boot(self, machine, *args, env=None):
-        return bash('exec "$WK_ROOT/cmd/boot" %s %s' % (machine, " ".join(args)), env=env)
+        # cmd/boot is exec'd past the dispatcher, which is what would turn --dry-run into WK_DRY_RUN.
+        dry = "WK_DRY_RUN=1 " if "--dry-run" in args else ""
+        args = [a for a in args if a != "--dry-run"]
+        return bash('%sexec "$WK_ROOT/cmd/boot" %s %s' % (dry, machine, " ".join(args)), env=env)
 
     def test_a_driver_that_reaches_its_machine_answers_from_a_linux_host(self):
         for args in (("--status",), ("--dry-run",)):

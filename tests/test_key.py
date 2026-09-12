@@ -14,7 +14,7 @@ import os
 import subprocess
 import unittest
 
-from tests.support import REPO, WkTest, stub_path
+from tests.support import REPO, WkTest, func_body, stub_path
 from tests.test_credcheck import FINE, login
 
 KEY = REPO / "cmd" / "key"
@@ -396,13 +396,6 @@ class TestTheTopicIsMintedNotAsked(_KeyRun):
         self.assertIn("--paste cannot carry a claude.ai login",
                       cp.stdout + cp.stderr)
 
-    def test_an_unknown_flag_is_refused(self):
-        cp, secrets = self.key("set", "ntfy", "--bogus")
-        self.assertNotEqual(0, cp.returncode, cp.stdout)
-        self.assertIn("usage:", cp.stdout + cp.stderr)
-        self.assertFalse(self.topic_path(secrets).exists())
-
-
 # A `gh` whose answers are GitHub's for a machine whose deploy keys are not
 # registered yet (an empty key list; every registration accepted) and for one
 # where they are (the list carries the public halves). `read_only` is in the
@@ -606,3 +599,41 @@ class TestTheTailnetKeyScope(WkTest):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestABareKeyChangesNothing(_KeyRun):
+    """`wk key` with no verb is `wk key check`: a report. What writes to
+    another machine or to GitHub -- the fan-out to peer workstations, the
+    revocation `--rotate` starts with -- asks first, defaulting to No."""
+
+    def test_the_default_verb_is_check(self):
+        self.assertIn('ACTION="${1:-check}"', KEY.read_text())
+
+    def test_it_prints_the_report_and_nothing_else(self):
+        bare, _ = self.key()
+        check, _ = self.key("check")
+        self.assertIn("credentials:", bare.stdout)
+        self.assertEqual(check.stdout, bare.stdout)
+        for word in ("sharing to", "registering", "minted"):
+            self.assertNotIn(word, bare.stdout + bare.stderr)
+
+    def test_the_fan_out_asks_before_writing_over_a_peer(self):
+        """deploy and setup go through deploy_keys, which asks before
+        register_shared_keys and share_keys; the share arm asks itself."""
+        body = func_body(KEY.read_text(), "deploy_keys")
+        self.assertIn("confirm ", body)
+        self.assertLess(body.index("confirm "), body.index("share_keys"),
+                        "share_keys runs before the question is asked")
+        arm = KEY.read_text().split("\nshare)", 1)[1].split("\ndeploy)", 1)[0]
+        self.assertLess(arm.index("confirm "), arm.index("share_keys"), arm)
+
+    def test_a_declined_fan_out_is_not_reported_as_done(self):
+        arm = KEY.read_text().split("\nshare)", 1)[1].split("\ndeploy)", 1)[0]
+        self.assertIn('die "not shared', arm, arm)
+        body = func_body(KEY.read_text(), "deploy_keys")
+        self.assertIn("return 3", body, body)
+
+    def test_rotate_asks_before_revoking_on_github(self):
+        body = func_body(KEY.read_text(), "deploy_keys")
+        self.assertLess(body.index("confirm "), body.index("rotate_keys"),
+                        "rotate_keys runs before the question is asked")

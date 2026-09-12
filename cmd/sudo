@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # wk sudo status|setup -- make root cost a password, on a short leash, everywhere
-# wk: where=host name=none group=sources
+# wk: where=host name=none group=sources takes=1 opts --target=,--all
 #
 # Two things have to be true before an unattended agent runs anything as root,
 # and neither is true by default: no blanket NOPASSWD (Igalia's shared build
@@ -45,9 +45,10 @@ while [ $# -gt 0 ]; do
     case "$1" in
         status|setup) ACTION="$1"; shift ;;
         require) die "'wk sudo require' is now 'wk sudo setup'" ;;
-        --target) TARGET="${2:-}"; [ -n "$TARGET" ] || die "--target needs a name"; shift 2 ;;
+        --target)   TARGET="${2:-}"; [ -n "$TARGET" ] || die "--target needs a name"; shift 2 ;;
+        --target=*) TARGET="${1#*=}"; [ -n "$TARGET" ] || die "--target needs a name"; shift ;;
         --all)    ALL=1; shift ;;
-        *) die "usage: wk sudo status|setup; see wk sudo -h" ;;
+        *) die "'$1' is not a verb of wk sudo: status or setup; see wk sudo -h" ;;
     esac
 done
 

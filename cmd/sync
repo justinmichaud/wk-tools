@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # wk sync [<workspace>|--target <t>|--all|--tools] -- bring WebKit and the tooling up to date
-# wk: where=workspace name=optional group=sources needs git,rsync
+# wk: where=workspace name=optional group=sources needs git,rsync opts --all,--target=,--tools,--machine
 # wk: flag --target,--all,--tools,--machine where=host
 #
 # A fetch, and never a checkout: no branch is switched, merged or rebased, here
@@ -95,15 +95,6 @@ scope_set() { # <scope> <as-typed>
     SCOPE="$1"; SCOPE_AS="$2"
 }
 
-# What the dispatcher's where=host and name checks leave unrefused in here is a *different* workspace's name, checked before the loop.
-if in_workspace && [ -n "${1:-}" ]; then
-    case "$1" in
-        -*|"$(wk_self)") ;;
-        *) die "'wk sync $1' acts on a host, and this is workspace '$(wk_self)'.
-    From the host:  wk sync $1" ;;
-    esac
-fi
-
 while [ $# -gt 0 ]; do
     case "$1" in
         --all)  scope_set all --all; shift ;;
@@ -118,11 +109,6 @@ while [ $# -gt 0 ]; do
             scope_set target --target ;;
         --tools|--tools=*)
             case "$1" in
-                --tools=*)
-                    _v="${1#*=}"
-                    [ -n "$_v" ] || die "--tools= names one target; --tools alone is every one of them."
-                    [ -z "$TARGET" ] || die "one target at a time (got '$TARGET' and '$_v')"
-                    TARGET="$_v"; shift ;;
                 *)  shift
                     case "${1:-}" in ''|-*) ;;
                         *) [ -z "$TARGET" ] || die "one target at a time (got '$TARGET' and '$1')"
@@ -135,10 +121,7 @@ while [ $# -gt 0 ]; do
         wk sync --all         every workspace on every target
         wk sync --tools       every machine's wk-tools, mirror and snapshot
         wk sync --tools <t>   just that one's" ;;
-        -*)         die "unknown option: $1
-    $USAGE" ;;
-        *)          [ -z "$ONLY" ] || die "one workspace at a time (got '$ONLY' and '$1')"
-                    ONLY="$1"; require_name "$ONLY"; shift ;;
+        *)          ONLY="$1"; require_name "$ONLY"; shift ;;
     esac
 done
 

@@ -2,6 +2,7 @@
 #
 # wk status [<workspace>] -- what is happening, without guessing
 # wk: where=workspace name=optional here readonly group=workspaces
+# wk: opts --no-fleet,--no-devices,--records,--json,--text,--cli,--html=,--web,--port=,--interval=,--wait,--timeout=
 #
 # The build records its own state, not a process list, and this reads it.
 #
@@ -59,7 +60,6 @@ _jesc() {
         head=${s%%$'\033'*}
         tail=${s#*$'\033'}
         tail=${tail#\[}
-        # No `m` at all leaves tail unchanged, still ending the loop.
         case "$tail" in *m*) tail=${tail#*m} ;; esac
         s="$head$tail"
     done
@@ -111,7 +111,6 @@ machine_of() {
     fi
 }
 
-# In a subshell, so the driver's overrides die with it.
 machine_of_target() { ( load_target "$1" >/dev/null 2>&1; machine_of "$1" ); }
 
 _machines_said=" "
@@ -610,27 +609,18 @@ WAIT_TIMEOUT="${WK_WAIT_TIMEOUT:-0}"
 _args=""
 while [ $# -gt 0 ]; do
     case "$1" in
-        --no-fleet)  FLEET=""; DEVICES=""; shift ;;   # also accepted after --wait, not only first
+        --no-fleet)  FLEET=""; DEVICES=""; shift ;;
         --no-devices) DEVICES=""; shift ;;
         --records)   RECORDS=1; shift ;;
         --json)      MODE=json; MODE_ASKED=1; shift ;;
         --text|--cli) MODE=text; MODE_ASKED=1; shift ;;
-        --html)      MODE=html; MODE_ASKED=1
-                     case "${2:-}" in -*|"") ;; *) HTML_OUT="$2"; shift ;; esac
-                     shift ;;
+        --html)      MODE=html; MODE_ASKED=1; HTML_OUT="${2:-}"; [ "$HTML_OUT" != - ] || HTML_OUT=""; shift 2 ;;
         --web)       MODE=web; MODE_ASKED=1; shift ;;
         --port)      WEB_PORT="${2:-0}"; shift 2 ;;
-        --port=*)    WEB_PORT="${1#*=}"; shift ;;
         --interval)  WEB_INTERVAL="${2:-20}"; shift 2 ;;
-        --interval=*) WEB_INTERVAL="${1#*=}"; shift ;;
         --wait)      WAIT=1; shift ;;
         --timeout)   WAIT_TIMEOUT="${2:-0}"; shift 2 ;;
-        --timeout=*) WAIT_TIMEOUT="${1#*=}"; shift ;;
-        -*)          die "usage: wk status [<workspace>] [--json|--text|--web|--html [<file>]]
-    [--wait] [--timeout <s>] [--port <n>] [--interval <s>] [--records]
-    [--no-fleet] [--no-devices]; see wk status -h" ;;
-        *)           [ -z "$_args" ] || die "usage: wk status [<workspace>]; unexpected argument: $1; see wk status -h"
-                     _args="$1"; shift ;;
+        *)           _args="$1"; shift ;;
     esac
 done
 # shellcheck disable=SC2086 -- deliberate re-splitting of the collected words (at most one).

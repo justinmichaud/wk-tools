@@ -20,7 +20,12 @@ import subprocess
 import unittest
 from pathlib import Path
 
+import re
+import threading
+from http.server import HTTPServer
+
 from tests.support import REPO, WkTest, stub_path
+from tests.test_credcheck import FakeGitHub
 from tests.test_key import SSH_IS_THE_FORKS_KEY, SECURITY_HAS_NOTHING
 
 KEY = REPO / "cmd" / "key"
@@ -49,8 +54,11 @@ class _Shared(WkTest):
         store = self.tmp / "store"
         self.secrets = store / "secrets"
         self.held = store / "push-keys"
+        # WK_YES: what the dispatcher exports for --yes; the fan-out and the
+        # rotation ask first, and what is measured here is what they do once answered.
         env.update({"WK_HOST_SECRETS": str(self.secrets), "WK_STORE": str(store),
-                    "WK_NTFY_API": "http://127.0.0.1:1",
+                    "WK_NTFY_API": "http://127.0.0.1:1", "WK_YES": "1",
+                    "WK_GITHUB_API": "http://127.0.0.1:1",
                     "WK_TARGET_REGISTRY": str(self.tmp / "reg")})
         (self.tmp / "reg").mkdir(exist_ok=True)
         return env
@@ -223,3 +231,69 @@ class TestABuildMachineHoldsNoKey(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestTheTokenAloneToOnePeer(TestShareFansOutToWorkstationsOnly):
+    """`wk key share --to <peer> --only github-pat` sends the token and
+    nothing else, to that peer and no other: the half a machine with a
+    refused token asks a peer for."""
+
+    def test_only_the_token_travels_and_only_to_the_named_peer(self):
+        self.key("ensure")
+        (self.held / "github-pat").write_text("ghp_notarealtoken\n")
+        env = self.fleet()
+        cp = self.key("share", "--to", "peerbox", "--only", "github-pat",
+                      stubs={"ssh": PEER_SSH}, env=env)
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        calls = [l for l in self.peer_log.read_text().splitlines() if l.strip()]
+        self.assertEqual(["key set github-pat --paste"], calls)
+
+    def test_a_machine_that_is_not_a_peer_is_refused(self):
+        self.key("ensure")
+        env = self.fleet()
+        cp = self.key("share", "--to", "buildbox", stubs={"ssh": PEER_SSH}, env=env)
+        self.assertNotEqual(cp.returncode, 0)
+        self.assertIn("not a peer workstation", cp.stderr)
+        self.assertEqual("", self.peer_log.read_text().strip())
+
+    def test_only_takes_the_one_credential_that_travels_alone(self):
+        self.key("ensure")
+        env = self.fleet()
+        cp = self.key("share", "--only", "claude", stubs={"ssh": PEER_SSH}, env=env)
+        self.assertNotEqual(cp.returncode, 0)
+        self.assertIn("--only takes github-pat", cp.stderr)
+
+
+class TestARefusedTokenIsTakenFromAPeerFirst(TestShareFansOutToWorkstationsOnly):
+    """The token is one for the fleet: when GitHub refuses the one stored
+    here, `wk key deploy` asks each peer to share its own before anyone is
+    asked to mint a new one. The peer's share is answered with WK_YES,
+    because this run already asked its question."""
+
+    def setUp(self):
+        super().setUp()
+        self.server = HTTPServer(("127.0.0.1", 0), FakeGitHub)
+        self.addCleanup(self.server.server_close)
+        self.addCleanup(self.server.shutdown)
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        FakeGitHub.user_status = 401
+        FakeGitHub.seen = []
+
+    def test_deploy_asks_the_peer_for_its_token(self):
+        self.key("ensure")
+        (self.held / "github-pat").write_text("ghp_revokedone\n")
+        gh_log = self.tmp / "gh.log"; gh_log.write_text("")
+        gh_keys = self.tmp / "gh.keys"; gh_keys.write_text("")
+        env = {**self.fleet(), "WK_GITHUB_API": "http://127.0.0.1:%d" % self.server.server_port,
+               "WK_TEST_GH_LOG": str(gh_log), "WK_TEST_GH_KEYS": str(gh_keys)}
+        cp = self.key("deploy", stubs={"ssh": PEER_SSH, "gh": GH_RECORDER,
+                                       "security": SECURITY_HAS_NOTHING}, env=env)
+        out = cp.stdout + cp.stderr
+        calls = [l for l in self.peer_log.read_text().splitlines() if l.strip()]
+        asked = [c for c in calls if re.fullmatch(r"key share --to \S+ --only github-pat", c)]
+        self.assertEqual(1, len(asked), calls)
+        self.assertIn("asking peerbox for its github-pat", out)
+        # The stub peer sends nothing back, so the refused token is still here and named, not fanned out.
+        self.assertIn("wk key set github-pat --replace", out)
+        self.assertNotIn("key set github-pat --paste", calls)
+        self.assertEqual("ghp_revokedone", (self.held / "github-pat").read_text().strip())

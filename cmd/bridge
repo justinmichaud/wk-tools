@@ -2,8 +2,11 @@
 #
 # wk bridge <sub> [<name>] [flags] -- provision a phone as a tailnet bridge
 #
-# wk: where=host name=none group=hosts
+# wk: where=host name=none group=hosts takes=2 opts --at= destructive rm dryrun
 # wk: readonly ls,status,battery
+# wk: sub ls takes=1 opts=--names
+# wk: sub provision opts=--at=,--no-tailnet,--disk=,--image=,--rebuild,--no-write
+# wk: sub setup opts=--at=,--no-tailnet
 #
 # A bridge is a phone with two legs: WiFi to the house, USB-C Ethernet to a
 # segment with no other way onto the tailnet -- a BMC's management port, or a
@@ -36,8 +39,6 @@
 #   --no-write                  (provision) the phone already holds the right
 #                             system; skip writing it
 #   --no-tailnet                 (setup) stop after the role, before tailscale
-#   --dry-run                    (provision/setup) resolve everything, write
-#                             nothing
 #
 #   WK_BRIDGE_AUTHKEY=<key>       (setup) the tailnet auth key, for a run with
 #                             nobody there to paste one in; otherwise this
@@ -358,10 +359,9 @@ _ls_probe() { # <destination> -> up | key-changed | unreachable
 
 cmd_ls() {
     local name any=""
-    if [ "${1:-}" = --names ]; then
-        bridge_names
-        return 0
-    fi
+    case "${1:-}" in
+        --names) bridge_names; return 0 ;;
+    esac
     printf '%-28s %-10s %-16s %-12s %s\n' NAME DEVICE SEGMENT STATE NOTE
     for name in $(bridge_names); do
         any=1
@@ -753,20 +753,16 @@ bridge_reach_hint() {
 }
 
 cmd_provision() {
-    local disk="" image="" rebuild="" no_write="" dry=""
+    local disk="" image="" rebuild="" no_write="" dry="${WK_DRY_RUN:-}"
     while [ $# -gt 0 ]; do
         case "$1" in
-            --at)       BR_AT="${2:-}"; [ -n "${BR_AT:-}" ] || die "--at needs a host or address"; shift 2 ;;
-            --no-tailnet) BR_NO_TAILNET=1; shift ;;
-            --disk)     disk="${2:-}";  [ -n "$disk" ]  || die "--disk needs <machine>:<device>"; shift 2 ;;
-            --image)    image="${2:-}"; [ -n "$image" ] || die "--image needs a path"; shift 2 ;;
-            --rebuild)  rebuild=1; shift ;;
-            --no-write) no_write=1; shift ;;
-            --dry-run)  dry=1; shift ;;
-            *) die "usage: wk bridge provision <name> [--at <host>] [--disk <machine>:<dev>]
-                               [--image <path>] [--rebuild] [--no-write] [--dry-run]
-    unknown option: $1" ;;
+            --no-tailnet) BR_NO_TAILNET=1 ;;
+            --disk)     disk="${2:-}";  [ -n "$disk" ]  || die "--disk needs <machine>:<device>"; shift ;;
+            --image)    image="${2:-}"; [ -n "$image" ] || die "--image needs a path"; shift ;;
+            --rebuild)  rebuild=1 ;;
+            --no-write) no_write=1 ;;
         esac
+        shift
     done
     [ -z "$rebuild" ] || [ -z "$image" ] \
         || die "--rebuild and --image contradict each other: one builds a new image, the other names a local file."
@@ -955,14 +951,10 @@ $parts        WK_BRIDGE_AUTHKEY=tskey-... wk bridge setup $BR_NAME"
 
 
 cmd_setup() {
-    local dry=""
+    local dry="${WK_DRY_RUN:-}"
     while [ $# -gt 0 ]; do
         case "$1" in
-            --dry-run) dry=1 ;;
-            --at) BR_AT="${2:-}"; [ -n "$BR_AT" ] || die "--at needs a host or address"; shift ;;
             --no-tailnet) BR_NO_TAILNET=1 ;;
-            *) die "usage: wk bridge setup <name> [--at <host>] [--no-tailnet] [--dry-run]
-    unknown option: $1" ;;
         esac
         shift
     done
@@ -1105,30 +1097,17 @@ EOF
 
 # The last step on its own: `tailscale up --advertise-tags` is settable only at login.
 cmd_tailnet() {
-    while [ $# -gt 0 ]; do
-        case "$1" in
-            --at) BR_AT="${2:-}"; [ -n "$BR_AT" ] || die "--at needs a host or address"; shift 2 ;;
-            *) die "usage: wk bridge tailnet <name> [--at <host>]
-    unknown option: $1" ;;
-        esac
-    done
+    BR_NO_TAILNET=""
+    [ -z "${WK_DRY_RUN:-}" ] || { cmd_setup; return 0; }
     resolve_priv
     rsh "$PRIV test -f /etc/wk-bridge.conf" 2>/dev/null \
         || die "$BR_SSH has no bridge role on it yet.
     'wk bridge setup $BR_NAME --no-tailnet' applies everything else first; this
     command is only the tailnet half."
-    BR_NO_TAILNET=""
-    cmd_setup "$@"
+    cmd_setup
 }
 
 cmd_status() {
-    while [ $# -gt 0 ]; do
-        case "$1" in
-            --at) BR_AT="${2:-}"; [ -n "$BR_AT" ] || die "--at needs a host or address"; shift 2 ;;
-            *) die "usage: wk bridge status <name> [--at <host>]
-    unknown option: $1" ;;
-        esac
-    done
     resolve_priv
     rsh "$PRIV test -x /usr/local/sbin/wk-bridge-healthcheck" 2>/dev/null \
         || die "$BR_SSH answers but has no bridge role on it.
@@ -1137,13 +1116,6 @@ cmd_status() {
 }
 
 cmd_battery() {
-    while [ $# -gt 0 ]; do
-        case "$1" in
-            --at) BR_AT="${2:-}"; [ -n "$BR_AT" ] || die "--at needs a host or address"; shift 2 ;;
-            *) die "usage: wk bridge battery <name> [--at <host>]
-    unknown option: $1" ;;
-        esac
-    done
     resolve_ssh || die "cannot reach $BR_NAME.
     'wk bridge status $BR_NAME' has the full diagnosis."
     rsh 'sh -s' <<'EOF'
@@ -1172,21 +1144,15 @@ EOF
 }
 
 cmd_rm() {
-    while [ $# -gt 0 ]; do
-        case "$1" in
-            --at) BR_AT="${2:-}"; [ -n "$BR_AT" ] || die "--at needs a host or address"; shift 2 ;;
-            *) die "usage: wk bridge rm <name> [--at <host>]
-    unknown option: $1" ;;
-        esac
-    done
-    resolve_priv
-    log "this removes the bridge role from $BR_SSH:"
+    log "this removes the bridge role from $BR_NAME:"
     log "  services       wk-bridge-{dhcp,nftables,netwatch,watchdog,usb-host,camera,battery}"
     log "  configuration  /etc/wk-bridge.conf, /etc/wk-bridge-battery.conf,"
     log "                 /etc/dnsmasq.d/wk-bridge.conf, /etc/nftables.d/wk-bridge.nft,"
     log "                 the udev rule, the NM connection, the chrony and sshd drop-ins"
     log "  tailnet        the node logs out, so it stops advertising $BR_SEGMENT"
     log "it leaves postmarketOS, the packages, and your ssh keys alone."
+    [ -z "${WK_DRY_RUN:-}" ] || { log "dry run -- nothing was removed"; return 0; }
+    resolve_priv
     confirm "remove the bridge role from $BR_SSH?" || die "aborted -- nothing was changed"
 
     # sshd's drop-in is removed *before* the daemon is reloaded, so a run that dies partway leaves ssh working.
@@ -1243,24 +1209,24 @@ EOF
 ACTION="${1:-}"; shift || true
 case "$ACTION" in
     ls)
-        case "${1:-}" in
-            ""|--names) ;;
-            *) die "usage: wk bridge ls [--names]
-    unexpected argument: $1" ;;
-        esac
         cmd_ls "$@"
         ;;
     setup|status|battery|rm|provision|tailnet)
-        NAME="${1:-}"
-        case "$NAME" in
-            -*) die "usage: wk bridge $ACTION <name> [flags]; see wk bridge -h
-    unexpected argument: $NAME" ;;
-        esac
+        # The name is the first positional, wherever it sits among the options; --at is every subverb's, the rest are handed on.
+        NAME=""; ARGS=()
+        while [ $# -gt 0 ]; do
+            case "$1" in
+                --at)           BR_AT="${2:-}"; [ -n "$BR_AT" ] || die "--at needs a host or address"; shift ;;
+                --disk|--image) ARGS+=("$1" "${2:-}"); shift ;;
+                -*)             ARGS+=("$1") ;;
+                *)              NAME="$1" ;;
+            esac
+            shift
+        done
         [ -n "$NAME" ] || die "usage: wk bridge $ACTION <name>
     Declared bridges:$(bridge_names | sed 's/^/ /' | tr -d '\n')"
-        shift || true
         load_bridge "$NAME"
-        cmd_"$ACTION" "$@"
+        cmd_"$ACTION" ${ARGS[@]+"${ARGS[@]}"}
         ;;
     *)
         die "usage: wk bridge <sub> [<name>] [flags]; see wk bridge -h"

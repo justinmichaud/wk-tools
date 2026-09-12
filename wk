@@ -37,20 +37,21 @@ WK_MACHINE="${WK_MACHINE:-wk}"
 # Line 2 of cmd/<name> is `# wk <name> <args> -- <summary>`; `# wk:` lines in its first 15 declare its shape:
 #   where=  host (this workstation's hardware; never forwarded, refused inside a workspace and on a shared build host) | store (the store, on the machine holding it: the podman VM on a macOS workstation, here on Linux and on a build machine; refused inside a workspace) | local (wherever invoked) | workspace (the name resolves here, the target decides where it runs) | dynamic (the command answers `wk <cmd> --where <args>` itself)
 #   name=   required|optional|none -- how the name arrives; a missing one means all of them or none, and one no workspace answers to is refused here
-#   takes=<n>  positionals of the command's own that follow the name, so `wk pr <ref>` is a ref and `wk pr <ws> <ref>` is both
+#   takes=<n|*>  positionals of the command's own that follow the name, so `wk pr <ref>` is a ref and `wk pr <ws> <ref>` is both; `*` for any number
 #   ready=yes  wait for the workspace to finish creating.  group=<g>  which block of `wk help` lists it.  lifecycle  creates or destroys the workspace record
-#   readonly [<subverbs>]  changes nothing, never starts the podman machine.  broker <subverbs>|*  allowed inside a workspace, through the broker.  outside  refused inside one
+#   readonly [<subverbs>]  changes nothing, never starts the podman machine.  destructive [<subverbs|flags>]  removes, overwrites or revokes something: asks first.  dryrun [<subverbs|flags>]  honours --dry-run (prints, changes nothing); outside the list the flag is refused
+#   opts <--a,--b=,-c>  the options it accepts, `=` marking one with a value; anything else is refused here.  passthrough[=tail]  what follows `--` (=tail: the last positional) is another program's, unchecked.  broker <subverbs>|*  allowed inside a workspace, through the broker.  outside  refused inside one
 #   forward=no  runs on this host, still on the machine holding the workspace.  here  also pins it to where the person typed it.  bare=merged  with no name, report on every target here
 #   post=<hook>  zed|ssh-alias-remove, after the forwarded half.  values=<flag>  the read-only flag `wk <cmd> -h` runs to print the closed set.  needs <a,b>  tools and standing checked before anything runs (gh, tart, nmap, gh-auth, tailnet)
-#   sub <a,b> / flag <--x,--y>  per-subverb or per-flag override of where=, name= (@2 = the positional after the subverb) and needs=; an empty needs= clears the command's list
+#   sub <a,b> / flag <--x,--y>  per-subverb or per-flag override of where=, name= (@2 = the positional after the subverb), takes=, opts=, passthrough= and needs=; an empty needs= clears the command's list
 
 decl_load() { # <impl>
     # The one `where=` vocabulary; tests read this line and lift the function on its own (tests/test_sync.py's _lift_func).
     local WK_WHERE_VALUES="host store local workspace dynamic"
     D_WHERE=workspace D_NAME=none D_READY=no D_GROUP=other D_LIFECYCLE=""
     D_READONLY="" D_BROKER="" D_FORWARD=yes D_BARE="" D_POST="" D_SUB="" D_FLAG="" D_OUTSIDE="" D_NEEDS=""
-    D_HERE="" D_TAKES=0 D_VALUES=""
-    local line tok
+    D_HERE="" D_TAKES=0 D_VALUES="" D_DESTRUCTIVE="" D_OPTS="" D_PASSTHROUGH="" D_DRYRUN=""
+    local line tok pending=""
     set -f   # `broker *` is a word, not a glob
     while IFS= read -r line; do
         case "$line" in "# wk:"*) ;; *) continue ;; esac
@@ -63,6 +64,10 @@ ${line# flag }" ; continue ;;
         esac
         for tok in $line; do
             case "$tok" in
+                where=*|name=*|takes=*|ready=*|group=*|lifecycle|values=*|forward=no|here|outside|bare=merged|post=*|passthrough*|dryrun|readonly|broker|needs|opts|destructive)
+                    pending="" ;;
+            esac
+            case "$tok" in
                 where=*)  D_WHERE=${tok#where=}
                           case " $WK_WHERE_VALUES " in
                               *" $D_WHERE "*) ;;
@@ -73,27 +78,34 @@ ${line# flag }" ; continue ;;
                 ready=*)  D_READY=${tok#ready=} ;;
                 group=*)  D_GROUP=${tok#group=} ;;
                 lifecycle) D_LIFECYCLE=1 ;;
-                readonly) D_READONLY=yes ;;
-                broker)   D_BROKER=pending ;;
-                needs)    D_NEEDS=pending ;;
+                readonly) D_READONLY=yes; pending=readonly ;;
+                destructive) D_DESTRUCTIVE=yes; pending=destructive ;;
+                broker)   D_BROKER="*"; pending=broker ;;
+                needs)    pending=needs ;;
+                opts)     pending=opts ;;
+                passthrough) D_PASSTHROUGH=yes ;;
+                dryrun)   D_DRYRUN=yes; pending=dryrun ;;
+                passthrough=tail) D_PASSTHROUGH=tail ;;
                 values=*) D_VALUES=${tok#values=} ;;
                 forward=no) D_FORWARD=no ;;
                 here)     D_HERE=1; D_FORWARD=no ;;
                 outside)  D_OUTSIDE=1 ;;
                 bare=merged) D_BARE=merged ;;
                 post=*)   D_POST=${tok#post=} ;;
-                *)  case "$D_NEEDS:$D_READONLY:$D_BROKER" in
-                        pending:*)     D_NEEDS=$tok ;;
-                        *:yes:pending) D_BROKER=$tok ;;
-                        *:yes:*)       D_READONLY=$tok ;;
-                        *:*:pending)   D_BROKER=$tok ;;
-                    esac ;;
+                *)  case "$pending" in
+                        needs)       D_NEEDS=$tok ;;
+                        opts)        D_OPTS=$tok ;;
+                        readonly)    D_READONLY=$tok ;;
+                        destructive) D_DESTRUCTIVE=$tok ;;
+                        dryrun)      D_DRYRUN=$tok ;;
+                        broker)      D_BROKER=$tok ;;
+                        *) die "$(basename "$1"): '$tok' is not a declaration this dispatcher knows" ;;
+                    esac
+                    pending="" ;;
             esac
         done
     done < <(head -15 "$1")
     set +f
-    [ "$D_BROKER" = pending ] && D_BROKER="*"
-    [ "$D_NEEDS" = pending ] && D_NEEDS=""
     return 0
 }
 
@@ -128,6 +140,19 @@ sub_override() { # <key> <subverb>
 $D_SUB
 EOF
     return 1
+}
+
+argv_split() { # <opts> <args...> -- ARGS, with every declared `--x=v` back to `--x v` for the command
+    local opts="$1" a; shift
+    ARGS=()
+    while [ $# -gt 0 ]; do
+        a="$1"; shift
+        case "$a" in
+            --) ARGS+=("$a" ${1+"$@"}); break ;;
+            --*=*) if in_list "${a%%=*}=" "$opts"; then ARGS+=("${a%%=*}" "${a#*=}"); else ARGS+=("$a"); fi ;;
+            *)  ARGS+=("$a") ;;
+        esac
+    done
 }
 
 # `--flag=value` counts as `--flag`: an unrecognised `--target=<t>` would leave `where` at its default and send a host command to the podman VM.
@@ -176,6 +201,72 @@ cmd_readonly() { # <subverb>
     in_list "${1:-}" "$D_READONLY"
 }
 
+in_argv_list() { # <list> <args...> -- is the subverb, or any flag, in the list; `yes` is every invocation
+    local list="$1" a; shift
+    [ -n "$list" ] || return 1
+    [ "$list" = yes ] && return 0
+    for a in ${1+"$@"}; do
+        in_list "${a%%=*}" "$list" && return 0
+    done
+    return 1
+}
+cmd_destructive() { in_argv_list "$D_DESTRUCTIVE" ${1+"$@"}; }   # <args...>
+cmd_opts() { # <args...> -- the option list for this invocation's subverb or flag
+    local o
+    o=$(flag_override opts ${1+"$@"}) || o=$(sub_override opts "${1:-}") || o="$D_OPTS"
+    printf '%s' "$o"
+}
+cmd_dryrun()      { in_argv_list "$D_DRYRUN" ${1+"$@"}; }        # <args...>
+
+# The one place an argument is refused: an option the command (or its subverb) does not declare, a value where none is taken or missing where one is, a positional past what it takes. What passes is left in ARGS with every `--x v` joined as `--x=v`, one word per option, so the name arithmetic below never mistakes a value for a positional; argv_split hands the command the two-word form.
+argv_check() { # <cmd> <impl> <args...>
+    local cmd="$1" impl="$2"; shift 2
+    local sub="${1:-}" opts pass decl slot takes max n=0 a key
+    ARGS=()
+    opts=$(cmd_opts ${1+"$@"})
+    pass=$(sub_override passthrough "$sub") || pass="$D_PASSTHROUGH"
+    decl=$(cmd_name ${1+"$@"}); takes=$(cmd_takes ${1+"$@"})
+    slot=0
+    if [ "${decl%@*}" != none ]; then
+        slot=$(name_slot "$decl")
+        ! in_workspace || slot=$((slot - 1))   # the name is implicit in there
+    fi
+    max=$((slot + ${takes/\*/0}))
+    while [ $# -gt 0 ]; do
+        a="$1"; shift
+        case "$a" in
+            --)  [ -n "$pass" ] || usage_die "$cmd" "$impl" "'--' means nothing to wk $cmd"
+                 ARGS+=("$a" ${1+"$@"}); return 0 ;;
+            -?*) key="${a%%=*}"
+                 if in_list "$key=" "$opts"; then
+                     case "$a" in
+                         *=*) ARGS+=("$a") ;;
+                         *)   [ $# -gt 0 ] || usage_die "$cmd" "$impl" "$key needs a value"
+                              ARGS+=("$a=$1"); shift ;;
+                     esac
+                 elif in_list "$key" "$opts"; then
+                     case "$a" in *=*) usage_die "$cmd" "$impl" "$key takes no value" ;; esac
+                     ARGS+=("$a")
+                 else
+                     usage_die "$cmd" "$impl" "unknown option: $a"
+                 fi ;;
+            *)   ARGS+=("$a")
+                 if [ "$n" -eq 0 ] && in_workspace && [ "$a" = "$(wk_self)" ]; then continue; fi   # the name in here: refused further down, by name
+                 n=$((n + 1))
+                 [ "$takes" = '*' ] && continue
+                 if [ "$n" -gt "$max" ]; then
+                     [ "$pass" = tail ] && { ARGS+=(${1+"$@"}); return 0; }
+                     if in_workspace && [ "${decl%@*}" != none ]; then
+                         usage_die "$cmd" "$impl" "unexpected argument: $a (this is workspace '$(wk_self)', so there is no workspace argument in here)"
+                     fi
+                     usage_die "$cmd" "$impl" "unexpected argument: $a"
+                 fi
+                 [ "$pass" = tail ] && [ "$n" -eq "$max" ] && { ARGS+=(${1+"$@"}); return 0; } ;;
+        esac
+    done
+    return 0
+}
+
 check_needs() { # <cmd> [<subverb>]
     local n missing="" needs="$D_NEEDS" ov
     if [ -n "${2:-}" ] && ov=$(sub_override needs "$2"); then needs="$ov"; fi
@@ -222,7 +313,7 @@ positional_count() { # <args...>
 }
 
 argv_name() { # <slot> <takes> <args...>
-    local slot="$1" takes="$2"; shift 2
+    local slot="$1" takes="${2/\*/0}"; shift 2
     [ "$(positional_count ${1+"$@"})" -ge "$((slot + takes))" ] || return 1
     positional "$slot" ${1+"$@"}
 }
@@ -271,6 +362,12 @@ usage() {
                            force past a missing workspace or a failed build
   wk <command> --quiet     drop the info/log narration; a result, a warning
                            and an error still print. Every command accepts it
+  wk <command> --dry-run   print every command it would run, run none of them;
+                           -n for short. Every command accepts it
+  wk <command> --yes       answer yes to the question a destructive command
+                           asks first; -y for short. Nothing else is asked
+  An option a command does not name in its -h, or an argument past what it
+  takes, is refused with its usage line.
   wk <command> --all       every one of what the command acts on -- every
                            machine ('wk push'/'wk sudo'), every workspace on
                            every target ('wk sync'), every line of the log
@@ -304,7 +401,8 @@ dump_declarations() {
         n=$(basename "$f")
         line=$(synopsis "$f")
         syn=${line%% -- *}
-        printf '%s\t%s\t%s\t%s\t%s\n' "$n" "$D_WHERE" "$D_NAME" "$D_GROUP" "$syn"
+        printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$n" "$D_WHERE" "$D_NAME" "$D_GROUP" "$syn" \
+            "$D_TAKES" "${D_OPTS:--}" "${D_DESTRUCTIVE:--}" "${D_DRYRUN:-no}" "${D_PASSTHROUGH:--}" "${D_READONLY:--}"
     done
 }
 
@@ -379,13 +477,22 @@ explain_cmd() { # <cmd> <impl>
     printf 'wk %s\n\n' "$(synopsis "$impl")"
     if cmd_readonly; then
         printf '  changes things: no -- starts nothing, writes nothing, repairs nothing\n'
+    elif [ "$D_DRYRUN" = yes ]; then
+        printf '  changes things: yes -- wk %s ... --dry-run prints what it would run and runs none of it\n' "$cmd"
+    elif [ -n "$D_DRYRUN" ]; then
+        printf '  changes things: yes -- %s honour --dry-run; the rest have no dry run yet (docs/HANDOFF-cli.md)\n' "${D_DRYRUN//,/, }"
     else
-        printf '  changes things: yes\n'
+        printf '  changes things: yes -- and has no dry run yet (docs/HANDOFF-cli.md)\n'
+    fi
+    if ! cmd_readonly; then
+        case "$D_DESTRUCTIVE" in
+            "")  ;;
+            yes) printf '  destructive: yes -- asks before it acts; --yes answers\n' ;;
+            *)   printf '  destructive: %s -- these ask before they act; --yes answers\n' "${D_DESTRUCTIVE//,/, }" ;;
+        esac
     fi
     printf '  runs on: %s\n' "$(where_prose "$D_WHERE")"
     where_overrides
-    grep -q -- '--dry-run' "$impl" 2>/dev/null \
-        && printf '  preview: wk %s ... --dry-run resolves everything and changes nothing\n' "$cmd"
     printf '\nwhat it does (from %s):\n' "${impl#$WK_ROOT/}"
     awk 'NR == 1 { next }
          /^# wk:/ { next }
@@ -419,14 +526,9 @@ machine_running() {
     [ "$(podman machine inspect "$WK_MACHINE" --format '{{.State}}' 2>/dev/null)" = running ]
 }
 
-bare_subject() {
+bare_subject() {   # options are one word each here (argv_check), so a bare word is a subject
     while [ $# -gt 0 ]; do
         case "$1" in
-            --port|--interval|--timeout)
-                shift; [ $# -gt 0 ] && shift ;;
-            --html)
-                shift
-                case "${1:-}" in -*|"") ;; *) shift ;; esac ;;
             -*) shift ;;
             *)  return 1 ;;
         esac
@@ -576,12 +678,14 @@ main() {
     [ -x "$impl" ] || { warn "unknown command: $cmd"; usage; }
     decl_load "$impl"
 
-    _rest=()
+    _rest=(); _globals=""
     for _a in ${@+"$@"}; do
         case "$_seen_dashdash:$_a" in
             :-h|:--help|:--explain) explain_cmd "$cmd" "$impl" ;;
-            :--force) WK_FORCE=1; export WK_FORCE; continue ;;
-            :--quiet) WK_QUIET=1; export WK_QUIET; continue ;;
+            :--force) WK_FORCE=1; export WK_FORCE; _globals="$_globals $_a"; continue ;;
+            :--quiet) WK_QUIET=1; export WK_QUIET; _globals="$_globals $_a"; continue ;;
+            :--dry-run|:-n) WK_DRY_RUN=1; export WK_DRY_RUN; _globals="$_globals $_a"; continue ;;
+            :--yes|:-y) WK_YES=1; export WK_YES; _globals="$_globals $_a"; continue ;;
             :--)      _seen_dashdash=1 ;;
         esac
         _rest+=("$_a")
@@ -599,7 +703,7 @@ main() {
     From the host:  wk $cmd $(wk_self)"
         fi
         die "'wk $cmd' acts on a host, and this is workspace '$(wk_self)'.
-    From the host:  wk $cmd${*:+ $*}"
+    From the host:  wk $cmd${*:+ $*}$_globals"
     fi
     if in_remote_host && [ "$where" = host ]; then
         die "'wk $cmd' acts on a workstation's own store or hardware, and this is
@@ -613,6 +717,15 @@ main() {
     Run 'wk $cmd' there: the workstation owns the workspace's store, and a
     later 'wk build' finds its target from that store."
     fi
+
+    # After the "acts on a host" refusals: where a command may not run at all says more than what its arguments look like.
+    argv_check "$cmd" "$impl" ${1+"$@"}
+    set -- ${ARGS[@]+"${ARGS[@]}"}
+    if [ -n "${WK_DRY_RUN:-}" ] && ! cmd_dryrun ${1+"$@"} && ! cmd_readonly "${1:-}"; then
+        usage_die "$cmd" "$impl" "'wk $cmd' has no dry run yet: not every change it makes goes through
+    the one path --dry-run intercepts (docs/HANDOFF-cli.md names it as owed)"
+    fi
+    if cmd_destructive ${1+"$@"}; then WK_DESTRUCTIVE=1; export WK_DESTRUCTIVE; fi
 
     if [ "$where" = workspace ]; then
         decl=$(cmd_name "$@"); slot=$(name_slot "$decl"); takes=$(cmd_takes "$@")
@@ -639,7 +752,7 @@ main() {
         store_is_local || forward_to_vm "$cmd" "$@"
     fi
 
-    [ "$where" = workspace ] || exec "$impl" "$@"
+    [ "$where" = workspace ] || { argv_split "$(cmd_opts "$@")" "$@"; exec "$impl" ${ARGS[@]+"${ARGS[@]}"}; }
 
     [ -z "$delegate" ] || delegate_run "$delegate" "$cmd" "$@"
 
@@ -709,6 +822,7 @@ main() {
             wait_ready "$name"
         fi
     fi
-    exec "$impl" "$@"
+    argv_split "$(cmd_opts "$@")" "$@"
+    exec "$impl" ${ARGS[@]+"${ARGS[@]}"}
 }
 main "$@"

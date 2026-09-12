@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # wk ai claude|pi <workspace> [agent options] -- run a coding agent inside a workspace
-# wk: where=workspace name=required@2 ready=yes group=workspaces
+# wk: where=workspace name=required@2 ready=yes group=workspaces opts --rc,--stop passthrough=tail
 #
 # The workspace name comes first; everything after it is the agent's, verbatim.
 # --rc and --stop are wk's own and are taken out of argv here.
@@ -21,10 +21,10 @@
 #   wk ai claude <ws> --rc          start it (a no-op, reported, if already up)
 #   wk ai claude <ws> --rc --stop   stop it
 #
-# `wk new` and `wk start` start remote control themselves; WK_NO_CLAUDE_RC=1
-# turns that off. It needs the claude.ai account login rather than a
-# `claude setup-token` token: 'wk key set claude-login', or a guest logs in for
-# itself. Onboarding, the trust dialog and the remote-control dialog are
+# `wk new`, `wk start` and `wk vm start` start remote control in what they
+# bring up; WK_NO_CLAUDE_RC=1 turns that off. It needs the claude.ai account
+# login rather than a `claude setup-token` token: 'wk key set claude-login', or
+# a guest logs in for itself. Onboarding, the trust dialog and the remote-control dialog are
 # recorded in the workspace before either kind of session starts
 # (claude/workspace-config.py).
 #

@@ -2,10 +2,11 @@
 #
 # wk boot <machine> [options] -- put a machine into bench mode for one boot, then back
 #
-# wk: where=host name=none values=--list group=hosts broker *
+# wk: where=host name=none values=--list group=hosts broker * takes=1 dryrun
+# wk: opts --status,--prepare,--diag,--keep,--back,--disarm,--system=,--image=,--list
 # wk: readonly --status,--diag
 #
-#   wk boot <machine> [--system <id>] [--dry-run]  arm the one-shot and reboot
+#   wk boot <machine> [--system <id>]              arm the one-shot and reboot
 #   wk boot <machine> --status                     what mode it is in, and why
 #   wk boot <machine> --prepare                    put this tree and the privileged
 #                                                  helpers on it, so nothing here has
@@ -34,35 +35,25 @@ WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 # This acts on a physical machine the sandbox cannot reach, so a sandboxed invocation becomes a request over the one socket a workspace can see.
 . "$WK_ROOT/lib/broker.sh"
 
-if [ "${1:-}" = --list ]; then
-    [ $# -eq 1 ] || die "usage: wk boot --list; see wk boot -h"
-    machine_list; exit 0
-fi
-
-MACHINE="${1:-}"; shift 2>/dev/null || true
-[ -n "$MACHINE" ] || die "usage: wk boot <machine> [options]; see wk boot -h"
-case "$MACHINE" in -*) die "usage: wk boot <machine> [options]; see wk boot -h" ;; esac
-
-ACTION=arm; IMAGE=""; DRY=""
+MACHINE=""; ACTION=arm; IMAGE=""; DRY="${WK_DRY_RUN:-}"
 while [ $# -gt 0 ]; do
     case "$1" in
+        --list)    machine_list; exit 0 ;;
         --status)  ACTION=status ;;
         --prepare) ACTION=prepare ;;
         --diag)    ACTION=diag ;;
         --keep)    ACTION=keep ;;
         --back)    ACTION=back ;;
         --disarm)  ACTION=disarm ;;
-        --dry-run) DRY=1 ;;
         --system)  IMAGE="${2:-}"; shift ;;
-        --image)   die "renamed: --system <id> (a bootable artifact is a system, never bare
+        --system=*) IMAGE="${1#*=}" ;;
+        --image|--image=*) die "renamed: --system <id> (a bootable artifact is a system, never bare
     'image' -- wk help images)" ;;
-        -*) die "usage: wk boot <machine> [--status|--diag|--keep|--back|--disarm|--prepare|--system <id>|--dry-run]; see wk boot -h
-    unknown option: $1" ;;
-        *)  die "usage: wk boot <machine> [--status|--diag|--keep|--back|--disarm|--prepare|--system <id>|--dry-run]; see wk boot -h
-    unexpected argument: $1" ;;
+        *)  MACHINE="$1" ;;
     esac
     shift
 done
+[ -n "$MACHINE" ] || die "usage: wk boot <machine> [options]; see wk boot -h"
 
 # Everything below reaches hardware; only the action word and the machine name cross the socket. --keep is requestable, or the self-return watchdog would cut a long run.
 if in_workspace; then

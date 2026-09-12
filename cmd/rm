@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # wk rm <name>... -- destroy one or more workspaces and everything they created
-# wk: where=workspace name=required lifecycle post=ssh-alias-remove group=workspaces
+# wk: where=workspace name=required lifecycle post=ssh-alias-remove group=workspaces takes=* destructive
 #
 # The container, the overlay, the home directory and the ssh alias all go;
 # shared caches (ccache, yocto, buildroot) survive.
@@ -24,7 +24,6 @@ require_name "$NAME"
 NAMES=("$NAME")
 for _a in ${@+"$@"}; do
     case "$_a" in
-        -*) die "usage: wk rm <name>...; unknown option: $_a; see wk rm -h" ;;
     esac
     require_name "$_a"
     NAMES+=("$_a")

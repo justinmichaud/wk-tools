@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # wk doctor [--all] -- what is provisioned on this machine, and what is still missing
-# wk: where=local name=none readonly group=hosts
+# wk: where=local name=none readonly group=hosts opts --all,--probe-store
 #
 # The reinstall companion: `./setup` is the automated path, but several pieces
 # are deliberately manual (interactive sudo, credentials, hardware). This prints
@@ -54,15 +54,11 @@ probe_store() {
         printf 'git.manyfiles=%s\n' "$(git config --get feature.manyFiles 2>/dev/null || true)"
     fi
 }
-if [ "${1:-}" = --probe-store ]; then
-    probe_store
-    exit 0
-fi
 ALL=""
 case "${1:-}" in
-    --all) ALL=1; shift ;;
+    --probe-store) probe_store; exit 0 ;;
+    --all) ALL=1 ;;
 esac
-[ $# -eq 0 ] || die "usage: wk doctor [--all]; see wk doctor -h"
 
 missing=0
 ok()   { printf '  \033[32mok\033[0m    %s\n' "$*" >&2; }

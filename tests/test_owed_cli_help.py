@@ -3,12 +3,11 @@ the configurations it accepts -- owed by docs/HANDOFF-wk-cli.md: "every
 command's `--help` prints the actual command line it would run and the
 configurations it accepts [needs a test]".
 
-`wk <cmd> -h` is produced by `wk`'s own `explain_cmd`: a `preview:` line
-appears only when `grep -q -- '--dry-run' "$impl"` finds the flag in the
-command's own file, and a `valid values:` section appears only when the
-command's `# wk:` line declares `values=<flag>` -- the dispatcher then runs
-`wk <cmd> <flag>` itself, so the list can never fall out of step with the
-code. Both mechanisms are read here exactly as `wk` reads them (real `wk
+`wk <cmd> -h` is produced by `wk`'s own `explain_cmd`: the `changes things:`
+line says `--dry-run prints what it would run` only when the command's
+`# wk:` line declares `dryrun`, and a `valid values:` section appears only
+when it declares `values=<flag>` -- the dispatcher then runs `wk <cmd>
+<flag>` itself, so the list can never fall out of step with the code. Both mechanisms are read here exactly as `wk` reads them (real `wk
 <cmd> -h` invocations, not a retyped copy of the decision).
 
 `wk build -h` is the one place both halves of the claim are true together:
@@ -51,7 +50,7 @@ class TestBuildDocumentsBothThePreviewAndTheConfigs(WkTest):
 
     def test_build_h_shows_a_dry_run_preview_and_lists_every_config(self):
         text = _help_text("build")
-        self.assertIn("preview:", text, text)
+        self.assertIn("--dry-run prints what it would run", text, text)
         self.assertIn("valid values", text, text)
         for config in ("jsc-release", "gtk-release", "mac-release"):
             self.assertIn(config, text, text)
@@ -66,35 +65,35 @@ class TestOtherConfigCommandsDoNotFullyMeetTheClaim(WkTest):
     def test_run_has_neither_a_dry_run_preview_nor_a_config_list(self):
         """defect: cmd/run has no --dry-run and declares no values=, so `wk run -h` shows neither the command it would run nor the configs it accepts"""
         text = _help_text("run")
-        self.assertIn("preview:", text, text)
+        self.assertIn("--dry-run prints what it would run", text, text)
         self.assertIn("valid values", text, text)
 
     @unittest.expectedFailure
     def test_gui_has_neither_a_dry_run_preview_nor_a_config_list(self):
         """defect: cmd/gui has no --dry-run and declares no values=, so `wk gui -h` shows neither the command it would run nor the configs it accepts"""
         text = _help_text("gui")
-        self.assertIn("preview:", text, text)
+        self.assertIn("--dry-run prints what it would run", text, text)
         self.assertIn("valid values", text, text)
 
     @unittest.expectedFailure
     def test_bench_lists_plans_not_the_build_configs_its_own_flag_takes(self):
         """defect: cmd/bench's values=--list enumerates benchmark plans, so `wk bench -h`'s 'valid values' section never names a build config despite --config being one of its own flags"""
         text = _help_text("bench")
-        self.assertIn("preview:", text, text)  # true already
+        self.assertIn("--dry-run prints what it would run", text, text)  # true already
         self.assertIn("jsc-release", _values_section(text), text)  # only plans are listed -- fails
 
     @unittest.expectedFailure
     def test_test_previews_the_run_but_not_the_config_list(self):
         """defect: cmd/test has --dry-run (prints a 'would run' line) but declares no values=, so `wk test -h` never lists the configs its own --config accepts"""
         text = _help_text("test")
-        self.assertIn("preview:", text, text)  # true already
+        self.assertIn("--dry-run prints what it would run", text, text)  # true already
         self.assertIn("valid values", text, text)  # not declared -- fails
 
     @unittest.expectedFailure
     def test_profile_lists_modes_not_the_build_configs_its_own_flag_takes(self):
         """defect: cmd/profile's values=--list enumerates profiler modes, so `wk profile -h`'s 'valid values' section never names a build config despite --config being one of its own flags"""
         text = _help_text("profile")
-        self.assertIn("preview:", text, text)  # true already
+        self.assertIn("--dry-run prints what it would run", text, text)  # true already
         self.assertIn("jsc-release", _values_section(text), text)  # only modes are listed -- fails
 
 

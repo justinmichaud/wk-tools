@@ -2,7 +2,9 @@
 #
 # wk ab <pr-spec|sha> [options] -- an interleaved A/B of a pull request on the fleet's boards
 #
-# wk: where=host name=none group=hosts needs ssh,python3
+# wk: where=host name=none group=hosts needs ssh,python3 takes=1 destructive dryrun
+# wk: opts --devices=,--release=,--builder=,--bits=,--base=,--plan=,--rounds=,--count=,--timeout=,--task=,--kill,--detach
+# wk: flag --kill takes=1 opts=--kill
 #
 #   wk ab wpe:1725 --devices rpi3,rpi4          the A/B of WPEWebKit PR 1725 on
 #                                                both boards: two WebKits built
@@ -27,8 +29,6 @@
 #   --timeout <s>         seconds one iteration may take before the run is
 #                         given up (default: the plan's own; Speedometer's 600
 #                         is too short for an rpi3)
-#   --yes                 run without the prompt (a script, an agent)
-#   --dry-run             print the parameters and the commands, run nothing
 #   --detach              confirm, create the task, then hand the work to a
 #                         process that outlives this one; follow it with
 #                         wk status and wk bench report <task>
@@ -72,7 +72,7 @@ WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 . "$WK_ROOT/lib/task.sh"
 . "$WK_ROOT/image/pgo.sh"
 
-USAGE="usage: wk ab <pr-spec|sha> --devices <a,b> [--release X.Y] [--builder B] [--bits N] [--base <sha>] [--plan P]... [--rounds N] [--count N] [--timeout S] [--yes] [--dry-run] [--detach]; wk ab <task> --kill stops one; see wk ab -h"
+USAGE="usage: wk ab <pr-spec|sha> --devices <a,b> [--release X.Y] [--builder B] [--bits N] [--base <sha>] [--plan P]... [--rounds N] [--count N] [--timeout S] [--detach]; wk ab <task> --kill stops one; see wk ab -h"
 
 _ab_pgid() { ps -o pgid= -p "$1" 2>/dev/null | tr -dc '0-9'; }
 
@@ -118,7 +118,11 @@ SPEC="${1:-}"; shift 2>/dev/null || true
 [ -n "$SPEC" ] || die "$USAGE"
 case "$SPEC" in -*) die "$USAGE" ;; esac
 
-DEVICES="" RELEASE="" BUILDER="" BITS="" BASE="" ROUNDS=5 COUNT="" TIMEOUT="" DRY="" DETACH="" TASK="" KILL="" PLANS=()
+# `--opt=value` is `--opt value` to the loop below.
+ARGS=()
+for a in "$@"; do case "$a" in --*=*) ARGS+=("${a%%=*}" "${a#*=}") ;; *) ARGS+=("$a") ;; esac; done
+set -- ${ARGS[@]+"${ARGS[@]}"}
+DEVICES="" RELEASE="" BUILDER="" BITS="" BASE="" ROUNDS=5 COUNT="" TIMEOUT="" DETACH="" TASK="" KILL="" PLANS=()
 while [ $# -gt 0 ]; do
     case "$1" in
         --devices) DEVICES="${2:-}"; shift ;;
@@ -133,17 +137,11 @@ while [ $# -gt 0 ]; do
         --timeout) TIMEOUT="${2:-}"; shift ;;
         --task)    TASK="${2:-}"; shift ;;
         --kill)    KILL=1 ;;
-        --yes)     WK_YES=1; export WK_YES ;;
-        --dry-run) DRY=1 ;;
         --detach)  DETACH=1 ;;
-        -*) die "$USAGE; unknown option: $1" ;;
-        *)  die "$USAGE; unexpected argument: $1" ;;
     esac
     shift
 done
 if [ -n "$KILL" ]; then
-    [ "${#ORIG_ARGS[@]}" -eq 2 ] \
-        || die "--kill takes the task name and nothing else: wk ab <task> --kill"
     ab_kill "$SPEC"
     exit 0
 fi
@@ -153,7 +151,7 @@ case "$ROUNDS" in ''|*[!0-9]*) die "--rounds takes a number (got '$ROUNDS')" ;; 
 [ "$ROUNDS" -ge 1 ] || die "--rounds needs to be at least 1"
 [ -z "$COUNT" ] || case "$COUNT" in *[!0-9]*) die "--count takes a number (got '$COUNT')" ;; esac
 [ -z "$TIMEOUT" ] || case "$TIMEOUT" in *[!0-9]*) die "--timeout takes seconds (got '$TIMEOUT')" ;; esac
-[ -z "$DETACH" ] || [ -z "$DRY" ] || die "--detach and --dry-run: a dry run has nothing to detach"
+[ -z "$DETACH" ] || [ -z "${WK_DRY_RUN:-}" ] || die "--detach and --dry-run: a dry run has nothing to detach"
 [ -z "$TASK" ] || bench_task_attach "$TASK"
 [ "${#PLANS[@]}" -gt 0 ] || PLANS=(speedometer3)
 case "$BITS" in ''|32|64) ;; *) die "--bits takes 32 or 64 (got '$BITS')" ;; esac
@@ -349,7 +347,7 @@ log "  plans     ${PLANS[*]}"
 log "  rounds    $ROUNDS per plan, interleaved A B A B ...${COUNT:+; --count $COUNT iterations per run}"
 log "  slots     base, $PR_SLOT -- one image per board, two WebKits beside it"
 log "  task      $TASK"
-log "            $TASK_DIR$([ -n "$DRY" ] && [ ! -d "$TASK_DIR" ] && echo '  (not created: dry run)')"
+log "            $TASK_DIR$([ -n "${WK_DRY_RUN:-}" ] && [ ! -d "$TASK_DIR" ] && echo '  (not created: dry run)')"
 log ""
 for ((i = 0; i < NDEV; i++)); do
     log "  ${DEV[$i]}: image ${PROFILE[$i]}"
@@ -393,7 +391,7 @@ log "each 'wk pi bench --ab' checks every result against the slot's build-id in"
 log "the running web process; the report pairs the rounds and writes one"
 log "self-contained html file per board and plan into the task."
 
-if [ -n "$DRY" ]; then
+if [ -n "${WK_DRY_RUN:-}" ]; then
     log ""
     log "dry run -- nothing was built or run."
     exit 0

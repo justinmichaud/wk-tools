@@ -43,7 +43,7 @@ from tests.test_dispatch_speed import _LOCAL_CONF, _MACHINE_CONF, _WITNESS_SSH
 _PROBE = '''#!/usr/bin/env bash
 #
 # wk probe <workspace> -- print what the dispatcher handed over
-# wk: where=workspace name=required group=other readonly
+# wk: where=workspace name=required group=other readonly opts --target=
 #
 # A test probe (tests/test_dispatch_handoff.py), never installed.
 set -euo pipefail

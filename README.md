@@ -88,6 +88,35 @@ over its own record when the two disagree; and never lets a read-only command
 (`wk status`, `wk ls`, `wk logs`, `wk doctor`) change anything or block on a
 run it is only reporting.
 
+## Every command, the same way
+
+A command is a file in `cmd/`, and the `# wk:` lines at its top declare its
+shape to the dispatcher (`wk`), which enforces the same rules for all of them
+before the command runs. `wk <cmd> -h` prints what those declarations say.
+
+- **What it changes.** `readonly` commands start nothing and write nothing;
+  the rest change things; a `destructive` command, subverb or flag removes,
+  overwrites or revokes something and **asks once before it acts**. The
+  question defaults to No and declines without a terminal; `--yes` (`-y`)
+  answers it. Nothing that is not destructive ever asks.
+- **`--dry-run` (`-n`), for every command.** Every state change a command
+  makes goes through one library function, `act`, which under `--dry-run`
+  prints the command it would run and runs nothing. A command whose changes
+  are not all on that path yet is refused the flag with the reason, rather
+  than let through to change something; `docs/HANDOFF-cli.md` lists those.
+- **Arguments are checked against the declaration.** `opts` names the options
+  a command takes (`--x=` for one with a value), `takes` how many positionals
+  follow the name, `passthrough` where the rest belongs to another program
+  (after `--`, or `=tail` after the last positional). Anything else is refused
+  with the usage line, once, in the dispatcher.
+- **`--force`, `--quiet`** are the dispatcher's too: `--force` crosses a
+  refusal that exists because of a rule and says so again at the end;
+  `--quiet` drops narration and keeps results, warnings and errors.
+- **What the dispatcher tells the command.** `WK_FORCE`, `WK_QUIET`,
+  `WK_DRY_RUN` and `WK_YES` carry the flags above; `WK_DESTRUCTIVE` says the
+  invocation reached a destructive arm, and `confirm` sets `WK_CONFIRMED` once
+  the question is answered, which is what lets `act` act. None is set by hand.
+
 ## Local vs remote
 
 Every `wk <cmd> -h` prints a `runs on:` line, and commands fall into three
@@ -1126,11 +1155,14 @@ all. Nothing degrades silently -- the next `wk doctor` asks again.
 
 `wk key setup` is the whole of it on a new machine: the deploy keys first (they
 are the one step that needs `gh`), then every credential this machine has not
-got, asked for one at a time, then `wk key check`. It prints one line per
+got, asked for one at a time, then `wk key check` -- the read-only report, and
+what a bare `wk key` runs. It prints one line per
 credential -- the name, `stored`, `minted`, `skipped` or `refused`, and the path
 or the one-line reason -- and then that table, and nothing else: a credential
-already stored is left exactly as it is, an empty answer skips one, and the run
-can be killed and repeated. `wk key set <name>` is the same thing for one of
+already stored is left exactly as it is unless its issuer now refuses it (a
+revoked GitHub token is asked for again, and `wk key deploy` replaces it before
+fanning anything out), an empty answer skips one, and the run can be killed
+and repeated. `wk key set <name>` is the same thing for one of
 them by name --
 `github-pat`, `claude`, `claude-login`, `litellm`, `tailnet`, `tailnet-api` --
 and with nothing to store it reports what the stored one can do instead.
@@ -1141,10 +1173,15 @@ of their own: `wk key deploy`.
 **One deploy key per fork, the same on every workstation.** `wk key deploy`
 mints the key, registers it once on GitHub under a single title, and fans the
 private halves out over the tailnet to every other workstation -- a peer with a
-`wk` of its own -- so the whole fleet holds one key, not one per machine. `wk
-key share` does the fan-out alone, which is what a fresh workstation runs to
-catch up (it takes each key with `wk key adopt`, the value on stdin, never an
-argument). `wk key deploy --rotate` turns the fleet over from one command:
+`wk` of its own -- so the whole fleet holds one key, not one per machine. The
+fan-out writes over what those machines hold and `--rotate` revokes keys on
+GitHub, so each asks first and declines without a terminal (`WK_YES=1` answers
+for you). `wk
+key share` does the fan-out alone (each key arrives through `wk key adopt`,
+the value on stdin, never an argument); `--to <machine>` sends to one peer and
+`--only github-pat` sends the token alone, which is how `wk key deploy` on a
+machine whose token GitHub refuses takes a working one from a peer before
+asking anyone to mint another. `wk key deploy --rotate` turns the fleet over from one command:
 it removes the old key from GitHub, mints a fresh one, and fans that out. The
 GitHub API token rides the same fan-out, so `wk key set github-pat` on one
 workstation and `wk key share` puts it everywhere. A shared build machine is

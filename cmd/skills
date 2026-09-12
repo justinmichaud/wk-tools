@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # wk skills status|diff|pull|push -- manage the shared, mutable skills directory
-# wk: where=host name=none group=sources needs rsync
+# wk: where=host name=none group=sources needs rsync takes=1 destructive pull,push
 #
 # Every workspace mounts the same writable /skills.
 #
@@ -9,8 +9,6 @@
 #   wk skills diff     the actual diff
 #   wk skills pull     shared -> repo, so `git diff` shows it and you can commit
 #   wk skills push     repo -> shared, discarding workspace edits
-#
-# push is destructive and asks first.
 
 set -euo pipefail
 WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -27,7 +25,6 @@ fi
 [ -d "$SHARED" ] || { ensure_dir "$SHARED"; cp -a "$REPO/." "$SHARED/" 2>/dev/null || true; }
 
 ACTION="${1:-status}"
-[ $# -le 1 ] || die "usage: wk skills status|diff|pull|push; see wk skills -h"
 
 case "$ACTION" in
 status)

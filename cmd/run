@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # wk run <workspace> [options] [-- jsc-args] -- run jsc from a workspace build
-# wk: where=workspace name=required ready=yes group=workspaces
+# wk: where=workspace name=required ready=yes group=workspaces opts --config=,--lldb,--until-crash,--max= passthrough
 #
 # Runs the jsc binary a build produced, from the workspace's own build tree on
 # its target. Everything after `--` goes to jsc verbatim.
@@ -40,12 +40,11 @@ while [ $# -gt 0 ]; do
         --max)
             MAX="${2:-}"
             case "$MAX" in
-                ''|*[!0-9]*) die "--max needs a positive integer iteration count (got '${2:-}')
+                *[!0-9]*) die "--max needs a positive integer iteration count (got '${2:-}')
     example:  wk run $NAME --until-crash --max 50 -- ..." ;;
             esac
             shift 2 ;;
         --)            shift; break ;;
-        *)             break ;;
     esac
 done
 

@@ -2,7 +2,7 @@
 #
 # wk disk -- everything wk is storing on this machine, with the total
 #
-# wk: where=local name=none readonly group=sources
+# wk: where=local name=none readonly group=sources opts --probe-store
 #
 # The bytes are in three places no single `du` reaches:
 #
@@ -125,16 +125,8 @@ render_probe() { # <add|noted> [input file]
     done < "${2:-/dev/stdin}"
 }
 
-if [ "${1:-}" = --probe-store ]; then
-    [ $# -eq 1 ] || die "usage: wk disk; see wk disk -h
-    unexpected argument: $2"
-    probe_store
-    exit 0
-fi
-
 case "${1:-}" in
-    '') ;;
-    *) die "usage: wk disk; see wk disk -h" ;;
+    --probe-store) probe_store; exit 0 ;;
 esac
 
 info "wk disk on $(wk_os) ($(hostname -s 2>/dev/null || hostname))"

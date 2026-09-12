@@ -2,13 +2,17 @@
 #
 # wk bench <workspace> <plan> [options] -- run a benchmark and keep the result defensible
 #
-# wk: where=workspace name=required values=--list ready=yes group=workspaces needs python3
+# wk: where=workspace name=required takes=1 values=--list ready=yes group=workspaces needs python3 dryrun stage,staged,mac,mac-volume
+# wk: opts --list,--config=,--count=,--browser=,--subtests=,--software,--browser-args=,--cores= destructive --install,--all readonly --list,ls,precision
+# wk: flag --list where=store name=none takes=0
 # wk: sub stage,staged,mac,mac-volume,mac-ab,ab-summary,compare,report,precision,ls where=host
-# wk: sub seed where=dynamic
-# wk: sub ls,compare,report,precision name=none
-# wk: sub seed name=required@2
-# wk: flag --list where=store name=none
-# wk: readonly --list,ls,precision
+# wk: sub seed where=dynamic name=required@2 takes=1 opts=
+# wk: sub ls name=none takes=1 opts=
+# wk: sub compare,report name=none takes=4 opts=--html,--text
+# wk: sub precision name=none takes=3 opts=--detect=
+# wk: sub stage takes=1 opts=--to=,--config=,--plan=,--payload=
+# wk: sub staged opts=--id=,--plan=,--expect-display=,--count=,--subtests=,--browser-args=,--payload=,--profile=,--timeout=,--ls
+# wk: sub mac,mac-volume,mac-ab,ab-summary takes=0 passthrough=tail
 #
 # <plan> is Tools/Scripts/run-benchmark's own name; `wk bench --list` reads
 # them off the machine's WebKit mirror, no workspace needed.
@@ -26,7 +30,7 @@
 #   wk bench stage <ws> --to <machine>     put a build where a bare-metal role
 #                                          will find it (build in the guest,
 #                                          run on the machine itself)
-#       [--config C] [--dry-run]
+#       [--config C]
 #       [--plan P [--payload <dir>]]...    repeatable: one pinned copy of each
 #                                          benchmark the machine will run, since
 #                                          a benchmark install has no network
@@ -39,7 +43,6 @@
 #                                          on; refuses any other, and refuses a
 #                                          second panel or a mirror set
 #       --ls                               what is staged here, and what ran
-#       --dry-run                          resolve everything; run nothing
 #       --force                            record it despite a preflight fail
 #                                          (still refuses to run outside bench
 #                                          mode -- nothing does)
@@ -49,7 +52,9 @@
 #                                          person has to do, run, come back
 #   wk bench mac-volume [options]          make or manage this Mac's benchmark
 #                                          install, run on the Mac itself; see
-#                                          wk bench mac-volume -h
+#                                          wk bench mac-volume -h. --install (and --all)
+#                                          erases the volume first, and asks
+#   (mac, mac-volume, mac-ab and ab-summary read their own options: bench/*.sh)
 #   wk bench mac-ab <ws> [--rounds N]      an interleaved A/B on the Mac's
 #                                          benchmark install, with nobody in the
 #                                          room: plant a job, reboot, read it
@@ -487,9 +492,9 @@ cmd_run() {
     local class runner arch
     class=$(bench_class "$plan")
     arch=$(t_arch "$ws")
-    case "$CFG_PORT" in
-        --jsc-only) runner=jsc ;;
-        *)          runner=browser ;;
+    case "${CFG_PORT#--}" in   # the port's name, off its build-webkit flag
+        jsc-only) runner=jsc ;;
+        *)        runner=browser ;;
     esac
 
     if [ "$runner" = jsc ] && [ "$class" = gpu ]; then
@@ -510,10 +515,10 @@ cmd_run() {
     local build_dir; build_dir=$(config_build_dir)
 
     if [ "$runner" = browser ] && [ -z "$BROWSER" ]; then
-        case "$CFG_PORT" in
-            --wpe) BROWSER=minibrowser-wpe ;;
-            --gtk) BROWSER=minibrowser-gtk ;;
-            *)     die "no benchmark browser for port $CFG_PORT" ;;
+        case "${CFG_PORT#--}" in
+            wpe) BROWSER=minibrowser-wpe ;;
+            gtk) BROWSER=minibrowser-gtk ;;
+            *)   die "no benchmark browser for port $CFG_PORT" ;;
         esac
     fi
     [ -n "$SOFTWARE" ] && SOFTWARE_REASON="--software"
@@ -709,12 +714,10 @@ cmd_report() {
         case "$1" in
             --html) case "${2:-}" in *.html) html="$2"; shift 2 ;; *) html=1; shift ;; esac ;;
             --text) text=1; shift ;;
-            -*) die "$_REPORT_USAGE" ;;
             # A third bare word is `wk bench compare`'s <ws>, accepted and ignored.
             *) positional+=("$1"); shift ;;
         esac
     done
-    [ ${#positional[@]} -le 3 ] || die "$_REPORT_USAGE; unexpected argument: ${positional[3]}"
     [ ${#positional[@]} -ge 1 ] || die "$_REPORT_USAGE"
 
     if [ ${#positional[@]} -eq 1 ]; then
@@ -771,7 +774,7 @@ stage_drop_half() {
 }
 
 cmd_stage() {
-    local ws="$1" machine="" config="" plan="" payload="" plans="" dry=""
+    local ws="$1" machine="" config="" plan="" payload="" plans="" dry="${WK_DRY_RUN:-}"
     shift
 
     # --plan repeats, each optionally followed by the --payload pinning that benchmark: `plans` collects them one `<plan>\t<payload>` line at a time, flushed when the next --plan starts. Lines rather than a space-separated list, a path being allowed to contain a space.
@@ -799,10 +802,6 @@ cmd_stage() {
                        shift 2 ;;
             --payload) [ -n "$plan" ] || die "--payload names a pinned copy of one benchmark, so it follows the --plan it is a copy of"
                        payload="${2:-}"; shift 2 ;;
-            --dry-run) dry=1; shift ;;
-            *) die "unknown option: $1
-    usage: wk bench stage <workspace> --to <machine> [--config C]
-                          [--plan P [--payload <dir>]]... [--dry-run]" ;;
         esac
     done
     _stage_flush_plan
@@ -1025,7 +1024,7 @@ staged_field() {
 }
 
 cmd_staged() {
-    local id="" plan="" dry="" list="" PAYLOAD="" TIMEOUT="" PROFILE="" EXPECT_DISPLAY=""
+    local id="" plan="" dry="${WK_DRY_RUN:-}" list="" PAYLOAD="" TIMEOUT="" PROFILE="" EXPECT_DISPLAY=""
     while [ $# -gt 0 ]; do
         case "$1" in
             --id)       id="${2:-}"; shift 2 ;;
@@ -1037,13 +1036,7 @@ cmd_staged() {
             --payload)  PAYLOAD="${2:-}"; shift 2 ;;
             --profile)  PROFILE="${2:-}"; shift 2 ;;
             --timeout)  TIMEOUT="${2:-}"; shift 2 ;;
-                --dry-run)  dry=1; shift ;;
             --ls)       list=1; shift ;;
-            *) die "unknown option: $1
-    usage: wk bench staged [--plan P] [--id <staged-id>] [--count N]
-                           [--subtests \"A B\"] [--profile <file>] [--ls]
-                           [--expect-display \"<kind> <w>x<h>\"]
-                           [--dry-run] [--force]" ;;
         esac
     done
 
@@ -1373,15 +1366,14 @@ mac_aslr_probe() {
 }
 
 case "${1:-}" in
-    --list)  [ $# -eq 1 ] || die "usage: wk bench --list; see wk bench -h"
-             bench_plan_list || exit 1; exit 0 ;;
+    --list)  bench_plan_list || exit 1; exit 0 ;;
     ls)      shift; cmd_ls; exit 0 ;;
     compare) shift; [ $# -ge 2 ] || die "usage: wk bench compare <run-a> <run-b> [ws]; see wk bench -h"
              cmd_compare "$@"; exit 0 ;;
     report)  shift; cmd_report "$@"; exit 0 ;;
     staged)  shift; cmd_staged "$@"; exit 0 ;;
-    mac)     shift; exec "$WK_ROOT/bench/mac-lane.sh" "$@" ;;
-    mac-volume) shift; exec "$WK_ROOT/bench/mac-bench-volume.sh" "$@" ;;
+    mac)     shift; exec "$WK_ROOT/bench/mac-lane.sh" ${WK_DRY_RUN:+--dry-run} "$@" ;;
+    mac-volume) shift; exec "$WK_ROOT/bench/mac-bench-volume.sh" ${WK_DRY_RUN:+--dry-run} "$@" ;;
     mac-ab)  shift; exec "$WK_ROOT/bench/mac-ab.sh" "$@" ;;
     ab-summary) shift; exec "$WK_ROOT/bench/mac-ab-summary.sh" "$@" ;;
     precision)
@@ -1390,25 +1382,22 @@ case "${1:-}" in
         while [ $# -gt 0 ]; do
             case "$1" in
                 --detect) _det="${2:-}"; shift 2 ;;
-                -*) die "unknown option: $1
-    usage: wk bench precision <run-a> <run-b> [--detect PCT]" ;;
                 *)  _sides="$_sides${_sides:+ }$1"; shift ;;
             esac
         done
         # shellcheck disable=SC2086 -- two words, checked next.
         set -- $_sides
-        [ $# -eq 2 ] || die "usage: wk bench precision <run-a> <run-b> [--detect PCT]
+        [ $# -ge 2 ] || die "usage: wk bench precision <run-a> <run-b> [--detect PCT]
     Either side may be comma-separated run directories, pooled."
         wkdata ab-precision --target "$_det" --a "$1" --b "$2"
         exit $? ;;
     stage)   shift
-             [ $# -ge 1 ] || die "usage: wk bench stage <workspace> --to <machine> [--config C] [--plan P] [--payload <dir>] [--dry-run]; see wk bench -h"
+             [ $# -ge 1 ] || die "usage: wk bench stage <workspace> --to <machine> [--config C] [--plan P] [--payload <dir>]; see wk bench -h"
              cmd_stage "$@"; exit 0 ;;
     seed)    shift
              # For a container workspace the dispatcher resolved the name into WK_NAME; otherwise it is still the first argument.
              if [ -n "${WK_NAME:-}" ]; then SEED_WS="$WK_NAME"; else SEED_WS="${1:-}"; shift 2>/dev/null || true; fi
              [ -n "$SEED_WS" ] && [ $# -ge 1 ] || die "usage: wk bench seed <workspace> <plan>; see wk bench -h"
-             [ -z "${2:-}" ] || die "usage: wk bench seed <workspace> <plan>; unexpected argument: $2; see wk bench -h"
              load_target "$(ws_target "$SEED_WS")"
              [ -n "${WK_NAME:-}" ] || wait_ready "$SEED_WS"
              seed_payload "$1"; exit 0 ;;
@@ -1428,9 +1417,6 @@ while [ $# -gt 0 ]; do
         --software) SOFTWARE=1; shift ;;
         --browser-args) BROWSER_ARGS="${2:-}"; shift 2 ;;
         --cores)    CORES="${2:-}"; shift 2 ;;
-        *) die "usage: wk bench <workspace> <plan> [--config C] [--count N] [--subtests \"A B\"]
-    [--software] [--browser-args \"...\"] [--cores <set>]; see wk bench -h
-    unexpected argument: $1" ;;
     esac
 done
 

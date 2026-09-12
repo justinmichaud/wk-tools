@@ -7,7 +7,8 @@
 # into the podman VM. macOS guests are listed rather than started.
 #
 #   wk start                 the podman machine, then every container
-#   wk start <workspace>     only that workspace's environment
+#   wk start <workspace>     only that workspace's environment; for a macOS
+#                            guest this is `wk vm start <workspace>`
 #
 # WK_NO_CLAUDE_RC=1 skips restarting claude remote control in the containers
 # that came back up.
@@ -24,17 +25,13 @@ WK_MACHINE="${WK_MACHINE:-wk}"
 NAME="${WK_NAME:-}"
 
 if [ -n "$NAME" ]; then
-    [ $# -eq 0 ] || die "usage: wk start [<workspace>]; see wk start -h
-    'wk start $NAME' takes no options"
     TARGET="$(ws_target "$NAME")"
     load_target "$TARGET"
+    [ "$WK_TARGET_KIND" != vm ] || exec "$WK_ROOT/wk" vm start "$NAME"
     [ "$(t_info "$NAME")" != absent ] || die "no such workspace: $NAME"
     t_start "$NAME"
     exit 0
 fi
-
-[ $# -eq 0 ] || die "usage: wk start [<workspace>]; see wk start -h
-    unexpected argument: $1"
 
 if is_macos && [ -z "${WK_IN_VM:-}" ]; then
     state=$(_machine_state "$WK_MACHINE")

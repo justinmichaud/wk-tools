@@ -37,7 +37,7 @@ class TestLayoutPathCheck(unittest.TestCase):
                 p.write_text("<html>\n")
             (src / "LayoutTests").mkdir(parents=True, exist_ok=True)
             pre = (f'set -euo pipefail\n. "{REPO}/lib/common.sh"\n'
-                   f'NAME=probe-ws\nSUITE={suite}\nDRY={dry!r}\n'
+                   f'NAME=probe-ws\nSUITE={suite}\nexport WK_DRY_RUN={dry!r}\n'
                    f'SRC={str(src)!r}\n'
                    't_exec() { shift; sh -c "$3"; }\n'
                    'set -- ' + " ".join(repr(p) for p in paths) + "\n")

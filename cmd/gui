@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 #
 # wk gui <workspace> [<url>] [flags] -- run MiniBrowser in the benchmark seat
-# wk: where=workspace name=required ready=yes forward=no group=workspaces
+# wk: where=workspace name=required ready=yes forward=no group=workspaces takes=1 passthrough
+# wk: opts --config=,--wpe,--gtk,--mac,--no-fullscreen,--lldb=
 #
 # The same launch a perf run performs (Tools/Scripts/run-minibrowser), without
 # the benchmark around it. Refuses when there is no session to draw into.
@@ -12,8 +13,8 @@
 #   --wpe, --gtk, --mac    shorthand for --config wpe-release / gtk-release / mac-release
 #   --no-fullscreen        skip the port's fullscreen flag (WPE: --fullscreen,
 #                          GTK: --full-screen; the Apple port has neither)
-#   --lldb [ui|web]        run under lldb: "ui" (default) stops before start;
-#                          "web" attaches to the web process once it starts
+#   --lldb <ui|web>        run under lldb: "ui" stops before start; "web"
+#                          attaches to the web process once it starts
 #   -- <args>              extra arguments passed straight to the browser
 
 set -euo pipefail
@@ -45,15 +46,12 @@ while [ $# -gt 0 ]; do
         --wpe)           CONFIG=wpe-release; shift ;;
         --gtk)           CONFIG=gtk-release; shift ;;
         --mac)           CONFIG=mac-release; shift ;;
-        --lldb)          DEBUG=ui
-                         case "${2:-}" in ui|web) DEBUG="$2"; shift ;; esac
-                         shift ;;
+        --lldb)          DEBUG="${2:-}"
+                         case "$DEBUG" in ui|web) ;; *) die "--lldb takes ui or web, not '$DEBUG'" ;; esac
+                         shift 2 ;;
         --no-fullscreen) FULLSCREEN=""; shift ;;
         --)              shift; EXTRA=$(sh_quote "$@"); break ;;
-        -*)              die "usage: wk gui <workspace> [<url>] [--config <c>] [--wpe|--gtk|--mac]
-    [--no-fullscreen] [--lldb [ui|web]] [-- <args>]; unknown option: $1; see wk gui -h" ;;
-        *)               [ -z "$URL" ] || die "usage: wk gui <workspace> [<url>]; one url at a time (got '$URL' and '$1'); see wk gui -h"
-                         URL="$1"; shift ;;
+        *)               URL="$1"; shift ;;
     esac
 done
 

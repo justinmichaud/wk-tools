@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # wk ls -- workspaces, what they are pinned to, and what they cost on disk
-# wk: where=workspace name=none bare=merged readonly group=workspaces
+# wk: where=workspace name=none bare=merged readonly group=workspaces opts --json,--continued,--more-follows,--empty-so-far
 #
 # One line per workspace, on every target this machine knows:
 #
@@ -46,13 +46,12 @@ CONTINUED=""
 MORE_FOLLOWS=""
 EMPTY_SO_FAR=""
 JSON=""
-while [ $# -gt 0 ]; do
-    case "$1" in
-        --continued)    CONTINUED=1; shift ;;
-        --more-follows) MORE_FOLLOWS=1; shift ;;
-        --empty-so-far) EMPTY_SO_FAR=1; shift ;;
-        --json)         JSON=1; shift ;;
-        *) die "usage: wk ls [--json]; see wk ls -h" ;;
+for _a in ${@+"$@"}; do
+    case "$_a" in
+        --continued)    CONTINUED=1 ;;
+        --more-follows) MORE_FOLLOWS=1 ;;
+        --empty-so-far) EMPTY_SO_FAR=1 ;;
+        --json)         JSON=1 ;;
     esac
 done
 

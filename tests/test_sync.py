@@ -388,7 +388,6 @@ class TestSyncArgParsing(unittest.TestCase):
 
     def test_tools_takes_an_optional_target(self):
         self.assertEqual(self._parsed("--tools", "buildbox4"), "SCOPE=tools ONLY= TARGET=buildbox4")
-        self.assertEqual(self._parsed("--tools=buildbox4"), "SCOPE=tools ONLY= TARGET=buildbox4")
 
     def test_tools_does_not_eat_a_following_flag_as_its_target(self):
         # `--tools --all` is two scopes, not a target called "--all": the
@@ -410,28 +409,8 @@ class TestSyncArgParsing(unittest.TestCase):
         self.assertIn("ask for different things", cp.stderr)
         self.assertIn("'myws'", cp.stderr)
 
-    def test_two_names_is_refused(self):
-        cp = self._parse("a", "b")
-        self.assertNotEqual(cp.returncode, 0)
-        self.assertIn("one workspace at a time (got 'a' and 'b')", cp.stderr)
-
-    def test_unknown_flag_is_refused_with_the_usage(self):
-        cp = self._parse("--bogus")
-        self.assertNotEqual(cp.returncode, 0)
-        self.assertIn("unknown option: --bogus", cp.stderr)
-        self.assertIn("--tools", cp.stderr)
-
-    def test_an_empty_equals_value_is_refused_not_read_as_every_target(self):
-        # `--tools` alone means every target; `--tools=` has said there is
-        # one, so an empty one is a mistake rather than a second spelling of
-        # "all of them".
-        cp = self._parse("--tools=")
-        self.assertNotEqual(cp.returncode, 0)
-        self.assertIn("--tools= names one target", cp.stderr)
-
     def test_a_second_target_is_refused_rather_than_overwriting_the_first(self):
-        for pair in (("--target", "moose", "--target", "buildbox4"),
-                     ("--tools=moose", "--tools=buildbox4")):
+        for pair in (("--target", "moose", "--target", "buildbox4"),):
             cp = self._parse(*pair)
             self.assertNotEqual(cp.returncode, 0, f"{pair} was accepted")
             self.assertIn("one target at a time (got 'moose' and 'buildbox4')", cp.stderr)
@@ -780,8 +759,12 @@ class TestSyncInsideWorkspace(unittest.TestCase):
         self._refused("--tools")
         self._refused("--target", "container")
 
-    def test_a_different_workspaces_name_is_refused_the_same_way(self):
-        self._refused("someotherws")
+    def test_a_different_workspaces_name_is_refused_by_the_dispatcher(self):
+        # Inside a workspace the name is implicit, so a positional is one too many.
+        with fake_workspace() as ws:
+            cp = ws.run("sync", "someotherws")
+        self.assertEqual(cp.returncode, 2, cp.stdout)
+        self.assertIn("unexpected argument: someotherws", cp.stdout)
 
     def test_an_unrecognised_flag_is_refused_as_unknown_not_as_host_only(self):
         # Not one of the scope flags the dispatcher intercepts -- cmd/sync's

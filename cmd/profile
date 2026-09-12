@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 #
 # wk profile [<workspace>] [flags] [file.js] -- profile a jsc or browser run
-# wk: where=workspace name=required values=--list ready=yes group=workspaces
+# wk: where=workspace name=required values=--list ready=yes group=workspaces takes=* passthrough dryrun
+# wk: opts --mode=,--config=,--browser,--process=,--attach=,--jit-dump,--markers,--top=,--fetch,--env=,--list
 # wk: flag --list where=local name=none
 #
 # Where the time went, with the env-var wall for each profiler written down once.
@@ -53,7 +54,6 @@
 #   --fetch [dir]     copy the artifacts to this machine when the run ends
 #   --env NAME=VALUE  one more variable for the run (repeatable)
 #   --list            print the available modes and exit
-#   --dry-run         print the environment and the command, run nothing
 #
 # Everything after `--` is passed to what is being profiled.
 
@@ -74,7 +74,7 @@ MODE=sampling
 CONFIG="${WK_CONFIG:-}"
 BROWSER=""; URL=""; PROCESS=web; PROCESS_EXPLICIT=""
 ATTACH=""; JITDUMP=""; MARKERS=""; TOP=""
-FETCH=""; FETCH_DIR=""; DRY=""; EXTRA_ENV=""
+FETCH=""; FETCH_DIR=""; DRY="${WK_DRY_RUN:-}"; EXTRA_ENV=""
 ARGS=()
 
 while [ $# -gt 0 ]; do
@@ -82,25 +82,25 @@ while [ $# -gt 0 ]; do
         --mode)    MODE="${2:-}"; shift 2 ;;
         --mode=*)  MODE="${1#*=}"; shift ;;
         --config)  CONFIG="${2:-}"; shift 2 ;;
+        --config=*) CONFIG="${1#*=}"; shift ;;
         --browser) BROWSER=1; shift
                    case "${1:-}" in ''|-*) ;; *) URL="$1"; shift ;; esac ;;
         --process) PROCESS="${2:-}"; PROCESS_EXPLICIT=1; shift 2 ;;
         --process=*) PROCESS="${1#*=}"; PROCESS_EXPLICIT=1; shift ;;
-        --attach)  ATTACH="${2:-}"; [ -n "$ATTACH" ] || die "--attach needs a pid or a process name"; shift 2 ;;
+        --attach)  ATTACH="${2:-}"; shift 2 ;;
+        --attach=*) ATTACH="${1#*=}"; shift ;;
         --jit-dump) JITDUMP=1; shift ;;
         --markers) MARKERS=1; shift ;;
         --top)     TOP="${2:-}"; shift 2 ;;
+        --top=*)   TOP="${1#*=}"; shift ;;
         --fetch)   FETCH=1; shift
                    case "${1:-}" in ''|-*) ;; *) FETCH_DIR="$1"; shift ;; esac ;;
         --env)     EXTRA_ENV="$EXTRA_ENV
 ${2:-}"; shift 2 ;;
-        --dry-run) DRY=1; shift ;;
+        --env=*)   EXTRA_ENV="$EXTRA_ENV
+${1#*=}"; shift ;;
         --list)    printf '%s\n' $MODES; exit 0 ;;
         --)        shift; while [ $# -gt 0 ]; do ARGS+=("$1"); shift; done ;;
-        -*)        die "usage: wk profile [<workspace>] [--mode <m>] [--config <c>] [--browser [url]]
-    [--process ui|web|network|gpu] [--attach <pid|name>] [--jit-dump] [--markers]
-    [--top <n>] [--fetch [dir]] [--env NAME=VALUE] [--list] [--dry-run] [--] [file.js]
-    unknown option: $1; 'wk profile -h' lists them." ;;
         *)         ARGS+=("$1"); shift ;;
     esac
 done

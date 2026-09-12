@@ -1,14 +1,19 @@
 #!/usr/bin/env bash
 #
-# wk key setup|set|deploy|check|show|ensure -- the credentials this machine holds
-# wk: where=host name=none group=sources needs gh,gh-auth
+# wk key check|setup|set|deploy|show|ensure -- the credentials this machine holds
+# wk: where=host name=none group=sources needs gh,gh-auth takes=1 destructive setup,deploy,share,--replace
 # wk: sub show,ensure,pub,sshtest,fingerprints,set,register,claude,tailnet,tailnet-api,share,adopt needs=
+# wk: sub set,pub,sshtest,adopt takes=2
+# wk: sub set opts=--replace,--paste
+# wk: sub deploy opts=--rotate
+# wk: sub share opts=--to=,--only=
 #
 #   wk key setup      store every credential this machine has not got yet, and
 #                     report what each one can do. The one command a new
 #                     machine needs: it asks for the ones wk is given, mints
 #                     the ones wk makes itself, leaves the ones already here
-#                     alone, and can be re-run. One line per credential --
+#                     alone unless their issuer now refuses them (those are
+#                     asked for again), and can be re-run. One line per credential --
 #                     stored, minted, skipped or refused, with the path or the
 #                     reason -- and then `wk key check`'s table
 #   wk key set <name> [--replace] [--paste]
@@ -61,12 +66,21 @@
 #                     workstation, registered on GitHub with write access, and
 #                     fanned out over the tailnet to the other workstations so
 #                     they all hold the one key. --rotate makes a fresh key,
-#                     removes the old one from GitHub, and fans the new one out
+#                     removes the old one from GitHub, and fans the new one out.
+#                     Asks once, first. A stored GitHub API token GitHub refuses
+#                     is replaced before the fan-out -- taken from a peer that
+#                     holds one GitHub accepts, else asked for -- and never
+#                     fanned out as is
 #   wk key share      fan this machine's deploy keys and API token out to every
 #                     other workstation over the tailnet, without touching
-#                     GitHub -- what a new workstation runs to catch up
+#                     GitHub. Asks first: it overwrites what those machines hold
+#                       --to <machine>     one workstation only
+#                       --only github-pat  the API token only, not the keys --
+#                                          how a peer takes a working token
+#                                          from this machine (setup, deploy)
 #   wk key check      what every credential this machine holds can do and how
-#                     far it reaches, each one asked again at that moment
+#                     far it reaches, each one asked again at that moment.
+#                     Read-only, and what a bare `wk key` runs
 #   wk key show       print the public halves
 #   wk key ensure     create missing push keys without registering them
 #
@@ -120,9 +134,7 @@ WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
 load_target "$(default_target)" 2>/dev/null || true
 
-ACTION="${1:-setup}"
-
-USAGE="usage: wk key setup|set|deploy|check|show|ensure; see wk key -h"
+ACTION="${1:-check}"
 
 ensure_keys() { "$0" ensure 2>&1 | sed 's/^/  /'; }
 
@@ -193,6 +205,23 @@ cred_admit() { # <name> <value>
 
 cred_look() { # <name>   what the stored one can do, asked now
     CRED_VERDICT=$(wk_cred_check "$1" --stored)
+}
+
+cred_stale() { # <name> -- stored, and its issuer refuses it now; `unverified` (no network to ask) is not stale
+    wk_cred_present "$1" || return 1
+    cred_look "$1"
+    [ "$(wk_cred_verdict "$CRED_VERDICT")" = bad ]
+}
+
+cred_replace_stale() { # <name> -- 0 when nothing was stale or a fresh one is stored; the value is typed, so no terminal means it is named and left
+    cred_stale "$1" || return 0
+    warn "$1 is stored here but refused: $(wk_cred_detail "$CRED_VERDICT" | sed -n 1p)"
+    [ "$1" != github-pat ] || ! cred_take_from_fleet "$1" || return 0
+    if [ ! -t 0 ]; then
+        warn "a replacement is typed at a prompt, and there is no terminal here:  wk key set $1 --replace"
+        return 1
+    fi
+    "$0" set "$1" --replace
 }
 
 cred_print() { # <name>  non-zero when it cannot do its job
@@ -280,10 +309,13 @@ _peer_workstation() {
     return 0
 }
 
+SHARE_ONLY=""   # github-pat: the token alone travels (`wk key share --only`)
+
 share_to() { # <machine> -- each value on stdin, never an argument in `ps` over there
     local machine="$1" remote repo alias pat
     while read -r remote repo alias; do
         [ -n "$remote" ] || continue
+        [ -z "$SHARE_ONLY" ] || continue
         [ -n "$(wk_push_key "$remote")" ] || continue
         if wk_push_key "$remote" | ( load_target "$machine"; t_wk key adopt "$remote" ) >/dev/null 2>&1; then
             changed "$machine: shared the $repo deploy key"
@@ -295,6 +327,10 @@ share_to() { # <machine> -- each value on stdin, never an argument in `ps` over 
 $(wk_push_forks)
 EOF
     pat=$(wk_github_pat)
+    if [ -n "$pat" ] && cred_stale github-pat; then
+        warn "$machine: the GitHub API token is not shared -- GitHub refuses the one stored here"
+        pat=""
+    fi
     if [ -n "$pat" ]; then
         if printf '%s\n' "$pat" | ( load_target "$machine"; t_wk key set github-pat --paste ) >/dev/null 2>&1; then
             changed "$machine: shared the GitHub API token"
@@ -305,13 +341,32 @@ EOF
     fi
 }
 
-share_keys() {
+share_keys() { # [machine] -- every peer, or that one
     local machine failed=0
-    for machine in $(peer_workstations); do
+    for machine in ${1:-$(peer_workstations)}; do
         info "sharing to $machine"
         share_to "$machine" || failed=1
     done
     return "$failed"
+}
+
+# The token is one for the fleet, so a peer holding one GitHub accepts is asked to share it here before a person is asked to mint one. The peer's share asks its own question; WK_YES answers it, because this run already asked.
+cred_take_from_fleet() { # <name> -- 0 once a stored one here is accepted
+    local peer self; self=$(wk_machine_name)
+    for peer in $(peer_workstations); do
+        info "asking $peer for its $1"
+        ( load_target "$peer"; WK_YES=1 t_wk key share --to "$self" --only "$1" ) >/dev/null 2>&1 \
+            || { warn "$peer did not share its $1 (an older wk-tools there has no 'share --to': wk sync --tools)"; continue; }
+        if ! cred_stale "$1"; then info "took the $1 from $peer"; return 0; fi
+        warn "$peer's $1 is refused too"
+    done
+    return 1
+}
+
+fanout_prose() { # what the fan-out overwrites, for the one question asked first; nothing when there is no peer
+    local peers; peers=$(peer_workstations | tr '\n' ' ')
+    [ -n "${peers// /}" ] || return 0
+    printf ' and overwrite the deploy keys and GitHub API token that %s hold(s)' "${peers% }"
 }
 
 registered_key_body() { # <repo> -- the registered keys, matched on the jq-safe base64 body
@@ -370,16 +425,22 @@ $(wk_push_forks)
 EOF
 }
 
-deploy_keys() {
-    local failed=0
+deploy_keys() { # [rotate] -- one question, before anything is removed or overwritten; 3 when declined
+    local failed=0 fanout; fanout=$(fanout_prose)
+    if [ -n "${1:-}" ]; then
+        confirm "remove the shared deploy keys from GitHub, mint fresh ones and register them${fanout}?" || return 3
+        info "rotating: removing the old shared keys from GitHub"; rotate_keys
+    elif [ -n "$fanout" ]; then
+        confirm "register the shared deploy keys on GitHub${fanout}?" || return 3
+    fi
     ensure_keys
+    cred_replace_stale github-pat || failed=1
     register_shared_keys || failed=1
     share_keys || failed=1
     return "$failed"
 }
 
 if [ "$ACTION" = ensure ]; then
-    [ -z "${2:-}" ] || die "$USAGE"
     ensure_dir "$(wk_secrets_dir)" 0700
     ensure_dir "$(wk_push_held_dir)" 0700
     wk_push_forks | while read -r remote repo alias; do
@@ -405,11 +466,15 @@ fi
 
 case "$ACTION" in
 setup)
-    [ -z "${2:-}" ] || die "$USAGE"
-    deploy_keys || true
+    _rc=0; deploy_keys || _rc=$?
+    [ "$_rc" != 3 ] || warn "the deploy keys were not touched -- 'wk key deploy' does them alone"
     for _name in $(wk_cred_settable); do
         if wk_cred_present "$_name"; then
-            log "$(cred_line "$_name" stored "$(wk_cred_path "$_name")")"
+            if cred_stale "$_name"; then
+                cred_replace_stale "$_name" || true
+            else
+                log "$(cred_line "$_name" stored "$(wk_cred_path "$_name")")"
+            fi
             continue
         fi
         # A credential declined, or one that cannot be asked for without a
@@ -429,7 +494,6 @@ set)
         case "$1" in
             --replace) _replace=1 ;;
             --paste)   _paste=1 ;;
-            *)         die "$USAGE" ;;
         esac
         shift
     done
@@ -502,8 +566,7 @@ set)
 
 pub)
     remote="${2:-}"
-    [ -n "$remote" ] || die "$USAGE"
-    [ -z "${3:-}" ] || die "$USAGE"
+    [ -n "$remote" ] || die "wk key $ACTION needs a fork: $(wk_push_forks | awk 'NF{printf "%s ",$1}')"
     out=$(pub_of "$remote")
     [ -n "$out" ] || exit 1
     printf '%s\n' "$out"
@@ -511,8 +574,7 @@ pub)
 
 sshtest)
     remote="${2:-}"
-    [ -n "$remote" ] || die "$USAGE"
-    [ -z "${3:-}" ] || die "$USAGE"
+    [ -n "$remote" ] || die "wk key $ACTION needs a fork: $(wk_push_forks | awk 'NF{printf "%s ",$1}')"
     priv=$(priv_of "$remote")
     [ -n "$priv" ] || { echo "no key"; exit 1; }
     ssh -o StrictHostKeyChecking=accept-new -o IdentitiesOnly=yes \
@@ -521,7 +583,6 @@ sshtest)
     ;;
 
 fingerprints)
-    [ -z "${2:-}" ] || die "$USAGE"
     wk_push_forks | while read -r remote repo alias; do
         [ -n "$remote" ] || continue
         pub=$(pub_of "$remote")
@@ -536,7 +597,6 @@ fingerprints)
     ;;
 
 show)
-    [ -z "${2:-}" ] || die "$USAGE"
     wk_push_forks | while read -r remote repo alias; do
         [ -n "$remote" ] || continue
         printf '# %s\n%s\n' "$repo" "$(pub_of "$remote")"
@@ -546,7 +606,6 @@ show)
 adopt)
     remote="${2:-}"
     [ -n "$remote" ] || die "usage: wk key adopt <fork>   (the private key on stdin)"
-    [ -z "${3:-}" ] || die "$USAGE"
     wk_push_forks | awk 'NF {print $1}' | grep -qxF "$remote" \
         || die "no fork called '$remote'; this checkout knows: $(wk_push_forks | awk 'NF{printf "%s ",$1}')"
     wk_push_key_adopt "$remote" \
@@ -555,29 +614,43 @@ adopt)
     ;;
 
 share)
-    [ -z "${2:-}" ] || die "$USAGE"
-    _peers=$(peer_workstations)
+    _to=""; shift
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --to)   _to="${2:-}"; shift ;;
+            --only) SHARE_ONLY="${2:-}"; shift ;;
+        esac
+        shift
+    done
+    [ -z "$SHARE_ONLY" ] || [ "$SHARE_ONLY" = github-pat ] \
+        || die "--only takes github-pat: the token is the one credential that travels alone (the deploy keys go together)"
+    if [ -n "$_to" ]; then
+        peer_workstations | grep -qxF "$_to" \
+            || die "'$_to' is not a peer workstation this machine reaches (a peer with wk over the tailnet)"
+        _peers="$_to"
+    else
+        _peers=$(peer_workstations)
+    fi
     [ -n "$_peers" ] || { info "no other workstation to share with (a peer with wk over the tailnet)"; exit 0; }
-    share_keys || die "one or more workstations did not take the shared keys (above)"
-    info "every workstation now holds this machine's deploy keys and API token"
+    _what="the deploy keys and GitHub API token"; [ -z "$SHARE_ONLY" ] || _what="the GitHub API token"
+    confirm "overwrite $_what that $(printf '%s ' $_peers | sed 's/ $//') hold(s) with this machine's?" \
+        || die "not shared -- nothing on them was changed"
+    share_keys $_to || die "one or more workstations did not take what was shared (above)"
+    info "$(printf '%s ' $_peers | sed 's/ $//') now hold(s) this machine's ${_what#the }"
     ;;
 
 deploy)
     _rotate=""
     case "${2:-}" in
         --rotate) _rotate=1 ;;
-        "")       ;;
-        *)        die "usage: wk key deploy [--rotate]; see wk key -h" ;;
     esac
-    [ -z "${3:-}" ] || die "$USAGE"
-    [ -z "$_rotate" ] || { info "rotating: removing the old shared keys from GitHub"; rotate_keys; }
-    deploy_keys || true
+    _rc=0; deploy_keys $_rotate || _rc=$?
+    [ "$_rc" != 3 ] || die "not done -- nothing was changed"
     echo >&2
     "$0" check
     ;;
 
 check)
-    [ -z "${2:-}" ] || die "$USAGE"
     rc=0
     _machines=$(workstations)
     _forks=$(wk_push_forks)
@@ -637,6 +710,6 @@ register|claude|tailnet|tailnet-api)
     ;;
 
 *)
-    die "$USAGE"
+    die "'$ACTION' is not a verb of wk key; see wk key -h"
     ;;
 esac

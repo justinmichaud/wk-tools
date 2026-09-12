@@ -74,6 +74,7 @@ buildroot_build() {
     ws="${ws:-buildroot-$profile}"
 
     if [ -n "$stop" ]; then
+        [ -z "$dry" ] || { log "dry run -- would ask the build in '$ws' to stop"; return 0; }
         local pf; pf=$(buildroot_pidfile "$ws" image)
         [ -s "$pf" ] || die "no buildroot build is running in '$ws'"
         t_exec "$ws" "kill $(cat "$pf")" >/dev/null 2>&1 || true

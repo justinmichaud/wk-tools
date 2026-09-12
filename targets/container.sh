@@ -224,8 +224,9 @@ _wrap_cmd() {
 # --quiet: without it wkdev-enter's banner mixes SDK chatter into the output.
 t_exec() {
     local name="$1"; shift
-    local c; c=$(_ctr "$name")
-    _sdk "$WK_SDK/scripts/host-only/wkdev-enter" --quiet --name "$c" --exec -- $(_wrap_cmd) "$@"
+    local c tty=""; c=$(_ctr "$name")
+    { [ -t 0 ] && [ -t 1 ]; } || tty=--no-tty   # no terminal here means none in there: git would page into it and wait for ever
+    _sdk "$WK_SDK/scripts/host-only/wkdev-enter" --quiet --name "$c" $tty --exec -- $(_wrap_cmd) "$@"
 }
 
 # podman's seccomp allow-list lacks personality(ADDR_NO_RANDOMIZE); stop-on-exec would hijack `wk gui --lldb ui`.

@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 #
 # wk stop [<workspace>] [--keep-vm] -- shut down one workspace, or everything
-# wk: where=workspace name=optional forward=no group=hosts needs podman
+# wk: where=workspace name=optional forward=no group=hosts needs podman opts --keep-vm
+# wk: flag --keep-vm name=none
 #
 # A named workspace: stops only its container or macOS guest; nothing on disk
 # is touched.
@@ -26,30 +27,24 @@ WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 WK_MACHINE="${WK_MACHINE:-wk}"
 
 NAME="${WK_NAME:-}"
+KEEP_VM=""
+for _a in "$@"; do
+    case "$_a" in
+        --keep-vm) KEEP_VM=1 ;;
+    esac
+done
 
 if [ -n "$NAME" ]; then
-    [ $# -eq 0 ] || die "usage: wk stop [<workspace>] [--keep-vm]; see wk stop -h
-    'wk stop $NAME' takes no options -- --keep-vm only applies to a bare 'wk stop'"
+    [ -z "$KEEP_VM" ] || die "'wk stop $NAME' takes no options -- --keep-vm only applies to a bare 'wk stop'"
     TARGET="$(ws_target "$NAME")"
     load_target "$TARGET"
     [ "$(t_info "$NAME")" != absent ] || die "no such workspace: $NAME"
 
-    # t_stop kills claude remote-control with a container or guest, not with a checkout.
     [ "$WK_TARGET_KIND" != remote ] || rc_stop "$NAME"
 
     t_stop "$NAME"
     exit 0
 fi
-
-KEEP_VM=""
-case "${1:-}" in
-    --keep-vm) KEEP_VM=1; shift ;;
-    "") ;;
-    *) die "usage: wk stop [<workspace>] [--keep-vm]; see wk stop -h
-    unexpected argument: $1" ;;
-esac
-[ $# -eq 0 ] || die "usage: wk stop [<workspace>] [--keep-vm]; see wk stop -h
-    unexpected argument: $1"
 
 # Before the podman-machine check: a macOS VM holds its memory even with the machine stopped.
 if is_macos && [ -z "${WK_IN_VM:-}" ]; then

@@ -2,7 +2,7 @@
 #
 # wk remotes [<workspace>] [--fix] -- are this checkout's git remotes right?
 # wk: where=workspace name=optional bare=merged group=sources
-# wk: readonly
+# wk: readonly opts --fix,--continued
 #
 # Asked of the workspace, not of a record: does `origin` mean upstream
 # (fetch-only, push URL `no-push://`), can `fork` be pushed to over ssh through
@@ -35,8 +35,6 @@ while [ $# -gt 0 ]; do
     case "$1" in
         --fix) FIX=1; shift ;;
         --continued) CONTINUED=1; shift ;;
-        -*) die "usage: wk remotes [<workspace>] [--fix]; unknown option: $1; see wk remotes -h" ;;
-        *)  die "usage: wk remotes [<workspace>] [--fix]; unexpected argument: $1; see wk remotes -h" ;;
     esac
 done
 NAME="${WK_NAME:-}"

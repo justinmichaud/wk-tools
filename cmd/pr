@@ -2,7 +2,7 @@
 #
 # wk pr [<workspace>] <user>:<branch>|<n>|wpe:<n> -- check out a PR head, from either project
 # wk: where=workspace name=optional takes=1 ready=yes group=sources
-# wk: sub open where=host needs=gh,gh-auth
+# wk: sub open where=host name=optional@2 takes=0 opts=--draft,--web needs=gh,gh-auth
 # wk: sub rebase name=optional@2 takes=0
 #
 #   wk pr justinmichaud:eng/non-cocoa-fuzz-Frame-cache-evicted-or-unparsed-frames-dereferenced
@@ -94,12 +94,7 @@ SPEC="${1:-}"
 
 # 'rebase' never matches a workspace name, so it survives as $1 and a name after it is $2.
 if [ "$SPEC" = rebase ]; then
-    if [ -n "$NAME" ]; then
-        [ -z "${2:-}" ] || die "usage: wk pr rebase [<workspace>]; unexpected argument: $2; see wk pr -h"
-    else
-        NAME="${2:-}"
-        [ -z "${3:-}" ] || die "usage: wk pr rebase [<workspace>]; unexpected argument: $3; see wk pr -h"
-    fi
+    [ -n "$NAME" ] || NAME="${2:-}"
     [ -n "$NAME" ] || die "usage: wk pr rebase [<workspace>]; run inside a workspace, or name one; see wk pr -h"
     shift $#
     require_name "$NAME"
@@ -135,10 +130,7 @@ if [ "$SPEC" = open ]; then
         case "$1" in
             --draft) DRAFT=1; shift ;;
             --web)   WEB=1; shift ;;
-            -*)      die "usage: wk pr open <workspace> [--draft] [--web]; see wk pr -h" ;;
-            *)
-                [ -z "$NAME2" ] || die "usage: wk pr open <workspace> [--draft] [--web]; see wk pr -h"
-                NAME2="$1"; shift ;;
+            *)       NAME2="$1"; shift ;;
         esac
     done
     [ -n "$NAME" ] || NAME="$NAME2"
@@ -183,8 +175,6 @@ fi
     || die "'wk pr $SPEC' does not say which workspace to check it out into.
     Name one:        wk pr <workspace> $SPEC   ('wk ls' lists them)
     or run it in one: wk pr $SPEC"
-[ -z "${2:-}" ] \
-    || die "usage: wk pr [<workspace>] <user>:<branch>|<n>|wpe:<n>; unexpected argument: $2; see wk pr -h"
 shift $#
 
 require_name "$NAME"

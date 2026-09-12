@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # wk selftest [--quick] [-v] [<pattern>] -- run the test suite in tests/
-# wk: where=local name=none group=hosts needs python3
+# wk: where=local name=none group=hosts needs python3 takes=1 opts --quick,-v
 #
 # Real tests, stdlib unittest, one per behaviour. Tests that need the podman
 # VM, a configured machine or a board skip by name when it is absent; a test
@@ -21,7 +21,6 @@ while [ $# -gt 0 ]; do
     case "$1" in
         --quick) QUICK=1; shift ;;
         -v)      VERBOSE=-v; shift ;;
-        -*)      die "usage: wk selftest [--quick] [-v] [<pattern>]; see wk selftest -h" ;;
         *)       PATTERN+=(-k "$1"); shift ;;
     esac
 done

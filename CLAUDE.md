@@ -90,8 +90,22 @@ rewritten file resumes a running process mid-word. Check `wk status` first.
    reports it and believes the machine.
 6. **Read-only is read-only.** A reporting command changes nothing, takes no
    lock, and is never blocked by the work it asks about.
-7. **Prompts guard destructive actions only.** Routine paths never prompt; a
-   destructive prompt defaults to No and declines without a terminal.
+7. **Prompts guard destructive actions only, and every destructive action
+   is prompted.** A command (or subverb, or flag) that removes, overwrites or
+   revokes something is declared `destructive` to the dispatcher, asks once
+   before it acts through `confirm`, defaults to No, and declines without a
+   terminal; `--yes` answers it. Nothing else prompts.
+8. **Every state change goes through `act`, so every command has the same
+   dry run.** `wk <cmd> --dry-run` prints each command `act` would run and
+   runs none of them. A command declares `dryrun` only once every path
+   honours that; an invocation not yet on that path is refused the flag,
+   never let through. Reads, probes and the command's own log and task
+   record are not state changes.
+9. **The dispatcher refuses what a command does not declare.** Options
+   (`opts`), positionals (`takes`) and passthrough tails are declared in the
+   `# wk:` lines; an option or argument outside them is refused with the
+   usage line before anything runs. No command parses argv defensively for
+   itself.
 
 ## Cattle, not pets
 

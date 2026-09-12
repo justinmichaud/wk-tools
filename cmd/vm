@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 #
 # wk vm <sub> -- disposable macOS VMs for building the Apple ports
-# wk: where=host name=none group=hosts needs tart
+# wk: where=host name=none group=hosts needs tart takes=2 destructive rm,--rebuild,--rm
+# wk: sub ls takes=1
+# wk: sub base takes=1 opts=--refresh,--rebuild,--rm
 #
 # macOS has no container primitive for macOS userspace, so isolation for an
 # Apple-port build is a VM.
@@ -12,7 +14,8 @@
 #   ls                        list guests and their state, and whether the
 #                             golden base still matches its provisioning inputs
 #   new <name>                create a guest, cloned from the golden base
-#   start <name>              boot it, write its ssh alias (wk-<name>)
+#   start <name>              boot it, write its ssh alias (wk-<name>) and start
+#                             claude remote control in it (WK_NO_CLAUDE_RC=1: not)
 #   stop <name>               shut it down
 #   ip <name>                 its current address
 #   check <name>              is it on an empty desktop, with nothing modal in
@@ -48,14 +51,6 @@ _write_alias() {
 }
 
 SUB="${1:-ls}"; shift || true
-
-case "$SUB" in
-    ls)   [ $# -eq 0 ] || die "usage: wk vm ls; see wk vm -h" ;;
-    base) [ $# -le 1 ] || die "usage: wk vm base [--refresh|--rebuild|--rm]; see wk vm -h" ;;
-    new|start|stop|ip|enter|sync|rm|check)
-          [ $# -eq 1 ] && [ "${1#-}" = "$1" ] \
-              || die "usage: wk vm $SUB <name>; see wk vm -h" ;;
-esac
 
 case "$SUB" in
 ls)
@@ -108,6 +103,11 @@ start)
     NAME="${1:-}"; require_name "$NAME"
     ip=$(t_start "$NAME")
     _write_alias "$NAME" "$ip"
+    if [ -z "${WK_NO_CLAUDE_RC:-}" ]; then
+        "$WK_ROOT/wk" ai claude "$NAME" --rc \
+            || warn "'$NAME' is up; starting claude remote control in it is what failed
+  (above). 'wk ai claude $NAME --rc' retries; WK_NO_CLAUDE_RC=1 stops trying."
+    fi
     info "$NAME is up at $ip"
     log  "  wk build $NAME mac-release"
     log  "  zed ssh://wk-$NAME$(t_src "$NAME")"
@@ -174,9 +174,6 @@ base)
         ;;
     "")
         _ensure_base
-        ;;
-    *)
-        die "usage: wk vm base [--refresh|--rebuild|--rm]; see wk vm -h"
         ;;
     esac
     info "golden base '$WK_VM_BASE' is ready"

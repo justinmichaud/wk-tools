@@ -348,9 +348,9 @@ class TestTheStartUpDialogsAreAnsweredBeforeAnythingStarts(WkTest):
 class TestRemoteControlIsOnByDefault(WkTest):
     """A workspace is reachable from the phone without anybody having
     remembered to ask: `wk new` starts remote control in the workspace it just
-    made, and `wk start` starts it in every container it brings back up. Both
-    call `wk ai claude --rc` -- the one implementation -- and neither may fail
-    because of it.
+    made, `wk start` starts it in every container it brings back up, and
+    `wk vm start` in the guest it boots. All three call `wk ai claude --rc` --
+    the one implementation -- and none may fail because of it.
 
     What is checked here is the wiring, statically: exercising it needs a real
     container (a workspace, a running podman machine and a Claude CLI in it),
@@ -359,6 +359,10 @@ class TestRemoteControlIsOnByDefault(WkTest):
 
     NEW = (REPO / "cmd" / "new").read_text()
     START = (REPO / "cmd" / "start").read_text()
+    VM = (REPO / "cmd" / "vm").read_text()
+    CALLS = (("new", NEW, 'ai claude "$NAME" --rc'),
+             ("start", START, 'ai claude "$_ws" --rc'),
+             ("vm", VM, 'ai claude "$NAME" --rc'))
 
     def test_new_starts_it_through_the_one_command(self):
         self.assertIn('ai claude "$NAME" --rc', self.NEW,
@@ -371,20 +375,41 @@ class TestRemoteControlIsOnByDefault(WkTest):
         self.assertIn('ai claude "$_ws" --rc', self.START,
                       "wk start no longer starts remote control")
 
-    def test_both_honour_one_switch(self):
-        for name, text in (("new", self.NEW), ("start", self.START)):
+    def test_vm_start_starts_it_in_the_guest_it_boots(self):
+        """`--rc` verifies the sandbox, and cmd/verify wants the workspace
+        running -- which a guest is not until it is booted."""
+        arm = self.VM.split("\nstart)", 1)[1].split("\nstop)", 1)[0]
+        self.assertIn('ai claude "$NAME" --rc', arm,
+                      "wk vm start does not start remote control")
+        self.assertLess(arm.index('_write_alias'), arm.index('ai claude "$NAME" --rc'),
+                        "the alias is written before remote control is started")
+
+    def test_new_does_not_try_a_workspace_that_is_not_running(self):
+        """`wk new --target vm` leaves the guest stopped by design, so trying
+        there fails verify and reports a made workspace as a failed one."""
+        self.assertIn('[ "$(t_info "$NAME")" = running ]', self.NEW,
+                      "wk new starts remote control without checking the "
+                      "workspace is running")
+
+    def test_start_of_a_guest_is_vm_start(self):
+        """One boot path: `wk start <guest>` hands over to `wk vm start`, which
+        writes the alias and starts remote control."""
+        self.assertIn('[ "$WK_TARGET_KIND" != vm ] || exec "$WK_ROOT/wk" vm start "$NAME"',
+                      self.START)
+
+    def test_all_honour_one_switch(self):
+        for name, text, _ in self.CALLS:
             with self.subTest(cmd=name):
                 self.assertIn("WK_NO_CLAUDE_RC", text,
                               f"wk {name} has no way to turn it off")
 
-    def test_neither_can_fail_because_of_it(self):
+    def test_none_can_fail_because_of_it(self):
         """A workspace that exists must not be reported as a failed creation,
         and one agent that will not start is not a machine that will not start.
 
         The invocation -- the line that ends in a continuation, not the prose
         around it -- is followed by a warning, never a `die`."""
-        for name, text, call in (("new", self.NEW, 'ai claude "$NAME" --rc'),
-                                 ("start", self.START, 'ai claude "$_ws" --rc')):
+        for name, text, call in self.CALLS:
             lines = text.splitlines()
             idx = [i for i, l in enumerate(lines) if call in l and not l.strip().startswith("#")]
             self.assertEqual(len(idx), 1, f"wk {name}: {len(idx)} invocations, expected 1")

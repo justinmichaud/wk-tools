@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 #
 # wk test <workspace> [flags] [paths...] -- run the JSC or layout test suites
-# wk: where=workspace name=required ready=yes group=workspaces
+# wk: where=workspace name=required ready=yes group=workspaces takes=* passthrough dryrun
+# wk: opts --config=,--layout,--gpu,--lldb,--kill
 #
 # The same reportability as `wk build`: a watchdog that detects a silent run, a
 # status file `wk status` can read, and a summary instead of raw output. --lldb
@@ -17,7 +18,6 @@
 #   --gpu                use the real GPU for layout tests (Linux only)
 #   --lldb [web|ui]      debug one layout test: "web" (default) attaches to the
 #                        web process, "ui" to WebKitTestRunner
-#   --dry-run            print the resolved run and stop
 #   --kill               stop the test run in this workspace, wherever it runs
 
 set -euo pipefail
@@ -37,22 +37,19 @@ require_name "$NAME"
 CONFIG="${WK_CONFIG:-}"
 SUITE=jsc
 GPU=""
-DRY=""
 LLDB=""
 KILL=""
 while [ $# -gt 0 ]; do
     case "$1" in
         --config)  CONFIG="${2:-}"; shift 2 ;;
+        --config=*) CONFIG="${1#*=}"; shift ;;
         --layout)  SUITE=layout; shift ;;
         --gpu)     GPU=1; shift ;;
         --lldb)    LLDB=web
                    case "${2:-}" in ui|web) LLDB="$2"; shift ;; esac
                    shift ;;
-        --dry-run) DRY=1; shift ;;
         --kill)    KILL=1; shift ;;
         --)        shift; break ;;
-        -*)        die "usage: wk test <workspace> [--config <c>] [--layout] [--gpu]
-    [--lldb [web|ui]] [--dry-run] [--kill] [--] [paths...]; see wk test -h" ;;
         *)         break ;;
     esac
 done
@@ -84,7 +81,7 @@ if [ "$SUITE" = layout ] && config_jsc_only; then
     the configs.)"
 fi
 
-if [ -n "$DRY" ]; then
+if [ -n "${WK_DRY_RUN:-}" ]; then
     WS_STATE=$(ws_state "$NAME")
 else
     WS_STATE=present
@@ -101,7 +98,7 @@ POLITE=""
 [ "$WK_TARGET_KIND" = remote ] && POLITE=1
 JOBS=$(build_jobs "$POLITE")
 build_admit "this test run" "$JOBS"
-build_record "wk test $NAME" "$JOBS" "$(( JOBS * WK_MB_PER_JOB ))" "pid:$$"
+[ -n "${WK_DRY_RUN:-}" ] || build_record "wk test $NAME" "$JOBS" "$(( JOBS * WK_MB_PER_JOB ))" "pid:$$"
 
 if [ "$CFG_BUILDSYS" = xcode ]; then
     RENDER_ENV=""
@@ -118,7 +115,7 @@ else
     RENDER_DESC="software rendering"
 fi
 
-if [ "$SUITE" = layout ] && [ $# -gt 0 ] && [ -z "$DRY" ]; then
+if [ "$SUITE" = layout ] && [ $# -gt 0 ] && [ -z "${WK_DRY_RUN:-}" ]; then
     _missing=$(t_exec "$NAME" sh -c "$(
         printf 'for t in %s; do\n' "$(sh_quote "$@")"
         printf '  p=${t%%%%\\?*}\n'
@@ -168,7 +165,7 @@ layout)
 *) die "unknown suite: $SUITE" ;;
 esac
 
-if [ -n "$DRY" ]; then
+if [ -n "${WK_DRY_RUN:-}" ]; then
     log "dry run -- nothing was run."
     ARCH_LABEL=$(arch_label "$ARCH")
     log "  workspace: $NAME ($TARGET, $WS_STATE${ARCH_LABEL:+, $ARCH_LABEL})"

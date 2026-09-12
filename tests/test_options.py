@@ -1,6 +1,6 @@
 """Option consistency across cmd/*: --quiet (dispatcher-level, once), --json
-on `wk ls`/`wk find`, and every command in this audit's file set refusing an
-unknown flag instead of silently accepting it.
+on `wk ls`/`wk find`, and what stays a command's own once the dispatcher
+refuses unknown options and extra arguments for all of them.
 
 Run: python3 -m unittest tests.test_options -v
 """
@@ -145,12 +145,6 @@ class TestLsJson(WkTest):
         self.assertNotIn("NAME", cp.stdout)
         self.assertEqual(len(cp.stdout.strip().splitlines()), 1, cp.stdout)
 
-    def test_ls_refuses_an_unknown_flag(self):
-        """`wk ls --bogus` is refused, not silently accepted"""
-        cp = run("ls", "--bogus")
-        self.assertNotEqual(cp.returncode, 0)
-        self.assertIn("usage:", cp.stdout)
-
     def test_json_merge_list_merges_concatenated_documents(self):
         """json_merge_list (lib/common.sh) merges N files, each zero or more
         JSON documents concatenated with no delimiter -- the shape a
@@ -191,80 +185,11 @@ class TestFindJson(WkTest):
                            "--no-ssh", "--json")
         self.assertEqual(len(cp.stdout.strip().splitlines()), 1, cp.stdout)
 
-    def test_find_refuses_an_unknown_flag(self):
-        cp = run("find", "--bogus")
-        self.assertNotEqual(cp.returncode, 0)
-        self.assertIn("usage:", cp.stdout)
-
-
-class TestUnknownFlagRefused(WkTest):
-    """A parameter this command does not recognise is refused, not silently
-    ignored (docs/defects, "a parameter silently ignored instead of
-    refused"). Every case here needs no real workspace or machine."""
-
-    def test_sudo(self):
-        cp = run("sudo", "--bogus")
-        self.assertNotEqual(cp.returncode, 0)
-        self.assertIn("usage:", cp.stdout)
-
-    def test_push(self):
-        cp = run("push", "--bogus")
-        self.assertNotEqual(cp.returncode, 0)
-        self.assertIn("usage:", cp.stdout)
-
-    def test_sync(self):
-        # WK_TARGET: `wk sync` with no name is a container command, and on a
-        # macOS host that forwards into the podman VM. The refusal under test is
-        # this dispatcher's.
-        cp = run("sync", "--bogus", env={"WK_TARGET": "vm"})
-        self.assertNotEqual(cp.returncode, 0)
-        self.assertIn("usage:", cp.stdout)
-
-    def test_doctor(self):
-        cp = run("doctor", "--bogus")
-        self.assertNotEqual(cp.returncode, 0)
-        self.assertIn("usage:", cp.stdout)
-
-    def test_remote_extra_positional(self):
-        """`wk remote setup <target> <extra>` -- an argument past <target>"""
-        cp = run("remote", "setup", "some-bogus-host", "extra-garbage")
-        self.assertNotEqual(cp.returncode, 0)
-        self.assertIn("usage:", cp.stdout)
-
-    def test_verify_unknown_flag(self):
-        """cmd/verify's own flag check runs before any store/target lookup,
-        so this needs no real workspace -- just a name past require_name."""
-        cp = run_impl("verify", "--bogus", env={"WK_NAME": "fakews"})
-        self.assertNotEqual(cp.returncode, 0)
-        self.assertIn("usage:", cp.stdout)
-
-    def test_logs_unknown_flag(self):
-        """cmd/logs checks the flag only after finding a build.log, so this
-        one needs a scratch store with a workspace directory in it."""
-        with temp_store() as store:
-            d = Path(store["WK_STORE"])
-            (d / "ws" / "fakews").mkdir(parents=True)
-            (d / "ws" / "fakews" / "build.log").write_text("fake\n")
-            cp = run_impl("logs", "--bogus",
-                           env={"WK_STORE": store["WK_STORE"], "WK_TARGET": "container",
-                                "WK_NAME": "fakews"})
-        self.assertNotEqual(cp.returncode, 0)
-        self.assertIn("usage:", cp.stdout)
-
-    def test_build_list_extra_positional_refused(self):
-        """`wk build --list <extra>` previously exited 0, silently ignoring
-        anything typed after --list."""
-        cp = run_impl("build", "--list", "extra-garbage")
-        self.assertNotEqual(cp.returncode, 0)
-        self.assertIn("usage:", cp.stdout)
-
-    def test_disk_probe_store_extra_positional_refused(self):
-        """cmd/disk's internal --probe-store branch (used when piping this
-        file into the podman VM's bash) previously ignored a trailing
-        argument."""
-        cp = run_impl("disk", "--probe-store", "extra-garbage")
-        self.assertNotEqual(cp.returncode, 0)
-        self.assertIn("usage:", cp.stdout)
+class TestWhatStaysTheCommandsOwn(WkTest):
+    """Refusing an unknown option or an extra argument is the dispatcher's
+    (tests/test_cli_shape.py). What stays a command's own: a deliberate
+    passthrough to the program it runs, documented in its -h; a missing
+    required argument; an unknown subverb name."""
 
     def test_build_passthrough_is_documented_not_a_silent_ignore(self):
         """cmd/build forwards an unrecognised flag to build-webkit, on
@@ -273,44 +198,6 @@ class TestUnknownFlagRefused(WkTest):
         text = (REPO / "cmd" / "build").read_text()
         self.assertIn("everything left passes\n# through to the build untouched", text)
 
-
-class TestSecondHalfUnknownFlagRefused(WkTest):
-    """The second half of the option-consistency audit (docs/defects):
-    status, bench, pr, run, gc, pick, session, quiesce, test, enter, zed,
-    gui, profile, ai. Each refuses an unknown flag with 'usage:', or --
-    run, enter, ai -- documents a deliberate passthrough to what it runs
-    instead (confirmed by a doc-text test, not a refusal one)."""
-
-    def test_status_unknown_flag(self):
-        cp = run_impl("status", "--bogus")
-        self.assertNotEqual(cp.returncode, 0)
-        self.assertIn("usage:", cp.stdout)
-
-    def test_status_extra_positional_refused(self):
-        """a second bare word is refused, not silently dropped -- both used
-        to land in $_args with only the first ever read back out."""
-        cp = run_impl("status", "ws1", "ws2")
-        self.assertNotEqual(cp.returncode, 0)
-        self.assertIn("usage:", cp.stdout)
-        self.assertIn("unexpected argument", cp.stdout)
-
-    def test_bench_unknown_flag(self):
-        cp = run_impl("bench", "someplan", "--bogus", env={"WK_NAME": "fakews"})
-        self.assertNotEqual(cp.returncode, 0)
-        self.assertIn("usage:", cp.stdout)
-
-    def test_bench_report_extra_positional_refused(self):
-        """a fourth bare argument to 'wk bench report' is refused; the third
-        is `wk bench compare`'s <ws> and stays accepted-and-ignored (see the
-        header comment on cmd/bench's 'compare' line)."""
-        cp = run_impl("bench", "report", "a", "b", "ws", "extra")
-        self.assertNotEqual(cp.returncode, 0)
-        self.assertIn("usage:", cp.stdout)
-
-    def test_bench_seed_extra_positional_refused(self):
-        cp = run_impl("bench", "seed", "somews", "someplan", "extra")
-        self.assertNotEqual(cp.returncode, 0)
-        self.assertIn("usage:", cp.stdout)
 
     def test_bench_count_documented_as_iterations_per_run(self):
         text = (REPO / "cmd" / "bench").read_text()
@@ -322,45 +209,6 @@ class TestSecondHalfUnknownFlagRefused(WkTest):
         text = (REPO / "cmd" / "run").read_text()
         self.assertIn("Everything after `--` goes to jsc verbatim.", text)
 
-    def test_pr_open_unknown_flag(self):
-        """'wk pr open' is the sub-verb with its own flag loop."""
-        cp = run_impl("pr", "open", "somews", "--bogus")
-        self.assertNotEqual(cp.returncode, 0)
-        self.assertIn("usage:", cp.stdout)
-
-    def test_pr_extra_positional_refused(self):
-        cp = run_impl("pr", "someuser:somebranch", "extra", env={"WK_NAME": "fakews"})
-        self.assertNotEqual(cp.returncode, 0)
-        self.assertIn("usage:", cp.stdout)
-        self.assertIn("unexpected argument", cp.stdout)
-
-    def test_pr_rebase_extra_positional_refused(self):
-        cp = run_impl("pr", "rebase", "fakews", "extra")
-        self.assertNotEqual(cp.returncode, 0)
-        self.assertIn("usage:", cp.stdout)
-        self.assertIn("unexpected argument", cp.stdout)
-
-    def test_gc_unknown_flag(self):
-        with temp_store() as store:
-            cp = run_impl("gc", "--bogus", env={
-                "WK_STORE": store["WK_STORE"], "WK_TARGET": "container",
-                "XDG_STATE_HOME": store["WK_STORE"],
-            })
-        self.assertNotEqual(cp.returncode, 0)
-        self.assertIn("usage:", cp.stdout)
-
-    def test_gc_second_flag_no_longer_dropped(self):
-        """previously the parser only ever looked at $1: a second flag (a
-        typo next to a real one) was silently ignored instead of applied or
-        refused. It is a real loop over argv now."""
-        with temp_store() as store:
-            cp = run_impl("gc", "--refresh-net", "--bogus", env={
-                "WK_STORE": store["WK_STORE"], "WK_TARGET": "container",
-                "XDG_STATE_HOME": store["WK_STORE"],
-            })
-        self.assertNotEqual(cp.returncode, 0)
-        self.assertIn("usage:", cp.stdout)
-
     def test_pick_requires_at_least_one_commit(self):
         """wk pick's grammar is variadic commit specs with no flags to typo;
         the equivalent refusal is a missing commit argument."""
@@ -368,52 +216,9 @@ class TestSecondHalfUnknownFlagRefused(WkTest):
         self.assertNotEqual(cp.returncode, 0)
         self.assertIn("usage:", cp.stdout)
 
-    @unittest.skipUnless(platform.system() == "Linux", "wk session is Linux-only")
-    def test_session_unknown_flag(self):
-        cp = run_impl("session", "on", "--bogus")
-        self.assertNotEqual(cp.returncode, 0)
-        self.assertIn("usage:", cp.stdout)
-
-    def test_quiesce_unknown_verb(self):
-        cp = run_impl("quiesce", "--bogus")
-        self.assertNotEqual(cp.returncode, 0)
-        self.assertIn("usage:", cp.stdout)
-
-    def test_quiesce_extra_positional_refused(self):
-        """previously only $1 was ever read as the action; a second word
-        (e.g. a stray flag after 'on') was silently dropped."""
-        cp = run_impl("quiesce", "on", "extra")
-        self.assertNotEqual(cp.returncode, 0)
-        self.assertIn("usage:", cp.stdout)
-
-    def test_test_unknown_flag(self):
-        cp = run_impl("test", "--bogus", env={"WK_NAME": "fakews"})
-        self.assertNotEqual(cp.returncode, 0)
-        self.assertIn("usage:", cp.stdout)
-
     def test_enter_passthrough_is_documented(self):
         text = (REPO / "cmd" / "enter").read_text()
         self.assertIn("run one command there and exit", text)
-
-    def test_zed_unknown_flag(self):
-        cp = run_impl("zed", "--bogus")
-        self.assertNotEqual(cp.returncode, 0)
-        self.assertIn("usage:", cp.stdout)
-
-    def test_gui_unknown_flag(self):
-        cp = run_impl("gui", "--bogus", env={"WK_NAME": "fakews"})
-        self.assertNotEqual(cp.returncode, 0)
-        self.assertIn("usage:", cp.stdout)
-
-    def test_gui_extra_url_refused(self):
-        cp = run_impl("gui", "url1", "url2", env={"WK_NAME": "fakews"})
-        self.assertNotEqual(cp.returncode, 0)
-        self.assertIn("usage:", cp.stdout)
-
-    def test_profile_unknown_flag(self):
-        cp = run_impl("profile", "--bogus")
-        self.assertNotEqual(cp.returncode, 0)
-        self.assertIn("usage:", cp.stdout)
 
     def test_ai_passthrough_is_documented(self):
         """`wk ai <agent> <ws> ...` hands the rest of argv to the agent, and
@@ -426,45 +231,9 @@ class TestSecondHalfUnknownFlagRefused(WkTest):
             self.assertIn(wks_own, header)
 
 
-class TestThirdHalfUnknownFlagRefused(WkTest):
-    """The remaining commands from the unknown-arg audit (docs/defects):
-    rm, vm, backup (read-only, not fixed -- see docs/defects)."""
-
-    def test_rm_unknown_flag_refused(self):
-        """a token shaped like a flag is not silently treated as a second
-        workspace name to destroy; require_name refuses it before the
-        confirmation prompt."""
-        cp = run_impl("rm", "--bogus-flag-xyz", env={"WK_NAME": "fakews"})
-        self.assertNotEqual(cp.returncode, 0)
-        self.assertIn("usage:", cp.stdout)
-
     @unittest.skipUnless(platform.system() == "Darwin", "wk vm is macOS-only")
     def test_vm_unknown_subverb_refused(self):
         cp = run_impl("vm", "bogus-sub")
-        self.assertNotEqual(cp.returncode, 0)
-        self.assertIn("usage:", cp.stdout)
-
-    @unittest.skipUnless(platform.system() == "Darwin", "wk vm is macOS-only")
-    def test_vm_new_extra_positional_refused(self):
-        cp = run_impl("vm", "new", "somename", "extra")
-        self.assertNotEqual(cp.returncode, 0)
-        self.assertIn("usage:", cp.stdout)
-
-    @unittest.skipUnless(platform.system() == "Darwin", "wk vm is macOS-only")
-    def test_vm_ls_extra_positional_refused(self):
-        cp = run_impl("vm", "ls", "extra")
-        self.assertNotEqual(cp.returncode, 0)
-        self.assertIn("usage:", cp.stdout)
-
-    @unittest.skipUnless(platform.system() == "Darwin", "wk vm is macOS-only")
-    def test_vm_base_extra_positional_refused(self):
-        cp = run_impl("vm", "base", "--refresh", "extra")
-        self.assertNotEqual(cp.returncode, 0)
-        self.assertIn("usage:", cp.stdout)
-
-    @unittest.skipUnless(platform.system() == "Linux", "wk session is Linux-only")
-    def test_session_gdm_unknown_flag(self):
-        cp = run_impl("session", "gdm", "--bogus")
         self.assertNotEqual(cp.returncode, 0)
         self.assertIn("usage:", cp.stdout)
 
@@ -475,60 +244,9 @@ class TestThirdHalfUnknownFlagRefused(WkTest):
         self.assertIn("--mirror is an accepted synonym for --bmc", text)
 
 
-class TestPiPickSessionOptions(WkTest):
-    """The third half of the option-consistency audit (docs/defects): pi,
-    pick, session. Each case here parses (and refuses) before touching a
-    machine or network, so it needs no hardware."""
-
-    def test_pi_setup_unknown_flag_refused(self):
-        """`wk pi setup <host>` takes no flags at all; previously anything
-        past the host was silently dropped rather than refused."""
-        cp = run_impl("pi", "setup", "somehost", "--bogus")
-        self.assertNotEqual(cp.returncode, 0)
-        self.assertIn("usage:", cp.stdout)
-
-    def test_pi_setup_extra_positional_refused(self):
-        cp = run_impl("pi", "setup", "somehost", "extra-garbage")
-        self.assertNotEqual(cp.returncode, 0)
-        self.assertIn("usage:", cp.stdout)
-        self.assertIn("unexpected argument", cp.stdout)
-
-    def test_pi_deploy_unknown_flag_refused(self):
-        cp = run_impl("pi", "deploy", "somews", "somemachine", "--bogus")
-        self.assertNotEqual(cp.returncode, 0)
-        self.assertIn("usage:", cp.stdout)
-
-    def test_pi_deploy_extra_positional_refused(self):
-        cp = run_impl("pi", "deploy", "somews", "somemachine", "extra")
-        self.assertNotEqual(cp.returncode, 0)
-        self.assertIn("usage:", cp.stdout)
-        self.assertIn("unexpected argument", cp.stdout)
-
-    def test_pi_bench_unknown_flag_refused(self):
-        cp = run_impl("pi", "bench", "somemachine", "someplan", "--bogus")
-        self.assertNotEqual(cp.returncode, 0)
-        self.assertIn("usage:", cp.stdout)
-
-    def test_pi_bench_extra_positional_refused(self):
-        cp = run_impl("pi", "bench", "somemachine", "someplan", "extra")
-        self.assertNotEqual(cp.returncode, 0)
-        self.assertIn("usage:", cp.stdout)
-        self.assertIn("unexpected argument", cp.stdout)
-
     def test_pi_bench_count_documented_as_iterations_per_run(self):
         text = (REPO / "cmd" / "pi").read_text()
         self.assertIn("iterations per run", text)
-
-    def test_pi_boot_order_unknown_flag_refused(self):
-        cp = run_impl("pi", "boot-order", "somehost", "local", "--bogus")
-        self.assertNotEqual(cp.returncode, 0)
-        self.assertIn("usage:", cp.stdout)
-
-    def test_pi_boot_order_extra_positional_refused(self):
-        cp = run_impl("pi", "boot-order", "somehost", "local", "extra")
-        self.assertNotEqual(cp.returncode, 0)
-        self.assertIn("usage:", cp.stdout)
-        self.assertIn("unexpected argument", cp.stdout)
 
     def test_pi_flash_tombstone_names_sysimage_not_an_image_store(self):
         """there is no image store (a built image stays in the workspace
@@ -545,14 +263,3 @@ class TestPiPickSessionOptions(WkTest):
         text = (REPO / "cmd" / "pick").read_text()
         self.assertIn("wk pick [<workspace>] <commit>...", text)
 
-    @unittest.skipUnless(platform.system() == "Linux", "wk session is Linux-only")
-    def test_session_extra_positional_refused(self):
-        """`wk session status extra` -- a stray word past the action is
-        refused by the same loop that refuses an unknown flag, since neither
-        matches the one recognised token (--bmc/--mirror)."""
-        cp = run_impl("session", "status", "extra")
-        self.assertNotEqual(cp.returncode, 0)
-        self.assertIn("usage:", cp.stdout)
-
-if __name__ == "__main__":
-    unittest.main()

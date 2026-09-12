@@ -21,10 +21,5 @@ git_dirty() {
     [ -z "$(git -C "$WK_ROOT" status --porcelain --untracked-files=no 2>/dev/null)" ] && echo no || echo yes
 }
 
-case "${1:-}" in
-'')
-    printf 'sha=%s\n'   "$(git_sha)"
-    printf 'dirty=%s\n' "$(git_dirty)"
-    ;;
-*) die "usage: wk version; see wk version -h" ;;
-esac
+printf 'sha=%s\n'   "$(git_sha)"
+printf 'dirty=%s\n' "$(git_dirty)"

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # wk notify <headline> [--detail <text>] [--tag <name>] -- tell a person the fleet wants them
-# wk: where=host name=none group=hosts
+# wk: where=host name=none group=hosts takes=1 opts --detail=,--tag=
 #
 #   <headline>       the one line a phone shows
 #   --detail <text>  the body under the headline
@@ -26,22 +26,15 @@ WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 . "$WK_ROOT/lib/common.sh"
 . "$WK_ROOT/lib/store.sh"
 
-USAGE="usage: wk notify <headline> [--detail <text>] [--tag <name>]; see wk notify -h"
-
 HEADLINE=""
 BODY=()
 while [ $# -gt 0 ]; do
     case "$1" in
-        --detail|--tag)
-            [ -n "${2:-}" ] || die "$1 needs a value
-    $USAGE"
-            BODY+=("$1" "$2"); shift 2 ;;
-        *)  [ -z "$HEADLINE" ] || die "$USAGE"
-            case "$1" in -*) die "$USAGE" ;; esac
-            HEADLINE="$1"; shift ;;
+        --detail|--tag) BODY+=("$1" "${2:-}"); shift 2 ;;
+        *)              HEADLINE="$1"; shift ;;
     esac
 done
-[ -n "$HEADLINE" ] || die "$USAGE"
+[ -n "$HEADLINE" ] || die "wk notify needs a headline; see wk notify -h"
 
 wk_cred_present ntfy \
     || die "no ntfy topic on this machine: wk key set ntfy

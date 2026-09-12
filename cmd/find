@@ -2,7 +2,8 @@
 #
 # wk find [<machine>] [options] -- every device on every segment this machine can reach
 #
-# wk: where=host name=none readonly group=hosts
+# wk: where=host name=none readonly group=hosts takes=1
+# wk: opts --segment=,--vantage=,--no-ssh,--timeout=,--json
 #
 #   (no argument)      every device on every segment this machine can reach
 #   <machine>          only the device that is that fleet machine, and say which
@@ -53,8 +54,7 @@ while [ $# -gt 0 ]; do
         --no-ssh)  NO_SSH=1; shift ;;
         --timeout) SWEEP_TIMEOUT="${2:-}"; shift 2 ;;
         --json)    WANT_JSON=1; shift ;;
-        -*) die "usage: wk find [<machine>] [options]; see wk find -h" ;;
-        *)  [ -z "$WANT" ] || die "unexpected argument: $1"; WANT="$1"; shift ;;
+        *)  WANT="$1"; shift ;;
     esac
 done
 

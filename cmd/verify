@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # wk verify <workspace> -- prove the sandbox is what it claims to be
-# wk: where=workspace name=required ready=yes outside group=workspaces
+# wk: where=workspace name=required ready=yes outside group=workspaces opts --gpu
 #
 # Refused inside a workspace: half the properties are only visible from the
 # host. Every property is tested from inside the workspace, not read from the
@@ -377,11 +377,8 @@ require_name "$NAME"
 
 WANT_GPU=""
 case "${1:-}" in
-    "") ;;
     --gpu) WANT_GPU=1 ;;
-    *) die "usage: wk verify <workspace> [--gpu]; see wk verify -h" ;;
 esac
-[ $# -le 1 ] || die "usage: wk verify <workspace> [--gpu]; see wk verify -h"
 
 TARGET="$(ws_target "$NAME")"
 load_target "$TARGET"

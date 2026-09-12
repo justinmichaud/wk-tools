@@ -62,7 +62,7 @@ gh_authenticated() {
 
 wk_ssh_timeout() { printf '%s' "${WK_SSH_TIMEOUT:-10}"; }
 
-WK_DISPATCH_VARS="WK_NAME WK_TARGET WK_TARGET_KIND WK_ROOT WK_FORCE WK_QUIET WK_ROW_LABEL WK_HOST_SELF WK_IN_VM"
+WK_DISPATCH_VARS="WK_NAME WK_TARGET WK_TARGET_KIND WK_ROOT WK_FORCE WK_QUIET WK_DRY_RUN WK_DESTRUCTIVE WK_CONFIRMED WK_ROW_LABEL WK_HOST_SELF WK_IN_VM"
 
 wk_exec_clean() { # <command...> -- exec with none of WK_DISPATCH_VARS set
     local v unset_args=""
@@ -267,7 +267,7 @@ sh_quote() { # ssh joins its arguments and hands them to a remote shell
 
 # An older `wk` across a hop ignores an unknown variable, dies on a flag.
 wk_forwarded_env() {
-    printf '%s' "${WK_DEBUG:+WK_DEBUG=1 }${WK_QUIET:+WK_QUIET=1 }${WK_YES:+WK_YES=1 }${WK_FORCE:+WK_FORCE=1 }"
+    printf '%s' "${WK_DEBUG:+WK_DEBUG=1 }${WK_QUIET:+WK_QUIET=1 }${WK_YES:+WK_YES=1 }${WK_FORCE:+WK_FORCE=1 }${WK_DRY_RUN:+WK_DRY_RUN=1 }"
 }
 
 # A candidate is run, not found: the wkdev image's /opt/swift/usr/bin lldb comes first on PATH and links libxml2.so.2, while the image ships libxml2.so.16.
@@ -290,17 +290,35 @@ lldb_pin_opts() {
 
 confirm() {
     local prompt="$1"
-    [ -n "${WK_YES:-}" ] && return 0
+    if [ -n "${WK_DRY_RUN:-}" ]; then
+        printf 'would ask: %s [y/N]\n' "$prompt" >&2
+        WK_CONFIRMED=1; export WK_CONFIRMED
+        return 0
+    fi
+    if [ -n "${WK_YES:-}" ]; then WK_CONFIRMED=1; export WK_CONFIRMED; return 0; fi
 
     if [ ! -t 0 ]; then
-        warn "$prompt -- declining (no terminal; re-run interactively, or set WK_YES=1)"
+        warn "$prompt -- declining (no terminal; re-run interactively, or pass --yes)"
         return 1
     fi
 
     printf '%s [y/N] ' "$prompt" >&2
     local reply
     read -r reply || return 1
-    case "$reply" in [yY]*) return 0 ;; *) return 1 ;; esac
+    case "$reply" in [yY]*) WK_CONFIRMED=1; export WK_CONFIRMED; return 0 ;; *) return 1 ;; esac
+}
+
+# Every state change goes through here and nowhere else: under --dry-run it is printed, not run, and a destructive command (declared so to the dispatcher) cannot act before confirm() has been answered.
+act() { # <cmd...>
+    if [ -n "${WK_DRY_RUN:-}" ]; then
+        { printf 'would run:'; printf ' %q' "$@"; printf '\n'; } >&2
+        return 0
+    fi
+    [ -z "${WK_DESTRUCTIVE:-}" ] || [ -n "${WK_CONFIRMED:-}" ] \
+        || die "BUG: this command is declared destructive and acted before asking:
+    $(printf ' %q' "$@")"
+    debug "run:$(printf ' %q' "$@")"
+    "$@"
 }
 
 prompt_secret_value() {  # $1 = what to ask for, $2 = the page that mints one, $3 = what is left to choose there

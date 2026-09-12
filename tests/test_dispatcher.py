@@ -169,7 +169,7 @@ class TestWorkspaceRefusals(WkTest):
 
             cp2 = ws.run("build", "otherws", "jsc-release", "--dry-run")
             self.assertNotEqual(cp2.returncode, 0, "'wk build <ws> <config>' was accepted inside a workspace")
-            self.assertIn("no name", cp2.stdout + cp2.stderr)
+            self.assertIn("no workspace argument in here", cp2.stdout + cp2.stderr)
 
         # The host form typed outside with a bare argument: must ask for the
         # config rather than guess. WK_IN_VM=1 pins this to argument parsing
@@ -353,7 +353,7 @@ class TestZedNames(WkTest):
         out = cp.stdout + cp.stderr
         if "zed is not installed" in out:
             self.skipTest("zed is not installed here, so the names are never reached")
-        self.assertIn("one name at a time", out, out)
+        self.assertIn("unexpected argument: two-", out, out)
 
 
 class TestFlagNameOverride(WkTest):

@@ -2,7 +2,7 @@
 #
 # wk completion bash|zsh -- print a shell completion script for wk
 #
-# wk: where=local name=none group=hosts
+# wk: where=local name=none readonly group=hosts takes=1 opts --list-workspaces,--flags=
 #
 # Prints a script meant to be eval'd by your shell's rc; `shell/bashrc` does
 # this for both shells, guarded on `wk` being on PATH. It completes:
@@ -55,18 +55,14 @@ list_flags() {
 }
 
 case "${1:-}" in
-    --list-workspaces) [ $# -eq 1 ] || usage; list_workspaces_local; exit 0 ;;
-    --flags)
-        [ $# -eq 2 ] || usage
-        list_flags "$2"
-        exit 0 ;;
+    --list-workspaces) list_workspaces_local; exit 0 ;;
+    --flags) list_flags "$2"; exit 0 ;;
 esac
 
 case "${1:-}" in
     bash|zsh) ;;
     *) usage ;;
 esac
-[ $# -eq 1 ] || usage
 SHELL_NAME="$1"
 
 _completion_function() {

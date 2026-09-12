@@ -2,7 +2,7 @@
 #
 # wk quiesce on|off|status -- quiet the machine for benchmarking
 #
-# wk: where=host name=none group=hosts needs quiesce-helper
+# wk: where=host name=none group=hosts needs quiesce-helper takes=1
 # wk: sub status needs=
 #
 # Privileged actions go through the sudoers-allowlisted helper (wk-quiesce-priv);
@@ -32,7 +32,6 @@ PRIV=/usr/local/libexec/wk-quiesce-priv
 QUIET_DESKTOP="$WK_ROOT/bench/mac-quiet-desktop.sh"
 
 ACTION="${1:-status}"
-[ $# -le 1 ] || die "usage: wk quiesce on|off|status -- quiet the machine for benchmarking.; see wk quiesce -h"
 
 # One per machine: on macOS $TMPDIR is per-user *and per-session*, so `on` at the keyboard and `off` over ssh would strand state in two directories.
 # WK_QUIESCE_STATE is a test hook (tests/test_quiesce.py sets it); cmd/status reads the same one.

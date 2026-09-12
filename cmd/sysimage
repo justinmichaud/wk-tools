@@ -2,8 +2,13 @@
 #
 # wk sysimage <sub> [args] -- build and manage bootable systems
 #
-# wk: where=host name=none values=--list group=hosts
+# wk: where=host name=none values=--list group=hosts takes=1 opts --list dryrun build,webkit,write
 # wk: readonly ls,disks,--list
+# wk: destructive write
+# wk: flag --list takes=0
+# wk: sub build,webkit,disks,rm,flash takes=2
+# wk: sub build,webkit passthrough=tail
+# wk: sub write opts=--from=,--disk=,--profile=,--machine=,--rescue,--grow,--no-grow
 #
 # An image is a whole machine, built from a spec in this repo, that a machine can
 # be put into for one boot and taken out of again.
@@ -12,7 +17,7 @@
 # pass; every edit an image needs is made afterwards, on the card, by the
 # machine holding the reader (admin/wk-card-priv).
 #
-#   build <profile> [--dry-run]  build from the spec in this repo. A yocto
+#   build <profile> [options]    build from the spec in this repo. A yocto
 #                                profile also takes --workspace, --detach,
 #                                --stop, --keep-work, --chromium,
 #                                --local-layer|--no-local-layer,
@@ -23,8 +28,8 @@
 #                                buildroot takes --workspace, --detach,
 #                                --stop; pmos takes --detach and --resume and
 #                                builds on a Linux aarch64 machine over ssh;
-#                                fetch takes only --dry-run
-#   webkit <profile> --commit <sha> --slot <name> [--detach] [--dry-run]
+#                                fetch takes no options
+#   webkit <profile> --commit <sha> --slot <name> [--detach]
 #                                build one WebKit commit into a named slot
 #                                beside the image, the way its builder builds
 #                                WebKit. A board carries any number of slots and
@@ -290,11 +295,11 @@ cmd_build() {
     where the missing piece goes once it exists."
 
     case "${IMG_BUILDER:-}" in
-        fetch)     fetch_build "$profile" "$@"; return $? ;;
-        pmos)      pmos_build  "$profile" "$@"; return $? ;;
+        fetch)     fetch_build "$profile" ${WK_DRY_RUN:+--dry-run} "$@"; return $? ;;
+        pmos)      pmos_build  "$profile" ${WK_DRY_RUN:+--dry-run} "$@"; return $? ;;
         # A resolved workspace target first, so the builder can refuse a remote or VM one.
-        buildroot) load_target "${WK_TARGET:-$(default_target)}"; buildroot_build "$profile" "$@"; return $? ;;
-        yocto)     load_target "${WK_TARGET:-$(default_target)}"; yocto_build     "$profile" "$@"; return $? ;;
+        buildroot) load_target "${WK_TARGET:-$(default_target)}"; buildroot_build "$profile" ${WK_DRY_RUN:+--dry-run} "$@"; return $? ;;
+        yocto)     load_target "${WK_TARGET:-$(default_target)}"; yocto_build     "$profile" ${WK_DRY_RUN:+--dry-run} "$@"; return $? ;;
         '')  die "profile '$profile' names no builder.
     Every profile declares IMG_BUILDER and there is no default (wk help).
     image/profiles.sh is where this one is defined." ;;
@@ -306,16 +311,16 @@ cmd_build() {
 
 cmd_webkit() {
     local profile="${1:-}"
-    [ -n "$profile" ] || die "usage: wk sysimage webkit <profile> --commit <sha> --slot <name> [--detach] [--dry-run]; see wk sysimage -h"
+    [ -n "$profile" ] || die "usage: wk sysimage webkit <profile> --commit <sha> --slot <name> [--detach]; see wk sysimage -h"
     image_profile_load "$profile" || die "unknown profile '$profile'.
     'wk sysimage --list' has every configuration."
     shift
     case "${IMG_BUILDER:-}" in
-        buildroot) load_target "${WK_TARGET:-$(default_target)}"; buildroot_webkit "$profile" "$@"; return $? ;;
+        buildroot) load_target "${WK_TARGET:-$(default_target)}"; buildroot_webkit "$profile" ${WK_DRY_RUN:+--dry-run} "$@"; return $? ;;
         yocto)     load_target "${WK_TARGET:-$(default_target)}"
                    # 2.52 onwards the perf build *is* the profile-guided one, so one command is still one slot and three phases sit behind it (image/pgo.sh).
-                   if image_pgo_wanted; then image_pgo_webkit "$profile" "$@"
-                   else yocto_build "$profile" --stage webkit "$@"; fi
+                   if image_pgo_wanted; then image_pgo_webkit "$profile" ${WK_DRY_RUN:+--dry-run} "$@"
+                   else yocto_build "$profile" --stage webkit ${WK_DRY_RUN:+--dry-run} "$@"; fi
                    return $? ;;
         *) die "'$profile' is built by ${IMG_BUILDER:-no builder}, and only a buildroot or yocto image takes WebKit slots" ;;
     esac
@@ -335,8 +340,6 @@ _ws_building() { # <workspace>
 }
 
 cmd_ls() {
-    [ $# -eq 0 ] || die "usage: wk sysimage ls|list; unexpected argument: $1"
-
     local n=0 builder ws path bytes mtime prof machine note state
     local rows; rows=$(image_workspace_scan)
 
@@ -416,10 +419,6 @@ cmd_disks() {
     [ -n "$machine" ] || die "usage: wk sysimage disks <machine>
     machines:
 $(machine_list | sed 's/^/      /')"
-    case "$machine" in
-        -*) die "usage: wk sysimage disks <machine>; unknown option: $machine" ;;
-    esac
-    [ $# -le 1 ] || die "usage: wk sysimage disks <machine>; unexpected argument: $2"
     machine_load "$machine" || die "unknown machine '$machine'"
     m_reachable || die "$machine is not reachable over ssh"
     log "removable disks attached to $machine:"
@@ -673,7 +672,7 @@ $(machine_list | sed 's/^/      /')"
     local kept=no
     if [ "$role" != rescue ] && [ -n "$fleet_edit" ] \
        && { disk_is_second "$DISK_DEV" || [ "${DISK_DEV%@*}" = "${NODE_DEVICE:-}" ]; }; then
-        kept=$(disk_tailnet_save "$DISK_DEV")
+        if [ -n "$dry" ]; then kept="looked for at write time"; else kept=$(disk_tailnet_save "$DISK_DEV"); fi
     fi
 
     if [ -n "$dry" ]; then
@@ -829,7 +828,7 @@ _tailnet_name_for() { # <machine> <bench|rescue>
 }
 
 cmd_write() {
-    local spec="" dry="" grow=1 grow_set="" from="" profile="" role=bench mach=""
+    local spec="" dry="${WK_DRY_RUN:-}" grow=1 grow_set="" from="" profile="" role=bench mach=""
     while [ $# -gt 0 ]; do
         case "$1" in
             --disk)    spec="${2:-}"; [ -n "$spec" ] || die "--disk needs <machine>:<device>"; shift 2 ;;
@@ -837,18 +836,8 @@ cmd_write() {
             --profile) profile="${2:-}"; shift 2 ;;
             --machine) mach="${2:-}"; [ -n "$mach" ] || die "--machine needs a name"; shift 2 ;;
             --rescue)  role=rescue; shift ;;
-            --dry-run) dry=1; shift ;;
             --grow)    grow=1; grow_set=1; shift ;;
             --no-grow) grow=0; grow_set=1; shift ;;
-            -*) die "usage: wk sysimage write --from <configuration|path|vm:path> --disk <machine>:<device>[@second|@third]
-    [--profile <name>] [--machine <name>] [--rescue] [--grow|--no-grow] [--dry-run]
-    unknown option: $1" ;;
-            *)  die "usage: wk sysimage write --from <configuration|path|vm:path> --disk <machine>:<device>[@second|@third]
-    unexpected argument: $1
-    An image is bytes a workspace produced, not an id in a catalogue
-    (wk help), so what identifies one is its path -- pass it to --from.
-    'wk sysimage ls' lists every image a workspace here has built, with the
-    path to pass." ;;
         esac
     done
     [ -z "$mach" ] || machine_load "$mach" >/dev/null 2>&1 || die "unknown machine '$mach' for --machine
@@ -891,8 +880,7 @@ cmd_flash() {
 
 
 case "${1:-}" in
-    --list) [ -z "${2:-}" ] || die "usage: wk sysimage --list; unexpected argument: $2"
-            image_profile_list; exit 0 ;;
+    --list) image_profile_list; exit 0 ;;
     build) shift; cmd_build "$@" ;;
     webkit) shift; cmd_webkit "$@" ;;
     ls|list) shift; cmd_ls "$@" ;;

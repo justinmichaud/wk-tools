@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # wk pick [<workspace>] <commit>... -- cherry-pick WebKit commits onto this branch
-# wk: where=workspace name=required ready=yes group=sources
+# wk: where=workspace name=required takes=* ready=yes group=sources
 #
 # Each argument is a WebKit identifier (`287654@main`) or a sha/ref, picked in
 # the order given -- never reordered.

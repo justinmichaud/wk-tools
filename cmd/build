@@ -1,23 +1,24 @@
 #!/usr/bin/env bash
 #
 # wk build <workspace> <config> -- build WebKit or JSC
-# wk: where=workspace name=required values=--list ready=yes group=workspaces
-# wk: flag --list where=local
+# wk: where=workspace name=required takes=1 values=--list ready=yes group=workspaces dryrun passthrough
+# wk: opts --list,--no-defaults,--detach,--kill,--babysit,--branch=,--mem-budget=,--mem-floor=,--cmake=,--env=,--cmakeargs=,--sysroot=
+# wk: flag --list where=local name=none takes=0
+# wk: flag --kill takes=0 opts=--kill
 #
 # The job count is derived from memory actually available right now, and the
 # build runs where the scheduler and the OOM killer will pick it over your
-# desktop session.
+# desktop session. Under wk's --dry-run it resolves everything and prints the
+# exact command line this build would run, prefixed `running:`, and builds nothing.
 #
 #   --list                 print the available configs (wk build --list) and exit
-#   --dry-run              resolve everything and print the exact command line
-#                          this build would run, prefixed `running:`; build nothing
 #   --no-defaults          skip this target's WK_BUILD_ARGS conf default
 #   --detach                hand the build to the machine that runs it, and return;
 #                           a foreground build is cancelled if its terminal or
 #                           its ssh goes away (the driver takes the HUP)
 #   --kill                  stop the build running in this workspace, wherever it
-#                           runs, and record it as cancelled
-#   --babysit[=model]       run under a Claude fix loop until it builds or gives up
+#                           runs, and record it as cancelled; takes no config
+#   --babysit               run under a Claude fix loop until it builds or gives up
 #   --branch <name>         check out this branch first
 #   --mem-budget <MB>       memory ceiling for the watchdog
 #   --mem-floor <MB>        memory floor for the watchdog
@@ -25,8 +26,7 @@
 #   --env NAME=VALUE        extra environment for the build, overriding the config's (repeatable)
 #   --                      everything after this goes to build-webkit verbatim
 #
-#   WK_BABYSIT_MODEL=<model>    the model bare `--babysit` (no `=model`) uses
-#                               (default haiku)
+#   WK_BABYSIT_MODEL=<model>    the model `--babysit` uses (default haiku)
 #   WK_BABYSIT_ATTEMPTS=<n>     fixes the babysitter tries before giving up
 #                               (default 5)
 #   WK_MEM_INTERVAL=<s>         how often the memory watchdog samples (default 30)
@@ -46,16 +46,13 @@ WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 # Kept whole, before any parsing consumes it: `--detach` re-runs this same command.
 _ALL_ARGS=("$@")
 
-if [ "${1:-}" = --list ]; then
-    [ $# -eq 1 ] || die "usage: wk build --list; see wk build -h
-    unexpected argument: $2"
-    log "available configs:"
-    config_list | sed 's/^/  /'
-    exit 0
-fi
+case "${1:-}" in
+    --list) log "available configs:"
+            config_list | sed 's/^/  /'
+            exit 0 ;;
+esac
 
-DRY=""
-[ "${1:-}" = --dry-run ] && { DRY=1; shift; }
+DRY="${WK_DRY_RUN:-}"
 
 NAME="${WK_NAME:-}"
 require_name "$NAME"
@@ -66,10 +63,9 @@ load_target "$TARGET"
 
 _KILL_CMD="wk build$(in_workspace || printf ' %s' "$NAME") --kill"
 
-if [ "${1:-}" = --kill ]; then   # before a config is required: stopping a build names none
-    shift
-    [ $# -eq 0 ] || die "$_KILL_CMD stops the build already running in '$NAME' and
-    takes nothing with it -- no config, and not --detach.  Unexpected: $*"
+case "${1:-}" in
+  --kill)   # before a config is required: stopping a build names none
+    [ -z "$DRY" ] || { log "dry run -- would stop the babysitter and the build running in '$NAME'"; exit 0; }
     _stopped=0; _left=""   # the babysitter first: left alone it starts the next build itself
     for _kind in babysit build; do
         _rc=0; job_stop "$NAME" "$_kind" || _rc=$?
@@ -82,20 +78,11 @@ if [ "${1:-}" = --kill ]; then   # before a config is required: stopping a build
     Look at it:  wk enter $NAME  and then  pgrep -af ninja"
     [ "$_stopped" = 0 ] || log "  the build directory keeps what it compiled, so
   'wk build$(in_workspace || printf ' %s' "$NAME") <config>' resumes rather than starts over."
-    exit 0
-fi
+    exit 0 ;;
+esac
 
-if in_workspace; then
-    # A subshell, because this only asks whether the word names a config at all: config_load refuses an Apple config on a Linux target.
-    if [ -n "${2:-}" ] && ( config_load "${2:-}" "$(t_os)" ) >/dev/null 2>&1; then
-        die "no such workspace: ${1:-} -- this is workspace '$NAME', so the
-    form in here is 'wk build ${2:-}' with no name"
-    fi
-fi
 CONFIG="${1:-}"
 shift 1 2>/dev/null || true
-
-[ "${1:-}" = --dry-run ] && { DRY=1; shift; }
 
 [ -n "$CONFIG" ] || {
     if in_workspace; then log "usage: wk build <config>"
@@ -145,11 +132,9 @@ EXTRA_ENV=""; _NL='
 '   # newline-separated, since an environment value may contain spaces
 while [ $# -gt 0 ]; do
     case "$1" in
-        --dry-run)   DRY=1; shift ;;
         --detach)    DETACH=1; shift ;;
         --no-defaults) NO_DEFAULTS=1; shift ;;
         --babysit)   BABYSIT="${WK_BABYSIT_MODEL:-haiku}"; shift ;;
-        --babysit=*) BABYSIT="${1#*=}"; shift ;;
         --branch)    BRANCH="${2:-}"; [ -n "$BRANCH" ] || die "--branch needs a name"; shift 2 ;;
         --branch=*)  BRANCH="${1#*=}"; shift ;;
 
@@ -235,7 +220,7 @@ if [ -n "$BABYSIT" ]; then
 fi
 
 # A WebKit build is tens of minutes and the connection driving it is not: anything that kills the driver takes the build with it.
-if [ -n "$DETACH" ]; then
+if [ -n "$DETACH" ] && [ -z "$DRY" ]; then
     # _ALL_ARGS still has the workspace name the dispatcher resolved and dropped ($WK_NAME now, not $1).
     _det=()
     in_workspace || _det+=("$NAME")

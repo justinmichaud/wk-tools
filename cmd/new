@@ -2,6 +2,7 @@
 #
 # wk new <name> -- create a workspace named after the task it is for
 # wk: where=workspace name=required lifecycle post=zed group=workspaces
+# wk: opts --target=,--base=,--arch=,--zed,--no-wait,--kill,--pr=,--sysroot,--_detached
 #
 # Other targets take minutes (a guest clone, a git clone over ssh), so creation is
 # *detached*: a dropped connection does not take it with it, and re-running `wk
@@ -161,8 +162,6 @@ while [ $# -gt 0 ]; do
     architecture, executed natively. A sysroot cross build stays in a native
     workspace and is a property of the build, so it will be 'wk build
     --sysroot', not 'wk new --sysroot'." ;;
-        *) die "usage: wk new <name> [--target <target>] [--base <id>] [--arch <arch>]
-    [--zed] [--no-wait] [--pr <spec>] [--kill]; unknown option: $1; see wk new -h" ;;
     esac
 done
 
@@ -347,7 +346,8 @@ if [ -n "$PR_SPEC" ]; then
 fi
 
 RC_UP=""
-if [ -z "${WK_NO_CLAUDE_RC:-}" ] && [ "$WK_TARGET_KIND" != remote ]; then
+if [ -z "${WK_NO_CLAUDE_RC:-}" ] && [ "$WK_TARGET_KIND" != remote ] \
+   && [ "$(t_info "$NAME")" = running ]; then
     if "$WK_ROOT/wk" ai claude "$NAME" --rc; then
         RC_UP=1
     else
@@ -362,7 +362,7 @@ if ! arch_is_native "$ARCH"; then
 fi
 case "$WK_TARGET_KIND" in
 vm)
-    log "  wk vm start $NAME       boot it (an ssh alias is written then)"
+    log "  wk vm start $NAME       boot it (its ssh alias and claude remote control start then)"
     log "  wk zed $NAME            the checkout, in Zed (once it is up)"
     log "  wk build $NAME mac-release"
     ;;

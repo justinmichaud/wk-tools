@@ -44,7 +44,7 @@ def run_wk(args, timeout=1800):
             capture_output=True,
             text=True,
             timeout=timeout,
-            env={**os.environ, "WK_YES": "1"},
+            env=os.environ,
         )
         out = (p.stdout or "") + (p.stderr or "")
         return p.returncode, out.strip()
@@ -226,9 +226,6 @@ def respond(rid, result=None, error=None):
 
 
 def main():
-    if len(sys.argv) > 1:
-        sys.stderr.write("usage: wk mcp; no arguments -- it speaks JSON-RPC over stdio\n")
-        sys.exit(1)
     for line in sys.stdin:
         line = line.strip()
         if not line:

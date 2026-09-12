@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # wk logs <workspace> [--follow] -- the build or image-stage log, with the noise stripped
-# wk: where=workspace name=required group=workspaces readonly
+# wk: where=workspace name=required group=workspaces readonly opts --follow,-f,--all,-a,--gates,-g
 #
 # ninja writes progress with carriage returns; this normalises that and shows
 # the first error plus the last output.
@@ -72,14 +72,12 @@ GATES
 $script"
 }
 
-USAGE="usage: wk logs [<workspace>] [--follow|-f|--all|-a|--gates|-g]; see wk logs -h"
-[ $# -le 1 ] || die "$USAGE"
+[ $# -le 1 ] || die "wk logs shows one of --follow, --all or --gates at a time; see wk logs -h"
 case "${1:-}" in
 --gates|-g)  gates; exit 0 ;;
 --follow|-f) resolve_log; exec tail -f "$LOG" ;;
 --all|-a)    resolve_log; exec tr '\r' '\n' < "$LOG" ;;
 "")          resolve_log ;;
-*) die "$USAGE" ;;
 esac
 
 log "errors:"

@@ -2,7 +2,8 @@
 #
 # wk gc [--purge-mirror] [--purge-pmos] [--purge-builds] -- reclaim disk
 #
-# wk: where=host name=none group=sources
+# wk: where=host name=none group=sources opts --purge-mirror,--purge-pmos,--purge-builds,--refresh-net
+# wk: destructive --purge-mirror,--purge-pmos,--purge-builds
 #
 # Reclaims by reference count, so a plain `wk gc` never loses work: unreferenced
 # base snapshots, dangling podman images/volumes, the mirror (repacked, not
@@ -44,16 +45,20 @@ REFRESH_NET=""
 PURGE=""
 PURGE_PMOS=""
 PURGE_BUILDS=""
-while [ $# -gt 0 ]; do
-    case "$1" in
-        --refresh-net)  REFRESH_NET=1; shift ;;
-        --purge-mirror) PURGE=1; shift ;;
-        --purge-pmos)   PURGE_PMOS=1; shift ;;
-        --purge-builds) PURGE_BUILDS=1; shift ;;
-        *) die "usage: wk gc [--purge-mirror] [--purge-pmos] [--purge-builds] [--refresh-net] -- reclaim disk.; see wk gc -h" ;;
+for _a in "$@"; do
+    case "$_a" in
+        --refresh-net)  REFRESH_NET=1 ;;
+        --purge-mirror) PURGE=1 ;;
+        --purge-pmos)   PURGE_PMOS=1 ;;
+        --purge-builds) PURGE_BUILDS=1 ;;
     esac
 done
 
+# Asked once, where the person typed it: the container half (WK_IN_VM) is launched by this half after the answer.
+if [ -n "$PURGE_BUILDS" ] && [ -z "${WK_IN_VM:-}" ]; then
+    confirm "erase every image build tree (--purge-builds)? the next image build refetches them, and that takes hours" \
+        || die "aborted -- nothing was changed"
+fi
 
 gc_retired_trees() {
     if [ -d "$WK_STORE/serve" ]; then
@@ -120,7 +125,7 @@ if is_macos && [ -z "${WK_IN_VM:-}" ]; then
         [ -n "$PURGE_BUILDS" ]  && _fwd="$_fwd --purge-builds"
         [ -n "$REFRESH_NET" ]   && _fwd="$_fwd --refresh-net"
         podman machine ssh "${WK_MACHINE:-wk}" -- \
-            "WK_IN_VM=1 WK_ROOT=/opt/wk-tools WK_STORE=/var/lib/wk bash -s --$_fwd" <"$0"
+            "$(wk_forwarded_env)WK_IN_VM=1 WK_ROOT=/opt/wk-tools WK_STORE=/var/lib/wk bash -s --$_fwd" <"$0"
         exit $?
     fi
     warn "the podman machine is not running, so the container store was not touched"

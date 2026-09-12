@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # wk scp [<workspace>] [-r] <src> <dst> -- copy a file or directory in or out of a workspace
-# wk: where=workspace name=required takes=2 here group=workspaces
+# wk: where=workspace name=required takes=2 here group=workspaces opts -r
 #
 #   wk scp bug-238 :Tools/foo.js ./foo.js      # out of the workspace
 #   wk scp bug-238 ./foo.js :Tools/foo.js      # into it
@@ -32,7 +32,6 @@ OPERANDS=()
 while [ $# -gt 0 ]; do
     case "$1" in
         -r) RECURSE=1; shift ;;
-        -*) _usage "unknown option: $1" ;;
         *)  OPERANDS+=("$1"); shift ;;
     esac
 done

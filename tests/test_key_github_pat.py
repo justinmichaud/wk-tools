@@ -124,12 +124,6 @@ class TestNothingStoredYet(_PatRun):
         self.assertIn("no github-pat credential here to replace", cp.stderr)
         self.assertIn(str(self.pat()), cp.stderr)
 
-    def test_an_unknown_flag_is_the_usage(self):
-        cp = self.key("set", "github-pat", "--rotate")
-        self.assertNotEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertIn("usage: wk key", cp.stderr)
-        self.assertFalse(self.pat().exists())
-
     def test_an_empty_answer_stores_nothing_and_says_what_that_costs(self):
         rc, out = self.key_tty("set", "github-pat", paste="")
         self.assertNotEqual(rc, 0, out)
@@ -357,3 +351,69 @@ class TestWhatTheTokenCanDoDecidesWhetherItIsKept(_PatRun):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestATokenGitHubRefusesIsReplaced(_PatRun):
+    """A stored token GitHub answers 401 for is a missing one with a stale
+    file in the way: `wk key setup` and `wk key deploy` ask for a fresh one
+    before anything spends or shares it. The new value is typed at a prompt,
+    so a run without a terminal names the remedy and leaves the file alone --
+    it never fans the refused token out, and never removes it unasked."""
+
+    def setUp(self):
+        super().setUp()
+        self.server = HTTPServer(("127.0.0.1", 0), FakeGitHub)
+        self.addCleanup(self.server.server_close)
+        self.addCleanup(self.server.shutdown)
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        FakeGitHub.user_status = 401
+        FakeGitHub.scopes = ""
+        FakeGitHub.expiry = ""
+        FakeGitHub.pulls = {}
+        FakeGitHub.repos = ["justinmichaud/WebKit", "justinmichaud/WPEWebKit"]
+        FakeGitHub.repos_status = 200
+        FakeGitHub.repos_answer = None
+        FakeGitHub.seen = []
+        self.extra_env = {
+            "WK_GITHUB_API": "http://127.0.0.1:%d" % self.server.server_port}
+        self.pat().write_text("ghp_revokedone\n")
+        self.pat().chmod(0o600)
+
+    def _key_with_gh_refusing(self, *args):
+        from tests.test_key import GH_REFUSES
+        with stub_path({"podman": PODMAN_TRAP, "gh": GH_REFUSES}) as binp:
+            return subprocess.run([str(KEY), *args], cwd=str(REPO),
+                                  env=self._env(binp), capture_output=True,
+                                  text=True, timeout=120)
+
+    def test_setup_names_the_refused_token_and_how_to_replace_it(self):
+        cp = self._key_with_gh_refusing("setup")
+        out = cp.stdout + cp.stderr
+        self.assertIn("github-pat is stored here but refused", out)
+        self.assertIn("wk key set github-pat --replace", out)
+        self.assertNotRegex(out, r"github-pat\s+stored\s")
+        self.assertEqual("ghp_revokedone", self.pat().read_text().strip(),
+                         "a run with no terminal removed the token unasked")
+
+    def test_deploy_does_the_same_before_the_fan_out(self):
+        cp = self._key_with_gh_refusing("deploy")
+        out = cp.stdout + cp.stderr
+        self.assertIn("github-pat is stored here but refused", out)
+        self.assertNotEqual(cp.returncode, 0, out)
+        self.assertEqual("ghp_revokedone", self.pat().read_text().strip())
+
+    def test_a_token_github_accepts_is_left_alone(self):
+        FakeGitHub.user_status = 200
+        FakeGitHub.pulls = {"justinmichaud/WebKit": 201, "justinmichaud/WPEWebKit": 201}
+        cp = self._key_with_gh_refusing("setup")
+        out = cp.stdout + cp.stderr
+        self.assertNotIn("stored here but refused", out)
+        self.assertRegex(out, r"github-pat\s+stored\s")
+
+    def test_the_fan_out_skips_a_refused_token(self):
+        """share_to asks cred_stale before sending the token; the deploy keys
+        still travel."""
+        body = (REPO / "cmd" / "key").read_text()
+        i = body.index("share_to() {")
+        j = body.index("\n}\n", i)
+        self.assertIn("cred_stale github-pat", body[i:j])
