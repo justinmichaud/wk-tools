@@ -76,15 +76,11 @@ if [ -d "$SRC/.git" ]; then             # an old snapshot's remotes are stale
     fi
 fi
 
-if command -v claude >/dev/null 2>&1 || [ -x "$HOME/.local/bin/claude" ]; then
-    log "Claude CLI already present"
+_claude=$(_store_fn wk_claude_cli_script) || _claude=""
+if [ -n "$_claude" ] && _out=$("$WK_TOOLS/container/proxy/ensure-bridge.sh" sh -c "$_claude" </dev/null); then
+    log "Claude CLI: $_out"
 else
-    log "installing Claude Code"       # its own installer: it self-updates
-    if curl -fsSL https://claude.ai/install.sh | bash >/dev/null 2>&1; then
-        log "Claude CLI installed ($("$HOME/.local/bin/claude" --version 2>/dev/null || echo unknown))"
-    else
-        log "claude install failed -- check egress; run the installer by hand"
-    fi
+    log "claude install failed -- check egress; run the installer by hand"
 fi
 
 install -d "$HOME/.claude"

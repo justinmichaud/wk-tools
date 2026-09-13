@@ -174,6 +174,18 @@ echo setup=ok
 EOF
 }
 
+wk_claude_cli_script() {
+    cat <<'EOF'
+[ ! -r "$HOME/.wk-egress" ] || . "$HOME/.wk-egress"
+if command -v claude >/dev/null 2>&1 || [ -x "$HOME/.local/bin/claude" ]; then
+    echo claude=present
+    exit 0
+fi
+curl -fsSL https://claude.ai/install.sh | bash >/dev/null 2>&1 || { echo claude=failed; exit 1; }
+echo claude=installed
+EOF
+}
+
 # `git config remote.<r>.url`, not `git remote get-url`: that one applies the url.<mirror>.insteadOf rewrite and would report every remote as pointing at the mirror. It is also the value git-webkit reads.
 wk_wiring_check_script() { # <src> <mirror-dir> [<skip-env>] -- a `problem:` line per fault, exit 1
     local src="$1" mirror="${2:-}" skip_env="${3:-}"

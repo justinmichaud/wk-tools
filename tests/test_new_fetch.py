@@ -1072,8 +1072,8 @@ def _fix_gitwebkit(kind="container", out="setup=ok", rc="0"):
 
 
 class TestFixRunsGitWebkitSetup(unittest.TestCase):
-    """`git-webkit setup` runs once, at a container's first start or in a
-    guest's golden base, and a GitHub request that fails there leaves a
+    """`git-webkit setup` runs at a workspace's first start, container or
+    guest, and a GitHub request that fails there leaves a
     checkout whose `git-webkit pr` prompts or refuses. `wk remotes <ws> --fix`
     is what re-runs it: the script is lib/store.sh's one generator, it reports
     its own `setup=` line, and a failure names the remedy rather than leaving

@@ -460,6 +460,16 @@ class TestPyobjcIsProvisionedNotAssumed(WkTest):
         self.assertIn("mac-pyobjc.sh", func_body(text, "_settle_desktop"))
         self.assertIn("mac-pyobjc.sh", func_body(text, "_base_inputs_hash"))
 
+    def test_both_runs_of_the_desktop_script_feed_it_the_same_library(self):
+        """vm/desktop.sh sources nothing: it calls wk_pyobjc_install and the
+        caller cats the library ahead of it. A caller that leaves the library
+        out gets `command not found` and a guest with no pyobjc."""
+        base = (REPO / "vm" / "provision-base.sh").read_text()
+        settle = func_body((REPO / "targets" / "vm.sh").read_text(), "_settle_desktop")
+        for text, who in ((base, "vm/provision-base.sh"), (settle, "_settle_desktop")):
+            self.assertLess(text.index("mac-pyobjc.sh"), text.index("vm/desktop.sh"),
+                            f"{who} runs vm/desktop.sh without bench/mac-pyobjc.sh ahead of it")
+
     def test_the_benchmark_install_is_given_it_by_both_writers(self):
         """--build-pkg and --repair write the same payload, from one table."""
         text = (REPO / "bench" / "mac-bench-volume.sh").read_text()

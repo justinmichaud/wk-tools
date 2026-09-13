@@ -225,7 +225,7 @@ vm_guest_git_findings
         self.assertIn("did not answer", what)
         self.assertIn("wk vm check mac-rel", remedy)
 
-    def test_an_unset_identity_names_a_refreshed_base_as_the_remedy(self):
+    def test_an_unset_identity_names_a_start_as_the_remedy(self):
         blob = "git.name=\ngit.email=\ngit.fsmonitor=\ngit.manyfiles="
         f = self._run(
             'printf "mac-rel\\n"',
@@ -234,8 +234,8 @@ vm_guest_git_findings
         )
         name_row = [r for r in f if "user.name" in r[1]][0]
         self.assertEqual(name_row[0], "wrong")
-        self.assertIn("wk vm base --refresh, then wk rm mac-rel", name_row[2])
-        self.assertIn("wk new", name_row[2])
+        self.assertIn("wk start mac-rel", name_row[2])
+        self.assertNotIn("base", name_row[2], "a guest's identity is not the base's to fix")
 
     def test_multiple_guests_only_the_running_one_is_checked(self):
         blob = (f"git.name={WANT_NAME}\ngit.email={WANT_EMAIL}\n"

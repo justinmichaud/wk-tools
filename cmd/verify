@@ -326,7 +326,7 @@ else:
     return "$fails"
 }
 
-# `git-webkit setup` runs once, at first start (container/firstrun.sh) or in the golden base, and nothing re-runs it; `webkitscmpy.setup` is the record it writes.
+# `git-webkit setup` runs at a workspace's first start (container/firstrun.sh, targets/vm.sh) and no-ops after; `webkitscmpy.setup` is the record it writes.
 probe_gitwebkit_setup() {
     local fails=0 marker
     marker=$(inside "git -C $(t_src "$NAME") config --get webkitscmpy.setup")

@@ -2,13 +2,11 @@
 
 set -euo pipefail
 
-SRC="$HOME/WebKit"
 MIRROR="${WK_VM_MIRROR:?WK_VM_MIRROR must name the guest mirror; this script is run by targets/vm.sh}"
 WK_TOOLS_DIR="$HOME/wk-tools"
 
 say() { printf '==> %s\n' "$*" >&2; }
 
-# sed, not `| head -1`, which SIGPIPEs xcodebuild.
 _xcode=$(xcodebuild -version 2>/dev/null | sed -n 1p) || true
 [ -n "$_xcode" ] || {
     echo "error: no usable Xcode in this image" >&2
@@ -24,7 +22,6 @@ _free_gb() { df -g /System/Volumes/Data | awk 'NR==2 {print $4}'; }
 
 _store=$(python3 "$WK_TOOLS_DIR/lib/wkmac.py" physical-store 2>/dev/null)
 if [ -n "$_store" ]; then
-    # 0 = all available space; macOS may auto-expand and return error -69743 for it, so free space after is the verdict.
     _out=$(sudo diskutil apfs resizeContainer "$_store" 0 2>&1) || true
 fi
 
@@ -54,58 +51,6 @@ git -C "$MIRROR" rev-parse --verify --quiet refs/heads/main >/dev/null || {
     exit 1
 }
 
-if [ -d "$SRC/.git" ]; then
-    say "WebKit checkout present, fast-forwarding it from the mirror"
-    git -C "$SRC" fetch --quiet --no-tags --prune "$MIRROR" \
-        '+refs/heads/main:refs/remotes/origin/main' || true
-    git -C "$SRC" reset --hard --quiet refs/remotes/origin/main || true
-else
-    say "cloning WebKit from the mirror"
-    git clone --quiet --shared --branch main "$MIRROR" "$SRC"
-fi
-_store_fn() { bash -c '. "$1/lib/common.sh"; . "$1/lib/store.sh"; "$2" "${3:-}" "${4:-}"' \
-                  _ "$WK_TOOLS_DIR" "$@" 2>/dev/null; }
-
-_wiring=$(_store_fn wk_wiring_script "$SRC" "$MIRROR") \
-    && sh -c "$_wiring" \
-    && say "remotes: origin=WebKit/WebKit, forks added; fetches read $MIRROR" \
-    || say "WARNING: could not wire the checkout's remotes"
-
-# In the base, so every guest cloned from it is set up already. ~/.wk-egress is where targets/vm.sh puts the proxy and the injector's CA on every start, and the credential is the placeholder that injector replaces.
-[ ! -r "$HOME/.wk-egress" ] || . "$HOME/.wk-egress"
-GITHUB_COM_USERNAME=$(_store_fn wk_github_user) || GITHUB_COM_USERNAME=""
-export GITHUB_COM_USERNAME
-export GITHUB_COM_TOKEN=wk-injects-this
-if _setup=$(_store_fn wk_gitwebkit_setup_script "$SRC") && _out=$(sh -c "$_setup" </dev/null); then
-    say "git-webkit: $_out"
-else
-    say "WARNING: 'git-webkit setup' did not finish (above); on a workspace made"
-    say "         from this base, from the host:  wk remotes <ws> --fix"
-fi
-
-say "WebKit at $(git -C "$SRC" rev-parse --short HEAD)"
-
-if command -v claude >/dev/null 2>&1 || [ -x "$HOME/.local/bin/claude" ]; then
-    say "Claude CLI present"
-else
-    say "installing the Claude CLI"
-    curl -fsSL https://claude.ai/install.sh | bash || \
-        echo "warning: Claude CLI install failed; 'wk ai claude' will not work here" >&2
-fi
-
-if [ -d "$WK_TOOLS_DIR/claude" ]; then
-    mkdir -p "$HOME/.claude"
-    ln -sfn "$WK_TOOLS_DIR/claude/settings.json" "$HOME/.claude/settings.json"
-    ln -sfn "$WK_TOOLS_DIR/claude/hooks"         "$HOME/.claude/hooks"
-    ln -sfn "$WK_TOOLS_DIR/claude/CLAUDE.md"     "$HOME/.claude/CLAUDE.md"
-    ln -sfn "$WK_TOOLS_DIR/claude/skills"        "$HOME/.claude/skills"
-    say "Claude config linked from $WK_TOOLS_DIR/claude"
-else
-    echo "warning: $WK_TOOLS_DIR/claude missing; ~/.claude not configured" >&2
-fi
-git config --global --replace-all include.path "$WK_TOOLS_DIR/dotfiles/gitconfig"
-say "git identity and settings included from $WK_TOOLS_DIR/dotfiles/gitconfig"
-
 # The guest keeps the image's admin password: `sysadminctl -oldPassword`, the only form the account itself can run, exits 0 having changed nothing on macOS Tahoe 26.5.
 WK_VM_USER="${WK_VM_USER:-admin}"
 WK_VM_PASSWORD="${WK_VM_PASSWORD:-admin}"
@@ -114,7 +59,8 @@ WK_VM_DISPLAY="${WK_VM_DISPLAY:-1280x800}"
 WK_VM_DISPLAY_W="${WK_VM_DISPLAY%x*}"
 WK_VM_DISPLAY_H="${WK_VM_DISPLAY#*x}"
 
-cat "$WK_TOOLS_DIR/bench/mac-quiet-desktop.sh" "$WK_TOOLS_DIR/vm/desktop.sh" \
+cat "$WK_TOOLS_DIR/bench/mac-quiet-desktop.sh" "$WK_TOOLS_DIR/bench/mac-pyobjc.sh" \
+    "$WK_TOOLS_DIR/vm/desktop.sh" \
     | WK_VM_PASSWORD="$WK_VM_PASSWORD" bash -s
 
 # pmset alone does not keep the display awake.
@@ -172,16 +118,5 @@ cat > "$HOME/Library/LaunchAgents/org.wk.display.plist" <<PLIST
   <key>RunAtLoad</key><true/>
 </dict></plist>
 PLIST
-
-bash "$WK_TOOLS_DIR/vm/shell-rc.sh" "$WK_TOOLS_DIR"
-
-if [ -d "$SRC/Tools/Scripts" ]; then
-    say "warming webkitpy's autoinstalled packages"
-    ( cd "$SRC" && Tools/Scripts/run-webkit-tests --help >/dev/null 2>&1 ) || \
-        echo "warning: could not warm webkitpy's autoinstall; workspaces will do it themselves" >&2
-    if [ -d "$SRC/Tools/Scripts/libraries/autoinstalled" ]; then
-        say "autoinstalled: $(du -sh "$SRC/Tools/Scripts/libraries/autoinstalled" | cut -f1)"
-    fi
-fi
 
 say "base provisioning complete"

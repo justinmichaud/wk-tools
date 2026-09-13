@@ -234,6 +234,8 @@ _converge_guest() { # <name> <ip>
     _write_lldbinit "$name" "$ip" || debug "could not write .lldbinit in $name"
     _set_guest_clock "$name" "$ip" || warn "could not set $name's clock; TLS in there will fail as CERT_NOT_YET_VALID"
     _set_guest_egress "$name" "$ip" || warn "could not set $name's egress; nothing in there will reach the outside"
+    _write_checkout "$name" "$ip" || warn "$name's WebKit checkout is not wired and set up (above); 'wk remotes $name --fix' once it is up"
+    _install_claude_cli "$name" "$ip" || warn "could not install the Claude CLI in $name; 'wk ai claude $name' will not work there"
     _write_claude_config "$name" "$ip" || warn "could not link ~/.claude in $name; an agent in there would have no instructions"
     _write_agent_secrets "$name" "$ip" || warn "could not write the agent credentials into $name; an agent in there will ask you to log in"
     _write_deploy_keys "$name" "$ip" || warn "could not write $name's ssh config and public key halves; a push from in there is refused ('wk push status')"
@@ -627,6 +629,46 @@ _write_claude_config() {
         for f in settings.json hooks CLAUDE.md skills; do
             ln -sfn $(sh_quote "$tools/claude")/\$f \$HOME/.claude/\$f
         done"
+}
+
+# A guest's checkout is made at first start, --shared from the mirror its base seeds, and converged on every start under the injected credential: the identity include, the wiring, then `git-webkit setup --defaults`, which no-ops once webkitscmpy.setup is true. The generated halves are piped, never expanded into a heredoc: they carry `$` of their own.
+_write_checkout() { # <name> <ip>
+    local name="$1" ip="$2" src mirror out rc=0 t0
+    src=$(t_src "$name"); mirror=$(t_mirror_dir "$name")
+    t0=$(date +%s)
+    out=$({
+        cat <<'EOF'
+set -u
+git config --global --replace-all include.path "$WK_TOOLS/dotfiles/gitconfig"
+if [ -d "$WK_SRC/.git" ]; then
+    echo checkout=present
+elif [ ! -d "$WK_MIRROR" ]; then
+    echo checkout=no-mirror; exit 1
+elif git clone --quiet --shared --branch main "$WK_MIRROR" "$WK_SRC"; then
+    echo checkout=cloned
+else
+    echo checkout=clone-failed; exit 1
+fi
+[ ! -r "$HOME/.wk-egress" ] || . "$HOME/.wk-egress"
+EOF
+        wk_wiring_script "$src" "$mirror"
+        wk_gitwebkit_setup_script "$src"
+    } | _ssh "$ip" "env WK_SRC=$(sh_quote "$src") WK_MIRROR=$(sh_quote "$mirror") \
+                        WK_TOOLS=$(sh_quote "$(t_tools "$name")") bash -s" 2>&1 | tr -d '\r') || rc=$?
+    case "$out" in
+        *checkout=cloned*) info "$name's WebKit checkout made from its mirror in $(( $(date +%s) - t0 ))s" ;;
+    esac
+    case "$out" in
+        *setup=ok*) info "git-webkit is set up in $name" ;;
+    esac
+    [ "$rc" -eq 0 ] || printf '%s\n' "$out" | tail -5 | sed 's/^/    /' >&2
+    return "$rc"
+}
+
+_install_claude_cli() { # <name> <ip>
+    local name="$1" ip="$2" out
+    out=$(wk_claude_cli_script | _ssh "$ip" "sh -s" 2>/dev/null | tr -d '\r') || return 1
+    case "$out" in claude=installed) info "Claude CLI installed in $name" ;; esac
 }
 
 # One row per named secret (wk_agent_secrets, lib/store.sh), rewritten every start so a rotation converges: a guest holding a withdrawn credential, or one the delivery column does not send here -- the claude.ai login, whose own tool rewrites it in place -- is the state this must not leave behind. A guest authenticates into a store this host never writes (CLAUDE_SECURESTORAGE_CONFIG_DIR, vm/shell-rc.sh).
@@ -1125,8 +1167,7 @@ _base_ready() { _base_exists && [ -f "$(_base_marker)" ]; }
 # The inputs that produced this base, as one hash: vm_base_stale recomputes and compares on every read, so a script edited here makes every base built before it read stale at once.
 _base_inputs_hash() {
     {
-        cat "$WK_ROOT/vm/provision-base.sh" "$WK_ROOT/vm/desktop.sh" \
-            "$WK_ROOT/vm/shell-rc.sh" "$WK_ROOT/bench/mac-pyobjc.sh"
+        cat "$WK_ROOT/vm/provision-base.sh" "$WK_ROOT/vm/desktop.sh" "$WK_ROOT/bench/mac-pyobjc.sh"
         printf 'image=%s\nuser=%s\n' "$WK_VM_IMAGE" "$WK_VM_USER"
     } | python3 -c 'import hashlib,sys
 print(hashlib.sha256(sys.stdin.buffer.read()).hexdigest()[:16])'
@@ -1141,7 +1182,7 @@ vm_base_stale() {
         return 0
     fi
     [ "$rec" = "$(_base_inputs_hash)" ] && return 1
-    echo "vm/provision-base.sh, vm/desktop.sh, vm/shell-rc.sh, bench/mac-pyobjc.sh, WK_VM_IMAGE or WK_VM_USER has changed since it was built"
+    echo "vm/provision-base.sh, vm/desktop.sh, bench/mac-pyobjc.sh, WK_VM_IMAGE or WK_VM_USER has changed since it was built"
     return 0
 }
 

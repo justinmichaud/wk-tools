@@ -17,11 +17,13 @@ helpers -- no VM, no guest, no ssh.
 Run: python3 -m unittest tests.test_vm_base -v
 """
 import os
-import subprocess
 import platform
+import shutil
+import subprocess
 import unittest
 
-from tests.support import REPO, WkTest, bash, func_body, stub_path
+from tests.support import (REPO, WkTest, assert_guest_start_converges, bash,
+                           func_body, stub_path)
 
 PROVISION = REPO / "vm" / "provision-base.sh"
 VM = REPO / "targets" / "vm.sh"
@@ -559,7 +561,7 @@ class TestTheGuestCarriesAMirror(unittest.TestCase):
     def test_the_checkout_shares_the_mirrors_objects(self):
         """--shared, so the history is stored once in the base and the
         per-workspace cost of both is what copy-on-write makes it."""
-        self.assertIn("git clone --quiet --shared", PROVISION.read_text())
+        self.assertIn("git clone --quiet --shared", func_body(VM.read_text(), "_write_checkout"))
 
     def test_nothing_is_seeded_from_the_host(self):
         """One path to a checkout: the mirror. A seed rsynced off the host is a
@@ -570,6 +572,152 @@ class TestTheGuestCarriesAMirror(unittest.TestCase):
                 self.assertNotIn("wk-seed", path.read_text())
                 self.assertNotIn("WK_HOST_WEBKIT", path.read_text())
 
+
+class TestGitWebkitSetupHasAnIdentityToRead(unittest.TestCase):
+    """`git-webkit setup --defaults` asks for a user email when none is in
+    reach, and its stdin is /dev/null, so the setup dies on EOF and the
+    marker `wk verify` reads is never written. The include that carries the
+    identity therefore precedes the setup wherever it runs unattended."""
+
+    def _order(self, text, who):
+        include = text.index("include.path")
+        setup = text.index("wk_gitwebkit_setup_script")
+        self.assertLess(include, setup,
+                        f"{who} runs git-webkit setup before the git identity is configured")
+
+    def test_a_guests_first_start(self):
+        self._order(func_body(VM.read_text(), "_write_checkout"), "_write_checkout")
+
+    def test_a_containers_first_start(self):
+        self._order((REPO / "container" / "firstrun.sh").read_text(), "container/firstrun.sh")
+
+    def test_the_identity_is_the_one_dotfile(self):
+        for path in (VM, REPO / "container" / "firstrun.sh"):
+            with self.subTest(file=path.name):
+                self.assertIn("dotfiles/gitconfig", path.read_text())
+
+
+class TestTheBaseCarriesOnlyWhatChangesWithTheImage(unittest.TestCase):
+    """A base is rebuilt for a new image, and for nothing else. What depends
+    on this tree or on a credential -- the checkout, its remotes, git-webkit
+    setup, the Claude CLI, the shell -- is made in the guest at its first
+    start and converged on every start, so neither a rotated token nor an
+    edited script asks for hours of rebuild."""
+
+    BAKED_NOWHERE = ("git clone", "wk_wiring_script", "wk_gitwebkit_setup_script",
+                     "claude.ai/install.sh", "wk_claude_cli_script", "include.path",
+                     "shell-rc.sh", ".claude")
+
+    def test_provisioning_makes_no_checkout_and_installs_no_tool(self):
+        text = PROVISION.read_text()
+        for word in self.BAKED_NOWHERE:
+            with self.subTest(word=word):
+                self.assertNotIn(word, text, f"vm/provision-base.sh bakes {word!r} into the base")
+        self.assertIn("mirror_refresh_script", text, "the mirror seed is what the base is for")
+
+    def test_the_guest_gets_them_on_every_start(self):
+        assert_guest_start_converges(self, '_write_checkout "$name" "$ip"')
+        assert_guest_start_converges(self, '_install_claude_cli "$name" "$ip"')
+
+    def test_the_base_inputs_are_the_base_scripts_only(self):
+        text = VM.read_text()
+        self.assertNotIn("shell-rc.sh", func_body(text, "_base_inputs_hash"))
+        self.assertNotIn("shell-rc.sh", func_body(text, "vm_base_stale"))
+
+    def test_one_installer_script_for_container_and_guest(self):
+        self.assertIn("wk_claude_cli_script", (REPO / "container" / "firstrun.sh").read_text())
+        self.assertIn("wk_claude_cli_script", func_body(VM.read_text(), "_install_claude_cli"))
+        for rel in ("container/firstrun.sh", "targets/vm.sh", "vm/provision-base.sh"):
+            self.assertNotIn("claude.ai/install.sh", (REPO / rel).read_text(),
+                             f"{rel} carries its own Claude CLI installer")
+
+
+# `ssh`: the guest as a directory. The remote command is the last argument and
+# the script arrives on stdin; /Users/admin is rewritten to the scratch guest in
+# both, and the command runs with HOME there, so the real git runs.
+FAKE_SSH_GUEST = '''
+for a in "$@"; do last="$a"; done
+cmd=$(printf '%s' "$last" | sed "s|/Users/admin|$WK_TEST_GUEST|g")
+sed "s|/Users/admin|$WK_TEST_GUEST|g" | HOME="$WK_TEST_GUEST" sh -c "$cmd"
+'''
+
+# What the checkout needs of WebKit: `git-webkit setup --defaults`, which here
+# records each call and writes the marker the real one writes.
+FAKE_GIT_WEBKIT = '''#!/bin/sh
+echo "$*" >> "$HOME/git-webkit.calls"
+[ "$1 $2" = "setup --defaults" ] || exit 2
+git config webkitscmpy.setup true
+'''
+
+
+class TestTheCheckoutIsMadeAtFirstStart(WkTest):
+    """`_write_checkout` against a scratch guest holding a bare mirror: the
+    first start clones from it, wires it and runs setup; the next start finds
+    all three done and changes nothing."""
+
+    def setUp(self):
+        super().setUp()
+        self.guest = self.tmp / "guest"
+        (self.guest / "wk-tools").mkdir(parents=True)
+        self.mirror = self.guest / "WebKit.git"
+        src = self.tmp / "seed"
+        (src / "Tools" / "Scripts").mkdir(parents=True)
+        gw = src / "Tools" / "Scripts" / "git-webkit"
+        gw.write_text(FAKE_GIT_WEBKIT)
+        gw.chmod(0o755)
+        env = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+               "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
+        for cmd in (["git", "init", "-q", "-b", "main"], ["git", "add", "."],
+                    ["git", "commit", "-q", "-m", "seed"]):
+            subprocess.run(cmd, cwd=src, env=env, check=True)
+        subprocess.run(["git", "clone", "-q", "--bare", str(src), str(self.mirror)], check=True)
+
+    def _start(self):
+        with stub_path({"ssh": FAKE_SSH_GUEST, "tart": TART}) as binp:
+            env = {
+                "PATH": f"{binp}:{os.environ['PATH']}",
+                "WK_TEST_GUEST": str(self.guest),
+                "WK_VM_STORE": str(self.tmp / "vmstore"),
+                "WK_LOCK_DIR": str(self.tmp / "locks"),
+                "XDG_STATE_HOME": str(self.tmp / "state"),
+                "WK_STORE": str(self.tmp / "store"),
+            }
+            return bash(DRIVER + "_write_checkout demo 1.2.3.4\n", env=env, timeout=120)
+
+    def _config(self, key):
+        return subprocess.run(["git", "-C", str(self.guest / "WebKit"), "config", "--get-all", key],
+                              capture_output=True, text=True).stdout.split()
+
+    def test_the_first_start_clones_wires_and_sets_up(self):
+        cp = self._start()
+        out = cp.stdout + cp.stderr
+        self.assertEqual(cp.returncode, 0, out)
+        self.assertIn("checkout made from its mirror in", out)
+        self.assertIn("git-webkit is set up in demo", out)
+        self.assertEqual(self._config("webkitscmpy.setup"), ["true"])
+        self.assertEqual(self._config("remote.origin.url"), ["https://github.com/WebKit/WebKit.git"])
+        self.assertIn("https://github.com/WebKit/WebKit.git", self._config(f"url.{self.mirror}.insteadOf"),
+                      "fetches do not read the mirror")
+        self.assertIn("dotfiles/gitconfig", (self.guest / ".gitconfig").read_text())
+        self.assertTrue((self.guest / "WebKit" / ".git" / "objects" / "info" / "alternates").exists(),
+                        "the clone copied the history rather than sharing the mirror's")
+
+    def test_the_next_start_finds_it_done(self):
+        self._start()
+        cp = self._start()
+        out = cp.stdout + cp.stderr
+        self.assertEqual(cp.returncode, 0, out)
+        self.assertNotIn("made from its mirror", out)
+        self.assertNotIn("git-webkit is set up", out)
+        calls = (self.guest / "git-webkit.calls").read_text().splitlines()
+        self.assertEqual(calls, ["setup --defaults"], "setup ran again on a set-up checkout")
+
+    def test_no_mirror_is_a_failure_that_says_so(self):
+        shutil.rmtree(self.mirror)
+        cp = self._start()
+        self.assertNotEqual(cp.returncode, 0)
+        self.assertIn("checkout=no-mirror", cp.stdout + cp.stderr)
+        self.assertFalse((self.guest / "WebKit").exists())
 
 if __name__ == "__main__":
     unittest.main()

@@ -344,8 +344,7 @@ if is_linux; then
     esac
 fi
 
-# A stopped guest is skipped rather than reported unreachable, since doctor starts nothing;
-# a guest is a clone of the golden base, so a wrong one is fixed by a refreshed base and a fresh clone.
+# A stopped guest is skipped rather than reported unreachable, since doctor starts nothing; the include is written on every start (targets/vm.sh), so a start is the remedy.
 VM_GIT_PROBE='command -v git >/dev/null 2>&1 || exit 0
 printf "git.name=%s\n" "$(git config --get user.name 2>/dev/null || true)"
 printf "git.email=%s\n" "$(git config --get user.email 2>/dev/null || true)"
@@ -357,7 +356,7 @@ vm_guest_git_findings() {
         [ -n "$g" ] || continue
         state=$(t_info "$g" 2>/dev/null || true)
         [ "$state" = running ] || continue
-        remedy="wk vm base --refresh, then wk rm $g and wk new (a guest is a clone of the base)"
+        remedy="wk start $g (the include is written on every start)"
         blob=$(t_exec "$g" sh -c "$VM_GIT_PROBE" 2>/dev/null) || blob=""
         if [ -z "$blob" ]; then
             printf 'note\t%s (tart guest): git config did not answer\t%s\n' "$g" "wk vm check $g"

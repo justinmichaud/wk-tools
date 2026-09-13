@@ -285,11 +285,15 @@ the `mac-*` config of the same configuration. The reverse is refused: a
 `mac-*` config on a Linux target says so rather than running xcodebuild.
 
 Every guest is an APFS clone of one golden base, so **what the base carries is
-what every guest carries**: Xcode, a checkout, and the
-desktop settled onto an empty screen. The base is made by scripts in this
-tree, and editing one of
-them does not change a base already built -- so the base records the hash of
-the inputs that produced it, and every read recomputes that hash and compares.
+what every guest carries**, and it carries only what changes with the image:
+Xcode, the desktop settled onto an empty screen, and a bare WebKit mirror.
+Everything that depends on this tree or on a credential -- the checkout,
+its remotes, `git-webkit setup`, the Claude CLI, the shell -- is made in the
+guest at its first start and converged on every start, so a rotated token or
+an edited script never asks for a rebuilt base. The base is made by scripts in
+this tree, and editing one of them does not change a base already built -- so
+the base records the hash of the inputs that produced it, and every read
+recomputes that hash and compares.
 `wk vm ls` prints the verdict under `BASE`, `wk new --target vm` warns before
 cloning a base that predates its inputs, and `wk doctor` says the same on the
 way past; each of them names `wk vm base --rebuild`, which is hours and is
@@ -362,9 +366,9 @@ host: the container target's own machine (the podman VM on macOS, this host
 on Linux), every currently-running tart guest, and (`--all`) every build
 box. Each unset or diverging value is named with the command that installs
 the include there (`container/firstrun.sh` for a workspace,
-`remote/provision.sh` for a build box, `wk enter <name> -- git config
---global include.path ...` by hand for a tart guest, since nothing provisions
-one yet); a machine that does not answer is unreachable, never broken.
+`remote/provision.sh` for a build box, `wk start <name>` for a tart guest,
+which writes it on every start); a machine that does not answer is
+unreachable, never broken.
 
 **Someone else's PR, a PR by number, a rebase**
 
@@ -386,7 +390,8 @@ also **fetches**: once, from the mirror its target names, then a
 fast-forward onto it -- a local read of a handful of refs, never the network,
 and never a refresh of the mirror itself (that is `wk sync --tools`, minutes).
 Every target's driver names one -- a container's is this machine's own, a
-guest's lives in its golden base, beside the checkout -- but creation asks
+guest's is seeded by its golden base, beside where the checkout is cloned
+from it at first start -- but creation asks
 the workspace rather than assuming: a guest cloned from a base built before
 its mirror existed answers with none, and is told to `wk sync` it instead.
 A snapshot that is *not* on that branch is refused rather than overlaid --
@@ -394,9 +399,9 @@ every workspace made from it would start detached, publish after publish,
 since each snapshot is a hardlinked copy of the one before -- so `wk new` names
 `wk sync`, and publishing over it puts it back on its branch.
 
-`git-webkit setup --defaults` has already run in it, too, wherever the
-checkout can reach GitHub through the credential injector (a container at
-first start, a guest's golden base): the commit hooks, the Objective-C diff
+`git-webkit setup --defaults` has already run in it, too, at the workspace's
+first start, where the checkout reaches GitHub through the credential
+injector (container and guest alike): the commit hooks, the Objective-C diff
 drivers, `pull.rebase` and the fork `git-webkit pr` opens a pull request
 against are configured before the workspace is handed over. `git config
 webkitscmpy.setup` is the record of it; it is asked of `main`, because on any

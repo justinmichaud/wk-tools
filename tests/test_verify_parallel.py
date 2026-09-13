@@ -237,8 +237,8 @@ class TestWhetherTheAgentCanAuthenticateIsMeasured(WkTest):
 
 
 class TestGitWebkitSetupIsMeasured(WkTest):
-    """`git-webkit setup` runs once, at a container's first start or in a
-    guest's golden base, and a GitHub request that fails there leaves the
+    """`git-webkit setup` runs at a workspace's first start, container or
+    guest, and a GitHub request that fails there leaves the
     checkout with no hooks and no fork remote for `git-webkit pr` -- measured
     once, "Is your API token out of date?" 43 s after the egress bridge came
     up, while the same command later in the same container succeeded. Nothing
