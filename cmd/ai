@@ -23,8 +23,8 @@
 #
 # `wk new`, `wk start` and `wk vm start` start remote control in what they
 # bring up; WK_NO_CLAUDE_RC=1 turns that off. It needs the claude.ai account
-# login rather than a `claude setup-token` token: 'wk key set claude-login', or
-# a guest logs in for itself. Onboarding, the trust dialog and the remote-control dialog are
+# login rather than a `claude setup-token` token: 'wk key set claude-login',
+# which every container and guest reads. Onboarding, the trust dialog and the remote-control dialog are
 # recorded in the workspace before either kind of session starts
 # (claude/workspace-config.py).
 #
@@ -424,12 +424,13 @@ if [ "$WK_TARGET_KIND" = vm ]; then
     fi
     if [ -x "${WK_SOFTNET_BIN:-/usr/local/bin/softnet}" ] && [ -z "${WK_VM_UNFILTERED:-}" ]; then
         info "'$NAME' is a macOS VM: egress is filtered on the host by Softnet,
-  default-deny except the wk-proxy address. The host filesystem is unreachable
-  and the guest is disposable."
+  default-deny except the wk-proxy address. Of the host filesystem it reaches
+  one directory, the claude.ai login every container mounts too, and the
+  guest is disposable."
     elif [ -n "${WK_VM_UNFILTERED:-}" ]; then
-        warn "WK_VM_UNFILTERED=1: '$NAME' has the open network. The host filesystem
-  is still unreachable and the guest is still disposable -- but that is the
-  whole of the boundary right now."
+        warn "WK_VM_UNFILTERED=1: '$NAME' has the open network. Of the host filesystem
+  it still reaches only the login directory, and the guest is still
+  disposable -- but that is the whole of the boundary right now."
     else
         barrier "softnet is not installed, so this guest's egress is not filtered.
     Install it:  ./setup --stage softnet   (needs a terminal)

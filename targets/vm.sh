@@ -175,6 +175,10 @@ t_ssh_user() { printf '%s' "$WK_VM_USER"; }
 
 t_agent_sock() { printf '/Users/%s/.wk-ssh-agent.sock' "$WK_VM_USER"; }
 
+# The one host directory a guest mounts: the claude.ai login the CLI rotates in place, so every holder here reads one set of bytes (wk_agent_rw_dir). tart automounts a named share at this path.
+WK_VM_AGENT_RW_SHARE=agent-rw
+_agent_rw_guest_dir() { printf '/Volumes/My Shared Files/%s' "$WK_VM_AGENT_RW_SHARE"; }
+
 # _boot records WK_VM_UNFILTERED as a file beside the run log, because Softnet is applied at `tart run` and a guest booted without it stays open for its whole life -- the environment this is read in says nothing about it.
 t_egress_filtered() { [ ! -f "$WK_VM_DIR/$1.unfiltered" ]; }
 
@@ -511,9 +515,10 @@ _boot() {
             rm -f "$WK_VM_DIR/${v#wk-}.unfiltered"
         fi
 
+        ensure_dir "$(wk_agent_rw_dir)" 0700
         # nohup, not a bare `&`, or the VM dies with the terminal. Windowed: a macOS guest is the one workspace kind with a real GPU, and it is the .app's own binary that runs -- outside the bundle tart loses com.apple.security.virtualization and fullScreenPrimary.
         # shellcheck disable=SC2086 -- deliberate word splitting of the flags.
-        nohup "$(tart_bin)" run $sflags "$v" >"$runlog" 2>&1 &
+        nohup "$(tart_bin)" run $sflags --dir="$WK_VM_AGENT_RW_SHARE:$(wk_agent_rw_dir)" "$v" >"$runlog" 2>&1 &
         disown 2>/dev/null || true
         info "booting $v (log: $runlog)"
     fi
@@ -676,6 +681,12 @@ _write_agent_secrets() { # <name> <ip>
     local name="$1" ip="$2" sname sfile shome svar skind sdelivery val here n=0
     while read -r sname sfile shome svar skind sdelivery; do
         [ -n "$sname" ] || continue
+        if [ "$skind" = file ]; then   # read where the host's directory is mounted; a copy under ~ would be a second holder
+            _ssh "$ip" "rm -f \$HOME/$(sh_quote "$shome") && bash -lc 'test -d \"\$CLAUDE_SECURESTORAGE_CONFIG_DIR\"'" </dev/null \
+                || warn "the $WK_VM_AGENT_RW_SHARE share is not mounted in $name, so it has no claude.ai login:
+    'wk vm stop $name', then 'wk vm start $name' boots it with the share"
+            continue
+        fi
         here=1
         case ",$sdelivery," in *,vm,*)
             here=0; wk_agent_secret_present "$sname" || here=$?
@@ -698,7 +709,12 @@ EOF
 t_agent_secret_remedy() { # <name> <secret>
     local name="$1" sname="$2"
     [ "$(wk_agent_secret_kind "$sname")" = file ] || { agent_secret_store_remedy "$sname"; return; }
-    printf "a guest logs in for itself and this host is never a second holder: 'wk enter %s', then 'claude auth login' once" "$name"
+    if t_exec "$name" bash -lc 'test -d "$CLAUDE_SECURESTORAGE_CONFIG_DIR"' >/dev/null 2>&1; then
+        agent_secret_store_remedy "$sname"
+    else
+        printf "the %s share is not mounted in '%s': 'wk vm stop %s', then 'wk vm start %s' boots it with the share" \
+            "$WK_VM_AGENT_RW_SHARE" "$name" "$name" "$name"
+    fi
 }
 
 # Softnet allows one address, where wk-proxy listens, so a guest's direct TCP to port 22 is dropped and this proxy is an HTTP CONNECT one; github.com:22 is in its allowlist.
@@ -909,12 +925,12 @@ _write_lldbinit() {
 }
 
 _write_shell_rc() { # <name> <ip>
-    _ssh "$2" "bash -s $(sh_quote "$(t_tools "$1")")" < "$WK_ROOT/vm/shell-rc.sh"
+    _ssh "$2" "bash -s $(sh_quote "$(t_tools "$1")") $(sh_quote "$(_agent_rw_guest_dir)")" < "$WK_ROOT/vm/shell-rc.sh"
 }
 
 command -v tools_push >/dev/null 2>&1 || . "$WK_ROOT/lib/tools.sh"
 
-# A git bundle of this tree's HEAD (tools_push, lib/tools.sh) rather than a mount: no --dir is ever passed to `tart run`, and an uncommitted tree here is refused.
+# A git bundle of this tree's HEAD (tools_push, lib/tools.sh) rather than a mount: the one --dir a guest gets is the agent-rw share (_boot), and an uncommitted tree here is refused.
 _push_tools() {
     local name="$1" ip="$2"
     tools_push "$(t_tools "$name")" _ssh "$ip"

@@ -35,10 +35,11 @@
 #                                     wk_push_forks: the token page cannot
 #                                     preselect them, so its own answer to
 #                                     `GET /user/repos` is what decides
-#                       claude        the Claude Code token every workspace
-#                                     this machine makes starts authenticated
-#                                     with (`claude setup-token` prints one)
-#                       claude-login  the claude.ai login the containers share,
+#                       claude        the Claude Code token a build box's agent
+#                                     starts authenticated with (`claude
+#                                     setup-token` prints one); inference only
+#                       claude-login  the claude.ai login every container and
+#                                     guest here shares,
 #                                     made once here in a browser with the
 #                                     shared directory as the CLI's config home,
 #                                     so the credential and the account record

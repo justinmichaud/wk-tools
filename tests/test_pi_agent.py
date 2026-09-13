@@ -104,7 +104,7 @@ class TestTheTable(unittest.TestCase):
         """Rotating nothing: a store made before the table existed holds
         secrets/claude-token, and every container already links to that name."""
         self.assertEqual(("claude", "claude-token", ".wk-agent-token",
-                          "CLAUDE_CODE_OAUTH_TOKEN", "value", "vm,remote"),
+                          "CLAUDE_CODE_OAUTH_TOKEN", "value", "remote"),
                          TABLE[0])
 
     def test_a_file_row_names_no_variable(self):

@@ -275,10 +275,18 @@ class TestOneClaudeCredentialPerTarget(unittest.TestCase):
     def test_the_login_goes_only_where_this_machines_bytes_go(self):
         """A file row is rewritten in place by the CLI, so a copy is a second
         holder whose first refresh invalidates every other one. A container
-        mounts the very bytes; nothing else may be sent them."""
+        and a guest mount the very bytes; a build box, where other people are
+        root, is sent nothing."""
         for row in FILE_ROWS:
             with self.subTest(name=row[0]):
-                self.assertEqual(["container"], row[5].split(","))
+                self.assertEqual(["container", "vm"], row[5].split(","))
+
+    def test_a_kind_given_the_login_is_given_no_token(self):
+        """The token wins over the login (cmd/verify), so a kind that mounts
+        the login is sent no token."""
+        for kind in ("container", "vm"):
+            with self.subTest(kind=kind):
+                self.assertNotIn("claude", [r[0] for r in delivered_to(kind, VALUE_ROWS)])
 
     def test_the_container_is_given_no_claude_token(self):
         """It has the login, and the token would win over it."""
@@ -502,8 +510,8 @@ _write_agent_secrets demo 1.2.3.4
 
     def test_it_is_unreadable_to_anyone_else_in_the_guest(self):
         home = self._home()
-        self._write(self._store(values=["claude"]), home)
-        mode = (home / TABLE[0][2]).stat().st_mode & 0o777
+        self._write(self._store(values=[VM_ROWS[0][0]]), home)
+        mode = (home / VM_ROWS[0][2]).stat().st_mode & 0o777
         self.assertEqual(mode, 0o600, oct(mode))
 
     def test_a_store_with_none_withdraws_what_the_guest_holds(self):
@@ -642,8 +650,8 @@ r_host=fakebox
 # document the Claude CLI *rewrites*, spending the refresh token in it and
 # storing the rotated one back. So the delivery is a directory, not a link, and
 # it reaches only a workspace that can look at the very bytes this machine
-# does. A guest could hold nothing but a copy, whose first refresh would
-# invalidate the original, so a guest is given none and logs in for itself.
+# does: a container through its bind mount, a guest through the one virtiofs
+# share tart is given. A copy would be a second holder, so none is ever made.
 
 # A credential-shaped document, and deliberately nothing like a real one. Two
 # lines, so a reader that took only the first would be caught.
@@ -651,13 +659,89 @@ FAKE_LOGIN = ('{"claudeAiOauth":{"accessToken":"' + PLACEHOLDER + '",\n'
               '"refreshToken":"' + PLACEHOLDER + '","scopes":["user:profile"]}}')
 
 
-class TestAGuestIsNeverGivenTheFileRow(_Delivery):
+class TestAGuestMountsTheShare(_Delivery):
+    """The login reaches a guest as the host's directory itself, over the one
+    virtiofs share `tart run` is given; the golden base gets none, since a
+    credential in the base would be in every clone's image."""
+
+    def test_the_guest_boots_with_the_share_and_the_base_without(self):
+        vm = (REPO / "targets" / "vm.sh").read_text()
+        self.assertIn('--dir="$WK_VM_AGENT_RW_SHARE:$(wk_agent_rw_dir)"', func_body(vm, "_boot"))
+        self.assertNotIn("--dir", func_body(vm, "_start_base"))
+
+    def test_the_rc_is_told_where_the_share_is_by_the_driver(self):
+        """One authority for the guest path: the driver names the share and
+        hands the rc the directory, and the rc refuses to guess one."""
+        vm = (REPO / "targets" / "vm.sh").read_text()
+        self.assertIn("_agent_rw_guest_dir", func_body(vm, "_write_shell_rc"))
+        home = self.tmp / "rc-home"
+        home.mkdir()
+        cp = subprocess.run(["bash", str(REPO / "vm" / "shell-rc.sh"), str(REPO)],
+                            env={"HOME": str(home), "PATH": os.environ["PATH"]},
+                            capture_output=True, text=True, timeout=60)
+        self.assertNotEqual(0, cp.returncode)
+        self.assertIn("targets/vm.sh", cp.stderr)
+        self.assertFalse((home / ".zshrc").exists(), "it wrote an rc with no directory to name")
+
+    def test_a_guest_wired_to_log_in_for_itself_is_rewired(self):
+        """A guest from before the share pointed the CLI at its own
+        ~/.claude-login; that stanza goes and exactly one export is left."""
+        home = self.tmp / "old-home"
+        home.mkdir()
+        rcfile = home / ".zshrc"
+        rcfile.write_text("\n# wk-tools: the guest's own Claude login, not a Keychain\n"
+                          'export CLAUDE_SECURESTORAGE_CONFIG_DIR="$HOME/.claude-login"\n')
+        cp = subprocess.run(["bash", str(REPO / "vm" / "shell-rc.sh"), str(REPO), "/mnt/share"],
+                            env={"HOME": str(home), "PATH": os.environ["PATH"]},
+                            capture_output=True, text=True, timeout=60)
+        self.assertEqual(0, cp.returncode, cp.stdout + cp.stderr)
+        exports = [l for l in rcfile.read_text().splitlines() if "CLAUDE_SECURESTORAGE_CONFIG_DIR" in l]
+        self.assertEqual(['export CLAUDE_SECURESTORAGE_CONFIG_DIR="/mnt/share"'], exports)
+        self.assertNotIn(".claude-login", rcfile.read_text())
+
+    def _write(self, store, home):
+        with stub_path({"ssh": FAKE_SSH, "tart": FAKE_TART}) as binp:
+            env = self._env(store, home,
+                            {"PATH": f"{binp}:{os.environ['PATH']}",
+                             "WK_VM_STORE": str(self.tmp / "vmstore")})
+            return bash('''
+. "$WK_ROOT/lib/common.sh"
+. "$WK_ROOT/lib/store.sh"
+. "$WK_ROOT/lib/target.sh"
+load_target vm >/dev/null 2>&1
+_write_agent_secrets demo 1.2.3.4
+''', env=env)
+
+    def _wired_home(self, mounted):
+        home = self._home()
+        store = home / "agent-rw"
+        cp = subprocess.run(["bash", str(REPO / "vm" / "shell-rc.sh"), str(REPO), str(store)],
+                            env={"HOME": str(home), "PATH": os.environ["PATH"]},
+                            capture_output=True, text=True, timeout=60)
+        self.assertEqual(0, cp.returncode, cp.stdout + cp.stderr)
+        if mounted:
+            store.mkdir()
+        return home
+
+    def test_a_start_without_the_share_says_so_and_names_the_reboot(self):
+        cp = self._write(self._store(), self._wired_home(mounted=False))
+        self.assertEqual(0, cp.returncode, cp.stdout + cp.stderr)
+        self.assertIn("not mounted in demo", cp.stderr)
+        self.assertIn("wk vm start demo", cp.stderr)
+
+    def test_a_start_with_the_share_is_quiet(self):
+        cp = self._write(self._store(), self._wired_home(mounted=True))
+        self.assertEqual(0, cp.returncode, cp.stdout + cp.stderr)
+        self.assertNotIn("not mounted", cp.stderr)
+
+
+class TestAGuestIsNeverGivenACopyOfTheFileRow(_Delivery):
     """targets/vm.sh's _write_agent_secrets, the real function: a credential
     its own tool rewrites in place is never copied into a guest, whatever this
     machine's store holds. A copy would be a second holder whose first refresh
-    invalidates the bytes every container here shares; the guest logs in for
-    itself instead. Delivered as absence, so a copy an older start left behind
-    goes away like any withdrawn credential."""
+    invalidates the bytes every other holder shares; the guest reads the
+    mounted share instead, and a copy an older start left behind goes away
+    like any withdrawn credential."""
 
     def _store_with_login(self):
         d = self._store()
@@ -763,7 +847,7 @@ _write_agent_secrets demo 1.2.3.4
         rcfile.write_text(
             "\n# wk-tools: the Claude credential the host writes here, not a Keychain\n"
             'export CLAUDE_SECURESTORAGE_CONFIG_DIR="$HOME/.claude"\n')
-        cp = subprocess.run(["bash", str(REPO / "vm" / "shell-rc.sh"), str(REPO)],
+        cp = subprocess.run(["bash", str(REPO / "vm" / "shell-rc.sh"), str(REPO), str(home / "agent-rw")],
                             env={"HOME": str(home), "PATH": os.environ["PATH"]},
                             capture_output=True, text=True, timeout=120)
         self.assertEqual(0, cp.returncode, cp.stdout + cp.stderr)
@@ -778,19 +862,18 @@ class TestWhoIsAskedWhetherAWorkspaceCanAuthenticate(_Delivery):
     which every driver inherits: it asks the target through its own login
     shell, the one authority on where its credential store is."""
 
-    def _guest(self, login=None):
+    def _guest(self, login=None, mounted=True):
         """A guest home wired by the real vm/shell-rc.sh, so the probe and the
         rc agree about the directory or this fails."""
         home = self.tmp / "guest-home"
         home.mkdir(exist_ok=True)
-        cp = subprocess.run(["bash", str(REPO / "vm" / "shell-rc.sh"), str(REPO)],
+        store = home / "agent-rw"   # where the share would be mounted
+        cp = subprocess.run(["bash", str(REPO / "vm" / "shell-rc.sh"), str(REPO), str(store)],
                             env={"HOME": str(home), "PATH": os.environ["PATH"]},
                             capture_output=True, text=True, timeout=120)
         self.assertEqual(0, cp.returncode, cp.stdout + cp.stderr)
-        m = re.search(r'CLAUDE_SECURESTORAGE_CONFIG_DIR="\$HOME/([^"]+)"',
-                      (REPO / "vm" / "shell-rc.sh").read_text())
-        store = home / m.group(1)
-        store.mkdir(exist_ok=True)
+        if mounted:
+            store.mkdir(exist_ok=True)
         if login is not None:
             (store / FILE_ROWS[0][1]).write_text(login)
         return home
@@ -808,7 +891,7 @@ load_target vm >/dev/null 2>&1
 if {fn} demo {secret}; then echo YES; else echo NO; fi
 ''', env=env)
 
-    def test_a_guest_that_logged_in_for_itself_answers_yes(self):
+    def test_a_guest_whose_share_holds_the_login_answers_yes(self):
         cp = self._ask(self._store(), self._guest(FAKE_LOGIN),
                        "t_agent_secret_present", FILE_ROWS[0][0])
         self.assertIn("YES", cp.stdout, cp.stdout + cp.stderr)
@@ -848,10 +931,19 @@ if {fn} demo {secret}; then echo YES; else echo NO; fi
                             "t_agent_secret_present", row[0])
         self.assertIn("NO", without.stdout, without.stdout + without.stderr)
 
-    def test_the_guests_remedy_is_to_log_in_in_there(self):
+    def test_a_mounted_empty_share_names_this_machines_store(self):
         cp = self._ask(self._store(), self._guest(), "t_agent_secret_remedy",
                        FILE_ROWS[0][0])
-        self.assertIn("claude auth login", cp.stdout, cp.stdout + cp.stderr)
+        self.assertIn(f"wk key set {FILE_ROWS[0][0]}", cp.stdout, cp.stdout + cp.stderr)
+        self.assertNotIn("claude auth login", cp.stdout, cp.stdout)
+
+    def test_a_guest_without_the_share_is_told_to_boot_again(self):
+        """A guest booted before the share existed has nowhere to read the
+        login from, however full this store is; the share arrives at boot."""
+        cp = self._ask(self._store(), self._guest(mounted=False),
+                       "t_agent_secret_remedy", FILE_ROWS[0][0])
+        self.assertIn("not mounted", cp.stdout, cp.stdout + cp.stderr)
+        self.assertIn("wk vm start demo", cp.stdout, cp.stdout)
         self.assertNotIn("wk key set", cp.stdout, cp.stdout)
 
     def test_a_value_rows_remedy_is_this_machines_store(self):

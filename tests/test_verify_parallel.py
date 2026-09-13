@@ -194,12 +194,12 @@ class TestWhetherTheAgentCanAuthenticateIsMeasured(WkTest):
         self.assertIn("CLAUDE_CODE_OAUTH_TOKEN", cp.stdout)
         self.assertIn("the token wins", cp.stdout)
 
-    def test_a_guest_is_the_other_way_round(self):
-        """A vm is given the token and no login, so the token is what must be
-        there and claude.ai is what would be wrong."""
-        cp = self._with_token(self.TOKEN, "set", kind="vm")
+    def test_a_build_box_is_the_other_way_round(self):
+        """A build box is given the token and no login, so the token is what
+        must be there and claude.ai is what would be wrong."""
+        cp = self._with_token(self.TOKEN, "set", kind="remote")
         self.assertEqual(0, cp.returncode, cp.stdout)
-        cp = self._with_token(self.TOKEN, "", kind="vm")
+        cp = self._with_token(self.TOKEN, "", kind="remote")
         self.assertEqual(1, cp.returncode, cp.stdout)
         self.assertIn("no $CLAUDE_CODE_OAUTH_TOKEN", cp.stdout)
 

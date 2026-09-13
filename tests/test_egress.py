@@ -1105,7 +1105,7 @@ def _wire(home, times=1):
     start. More than once to prove a second start changes nothing."""
     for _ in range(times):
         cp = subprocess.run(
-            ["bash", str(SHELL_RC), str(REPO)],
+            ["bash", str(SHELL_RC), str(REPO), str(home / "agent-rw")],
             env={"HOME": str(home), "PATH": "/usr/bin:/bin"},
             capture_output=True, text=True, timeout=60,
         )

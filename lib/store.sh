@@ -1032,9 +1032,9 @@ unreferenced_bases() {
 #   <name> <file here> <file in the home> <variable> <kind> <delivery>
 wk_agent_secrets() {
     cat <<'EOF'
-claude        claude-token        .wk-agent-token             CLAUDE_CODE_OAUTH_TOKEN  value  vm,remote
+claude        claude-token        .wk-agent-token             CLAUDE_CODE_OAUTH_TOKEN  value  remote
 litellm       litellm-key         .wk-litellm-key             LITELLM_API_KEY          value  container,vm,remote
-claude-login  .credentials.json   .claude/.credentials.json   -                        file   container
+claude-login  .credentials.json   .claude/.credentials.json   -                        file   container,vm
 EOF
 }
 

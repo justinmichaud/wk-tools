@@ -1239,10 +1239,9 @@ of its own: it runs `claude auth login` with the CLI pointed at the directory
 the containers share, so the browser flow writes the credential straight where
 they read it -- nothing is pasted, nothing is printed, and what lands is
 refused unless it really is a login with the `user:profile` scope. It is
-separate from this machine's own login, and for the same reason a guest gets
-none: a second holder of one refresh token locks the other out (below). It is
-an *account* credential: an agent holding it can act as you, which is the trade
-`--rc` is.
+separate from this machine's own login, because a second holder of one refresh
+token locks the other out (below). It is an *account* credential: an agent
+holding it can act as you, which is the trade `--rc` is.
 
 It is delivered differently from the token because it is not a value: the
 Claude CLI spends the refresh token in it and writes the rotated one back over
@@ -1257,17 +1256,18 @@ a rename, which would replace a symlink with a private copy on the first
 refresh; pointing every container at one directory also puts them all on the
 CLI's own `.storage-write` lock, so concurrent refreshes serialize.
 
-A macOS guest could be handed nothing but a copy, and a copy is a second holder
-whose first refresh invalidates the file every container shares -- so the
-delivery column sends it to a container and nowhere else. It logs in for itself instead: `wk enter <ws>`, then
-`claude auth login` once, and what that leaves lives only in that guest, in
-`~/.claude-login` -- a directory this host never writes, which is why `wk vm
-start` can take the login's file out of `~/.claude` on every start without ever
-touching the guest's own. `wk ai claude --rc` and `wk verify` ask the workspace
-rather than this machine's store -- what was given is not what is there -- and
-their refusal names the login to run in it. A shared build box gets no login at all -- an account credential on a
-machine other people are root on is theirs -- so an agent there has the
-inference-only token and no remote control.
+A macOS guest reads the same directory: `tart run` is given it as its one
+`--dir`, the share `agent-rw`, which the guest automounts under `/Volumes/My
+Shared Files`, and `vm/shell-rc.sh` points the CLI there. Never a copy -- a
+copy is a second holder whose first refresh invalidates the file everyone else
+shares -- so `wk vm start` removes any login file under the guest's `~/.claude`
+on every start. It is the only piece of the host filesystem a guest reaches.
+`wk ai claude --rc` and `wk verify` ask the workspace rather than this machine's
+store -- what was given is not what is there -- and their refusal names the
+remedy: the store when the share is mounted and empty, a stop and start when a
+guest booted before the share existed. A shared build box gets no login at all
+-- an account credential on a machine other people are root on is theirs -- so
+an agent there has the inference-only token and no remote control.
 
 **`wk push`: pushing and opening a pull request without holding the credentials**
 
@@ -1412,7 +1412,8 @@ podman machine rm wk && ./setup && wk sync
 
 `./setup` does the same by itself, prompting first, whenever the machine's
 mounts are not the three it must have -- this checkout at `/var/opt/wk-tools`
-and `~/.config/wk/secrets` read-only, and `~/.config/wk/agent-rw` read-write: a
+and `~/.config/wk/secrets` read-only, and `~/.config/wk/agent-rw` read-write
+(the directory every tart guest mounts as well): a
 mount is settable only at creation, so a machine made any other way is
 destroyed and made again rather than patched. That third one is the only
 writable mount in the design and holds one thing, the Claude login credential

@@ -304,8 +304,8 @@ class TestTheStartUpDialogsAreAnsweredBeforeAnythingStarts(WkTest):
         self.assertFalse((home / ".claude.json").exists())
 
     def test_a_guest_that_logged_in_for_itself_keeps_its_own_record(self):
-        """A macOS guest is handed no shared login: its directory holds no
-        credential and no record, and its own ~/.claude.json has both."""
+        """A workspace whose shared directory is empty -- a guest booted
+        without the share -- keeps the record its own ~/.claude.json has."""
         home = self.tmp / "ws-home-guest"
         home.mkdir()
         (home / ".claude.json").write_text(json.dumps(
