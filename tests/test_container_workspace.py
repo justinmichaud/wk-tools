@@ -158,18 +158,22 @@ class TestCancellingARealBuild(WkTest):
         super().tearDown()
 
     def _build_task(self):
-        """The build task record `wk status --records` reports, and the walk's
-        own exit code."""
+        """The build's state as `wk status --records` reports it, and the
+        walk's own exit code: a task record while it runs or ended badly, the
+        workspace row's build sub once it ended as asked (cmd/status
+        report_tasks: what it produced is the report)."""
         cp = run("status", self.name, "--records", "--no-fleet", timeout=300)
-        last = None
+        task, sub = None, None
         for line in cp.stdout.splitlines():
             if not line.startswith("{"):
                 continue
             rec = json.loads(line)
             if rec.get("kind") == "task" and rec.get("task_kind") == "build" \
                     and rec.get("name") == self.name:
-                last = rec
-        return cp, last
+                task = rec
+            if rec.get("kind") == "workspace" and rec.get("name") == self.name:
+                sub = next((x for x in rec.get("subs", []) if x.get("kind") == "build"), sub)
+        return cp, task or sub
 
     def _ninja_started(self):
         """Whether the log has a ninja progress line yet: the build's output

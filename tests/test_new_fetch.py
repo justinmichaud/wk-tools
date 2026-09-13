@@ -1132,10 +1132,13 @@ class TestWhatFixConverges(unittest.TestCase):
                   + 'rc=0\none demo || rc=$?\nprintf "rc=%s\\n" "$rc"\n')
         return bash(script)
 
-    def test_a_wired_checkout_still_gets_the_setup_step(self):
+    def test_a_wired_checkout_is_rewired_and_gets_the_setup_step(self):
+        """The check reads the remotes; the wiring also carries config the
+        check does not read (wk_fetch_config), so --fix re-asserts it whatever
+        the verdict, and then runs the setup."""
         cp = self._one("0")
+        self.assertIn("FIXWIRING", cp.stdout)
         self.assertIn("GITWEBKIT", cp.stdout)
-        self.assertNotIn("FIXWIRING", cp.stdout)
         self.assertIn("rc=0", cp.stdout)
 
     def test_a_wrongly_wired_checkout_gets_both(self):
