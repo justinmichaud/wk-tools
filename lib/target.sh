@@ -44,8 +44,18 @@ t_agent_secret_present() { # <name> <secret>
 }
 t_agent_secret_remedy() { agent_secret_store_remedy "$2"; } # <name> <secret>
 
+# What the store holds decides the remedy: nothing, one no workspace can use, or a usable one this workspace was made without.
 agent_secret_store_remedy() { # <secret>
-    printf "this machine's store holds no %s: 'wk key set %s' puts one there" "$1" "$1"
+    local line
+    wk_cred_present "$1" \
+        || { printf "this machine's store holds no %s: 'wk key set %s' puts one there" "$1" "$1"; return 0; }
+    line=$(wk_cred_check "$1" --stored)
+    if [ "$(wk_cred_verdict "$line")" = bad ]; then
+        printf "this machine's store holds a %s no workspace can use (%s): 'wk key set %s --replace' makes a new one" \
+            "$1" "$(wk_cred_detail "$line" | sed -n 1p)" "$1"
+    else
+        printf "this machine's store holds a usable %s that this workspace was made without: 'wk rm' and 'wk new' remake it with one" "$1"
+    fi
 }
 
 t_needs_base() { return 0; }        # 0 when `wk new` must resolve a base snapshot first

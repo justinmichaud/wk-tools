@@ -1179,6 +1179,9 @@ of their own: `wk key deploy`.
 mints the key, registers it once on GitHub under a single title, and fans the
 private halves out over the tailnet to every other workstation -- a peer with a
 `wk` of its own -- so the whole fleet holds one key, not one per machine. The
+public half is derived from the private one whenever either is written and
+lives only in the directory every workspace reads: ssh refuses an identity
+whose `.pub` neighbour disagrees with it, so none is kept beside the key. The
 fan-out writes over what those machines hold and `--rotate` revokes keys on
 GitHub, so each asks first and declines without a terminal (`WK_YES=1` answers
 for you). `wk
@@ -1189,7 +1192,16 @@ machine whose token GitHub refuses takes a working one from a peer before
 asking anyone to mint another. `wk key deploy --rotate` turns the fleet over from one command:
 it removes the old key from GitHub, mints a fresh one, and fans that out. The
 GitHub API token rides the same fan-out, so `wk key set github-pat` on one
-workstation and `wk key share` puts it everywhere. A shared build machine is
+workstation and `wk key share` puts it everywhere. The claude.ai login rides
+it differently, because a copy of one is a second holder (below): for each
+workstation that has no usable login, `wk key share` logs in *for* it here --
+one browser round trip per such workstation, all from the machine you are at,
+each into a directory of its own -- and sends that login over (`wk key adopt
+claude-login`, the credential and the account record as a tar on stdin, judged
+before anything is kept), so every workstation holds the only copy of its own
+grant and nobody signs in on each device. `wk key check` reports every
+workstation's login, so a `deploy` run anywhere ends by naming the one still
+without. A shared build machine is
 not a workstation and holds no key at all -- it reaches the deploy key through
 an ssh-agent forwarded from whoever drives a push, so nothing private rests on
 a machine other people are root on (`remote/provision.sh` writes an ssh config
@@ -1216,12 +1228,12 @@ reaches any target, and the table's **delivery column** (`wk_agent_secrets`,
 `lib/store.sh`) says which: `CLAUDE_CODE_OAUTH_TOKEN` takes precedence over a
 stored login wherever both arrive, and Remote Control refuses the token, so a
 target given both is a target whose agent cannot do the thing it was given the
-login for. A container gets the account login below; a macOS guest and a build
-box get the token, stored by `wk key set claude` (from `claude setup-token`)
+login for. A container and a macOS guest get the account login below; a build
+box gets the token, stored by `wk key set claude` (from `claude setup-token`)
 and read by `shell/bashrc` into `CLAUDE_CODE_OAUTH_TOKEN`. It is kept on the
 machine you typed that on (`~/.config/wk/secrets`, which the podman VM mounts
-read-only), so storing one needs no VM running; a guest and a build box are
-given a copy when the workspace comes up, and lose it the same way when
+read-only), so storing one needs no VM running; a build box is given a copy
+when the workspace comes up, and loses it the same way when
 `wk key set claude --replace` withdraws one. `wk verify` asks the workspace
 itself whether it is authenticated (`claude auth status`), and which credential
 answered. A container is given its credentials by mounting a directory rather
@@ -1238,7 +1250,12 @@ are limited to inference-only."* So `wk key set claude-login` makes a login
 of its own: it runs `claude auth login` with the CLI pointed at the directory
 the containers share, so the browser flow writes the credential straight where
 they read it -- nothing is pasted, nothing is printed, and what lands is
-refused unless it really is a login with the `user:profile` scope. It is
+refused unless it really is a login with the `user:profile` scope. On a Mac
+the CLI would put that login in the login Keychain, where no workspace can
+read it and which it has no switch to bypass, so the login runs with a
+`security` first on PATH that answers as a locked Keychain does
+(`lib/no-keychain`), and the CLI writes the file instead -- what it does in a
+guest reached over ssh. It is
 separate from this machine's own login, because a second holder of one refresh
 token locks the other out (below). It is an *account* credential: an agent
 holding it can act as you, which is the trade `--rc` is.

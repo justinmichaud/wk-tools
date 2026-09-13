@@ -72,6 +72,7 @@ FAKE_CLAUDE = '''#!/bin/sh
   printf 'argv: %s\\n' "$*"
   printf 'store: %s\\n' "$CLAUDE_SECURESTORAGE_CONFIG_DIR"
   printf 'config: %s\\n' "$CLAUDE_CONFIG_DIR"
+  printf 'security: %s\\n' "$(security show-keychain-info >/dev/null 2>&1; echo $?)"
 } >> "$WK_TEST_CLAUDE_LOG"
 if [ -s "$WK_TEST_LOGIN" ]; then
     mkdir -p "$CLAUDE_SECURESTORAGE_CONFIG_DIR"
@@ -175,6 +176,20 @@ class TestItLogsInWhereTheContainersRead(_Login):
         self.assertEqual(ORG, json.loads(self.recorded().read_text())
                          ["oauthAccount"]["organizationUuid"])
         self.assertFalse((self.home / ".claude.json").exists())
+
+    def test_the_cli_is_shown_a_locked_keychain_so_it_writes_the_file(self):
+        """Measured in the CLI: with `security` reaching a login Keychain it
+        stores the login there, under a service name hashed from the store
+        directory, and no workspace can read a Keychain. It has no switch to
+        the file; a `security` answering as a locked Keychain does (exit 36,
+        what an ssh session into a guest gets) is that switch, and it is the
+        first thing on PATH for this one command."""
+        self.leaves(login())
+        cp = self.key("set", "claude-login")
+        self.assertEqual(0, cp.returncode, cp.stdout)
+        self.assertIn("security: 36", self.log.read_text())
+        shim = REPO / "lib" / "no-keychain" / "security"
+        self.assertEqual(36, subprocess.run([str(shim), "show-keychain-info"]).returncode)
 
     def test_the_report_names_the_organization_which_is_not_secret(self):
         self.leaves(login())
@@ -322,6 +337,138 @@ class TestItRefusesWhatCannotBeUsed(_Login):
         self.assertIn("account record", cp.stdout)
 
 
+class TestVerdictIsWhatAnotherWorkstationAsks(_Login):
+    """`wk key check` on any workstation asks each peer `wk key verdict
+    claude-login` -- the login is never fanned out, so the peer is the only one
+    that can say whether it holds a usable one."""
+
+    def test_a_stored_login_answers_ok_on_one_line(self):
+        self.leaves(login())
+        self.key("set", "claude-login")
+        cp = self.key("verdict", "claude-login")
+        self.assertEqual(0, cp.returncode, cp.stdout)
+        self.assertRegex(cp.stdout.splitlines()[0], r"^ok\tscopes: ")
+        self.assertNotIn(SECRET, cp.stdout, cp.stdout)
+
+    def test_nothing_stored_answers_absent(self):
+        cp = self.key("verdict", "claude-login")
+        self.assertEqual(0, cp.returncode, cp.stdout)
+        self.assertTrue(cp.stdout.startswith("absent\t"), cp.stdout)
+
+    def test_a_login_the_cli_emptied_answers_bad(self):
+        """What a second holder's refresh leaves behind: the CLI rewrites the
+        file with empty tokens and expiresAt 0 (the docstring above)."""
+        self.leaves(login())
+        self.key("set", "claude-login")
+        self.stored().write_text(login(accessToken="", refreshToken="", expiresAt=0))
+        cp = self.key("verdict", "claude-login")
+        self.assertTrue(cp.stdout.startswith("bad\t"), cp.stdout)
+
+    def test_an_unknown_name_is_refused(self):
+        cp = self.key("verdict", "nope")
+        self.assertNotEqual(0, cp.returncode, cp.stdout)
+
+
+class TestTheRemedyReadsTheStore(_Login):
+    """`wk verify` and `wk ai claude` name the remedy when a workspace has no
+    login, and it is derived from what this machine's store holds
+    (agent_secret_store_remedy, lib/target.sh): nothing, one no workspace can
+    use, or a usable one the workspace was made without."""
+
+    def remedy(self):
+        with stub_path({"claude": FAKE_CLAUDE}) as binp:
+            env = self._env(binp)
+        cp = self.bash(". lib/common.sh; . lib/store.sh; . lib/target.sh; "
+                       "agent_secret_store_remedy claude-login", env=env)
+        self.assertEqual(0, cp.returncode, cp.stderr)
+        return cp.stdout
+
+    def test_nothing_stored_names_the_command_that_stores_one(self):
+        out = self.remedy()
+        self.assertIn("holds no claude-login", out)
+        self.assertIn("wk key set claude-login", out)
+        self.assertNotIn("--replace", out)
+
+    def test_an_emptied_login_names_the_rotation(self):
+        self.leaves(login())
+        self.key("set", "claude-login")
+        self.stored().write_text(login(accessToken="", refreshToken="", expiresAt=0))
+        out = self.remedy()
+        self.assertIn("no workspace can use", out)
+        self.assertIn("wk key set claude-login --replace", out)
+
+    def test_a_usable_login_points_at_the_workspace_not_the_store(self):
+        self.leaves(login())
+        self.key("set", "claude-login")
+        out = self.remedy()
+        self.assertIn("usable claude-login", out)
+        self.assertNotIn("--replace", out)
+
+
+def bundle(credential, account=None):
+    """What `wk key share` sends: the two files a login leaves, as a tar."""
+    import io
+    import tarfile
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w") as tar:
+        for name, text in ((".credentials.json", credential), (".claude.json", account)):
+            if text is None:
+                continue
+            data = text.encode()
+            info = tarfile.TarInfo(name)
+            info.size = len(data)
+            tar.addfile(info, io.BytesIO(data))
+    return buf.getvalue()
+
+
+class TestAdoptTakesALoginMadeForThisWorkstation(_Login):
+    """`wk key share` on another workstation logs in for this one and pipes
+    the two files here; nothing is kept until the rule has passed them."""
+
+    def adopt(self, data):
+        with stub_path({"claude": FAKE_CLAUDE}) as binp:
+            env = _clean_env(self._env(binp))
+            return subprocess.run([str(WK), "key", "adopt", "claude-login"],
+                                  cwd=str(REPO), env=env, input=data,
+                                  capture_output=True, timeout=120)
+
+    def test_the_two_files_land_where_the_containers_read_them(self):
+        cp = self.adopt(bundle(login(), record()))
+        self.assertEqual(0, cp.returncode, cp.stdout + cp.stderr)
+        self.assertEqual(login(), self.stored().read_text())
+        self.assertEqual(ORG, json.loads(self.recorded().read_text())
+                         ["oauthAccount"]["organizationUuid"])
+        self.assertEqual(0o600, self.stored().stat().st_mode & 0o777)
+        self.assertNotIn(SECRET.encode(), cp.stdout + cp.stderr)
+        self.assertTrue(cp.stdout.startswith(b"ok\t"), cp.stdout)
+
+    def test_it_replaces_the_login_that_was_here(self):
+        self.leaves(login())
+        self.key("set", "claude-login")
+        cp = self.adopt(bundle(login(accessToken=SECRET + "-made-elsewhere"), record()))
+        self.assertEqual(0, cp.returncode, cp.stdout + cp.stderr)
+        self.assertIn("-made-elsewhere", self.stored().read_text())
+
+    def test_a_login_the_rule_refuses_is_not_kept(self):
+        cp = self.adopt(bundle(login(scopes=["user:inference"]), record()))
+        self.assertNotEqual(0, cp.returncode, cp.stdout + cp.stderr)
+        self.assertIn(b"user:profile", cp.stdout + cp.stderr)
+        self.assertFalse(self.stored().exists())
+
+    def test_a_bundle_without_the_account_record_is_refused(self):
+        cp = self.adopt(bundle(login()))
+        self.assertNotEqual(0, cp.returncode, cp.stdout + cp.stderr)
+        self.assertFalse(self.stored().exists())
+
+    def test_rubbish_on_stdin_is_refused_and_the_old_login_stays(self):
+        self.leaves(login())
+        self.key("set", "claude-login")
+        cp = self.adopt(b"not a tar\n")
+        self.assertNotEqual(0, cp.returncode, cp.stdout + cp.stderr)
+        self.assertIn(b"login bundle", cp.stdout + cp.stderr)
+        self.assertEqual(login(), self.stored().read_text())
+
+
 class TestReplace(_Login):
     def test_replacing_nothing_is_refused_and_names_the_remedy(self):
         cp = self.key("set", "claude-login", "--replace")
@@ -379,8 +526,8 @@ class TestNothingElseLearnedTheShape(unittest.TestCase):
     def test_the_login_is_made_where_the_containers_read_it(self):
         """The variable and the directory are one expression, so no second
         idea of where a container's login lives can drift in."""
-        self.assertIn('CLAUDE_CONFIG_DIR="$(wk_agent_rw_dir)" '
-                      'CLAUDE_SECURESTORAGE_CONFIG_DIR="$(wk_agent_rw_dir)" '
+        self.assertIn('_dir="${2:-$(wk_agent_rw_dir)}"', self.KEY)
+        self.assertIn('CLAUDE_CONFIG_DIR="$_dir" CLAUDE_SECURESTORAGE_CONFIG_DIR="$_dir" '
                       'claude auth login', self.KEY)
 
     def test_no_other_file_names_the_keychain_item(self):

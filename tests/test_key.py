@@ -99,6 +99,28 @@ class TestEnsureRunsHere(_KeyRun):
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
         self.assertTrue((secrets / "build_key_fork.pub").exists())
 
+    def test_the_public_half_is_the_private_ones_own_and_nothing_sits_beside_the_key(self):
+        """ssh reads a `.pub` beside an identity and refuses the identity when
+        the two disagree ("private key contents do not match public"), so the
+        one public half is derived from the private key on every run and no
+        copy is kept next to it -- a stale one there would otherwise be
+        re-asserted over the published one after `wk key adopt` replaced the
+        private key."""
+        _cp, secrets = self.key("ensure")
+        held = secrets.parent / "push-keys"
+        self.assertFalse((held / "build_key_fork.pub").exists())
+        subprocess.run(["ssh-keygen", "-t", "ed25519", "-N", "", "-q",
+                        "-f", str(self.tmp / "other")], check=True)
+        stale = (self.tmp / "other.pub").read_text()
+        (secrets / "build_key_fork.pub").write_text(stale)
+        (held / "build_key_fork.pub").write_text(stale)
+        cp, _ = self.key("ensure")
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        derived = subprocess.run(["ssh-keygen", "-y", "-f", str(held / "build_key_fork")],
+                                 capture_output=True, text=True, check=True).stdout
+        self.assertEqual(derived, (secrets / "build_key_fork.pub").read_text())
+        self.assertFalse((held / "build_key_fork.pub").exists())
+
 
 class TestTheKeysAreReadFromHere(_KeyRun):
     def test_pub_reads_the_public_half_where_every_workspace_reads_it(self):

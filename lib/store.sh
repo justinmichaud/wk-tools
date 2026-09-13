@@ -395,22 +395,61 @@ wk_push_key() { # <fork> -- read only by push_agent_load, into `ssh-add -`
     _wk_secret_read "$(wk_push_held_dir)/build_key_$1"
 }
 
-# The shared deploy key arrives from another workstation over the tailnet (cmd/key share). Written here, the public half re-derived from it so the two never disagree, and the container view republished so every workspace picks the new key up.
+# The shared deploy key arrives from another workstation over the tailnet (cmd/key share). Written here once it parses as a key, then published like any other.
 wk_push_key_adopt() { # <fork> -- private half on stdin
-    local fork="$1" priv pub key
+    local fork="$1" priv key
     priv="$(wk_push_held_dir)/build_key_$fork"
-    pub="$(wk_secrets_dir)/build_key_$fork.pub"
     ensure_dir "$(wk_push_held_dir)" 0700
     ensure_dir "$(wk_secrets_dir)" 0700
     key="$(cat)"
     printf '%s\n' "$key" | (umask 077 && cat > "$priv.new") || return 1
     chmod 0600 "$priv.new"
-    ssh-keygen -y -f "$priv.new" > "$pub.new" 2>/dev/null \
-        || { rm -f "$priv.new" "$pub.new"; return 1; }
-    chmod 0644 "$pub.new"
+    ssh-keygen -y -f "$priv.new" >/dev/null 2>&1 </dev/null || { rm -f "$priv.new"; return 1; }
     mv "$priv.new" "$priv"
-    mv "$pub.new" "$pub"
+    wk_push_pub_publish "$fork"
+}
+
+# The public half is derived from the private one on every write and kept in one place, the directory every workspace reads: ssh reads a `.pub` beside an identity and refuses the identity when the two disagree, so none is left there.
+wk_push_pub_publish() { # <fork>
+    local priv pub
+    priv="$(wk_push_held_dir)/build_key_$1"
+    pub="$(wk_secrets_dir)/build_key_$1.pub"
+    rm -f "$priv.pub"
+    ssh-keygen -y -f "$priv" > "$pub.new" 2>/dev/null </dev/null || { rm -f "$pub.new"; return 1; }
+    chmod 0644 "$pub.new"
+    if cmp -s "$pub.new" "$pub"; then rm -f "$pub.new"; else mv "$pub.new" "$pub"; fi
     secrets_publish_view container
+}
+
+# A claude.ai login another workstation made for this one (cmd/key share): the credential and the account record beside it, a tar on stdin, judged whole before anything here is replaced. Prints the rule's verdict line.
+wk_login_adopt() {
+    local dir line rw; rw=$(wk_agent_rw_dir)
+    ensure_dir "$rw" 0700
+    dir=$(mktemp -d "${TMPDIR:-/tmp}/wk-login-adopt.XXXXXX") || return 1
+    if ! tar -C "$dir" -xf - .credentials.json .claude.json 2>/dev/null \
+       || [ ! -s "$dir/.credentials.json" ] || [ ! -s "$dir/.claude.json" ]; then
+        rm -rf "$dir"
+        printf 'bad\tnot a login bundle: a tar holding .credentials.json and .claude.json was expected on stdin\n'
+        return 1
+    fi
+    line=$(wk_cred_check claude-login --path "$dir/.credentials.json" < "$dir/.credentials.json")
+    if [ "$(wk_cred_verdict "$line")" = bad ]; then
+        rm -rf "$dir"; printf '%s\n' "$line"; return 1
+    fi
+    wk_cred_clear claude-login
+    chmod 0600 "$dir/.credentials.json" "$dir/.claude.json"
+    mv "$dir/.credentials.json" "$rw/.credentials.json"
+    mv "$dir/.claude.json" "$rw/.claude.json"
+    rmdir "$dir"
+    printf '%s\n' "$line"
+}
+
+wk_login_made_in() { # <dir> -> the verdict line
+    [ -s "$1/.credentials.json" ] || { printf 'bad\tthe login left nothing in %s\n' "$1"; return 0; }
+    wk_cred_check claude-login --path "$1/.credentials.json" < "$1/.credentials.json"
+}
+wk_login_pack() { # <dir> -- the tar wk_login_adopt takes, on stdout
+    tar -C "$1" -cf - .credentials.json .claude.json
 }
 
 # lib/secretfile.py holds the rule "this is a file, and it is ours": agent-rw is
