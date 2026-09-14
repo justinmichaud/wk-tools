@@ -390,12 +390,13 @@ _start_host_proxy() {
     return 1
 }
 
-# container/proxy/github-inject.py, the same program the podman machine runs for containers: it terminates TLS for api.github.com and adds the Authorization header, so a guest opens a PR without holding the token.
+# container/proxy/github-inject.py, the same program the podman machine runs for containers: it terminates TLS for api.github.com and bugs.webkit.org and adds the credential, so a guest opens a PR and files its bug without holding either.
 _inject_sock()  { echo "$WK_VM_DIR/github-inject.sock"; }
 _inject_dir()   { echo "$WK_VM_DIR/github-inject"; }
 _inject_ca()    { echo "$WK_VM_DIR/wk-github-ca.pem"; }
 _inject_pat()   { echo "$WK_VM_DIR/push-github-pat"; }
 _inject_read_pat() { echo "$WK_VM_DIR/read-github-pat"; }
+_inject_bugzilla_key() { echo "$WK_VM_DIR/push-bugzilla-api-key"; }
 
 # macOS `nc -z -U` answers 1 for a socket that is being served, so the connect is made in python: a false negative here restarts a live injector and reports the guest has none.
 _inject_running() {
@@ -412,7 +413,7 @@ s.close()' "$(_inject_sock)" 2>/dev/null
 # The standing read token reaches the injector that serves the guests through this one call: every guest start makes it (_start_host_inject below) and so does every `wk key set github-pat` (push_agent_pat_deliver, lib/store.sh), so a token stored, rotated or withdrawn on this host is the one a guest reads.
 vm_push_pat_converge() {
     ensure_dir "$WK_VM_DIR"
-    push_agent_pat_sync _agent_exec "$(_inject_read_pat)" && return 0
+    push_agent_cred_sync _agent_exec "$(_inject_read_pat)" github-pat && return 0
     warn "could not converge $(_inject_read_pat); a read from a guest answers 401"
     return 1
 }
@@ -428,6 +429,7 @@ _start_host_inject() {
     WK_INJECT_CA_OUT="$(_inject_ca)" \
     WK_INJECT_PAT="$(_inject_pat)" \
     WK_INJECT_READ_PAT="$(_inject_read_pat)" \
+    WK_INJECT_BUGZILLA_KEY="$(_inject_bugzilla_key)" \
     nohup /usr/bin/python3 "$WK_ROOT/container/proxy/github-inject.py" >"$log" 2>&1 &
     echo $! > "$WK_VM_DIR/github-inject.pid"
     disown 2>/dev/null || true
@@ -775,11 +777,14 @@ vm_push_keys_converge() { # <on|off>
     if [ "$action" = on ]; then
         _start_host_agent || return 1
         push_agent_load _agent_exec "$(_agent_sock)" >/dev/null || rc=1
-        push_agent_pat_write _agent_exec "$(_inject_pat)" \
-            || push_agent_pat_clear _agent_exec "$(_inject_pat)"
+        push_agent_cred_write _agent_exec "$(_inject_pat)" github-pat \
+            || push_agent_cred_clear _agent_exec "$(_inject_pat)"
+        push_agent_cred_write _agent_exec "$(_inject_bugzilla_key)" bugzilla-api-key \
+            || push_agent_cred_clear _agent_exec "$(_inject_bugzilla_key)"
     else
         push_agent_clear _agent_exec "$(_agent_sock)" || true
-        push_agent_pat_clear _agent_exec "$(_inject_pat)" || true
+        push_agent_cred_clear _agent_exec "$(_inject_pat)" || true
+        push_agent_cred_clear _agent_exec "$(_inject_bugzilla_key)" || true
         local left; left=$(vm_push_agent_keys)
         if [ "$left" != 0 ]; then
             printf '  %-24s %s\n' "the guests' agent" \
@@ -847,6 +852,7 @@ set -u
 addr='$addr'
 port='$WK_VM_PROXY_PORT'
 ghuser=$(sh_quote "$(wk_github_user)")
+bzuser=$(sh_quote "$(wk_bugzilla_user 2>/dev/null || true)")
 cat > /tmp/.wk-github-ca.new <<'WKCA'
 $ca
 WKCA
@@ -865,6 +871,7 @@ export HTTP_PROXY=http://\$addr:\$port
 export HTTPS_PROXY=http://\$addr:\$port
 export no_proxy=localhost,127.0.0.1,::1
 export NO_PROXY=localhost,127.0.0.1,::1
+export PYTHON_KEYRING_BACKEND=keyring.backends.null.Keyring
 WKEGRESS
 fi
 
@@ -883,6 +890,10 @@ export GITHUB_COM_TOKEN=wk-injects-this
 export SSL_CERT_FILE=\$HOME/.wk-ca-bundle.pem
 export GH_TOKEN=wk-injects-this
 WKCAENV
+    [ -z "\$bzuser" ] || cat >> "\$HOME/.wk-egress" <<WKBZENV
+export BUGS_WEBKIT_ORG_USERNAME=\$bzuser
+export BUGS_WEBKIT_ORG_PASSWORD=wk-injects-this
+WKBZENV
 else
     rm -f /tmp/.wk-github-ca.new "\$HOME/.wk-github-ca.pem" "\$HOME/.wk-ca-bundle.pem"
 fi

@@ -15,6 +15,7 @@ measures against a real `ssh-agent`:
 
 Run: python3 -m unittest tests.test_push_agent -v
 """
+import json
 import os
 import shutil
 import signal
@@ -93,6 +94,7 @@ class _Agent(WkTest):
             "WK_PUSH_AGENT_SOCK": str(self.sock),
             "WK_PUSH_PAT_FILE": str(self.tmp / "pat"),
             "WK_PUSH_READ_PAT_FILE": str(self.tmp / "read-pat"),
+            "WK_PUSH_BUGZILLA_KEY_FILE": str(self.tmp / "bz-key"),
             "WK_MACHINE": "wk-no-such-machine",
             "XDG_STATE_HOME": str(self.tmp / "state"),
         }
@@ -190,26 +192,74 @@ class TestTheApiToken(_Agent):
     def test_the_token_is_written_and_removed_by_the_same_switch(self):
         (self.held / "github-pat").write_text("ghp-not-a-real-token\n")
         pat = self.tmp / "pat"
-        cp = self.sh(f'push_agent_pat_write _fake_exec "{pat}"')
+        cp = self.sh(f'push_agent_cred_write _fake_exec "{pat}" github-pat')
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
         self.assertEqual("ghp-not-a-real-token\n", pat.read_text())
         self.assertEqual(0o600, pat.stat().st_mode & 0o777)
 
-        self.sh(f'push_agent_pat_clear _fake_exec "{pat}"')
+        self.sh(f'push_agent_cred_clear _fake_exec "{pat}"')
         self.assertFalse(pat.exists())
 
     def test_the_token_is_never_an_argument_either(self):
         (self.held / "github-pat").write_text("ghp-not-a-real-token\n")
-        self.sh(f'push_agent_pat_write _fake_exec "{self.tmp}/pat"')
+        self.sh(f'push_agent_cred_write _fake_exec "{self.tmp}/pat" github-pat')
         self.assertNotIn("ghp-not-a-real-token", self.exec_log())
 
     def test_writing_with_no_token_here_fails_rather_than_writing_nothing(self):
         """An empty token file would be a token file: the injector reads the
         first line and would send `Authorization: Bearer`."""
         pat = self.tmp / "pat"
-        cp = self.sh(f'push_agent_pat_write _fake_exec "{pat}"')
+        cp = self.sh(f'push_agent_cred_write _fake_exec "{pat}" github-pat')
         self.assertNotEqual(cp.returncode, 0)
         self.assertFalse(pat.exists())
+
+
+class TestTheBugzillaKey(_Agent):
+    """The Bugzilla API key is the switch's alone: a Bugzilla key is one
+    account with no read-only form, so no standing half exists and `wk push
+    on|off` writes and removes the one file the injector reads it from."""
+
+    def test_it_is_written_and_removed_by_the_same_switch(self):
+        (self.held / "github-pat").write_text("ghp-not-a-real-token\n")
+        (self.held / "bugzilla-api-key").write_text("not-a-real-bugzilla-key\n")
+        cp = self.run_wk("push", "on", env=self.env())
+        self.assertEqual(0, cp.returncode, cp.stdout + cp.stderr)
+        self.assertEqual("not-a-real-bugzilla-key\n", (self.tmp / "bz-key").read_text())
+        self.assertEqual(0o600, (self.tmp / "bz-key").stat().st_mode & 0o777)
+        self.assertIn("the Bugzilla API key is where the injector reads it", cp.stdout)
+        cp = self.run_wk("push", "off", env=self.env())
+        self.assertEqual(0, cp.returncode, cp.stdout + cp.stderr)
+        self.assertFalse((self.tmp / "bz-key").exists())
+
+    def test_it_is_never_an_argument_either(self):
+        (self.held / "bugzilla-api-key").write_text("not-a-real-bugzilla-key\n")
+        self.sh(f'push_agent_cred_write _fake_exec "{self.tmp}/bz" bugzilla-api-key')
+        self.assertNotIn("not-a-real-bugzilla-key", self.exec_log())
+
+    def test_on_without_one_says_so_and_leaves_no_file(self):
+        (self.held / "github-pat").write_text("ghp-not-a-real-token\n")
+        cp = self.run_wk("push", "on", env=self.env())
+        self.assertEqual(0, cp.returncode, cp.stdout + cp.stderr)
+        self.assertIn("wk key set bugzilla-api-key", cp.stdout)
+        self.assertFalse((self.tmp / "bz-key").exists())
+
+    def test_off_reads_the_file_back_rather_than_trusting_the_clear(self):
+        src = (REPO / "cmd" / "push").read_text()
+        body = src[src.index("\noff)\n"):src.index("\nstatus)\n")]
+        self.assertIn('push_agent_cred_present push_agent_exec "$MACHINE_BZ"', body)
+
+    def test_status_names_it_in_every_position(self):
+        cp = self.run_wk("push", "status", env=self.env())
+        self.assertIn("no key ('wk key set bugzilla-api-key')", cp.stdout)
+        (self.held / "bugzilla-api-key").write_text("not-a-real-bugzilla-key\n")
+        cp = self.run_wk("push", "status", env=self.env())
+        self.assertIn("held back", cp.stdout)
+        self.assertIn("bugzilla-api-key", cp.stdout)
+        (self.tmp / "bz-key").write_text("not-a-real-bugzilla-key\n")
+        cp = self.run_wk("push", "status", env=self.env())
+        self.assertIn("can file the bug", cp.stdout)
+        self.assertEqual(0, cp.returncode, "a key where the injector reads it is push ON")
+        self.assertNotIn("not-a-real-bugzilla-key", cp.stdout + cp.stderr)
 
 
 class TestTheStandingReadToken(_Agent):
@@ -222,7 +272,7 @@ class TestTheStandingReadToken(_Agent):
 
     def test_it_is_written_from_the_token_this_device_holds(self):
         (self.held / "github-pat").write_text("ghp-not-a-real-token\n")
-        cp = self.sh(f'push_agent_pat_sync _fake_exec "{self.read_pat()}"')
+        cp = self.sh(f'push_agent_cred_sync _fake_exec "{self.read_pat()}" github-pat')
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
         self.assertEqual("ghp-not-a-real-token\n", self.read_pat().read_text())
         self.assertEqual(0o600, self.read_pat().stat().st_mode & 0o777)
@@ -231,13 +281,13 @@ class TestTheStandingReadToken(_Agent):
         """Write-or-clear, not write-only: a `wk key set github-pat --replace`
         that stored nothing must not leave the old token on the machine."""
         self.read_pat().write_text("ghp-the-old-one\n")
-        cp = self.sh(f'push_agent_pat_sync _fake_exec "{self.read_pat()}"')
+        cp = self.sh(f'push_agent_cred_sync _fake_exec "{self.read_pat()}" github-pat')
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
         self.assertFalse(self.read_pat().exists())
 
     def test_it_is_never_an_argument_either(self):
         (self.held / "github-pat").write_text("ghp-not-a-real-token\n")
-        self.sh(f'push_agent_pat_sync _fake_exec "{self.read_pat()}"')
+        self.sh(f'push_agent_cred_sync _fake_exec "{self.read_pat()}" github-pat')
         self.assertNotIn("ghp-not-a-real-token", self.exec_log())
 
     def test_a_far_side_that_refuses_is_reported_not_swallowed(self):
@@ -245,7 +295,7 @@ class TestTheStandingReadToken(_Agent):
         reads nothing until the next converging call."""
         (self.held / "github-pat").write_text("ghp-not-a-real-token\n")
         cp = self.sh('_no_exec() { return 1; }\n'
-                     f'push_agent_pat_sync _no_exec "{self.read_pat()}" && echo YES || echo NO')
+                     f'push_agent_cred_sync _no_exec "{self.read_pat()}" github-pat && echo YES || echo NO')
         self.assertIn("NO", cp.stdout, cp.stdout + cp.stderr)
 
     def test_its_path_is_beside_the_switchs_and_carries_no_quotes(self):
@@ -276,10 +326,10 @@ class TestTheStandingReadToken(_Agent):
         for f in ("host/macos/vmtools.sh", "host/linux/sdk.sh"):
             with self.subTest(host=f):
                 text = (REPO / f).read_text()
-                self.assertIn('push_agent_pat_sync push_agent_exec '
-                              '"$(push_agent_machine_read_pat)"', text)
+                self.assertIn('push_agent_cred_sync push_agent_exec '
+                              '"$(push_agent_machine_read_pat)" github-pat', text)
                 self.assertLess(text.index("unit_start wk-github-inject.service"),
-                                text.index("push_agent_pat_sync"))
+                                text.index("push_agent_cred_sync"))
 
     def test_the_switch_writes_and_removes_only_the_write_token(self):
         (self.held / "github-pat").write_text("ghp-not-a-real-token\n")
@@ -359,17 +409,17 @@ class TestAPathWithASpaceInIt(_Agent):
 
     def test_the_token_round_trips_through_a_path_with_a_space(self):
         pat = self.spaced / "push-github-pat"
-        cp = self.sh(f'push_agent_pat_write _fake_exec "{pat}"')
+        cp = self.sh(f'push_agent_cred_write _fake_exec "{pat}" github-pat')
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
         self.assertEqual("ghp-not-a-real-token\n", pat.read_text())
         self.assertEqual([pat.name], [p.name for p in self.spaced.iterdir()],
                          "the unquoted path made more than one file")
 
-        cp = self.sh(f'if push_agent_pat_present _fake_exec "{pat}"; '
+        cp = self.sh(f'if push_agent_cred_present _fake_exec "{pat}"; '
                      f'then echo present; else echo absent; fi')
         self.assertIn("present", cp.stdout, cp.stdout + cp.stderr)
 
-        cp = self.sh(f'push_agent_pat_clear _fake_exec "{pat}"')
+        cp = self.sh(f'push_agent_cred_clear _fake_exec "{pat}"')
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
         self.assertFalse(pat.exists())
 
@@ -695,7 +745,8 @@ load_target container >/dev/null 2>&1
 store_init
 printf %s "$(wk_secrets_dir)"
 ''', env={"WK_STORE": str(store), "WK_STORE_DEFAULT": str(store),
-           "WK_HOST_SECRETS": str(store / "secrets")})
+           "WK_HOST_SECRETS": str(store / "secrets"),
+           "XDG_STATE_HOME": str(self.tmp / "state")})
         self.assertEqual(0, cp.returncode, cp.stdout + cp.stderr)
         return Path(cp.stdout.strip())
 
@@ -753,9 +804,45 @@ store_init
 ''' + extra + '''
 printf %s "$(wk_secrets_view_dir container)"
 ''', env={"WK_STORE": str(store), "WK_STORE_DEFAULT": str(store),
-           "WK_HOST_SECRETS": str(secrets)})
+           "WK_HOST_SECRETS": str(secrets),
+           "XDG_STATE_HOME": str(self.tmp / "state")})
         self.assertEqual(0, cp.returncode, cp.stdout + cp.stderr)
+        self.last = cp
         return secrets, Path(cp.stdout.strip().splitlines()[-1])
+
+    def test_with_no_mirror_the_bugzilla_login_is_absent_and_said_so(self):
+        """The login is WebKit's record, read from the mirror; a machine with
+        no mirror publishes none and says why, and the bridge then exports no
+        Bugzilla placeholder (tests/test_egress.py)."""
+        _, view = self._publish()
+        self.assertFalse((view / "bugzilla-user").exists())
+        self.assertIn("no Bugzilla login", self.last.stderr)
+        self.assertIn("wk sync", self.last.stderr)
+
+    def test_the_bugzilla_login_is_read_from_the_mirror_and_published(self):
+        """metadata/contributors.json names each GitHub account's Bugzilla
+        login -- the first email, webkitpy's Committer.bugzilla_email -- and
+        the mirror is the copy every machine has, so nothing else records it."""
+        store = self.tmp / "store"
+        env = {"WK_STORE": str(store), "WK_STORE_DEFAULT": str(store),
+               "WK_HOST_SECRETS": str(store / "secrets"),
+               "XDG_STATE_HOME": str(self.tmp / "state")}
+        cp = bash('. "$WK_ROOT/lib/common.sh"\n. "$WK_ROOT/lib/store.sh"\n'
+                  'printf "%s\\n%s\\n" "$(wk_mirror)" "$(wk_github_user)"', env=env)
+        mirror, user = cp.stdout.split()
+        mirror = Path(mirror)
+        mirror.mkdir(parents=True)
+        subprocess.run(["git", "init", "-q", "-b", "main", str(mirror)], check=True)
+        (mirror / "metadata").mkdir()
+        (mirror / "metadata" / "contributors.json").write_text(json.dumps([
+            {"name": "Someone Else", "github": "someone", "emails": ["else@example.test"]},
+            {"name": "Me", "github": user, "emails": ["me@example.test", "other@example.test"]}]))
+        git = ["git", "-C", str(mirror), "-c", "user.name=t", "-c", "user.email=t@t"]
+        subprocess.run(git + ["add", "."], check=True)
+        subprocess.run(git + ["commit", "-q", "-m", "contributors"], check=True)
+        _, view = self._publish()
+        self.assertEqual("me@example.test\n", (view / "bugzilla-user").read_text())
+        self.assertNotIn("no Bugzilla login", self.last.stderr)
 
     def test_the_view_is_the_delivered_rows_and_the_public_files(self):
         secrets, view = self._publish()
@@ -979,7 +1066,7 @@ class TestTheReadTokenReachesEveryInjectorThisMachineRuns(_Agent):
     def test_the_key_command_delivers_through_it(self):
         text = (REPO / "cmd" / "key").read_text()
         self.assertIn("push_agent_pat_deliver", text)
-        self.assertNotIn('push_agent_pat_sync push_agent_exec', text,
+        self.assertNotIn('push_agent_cred_sync push_agent_exec', text,
                          "cmd/key converges one injector by hand again")
 
     def test_it_writes_the_machine_half_from_the_token_this_device_holds(self):
@@ -1000,6 +1087,6 @@ class TestTheReadTokenReachesEveryInjectorThisMachineRuns(_Agent):
         nothing else, so every guest start and every key rotation converge the
         same file the same way."""
         vm = (REPO / "targets" / "vm.sh").read_text()
-        self.assertEqual(1, vm.count("push_agent_pat_sync"),
+        self.assertEqual(1, vm.count("push_agent_cred_sync"),
                          "targets/vm.sh writes the guests' read token twice")
         self.assertIn("vm_push_pat_converge", vm)

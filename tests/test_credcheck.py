@@ -149,6 +149,121 @@ class _Rules(unittest.TestCase):
         self.assertEqual(want, got, detail)
 
 
+# --- bugzilla-api-key ------------------------------------------------------------
+BZ_LOGIN = "me@example.test"
+BZ_KEY = "notarealbugzillakey0123456789abcdefghijk"
+
+
+class FakeBugzilla(BaseHTTPRequestHandler):
+    """`GET /rest/valid_login?login=..&api_key=..` answers as bugs.webkit.org
+    (Bugzilla 5.0.4) does, measured 2026-09-14: `{"result": true}` for the
+    key's own login, `{"result": false}` for another login, and HTTP 400 with
+    error code 306 for a key it does not know."""
+
+    seen = []
+
+    def _send(self, code, body):
+        raw = json.dumps(body).encode()
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(raw)))
+        self.end_headers()
+        self.wfile.write(raw)
+
+    def do_GET(self):
+        FakeBugzilla.seen.append(self.path)
+        path, _, query = self.path.partition("?")
+        q = urllib.parse.parse_qs(query)
+        if path != "/rest/valid_login":
+            return self._send(404, {"error": True, "code": 32614})
+        if q.get("api_key", [""])[0] != BZ_KEY:
+            return self._send(400, {"error": True, "code": 306,
+                                    "message": "The API key you specified is invalid."})
+        self._send(200, {"result": q.get("login", [""])[0] == BZ_LOGIN})
+
+    def log_message(self, *a):
+        pass
+
+
+class _Bugzilla(_Rules):
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        cls.bz = HTTPServer(("127.0.0.1", 0), FakeBugzilla)
+        cls.bz_base = "http://127.0.0.1:%d" % cls.bz.server_port
+        threading.Thread(target=cls.bz.serve_forever, daemon=True).start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.bz.shutdown()
+        cls.bz.server_close()
+        super().tearDownClass()
+
+    def setUp(self):
+        super().setUp()
+        FakeBugzilla.seen = []
+
+    def bz_check(self, value, login=BZ_LOGIN, api=None):
+        return self.check("bugzilla-api-key", value,
+                          evidence=("login=%s" % login,) if login else (),
+                          env={"WK_BUGZILLA_API": api or self.bz_base})
+
+
+class TestTheBugzillaKey(_Bugzilla):
+    def test_the_keys_own_login_is_ok_and_named(self):
+        verdict, detail = self.bz_check(BZ_KEY)
+        self.assertEqual("ok", verdict, detail)
+        self.assertIn(BZ_LOGIN, detail)
+        self.assertIn("while push is on", detail)
+
+    def test_it_is_judged_as_a_pair_by_one_request(self):
+        """`wk_cred_check` (lib/store.sh) supplies the login as evidence, from
+        the mirror; the rule sends the pair to `valid_login` and nothing else."""
+        self.bz_check(BZ_KEY)
+        self.assertEqual(1, len(FakeBugzilla.seen), FakeBugzilla.seen)
+        self.assertTrue(FakeBugzilla.seen[0].startswith("/rest/valid_login?"))
+        self.assertIn("api_key=" + BZ_KEY, FakeBugzilla.seen[0])
+        self.assertIn("login=me%40example.test", FakeBugzilla.seen[0])
+
+    def test_another_accounts_key_is_refused_by_name(self):
+        verdict, detail = self.bz_check(BZ_KEY, login="other@example.test")
+        self.assertEqual("bad", verdict, detail)
+        self.assertIn("another account", detail)
+        self.assertIn("other@example.test", detail)
+
+    def test_a_key_bugzilla_does_not_know_is_refused(self):
+        verdict, detail = self.bz_check("notthekey")
+        self.assertEqual("bad", verdict, detail)
+        self.assertIn("306", detail)
+        self.assertIn("wk key set bugzilla-api-key", detail)
+
+    def test_with_no_login_to_judge_against_it_is_unverified_and_names_the_mirror(self):
+        verdict, detail = self.bz_check(BZ_KEY, login="")
+        self.assertEqual("unverified", verdict, detail)
+        self.assertIn("contributors.json", detail)
+        self.assertIn("wk sync", detail)
+        self.assertEqual([], FakeBugzilla.seen, "nothing to ask without a login")
+
+    def test_two_words_are_not_a_key(self):
+        verdict, _ = self.bz_check("two words")
+        self.assertEqual("bad", verdict)
+        self.assertEqual([], FakeBugzilla.seen)
+
+    def test_an_unreachable_bugzilla_is_unverified(self):
+        verdict, detail = self.bz_check(BZ_KEY, api="http://127.0.0.1:1")
+        self.assertEqual("unverified", verdict, detail)
+        self.assertIn("could not reach", detail)
+
+    def test_the_rule_names_the_injector_and_the_key_page(self):
+        cp = subprocess.run(["python3", str(CREDCHECK), "rule", "bugzilla-api-key",
+                             "--repos", FORKS], capture_output=True, text=True)
+        fields = dict(l.split("\t", 1) for l in cp.stdout.splitlines())
+        self.assertIn("github-inject.py", fields["spent_by"])
+        self.assertIn("api_key", fields["spent_by"])
+        self.assertEqual("https://bugs.webkit.org/userprefs.cgi?tab=apikey", fields["url"])
+        self.assertIn("whole account", fields["forbids"])
+
+
 # --- github-pat ---------------------------------------------------------------
 class TestTheTokenCanDoTheJob(_Rules):
     def test_a_fine_grained_token_that_can_open_a_pull_request_on_both_forks(self):
@@ -353,7 +468,7 @@ class TestWhereTheseApisMayBePointed(_Rules):
             capture_output=True, text=True, env=e, timeout=60)
 
     def test_an_http_host_that_is_not_loopback_is_refused_by_name(self):
-        for var in ("WK_GITHUB_API", "WK_ANTHROPIC_API"):
+        for var in ("WK_GITHUB_API", "WK_ANTHROPIC_API", "WK_BUGZILLA_API"):
             with self.subTest(var=var):
                 cp = self._run(**{var: "http://evil.example/"})
                 self.assertNotEqual(0, cp.returncode, cp.stdout)
@@ -364,7 +479,8 @@ class TestWhereTheseApisMayBePointed(_Rules):
         for value in ("https://api.example.com", "http://127.0.0.1:1",
                       "http://localhost:8080"):
             with self.subTest(value=value):
-                cp = self._run(WK_GITHUB_API=value, WK_ANTHROPIC_API=value)
+                cp = self._run(WK_GITHUB_API=value, WK_ANTHROPIC_API=value,
+                               WK_BUGZILLA_API=value)
                 self.assertEqual(0, cp.returncode, cp.stdout + cp.stderr)
 
 
@@ -934,7 +1050,8 @@ class TestOneTableForEveryCredential(_Rules):
             self.assertIn(row, self.names(), row)
 
     def test_the_credentials_held_beside_the_deploy_keys_have_rules_too(self):
-        for name in ("github-pat", "tailnet", "tailnet-api", "deploy-key"):
+        for name in ("github-pat", "bugzilla-api-key", "tailnet", "tailnet-api",
+                     "deploy-key"):
             self.assertIn(name, self.names())
 
     def rule(self, name, repos=FORKS):

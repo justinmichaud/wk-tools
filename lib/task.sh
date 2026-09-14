@@ -8,9 +8,7 @@ command -v wk_ws_dir >/dev/null 2>&1 || . "$WK_ROOT/lib/store.sh"
 
 task_root() { printf '%s' "$WK_STORE/task"; }
 
-# A waiter takes a stamp before spawning its driver and passes it to task_wait,
-# which then ignores every record older than it: the last record of a kind and
-# name is a previous run's until the driver has written its own.
+# A waiter's stamp precedes its driver, and task_wait ignores every record older than it: the last record of a kind and name is a previous run's until the driver writes its own.
 task_stamp() { date -u +%Y%m%dT%H%M%SZ; }
 
 task_id() { # <kind> <name> -- the pid separates two tasks begun in one second
@@ -31,8 +29,7 @@ task_field() { # <dir> <field> -- empty when the field is not recorded
     tr -d '\r' < "$1/$2"
 }
 
-task_begin() { # <kind> <where> <name> <kill-cmd> <log> <plan step>... -- prints the dir
-    # <where>: `here` for this machine's pid, `target` for the workspace's.
+task_begin() { # <kind> <where> <name> <kill-cmd> <log> <plan step>... -- prints the dir; <where> is `here` for this machine's pid, `target` for the workspace's
     local kind="$1" where="$2" name="$3" kill="$4" log="$5"
     shift 5
     case "$where" in here|target) ;; *) die "task_begin: where is here or target, not '$where'" ;; esac
@@ -53,8 +50,7 @@ task_begin() { # <kind> <where> <name> <kill-cmd> <log> <plan step>... -- prints
     [ "$where" = target ] || _task_put "$dir/pid" "$$"
     _task_put "$dir/argv"    "$(ps -o args= -p $$ 2>/dev/null | tr -d '\n')"
     _task_put "$dir/started" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-    # Past it, a reader knows the watchdog is gone rather than merely quiet.
-    [ -z "${WK_ABORT_SECONDS:-}" ] || _task_put "$dir/abort_after" "$WK_ABORT_SECONDS"
+    [ -z "${WK_ABORT_SECONDS:-}" ] || _task_put "$dir/abort_after" "$WK_ABORT_SECONDS"   # past it, a reader knows the watchdog is gone rather than merely quiet
     rm -f "$dir/exit" "$dir/finished"
     _task_put "$dir/step" 0
     printf '%s' "$dir"
@@ -86,10 +82,7 @@ task_stage() { # <dir> -- the name of the step now running
     sed -n "${n}p" "$1/plan"
 }
 
-# The first verdict stands, so one record has one author of its end: `--kill`
-# records `cancelled`, and the driver whose job it stopped then reaches its own
-# end with the failure that kill caused. task_begin clears the exit, so a re-run
-# is not blocked by it.
+# The first verdict stands: `--kill` records `cancelled` and the driver it stopped cannot overwrite that with the failure the kill caused; task_begin clears the exit, so a re-run is not blocked by it.
 task_end() { # <dir> <exit status or word>
     [ -d "${1:-}" ] || die "task_end: '${1:-}' is no task record -- the caller holds none to end (an unset YOCTO_TASK/PGO_TASK reads like this)"
     [ ! -f "$1/exit" ] || return 0
@@ -144,8 +137,7 @@ task_wait() { # <kind> <name> <log> [timeout] [pid] [floor stamp] -- the verdict
     local kind="$1" name="$2" log="$3" timeout="${4:-0}" pid="${5:-}" floor="${6:-}"
     local st waited=0 tail_pid=""
 
-    # The hook first: a signal between starting the reader and registering it leaves a `tail -f` holding this process's stderr after it has exited.
-    _task_wait_interrupted() { [ -z "$tail_pid" ] || kill "$tail_pid" 2>/dev/null || true; }
+    _task_wait_interrupted() { [ -z "$tail_pid" ] || kill "$tail_pid" 2>/dev/null || true; }   # registered before the reader starts: a signal between the two leaves a `tail -f` holding this process's stderr after it has exited
     on_interrupt _task_wait_interrupted
     if [ -f "$log" ]; then
         tail -n +1 -f "$log" >&2 & tail_pid=$!
@@ -155,8 +147,7 @@ task_wait() { # <kind> <name> <log> [timeout] [pid] [floor stamp] -- the verdict
         st=$(_task_wait_verdict "$kind" "$name" "$floor")
         case "$st" in starting|running|silent) ;; died) st=crashed; break ;; *) break ;; esac
 
-        # The record is the job's own claim and the pid the fact: a driver killed
-        # before it wrote one leaves `starting` forever otherwise.
+        # The record is the job's own claim and the pid the fact: a driver killed before it wrote one leaves `starting` forever otherwise.
         if [ -n "$pid" ] && ! kill -0 "$pid" 2>/dev/null; then
             wk_sleep 1   # one more pass: the child may be mid-write of its final state
             st=$(_task_wait_verdict "$kind" "$name" "$floor")
@@ -206,8 +197,7 @@ EOF
     [ -z "$last" ] || printf '%s' "$last"
 }
 
-# Exactly a stamp (and at most a pid) after the prefix, so `new-foo-` does not
-# claim `new-foo-bar-...`.
+# Exactly a stamp (and at most a pid) after the prefix, so `new-foo-` does not claim `new-foo-bar-...`.
 _task_stamp_of() { # <record id> <kind-name- prefix> -- the id's stamp, or 1 when the id is another task's
     local rest="${1#"$2"}" stamp
     [ "$rest" != "$1" ] || return 1

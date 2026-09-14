@@ -10,17 +10,18 @@
 #
 # A switch over *credentials nothing in a workspace ever holds*: the private
 # deploy keys sit in an ssh-agent outside the workspace, and the GitHub API token
-# in the injector that terminates TLS for api.github.com. README.md has the
-# mechanism.
+# and the Bugzilla API key in the injector that terminates TLS for api.github.com
+# and bugs.webkit.org. README.md has the mechanism.
 #
-#   on     the keys are in the agent and the token is where the injector reads
-#          it. `git push` and `git-webkit pr` work.
-#   off    `ssh-add -D` empties the agent and the token file is removed. ssh has
-#          no identity to offer and the injector answers 401. Nothing in a
-#          workspace can undo either.
+#   on     the keys are in the agent and the token and the Bugzilla key are
+#          where the injector reads them. `git push` and `git-webkit pr` work,
+#          the bug included.
+#   off    `ssh-add -D` empties the agent and both files are removed. ssh has
+#          no identity to offer, GitHub answers 401 and Bugzilla 410. Nothing
+#          in a workspace can undo any of it.
 #
 # There is no state file to disagree with reality: `status` asks the agent what it
-# holds (`ssh-add -l`) and the machine whether the token file is there. A machine
+# holds (`ssh-add -l`) and the machine whether the credential files are there. A machine
 # runs an agent per kind of workspace -- one in the podman machine the containers
 # mount its socket from, and on macOS one here for the guests, which cannot see a
 # unix socket across the hypervisor and reach it through a forward (targets/vm.sh).
@@ -114,6 +115,7 @@ LIVE="$(wk_secrets_dir)"
 WS_SOCK=$(t_agent_sock 2>/dev/null) || WS_SOCK=""
 MACHINE_SOCK="$(push_agent_machine_sock)"
 MACHINE_PAT="$(push_agent_machine_pat)"
+MACHINE_BZ="$(push_agent_machine_bugzilla_key)"
 
 forks() { wk_push_forks | awk 'NF {print $1}'; }
 
@@ -219,13 +221,21 @@ on)
     log "  every workspace can push to the forks now, including any agent in one."
     log "  'wk push off' when you are done; 'wk ai claude' turns it off by itself."
 
-    if push_agent_pat_write push_agent_exec "$MACHINE_PAT"; then
+    if push_agent_cred_write push_agent_exec "$MACHINE_PAT" github-pat; then
         changed "the GitHub API token is where the injector reads it ($(wk_github_user))"
         log  "  'git-webkit pr' in a workspace posts as that account; the token stays here"
     else
-        push_agent_pat_clear push_agent_exec "$MACHINE_PAT" || true
+        push_agent_cred_clear push_agent_exec "$MACHINE_PAT" || true
         warn "there is no GitHub API token here, so 'git-webkit pr' in a workspace gets 401"
         log  "  'wk key set github-pat' stores one (repo scope; it never enters a workspace)"
+    fi
+    if push_agent_cred_write push_agent_exec "$MACHINE_BZ" bugzilla-api-key; then
+        changed "the Bugzilla API key is where the injector reads it ($(wk_bugzilla_user 2>/dev/null || echo 'no login in the mirror'))"
+        log  "  'git-webkit pr' in a workspace files and updates the bug as that login; the key stays here"
+    else
+        push_agent_cred_clear push_agent_exec "$MACHINE_BZ" || true
+        warn "there is no Bugzilla API key here, so 'git-webkit pr' in a workspace cannot file or update a bug"
+        log  "  'wk key set bugzilla-api-key' stores one (it never enters a workspace)"
     fi
 
     log "  a push also needs this machine's key registered:  wk key check"
@@ -234,7 +244,8 @@ on)
 off)
     require_agent_target
     push_agent_clear    push_agent_exec "$MACHINE_SOCK" || true
-    push_agent_pat_clear push_agent_exec "$MACHINE_PAT" || true
+    push_agent_cred_clear push_agent_exec "$MACHINE_PAT" || true
+    push_agent_cred_clear push_agent_exec "$MACHINE_BZ" || true
     # Rewritten on `off` too: it names public halves and a socket, not a credential, and an unresolvable `github-webkit` fails with a hostname error.
     secrets_publish \
         || warn "could not rewrite $LIVE/ssh_config; a push from a workspace will fail
@@ -247,12 +258,17 @@ off)
         log  "  push is NOT off; 'wk push off' again, or restart wk-ssh-agent.service there"
         return 1
     fi
-    if push_agent_pat_present push_agent_exec "$MACHINE_PAT"; then
+    if push_agent_cred_present push_agent_exec "$MACHINE_PAT"; then
         warn "the GitHub API token is still at $MACHINE_PAT on that machine"
         log  "  push is NOT off; 'wk push off' again"
         return 1
     fi
-    changed "push is OFF -- the agent is empty and the injector has no token"
+    if push_agent_cred_present push_agent_exec "$MACHINE_BZ"; then
+        warn "the Bugzilla API key is still at $MACHINE_BZ on that machine"
+        log  "  push is NOT off; 'wk push off' again"
+        return 1
+    fi
+    changed "push is OFF -- the agent is empty and the injector has no token and no Bugzilla key"
     log "  workspaces keep their remotes and can fetch; a push and an API call are"
     log "  both refused at the door. The keys never left $HELD."
     ;;
@@ -269,13 +285,21 @@ status)
     done
 
     pat_live=0
-    if push_agent_pat_present push_agent_exec "$MACHINE_PAT"; then
+    if push_agent_cred_present push_agent_exec "$MACHINE_PAT"; then
         pat_live=1
         printf '%-10s %s\n' "api" "'git-webkit pr' allowed (token at $MACHINE_PAT)"
     elif [ -n "$(wk_github_pat)" ]; then
         printf '%-10s %s\n' "api" "held back ($(wk_github_pat_path))"
     else
         printf '%-10s %s\n' "api" "no token ('wk key set github-pat')"
+    fi
+    if push_agent_cred_present push_agent_exec "$MACHINE_BZ"; then
+        pat_live=1
+        printf '%-10s %s\n' "bugzilla" "'git-webkit pr' can file the bug (key at $MACHINE_BZ)"
+    elif [ -n "$(wk_bugzilla_key)" ]; then
+        printf '%-10s %s\n' "bugzilla" "held back ($(wk_bugzilla_key_path))"
+    else
+        printf '%-10s %s\n' "bugzilla" "no key ('wk key set bugzilla-api-key')"
     fi
 
     exposed=$(exposed_private_keys)
@@ -308,9 +332,9 @@ status)
         info "push is ON"
         return 0
     fi
-    # A key is not the only credential a publish needs: the injector's write token is one an agent could spend on a comment or a review.
+    # A key is not the only credential a publish needs: the injector's write token and Bugzilla key are ones an agent could spend on a comment or a bug.
     if [ "$pat_live" -eq 1 ]; then
-        info "push is ON -- no deploy key is loaded, but the injector has the write token"
+        info "push is ON -- no deploy key is loaded, but the injector has a write credential"
         return 0
     fi
     if [ "$held" -gt 0 ]; then

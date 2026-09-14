@@ -465,7 +465,7 @@ _wk_secret_read() { # <path> -- absent is not an error
 }
 
 # One switch over both halves a publish needs: an ssh-agent holding the private
-# keys, and the token file the api.github.com TLS injector reads. Each function
+# keys, and the credential files the TLS injector reads. Each function
 # below takes an exec function -- a command line run on the machine holding
 # those, stdin passed through -- and a path as that machine spells it, so a
 # shell word to expand there: /run/user/501 is not on macOS.
@@ -483,6 +483,10 @@ push_agent_machine_pat() {
 
 push_agent_machine_read_pat() {
     printf '%s' "${WK_PUSH_READ_PAT_FILE:-${WK_STORE:-/var/lib/wk}/read-github-pat}"
+}
+
+push_agent_machine_bugzilla_key() {
+    printf '%s' "${WK_PUSH_BUGZILLA_KEY_FILE:-${WK_STORE:-/var/lib/wk}/push-bugzilla-api-key}"
 }
 
 push_agent_exec() { # <shell command line>
@@ -532,35 +536,44 @@ push_agent_clear() { # <execfn> <sock>
 wk_github_pat_path() { printf '%s/github-pat' "$(wk_push_held_dir)"; }
 wk_github_pat() { _wk_secret_read "$(wk_github_pat_path)" | sed -n '1p'; }
 
+wk_bugzilla_key_path() { printf '%s/bugzilla-api-key' "$(wk_push_held_dir)"; }
+wk_bugzilla_key() { _wk_secret_read "$(wk_bugzilla_key_path)" | sed -n '1p'; }
+
 wk_github_user() { wk_push_forks | awk 'NF {print $2; exit}' | cut -d/ -f1; }
 
-push_agent_pat_write() { # <execfn> <path>
-    local pat; pat=$(wk_github_pat)
-    [ -n "$pat" ] || return 1
-    printf '%s\n' "$pat" | "$1" "umask 077 && cat > $(sh_quote "$2")"
+# WebKit's own record of who this GitHub account is on Bugzilla (webkitpy's Committer.bugzilla_email: the entry's first email), read from the mirror so no copy is kept; empty, exit 1, where there is no mirror or no entry.
+wk_bugzilla_user() {
+    git -C "$(wk_mirror)" cat-file -p main:metadata/contributors.json 2>/dev/null \
+        | python3 "$WK_ROOT/lib/contributors.py" bugzilla-login "$(wk_github_user)"
 }
 
-push_agent_pat_clear() { # <execfn> <path>
+push_agent_cred_write() { # <execfn> <path> <name> -- the first line of a stored credential, down a pipe
+    local value; value=$(_wk_secret_read "$(wk_cred_path "$3")" | sed -n '1p')
+    [ -n "$value" ] || return 1
+    printf '%s\n' "$value" | "$1" "umask 077 && cat > $(sh_quote "$2")"
+}
+
+push_agent_cred_clear() { # <execfn> <path>
     "$1" "rm -f $(sh_quote "$2")" </dev/null
 }
 
-push_agent_pat_sync() { # <execfn> <path>
-    if [ -n "$(wk_github_pat)" ]; then
-        push_agent_pat_write "$1" "$2"
+push_agent_cred_sync() { # <execfn> <path> <name>
+    if [ -n "$(_wk_secret_read "$(wk_cred_path "$3")" | sed -n '1p')" ]; then
+        push_agent_cred_write "$1" "$2" "$3"
     else
-        push_agent_pat_clear "$1" "$2"
+        push_agent_cred_clear "$1" "$2"
     fi
 }
 
 push_agent_pat_converge_machine() { # on every start of the podman machine, as `wk vm start` does for the guests': a token stored while it was down is otherwise a 401 from every container until './setup'
-    push_agent_pat_sync push_agent_exec "$(push_agent_machine_read_pat)" \
+    push_agent_cred_sync push_agent_exec "$(push_agent_machine_read_pat)" github-pat \
         || warn "the injector in the podman machine did not take the read token; './setup' converges it"
 }
 
 # Every injector this machine runs, in one call: the one in the podman machine that serves the containers, and on a macOS host the one here that serves the guests (targets/vm.sh). A token delivered to one of the two is a 401 from the other, so `wk key set github-pat` and any other convergence point calls this rather than picking a half.
 push_agent_pat_deliver() {
     local rc=0
-    push_agent_pat_sync push_agent_exec "$(push_agent_machine_read_pat)" || rc=1
+    push_agent_cred_sync push_agent_exec "$(push_agent_machine_read_pat)" github-pat || rc=1
     if is_macos; then
         ( . "$WK_ROOT/lib/target.sh"
           load_target vm >/dev/null 2>&1
@@ -569,7 +582,7 @@ push_agent_pat_deliver() {
     return "$rc"
 }
 
-push_agent_pat_present() { # <execfn> <path>
+push_agent_cred_present() { # <execfn> <path>
     local out
     out=$("$1" "test -s $(sh_quote "$2") && echo yes" </dev/null 2>/dev/null) || out=""
     [ "$out" = yes ]
@@ -591,6 +604,18 @@ push_agent_publish_config() { # <dir> is this machine's spelling; paths inside a
     printf '%s\n' "$(wk_github_user)" > "$dir/github-user.new" || return 1
     chmod 0644 "$dir/github-user.new"
     mv "$dir/github-user.new" "$dir/github-user"
+
+    local bz
+    if bz=$(wk_bugzilla_user) && [ -n "$bz" ]; then
+        printf '%s\n' "$bz" > "$dir/bugzilla-user.new" || return 1
+        chmod 0644 "$dir/bugzilla-user.new"
+        mv "$dir/bugzilla-user.new" "$dir/bugzilla-user"
+    else
+        rm -f "$dir/bugzilla-user"
+        warn "no Bugzilla login for $(wk_github_user): metadata/contributors.json in the
+    mirror ($(wk_mirror)) has no entry for that account, or there is no mirror
+    ('wk sync'). git-webkit in a workspace asks for one instead"
+    fi
 }
 
 # WebKit/WebKit has ~920 branches, tens of gigabytes to mirror, so only main.
@@ -915,7 +940,7 @@ wk_secrets_view_dir() { # <target kind>
 
 secrets_view_files() { # <target kind> -- what it may read, one name per line
     local kind="$1" name file home var vkind deliv f
-    printf '%s\n' ssh_config github-user
+    printf '%s\n' ssh_config github-user bugzilla-user
     for f in "$(wk_secrets_dir)"/build_key_*.pub; do
         [ -f "$f" ] && printf '%s\n' "${f##*/}"
     done
@@ -1127,6 +1152,7 @@ wk_agent_secret_store() { # <name> -- from stdin: an argument is visible in `ps`
 wk_cred_path() { # <name> -- where this machine keeps it
     case "$1" in
         github-pat)  wk_github_pat_path ;;
+        bugzilla-api-key) wk_bugzilla_key_path ;;
         tailnet)     wk_tailscale_authkey_path ;;
         tailnet-api) wk_tailscale_api_path ;;
         ntfy)        wk_ntfy_topic_path ;;
@@ -1181,13 +1207,14 @@ wk_cred_read() { # <name> -- every byte of it, nothing when it is absent
 # `--stored` judges what this machine holds, else the value comes on stdin,
 # before anything has written it.
 wk_cred_check() { # <name> [--stored] [...] -> <absent|ok|wide|bad|unverified><TAB><detail>
-    local name="$1" repos value; shift
+    local name="$1" repos value stored=""; shift
     repos=$(wk_push_forks | awk 'NF {printf "%s ", $2}')
-    if [ "${1:-}" != --stored ]; then
+    [ "${1:-}" != --stored ] || { stored=1; shift; }
+    [ "$name" != bugzilla-api-key ] || set -- "$@" --evidence "login=$(wk_bugzilla_user 2>/dev/null || true)"
+    if [ -z "$stored" ]; then
         python3 "$WK_ROOT/lib/credcheck.py" check "$name" --repos "$repos" "$@"
         return
     fi
-    shift
     if ! value=$(wk_cred_read "$name"); then
         printf 'bad\tthe file at %s could not be read; the refusal above says why\n' \
             "$(wk_cred_path "$name")"

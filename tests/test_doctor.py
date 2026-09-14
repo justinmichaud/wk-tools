@@ -429,8 +429,8 @@ class TestTheCredentialsSection(unittest.TestCase):
     def test_nothing_stored_is_reported_and_is_not_a_fault(self):
         out = self.run_block({})
         self.assertIn("credentials", out)
-        for name in ("github-pat", "claude", "litellm", "claude-login",
-                     "tailnet", "tailnet-api"):
+        for name in ("github-pat", "bugzilla-api-key", "claude", "litellm",
+                     "claude-login", "tailnet", "tailnet-api"):
             self.assertIn(name, out)
         self.assertIn("nothing stored", out)
         self.assertNotIn("\033[31m", out)

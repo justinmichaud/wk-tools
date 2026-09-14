@@ -142,7 +142,9 @@ means exactly that, not a broken setup — and an API call that needs an account
 answers `401`. Do not try to work around it: publishing is the one thing a
 disposable workspace is not allowed to do on its own. Say what you would have
 pushed and let the person at the keyboard run `wk push on`, which is also what
-makes `git-webkit pr` work from in here.
+makes `git-webkit pr` work from in here. The same switch covers Bugzilla:
+`BUGS_WEBKIT_ORG_PASSWORD` is the same placeholder, filing or updating a bug
+answers `410` while push is off, and `git-webkit pr` never asks for a login.
 
 Never use `git push --force` against a shared branch, and never commit unless
 asked.

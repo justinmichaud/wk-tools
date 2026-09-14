@@ -15,7 +15,8 @@ import os
 import platform
 import unittest
 
-from tests.support import REPO, WkTest, rand_suffix, run, scratch_dir, stub_path
+from tests.support import (REPO, TAILSCALE_KNOWS_NOTHING, WkTest, rand_suffix, run,
+                           scratch_dir, stub_path)
 
 
 def _is_macos():
@@ -86,7 +87,8 @@ esac
     def test_dry_run_prints_its_plan_and_says_nothing_was_written(self):
         img = self.tmp / "fake.img"
         img.write_text("not a real image, just bytes\n")
-        with stub_path({"ssh": self._SSH}) as binp, scratch_dir() as store, scratch_dir() as reg:
+        with stub_path({"ssh": self._SSH, "tailscale": TAILSCALE_KNOWS_NOTHING}) as binp, \
+                scratch_dir() as store, scratch_dir() as reg:
             cp = run(
                 "sysimage", "write", "--from", str(img),
                 "--disk", f"rpi5:/dev/sd{rand_suffix(2)}", "--dry-run",

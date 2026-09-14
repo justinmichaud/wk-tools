@@ -10,6 +10,7 @@ OVER_VOLTAGE_DELTA="${OVER_VOLTAGE_DELTA:-50000}"  # µV; 50mV = at the ~1.0V co
 NUMA_FAKE="${NUMA_FAKE:-auto}"            # auto = let the bootloader pick optimal N; a number forces numa=fake=N; 0/off disables
 NUMA_POLICY="${NUMA_POLICY:-interleave}"  # round-robin allocations across nodes — the actual memory-bandwidth win
 SDRAM_BANKLOW="${SDRAM_BANKLOW:-1}"       # Pi5 EEPROM memory banking (Pi4=3). Enables NUMA auto-split + best mem perf. Empty = leave EEPROM as-is
+CMA_MB="${CMA_MB:-512}"                   # sizes vc4-kms-v3d-pi5 defines: 64 96 128 192 256 320 384 448 512 -- any other is dropped and the board boots on the DTB default
 WIFI_REGDOM="${WIFI_REGDOM:-CA}"          # kernel regulatory domain this board's radio is used under (5 GHz DFS channels need it re-asserted every reconnect)
 set -euo pipefail
 log(){ printf '\n\033[1;36m== %s\033[0m\n' "$*"; }
@@ -47,6 +48,24 @@ EOF
   sudo sed -i "s/^v3d_freq=.*/v3d_freq=$V3D_FREQ/" "$CFG"; ok "v3d_freq=$V3D_FREQ"
   sudo sed -i "s/^arm_freq=.*/arm_freq=$ARM_FREQ/" "$CFG"; ok "arm_freq=$ARM_FREQ"
   if [ "$OVER_VOLTAGE_DELTA" != "0" ]; then ensure_pi5_line "over_voltage_delta=$OVER_VOLTAGE_DELTA"; fi
+  # CMA rides the [all] overlay line already there: dtoverlay accumulates, so a second vc4-kms-v3d line applies the overlay twice, and [pi3+]/[pi02] carry their own cma-128 for a 512MB board.
+  if ! grep -qE '^dtoverlay=vc4-kms-v3d([,[:space:]]|$)' "$CFG"; then
+    skip "no dtoverlay=vc4-kms-v3d line to carry cma-$CMA_MB"
+  elif grep -qE "^dtoverlay=vc4-kms-v3d,cma-$CMA_MB([,[:space:]]|$)" "$CFG"; then
+    skip "cma-$CMA_MB already set"
+  else
+    _cma_tmp=$(mktemp)
+    awk -v want="$CMA_MB" '
+/^\[/ { sec = $0 }
+sec == "[all]" && /^dtoverlay=vc4-kms-v3d([,[:space:]]|$)/ && !done {
+    n = split($0, parts, ",")
+    out = parts[1] ",cma-" want
+    for (i = 2; i <= n; i++) if (parts[i] !~ /^cma-[0-9]+$/) out = out "," parts[i]
+    $0 = out; done = 1
+}
+{ print }' "$CFG" > "$_cma_tmp"
+    sudo cp "$_cma_tmp" "$CFG"; rm -f "$_cma_tmp"; ok "dtoverlay=vc4-kms-v3d,cma-$CMA_MB"
+  fi
 else skip "no config.txt (not Pi firmware layout)"; fi
 
 log "2  CPU governor = performance"

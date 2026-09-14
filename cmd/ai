@@ -29,7 +29,15 @@
 # by Anthropic, and allowed remote control by the organization's policy -- and
 # a login that fails any of those refuses here with the remedy. Onboarding,
 # the trust dialog and the remote-control dialog are recorded in the workspace
-# before either kind of session starts (claude/workspace-config.py).
+# before either kind of session starts (claude/workspace-config.py): each is a
+# prompt that waits for a terminal the agent may not have, measured against
+# Claude Code 2.1.268 -- `claude remote-control` asks "Enable Remote Control?"
+# on stdin and answers no, exit 0, when stdin is /dev/null; and refuses to
+# start at all without the trust dialog accepted or without the account record
+# (oauthAccount.organizationUuid, 2.1.269) `claude auth login` wrote beside the
+# shared credential, which is copied in on every start so a rotated login
+# converges. WK_RC_WAIT=<seconds> is how long --rc waits for the server to
+# report connected (60).
 #
 # The agents this knows:
 #

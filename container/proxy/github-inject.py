@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
-"""Swap the placeholder Authorization a workspace holds for a real token: a read
-spends the standing one, a write only `wk push on`'s. See `wk help push`."""
+"""Swap the placeholder credential a workspace holds for a real one, on the two
+hosts whose TLS ends here. api.github.com takes a token in the Authorization
+header: a read spends the standing one, a write only `wk push on`'s.
+bugs.webkit.org takes an api_key query parameter, `wk push on`'s alone. See
+`wk help push`."""
 
 import asyncio
 import os
@@ -8,12 +11,15 @@ import re
 import subprocess
 import sys
 import tempfile
+import urllib.parse
 
 sys.path.insert(0, os.path.join(
     os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "lib"))
 from wknotify import sd_notify  # noqa: E402
 
-INJECT_HOST = "api.github.com"
+GITHUB = "api.github.com"
+BUGZILLA = "bugs.webkit.org"
+HOSTS = (GITHUB, BUGZILLA)
 INJECT_PORT = 443
 
 READ_TIMEOUT = 30
@@ -22,7 +28,13 @@ MAX_HEAD = 65536
 
 DROP_FROM_FORWARDED = ("authorization", "connection", "proxy-connection",
                        "keep-alive", "proxy-authorization", "host",
-                       "transfer-encoding", "content-length")
+                       "transfer-encoding", "content-length",
+                       "x-bugzilla-api-key", "x-bugzilla-login",
+                       "x-bugzilla-password", "x-bugzilla-token")
+
+# Every spelling Bugzilla's REST API takes a login in; a workspace's own never goes on, the switch's api_key does.
+BUGZILLA_PARAMS = ("login", "password", "api_key", "token", "bugzilla_api_key",
+                   "bugzilla_login", "bugzilla_password", "bugzilla_token")
 
 READ_METHODS = ("GET", "HEAD")
 
@@ -49,11 +61,37 @@ def is_read(method, target, body):
             and not _MUTATION.search(body))
 
 
-def rewrite_head(head, token, length=0):
+def host_of(head):
+    for line in head.split(b"\r\n")[1:]:
+        name, _, value = line.partition(b":")
+        if name.strip().lower() == b"host":
+            host = value.strip().decode("latin-1", "replace").lower().rstrip(".")
+            return host.rsplit(":", 1)[0] if ":" in host else host
+    return ""
+
+
+def bugzilla_target(target, key):
+    path, _, query = target.partition("?")
+    kept = [p for p in query.split("&")
+            if p and urllib.parse.unquote(p.split("=", 1)[0]).lower()
+            not in BUGZILLA_PARAMS]
+    if key:
+        kept.append("api_key=" + urllib.parse.quote(key, safe=""))
+    return path + ("?" + "&".join(kept) if kept else "")
+
+
+def rewrite_head(head, host, token, length=0):
     # Host and Content-Length are ours: a client's Host spends the token on
     # another name, and a length GitHub reads differently smuggles a second head.
     lines = head.split(b"\r\n")
-    out = [lines[0], b"Host: " + INJECT_HOST.encode("latin-1")]
+    request = lines[0]
+    if host == BUGZILLA:
+        parts = request.decode("latin-1", "replace").split(" ")
+        if len(parts) != 3:
+            return None
+        parts[1] = bugzilla_target(parts[1], token)
+        request = " ".join(parts).encode("latin-1")
+    out = [request, b"Host: " + host.encode("latin-1")]
     for line in lines[1:]:
         if not line:
             continue
@@ -61,7 +99,7 @@ def rewrite_head(head, token, length=0):
         if name.decode("latin-1", "replace") in DROP_FROM_FORWARDED:
             continue
         out.append(line)
-    if token:
+    if token and host == GITHUB:
         out.append(b"Authorization: Bearer " + token.encode("latin-1"))
     out.append(b"Content-Length: %d" % length)
     out.append(b"Connection: close")
@@ -114,7 +152,7 @@ keyUsage = critical,keyCertSign,cRLSign
 basicConstraints = critical,CA:false
 keyUsage = critical,digitalSignature,keyEncipherment
 extendedKeyUsage = serverAuth
-subjectAltName = DNS:%(cn)s
+subjectAltName = %(san)s
 """
 
 
@@ -123,11 +161,18 @@ def _openssl(*args):
                    stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
 
 
-def _conf(cn):
+def _conf(cn, names=(GITHUB,)):
     f = tempfile.NamedTemporaryFile("w", suffix=".cnf", delete=False)
-    f.write(_CERT_CONF % {"cn": cn})
+    f.write(_CERT_CONF % {"cn": cn, "san": ", ".join("DNS:" + n for n in names)})
     f.close()
     return f.name
+
+
+def leaf_names(leaf_crt):
+    out = subprocess.run(["openssl", "x509", "-noout", "-text", "-in", leaf_crt],
+                         stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                         text=True).stdout
+    return set(re.findall(r"DNS:([^,\s]+)", out))
 
 
 def ensure_certs(d, ca_out):
@@ -150,8 +195,11 @@ def ensure_certs(d, ca_out):
         os.chmod(ca_key, 0o600)
         log("made a CA in %s" % d)
 
+    # The leaf is remade when the set of names changes; the CA is what every workspace trusts and is kept.
+    if os.path.exists(leaf_crt) and leaf_names(leaf_crt) != set(HOSTS):
+        os.unlink(leaf_crt)
     if not (os.path.exists(leaf_key) and os.path.exists(leaf_crt)):
-        cnf = _conf(INJECT_HOST)
+        cnf = _conf(GITHUB, HOSTS)
         csr = os.path.join(d, "leaf.csr")
         try:
             _openssl("req", "-new", "-newkey", "rsa:2048", "-nodes",
@@ -165,7 +213,7 @@ def ensure_certs(d, ca_out):
             if os.path.exists(csr):
                 os.unlink(csr)
         os.chmod(leaf_key, 0o600)
-        log("made a leaf certificate for %s" % INJECT_HOST)
+        log("made a leaf certificate for %s" % ", ".join(HOSTS))
 
     with open(chain, "wb") as out:
         for part in (leaf_crt, ca_crt):
@@ -201,12 +249,15 @@ async def pipe(reader, writer):
 
 
 class Injector:
-    def __init__(self, pat_path, read_pat_path, client_ctx):
+    def __init__(self, pat_path, read_pat_path, bugzilla_key_path, client_ctx):
         self.pat_path = pat_path
         self.read_pat_path = read_pat_path
+        self.bugzilla_key_path = bugzilla_key_path
         self.client_ctx = client_ctx
 
-    def token_for(self, reading):
+    def token_for(self, host, reading):
+        if host == BUGZILLA:
+            return read_token(self.bugzilla_key_path)
         if reading:
             return read_token(self.read_pat_path) or read_token(self.pat_path)
         return read_token(self.pat_path)
@@ -250,17 +301,31 @@ class Injector:
                     break
                 body += chunk
 
+            host = host_of(head)
+            if host not in HOSTS:
+                await self.refuse(
+                    cwriter, b"421 Misdirected Request",
+                    b"the wk credential injector answers for " +
+                    " and ".join(HOSTS).encode("latin-1") +
+                    b", and this request's Host is neither\r\n")
+                return
             method, target = request_line(head)
             reading = is_read(method, target, body)
-            token = self.token_for(reading)
-            new_head = rewrite_head(head, token, len(body))
-            log("%s %s %s %s" % ("read" if reading else "write",
-                                 "inject" if token else "unauthenticated",
-                                 method, target[:200]))
+            token = self.token_for(host, reading)
+            new_head = rewrite_head(head, host, token, len(body))
+            if new_head is None:
+                await self.refuse(
+                    cwriter, b"400 Bad Request",
+                    b"a request line the wk credential injector cannot read is "
+                    b"refused for " + host.encode("latin-1") + b"\r\n")
+                return
+            # The client's target, never the rewritten one: that carries the key.
+            log("%s %s %s %s %s" % (host, "read" if reading else "write",
+                                    "inject" if token else "unauthenticated",
+                                    method, target[:200]))
 
             ureader, uwriter = await asyncio.open_connection(
-                INJECT_HOST, INJECT_PORT, ssl=self.client_ctx,
-                server_hostname=INJECT_HOST)
+                host, INJECT_PORT, ssl=self.client_ctx, server_hostname=host)
             upstream = uwriter
             uwriter.write(new_head + body)
             await uwriter.drain()
@@ -296,6 +361,8 @@ async def main():
                          os.path.join(store, "push-github-pat"))
     read_pat = os.environ.get("WK_INJECT_READ_PAT",
                               os.path.join(store, "read-github-pat"))
+    bugzilla_key = os.environ.get("WK_INJECT_BUGZILLA_KEY",
+                                  os.path.join(store, "push-bugzilla-api-key"))
 
     chain = ensure_certs(certs, ca_out)
 
@@ -304,7 +371,7 @@ async def main():
 
     client_ctx = ssl.create_default_context()
 
-    injector = Injector(pat, read_pat, client_ctx)
+    injector = Injector(pat, read_pat, bugzilla_key, client_ctx)
 
     if os.path.exists(sock):
         os.unlink(sock)
@@ -312,8 +379,9 @@ async def main():
     server = await asyncio.start_unix_server(injector.handle, path=sock,
                                              ssl=server_ctx)
     os.chmod(sock, 0o600)
-    log("listening on %s for %s (write token: %s, read token: %s, CA published at %s)"
-        % (sock, INJECT_HOST, pat, read_pat, ca_out))
+    log("listening on %s for %s (write token: %s, read token: %s, Bugzilla key: %s, "
+        "CA published at %s)" % (sock, ", ".join(HOSTS), pat, read_pat,
+                                 bugzilla_key, ca_out))
     sd_notify("READY=1")
 
     async with server:

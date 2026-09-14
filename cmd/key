@@ -31,8 +31,7 @@
 #                     <name> is a row of lib/credcheck.py:
 #
 #                       github-pat    what `git-webkit pr` opens a pull request
-#                                     with. The one credential that never
-#                                     enters a workspace: only the credential
+#                                     with. Never enters a workspace: only the credential
 #                                     injector reads it, which reads GitHub
 #                                     with it whatever position `wk push` is in
 #                                     and writes only while it is on. Refused
@@ -40,6 +39,14 @@
 #                                     wk_push_forks: the token page cannot
 #                                     preselect them, so its own answer to
 #                                     `GET /user/repos` is what decides
+#                       bugzilla-api-key
+#                                     what `git-webkit pr` files and updates the
+#                                     bug with. Never enters a workspace either:
+#                                     the injector adds it to every
+#                                     bugs.webkit.org request while `wk push` is
+#                                     on and to none while it is off. Judged as
+#                                     the login WebKit's contributors.json gives
+#                                     this GitHub account
 #                       claude        the Claude Code token a build box's agent
 #                                     starts authenticated with (`claude
 #                                     setup-token` prints one); inference only
@@ -73,23 +80,25 @@
 #                     fanned out over the tailnet to the other workstations so
 #                     they all hold the one key. --rotate makes a fresh key,
 #                     removes the old one from GitHub, and fans the new one out.
-#                     Asks once, first. A stored GitHub API token GitHub refuses
-#                     is replaced before the fan-out -- taken from a peer that
-#                     holds one GitHub accepts, else asked for -- and never
-#                     fanned out as is. The claude.ai login is never copied --
+#                     Asks once, first. A stored GitHub API token or Bugzilla
+#                     key its issuer refuses is replaced before the fan-out --
+#                     taken from a peer that holds one it accepts, else asked
+#                     for -- and never fanned out as is. The claude.ai login is never copied --
 #                     a copy is a second holder of one refresh token, and the
 #                     first refresh on either side locks the other out -- so a
 #                     workstation without a usable one is logged in for here:
 #                     the browser opens once per such workstation, and what it
 #                     leaves is sent there and kept nowhere else
-#   wk key share      fan this machine's deploy keys and API token out to every
-#                     other workstation over the tailnet, without touching
-#                     GitHub, and log in here for any without a claude.ai login
-#                     of its own. Asks first: it overwrites what those machines hold
+#   wk key share      fan this machine's deploy keys, GitHub API token and
+#                     Bugzilla API key out to every other workstation over the
+#                     tailnet, without touching GitHub, and log in here for any
+#                     without a claude.ai login of its own. Asks first: it
+#                     overwrites what those machines hold
 #                       --to <machine>     one workstation only
-#                       --only github-pat  the API token only, not the keys --
-#                                          how a peer takes a working token
-#                                          from this machine (setup, deploy)
+#                       --only <name>      github-pat or bugzilla-api-key alone,
+#                                          not the keys -- how a peer takes a
+#                                          working one from this machine
+#                                          (setup, deploy)
 #   wk key check      what every credential this machine holds can do and how
 #                     far it reaches, each one asked again at that moment, and
 #                     whether each other workstation holds a claude.ai login of
@@ -224,7 +233,7 @@ cred_stale() { # <name> -- stored, and its issuer refuses it now; `unverified` (
 cred_replace_stale() { # <name> -- 0 when nothing was stale or a fresh one is stored; the value is typed, so no terminal means it is named and left
     cred_stale "$1" || return 0
     warn "$1 is stored here but refused: $(wk_cred_detail "$CRED_VERDICT" | sed -n 1p)"
-    [ "$1" != github-pat ] || ! cred_take_from_fleet "$1" || return 0
+    ! cred_travels_alone "$1" || ! cred_take_from_fleet "$1" || return 0
     if [ ! -t 0 ]; then
         warn "a replacement is typed at a prompt, and there is no terminal here:  wk key set $1 --replace"
         return 1
@@ -317,10 +326,29 @@ cred_report() { # <name> -- non-zero when what is stored cannot do its job
 
 SHARED_KEY_TITLE="wk shared deploy key"   # rotation finds the old key to remove by this one title
 
-SHARE_ONLY=""   # github-pat: the token alone travels (`wk key share --only`)
+SHARED_VALUES="github-pat bugzilla-api-key"   # the pasted credentials a fan-out carries, each able to travel alone (`--only`); the deploy keys go together and the login is made per machine
+SHARE_ONLY=""
+
+cred_travels_alone() { case " $SHARED_VALUES " in *" $1 "*) return 0 ;; esac; return 1; }
+
+share_value() { # <machine> <name> -- on stdin over there; skipped when its issuer refuses the one stored here
+    local machine="$1" name="$2" value
+    value=$(wk_cred_read "$name" | sed -n '1p')
+    [ -n "$value" ] || return 0
+    if cred_stale "$name"; then
+        warn "$machine: the $name is not shared -- its issuer refuses the one stored here"
+        return 0
+    fi
+    if printf '%s\n' "$value" | ( load_target "$machine"; t_wk key set "$name" --paste ) >/dev/null 2>&1; then
+        changed "$machine: shared the $name"
+    else
+        warn "$machine: could not share the $name"
+        return 1
+    fi
+}
 
 share_to() { # <machine> -- each value on stdin, never an argument in `ps` over there
-    local machine="$1" remote repo alias pat
+    local machine="$1" remote repo alias name
     while read -r remote repo alias; do
         [ -n "$remote" ] || continue
         [ -z "$SHARE_ONLY" ] || continue
@@ -334,19 +362,10 @@ share_to() { # <machine> -- each value on stdin, never an argument in `ps` over 
     done <<EOF
 $(wk_push_forks)
 EOF
-    pat=$(wk_github_pat)
-    if [ -n "$pat" ] && cred_stale github-pat; then
-        warn "$machine: the GitHub API token is not shared -- GitHub refuses the one stored here"
-        pat=""
-    fi
-    if [ -n "$pat" ]; then
-        if printf '%s\n' "$pat" | ( load_target "$machine"; t_wk key set github-pat --paste ) >/dev/null 2>&1; then
-            changed "$machine: shared the GitHub API token"
-        else
-            warn "$machine: could not share the GitHub API token"
-            return 1
-        fi
-    fi
+    for name in $SHARED_VALUES; do
+        [ -z "$SHARE_ONLY" ] || [ "$SHARE_ONLY" = "$name" ] || continue
+        share_value "$machine" "$name" || return 1
+    done
     [ -n "$SHARE_ONLY" ] || share_login "$machine"
 }
 
@@ -407,7 +426,7 @@ cred_take_from_fleet() { # <name> -- 0 once a stored one here is accepted
 fanout_prose() { # what the fan-out overwrites, for the one question asked first; nothing when there is no peer
     local peers; peers=$(peer_workstations | tr '\n' ' ')
     [ -n "${peers// /}" ] || return 0
-    printf ' and overwrite the deploy keys and GitHub API token that %s hold(s), logging in here for any without a claude.ai login' "${peers% }"
+    printf ' and overwrite the deploy keys, GitHub API token and Bugzilla API key that %s hold(s), logging in here for any without a claude.ai login' "${peers% }"
 }
 
 registered_key_body() { # <repo> -- the registered keys, matched on the jq-safe base64 body
@@ -475,7 +494,7 @@ deploy_keys() { # [rotate] -- one question, before anything is removed or overwr
         confirm "register the shared deploy keys on GitHub${fanout}?" || return 3
     fi
     ensure_keys
-    cred_replace_stale github-pat || failed=1
+    for _name in $SHARED_VALUES; do cred_replace_stale "$_name" || failed=1; done
     register_shared_keys || failed=1
     share_keys || failed=1
     return "$failed"
@@ -669,8 +688,8 @@ share)
         esac
         shift
     done
-    [ -z "$SHARE_ONLY" ] || [ "$SHARE_ONLY" = github-pat ] \
-        || die "--only takes github-pat: the token is the one credential that travels alone (the deploy keys go together)"
+    [ -z "$SHARE_ONLY" ] || cred_travels_alone "$SHARE_ONLY" \
+        || die "--only takes $(printf '%s' "$SHARED_VALUES" | sed 's/ / or /g'): the pasted credentials travel alone (the deploy keys go together, the login is made per machine)"
     if [ -n "$_to" ]; then
         peer_workstations | grep -qxF "$_to" \
             || die "'$_to' is not a peer workstation this machine reaches (a peer with wk over the tailnet)"
@@ -679,7 +698,7 @@ share)
         _peers=$(peer_workstations)
     fi
     [ -n "$_peers" ] || { info "no other workstation to share with (a peer with wk over the tailnet)"; exit 0; }
-    _what="the deploy keys and GitHub API token"; [ -z "$SHARE_ONLY" ] || _what="the GitHub API token"
+    _what="the deploy keys, GitHub API token and Bugzilla API key"; [ -z "$SHARE_ONLY" ] || _what="the $SHARE_ONLY"
     confirm "overwrite $_what that $(printf '%s ' $_peers | sed 's/ $//') hold(s) with this machine's?" \
         || die "not shared -- nothing on them was changed"
     share_keys $_to || die "one or more workstations did not take what was shared (above)"

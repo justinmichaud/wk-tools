@@ -713,7 +713,7 @@ class TestTheGuestGetsTheInjectorsCa(WkTest):
     proxy address, because both are properties of this host and neither may be
     baked into an image."""
 
-    def _egress(self, home, vmstore, ca_text=None):
+    def _egress(self, home, vmstore, ca_text=None, prelude=""):
         log = self.tmp / "ssh.log"
         log.write_text("")
         vmdir = vmstore / "vm"
@@ -726,6 +726,7 @@ class TestTheGuestGetsTheInjectorsCa(WkTest):
 . "$WK_ROOT/lib/store.sh"
 . "$WK_ROOT/lib/target.sh"
 load_target vm >/dev/null 2>&1
+''' + prelude + '''
 _set_guest_egress demo 1.2.3.4 || true
 ''', env={
                 "PATH": f"{binp}:{os.environ['PATH']}",
@@ -735,8 +736,23 @@ _set_guest_egress demo 1.2.3.4 || true
                 "WK_HOST_SECRETS": str(self.tmp / "store" / "secrets"),
                 "WK_VM_STORE": str(vmstore),
                 "WK_VM_PROXY_ADDR": "192.168.2.1",
+                "XDG_STATE_HOME": str(self.tmp / "state"),
             })
         return cp
+
+    def test_the_bugzilla_placeholder_goes_in_with_the_login_and_not_without(self):
+        """The login is read from the mirror (wk_bugzilla_user); a host with
+        none writes no Bugzilla pair, so git-webkit in the guest asks rather
+        than validating an empty login."""
+        home, vmstore = _guest(self.tmp)
+        ca = "-----BEGIN CERTIFICATE-----\nx\n-----END CERTIFICATE-----\n"
+        self._egress(home, vmstore, ca_text=ca)
+        self.assertNotIn("BUGS_WEBKIT_ORG", (home / ".wk-egress").read_text())
+        self._egress(home, vmstore, ca_text=ca,
+                     prelude='wk_bugzilla_user() { echo me@example.test; }\n')
+        rc = (home / ".wk-egress").read_text()
+        self.assertIn("export BUGS_WEBKIT_ORG_USERNAME=me@example.test\n", rc)
+        self.assertIn("export BUGS_WEBKIT_ORG_PASSWORD=wk-injects-this\n", rc)
 
     def test_the_ca_and_the_placeholder_go_in_with_the_proxy(self):
         home, vmstore = _guest(self.tmp)
@@ -746,6 +762,7 @@ _set_guest_egress demo 1.2.3.4 || true
         self.assertIn("http_proxy=http://192.168.2.1:3128", rc)
         self.assertIn("GITHUB_COM_TOKEN=wk-injects-this", rc)
         self.assertIn("GITHUB_COM_USERNAME=justinmichaud", rc)
+        self.assertIn("PYTHON_KEYRING_BACKEND=keyring.backends.null.Keyring", rc)
         self.assertIn("REQUESTS_CA_BUNDLE=", rc)
         self.assertIn("CURL_CA_BUNDLE=", rc)
         self.assertIn("GIT_SSL_CAINFO=", rc)
@@ -883,7 +900,17 @@ _start_host_inject
         path from WK_INJECT_READ_PAT (container/proxy/github-inject.py)."""
         body = func_body((REPO / "targets" / "vm.sh").read_text(), "_start_host_inject")
         self.assertIn('WK_INJECT_READ_PAT="$(_inject_read_pat)"', body)
+        self.assertIn('WK_INJECT_BUGZILLA_KEY="$(_inject_bugzilla_key)"', body)
         self.assertIn("github-inject.py", body)
+
+    def test_the_switch_converges_the_bugzilla_key_beside_the_token(self):
+        """The guests' injector reads its Bugzilla key from a file only
+        `vm_push_keys_converge` writes and removes, the way it does the write
+        token."""
+        body = func_body((REPO / "targets" / "vm.sh").read_text(), "vm_push_keys_converge")
+        self.assertIn('push_agent_cred_write _agent_exec "$(_inject_bugzilla_key)" bugzilla-api-key', body)
+        self.assertEqual(2, body.count('push_agent_cred_clear _agent_exec "$(_inject_bugzilla_key)"'),
+                         "the key is cleared on `off`, and on an `on` that has none to write")
 
     @unittest.skipUnless(os.uname().sysname == "Darwin",
                          "guests are a macOS-host thing (tart)")

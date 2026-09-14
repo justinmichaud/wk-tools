@@ -140,7 +140,8 @@ class TestMirrorFetch(unittest.TestCase):
         self.locks.mkdir()
 
     def _env(self, extra=None):
-        e = {"WK_STORE": str(self.store), "WK_LOCK_DIR": str(self.locks)}
+        e = {"WK_STORE": str(self.store), "WK_LOCK_DIR": str(self.locks),
+             "XDG_STATE_HOME": str(self.tmp / "state")}
         if extra:
             e.update(extra)
         return e
@@ -376,8 +377,8 @@ class TestGitWebkitPrThroughTheInjector(unittest.TestCase):
     This drives the whole mechanism for real -- a TLS handshake against the
     injector's own leaf certificate, a requests-shaped request head over the
     wire, and a fake upstream that reports what arrived -- with no network and
-    no GitHub. INJECT_HOST/INJECT_PORT are pointed at that upstream, which is
-    the one thing a local run cannot do by configuration.
+    no GitHub. INJECT_PORT is pointed at that upstream, which is the one thing
+    a local run cannot do by configuration.
     """
 
     @classmethod
@@ -437,7 +438,8 @@ class TestGitWebkitPrThroughTheInjector(unittest.TestCase):
             m.INJECT_PORT = port
             # No standing read token here: this drives the write half, whose
             # only credential is the switch's.
-            injector = m.Injector(str(pat), str(d / "read-pat"), client_ctx)
+            injector = m.Injector(str(pat), str(d / "read-pat"), str(d / "bz-key"),
+                                  client_ctx)
 
             srv_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
             srv_ctx.load_cert_chain(chain, str(d / "certs" / "leaf.key"))

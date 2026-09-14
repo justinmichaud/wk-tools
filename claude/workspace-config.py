@@ -1,42 +1,14 @@
 #!/usr/bin/env python3
-"""Records in a workspace's ~/.claude.json the answers `wk` has already given,
-and the account behind the login it was handed.
-
-Run inside the workspace by cmd/ai, before any `claude` starts. Three prompts
-otherwise wait for a terminal the agent may not have, and each one measured
-against Claude Code 2.1.268:
-
-  hasCompletedOnboarding        the first-run flow
-  remoteDialogSeen              "Enable Remote Control? (y/n)", which
-                                `claude remote-control` asks on stdin and
-                                answers no -- and exits 0 -- when stdin is
-                                /dev/null, as a spawned server's is
-  projects[<checkout>]
-    .hasTrustDialogAccepted     the workspace trust dialog, without which
-                                remote control refuses to start at all
-  oauthAccount                  the account record `claude auth login` wrote
-                                beside the shared credential, in the CLI's
-                                config file in $CLAUDE_SECURESTORAGE_CONFIG_DIR;
-                                remote control reads organizationUuid from it
-                                and refuses to start without one (measured
-                                against 2.1.269), and it is copied in on every
-                                start so a rotated login converges
-
-`wk new` created the checkout in a workspace whose whole point is to be the
-blast radius, so these are wk's answers to give.
-
-Never overwrites an unreadable file: the CLI keeps live state in this one.
-"""
+"""workspace-config.py <checkout>: record in ~/.claude.json the answers `wk` has
+already given (onboarding, the remote-control dialog, trust for <checkout>) and
+the account record beside the shared login -- cmd/ai says why each is needed."""
 import json
 import os
 import sys
 import tempfile
 
 
-def account_record():
-    """The record beside the shared credential, or (None, why) when a credential
-    is there without one; (None, None) where no shared credential is mounted --
-    a guest logs in for itself and holds its own record."""
+def account_record():  # (record, None) | (None, why) | (None, None) with no shared credential mounted
     shared = os.environ.get("CLAUDE_SECURESTORAGE_CONFIG_DIR")
     if not shared:
         return None, None

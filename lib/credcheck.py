@@ -45,6 +45,8 @@ def _api_base(var, default):
 
 
 GITHUB_API = _api_base("WK_GITHUB_API", "https://api.github.com")
+BUGZILLA_API = _api_base("WK_BUGZILLA_API", "https://bugs.webkit.org")
+BUGZILLA_KEYS = "https://bugs.webkit.org/userprefs.cgi?tab=apikey"
 TIMEOUT = 20
 PER_PAGE = 100
 
@@ -204,6 +206,42 @@ def _github_pat(value, repos, path, evidence):
     return OK, ("a fine-grained token: it can open a pull request on the %d "
                 "forks and on none of the %d other repositories under this "
                 "account.\n    %s" % (len(repos), len(others), "; ".join(facts)))
+
+
+# A Bugzilla key is the account: nothing narrower exists, so the rule asks only whether bugs.webkit.org takes it for the login this GitHub account maps to. `valid_login` answers false for a key of another account and error 306 for one it does not know.
+def _bugzilla_api_key(value, repos, path, evidence):
+    key = value.strip()
+    if not key or len(key.split()) != 1:
+        return BAD, "there is no key there, or it is not one line."
+    login = evidence.get("login", "")
+    if not login:
+        return UNVERIFIED, ("no Bugzilla login to check it against: the login is "
+                            "the first email of this GitHub account's entry in "
+                            "WebKit's metadata/contributors.json, read from the "
+                            "mirror here ('wk sync' makes one).")
+    url = BUGZILLA_API + "/rest/valid_login?" + urllib.parse.urlencode(
+        {"login": login, "api_key": key})
+    try:
+        status, _headers, raw = _http("GET", url, None)
+    except Unreachable as e:
+        return UNVERIFIED, ("could not reach %s (%s), so whether it accepts this "
+                            "key is not known here; 'wk doctor' asks again."
+                            % (BUGZILLA_API, e))
+    doc = _json(raw)
+    if status == 400 and doc.get("code") == 306:
+        return BAD, ("%s does not accept this key (error 306): revoked, mistyped "
+                     "or never valid." % BUGZILLA_API)
+    if status != 200:
+        return UNVERIFIED, ("GET /rest/valid_login at %s answered HTTP %d rather "
+                            "than 200 or 400, so nothing about this key was "
+                            "established." % (BUGZILLA_API, status))
+    if doc.get("result") is not True:
+        return BAD, ("%s accepts this key, but not as %s: it belongs to another "
+                     "account, and `git-webkit pr` would file and assign as that "
+                     "one." % (BUGZILLA_API, login))
+    return OK, ("%s accepts it as %s.\n    spent on every bugs.webkit.org request "
+                "a workspace makes while push is on, and on none while it is off"
+                % (BUGZILLA_API, login))
 
 
 def _some(names, n=3):
@@ -769,6 +807,21 @@ RULES = collections.OrderedDict((
             % (", ".join(repos) or "the forks wk pushes to")),
         store_with="wk key set github-pat",
         check=_github_pat)),
+    ("bugzilla-api-key", Rule(
+        spent_by="container/proxy/github-inject.py -- the api_key query "
+                 "parameter a workspace's bugs.webkit.org request is forwarded "
+                 "with while push is on",
+        needs="be accepted by bugs.webkit.org as the login WebKit's "
+              "metadata/contributors.json gives this GitHub account",
+        forbids="rest where a workspace reads, or be spent while push is off: "
+                "a Bugzilla key is the whole account",
+        what="a bugs.webkit.org API key, so `git-webkit pr` in a workspace can "
+             "file the bug and post the pull request to it",
+        url=BUGZILLA_KEYS,
+        remedy="'New API key' there, described as this machine; the key is "
+               "shown once",
+        store_with="wk key set bugzilla-api-key",
+        check=_bugzilla_api_key)),
     ("claude", Rule(
         spent_by="shell/bashrc -- exported as $CLAUDE_CODE_OAUTH_TOKEN in a "
                  "macOS guest and on a build box, the two kinds of target the "

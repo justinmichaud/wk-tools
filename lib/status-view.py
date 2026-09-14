@@ -1,18 +1,12 @@
 #!/usr/bin/env python3
 """status-view.py <text|json|html|web|strip> <records-file> [--port N] [--interval S] [--out FILE]
 
-Input is the stream `wk status` collects: one JSON object per line, from
-several processes at once -- two JSON documents cannot be concatenated where two
-streams of lines can. Every view, `--json` included, draws the one merged
-document. No third-party library, `pip install` being no trade to make here.
-
-Two records are the stream's own, not the document's. `{"kind":"plan","jobs":
-[{"job":..,"machine":..},..]}` comes first and names every job the walk runs and
-the machine each one's records belong to; `{"kind":"flush","job":..}` ends one
-job. A machine's block is drawn when the last job the plan gave it has flushed,
-so nothing decides a machine is complete from what has happened to arrive.
-`strip -` (stdin to stdout) drops those two: a remote's own markers, passed
-through cmd/status's delegate, would end this walk's jobs.
+Input is the stream `wk status` collects, one JSON object per line from several
+processes at once; every view, `--json` included, draws the one merged document.
+Two records are the stream's own: `{"kind":"plan","jobs":[{"job":..,"machine":..},
+..]}` names every job and its machine first, and `{"kind":"flush","job":..}` ends
+one, so a machine's block is drawn when its last job has flushed, not from what
+happened to arrive. `strip -` drops both: a remote's markers would end this walk.
 """
 
 import http.server

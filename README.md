@@ -208,7 +208,7 @@ wk key setup                   # the deploy keys, then every credential this mac
                                # has not got, then what each one can do and how far
                                # it reaches -- one credential at a time, re-runnable,
                                # and Enter skips one you do not want
-wk push on                     # loads the keys into the agent and gives the injector a write token
+wk push on                     # loads the keys into the agent and gives the injector the write token and the Bugzilla key
 wk sync                        # clones WebKit into the mirror, publishes a snapshot
 eval "$(wk completion bash)"   # shell/bashrc does this for you; zsh: wk completion zsh
 ```
@@ -476,7 +476,8 @@ A workspace's fetch is `git fetch --all --prune` as git has that checkout
 configured -- the URL rewrite and the narrowed refspecs above -- so it is one
 local read of a handful of refs from the mirror its target names
 (`t_mirror_dir`): the machine's, bind-mounted into a container at the machine's
-own path and into a guest as the `mirror` share; a build machine's own copy.
+own path (which `WK_MIRROR` names in the container's environment) and into a
+guest as the `mirror` share; a build machine's own copy.
 There is no second refspec list in `wk sync` to keep
 in step with the checkout's own, which is why a person's `git fetch --all` in
 there is the same fetch.
@@ -1200,7 +1201,8 @@ revoked GitHub token is asked for again, and `wk key deploy` replaces it before
 fanning anything out), an empty answer skips one, and the run can be killed
 and repeated. `wk key set <name>` is the same thing for one of
 them by name --
-`github-pat`, `claude`, `claude-login`, `litellm`, `tailnet`, `tailnet-api` --
+`github-pat`, `bugzilla-api-key`, `claude`, `claude-login`, `litellm`,
+`tailnet`, `tailnet-api` --
 and with nothing to store it reports what the stored one can do instead.
 `--replace` is how a credential is rotated, and it is the only arm that removes
 one; `wk key setup --rotate` does it to every stored credential in turn, after
@@ -1223,11 +1225,11 @@ GitHub, so each asks first and declines without a terminal (`WK_YES=1` answers
 for you). `wk
 key share` does the fan-out alone (each key arrives through `wk key adopt`,
 the value on stdin, never an argument); `--to <machine>` sends to one peer and
-`--only github-pat` sends the token alone, which is how `wk key deploy` on a
-machine whose token GitHub refuses takes a working one from a peer before
-asking anyone to mint another. `wk key deploy --rotate` turns the fleet over from one command:
+`--only github-pat` (or `--only bugzilla-api-key`) sends that one credential
+alone, which is how `wk key deploy` on a machine whose token its issuer refuses
+takes a working one from a peer before asking anyone to mint another. `wk key deploy --rotate` turns the fleet over from one command:
 it removes the old key from GitHub, mints a fresh one, and fans that out. The
-GitHub API token rides the same fan-out, so `wk key set github-pat` on one
+GitHub API token and the Bugzilla API key ride the same fan-out, so `wk key set github-pat` on one
 workstation and `wk key share` puts it everywhere. The claude.ai login rides
 it differently, because a copy of one is a second holder (below): for each
 workstation that has no usable login, `wk key share` logs in *for* it here --
@@ -1352,17 +1354,23 @@ has no protocol for handing a private half back. `wk push off` is `ssh-add -D`.
 `wk push status` asks the agent what it holds (`ssh-add -l`) rather than
 reading a record of it.
 
-The API token is `wk key set github-pat`, kept beside the private halves and
-handed by `wk push on` to `wk-github-inject.service`, the one thing in this
-design that terminates TLS: `api.github.com` is allowed by the egress proxy and
-its CONNECT goes to the injector, which replaces the `Authorization` header
-with the real token and forwards the request. The workspace holds
-`GITHUB_COM_USERNAME` and the literal placeholder `GITHUB_COM_TOKEN=wk-injects-this`,
+The API token is `wk key set github-pat` and the Bugzilla key `wk key set
+bugzilla-api-key`, both kept beside the private halves and handed by `wk push
+on` to `wk-github-inject.service`, the one thing in this design that
+terminates TLS: `api.github.com` and `bugs.webkit.org` are allowed by the
+egress proxy and their CONNECTs go to the injector, which puts the real
+credential on the request -- GitHub's in the `Authorization` header,
+Bugzilla's as the `api_key` query parameter -- and forwards it. The request's
+own Host header, checked against those two names, decides which it is; any
+other name is refused (`421`). The workspace holds `GITHUB_COM_USERNAME` and
+`BUGS_WEBKIT_ORG_USERNAME`, the literal placeholders
+`GITHUB_COM_TOKEN=wk-injects-this` and `BUGS_WEBKIT_ORG_PASSWORD=wk-injects-this`,
 plus the injector's CA certificate (`/run/wk/wk-github-ca.pem`, added to the
 system bundle -- never replacing it). With push off the injector has no write
-token and forwards a write unauthenticated, so GitHub answers 401 for itself:
-the switch withholds a credential, it does not pretend the API is unreachable.
-`uploads.github.com` stays refused outright.
+token and no Bugzilla key and forwards a write unauthenticated, so GitHub
+answers 401 and Bugzilla 410 for themselves: the switch withholds a
+credential, it does not pretend the API is unreachable. `uploads.github.com`
+stays refused outright.
 
 **A read is always authenticated; a write is authenticated only while push is
 on.** A `GET` or `HEAD` on any path -- and a GraphQL document with no mutation
@@ -1375,6 +1383,18 @@ what the workspace does, so which of your own endpoints it reaches is your
 call, and push off leaves it nothing to spend. Neither token is ever inside a
 workspace.
 
+Bugzilla has no read-only key -- a key is the account -- so it has no
+standing half: while push is on every request a workspace makes of
+`bugs.webkit.org` carries the key, and while it is off every one goes
+anonymous, which reads a public bug and is refused a write. The login the key
+answers for is not stored anywhere: it is WebKit's own record, the first
+email of this GitHub account's entry in `metadata/contributors.json`
+(webkitpy's `Committer.bugzilla_email`), read from the mirror when `/secrets`
+is published (`/secrets/bugzilla-user`) and what the key is judged against
+(`wk key check` asks Bugzilla's `valid_login` for the pair). A workspace's own
+`login`/`password` parameters and any `X-BUGZILLA-*` header are dropped before
+the request goes on, as a client's `Authorization` is for GitHub.
+
 The standing token is one file on the machine that runs the workspaces
 (`$WK_STORE/read-github-pat`, and `~/.local/state/wk/vm/read-github-pat` on the
 macOS host whose injector serves the guests), written from the one it holds:
@@ -1386,6 +1406,17 @@ lets `gh` and `git-webkit` see a pull request in a workspace nothing can
 publish from. `gh` holds the same placeholder `GITHUB_COM_TOKEN` does
 (`GH_TOKEN`), plus the CA in `SSL_CERT_FILE`/`SSL_CERT_DIR`, which is what Go
 reads.
+
+`git-webkit` looks every other credential up in a keyring, and a workspace has
+none: the keyring library it autoinstalls picks libsecret in a container and
+the login Keychain in a guest, and with no session bus, or over ssh, every
+lookup raises -- which `git-webkit` reports as a locked macOS Keychain and
+exits on, before it reads `GITHUB_COM_TOKEN`. Both targets therefore set
+`PYTHON_KEYRING_BACKEND` to keyring's null backend (`ensure-bridge.sh`,
+`~/.wk-egress`): a lookup answers "nothing stored", the GitHub and Bugzilla
+credentials come from the environment, and anything else is asked for at the
+prompt and kept only in that process. With both in the environment,
+`git-webkit pr` asks for nothing.
 
 The per-fork alias blocks are in `/secrets/ssh_config`, which every container
 `Include`s and `wk push on|off` regenerates -- so a rotated key, an added fork
@@ -1857,7 +1888,7 @@ benchmark job runs as; `bench` unless that install names it otherwise),
 
 **Credentials and the tailnet**
 `WK_PUSH_AGENT_SOCK`, `WK_PUSH_PAT_FILE`, `WK_PUSH_READ_PAT_FILE`,
-`WK_TS_AUTHKEY`, `WK_TS_API_SECRET`, `WK_IMAGE_KEY`, `WK_ANY_ROOT`,
+`WK_PUSH_BUGZILLA_KEY_FILE`, `WK_TS_AUTHKEY`, `WK_TS_API_SECRET`, `WK_IMAGE_KEY`, `WK_ANY_ROOT`,
 `WK_TAILSCALE_TIMEOUT`, `WK_SOFTNET_BIN`.
 
 **Waiting, watching and reporting**

@@ -283,7 +283,7 @@ class TestWhatTheTokenCanDoDecidesWhetherItIsKept(_PatRun):
         FakeGitHub.user_status = 200
         FakeGitHub.scopes = ""
         FakeGitHub.expiry = ""
-        FakeGitHub.pulls = {}
+        FakeGitHub.pulls = {"justinmichaud/WebKit": 422, "justinmichaud/WPEWebKit": 422}
         FakeGitHub.repos = ["justinmichaud/WebKit", "justinmichaud/WPEWebKit"]
         FakeGitHub.repos_status = 200
         FakeGitHub.repos_answer = None
@@ -369,7 +369,7 @@ class TestATokenGitHubRefusesIsReplaced(_PatRun):
         FakeGitHub.user_status = 401
         FakeGitHub.scopes = ""
         FakeGitHub.expiry = ""
-        FakeGitHub.pulls = {}
+        FakeGitHub.pulls = {"justinmichaud/WebKit": 422, "justinmichaud/WPEWebKit": 422}
         FakeGitHub.repos = ["justinmichaud/WebKit", "justinmichaud/WPEWebKit"]
         FakeGitHub.repos_status = 200
         FakeGitHub.repos_answer = None
@@ -411,12 +411,16 @@ class TestATokenGitHubRefusesIsReplaced(_PatRun):
         self.assertRegex(out, r"github-pat\s+stored\s")
 
     def test_the_fan_out_skips_a_refused_token(self):
-        """share_to asks cred_stale before sending the token; the deploy keys
-        still travel."""
+        """share_value asks cred_stale before sending a pasted credential, and
+        share_to sends each of them through it; the deploy keys still travel."""
         body = (REPO / "cmd" / "key").read_text()
+        i = body.index("share_value() {")
+        j = body.index("\n}\n", i)
+        self.assertIn('cred_stale "$name"', body[i:j])
         i = body.index("share_to() {")
         j = body.index("\n}\n", i)
-        self.assertIn("cred_stale github-pat", body[i:j])
+        self.assertIn('share_value "$machine" "$name"', body[i:j])
+        self.assertIn("for name in $SHARED_VALUES", body[i:j])
 
 
 class TestTheMachineTakesTheTokenOnEveryStart(unittest.TestCase):

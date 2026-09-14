@@ -209,6 +209,17 @@ class TestShareFansOutToWorkstationsOnly(_Shared):
         self.assertIn("key verdict claude-login", calls)
         self.assertEqual(4, len(calls), calls)
 
+    def test_the_bugzilla_key_rides_the_same_fan_out(self):
+        self.key("ensure")
+        (self.held / "github-pat").write_text("ghp_notarealtoken\n")
+        (self.held / "bugzilla-api-key").write_text("notarealbugzillakey\n")
+        env = self.fleet()
+        self.key("share", stubs={"ssh": PEER_SSH}, env=env)
+        calls = [l for l in self.peer_log.read_text().splitlines() if l.strip()]
+        self.assertIn("key set github-pat --paste", calls)
+        self.assertIn("key set bugzilla-api-key --paste", calls)
+        self.assertEqual(5, len(calls), calls)
+
 
 # A peer whose `wk key verdict claude-login` answers what the test put in a
 # file, and whose `adopt claude-login` keeps what arrived on stdin for the test.
@@ -394,6 +405,17 @@ class TestTheTokenAloneToOnePeer(TestShareFansOutToWorkstationsOnly):
         calls = [l for l in self.peer_log.read_text().splitlines() if l.strip()]
         self.assertEqual(["key set github-pat --paste"], calls)
 
+    def test_the_bugzilla_key_travels_alone_too(self):
+        self.key("ensure")
+        (self.held / "github-pat").write_text("ghp_notarealtoken\n")
+        (self.held / "bugzilla-api-key").write_text("notarealbugzillakey\n")
+        env = self.fleet()
+        cp = self.key("share", "--to", "peerbox", "--only", "bugzilla-api-key",
+                      stubs={"ssh": PEER_SSH}, env=env)
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        calls = [l for l in self.peer_log.read_text().splitlines() if l.strip()]
+        self.assertEqual(["key set bugzilla-api-key --paste"], calls)
+
     def test_a_machine_that_is_not_a_peer_is_refused(self):
         self.key("ensure")
         env = self.fleet()
@@ -407,7 +429,7 @@ class TestTheTokenAloneToOnePeer(TestShareFansOutToWorkstationsOnly):
         env = self.fleet()
         cp = self.key("share", "--only", "claude", stubs={"ssh": PEER_SSH}, env=env)
         self.assertNotEqual(cp.returncode, 0)
-        self.assertIn("--only takes github-pat", cp.stderr)
+        self.assertIn("--only takes github-pat or bugzilla-api-key", cp.stderr)
 
 
 class TestARefusedTokenIsTakenFromAPeerFirst(TestShareFansOutToWorkstationsOnly):

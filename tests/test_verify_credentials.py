@@ -30,7 +30,7 @@ VERIFY = (REPO / "cmd" / "verify").read_text()
 # way, and adding a branch elsewhere in the file that happened to contain one
 # of them emptied this block into a syntax error.
 PROBES = ("probe_no_credentials_inside", "probe_agent_identities",
-          "probe_github_api")
+          "probe_github_api", "probe_bugzilla_api")
 
 # Answers for every probe the block makes, keyed by a substring of the command
 # it runs inside the workspace. The defaults are a healthy workspace with the
@@ -44,13 +44,17 @@ DEFAULTS = {
     "/pulls": "401",
     "GITHUB_COM_TOKEN": "wk-injects-this",
     "GH_TOKEN": "wk-injects-this",
+    "BUGS_WEBKIT_ORG_PASSWORD": "wk-injects-this",
+    "bugs.webkit.org/rest/version": "200",
+    "https://bugs.webkit.org/rest/bug 2": "410",
     "hosts.yml": "",
     "test -r /secrets/claude-token": "",
 }
 
 ORDER = ("PRIVATE KEY", "ssh-add -l", "api.github.com/user",
          "https://api.github.com/ ", "/pulls",
-         "GITHUB_COM_TOKEN", "GH_TOKEN", "hosts.yml",
+         "bugs.webkit.org/rest/version", "https://bugs.webkit.org/rest/bug 2",
+         "GITHUB_COM_TOKEN", "GH_TOKEN", "BUGS_WEBKIT_ORG_PASSWORD", "hosts.yml",
          "test -r /secrets/claude-token")
 
 # The one fork the stubbed wk_push_forks names, which is what the write probe
@@ -129,8 +133,10 @@ class TestAHealthyWorkspacePasses(_Block):
         self.assertIn("reachable through the injector", out)
         self.assertIn("a read is authenticated (HTTP 200)", out)
         self.assertIn("a write is unauthenticated (HTTP 401)", out)
+        self.assertIn("a Bugzilla write is unauthenticated (410", out)
         self.assertIn("GITHUB_COM_TOKEN in the workspace is the placeholder", out)
         self.assertIn("GH_TOKEN in the workspace is the placeholder", out)
+        self.assertIn("BUGS_WEBKIT_ORG_PASSWORD in the workspace is the placeholder", out)
 
     def test_a_row_this_kind_is_not_given_is_named_as_unreadable(self):
         """The delivery table (wk_agent_secrets) sends the Claude token to a vm
@@ -142,10 +148,12 @@ class TestAHealthyWorkspacePasses(_Block):
 
     def test_push_on_is_the_other_correct_state(self):
         out = self.run_block(push_on=True,
-                             answers={"ssh-add -l": "2", "/pulls": "422"})
+                             answers={"ssh-add -l": "2", "/pulls": "422",
+                                      "https://bugs.webkit.org/rest/bug 2": "50"})
         self.assertEqual(0, self.fails(out), out)
         self.assertIn("2 deploy key(s) reach this workspace", out)
         self.assertIn("a write is authenticated (HTTP 422", out)
+        self.assertIn("a Bugzilla write is authenticated (error 50", out)
 
     def test_a_device_with_no_token_stored_is_a_correct_state_too(self):
         """No `wk key set github-pat` anywhere: reads answer 401, which is a
@@ -243,7 +251,8 @@ class TestTheAgent(_Block):
         """The other direction, and it matters: a workspace whose socket is
         empty while the host says on is a `git push` that will fail at the
         door, reported as the sandbox holding when it is the plumbing."""
-        out = self.run_block(push_on=True, answers={"/pulls": "422"})
+        out = self.run_block(push_on=True, answers={
+            "/pulls": "422", "https://bugs.webkit.org/rest/bug 2": "50"})
         self.assertEqual(1, self.fails(out), out)
         self.assertIn("no identity reaches", out)
 
@@ -297,8 +306,9 @@ class TestAReadIsAuthenticatedFromTheStandingToken(_Block):
         differently would be measuring the write token."""
         for push_on, pulls in ((True, "422"), (False, "401")):
             with self.subTest(push_on=push_on):
-                out = self.run_block(push_on=push_on, answers={"/pulls": pulls,
-                                                               "ssh-add -l": "2" if push_on else "0"})
+                out = self.run_block(push_on=push_on, answers={
+                    "/pulls": pulls, "ssh-add -l": "2" if push_on else "0",
+                    "https://bugs.webkit.org/rest/bug 2": "50" if push_on else "410"})
                 self.assertEqual(0, self.fails(out), out)
                 self.assertIn("a read is authenticated (HTTP 200)", out)
 
@@ -330,7 +340,8 @@ class TestTheSwitch(_Block):
 
     def test_a_write_that_is_refused_while_push_is_on_fails(self):
         out = self.run_block(push_on=True, answers={"ssh-add -l": "1",
-                                                    "/pulls": "401"})
+                                                    "/pulls": "401",
+                                                    "https://bugs.webkit.org/rest/bug 2": "50"})
         self.assertEqual(1, self.fails(out), out)
         # A 401 has two causes from out here -- no write token, or one GitHub
         # refuses -- and naming only one sent a reader after the wrong fault
@@ -345,15 +356,62 @@ class TestTheSwitch(_Block):
         self.assertIn("-X POST -d '{}' https://api.github.com/repos/$fork/pulls", block)
 
 
+class TestBugzilla(_Block):
+    """The second injected host. Bugzilla has no read-only key, so the probe
+    is one anonymous reachability read and one empty write whose refusal code
+    says which credential, if any, reached Bugzilla."""
+
+    ON = {"ssh-add -l": "2", "/pulls": "422"}
+
+    def test_an_unreachable_bugzilla_fails_because_the_injector_is_not_in_its_path(self):
+        out = self.run_block(answers={"bugs.webkit.org/rest/version": "000"})
+        self.assertEqual(1, self.fails(out), out)
+        self.assertIn("not in the path for it", out)
+
+    def test_a_write_that_gets_past_login_while_push_is_off_fails(self):
+        out = self.run_block(push_on=False,
+                             answers={"https://bugs.webkit.org/rest/bug 2": "50"})
+        self.assertEqual(1, self.fails(out), out)
+        self.assertIn("a Bugzilla key is still on the machine", out)
+        self.assertIn("wk push off", out)
+
+    def test_push_on_with_no_key_names_what_to_store(self):
+        out = self.run_block(push_on=True, answers={
+            **self.ON, "https://bugs.webkit.org/rest/bug 2": "410"})
+        self.assertEqual(1, self.fails(out), out)
+        self.assertIn("no Bugzilla API key", out)
+        self.assertIn("wk key set bugzilla-api-key", out)
+
+    def test_push_on_with_a_key_bugzilla_refuses_names_the_replacement(self):
+        out = self.run_block(push_on=True, answers={
+            **self.ON, "https://bugs.webkit.org/rest/bug 2": "306"})
+        self.assertEqual(1, self.fails(out), out)
+        self.assertIn("does not know it", out)
+        self.assertIn("wk key set bugzilla-api-key --replace", out)
+
+    def test_an_answer_that_is_not_bugzillas_is_the_injector_not_answering(self):
+        out = self.run_block(push_on=True, answers={
+            **self.ON, "https://bugs.webkit.org/rest/bug 2": ""})
+        self.assertEqual(1, self.fails(out), out)
+        self.assertIn("nothing Bugzilla-shaped", out)
+
+    def test_the_probe_files_nothing(self):
+        """An empty bug names no product, which Bugzilla refuses before it
+        creates anything -- and the refusal's code is what is read."""
+        block = self.block()
+        self.assertIn("-d '{}' https://bugs.webkit.org/rest/bug", block)
+        self.assertIn("json.load(sys.stdin).get(", block)
+
+
 class TestThePlaceholders(_Block):
-    """Both variables, because `git-webkit` sends one and `gh` the other, and
-    a request with no Authorization header has nothing for the injector to
-    replace."""
+    """All three variables, because `git-webkit` sends two and `gh` the
+    other, and a request with no credential on it has nothing for the
+    injector to replace."""
 
     def test_a_real_looking_token_fails_and_is_never_printed(self):
         """Printing what the workspace holds would print a token on the one
         run where this check matters."""
-        for var in ("GITHUB_COM_TOKEN", "GH_TOKEN"):
+        for var in ("GITHUB_COM_TOKEN", "GH_TOKEN", "BUGS_WEBKIT_ORG_PASSWORD"):
             with self.subTest(var=var):
                 out = self.run_block(answers={var: "ghp-a-real-one"})
                 self.assertEqual(1, self.fails(out), out)
@@ -361,7 +419,7 @@ class TestThePlaceholders(_Block):
                 self.assertNotIn("ghp-a-real-one", out)
 
     def test_an_unset_token_fails_and_names_what_exports_it(self):
-        for var in ("GITHUB_COM_TOKEN", "GH_TOKEN"):
+        for var in ("GITHUB_COM_TOKEN", "GH_TOKEN", "BUGS_WEBKIT_ORG_PASSWORD"):
             with self.subTest(var=var):
                 out = self.run_block(answers={var: ""})
                 self.assertEqual(1, self.fails(out), out)

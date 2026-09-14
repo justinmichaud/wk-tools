@@ -285,8 +285,10 @@ load_target peerbox
     def test_one_implementation_builds_the_forwarded_environment(self):
         """every hop asks lib/common.sh for it, so a flag added to one is
         not missing from the other (CLAUDE.md, "one implementation per rule")"""
-        for path in (REPO / "wk", REPO / "targets" / "remote.sh"):
+        for path in (REPO / "lib" / "target.sh", REPO / "targets" / "remote.sh"):
             self.assertIn("wk_forwarded_env", path.read_text(), path)
+        self.assertIn("vm_wk_cmd", (REPO / "wk").read_text(),
+                      "the dispatcher's VM hop builds its command elsewhere than vm_wk_cmd")
         # The tracked tree, not a directory walk: an agent's git worktree
         # under .claude/worktrees is a second copy of every file.
         offenders = [str(f) for f in repo_files()

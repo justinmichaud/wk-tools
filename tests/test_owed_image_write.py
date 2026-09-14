@@ -17,7 +17,8 @@ Run: python3 -m unittest tests.test_owed_image_write -v
 import subprocess
 import unittest
 
-from tests.support import REPO, WkTest, bash, run, scratch_dir, stub_path
+from tests.support import (REPO, TAILSCALE_KNOWS_NOTHING, WkTest, bash, run, scratch_dir,
+                           stub_path)
 
 SYSIMAGE = REPO / "cmd" / "sysimage"
 
@@ -129,7 +130,8 @@ esac
         img.write_text("not a wic, not a profile this checkout knows\n")
         key = self.tmp / "id.pub"
         key.write_text("ssh-ed25519 AAAAtest test@example\n")
-        with stub_path({"ssh": self._SSH}) as binp, scratch_dir() as store, scratch_dir() as reg:
+        with stub_path({"ssh": self._SSH, "tailscale": TAILSCALE_KNOWS_NOTHING}) as binp, \
+                scratch_dir() as store, scratch_dir() as reg:
             cp = run(
                 "sysimage", "write", "--from", str(img),
                 "--disk", "rpi5:/dev/sdX", "--dry-run",

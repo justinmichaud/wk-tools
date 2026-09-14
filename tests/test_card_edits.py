@@ -22,7 +22,7 @@ import subprocess
 import unittest
 from pathlib import Path
 
-from tests.support import REPO, WkTest, bash, stub_path
+from tests.support import REPO, TAILSCALE_KNOWS_NOTHING, WkTest, bash, stub_path
 
 CARD_PRIV = REPO / "admin" / "wk-card-priv"
 DISK_SH = REPO / "boot" / "disk.sh"
@@ -870,7 +870,7 @@ esac
         key = self.tmp / "id.pub"
         key.write_text("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAtest test@example\n")
         store = self.tmp / "store"
-        with stub_path({"ssh": self._SSH}) as binp:
+        with stub_path({"ssh": self._SSH, "tailscale": TAILSCALE_KNOWS_NOTHING}) as binp:
             cp = self.run_wk(
                 "sysimage", "write", "--from", str(REPO / "README.md"),
                 "--profile", "webkit-2.52-yocto-rpi5-64",

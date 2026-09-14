@@ -25,7 +25,8 @@ if ! bridge_alive; then
     done
 fi
 
-# api.github.com's TLS terminates at the injector, which swaps the placeholder Authorization header for the real token. The bundle is the system store plus that CA and never that CA alone, since these variables replace the trust store outright; `gh` is Go and reads only SSL_CERT_FILE/SSL_CERT_DIR, webkitcorepy only GITHUB_COM_*.
+# api.github.com's TLS terminates at the injector, which swaps the placeholder Authorization header for the real token. The bundle is the system store plus that CA and never that CA alone, since these variables replace the trust store outright; `gh` is Go and reads only SSL_CERT_FILE/SSL_CERT_DIR, webkitcorepy only GITHUB_COM_* and BUGS_WEBKIT_ORG_* -- and, for every other credential, the keyring git-webkit autoinstalls, whose libsecret backend raises KeyringLocked on every lookup here (no session bus) and exits git-webkit; the null backend answers "nothing stored" and it prompts instead.
+export PYTHON_KEYRING_BACKEND=keyring.backends.null.Keyring
 WK_CA_SRC=/run/wk/wk-github-ca.pem
 WK_CA_BUNDLE="$WK_TMP/.wk-ca-bundle.pem"
 if [ -r "$WK_CA_SRC" ]; then
@@ -51,6 +52,11 @@ if [ -r /secrets/github-user ]; then
     GITHUB_COM_USERNAME=$(cat /secrets/github-user)
     export GITHUB_COM_USERNAME
     export GITHUB_COM_TOKEN=wk-injects-this
+fi
+if [ -r /secrets/bugzilla-user ]; then
+    BUGS_WEBKIT_ORG_USERNAME=$(cat /secrets/bugzilla-user)
+    export BUGS_WEBKIT_ORG_USERNAME
+    export BUGS_WEBKIT_ORG_PASSWORD=wk-injects-this
 fi
 
 WK_TOOLS_DIR=/opt/wk-tools

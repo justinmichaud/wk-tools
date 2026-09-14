@@ -35,7 +35,7 @@ unit_start wk-ssh-agent.service "$WK_ROOT" "$WK_STORE" \
 unit_start wk-github-inject.service "$WK_ROOT" "$WK_STORE" \
     "'git-webkit pr' in a workspace will fail" "$_unit_journal" sh -c
 
-if push_agent_pat_sync push_agent_exec "$(push_agent_machine_read_pat)"; then
+if push_agent_cred_sync push_agent_exec "$(push_agent_machine_read_pat)" github-pat; then
     debug "GitHub read token converged"
 else
     warn "could not write $(push_agent_machine_read_pat), so a read from a

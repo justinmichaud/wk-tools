@@ -189,8 +189,8 @@ class TestCheckAsksAboutEveryCredential(_KeyRun):
     def test_every_credential_is_reported_and_absence_is_not_a_fault(self):
         cp, _secrets = self.key("check")
         self.assertIn("credentials:", cp.stdout)
-        for name in ("github-pat", "claude", "litellm", "claude-login",
-                     "tailnet", "tailnet-api", "ntfy"):
+        for name in ("github-pat", "bugzilla-api-key", "claude", "litellm",
+                     "claude-login", "tailnet", "tailnet-api", "ntfy"):
             with self.subTest(name=name):
                 self.assertIn(name, cp.stdout)
         self.assertIn("nothing stored", cp.stdout)
@@ -271,8 +271,8 @@ class TestSetupDoesWhateverIsMissing(_KeyRun):
         cp, _secrets = self.setup_run()
         self.assertNotEqual(0, cp.returncode, cp.stdout + cp.stderr)
         self.assertIn("credentials:", cp.stdout)
-        for name in ("github-pat", "claude", "litellm", "claude-login",
-                     "tailnet", "tailnet-api", "ntfy"):
+        for name in ("github-pat", "bugzilla-api-key", "claude", "litellm",
+                     "claude-login", "tailnet", "tailnet-api", "ntfy"):
             with self.subTest(name=name):
                 self.assertIn(name, cp.stdout)
 
@@ -478,7 +478,7 @@ class TestSetupSaysOneLinePerCredential(_KeyRun):
     page cannot fill) per credential asked for."""
 
     EMPTY_BUDGET = 45
-    PROVISIONED_BUDGET = 20
+    PROVISIONED_BUDGET = 22
 
     def stubs(self, gh):
         return {"gh": gh, "ssh": SSH_IS_THE_FORKS_KEY,
@@ -492,7 +492,8 @@ class TestSetupSaysOneLinePerCredential(_KeyRun):
                 "WK_TS_API_SECRET": str(self.tmp / "tailscale-api-key"),
                 "WK_TAILNET_API": "http://127.0.0.1:1",
                 "WK_ANTHROPIC_API": "http://127.0.0.1:1",
-                "WK_GITHUB_API": "http://127.0.0.1:1"}
+                "WK_GITHUB_API": "http://127.0.0.1:1",
+                "WK_BUGZILLA_API": "http://127.0.0.1:1"}
 
     def lines(self, cp):
         return [l for l in (cp.stdout + cp.stderr).splitlines() if l.strip()]
@@ -503,8 +504,8 @@ class TestSetupSaysOneLinePerCredential(_KeyRun):
         lines = self.lines(cp)
         self.assertLess(len(lines), self.EMPTY_BUDGET,
                         "\n".join(lines))
-        for name in ("github-pat", "claude", "litellm", "claude-login",
-                     "tailnet", "tailnet-api"):
+        for name in ("github-pat", "bugzilla-api-key", "claude", "litellm",
+                     "claude-login", "tailnet", "tailnet-api"):
             with self.subTest(name=name):
                 self.assertRegex(cp.stderr, r"%s\s+skipped\s+\S" % name)
 
@@ -512,6 +513,7 @@ class TestSetupSaysOneLinePerCredential(_KeyRun):
         """Every credential this machine can hold, each one its rule accepts."""
         store = secrets.parent
         (store / "push-keys" / "github-pat").write_text(FINE + "\n")
+        (store / "push-keys" / "bugzilla-api-key").write_text("notarealbugzillakey\n")
         (secrets / "claude-token").write_text("sk-ant-oat01-notarealtoken\n")
         (secrets / "litellm-key").write_text("sk-notarealvirtualkey\n")
         (store / "agent-rw").mkdir(exist_ok=True)
@@ -534,8 +536,8 @@ class TestSetupSaysOneLinePerCredential(_KeyRun):
                          env=self.env())
         lines = self.lines(cp)
         self.assertLess(len(lines), self.PROVISIONED_BUDGET, "\n".join(lines))
-        for name in ("github-pat", "claude", "litellm", "claude-login",
-                     "tailnet", "tailnet-api", "ntfy"):
+        for name in ("github-pat", "bugzilla-api-key", "claude", "litellm",
+                     "claude-login", "tailnet", "tailnet-api", "ntfy"):
             with self.subTest(name=name):
                 self.assertRegex(cp.stderr, r"%s\s+stored\s+/" % name)
 
@@ -548,7 +550,7 @@ class TestSetupSaysOneLinePerCredential(_KeyRun):
                          env=self.env())
         rows = [l for l in cp.stdout.splitlines()
                 if l.startswith("    ") and l.strip()]
-        self.assertEqual(9, len(rows), cp.stdout)
+        self.assertEqual(10, len(rows), cp.stdout)
 
 
 class TestTheOldNamesSayWhatReplacedThem(_KeyRun):

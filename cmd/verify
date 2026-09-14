@@ -140,14 +140,15 @@ probe_no_credentials_inside() {
         fail "private key material inside the workspace: $(printf '%s' "$material" | tr '\n' ' ')"
     fi
 
-    # Never their values. `git-webkit` sends one (webkitcorepy), `gh` the other.
-    for _var in GITHUB_COM_TOKEN GH_TOKEN; do
+    # Never their values. `git-webkit` sends two (webkitcorepy), `gh` the other.
+    for _var in GITHUB_COM_TOKEN GH_TOKEN BUGS_WEBKIT_ORG_PASSWORD; do
         tok=$(inside "printf %s \"\${$_var:-}\"")
         case "$tok" in
             wk-injects-this) pass "$_var in the workspace is the placeholder" ;;
-            "")              fail "$_var is unset in here, so nothing that reads it sends an
-        Authorization header for the injector to replace (container/proxy/ensure-bridge.sh
-        exports both, from /secrets/github-user and the injector's CA)" ;;
+            "")              fail "$_var is unset in here, so nothing that reads it sends a
+        credential for the injector to replace (container/proxy/ensure-bridge.sh
+        exports all three, from /secrets/github-user, /secrets/bugzilla-user and
+        the injector's CA; 'wk push on' rewrites /secrets)" ;;
             *)               fail "$_var in the workspace is not the placeholder -- something
         put a real credential in here; find it and remove it" ;;
         esac
@@ -338,6 +339,37 @@ probe_gitwebkit_setup() {
     return "$fails"
 }
 
+# Two requests to one host. Bugzilla names its own refusal in the body (`code`): 410 is "log in first", 306 a key it does not know, and anything else is an authenticated request refused for being an empty bug -- so the empty POST measures the key and files nothing.
+probe_bugzilla_api() {
+    local fails=0 code
+    code=$(inside "curl -sS -m 20 -o /dev/null -w '%{http_code}' https://bugs.webkit.org/rest/version 2>/dev/null")
+    case "$code" in
+        200) pass "bugs.webkit.org reachable through the injector (HTTP $code)" ;;
+        *)   fail "bugs.webkit.org answered '${code:-nothing}' -- the injector is not in the path for it
+        (systemctl --user status wk-github-inject; the CA is /run/wk/wk-github-ca.pem)" ;;
+    esac
+
+    code=$(inside "curl -sS -m 20 -X POST -H 'Content-Type: application/json' -d '{}' https://bugs.webkit.org/rest/bug 2>/dev/null \
+        | python3 -c 'import json, sys; print(json.load(sys.stdin).get(\"code\", \"\"))' 2>/dev/null")
+    if [ "$PUSH_ON" = 1 ]; then
+        case "$code" in
+            410) fail "push is ON but POST /rest/bug answered 'log in first' (410): the injector has
+        no Bugzilla API key -- 'wk key set bugzilla-api-key', then 'wk push on' again" ;;
+            306) fail "push is ON and the key reached Bugzilla, which does not know it (306):
+        'wk key set bugzilla-api-key --replace', then 'wk push on' again" ;;
+            "")  fail "POST /rest/bug answered nothing Bugzilla-shaped -- the injector is in the
+        path but not answering for bugs.webkit.org" ;;
+            *)   pass "a Bugzilla write is authenticated (error $code: an empty bug, nothing filed), and push is on" ;;
+        esac
+    else
+        [ "$code" = 410 ] \
+            && pass "a Bugzilla write is unauthenticated (410, log in first): nothing in here can file a bug" \
+            || fail "POST /rest/bug answered '${code:-nothing}' where the host does not say push is
+        on -- expected 410, so a Bugzilla key is still on the machine:  wk push off"
+    fi
+    return "$fails"
+}
+
 # Probe exit: 0 hardware, 1 software only, 2 no EGL, 3 build failed.
 probe_gpu() {
     local fails=0 probe prc
@@ -439,6 +471,7 @@ fi
 par_run no-credentials-inside probe_no_credentials_inside
 par_run agent-identities probe_agent_identities
 par_run github-api probe_github_api
+par_run bugzilla-api probe_bugzilla_api
 par_run gitwebkit-setup probe_gitwebkit_setup
 par_run agent-credential probe_agent_credential
 par_run gpu probe_gpu
