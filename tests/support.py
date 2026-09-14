@@ -316,6 +316,21 @@ def scratch_dir(prefix="wk-test-"):
         shutil.rmtree(d, ignore_errors=True)
 
 
+@contextlib.contextmanager
+def glob_bait(patterns):
+    """A directory holding one file per pattern word, named so the word
+    pathname-expands there: `*Tools/Scripts/build-*` gets xTools/Scripts/build-x.
+    Run a matcher from this cwd and a pattern that leaks through an unquoted
+    expansion stops matching."""
+    with scratch_dir("wk-glob-bait-") as d:
+        for word in patterns.split():
+            name = re.sub(r"\[[^\]]*\]", "x", word).replace("*", "x").replace("?", "x")
+            path = d / name.lstrip("/")
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("")
+        yield d
+
+
 def podman_vm_running(machine="wk"):
     try:
         cp = subprocess.run(

@@ -546,8 +546,8 @@ class TestAToolsSweepThatLostATargetFails(unittest.TestCase):
 
     def test_the_furniture_verdict_is_the_exit_status(self):
         text = (REPO / "cmd" / "sync").read_text()
-        self.assertNotIn('sync_furniture "$TARGET" || true', text)
-        self.assertIn('sync_furniture "$TARGET" || FURNITURE_RC=1', text)
-        # One exit carries both verdicts, at the end of the run.
+        self.assertNotIn('sync_furniture || true', text)
+        self.assertIn('sync_furniture || FURNITURE_RC=1', text)
+        # One exit carries every verdict, at the end of the run.
         self.assertIn(
-            '[ "$FURNITURE_RC" -eq 0 ] && [ "$STORE_RC" -eq 0 ] || exit 1', text)
+            '[ "$FURNITURE_RC" -eq 0 ] && [ "$MIRROR_RC" -eq 0 ] && [ "$STORE_RC" -eq 0 ] || exit 1', text)

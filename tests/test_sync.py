@@ -162,58 +162,61 @@ class TestSnapshotCurrent(unittest.TestCase):
         self.assertFalse(self._current("", ""))
 
 
-class TestLocalStoreNamed(unittest.TestCase):
-    """local_store_named <target> is the pure decision behind which half of
-    `wk sync --tools` runs: the tooling copies always, and this machine's own
-    mirror and snapshot only when what was named includes them. A target with
-    a machine of its own keeps its own mirror -- refreshing it is that
-    driver's job (t_sync) -- so `wk sync --tools buildbox4` must not publish a
-    snapshot here. Driven through `. cmd/sync functions`, so no store, no
-    network and no workspace are touched."""
+class TestWhatAScopeNames(unittest.TestCase):
+    """scope_targets is the one list every half of a run walks -- the tooling
+    copies, whether this machine's mirror is refreshed, whose snapshot and
+    workspaces -- so the scopes are pinned here once: bare is the targets on
+    this machine, --target one, --all and a bare --tools every one this
+    machine knows. Lifted and driven over a stubbed fleet."""
 
-    def _named(self, target):
-        cp = bash(f'. cmd/sync functions\nlocal_store_named "{target}"\n')
-        return cp.returncode == 0
+    FUNCS = (_lift_func(REPO / "cmd" / "sync", "scope_targets")
+             + _lift_func(REPO / "cmd" / "sync", "scope_touches_here"))
+    FLEET = """
+target_here()    { echo container; echo vm; }
+walk_targets()   { echo container; echo vm; echo buildbox4; echo moose; }
+target_is_here() { case "$1" in container|vm) return 0 ;; *) return 1 ;; esac; }
+"""
 
-    def test_naming_nothing_includes_this_machines_store(self):
-        self.assertTrue(self._named(""))
+    def _targets(self, scope, target=""):
+        cp = bash(". lib/common.sh\n" + self.FLEET + self.FUNCS
+                  + f"SCOPE={shlex.quote(scope)}\nTARGET={shlex.quote(target)}\n"
+                  "scope_targets\nscope_touches_here && echo HERE || echo ELSEWHERE\n")
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        return cp.stdout.split()
 
-    def test_a_local_kind_includes_it(self):
-        # container and vm both keep their workspaces' snapshots in this
-        # machine's store (on macOS, in the podman VM it owns).
-        self.assertTrue(self._named("container"))
-        self.assertTrue(self._named("vm"))
-        self.assertTrue(self._named("local"))
+    def test_bare_is_every_target_on_this_machine(self):
+        self.assertEqual(self._targets("here"), ["container", "vm", "HERE"])
 
-    def test_a_machine_of_its_own_does_not(self):
-        # Every configured machine in the registry: none of them is this
-        # machine's store, so none of them publishes a snapshot here.
-        confs = sorted((REPO / "targets" / "hosts").glob("*.conf"))
-        self.assertTrue(confs, "no machine confs to check")
-        for conf in confs:
-            self.assertFalse(self._named(conf.stem), conf.stem)
+    def test_a_named_target_is_that_one(self):
+        self.assertEqual(self._targets("target", "buildbox4"), ["buildbox4", "ELSEWHERE"])
+        self.assertEqual(self._targets("target", "vm"), ["vm", "HERE"])
 
-    def test_a_name_that_is_no_target_does_not(self):
-        # Nothing here can be its store either; sync_furniture's load_target
-        # is what refuses the name itself, in one place for every command.
-        self.assertFalse(self._named("not-a-target"))
+    def test_all_and_a_bare_tools_are_everyone(self):
+        for scope in ("all", "tools"):
+            with self.subTest(scope=scope):
+                self.assertEqual(self._targets(scope),
+                                 ["container", "vm", "buildbox4", "moose", "HERE"])
+
+    def test_tools_with_a_target_is_that_one(self):
+        self.assertEqual(self._targets("tools", "moose"), ["moose", "ELSEWHERE"])
+
+    def test_no_command_decides_a_stores_locality_by_kind(self):
+        """Whose snapshot to publish is each target's own answer (t_needs_base
+        and store_is_local), not a kind list in cmd/sync."""
+        self.assertNotIn("local_store_named", (REPO / "cmd" / "sync").read_text())
 
 
 class TestWhatABareSyncMeans(unittest.TestCase):
     """The one decision left after parsing: a bare `wk sync` is this machine,
-    whole -- the default target's tooling, its mirror, a snapshot, then a fetch
-    in every workspace on it. There is no menu to answer, because the mirror
-    refresh is what makes each workspace's fetch a local read of a handful of
-    refs, and asking for one half without the other is the slow half. Lifted by
-    line range (top-level code, not a function) and driven with default_target
-    stubbed, so nothing here reaches a machine."""
+    whole -- every target that lives here, since the containers and the macOS
+    guests read the one mirror this host keeps. Lifted by line range
+    (top-level code, not a function)."""
 
     BLOCK = _lift_range(REPO / "cmd" / "sync", r"^# Bare is this machine", r"^fi$")
 
     def _resolve(self, scope="", only=""):
         script = (
             ". lib/common.sh\n"
-            "default_target() { echo container; }\n"
             f"SCOPE={shlex.quote(scope)}\nONLY={shlex.quote(only)}\nTARGET=''\n"
             + self.BLOCK
             + "\nprintf 'SCOPE=%s TARGET=%s\\n' \"$SCOPE\" \"$TARGET\"\n"
@@ -222,8 +225,8 @@ class TestWhatABareSyncMeans(unittest.TestCase):
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
         return cp.stdout.strip()
 
-    def test_bare_is_this_machines_whole_default_target(self):
-        self.assertEqual(self._resolve(), "SCOPE=target TARGET=container")
+    def test_bare_is_this_machine(self):
+        self.assertEqual(self._resolve(), "SCOPE=here TARGET=")
 
     def test_a_named_workspace_is_left_as_it_was_parsed(self):
         self.assertEqual(self._resolve(scope="ws", only="bug-238"),
@@ -236,54 +239,83 @@ class TestWhatABareSyncMeans(unittest.TestCase):
 
 
 class TestWhatEachScopeRuns(unittest.TestCase):
-    """cmd/sync's tail, in order: the tooling, then this machine's mirror and
-    snapshot, then a fetch in the workspaces -- because a workspace's fetch
-    reads that mirror, and fetching before refreshing it hands back what the
-    machine already had. Lifted by line range and driven over stubs at every
-    boundary (`with_lock store -- sync_store` is where the publish happens, so
-    stubbing with_lock records it without running one)."""
+    """cmd/sync's tail, in order: the tooling copies, this machine's mirror,
+    then each target's snapshot and the fetch in its workspaces -- a snapshot
+    is cloned off the mirror and a workspace fetches from it, so either before
+    the refresh hands back what the machine already had. The mirror is
+    refreshed where it is writable (mirror_is_here) and only when the scope
+    names a target of this machine; a snapshot goes to whoever holds the
+    target's store -- here, or the podman VM on a macOS host, which is asked
+    with the same scope word. Lifted by line range and driven over stubs at
+    every boundary (`with_lock store -- <fn>` is where the mirror refresh and
+    the publish happen, so stubbing with_lock records them without running
+    one)."""
 
     TAIL = _lift_range(REPO / "cmd" / "sync", r'^if \[ "\$SCOPE" = ws \]', r"^exit 0$")
+    SCOPES = (_lift_func(REPO / "cmd" / "sync", "scope_targets")
+              + _lift_func(REPO / "cmd" / "sync", "scope_touches_here"))
 
     STUBS = """
 in_workspace()      { return 1; }
 store_init()        { :; }
 sync_workspaces()   { echo "WORKSPACES: $*"; }
-sync_furniture()    { echo "FURNITURE: ${1:-<every target>}"; }
+sync_furniture()    { echo "FURNITURE: $(scope_targets | tr '\\n' ' ')"; }
 sync_target()       { echo "FETCH-IN: $1"; }
-local_store_named() { [ -z "$1" ] || [ "$1" = container ]; }
+load_target()       { case "$1" in container) _NEEDS=0 ;; *) _NEEDS=1 ;; esac; }
+t_needs_base()      { return "$_NEEDS"; }
 store_is_local()    { return 0; }
-walk_targets()      { echo container; echo buildbox4; }
+mirror_is_here()    { return 0; }
+target_here()       { echo container; echo vm; }
+walk_targets()      { echo container; echo vm; echo buildbox4; }
+target_is_here()    { [ "$1" != buildbox4 ]; }
+t_far_side()        { echo answering; }
+t_wk()              { echo "IN-VM: wk $*"; }
 with_lock()         { shift 2; echo "STORE: $*"; }
 """
 
     def _run(self, scope, target="", only="", extra=""):
         script = (
-            ". lib/common.sh\n" + self.STUBS + extra
+            ". lib/common.sh\n" + self.STUBS + self.SCOPES + extra
             + f"SCOPE={shlex.quote(scope)}\nTARGET={shlex.quote(target)}\n"
-            f"ONLY={shlex.quote(only)}\nFURNITURE_RC=0\n"
+            f"ONLY={shlex.quote(only)}\n"
             + self.TAIL
         )
         cp = bash(script)
-        return cp, [l for l in (cp.stdout + cp.stderr).splitlines()
-                    if l.split(":")[0] in ("FURNITURE", "STORE", "FETCH-IN", "WORKSPACES")]
+        return cp, [l.strip() for l in (cp.stdout + cp.stderr).splitlines()
+                    if l.strip().split(":")[0] in ("FURNITURE", "STORE", "FETCH-IN", "WORKSPACES", "IN-VM")]
+
+    def test_bare_is_the_tooling_the_mirror_then_each_target_here(self):
+        cp, steps = self._run("here")
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertEqual(steps, ["FURNITURE: container vm", "STORE: sync_mirror",
+                                 "STORE: sync_snapshot", "FETCH-IN: container",
+                                 "FETCH-IN: vm"])
 
     def test_a_named_target_refreshes_its_furniture_before_fetching_in_it(self):
         cp, steps = self._run("target", target="container")
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertEqual(steps, ["FURNITURE: container", "STORE: sync_store",
-                                 "FETCH-IN: container"])
+        self.assertEqual(steps, ["FURNITURE: container", "STORE: sync_mirror",
+                                 "STORE: sync_snapshot", "FETCH-IN: container"])
+
+    def test_a_guest_target_gets_the_mirror_and_a_fetch_but_no_snapshot(self):
+        """A guest clones its checkout off the host's mirror at first start
+        (targets/vm.sh) and overlays nothing, so there is no snapshot to
+        publish for it -- and no store of its own to fill with one."""
+        cp, steps = self._run("target", target="vm")
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertEqual(steps, ["FURNITURE: vm", "STORE: sync_mirror", "FETCH-IN: vm"])
 
     def test_all_visits_every_target_after_the_furniture(self):
         cp, steps = self._run("all")
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertEqual(steps, ["FURNITURE: <every target>", "STORE: sync_store",
-                                 "FETCH-IN: container", "FETCH-IN: buildbox4"])
+        self.assertEqual(steps, ["FURNITURE: container vm buildbox4", "STORE: sync_mirror",
+                                 "STORE: sync_snapshot", "FETCH-IN: container",
+                                 "FETCH-IN: vm", "FETCH-IN: buildbox4"])
 
     def test_tools_stops_at_the_furniture(self):
         cp, steps = self._run("tools", target="container")
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertEqual(steps, ["FURNITURE: container", "STORE: sync_store"])
+        self.assertEqual(steps, ["FURNITURE: container", "STORE: sync_mirror", "STORE: sync_snapshot"])
 
     def test_one_workspace_fetches_in_that_one_and_nothing_else(self):
         """`wk sync <ws>` is the cheap form a person types in a loop, and it
@@ -293,38 +325,67 @@ with_lock()         { shift 2; echo "STORE: $*"; }
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
         self.assertEqual(steps, ["WORKSPACES: bug-238"])
 
-    def test_a_machine_of_its_own_publishes_no_snapshot_here(self):
+    def test_a_machine_of_its_own_touches_neither_the_mirror_nor_a_snapshot_here(self):
         """A build box or a peer keeps its own store; this machine's mirror and
         snapshot are not part of syncing it (its own were, in sync_furniture)."""
         cp, steps = self._run("target", target="buildbox4")
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
         self.assertEqual(steps, ["FURNITURE: buildbox4", "FETCH-IN: buildbox4"])
 
-    def test_a_store_that_is_not_this_machines_says_where_it_is(self):
-        """On macOS the store is inside the podman VM: the tooling copies are
-        done out here, and the rest is said rather than attempted."""
+    def test_a_store_in_the_podman_vm_is_asked_with_the_same_scope_word(self):
+        """On a macOS host the container store is the VM's: the mirror is
+        refreshed out here, where it is writable, and the VM -- which runs
+        this same tree -- publishes the snapshot off its read-only mount and
+        fetches in each workspace."""
         cp, steps = self._run("target", target="container",
                               extra="store_is_local() { return 1; }\n")
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertEqual(steps, ["FURNITURE: container", "FETCH-IN: container"])
-        self.assertIn("in the podman VM", cp.stdout + cp.stderr)
+        self.assertEqual(steps, ["FURNITURE: container", "STORE: sync_mirror",
+                                 "IN-VM: wk sync --target container"])
+        cp, steps = self._run("tools", target="container",
+                              extra="store_is_local() { return 1; }\n")
+        self.assertEqual(steps, ["FURNITURE: container", "STORE: sync_mirror",
+                                 "IN-VM: wk sync --tools container"])
+
+    def test_a_stopped_podman_machine_is_named_and_is_not_a_success(self):
+        cp, steps = self._run("target", target="container",
+                              extra="store_is_local() { return 1; }\nt_far_side() { echo stopped; }\n")
+        self.assertNotEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertEqual(steps, ["FURNITURE: container", "STORE: sync_mirror"])
+        self.assertIn("podman machine is stopped", cp.stdout + cp.stderr)
+        self.assertIn("wk start", cp.stdout + cp.stderr)
+
+    def test_inside_the_podman_vm_the_mirror_is_read_not_refreshed(self):
+        """The VM's half of the macOS run above: its mirror is the host's,
+        mounted read-only, so the snapshot is published off it and nothing in
+        there fetches into it."""
+        cp, steps = self._run("target", target="container",
+                              extra="mirror_is_here() { return 1; }\n")
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertEqual(steps, ["FURNITURE: container", "STORE: sync_snapshot",
+                                 "FETCH-IN: container"])
 
     def test_a_target_that_did_not_take_the_tooling_fails_the_run(self):
         """The furniture verdict outlives the halves that follow it: the
         publish and the fetches still run, and a run that lost a target is not
         a success whatever they did."""
         cp, steps = self._run("target", target="container",
-                              extra='sync_furniture() { echo "FURNITURE: $1"; return 1; }\n')
+                              extra='sync_furniture() { echo "FURNITURE: $TARGET"; return 1; }\n')
         self.assertNotEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertEqual(steps, ["FURNITURE: container", "STORE: sync_store",
-                                 "FETCH-IN: container"])
+        self.assertEqual(steps, ["FURNITURE: container", "STORE: sync_mirror",
+                                 "STORE: sync_snapshot", "FETCH-IN: container"])
 
     def test_a_failed_publish_does_not_stop_the_fetches_and_is_not_a_success(self):
         cp, steps = self._run("target", target="container",
-                              extra="with_lock() { shift 2; echo \"STORE: $*\"; return 1; }\n")
+                              extra="with_lock() { shift 2; echo \"STORE: $*\"; [ \"$1\" != sync_snapshot ]; }\n")
         self.assertNotEqual(cp.returncode, 0, "a run that could not publish is not a success")
-        self.assertEqual(steps, ["FURNITURE: container", "STORE: sync_store",
-                                 "FETCH-IN: container"])
+        self.assertEqual(steps, ["FURNITURE: container", "STORE: sync_mirror",
+                                 "STORE: sync_snapshot", "FETCH-IN: container"])
+
+    def test_the_snapshot_borrows_the_mirrors_objects(self):
+        """`--shared`: a machine holds WebKit's history once, in the mirror,
+        and a snapshot -- and every workspace overlaid on it -- borrows it."""
+        self.assertIn("git clone --quiet --shared", self.TAIL)
 
 
 class TestSyncArgParsing(unittest.TestCase):
@@ -478,29 +539,14 @@ sync_workspaces() { echo "FETCH: $* target=${WK_TARGET:-}"; }
         self.assertNotIn("--tools", cp.stdout)
         self.assertNotIn("FETCH:", cp.stdout)
 
-    def test_a_target_whose_records_are_not_readable_here_says_so(self):
-        # The container store on macOS: it is inside the podman VM, so every
-        # workspace would read as "creating" from a base-id not visible here.
-        stubs = """
-load_target() { WK_REMOTE_PEER=""; }
-t_needs_base() { return 0; }
-store_is_local() { return 1; }
-target_workspaces() { echo ws-a; }
-sync_workspaces() { echo "FETCH: $*"; }
-"""
-        cp = self._run(self.SYNC_TARGET, stubs, "sync_target container")
-        self.assertEqual(cp.returncode, 0, cp.stderr)
-        self.assertNotIn("FETCH:", cp.stdout)
-        self.assertIn("podman VM", cp.stderr)
-
     FURNITURE_STUBS = """
 load_target() { :; }
-walk_targets() { echo container; echo vm; echo buildbox4; }
+scope_targets() { if [ -n "$TARGET" ]; then echo "$TARGET"; else echo container; echo vm; echo buildbox4; fi; }
 t_sync() { echo "furniture: $_t named=${WK_SYNC_NAMED:-no}"; }
 """
 
     def test_tools_with_no_target_visits_every_one(self):
-        cp = self._run(self.SYNC_FURNITURE, self.FURNITURE_STUBS, 'sync_furniture ""')
+        cp = self._run(self.SYNC_FURNITURE, self.FURNITURE_STUBS, 'TARGET=""; sync_furniture')
         self.assertEqual(cp.returncode, 0, cp.stderr)
         self.assertEqual(
             [l for l in cp.stdout.splitlines() if l.startswith("furniture:")],
@@ -511,7 +557,7 @@ t_sync() { echo "furniture: $_t named=${WK_SYNC_NAMED:-no}"; }
         # WK_SYNC_NAMED is the difference a peer reads: a snapshot is
         # published on somebody else's workstation only when it was named,
         # never as part of a sweep (targets/remote.sh, t_sync).
-        cp = self._run(self.SYNC_FURNITURE, self.FURNITURE_STUBS, "sync_furniture buildbox4")
+        cp = self._run(self.SYNC_FURNITURE, self.FURNITURE_STUBS, "TARGET=buildbox4; sync_furniture")
         self.assertEqual(cp.returncode, 0, cp.stderr)
         self.assertEqual(
             [l for l in cp.stdout.splitlines() if l.startswith("furniture:")],
@@ -598,8 +644,9 @@ class TestSyncingAPeerReachesItsOwnStore(unittest.TestCase):
         stubs = f"""
 WK_TARGET=apeer
 WK_REMOTE_HOST=apeer
+TARGET=apeer
 load_target()       {{ WK_TARGET="$1"; WK_REMOTE_PEER=1; }}
-walk_targets()      {{ echo apeer; }}
+scope_targets()     {{ echo apeer; }}
 target_workspaces() {{ echo ws-a; echo ws-b; }}
 _remote_probe()     {{ :; }}
 _remote_peer()      {{ return 0; }}
@@ -612,7 +659,7 @@ t_needs_base()      {{ return 1; }}
 store_is_local()    {{ return 0; }}
 """
         return bash(". lib/common.sh\n" + stubs + self.T_SYNC + self.SYNC_FURNITURE
-                    + self.SYNC_TARGET + "\nsync_furniture apeer\nsync_target apeer\n")
+                    + self.SYNC_TARGET + "\nsync_furniture\nsync_target apeer\n")
 
     def test_the_peer_refreshes_its_own_mirror_and_snapshot_and_each_workspace(self):
         cp = self._run()
@@ -630,121 +677,64 @@ store_is_local()    {{ return 0; }}
 
 
 class TestDispatcherForwardingRuleForSync(unittest.TestCase):
-    """The dispatcher's (`wk`) forwarding rule, driven directly against
-    cmd/sync's own declaration (`# wk: flag --target,--all,--tools,--machine
-    where=host`, cmd/sync:5): whether a container workspace on a macOS host gets `wk
-    sync ...` forwarded whole into the podman VM turns on two things in
-    `wk` -- cmd_where() (wk:164-171, using the flag/sub overrides
-    decl_load loaded) and resolve_target() (wk:344-354) -- combined by
-    `[ "$where" = workspace ] || exec "$impl" "$@"` (wk:707, which skips
-    the whole VM-forwarding block below it whenever `where` is not
-    `workspace`) and, inside that block, `[ "$(resolve_target "$@")" =
-    container ]` (wk:721-722). Lifted rather than run for real: this
-    machine is macOS (Platform: darwin), so an actual forwarding
-    `./wk sync ...` would try to start the podman VM -- a machine mutation
-    this suite must not cause."""
+    """cmd/sync declares `where=dynamic` and answers the dispatcher's
+    `wk sync --where <args>` itself: a workspace's name goes to the machine
+    holding it (the podman VM for a container workspace on a macOS host), and
+    every other shape is this host's -- the mirror is written here, and the
+    VM and the guests read it. Driven through the dispatcher's own cmd_where,
+    lifted, and through cmd/sync's answer directly; nothing is forwarded."""
 
     FUNCS = "\n".join(
         _lift_func(REPO / "wk", f)
-        # resolve_target asks the declaration where the name sits rather than
-        # taking the first positional, so its helpers come with it.
-        for f in ("decl_load", "in_list", "sub_override", "flag_override",
-                  "cmd_where", "cmd_name", "cmd_takes", "name_slot",
-                  "positional", "positional_count", "argv_name",
-                  "resolve_target")
+        for f in ("decl_load", "in_list", "sub_override", "flag_override", "cmd_where")
     )
 
-    def _where(self, *args):
+    def _where(self, *args, env=None):
         script = (
             ". lib/common.sh\n" + self.FUNCS
             + "\ndecl_load cmd/sync\ncmd_where cmd/sync " + " ".join(shlex.quote(a) for a in args) + "\n"
         )
-        cp = bash(script)
+        cp = bash(script, env=env)
         self.assertEqual(cp.returncode, 0, cp.stderr)
         return cp.stdout
 
-    def _target(self, *args, ws_target_returns=None):
-        # ws_target (lib/store.sh) is only called when resolve_target finds
-        # a name; stubbed here so this stays a pure decision-logic test with
-        # no real workspace registry.
-        stub = ""
-        if ws_target_returns is not None:
-            stub = f'ws_target() {{ printf %s {shlex.quote(ws_target_returns)}; }}\n'
-        # decl_load first, as the dispatcher does: resolve_target asks the
-        # declaration where the workspace name sits.
-        script = (
-            ". lib/common.sh\n" + stub + self.FUNCS
-            + "\ndecl_load cmd/sync\nresolve_target "
-            + " ".join(shlex.quote(a) for a in args) + "\n"
-        )
-        cp = bash(script)
-        self.assertEqual(cp.returncode, 0, cp.stderr)
-        return cp.stdout
+    def test_bare_sync_is_this_host(self):
+        self.assertEqual(self._where(), "host")
 
-    def test_bare_sync_is_where_workspace(self):
-        # No name, no scope flag: the default declaration (cmd/sync:4) applies.
-        self.assertEqual(self._where(), "workspace")
-
-    def test_a_named_workspace_is_where_workspace(self):
+    def test_a_named_workspace_goes_to_the_machine_holding_it(self):
         self.assertEqual(self._where("myws"), "workspace")
 
-    def test_every_scope_flag_is_where_host(self):
-        # cmd/sync:5's flag override -- this is what makes the dispatcher skip
-        # the VM-forwarding block entirely for a scope flag, regardless of
-        # what resolve_target would say. --machine is declared with them so
-        # its tombstone refuses here rather than inside the podman VM.
-        for flag in ("--all", "--tools", "--target", "--machine"):
-            self.assertEqual(self._where(flag), "host", flag)
+    def test_every_scope_flag_is_this_host(self):
+        for args in (("--all",), ("--tools",), ("--target", "moose"), ("--tools", "buildbox4"),
+                     ("--target=moose",), ("--tools=buildbox4",), ("--machine",),
+                     ("--tools", "--all")):
+            with self.subTest(args=args):
+                self.assertEqual(self._where(*args), "host", args)
 
-    def test_bare_sync_resolves_to_container_the_forwarding_default(self):
-        # No name and no --target means resolve_target's fallback
-        # (wk:352-353) applies: container. Combined with where=workspace
-        # above, this is the case that actually gets forwarded into the VM.
-        self.assertEqual(self._target(), "container")
+    def test_inside_a_workspace_bare_is_that_workspace(self):
+        """Inside a workspace a bare `wk sync` is that one fetch, and the
+        dispatcher refuses a host command in there -- so the answer is
+        `workspace`, and the scope flags stay `host` to be refused."""
+        with fake_workspace() as ws:
+            self.assertEqual(self._where(env=ws.env()), "workspace")
+            self.assertEqual(self._where("--all", env=ws.env()), "host")
 
-    def test_all_still_resolves_to_container_but_where_makes_it_moot(self):
-        # resolve_target on its own does not know about --all -- it just sees
-        # no name (a flag is not a positional) and defaults to container. It
-        # is cmd_where's "host" (tested above) that actually stops this from
-        # forwarding: the dispatcher never reaches its resolve_target check
-        # at all once `where` is not `workspace`.
-        self.assertEqual(self._target("--all"), "container")
-
-    def test_the_equals_spelling_is_a_flag_too(self):
-        # `--target=moose` is the same flag as `--target moose`, and the
-        # dispatcher has to see it as one: unrecognised, `where` stays at its
-        # default and a host command is sent to the podman VM, which can see
-        # none of the fleet.
-        self.assertEqual(self._where("--target=moose"), "host")
-        self.assertEqual(self._where("--tools=buildbox4"), "host")
-        self.assertEqual(self._target("--target=moose"), "moose")
-
-    def test_a_named_target_is_what_resolve_target_reports(self):
-        # `--target <t>` is the dispatcher's own spelling for "which target"
-        # (resolve_target, wk:379-388), shared with `wk new --target`: so
-        # `wk sync --target moose` is never mistaken for a container command.
-        self.assertEqual(self._target("--target", "moose"), "moose")
-
-    def test_a_named_container_workspace_resolves_to_container(self):
-        self.assertEqual(self._target("myws", ws_target_returns="container"), "container")
-
-    def test_a_named_vm_workspace_does_not_resolve_to_container(self):
-        # A workspace-scoped sync only forwards into the VM when the named
-        # workspace's own target actually is container; a vm/remote
-        # workspace's sync runs on the host instead (cmd/sync drives it
-        # over t_exec from out here).
-        self.assertEqual(self._target("myws", ws_target_returns="vm"), "vm")
+    def test_the_declaration_is_dynamic_and_nothing_else_decides(self):
+        text = (REPO / "cmd" / "sync").read_text()
+        self.assertIn("where=dynamic", text)
+        self.assertNotIn("where=host", text.split("set -euo pipefail")[0],
+                         "a flag override decides where= beside the --where answer")
 
 
 class TestSyncInsideWorkspace(unittest.TestCase):
     """Inside a workspace `wk sync` has exactly one meaning: fetch in this
-    workspace, from the mirror bind-mounted read-only at /mirror/WebKit.git
-    (defect: "wk sync should work inside a sandbox too"). cmd/sync no longer
-    declares `outside`; --target/--all/--tools/--machine are refused before
-    this file even starts by the dispatcher's own `flag ... where=host`
-    override (wk's in_workspace-and-where=host refusal), and cmd/sync
-    refuses a name that is not this workspace's own the same way. A bare
-    `wk sync` is the one shape that reaches all the way to a real fetch."""
+    workspace, from the mirror its machine mounts in read-only (defect: "wk
+    sync should work inside a sandbox too"). cmd/sync no longer declares
+    `outside`; --target/--all/--tools/--machine answer `host` to the
+    dispatcher's `--where` question and are refused before this file even
+    starts (wk's in_workspace-and-where=host refusal), and cmd/sync refuses a
+    name that is not this workspace's own the same way. A bare `wk sync` is
+    the one shape that reaches all the way to a real fetch."""
 
     def _refused(self, *args):
         with fake_workspace() as ws:
@@ -796,14 +786,11 @@ class TestSyncInsideWorkspace(unittest.TestCase):
         return bare, sha
 
     def test_bare_sync_fetches_in_this_workspaces_own_checkout(self):
-        # No real /mirror/WebKit.git on the machine running this test, so
-        # the fetch takes sync_workspaces' other branch -- the workspace's
-        # own "origin" remote, over what would be the egress-proxy path on
-        # a real workspace. That branch is exercised for real here; the
-        # /mirror branch is the same function, gated on a path this test
-        # cannot fake without root, so it is verified by reading (the
-        # command line names $(t_src) and /mirror/WebKit.git literally,
-        # cmd/sync's sync_workspaces) rather than by running it.
+        # No mirror mounted on the machine running this test, so the fetch
+        # takes sync_workspaces' other branch -- the workspace's own "origin"
+        # remote, over what would be the egress-proxy path on a real
+        # workspace. The mirror branch is the same function (ws_fetch_script),
+        # exercised against a local mirror in tests/test_mirror_path.py.
         with fake_workspace() as ws:
             bare, sha = self._bare_repo_with_a_commit(ws.tmp)
             src = ws.ws_dir / "WebKit"

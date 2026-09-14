@@ -1,16 +1,16 @@
 #!/usr/bin/env bash
 #
 # wk sync [<workspace>|--target <t>|--all|--tools] -- bring WebKit and the tooling up to date
-# wk: where=workspace name=optional group=sources needs git,rsync opts --all,--target=,--tools,--machine
-# wk: flag --target,--all,--tools,--machine where=host
+# wk: where=dynamic name=optional group=sources needs git,rsync opts --all,--target=,--tools,--machine
 #
 # A fetch, and never a checkout: no branch is switched, merged or rebased, here
 # or in a workspace. Safe to run at any time -- workspaces already made stay
 # pinned to the snapshot they were created from, and only ones made after this
 # pick up the new one.
 #
-#   wk sync                    this machine: its tooling, its mirror and a new
-#                              snapshot, then a fetch in every workspace here
+#   wk sync                    this machine: its tooling, its one WebKit mirror,
+#                              a new snapshot, then a fetch in every workspace
+#                              here -- the containers and the macOS guests
 #   wk sync <workspace>        a fetch in that one workspace, from its mirror
 #   wk sync --target <target>  that target's furniture, then its workspaces
 #   wk sync --all              every target's furniture, then its workspaces
@@ -29,18 +29,26 @@ WK_ROOT="${WK_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
 . "$WK_ROOT/lib/target.sh"
 . "$WK_ROOT/lib/par.sh"
 
+# The dispatcher's `where=dynamic` question. A workspace's name -- or a bare `wk sync` inside one -- goes to the machine holding it; every scope flag is this host's, where the mirror is written and the podman VM and the guests read it.
+if [ "${1:-}" = --where ]; then
+    shift
+    for _a in "$@"; do
+        case "$_a" in
+            --all|--tools|--tools=*|--target|--target=*|--machine) echo host; exit 0 ;;
+            -*) ;;
+            *)  echo workspace; exit 0 ;;
+        esac
+    done
+    if in_workspace; then echo workspace; else echo host; fi
+    exit 0
+fi
+
 STAGE_T0=0
 stage_begin() { STAGE_T0=$(date +%s); }
 stage_end()   { debug "stage $1: $(( $(date +%s) - STAGE_T0 ))s"; }
 
 snapshot_current() {
     [ -n "$1" ] && [ "$1" = "$2" ]
-}
-
-local_store_named() {
-    [ -z "${1:-}" ] && return 0
-    case "$(target_kind "$1" 2>/dev/null)" in container|vm|local) return 0 ;; esac
-    return 1
 }
 
 # `-B` resets rather than switches: the branch `git clone` leaves keeps the sha it was cloned at, and every later snapshot is hardlinked from that one.
@@ -131,19 +139,32 @@ if [ -n "$TARGET" ]; then
     ( load_target "$TARGET" >/dev/null ) || exit 1
 fi
 
-# Bare is this machine, whole: nothing to choose between, since the mirror refresh is what makes each workspace's fetch a local read of a handful of refs.
+# Bare is this machine, whole: every target that lives here, since the containers and the macOS guests read the one mirror this host keeps.
 if [ -z "$SCOPE" ] && [ -z "$ONLY" ]; then
-    SCOPE=target; TARGET=$(default_target)
+    SCOPE=here
 fi
 
 # walk_targets, not target_all: a machine answering another machine's --tools (WK_NO_DELEGATE) refreshes what it holds and asks nobody, so a sweep cannot bounce between peers.
-sync_furniture() { # <target>, or empty for every target this machine knows
-    local only="${1:-}" _bad=0 _t _targets
-    if [ -n "$only" ]; then _targets="$only"; else _targets=$(walk_targets); fi
-    for _t in $_targets; do
+scope_targets() {
+    case "$SCOPE" in
+        here)   target_here ;;
+        target) printf '%s\n' "$TARGET" ;;
+        *)      if [ -n "$TARGET" ]; then printf '%s\n' "$TARGET"; else walk_targets; fi ;;
+    esac
+}
+
+scope_touches_here() {
+    local _t
+    for _t in $(scope_targets); do target_is_here "$_t" && return 0; done
+    return 1
+}
+
+sync_furniture() {
+    local _bad=0 _t
+    for _t in $(scope_targets); do
         (
             load_target "$_t" >/dev/null || exit 3
-            [ -z "$only" ] || { WK_SYNC_NAMED=1; export WK_SYNC_NAMED; }
+            [ -z "$TARGET" ] || { WK_SYNC_NAMED=1; export WK_SYNC_NAMED; }
             t_sync
         ) || _bad=$((_bad + 1))
     done
@@ -228,11 +249,6 @@ sync_target() { # <target>
         )
         return 0
     fi
-    if ( load_target "$_t" >/dev/null 2>&1; t_needs_base && ! store_is_local ); then
-        info "$_t keeps its workspaces' records in the podman VM, not out here"
-        log  "  from in there:  wk sync <workspace>, or a bare 'wk sync' for the menu"
-        return 0
-    fi
 
     _ws=$( ( load_target "$_t" >/dev/null || exit 3; target_workspaces ) )
     [ -n "$_ws" ] || { info "no workspaces on $_t"; return 0; }
@@ -247,14 +263,10 @@ if [ "$SCOPE" = ws ]; then
     exit 0
 fi
 
-FURNITURE_RC=0
-sync_furniture "$TARGET" || FURNITURE_RC=1
-
-sync_store() {
-    local MIRROR NEW_ID NEW_DIR NEW_TREE PREV_ID PREV_TREE BRANCH _why
-    local _tag _name _state _mirror_main_sha _wiring
-    store_init
+sync_mirror() {
+    local MIRROR _tag _name _state
     MIRROR=$(wk_mirror)
+    mirror_init
 
     if [ -d "$MIRROR" ]; then
         unchanged "mirror exists"
@@ -277,7 +289,16 @@ sync_store() {
     stage_end "mirror fetch"
 
     git -C "$MIRROR" rev-parse --verify --quiet refs/heads/main >/dev/null \
-        || die "main was not fetched into the mirror; cannot publish a snapshot"
+        || die "main was not fetched into the mirror; nothing can be published from it"
+}
+
+# `--shared`: the snapshot borrows the mirror's objects, so a machine holds WebKit's history once and every workspace overlaid on the snapshot borrows them too -- which is why `wk gc` never prunes the mirror.
+sync_snapshot() {
+    local MIRROR NEW_ID NEW_DIR NEW_TREE PREV_ID PREV_TREE BRANCH _why
+    local _mirror_main_sha _wiring
+    store_init
+    MIRROR=$(wk_mirror)
+    [ -d "$MIRROR" ] || die "no mirror at $MIRROR to publish a snapshot from -- 'wk sync' on the host makes it"
     _mirror_main_sha=$(git -C "$MIRROR" rev-parse refs/heads/main)
 
     BRANCH="${WK_BRANCH:-origin/main}"
@@ -305,7 +326,7 @@ sync_store() {
         info "no previous snapshot; checking out $BRANCH (this takes a few minutes)"
         ensure_dir "$NEW_DIR"
         stage_begin
-        git clone --quiet "$MIRROR" "$NEW_TREE"
+        git clone --quiet --shared "$MIRROR" "$NEW_TREE"
         stage_end "snapshot publish (clone)"
     fi
 
@@ -332,23 +353,43 @@ sync_store() {
     info "published base $NEW_ID ($(cut -c1-10 < "$NEW_DIR/sha"))"
 }
 
-STORE_RC=0
-if local_store_named "$TARGET"; then
-    if store_is_local; then
-        # Exclusive: two of these racing would hardlink from each other's half-published snapshot. It also holds off `wk gc` and `wk new`, and is dropped before the workspace fetches below, which need nothing of the store.
-        with_lock store -- sync_store || STORE_RC=1
-    else
-        echo >&2
-        info "the mirror and the snapshot are in the podman VM, not out here"
-        log  "  the tooling copies above are done. For the rest:"
-        log  "      wk sync    forwards into the VM, and does them there"
+sync_in_vm() { # <target> -- the VM runs this same tree, so the scope word means the same in there
+    local _t="$1" _word
+    case "$SCOPE" in tools) _word=--tools ;; *) _word=--target ;; esac
+    if ( load_target "$_t" >/dev/null 2>&1; [ "$(t_far_side)" = answering ] ); then
+        info "$_t's snapshot and workspaces are in the podman VM -- syncing in there"
+        ( load_target "$_t" >/dev/null || exit 3; t_wk sync "$_word" "$_t" )
+        return
     fi
+    warn "the podman machine is stopped, so $_t's snapshot was not published and its
+    workspaces did not fetch:  wk start, then  wk sync $_word $_t"
+    return 1
+}
+
+sync_store_of() { # <target>: its snapshot, then (--tools excepted) a fetch in its workspaces
+    local _t="$1" _rc=0
+    if ( load_target "$_t" >/dev/null 2>&1; t_needs_base && ! store_is_local ); then
+        sync_in_vm "$_t"
+        return
+    fi
+    if ( load_target "$_t" >/dev/null 2>&1; t_needs_base ); then
+        # Exclusive: two of these racing would hardlink from each other's half-published snapshot. It also holds off `wk gc` and `wk new`, and is dropped before the workspace fetches, which need nothing of the store.
+        ( load_target "$_t" >/dev/null || exit 3; with_lock store -- sync_snapshot ) || _rc=1
+    fi
+    [ "$SCOPE" = tools ] || sync_target "$_t"
+    return "$_rc"
+}
+
+FURNITURE_RC=0
+sync_furniture || FURNITURE_RC=1
+
+MIRROR_RC=0
+if scope_touches_here && mirror_is_here; then
+    with_lock store -- sync_mirror || MIRROR_RC=1
 fi
 
-case "$SCOPE" in
-    target) sync_target "$TARGET" ;;
-    all)    for _t in $(walk_targets); do sync_target "$_t"; done ;;
-esac
+STORE_RC=0
+for _t in $(scope_targets); do sync_store_of "$_t" || STORE_RC=1; done
 
-[ "$FURNITURE_RC" -eq 0 ] && [ "$STORE_RC" -eq 0 ] || exit 1
+[ "$FURNITURE_RC" -eq 0 ] && [ "$MIRROR_RC" -eq 0 ] && [ "$STORE_RC" -eq 0 ] || exit 1
 exit 0

@@ -31,7 +31,7 @@ import time
 import unittest
 from pathlib import Path
 
-from tests.support import REPO, WkTest, bash, fake_workspace, rand_suffix, run
+from tests.support import REPO, WkTest, bash, fake_workspace, glob_bait, rand_suffix, run
 
 PRELUDE = f'''set -uo pipefail
 WK_ROOT="{REPO}"
@@ -354,8 +354,9 @@ class TestThePatternsCoverEveryShapeTheJobTakes(WkTest):
         return m.group(1)
 
     def _matches(self, args, want):
-        cp = bash(PRELUDE + "_job_pid_matches %s %s && echo MATCH || echo NOPE"
-                  % (shlex.quote(args), shlex.quote(want)), timeout=30)
+        with glob_bait(want) as cwd:
+            cp = bash(PRELUDE + "match_any %s %s && echo MATCH || echo NOPE"
+                      % (shlex.quote(args), shlex.quote(want)), timeout=30, cwd=str(cwd))
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
         return cp.stdout.strip().splitlines()[-1] == "MATCH"
 

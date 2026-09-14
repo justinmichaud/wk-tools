@@ -66,8 +66,10 @@ macOS has no CLI knob for its optimized charging.
 reference count or content key, never by hand: base snapshots, seeded
 benchmark payloads, bench results. On macOS it is the podman VM's
 `/var/lib/wk`, because a Mac cannot write that path itself, and this device
-keeps its own half beside it (logs, remote build status, and the credentials
-every workspace needs, which the VM mounts read-only rather than holding).
+keeps its own half beside it (logs, remote build status, the credentials
+every workspace needs, and the WebKit mirror -- the one copy of WebKit's
+history on the machine, which the VM and every tart guest mount read-only
+rather than holding).
 The artifacts the machine has to *open as files* -- a seeded benchmark
 payload, an exported runner tree, a downloaded profiler -- come from
 `wk_artifact_dir`: the store where it is this machine's, and this machine's
@@ -287,11 +289,14 @@ the `mac-*` config of the same configuration. The reverse is refused: a
 
 Every guest is an APFS clone of one golden base, so **what the base carries is
 what every guest carries**, and it carries only what changes with the image:
-Xcode, the desktop settled onto an empty screen, and a bare WebKit mirror.
-Everything that depends on this tree or on a credential -- the checkout,
-its remotes, `git-webkit setup`, the Claude CLI, the shell -- is made in the
-guest at its first start and converged on every start, so a rotated token or
-an edited script never asks for a rebuilt base. The base is made by scripts in
+Xcode, and the desktop settled onto an empty screen.
+Everything that depends on this tree, on a credential or on the host -- the
+checkout, its remotes, `git-webkit setup`, the Claude CLI, the shell -- is
+made in the guest at its first start and converged on every start, so a
+rotated token or an edited script never asks for a rebuilt base. The checkout
+is a `--shared` clone off this host's mirror, which every guest mounts
+read-only as the `mirror` share (beside `agent-rw`), so a guest is as current
+as the host's last `wk sync` and holds no history of its own. The base is made by scripts in
 this tree, and editing one of them does not change a base already built -- so
 the base records the hash of the inputs that produced it, and every read
 recomputes that hash and compares.
@@ -392,11 +397,10 @@ or `WK_BRANCH`), so `wk new` leaves the checkout **on branch `main`, tracking
 also **fetches**: once, from the mirror its target names, then a
 fast-forward onto it -- a local read of a handful of refs, never the network,
 and never a refresh of the mirror itself (that is `wk sync --tools`, minutes).
-Every target's driver names one -- a container's is this machine's own, a
-guest's is seeded by its golden base, beside where the checkout is cloned
-from it at first start -- but creation asks
-the workspace rather than assuming: a guest cloned from a base built before
-its mirror existed answers with none, and is told to `wk sync` it instead.
+Every target's driver names one -- a container's and a guest's are this
+machine's own, mounted in read-only; a build box's is its own copy -- but
+creation asks the workspace rather than assuming: a guest booted without its
+share answers with none, and is told to `wk sync` it instead.
 A snapshot that is *not* on that branch is refused rather than overlaid --
 every workspace made from it would start detached, publish after publish,
 since each snapshot is a hardlinked copy of the one before -- so `wk new` names
@@ -451,12 +455,17 @@ A workspace goes stale in its own checkout; a machine goes stale in what it
 keeps *for* workspaces -- its copy of wk-tools, its WebKit mirror, and the
 snapshot the next `wk new` clones. **`wk sync` is both, in that order**: the
 machine's furniture first, then a fetch in every workspace on it. The order is
-the point -- a workspace fetches from that mirror, so fetching before
-refreshing it hands back what the machine already had. Naming a machine is what
-says whose furniture to refresh, a peer's included; `--tools` is the furniture
-alone, and a workspace's name is that one fetch alone. Inside a workspace a
-bare `wk sync` is that one fetch; every scope is a machine's and is run from
-the host.
+the point -- a snapshot is cloned off that mirror and a workspace fetches from
+it, so either before the refresh hands back what the machine already had. A
+machine keeps **one mirror**, written where `wk sync` runs: on a macOS host
+that is the host's own, the podman VM mounts it read-only under its store and
+publishes its snapshots as `--shared` clones off it, and every tart guest
+mounts it as a share -- so WebKit's history is on the disk once, and a bare
+`wk sync` is this machine whole: the containers and the guests, one refresh.
+Naming a machine is what says whose furniture to refresh, a peer's included;
+`--tools` is the furniture alone, and a workspace's name is that one fetch
+alone. Inside a workspace a bare `wk sync` is that one fetch; every scope is a
+machine's and is run from the host.
 
 **A fetch, and never a checkout.** No branch is switched, merged or rebased by
 a sync, in a workspace or in the snapshot: `git rebase origin/main` in the
@@ -466,8 +475,9 @@ place a checkout moves, and only by `git merge --ff-only`.
 A workspace's fetch is `git fetch --all --prune` as git has that checkout
 configured -- the URL rewrite and the narrowed refspecs above -- so it is one
 local read of a handful of refs from the mirror its target names
-(`t_mirror_dir`): a container's own, bind-mounted at `/mirror`; a guest's or a
-build machine's own copy. There is no second refspec list in `wk sync` to keep
+(`t_mirror_dir`): the machine's, bind-mounted into a container at the machine's
+own path and into a guest as the `mirror` share; a build machine's own copy.
+There is no second refspec list in `wk sync` to keep
 in step with the checkout's own, which is why a person's `git fetch --all` in
 there is the same fetch.
 
@@ -498,7 +508,7 @@ directory, the machine's packages -- is *installed*, by
 runs.
 
 ```sh
-wk sync                                 # this machine: tooling, mirror, snapshot, then every workspace here
+wk sync                                 # this machine: tooling, mirror, snapshot, then every workspace here -- containers and guests
 wk sync bug-238                         # one workspace's fetch, and nothing else
 wk sync --target moose                  # that machine's furniture, then its workspaces
 wk sync --all                           # every target's, in turn
@@ -1456,21 +1466,22 @@ Every machine this repo knows is itself in the repo (`targets/hosts/*.conf`,
 `boot/machines/*.conf`), so a fresh clone already knows the whole fleet.
 Nothing else is machine-specific except what `wk backup` captures, and keys
 and secrets, which never live in git. Last resort, discarding a macOS host's
-whole container store -- the mirror, the snapshots, the workspaces and every
-bench run in the VM, but not this host's keys:
+whole container store -- the snapshots, the workspaces and every bench run in
+the VM, but not this host's keys or its mirror, which the VM only mounts:
 
 ```sh
 podman machine rm wk && ./setup && wk sync
 ```
 
 `./setup` does the same by itself, prompting first, whenever the machine's
-mounts are not the three it must have -- this checkout at `/var/opt/wk-tools`
-and `~/.config/wk/secrets` read-only, and `~/.config/wk/agent-rw` read-write
-(the directory every tart guest mounts as well): a
+mounts are not the four it must have -- this checkout at `/var/opt/wk-tools`,
+`~/.config/wk/secrets` and the mirror directory `~/.local/state/wk/git`
+read-only, and `~/.config/wk/agent-rw` read-write (the mirror and that
+directory are what every tart guest mounts as well): a
 mount is settable only at creation, so a machine made any other way is
-destroyed and made again rather than patched. That third one is the only
+destroyed and made again rather than patched. That writable one is the only
 writable mount in the design and holds one thing, the Claude login credential
-the CLI rotates in place; a machine that has the right three mounted the wrong
+the CLI rotates in place; a machine that has the right four mounted the wrong
 way round is refused instead, since recreating it would ask podman for the same
 modes again and loop. Every target is under `/var` because the machine's OS is
 an ostree one, where `/opt` is a symlink into it and systemd will not mount on

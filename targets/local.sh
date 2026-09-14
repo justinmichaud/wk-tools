@@ -23,7 +23,7 @@ t_tools() { echo "$WK_ROOT"; }
 
 t_mirror_dir() {
     case "$(wk_os)" in
-        macos) mirror_beside_checkout "$_local_src" ;;
+        macos) mirror_in_guest ;;
         *)     mirror_in_container ;;
     esac
 }

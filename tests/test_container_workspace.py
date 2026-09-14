@@ -74,7 +74,7 @@ class TestContainerWorkspaceLifecycle(WkTest):
             with self.subTest(remote=remote):
                 self.assertEqual(self._config(f"remote.{remote}.tagOpt"), "--no-tags")
                 self.assertIn(
-                    "/mirror/WebKit.git",
+                    "/git/WebKit.git",
                     self._config("--get-regexp", r"^url\..*\.insteadof$"),
                     "the four remotes are rewritten to the mirror bind-mounted in")
 
@@ -84,7 +84,7 @@ class TestContainerWorkspaceLifecycle(WkTest):
         self.assertEqual(cp.returncode, 0, f"'git fetch origin' failed: {cp.stdout}")
         print(f"[timing] git fetch origin in the workspace: {took:.1f}s")
         self.assertLess(took, 25, f"'git fetch origin' took {took:.1f}s -- it reads "
-                                  "the mirror bind-mounted at /mirror, so it is a "
+                                  "the mirror bind-mounted in, so it is a "
                                   "local read of a handful of refs")
 
         self.assertEqual(self._config("webkitscmpy.setup"), "true",

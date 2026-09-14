@@ -1,4 +1,4 @@
-"""host/macos/vmtools.sh's `_verify_mounts`: the podman machine's three mounts,
+"""host/macos/vmtools.sh's `_verify_mounts`: the podman machine's four mounts,
 asked of the machine itself rather than of the config file that created it.
 
 host/macos/machine.sh holds the machine to the mounts it asked podman for
@@ -23,7 +23,7 @@ VMTOOLS = REPO / "host" / "macos" / "vmtools.sh"
 
 # What _verify_mounts asks the machine, answered from the case under test:
 # whether the tooling is executable, whether each store directory is a mount,
-# whether the writable one is writable, and whether the other two are actually
+# whether the writable one is writable, and whether the other three are actually
 # read-only -- `-O ro` being the question findmnt is asked for that last one.
 FAKE_RSH = '''
 _rsh() {
@@ -31,7 +31,9 @@ _rsh() {
         *"test -x /opt/wk-tools/wk"*)   [ "$WANT_TOOLS" = 1 ] ;;
         *"-O ro"*"/opt/wk-tools"*)      [ "$WANT_TOOLS_RO" = 1 ] && echo /var/opt/wk-tools ;;
         *"-O ro"*"/secrets"*)           [ "$WANT_SECRETS_RO" = 1 ] && echo /var/lib/wk/secrets ;;
+        *"-O ro"*"/git"*)               [ "$WANT_GIT_RO" = 1 ] && echo /var/lib/wk/git ;;
         *"findmnt"*"/secrets"*)         [ "$WANT_SECRETS" = 1 ] && echo /var/lib/wk/secrets ;;
+        *"findmnt"*"/git"*)             [ "$WANT_GIT" = 1 ] && echo /var/lib/wk/git ;;
         *"findmnt"*"/agent-rw"*)        [ "$WANT_RW_MOUNT" = 1 ] && echo /var/lib/wk/agent-rw ;;
         *"test -w"*"/agent-rw"*)        [ "$WANT_RW_WRITABLE" = 1 ] ;;
         *) return 1 ;;
@@ -42,7 +44,7 @@ _rsh() {
 
 class TestVerifyMounts(WkTest):
     def _run(self, tools=1, secrets=1, rw_mount=1, rw_writable=1,
-             tools_ro=1, secrets_ro=1):
+             tools_ro=1, secrets_ro=1, git=1, git_ro=1):
         lifted = subprocess.run(
             ["sed", "-n", "/^_verify_mounts()/,/^}/p", str(VMTOOLS)],
             capture_output=True, text=True).stdout
@@ -55,6 +57,7 @@ WK_MACHINE=wk
 WANT_TOOLS={tools} WANT_SECRETS={secrets}
 WANT_RW_MOUNT={rw_mount} WANT_RW_WRITABLE={rw_writable}
 WANT_TOOLS_RO={tools_ro} WANT_SECRETS_RO={secrets_ro}
+WANT_GIT={git} WANT_GIT_RO={git_ro}
 {FAKE_RSH}
 {lifted}
 _verify_mounts && echo VERIFIED
@@ -62,17 +65,28 @@ _verify_mounts && echo VERIFIED
           "WK_HOST_SECRETS": str(self.tmp / "secrets"),
           "WK_DEBUG": "1"})
 
-    def test_all_three_there_and_the_writable_one_writable(self):
+    def test_all_four_there_and_the_writable_one_writable(self):
         cp = self._run()
         out = cp.stdout + cp.stderr
         self.assertEqual(cp.returncode, 0, out)
         self.assertIn("VERIFIED", cp.stdout)
         for phrase in ("mounted at /opt/wk-tools",
                        "mounted at /var/lib/wk/secrets",
+                       "mounted at /var/lib/wk/git",
                        "read-write at /var/lib/wk/agent-rw",
                        "/opt/wk-tools is mounted read-only",
-                       "/var/lib/wk/secrets is mounted read-only"):
+                       "/var/lib/wk/secrets is mounted read-only",
+                       "/var/lib/wk/git is mounted read-only"):
             self.assertIn(phrase, out)
+
+    def test_a_mirror_directory_that_is_not_a_mount_is_refused(self):
+        """A directory of the VM's own at that path: `wk sync` on the host
+        would refresh a mirror no snapshot in here is cloned from."""
+        cp = self._run(git=0)
+        out = cp.stdout + cp.stderr
+        self.assertNotEqual(cp.returncode, 0, out)
+        self.assertIn("/var/lib/wk/git is not a mount", out)
+        self.assertIn("reaches no snapshot", out)
 
     def test_no_tooling_mount_names_the_stage_that_makes_one(self):
         cp = self._run(tools=0)
@@ -118,7 +132,7 @@ _verify_mounts && echo VERIFIED
         turns the machine's provisioning into a guarantee. A workspace that
         can write here rewrites the tooling it runs and the deploy keys it
         pushes with."""
-        for case in ("tools_ro", "secrets_ro"):
+        for case in ("tools_ro", "secrets_ro", "git_ro"):
             with self.subTest(case=case):
                 cp = self._run(**{case: 0})
                 out = cp.stdout + cp.stderr
@@ -129,7 +143,7 @@ _verify_mounts && echo VERIFIED
 
     def test_it_runs_before_anything_that_names_a_path_in_them(self):
         """The whole point of failing once: the proxy, the skills and the
-        SDK all live in one of the three."""
+        SDK all live in one of the four."""
         text = VMTOOLS.read_text()
         self.assertLess(text.index("\n_verify_mounts\n"),
                         text.index("unit_start wk-proxy.service"),

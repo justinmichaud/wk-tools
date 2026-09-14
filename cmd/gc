@@ -6,9 +6,9 @@
 # wk: destructive --purge-mirror,--purge-pmos,--purge-builds
 #
 # Reclaims by reference count, so a plain `wk gc` never loses work: unreferenced
-# base snapshots, dangling podman images/volumes, the mirror (repacked, not
-# erased), ccache, the pmos build hosts' chroots, stale benchmark payload seeds,
-# and orphaned creation bookkeeping. A boot image is reclaimed with the workspace
+# base snapshots, dangling podman images/volumes, ccache, the pmos build hosts'
+# chroots, stale benchmark payload seeds, and orphaned creation bookkeeping. The
+# mirror is never pruned: every snapshot borrows its objects. A boot image is reclaimed with the workspace
 # that built it (`wk rm`). Also runs fstrim, since the VM's disk image is sparse
 # and only the guest discarding blocks returns them to the host. `wk disk`
 # reports what any of it costs.
@@ -57,6 +57,10 @@ done
 # Asked once, where the person typed it: the container half (WK_IN_VM) is launched by this half after the answer.
 if [ -n "$PURGE_BUILDS" ] && [ -z "${WK_IN_VM:-}" ]; then
     confirm "erase every image build tree (--purge-builds)? the next image build refetches them, and that takes hours" \
+        || die "aborted -- nothing was changed"
+fi
+if [ -n "$PURGE" ] && [ -z "${WK_IN_VM:-}" ]; then
+    confirm "erase the mirror and every base snapshot? 'wk sync' refetches them (a full clone)" \
         || die "aborted -- nothing was changed"
 fi
 
@@ -125,12 +129,20 @@ if is_macos && [ -z "${WK_IN_VM:-}" ]; then
         [ -n "$PURGE_BUILDS" ]  && _fwd="$_fwd --purge-builds"
         [ -n "$REFRESH_NET" ]   && _fwd="$_fwd --refresh-net"
         podman machine ssh "${WK_MACHINE:-wk}" -- \
-            "$(wk_forwarded_env)WK_IN_VM=1 WK_ROOT=/opt/wk-tools WK_STORE=/var/lib/wk bash -s --$_fwd" <"$0"
-        exit $?
+            "$(wk_forwarded_env)WK_IN_VM=1 WK_ROOT=/opt/wk-tools WK_STORE=/var/lib/wk bash -s --$_fwd" <"$0" \
+            || exit $?
+        # After the VM's half, which refuses while a workspace still borrows the mirror's objects.
+        if [ -n "$PURGE" ]; then
+            rm -rf "$(wk_mirror)"
+            info "erased the mirror $(wk_mirror)"
+        fi
+        exit 0
     fi
     warn "the podman machine is not running, so the container store was not touched"
-    log  "  'wk start', then 'wk gc' again -- that half is the mirror, the snapshots"
-    log  "  and every workspace's overlay, and it is the largest of them"
+    log  "  'wk start', then 'wk gc' again -- that half is the snapshots and every"
+    log  "  workspace's overlay, and it is the largest of them"
+    [ -z "$PURGE" ] || warn "the mirror was not erased either: whether a workspace in there still
+    borrows its objects cannot be known while the machine is stopped"
     gc_report_complete
     exit 0
 fi
@@ -152,17 +164,16 @@ if [ -n "$PURGE" ]; then
     -- or run plain 'wk gc', which prunes only what nothing references."
 
     # tr: macOS du right-aligns its size field, and " 0B" reads as a typo.
-    sz_m=$(du -sh "$(wk_mirror)" 2>/dev/null | cut -f1 | tr -d ' ' || echo '?')
     sz_b=$(du -sh "$(wk_base_dir)" 2>/dev/null | cut -f1 | tr -d ' ' || echo '?')
     n_b=$(ls -1 "$(wk_base_dir)" 2>/dev/null | wc -l | tr -d ' ')
-    log "  mirror    $(wk_mirror)  ($sz_m)"
-    log "  snapshots $(wk_base_dir)  ($sz_b, $n_b of them)"
-    confirm "erase the mirror and every base snapshot? 'wk sync' refetches them (a full clone)" \
-        || die "aborted -- nothing was changed"
-
-    rm -rf "${WK_STORE:?}/git" "${WK_STORE:?}/base"
-    info "erased the mirror and every base snapshot"
-    log  "  'wk sync' rebuilds them; 'wk new' needs one, so run it before the next workspace"
+    rm -rf "${WK_STORE:?}/base"
+    info "erased every base snapshot ($sz_b, $n_b of them)"
+    if mirror_is_here; then
+        sz_m=$(du -sh "$(wk_mirror)" 2>/dev/null | cut -f1 | tr -d ' ' || echo '?')
+        rm -rf "$(wk_mirror)"
+        info "erased the mirror $(wk_mirror) ($sz_m)"
+    fi
+    log  "  'wk sync' rebuilds them; 'wk new' needs a snapshot, so run it before the next workspace"
 fi
 
 unpinned=""
@@ -186,19 +197,6 @@ if [ "$WK_TARGET_KIND" = container ] && have podman; then
     podman image prune -f >/dev/null 2>&1 || true
     podman volume prune -f >/dev/null 2>&1 || true
     info "pruned dangling images and volumes"
-fi
-
-# Repacking rewrites pack files snapshots share inodes with via cp -al.
-active=$(list_workspaces | wc -l | tr -d ' ')
-if ! _uses_snapshots; then
-    debug "no snapshot store on target '$TARGET'; nothing to repack"
-elif [ ! -d "$(wk_mirror)" ]; then
-    debug "no mirror here; nothing to repack"
-elif [ "$active" -eq 0 ]; then
-    info "repacking the mirror"
-    git -C "$(wk_mirror)" gc --auto --quiet || true
-else
-    log "skipping mirror repack: $active workspace(s) still reference snapshots"
 fi
 
 if have ccache; then

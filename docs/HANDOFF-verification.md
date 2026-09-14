@@ -85,6 +85,10 @@ lands; the file goes with its last line.
 - `wk disk` inside a workspace answers the only version of the question available in there — this checkout, its build trees, its caches — because the host's store is not visible from a workspace by design
 - `wk disk` with the podman machine stopped leaves it stopped (the read-only rule, measured the same way as `wk status`)
 - `wk vm base --rm` deletes the golden base, then asks *separately* about the pulled OCI image (a download, not hours), and existing vm workspaces keep working — a `tart clone` is an independent guest
+- a guest's first `wk vm start` clones its checkout `--shared` off `/Volumes/My Shared Files/mirror/WebKit.git`, `git log` in it reads the host's objects over virtiofs, and a bare `wk sync` on the host then fetches in it with no network round trip
+- `wk new <guest> --target vm` with no host mirror refuses before the base is touched, naming `wk sync`
+- `./setup` on a Mac whose podman machine predates the mirror mount recreates it, and `wk sync` afterwards publishes a `--shared` snapshot in the VM whose alternates resolve inside a container (`git log` in a fresh container workspace)
+- `wk gc --purge-mirror` on a Mac erases the host mirror only after the VM's half succeeded, and leaves it when the machine is stopped
 
 ## Host: quiesce, session, gui
 

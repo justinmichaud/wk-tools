@@ -37,7 +37,12 @@ ccache_conf_write() { # <path to ccache.conf>
     ccache_conf_render > "$1"
 }
 
-wk_mirror()   { echo "$WK_STORE/git/WebKit.git"; }
+wk_mirror() {   # one per machine, written where `wk sync` runs: a macOS host's is its own, and the podman VM (/var/lib/wk/git) and every tart guest (the `mirror` share) mount it read-only
+    if is_macos && [ -z "${WK_IN_VM:-}" ]; then echo "$(wk_state_dir)/git/WebKit.git"
+    else echo "$WK_STORE/git/WebKit.git"; fi
+}
+mirror_is_here() { [ -z "${WK_IN_VM:-}" ]; }   # 0 where the mirror is writable
+mirror_init()    { ensure_dir "$(dirname "$(wk_mirror)")"; }
 wk_base_dir() { echo "$WK_STORE/base"; }
 wk_ws_dir()   { echo "$WK_STORE/ws/$1"; }
 
@@ -664,8 +669,8 @@ _mirror_fetch_do() {  # <src-refspec> <dest-ref> <src-url-or-remote>
 
 _mirror_fetch_into() {  # <src-url-or-remote> <src-refspec> <dest-ref>
     local src="$1" srcspec="$2" dest="$3"
-    store_is_local || die "the mirror is not this machine's (\$WK_STORE is $WK_STORE); a workspace here cannot read it"
-    store_init
+    mirror_is_here || die "the mirror in here is the host's, mounted read-only; run this on the host"
+    mirror_init
     with_lock store -- _mirror_fetch_do "$srcspec" "$dest" "$src"
 }
 

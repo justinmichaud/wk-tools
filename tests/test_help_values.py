@@ -18,6 +18,7 @@ the list comes from instead.
 Run: python3 -m unittest tests.test_help_values -v
 """
 import subprocess
+from pathlib import Path
 import unittest
 
 from tests.support import REPO, bash, scratch_dir, temp_store
@@ -151,13 +152,16 @@ class TestBenchListPlans(unittest.TestCase):
             subprocess.run(["git", "-C", str(src), "add", "-A"], check=True)
             subprocess.run(["git", "-C", str(src), "commit", "-q", "-m", "plans"], check=True)
 
-            mirror = store["path"] / "git" / "WebKit.git"
+            # Where this machine keeps its mirror is the store lib's answer
+            # (a macOS host's is under its state directory, not the store).
+            env = {"WK_STORE": store["WK_STORE"], "XDG_STATE_HOME": str(store["path"] / "state")}
+            mirror = Path(bash(". lib/common.sh; . lib/store.sh; wk_mirror", env=env).stdout.strip())
             mirror.parent.mkdir(parents=True, exist_ok=True)
             subprocess.run(["git", "clone", "-q", "--bare", str(src), str(mirror)], check=True)
 
             cp = bash(
                 ". lib/common.sh; . lib/store.sh; . lib/bench.sh; bench_plan_list",
-                env={"WK_STORE": store["WK_STORE"]},
+                env=env,
             )
             self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
             self.assertEqual(sorted(cp.stdout.split()),

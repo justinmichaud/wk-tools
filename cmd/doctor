@@ -273,6 +273,7 @@ local_state() { # <path> <kind> <how to get it back>
     fi
 }
 local_state "$WK_STORE/bench"                      backed-up   "benchmark runs and their provenance -- not regenerable at any price; a rerun is a different measurement"
+local_state "$(wk_mirror)"                         regenerable "wk sync clones WebKit into it again (the one copy here; the podman VM and every tart guest read it)"
 local_state "$(wk_secrets_dir)"                    regenerable "wk key deploy makes new deploy keys (revoke the old ones on GitHub)"
 local_state "$(wk_push_held_dir)"                  regenerable "wk key deploy makes new deploy keys; wk key set github-pat stores a new token (revoke the old ones on GitHub)"
 local_state "$(push_agent_machine_read_pat)"       regenerable "./setup and wk key set github-pat both write it from the token in $(wk_push_held_dir)"

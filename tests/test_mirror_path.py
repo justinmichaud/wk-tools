@@ -2,17 +2,16 @@
 
 A fetch in a workspace is either local -- against a bare mirror that already
 carries every upstream -- or four fetches of four upstreams over that
-workspace's egress. Which one it is depends on where that target's mirror is,
-and a container's bind mount `/mirror/WebKit.git` is the answer for exactly one
-of the four: a guest's mirror cannot be that path (macOS's system volume is
-read-only and nothing of the host's is mounted in there), so a command that
-spells it takes the network arm in there and pays ~1,500 remote heads' worth of
-negotiation per fetch.
+workspace's egress. Which one it is depends on where that target's mirror is:
+a machine keeps one, and a container sees it at the machine's own path
+(bind-mounted read-only, named in its environment), a tart guest at the share
+the host mounts in, a build box under its own root. A command that spells one
+of those takes the network arm elsewhere and pays ~1,500 remote heads' worth
+of negotiation per fetch.
 
 So each driver names its own mirror once and every command asks the driver.
-This holds each of the four to naming one, holds the path in a guest to being
-the one the guest's own driver builds, and holds the commands to asking rather
-than spelling it again.
+This holds each of the four to naming one, and holds the commands to asking
+rather than spelling it again.
 
 Hermetic: the drivers are sourced and asked, the way tests/test_target_os.py
 asks each of them for t_os. No container, guest, machine or network.
@@ -94,20 +93,30 @@ class TestEveryDriverNamesOne(WkTest):
         self.assertEqual(cp.stdout.strip(), "")
 
     def test_the_three_machines_name_three_different_mirrors(self):
-        """A container's is this machine's, bind-mounted; a guest's is inside
-        the guest; a build box's is on the box. Nothing of one is reachable
-        from another, so no two of them can be the same path."""
+        """A container's is this machine's, bind-mounted at its own path; a
+        guest's is the host's, on the share macOS automounts; a build box's is
+        on the box. No two of them are the same path."""
         got = {t: self._mirror(t) for t in ("container", "vm", "remote")}
         self.assertEqual(len(set(got.values())), 3, got)
 
-    def test_a_guests_mirror_sits_beside_its_checkout(self):
-        """Where in the guest is the vm driver's to say; that it is under the
-        account's own home is what makes it possible at all -- macOS's system
-        volume is read-only, so /mirror cannot be created in there."""
+    def test_a_containers_mirror_is_the_one_its_driver_named_in_the_environment(self):
+        """The alternates of a `--shared` snapshot are the machine's own path,
+        so the container is handed that path and mounts the mirror there --
+        which only the machine's driver knows (targets/container.sh)."""
+        self.assertEqual(_ask("container", env={"WK_MIRROR": "/some/store/git/WebKit.git"}),
+                         "/some/store/git/WebKit.git")
+        self.assertIn("--env WK_MIRROR=$(wk_mirror)", (REPO / "targets" / "container.sh").read_text())
+        self.assertIn('--volume $(dirname "$(wk_mirror)"):$(dirname "$(wk_mirror)"):ro',
+                      (REPO / "targets" / "container.sh").read_text())
+
+    def test_a_guests_mirror_is_the_hosts_on_the_share_the_guest_mounts(self):
+        """macOS automounts every tart share under one directory, so the path
+        is the share's name and nothing the guest holds."""
         mirror = self._mirror("vm")
-        src = _ask("vm", body="t_src demo")
-        self.assertEqual(mirror, f"{src}.git")
-        self.assertTrue(mirror.startswith("/Users/"), mirror)
+        self.assertEqual(mirror, "/Volumes/My Shared Files/mirror/WebKit.git")
+        self.assertIn('--dir="$WK_VM_MIRROR_SHARE:$(dirname "$(wk_mirror)"):ro"',
+                      (REPO / "targets" / "vm.sh").read_text(),
+                      "the guest is not booted with the mirror share")
 
 
 class TestAWorkspaceAnswersForTheKindItIs(WkTest):
@@ -121,19 +130,18 @@ class TestAWorkspaceAnswersForTheKindItIs(WkTest):
                 "PATH": f"{binp}:{os.environ['PATH']}",
             })), str(ws.ws_dir / "WebKit")
 
-    def test_in_a_container_it_is_the_bind_mount_the_container_driver_names(self):
-        got, _ = self._in_workspace("Linux")
-        self.assertEqual(got, _ask("container"))
+    def test_in_a_container_it_is_the_path_the_container_driver_named(self):
+        with fake_workspace() as ws, \
+             stub_path({"uname": UNAME % ("Linux", "Linux")}) as binp:
+            got = _ask("local", env=ws.env({
+                "PATH": f"{binp}:{os.environ['PATH']}",
+                "WK_MIRROR": "/some/store/git/WebKit.git",
+            }))
+        self.assertEqual(got, "/some/store/git/WebKit.git")
 
-    def test_in_a_guest_it_is_the_path_the_vm_driver_names(self):
-        """Two files spell this path, and they cannot be allowed to drift: the
-        vm driver builds the mirror there and the workspace inside that guest
-        fetches from there. Both derive it from the checkout, so this compares
-        the rule rather than the string."""
-        got, src = self._in_workspace("Darwin")
-        self.assertEqual(got, f"{src}.git")
-        vm_src = _ask("vm", body="t_src demo")
-        self.assertEqual(_ask("vm"), f"{vm_src}.git")
+    def test_in_a_guest_it_is_the_share_the_vm_driver_names(self):
+        got, _ = self._in_workspace("Darwin")
+        self.assertEqual(got, _ask("vm"))
 
 
 class MirrorFixture(WkTest):
@@ -334,28 +342,26 @@ class TestTheCommandsAskTheDriver(unittest.TestCase):
                 self.assertIn("t_mirror_dir", text,
                               f"{rel} fetches without asking the driver")
 
-    # Named exceptions: t_spawn (targets/container.sh) execs these directly,
-    # with no WK_ROOT and no lib/target.sh sourced, so there is no
-    # t_mirror_dir for them to ask -- each carries a comment saying so at the
-    # literal.
-    CONTAINER_ONLY_EXCEPTIONS = ("image/buildroot-webkit.sh", "image/yocto-build.sh")
+    # t_spawn (targets/container.sh) execs these directly, with no WK_ROOT and
+    # no lib/target.sh sourced, so there is no t_mirror_dir for them to ask:
+    # they read the path the container driver put in the environment.
+    CONTAINER_ONLY = ("image/buildroot-webkit.sh", "image/yocto-build.sh")
 
-    def test_the_container_only_exceptions_are_still_explained(self):
-        for rel in self.CONTAINER_ONLY_EXCEPTIONS:
+    def test_the_container_only_scripts_read_the_drivers_answer_from_the_environment(self):
+        for rel in self.CONTAINER_ONLY:
             text = (REPO / rel).read_text()
             with self.subTest(file=rel):
-                self.assertIn("/mirror/WebKit.git", text,
-                              f"{rel} no longer needs its named exception -- drop it from the list")
-                self.assertIn("no t_mirror_dir to ask", text,
-                              f"{rel} spells the mirror literal with no comment explaining why")
+                self.assertIn("${WK_MIRROR:?", text, f"{rel} does not require WK_MIRROR")
+                self.assertNotIn("/mirror/WebKit.git", text, f"{rel} spells a mirror path of its own")
+                self.assertIn("no t_mirror_dir to ask", text)
 
     def test_each_mirror_path_is_spelled_in_exactly_one_place(self):
         """A driver *answers* for a mirror; it does not spell one. Two of the
-        four share each answer -- the driver that makes the mirror, and
+        four share each answer -- the driver that mounts the mirror in, and
         targets/local.sh answering from inside a workspace of that kind -- so
         both paths live in lib/target.sh and every driver calls them."""
         target_sh = (REPO / "lib" / "target.sh").read_text()
-        for func in ("mirror_in_container", "mirror_beside_checkout"):
+        for func in ("mirror_in_container", "mirror_in_guest", "guest_share_dir"):
             with self.subTest(func=func):
                 self.assertRegex(target_sh, rf"(?m)^{func}\(\)\s*\{{")
         for rel in ("targets/local.sh", "targets/container.sh"):
@@ -365,8 +371,10 @@ class TestTheCommandsAskTheDriver(unittest.TestCase):
                 self.assertIn("mirror_in_container", (REPO / rel).read_text())
         for rel in ("targets/local.sh", "targets/vm.sh"):
             with self.subTest(file=rel):
-                self.assertIn("mirror_beside_checkout", (REPO / rel).read_text(),
-                              f"{rel} derives the guest mirror itself")
+                self.assertIn("mirror_in_guest", (REPO / rel).read_text(),
+                              f"{rel} spells the guest mirror itself")
+                self.assertNotIn("My Shared Files", (REPO / rel).read_text(),
+                                 f"{rel} spells the automount directory itself")
 
     def test_only_a_driver_names_a_path(self):
         named = sorted(
@@ -376,6 +384,93 @@ class TestTheCommandsAskTheDriver(unittest.TestCase):
         self.assertEqual(named, ["lib/target.sh", "targets/container.sh",
                                  "targets/local.sh", "targets/remote.sh",
                                  "targets/vm.sh"], named)
+
+
+class TestOneMirrorPerMachine(WkTest):
+    """wk_mirror and mirror_is_here (lib/store.sh): a machine keeps one mirror,
+    written where `wk sync` runs. On a macOS host that is the host's own state
+    directory, which the podman VM mounts read-only at its store's git/ and
+    every tart guest mounts as a share; in the VM the same bytes are read
+    under $WK_STORE and never written. Elsewhere the store is the machine's
+    own and the mirror sits in it."""
+
+    def _ask(self, body, macos, in_vm=False):
+        env = {"WK_STORE": "/var/lib/wk", "XDG_STATE_HOME": str(self.tmp / "state")}
+        if in_vm:
+            env["WK_IN_VM"] = "1"
+        cp = bash(f'set -euo pipefail\n. "$WK_ROOT/lib/common.sh"\n. "$WK_ROOT/lib/store.sh"\n'
+                  f'is_macos() {{ return {0 if macos else 1}; }}\n{body}\n', env=env)
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        return cp.stdout.strip()
+
+    def test_a_macos_host_keeps_it_in_its_own_state_directory(self):
+        self.assertEqual(self._ask("wk_mirror", macos=True),
+                         f"{self.tmp}/state/wk/git/WebKit.git")
+        self.assertEqual(self._ask("mirror_is_here && echo here || echo elsewhere", macos=True), "here")
+
+    def test_the_podman_vm_reads_the_hosts_under_its_store(self):
+        self.assertEqual(self._ask("wk_mirror", macos=True, in_vm=True), "/var/lib/wk/git/WebKit.git")
+        self.assertEqual(self._ask("mirror_is_here && echo here || echo elsewhere", macos=True, in_vm=True),
+                         "elsewhere")
+
+    def test_a_linux_machine_keeps_it_in_its_store(self):
+        self.assertEqual(self._ask("wk_mirror", macos=False), "/var/lib/wk/git/WebKit.git")
+        self.assertEqual(self._ask("mirror_is_here && echo here || echo elsewhere", macos=False), "here")
+
+    def test_nothing_fetches_into_the_mirror_from_the_podman_vm(self):
+        """A pull request head is fetched into the mirror (`wk ab`), and the
+        mount in the VM is read-only: refused with the machine that can."""
+        cp = bash('set -uo pipefail\n. "$WK_ROOT/lib/common.sh"\n. "$WK_ROOT/lib/store.sh"\n'
+                  'with_lock() { echo "LOCKED: $*"; }\n'
+                  '_mirror_fetch_into https://example/x.git refs/heads/b refs/remotes/pr/b\n',
+                  env={"WK_STORE": "/var/lib/wk", "WK_IN_VM": "1"})
+        self.assertNotEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertIn("the host", cp.stdout + cp.stderr)
+        self.assertNotIn("LOCKED:", cp.stdout)
+
+
+class TestASnapshotBorrowsTheMirrorsObjects(MirrorFixture):
+    """cmd/sync's sync_snapshot against the fixture mirror and a scratch
+    store: the snapshot it publishes is a `--shared` clone, so its objects
+    are the mirror's (an alternates file, no second copy), it is on main
+    tracking origin/main, and its completion marker is the mirror's main."""
+
+    def _publish(self):
+        store = self.tmp / "store"
+        lifted = subprocess.run(["sed", "-n", "/^sync_snapshot()/,/^}/p", str(REPO / "cmd" / "sync")],
+                                capture_output=True, text=True).stdout
+        self.assertIn("git clone --quiet --shared", lifted)
+        # The real wk_remotes here: the wiring rewrites each upstream's URL to
+        # the mirror, so the fetch after it reads the mirror and the network
+        # (refused at port 1) is never asked.
+        cp = bash('set -euo pipefail\ncd "$WK_ROOT"\n. cmd/sync functions\n'
+                  + f'wk_mirror() {{ echo {str(self.mirror)!r}; }}\n'
+                  + lifted + "\nsync_snapshot\n",
+                  env={"WK_STORE": str(store), "http_proxy": "http://127.0.0.1:1",
+                       "https_proxy": "http://127.0.0.1:1", "GIT_TERMINAL_PROMPT": "0"})
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        ids = sorted(d.name for d in (store / "base").iterdir())
+        self.assertEqual(len(ids), 1, ids)
+        return store / "base" / ids[0]
+
+    def test_the_published_tree_shares_the_mirror_and_is_complete(self):
+        d = self._publish()
+        alternates = d / "WebKit" / ".git" / "objects" / "info" / "alternates"
+        self.assertTrue(alternates.exists(), "the snapshot copied the history instead of borrowing it")
+        self.assertEqual(alternates.read_text().strip(), str(self.mirror / "objects"))
+        self.assertEqual((d / "sha").read_text().strip(),
+                         self._git("rev-parse", "refs/heads/main", cwd=self.mirror).stdout.strip())
+        self.assertEqual((d / "branch").read_text().strip(), "origin/main")
+        self.assertEqual(self._git("symbolic-ref", "--short", "HEAD", cwd=d / "WebKit").stdout.strip(), "main")
+
+    def test_no_mirror_is_refused_naming_the_host(self):
+        cp = bash('set -uo pipefail\ncd "$WK_ROOT"\n. cmd/sync functions\n'
+                  f'wk_mirror() {{ echo {str(self.tmp / "none.git")!r}; }}\n'
+                  + subprocess.run(["sed", "-n", "/^sync_snapshot()/,/^}/p", str(REPO / "cmd" / "sync")],
+                                   capture_output=True, text=True).stdout
+                  + "\nsync_snapshot\n", env={"WK_STORE": str(self.tmp / "store2")})
+        self.assertNotEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertIn("'wk sync' on the host makes it", cp.stdout + cp.stderr)
 
 
 if __name__ == "__main__":

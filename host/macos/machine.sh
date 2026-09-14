@@ -39,15 +39,17 @@ _disk="${WK_DISK_GB:-200}"
 # unit that fails at boot: the machine then runs without the mount, silently.
 ensure_dir "$(wk_secrets_dir)" 0700
 ensure_dir "$(wk_agent_rw_dir)" 0700
+mirror_init
 _secrets_mount="$(wk_secrets_dir):$WK_STORE/secrets:ro"
 _tools_mount="$WK_ROOT:/var/opt/wk-tools:ro"
 _agent_rw_mount="$(wk_agent_rw_dir):$WK_STORE/agent-rw:rw"
+_mirror_mount="$(dirname "$(wk_mirror)"):$WK_STORE/git:ro"
 
 # `podman machine inspect` does not expose Mounts (podman 5.4); read the config.
 _cfg="$HOME/.config/containers/podman/machine/applehv/$WK_MACHINE.json"
 
 _mount_state() {
-    python3 - "$_cfg" "$_secrets_mount" "$_tools_mount" "$_agent_rw_mount" <<'PY'
+    python3 - "$_cfg" "$_secrets_mount" "$_tools_mount" "$_agent_rw_mount" "$_mirror_mount" <<'PY'
 import json, os, sys
 
 # Both sides through realpath: one directory has two spellings (a symlinked
@@ -94,7 +96,7 @@ _report_losses() {
     fi
     podman machine ssh "$WK_MACHINE" -- '
         printf "workspaces  %s\n" "$(podman ps -a --filter name=^wk- --format "{{.Names}}" 2>/dev/null | sed "s/^wk-//" | tr "\n" " ")"
-        for d in git base ws cache skills bench; do
+        for d in base ws cache skills bench; do
             printf "%-11s %s\n" "$d" "$(du -sh /var/lib/wk/$d 2>/dev/null | cut -f1)"
         done
         printf "bench runs  %s\n" "$(ls -1 /var/lib/wk/bench 2>/dev/null | wc -l | tr -d " ")"
@@ -105,7 +107,7 @@ _absent_targets() {
     [ "$(podman machine inspect "$WK_MACHINE" --format '{{.State}}' 2>/dev/null)" = running ] \
         || return 0
     local spec target
-    for spec in "$_secrets_mount" "$_tools_mount" "$_agent_rw_mount"; do
+    for spec in "$_secrets_mount" "$_tools_mount" "$_agent_rw_mount" "$_mirror_mount"; do
         target=${spec%:*}; target=${target##*:}
         podman machine ssh "$WK_MACHINE" -- \
             "findmnt -no TARGET $(sh_quote "$target")" </dev/null >/dev/null 2>&1 \
@@ -142,8 +144,8 @@ $(printf '%s\n' "$_absent" | sed 's/^/    /')
     fi
     if [ "$_verdict" = differs ] && [ -n "${1:-}" ]; then
         die "internal error: podman machine '$WK_MACHINE' was just created with
-$(printf '    asks %s\n    asks %s\n    asks %s' \
-        "$_secrets_mount" "$_tools_mount" "$_agent_rw_mount")
+$(printf '    asks %s\n    asks %s\n    asks %s\n    asks %s' \
+        "$_secrets_mount" "$_tools_mount" "$_agent_rw_mount" "$_mirror_mount")
     and reads back as
 $(_mount_rows | sed 's/^/    has  /')
     The two spellings above are the same directories written differently, and
@@ -152,13 +154,14 @@ $(_mount_rows | sed 's/^/    has  /')
     Fix the comparison in _mount_state (host/macos/machine.sh)."
     fi
     case "$_verdict" in
-        ok) unchanged "machine mounts exactly this checkout and the secrets directory read-only, and the agent credential directory read-write (verified)" ;;
+        ok) unchanged "machine mounts exactly this checkout, the secrets directory and the mirror read-only, and the agent credential directory read-write (verified)" ;;
         notro)
             die "podman machine '$WK_MACHINE' has this design's mounts, mounted the wrong way:
 $(_mount_rows | sed 's/^/    has /')
     wants $_secrets_mount
     wants $_tools_mount
     wants $_agent_rw_mount
+    wants $_mirror_mount
     A workspace could then rewrite this checkout or its own deploy keys.
     This podman took the mode option and dropped it, and nothing here can fix
     that from the outside: the --volume lines in this file have to say
@@ -170,8 +173,8 @@ $(_mount_rows | sed 's/^/    has /')
     Recreate it with:  ./setup" ;;
         *)  die "could not read mounts from $_cfg -- refusing to proceed.
     Workspace isolation depends on this machine mounting exactly this
-    checkout, the secrets directory and the agent-writable directory, and
-    that cannot be confirmed." ;;
+    checkout, the secrets directory, the mirror and the agent-writable
+    directory, and that cannot be confirmed." ;;
     esac
 }
 
@@ -192,12 +195,14 @@ if podman machine inspect "$WK_MACHINE" >/dev/null 2>&1; then
             log  "    wants $_secrets_mount"
             log  "    wants $_tools_mount"
             log  "    wants $_agent_rw_mount"
+            log  "    wants $_mirror_mount"
         fi
         log  "  a mount is set only at creation (podman machine has no way to add"
         log  "  one), so the machine is destroyed and made again. That loses:"
         _report_losses
-        log  "  all of it is regenerable -- 'wk sync' refetches the mirror and"
-        log  "  publishes a snapshot, 'wk new' remakes a workspace -- except"
+        log  "  all of it is regenerable -- 'wk sync' publishes a snapshot off the"
+        log  "  mirror, which is this host's and survives, 'wk new' remakes a"
+        log  "  workspace -- except"
         log  "  /var/lib/wk/bench, which is measurements. Copy those out first:"
         log  "    podman machine ssh $WK_MACHINE -- tar -C /var/lib/wk -cf - bench > bench.tar"
         log  "  The deploy keys and agent tokens are not in this list: they are"
@@ -223,6 +228,7 @@ if ! podman machine inspect "$WK_MACHINE" >/dev/null 2>&1; then
         log  "    $_secrets_mount"
         log  "    $_tools_mount"
         log  "    $_agent_rw_mount"
+        log  "    $_mirror_mount"
         return 0 2>/dev/null || exit 0
     fi
     info "creating podman machine '$WK_MACHINE' (${_cores} cpus, ${_mem} MiB, ${_disk} GiB)"
@@ -237,7 +243,8 @@ if ! podman machine inspect "$WK_MACHINE" >/dev/null 2>&1; then
         --rootful \
         --volume "$_secrets_mount" \
         --volume "$_tools_mount" \
-        --volume "$_agent_rw_mount"
+        --volume "$_agent_rw_mount" \
+        --volume "$_mirror_mount"
 
     changed "created podman machine '$WK_MACHINE'"
 
@@ -261,5 +268,5 @@ else
 fi
 
 unset _cores _mem _disk _mounts _verdict _absent _cfg _secrets_mount _tools_mount \
-      _agent_rw_mount _cur_cpus _cur_mem _was_running
+      _agent_rw_mount _mirror_mount _cur_cpus _cur_mem _was_running
 unset -f _mount_state _absent_targets _read_mounts _mount_rows _check_mounts _report_losses

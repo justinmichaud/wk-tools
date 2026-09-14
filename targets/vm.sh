@@ -1,4 +1,4 @@
-# Target driver: a disposable macOS VM on Tart. `tart clone` is APFS copy-on-write, so a golden base with Xcode and a checkout is built once and every workspace is a free clone.
+# Target driver: a disposable macOS VM on Tart. `tart clone` is APFS copy-on-write, so a golden base with Xcode is built once and every workspace is a free clone; its WebKit checkout is `--shared` off the host's mirror, mounted in.
 
 . "$WK_ROOT/bench/mac-window-probe.sh"
 . "$WK_ROOT/bench/mac-quiet-desktop.sh"
@@ -144,7 +144,7 @@ t_src()   { echo "/Users/$WK_VM_USER/WebKit"; }
 t_home()  { echo "/Users/$WK_VM_USER"; }
 t_tools() { echo "/Users/$WK_VM_USER/wk-tools"; }
 
-t_mirror_dir() { mirror_beside_checkout "$(t_src "$1")"; }
+t_mirror_dir() { mirror_in_guest; }
 
 t_needs_base() { return 1; }
 
@@ -176,9 +176,8 @@ t_ssh_user() { printf '%s' "$WK_VM_USER"; }
 
 t_agent_sock() { printf '/Users/%s/.wk-ssh-agent.sock' "$WK_VM_USER"; }
 
-# The one host directory a guest mounts: the claude.ai login the CLI rotates in place, so every holder here reads one set of bytes (wk_agent_rw_dir). tart automounts a named share at this path.
-WK_VM_AGENT_RW_SHARE=agent-rw
-_agent_rw_guest_dir() { printf '/Volumes/My Shared Files/%s' "$WK_VM_AGENT_RW_SHARE"; }
+WK_VM_AGENT_RW_SHARE=agent-rw   # the claude.ai login the CLI rotates in place, so every holder here reads one set of bytes (wk_agent_rw_dir); the other share is the mirror (WK_VM_MIRROR_SHARE)
+_agent_rw_guest_dir() { guest_share_dir "$WK_VM_AGENT_RW_SHARE"; }
 
 # _boot records WK_VM_UNFILTERED as a file beside the run log, because Softnet is applied at `tart run` and a guest booted without it stays open for its whole life -- the environment this is read in says nothing about it.
 t_egress_filtered() { [ ! -f "$WK_VM_DIR/$1.unfiltered" ]; }
@@ -190,6 +189,8 @@ t_create() {
     local v; v=$(_vm "$name")
 
     [ "$(_vm_state "$v")" = absent ] || die "workspace '$name' already exists"
+    [ -d "$(wk_mirror)" ] || die "no WebKit mirror on this machine for '$name' to clone its checkout from
+    ($(wk_mirror) does not exist):  wk sync    makes it"
 
     _ensure_base
 
@@ -535,7 +536,8 @@ _boot() {
         ensure_dir "$(wk_agent_rw_dir)" 0700
         # nohup, not a bare `&`, or the VM dies with the terminal. Windowed: a macOS guest is the one workspace kind with a real GPU, and it is the .app's own binary that runs -- outside the bundle tart loses com.apple.security.virtualization and fullScreenPrimary.
         # shellcheck disable=SC2086 -- deliberate word splitting of the flags.
-        nohup "$(tart_bin)" run $sflags --dir="$WK_VM_AGENT_RW_SHARE:$(wk_agent_rw_dir)" "$v" >"$runlog" 2>&1 &
+        nohup "$(tart_bin)" run $sflags --dir="$WK_VM_AGENT_RW_SHARE:$(wk_agent_rw_dir)" \
+            --dir="$WK_VM_MIRROR_SHARE:$(dirname "$(wk_mirror)"):ro" "$v" >"$runlog" 2>&1 &
         disown 2>/dev/null || true
         info "booting $v (log: $runlog)"
     fi
@@ -653,7 +655,7 @@ _write_claude_config() {
         done"
 }
 
-# A guest's checkout is made at first start, --shared from the mirror its base seeds, and converged on every start under the injected credential: the identity include, the wiring, then `git-webkit setup --defaults`, which no-ops once webkitscmpy.setup is true. The generated halves are piped, never expanded into a heredoc: they carry `$` of their own.
+# A guest's checkout is made at first start, --shared from the host's mirror on its share, and converged on every start under the injected credential: the identity include, the wiring, then `git-webkit setup --defaults`, which no-ops once webkitscmpy.setup is true. The generated halves are piped, never expanded into a heredoc: they carry `$` of their own.
 _write_checkout() { # <name> <ip>
     local name="$1" ip="$2" src mirror out rc=0 t0
     src=$(t_src "$name"); mirror=$(t_mirror_dir "$name")
@@ -665,7 +667,9 @@ git config --global --replace-all include.path "$WK_TOOLS/dotfiles/gitconfig"
 if [ -d "$WK_SRC/.git" ]; then
     echo checkout=present
 elif [ ! -d "$WK_MIRROR" ]; then
-    echo checkout=no-mirror; exit 1
+    echo "checkout=no-mirror: $WK_MIRROR is not there. The share is mounted at boot, so"
+    echo "  'wk vm stop', then 'wk vm start' -- or the host has no mirror yet: wk sync"
+    exit 1
 elif git clone --quiet --shared --branch main "$WK_MIRROR" "$WK_SRC"; then
     echo checkout=cloned
 else
@@ -947,7 +951,7 @@ _write_shell_rc() { # <name> <ip>
 
 command -v tools_push >/dev/null 2>&1 || . "$WK_ROOT/lib/tools.sh"
 
-# A git bundle of this tree's HEAD (tools_push, lib/tools.sh) rather than a mount: the one --dir a guest gets is the agent-rw share (_boot), and an uncommitted tree here is refused.
+# A git bundle of this tree's HEAD (tools_push, lib/tools.sh) rather than a mount: a guest's shares are the agent-rw directory and the mirror (_boot), and an uncommitted tree here is refused.
 _push_tools() {
     local name="$1" ip="$2"
     tools_push "$(t_tools "$name")" _ssh "$ip"
@@ -960,36 +964,14 @@ t_sync_tools() {
     _write_marker "$name" "$ip"
 }
 
-t_sync() {
-    local g rc=0 ip m
-    command -v mirror_refresh_script >/dev/null 2>&1 || . "$WK_ROOT/lib/store.sh"
+t_sync() {   # the tooling copy only: a guest's mirror is the host's, refreshed by the host (cmd/sync)
+    local g rc=0
     for g in $(target_workspaces); do
         if [ "$(t_info "$g" 2>/dev/null)" != running ]; then
             printf '  %-24s %s\n' "$g" "not running -- skipped" >&2
             continue
         fi
-        t_sync_tools "$g" || { rc=1; continue; }
-        if ! ip=$(_ip "$g"); then
-            printf '  %-24s %s\n' "$g" "tools ok, no address to refresh the mirror over" >&2
-            rc=1
-            continue
-        fi
-        m=$(t_mirror_dir "$g")
-        if _ssh "$ip" "if [ -d $(sh_quote "$m") ]; then
-                           $(mirror_refresh_script "$m")
-                       else echo mirror-absent
-                       fi" \
-               | while read -r _tag _name _state; do
-                     case "$_tag" in
-                         mirror-fetch)
-                             printf '  %-24s %s\n' "$g" "mirror $_name $_state" >&2 ;;
-                         mirror-absent)
-                             printf '  %-24s %s\n' "$g" \
-                                 "tools ok, no mirror in this guest -- 'wk vm base --rebuild' puts one in every guest made after it" >&2 ;;
-                     esac
-                 done
-        then printf '  %-24s ok\n' "$g" >&2
-        else rc=1; fi
+        if t_sync_tools "$g"; then printf '  %-24s ok\n' "$g" >&2; else rc=1; fi
     done
     return "$rc"
 }
@@ -1225,7 +1207,7 @@ vm_base_findings() {
 
     if ! _base_exists; then
         _f wrong "no golden base VM '$WK_VM_BASE' -- there is nothing for a guest to be cloned from" \
-                 "wk vm base   (hours: the image pull, Xcode, a checkout)"
+                 "wk vm base   (hours: the image pull, Xcode's first launch)"
     elif [ ! -f "$(_base_marker)" ]; then
         _f wrong "'$WK_VM_BASE' exists but provisioning never finished in it" \
                  "wk vm base --refresh   (re-runs provisioning; nothing is re-downloaded)"
@@ -1278,7 +1260,7 @@ sys.exit(0 if any(v.get("Name") == sys.argv[1] for v in json.load(sys.stdin)) el
     _provision_base
 }
 
-# The base boots with the open network every time, and a workspace never does: provisioning clones WebKit and installs from PyPI, and Setup Assistant's account pane needs Apple's servers. Booting it once each way changes its subnet, and `tart ip` answers with the lease it had before.
+# The base boots with the open network every time, and a workspace never does: provisioning installs from PyPI, and Setup Assistant's account pane needs Apple's servers. Booting it once each way changes its subnet, and `tart ip` answers with the lease it had before.
 _start_base() { # -> ip
     local runlog="$WK_VM_DIR/base.run.log"
     if [ "$(_vm_state "$WK_VM_BASE")" != running ]; then
@@ -1343,17 +1325,16 @@ $(_runlog_tail "$runlog")"
     needs, and the base is built from the image WK_VM_IMAGE names -- check that
     image rather than patching the guest:  ssh into it and run  sudo -n true"
 
-    info "provisioning the base VM (Xcode licence, WebKit mirror and checkout, Claude CLI)"
+    info "provisioning the base VM (Xcode licence, disk, desktop)"
     _push_tools "$WK_VM_BASE" "$ip" \
         || die "the base cannot be provisioned without wk-tools in it (see above)"
     vm_login_note
-    # Detached and polled, not a foreground `ssh <long command>`: the clone is over an hour, and the connection does not always last it (measured 2026-09-04: "Read from remote host: Connection reset by peer", which took the clone with it).
+    # Detached and polled, not a foreground `ssh <long command>`: provisioning is minutes, and a dropped connection (measured 2026-09-04: "Read from remote host: Connection reset by peer") takes a foreground run with it.
     command -v detach_remote >/dev/null 2>&1 || . "$WK_ROOT/lib/detach.sh"
     local plog="/tmp/wk-base-provision.log" prc="/tmp/wk-base-provision.rc"
     detach_remote _base_ssh "$plog" "$prc" -- \
         env WK_VM_DISPLAY="$WK_VM_DISPLAY" WK_VM_USER="$WK_VM_USER" \
             WK_VM_PASSWORD="$WK_VM_PASSWORD" \
-            WK_VM_MIRROR="$(t_mirror_dir "$WK_VM_BASE")" \
             bash "$(t_tools "$WK_VM_BASE")/vm/provision-base.sh" \
         || die "could not start base provisioning in '$WK_VM_BASE'"
     local prov_rc; prov_rc=$(detach_wait_remote _base_ssh "$plog" "$prc")

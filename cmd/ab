@@ -208,10 +208,7 @@ ab_profile_for() { # <device> <bits or empty> -- prints the one profile, or dies
     # Unquoted on purpose: an empty --builder or width is a wildcard here.
     pattern="*-$RELEASE-${BUILDER:-*}-$dev-${bits:-*}"
     for c in $(image_config_names); do
-        # shellcheck disable=SC2254
-        case "$c" in
-            $pattern) matches="$matches $c" ;;
-        esac
+        match_any "$c" "$pattern" && matches="$matches $c"
     done
     set -- $matches
     case $# in

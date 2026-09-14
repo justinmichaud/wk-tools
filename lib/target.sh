@@ -13,8 +13,10 @@ t_ccache_dir() { echo "/ccache"; }   # inert on the Apple ports (no ccache)
 
 t_mirror_dir() { echo ""; }          # <name>; empty means fetch from the upstreams
 
-mirror_in_container()    { echo "/mirror/WebKit.git"; }   # the host's, bind-mounted read-only
-mirror_beside_checkout() { echo "$1.git"; }               # <checkout>: a guest's own
+mirror_in_container() { printf '%s' "${WK_MIRROR:-$(wk_mirror)}"; }   # the machine's own path, bind-mounted read-only and named in the container's environment, so a `--shared` snapshot's alternates resolve on both sides
+WK_VM_MIRROR_SHARE=mirror
+guest_share_dir()  { printf '/Volumes/My Shared Files/%s' "$1"; }   # <share name>: where macOS automounts a tart share
+mirror_in_guest()  { printf '%s/WebKit.git' "$(guest_share_dir "$WK_VM_MIRROR_SHARE")"; }
 t_sync_tools() { :; }               # push wk-tools in; nothing when it is bind-mounted
 
 t_sync()       { :; }               # refresh this target's furniture: its tooling copy, and its store

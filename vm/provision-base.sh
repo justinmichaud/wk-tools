@@ -2,7 +2,6 @@
 
 set -euo pipefail
 
-MIRROR="${WK_VM_MIRROR:?WK_VM_MIRROR must name the guest mirror; this script is run by targets/vm.sh}"
 WK_TOOLS_DIR="$HOME/wk-tools"
 
 say() { printf '==> %s\n' "$*" >&2; }
@@ -38,19 +37,6 @@ fi
 sudo pmset -a disablesleep 1 >/dev/null 2>&1 || true
 sudo systemsetup -setcomputersleep Never >/dev/null 2>&1 || true
 
-say "refreshing the WebKit mirror at $MIRROR (the first one clones all of WebKit)"
-_refresh=$(bash -c '. "$1/lib/common.sh"; . "$1/lib/store.sh"; mirror_refresh_script "$2"' \
-               _ "$WK_TOOLS_DIR" "$MIRROR") \
-    || { echo "error: could not build the mirror refresh script" >&2; exit 1; }
-sh -c "$_refresh" 2>&1 | sed 's/^/    /' >&2 \
-    || { echo "error: the mirror at $MIRROR could not be made (above)" >&2; exit 1; }
-
-git -C "$MIRROR" rev-parse --verify --quiet refs/heads/main >/dev/null || {
-    echo "error: the mirror at $MIRROR has no origin/main, so there is nothing" >&2
-    echo "       to check out. The fetch above says which upstream failed." >&2
-    exit 1
-}
-
 # The guest keeps the image's admin password: `sysadminctl -oldPassword`, the only form the account itself can run, exits 0 having changed nothing on macOS Tahoe 26.5.
 WK_VM_USER="${WK_VM_USER:-admin}"
 WK_VM_PASSWORD="${WK_VM_PASSWORD:-admin}"
@@ -63,7 +49,6 @@ cat "$WK_TOOLS_DIR/bench/mac-quiet-desktop.sh" "$WK_TOOLS_DIR/bench/mac-pyobjc.s
     "$WK_TOOLS_DIR/vm/desktop.sh" \
     | WK_VM_PASSWORD="$WK_VM_PASSWORD" bash -s
 
-# pmset alone does not keep the display awake.
 sudo -n tee /Library/LaunchDaemons/org.wk.nosleep.plist >/dev/null <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">

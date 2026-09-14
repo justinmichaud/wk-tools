@@ -100,13 +100,21 @@ _verify_mounts() {
     is created:  ./setup --stage machine"
     fi
 
+    if _rsh "findmnt -no TARGET $(sh_quote "$WK_STORE/git")" >/dev/null 2>&1; then
+        unchanged "the mirror directory is mounted at $WK_STORE/git"
+    else
+        die "$WK_STORE/git is not a mount inside '$WK_MACHINE', so the mirror this host
+    keeps ($(dirname "$(wk_mirror)")) reaches no snapshot and no workspace. The
+    machine mounts it there when it is created:  ./setup --stage machine"
+    fi
+
     local target
-    for target in /opt/wk-tools "$WK_STORE/secrets"; do
+    for target in /opt/wk-tools "$WK_STORE/secrets" "$WK_STORE/git"; do
         if _rsh "findmnt -no TARGET -O ro $(sh_quote "$target")" >/dev/null 2>&1; then
             unchanged "$target is mounted read-only"
         else
             die "$target is writable inside '$WK_MACHINE', so a workspace can rewrite
-    this checkout and the deploy keys it pushes with. podman drops the
+    this checkout, the deploy keys it pushes with, or the mirror. podman drops the
     read-only mode it is given and the machine's provisioning puts it back
     (host/macos/playbook.yaml); this says that provisioning did not run."
         fi

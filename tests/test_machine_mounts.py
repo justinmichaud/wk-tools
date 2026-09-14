@@ -1,11 +1,12 @@
-"""host/macos/machine.sh: the podman machine's three mounts.
+"""host/macos/machine.sh: the podman machine's four mounts.
 
 The machine mounts exactly this checkout at /var/opt/wk-tools -- which the
 machine OS also spells /opt/wk-tools, /opt being a symlink into /var on an
-ostree system -- and this device's secrets directory at $WK_STORE/secrets,
-both read-only, plus the one directory a workspace may write --
-$WK_STORE/agent-rw, holding the claude.ai login credential the Claude CLI
-rewrites in place (wk_agent_rw_dir, lib/store.sh) -- and nothing else:
+ostree system -- this device's secrets directory at $WK_STORE/secrets and its
+WebKit mirror at $WK_STORE/git, all three read-only, plus the one directory a
+workspace may write -- $WK_STORE/agent-rw, holding the claude.ai login
+credential the Claude CLI rewrites in place (wk_agent_rw_dir, lib/store.sh)
+-- and nothing else:
 `/Users` above all, which podman mounts by default. Which mount is writable is
 as much a part of the invariant as which mounts there are, so the two are
 separate verdicts: a different *set* is recreated, a set mounted the wrong way
@@ -129,6 +130,8 @@ class _Stage(WkTest):
         # Not an environment variable of its own: wk_agent_rw_dir is a sibling
         # of the secrets directory, so WK_HOST_SECRETS below places both.
         self.agent_rw = self.tmp / "agent-rw"
+        # wk_mirror on a macOS host is under wk_state_dir (lib/store.sh).
+        self.mirror_dir = self.home / ".local" / "state" / "wk" / "git"
         self.log = self.tmp / "podman.log"
         for d in (self.home, self.vm):
             d.mkdir(parents=True)
@@ -141,7 +144,8 @@ class _Stage(WkTest):
         and then holds the machine to."""
         return ((str(self.secrets), "/var/lib/wk/secrets", True),
                 (str(REPO), "/var/opt/wk-tools", True),
-                (str(self.agent_rw), "/var/lib/wk/agent-rw", False))
+                (str(self.agent_rw), "/var/lib/wk/agent-rw", False),
+                (str(self.mirror_dir), "/var/lib/wk/git", True))
 
     def run_stage(self, env=None, podman=None):
         script = f'''
@@ -160,6 +164,7 @@ is_macos() {{ return 0; }}
         e.update({
             "HOME": str(self.home),
             "XDG_CONFIG_HOME": str(self.home / ".config"),
+            "XDG_STATE_HOME": str(self.home / ".local" / "state"),
             "WK_HOST_SECRETS": str(self.secrets),
             "WK_STORE": "/var/lib/wk",
             "WK_TEST_VM": str(self.vm),
@@ -189,7 +194,7 @@ is_macos() {{ return 0; }}
         return ""
 
 
-class TestInitAsksForExactlyThreeMountsOnlyOneWritable(_Stage):
+class TestInitAsksForExactlyFourMountsOnlyOneWritable(_Stage):
     def test_the_init_argv(self):
         cp = self.run_stage()
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
@@ -198,7 +203,7 @@ class TestInitAsksForExactlyThreeMountsOnlyOneWritable(_Stage):
         for src, target, ro in self.want():
             with self.subTest(target=target):
                 self.assertIn(f"--volume {src}:{target}:{'ro' if ro else 'rw'}", argv)
-        self.assertEqual(3, argv.count("--volume"), argv)
+        self.assertEqual(4, argv.count("--volume"), argv)
         self.assertIn("--rootful", argv)
 
     def test_exactly_one_of_them_is_writable(self):
@@ -217,7 +222,7 @@ class TestInitAsksForExactlyThreeMountsOnlyOneWritable(_Stage):
         self.assertNotIn('--volume  ', self.init_argv() + " ")
         self.assertNotIn("/Users:/Users", self.init_argv())
 
-    def test_both_source_directories_are_made_first_and_are_private(self):
+    def test_the_source_directories_are_made_first_and_the_credential_ones_are_private(self):
         """podman refuses to init against a mount source that is not there."""
         cp = self.run_stage()
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
@@ -225,6 +230,7 @@ class TestInitAsksForExactlyThreeMountsOnlyOneWritable(_Stage):
             with self.subTest(dir=d.name):
                 self.assertTrue(d.is_dir())
                 self.assertEqual(0o700, d.stat().st_mode & 0o777)
+        self.assertTrue(self.mirror_dir.is_dir(), "the mirror directory is not made before the init")
 
     def test_what_init_wrote_is_what_the_verify_accepts(self):
         cp = self.run_stage()
@@ -271,15 +277,17 @@ class TestAMachineWithAnyOtherMountSetIsRecreated(_Stage):
     CASES = {
         "none": [],
         "users": [("/Users", "/Users", False)],
-        "one of three": [(str(REPO), "/var/opt/wk-tools", True)],
+        "one of four": [(str(REPO), "/var/opt/wk-tools", True)],
     }
 
     def setUp(self):
         super().setUp()
         # The wanted set minus the writable one: a machine that cannot rotate
-        # the agent credential, and has no mount to add it through.
+        # the agent credential, and has no mount to add it through -- and the
+        # set minus the mirror: a machine whose snapshots have nothing to borrow.
         self.CASES = dict(self.CASES)
-        self.CASES["no agent-rw"] = list(self.want()[:2])
+        self.CASES["no agent-rw"] = [self.want()[0], self.want()[1], self.want()[3]]
+        self.CASES["no mirror"] = list(self.want()[:3])
 
     def _run(self, case, env=None):
         self.exists()
@@ -378,7 +386,7 @@ class TestEveryTargetIsCanonicalInTheMachineOS(_Stage):
         argv = self.init_argv().split()
         targets = [argv[i + 1].split(":")[1]
                    for i, a in enumerate(argv) if a == "--volume"]
-        self.assertEqual(3, len(targets), self.podman)
+        self.assertEqual(4, len(targets), self.podman)
         for target in targets:
             with self.subTest(target=target):
                 self.assertTrue(target.startswith("/var/"), target)
@@ -710,16 +718,16 @@ class TestTheRightSetMountedTheWrongWayFailsLoudly(_Stage):
     def test_a_read_only_mount_handed_back_writable(self):
         """Even with a headless yes: it would destroy the store each time
         round and end up exactly here again."""
-        secrets, tools, rw = self.want()
+        secrets, tools, rw, mirror = self.want()
         self._wrong([(secrets[0], secrets[1], False),
                      (tools[0], tools[1], False),
-                     rw])
+                     rw, (mirror[0], mirror[1], False)])
 
     def test_the_writable_one_handed_back_read_only(self):
         """Not cosmetic: the Claude CLI would fail every refresh, and the
         credential every workspace shares would go stale rather than rotate."""
-        secrets, tools, rw = self.want()
-        self._wrong([secrets, tools, (rw[0], rw[1], True)])
+        secrets, tools, rw, mirror = self.want()
+        self._wrong([secrets, tools, (rw[0], rw[1], True), mirror])
 
 
 class TestAConfigItCannotReadIsRefused(_Stage):

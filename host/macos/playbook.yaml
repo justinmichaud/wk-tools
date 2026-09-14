@@ -17,7 +17,6 @@
         mode: "0755"
       loop:
         - "{{ wk_root }}"
-        - "{{ wk_root }}/git"
         - "{{ wk_root }}/base"
         - "{{ wk_root }}/ws"
         - "{{ wk_root }}/cache/ccache"

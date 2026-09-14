@@ -28,8 +28,8 @@
 # `wk vm base` manages the golden guest every workspace is cloned from.
 #
 #   base                      build it if missing, otherwise report it ready
-#   base --refresh            re-provision it in place: fetch its mirror seed,
-#                             re-apply its settings (minutes, keeps the image)
+#   base --refresh            re-provision it in place: re-apply its settings
+#                             (minutes, keeps the image)
 #   base --rebuild            delete and rebuild it from the pulled image
 #   base --rm                 erase it (and, on confirmation, the pulled
 #                             image cache) -- existing workspaces are unaffected

@@ -129,20 +129,11 @@ _job_pid_args() { # <ws> <pid> -- its command line inside the target, empty when
     t_exec "$1" ps -o args= -p "$2" 2>/dev/null | tr -d '\r' | tr '\n' ' '
 }
 
-# The patterns are one word each and separated by spaces, because a job's pid has more than one shape: build-in-target.sh execs the port's build script, so the same pid is the driver before the exec and the script after it. `|` inside an expansion is not alternation to `case` or `[[`, hence the loop.
-_job_pid_matches() { # <command line> <patterns> -- 0 when one of them matches
-    local args="$1" p
-    for p in $2; do
-        case "$args" in $p) return 0 ;; esac
-    done
-    return 1
-}
-
 job_pid_adopt() { # <ws> <task dir> <pid> <patterns its command line must match one of> -- 0 when the pid is the job's
     local ws="$1" dir="$2" pid="$3" want="$4" args
     [ -n "$want" ] || die "job_pid_adopt: ${dir##*/} named no pattern for pid $pid's command line"
     args=$(_job_pid_args "$ws" "$pid")
-    if _job_pid_matches "$args" "$want"; then
+    if match_any "$args" "$want"; then
         task_set "$dir" pid_match "$want"
         task_pid "$dir" "$pid"
         task_set "$dir" where target
@@ -243,7 +234,7 @@ _job_signal() { # <ws> <task dir> <pid> <signal>
     job_pid_adopt (lib/watchdog.sh), which is a bug."
         args=$(_job_pid_args "$ws" "$pid")
         [ -n "$args" ] || return 0   # gone between the liveness read and here: nothing to signal
-        _job_pid_matches "$args" "$want" || die "refusing to send $sig to pid $pid inside '$ws': it is running
+        match_any "$args" "$want" || die "refusing to send $sig to pid $pid inside '$ws': it is running
     '$args', not $want. The pid is what the workspace announced, and this one
     is another process -- in a shared PID namespace it could be another
     workspace's build. Stop the job where it runs:  wk enter $ws"

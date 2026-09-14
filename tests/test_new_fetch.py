@@ -426,9 +426,9 @@ sync_workspaces one
         (tests/test_mirror_path.py holds those): the fetch is `git fetch --all`
         as that checkout is configured, and the line printed for it says which
         mirror that configuration reads."""
-        for mirror in ("/mirror/WebKit.git",              # container
-                       "/Users/admin/WebKit.git",         # macOS guest
-                       "/home/you/wk/mirror"):            # build machine
+        for mirror in ("/var/lib/wk/git/WebKit.git",                  # container
+                       "/Volumes/My Shared Files/mirror/WebKit.git",  # macOS guest
+                       "/home/you/wk/mirror"):                        # build machine
             with self.subTest(mirror=mirror):
                 script, out = self._driven(mirror)
                 self.assertIn("cd '/src/WebKit'", script)

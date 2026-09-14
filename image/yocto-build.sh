@@ -426,9 +426,9 @@ case "$STAGE" in
                 2>/dev/null | wc -l | tr -d ' ')
             [ "$dirty" = 0 ] || fail "$SRC has $dirty uncommitted change(s); a slot is built from a
     commit and nothing else. Commit or discard them in the workspace first."
-            # t_spawn execs this with no WK_ROOT and no lib/target.sh, so there is no t_mirror_dir to ask: the fixed bind mount that driver names (tests/test_mirror_path.py's named exception).
+            # t_spawn execs this with no WK_ROOT and no lib/target.sh, so there is no t_mirror_dir to ask: the container driver names the mirror in the environment (mirror_in_container, lib/target.sh).
             git -C "$SRC" cat-file -e "$COMMIT^{commit}" 2>/dev/null \
-                || git -C "$SRC" fetch --quiet /mirror/WebKit.git "$COMMIT" \
+                || git -C "$SRC" fetch --quiet "${WK_MIRROR:?WK_MIRROR names the mirror this container mounts, set by targets/container.sh}" "$COMMIT" \
                 || fail "$COMMIT is not in this machine's mirror; 'wk ab' and 'wk pr' fetch a PR head into it first"
             git -C "$SRC" checkout --detach --quiet "$COMMIT" || fail "could not check out $COMMIT in $SRC"
             say "source        $SRC @ $(git -C "$SRC" rev-parse --short HEAD) ($(git -C "$SRC" log -1 --format=%s | cut -c1-60))"

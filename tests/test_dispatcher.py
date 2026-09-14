@@ -636,8 +636,8 @@ class TestHelpNamesEveryWhereOverride(WkTest):
                     self.assertIn(expected, text.splitlines(),
                                   f"'wk {f.name} -h' does not say where '{verbs}' runs:\n{text}")
                 checked += 1
-        # The commands that have one today: push, bench, sync, build, pi,
-        # profile, pr. A run that checked nothing would pass silently.
+        # The commands that have one today: push, bench, build, pi, profile,
+        # pr. A run that checked nothing would pass silently.
         self.assertGreater(checked, 5, "no where= override was checked at all")
 
     def test_the_top_level_answer_is_still_there(self):

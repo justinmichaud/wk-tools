@@ -266,6 +266,17 @@ sh_quote() { # ssh joins its arguments and hands them to a remote shell
 }
 
 # An older `wk` across a hop ignores an unknown variable, dies on a flag.
+# The only place a variable is a `case` pattern. The patterns arrive as words of one string because a task record holds one value, and `read -a` splits that string where `for p in $list` would also pathname-expand each word against the cwd -- inside a WebKit checkout, `*Tools/Scripts/build-*` becomes the filenames it names.
+match_any() { # <string> <glob patterns, space-separated> -- 0 when one matches
+    local s="$1" p
+    local -a pats=()
+    read -ra pats <<< "$2"
+    for p in ${pats[@]+"${pats[@]}"}; do
+        case "$s" in $p) return 0 ;; esac
+    done
+    return 1
+}
+
 wk_forwarded_env() {
     printf '%s' "${WK_DEBUG:+WK_DEBUG=1 }${WK_QUIET:+WK_QUIET=1 }${WK_YES:+WK_YES=1 }${WK_FORCE:+WK_FORCE=1 }${WK_DRY_RUN:+WK_DRY_RUN=1 }"
 }

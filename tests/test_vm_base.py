@@ -1,8 +1,7 @@
 """Building the golden macOS base.
 
-`wk vm base --rebuild` is hours -- an image pull, Xcode's first launch, a
-WebKit mirror and checkout -- and the completion marker is written after all
-of it. Anything fatal in the late steps therefore leaves a fully provisioned
+`wk vm base --rebuild` is hours -- an image pull, Xcode's first launch --
+and the completion marker is written after all of it. Anything fatal in the late steps therefore leaves a fully provisioned
 base with no marker, which the next run deletes as rubble (_ensure_base), so
 what is knowable up front is checked up front and the marker records what
 the base actually got.
@@ -470,107 +469,93 @@ class TestEveryHandoverStatesTheLogin(WkTest):
         self.assertIn("vm_login_note", enter.split("\nsync)", 1)[0])
 
 
-class TestSyncRefreshesEachGuestsMirror(WkTest):
-    """`wk sync --tools` reaches t_sync, this target's furniture: a guest's
-    tooling copy and its mirror. Each guest's mirror is its own -- inherited
-    from the base by copy-on-write and diverging from there -- so this is the
-    only thing that brings one up to date, and `wk sync <workspace>` then
-    fetches the checkout out of it with no network round trip.
+class TestSyncPushesTheToolingIntoEachRunningGuest(WkTest):
+    """`wk sync` reaches t_sync, this target's furniture, which for a guest is
+    its tooling copy alone: its mirror is the host's, mounted in, and the host
+    refreshes that (cmd/sync). Driven with the push replaced by a recorder."""
 
-    Driven with the ssh replaced by a recorder that answers as a guest would."""
-
-    def _sync(self, ssh_body):
+    def _sync(self, push_body, state="running"):
         store = self.tmp / "store"
         store.mkdir(exist_ok=True)
         with stub_path({"tart": TART}) as binp:
             return bash(DRIVER + f'''
-target_workspaces() {{ echo mya; }}
-t_info()            {{ echo running; }}
-t_sync_tools()      {{ :; }}
-_ip()               {{ echo 10.0.0.9; }}
-_ssh() {{ shift; printf '%s\\n' "$1" > {str(self.tmp / 'sent')!r}
-{ssh_body}
-}}
+target_workspaces() {{ echo mya; echo myb; }}
+t_info()            {{ echo {state}; }}
+t_sync_tools()      {{ echo "PUSHED: $1"; {push_body}; }}
+_ssh()              {{ echo "ssh should not have run" >&2; exit 1; }}
 t_sync
 ''', env={"WK_VM_STORE": str(store),
           "PATH": f"{binp}:{os.environ['PATH']}"})
 
-    def test_it_refreshes_the_mirror_the_driver_names(self):
-        cp = self._sync('echo "mirror-fetch origin ok"\necho "mirror-fetch fork FAILED"')
+    def test_every_running_guest_takes_the_tooling_and_nothing_else_is_sent(self):
+        cp = self._sync(":")
         out = cp.stdout + cp.stderr
         self.assertEqual(cp.returncode, 0, out)
-        sent = (self.tmp / "sent").read_text()
-        self.assertIn("/Users/admin/WebKit.git", sent)
-        # The one refresh snippet, not a second spelling of what a mirror is.
-        self.assertIn("mirror-fetch $r ok", sent)
-        self.assertIn("config remote.forkwpe.tagOpt --no-tags", sent)
-        self.assertIn("mirror origin ok", out)
-        self.assertIn("mirror fork FAILED", out, "an unreachable fork is not the guest's failure")
+        self.assertEqual([l for l in cp.stdout.splitlines() if l.startswith("PUSHED:")],
+                         ["PUSHED: mya", "PUSHED: myb"])
+        self.assertNotIn("should not have run", out)
         self.assertIn("mya", out)
 
-    def test_a_guest_with_no_mirror_is_told_what_puts_one_there(self):
-        """A guest predating the mirror is not upgraded in place -- a 19 GB
-        clone is not a side effect of `wk sync --tools`, and a guest is what
-        the golden base produced."""
-        cp = self._sync('echo mirror-absent')
-        out = cp.stdout + cp.stderr
-        self.assertEqual(cp.returncode, 0, out)
-        self.assertIn("no mirror in this guest", out)
-        self.assertIn("wk vm base --rebuild", out)
-
     def test_a_guest_that_is_not_running_is_skipped(self):
-        store = self.tmp / "store"
-        store.mkdir(exist_ok=True)
-        with stub_path({"tart": TART}) as binp:
-            cp = bash(DRIVER + '''
-target_workspaces() { echo mya; }
-t_info()            { echo exited; }
-_ssh()              { echo "ssh should not have run" >&2; exit 1; }
-t_sync
-''', env={"WK_VM_STORE": str(store), "PATH": f"{binp}:{os.environ['PATH']}"})
+        cp = self._sync(":", state="exited")
         out = cp.stdout + cp.stderr
         self.assertEqual(cp.returncode, 0, out)
         self.assertIn("not running -- skipped", out)
-        self.assertNotIn("should not have run", out)
+        self.assertNotIn("PUSHED:", out)
 
-    def test_a_refresh_that_could_not_run_fails_the_sync(self):
-        cp = self._sync("exit 1")
+    def test_a_push_that_failed_fails_the_sync(self):
+        cp = self._sync("return 1")
+        self.assertNotEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+
+    def test_no_guest_fetches_into_a_mirror_of_its_own(self):
+        self.assertNotIn("mirror_refresh_script", func_body(VM.read_text(), "t_sync"))
+
+
+class TestTheGuestReadsTheHostsMirror(WkTest):
+    """The one copy of WebKit's history on a Mac is the host's mirror
+    (wk_mirror, lib/store.sh); a guest mounts that directory read-only as a
+    share and clones its checkout `--shared` off it, so the base carries no
+    mirror and a guest is as current as the host's last `wk sync`."""
+
+    def test_provisioning_makes_no_mirror(self):
+        text = PROVISION.read_text()
+        for word in ("mirror_refresh_script", "WK_VM_MIRROR", "github.com"):
+            with self.subTest(word=word):
+                self.assertNotIn(word, text, f"vm/provision-base.sh still puts {word!r} in the base")
+        self.assertNotIn("WK_VM_MIRROR=", VM.read_text(), "targets/vm.sh still hands provisioning a mirror path")
+
+    def test_the_guest_is_booted_with_the_mirror_share_read_only(self):
+        boot = func_body(VM.read_text(), "_boot")
+        self.assertIn('--dir="$WK_VM_MIRROR_SHARE:$(dirname "$(wk_mirror)"):ro"', boot)
+
+    def test_a_guest_is_not_made_on_a_machine_with_no_mirror(self):
+        """The refusal is at creation, before a base is built or cloned: a
+        guest with nothing to clone its checkout from is rubble."""
+        with stub_path({"tart": TART}) as binp:
+            cp = bash(DRIVER + f'''
+_vm_state()    {{ echo absent; }}
+_ensure_base() {{ echo ENSURED; }}
+wk_mirror()    {{ echo {str(self.tmp / "nowhere" / "WebKit.git")!r}; }}
+t_create demo
+''', env={"WK_VM_STORE": str(self.tmp / "store"), "PATH": f"{binp}:{os.environ['PATH']}"})
         out = cp.stdout + cp.stderr
         self.assertNotEqual(cp.returncode, 0, out)
-
-
-class TestTheGuestCarriesAMirror(unittest.TestCase):
-    """Provisioning builds the mirror every guest cloned from this base
-    inherits, at the path the driver names (t_mirror_dir) -- handed over
-    rather than spelled again in the guest."""
-
-    def test_the_path_is_the_drivers_and_is_required(self):
-        text = PROVISION.read_text()
-        self.assertIn("WK_VM_MIRROR:?", text,
-                      "the guest script invents a mirror path when given none")
-        self.assertIn('WK_VM_MIRROR="$(t_mirror_dir "$WK_VM_BASE")"',
-                      VM.read_text(),
-                      "targets/vm.sh no longer hands the mirror path over")
-
-    def test_it_is_made_by_the_one_refresh_script(self):
-        text = PROVISION.read_text()
-        self.assertIn("mirror_refresh_script", text)
-        self.assertNotIn("github.com", text,
-                         "provisioning names an upstream URL of its own")
+        self.assertIn("no WebKit mirror on this machine", out)
+        self.assertIn("wk sync", out)
+        self.assertNotIn("ENSURED", out)
 
     def test_the_checkout_shares_the_mirrors_objects(self):
-        """--shared, so the history is stored once in the base and the
-        per-workspace cost of both is what copy-on-write makes it."""
+        """--shared, so the history is stored once, on the host."""
         self.assertIn("git clone --quiet --shared", func_body(VM.read_text(), "_write_checkout"))
 
-    def test_nothing_is_seeded_from_the_host(self):
+    def test_nothing_is_seeded_from_the_host_by_copy(self):
         """One path to a checkout: the mirror. A seed rsynced off the host is a
-        second one, taken only when a host happens to have a checkout at a path
-        nothing else in this repo knows about."""
+        second one, and a second copy of the history."""
         for path in (PROVISION, VM):
             with self.subTest(file=path.name):
                 self.assertNotIn("wk-seed", path.read_text())
                 self.assertNotIn("WK_HOST_WEBKIT", path.read_text())
+                self.assertNotIn("rsync", func_body(path.read_text(), "_write_checkout") if path is VM else path.read_text())
 
 
 class TestGitWebkitSetupHasAnIdentityToRead(unittest.TestCase):
@@ -599,21 +584,21 @@ class TestGitWebkitSetupHasAnIdentityToRead(unittest.TestCase):
 
 class TestTheBaseCarriesOnlyWhatChangesWithTheImage(unittest.TestCase):
     """A base is rebuilt for a new image, and for nothing else. What depends
-    on this tree or on a credential -- the checkout, its remotes, git-webkit
-    setup, the Claude CLI, the shell -- is made in the guest at its first
-    start and converged on every start, so neither a rotated token nor an
-    edited script asks for hours of rebuild."""
+    on this tree, on a credential or on the host -- the checkout, its remotes,
+    git-webkit setup, the Claude CLI, the shell, the mirror it clones from --
+    is made in the guest at its first start or mounted in, and converged on
+    every start, so neither a rotated token nor an edited script nor a stale
+    mirror asks for hours of rebuild."""
 
-    BAKED_NOWHERE = ("git clone", "wk_wiring_script", "wk_gitwebkit_setup_script",
-                     "claude.ai/install.sh", "wk_claude_cli_script", "include.path",
-                     "shell-rc.sh", ".claude")
+    BAKED_NOWHERE = ("git clone", "mirror_refresh_script", "wk_wiring_script",
+                     "wk_gitwebkit_setup_script", "claude.ai/install.sh",
+                     "wk_claude_cli_script", "include.path", "shell-rc.sh", ".claude")
 
     def test_provisioning_makes_no_checkout_and_installs_no_tool(self):
         text = PROVISION.read_text()
         for word in self.BAKED_NOWHERE:
             with self.subTest(word=word):
                 self.assertNotIn(word, text, f"vm/provision-base.sh bakes {word!r} into the base")
-        self.assertIn("mirror_refresh_script", text, "the mirror seed is what the base is for")
 
     def test_the_guest_gets_them_on_every_start(self):
         assert_guest_start_converges(self, '_write_checkout "$name" "$ip"')
@@ -633,12 +618,14 @@ class TestTheBaseCarriesOnlyWhatChangesWithTheImage(unittest.TestCase):
 
 
 # `ssh`: the guest as a directory. The remote command is the last argument and
-# the script arrives on stdin; /Users/admin is rewritten to the scratch guest in
-# both, and the command runs with HOME there, so the real git runs.
+# the script arrives on stdin; /Users/admin and the mirror share are rewritten
+# to the scratch guest in both, and the command runs with HOME there, so the
+# real git runs.
 FAKE_SSH_GUEST = '''
 for a in "$@"; do last="$a"; done
-cmd=$(printf '%s' "$last" | sed "s|/Users/admin|$WK_TEST_GUEST|g")
-sed "s|/Users/admin|$WK_TEST_GUEST|g" | HOME="$WK_TEST_GUEST" sh -c "$cmd"
+rw="s|/Users/admin|$WK_TEST_GUEST|g; s|/Volumes/My Shared Files/mirror|$WK_TEST_GUEST/share|g"
+cmd=$(printf '%s' "$last" | sed "$rw")
+sed "$rw" | HOME="$WK_TEST_GUEST" sh -c "$cmd"
 '''
 
 # What the checkout needs of WebKit: `git-webkit setup --defaults`, which here
@@ -651,15 +638,16 @@ git config webkitscmpy.setup true
 
 
 class TestTheCheckoutIsMadeAtFirstStart(WkTest):
-    """`_write_checkout` against a scratch guest holding a bare mirror: the
-    first start clones from it, wires it and runs setup; the next start finds
-    all three done and changes nothing."""
+    """`_write_checkout` against a scratch guest with a bare mirror on its
+    share: the first start clones from it, wires it and runs setup; the next
+    start finds all three done and changes nothing."""
 
     def setUp(self):
         super().setUp()
         self.guest = self.tmp / "guest"
         (self.guest / "wk-tools").mkdir(parents=True)
-        self.mirror = self.guest / "WebKit.git"
+        (self.guest / "share").mkdir()
+        self.mirror = self.guest / "share" / "WebKit.git"
         src = self.tmp / "seed"
         (src / "Tools" / "Scripts").mkdir(parents=True)
         gw = src / "Tools" / "Scripts" / "git-webkit"
@@ -712,11 +700,16 @@ class TestTheCheckoutIsMadeAtFirstStart(WkTest):
         calls = (self.guest / "git-webkit.calls").read_text().splitlines()
         self.assertEqual(calls, ["setup --defaults"], "setup ran again on a set-up checkout")
 
-    def test_no_mirror_is_a_failure_that_says_so(self):
+    def test_no_mirror_is_a_failure_that_names_both_remedies(self):
+        """The share is mounted at boot and the mirror is made by `wk sync`;
+        either can be the one missing."""
         shutil.rmtree(self.mirror)
         cp = self._start()
+        out = cp.stdout + cp.stderr
         self.assertNotEqual(cp.returncode, 0)
-        self.assertIn("checkout=no-mirror", cp.stdout + cp.stderr)
+        self.assertIn("checkout=no-mirror", out)
+        self.assertIn("wk vm start", out)
+        self.assertIn("wk sync", out)
         self.assertFalse((self.guest / "WebKit").exists())
 
 if __name__ == "__main__":

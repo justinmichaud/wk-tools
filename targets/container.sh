@@ -145,7 +145,8 @@ t_create() {
     flags=(
         --additional-flags
         "--volume ${WK_TOOLS_SRC:-$WK_ROOT}:/opt/wk-tools:ro
-         --volume $(dirname "$(wk_mirror)"):/mirror:ro
+         --volume $(dirname "$(wk_mirror)"):$(dirname "$(wk_mirror)"):ro
+         --env WK_MIRROR=$(wk_mirror)
          --volume $overlay
          --volume $build_mount
          --volume $ws:/var/lib/wk/ws/$name
