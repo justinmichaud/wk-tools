@@ -24,9 +24,12 @@
 # `wk new`, `wk start` and `wk vm start` start remote control in what they
 # bring up; WK_NO_CLAUDE_RC=1 turns that off. It needs the claude.ai account
 # login rather than a `claude setup-token` token: 'wk key set claude-login',
-# which every container and guest reads. Onboarding, the trust dialog and the remote-control dialog are
-# recorded in the workspace before either kind of session starts
-# (claude/workspace-config.py).
+# which every container and guest reads. Before the server is spawned the
+# login is put to its rule where the workspace holds it -- renewed, accepted
+# by Anthropic, and allowed remote control by the organization's policy -- and
+# a login that fails any of those refuses here with the remedy. Onboarding,
+# the trust dialog and the remote-control dialog are recorded in the workspace
+# before either kind of session starts (claude/workspace-config.py).
 #
 # The agents this knows:
 #
@@ -147,6 +150,8 @@ rc_start() {
     leaves behind -- and remote control refuses anything less: a
     'claude setup-token' token ('wk key set claude') is inference-only.
     $(t_agent_secret_remedy "$name" claude-login)"
+    rc_login_judge "$(t_agent_secret_verdict "$name" claude-login)" "in '$name'" \
+        "A plain session there is unaffected:  wk ai claude $name"
 
     log=$(rc_log "$name"); pidf=$(rc_pidfile "$name")
     t_exec "$name" mkdir -p "$(t_home "$name")" >/dev/null 2>&1 || true

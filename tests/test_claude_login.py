@@ -29,7 +29,11 @@ import shutil
 import subprocess
 import unittest
 
+import threading
+from http.server import HTTPServer
+
 from tests.support import REPO, WK, WkTest, _clean_env, run, stub_path
+from tests.test_credcheck import FakeAnthropic
 from tests.test_pi_agent import FILE_ROWS, store_path
 
 # Not a credential, and deliberately nothing like one. The shape is the CLI's
@@ -44,7 +48,8 @@ BARE_PATH = "/usr/bin:/bin"
 
 def login(**over):
     d = {"accessToken": SECRET, "refreshToken": SECRET + "-r",
-         "expiresAt": 1, "scopes": ["user:inference", "user:profile"]}
+         "expiresAt": 4102444800000, "refreshTokenExpiresAt": 4102444800000,
+         "scopes": ["user:inference", "user:profile"]}
     d.update(over)
     return json.dumps({"claudeAiOauth": d})
 
@@ -88,8 +93,23 @@ exit ${WK_TEST_CLAUDE_EXIT:-0}
 
 
 class _Login(WkTest):
-    """A scratch store, and a `claude` that records what it was asked to do
-    instead of opening a browser."""
+    """A scratch store, a `claude` that records what it was asked to do
+    instead of opening a browser, and an Anthropic that answers for the login
+    it leaves (tests/test_credcheck.py's FakeAnthropic): the rule asks it
+    before anything is reported."""
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        cls.anthropic = HTTPServer(("127.0.0.1", 0), FakeAnthropic)
+        cls.anthropic_base = "http://127.0.0.1:%d" % cls.anthropic.server_port
+        threading.Thread(target=cls.anthropic.serve_forever, daemon=True).start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.anthropic.shutdown()
+        cls.anthropic.server_close()
+        super().tearDownClass()
 
     def setUp(self):
         super().setUp()
@@ -131,6 +151,8 @@ class _Login(WkTest):
             "WK_TEST_RECORD": str(self.account),
             # A store of its own, so nothing here goes near the real one.
             "WK_STORE": str(self.store),
+            "WK_ANTHROPIC_API": self.anthropic_base,
+            "WK_CLAUDE_OAUTH": self.anthropic_base,
         }
         env.update(over)
         return env

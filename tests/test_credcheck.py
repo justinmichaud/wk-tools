@@ -368,11 +368,143 @@ class TestWhereTheseApisMayBePointed(_Rules):
                 self.assertEqual(0, cp.returncode, cp.stdout + cp.stderr)
 
 
+class FakeAnthropic(BaseHTTPRequestHandler):
+    """api.anthropic.com and platform.claude.com as the rules see them
+    (measured 2026-09-10 and 2026-09-14): `GET /v1/models` answers 200 for a
+    token Anthropic accepts and 401 for one it does not, with no model
+    inferred; `GET /api/oauth/profile` names the account and organization
+    behind a login; `GET /api/claude_code/policy_limits` is the organization's
+    restrictions, what the CLI reads before it starts remote control; `POST
+    /v1/oauth/token` renews a login, or answers 400 invalid_grant for a refresh
+    token it no longer knows."""
+
+    status = 200             # /v1/models and /api/oauth/profile
+    policy_status = 200
+    policy = {"restrictions": {}, "compliance_taints": []}
+    refresh_status = 200
+    refresh_answer = None
+    seen = []
+
+    def _send(self, status, body):
+        raw = json.dumps(body).encode()
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(raw)))
+        self.end_headers()
+        self.wfile.write(raw)
+
+    def do_GET(self):
+        FakeAnthropic.seen.append(
+            (self.command, self.path, self.headers.get("Authorization", ""),
+             self.headers.get("anthropic-version", "")))
+        if self.path.startswith("/api/claude_code/policy_limits"):
+            return self._send(FakeAnthropic.policy_status, FakeAnthropic.policy)
+        if FakeAnthropic.status != 200:
+            return self._send(FakeAnthropic.status,
+                              {"type": "error",
+                               "error": {"type": "authentication_error"}})
+        if self.path.startswith("/api/oauth/profile"):
+            return self._send(200, {
+                "account": {"email": "someone@example.invalid"},
+                "organization": {"uuid": ORG, "name": "Example Org",
+                                 "subscription_status": "active"}})
+        return self._send(200, {"data": [{"id": "claude-x"}]})
+
+    def do_POST(self):
+        length = int(self.headers.get("Content-Length") or 0)
+        body = json.loads(self.rfile.read(length) or b"{}")
+        FakeAnthropic.seen.append(
+            (self.command, self.path, body.get("grant_type", ""),
+             body.get("refresh_token", "")))
+        if FakeAnthropic.refresh_status != 200:
+            return self._send(FakeAnthropic.refresh_status,
+                              {"error": "invalid_grant"})
+        answer = FakeAnthropic.refresh_answer or {
+            "access_token": RENEWED, "refresh_token": ROTATED,
+            "expires_in": 28800, "refresh_token_expires_in": 30 * 86400,
+            "scope": body.get("scope", "")}
+        return self._send(200, answer)
+
+    def log_message(self, *a):
+        pass
+
+
+ORG = "org-1111"
+RENEWED = "renewed-" + "a" * 20
+ROTATED = "rotated-" + "r" * 20
+RECORD = {"oauthAccount": {"organizationUuid": ORG,
+                           "organizationName": "Example"}}
+
+
+class _Anthropic(_Rules):
+    """A FakeAnthropic of the class's own, reset before every test."""
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        cls.anthropic = HTTPServer(("127.0.0.1", 0), FakeAnthropic)
+        cls.anthropic_base = "http://127.0.0.1:%d" % cls.anthropic.server_port
+        cls.anthropic_thread = threading.Thread(
+            target=cls.anthropic.serve_forever, daemon=True)
+        cls.anthropic_thread.start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.anthropic.shutdown()
+        cls.anthropic.server_close()
+        super().tearDownClass()
+
+    def setUp(self):
+        super().setUp()
+        FakeAnthropic.status = 200
+        FakeAnthropic.policy_status = 200
+        FakeAnthropic.policy = {"restrictions": {}, "compliance_taints": []}
+        FakeAnthropic.refresh_status = 200
+        FakeAnthropic.refresh_answer = None
+        FakeAnthropic.seen = []
+
+    def anthropic_env(self, api=None):
+        base = api if api is not None else self.anthropic_base
+        return {"WK_ANTHROPIC_API": base, "WK_CLAUDE_OAUTH": base}
+
+
+class FakeLiteLLM(BaseHTTPRequestHandler):
+    """ai.igalia.com as measured 2026-09-14: `GET /v1/models` lists what a key
+    may call (401 for one it does not accept), and `GET /key/info` answers 403
+    for a key restricted to the LLM API routes, 200 with the key's own record
+    for one that is not."""
+
+    models_status = 200
+    info_status = 403
+
+    def do_GET(self):
+        if self.path.startswith("/v1/models"):
+            status = FakeLiteLLM.models_status
+            body = ({"data": [{"id": "m1"}, {"id": "m2"}]} if status == 200
+                    else {"error": {"message": "Authentication Error"}})
+        elif self.path.startswith("/key/info"):
+            status = FakeLiteLLM.info_status
+            body = ({"info": {"key_alias": "wk", "expires": None,
+                              "max_budget": 10}} if status == 200
+                    else {"detail": "Virtual key is not allowed to call this route."})
+        else:
+            status, body = 404, {"detail": "Not Found"}
+        raw = json.dumps(body).encode()
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(raw)))
+        self.end_headers()
+        self.wfile.write(raw)
+
+    def log_message(self, *a):
+        pass
+
+
 # --- the claude.ai login -------------------------------------------------------
 def login(scopes=("user:profile", "user:inference"), refresh="r" * 20,
-          refresh_expires_days=29, subscription="team"):
+          refresh_expires_days=29, subscription="team", access_expires_s=3600):
     doc = {"accessToken": "a" * 20, "scopes": list(scopes),
-           "expiresAt": int((time.time() + 3600) * 1000),
+           "expiresAt": int((time.time() + access_expires_s) * 1000),
            "subscriptionType": subscription}
     if refresh:
         doc["refreshToken"] = refresh
@@ -382,7 +514,7 @@ def login(scopes=("user:profile", "user:inference"), refresh="r" * 20,
     return json.dumps({"claudeAiOauth": doc})
 
 
-class TestTheClaudeLogin(_Rules):
+class TestTheClaudeLogin(_Anthropic):
     def test_a_login_that_carries_what_an_agent_spends(self):
         verdict, detail = self.check("claude-login", login())
         self.assertEqual("ok", verdict, detail)
@@ -390,35 +522,159 @@ class TestTheClaudeLogin(_Rules):
         self.assertIn("subscription: team", detail)
         self.assertIn("renewable until", detail)
 
-    def _stored(self, record):
+    def _stored(self, record=RECORD, doc=None):
         """A login as the store holds it: the credential file, and beside it
         the CLI's config file with (or without) the account record."""
         d = self.tmp / "agent-rw"
         d.mkdir(exist_ok=True)
-        (d / ".credentials.json").write_text(login())
+        (d / ".credentials.json").write_text(doc or login())
         if record is not None:
             (d / ".claude.json").write_text(json.dumps(record))
         return d / ".credentials.json"
+
+    def stored(self, path, api=None):
+        return self.check("claude-login", path=path, env=self.anthropic_env(api))
 
     def test_a_stored_login_is_judged_with_the_record_beside_it(self):
         """Measured 2026-09-11: remote control reads organizationUuid from the
         CLI's config file and refuses without it, so a stored login is judged
         by the record `claude auth login` left beside the credential."""
-        path = self._stored({"oauthAccount": {"organizationUuid": "org-1",
-                                              "organizationName": "Example"}})
-        verdict, detail = self.check("claude-login", login(), path=path)
+        verdict, detail = self.stored(self._stored())
         self.assertEqual("ok", verdict, detail)
         self.assertIn("organization: Example", detail)
 
     def test_a_stored_login_with_no_record_is_refused_and_names_the_rotation(self):
         for record in (None, {}, {"oauthAccount": {"emailAddress": "x"}}):
             with self.subTest(record=record):
-                path = self._stored(record)
-                verdict, detail = self.check("claude-login", login(), path=path)
+                verdict, detail = self.stored(self._stored(record))
                 self.assertEqual("bad", verdict, detail)
                 self.assertIn("no account record", detail)
                 self.assertIn("organizationUuid", detail)
                 self.assertIn("wk key set claude-login --replace", detail)
+        self.assertEqual([], FakeAnthropic.seen, "asked before the record was read")
+
+    def test_a_stored_login_is_asked_about_and_the_answer_is_the_report(self):
+        """What Anthropic says now, not what the file says: the organization
+        and subscription from the profile, and the organization's policy on
+        remote control, published as a line a command can decide on."""
+        verdict, detail = self.stored(self._stored())
+        self.assertEqual("ok", verdict, detail)
+        self.assertIn("organization: Example Org", detail)
+        self.assertIn("subscription active", detail)
+        self.assertIn("remote control allowed", detail)
+        self.assertIn("\n    remote-control: allowed", detail)
+        paths = [seen[1] for seen in FakeAnthropic.seen]
+        self.assertTrue(any(p.startswith("/api/oauth/profile") for p in paths), paths)
+        self.assertTrue(any(p.startswith("/api/claude_code/policy_limits") for p in paths), paths)
+        self.assertNotIn("POST", [seen[0] for seen in FakeAnthropic.seen],
+                         "a current access token was renewed for nothing")
+
+    def test_an_expired_access_token_is_renewed_and_written_back(self):
+        """The one way to ask Anthropic anything about a login whose access
+        token has run out: the refresh token is posted the way the CLI posts
+        it, and the rotated pair written over the one file every holder reads,
+        the rest of the document kept."""
+        path = self._stored(doc=login(access_expires_s=-60))
+        verdict, detail = self.stored(path)
+        self.assertEqual("ok", verdict, detail)
+        posts = [seen for seen in FakeAnthropic.seen if seen[0] == "POST"]
+        self.assertEqual(1, len(posts), FakeAnthropic.seen)
+        self.assertEqual(("/v1/oauth/token", "refresh_token", "r" * 20), posts[0][1:])
+        after = json.loads(path.read_text())["claudeAiOauth"]
+        self.assertEqual(RENEWED, after["accessToken"])
+        self.assertEqual(ROTATED, after["refreshToken"])
+        self.assertGreater(after["expiresAt"], time.time() * 1000)
+        self.assertEqual("team", after["subscriptionType"])
+        self.assertEqual(["user:profile", "user:inference"], after["scopes"])
+        self.assertEqual(0o600, path.stat().st_mode & 0o777)
+        self.assertFalse((path.parent / ".oauth_refresh.lock").exists())
+        self.assertNotIn("r" * 20, detail)
+        self.assertNotIn(RENEWED, detail)
+
+    def test_a_refresh_anthropic_refuses_is_a_dead_login(self):
+        FakeAnthropic.refresh_status = 400
+        path = self._stored(doc=login(access_expires_s=-60))
+        before = path.read_text()
+        verdict, detail = self.stored(path)
+        self.assertEqual("bad", verdict, detail)
+        self.assertIn("refuses to renew it", detail)
+        self.assertIn("invalid_grant", detail)
+        self.assertIn("wk key set claude-login --replace", detail)
+        self.assertEqual(before, path.read_text(), "a refused refresh rewrote the file")
+
+    def test_a_login_anthropic_no_longer_accepts_is_refused(self):
+        FakeAnthropic.status = 401
+        verdict, detail = self.stored(self._stored())
+        self.assertEqual("bad", verdict, detail)
+        self.assertIn("does not accept this login", detail)
+
+    def test_a_refresh_lock_another_process_holds_is_respected(self):
+        """The CLI's own lock, beside the credential: a session mid-refresh is
+        left to finish, and the login is reported unverified rather than
+        refreshed twice -- which would rotate the token out from under it."""
+        path = self._stored(doc=login(access_expires_s=-60))
+        lock = path.parent / ".oauth_refresh.lock"
+        lock.mkdir()
+        before = path.read_text()
+        verdict, detail = self.stored(path)
+        self.assertEqual("unverified", verdict, detail)
+        self.assertIn("refresh lock", detail)
+        self.assertIn("\n    remote-control: unverified", detail)
+        self.assertEqual([], [seen for seen in FakeAnthropic.seen if seen[0] == "POST"])
+        self.assertEqual(before, path.read_text())
+        self.assertTrue(lock.is_dir(), "another process's lock was removed")
+
+    def test_a_lock_abandoned_over_a_minute_ago_is_taken(self):
+        path = self._stored(doc=login(access_expires_s=-60))
+        lock = path.parent / ".oauth_refresh.lock"
+        lock.mkdir()
+        stale = time.time() - 120
+        os.utime(lock, (stale, stale))
+        verdict, detail = self.stored(path)
+        self.assertEqual("ok", verdict, detail)
+        self.assertEqual(RENEWED, json.loads(path.read_text())["claudeAiOauth"]["accessToken"])
+        self.assertFalse(lock.exists())
+
+    def test_a_policy_that_denies_remote_control_is_said_with_the_remedy(self):
+        """The login is still a login -- every plain session works -- so the
+        verdict stays ok and the denial rides as the fact the two commands that
+        start remote control refuse on."""
+        FakeAnthropic.policy = {"restrictions": {"allow_remote_control": {"allowed": False}},
+                                "compliance_taints": []}
+        verdict, detail = self.stored(self._stored())
+        self.assertEqual("ok", verdict, detail)
+        self.assertIn("remote control DENIED", detail)
+        self.assertIn("\n    remote-control: denied", detail)
+        self.assertIn("fix: an owner of the Example Org organization", detail)
+        self.assertIn("WK_NO_CLAUDE_RC=1", detail)
+
+    def test_a_hipaa_organization_is_denied_the_same_way(self):
+        FakeAnthropic.policy = {"restrictions": {}, "compliance_taints": ["hipaa"]}
+        verdict, detail = self.stored(self._stored())
+        self.assertEqual("ok", verdict, detail)
+        self.assertIn("\n    remote-control: denied", detail)
+        self.assertIn("HIPAA", detail)
+
+    def test_a_policy_the_api_does_not_serve_is_unverified_and_names_the_path(self):
+        """The CLI refuses remote control on a 404 for this path and says a
+        proxy is the usual cause; the verdict says the same, ahead of time."""
+        FakeAnthropic.policy_status = 404
+        verdict, detail = self.stored(self._stored())
+        self.assertEqual("ok", verdict, detail)
+        self.assertIn("\n    remote-control: unverified", detail)
+        self.assertIn("policy_limits", detail)
+        self.assertIn("404", detail)
+
+    def test_no_network_is_unverified_not_refused(self):
+        for doc, want in ((login(), "could not reach"),
+                          (login(access_expires_s=-60), "neither renewed nor asked about")):
+            with self.subTest(want=want):
+                path = self._stored(doc=doc)
+                verdict, detail = self.stored(path, api="http://127.0.0.1:1")
+                self.assertEqual("unverified", verdict, detail)
+                self.assertIn(want, detail)
+                self.assertIn("\n    remote-control: unverified", detail)
+                self.assertEqual(doc, path.read_text())
 
     def test_a_login_on_stdin_alone_is_not_asked_for_a_record(self):
         """Before anything is stored there is no directory to look beside."""
@@ -460,58 +716,33 @@ class TestTheClaudeLogin(_Rules):
 
 
 # --- the two pasted keys -------------------------------------------------------
-class FakeAnthropic(BaseHTTPRequestHandler):
-    """`GET /v1/models` is the read-only request that answers whether Anthropic
-    still accepts a token: 200 when it does, 401 when it does not, and no model
-    is inferred either way (measured against api.anthropic.com, 2026-09-10)."""
-
-    status = 200
-    seen = []
-
-    def do_GET(self):
-        FakeAnthropic.seen.append(
-            (self.command, self.path, self.headers.get("Authorization", ""),
-             self.headers.get("anthropic-version", "")))
-        body = ({"data": [{"id": "claude-x"}]} if FakeAnthropic.status == 200
-                else {"type": "error",
-                      "error": {"type": "authentication_error"}})
-        raw = json.dumps(body).encode()
-        self.send_response(FakeAnthropic.status)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(raw)))
-        self.end_headers()
-        self.wfile.write(raw)
-
-    do_POST = do_GET
-
-    def log_message(self, *a):
-        pass
-
-
-class TestTheAgentKeys(_Rules):
+class TestTheAgentKeys(_Anthropic):
     @classmethod
     def setUpClass(cls):
         super().setUpClass()
-        cls.anthropic = HTTPServer(("127.0.0.1", 0), FakeAnthropic)
-        cls.anthropic_base = "http://127.0.0.1:%d" % cls.anthropic.server_port
-        cls.anthropic_thread = threading.Thread(
-            target=cls.anthropic.serve_forever, daemon=True)
-        cls.anthropic_thread.start()
+        cls.litellm = HTTPServer(("127.0.0.1", 0), FakeLiteLLM)
+        cls.litellm_base = "http://127.0.0.1:%d" % cls.litellm.server_port
+        cls.litellm_thread = threading.Thread(
+            target=cls.litellm.serve_forever, daemon=True)
+        cls.litellm_thread.start()
 
     @classmethod
     def tearDownClass(cls):
-        cls.anthropic.shutdown()
-        cls.anthropic.server_close()
+        cls.litellm.shutdown()
+        cls.litellm.server_close()
         super().tearDownClass()
 
     def setUp(self):
         super().setUp()
-        FakeAnthropic.status = 200
-        FakeAnthropic.seen = []
+        FakeLiteLLM.models_status = 200
+        FakeLiteLLM.info_status = 403
 
     def claude(self, value, api=None):
-        return self.check("claude", value, env={
-            "WK_ANTHROPIC_API": api if api is not None else self.anthropic_base})
+        return self.check("claude", value, env=self.anthropic_env(api))
+
+    def litellm_key(self, value, api=None):
+        return self.check("litellm", value, env={
+            "WK_LITELLM_API": api if api is not None else self.litellm_base})
 
     def test_a_setup_token_is_accepted_and_its_narrowness_named(self):
         verdict, detail = self.claude("sk-ant-oat01-abc")
@@ -565,15 +796,35 @@ class TestTheAgentKeys(_Rules):
         self.assertEqual("bad", verdict, detail)
         self.assertIn("sk-ant-oat", detail)
 
-    def test_a_litellm_virtual_key_names_the_endpoint_it_belongs_to(self):
-        """The endpoint is one constant beside the key page (LITELLM_ENDPOINT),
-        so the verdict names it rather than leaving a reader to find it in a
-        workspace's config."""
-        verdict, detail = self.check("litellm", "sk-abc123")
+    def test_a_litellm_key_the_endpoint_accepts_and_restricts_is_ok(self):
+        """Measured, not assumed: the endpoint is asked what the key may call,
+        and a key shut out of the management routes (403 on /key/info) is what
+        a key every workspace holds should be."""
+        verdict, detail = self.litellm_key("sk-abc123")
         self.assertEqual("ok", verdict, detail)
+        self.assertIn("serves it 2 model(s)", detail)
+        self.assertIn("restricted to the LLM API routes", detail)
         self.assertIn("models.json", detail)
-        self.assertIn(credcheck.LITELLM_ENDPOINT, detail)
-        self.assertIn("unmeasured", detail)
+        self.assertIn(self.litellm_base + "/v1", detail)
+
+    def test_a_litellm_key_the_endpoint_refuses_is_refused_here(self):
+        FakeLiteLLM.models_status = 401
+        verdict, detail = self.litellm_key("sk-abc123")
+        self.assertEqual("bad", verdict, detail)
+        self.assertIn("does not accept this key", detail)
+        self.assertIn("wk key set litellm", detail)
+
+    def test_a_litellm_key_that_reaches_the_management_routes_is_wide(self):
+        FakeLiteLLM.info_status = 200
+        verdict, detail = self.litellm_key("sk-abc123")
+        self.assertEqual("wide", verdict, detail)
+        self.assertIn("key-management routes", detail)
+        self.assertIn("alias wk", detail)
+
+    def test_a_litellm_endpoint_out_of_reach_leaves_the_key_unverified(self):
+        verdict, detail = self.litellm_key("sk-abc123", api="http://127.0.0.1:1")
+        self.assertEqual("unverified", verdict, detail)
+        self.assertIn("could not reach", detail)
 
     def test_the_upstream_anthropic_key_is_refused_where_a_virtual_one_belongs(self):
         verdict, detail = self.check("litellm", "sk-ant-api03-abc")

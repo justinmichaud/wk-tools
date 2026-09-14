@@ -5,7 +5,7 @@
 # wk: sub show,ensure,pub,sshtest,fingerprints,set,register,claude,tailnet,tailnet-api,share,adopt,verdict needs=
 # wk: sub set,pub,sshtest,adopt,verdict takes=2
 # wk: sub set opts=--replace,--paste
-# wk: sub deploy opts=--rotate
+# wk: sub deploy,setup opts=--rotate
 # wk: sub share opts=--to=,--only=
 #
 #   wk key setup      store every credential this machine has not got yet, and
@@ -16,6 +16,11 @@
 #                     asked for again), and can be re-run. One line per credential --
 #                     stored, minted, skipped or refused, with the path or the
 #                     reason -- and then `wk key check`'s table
+#                       --rotate  turn every credential over: the deploy keys
+#                                 as `wk key deploy --rotate` does, then each
+#                                 stored credential replaced in turn as
+#                                 `wk key set <name> --replace` does. Asks
+#                                 once, first
 #   wk key set <name> [--replace] [--paste]
 #                     one credential by name, or the report on it when it is
 #                     already here.
@@ -152,23 +157,10 @@ ACTION="${1:-check}"
 
 ensure_keys() { "$0" ensure 2>&1 | sed 's/^/  /'; }
 
-# Every workstation that holds the shared key: this one, and the peers. A shared build machine is not one -- it holds no key and reaches ours through a forwarded agent (build_boxes below).
+# Every workstation that holds the shared key: this one, and the peers (peer_workstations, lib/target.sh).
 workstations() {
     echo local
-    for_each_machine _peer_workstation
-    return 0
-}
-
-# The shared build machines: a wk over there, but not a peer, so no key rests on them.
-build_boxes() {
-    for_each_machine _build_box
-    return 0
-}
-
-_build_box() {
-    ( load_target "$1"
-      [ -z "${WK_REMOTE_PEER:-}" ] && t_has_wk ) 2>/dev/null && echo "$1"
-    return 0
+    peer_workstations
 }
 
 m_label() {
@@ -289,17 +281,15 @@ check_cred_row() { # <name>
     [ "$(wk_cred_verdict "$CRED_VERDICT")" != bad ]
 }
 
-# A peer's claude.ai login is its own (never fanned out), so it is asked for its verdict rather than read.
 check_login_row() { # <peer>
     local line
     printf '    %-28s ' "$1" >&3
-    line=$( ( load_target "$1"; t_wk key verdict claude-login ) 2>/dev/null | tr -d '\r' | sed -n 1p) || line=""
-    [ -n "$line" ] || line=$(printf 'unverified\t%s did not answer: unreachable, or an older wk-tools there without the verdict subverb (wk sync --tools %s)' "$1" "$1")
+    line=$(peer_login_verdict "$1") || true
     case "$(wk_cred_verdict "$line")" in
         absent) printf "no login: from a terminal here, 'wk key share --to %s' logs in for it\n" "$1" >&3; return 1 ;;
-        bad)    printf '%s\n' "$(wk_cred_detail "$line")" >&3
+        bad)    cred_row "$line" >&3
                 printf "    fix: from a terminal here, 'wk key share --to %s' logs in for it\n" "$1" >&3; return 1 ;;
-        *)      printf '%s\n' "$(wk_cred_detail "$line")" >&3 ;;
+        *)      cred_row "$line" >&3 ;;
     esac
 }
 
@@ -326,18 +316,6 @@ cred_report() { # <name> -- non-zero when what is stored cannot do its job
 }
 
 SHARED_KEY_TITLE="wk shared deploy key"   # rotation finds the old key to remove by this one title
-
-# The other workstations: a peer with a wk over there. A build machine is not one (build_boxes) -- it holds no key.
-peer_workstations() {
-    for_each_machine _peer_workstation
-    return 0
-}
-
-_peer_workstation() {
-    ( load_target "$1"
-      [ -n "${WK_REMOTE_PEER:-}" ] && t_has_wk ) 2>/dev/null && echo "$1"
-    return 0
-}
 
 SHARE_ONLY=""   # github-pat: the token alone travels (`wk key share --only`)
 
@@ -375,8 +353,8 @@ EOF
 # The claude.ai login is one holder's, so a peer without a usable one is logged in for here, in a directory of its own, and that login is sent to it and kept nowhere else.
 share_login() { # <machine>
     local machine="$1" line dir
-    line=$( ( load_target "$machine"; t_wk key verdict claude-login ) 2>/dev/null | tr -d '\r' | sed -n 1p) || line=""
-    [ -n "$line" ] || { warn "$machine: did not say whether it holds a claude.ai login (unreachable, or an older wk-tools there without 'wk key verdict': wk sync --tools $machine)"; return 1; }
+    line=$(peer_login_verdict "$machine") \
+        || { warn "$machine: $(wk_cred_detail "$line")"; return 1; }
     case "$(wk_cred_verdict "$line")" in
         ok|wide|unverified) unchanged "$machine: holds a claude.ai login of its own"; return 0 ;;
     esac
@@ -524,11 +502,15 @@ fi
 
 case "$ACTION" in
 setup)
-    _rc=0; deploy_keys || _rc=$?
+    _rotate=""
+    [ "${2:-}" != --rotate ] || _rotate=1
+    _rc=0; deploy_keys $_rotate || _rc=$?
     [ "$_rc" != 3 ] || warn "the deploy keys were not touched -- 'wk key deploy' does them alone"
     for _name in $(wk_cred_settable); do
         if wk_cred_present "$_name"; then
-            if cred_stale "$_name"; then
+            if [ -n "$_rotate" ]; then
+                "$0" set "$_name" --replace || true
+            elif cred_stale "$_name"; then
                 cred_replace_stale "$_name" || true
             else
                 log "$(cred_line "$_name" stored "$(wk_cred_path "$_name")")"

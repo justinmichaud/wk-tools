@@ -304,6 +304,32 @@ class TestSetupDoesWhateverIsMissing(_KeyRun):
         self.assertNotIn("ntfy.sh topic this machine's notifications go to",
                          cp.stdout + cp.stderr, "it asked for one instead")
 
+    def test_rotate_turns_over_every_stored_credential(self):
+        """`wk key setup --rotate` is the one command that turns the lot over:
+        the deploy keys are re-minted the way `deploy --rotate` does, then each
+        stored credential is replaced the way `set --replace` does -- cleared,
+        then asked for or minted anew -- so a run abandoned at a prompt leaves
+        no old value behind, and the next `wk key setup` asks for what is
+        missing."""
+        _cp, secrets = self.key("ensure")
+        held = secrets.parent / "push-keys"
+        old_key = (held / "build_key_fork").read_bytes()
+        (held / "github-pat").write_text("github_pat_11ABC_notarealtoken\n")
+        (secrets / "litellm-key").write_text("sk-litellm-old\n")
+        home = self.tmp / "home"
+        home.mkdir(exist_ok=True)
+        cp, _ = self.key("setup", "--rotate",
+                         stubs={"gh": GH_REFUSES, "security": SECURITY_HAS_NOTHING},
+                         env={"HOME": str(home), "WK_YES": "1"})
+        out = cp.stdout + cp.stderr
+        self.assertNotEqual(old_key, (held / "build_key_fork").read_bytes(),
+                            "the deploy key was not re-minted: " + out)
+        self.assertIn("removed the old github-pat credential", out)
+        self.assertIn("removed the old litellm credential", out)
+        self.assertFalse((held / "github-pat").exists(), "the old token outlived its replace")
+        self.assertFalse((secrets / "litellm-key").exists())
+        self.assertIn("credentials:", cp.stdout)
+
     def test_one_already_stored_is_left_exactly_as_it_is(self):
         _cp, secrets = self.key("ensure")
         token = secrets.parent / "push-keys" / "github-pat"

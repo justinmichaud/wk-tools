@@ -23,6 +23,8 @@ lands; the file goes with its last line.
 - `sdk-patches/apply.sh` verify fails when a security section no-ops (temporarily break one token to prove the check can fail)
 - one `claude login` in a workspace seeds `/secrets` and a second workspace inherits it
 - `wk ai claude --force` starts an agent in a workspace whose sandbox check failed, with the warning repeated at exit
+- `wk new <ws>` on a machine whose organization denies Remote Control (`allow_remote_control` off in the Claude Code policy) refuses before creating anything and names the owner; `WK_NO_CLAUDE_RC=1` makes the workspace. Needs such an organization
+- `wk key share --to <peer>` re-logs in a peer whose own login Anthropic refuses (`wk doctor --all` red on that row), and the fleet's logins turn over from one command -- today each peer's login is its own and only a missing or dead one is made for it
 - `wk ai claude` in a terminal turns it back on when the session ends
 - `wk key register` registers each machine's key separately, titled with the machine name, and `wk key check` reports per machine
 - a remote checkout gets `origin` = WebKit/WebKit, both forks, the machine's mirror, and `core.sshCommand` pointing at `$root/ssh/config`, with nothing outside the wk root edited: true of `db`, false of `bb4`, which `wk remotes` reports

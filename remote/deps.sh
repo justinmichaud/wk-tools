@@ -113,6 +113,32 @@ DEPS
                 "wk's build sets its own $v and ignores that one (build/configs.sh)"
     done
 
+    # The copies of this machine's agent credentials (cmd/remote writes every row delivered to a `remote`), compared by digest with what is stored here.
+    local sname shome sdeliv here there
+    while read -r sname _ shome _ _ sdeliv; do
+        [ -n "$sname" ] || continue
+        case ",$sdeliv," in *,remote,*) ;; *) continue ;; esac
+        there=$(_v "cred\.$shome")
+        here=$(wk_agent_secret "$sname")
+        [ -z "$here" ] || here=$(printf '%s\n' "$here" | python3 -c 'import hashlib,sys
+print(hashlib.sha256(sys.stdin.buffer.read()).hexdigest()[:16])')
+        if [ -n "$here" ] && [ "$here" = "$there" ]; then
+            _f ok "$sname credential: the copy there is the one stored here"
+        elif [ "$there" = "?" ]; then
+            _f note "$sname credential is there, and the machine has no sha256sum to compare it with" "wk remote setup <target>  (it rewrites the copy)"
+        elif [ -n "$here" ] && [ -z "$there" ]; then
+            _f wanted "$sname credential is not on the machine, so an agent there asks for /login" "wk remote setup <target>  (it writes the copy)"
+        elif [ -n "$here" ]; then
+            _f wanted "$sname credential there is not the one stored here: rotated since it was written" "wk remote setup <target>  (it rewrites the copy)"
+        elif [ -n "$there" ]; then
+            _f wanted "$sname credential is on the machine and no longer stored here" "wk remote setup <target>  (it removes the copy)"
+        else
+            _f note "$sname credential: none here and none there" "wk key set $sname, then wk remote setup <target>"
+        fi
+    done <<ROWS
+$(wk_agent_secrets)
+ROWS
+
     unset -f _f _v
     return 0
 }

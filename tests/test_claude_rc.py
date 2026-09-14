@@ -30,8 +30,15 @@ from tests.support import REPO, WkTest, bash, run, temp_store
 # What rc_start requires before it will spawn anything: the claude.ai login
 # credential, in this machine's writable agent directory (wk_agent_rw_dir,
 # lib/store.sh -- a sibling of the secrets directory, so WK_HOST_SECRETS
-# places both). Deliberately nothing like a real one.
-FAKE_LOGIN = '{"claudeAiOauth":{"accessToken":"x","refreshToken":"y","scopes":["user:profile"]}}'
+# places both), with the account record beside it. Deliberately nothing like
+# a real one; every network the rule would ask is pointed at a closed port
+# (tests/support.py), so the login is unverified and the start goes ahead.
+FAKE_LOGIN = json.dumps({"claudeAiOauth": {
+    "accessToken": "x", "refreshToken": "y",
+    "scopes": ["user:profile", "user:inference"],
+    "expiresAt": 4102444800000, "refreshTokenExpiresAt": 4102444800000}})
+FAKE_RECORD = json.dumps({"oauthAccount": {"organizationUuid": "org-1",
+                                           "organizationName": "Example"}})
 
 
 def credential_env(tmp, login=True):
@@ -42,6 +49,7 @@ def credential_env(tmp, login=True):
     rw.mkdir(parents=True, exist_ok=True)
     if login:
         (rw / ".credentials.json").write_text(FAKE_LOGIN)
+        (rw / ".claude.json").write_text(FAKE_RECORD)
     return {"WK_HOST_SECRETS": str(secrets)}
 
 
@@ -74,6 +82,7 @@ export CLAUDE_SECURESTORAGE_CONFIG_DIR="$(wk_agent_rw_dir)"
 t_exec()  { local name="$1"; shift; "$@"; }
 t_home()  { printf '%s' "$TMP_HOME"; }
 t_src()   { printf '%s' "$TMP_SRC"; }
+t_tools() { printf '%s' "$WK_ROOT"; }
 t_spawn() {
     local name="$1" log="$2" pidf="$3"; shift 3
     "$@" > "$log" 2>&1 < /dev/null &
@@ -441,6 +450,7 @@ export CLAUDE_SECURESTORAGE_CONFIG_DIR="$(wk_agent_rw_dir)"
 t_exec()  { local name="$1"; shift; "$@"; }
 t_home()  { printf '%s' "$TMP_HOME"; }
 t_src()   { printf '%s' "$TMP_SRC"; }
+t_tools() { printf '%s' "$WK_ROOT"; }
 t_spawn() {
     local name="$1" log="$2" pidf="$3"; shift 3
     "$@" > "$log" 2>&1 < /dev/null &
@@ -507,6 +517,7 @@ export CLAUDE_SECURESTORAGE_CONFIG_DIR="$(wk_agent_rw_dir)"
 t_exec()  { local name="$1"; shift; "$@"; }
 t_home()  { printf '%s' "$TMP_HOME"; }
 t_src()   { printf '%s' "$TMP_SRC"; }
+t_tools() { printf '%s' "$WK_ROOT"; }
 t_spawn() {
     local name="$1" log="$2" pidf="$3"; shift 3
     echo "SPAWNED" >> "$TMP_HOME/spawned"
@@ -542,6 +553,7 @@ export CLAUDE_SECURESTORAGE_CONFIG_DIR="$(wk_agent_rw_dir)"
 t_exec()  { local name="$1"; shift; "$@"; }
 t_home()  { printf '%s' "$TMP_HOME"; }
 t_src()   { printf '%s' "$TMP_SRC"; }
+t_tools() { printf '%s' "$WK_ROOT"; }
 t_spawn() {
     local name="$1" log="$2" pidf="$3"; shift 3
     echo "SPAWNED" >> "$TMP_HOME/spawned"
@@ -642,6 +654,155 @@ class TestRemoteControlRefusesWithoutTheLoginCredential(unittest.TestCase):
         """`wk key set claude` stores one, and it is the obvious wrong guess."""
         err = _section(self.cp.stdout, "err")
         self.assertIn("setup-token", err, err)
+
+
+_PROBE_JUDGED = r'''
+set -euo pipefail
+export WK_ROOT="__REPO__"
+export WK_CLAUDE_LIB=1
+. "__REPO__/cmd/ai"
+
+WS="probe-ws"
+mkdir -p "$(wk_ws_dir "$WS")"
+TMP_HOME=$(mktemp -d)
+TMP_SRC=$(mktemp -d)
+export CLAUDE_SECURESTORAGE_CONFIG_DIR="$(wk_agent_rw_dir)"
+t_exec()  { local name="$1"; shift; "$@"; }
+t_home()  { printf '%s' "$TMP_HOME"; }
+t_src()   { printf '%s' "$TMP_SRC"; }
+t_tools() { printf '%s' "$WK_ROOT"; }
+t_spawn() {
+    local name="$1" log="$2" pidf="$3"; shift 3
+    echo "SPAWNED" >> "$TMP_HOME/spawned"
+    "$@" > "$log" 2>&1 < /dev/null &
+    printf '%s' "$!" > "$pidf"
+}
+# The workspace's answer about its own login, standing in for the rule run in there.
+t_agent_secret_verdict() { cat "$VERDICT_FILE"; }
+
+FAKE_CLAUDE="$TMP_HOME/claude"
+printf '#!/bin/sh\nsleep 20\n' > "$FAKE_CLAUDE"
+chmod +x "$FAKE_CLAUDE"
+if ( rc_start "$WS" "$FAKE_CLAUDE" ) 2>"$TMP_HOME/err"; then echo "MARK:started"; else echo "MARK:refused"; fi
+echo "MARK:err"; cat "$TMP_HOME/err"
+echo "MARK:spawned"; cat "$TMP_HOME/spawned" 2>/dev/null || true
+kill "$(cat "$TMP_HOME/claude-remote-control.pid" 2>/dev/null)" 2>/dev/null || true
+'''
+
+
+class TestTheLoginIsJudgedBeforeTheSpawn(unittest.TestCase):
+    """Presence is not enough: the CLI starts remote control, renews the login
+    on the way, and when that fails refuses in words about the organization's
+    policy ("Remote Control is disabled by your organization's policy. Contact
+    your organization admin for access." is its wording for a policy it could
+    not load, measured in 2.1.270). So the login is put to its rule in the
+    workspace first, and a server that would stop at once is a refusal here
+    with the remedy."""
+
+    @staticmethod
+    def _probe(verdict):
+        tmp = tempfile.mkdtemp(prefix="wk-rc-judged-")
+        Path(tmp, "verdict").write_text(verdict)
+        env = {"WK_STORE": tmp, "VERDICT_FILE": str(Path(tmp, "verdict"))}
+        env.update(credential_env(tmp, login=True))
+        return bash(_PROBE_JUDGED.replace("__REPO__", str(REPO)), env=env, timeout=60)
+
+    def test_a_login_anthropic_refuses_is_a_refusal_here_and_nothing_is_spawned(self):
+        cp = self._probe("bad\tAnthropic does not accept this login (HTTP 401).\n    fix: claude auth login -- then: wk key set claude-login --replace\n")
+        self.assertIn("MARK:refused", cp.stdout, cp.stdout + cp.stderr)
+        err = _section(cp.stdout, "err")
+        self.assertIn("no session can use", err)
+        self.assertIn("wk key set claude-login --replace", err)
+        self.assertIn("wk ai claude probe-ws", err)
+        self.assertEqual("", _section(cp.stdout, "spawned").strip(), cp.stdout)
+
+    def test_an_organization_that_denies_remote_control_is_a_refusal_naming_the_owner(self):
+        cp = self._probe("ok\tscopes: user:profile; remote control DENIED: allow_remote_control is off.\n    remote-control: denied\n    fix: an owner of the Example organization turns Remote Control on\n")
+        self.assertIn("MARK:refused", cp.stdout, cp.stdout + cp.stderr)
+        err = _section(cp.stdout, "err")
+        self.assertIn("policy denies remote control", err)
+        self.assertIn("an owner of the Example organization", err)
+        self.assertEqual("", _section(cp.stdout, "spawned").strip(), cp.stdout)
+
+    def test_a_login_nobody_could_ask_about_starts_with_a_warning(self):
+        cp = self._probe("unverified\tcould not reach api (Connection refused).\n    remote-control: unverified\n")
+        self.assertIn("MARK:started", cp.stdout, cp.stdout + cp.stderr)
+        self.assertIn("could not be verified", _section(cp.stdout, "err"))
+        self.assertIn("SPAWNED", _section(cp.stdout, "spawned"))
+
+    def test_a_login_the_policy_allows_starts_without_a_word(self):
+        cp = self._probe("ok\tscopes: user:profile; remote control allowed by the organization's policy.\n    remote-control: allowed\n")
+        self.assertIn("MARK:started", cp.stdout, cp.stdout + cp.stderr)
+        self.assertNotIn("warning", _section(cp.stdout, "err"))
+        self.assertIn("SPAWNED", _section(cp.stdout, "spawned"))
+
+
+class TestNewChecksTheLoginBeforeItMakesAnything(unittest.TestCase):
+    """`wk new` starts remote control in the workspace it makes, so what that
+    needs is measured before anything is made -- on this end, before the
+    detach, and never by the detached driver itself. One reading of a verdict
+    for both commands: rc_login_judge (lib/store.sh)."""
+
+    NEW = (REPO / "cmd" / "new").read_text()
+
+    def test_the_store_is_judged_before_the_detach_and_not_by_the_driver(self):
+        judge = self.NEW.index('rc_login_judge "$(wk_cred_check claude-login --stored)"')
+        self.assertLess(judge, self.NEW.index("_pid=$(detach_run"))
+        guard = self.NEW[self.NEW.rindex("\nif ", 0, judge):judge]
+        self.assertIn('-z "$DETACHED"', guard)
+        self.assertIn("WK_NO_CLAUDE_RC", guard)
+
+    def test_a_build_machine_is_not_asked(self):
+        judge = self.NEW.index('rc_login_judge "$(wk_cred_check claude-login --stored)"')
+        arm = self.NEW[self.NEW.rindex("case", 0, judge):judge]
+        self.assertIn("container|vm)", arm)
+
+    @staticmethod
+    def _judge(line):
+        tmp = tempfile.mkdtemp(prefix="wk-rc-judge-")
+        Path(tmp, "line").write_text(line)
+        return bash('''
+set -euo pipefail
+. "$WK_ROOT/lib/common.sh"
+. "$WK_ROOT/lib/store.sh"
+rc_login_judge "$(cat "$LINE_FILE")" "in this machine's store" "WK_NO_CLAUDE_RC=1 wk new x    makes it without remote control"
+echo "JUDGED:went-ahead"
+''', env={"LINE_FILE": str(Path(tmp, "line"))})
+
+    def test_nothing_stored_is_refused_with_the_command_that_stores_one(self):
+        cp = self._judge("absent\tnothing stored -- wk key set claude-login")
+        self.assertNotEqual(0, cp.returncode, cp.stdout + cp.stderr)
+        self.assertIn("wk key set claude-login", cp.stderr)
+        self.assertIn("WK_NO_CLAUDE_RC=1 wk new x", cp.stderr)
+        self.assertNotIn("JUDGED:went-ahead", cp.stdout)
+
+    def test_a_dead_login_is_refused_with_its_detail(self):
+        cp = self._judge("bad\tAnthropic does not accept this login (HTTP 401).\n    fix: claude auth login -- then: wk key set claude-login --replace")
+        self.assertNotEqual(0, cp.returncode, cp.stdout + cp.stderr)
+        self.assertIn("no session can use", cp.stderr)
+        self.assertIn("wk key set claude-login --replace", cp.stderr)
+
+    def test_a_denied_policy_is_refused_with_the_owner_named(self):
+        cp = self._judge("ok\tscopes: x; remote control DENIED: allow_remote_control is off.\n    remote-control: denied\n    fix: an owner of the Example organization turns Remote Control on")
+        self.assertNotEqual(0, cp.returncode, cp.stdout + cp.stderr)
+        self.assertIn("policy denies remote control", cp.stderr)
+        self.assertIn("an owner of the Example organization", cp.stderr)
+        self.assertIn("WK_NO_CLAUDE_RC=1", cp.stderr)
+
+    def test_unverified_goes_ahead_with_a_warning(self):
+        for line in ("unverified\tcould not reach the API.\n    remote-control: unverified",
+                     "ok\tscopes: x; remote control unverified: 404.\n    remote-control: unverified"):
+            with self.subTest(line=line[:12]):
+                cp = self._judge(line)
+                self.assertEqual(0, cp.returncode, cp.stdout + cp.stderr)
+                self.assertIn("could not be verified", cp.stderr)
+                self.assertIn("JUDGED:went-ahead", cp.stdout)
+
+    def test_allowed_goes_ahead_in_silence(self):
+        cp = self._judge("ok\tscopes: x; remote control allowed by the organization's policy.\n    remote-control: allowed")
+        self.assertEqual(0, cp.returncode, cp.stdout + cp.stderr)
+        self.assertEqual("", cp.stderr)
+        self.assertIn("JUDGED:went-ahead", cp.stdout)
 
 
 # What stands between a pid a workspace wrote into a file in its own home and a

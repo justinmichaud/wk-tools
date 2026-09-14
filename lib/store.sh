@@ -1195,3 +1195,40 @@ wk_cred_check() { # <name> [--stored] [...] -> <absent|ok|wide|bad|unverified><T
 
 wk_cred_verdict() { printf '%s' "${1%%$'\t'*}"; }
 wk_cred_detail()  { printf '%s' "${1#*$'\t'}"; }
+
+# A `    <key>: <value>` line in a verdict's detail: how lib/credcheck.py publishes a fact a command decides on.
+wk_cred_fact() { # <verdict line> <key>
+    printf '%s\n' "$1" | sed -n "s/^ *$2: //p" | sed -n 1p
+}
+
+# One reading of a claude.ai login's verdict for the two commands that start remote control -- cmd/new before it makes a workspace, cmd/ai before it spawns the server: a refusal with the remedy when the server would stop at once, a warning when the answer needs a network that did not answer.
+rc_login_judge() { # <verdict line> <where the login is> <what runs without remote control>
+    local line="$1" where="$2" without="$3"
+    case "$(wk_cred_verdict "$line")" in
+        absent)
+            die "no claude.ai login $where, and remote control refuses to start without one:
+    $(wk_cred_detail "$line")
+    $without" ;;
+        bad)
+            die "the claude.ai login $where is one no session can use, so remote control would start and stop at once:
+    $(wk_cred_detail "$line")
+    $without" ;;
+        ok|wide)
+            case "$(wk_cred_fact "$line" remote-control)" in
+                allowed) ;;
+                denied)
+                    die "the organization's policy denies remote control to the login $where, so the server would start and stop at once:
+    $(wk_cred_detail "$line" | sed -n '1p; /^ *fix: /p')
+    $without" ;;
+                *)
+                    warn "whether the login $where may run remote control could not be verified:
+    $(wk_cred_detail "$line" | sed -n 1p)
+  it is started anyway, and the start reports how it went" ;;
+            esac ;;
+        *)
+            warn "whether Anthropic still accepts the claude.ai login $where could not be verified:
+    $(wk_cred_detail "$line" | sed -n 1p)
+  remote control is started anyway, and the start reports how it went" ;;
+    esac
+    return 0
+}

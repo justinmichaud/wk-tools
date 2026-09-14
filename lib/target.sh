@@ -44,6 +44,17 @@ t_agent_secret_present() { # <name> <secret>
 }
 t_agent_secret_remedy() { agent_secret_store_remedy "$2"; } # <name> <secret>
 
+# The credential as the workspace holds it, put to its rule where it is spent: the check renews a login whose access token has run out and asks Anthropic what it can do, through the egress a session there uses.
+t_agent_secret_verdict() { # <name> <secret> -> the verdict, every line of it
+    local file
+    if [ "$(wk_agent_secret_kind "$2")" = file ]; then
+        file="\"\$CLAUDE_SECURESTORAGE_CONFIG_DIR/$(wk_agent_secret_field "$2" 2)\""
+    else
+        file="\"\$HOME/$(wk_agent_secret_field "$2" 3)\""
+    fi
+    t_exec "$1" bash -lc "python3 $(sh_quote "$(t_tools "$1")/lib/credcheck.py") check $(sh_quote "$2") --path $file < $file" 2>/dev/null | tr -d '\r'
+}
+
 # What the store holds decides the remedy: nothing, one no workspace can use, or a usable one this workspace was made without.
 agent_secret_store_remedy() { # <secret>
     local line
@@ -418,6 +429,27 @@ for_each_machine() { # <fn> <args...> -- worst exit status wins
         [ "$rc" -gt "$worst" ] && worst=$rc
     done
     return "$worst"
+}
+
+peer_workstations() { for_each_machine _peer_workstation; return 0; }
+_peer_workstation() {
+    ( load_target "$1"; [ -n "${WK_REMOTE_PEER:-}" ] && t_has_wk ) 2>/dev/null && echo "$1"
+    return 0
+}
+build_boxes() { for_each_machine _build_box; return 0; }
+_build_box() {
+    ( load_target "$1"; [ -z "${WK_REMOTE_PEER:-}" ] && t_has_wk ) 2>/dev/null && echo "$1"
+    return 0
+}
+
+peer_login_verdict() { # <peer> -> the verdict, every line of it
+    local line
+    line=$( ( load_target "$1"; t_wk key verdict claude-login ) 2>/dev/null | tr -d '\r') || line=""
+    if [ -z "$line" ]; then
+        printf 'unverified\t%s did not answer: unreachable, or an older wk-tools there without the verdict subverb (wk sync --tools %s)\n' "$1" "$1"
+        return 1
+    fi
+    printf '%s\n' "$line"
 }
 
 far_side_reason() { # <target> <far side> -- why it is not answering, for a person; `unreachable` reads the WK_FAR_WHY of a t_answers in this shell

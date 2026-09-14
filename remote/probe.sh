@@ -40,3 +40,11 @@ if [ -f "$HOME/.wk-remote" ]; then
 else
     printf 'marker=no\n'
 fi
+
+# The credential copies `wk remote setup` writes into the home, by digest, so the machine that stores them tells a stale copy from its own without a value crossing back.
+for _f in "$HOME"/.wk-*; do
+    [ -f "$_f" ] || continue
+    case "$_f" in */.wk-remote) continue ;; esac
+    _d=$(sha256sum < "$_f" 2>/dev/null | cut -c1-16)
+    printf 'cred.%s=%s\n' "${_f##*/}" "${_d:-?}"
+done

@@ -30,6 +30,12 @@
 # Creation fetches from the mirror beside its snapshot and fast-forwards the
 # checkout onto it. It never fetches over the network and never refreshes the
 # mirror itself: that is `wk sync --tools`.
+#
+# Claude remote control is started in the workspace once it is up, and what
+# that needs -- a claude.ai login this machine stores, one Anthropic accepts,
+# one the organization's policy allows remote control -- is checked before
+# anything is made. A refusal names the remedy; WK_NO_CLAUDE_RC=1 makes the
+# workspace without remote control.
 
 set -euo pipefail
 WK_ROOT="${WK_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
@@ -196,6 +202,15 @@ fi
 
 # Refuse before detaching: t_create's refusal belongs on the terminal, not in a log nobody was told to read yet.
 if [ "$WK_TARGET_KIND" = local ]; then t_create "$NAME"; fi
+
+# Remote control is started in the finished workspace, so what it needs is measured before anything is made: the store's login is what a container or a guest is given.
+if [ -z "$DETACHED" ] && [ -z "${WK_NO_CLAUDE_RC:-}" ]; then
+    case "$WK_TARGET_KIND" in
+    container|vm)
+        rc_login_judge "$(wk_cred_check claude-login --stored)" "in this machine's store" \
+            "WK_NO_CLAUDE_RC=1 wk new $NAME --target $TARGET    makes it without remote control" ;;
+    esac
+fi
 
 t_store_init
 

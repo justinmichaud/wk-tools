@@ -11,10 +11,13 @@
 # and never prompts. State it cannot see without starting something is reported
 # as '??' with the command that would reveal it.
 #
-#   --all   also ask every configured build machine (targets/hosts/*.conf) what
-#           it has: the tools a build needs there, the identity a commit made
-#           there would carry, any build variable that machine's own profile
-#           sets, and whether what provisioned it is still what this tree says.
+#   --all   also ask every configured machine (targets/hosts/*.conf) what it
+#           has. A peer workstation: whether its own claude.ai login is one
+#           Anthropic accepts and may run remote control. A build machine: the
+#           tools a build needs there, the identity a commit made there would
+#           carry, any build variable that machine's own profile sets, whether
+#           the credential copies it holds are the ones stored here, and
+#           whether what provisioned it is still what this tree says.
 #           A machine that does not answer is reported as unreachable, never as
 #           broken. Also reads every bridge phone's battery charge cap and, on a
 #           Mac with a battery, the `pmset -g batt` line -- macOS has no
@@ -145,8 +148,38 @@ credentials_section() {
             absent) unk  "$_cname: $_why" "wk key setup" ;;
             *)      unk  "$_cname: $_why" "wk key check" ;;
         esac
+        [ "$_cname" = claude-login ] && remote_control_row "the workspaces this login reaches" "$_line"
     done
     unset _cname _line _why _fix
+}
+
+# Whether the organization's policy lets a login run remote control, read off its verdict (lib/credcheck.py publishes it as a `remote-control:` line; none when nothing could be asked, and the credential's own row says why).
+remote_control_row() { # <where> <verdict line>
+    case "$(wk_cred_fact "$2" remote-control)" in
+        allowed) ok   "remote control in $1: allowed by the organization's policy" ;;
+        denied)  miss "remote control in $1: denied by the organization's policy" \
+                      "$(wk_cred_detail "$2" | sed -n 's/^ *fix: //p')" ;;
+        "")      ;;
+        *)       unk  "remote control in $1: unverified" "$(wk_cred_detail "$2" | sed -n 1p)" ;;
+    esac
+    return 0
+}
+
+# Each peer workstation holds a login of its own (wk key share), so each is asked for its own verdict.
+fleet_logins_section() {
+    local peer line
+    section "claude.ai login on the other workstations (each its own)"
+    for peer in $(peer_workstations); do
+        line=$(peer_login_verdict "$peer") || true
+        case "$(wk_cred_verdict "$line")" in
+            ok|wide)    ok   "$peer: $(wk_cred_detail "$line" | sed -n 1p)"
+                        remote_control_row "the workspaces $peer makes" "$line" ;;
+            absent|bad) miss "$peer: $(wk_cred_detail "$line" | sed -n 1p)" \
+                             "wk key share --to $peer  (from a terminal here: it logs in for $peer)" ;;
+            *)          unk  "$peer: $(wk_cred_detail "$line" | sed -n 1p)" "wk key check" ;;
+        esac
+    done
+    return 0
 }
 
 credentials_section
@@ -418,6 +451,7 @@ fi
 if [ -n "$ALL" ]; then
     . "$WK_ROOT/lib/target.sh"
     . "$WK_ROOT/remote/deps.sh"
+    fleet_logins_section
     for _t in $(target_all); do
         [ "$_t" = container ] && continue
         ( load_target "$_t" >/dev/null 2>&1 && [ "$WK_TARGET_KIND" = remote ] ) || continue

@@ -337,8 +337,10 @@ wk remote setup buildbox4               # probes it over ssh, writes targets/hos
                                         # WK_BUILD_ARGS= in that conf is appended to every build there
 wk new big-build --target buildbox4
 wk build big-build jsc-release          # sized from that machine's live load
-wk doctor --all                         # what every build box has, and whether what
-                                        # provisioned it is still what this tree says
+wk doctor --all                         # what every build box has, whether the credential
+                                        # copies it holds are this machine's, whether what
+                                        # provisioned it is still what this tree says -- and
+                                        # every other workstation's own claude.ai login
 wk remote rm buildbox4                  # undo it; git rm the conf to forget it for good
 ```
 
@@ -1150,6 +1152,24 @@ token's form takes no repository parameter and so arrives on *All
 repositories* unless the person changes that field -- which is one account's
 whole reach sitting behind a workspace boundary.
 
+The claude.ai login is judged the way a session spends it. A stored login
+whose access token has run out is renewed first -- the refresh token posted to
+the CLI's own token endpoint under the CLI's own `.oauth_refresh.lock`, the
+rotated pair written over the one file every holder reads -- because that is
+the only way to ask Anthropic anything about it (`claude auth status` reads the
+file and answers `loggedIn` for a token Anthropic has never seen), and a
+refresh Anthropic refuses is the one fact worth knowing: the login is dead, or a
+copy of it refreshed first. Renewing an access token is not a state change: the
+grant is the same, and the CLI does it at every session start. Then the profile
+(which organization, whether the subscription is active) and the organization's
+Claude Code policy -- `/api/claude_code/policy_limits`, what the CLI itself
+reads before it starts remote control -- so the verdict ends in a
+`remote-control: allowed|denied|unverified` line, which `wk new`, `wk ai claude
+--rc` and `wk doctor` decide on (`rc_login_judge`, `lib/store.sh`). The LiteLLM
+key is asked the same way: `GET /v1/models` says whether the endpoint accepts
+it, and `/key/info` -- a management route a key every workspace holds must be
+shut out of -- answering 403 is what makes it `ok` rather than `wide`.
+
 A refusal names the credential, what it can do, what it must do and the exact
 page to reissue it at, and it stores nothing. A machine that cannot reach
 GitHub or the tailnet stores the credential and reports it *unverified*: being
@@ -1172,8 +1192,13 @@ them by name --
 `github-pat`, `claude`, `claude-login`, `litellm`, `tailnet`, `tailnet-api` --
 and with nothing to store it reports what the stored one can do instead.
 `--replace` is how a credential is rotated, and it is the only arm that removes
-one. The deploy keys are generated here rather than pasted, so they have a verb
-of their own: `wk key deploy`.
+one; `wk key setup --rotate` does it to every stored credential in turn, after
+turning the deploy keys over the way `wk key deploy --rotate` does, so the
+whole machine rotates from one command -- each credential still typed at its
+prompt, made in its browser or minted, and a run abandoned at one of them
+leaves that credential absent for the next `wk key setup` to ask for. The
+deploy keys are generated here rather than pasted, so they have a verb of their
+own: `wk key deploy`.
 
 **One deploy key per fork, the same on every workstation.** `wk key deploy`
 mints the key, registers it once on GitHub under a single title, and fans the
@@ -1282,7 +1307,17 @@ on every start. It is the only piece of the host filesystem a guest reaches.
 `wk ai claude --rc` and `wk verify` ask the workspace rather than this machine's
 store -- what was given is not what is there -- and their refusal names the
 remedy: the store when the share is mounted and empty, a stop and start when a
-guest booted before the share existed. A shared build box gets no login at all
+guest booted before the share existed. Before `--rc` spawns the server it puts
+the login to its rule in the workspace (`t_agent_secret_verdict`, through the
+egress a session there uses), and `wk new` puts the store's to it before it
+makes anything: a login Anthropic refuses, or one whose organization denies
+remote control, is a refusal with the remedy rather than a server that starts
+and stops. The CLI's own refusal for a login it could not renew in time is
+worded as the organization's policy -- *"Remote Control is disabled by your
+organization's policy. Contact your organization admin for access."* is its
+wording for a policy document it could not load (measured in 2.1.270; a policy
+that really denies says *"to enable it"*) -- which is why the check renews
+first. A shared build box gets no login at all
 -- an account credential on a machine other people are root on is theirs -- so
 an agent there has the inference-only token and no remote control.
 

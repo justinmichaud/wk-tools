@@ -35,7 +35,12 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import json
+import threading
+from http.server import HTTPServer
+
 from tests.support import REPO, WkTest, bash, func_body, stub_path
+from tests.test_credcheck import FakeAnthropic, FakeLiteLLM, RECORD, login
 
 CMD_DOCTOR = REPO / "cmd" / "doctor"
 LIB_COMMON = REPO / "lib" / "common.sh"
@@ -369,7 +374,30 @@ class TestTheCredentialsSection(unittest.TestCase):
     def block(self):
         return func_body(CMD_DOCTOR.read_text(), "credentials_section")
 
-    def run_block(self, secrets):
+    @classmethod
+    def setUpClass(cls):
+        cls.servers = []
+        for handler in (FakeAnthropic, FakeLiteLLM):
+            server = HTTPServer(("127.0.0.1", 0), handler)
+            threading.Thread(target=server.serve_forever, daemon=True).start()
+            cls.servers.append(server)
+        cls.anthropic = "http://127.0.0.1:%d" % cls.servers[0].server_port
+        cls.litellm = "http://127.0.0.1:%d" % cls.servers[1].server_port
+
+    @classmethod
+    def tearDownClass(cls):
+        for server in cls.servers:
+            server.shutdown()
+            server.server_close()
+
+    def setUp(self):
+        FakeAnthropic.status = 200
+        FakeAnthropic.policy_status = 200
+        FakeAnthropic.policy = {"restrictions": {}, "compliance_taints": []}
+        FakeLiteLLM.models_status = 200
+        FakeLiteLLM.info_status = 403
+
+    def run_block(self, secrets, online=True):
         tmp = Path(tempfile.mkdtemp(prefix="wk-test-doctor-cred-"))
         self.addCleanup(shutil.rmtree, tmp, True)
         for rel, value in secrets.items():
@@ -377,18 +405,26 @@ class TestTheCredentialsSection(unittest.TestCase):
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(value + "\n")
         harness = (_lift_one_liners(CMD_DOCTOR, ("ok", "miss", "unk", "section"))
+                   + "\n" + _lift_func(CMD_DOCTOR, "remote_control_row")
                    + "\nmissing=0\n")
+        env = {"WK_HOST_SECRETS": str(tmp / "secrets"),
+               "WK_STORE": str(tmp),
+               "WK_TS_AUTHKEY": str(tmp / "tailscale-authkey"),
+               "WK_TS_API_SECRET": str(tmp / "tailscale-api-key"),
+               "WK_GITHUB_API": "http://127.0.0.1:1",
+               "WK_TAILNET_API": "http://127.0.0.1:1"}
+        if online:
+            env.update({"WK_ANTHROPIC_API": self.anthropic,
+                        "WK_CLAUDE_OAUTH": self.anthropic,
+                        "WK_LITELLM_API": self.litellm})
         cp = bash('set -euo pipefail\n'
                   f'. "{REPO}/lib/common.sh"\n. "{REPO}/lib/store.sh"\n'
-                  + harness + self.block(),
-                  env={"WK_HOST_SECRETS": str(tmp / "secrets"),
-                       "WK_STORE": str(tmp),
-                       "WK_TS_AUTHKEY": str(tmp / "tailscale-authkey"),
-                       "WK_TS_API_SECRET": str(tmp / "tailscale-api-key"),
-                       "WK_GITHUB_API": "http://127.0.0.1:1",
-                       "WK_TAILNET_API": "http://127.0.0.1:1"})
+                  + harness + self.block(), env=env)
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
         return cp.stdout + cp.stderr
+
+    LOGIN = {"agent-rw/.credentials.json": login(),
+             "agent-rw/.claude.json": json.dumps(RECORD)}
 
     def test_nothing_stored_is_reported_and_is_not_a_fault(self):
         out = self.run_block({})
@@ -412,16 +448,111 @@ class TestTheCredentialsSection(unittest.TestCase):
         self.assertIn("could not reach", out)
 
     def test_an_acceptable_credential_reports_what_it_can_do(self):
-        """The litellm rule, which judges the key it is given and asks nothing
-        of a network: what the claude rule reports once Anthropic has answered
-        is tests/test_credcheck.py's subject, and it has the stub for it."""
         out = self.run_block({"secrets/litellm-key": "sk-litellm-abc"})
-        self.assertIn("LiteLLM virtual key", out)
+        self.assertIn("restricted to the LLM API routes", out)
+        self.assertNotIn("\033[31m", out)
+
+    def test_a_login_the_policy_allows_remote_control_has_an_ok_row_for_it(self):
+        out = self.run_block(self.LOGIN)
+        self.assertIn("claude-login -- scopes:", out)
+        self.assertRegex(out, r"ok.*remote control in the workspaces this login reaches: allowed")
+
+    def test_a_login_the_policy_denies_remote_control_is_a_red_row_with_the_remedy(self):
+        """The credential is fine and every plain session works, so its own
+        row stays green; the thing `wk new` will refuse on gets a row of its
+        own, red, naming who can change it."""
+        FakeAnthropic.policy = {"restrictions": {"allow_remote_control": {"allowed": False}},
+                                "compliance_taints": []}
+        out = self.run_block(self.LOGIN)
+        self.assertRegex(out, r"\033\[31m--.*remote control in the workspaces this login reaches: denied")
+        self.assertIn("an owner of the Example Org organization", out)
+
+    def test_a_login_nobody_could_ask_about_says_so_on_both_rows(self):
+        out = self.run_block(self.LOGIN, online=False)
+        self.assertRegex(out, r"\?\?.*claude-login: could not reach")
+        self.assertRegex(out, r"\?\?.*remote control in the workspaces this login reaches: unverified")
+
+    def test_a_dead_login_is_red_with_the_replacement_and_no_policy_row(self):
+        FakeAnthropic.status = 401
+        out = self.run_block(self.LOGIN)
+        self.assertRegex(out, r"\033\[31m--.*claude-login: Anthropic does not accept this login")
+        self.assertIn("wk key set claude-login --replace", out)
+        self.assertNotIn("remote control in the workspaces", out)
 
     def test_nothing_stored_is_ever_printed(self):
         secret = "sk-ant-oat01-do-not-print-this"
         out = self.run_block({"secrets/claude-token": secret})
         self.assertNotIn(secret, out)
+
+
+class TestTheOtherWorkstationsLogins(unittest.TestCase):
+    """`wk doctor --all` asks each peer workstation for its own login's
+    verdict -- what `wk key check` already does -- and renders it as rows:
+    the block is lifted and driven against fakes of the two things it calls,
+    peer_workstations and peer_login_verdict (lib/target.sh)."""
+
+    VERDICTS = {
+        "goodbox": "ok\tscopes: user:profile; organization: Example Org; remote control allowed by the organization's policy.\n    remote-control: allowed",
+        "deniedbox": "ok\tscopes: user:profile; remote control DENIED: allow_remote_control is off.\n    remote-control: denied\n    fix: an owner of the Example Org organization turns Remote Control on",
+        "emptybox": "bad\tno accessToken.",
+        "newbox": "absent\tnothing stored -- wk key set claude-login",
+    }
+
+    def rows(self, peers, unanswered=()):
+        cases = "\n".join(
+            f"            {name}) printf '%s\\n' {_sq(verdict)} ;;"
+            for name, verdict in self.VERDICTS.items() if name in peers)
+        cases += "\n" + "\n".join(
+            f"            {name}) printf 'unverified\\t%s did not answer: unreachable\\n' {name}; return 1 ;;"
+            for name in unanswered)
+        harness = (_lift_one_liners(CMD_DOCTOR, ("ok", "miss", "unk", "section"))
+                   + "\n" + _lift_func(CMD_DOCTOR, "remote_control_row")
+                   + "\n" + _lift_func(CMD_DOCTOR, "fleet_logins_section")
+                   + "\nmissing=0\n")
+        cp = bash(f'''
+set -euo pipefail
+. "{REPO}/lib/common.sh"
+. "{REPO}/lib/store.sh"
+{harness}
+peer_workstations() {{ printf '%s\\n' {" ".join(peers + tuple(unanswered))}; }}
+peer_login_verdict() {{
+    case "$1" in
+{cases}
+    esac
+}}
+fleet_logins_section
+echo "missing=$missing"
+''')
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        return cp.stdout + cp.stderr
+
+    def test_a_peer_with_a_usable_login_is_ok_and_its_policy_is_a_row(self):
+        out = self.rows(("goodbox",))
+        self.assertRegex(out, r"ok.*goodbox: scopes: user:profile")
+        self.assertRegex(out, r"ok.*remote control in the workspaces goodbox makes: allowed")
+        self.assertIn("missing=0", out)
+
+    def test_a_peer_whose_organization_denies_remote_control_is_red_with_the_owner_named(self):
+        out = self.rows(("deniedbox",))
+        self.assertRegex(out, r"--.*remote control in the workspaces deniedbox makes: denied.*an owner of the Example Org")
+        self.assertIn("missing=1", out)
+
+    def test_a_peer_without_a_usable_login_is_red_with_the_share_command(self):
+        out = self.rows(("emptybox", "newbox"))
+        self.assertRegex(out, r"--.*emptybox: no accessToken\..*wk key share --to emptybox")
+        self.assertRegex(out, r"--.*newbox: nothing stored.*wk key share --to newbox")
+        self.assertIn("missing=2", out)
+
+    def test_a_peer_that_does_not_answer_is_unknown_never_broken(self):
+        out = self.rows((), unanswered=("farbox",))
+        self.assertRegex(out, r"\?\?.*farbox: farbox did not answer")
+        self.assertIn("missing=0", out)
+
+    def test_doctor_walks_the_fleet_only_when_asked(self):
+        text = CMD_DOCTOR.read_text()
+        head, _, tail = text.partition('if [ -n "$ALL" ]; then\n    . "$WK_ROOT/lib/target.sh"')
+        self.assertNotIn("fleet_logins_section\n", head.split("fleet_logins_section() {")[1])
+        self.assertIn("fleet_logins_section", tail)
 
 
 class TestSyntax(unittest.TestCase):

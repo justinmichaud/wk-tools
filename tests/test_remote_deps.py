@@ -13,7 +13,10 @@ what it says about *this* fleet is a fact about the fleet, not about the code.
 
 Run: python3 -m unittest tests.test_remote_deps -v
 """
+import hashlib
+import tempfile
 import unittest
+from pathlib import Path
 
 from tests.support import REPO, WkTest, bash
 
@@ -41,6 +44,8 @@ git.manyfiles=true
 marker=yes
 root=/home/x/wk
 target=fullbox
+cred..wk-agent-token=__TOKEN__
+cred..wk-litellm-key=__LITELLM__
 """
 
 THIN = """host=thinbox
@@ -68,20 +73,38 @@ target=thinbox
 NO_GIT = FULL.replace("tool.git=/usr/bin/git", "tool.git=")
 
 
-def findings(probe):
+def _digest(value):
+    return hashlib.sha256((value + "\n").encode()).hexdigest()[:16]
+
+
+# The store the findings compare a machine's credential copies with: a scratch one holding the two values FULL's digests are of.
+TOKEN, LITELLM = "sk-ant-oat01-placeholder", "sk-litellm-placeholder"
+FULL = FULL.replace("__TOKEN__", _digest(TOKEN)).replace("__LITELLM__", _digest(LITELLM))
+
+
+def store_with(**values):
+    tmp = Path(tempfile.mkdtemp(prefix="wk-test-deps-store-"))
+    (tmp / "secrets").mkdir()
+    for name, value in values.items():
+        (tmp / "secrets" / name).write_text(value + "\n")
+    return {"WK_STORE": str(tmp), "WK_HOST_SECRETS": str(tmp / "secrets")}
+
+
+def findings(probe, env=None):
     # The probe arrives as a heredoc, not as a quoted argument: it is many
     # lines, and a repr()'d one would reach the shell with literal backslash-n.
     cp = bash(f'''
 set -euo pipefail
 WK_ROOT={str(REPO)!r}
 . "$WK_ROOT/lib/common.sh"
+. "$WK_ROOT/lib/store.sh"
 . "$WK_ROOT/remote/deps.sh"
 probe=$(cat <<'PROBE_EOF'
 {probe}
 PROBE_EOF
 )
 wk_remote_findings "$probe"
-''')
+''', env=env if env is not None else store_with(**{"claude-token": TOKEN, "litellm-key": LITELLM}))
     assert cp.returncode == 0, cp.stdout + cp.stderr
     out = []
     for line in cp.stdout.splitlines():
@@ -155,6 +178,48 @@ class TestTheFindings(WkTest):
     def test_a_complete_machine_reports_only_ok(self):
         states = {f[0] for f in findings(FULL)}
         self.assertEqual(states, {"ok"}, findings(FULL))
+
+    def _cred(self, probe, name, env=None):
+        rows = [f for f in findings(probe, env) if f[1].startswith(name + " credential")]
+        self.assertEqual(1, len(rows), rows)
+        return rows[0]
+
+    def test_a_copy_that_is_this_machines_credential_is_ok(self):
+        self.assertEqual("ok", self._cred(FULL, "claude")[0])
+        self.assertEqual("ok", self._cred(FULL, "litellm")[0])
+
+    def test_a_copy_rotated_out_from_under_is_wanted_with_the_setup_that_rewrites_it(self):
+        state, what, remedy = self._cred(FULL, "claude", store_with(**{"claude-token": "sk-ant-oat01-rotated", "litellm-key": LITELLM}))
+        self.assertEqual("wanted", state)
+        self.assertIn("rotated since", what)
+        self.assertIn("wk remote setup", remedy)
+
+    def test_a_machine_without_the_copy_is_wanted(self):
+        state, what, remedy = self._cred(FULL.replace("cred..wk-agent-token=", "cred..wk-other="), "claude")
+        self.assertEqual("wanted", state)
+        self.assertIn("not on the machine", what)
+        self.assertIn("wk remote setup", remedy)
+
+    def test_a_copy_of_a_credential_no_longer_stored_here_is_wanted_gone(self):
+        state, what, _r = self._cred(FULL, "claude", store_with(**{"litellm-key": LITELLM}))
+        self.assertEqual("wanted", state)
+        self.assertIn("no longer stored here", what)
+
+    def test_no_credential_on_either_side_is_a_note(self):
+        state, what, remedy = self._cred(THIN, "claude", store_with())
+        self.assertEqual("note", state)
+        self.assertIn("wk key set claude", remedy)
+
+    def test_a_machine_that_could_not_digest_its_copy_is_a_note(self):
+        state, what, _r = self._cred(FULL.replace(_digest(TOKEN), "?"), "claude")
+        self.assertEqual("note", state)
+        self.assertIn("sha256sum", what)
+
+    def test_the_probe_reports_every_copy_by_digest_and_never_by_value(self):
+        text = PROBE.read_text()
+        self.assertIn('for _f in "$HOME"/.wk-*', text)
+        self.assertIn("sha256sum", text)
+        self.assertNotIn("cat \"$_f\"", text)
 
     def test_a_missing_wanted_tool_is_reported_with_one_root_command(self):
         f = findings(THIN)
