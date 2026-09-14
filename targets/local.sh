@@ -12,6 +12,8 @@ mkdir -p "$WK_STORE/ws/$_local_name"
 
 t_src()   { echo "$_local_src"; }
 
+t_home()  { echo "$HOME"; }
+
 # The kernel is the host's, so an armhf container reports aarch64 from uname.
 t_arch()  { echo "${_local_arch:-native}"; }
 

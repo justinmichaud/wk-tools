@@ -21,7 +21,8 @@
 #      from under the record, or a machine that will not answer (3 is a build
 #      whose watchdog reported; 4 is a workspace whose record no longer has a
 #      writer -- don't conflate them). Also what a fleet walk reports for an
-#      unreachable peer.
+#      unreachable peer, and a workspace that did not answer about its job's
+#      pid within WK_TASK_ASK_SECONDS (default 5): `unanswered`.
 #
 # At a terminal, with nothing else said, this opens the page (`--web`).
 # Anything else (a pipe, CI, an agent) gets the plain table; `--text` asks
@@ -145,7 +146,7 @@ report() {
     # task block below renders in full (report_tasks): the plan, the command
     # that stops it and the log are said there, once.
     _bd=$(task_find build "$ws")
-    [ -z "$_bd" ] || sub_add "{\"kind\":\"build\",\"state\":\"$(_jesc "$(task_verdict "$_bd" log)")\",\"config\":\"$(_jesc "$(task_field "$_bd" config)")\"}"
+    [ -z "$_bd" ] || sub_add "{\"kind\":\"build\",\"state\":\"$(_jesc "$(task_verdict "$_bd" capped)")\",\"config\":\"$(_jesc "$(task_field "$_bd" config)")\"}"
     rec_json subs "[$_subs]"
     rec_emit
     return 0
@@ -315,10 +316,7 @@ elif local in tags:
     rec_emit
 }
 
-# One record per long-running command, whatever wrote it (lib/task.sh). The
-# verdict is computed here and never stored, from the log's age rather than the
-# pid for a task inside a workspace: this listing is read-only and must answer
-# about a wedged workspace, not wait on one.
+# One record per long-running command, whatever wrote it (lib/task.sh). The verdict is computed here and never stored; a pid inside a workspace is asked of it under WK_TASK_ASK_SECONDS, since this listing is read-only and must answer about a wedged workspace rather than wait on one.
 _tasks_said=" "
 report_tasks() { # [name] -- the tasks in this target's store, once per store; only <name>'s when named
     local only="${1:-}" d st _plan _l _abort _age
@@ -327,7 +325,7 @@ report_tasks() { # [name] -- the tasks in this target's store, once per store; o
     while IFS= read -r d; do
         [ -n "$d" ] || continue
         [ -z "$only" ] || [ "$(task_field "$d" name)" = "$only" ] || continue
-        st=$(task_verdict "$d" log)
+        st=$(task_verdict "$d" capped)
         # A task that ended as it was asked to leaves what it produced as the report -- the workspace row, the image, the bench run. Only one that ended badly still needs a reader.
         case " ok cancelled stopped refused " in
             *" $st "*) continue ;;
@@ -369,6 +367,9 @@ report_tasks() { # [name] -- the tasks in this target's store, once per store; o
                             bump 2 ;;
             starting)       bump 2 ;;
             died)           note_warn "$(task_field "$d" kind) '$(task_field "$d" name)' died without recording an exit -- its log is $(task_field "$d" log)"
+                            bump 4 ;;
+            unanswered)     note_warn "'$(task_field "$d" name)' did not say within ${WK_TASK_ASK_SECONDS:-5}s whether pid $(task_field "$d" pid) is alive, so
+      nothing here can confirm the record. Ask it directly:  wk enter $(task_field "$d" name)"
                             bump 4 ;;
             failed)         note_warn "exit $(task_field "$d" exit)"
                             while IFS= read -r _l; do note "  $_l"; done \

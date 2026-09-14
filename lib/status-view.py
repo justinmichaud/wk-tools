@@ -176,6 +176,7 @@ BAD = (
     "unhealthy",
     "incomplete",   # a task that stopped before every step of its plan ended
     "died",         # a pid that no longer answers, with no exit recorded
+    "unanswered",   # the workspace holding the pid did not say in time
     "failed",
     "oom",
     "stalled",

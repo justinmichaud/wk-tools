@@ -141,6 +141,7 @@ _running_vms() {
 _running_count() { _running_vms | awk 'END { print NR }'; }
 
 t_src()   { echo "/Users/$WK_VM_USER/WebKit"; }
+t_home()  { echo "/Users/$WK_VM_USER"; }
 t_tools() { echo "/Users/$WK_VM_USER/wk-tools"; }
 
 t_mirror_dir() { mirror_beside_checkout "$(t_src "$1")"; }
@@ -322,6 +323,20 @@ _softnet_flags() {
 
 _proxy_pidfile() { echo "$WK_VM_DIR/proxy.pid"; }
 
+# A daemon keeps the code it was started with, and its pidfile's mtime is when that was: one older than any source under container/proxy is stopped so the start below runs the current one.
+_host_daemon_restart_if_stale() { # <pidfile> <what it is>
+    local pf="$1" pid f stale="" i=0
+    pid=$(cat "$pf" 2>/dev/null) || return 0
+    [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null || return 0
+    for f in "$WK_ROOT"/container/proxy/*.py; do [ "$f" -nt "$pf" ] && stale=1; done
+    [ -n "$stale" ] || return 0
+    info "restarting the $2: container/proxy changed since it started"
+    kill "$pid" 2>/dev/null || true
+    while [ "$i" -lt 20 ] && kill -0 "$pid" 2>/dev/null; do sleep 0.25; i=$((i + 1)); done
+    kill -0 "$pid" 2>/dev/null && kill -9 "$pid" 2>/dev/null
+    rm -f "$pf"
+}
+
 _proxy_running() {
     local pf; pf=$(_proxy_pidfile)
     [ -f "$pf" ] && kill -0 "$(cat "$pf" 2>/dev/null)" 2>/dev/null && return 0
@@ -335,6 +350,7 @@ _start_host_proxy() {
     # The injector first: the proxy hands it api.github.com's CONNECT, and one started after the proxy answers those with 502 until it is up. Ahead of the liveness check too, not only ahead of starting the proxy -- the injector's standing read token is converged in there from what this host holds, and a start that found the proxy already up would leave a rotated token undelivered and every read from a guest answering 401.
     _start_host_inject || true
 
+    _host_daemon_restart_if_stale "$(_proxy_pidfile)" "egress proxy"
     _proxy_running && { debug "host proxy already running"; return 0; }
 
     ensure_dir "$WK_VM_DIR"
@@ -403,6 +419,7 @@ vm_push_pat_converge() {
 _start_host_inject() {
     ensure_dir "$WK_VM_DIR"
     vm_push_pat_converge || true
+    _host_daemon_restart_if_stale "$WK_VM_DIR/github-inject.pid" "GitHub API injector"
     _inject_running && return 0
     local log="$WK_VM_DIR/github-inject.log" i=0
     WK_INJECT_SOCK="$(_inject_sock)" \

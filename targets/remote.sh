@@ -298,6 +298,8 @@ t_mirror_dir() { [ -n "$(_remote_reference)" ] || printf '%s' "$(_remote_root)/m
 
 _remote_home() { _remote_probe; printf '%s' "$_WK_REMOTE_HOME"; }
 
+t_home() { _remote_home; }
+
 # A relative WK_REMOTE_TOOLS is relative to the *remote* home: the conf is sourced here.
 t_tools() {
     case "${WK_REMOTE_TOOLS:-}" in

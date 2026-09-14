@@ -948,6 +948,52 @@ _start_host_proxy
                         body.index("_proxy_running"))
 
 
+class TestAHostDaemonOlderThanItsSourceIsRestarted(WkTest):
+    """The proxy and the injector run on this host from container/proxy, and a
+    guest start that found one already up left it running the copy it was
+    started from: a proxy older than its fix kept the old behaviour for
+    every guest (measured 2026-09-14: three days of `GET https://` relayed
+    to :80 after the fix landed). A pidfile is written at the start, so its
+    mtime against the sources says whether the daemon predates them."""
+
+    SCRIPT = """
+. "$WK_ROOT/lib/common.sh"
+. "$WK_ROOT/lib/store.sh"
+. "$WK_ROOT/lib/target.sh"
+load_target vm >/dev/null 2>&1
+sleep 60 & pid=$!
+echo "$pid" > "$PIDFILE"
+touch -t "$PIDFILE_STAMP" "$PIDFILE"
+_host_daemon_restart_if_stale "$PIDFILE" "egress proxy"
+if kill -0 "$pid" 2>/dev/null; then echo "MARK:alive"; kill "$pid"; else echo "MARK:gone"; fi
+[ -f "$PIDFILE" ] && echo "MARK:pidfile-kept" || echo "MARK:pidfile-removed"
+"""
+
+    def _run(self, stamp):
+        pidfile = self.tmp / "proxy.pid"
+        return bash(self.SCRIPT, env={"PIDFILE": str(pidfile), "PIDFILE_STAMP": stamp,
+                                      "WK_VM_STORE": str(self.tmp / "vmstore")})
+
+    def test_one_started_before_its_source_changed_is_stopped(self):
+        cp = self._run("200101010000")
+        self.assertIn("MARK:gone", cp.stdout, cp.stdout + cp.stderr)
+        self.assertIn("MARK:pidfile-removed", cp.stdout)
+        self.assertIn("restarting the egress proxy", cp.stderr, cp.stderr)
+
+    def test_one_started_after_is_left_alone(self):
+        cp = self._run("203001010000")
+        self.assertIn("MARK:alive", cp.stdout, cp.stdout + cp.stderr)
+        self.assertIn("MARK:pidfile-kept", cp.stdout)
+        self.assertNotIn("restarting", cp.stderr)
+
+    def test_both_daemons_are_checked_ahead_of_their_already_running_return(self):
+        text = (REPO / "targets" / "vm.sh").read_text()
+        for fn, probe in (("_start_host_proxy", "_proxy_running"),
+                          ("_start_host_inject", "_inject_running")):
+            body = func_body(text, fn)
+            self.assertLess(body.index("_host_daemon_restart_if_stale"), body.index(probe), fn)
+
+
 @unittest.skipUnless(os.uname().sysname == "Darwin",
                      "guests are a macOS-host thing (tart)")
 @unittest.skipUnless(shutil.which("ssh-agent"), "needs ssh-agent")

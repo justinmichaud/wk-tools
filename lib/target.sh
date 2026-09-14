@@ -1,8 +1,8 @@
 # Loading a target driver, and the defaults every driver inherits. Commands
 # under cmd/ call only this contract, never podman, tart or ssh directly.
-# Required: t_create <name> [base], t_exec <name> <cmd..>, t_enter <name>,
-# t_destroy <name>, t_list ("<name><tab><state>" per line), t_info <name>
-# (absent | creating | unreachable | the driver's word for one that exists).
+# Required: t_create <name> [base], t_exec <name> <cmd..>, t_enter <name>, t_destroy <name>,
+# t_home <name> (the workspace user's home, seen from inside it: never this machine's), t_list
+# ("<name><tab><state>" per line), t_info <name> (absent | creating | unreachable | the driver's word for one that exists).
 # Everything below is a default a driver overrides only where it differs.
 
 t_src()        { echo "/src/WebKit"; }   # the WebKit checkout inside the target
@@ -76,8 +76,6 @@ t_start() { info "'$WK_TARGET' has no notion of starting a single workspace -- n
 t_stop() { die "the '$WK_TARGET' target has no notion of stopping a single workspace -- '$1' is left running"; }
 t_store_init() { store_init; }      # create the host-side directories this target needs
 
-t_home()       { echo "$HOME"; }   # the workspace user's home dir, as seen from inside it
-
 # `t_exec <ws> cat <file>` into a redirect corrupts binary data both ways.
 t_pull() {
     local name="$1" src="$2" dest="$3"
@@ -121,11 +119,11 @@ _ssh_opts_base() { # never interactive, bounded connect; drivers add their own
     printf '%s' "-o BatchMode=yes -o ConnectTimeout=${1:-10}"
 }
 
-# `nohup cmd &` survives an ssh close but not `podman exec` -- hence setsid.
+# The far side is reached over ssh: nohup outlives the session's SIGHUP and disown drops it from the job table (detach_remote, lib/detach.sh). No setsid: macOS ships none.
 t_spawn() { # <name> <log> <pidf> <cmd...> -- detached from this process
     local name="$1" log="$2" pidf="$3"; shift 3
-    t_exec "$name" bash -lc "setsid nohup $(sh_quote "$@") \
-        > $(sh_quote "$log") 2>&1 < /dev/null & echo \$! > $(sh_quote "$pidf")"
+    t_exec "$name" bash -lc "nohup $(sh_quote "$@") \
+        > $(sh_quote "$log") 2>&1 < /dev/null & echo \$! > $(sh_quote "$pidf"); disown"
 }
 
 t_branch() { # `-` when unknowable without starting something

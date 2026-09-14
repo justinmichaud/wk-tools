@@ -202,6 +202,28 @@ class TestOneRecordPerKind(WkTest):
             'printf "%s\\n" "$(task_verdict "$d2")"')
         self.assertEqual(out.split(), ["cancelled", "starting"])
 
+    def test_a_capped_reading_of_a_workspace_pid_is_the_workspaces_answer(self):
+        """`capped` asks the workspace through t_exec for WK_TASK_ASK_SECONDS at
+        most: 0 is alive, 1 is no such process, and anything else -- an ssh
+        that failed, a podman exec that did not, the cap -- is `unanswered`."""
+        for answer, word in (("return 0", "running"), ("return 1", "died"),
+                             ("return 255", "unanswered"), ("sleep 30", "unanswered")):
+            with self.subTest(answer=answer):
+                out = self._sh(
+                    'd=$(task_begin rc target ws1 "k" /l one)\n'
+                    'task_pid "$d" 4242\n'
+                    'printf "%s\\n" "$(task_verdict "$d" capped)"',
+                    env='WK_TASK_ASK_SECONDS=1\nt_exec() { %s; }' % answer)
+                self.assertEqual(out.strip(), word)
+
+    def test_an_uncapped_reading_waits_for_the_workspace(self):
+        out = self._sh(
+            'd=$(task_begin rc target ws1 "k" /l one)\n'
+            'task_pid "$d" 4242\n'
+            'printf "%s\\n" "$(task_verdict "$d")"',
+            env='t_exec() { sleep 2; return 0; }')
+        self.assertEqual(out.strip(), "running")
+
     def test_a_task_with_no_pid_yet_is_starting_not_died(self):
         out = self._sh('d=$(task_begin rc target ws1 "k" /l one)\n'
                        'printf "%s\\n" "$(task_verdict "$d")"')

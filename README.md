@@ -162,9 +162,10 @@ command a person types to stop it. `wk status` renders each the same way, with
 the steps done, running and still to come, so reading one never depends on
 knowing which command wrote it. Liveness is asked of the process table at read
 time: a pid that no longer answers with no exit recorded reads `died`. A pid
-that lives inside a workspace is asked of that workspace only by the commands
-that act on it (`--kill`); `wk status` reads the log's age instead, so a wedged
-workspace is reported and not waited on. The pid such a job announces is the
+that lives inside a workspace is asked of that workspace, by `wk status` under
+a cap of `WK_TASK_ASK_SECONDS` (default 5) so a wedged workspace reads
+`unanswered` rather than being waited on, and by the commands that act on it
+(`--kill`) for as long as it takes. The pid such a job announces is the
 workspace's own claim, so nothing signals it while its command line in there is
 not the job the record names.
 

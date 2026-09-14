@@ -93,6 +93,7 @@ FAKE_CLAUDE="$TMP_HOME/claude"
 cat > "$FAKE_CLAUDE" <<'EOS'
 #!/bin/sh
 echo "$@" >> "$CLAUDE_LOG"
+echo "Connected · WebKit · main"
 sleep 20
 EOS
 chmod +x "$FAKE_CLAUDE"
@@ -525,7 +526,7 @@ t_spawn() {
     printf '%s' "$!" > "$pidf"
 }
 FAKE_CLAUDE="$TMP_HOME/claude"
-printf '#!/bin/sh\nsleep 20\n' > "$FAKE_CLAUDE"
+printf '#!/bin/sh\necho Connected\nsleep 20\n' > "$FAKE_CLAUDE"
 chmod +x "$FAKE_CLAUDE"
 if ( rc_start "$WS" "$FAKE_CLAUDE" ) 2>"$TMP_HOME/err"; then echo "MARK:started"; else echo "MARK:refused"; fi
 echo "MARK:err"; cat "$TMP_HOME/err"
@@ -566,7 +567,7 @@ t_agent_secret_present() { [ "$TARGET_SAYS" = yes ]; }
 t_agent_secret_remedy()  { printf 'log in inside the guest: claude auth login'; }
 
 FAKE_CLAUDE="$TMP_HOME/claude"
-printf '#!/bin/sh\nsleep 20\n' > "$FAKE_CLAUDE"
+printf '#!/bin/sh\necho Connected\nsleep 20\n' > "$FAKE_CLAUDE"
 chmod +x "$FAKE_CLAUDE"
 if ( rc_start "$WS" "$FAKE_CLAUDE" ) 2>"$TMP_HOME/err"; then echo "MARK:started"; else echo "MARK:refused"; fi
 echo "MARK:err"; cat "$TMP_HOME/err"
@@ -606,6 +607,162 @@ class TestTheGateFollowsTheTargetAndNotThisMachine(unittest.TestCase):
         cp = self._probe("yes", login=False)
         self.assertIn("MARK:started", cp.stdout, cp.stdout + cp.stderr)
         self.assertIn("SPAWNED", _section(cp.stdout, "spawned"), cp.stdout)
+
+
+class TestTheHomeItWritesIntoIsTheWorkspaces(unittest.TestCase):
+    """rc_start writes the server's pid and log under t_home, inside the
+    workspace. A guest's user is WK_VM_USER and a build box's is whatever
+    its shell reported, so a driver that inherited this machine's $HOME would
+    have the server redirect into a directory the target does not have."""
+
+    _PIDFILE = """
+set -euo pipefail
+export WK_ROOT="__REPO__"
+export WK_CLAUDE_LIB=1
+. "__REPO__/cmd/ai"
+__SEED__
+. "__REPO__/targets/__DRIVER__.sh"
+rc_pidfile ws
+"""
+
+    def _pidfile(self, driver, seed, env=None):
+        e = {"HOME": "/Users/not-the-target"}
+        e.update(env or {})
+        cp = bash(self._PIDFILE.replace("__REPO__", str(REPO))
+                  .replace("__DRIVER__", driver).replace("__SEED__", seed), env=e)
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        return cp.stdout.strip()
+
+    def test_a_guests_pidfile_is_under_its_own_user(self):
+        self.assertEqual(self._pidfile("vm", "", {"WK_VM_USER": "guestuser"}),
+                         "/Users/guestuser/claude-remote-control.pid")
+
+    def test_a_build_boxs_pidfile_is_under_the_home_it_reported(self):
+        seed = "WK_TARGET=box WK_REMOTE_HOST=box\n_WK_REMOTE_HOME=/home/far _WK_REMOTE_PROBED=1"
+        self.assertEqual(self._pidfile("remote", seed),
+                         "/home/far/claude-remote-control.pid")
+
+    def test_a_containers_pidfile_is_under_the_container_user(self):
+        self.assertEqual(self._pidfile("container", "", {"WK_CONTAINER_USER": "ctruser"}),
+                         "/home/ctruser/claude-remote-control.pid")
+
+    def test_no_driver_inherits_this_machines_home(self):
+        """The contract has no default for t_home: each driver states its own."""
+        self.assertNotIn("t_home()", (REPO / "lib" / "target.sh").read_text())
+        for d in sorted((REPO / "targets").glob("*.sh")):
+            self.assertIn("t_home()", d.read_text(), d.name)
+
+
+class TestTheSharedDetachNeedsNothingMacosLacks(unittest.TestCase):
+    """The drivers that reach a workspace over ssh share lib/target.sh's
+    t_spawn, and a macOS guest is one of them: it has nohup and no setsid
+    (measured in a wk-base clone, macOS 26.4). So the detach is nohup and
+    disown, the pidfile holds the command's own pid, and it is alive after
+    the shell that started it has gone."""
+
+    _SPAWN = """
+set -euo pipefail
+. "$WK_ROOT/lib/common.sh"
+. "$WK_ROOT/lib/target.sh"
+t_exec() { shift; "$@"; }
+PATH="$SANDBOX/bin:$PATH"
+t_spawn ws "$SANDBOX/log" "$SANDBOX/pid" sleep 30
+sleep 0.5
+pid=$(cat "$SANDBOX/pid")
+kill -0 "$pid" && echo "MARK:alive"
+ps -o command= -p "$pid"
+kill "$pid"
+"""
+
+    def test_it_starts_without_setsid_and_the_pid_is_the_commands(self):
+        tmp = Path(tempfile.mkdtemp(prefix="wk-spawn-"))
+        (tmp / "bin").mkdir()
+        (tmp / "bin" / "setsid").write_text("#!/bin/sh\necho 'bash: setsid: command not found' >&2\nexit 127\n")
+        (tmp / "bin" / "setsid").chmod(0o755)
+        cp = bash(self._SPAWN, env={"SANDBOX": str(tmp)})
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertIn("MARK:alive", cp.stdout, cp.stdout + cp.stderr)
+        self.assertIn("sleep 30", cp.stdout, cp.stdout)
+        self.assertEqual("", (tmp / "log").read_text(), "the command's log carries a start-up error")
+
+    def test_no_driver_detaches_with_setsid(self):
+        for f in [REPO / "lib" / "target.sh", *sorted((REPO / "targets").glob("*.sh"))]:
+            code = [l for l in f.read_text().splitlines() if not l.lstrip().startswith("#")]
+            self.assertEqual([], [l for l in code if "setsid" in l], f.name)
+
+
+# One probe, the fake server substituted: what rc_start reports is decided by
+# what the server itself says down its log, and when.
+_PROBE_FAKE_SERVER = r'''
+set -euo pipefail
+export WK_ROOT="__REPO__"
+export WK_CLAUDE_LIB=1
+. "__REPO__/cmd/ai"
+
+WS="probe-ws-server"
+mkdir -p "$(wk_ws_dir "$WS")"
+TMP_HOME=$(mktemp -d); TMP_SRC=$(mktemp -d)
+export CLAUDE_SECURESTORAGE_CONFIG_DIR="$(wk_agent_rw_dir)"
+t_exec()  { local name="$1"; shift; "$@"; }
+t_home()  { printf '%s' "$TMP_HOME"; }
+t_src()   { printf '%s' "$TMP_SRC"; }
+t_tools() { printf '%s' "$WK_ROOT"; }
+t_spawn() {
+    local name="$1" log="$2" pidf="$3"; shift 3
+    "$@" > "$log" 2>&1 < /dev/null &
+    printf '%s' "$!" > "$pidf"
+}
+FAKE_CLAUDE="$TMP_HOME/claude"
+cat > "$FAKE_CLAUDE" <<'EOS'
+__FAKE__
+EOS
+chmod +x "$FAKE_CLAUDE"
+if ( rc_start "$WS" "$FAKE_CLAUDE" ) 2>"$TMP_HOME/err"; then echo "MARK:started"; else echo "MARK:refused"; fi
+echo "MARK:err"; cat "$TMP_HOME/err"
+echo "MARK:status"
+_t=$(rc_task "$WS")
+printf 'verdict=%s\npid=%s\n' "$(task_verdict "$_t")" "$(task_field "$_t" pid)"
+kill "$(cat "$TMP_HOME/claude-remote-control.pid" 2>/dev/null)" 2>/dev/null || true
+'''
+
+
+class TestTheServersOwnWordDecidesWhatTheStartReports(unittest.TestCase):
+    """Measured in a guest (Claude Code 2.1.270): a server whose policy fetch
+    fails retries for about four seconds and then exits with the refusal
+    worded as the organization's policy, and one that is up says `Connected`
+    down its log. A start that settled after half a second reported the
+    first one running; now it waits for one word or the other."""
+
+    @staticmethod
+    def _probe(fake, wait=None):
+        tmp = tempfile.mkdtemp(prefix="wk-rc-server-")
+        env = {"WK_STORE": tmp}
+        if wait is not None:
+            env["WK_RC_WAIT"] = str(wait)
+        env.update(credential_env(tmp, login=True))
+        return bash(_PROBE_FAKE_SERVER.replace("__REPO__", str(REPO)).replace("__FAKE__", fake),
+                    env=env, timeout=90)
+
+    def test_one_that_dies_seconds_in_is_reported_dead_with_its_reason(self):
+        cp = self._probe("#!/bin/sh\nsleep 2\necho 'Error: Remote Control is disabled by your organization'\"'\"'s policy.'\nexit 1")
+        self.assertIn("MARK:refused", cp.stdout, cp.stdout + cp.stderr)
+        err = _section(cp.stdout, "err")
+        self.assertIn("exited at once", err, err)
+        self.assertIn("disabled by your organization", err, err)
+        self.assertIn("verdict=failed", _section(cp.stdout, "status"))
+
+    def test_one_that_connects_is_running(self):
+        cp = self._probe("#!/bin/sh\nsleep 1\necho 'Connected · WebKit · main'\nsleep 20")
+        self.assertIn("MARK:started", cp.stdout, cp.stdout + cp.stderr)
+        self.assertIn("verdict=running", _section(cp.stdout, "status"))
+
+    def test_one_alive_without_a_word_is_not_called_running(self):
+        cp = self._probe("#!/bin/sh\nsleep 20", wait=2)
+        self.assertIn("MARK:refused", cp.stdout, cp.stdout + cp.stderr)
+        err = _section(cp.stdout, "err")
+        self.assertIn("has not reported connected", err, err)
+        # Left running and adopted, so `--stop` can still reach it.
+        self.assertRegex(_section(cp.stdout, "status"), r"pid=\d+")
 
 
 class TestNothingAsksTheStoreDirectly(unittest.TestCase):
@@ -681,7 +838,7 @@ t_spawn() {
 t_agent_secret_verdict() { cat "$VERDICT_FILE"; }
 
 FAKE_CLAUDE="$TMP_HOME/claude"
-printf '#!/bin/sh\nsleep 20\n' > "$FAKE_CLAUDE"
+printf '#!/bin/sh\necho Connected\nsleep 20\n' > "$FAKE_CLAUDE"
 chmod +x "$FAKE_CLAUDE"
 if ( rc_start "$WS" "$FAKE_CLAUDE" ) 2>"$TMP_HOME/err"; then echo "MARK:started"; else echo "MARK:refused"; fi
 echo "MARK:err"; cat "$TMP_HOME/err"

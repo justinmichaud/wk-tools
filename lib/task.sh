@@ -111,13 +111,10 @@ task_alive() { # <dir> -- a `target` pid means nothing to this kernel
     kill -0 "$pid" 2>/dev/null
 }
 
-# <how> decides a `target` pid's liveness: `pid` asks the workspace, which is
-# what a command about to signal it needs; `log` reads the log's age instead, so
-# a read-only report is not held up by a wedged workspace (a `t_exec` into one
-# has no timeout of its own).
-task_verdict() { # <dir> [pid|log] -- starting|running|silent|died|ok|the word task_end took
+# <how> decides how long a `target` pid's workspace is waited on: `pid` for as long as it takes, which is what a command about to signal it needs; `capped` for WK_TASK_ASK_SECONDS, so a read-only report about a wedged workspace says `unanswered` rather than waiting on it (a `t_exec` has no bound of its own).
+task_verdict() { # <dir> [pid|capped] -- starting|running|silent|died|unanswered|ok|the word task_end took
     local dir="$1" how="${2:-pid}" rc age
-    case "$how" in pid|log) ;; *) die "task_verdict: liveness is read from the pid or the log, not '$how'" ;; esac
+    case "$how" in pid|capped) ;; *) die "task_verdict: the pid is asked for as long as it takes or capped, not '$how'" ;; esac
     if [ -f "$dir/exit" ]; then
         rc=$(task_field "$dir" exit)
         case "$rc" in
@@ -130,6 +127,13 @@ task_verdict() { # <dir> [pid|log] -- starting|running|silent|died|ok|the word t
     [ -n "$(task_field "$dir" pid)" ] || { printf 'starting'; return 0; }
     if [ "$how" = pid ] || [ "$(task_field "$dir" where)" != target ]; then
         task_alive "$dir" || { printf 'died'; return 0; }
+    else
+        rc=0; capped "${WK_TASK_ASK_SECONDS:-5}" task_alive "$dir" >/dev/null 2>&1 || rc=$?
+        case "$rc" in
+            0) ;;
+            1) printf 'died'; return 0 ;;   # the workspace answered: no such process
+            *) printf 'unanswered'; return 0 ;;
+        esac
     fi
     age=$(log_age "$(task_field "$dir" log)" 2>/dev/null) || { printf 'running'; return 0; }
     [ -n "$(task_field "$dir" abort_after)" ] || { printf 'running'; return 0; }   # silence is a verdict only against a declared deadline: a session or a tunnel has no output to produce

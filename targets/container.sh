@@ -277,7 +277,7 @@ t_path_kind() {
          else echo absent; fi" 2>/dev/null | tr -d '\r'
 }
 
-# podman's own detached exec: `setsid nohup` (lib/target.sh) does not survive here.
+# podman's own detached exec: a job left behind by `podman exec` (the nohup and disown of lib/target.sh) dies with it.
 t_spawn() {
     local name="$1" log="$2" pidf="$3"; shift 3
     local c u; c=$(_ctr "$name"); u="$WKDEV_CONTAINER_USER"

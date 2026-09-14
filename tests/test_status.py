@@ -338,21 +338,34 @@ first_error() {{ :; }}
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
         return cp.stdout
 
-    def test_a_task_whose_pid_is_in_a_workspace_is_not_asked_through_it(self):
-        """This listing is read-only and must answer *about* a wedged
-        workspace: a `t_exec` into one has no timeout of its own, so the
-        verdict for a `target` record comes from the log's age instead
-        (task_verdict's `log` reading)."""
+    def _target_task(self, name):
         bash('. "%s/lib/common.sh"\n. "%s/lib/task.sh"\n'
-             'd=$(task_begin build target ws3 "wk build ws3 --kill" /nolog compile)\n'
-             'task_pid "$d" 4242\n' % (REPO, REPO), env={"WK_STORE": self.store})
+             'd=$(task_begin build target %s "wk build %s --kill" /nolog compile)\n'
+             'task_pid "$d" 4242\n' % (REPO, REPO, name, name), env={"WK_STORE": self.store})
+
+    def test_a_task_whose_pid_is_in_a_workspace_is_asked_of_it_under_a_cap(self):
+        """This listing is read-only and must answer *about* a wedged
+        workspace: the pid is asked of it (a record alone is no evidence it
+        runs), but for WK_TASK_ASK_SECONDS at most, and one that does not
+        answer in time reads `unanswered`, never `running`."""
+        self._target_task("ws3")
         marker = self.tmp / "t_exec-called"
         out = self._lines_reported(
+            'WK_TASK_ASK_SECONDS=1\n'
             't_exec() { printf x >> "%s"; sleep 30; }\n'
             'ws_target() { printf container; }\n'
             'load_target() { :; }\n' % marker, "ws3")
-        self.assertIn("state=running", out, out)
-        self.assertFalse(marker.exists(), "it asked the workspace it was reporting on")
+        self.assertIn("state=unanswered", out, out)
+        self.assertTrue(marker.exists(), "it never asked the workspace it was reporting on")
+
+    def test_a_workspace_that_answers_decides_running_or_died(self):
+        self._target_task("ws3")
+        for answer, state in (("return 0", "running"), ("return 1", "died")):
+            with self.subTest(answer=answer):
+                out = self._lines_reported(
+                    't_exec() { %s; }\nws_target() { printf container; }\nload_target() { :; }\n' % answer,
+                    "ws3")
+                self.assertIn("state=%s" % state, out, out)
 
     def test_a_task_is_reported_on_the_machine_its_pid_is_on(self):
         """The record names the machine running the job (`t_task_put` rewrites
