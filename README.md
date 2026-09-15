@@ -1210,7 +1210,10 @@ answered just now -- and one block at the end. A workstation holding the very
 credential this machine holds says so rather than repeating its reach, because
 a credential is one credential wherever the fleet keeps it. Anything that needs
 a person ends up under `needs you:`, numbered, the command to type first and
-the page that mints what it wants under it; with nothing to do it says that in
+the page that mints what it wants under it -- and one this machine cannot use
+that another workstation holds a working one of is `wk key setup`, which takes
+it, rather than that page, so a credential is one line to type wherever in the
+fleet the fault is; with nothing to do it says that in
 one line, and a row nobody could judge is named as unestablished rather than as
 work. `wk key set <name>` is the same thing for one of
 them by name --
@@ -1226,10 +1229,12 @@ leaves that credential absent for the next `wk key setup` to ask for. The
 deploy keys are generated here rather than pasted, so they have a verb of their
 own: `wk key deploy`.
 
-**The fleet holds one of each, and which one is decided by evidence.** Three
-things are the fleet's rather than one machine's: each fork's deploy key, the
-GitHub API token and the Bugzilla API key. `wk key setup` *elects* each of them
-rather than pushing this machine's outward. It asks every workstation what it
+**The fleet holds one of each, and which one is decided by evidence.** Every
+credential is the fleet's rather than one machine's -- each fork's deploy key,
+the GitHub API token, the Bugzilla API key, the Claude Code token, the LiteLLM
+key, both tailnet keys and the ntfy topic -- with one exception, the claude.ai
+login, which is made per machine for the reason below. `wk key setup` *elects*
+each of the rest rather than pushing this machine's outward. It asks every workstation what it
 holds and whether its issuer still accepts it, all of them at once and at that
 moment, and the best working answer wins: one GitHub accepts beats one it
 refuses, and a token that reaches exactly the forks beats one that reaches
@@ -1244,8 +1249,8 @@ that works, this machine mints or is asked for one and *that* one is fanned
 out. When nothing could be judged at all -- no network reached the issuer --
 nothing is moved and the run says so: being offline is a state, not a verdict,
 and a credential nobody could judge is never written over another machine's.
-`wk key check` reports what each workstation holds, so the convergence is
-visible rather than asserted.
+`wk key check` reports what each workstation holds of every one of them, so the
+convergence is visible rather than asserted.
 
 **One deploy key per fork, the same on every workstation.** `wk key deploy` is
 that election for the deploy keys alone: it mints a key when the fleet has

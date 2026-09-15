@@ -877,8 +877,9 @@ RULES = collections.OrderedDict((
         spent_by="lib/tailnet.py -- retiring the offline fleet node whose name "
                  "a new card needs",
         needs="list and delete devices on this tailnet",
-        forbids="leave this machine: it is never written to a card",
-        what="the tailnet API access token this machine retires a stale fleet "
+        forbids="be written to a card or reach a workspace: it administers "
+                "the whole tailnet",
+        what="the tailnet API access token a workstation retires a stale fleet "
              "node with",
         url=TAILSCALE_KEYS,
         remedy="Generate access token: the tag:wk devices scope is enough",

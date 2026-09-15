@@ -1,5 +1,5 @@
-"""The fleet holds one deploy key per fork, one GitHub API token and one
-Bugzilla API key, and a shared build machine holds none of them at all.
+"""The fleet holds one deploy key per fork and one of every credential but the
+claude.ai login, and a shared build machine holds none of them at all.
 
 Which one it holds is elected rather than pushed: `wk key setup` asks every
 workstation what it holds and whether its issuer still accepts it, at that
@@ -303,6 +303,9 @@ class _Fleet(_Shared):
                     "WK_BUGZILLA_API": "http://127.0.0.1:1",
                     "WK_ANTHROPIC_API": "http://127.0.0.1:1",
                     "WK_TAILNET_API": "http://127.0.0.1:1",
+                    "WK_LITELLM_API": "http://127.0.0.1:1",
+                    "WK_TS_AUTHKEY": str(self.tmp / "tailscale-authkey"),
+                    "WK_TS_API_SECRET": str(self.tmp / "tailscale-api-key"),
                     "HOME": str(self.tmp / "home")})
         (self.tmp / "home").mkdir(exist_ok=True)
         return env
@@ -382,6 +385,71 @@ class TestSetupPutsOneWorkingCredentialOnEveryWorkstation(_Fleet):
         self.assertIn("bugzilla-api-key: no workstation's could be judged", out)
         self.assertIn("key set github-pat --paste", self.calls(),
                       "one credential nobody could judge stopped the rest")
+
+
+class TestEveryCredentialIsTheFleets(_Fleet):
+    """One of each on every workstation, not only the deploy keys and the two
+    API tokens: a working LiteLLM key, Claude token, tailnet key or ntfy topic
+    on any workstation is the one the fleet ends up holding. The claude.ai login
+    is the single exception -- made per machine, never given and never pasted
+    over -- because a copy is a second holder of one refresh token."""
+
+    ELECTED = ("github-pat", "bugzilla-api-key", "claude", "litellm",
+               "tailnet", "tailnet-api", "ntfy")
+
+    def test_each_one_is_put_to_the_election(self):
+        """Every workstation is asked what it holds of each of them; nothing is
+        left to be this machine's own but the login."""
+        self.key("ensure")
+        self.registered()
+        env = self.fleet_env(verdict="absent\tnothing stored\n",
+                             login="ok\tscopes: user:inference user:profile\n")
+        cp = self.setup(env=env)
+        asked = [l.split(" ", 2)[2] for l in self.calls()
+                 if l.startswith("key verdict ")]
+        for name in self.ELECTED:
+            with self.subTest(name=name):
+                self.assertIn(name, asked, cp.stdout + cp.stderr)
+
+    def test_a_peers_working_litellm_key_is_taken_when_this_machine_holds_none(self):
+        """The shape a machine with no LiteLLM key was left in: the fleet holds
+        one that works, so it is taken here rather than asked for."""
+        self.key("ensure")
+        self.registered()
+        env = self.fleet_env(
+            verdict="ok\tai.igalia.com accepts it\n    fingerprint: aaaaaaaaaaaa\n",
+            give="sk-notarealvirtualkey\n",
+            login="ok\tscopes: user:inference user:profile\n")
+        cp = self.setup(env=env)
+        out = cp.stdout + cp.stderr
+        self.assertIn("key give litellm", self.calls(), out)
+        self.assertEqual("sk-notarealvirtualkey",
+                         (self.secrets / "litellm-key").read_text().strip(),
+                         "the working key was not taken: " + out)
+
+    def test_one_this_machine_holds_goes_to_a_peer_holding_none(self):
+        """The other direction, with a credential the rule can judge without a
+        network: the peer has none, so this machine's is put there."""
+        self.key("ensure")
+        self.registered()
+        env = self.fleet_env(verdict="absent\tnothing stored\n",
+                             login="ok\tscopes: user:inference user:profile\n")
+        (self.tmp / "tailscale-authkey").write_text("tskey-auth-k1-abc\n")
+        cp = self.setup(env=env)
+        self.assertIn("key set tailnet --paste", self.calls(),
+                      cp.stdout + cp.stderr)
+
+    def test_the_login_is_never_elected_given_or_pasted(self):
+        self.key("ensure")
+        self.registered()
+        env = self.fleet_env(
+            verdict="ok\tit reaches exactly the forks\n    fingerprint: aaaaaaaaaaaa\n",
+            give=GOOD_PAT + "\n",
+            login="ok\tscopes: user:inference user:profile\n")
+        cp = self.setup(env=env)
+        calls = self.calls()
+        self.assertNotIn("key give claude-login", calls, cp.stdout + cp.stderr)
+        self.assertNotIn("key set claude-login --paste", calls)
 
 
 class TestTheBestWorkingOneWins(_Fleet):
@@ -488,8 +556,8 @@ class TestNothingMovesUntilTheQuestionIsAnswered(_Fleet):
 
 class TestCheckAsksEachWorkstationWhatItHolds(_Fleet):
     """`wk key check` -- what `setup` ends with -- asks every peer workstation
-    what it holds of the ones the fleet shares and whether it has a claude.ai
-    login of its own, and names the one still without."""
+    what it holds of each credential and whether it has a claude.ai login of
+    its own, and names the one still without."""
 
     def check(self, **files):
         self.key("ensure")
@@ -508,12 +576,15 @@ class TestCheckAsksEachWorkstationWhatItHolds(_Fleet):
         self.assertNotIn("buildbox", out.split("the other workstations")[1])
         self.assertNotEqual(0, cp.returncode)
 
-    def test_what_a_peer_holds_of_the_shared_ones_is_a_row_each(self):
+    def test_what_a_peer_holds_of_each_credential_is_a_row(self):
         cp = self.check(login="ok\tscopes: user:inference user:profile\n",
                         verdict="ok\tit reaches exactly the forks\n")
         out = cp.stdout + cp.stderr
-        self.assertRegex(out, r"peerbox github-pat\s+it reaches exactly the forks")
-        self.assertRegex(out, r"peerbox bugzilla-api-key\s+it reaches exactly the forks")
+        for name in ("github-pat", "bugzilla-api-key", "claude", "litellm",
+                     "tailnet", "tailnet-api", "ntfy"):
+            with self.subTest(name=name):
+                self.assertRegex(out, r"peerbox %s\s+it reaches exactly the forks"
+                                 % name)
 
     def test_a_peer_holding_none_of_the_fleets_is_a_fault_with_one_remedy(self):
         cp = self.check(login="ok\tscopes: user:inference user:profile\n",
@@ -546,14 +617,73 @@ class TestCheckAsksEachWorkstationWhatItHolds(_Fleet):
 
     def test_a_peer_holding_a_different_one_reports_it_whole(self):
         """The other side of that branch: a peer whose credential is not this
-        machine's is the whole verdict plus the election that settles it."""
+        machine's is the whole verdict, and the election that settles it is
+        named once, against the credential."""
         cp = self.check(login="ok\tscopes: user:inference user:profile\n",
                         verdict="ok\tit reaches exactly the forks\n"
                                 "    fingerprint: not-the-one-here\n")
         out = cp.stdout + cp.stderr
         self.assertRegex(out, r"peerbox github-pat\s+it reaches exactly the forks")
         self.assertRegex(out.split("needs you:")[1],
-                         r"peerbox github-pat\s+wk key setup")
+                         r"github-pat\s+wk key setup\s+\(peerbox holds one")
+
+
+class TestTheFleetSettlesWhatThisMachineCannotUse(_Fleet):
+    """A credential this machine has none of, or one its issuer refuses, is not
+    a trip to the issuer for a fresh one when another workstation holds one that
+    works: the remedy `wk key check` names is the one command that takes it.
+    A peer holding the very credential this machine holds settles nothing --
+    both are the same bytes -- so that row keeps the issuer's remedy."""
+
+    def check(self, pat=None, **files):
+        self.key("ensure")
+        if pat:
+            (self.held / "github-pat").write_text(pat + "\n")
+        env = self.fleet_env(**files)
+        return self.key("check", stubs={"ssh": FLEET_SSH, "gh": GH_RECORDER,
+                                        "security": SECURITY_HAS_NOTHING}, env=env)
+
+    def peer_holds_a_working_one(self, fingerprint="not-the-one-here"):
+        return dict(login="ok\tscopes: user:inference user:profile\n",
+                    verdict="ok\tit reaches exactly the forks\n"
+                            "    fingerprint: %s\n" % fingerprint)
+
+    def test_one_this_machine_has_none_of_is_taken_rather_than_asked_for(self):
+        cp = self.check(**self.peer_holds_a_working_one())
+        needs = (cp.stdout + cp.stderr).split("needs you:")[1]
+        self.assertRegex(needs, r"github-pat\s+wk key setup\s+\(peerbox holds one "
+                                r"its issuer accepts\)")
+
+    def test_one_the_issuer_refuses_here_is_settled_by_the_fleet(self):
+        cp = self.check(pat=OTHER_PAT, **self.peer_holds_a_working_one())
+        out = cp.stdout + cp.stderr
+        needs = out.split("needs you:")[1]
+        self.assertRegex(needs, r"github-pat\s+wk key setup\s+\(peerbox holds one "
+                                r"its issuer accepts\)")
+        self.assertNotRegex(needs, r"\n\s+\d+\. github-pat\s+wk key set github-pat")
+
+    def test_one_credential_is_one_line_to_type(self):
+        """This machine's row and the peer's are one fault, and one command
+        settles every workstation, so it is named once."""
+        cp = self.check(**self.peer_holds_a_working_one())
+        needs = (cp.stdout + cp.stderr).split("needs you:")[1]
+        self.assertEqual(1, len([l for l in needs.splitlines() if "litellm" in l]),
+                         needs)
+
+    def test_a_peer_holding_the_same_one_sends_you_to_the_issuer(self):
+        """Two machines, one credential: taking it changes nothing, so the row
+        keeps the remedy that mints a working one."""
+        self.base_env()
+        self.held.mkdir(parents=True, exist_ok=True)
+        (self.held / "github-pat").write_text(OTHER_PAT + "\n")
+        fp = subprocess.run(
+            ["python3", str(REPO / "lib" / "secretfile.py"), "fingerprint",
+             str(self.held / "github-pat")],
+            capture_output=True, text=True, check=True).stdout.strip()
+        cp = self.check(pat=OTHER_PAT, **self.peer_holds_a_working_one(fp))
+        needs = (cp.stdout + cp.stderr).split("needs you:")[1]
+        self.assertRegex(needs, r"github-pat\s+wk key set github-pat")
+        self.assertNotRegex(needs, r"github-pat\s+wk key setup")
 
 
 class TestGiveIsTheOtherHalfOfAdopt(_Shared):
