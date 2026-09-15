@@ -6,7 +6,7 @@ base with no marker, which the next run deletes as rubble (_ensure_base), so
 what is knowable up front is checked up front and the marker records what
 the base actually got.
 
-The password is not one of those steps: macOS Tahoe 26.5 refuses the
+The password is not one of those steps: macOS Tahoe 26.4 refuses the
 only change form the account itself can run, so the guest keeps the password
 its image ships and every command that hands a guest over states it.
 
@@ -416,7 +416,7 @@ class TestADirtyTreeIsRefusedBeforeTheBaseIsDestroyed(WkTest):
 
 
 class TestTheGuestKeepsTheImagesPassword(WkTest):
-    """Measured on macOS Tahoe 26.5: the only form the account itself can run,
+    """Measured on macOS Tahoe 26.4: the only form the account itself can run,
     `sysadminctl -oldPassword`, exits 0 having changed nothing. So the password
     is not changed at all, and one variable names it."""
 

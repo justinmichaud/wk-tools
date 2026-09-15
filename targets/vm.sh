@@ -4,7 +4,8 @@
 . "$WK_ROOT/bench/mac-quiet-desktop.sh"
 . "$WK_ROOT/bench/mac-pyobjc.sh"
 
-WK_VM_IMAGE="${WK_VM_IMAGE:-ghcr.io/cirruslabs/macos-tahoe-xcode:26.5}"
+# macOS 26.6.2 with Xcode 27 beta 6 -- ghcr.io/cirruslabs/macos-tahoe-xcode:27-beta-6 as it stood on 2026-09-15. A Cirrus Labs `-xcode` tag is the *Xcode* version, not the macOS one, and the first Saturday of every month re-pushes those tags onto whatever macOS base is newest, so only a digest names one image; the base staleness record hashes this string.
+WK_VM_IMAGE="${WK_VM_IMAGE:-ghcr.io/cirruslabs/macos-tahoe-xcode@sha256:f441eb487a18b4588c096adcff5eb48fddca550909e01c472580872b48c166b0}"
 WK_VM_BASE="${WK_VM_BASE:-wk-base}"
 WK_VM_MAX="${WK_VM_MAX:-2}"
 WK_VM_USER="${WK_VM_USER:-admin}"

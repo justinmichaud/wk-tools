@@ -254,15 +254,20 @@ machine this lane runs on.
      `~/Library/Developer/Xcode/DerivedData` from builds that predate the
      explicit placement; dead weight every clone inherits. Delete it during
      the next base refresh (anything wanted is regenerated).
-   - **B9 — parked by decision, 2026-08-18.** The guest runs macOS 26.4
-     while the build targets the 26.5 SDK. The only symptom is `open -a`
-     being refused (-10825), and nothing in `wk` uses `open -a`. Upgrades
-     are by rebuild only (`WK_VM_IMAGE` + a base rebuild); blocked upstream
-     on a suitable image (re-checked 2026-08-18). One command re-checks the
-     available tags, no tart pull required:
+   - **B9** — the golden base still holds macOS 26.4 with Xcode 26.5;
+     `WK_VM_IMAGE` names macOS 26.6.2 with Xcode 27 beta 6. `wk vm base
+     --rebuild` (hours, a 140 GB pull), then `sw_vers -productVersion` in a
+     guest reads 26.6.2.
+   - **B10** — re-pin `WK_VM_IMAGE` to an Xcode 27 GA image once Cirrus Labs
+     publishes one: Xcode 27.0 GM is out, `macos-tahoe-xcode` carries only
+     betas of it, and `macos-golden-gate-*` (macOS 27) has no Xcode variant.
+     A `-xcode` tag is the Xcode version, so the macOS inside is read from
+     which `macos-tahoe-vanilla:<ver>` the tag's layer digests overlap. Both
+     listings, no tart pull required:
 
          T=$(curl -s "https://ghcr.io/token?scope=repository:cirruslabs/macos-tahoe-xcode:pull&service=ghcr.io" | python3 -c 'import sys,json;print(json.load(sys.stdin)["token"])')
          curl -s -H "Authorization: Bearer $T" https://ghcr.io/v2/cirruslabs/macos-tahoe-xcode/tags/list
+         curl -s https://api.github.com/repos/cirruslabs/macos-image-templates/releases
 3. **Cross-compile / remote-target verification on macOS** — the remote-target
    half is done (driven from this machine, 2026-08-19). Left: the Tart-guest
    case (ssh across the Softnet boundary), the cross-compile transfer once

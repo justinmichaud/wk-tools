@@ -1,52 +1,9 @@
-Everything is answered inline.
+Bash completions should work for subcommands: ex, wk key check (check should be completed)
 
-Still open (each needs a hand or a commit first):
+Verbs should not be able to be mixed with subcommands. Audit all commands to ensure they are not mixed or confused.
 
-- Claude remote control inside a container: run once, in a terminal with a
-  browser, `wk key set claude-login --replace` (the container login is a
-  session of its own; a copy of this machine's credential dies at the first
-  refresh). Then measure: wk new probe; wk ai claude probe --rc; wk status
-  (an `rc` task with its kill line). Seen once on a cold container before the
-  login fix: "Remote Control is disabled by your organization's policy" with
-  growthBookFeaturesLoaded=0; re-measure after the login.
+All commands that make irrevrsable changes should prompt.
 
-- moose: a peer takes tooling only from origin/main. After commit + push:
-  wk sync --target moose; ssh moose wk new probe; wk status probe (the `new`
-  plan, then HEAD main tracking origin/main); ssh moose 'cd
-  ~/.local/share/wk/ws/probe/changes && time git fetch origin'. moose's
-  three snapshots predate the branch record; the first `wk sync` there
-  republishes.
+Text that explains things to the user should be conscise. We should never embedd facts in text (ex: "one key located on moose" must be derived and must change, you can't put that in text because it makes the user think you actually checked something)
 
-- tart guests: measured on `mya` with this tree from the host side: `wk
-  remotes mya --fix` rewires (git fetch origin 7.2 s -> 0.56 s), `wk verify`
-  runs for a guest, and the guests' read token converges at `wk start`; the
-  guest's own wk-tools clone and rc files take the commit like moose does.
-  After commit: wk start mya; wk verify mya (no 401); wk push status; wk push
-  off (both agents empty).
-
-- GitHub PAT: `wk key check` measures the token's reach and refuses this
-  machine's (48 repositories). Reissue with "Only select repositories" =
-  justinmichaud/WebKit + justinmichaud/WPEWebKit, then
-  wk key set github-pat --replace.
-
-- rpi5: `./setup` on the board now runs host/linux/rpi5/rpi5-setup.sh (the
-  tailscale0 NetworkManager drop-in and the regulatory-domain unit are in
-  it); pull the board's wk-tools clone after the commit and run ./setup there.
-  The alt+arrow bindings ride the same pull.
-
-Noticed, not fixed:
-
-- `git-webkit setup` at container first start got one 401 43 s after the
-  bridge came up and succeeded when re-run; `wk verify` reports the marker
-  and `wk remotes <ws> --fix` converges it. The one 401 is unmeasured.
-- The broker's request record is still its own shape (a Python daemon on the
-  host cannot write into the podman VM's store); owed in docs/HANDOFF-status.md.
-
-- ==> pre-building 'mac-release' in the base with -j6
-  This is the slow one and it happens once. Every workspace cloned
-  from this base inherits the build tree and the compilation cache.
-
-  This makes no sense, the cache will be stale very quicly. don't do this.
-
-  Removed. The base carries Xcode and a checkout, never a build tree;
-  the marker no longer records a prebuild and WK_VM_BASE_PREBUILD is gone.
+Commands should be clear and concise, consistent with each other, and you should step through the full process of using the command as a new user to ensure it is always clear what to do next. Each command should give enough outupt that if something goes wrong, it can be debugged (for example, the explain mode should print every command it would have executed), instead of needing sketchy debugging commands. This is part of a bigger principle, which is that everything should be constructed by layered levels of abstraction that are never leaky, not by bespoke hacks. Nothing should reach across a logical layer of abstraction.

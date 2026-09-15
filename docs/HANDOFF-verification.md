@@ -49,8 +49,8 @@ lands; the file goes with its last line.
 - the paravirtual GPU is feature-capped: families apple1-5 only, **no metal3, no raytracing**. Fine to interact with, NOT a basis for judging WebGPU or rendering performance against bare metal
 - the base VM provisions with unfiltered egress -- Softnet's flags are passed in `t_start` only, so the base boots on plain vmnet (192.168.64.x) and `curl https://pypi.org` answers 200; the egress block it writes names the Softnet gateway and is for the clones. One-shot and host-driven with no agent in it, so the sandbox audit records it as a decision rather than finding it
 - the tart window resizes and goes fullscreen -- broken today
-- a guest on the host's own macOS: the guest is 26.4 against a 26.6.1 host because no suitable image exists upstream (re-checked 2026-08-18), and the only symptom is `open -a`. docs/HANDOFF.md lane B step 2 (item B9) carries the one-command tag check
-- `open -a` inside the guest -- broken today, LaunchServices -10825: the app targets the 26.5 SDK and the guest is 26.4, so a launch goes through a direct bundle exec
+- a guest on the host's own macOS: `WK_VM_IMAGE` names macOS 26.6.2, the base still holds 26.4 -- docs/HANDOFF.md lane B step 2 (item B9) owes the rebuild, item B10 the Xcode 27 GA re-pin
+- `open -a` inside the guest -- broken today, LaunchServices -10825; cmd/gui carries the cause and the one change upstream that retires the direct bundle exec
 - the ~100 `llvmcas:/... does not exist` warnings lldb prints resolving Swift-interop types: the explicit Swift `.pcm`s record inputs as CAS ids `llvm-cas --print-kind` calls "unknown object", including in a CAS built minutes earlier with the same id byte for byte, so the objects were never in the compilation cache. `symbols.cas-path` is measured and has no effect. Root-cause it
 - a mac build reaches ImageDiff, not just `BUILD SUCCEEDED`: every pixel and reftest comparison needs `WebKitBuild/Release/ImageDiff`, and build-webkit's second xcodebuild invocation (`build-imagediff`, which has no `-scheme`) is the one that produces it
 - a build in a **fresh clone off a warm base** completes in well under 45 min

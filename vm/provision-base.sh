@@ -37,7 +37,7 @@ fi
 sudo pmset -a disablesleep 1 >/dev/null 2>&1 || true
 sudo systemsetup -setcomputersleep Never >/dev/null 2>&1 || true
 
-# The guest keeps the image's admin password: `sysadminctl -oldPassword`, the only form the account itself can run, exits 0 having changed nothing on macOS Tahoe 26.5.
+# The guest keeps the image's admin password: `sysadminctl -oldPassword`, the only form the account itself can run, exits 0 having changed nothing on macOS Tahoe 26.4.
 WK_VM_USER="${WK_VM_USER:-admin}"
 WK_VM_PASSWORD="${WK_VM_PASSWORD:-admin}"
 
