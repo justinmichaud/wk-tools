@@ -46,6 +46,7 @@ WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 . "$WK_ROOT/lib/reach.sh"
 . "$WK_ROOT/lib/resources.sh"
 . "$WK_ROOT/lib/par.sh"
+. "$WK_ROOT/host/units.sh"
 wk_atexit par_cleanup
 
 worst=0
@@ -450,18 +451,27 @@ report_health() {
         rec_emit
     fi
 
-    if have systemctl && systemctl --user cat wk-proxy.service >/dev/null 2>&1; then
+    # What each service costs when it is not there, and `unit_stale`: a tools sync replaces the program under a running service, which keeps the code it started with -- an allowlist or an injected credential added here reaches nothing until it is restarted.
+    while IFS='|' read -r _u _label _cost; do
+        [ -n "$_u" ] || continue
+        have systemctl && systemctl --user cat "$_u" >/dev/null 2>&1 || continue
         rec_start service
         rec_set machine "$m"
-        rec_set name    "egress proxy"
-        if systemctl --user is-active --quiet wk-proxy.service; then
-            rec_set state running
-        else
+        rec_set name    "$_label"
+        if ! systemctl --user is-active --quiet "$_u"; then
             rec_set state stopped
-            rec_set fix   "systemctl --user start wk-proxy   (workspaces have no network without it)"
+            rec_set fix   "systemctl --user start ${_u%.service}   ($_cost)"
+        elif unit_stale "$_u"; then
+            rec_set state "running code older than this checkout"
+            rec_set fix   "./setup   (restarts it on the program that is in the tree now)"
+        else
+            rec_set state running
         fi
         rec_emit
-    fi
+    done <<EOF
+wk-proxy.service|egress proxy|workspaces have no network without it
+wk-github-inject.service|credential injector|'git-webkit pr' and 'gh' in a workspace get no credential
+EOF
 
     for f in "$(wk_lock_dir)"/*.lock; do
         [ -e "$f" ] || continue

@@ -17,6 +17,16 @@ unit_program() { # <unit name>
     }' "$WK_ROOT/host/units/$1"
 }
 
+# A service goes on running the program it exec'd: a tools sync moves the file under it, and until it is restarted the machine is running code nobody can read in the tree. /proc/<pid> is stamped with when the process started, so this compares two facts and stores neither.
+unit_stale() { # <unit name> -- 0 when this tree's program is newer than the running service
+    local name="$1" prog pid
+    prog=$(unit_program "$name")
+    [ -n "$prog" ] || return 1
+    pid=$(systemctl --user show -p MainPID --value "$name" 2>/dev/null) || return 1
+    { [ -n "$pid" ] && [ "$pid" != 0 ] && [ -d "/proc/$pid" ]; } || return 1
+    [ "$WK_ROOT/$prog" -nt "/proc/$pid" ]
+}
+
 unit_install() { # <unit name> <tools root> <store> <run...>
     local name="$1" root="$2" store="$3"; shift 3
     local dir='~/.config/systemd/user' tmp

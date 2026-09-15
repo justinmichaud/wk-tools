@@ -104,6 +104,14 @@ task_alive() { # <dir> -- a `target` pid means nothing to this kernel
     kill -0 "$pid" 2>/dev/null
 }
 
+# The verdicts a task is still going under: no exit recorded and a pid that is there, or one its workspace would not answer for. `wk stop --tasks` acts on these and nothing else -- a `died`, `failed` or `oom` record is over, and its kind's kill command has nothing left to stop.
+task_running() { # <verdict>
+    case " starting running silent unanswered " in
+        *" $1 "*) return 0 ;;
+    esac
+    return 1
+}
+
 # <how> decides how long a `target` pid's workspace is waited on: `pid` for as long as it takes, which is what a command about to signal it needs; `capped` for WK_TASK_ASK_SECONDS, so a read-only report about a wedged workspace says `unanswered` rather than waiting on it (a `t_exec` has no bound of its own).
 task_verdict() { # <dir> [pid|capped] -- starting|running|silent|died|unanswered|ok|the word task_end took
     local dir="$1" how="${2:-pid}" rc age

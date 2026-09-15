@@ -169,7 +169,10 @@ a cap of `WK_TASK_ASK_SECONDS` (default 5) so a wedged workspace reads
 `unanswered` rather than being waited on, and by the commands that act on it
 (`--kill`) for as long as it takes. The pid such a job announces is the
 workspace's own claim, so nothing signals it while its command line in there is
-not the job the record names.
+not the job the record names. `wk stop --tasks` ends every one of them at once
+-- through each record's own kill command, never a signal of its own -- and
+reads the tasks again afterwards rather than believing the exit statuses.
+`--all` asks every other machine too, each through its own wk.
 
 ## Setup
 
@@ -243,6 +246,7 @@ wk run   bug-238 -- -e 'print(1+1)'
 wk run   bug-238 --until-crash --max 50 -- crash.js   # repeat until it fails; keeps the log and core
 wk test  bug-238
 wk logs  bug-238 --follow               # the build log, noise stripped
+wk stop --tasks                         # stop everything still running here, each by its own kill line
 wk enter bug-238 -- ls                  # a shell, or one command, in it -- any target
 wk stop  bug-238                        # park it: environment stopped, everything kept
 wk start bug-238
@@ -506,7 +510,9 @@ egress proxy and the GitHub injector as systemd units, the shared skills
 directory, the machine's packages -- is *installed*, by
 `./setup --stage vmtools`, so an edited `container/proxy/wk-proxy.py` or
 `container/proxy/github-inject.py` is live in the VM only after that stage
-runs.
+runs. Until it does, the service is running the program it exec'd and the
+edit reaches nothing, so `wk status` says so of each one -- the file's mtime
+against `/proc/<pid>`, on every machine that carries them.
 
 ```sh
 wk sync                                 # this machine: tooling, mirror, snapshot, then every workspace here -- containers and guests

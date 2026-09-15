@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 #
 # wk stop [<workspace>] [--keep-vm] -- shut down one workspace, or everything
-# wk: where=workspace name=optional forward=no group=hosts needs podman opts --keep-vm
+# wk: where=workspace name=optional forward=no group=hosts needs podman opts --keep-vm,--tasks,--all destructive --tasks dryrun --tasks
 # wk: flag --keep-vm name=none
+# wk: flag --tasks name=none
+# wk: flag --all name=none
 #
 # A named workspace: stops only its container or macOS guest; nothing on disk
 # is touched.
@@ -13,6 +15,14 @@
 #   wk stop                  macOS VMs, containers, then the machine
 #   wk stop --keep-vm        macOS VMs and containers, leave the machine running
 #   wk stop <workspace>      only that workspace's environment
+#   wk stop --tasks          every task still running here -- a build, a
+#                            creation, an agent session -- through the kill
+#                            command each one recorded. Workspaces stay up
+#   wk stop --tasks --all    every machine's too, each through its own wk
+#
+#   0  nothing was left running
+#   1  a task was still there after its kill command ran
+#   3  a machine did not answer, so what runs there is unknown
 
 set -euo pipefail
 WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -27,12 +37,94 @@ WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 WK_MACHINE="${WK_MACHINE:-wk}"
 
 NAME="${WK_NAME:-}"
-KEEP_VM=""
-for _a in "$@"; do
-    case "$_a" in
-        --keep-vm) KEEP_VM=1 ;;
+KEEP_VM="" TASKS="" EVERYWHERE=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --keep-vm)  KEEP_VM=1; shift ;;
+        --tasks)    TASKS=1; shift ;;
+        --all)      EVERYWHERE=1; shift ;;
+        *)          shift ;;
     esac
 done
+
+# A task's record names the command that stops it, and that command is its kind's own: nothing here knows how to end a build, a creation or an agent session.
+tasks_running() {   # <dir>\t<kind> <name>\t<kill> for each task still going
+    local d st
+    while IFS= read -r d; do
+        [ -n "$d" ] || continue
+        st=$(task_verdict "$d" capped)
+        task_running "$st" || continue
+        printf '%s\t%s %s\t%s\n' "$d" "$(task_field "$d" kind)" \
+               "$(task_field "$d" name)" "$(task_field "$d" kill)"
+    done <<EOF
+$(task_list)
+EOF
+}
+
+stop_tasks_here() {
+    local rows left d what kill n
+    rows=$(tasks_running)
+    if [ -z "$rows" ]; then
+        info "no task is running on $(wk_machine_name)"
+        return 0
+    fi
+    n=$(printf '%s\n' "$rows" | grep -c .) || n=0
+    while IFS="$(printf '\t')" read -r d what kill; do
+        [ -n "$d" ] || continue
+        log "  $what -- $kill"
+    done <<EOF
+$rows
+EOF
+    confirm "stop $n task(s) on $(wk_machine_name)? What they have not finished is dropped" \
+        || die "nothing stopped"
+
+    # Answered once, here: a kill command of its own would ask again with no terminal to ask in.
+    WK_YES=1; export WK_YES
+    while IFS="$(printf '\t')" read -r d what kill; do
+        [ -n "$d" ] || continue
+        act env PATH="$WK_ROOT/bin:$PATH" sh -c "$kill" || warn "'$kill' exited non-zero"
+    done <<EOF
+$rows
+EOF
+    [ -z "${WK_DRY_RUN:-}" ] || return 0   # nothing was stopped, so nothing is read back
+
+    # Asked again rather than believed: a kill command that exited 0 is not evidence the task ended.
+    left=$(tasks_running)
+    if [ -n "$left" ]; then
+        warn "still running on $(wk_machine_name):"
+        printf '%s\n' "$left" | cut -f2 | sed 's/^/    /' >&2
+        return 1
+    fi
+    changed "no task is running on $(wk_machine_name)"
+}
+
+if [ -n "$TASKS" ]; then
+    [ -z "$KEEP_VM" ] || die "'--keep-vm' is about the podman machine, which 'wk stop --tasks' leaves alone"
+
+    rc=0
+    if [ -z "$EVERYWHERE" ]; then
+        stop_tasks_here || rc=$?
+        exit "$rc"
+    fi
+
+    _tasks_one() {   # <machine>
+        local t="$1" rc=0 out
+        load_target "$t"
+        # A machine that cannot be asked may be running something, so it is 3 and not 0.
+        machine_answers "$t" || return 3
+        out=$(t_wk stop --tasks 2>&1) || rc=$?
+        printf '%s\n' "$out" | sed "s/^/$(printf '%-22s' "$t")/"
+        return "$rc"
+    }
+
+    confirm "stop every task on this machine and every other one? What they have not finished is dropped" \
+        || die "nothing stopped"
+    WK_YES=1; export WK_YES
+    stop_tasks_here || rc=$?
+    fan=0; for_each_machine _tasks_one || fan=$?
+    [ "$fan" -le "$rc" ] || rc="$fan"
+    exit "$rc"
+fi
 
 if [ -n "$NAME" ]; then
     [ -z "$KEEP_VM" ] || die "'wk stop $NAME' takes no options -- --keep-vm only applies to a bare 'wk stop'"

@@ -17,6 +17,10 @@ instead of answering `is-active` yes at t=0.
 Run: python3 -m unittest tests.test_host_units -v
 """
 import os
+import shlex
+import shutil
+import subprocess
+import time
 import unittest
 from pathlib import Path
 
@@ -423,6 +427,78 @@ class TestTheStartVerdictComesFromSystemd(WkTest):
         cp, out = self._start(active=False)
         self.assertIn("started wk-ssh-agent.service", out)
         self.assertEqual([], list(self.store.iterdir()))
+
+
+def _has_user_systemd():
+    if not shutil.which("systemd-run"):
+        return False
+    return subprocess.run(["systemctl", "--user", "is-system-running"],
+                          capture_output=True).returncode in (0, 1)
+
+
+@unittest.skipUnless(_has_user_systemd(), "no systemd --user bus here")
+class TestAServiceRunningOlderCodeThanTheTree(WkTest):
+    """`wk status` reports it, because a tools sync replaces a program under a
+    long-lived service and systemd goes on running what it exec'd: the egress
+    allowlist and the credential injector both live in files a sync moves, and
+    a host added to either reaches nothing until the service is restarted.
+
+    Driven against a real transient unit, whose program is a file this test
+    owns: the fact is the program file's mtime against /proc/<pid>, which is
+    stamped with when the process started.
+    """
+
+    UNIT = "wk-test-unit-stale.service"
+
+    def setUp(self):
+        super().setUp()
+        self.root = self.tmp / "tree"
+        (self.root / "host" / "units").mkdir(parents=True)
+        self.prog = self.root / "sleeper.sh"
+        self.prog.write_text("#!/bin/bash\nexec sleep 300\n")
+        self.prog.chmod(0o755)
+        (self.root / "host" / "units" / self.UNIT).write_text(
+            "[Service]\nExecStart=@WK_ROOT@/sleeper.sh\n")
+        subprocess.run(["systemctl", "--user", "reset-failed", self.UNIT],
+                       capture_output=True)
+        cp = subprocess.run(["systemd-run", "--user", "--unit", self.UNIT,
+                             str(self.prog)], capture_output=True, text=True)
+        self.assertEqual(0, cp.returncode, cp.stdout + cp.stderr)
+        self.addCleanup(subprocess.run, ["systemctl", "--user", "stop", self.UNIT],
+                        capture_output=True)
+
+    def stale(self):
+        cp = bash('. "$WK_ROOT/host/units.sh"\n'
+                  'WK_ROOT=%s unit_stale %s && echo stale || echo current'
+                  % (shlex.quote(str(self.root)), self.UNIT))
+        self.assertEqual(0, cp.returncode, cp.stdout + cp.stderr)
+        return cp.stdout.strip().splitlines()[-1]
+
+    def test_the_program_it_started_with_reads_current(self):
+        self.assertEqual("current", self.stale())
+
+    def test_a_program_written_since_it_started_reads_stale(self):
+        time.sleep(1.1)   # one second of mtime resolution on the coarsest filesystem
+        self.prog.write_text("#!/bin/bash\nexec sleep 301\n")
+        self.assertEqual("stale", self.stale())
+
+    def test_a_service_that_is_not_running_is_not_called_stale(self):
+        """Stopped is its own verdict in the report, with its own remedy."""
+        subprocess.run(["systemctl", "--user", "stop", self.UNIT], capture_output=True)
+        self.prog.write_text("#!/bin/bash\nexec sleep 301\n")
+        self.assertEqual("current", self.stale())
+
+
+class TestTheReportNamesBothServices(WkTest):
+    """The injector is reported beside the proxy: a workspace with neither has
+    no network and no credential, and both are units this tree's code runs."""
+
+    def test_status_reports_each_one_and_asks_whether_it_is_stale(self):
+        text = (REPO / "cmd" / "status").read_text()
+        for unit in ("wk-proxy.service", "wk-github-inject.service"):
+            with self.subTest(unit=unit):
+                self.assertIn(unit, text)
+        self.assertIn("unit_stale", text)
 
 
 if __name__ == "__main__":
