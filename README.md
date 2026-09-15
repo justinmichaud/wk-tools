@@ -1453,7 +1453,10 @@ exits on, before it reads `GITHUB_COM_TOKEN`. Both targets therefore set
 `~/.wk-egress`): a lookup answers "nothing stored", the GitHub and Bugzilla
 credentials come from the environment, and anything else is asked for at the
 prompt and kept only in that process. With both in the environment,
-`git-webkit pr` asks for nothing.
+`git-webkit pr` asks for nothing. An editor's terminal is the one way into a
+container that inherits none of it -- sshd builds a session's environment from
+scratch -- so the wrapper publishes what it set and the sshd it starts hands a
+session exactly that (`SetEnv`).
 
 The per-fork alias blocks are in `/secrets/ssh_config`, which every container
 `Include`s and `wk push on|off` regenerates -- so a rotated key, an added fork

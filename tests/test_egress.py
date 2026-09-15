@@ -1106,6 +1106,59 @@ class TestTheTwoTokens(WkTest):
                       logged)
 
 
+def run_bridge(ca, *print_vars, bugzilla_user=None, github_user=None,
+               env_extra=None):
+    """(what the wrapped command printed, the bundle's path, its bytes).
+    `bugzilla_user=`/`github_user=` are what `wk push` published under
+    /secrets, and `env_extra=` what the container was created with."""
+    d = Path(tempfile.mkdtemp(prefix="wk-test-gh-env-"))
+    try:
+        secrets = d / "secrets"
+        secrets.mkdir()
+        if bugzilla_user is not None:
+            (secrets / "bugzilla-user").write_text(bugzilla_user + "\n")
+        if github_user is not None:
+            (secrets / "github-user").write_text(github_user + "\n")
+        tools = d / "wk-tools"
+        (tools / "shell").mkdir(parents=True)
+        (tools / "container" / "proxy").mkdir(parents=True)
+        (tools / "shell" / "path.sh").write_text(":\n")
+        (tools / "container" / "proxy" / "bridge.py").write_text(
+            "import time; time.sleep(30)\n")
+        runwk = d / "run-wk"
+        runwk.mkdir()
+        if ca:
+            (runwk / "wk-github-ca.pem").write_text("THE-INJECTORS-CA\n")
+        sysca = d / "ca-certificates.crt"
+        sysca.write_text("THE-SYSTEM-STORE\n")
+        script = d / "ensure-bridge.sh"
+        script.write_text(
+            (REPO / "container" / "proxy" / "ensure-bridge.sh").read_text()
+            .replace("/opt/wk-tools", str(tools))
+            .replace("/run/wk/wk-github-ca.pem", str(runwk / "wk-github-ca.pem"))
+            .replace("/etc/ssl/certs/ca-certificates.crt", str(sysca))
+            .replace("/secrets/", str(secrets) + "/"))
+        rw = d / "rw"
+        rw.mkdir()
+        show = "; ".join('printf "%s=[%s]\\n" ' + v + ' "${' + v + ':-}"'
+                         for v in print_vars)
+        env = {k: v for k, v in os.environ.items()
+               if k not in ("GH_TOKEN", "SSL_CERT_FILE", "SSL_CERT_DIR",
+                            "PYTHON_KEYRING_BACKEND", "BUGS_WEBKIT_ORG_USERNAME",
+                            "BUGS_WEBKIT_ORG_PASSWORD")}
+        env["TMPDIR"] = str(rw)
+        env.update(env_extra or {})
+        cp = subprocess.run(["bash", str(script), "sh", "-c", show],
+                            env=env, capture_output=True, text=True,
+                            timeout=60)
+        assert cp.returncode == 0, cp.stdout + cp.stderr
+        bundle = rw / ".wk-ca-bundle.pem"
+        text = bundle.read_text() if bundle.exists() else ""
+        return cp.stdout, bundle, text
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
 class TestWhatGhNeeds(unittest.TestCase):
     """`gh` reads GitHub through the same injector as everything else, so it
     needs two things nothing else does: a token to put in an Authorization
@@ -1118,56 +1171,8 @@ class TestWhatGhNeeds(unittest.TestCase):
     paths that exist only in a container.
     """
 
-    def run_bridge(self, ca, *print_vars, bugzilla_user=None):
-        """(what the wrapped command printed, the bundle's path, its bytes).
-        `bugzilla_user=` is what `wk push` published at /secrets/bugzilla-user."""
-        import os
-        d = Path(tempfile.mkdtemp(prefix="wk-test-gh-env-"))
-        try:
-            secrets = d / "secrets"
-            secrets.mkdir()
-            if bugzilla_user is not None:
-                (secrets / "bugzilla-user").write_text(bugzilla_user + "\n")
-            tools = d / "wk-tools"
-            (tools / "shell").mkdir(parents=True)
-            (tools / "container" / "proxy").mkdir(parents=True)
-            (tools / "shell" / "path.sh").write_text(":\n")
-            (tools / "container" / "proxy" / "bridge.py").write_text(
-                "import time; time.sleep(30)\n")
-            runwk = d / "run-wk"
-            runwk.mkdir()
-            if ca:
-                (runwk / "wk-github-ca.pem").write_text("THE-INJECTORS-CA\n")
-            sysca = d / "ca-certificates.crt"
-            sysca.write_text("THE-SYSTEM-STORE\n")
-            script = d / "ensure-bridge.sh"
-            script.write_text(
-                (REPO / "container" / "proxy" / "ensure-bridge.sh").read_text()
-                .replace("/opt/wk-tools", str(tools))
-                .replace("/run/wk/wk-github-ca.pem", str(runwk / "wk-github-ca.pem"))
-                .replace("/etc/ssl/certs/ca-certificates.crt", str(sysca))
-                .replace("/secrets/", str(secrets) + "/"))
-            rw = d / "rw"
-            rw.mkdir()
-            show = "; ".join('printf "%s=[%s]\\n" ' + v + ' "${' + v + ':-}"'
-                             for v in print_vars)
-            env = {k: v for k, v in os.environ.items()
-                   if k not in ("GH_TOKEN", "SSL_CERT_FILE", "SSL_CERT_DIR",
-                                "PYTHON_KEYRING_BACKEND", "BUGS_WEBKIT_ORG_USERNAME",
-                                "BUGS_WEBKIT_ORG_PASSWORD")}
-            env["TMPDIR"] = str(rw)
-            cp = subprocess.run(["bash", str(script), "sh", "-c", show],
-                                env=env, capture_output=True, text=True,
-                                timeout=60)
-            self.assertEqual(0, cp.returncode, cp.stdout + cp.stderr)
-            bundle = rw / ".wk-ca-bundle.pem"
-            text = bundle.read_text() if bundle.exists() else ""
-            return cp.stdout, bundle, text
-        finally:
-            shutil.rmtree(d, ignore_errors=True)
-
     def test_gh_gets_the_placeholder_and_the_bundle_go_reads(self):
-        out, bundle, _ = self.run_bridge(True, "GH_TOKEN", "SSL_CERT_FILE",
+        out, bundle, _ = run_bridge(True, "GH_TOKEN", "SSL_CERT_FILE",
                                          "SSL_CERT_DIR")
         self.assertIn("GH_TOKEN=[wk-injects-this]", out)
         self.assertIn("SSL_CERT_FILE=[%s]" % bundle, out)
@@ -1176,7 +1181,7 @@ class TestWhatGhNeeds(unittest.TestCase):
     def test_a_workspace_with_no_injector_ca_gets_neither(self):
         """No CA is no injector in the path, and a placeholder token would
         then be an Authorization header nothing replaces."""
-        out, _, _ = self.run_bridge(False, "GH_TOKEN", "SSL_CERT_FILE",
+        out, _, _ = run_bridge(False, "GH_TOKEN", "SSL_CERT_FILE",
                                     "SSL_CERT_DIR")
         self.assertIn("GH_TOKEN=[]", out)
         self.assertIn("SSL_CERT_FILE=[]", out)
@@ -1188,12 +1193,12 @@ class TestWhatGhNeeds(unittest.TestCase):
         injected credential; the null backend is set whether or not the
         injector's CA is in the path."""
         for ca in (True, False):
-            out, _, _ = self.run_bridge(ca, "PYTHON_KEYRING_BACKEND")
+            out, _, _ = run_bridge(ca, "PYTHON_KEYRING_BACKEND")
             self.assertIn("PYTHON_KEYRING_BACKEND=[keyring.backends.null.Keyring]",
                           out)
 
     def test_git_webkit_gets_the_bugzilla_placeholder_from_the_published_login(self):
-        out, _, _ = self.run_bridge(True, "BUGS_WEBKIT_ORG_USERNAME",
+        out, _, _ = run_bridge(True, "BUGS_WEBKIT_ORG_USERNAME",
                                     "BUGS_WEBKIT_ORG_PASSWORD",
                                     bugzilla_user="me@example.test")
         self.assertIn("BUGS_WEBKIT_ORG_USERNAME=[me@example.test]", out)
@@ -1203,13 +1208,13 @@ class TestWhatGhNeeds(unittest.TestCase):
         """A placeholder with no login beside it would have git-webkit
         validate an empty pair; with neither it asks, which is the visible
         state `wk verify` fails on."""
-        out, _, _ = self.run_bridge(True, "BUGS_WEBKIT_ORG_USERNAME",
+        out, _, _ = run_bridge(True, "BUGS_WEBKIT_ORG_USERNAME",
                                     "BUGS_WEBKIT_ORG_PASSWORD")
         self.assertIn("BUGS_WEBKIT_ORG_USERNAME=[]", out)
         self.assertIn("BUGS_WEBKIT_ORG_PASSWORD=[]", out)
 
     def test_the_bundle_it_names_is_the_systems_plus_the_ca(self):
-        _, _, text = self.run_bridge(True, "SSL_CERT_FILE")
+        _, _, text = run_bridge(True, "SSL_CERT_FILE")
         self.assertEqual("THE-SYSTEM-STORE\nTHE-INJECTORS-CA\n", text)
 
     def test_a_guest_gets_the_same_two(self):
@@ -1233,9 +1238,11 @@ class TestTheWorkspaceHoldsThePlaceholder(unittest.TestCase):
         BUGS_WEBKIT_ORG_PASSWORD and the container's own keyring backend, so
         `git-webkit pr` hunts a keyring no container has, and reports the
         failed lookup as a locked macOS Keychain -- measured from `wk enter`
-        on a Linux workstation, where there is no Keychain at all."""
+        on a Linux workstation, where there is no Keychain at all. The way in
+        an editor takes is the sshd, which the wrapper starts for the same
+        reason."""
         text = (REPO / "targets" / "container.sh").read_text()
-        for fn in ("t_exec", "t_enter", "t_spawn"):
+        for fn in ("t_exec", "t_enter", "t_spawn", "t_ssh_sshd_cmd"):
             with self.subTest(fn=fn):
                 self.assertRegex(func_body(text, fn),
                                  r"_wrap_cmd|ensure-bridge\.sh")
@@ -1425,6 +1432,92 @@ def _shell_vars(shell, home, args):
         if k in VARS:
             out[k] = v
     return out
+
+
+class TestTheEditorsTerminalGetsTheSameEnvironment(unittest.TestCase):
+    """An editor reaches a container over ssh, and sshd builds a session's
+    environment from scratch: it hands on nothing of the wrapper's, so a
+    terminal pane would go without the injected credentials and the keyring
+    backend that every other way in has -- `git-webkit pr` there hunts a
+    keyring no container has and exits reporting a locked macOS Keychain.
+    So the wrapper publishes what it set and sshd carries that line."""
+
+    def setenv_line(self, *args, **kwargs):
+        """(the line the wrapper published, the bundle it named in it)."""
+        out, bundle, _ = run_bridge(*args, "WK_SSH_SETENV", **kwargs)
+        for line in out.splitlines():
+            if line.startswith("WK_SSH_SETENV="):
+                return line[len("WK_SSH_SETENV=["):-1], bundle
+        self.fail("the wrapper printed no WK_SSH_SETENV: " + out)
+
+    def test_it_carries_every_variable_the_wrapper_sets(self):
+        line, bundle = self.setenv_line(True, github_user="justinmichaud",
+                                        bugzilla_user="me@example.test")
+        for pair in ("PYTHON_KEYRING_BACKEND=keyring.backends.null.Keyring",
+                     "GITHUB_COM_USERNAME=justinmichaud",
+                     "GITHUB_COM_TOKEN=wk-injects-this",
+                     "BUGS_WEBKIT_ORG_USERNAME=me@example.test",
+                     "BUGS_WEBKIT_ORG_PASSWORD=wk-injects-this",
+                     "GH_TOKEN=wk-injects-this",
+                     "SSL_CERT_FILE=%s" % bundle):
+            with self.subTest(pair=pair):
+                self.assertIn(pair, line.split(" "))
+
+    def test_it_carries_the_proxy_the_container_was_created_with(self):
+        """Inherited rather than set here, and just as absent from a session:
+        a pane with no proxy reports every host in the world as unreachable."""
+        line, _ = self.setenv_line(True, env_extra={
+            "http_proxy": "http://127.0.0.1:3128",
+            "NO_PROXY": "localhost,127.0.0.1,::1"})
+        self.assertIn("http_proxy=http://127.0.0.1:3128", line)
+        self.assertIn("NO_PROXY=localhost,127.0.0.1,::1", line)
+
+    def test_a_value_with_whitespace_is_left_out_rather_than_truncating_it(self):
+        """SetEnv has no quoting, so one value with a space in it would end the
+        option and take every assignment after it; the variable is still
+        exported for every other way in."""
+        out, _, _ = run_bridge(True, "WK_SSH_SETENV", "GITHUB_COM_USERNAME",
+                               github_user="two words")
+        self.assertIn("GITHUB_COM_USERNAME=[two words]", out)
+        self.assertNotIn("GITHUB_COM_USERNAME=two", out)
+        self.assertIn("GITHUB_COM_TOKEN=wk-injects-this", out)
+
+    def test_sshd_is_exec_d_with_that_line_in_one_setenv(self):
+        """The quoting, driven: the container's sshd command is built here and
+        run against a wrapper and an sshd that only say what they were given.
+        One -o SetEnv carries every assignment (the keyword takes only its
+        first) and the sftp subsystem survives the same quoting."""
+        d = Path(tempfile.mkdtemp(prefix="wk-test-sshd-env-"))
+        try:
+            wrapper = d / "wrapper.sh"
+            wrapper.write_text('#!/bin/bash\n'
+                               'export WK_SSH_SETENV="A=1 B=2"\nexec "$@"\n')
+            sshd = d / "sshd"
+            sshd.write_text('#!/bin/bash\n'
+                            'for a in "$@"; do printf "ARG=[%s]\\n" "$a"; done\n')
+            for f in (wrapper, sshd):
+                f.chmod(0o755)
+            body = func_body((REPO / "targets" / "container.sh").read_text(),
+                             "t_ssh_sshd_cmd")
+            cp = subprocess.run(
+                ["bash", "-c", "_ctr_user() { echo tester; }\n"
+                 "t_ssh_sshd_cmd() {%s}\nt_ssh_sshd_cmd ws" % body],
+                capture_output=True, text=True, timeout=60)
+            self.assertEqual(0, cp.returncode, cp.stdout + cp.stderr)
+            cmd = (cp.stdout
+                   .replace("mkdir -p /run/sshd && ", "")
+                   .replace("/opt/wk-tools/container/proxy/ensure-bridge.sh",
+                            str(wrapper))
+                   .replace("/usr/sbin/sshd", str(sshd)))
+            cp = subprocess.run(["sh", "-c", cmd], capture_output=True,
+                                text=True, timeout=60)
+            self.assertEqual(0, cp.returncode, cp.stdout + cp.stderr)
+            args = cp.stdout.splitlines()
+            self.assertEqual(["ARG=[SetEnv=A=1 B=2]"],
+                             [a for a in args if "SetEnv" in a])
+            self.assertIn("ARG=[Subsystem=sftp internal-sftp]", args)
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
 
 
 class TestGuestProxyEnvironment(WkTest):

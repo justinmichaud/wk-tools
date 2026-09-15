@@ -353,20 +353,18 @@ _ctr_user() {
 
 _ctr_home() { echo "/home/$(_ctr_user "$1")"; }
 
-# -i is inetd mode (no listener); one SetEnv carries every assignment because the keyword takes only its first; internal-sftp avoids the login shell's `cd`.
+# -i is inetd mode (no listener); internal-sftp avoids the login shell's `cd`. sshd builds a session's environment from scratch, so an editor's terminal gets what every other way in gets through the wrapper's own SetEnv line, in one option because the keyword takes only its first.
 t_ssh_sshd_cmd() {
     local name="$1" u h
     u=$(_ctr_user "$name") || return 1
     h="/home/$u"
     printf '%s' "mkdir -p /run/sshd && exec /opt/wk-tools/container/proxy/ensure-bridge.sh \
-/usr/sbin/sshd -i -e -f /dev/null \
+/bin/sh -c 'exec /usr/sbin/sshd -i -e -f /dev/null \
 -o HostKey=$h/.wk-ssh/ssh_host_ed25519_key \
 -o AuthorizedKeysFile=.ssh/authorized_keys \
 -o UsePAM=no -o PidFile=none -o PermitRootLogin=no -o AllowUsers=$u -o LogLevel=ERROR \
--o Subsystem='sftp internal-sftp' \
--o 'SetEnv=http_proxy=http://127.0.0.1:3128 https_proxy=http://127.0.0.1:3128 \
-HTTP_PROXY=http://127.0.0.1:3128 HTTPS_PROXY=http://127.0.0.1:3128 \
-no_proxy=localhost,127.0.0.1,::1 NO_PROXY=localhost,127.0.0.1,::1'"
+-o Subsystem=\"sftp internal-sftp\" \
+-o SetEnv=\"\$WK_SSH_SETENV\"'"
 }
 
 t_ssh_user()  { _ctr_user "$1"; }
