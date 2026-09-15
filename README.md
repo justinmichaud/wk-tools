@@ -1422,10 +1422,13 @@ other name is refused (`421`). The workspace holds `GITHUB_COM_USERNAME` and
 `GITHUB_COM_TOKEN=wk-injects-this` and `BUGS_WEBKIT_ORG_PASSWORD=wk-injects-this`,
 plus the injector's CA certificate (`/run/wk/wk-github-ca.pem`, added to the
 system bundle -- never replacing it). With push off the injector has no write
-token and no Bugzilla key and forwards a write unauthenticated, so GitHub
-answers 401 and Bugzilla 410 for themselves: the switch withholds a
-credential, it does not pretend the API is unreachable. `uploads.github.com`
-stays refused outright.
+token and no Bugzilla key, so a write is refused there -- `412`, and a body
+saying the switch is off for this workspace's machine and naming `wk push on`
+-- rather than forwarded for the far end to answer for a credential it was
+never sent. A bare 401 from
+GitHub is what `git-webkit pr` reports as an expired token, which sends a
+person to `git-webkit setup` for a fault that is a switch on the host.
+`uploads.github.com` stays refused outright.
 
 **A read is always authenticated; a write is authenticated only while push is
 on.** A `GET` or `HEAD` on any path -- and a GraphQL document with no mutation
@@ -1433,10 +1436,9 @@ in it -- is forwarded with the standing read token whatever position `wk push`
 is in: an agent in a workspace has to read a pull request, its EWS statuses and
 the issue a branch tracks, `gh` has to work, and no read changes anything of
 yours. Everything else is a write, and a write spends the switch's token or
-none. The injector refuses nothing of its own: push on means you are watching
-what the workspace does, so which of your own endpoints it reaches is your
-call, and push off leaves it nothing to spend. Neither token is ever inside a
-workspace.
+is refused by name. The injector is otherwise transparent: push on means you
+are watching what the workspace does, so which of your own endpoints it
+reaches is your call. Neither token is ever inside a workspace.
 
 Bugzilla has no read-only key -- a key is the account -- so it has no
 standing half: while push is on every request a workspace makes of
@@ -1455,7 +1457,13 @@ The standing token is one file on the machine that runs the workspaces
 macOS host whose injector serves the guests), written from the one it holds:
 `wk key set github-pat` delivers it when you store, rotate or withdraw one, and
 `./setup` again on every run, so a machine remade from scratch has it before
-anything runs there. `wk push off` therefore no longer strips every token from
+anything runs there. The write copy is converged by the same command and at the
+same moment, but only while the switch is on: `wk push on` writes it from the
+held one at the moment it runs, so rotating a credential without that would
+leave the machine spending the revoked one -- a `401 Bad credentials` from
+`git-webkit pr` that reads as an expired token. With the switch off nothing is
+handed over, because writing one there would be turning push on.
+`wk push off` therefore no longer strips every token from
 the machine -- it removes the write one, and reads keep working, which is what
 lets `gh` and `git-webkit` see a pull request in a workspace nothing can
 publish from. `gh` holds the same placeholder `GITHUB_COM_TOKEN` does

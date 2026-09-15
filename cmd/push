@@ -17,8 +17,8 @@
 #          where the injector reads them. `git push` and `git-webkit pr` work,
 #          the bug included.
 #   off    `ssh-add -D` empties the agent and both files are removed. ssh has
-#          no identity to offer, GitHub answers 401 and Bugzilla 410. Nothing
-#          in a workspace can undo any of it.
+#          no identity to offer, and the injector refuses a write with a 412
+#          naming this switch. Nothing in a workspace can undo any of it.
 #
 # There is no state file to disagree with reality: `status` asks the agent what it
 # holds (`ssh-add -l`) and the machine whether the credential files are there. A machine

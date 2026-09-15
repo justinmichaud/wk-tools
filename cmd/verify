@@ -252,11 +252,13 @@ probe_github_api() {
         than 422 -- the injector has no write token ('wk push on' again)" ;;
         esac
     else
-        [ "$code" = 401 ] \
-            && pass "a write is unauthenticated (HTTP 401): nothing in here can post" \
-            || fail "POST /repos/$fork/pulls answered '${code:-nothing}' where the host does
-        not say push is on -- expected 401, so a write token is still on the
-        machine:  wk push off"
+        [ "$code" = 412 ] \
+            && pass "a write is refused by the injector (HTTP 412), which names 'wk push on'" \
+            || fail "POST /repos/$fork/pulls answered '${code:-nothing}' where the host does not
+        say push is on -- expected 412, the injector's own refusal. A 401 is an
+        injector still running older code, which 'wk status' reports and
+        './setup' on that machine restarts; anything else is a write token
+        still on the machine:  wk push off"
     fi
     return "$fails"
 }
@@ -349,9 +351,9 @@ probe_bugzilla_api() {
         (systemctl --user status wk-github-inject; the CA is /run/wk/wk-github-ca.pem)" ;;
     esac
 
-    code=$(inside "curl -sS -m 20 -X POST -H 'Content-Type: application/json' -d '{}' https://bugs.webkit.org/rest/bug 2>/dev/null \
-        | python3 -c 'import json, sys; print(json.load(sys.stdin).get(\"code\", \"\"))' 2>/dev/null")
     if [ "$PUSH_ON" = 1 ]; then
+        code=$(inside "curl -sS -m 20 -X POST -H 'Content-Type: application/json' -d '{}' https://bugs.webkit.org/rest/bug 2>/dev/null \
+        | python3 -c 'import json, sys; print(json.load(sys.stdin).get(\"code\", \"\"))' 2>/dev/null")
         case "$code" in
             410) fail "push is ON but POST /rest/bug answered 'log in first' (410): the injector has
         no Bugzilla API key -- 'wk key set bugzilla-api-key', then 'wk push on' again" ;;
@@ -362,10 +364,15 @@ probe_bugzilla_api() {
             *)   pass "a Bugzilla write is authenticated (error $code: an empty bug, nothing filed), and push is on" ;;
         esac
     else
-        [ "$code" = 410 ] \
-            && pass "a Bugzilla write is unauthenticated (410, log in first): nothing in here can file a bug" \
+        # Nothing reaches Bugzilla to name its own refusal, so the status is the injector's.
+        code=$(inside "curl -sS -m 20 -o /dev/null -w '%{http_code}' -X POST -H 'Content-Type: application/json' -d '{}' https://bugs.webkit.org/rest/bug 2>/dev/null")
+        [ "$code" = 412 ] \
+            && pass "a Bugzilla write is refused by the injector (HTTP 412), which names 'wk push on'" \
             || fail "POST /rest/bug answered '${code:-nothing}' where the host does not say push is
-        on -- expected 410, so a Bugzilla key is still on the machine:  wk push off"
+        on -- expected 412, the injector's own refusal. Bugzilla's own 'log in
+        first' is an injector still running older code, which 'wk status'
+        reports and './setup' on that machine restarts; anything else is a
+        Bugzilla key still on the machine:  wk push off"
     fi
     return "$fails"
 }

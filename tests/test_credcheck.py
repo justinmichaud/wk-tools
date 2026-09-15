@@ -1205,8 +1205,11 @@ class TestOneTableForEveryCredential(_Rules):
         query = urllib.parse.parse_qs(urllib.parse.urlparse(url).query)
         self.assertEqual(["write"], query["contents"])
         self.assertEqual(["write"], query["pull_requests"])
-        self.assertEqual(["366"], query["expires_in"])
-        self.assertEqual(366, credcheck.MAX_PAT_DAYS)
+        self.assertEqual([str(credcheck.MAX_PAT_DAYS)], query["expires_in"])
+        # The ceiling WebKit's policy states, not a preference: a link that
+        # minted a longer-lived token would mint one every project refuses.
+        self.assertLessEqual(credcheck.MAX_PAT_DAYS, 366)
+        self.assertGreater(credcheck.MAX_PAT_DAYS, 0)
         self.assertEqual(["wkuser"], query["target_name"])
         self.assertNotIn("repositories", query)
         for repo in FORKS.split():

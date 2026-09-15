@@ -188,6 +188,78 @@ class TestEvidence(_Agent):
         self.assertIn("no identities", self.ssh_add("-l").stdout)
 
 
+class TestARotatedCredentialReachesTheInjectorWhilePushIsOn(_Agent):
+    """`wk push on` writes the injector's copy from the held one at the moment
+    it runs, so rotating a credential while the switch is on used to leave the
+    machine spending the revoked one -- `git-webkit pr` answered 401 Bad
+    credentials until someone flipped the switch, and nothing said so.
+    `cred_deliver` (cmd/key) converges it on every store, rotate and withdraw.
+
+    The switch's position is the agent's own contents, which is what `wk push
+    status` reports it from: keys loaded is on, empty is off."""
+
+    def converge(self, name, path):
+        return self.sh(f'push_agent_switch_cred_converge _fake_exec '
+                       f'"{self.sock}" "{path}" {name}')
+
+    def test_the_new_one_replaces_what_the_machine_is_writing_with(self):
+        pat = self.tmp / "pat"
+        pat.write_text("ghp-the-revoked-one\n")
+        pat.chmod(0o600)   # as `wk push on` wrote it, under umask 077
+        (self.held / "github-pat").write_text("ghp-the-new-one\n")
+        self.sh(f'push_agent_load _fake_exec "{self.sock}"')
+        cp = self.converge("github-pat", pat)
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertEqual("ghp-the-new-one\n", pat.read_text())
+        self.assertEqual(0o600, pat.stat().st_mode & 0o777)
+
+    def test_a_withdrawn_one_is_taken_away_rather_than_left_live(self):
+        """`wk key set <name> --replace` clears the held one first: a machine
+        still writing with it would be the withdrawal not having happened."""
+        pat = self.tmp / "pat"
+        pat.write_text("ghp-the-revoked-one\n")
+        self.sh(f'push_agent_load _fake_exec "{self.sock}"')
+        cp = self.converge("github-pat", pat)
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertFalse(pat.exists())
+
+    def test_with_the_switch_off_nothing_is_handed_over(self):
+        """The agent is empty, so writing the credential here would be turning
+        push on -- which is the one thing a `wk key` command must never do."""
+        pat = self.tmp / "pat"
+        (self.held / "github-pat").write_text("ghp-the-new-one\n")
+        cp = self.converge("github-pat", pat)
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertFalse(pat.exists(), "a wk key command turned push on")
+
+    def test_the_bugzilla_key_is_converged_the_same_way(self):
+        bz = self.tmp / "bz-key"
+        bz.write_text("the-revoked-key\n")
+        (self.held / "bugzilla-api-key").write_text("the-new-key\n")
+        self.sh(f'push_agent_load _fake_exec "{self.sock}"')
+        cp = self.converge("bugzilla-api-key", bz)
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertEqual("the-new-key\n", bz.read_text())
+
+    def test_the_value_is_never_an_argument_on_the_way_there(self):
+        pat = self.tmp / "pat"
+        (self.held / "github-pat").write_text("ghp-the-new-one\n")
+        self.sh(f'push_agent_load _fake_exec "{self.sock}"')
+        self.converge("github-pat", pat)
+        self.assertNotIn("ghp-the-new-one", self.exec_log())
+
+    def test_wk_key_converges_through_this_one_function(self):
+        """Every path that stores, rotates or withdraws one goes through
+        cred_deliver, so the fan-out onto another workstation (`wk key set
+        --paste`) converges that machine too."""
+        body = (REPO / "cmd" / "key").read_text()
+        self.assertIn("push_agent_switch_cred_converge push_agent_exec", body)
+        self.assertEqual(1, body.count("cred_deliver() {"))
+        self.assertEqual(
+            1, (REPO / "lib" / "store.sh").read_text()
+            .count("push_agent_switch_cred_converge() {"))
+
+
 class TestTheApiToken(_Agent):
     def test_the_token_is_written_and_removed_by_the_same_switch(self):
         (self.held / "github-pat").write_text("ghp-not-a-real-token\n")

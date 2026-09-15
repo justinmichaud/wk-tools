@@ -135,6 +135,29 @@ def drive_injector(tmp, client_bytes,
     return bytes(cwriter.data), bytes(uwriter.data), opened, logged.getvalue()
 
 
+def assert_refused_with_the_switch_off(case, method, target,
+                                       host="api.github.com", extra="", **kw):
+    """One write with `wk push off`: nothing leaves the injector, and what the
+    client reads back names the switch rather than the far end answering for a
+    credential it was never sent. `extra=` is appended to the query, for the
+    Bugzilla requests that carry the placeholder login pair."""
+    sep = "&" if "?" in target else "?"
+    full = target + (sep + extra if extra else "")
+    head = ("%s %s HTTP/1.1\r\nHost: %s\r\nContent-Length: 0\r\n\r\n"
+            % (method, full, host)).encode("latin-1")
+    client, upstream, opened, logged = drive_injector(case.tmp, head,
+                                                      token=None, **kw)
+    case.assertEqual([], opened,
+                     "%s %s reached the network" % (method, target))
+    case.assertEqual(b"", upstream)
+    case.assertIn(b"412 Precondition Failed", client)
+    case.assertIn(b"wk push is off for this workspace's machine", client)
+    case.assertIn(b"'wk push on'", client)
+    case.assertNotIn(b"wk-injects-this", client)
+    case.assertIn("write refused: push is off", logged)
+    return client, logged
+
+
 class TestDevelopmentAllowlist(unittest.TestCase):
     """The hosts ordinary development needs, each measured as a refusal before
     it was added. Suffix matching is on a dot boundary, so one entry covers the
@@ -838,12 +861,29 @@ class TestTheInjectorForwardsBugzilla(WkTest):
                 self.assertIn("bugs.webkit.org", logged)
                 self.assertIn(" inject ", logged)
 
-    def test_every_request_goes_anonymous_while_push_is_off(self):
+    def test_every_read_goes_anonymous_while_push_is_off(self):
+        """Bugzilla is readable without an account, so a read is forwarded
+        with no key rather than refused: the switch governs what a workspace
+        can publish, not what it can look at."""
         for method, target in GIT_WEBKIT_BUGZILLA:
+            if method not in ("GET", "HEAD"):
+                continue
             with self.subTest(request="%s %s" % (method, target)):
                 upstream, logged = self.forward(method, target)
                 self.assertNotIn(b"api_key", upstream)
                 self.assertIn(" unauthenticated ", logged)
+
+    def test_every_write_is_refused_by_name_while_push_is_off(self):
+        """Nothing is sent, so Bugzilla never answers for a key it was never
+        given: the injector says the switch is off and names the command that
+        turns it on."""
+        for method, target in GIT_WEBKIT_BUGZILLA:
+            if method in ("GET", "HEAD"):
+                continue
+            with self.subTest(request="%s %s" % (method, target)):
+                assert_refused_with_the_switch_off(
+                    self, method, target, host="bugs.webkit.org",
+                    extra="login=me%40example.test&password=wk-injects-this")
 
     def test_neither_credential_crosses_to_the_other_host(self):
         _, upstream, _, _ = drive_injector(
@@ -855,9 +895,8 @@ class TestTheInjectorForwardsBugzilla(WkTest):
         _, upstream, _, logged = drive_injector(
             self.tmp, b"POST /repos/x/y/pulls HTTP/1.1\r\nHost: api.github.com\r\n"
             b"Content-Length: 0\r\n\r\n", token=None, bugzilla_key="bz-key")
-        self.assertNotIn(b"bz-key", upstream)
-        self.assertNotIn(b"api_key", upstream)
-        self.assertIn("write unauthenticated", logged)
+        self.assertEqual(b"", upstream, "a write left the injector with push off")
+        self.assertIn("write refused: push is off", logged)
 
     def test_the_log_names_the_clients_target_and_never_the_key(self):
         _, _, _, logged = drive_injector(
@@ -926,14 +965,13 @@ class TestTheInjectorForwardsEverything(WkTest):
                 self.assertIn(b"Authorization: Bearer ghp-not-a-real-token",
                               upstream)
 
-    def test_a_hostile_write_carries_nothing_with_the_switch_off(self):
+    def test_a_hostile_write_is_refused_by_name_with_the_switch_off(self):
+        """Not forwarded stripped of its credential -- not forwarded at all.
+        The standing read token is on the machine and reaches none of these."""
         for method, target in HOSTILE_WRITES:
             with self.subTest(request="%s %s" % (method, target)):
-                upstream, logged = self.forward(
-                    method, target, token=None, read_token="ghp-read-only")
-                self.assertNotIn(b"Authorization", upstream)
-                self.assertNotIn(b"ghp-read-only", upstream)
-                self.assertIn("write unauthenticated", logged)
+                assert_refused_with_the_switch_off(
+                    self, method, target, read_token="ghp-read-only")
 
     def test_a_path_a_server_would_normalise_is_forwarded_unchanged(self):
         """There is no rule left for a `..` or a percent-escape to walk past,
@@ -1090,20 +1128,25 @@ class TestTheTwoTokens(WkTest):
         self.assertIn(b"Authorization: Bearer ghp-read-only", upstream)
         self.assertIn("read inject GET /repos/WebKit/WebKit/pulls/1234", logged)
 
-    def test_a_write_carries_nothing_with_the_switch_off(self):
-        """The same machine and the same read token: the write is forwarded,
-        because refusing it would be this program pretending the API is
-        unreachable, and unauthenticated, because the switch is off."""
-        _, upstream, opened, logged = drive_injector(
+    def test_a_write_is_refused_by_name_with_the_switch_off(self):
+        """The same machine and the same read token: the write never leaves
+        the injector. Forwarding it stripped of its credential made the far
+        end answer for a token it was never sent -- GitHub's bare 401, which
+        `git-webkit pr` reports as an expired token and sends a person to
+        `git-webkit setup`. The refusal names the switch instead."""
+        client, upstream, opened, logged = drive_injector(
             self.tmp,
             b"POST /repos/WebKit/WebKit/pulls HTTP/1.1\r\n"
             b"Host: api.github.com\r\nContent-Length: 2\r\n\r\nhi",
             token=None, read_token="ghp-read-only")
-        self.assertEqual([("api.github.com", 443)], opened)
-        self.assertNotIn(b"Authorization", upstream)
-        self.assertNotIn(b"ghp-read-only", upstream)
-        self.assertIn("write unauthenticated POST /repos/WebKit/WebKit/pulls",
-                      logged)
+        self.assertEqual([], opened, "the write reached the network")
+        self.assertEqual(b"", upstream)
+        self.assertIn(b"412 Precondition Failed", client)
+        self.assertIn(b"wk push is off for this workspace's machine", client)
+        self.assertIn(b"'wk push on'", client)
+        self.assertNotIn(b"ghp-read-only", client)
+        self.assertIn("write refused: push is off POST "
+                      "/repos/WebKit/WebKit/pulls", logged)
 
 
 def run_bridge(ca, *print_vars, bugzilla_user=None, github_user=None,

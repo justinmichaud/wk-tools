@@ -41,12 +41,12 @@ DEFAULTS = {
     "ssh-add -l": "0",
     "https://api.github.com/ ": "200",
     "api.github.com/user": "200",
-    "/pulls": "401",
+    "/pulls": "412",
     "GITHUB_COM_TOKEN": "wk-injects-this",
     "GH_TOKEN": "wk-injects-this",
     "BUGS_WEBKIT_ORG_PASSWORD": "wk-injects-this",
     "bugs.webkit.org/rest/version": "200",
-    "https://bugs.webkit.org/rest/bug 2": "410",
+    "https://bugs.webkit.org/rest/bug 2": "412",
     "hosts.yml": "",
     "test -r /secrets/claude-token": "",
 }
@@ -132,8 +132,8 @@ class TestAHealthyWorkspacePasses(_Block):
         self.assertIn("no identity reaches this workspace", out)
         self.assertIn("reachable through the injector", out)
         self.assertIn("a read is authenticated (HTTP 200)", out)
-        self.assertIn("a write is unauthenticated (HTTP 401)", out)
-        self.assertIn("a Bugzilla write is unauthenticated (410", out)
+        self.assertIn("a write is refused by the injector (HTTP 412)", out)
+        self.assertIn("a Bugzilla write is refused by the injector (HTTP 412)", out)
         self.assertIn("GITHUB_COM_TOKEN in the workspace is the placeholder", out)
         self.assertIn("GH_TOKEN in the workspace is the placeholder", out)
         self.assertIn("BUGS_WEBKIT_ORG_PASSWORD in the workspace is the placeholder", out)
@@ -304,11 +304,11 @@ class TestAReadIsAuthenticatedFromTheStandingToken(_Block):
     def test_the_switch_does_not_govern_it(self):
         """The same 200 with push on and with push off: a check that answered
         differently would be measuring the write token."""
-        for push_on, pulls in ((True, "422"), (False, "401")):
+        for push_on, pulls in ((True, "422"), (False, "412")):
             with self.subTest(push_on=push_on):
                 out = self.run_block(push_on=push_on, answers={
                     "/pulls": pulls, "ssh-add -l": "2" if push_on else "0",
-                    "https://bugs.webkit.org/rest/bug 2": "50" if push_on else "410"})
+                    "https://bugs.webkit.org/rest/bug 2": "50" if push_on else "412"})
                 self.assertEqual(0, self.fails(out), out)
                 self.assertIn("a read is authenticated (HTTP 200)", out)
 
@@ -335,7 +335,7 @@ class TestTheSwitch(_Block):
     def test_a_write_that_succeeds_while_push_is_off_fails(self):
         out = self.run_block(push_on=False, answers={"/pulls": "422"})
         self.assertEqual(1, self.fails(out), out)
-        self.assertIn("a write token is still on the\n        machine", out)
+        self.assertIn("still on the machine:  wk push off", out)
         self.assertIn("wk push off", out)
 
     def test_a_write_that_is_refused_while_push_is_on_fails(self):
@@ -372,7 +372,7 @@ class TestBugzilla(_Block):
         out = self.run_block(push_on=False,
                              answers={"https://bugs.webkit.org/rest/bug 2": "50"})
         self.assertEqual(1, self.fails(out), out)
-        self.assertIn("a Bugzilla key is still on the machine", out)
+        self.assertIn("Bugzilla key still on the machine", out)
         self.assertIn("wk push off", out)
 
     def test_push_on_with_no_key_names_what_to_store(self):

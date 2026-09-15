@@ -56,7 +56,9 @@
 #                                     too unless each project a fork belongs to
 #                                     accepts it: an organization's token policy
 #                                     caps a fine-grained token's lifetime, so
-#                                     the link mints one for 366 days
+#                                     the link mints one with a lifetime it
+#                                     allows. Rotating it while `wk push` is on
+#                                     hands the new one straight to the injector
 #                       bugzilla-api-key
 #                                     what `git-webkit pr` files and updates the
 #                                     bug with. Never enters a workspace either:
@@ -376,12 +378,23 @@ check_peer_row() { # <peer> <name> -- one command is the remedy for every fault 
 
 # Deliberately not delivered into a workspace like the wk_agent_secrets rows: only the credential injector, on the machine that runs the workspaces, ever reads the token.
 cred_deliver() { # <name> -- carry a stored, rotated or withdrawn one to where it is read
-    [ "$1" = github-pat ] || return 0
-    push_agent_pat_deliver && return 0
-    warn "an injector on this machine did not take the read token, so a read from
+    local machine
+    case "$1" in
+        github-pat)
+            machine=$(push_agent_machine_pat)
+            push_agent_pat_deliver \
+                || warn "an injector on this machine did not take the read token, so a read from
     the workspaces it serves answers 401 until it does. './setup' converges the
     one in the podman machine (the vmtools stage on macOS, sdk on Linux) and
-    'wk vm start <guest>' the one that serves the guests."
+    'wk vm start <guest>' the one that serves the guests." ;;
+        bugzilla-api-key) machine=$(push_agent_machine_bugzilla_key) ;;
+        *) return 0 ;;
+    esac
+    push_agent_switch_cred_converge push_agent_exec \
+        "$(push_agent_machine_sock)" "$machine" "$1" \
+        || warn "the injector on this machine is still writing with the $1 stored
+    before this one, so 'git-webkit pr' in a workspace spends that: 'wk push off'
+    then 'wk push on' hands it the one stored here."
 }
 
 # Every reader of a stored credential redacts it, so this print is the only chance to point a phone at one wk mints.

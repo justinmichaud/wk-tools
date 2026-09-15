@@ -582,6 +582,12 @@ push_agent_pat_deliver() {
     return "$rc"
 }
 
+# The copy `wk push on` handed the injector is written from the held one at the moment the switch was flipped, so one rotated or withdrawn while push is on leaves the machine spending the old one; only while it is on, because writing one into a machine whose agent holds no key would be turning push on.
+push_agent_switch_cred_converge() { # <execfn> <sock> <machine path> <name>
+    [ -n "$(push_agent_list "$1" "$2")" ] || return 0
+    push_agent_cred_sync "$1" "$3" "$4"
+}
+
 push_agent_cred_present() { # <execfn> <path>
     local out
     out=$("$1" "test -s $(sh_quote "$2") && echo yes" </dev/null 2>/dev/null) || out=""
