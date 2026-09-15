@@ -44,6 +44,20 @@ def _wait_dead(pid, timeout=60):
     return False
 
 
+def _wait_registered(name, timeout=120):
+    """Poll until <name> exists at all. `wk new --no-wait` returns the instant
+    the driver is spawned, so a kill sent straight after it can land before the
+    driver has created anything -- and `wk rm` is then right that there is no
+    such workspace. Rubble is what the test below is about, so it waits for
+    some to exist before killing."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if run("status", name, "--json").returncode == 0:
+            return True
+        time.sleep(0.5)
+    return False
+
+
 @requires_podman_vm()
 class TestWkNewKilledMidway(WkTest):
     """`wk new` detaches its driver (cmd/new's `--_detached` half) and this
@@ -128,6 +142,10 @@ class TestWkRmOfRubble(WkTest):
         self.assertIsNotNone(m, cp.stdout)
         pid = m.group(1)
 
+        self.assertTrue(
+            _wait_registered(self.name),
+            f"'{self.name}' never came into existence for the kill to leave rubble",
+        )
         podman_vm_ssh(f"kill -9 {pid}")
         self.assertTrue(_wait_dead(pid), f"driver pid {pid} did not die")
 

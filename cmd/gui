@@ -109,15 +109,10 @@ fi
 
 TYPE_FLAG="--$(printf '%s' "$CFG_TYPE" | tr 'A-Z' 'a-z')"
 
-# `open -a` is refused for the Apple bundle (LaunchServices -10825, incompatible
-# system version), so the binary inside it is exec'd. MiniBrowser's
-# LSMinimumSystemVersion is MACOSX_DEPLOYMENT_TARGET, which WebKit reads from a
-# table keyed by the host's macOS major (Configurations/DeploymentTargets.xcconfig,
-# generated from Configurations/Makefile) and, on a miss, from the SDK instead: that
-# list names 15 and 27, so a macOS 26 host stamps a minimum it does not itself meet.
-# TODO: `open -a` once that list carries the guest's major.
-# A CMake port's browser is a grandchild lldb never sees, so WEBKIT_MINI_BROWSER_PREFIX
-# (webkitpy/port/{gtk,wpe}.py) inserts lldb after the port sets up.
+# `open -a` is refused for the Apple bundle (LaunchServices -10825): WebKit stamps an
+# LSMinimumSystemVersion from a table (Configurations/DeploymentTargets.xcconfig) naming
+# macOS 15 and 27, so a 26 host stamps a minimum it does not meet -- TODO: once it does.
+# A CMake port's browser is a grandchild lldb never sees; WEBKIT_MINI_BROWSER_PREFIX inserts it.
 if [ "$CFG_BUILDSYS" = xcode ]; then
     LAUNCH_ENV=$(config_browser_env "$SRC")
     LAUNCH_CMD="$(sh_quote "$BROWSER") $(config_browser_url_flag) $(sh_quote "$URL") $EXTRA"
@@ -125,7 +120,6 @@ if [ "$CFG_BUILDSYS" = xcode ]; then
 else
     LAUNCH_ENV="WPE_BROWSER=minibrowser $RUN_ENV"
     LAUNCH_CMD="Tools/Scripts/run-minibrowser $CFG_PORT $TYPE_FLAG -- $FS_FLAG $(sh_quote "$URL") $EXTRA"
-    # \$LLDB stays literal for lldb_prelude in the workspace; run-minibrowser shlex.splits it.
     UI_PREFIX="WEBKIT_MINI_BROWSER_PREFIX=\"\$LLDB $(t_lldb_opts) $(lldb_pin_opts) --\""
 fi
 

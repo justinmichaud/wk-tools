@@ -10,8 +10,7 @@ WK_VM_BASE="${WK_VM_BASE:-wk-base}"
 WK_VM_MAX="${WK_VM_MAX:-2}"
 WK_VM_USER="${WK_VM_USER:-admin}"
 
-# The image ships admin/admin (Cirrus Labs) and it is kept: macOS refuses the change
-# from inside the guest, and only the guest's own login window ever asks for it.
+# The image's admin/admin (Cirrus Labs) is kept: macOS refuses the change from inside the guest, and only the guest's own login window ever asks for it.
 WK_VM_PASSWORD="${WK_VM_PASSWORD:-admin}"
 
 vm_login_note() {
