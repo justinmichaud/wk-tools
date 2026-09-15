@@ -102,7 +102,12 @@
 #                     far it reaches, what each other workstation holds of the
 #                     ones the fleet shares, and whether each holds a claude.ai
 #                     login of its own -- every line asked again at that moment.
-#                     Read-only, and what a bare `wk key` runs
+#                     One row each: a state, the name, and what its issuer
+#                     just said; a workstation holding the same credential as
+#                     this one says so rather than repeating its reach.
+#                     Anything that needs doing ends up under `needs you:`, the
+#                     command to type first and where to get what it wants
+#                     second. Read-only, and what a bare `wk key` runs
 #   wk key show       print the public halves, and the ntfy topic URL to point a
 #                     phone at
 #   wk key ensure     create missing push keys without registering them
@@ -264,15 +269,44 @@ cred_line() { # <name> <stored|minted|taken|skipped|refused> <path or one-line r
     printf '%-13s %-8s %s%s' "$1" "$2" "$3" "${var:+  (\$$var in a workspace)}"
 }
 
-# One row of `wk key check`, in a column-aligned table: the verdict's summary line, and the fix when the detail carries one (lib/credcheck.py writes it as a `fix:` line for a credential that cannot do its job). The rest of the detail -- what it must be able to do, what it must not -- is what `wk key set <name>` prints about the one already here.
-cred_row() { # <verdict line>
-    printf '%s\n' "$(wk_cred_detail "$1" | sed -n '1p; /^ *fix: /p')"
+CHECK_ACTION="@@action@@"   # one row of `wk key check` is a state, the label and the verdict's summary line; lib/credcheck.py's `fix:` line leaves the table as an action record, collected behind this marker (no label, url or remedy carries it) and printed once at the end, where a person looks for what to type. The rest of the detail is what `wk key set <name>` prints about the one already here
+
+row_state() { # <verdict>
+    case "$1" in
+        ok)         printf 'ok' ;;
+        wide)       printf 'wide' ;;
+        unverified) printf '?' ;;
+        absent)     printf 'none' ;;
+        *)          printf 'FIX' ;;
+    esac
+}
+
+table_row() { # <state> <label> <summary>
+    printf '    %-4s %-28s %s\n' "$1" "$2" "$3"
+}
+
+cred_row() { # <label> <verdict line>
+    table_row "$(row_state "$(wk_cred_verdict "$2")")" "$1" \
+        "$(wk_cred_detail "$2" | sed -n 1p)"
+    wk_cred_detail "$2" | sed -n "s|^ *fix: |$CHECK_ACTION$1\t|p"
+}
+
+SAME_AS_HERE="the one this machine holds"   # a credential is one credential wherever the fleet holds it, so its reach is reported once: a peer row is the whole verdict only when it has something of its own to say -- a different credential, or the same one its issuer answers differently about
+
+row_agrees() { # <this machine's fingerprint> <verdict line>
+    [ -n "$1" ] && [ "$(wk_cred_verdict "$2")" = ok ] \
+        && [ "$(wk_cred_fact "$2" fingerprint)" = "$1" ]
+}
+
+# What a row that is not lib/credcheck.py's to judge owes a person: the same record, so it reaches the same block.
+row_action() { # <label> <what to type>
+    printf '%s%s\t%s\n' "$CHECK_ACTION" "$1" "$2"
 }
 
 fork_verdict() { # <machine> <fork> <repo> -- judged now: what that key authenticates as there, and whether its public half is registered with write access
     local machine="$1" remote="$2" repo="$3" pub b64 ro line
     pub=$(m_ask "$machine" pub "$remote")
-    [ -n "$pub" ] || { printf 'absent\tno key -- run: wk key deploy\n'; return 0; }
+    [ -n "$pub" ] || { printf 'absent\tno key for this fork\n    fix: wk key deploy\n'; return 0; }
 
     # Matched on the base64 body, which is unique and jq-safe. `|| ro=""` keeps this a report: pipefail would end it on a refused API call.
     b64=$(printf '%s' "$pub" | awk '{print $2}')
@@ -292,38 +326,45 @@ cred_verdict_of() { # <machine> <name> -- a verdict line; a peer that cannot be 
 # One row of `wk key check`, whole, in its own par job: the rows are independent probes, so they are asked at once and the table replays them in its own order.
 check_fork_row() { # <machine> <remote> <repo>
     local line
-    printf '    %-28s ' "$3" >&3
     line=$(fork_verdict "$1" "$2" "$3")
-    cred_row "$line" >&3
+    if [ "$1" != local ] && row_agrees "$(pub_fingerprint "$(pub_of "$2")")" "$line"; then
+        table_row ok "$3" "$SAME_AS_HERE" >&3
+        return 0
+    fi
+    cred_row "$3" "$line" >&3
     [ "$(wk_cred_verdict "$line")" = ok ]
 }
 
 check_cred_row() { # <name>
-    printf '    %-28s ' "$1" >&3
     cred_look "$1"
-    cred_row "$CRED_VERDICT" >&3
+    cred_row "$1" "$CRED_VERDICT" >&3
     [ "$(wk_cred_verdict "$CRED_VERDICT")" != bad ]
 }
 
 check_peer_row() { # <peer> <name> -- one command is the remedy for every fault here, because one command puts all of it there
     local line v fp
-    printf '    %-28s ' "$1 $2" >&3
     line=$(cred_verdict_of "$1" "$2")
     v=$(wk_cred_verdict "$line")
     if [ "$2" = claude-login ] && [ "$v" = absent ]; then
-        printf "no login: from a terminal here, 'wk key setup' logs in for it\n" >&3
+        table_row FIX "$1 $2" "no claude.ai login of its own" >&3
+        row_action "$1 $2" "from a terminal here: wk key setup   (it logs in for $1)" >&3
         return 1
     fi
-    cred_row "$line" >&3
+    # A claude.ai login is made per machine, so there is no one here for it to be the same as.
+    if [ "$2" != claude-login ] && row_agrees "$(wk_cred_fingerprint "$2")" "$line"; then
+        table_row ok "$1 $2" "$SAME_AS_HERE" >&3
+        return 0
+    fi
+    cred_row "$1 $2" "$line" >&3
     case "$v" in
-        absent) printf "    fix: 'wk key setup' here puts the fleet's %s there\n" "$2" >&3; return 1 ;;
-        bad)    printf "    fix: from a terminal here, 'wk key setup' replaces it\n" >&3; return 1 ;;
+        absent) row_action "$1 $2" "wk key setup   (it puts the fleet's $2 there)" >&3; return 1 ;;
+        bad)    row_action "$1 $2" "from a terminal here: wk key setup   (it replaces what $1 holds)" >&3; return 1 ;;
     esac
     # Whether the fleet agrees, not whether each machine is separately fine. Never a fault: both can work, and the next election settles it.
-    [ "$2" != claude-login ] || return 0   # each machine's own, so there is nothing to differ from
+    [ "$2" != claude-login ] || return 0
     fp=$(wk_cred_fact "$line" fingerprint)
     [ -n "$fp" ] && [ "$fp" != "$(wk_cred_fingerprint "$2")" ] \
-        && printf "    it is not the one this machine holds; 'wk key setup' elects between them\n" >&3
+        && row_action "$1 $2" "wk key setup   (it is not the one this machine holds; an election settles it)" >&3
     return 0
 }
 
@@ -654,11 +695,15 @@ setup)
         [ -z "$_peers" ] || [ -n "$FLEET" ] \
             || warn "$_peers was left exactly as it is -- this machine's own credentials are still set up"
     fi
-    converge_forks || true
+    _left=""
+    converge_forks || _left="the deploy keys"
     # A credential declined, or one that cannot be asked for without a terminal,
     # is not a reason to leave the rest of them unset.
-    for _name in $(wk_cred_settable); do cred_setup "$_name" || true; done
-    [ -z "$FLEET" ] || fleet_logins || true
+    for _name in $(wk_cred_settable); do
+        cred_setup "$_name" || _left="$_left $_name"
+    done
+    [ -z "$FLEET" ] || fleet_logins || _left="$_left the other workstations' logins"
+    [ -z "$_left" ] || warn "not settled:$_left"   # a run declined, unable to ask, or killed part way looks exactly like one that finished unless it says so; `check` below says what each one wants
     "$0" check
     ;;
 
@@ -850,41 +895,72 @@ EOF
     done
     par_wait
 
+    ACTIONS=""   # a job's record carries its table row and, for anything that needs doing, an action record: rows print where they are, actions are held for the block below
+    replay() { # <job>
+        local l
+        while IFS= read -r l; do
+            case "$l" in
+                "$CHECK_ACTION"*) ACTIONS="$ACTIONS${l#"$CHECK_ACTION"}
+" ;;
+                *) printf '%s\n' "$l" ;;
+            esac
+        done <<EOR
+$(par_record "$1")
+EOR
+        [ "$(par_rc "$1")" = 0 ] || rc=1
+    }
+
     for machine in $_machines; do
       label=$(m_label "$machine")
       section_printed=""
       while read -r remote repo alias; do
         [ -n "$remote" ] || continue
         [ -n "$section_printed" ] || { printf '  %s\n' "$label:"; section_printed=1; }
-        par_record "fork-$machine-$remote"
-        [ "$(par_rc "fork-$machine-$remote")" = 0 ] || rc=1
+        replay "fork-$machine-$remote"
       done <<EOF
 $_forks
 EOF
     done
 
-    if [ -n "$_boxes" ]; then
-        printf '  build machines (nothing at rest -- reached by a forwarded agent):\n'
-        for machine in $_boxes; do
-            printf '    %-28s %s\n' "$machine" "holds no credential; 'wk push' forwards the elected key"
-        done
+    if [ -n "$_boxes" ]; then   # one row for all of them: a build machine holds nothing, so there is nothing about any one of them to report separately
+        printf '  build machines:\n'
+        # shellcheck disable=SC2086 -- deliberate splitting: one row names them all.
+        table_row ok "$(echo $_boxes | sed 's/ /, /g')" \
+            "nothing at rest; 'wk push' forwards the elected key"
     fi
 
     printf '  credentials:\n'
-    for _cname in $_creds; do
-        par_record "cred-$_cname"
-        [ "$(par_rc "cred-$_cname")" = 0 ] || rc=1
-    done
+    for _cname in $_creds; do replay "cred-$_cname"; done
     if [ -n "$_peers" ]; then
-        printf '  the other workstations (the fleet holds one of each, and each its own login):\n'
+        printf '  the other workstations (one of each, and each its own login):\n'
         for machine in $_peers; do
-            for _cname in $_shared; do
-                par_record "peer-$machine-$_cname"
-                [ "$(par_rc "peer-$machine-$_cname")" = 0 ] || rc=1
-            done
+            for _cname in $_shared; do replay "peer-$machine-$_cname"; done
         done
     fi
     par_end
+
+    if [ -n "$ACTIONS" ]; then   # the command first, because that is the line a person acts on. lib/credcheck.py writes its fix as `<where> -- then: <command>`; a row that named its own remedy is the command alone
+        printf '\n  needs you:\n'
+        _n=0
+        while IFS="$(printf '\t')" read -r _label _fix; do
+            [ -n "$_label" ] || continue
+            _n=$((_n + 1))
+            case "$_fix" in
+                *" -- then: "*) _cmd="${_fix##* -- then: }"; _where="${_fix% -- then: *}" ;;
+                *)              _cmd="$_fix"; _where="" ;;
+            esac
+            case "$_where" in "$_cmd"*) _where="" ;; esac   # the deploy-key rule's remedy *is* the command, and would otherwise print twice
+            printf '    %d. %-26s %s\n' "$_n" "$_label" "$_cmd"
+            [ -z "$_where" ] || printf '       %-26s %s\n' "" "$_where"
+        done <<EOF
+$ACTIONS
+EOF
+    elif [ "$rc" = 0 ]; then
+        printf '\n  nothing needs you.\n'
+    else
+        # A row can fail without naming a remedy: an issuer that did not answer leaves its verdict unestablished, which is not something to go and do.
+        printf '\n  nothing to do by hand: what is not marked `ok` above could not be\n  established just now, so ask again.\n'
+    fi
     exit $rc
     ;;
 

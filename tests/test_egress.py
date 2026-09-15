@@ -26,7 +26,8 @@ import unittest
 import unittest.mock
 from pathlib import Path
 
-from tests.support import assert_guest_start_converges, REPO, WkTest
+from tests.support import (assert_guest_start_converges, func_body,
+                           REPO, WkTest)
 
 PROXY = REPO / "container" / "proxy" / "wk-proxy.py"
 INJECT = REPO / "container" / "proxy" / "github-inject.py"
@@ -1225,6 +1226,26 @@ class TestWhatGhNeeds(unittest.TestCase):
 class TestTheWorkspaceHoldsThePlaceholder(unittest.TestCase):
     """Both targets set the same two variables and the same CA bundle, from the
     one wrapper each of them already goes through."""
+
+    def test_every_way_into_a_container_goes_through_the_wrapper(self):
+        """A shell from `wk enter` reads what a `wk enter <ws> -- <cmd>` reads.
+        Without the wrapper it has no GITHUB_COM_TOKEN, no
+        BUGS_WEBKIT_ORG_PASSWORD and the container's own keyring backend, so
+        `git-webkit pr` hunts a keyring no container has, and reports the
+        failed lookup as a locked macOS Keychain -- measured from `wk enter`
+        on a Linux workstation, where there is no Keychain at all."""
+        text = (REPO / "targets" / "container.sh").read_text()
+        for fn in ("t_exec", "t_enter", "t_spawn"):
+            with self.subTest(fn=fn):
+                self.assertRegex(func_body(text, fn),
+                                 r"_wrap_cmd|ensure-bridge\.sh")
+
+    def test_the_shell_wk_enter_spawns_is_still_a_login_shell(self):
+        """What the wrapper may not cost: wkdev-enter spawns a login shell of
+        its own only when it is given no command, and the container's rc is
+        what puts the checkout on PATH and starts the shell in it."""
+        self.assertIn("--login", func_body(
+            (REPO / "targets" / "container.sh").read_text(), "t_enter"))
 
     def test_a_container_gets_them_from_ensure_bridge(self):
         text = (REPO / "container" / "proxy" / "ensure-bridge.sh").read_text()

@@ -502,7 +502,9 @@ class TestCheckAsksEachWorkstationWhatItHolds(_Fleet):
                         verdict="ok\tit reaches exactly the forks\n")
         out = cp.stdout + cp.stderr
         self.assertIn("the other workstations", out)
-        self.assertRegex(out, r"peerbox claude-login\s+no login: .*wk key setup")
+        self.assertRegex(out, r"peerbox claude-login\s+no claude.ai login of its own")
+        self.assertRegex(out.split("needs you:")[1],
+                         r"peerbox claude-login\s+.*wk key setup")
         self.assertNotIn("buildbox", out.split("the other workstations")[1])
         self.assertNotEqual(0, cp.returncode)
 
@@ -518,8 +520,40 @@ class TestCheckAsksEachWorkstationWhatItHolds(_Fleet):
                         verdict="absent\tnothing stored\n")
         out = cp.stdout + cp.stderr
         self.assertRegex(out, r"peerbox github-pat\s+nothing stored")
-        self.assertIn("fix: 'wk key setup' here puts the fleet's github-pat there", out)
+        self.assertRegex(out.split("needs you:")[1],
+                         r"peerbox github-pat\s+wk key setup\s+\(it puts the fleet's "
+                         r"github-pat there\)")
         self.assertNotEqual(0, cp.returncode)
+
+    def test_a_peer_holding_the_same_one_does_not_repeat_its_reach(self):
+        """A credential is one credential wherever the fleet holds it, so what
+        it can do is reported once. A peer holding the very credential this
+        machine holds, with its issuer answering the same, says so; the
+        sentence belongs to the `credentials:` row above."""
+        self.base_env()          # it is what names the directories below
+        self.held.mkdir(parents=True, exist_ok=True)
+        (self.held / "github-pat").write_text(GOOD_PAT + "\n")
+        fp = subprocess.run(
+            ["python3", str(REPO / "lib" / "secretfile.py"), "fingerprint",
+             str(self.held / "github-pat")],
+            capture_output=True, text=True, check=True).stdout.strip()
+        cp = self.check(login="ok\tscopes: user:inference user:profile\n",
+                        verdict="ok\tit reaches exactly the forks\n"
+                                "    fingerprint: %s\n" % fp)
+        out = cp.stdout + cp.stderr
+        self.assertRegex(out, r"peerbox github-pat\s+the one this machine holds")
+        self.assertNotRegex(out, r"peerbox github-pat\s+it reaches exactly the forks")
+
+    def test_a_peer_holding_a_different_one_reports_it_whole(self):
+        """The other side of that branch: a peer whose credential is not this
+        machine's is the whole verdict plus the election that settles it."""
+        cp = self.check(login="ok\tscopes: user:inference user:profile\n",
+                        verdict="ok\tit reaches exactly the forks\n"
+                                "    fingerprint: not-the-one-here\n")
+        out = cp.stdout + cp.stderr
+        self.assertRegex(out, r"peerbox github-pat\s+it reaches exactly the forks")
+        self.assertRegex(out.split("needs you:")[1],
+                         r"peerbox github-pat\s+wk key setup")
 
 
 class TestGiveIsTheOtherHalfOfAdopt(_Shared):

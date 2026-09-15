@@ -172,6 +172,10 @@ exit 1
 # authenticate gives.
 SSH_REFUSES = '#!/bin/sh\nexit 255\n'
 
+# A `gh` that answers every call with an empty body: the key list could not be
+# read, so whether a registration carries write access is unestablished.
+GH_SAYS_NOTHING = '#!/bin/sh\nexit 0\n'
+
 
 class TestCheckAsksAboutEveryCredential(_KeyRun):
     """`wk key check` is the one report over all of them, and every line of it
@@ -203,19 +207,56 @@ class TestCheckAsksAboutEveryCredential(_KeyRun):
         self.assertIn("does not start like a GitHub personal access token",
                       cp.stdout)
 
-    def test_every_row_is_one_line_plus_at_most_the_fix(self):
-        """`wk key check` is an aligned table, so a row is a summary line and,
-        for a credential that cannot do its job, the `fix:` line -- never the
-        whole detail wrapped across the column."""
+    def test_a_row_is_one_line_and_the_fix_leaves_the_table(self):
+        """`wk key check` is an aligned table, so a row is a state, a name and
+        one summary line -- never the whole detail wrapped across the column,
+        and never the `fix:` line, which leaves the table for the block at the
+        end where a person looks for what to type."""
         cp, secrets = self.key("ensure")
         (secrets.parent / "push-keys" / "github-pat").write_text("hunter2\n")
         cp, _ = self.key("check")
-        rows = [l for l in cp.stdout.splitlines()
-                if l.startswith("    ") and l.strip()]
+        table, _, actions = cp.stdout.partition("needs you:")
+        rows = [l for l in table.splitlines() if l.startswith("    ") and l.strip()]
         for line in rows:
             with self.subTest(line=line):
                 self.assertNotIn("it must ", line)
-        self.assertTrue(any("fix:" in l for l in rows), cp.stdout)
+                self.assertNotIn("fix:", line)
+        self.assertTrue(rows, cp.stdout)
+        self.assertIn("github-pat", actions)
+
+    def test_what_needs_doing_is_named_once_with_the_command_to_type(self):
+        """The one thing a person wants from this report: a numbered list of
+        what is not right and the command that puts each one right, the command
+        first and where to get what it wants under it."""
+        cp, secrets = self.key("ensure")
+        (secrets.parent / "push-keys" / "github-pat").write_text("hunter2\n")
+        cp, _ = self.key("check")
+        self.assertNotEqual(0, cp.returncode, cp.stdout)
+        actions = cp.stdout.partition("needs you:")[2]
+        self.assertRegex(actions, r"\d+\. github-pat\s+wk key set github-pat --replace")
+        self.assertIn("https://github.com/settings/personal-access-tokens/new",
+                      actions)
+
+    def test_a_deploy_key_remedy_is_not_printed_twice(self):
+        """The deploy-key rule's remedy *is* the command, so the line naming
+        where to get one would otherwise repeat it."""
+        cp, _secrets = self.key("check")
+        actions = cp.stdout.partition("needs you:")[2]
+        self.assertEqual(2, actions.count("wk key deploy"),
+                         "one line per fork, not two: " + actions)
+
+    def test_a_row_that_fails_without_a_remedy_is_not_called_nothing_to_do(self):
+        """A fork whose registration could not be read fails the check and
+        names no remedy -- there is nothing to go and do about an issuer that
+        did not answer, and saying `nothing needs you` while exiting non-zero
+        would be the report contradicting itself."""
+        self.key("ensure")
+        cp, _ = self.key("check", stubs={"gh": GH_SAYS_NOTHING,
+                                         "ssh": SSH_IS_THE_FORKS_KEY})
+        self.assertNotEqual(0, cp.returncode, cp.stdout)
+        self.assertNotIn("nothing needs you.", cp.stdout)
+        self.assertNotIn("needs you:", cp.stdout)
+        self.assertIn("could not be\n  established just now", cp.stdout)
 
     def test_the_fork_rows_are_asked_at_once(self):
         """Every row of the table is an independent probe -- a `gh api` call
@@ -275,6 +316,18 @@ class TestSetupDoesWhateverIsMissing(_KeyRun):
                      "claude-login", "tailnet", "tailnet-api", "ntfy"):
             with self.subTest(name=name):
                 self.assertIn(name, cp.stdout)
+
+    def test_what_it_could_not_settle_is_named_before_the_report(self):
+        """A run that was declined, could not ask, or was killed part way looks
+        exactly like one that finished unless it says so -- and then `wk key
+        check` afterwards reads as the report complaining about work the run
+        was supposed to have done."""
+        cp, _secrets = self.setup_run()
+        left = [l for l in cp.stderr.splitlines() if "not settled:" in l]
+        self.assertEqual(1, len(left), cp.stderr)
+        for name in ("litellm", "tailnet-api"):
+            with self.subTest(name=name):
+                self.assertIn(name, left[0])
 
     def test_a_credential_it_cannot_ask_for_does_not_end_the_run(self):
         """No terminal, so every prompt refuses; the last credential in the

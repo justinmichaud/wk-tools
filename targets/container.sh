@@ -289,11 +289,12 @@ t_spawn() {
         >/dev/null
 }
 
-t_enter() {
+t_enter() {   # through _wrap_cmd like every other way in: without it a shell has no GITHUB_COM_TOKEN, no BUGS_WEBKIT_ORG_PASSWORD and the container's own keyring backend, and `git-webkit pr` reports the failed keyring lookup as a locked macOS Keychain and exits. wkdev-enter spawns a login shell of its own only when given no command, so that shell is spelled out here
     local name="$1"
     local c; c=$(_ctr "$name")
-    _hpodman exec -d "$c" /opt/wk-tools/container/proxy/ensure-bridge.sh true 2>/dev/null || true
-    _sdk "$WK_SDK/scripts/host-only/wkdev-enter" --name "$c"
+    _sdk "$WK_SDK/scripts/host-only/wkdev-enter" --name "$c" --exec -- \
+        $(_wrap_cmd) /usr/bin/env "USER=$WKDEV_CONTAINER_USER" \
+        "$WKDEV_CONTAINER_SHELL" --login
 }
 
 # From macOS the store and the containers are the podman machine's, so the machine answers for them in its own words.

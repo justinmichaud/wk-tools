@@ -1197,10 +1197,22 @@ are the one step that needs `gh`), then every credential this machine has not
 got, asked for one at a time, then `wk key check` -- the read-only report, and
 what a bare `wk key` runs. It prints one line per
 credential -- the name, `stored`, `minted`, `skipped` or `refused`, and the path
-or the one-line reason -- and then that table, and nothing else: a credential
+or the one-line reason -- then names whatever it could not settle, and then that
+table: a credential
 already stored is left exactly as it is unless its issuer now refuses it, an
 empty answer skips one, and the run can be killed
-and repeated. `wk key set <name>` is the same thing for one of
+and repeated. A run that was declined, could not ask or was killed part way
+says so, so the report after it never reads as a complaint about work the run
+was supposed to have done.
+
+`wk key check` is one row per thing -- a state, the name, and what its issuer
+answered just now -- and one block at the end. A workstation holding the very
+credential this machine holds says so rather than repeating its reach, because
+a credential is one credential wherever the fleet keeps it. Anything that needs
+a person ends up under `needs you:`, numbered, the command to type first and
+the page that mints what it wants under it; with nothing to do it says that in
+one line, and a row nobody could judge is named as unestablished rather than as
+work. `wk key set <name>` is the same thing for one of
 them by name --
 `github-pat`, `bugzilla-api-key`, `claude`, `claude-login`, `litellm`,
 `tailnet`, `tailnet-api` --
