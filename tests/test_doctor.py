@@ -489,7 +489,7 @@ class TestTheOtherWorkstationsLogins(unittest.TestCase):
     """`wk doctor --all` asks each peer workstation for its own login's
     verdict -- what `wk key check` already does -- and renders it as rows:
     the block is lifted and driven against fakes of the two things it calls,
-    peer_workstations and peer_login_verdict (lib/target.sh)."""
+    peer_workstations and peer_cred_verdict (lib/target.sh)."""
 
     VERDICTS = {
         "goodbox": "ok\tscopes: user:profile; organization: Example Org; remote control allowed by the organization's policy.\n    remote-control: allowed",
@@ -515,7 +515,7 @@ set -euo pipefail
 . "{REPO}/lib/store.sh"
 {harness}
 peer_workstations() {{ printf '%s\\n' {" ".join(peers + tuple(unanswered))}; }}
-peer_login_verdict() {{
+peer_cred_verdict() {{
     case "$1" in
 {cases}
     esac
@@ -537,10 +537,10 @@ echo "missing=$missing"
         self.assertRegex(out, r"--.*remote control in the workspaces deniedbox makes: denied.*an owner of the Example Org")
         self.assertIn("missing=1", out)
 
-    def test_a_peer_without_a_usable_login_is_red_with_the_share_command(self):
+    def test_a_peer_without_a_usable_login_is_red_with_the_one_command(self):
         out = self.rows(("emptybox", "newbox"))
-        self.assertRegex(out, r"--.*emptybox: no accessToken\..*wk key share --to emptybox")
-        self.assertRegex(out, r"--.*newbox: nothing stored.*wk key share --to newbox")
+        self.assertRegex(out, r"--.*emptybox: no accessToken\..*wk key setup")
+        self.assertRegex(out, r"--.*newbox: nothing stored.*wk key setup")
         self.assertIn("missing=2", out)
 
     def test_a_peer_that_does_not_answer_is_unknown_never_broken(self):

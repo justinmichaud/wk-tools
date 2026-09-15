@@ -3,6 +3,7 @@
 What is owed across more than one board or bridge; board- and bridge-specific
 work lives in the other `docs/HANDOFF-*.md`.
 
+- [ ] `wk key check` calls a peer that did not answer at all "no key" on its deploy-key rows, the same words as a peer that answered and holds none; the election reads those rows, so the two need to read differently [needs a peer that is off]
 - [ ] run the card edits against a real card on rpi5: `retarget`, `cmdline-append`, `config-append`, `boot-id`, `units`, `boot-check`, `parts`, `root-spec` — every one is written and none has met a reader [needs a card in rpi5]
 - [ ] boot a board off a card those verbs wrote: the units start, the root resolves by PARTUUID, `wk-image.id` names the system [needs a Pi card in hand]
 - [ ] `wk sysimage write` seeding the tailnet key onto a card, and the board then joining the tailnet on first boot [needs a Pi card in hand]

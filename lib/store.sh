@@ -400,7 +400,7 @@ wk_push_key() { # <fork> -- read only by push_agent_load, into `ssh-add -`
     _wk_secret_read "$(wk_push_held_dir)/build_key_$1"
 }
 
-# The shared deploy key arrives from another workstation over the tailnet (cmd/key share). Written here once it parses as a key, then published like any other.
+# The elected deploy key arrives from another workstation over the tailnet (cmd/key). Written here once it parses as a key, then published like any other.
 wk_push_key_adopt() { # <fork> -- private half on stdin
     local fork="$1" priv key
     priv="$(wk_push_held_dir)/build_key_$fork"
@@ -426,7 +426,7 @@ wk_push_pub_publish() { # <fork>
     secrets_publish_view container
 }
 
-# A claude.ai login another workstation made for this one (cmd/key share): the credential and the account record beside it, a tar on stdin, judged whole before anything here is replaced. Prints the rule's verdict line.
+# A claude.ai login another workstation made for this one (cmd/key setup): the credential and the account record beside it, a tar on stdin, judged whole before anything here is replaced. Prints the rule's verdict line.
 wk_login_adopt() {
     local dir line rw; rw=$(wk_agent_rw_dir)
     ensure_dir "$rw" 0700
@@ -1202,6 +1202,10 @@ wk_cred_clear() { # <name> -- this machine holds it no longer; a file row's logi
 
 wk_cred_read() { # <name> -- every byte of it, nothing when it is absent
     _wk_secret_read "$(wk_cred_path "$1")"
+}
+
+wk_cred_fingerprint() { # <name> -- what an election compares: one credential on two machines fingerprints alike, and the value cannot be got back from it
+    python3 "$WK_ROOT/lib/secretfile.py" fingerprint "$(wk_cred_path "$1")"
 }
 
 # `--stored` judges what this machine holds, else the value comes on stdin,

@@ -1,26 +1,43 @@
 #!/usr/bin/env bash
 #
 # wk key check|setup|set|deploy|show|ensure -- the credentials this machine holds
-# wk: where=host name=none group=sources needs gh,gh-auth takes=1 destructive setup,deploy,share,--replace
-# wk: sub show,ensure,pub,sshtest,fingerprints,set,register,claude,tailnet,tailnet-api,share,adopt,verdict needs=
-# wk: sub set,pub,sshtest,adopt,verdict takes=2
+# wk: where=host name=none group=sources needs gh,gh-auth takes=1 destructive setup,deploy,--replace
+# wk: sub show,ensure,pub,sshtest,fingerprints,set,register,claude,tailnet,tailnet-api,share,adopt,verdict,give needs=
+# wk: sub set,pub,sshtest,adopt,verdict,give takes=2
 # wk: sub set opts=--replace,--paste
 # wk: sub deploy,setup opts=--rotate
-# wk: sub share opts=--to=,--only=
 #
-#   wk key setup      store every credential this machine has not got yet, and
-#                     report what each one can do. The one command a new
-#                     machine needs: it asks for the ones wk is given, mints
-#                     the ones wk makes itself, leaves the ones already here
-#                     alone unless their issuer now refuses them (those are
-#                     asked for again), and can be re-run. One line per credential --
-#                     stored, minted, skipped or refused, with the path or the
-#                     reason -- and then `wk key check`'s table
-#                       --rotate  turn every credential over: the deploy keys
-#                                 as `wk key deploy --rotate` does, then each
-#                                 stored credential replaced in turn as
-#                                 `wk key set <name> --replace` does. Asks
-#                                 once, first
+#   wk key setup      every credential this machine needs, and one working
+#                     credential of each kind on every workstation. The one
+#                     command a new machine needs, and the one that keeps the
+#                     fleet holding the same keys:
+#                       the deploy keys, the GitHub API token and the Bugzilla
+#                       API key are elected. Every workstation is asked what it
+#                       holds and whether its issuer still accepts it, at that
+#                       moment, and the best working answer wins -- age counts
+#                       for nothing. The winner is put on every workstation
+#                       holding a different one, and a tie goes to this machine,
+#                       so a fleet that already agrees is left alone.
+#                       When no workstation holds one that works, this machine
+#                       mints or is asked for one, and that one is fanned out.
+#                       The claude.ai login is never copied: a workstation
+#                       without a usable one is logged in for here and sent only
+#                       its own. The rest -- claude, litellm, tailnet,
+#                       tailnet-api, ntfy -- are this machine's own, stored if
+#                       missing and asked for again if their issuer now refuses
+#                       them.
+#                     A build machine is sent nothing: it keeps no credential at
+#                     rest and reaches the elected deploy key through an
+#                     ssh-agent forwarded from whoever drives the push. One line
+#                     per credential -- stored, minted, taken, skipped or
+#                     refused -- and then `wk key check`'s table. It overwrites
+#                     what the other workstations hold, so it asks once, first,
+#                     and it can be killed and re-run
+#                       --rotate  turn every credential over rather than elect
+#                                 one: the deploy keys as `wk key deploy
+#                                 --rotate` does, then each stored credential
+#                                 replaced as `wk key set <name> --replace`
+#                                 does, and the fresh ones fanned out
 #   wk key set <name> [--replace] [--paste]
 #                     one credential by name, or the report on it when it is
 #                     already here.
@@ -75,45 +92,30 @@
 #                                     never written to a card or held by a
 #                                     workspace
 #
-#   wk key deploy     the push keys: one deploy key per fork, the same on every
-#                     workstation, registered on GitHub with write access, and
-#                     fanned out over the tailnet to the other workstations so
-#                     they all hold the one key. --rotate makes a fresh key,
-#                     removes the old one from GitHub, and fans the new one out.
-#                     Asks once, first. A stored GitHub API token or Bugzilla
-#                     key its issuer refuses is replaced before the fan-out --
-#                     taken from a peer that holds one it accepts, else asked
-#                     for -- and never fanned out as is. The claude.ai login is never copied --
-#                     a copy is a second holder of one refresh token, and the
-#                     first refresh on either side locks the other out -- so a
-#                     workstation without a usable one is logged in for here:
-#                     the browser opens once per such workstation, and what it
-#                     leaves is sent there and kept nowhere else
-#   wk key share      fan this machine's deploy keys, GitHub API token and
-#                     Bugzilla API key out to every other workstation over the
-#                     tailnet, without touching GitHub, and log in here for any
-#                     without a claude.ai login of its own. Asks first: it
-#                     overwrites what those machines hold
-#                       --to <machine>     one workstation only
-#                       --only <name>      github-pat or bugzilla-api-key alone,
-#                                          not the keys -- how a peer takes a
-#                                          working one from this machine
-#                                          (setup, deploy)
+#   wk key deploy     the deploy keys alone, elected and converged the way
+#                     `setup` does them: the key each fork's repository accepts
+#                     wins, it is registered on GitHub with write access under a
+#                     single title, and every workstation holding a different
+#                     one takes it. --rotate removes the old keys from GitHub
+#                     and mints fresh ones instead of electing. Asks once, first
 #   wk key check      what every credential this machine holds can do and how
-#                     far it reaches, each one asked again at that moment, and
-#                     whether each other workstation holds a claude.ai login of
-#                     its own. Read-only, and what a bare `wk key` runs
+#                     far it reaches, what each other workstation holds of the
+#                     ones the fleet shares, and whether each holds a claude.ai
+#                     login of its own -- every line asked again at that moment.
+#                     Read-only, and what a bare `wk key` runs
 #   wk key show       print the public halves
 #   wk key ensure     create missing push keys without registering them
 #
 # One key per fork, the same on every workstation and shared by every workspace:
 # GitHub deploy keys are scoped to a single repository and refuse the same key on
 # a second one, so a compromised workspace can push to the forks in wk_push_forks
-# and nowhere else. The one key per fork is registered once, and the same private
-# half is held on every workstation -- fanned out over the tailnet by 'wk key
-# share', which 'deploy' calls after it registers. Rotating on any workstation
-# ('wk key deploy --rotate') removes the old key from GitHub, mints a new one,
-# and fans it out, so the whole fleet turns over from one command.
+# and nowhere else. The one key per fork is registered once and held on every
+# workstation. Which key that is, and which GitHub API token and Bugzilla API
+# key the fleet uses, is decided by evidence taken at that moment rather than by
+# where one was last stored: 'wk key setup' asks every workstation what it holds
+# and whether its issuer still accepts it, and the best working answer is put
+# everywhere. Rotating ('wk key setup --rotate', or 'wk key deploy --rotate' for
+# the keys alone) turns the whole fleet over from one command.
 #
 # A shared build machine holds no key at all: it reaches the deploy key through
 # an ssh-agent forwarded from the workstation that drives it, so nothing private
@@ -121,18 +123,24 @@
 # Registration goes through the GitHub API, which takes the title, key and
 # read_only=false directly.
 #
-# Three more, addressed to one fork rather than every one of them, meant for
-# another machine or `wk status` to call rather than to type by hand:
+# The rest are meant for another machine to call over the tailnet, or for `wk
+# status`, rather than to type by hand:
 #
 #   wk key pub <fork>        print that fork's public key
 #   wk key sshtest <fork>    does that fork's key authenticate, and as what
 #   wk key fingerprints      every key here, its fingerprint and its state
 #   wk key verdict <name>    one stored credential's verdict and detail, as
-#                            `check` prints them, on one tab-separated line
+#                            `check` prints them, on one tab-separated line,
+#                            with the fingerprint an election compares
 #   wk key adopt <fork>      take a shared deploy key's private half on stdin
 #   wk key adopt claude-login
 #                            take a login made for this workstation: a tar of
 #                            its two files on stdin, judged before it is kept
+#   wk key give <fork>|<name>
+#                            print that credential, for the workstation running
+#                            `wk key setup` to take -- the other half of
+#                            `adopt`. Never the claude.ai login: that one is
+#                            made per machine and never copied
 #
 # <fork> is one of wk_push_forks' short names (lib/store.sh).
 #
@@ -163,13 +171,17 @@ WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 load_target "$(default_target)" 2>/dev/null || true
 
 ACTION="${1:-check}"
+ROTATE=""   # --rotate: the fleet takes this machine's fresh credential instead of electing one
+case "${2:-}" in
+    --rotate) ROTATE=1 ;;
+esac
 
 ensure_keys() { "$0" ensure 2>&1 | sed 's/^/  /'; }
 
-# Every workstation that holds the shared key: this one, and the peers (peer_workstations, lib/target.sh).
-workstations() {
-    echo local
-    peer_workstations
+PEERS=""; WORKSTATIONS=""
+fleet_resolve() {   # asking whether a machine is a peer is an ssh round trip (peer_workstations, lib/target.sh), so a run asks once and every arm reads these
+    PEERS=$(peer_workstations)
+    WORKSTATIONS=$(printf 'local\n%s' "$PEERS")
 }
 
 m_label() {
@@ -177,16 +189,18 @@ m_label() {
     printf '%s' "$1"
 }
 
-# `|| true` on both: a machine with no key yet answers non-zero, and under `set -o pipefail` that would end the command.
-m_pub() {
-    if [ "$1" = local ]; then pub_of "$2"; return 0; fi
-    { ( load_target "$1"; t_wk key pub "$2" ) 2>/dev/null || true; } | tr -d '\r'
+# Every question to a workstation goes through here, so an election asks all of them the same one. `|| true`: a machine with no credential answers non-zero, and under `set -o pipefail` that would end the command.
+m_ask() { # <machine> <args...> -- its answer on stdout, never a failure
+    if [ "$1" = local ]; then shift; "$0" "$@" 2>/dev/null || true; return 0; fi
+    local m="$1"; shift
+    { ( load_target "$m"; t_wk key "$@" ) 2>/dev/null || true; } | tr -d '\r'
+    return 0
 }
 
-m_sshtest() {
-    if [ "$1" = local ]; then "$0" sshtest "$2" 2>/dev/null || true; return 0; fi
-    { ( load_target "$1"; t_wk key sshtest "$2" ) 2>/dev/null || true; } | tr -d '\r'
-    return 0
+m_tell() { # <machine> <args...> -- non-zero when it did not take what arrived; the value is on stdin, never an argument in `ps` over there
+    if [ "$1" = local ]; then shift; "$0" "$@" >/dev/null 2>&1; return; fi
+    local m="$1"; shift
+    ( load_target "$m"; t_wk key "$@" ) >/dev/null 2>&1
 }
 pub_of() { # <fork>
     cat "$(wk_secrets_dir)/build_key_$1.pub" 2>/dev/null
@@ -230,17 +244,6 @@ cred_stale() { # <name> -- stored, and its issuer refuses it now; `unverified` (
     [ "$(wk_cred_verdict "$CRED_VERDICT")" = bad ]
 }
 
-cred_replace_stale() { # <name> -- 0 when nothing was stale or a fresh one is stored; the value is typed, so no terminal means it is named and left
-    cred_stale "$1" || return 0
-    warn "$1 is stored here but refused: $(wk_cred_detail "$CRED_VERDICT" | sed -n 1p)"
-    ! cred_travels_alone "$1" || ! cred_take_from_fleet "$1" || return 0
-    if [ ! -t 0 ]; then
-        warn "a replacement is typed at a prompt, and there is no terminal here:  wk key set $1 --replace"
-        return 1
-    fi
-    "$0" set "$1" --replace
-}
-
 cred_print() { # <name>  non-zero when it cannot do its job
     local v d
     v=$(wk_cred_verdict "$CRED_VERDICT"); d=$(wk_cred_detail "$CRED_VERDICT")
@@ -254,7 +257,7 @@ cred_print() { # <name>  non-zero when it cannot do its job
 
 cred_known() { wk_cred_settable | grep -qxF "$1"; }
 
-cred_line() { # <name> <stored|minted|skipped|refused> <path or one-line reason>
+cred_line() { # <name> <stored|minted|taken|skipped|refused> <path or one-line reason>
     local var; var=$(wk_agent_secret_field "$1" 4)
     [ "$var" = - ] && var=""
     printf '%-13s %-8s %s%s' "$1" "$2" "$3" "${var:+  (\$$var in a workspace)}"
@@ -265,20 +268,31 @@ cred_row() { # <verdict line>
     printf '%s\n' "$(wk_cred_detail "$1" | sed -n '1p; /^ *fix: /p')"
 }
 
-# One row of `wk key check`, whole, in its own par job: the rows are independent probes, so they are asked at once and the table replays them in its own order.
-check_fork_row() { # <machine> <remote> <repo>
+fork_verdict() { # <machine> <fork> <repo> -- judged now: what that key authenticates as there, and whether its public half is registered with write access
     local machine="$1" remote="$2" repo="$3" pub b64 ro line
-    printf '    %-28s ' "$repo" >&3
-    pub=$(m_pub "$machine" "$remote")
-    [ -n "$pub" ] || { echo "no key -- run: wk key deploy" >&3; return 1; }
+    pub=$(m_ask "$machine" pub "$remote")
+    [ -n "$pub" ] || { printf 'absent\tno key -- run: wk key deploy\n'; return 0; }
 
     # Matched on the base64 body, which is unique and jq-safe. `|| ro=""` keeps this a report: pipefail would end it on a refused API call.
     b64=$(printf '%s' "$pub" | awk '{print $2}')
     ro=$(gh api "repos/$repo/keys" </dev/null 2>/dev/null \
          --jq ".[] | select(.key | contains(\"$b64\")) | .read_only" | head -1) || ro=""
     line=$(wk_cred_check deploy-key --repos "$repo" \
-               --evidence "ssh=$(m_sshtest "$machine" "$remote")" \
+               --evidence "ssh=$(m_ask "$machine" sshtest "$remote")" \
                --evidence "read_only=$ro" </dev/null)
+    printf '%s\n    fingerprint: %s\n' "$line" "$(pub_fingerprint "$pub")"
+}
+
+cred_verdict_of() { # <machine> <name> -- a verdict line; a peer that cannot be asked says so rather than looking empty (peer_cred_verdict, lib/target.sh)
+    [ "$1" != local ] || { "$0" verdict "$2"; return 0; }
+    peer_cred_verdict "$1" "$2" || true
+}
+
+# One row of `wk key check`, whole, in its own par job: the rows are independent probes, so they are asked at once and the table replays them in its own order.
+check_fork_row() { # <machine> <remote> <repo>
+    local line
+    printf '    %-28s ' "$3" >&3
+    line=$(fork_verdict "$1" "$2" "$3")
     cred_row "$line" >&3
     [ "$(wk_cred_verdict "$line")" = ok ]
 }
@@ -290,16 +304,26 @@ check_cred_row() { # <name>
     [ "$(wk_cred_verdict "$CRED_VERDICT")" != bad ]
 }
 
-check_login_row() { # <peer>
-    local line
-    printf '    %-28s ' "$1" >&3
-    line=$(peer_login_verdict "$1") || true
-    case "$(wk_cred_verdict "$line")" in
-        absent) printf "no login: from a terminal here, 'wk key share --to %s' logs in for it\n" "$1" >&3; return 1 ;;
-        bad)    cred_row "$line" >&3
-                printf "    fix: from a terminal here, 'wk key share --to %s' logs in for it\n" "$1" >&3; return 1 ;;
-        *)      cred_row "$line" >&3 ;;
+check_peer_row() { # <peer> <name> -- one command is the remedy for every fault here, because one command puts all of it there
+    local line v fp
+    printf '    %-28s ' "$1 $2" >&3
+    line=$(cred_verdict_of "$1" "$2")
+    v=$(wk_cred_verdict "$line")
+    if [ "$2" = claude-login ] && [ "$v" = absent ]; then
+        printf "no login: from a terminal here, 'wk key setup' logs in for it\n" >&3
+        return 1
+    fi
+    cred_row "$line" >&3
+    case "$v" in
+        absent) printf "    fix: 'wk key setup' here puts the fleet's %s there\n" "$2" >&3; return 1 ;;
+        bad)    printf "    fix: from a terminal here, 'wk key setup' replaces it\n" >&3; return 1 ;;
     esac
+    # Whether the fleet agrees, not whether each machine is separately fine. Never a fault: both can work, and the next election settles it.
+    [ "$2" != claude-login ] || return 0   # each machine's own, so there is nothing to differ from
+    fp=$(wk_cred_fact "$line" fingerprint)
+    [ -n "$fp" ] && [ "$fp" != "$(wk_cred_fingerprint "$2")" ] \
+        && printf "    it is not the one this machine holds; 'wk key setup' elects between them\n" >&3
+    return 0
 }
 
 # Deliberately not delivered into a workspace like the wk_agent_secrets rows: only the credential injector, on the machine that runs the workspaces, ever reads the token.
@@ -326,59 +350,184 @@ cred_report() { # <name> -- non-zero when what is stored cannot do its job
 
 SHARED_KEY_TITLE="wk shared deploy key"   # rotation finds the old key to remove by this one title
 
-SHARED_VALUES="github-pat bugzilla-api-key"   # the pasted credentials a fan-out carries, each able to travel alone (`--only`); the deploy keys go together and the login is made per machine
-SHARE_ONLY=""
+SHARED_VALUES="github-pat bugzilla-api-key"   # the credentials the fleet holds one of, elected and fanned out; the deploy keys are elected per fork and the claude.ai login is made per machine
 
-cred_travels_alone() { case " $SHARED_VALUES " in *" $1 "*) return 0 ;; esac; return 1; }
+# An election settles a disagreement between workstations, so with no peer, or with the question declined, every arm does this machine alone.
+FLEET=""    # another workstation exists and may be written to
 
-share_value() { # <machine> <name> -- on stdin over there; skipped when its issuer refuses the one stored here
-    local machine="$1" name="$2" value
-    value=$(wk_cred_read "$name" | sed -n '1p')
-    [ -n "$value" ] || return 0
-    if cred_stale "$name"; then
-        warn "$machine: the $name is not shared -- its issuer refuses the one stored here"
-        return 0
-    fi
-    if printf '%s\n' "$value" | ( load_target "$machine"; t_wk key set "$name" --paste ) >/dev/null 2>&1; then
-        changed "$machine: shared the $name"
-    else
-        warn "$machine: could not share the $name"
-        return 1
-    fi
+cred_shared() { case " $SHARED_VALUES " in *" $1 "*) return 0 ;; esac; return 1; }
+
+peers_named() { echo $PEERS; }
+
+pub_fingerprint() { # <public half> -- what says two workstations hold one key
+    printf '%s\n' "$1" | ssh-keygen -lf - 2>/dev/null | awk '{print $2}'
 }
 
-share_to() { # <machine> -- each value on stdin, never an argument in `ps` over there
-    local machine="$1" remote repo alias name
-    while read -r remote repo alias; do
-        [ -n "$remote" ] || continue
-        [ -z "$SHARE_ONLY" ] || continue
-        [ -n "$(wk_push_key "$remote")" ] || continue
-        if wk_push_key "$remote" | ( load_target "$machine"; t_wk key adopt "$remote" ) >/dev/null 2>&1; then
-            changed "$machine: shared the $repo deploy key"
-        else
-            warn "$machine: could not share the $repo deploy key"
-            return 1
-        fi
-    done <<EOF
-$(wk_push_forks)
-EOF
-    for name in $SHARED_VALUES; do
-        [ -z "$SHARE_ONLY" ] || [ "$SHARE_ONLY" = "$name" ] || continue
-        share_value "$machine" "$name" || return 1
+ELECT_ROWS=""; ELECT_WINNER=""; ELECT_HELD=""
+elect_clear() { ELECT_ROWS=""; ELECT_WINNER=""; ELECT_HELD=""; }
+
+# Every workstation is asked at once, and the best working answer wins: `ok` over
+# `wide`, and one that cannot do its job never travels. Age is not evidence -- a
+# token minted this morning that reaches nothing loses to the one that works --
+# and a tie goes to this machine, so a fleet that already agrees moves nothing.
+elect() { # <verdict-fn> <args...> -- fills ELECT_WINNER, ELECT_HELD and ELECT_ROWS
+    local m line v rank best=0
+    elect_clear
+    par_begin
+    for m in $WORKSTATIONS; do par_run "elect-$m" elect_ask "$m" "$@"; done
+    par_wait
+    for m in $WORKSTATIONS; do
+        line=$(par_record "elect-$m")
+        v=$(wk_cred_verdict "$line")
+        [ "$v" != unverified ] || ELECT_HELD=1
+        ELECT_ROWS="$ELECT_ROWS$m $v $(wk_cred_fact "$line" fingerprint)
+"
+        rank=0
+        case "$v" in ok) rank=3 ;; wide) rank=2 ;; esac
+        [ "$rank" -le "$best" ] || { best="$rank"; ELECT_WINNER="$m"; }
     done
-    [ -n "$SHARE_ONLY" ] || share_login "$machine"
+    par_end
+}
+
+elect_ask() { # <machine> <verdict-fn> <args...> -- one candidate, on its own fd
+    local m="$1" fn="$2"; shift 2
+    "$fn" "$m" "$@" >&3
+}
+
+elect_fingerprint() { # <machine> -- what the election found that one holding
+    printf '%s\n' "$ELECT_ROWS" | awk -v m="$1" '$1 == m { print $3; exit }'
+}
+
+fleet_fork() { # <fork> <repo> -- the elected key taken from whoever holds it, registered once, and on every workstation; non-zero when it could not be settled
+    local remote="$1" repo="$2" failed=0
+    elect_clear
+    if [ -n "$FLEET" ] && [ -z "$ROTATE" ]; then
+        elect fork_verdict "$remote" "$repo"
+        if [ -n "$ELECT_WINNER" ] && [ "$ELECT_WINNER" != local ]; then
+            info "$repo: $ELECT_WINNER holds the deploy key GitHub accepts -- taking it"
+            m_ask "$ELECT_WINNER" give "$remote" | m_tell local adopt "$remote" \
+                || { warn "$repo: $ELECT_WINNER's deploy key did not arrive, so nothing was changed (an older wk-tools there has no 'give': wk sync --tools $ELECT_WINNER)"; return 1; }
+            log "  an ssh-agent already holding the old key keeps offering it:  wk push off && wk push on"
+        fi
+    fi
+    # Not a move: it adds this key to the one repository it is scoped to, whatever the others hold, and does nothing when it is already there.
+    register_fork "$remote" "$repo" || failed=1
+    [ -n "$FLEET" ] || return "$failed"
+    if [ -z "$ELECT_WINNER" ] && [ -n "$ELECT_HELD" ]; then
+        warn "$repo: no workstation's deploy key could be judged, so none was written over another's"
+        return 1
+    fi
+    fan_out_fork "$remote" "$repo" || failed=1
+    return "$failed"
+}
+
+fan_out_fork() { # <fork> <repo> -- onto every peer holding a different key
+    local repo="$2" m mine failed=0
+    mine=$(pub_fingerprint "$(pub_of "$1")")
+    [ -n "$mine" ] || return 1
+    for m in $PEERS; do
+        if [ "$(elect_fingerprint "$m")" = "$mine" ]; then
+            unchanged "$m: already holds the $repo deploy key"
+        elif wk_push_key "$1" | m_tell "$m" adopt "$1"; then
+            changed "$m: took the $repo deploy key"
+        else
+            warn "$m: could not take the $repo deploy key"
+            failed=1
+        fi
+    done
+    return "$failed"
+}
+
+fleet_cred() { # <name> -- the elected value taken from whoever holds it, asked for here when nobody holds one, and on every workstation
+    local name="$1" failed=0
+    elect_clear
+    if [ -n "$ROTATE" ]; then
+        rotate_here "$name" || return 1
+    else
+        elect cred_verdict_of "$name"
+        if [ -n "$ELECT_WINNER" ] && [ "$ELECT_WINNER" != local ]; then
+            info "$name: $ELECT_WINNER holds one its issuer accepts -- taking it"
+            m_ask "$ELECT_WINNER" give "$name" | "$0" set "$name" --paste >/dev/null \
+                || { warn "$name: what $ELECT_WINNER sent was not stored, so nothing here was changed (an older wk-tools there has no 'give': wk sync --tools $ELECT_WINNER)"; return 1; }
+            log "$(cred_line "$name" taken "$(wk_cred_path "$name")")"
+        elif [ -z "$ELECT_WINNER" ]; then
+            if [ -n "$ELECT_HELD" ]; then
+                # Being offline is a state, not a verdict: nothing is known to be broken, so nothing is replaced and nothing is written over another machine's.
+                ! wk_cred_present "$name" \
+                    || log "$(cred_line "$name" stored "$(wk_cred_path "$name")")"
+                warn "$name: no workstation's could be judged, so none was written over another's"
+                return 1
+            fi
+            warn "$name: no workstation holds one its issuer accepts"
+            cred_refresh "$name" || return 1
+        else
+            log "$(cred_line "$name" stored "$(wk_cred_path "$name")")"
+        fi
+    fi
+    fan_out_cred "$name" || failed=1
+    return "$failed"
+}
+
+fan_out_cred() { # <name> -- onto every peer holding a different one
+    local m mine failed=0
+    mine=$(wk_cred_fingerprint "$1")
+    [ -n "$mine" ] || { warn "$1: nothing is stored here, so the other workstations were left as they are"; return 1; }
+    for m in $PEERS; do
+        if [ "$(elect_fingerprint "$m")" = "$mine" ]; then
+            unchanged "$m: already holds the $1 the fleet uses"
+        elif wk_cred_read "$1" | m_tell "$m" set "$1" --paste; then
+            changed "$m: took the $1"
+        else
+            warn "$m: could not take the $1"
+            failed=1
+        fi
+    done
+    return "$failed"
+}
+
+cred_setup() { # <name> -- the fleet holds one of the shared two; the rest are this machine's own
+    if [ -n "$FLEET" ] && cred_shared "$1"; then fleet_cred "$1"; return; fi
+    local_cred "$1"
+}
+
+# The one question, asked before any credential is overwritten on another
+# workstation or any key removed from GitHub. Registering a key and storing one
+# here take nothing away, so a lone machine that is not rotating is asked nothing.
+fleet_confirm() { # <question> -- non-zero only when it was asked and declined
+    [ -n "$ROTATE" ] || [ -n "$FLEET" ] || return 0
+    confirm "$1"
+}
+
+local_cred() { # <name> -- one this machine holds for itself
+    [ -z "$ROTATE" ] || { rotate_here "$1"; return; }
+    if ! wk_cred_present "$1"; then "$0" set "$1"; return; fi
+    if cred_stale "$1"; then
+        warn "$1 is stored here but refused: $(wk_cred_detail "$CRED_VERDICT" | sed -n 1p)"
+        cred_refresh "$1"
+        return
+    fi
+    log "$(cred_line "$1" stored "$(wk_cred_path "$1")")"
+}
+
+cred_refresh() { # <name> -- a fresh one here, nowhere in the fleet holding one that works; typed at a prompt, so no terminal means it is named and left
+    wk_cred_present "$1" || { "$0" set "$1"; return; }
+    [ -t 0 ] || { warn "a replacement is typed at a prompt, and there is no terminal here:  wk key set $1 --replace"; return 1; }
+    "$0" set "$1" --replace
+}
+
+rotate_here() { # <name> -- this machine's fresh one, which the fleet then takes
+    if wk_cred_present "$1"; then "$0" set "$1" --replace; else "$0" set "$1"; fi
 }
 
 # The claude.ai login is one holder's, so a peer without a usable one is logged in for here, in a directory of its own, and that login is sent to it and kept nowhere else.
 share_login() { # <machine>
     local machine="$1" line dir
-    line=$(peer_login_verdict "$machine") \
-        || { warn "$machine: $(wk_cred_detail "$line")"; return 1; }
+    line=$(cred_verdict_of "$machine" claude-login)
     case "$(wk_cred_verdict "$line")" in
         ok|wide|unverified) unchanged "$machine: holds a claude.ai login of its own"; return 0 ;;
     esac
     have claude || { warn "$machine: has no usable claude.ai login, and the Claude CLI that makes one is not on PATH here"; return 1; }
-    [ -t 0 ] || { warn "$machine: has no usable claude.ai login; making one is a browser flow, so from a terminal:  wk key share --to $machine"; return 1; }
+    [ -t 0 ] || { warn "$machine: has no usable claude.ai login; making one is a browser flow, so from a terminal:  wk key setup"; return 1; }
     dir=$(mktemp -d "${TMPDIR:-/tmp}/wk-login.XXXXXX") || return 1
     SHARE_LOGIN_DIR="$dir"; wk_atexit _share_login_cleanup
     info "$machine: logging in for it -- the browser opens once; what it leaves goes to $machine and stays nowhere else"
@@ -401,32 +550,10 @@ share_login() { # <machine>
 }
 _share_login_cleanup() { [ -z "${SHARE_LOGIN_DIR:-}" ] || rm -rf "$SHARE_LOGIN_DIR"; }
 
-share_keys() { # [machine] -- every peer, or that one
-    local machine failed=0
-    for machine in ${1:-$(peer_workstations)}; do
-        info "sharing to $machine"
-        share_to "$machine" || failed=1
-    done
+fleet_logins() { # each workstation's own login, made here for any without one
+    local m failed=0
+    for m in $PEERS; do share_login "$m" || failed=1; done
     return "$failed"
-}
-
-# The token is one for the fleet, so a peer holding one GitHub accepts is asked to share it here before a person is asked to mint one. The peer's share asks its own question; WK_YES answers it, because this run already asked.
-cred_take_from_fleet() { # <name> -- 0 once a stored one here is accepted
-    local peer self; self=$(wk_machine_name)
-    for peer in $(peer_workstations); do
-        info "asking $peer for its $1"
-        ( load_target "$peer"; WK_YES=1 t_wk key share --to "$self" --only "$1" ) >/dev/null 2>&1 \
-            || { warn "$peer did not share its $1 (an older wk-tools there has no 'share --to': wk sync --tools)"; continue; }
-        if ! cred_stale "$1"; then info "took the $1 from $peer"; return 0; fi
-        warn "$peer's $1 is refused too"
-    done
-    return 1
-}
-
-fanout_prose() { # what the fan-out overwrites, for the one question asked first; nothing when there is no peer
-    local peers; peers=$(peer_workstations | tr '\n' ' ')
-    [ -n "${peers// /}" ] || return 0
-    printf ' and overwrite the deploy keys, GitHub API token and Bugzilla API key that %s hold(s), logging in here for any without a claude.ai login' "${peers% }"
 }
 
 registered_key_body() { # <repo> -- the registered keys, matched on the jq-safe base64 body
@@ -445,36 +572,30 @@ revoke_shared_keys() { # <repo>
     done
 }
 
-register_shared_keys() { # 0 unless a fork could not be registered
-    local remote repo alias pub body failed=0
-    while read -r remote repo alias; do
-        [ -n "$remote" ] || continue
-        pub=$(pub_of "$remote")
-        [ -n "$pub" ] || { warn "no key for $repo here -- 'wk key ensure' makes it"; failed=1; continue; }
-        body=$(printf '%s' "$pub" | awk '{print $1" "$2}')
-        if registered_key_body "$repo" | grep -qxF "$body"; then
-            unchanged "$repo: the shared deploy key is already registered"
-            continue
-        fi
-        info "registering the shared deploy key on $repo"
-        # read_only=false: a key registered read-only looks fine until the first push fails.
-        if gh api "repos/$repo/keys" \
-             -f "title=$SHARED_KEY_TITLE" -f "key=$pub" \
-             -F read_only=false </dev/null >/dev/null 2>&1; then
-            changed "$repo: the shared deploy key is registered with write access"
-        else
-            warn "$repo: could not register the shared key automatically"
-            log  "  add it at https://github.com/$repo/settings/keys/new, ticking 'Allow write access':"
-            printf '%s\n' "$pub"
-            failed=1
-        fi
-    done <<EOF
-$(wk_push_forks)
-EOF
-    return "$failed"
+register_fork() { # <fork> <repo> -- the elected key on GitHub, once, with write access
+    local pub body
+    pub=$(pub_of "$1")
+    [ -n "$pub" ] || { warn "no key for $2 here -- 'wk key ensure' makes it"; return 1; }
+    body=$(printf '%s' "$pub" | awk '{print $1" "$2}')
+    if registered_key_body "$2" | grep -qxF "$body"; then
+        unchanged "$2: the shared deploy key is already registered"
+        return 0
+    fi
+    info "registering the shared deploy key on $2"
+    # read_only=false: a key registered read-only looks fine until the first push fails.
+    if gh api "repos/$2/keys" \
+         -f "title=$SHARED_KEY_TITLE" -f "key=$pub" \
+         -F read_only=false </dev/null >/dev/null 2>&1; then
+        changed "$2: the shared deploy key is registered with write access"
+        return 0
+    fi
+    warn "$2: could not register the shared key automatically"
+    log  "  add it at https://github.com/$2/settings/keys/new, ticking 'Allow write access':"
+    printf '%s\n' "$pub"
+    return 1
 }
 
-rotate_keys() {   # the old keys off GitHub first (one left there keeps write access), then deploy_keys makes and fans out fresh ones
+rotate_keys() {   # the old keys off GitHub first (one left there keeps write access), then a fresh one is minted and fanned out
     local remote repo alias
     while read -r remote repo alias; do
         [ -n "$remote" ] || continue
@@ -485,18 +606,16 @@ $(wk_push_forks)
 EOF
 }
 
-deploy_keys() { # [rotate] -- one question, before anything is removed or overwritten; 3 when declined
-    local failed=0 fanout; fanout=$(fanout_prose)
-    if [ -n "${1:-}" ]; then
-        confirm "remove the shared deploy keys from GitHub, mint fresh ones and register them${fanout}?" || return 3
-        info "rotating: removing the old shared keys from GitHub"; rotate_keys
-    elif [ -n "$fanout" ]; then
-        confirm "register the shared deploy keys on GitHub${fanout}?" || return 3
-    fi
+converge_forks() { # one elected deploy key per fork, registered, on every workstation
+    local remote repo alias failed=0
+    [ -z "$ROTATE" ] || { info "rotating: removing the old shared keys from GitHub"; rotate_keys; }
     ensure_keys
-    for _name in $SHARED_VALUES; do cred_replace_stale "$_name" || failed=1; done
-    register_shared_keys || failed=1
-    share_keys || failed=1
+    while read -r remote repo alias; do
+        [ -n "$remote" ] || continue
+        fleet_fork "$remote" "$repo" || failed=1
+    done <<EOF
+$(wk_push_forks)
+EOF
     return "$failed"
 }
 
@@ -521,25 +640,24 @@ fi
 
 case "$ACTION" in
 setup)
-    _rotate=""
-    [ "${2:-}" != --rotate ] || _rotate=1
-    _rc=0; deploy_keys $_rotate || _rc=$?
-    [ "$_rc" != 3 ] || warn "the deploy keys were not touched -- 'wk key deploy' does them alone"
-    for _name in $(wk_cred_settable); do
-        if wk_cred_present "$_name"; then
-            if [ -n "$_rotate" ]; then
-                "$0" set "$_name" --replace || true
-            elif cred_stale "$_name"; then
-                cred_replace_stale "$_name" || true
-            else
-                log "$(cred_line "$_name" stored "$(wk_cred_path "$_name")")"
-            fi
-            continue
-        fi
-        # A credential declined, or one that cannot be asked for without a
-        # terminal, is not a reason to leave the rest of them unset.
-        "$0" set "$_name" || true
-    done
+    wk_atexit par_cleanup
+    fleet_resolve
+    _peers=$(peers_named)
+    FLEET=""; [ -z "$_peers" ] || FLEET=1
+    if [ -n "$ROTATE" ]; then
+        fleet_confirm "turn every credential over -- the shared deploy keys removed from GitHub and minted afresh, every credential stored here replaced${_peers:+, and what $_peers hold(s) overwritten with the fresh ones}?" \
+            || die "not done -- nothing was changed"
+    else
+        fleet_confirm "put one working deploy key, GitHub API token and Bugzilla API key on this machine and on $_peers, overwriting what differs, and log in here for any of them without a claude.ai login?" \
+            || FLEET=""
+        [ -z "$_peers" ] || [ -n "$FLEET" ] \
+            || warn "$_peers was left exactly as it is -- this machine's own credentials are still set up"
+    fi
+    converge_forks || true
+    # A credential declined, or one that cannot be asked for without a terminal,
+    # is not a reason to leave the rest of them unset.
+    for _name in $(wk_cred_settable); do cred_setup "$_name" || true; done
+    [ -z "$FLEET" ] || fleet_logins || true
     "$0" check
     ;;
 
@@ -565,10 +683,10 @@ set)
     one and what it must be able to do."
 
     if wk_cred_mints "$_name"; then _mints=1; fi
-    # --paste takes any credential's value on stdin, so a second workstation holds the same one as the first (wk key share fans them out this way). The one it cannot carry is the claude.ai login: that is a browser flow, not a value.
+    # --paste takes any credential's value on stdin, so a second workstation holds the same one as the first (this is how an election puts the winner everywhere). The one it cannot carry is the claude.ai login: that is a browser flow, not a value.
     [ -z "$_paste" ] || [ "$_name" != claude-login ] \
         || die "--paste cannot carry a claude.ai login -- it is made in a browser:
-    wk key set claude-login here, or 'wk key share --to $(wk_machine_name)' from a workstation with one"
+    wk key set claude-login here, or 'wk key setup' from a workstation with one"
 
     if [ -n "$_replace" ]; then
         wk_cred_present "$_name" \
@@ -646,7 +764,7 @@ fingerprints)
         [ -n "$remote" ] || continue
         pub=$(pub_of "$remote")
         [ -n "$pub" ] || { printf '%-9s %-50s %s\n' "$remote" "-" "no key"; continue; }
-        fp=$(printf '%s\n' "$pub" | ssh-keygen -lf - 2>/dev/null | awk '{print $2}')
+        fp=$(pub_fingerprint "$pub")
         # A private half is always in the one directory nothing mounts, so where it is says nothing about the switch (`wk push status` does).
         priv=$(priv_of "$remote")
         [ -n "$priv" ] && state="private half here ('wk push status')" \
@@ -679,46 +797,27 @@ adopt)
     log "adopted the shared deploy key for $remote"
     ;;
 
-share)
-    _to=""; shift
-    while [ $# -gt 0 ]; do
-        case "$1" in
-            --to)   _to="${2:-}"; shift ;;
-            --only) SHARE_ONLY="${2:-}"; shift ;;
-        esac
-        shift
-    done
-    [ -z "$SHARE_ONLY" ] || cred_travels_alone "$SHARE_ONLY" \
-        || die "--only takes $(printf '%s' "$SHARED_VALUES" | sed 's/ / or /g'): the pasted credentials travel alone (the deploy keys go together, the login is made per machine)"
-    if [ -n "$_to" ]; then
-        peer_workstations | grep -qxF "$_to" \
-            || die "'$_to' is not a peer workstation this machine reaches (a peer with wk over the tailnet)"
-        _peers="$_to"
-    else
-        _peers=$(peer_workstations)
-    fi
-    [ -n "$_peers" ] || { info "no other workstation to share with (a peer with wk over the tailnet)"; exit 0; }
-    _what="the deploy keys, GitHub API token and Bugzilla API key"; [ -z "$SHARE_ONLY" ] || _what="the $SHARE_ONLY"
-    confirm "overwrite $_what that $(printf '%s ' $_peers | sed 's/ $//') hold(s) with this machine's?" \
-        || die "not shared -- nothing on them was changed"
-    share_keys $_to || die "one or more workstations did not take what was shared (above)"
-    info "$(printf '%s ' $_peers | sed 's/ $//') now hold(s) this machine's ${_what#the }"
-    ;;
-
 deploy)
-    _rotate=""
-    case "${2:-}" in
-        --rotate) _rotate=1 ;;
-    esac
-    _rc=0; deploy_keys $_rotate || _rc=$?
-    [ "$_rc" != 3 ] || die "not done -- nothing was changed"
+    wk_atexit par_cleanup
+    fleet_resolve
+    _peers=$(peers_named)
+    FLEET=""; [ -z "$_peers" ] || FLEET=1
+    if [ -n "$ROTATE" ]; then
+        fleet_confirm "remove the shared deploy keys from GitHub, mint fresh ones and register them${_peers:+, and put them on $_peers}?" \
+            || die "not done -- nothing was changed"
+    else
+        fleet_confirm "register the shared deploy keys on GitHub and put the elected one on $_peers?" \
+            || die "not done -- nothing was changed"
+    fi
+    converge_forks || true
     echo >&2
     "$0" check
     ;;
 
 check)
     rc=0
-    _machines=$(workstations)
+    fleet_resolve
+    _machines="$WORKSTATIONS"
     _forks=$(wk_push_forks)
     _creds=$(wk_cred_settable)
     _boxes=$(build_boxes)
@@ -734,8 +833,13 @@ $_forks
 EOF
     done
     for _cname in $_creds; do par_run "cred-$_cname" check_cred_row "$_cname"; done
-    _peers=$(peer_workstations)
-    for machine in $_peers; do par_run "login-$machine" check_login_row "$machine"; done
+    _peers="$PEERS"
+    _shared="$SHARED_VALUES claude-login"
+    for machine in $_peers; do
+        for _cname in $_shared; do
+            par_run "peer-$machine-$_cname" check_peer_row "$machine" "$_cname"
+        done
+    done
     par_wait
 
     for machine in $_machines; do
@@ -752,9 +856,9 @@ EOF
     done
 
     if [ -n "$_boxes" ]; then
-        printf '  build machines (no key at rest -- reached by forwarded agent):\n'
+        printf '  build machines (nothing at rest -- reached by a forwarded agent):\n'
         for machine in $_boxes; do
-            printf '    %-28s %s\n' "$machine" "holds no deploy key; 'wk push' forwards yours"
+            printf '    %-28s %s\n' "$machine" "holds no credential; 'wk push' forwards the elected key"
         done
     fi
 
@@ -764,26 +868,50 @@ EOF
         [ "$(par_rc "cred-$_cname")" = 0 ] || rc=1
     done
     if [ -n "$_peers" ]; then
-        printf '  claude.ai login on the other workstations (each its own, made for it by wk key share):\n'
+        printf '  the other workstations (the fleet holds one of each, and each its own login):\n'
         for machine in $_peers; do
-            par_record "login-$machine"
-            [ "$(par_rc "login-$machine")" = 0 ] || rc=1
+            for _cname in $_shared; do
+                par_record "peer-$machine-$_cname"
+                [ "$(par_rc "peer-$machine-$_cname")" = 0 ] || rc=1
+            done
         done
     fi
     par_end
     exit $rc
     ;;
 
+give)
+    _what="${2:-}"
+    [ -n "$_what" ] \
+        || die "usage: wk key give <fork>|<name>   (it prints on stdout, for the workstation electing one to take)"
+    [ "$_what" != claude-login ] \
+        || die "a claude.ai login is never handed over: a copy is a second holder of one
+    refresh token, and the first refresh on either side locks the other out.
+    'wk key setup' on a workstation that has one logs in for this machine instead."
+    if wk_push_forks | awk 'NF {print $1}' | grep -qxF "$_what"; then
+        wk_push_key "$_what"
+    elif cred_known "$_what"; then
+        wk_cred_read "$_what"
+    else
+        die "there is no fork or credential called '$_what'.
+    This checkout knows: $(wk_push_forks | awk 'NF{printf "%s ",$1}')$(wk_cred_settable | tr '\n' ' ')"
+    fi
+    ;;
+
 verdict)
     _name="${2:-}"
     cred_known "$_name" || die "usage: wk key verdict <name>
     names: $(wk_cred_settable | tr '\n' ' ')"
+    # It travels with the verdict because that is what an election on another workstation compares.
     wk_cred_check "$_name" --stored
+    _fp=$(wk_cred_fingerprint "$_name")
+    [ -z "$_fp" ] || printf '    fingerprint: %s\n' "$_fp"
     ;;
 
-register|claude|tailnet|tailnet-api)
+register|claude|tailnet|tailnet-api|share)
     case "$ACTION" in
         register) _now="wk key deploy" ;;
+        share)    _now="wk key setup   (it elects the credential the fleet holds rather than pushing this machine's)" ;;
         claude)   _now="wk key set claude   (the account login beside it is 'wk key set claude-login')" ;;
         *)        _now="wk key set $ACTION" ;;
     esac

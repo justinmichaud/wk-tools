@@ -205,8 +205,8 @@ wk sudo setup                  # closes sudo's 5-minute timestamp and NOPASSWD
 gh auth login                  # wk key setup calls the GitHub API with this
 claude setup-token             # a token to paste when wk key setup asks for one
 wk key setup                   # the deploy keys, then every credential this machine
-                               # has not got, then what each one can do and how far
-                               # it reaches -- one credential at a time, re-runnable,
+                               # has not got, and the same working one on every
+                               # workstation -- one credential at a time, re-runnable,
                                # and Enter skips one you do not want
 wk push on                     # loads the keys into the agent and gives the injector the write token and the Bugzilla key
 wk sync                        # clones WebKit into the mirror, publishes a snapshot
@@ -1188,7 +1188,7 @@ GitHub or the tailnet stores the credential and reports it *unverified*: being
 offline is a state, and refusing there would leave the machine with nothing at
 all. Nothing degrades silently -- the next `wk doctor` asks again.
 
-**`wk key setup`: one command, every credential**
+**`wk key setup`: one command, every credential, one fleet**
 
 `wk key setup` is the whole of it on a new machine: the deploy keys first (they
 are the one step that needs `gh`), then every credential this machine has not
@@ -1196,9 +1196,8 @@ got, asked for one at a time, then `wk key check` -- the read-only report, and
 what a bare `wk key` runs. It prints one line per
 credential -- the name, `stored`, `minted`, `skipped` or `refused`, and the path
 or the one-line reason -- and then that table, and nothing else: a credential
-already stored is left exactly as it is unless its issuer now refuses it (a
-revoked GitHub token is asked for again, and `wk key deploy` replaces it before
-fanning anything out), an empty answer skips one, and the run can be killed
+already stored is left exactly as it is unless its issuer now refuses it, an
+empty answer skips one, and the run can be killed
 and repeated. `wk key set <name>` is the same thing for one of
 them by name --
 `github-pat`, `bugzilla-api-key`, `claude`, `claude-login`, `litellm`,
@@ -1207,43 +1206,62 @@ and with nothing to store it reports what the stored one can do instead.
 `--replace` is how a credential is rotated, and it is the only arm that removes
 one; `wk key setup --rotate` does it to every stored credential in turn, after
 turning the deploy keys over the way `wk key deploy --rotate` does, so the
-whole machine rotates from one command -- each credential still typed at its
+whole fleet rotates from one command -- each credential still typed at its
 prompt, made in its browser or minted, and a run abandoned at one of them
 leaves that credential absent for the next `wk key setup` to ask for. The
 deploy keys are generated here rather than pasted, so they have a verb of their
 own: `wk key deploy`.
 
-**One deploy key per fork, the same on every workstation.** `wk key deploy`
-mints the key, registers it once on GitHub under a single title, and fans the
-private halves out over the tailnet to every other workstation -- a peer with a
+**The fleet holds one of each, and which one is decided by evidence.** Three
+things are the fleet's rather than one machine's: each fork's deploy key, the
+GitHub API token and the Bugzilla API key. `wk key setup` *elects* each of them
+rather than pushing this machine's outward. It asks every workstation what it
+holds and whether its issuer still accepts it, all of them at once and at that
+moment, and the best working answer wins: one GitHub accepts beats one it
+refuses, and a token that reaches exactly the forks beats one that reaches
+further. Age counts for nothing -- a token minted this morning that reaches
+nothing loses to the one that works -- and a tie goes to the machine you are
+at, so a fleet that already agrees moves nothing. The winner is taken here when
+a peer holds it (`wk key give`, over ssh and on stdout, the other half of `wk
+key adopt`) and then put on every workstation holding a different one; one
+already holding it is left alone, because a verdict carries a fingerprint and
+two copies of one credential fingerprint alike. When no workstation holds one
+that works, this machine mints or is asked for one and *that* one is fanned
+out. When nothing could be judged at all -- no network reached the issuer --
+nothing is moved and the run says so: being offline is a state, not a verdict,
+and a credential nobody could judge is never written over another machine's.
+`wk key check` reports what each workstation holds, so the convergence is
+visible rather than asserted.
+
+**One deploy key per fork, the same on every workstation.** `wk key deploy` is
+that election for the deploy keys alone: it mints a key when the fleet has
+none, registers it once on GitHub under a single title, and puts the one that
+works on every other workstation -- a peer with a
 `wk` of its own -- so the whole fleet holds one key, not one per machine. The
 public half is derived from the private one whenever either is written and
 lives only in the directory every workspace reads: ssh refuses an identity
 whose `.pub` neighbour disagrees with it, so none is kept beside the key. The
 fan-out writes over what those machines hold and `--rotate` revokes keys on
-GitHub, so each asks first and declines without a terminal (`WK_YES=1` answers
-for you). `wk
-key share` does the fan-out alone (each key arrives through `wk key adopt`,
-the value on stdin, never an argument); `--to <machine>` sends to one peer and
-`--only github-pat` (or `--only bugzilla-api-key`) sends that one credential
-alone, which is how `wk key deploy` on a machine whose token its issuer refuses
-takes a working one from a peer before asking anyone to mint another. `wk key deploy --rotate` turns the fleet over from one command:
-it removes the old key from GitHub, mints a fresh one, and fans that out. The
-GitHub API token and the Bugzilla API key ride the same fan-out, so `wk key set github-pat` on one
-workstation and `wk key share` puts it everywhere. The claude.ai login rides
+GitHub, so each asks once, first, and declines without a terminal (`WK_YES=1`
+answers for you); declined, no other machine is touched and this machine's own
+credentials are still set up. Each key arrives through `wk key adopt`, the value
+on stdin, never an argument. `wk key deploy --rotate` turns the fleet over from
+one command: it removes the old key from GitHub, mints a fresh one, and puts
+that one everywhere, electing nothing -- what you are deliberately turning over
+wins by fiat. The claude.ai login rides
 it differently, because a copy of one is a second holder (below): for each
-workstation that has no usable login, `wk key share` logs in *for* it here --
+workstation that has no usable login, `wk key setup` logs in *for* it here --
 one browser round trip per such workstation, all from the machine you are at,
 each into a directory of its own -- and sends that login over (`wk key adopt
 claude-login`, the credential and the account record as a tar on stdin, judged
 before anything is kept), so every workstation holds the only copy of its own
 grant and nobody signs in on each device. `wk key check` reports every
-workstation's login, so a `deploy` run anywhere ends by naming the one still
+workstation's login, so a run anywhere ends by naming the one still
 without. A shared build machine is
-not a workstation and holds no key at all -- it reaches the deploy key through
-an ssh-agent forwarded from whoever drives a push, so nothing private rests on
-a machine other people are root on (`remote/provision.sh` writes an ssh config
-with no `IdentityFile`).
+not a workstation: it is sent none of this and keeps nothing at rest, reaching
+the elected deploy key through an ssh-agent forwarded from whoever drives a
+push, so nothing private rests on a machine other people are root on
+(`remote/provision.sh` writes an ssh config with no `IdentityFile`).
 
 Every prompt is built from the credential's own row in `lib/credcheck.py`, and
 it is three lines and the prompt: what to paste, the page that mints one with

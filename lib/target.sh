@@ -442,9 +442,9 @@ _build_box() {
     return 0
 }
 
-peer_login_verdict() { # <peer> -> the verdict, every line of it
+peer_cred_verdict() { # <peer> <name> -> that machine's verdict for it, every line
     local line
-    line=$( ( load_target "$1"; t_wk key verdict claude-login ) 2>/dev/null | tr -d '\r') || line=""
+    line=$( ( load_target "$1"; t_wk key verdict "$2" ) 2>/dev/null | tr -d '\r') || line=""
     if [ -z "$line" ]; then
         printf 'unverified\t%s did not answer: unreachable, or an older wk-tools there without the verdict subverb (wk sync --tools %s)\n' "$1" "$1"
         return 1

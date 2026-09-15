@@ -425,7 +425,7 @@ class TestTheTopicIsMintedNotAsked(_KeyRun):
 
     def test_paste_carries_a_handed_credential_too(self):
         """--paste takes any credential's value on stdin so a second workstation
-        can hold the same one as the first -- how `wk key share` fans the API
+        can hold the same one as the first -- how `wk key setup` puts the API
         token out. A malformed one is still put to the rule and refused."""
         cp, _secrets = self.key("set", "github-pat", "--paste",
                                 input="not-a-token\n")
@@ -465,6 +465,26 @@ SSH_IS_THE_FORKS_KEY = (
     '  *) echo "Hi justinmichaud/WebKit! You\'ve successfully authenticated, '
     'but GitHub does not provide shell access." ;;\n'
     'esac\nexit 0\n')
+
+
+def provision_credentials(secrets, tmp):
+    """Every credential a machine can hold, each one its rule accepts. What a
+    test that must not stop at a prompt starts from."""
+    store = secrets.parent
+    (store / "push-keys" / "github-pat").write_text(FINE + "\n")
+    (store / "push-keys" / "bugzilla-api-key").write_text("notarealbugzillakey\n")
+    (secrets / "claude-token").write_text("sk-ant-oat01-notarealtoken\n")
+    (secrets / "litellm-key").write_text("sk-notarealvirtualkey\n")
+    (store / "agent-rw").mkdir(exist_ok=True)
+    (store / "agent-rw" / ".credentials.json").write_text(login())
+    # The account record `claude auth login` writes beside the credential, in the CLI's config home (cmd/key points CLAUDE_CONFIG_DIR there); the rule reads its organization, which remote control needs.
+    (store / "agent-rw" / ".claude.json").write_text(json.dumps(
+        {"oauthAccount": {"organizationUuid": "org-1",
+                          "organizationName": "Example Org"}}))
+    (store / "notify").mkdir(exist_ok=True)
+    (store / "notify" / "ntfy-topic").write_text("a-topic-minted-here\n")
+    (tmp / "tailscale-authkey").write_text("tskey-auth-k1-abc\n")
+    (tmp / "tailscale-api-key").write_text("tskey-api-k1-abc\n")
 
 
 class TestSetupSaysOneLinePerCredential(_KeyRun):
@@ -510,22 +530,7 @@ class TestSetupSaysOneLinePerCredential(_KeyRun):
                 self.assertRegex(cp.stderr, r"%s\s+skipped\s+\S" % name)
 
     def provision(self, secrets):
-        """Every credential this machine can hold, each one its rule accepts."""
-        store = secrets.parent
-        (store / "push-keys" / "github-pat").write_text(FINE + "\n")
-        (store / "push-keys" / "bugzilla-api-key").write_text("notarealbugzillakey\n")
-        (secrets / "claude-token").write_text("sk-ant-oat01-notarealtoken\n")
-        (secrets / "litellm-key").write_text("sk-notarealvirtualkey\n")
-        (store / "agent-rw").mkdir(exist_ok=True)
-        (store / "agent-rw" / ".credentials.json").write_text(login())
-        # The account record `claude auth login` writes beside the credential, in the CLI's config home (cmd/key points CLAUDE_CONFIG_DIR there); the rule reads its organization, which remote control needs.
-        (store / "agent-rw" / ".claude.json").write_text(json.dumps(
-            {"oauthAccount": {"organizationUuid": "org-1",
-                              "organizationName": "Example Org"}}))
-        (store / "notify").mkdir(exist_ok=True)
-        (store / "notify" / "ntfy-topic").write_text("a-topic-minted-here\n")
-        (self.tmp / "tailscale-authkey").write_text("tskey-auth-k1-abc\n")
-        (self.tmp / "tailscale-api-key").write_text("tskey-api-k1-abc\n")
+        provision_credentials(secrets, self.tmp)
 
     def test_a_machine_that_holds_them_all_stays_under_its_budget(self):
         """Nothing to ask for and nothing to register: one line each saying
@@ -667,23 +672,26 @@ class TestABareKeyChangesNothing(_KeyRun):
         for word in ("sharing to", "registering", "minted"):
             self.assertNotIn(word, bare.stdout + bare.stderr)
 
-    def test_the_fan_out_asks_before_writing_over_a_peer(self):
-        """deploy and setup go through deploy_keys, which asks before
-        register_shared_keys and share_keys; the share arm asks itself."""
-        body = func_body(KEY.read_text(), "deploy_keys")
-        self.assertIn("confirm ", body)
-        self.assertLess(body.index("confirm "), body.index("share_keys"),
-                        "share_keys runs before the question is asked")
-        arm = KEY.read_text().split("\nshare)", 1)[1].split("\ndeploy)", 1)[0]
-        self.assertLess(arm.index("confirm "), arm.index("share_keys"), arm)
+    def arm(self, verb):
+        return KEY.read_text().split("\n%s)\n" % verb, 1)[1].split("\n    ;;", 1)[0]
 
-    def test_a_declined_fan_out_is_not_reported_as_done(self):
-        arm = KEY.read_text().split("\nshare)", 1)[1].split("\ndeploy)", 1)[0]
-        self.assertIn('die "not shared', arm, arm)
-        body = func_body(KEY.read_text(), "deploy_keys")
-        self.assertIn("return 3", body, body)
+    def test_nothing_is_elected_taken_or_written_before_the_question(self):
+        """Every arm that can overwrite another workstation, or revoke a key on
+        GitHub, asks first: the election, the fan-out and rotate_keys all sit
+        inside converge_forks and the credential walk, after fleet_confirm.
+        The declined run itself is driven against a peer in
+        tests/test_key_shared.py."""
+        self.assertIn("rotate_keys", func_body(KEY.read_text(), "converge_forks"))
+        for verb in ("setup", "deploy"):
+            with self.subTest(verb=verb):
+                arm = self.arm(verb)
+                self.assertLess(arm.index("fleet_confirm "), arm.index("converge_forks"), arm)
 
-    def test_rotate_asks_before_revoking_on_github(self):
-        body = func_body(KEY.read_text(), "deploy_keys")
-        self.assertLess(body.index("confirm "), body.index("rotate_keys"),
-                        "rotate_keys runs before the question is asked")
+    def test_a_declined_question_is_not_reported_as_done(self):
+        """`deploy` has nothing left to do, so it says so and stops; `setup`
+        still has this machine's own credentials to set up, so it drops the
+        fleet and goes on."""
+        self.assertIn('die "not done', self.arm("deploy"))
+        setup = self.arm("setup")
+        self.assertIn('|| FLEET=""', setup, setup)
+        self.assertIn("was left exactly as it is", setup)

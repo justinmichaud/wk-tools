@@ -165,17 +165,17 @@ remote_control_row() { # <where> <verdict line>
     return 0
 }
 
-# Each peer workstation holds a login of its own (wk key share), so each is asked for its own verdict.
+# Each peer workstation holds a login of its own (it is never copied), so each is asked for its own verdict.
 fleet_logins_section() {
     local peer line
     section "claude.ai login on the other workstations (each its own)"
     for peer in $(peer_workstations); do
-        line=$(peer_login_verdict "$peer") || true
+        line=$(peer_cred_verdict "$peer" claude-login) || true
         case "$(wk_cred_verdict "$line")" in
             ok|wide)    ok   "$peer: $(wk_cred_detail "$line" | sed -n 1p)"
                         remote_control_row "the workspaces $peer makes" "$line" ;;
             absent|bad) miss "$peer: $(wk_cred_detail "$line" | sed -n 1p)" \
-                             "wk key share --to $peer  (from a terminal here: it logs in for $peer)" ;;
+                             "wk key setup  (from a terminal here: it logs in for $peer)" ;;
             *)          unk  "$peer: $(wk_cred_detail "$line" | sed -n 1p)" "wk key check" ;;
         esac
     done

@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""read|present|write one credential file. Every open is O_NOFOLLOW and the fd is
+"""read|present|write|fingerprint one credential file. Every open is O_NOFOLLOW and the fd is
 checked regular/ours/st_nlink==1: agent-rw is mounted read-write into every container, where a workspace could otherwise aim a credential at push-keys."""
 
+import hashlib
 import os
 import stat
 import sys
@@ -83,12 +84,26 @@ def write(path):
     return 0
 
 
-VERBS = {"read": read, "present": present, "write": write}
+def fingerprint(path):
+    # Stripped, because one machine's copy was written by `wk key set --paste`, which ends it in a newline.
+    fd = _open_read("read", path)
+    if fd is None:
+        return 0
+    with os.fdopen(fd, "rb") as f:
+        data = f.read().strip()
+    if data:
+        sys.stdout.write(hashlib.sha256(data).hexdigest()[:12] + "\n")
+    return 0
+
+
+VERBS = {"read": read, "present": present, "write": write,
+         "fingerprint": fingerprint}
 
 
 def main(argv):
     if len(argv) != 3 or argv[1] not in VERBS:
-        sys.stderr.write("usage: secretfile.py read|present|write <path>\n")
+        sys.stderr.write(
+            "usage: secretfile.py read|present|write|fingerprint <path>\n")
         return 2
     return VERBS[argv[1]](argv[2])
 

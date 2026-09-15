@@ -428,7 +428,7 @@ class TestTheRemedyReadsTheStore(_Login):
 
 
 def bundle(credential, account=None):
-    """What `wk key share` sends: the two files a login leaves, as a tar."""
+    """What `wk key setup` sends a peer: the two files a login leaves, as a tar."""
     import io
     import tarfile
     buf = io.BytesIO()
@@ -444,7 +444,7 @@ def bundle(credential, account=None):
 
 
 class TestAdoptTakesALoginMadeForThisWorkstation(_Login):
-    """`wk key share` on another workstation logs in for this one and pipes
+    """`wk key setup` on another workstation logs in for this one and pipes
     the two files here; nothing is kept until the rule has passed them."""
 
     def adopt(self, data):

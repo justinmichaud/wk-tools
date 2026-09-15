@@ -355,10 +355,10 @@ if __name__ == "__main__":
 
 class TestATokenGitHubRefusesIsReplaced(_PatRun):
     """A stored token GitHub answers 401 for is a missing one with a stale
-    file in the way: `wk key setup` and `wk key deploy` ask for a fresh one
-    before anything spends or shares it. The new value is typed at a prompt,
-    so a run without a terminal names the remedy and leaves the file alone --
-    it never fans the refused token out, and never removes it unasked."""
+    file in the way: `wk key setup` asks for a fresh one before anything
+    spends or shares it. The new value is typed at a prompt, so a run without
+    a terminal names the remedy and leaves the file alone -- it never puts the
+    refused token on another workstation, and never removes it unasked."""
 
     def setUp(self):
         super().setUp()
@@ -395,10 +395,13 @@ class TestATokenGitHubRefusesIsReplaced(_PatRun):
         self.assertEqual("ghp_revokedone", self.pat().read_text().strip(),
                          "a run with no terminal removed the token unasked")
 
-    def test_deploy_does_the_same_before_the_fan_out(self):
+    def test_deploy_leaves_the_token_alone_and_still_reports_it(self):
+        """`wk key deploy` is the deploy keys' verb and no longer touches the
+        token: it neither replaces nor spends it, and the table it ends with
+        still says GitHub refuses it."""
         cp = self._key_with_gh_refusing("deploy")
         out = cp.stdout + cp.stderr
-        self.assertIn("github-pat is stored here but refused", out)
+        self.assertNotIn("github-pat is stored here but refused", out)
         self.assertNotEqual(cp.returncode, 0, out)
         self.assertEqual("ghp_revokedone", self.pat().read_text().strip())
 
@@ -409,18 +412,6 @@ class TestATokenGitHubRefusesIsReplaced(_PatRun):
         out = cp.stdout + cp.stderr
         self.assertNotIn("stored here but refused", out)
         self.assertRegex(out, r"github-pat\s+stored\s")
-
-    def test_the_fan_out_skips_a_refused_token(self):
-        """share_value asks cred_stale before sending a pasted credential, and
-        share_to sends each of them through it; the deploy keys still travel."""
-        body = (REPO / "cmd" / "key").read_text()
-        i = body.index("share_value() {")
-        j = body.index("\n}\n", i)
-        self.assertIn('cred_stale "$name"', body[i:j])
-        i = body.index("share_to() {")
-        j = body.index("\n}\n", i)
-        self.assertIn('share_value "$machine" "$name"', body[i:j])
-        self.assertIn("for name in $SHARED_VALUES", body[i:j])
 
 
 class TestTheMachineTakesTheTokenOnEveryStart(unittest.TestCase):
