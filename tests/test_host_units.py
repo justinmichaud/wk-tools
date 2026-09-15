@@ -455,17 +455,27 @@ class TestAServiceRunningOlderCodeThanTheTree(WkTest):
         self.root = self.tmp / "tree"
         (self.root / "host" / "units").mkdir(parents=True)
         self.prog = self.root / "sleeper.sh"
-        self.prog.write_text("#!/bin/bash\nexec sleep 300\n")
-        self.prog.chmod(0o755)
+        self.prog.write_text("exec sleep 300\n")
+        # The real bodies name an interpreter and then the program, which is
+        # the field unit_program picks out; a body of another shape resolves
+        # to no program at all and every verdict below would read `current`.
         (self.root / "host" / "units" / self.UNIT).write_text(
-            "[Service]\nExecStart=@WK_ROOT@/sleeper.sh\n")
+            "[Service]\nExecStart=/bin/bash @WK_ROOT@/sleeper.sh\n")
+        self.assertEqual("sleeper.sh", self.program())
         subprocess.run(["systemctl", "--user", "reset-failed", self.UNIT],
                        capture_output=True)
         cp = subprocess.run(["systemd-run", "--user", "--unit", self.UNIT,
-                             str(self.prog)], capture_output=True, text=True)
+                             "/bin/bash", str(self.prog)],
+                            capture_output=True, text=True)
         self.assertEqual(0, cp.returncode, cp.stdout + cp.stderr)
         self.addCleanup(subprocess.run, ["systemctl", "--user", "stop", self.UNIT],
                         capture_output=True)
+
+    def program(self):
+        cp = bash('. "$WK_ROOT/host/units.sh"\nWK_ROOT=%s unit_program %s'
+                  % (shlex.quote(str(self.root)), self.UNIT))
+        self.assertEqual(0, cp.returncode, cp.stdout + cp.stderr)
+        return cp.stdout.strip()
 
     def stale(self):
         cp = bash('. "$WK_ROOT/host/units.sh"\n'
