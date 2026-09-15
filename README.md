@@ -1172,6 +1172,18 @@ token's form takes no repository parameter and so arrives on *All
 repositories* unless the person changes that field -- which is one account's
 whole reach sitting behind a workspace boundary.
 
+The forks are not the whole question, because a pull request is opened on the
+*project*, not on the fork it comes from. An organization's personal access
+token policy refuses a token wholesale: not one permission but every call to
+every repository it owns, a plain read included. WebKit's caps a fine-grained
+token's lifetime at 366 days, so a token minted to never expire passes every
+fork probe above and answers `403` on `WebKit/WebKit` -- `git-webkit pr` gets
+nothing open. So the rule asks GitHub which project each fork is a `parent` of
+and reads that project with the token: 200 is accepted, 403 is refused, and
+GitHub's own message -- which names the offending token and the page to shorten
+its lifetime at -- is the verdict's remedy. The link `wk key set github-pat`
+prints mints one for 366 days for the same reason.
+
 The claude.ai login is judged the way a session spends it. A stored login
 whose access token has run out is renewed first -- the refresh token posted to
 the CLI's own token endpoint under the CLI's own `.oauth_refresh.lock`, the

@@ -75,13 +75,17 @@ def fix_of(rule, repos):
                                    _resolved(rule.remedy, repos)) if x)
 
 
+# The longest lifetime an organization's token policy allows: a fine-grained token minted to never expire reaches the forks and is refused by every project they are forks of (measured against WebKit/WebKit, 2026-09-15).
+MAX_PAT_DAYS = 365
+
+
 # GitHub takes the name, the expiry and every permission as a query parameter, and the repository list as none.
 def _github_pat_url(repos):
     q = [("name", "wk"),
          ("description", "opens pull requests from a wk workspace")]
     if repos:
         q.append(("target_name", repos[0].split("/")[0]))
-    q += [("expires_in", "none"), ("contents", "write"),
+    q += [("expires_in", str(MAX_PAT_DAYS)), ("contents", "write"),
           ("pull_requests", "write")]
     return ("https://github.com/settings/personal-access-tokens/new?"
             + urllib.parse.urlencode(q))
@@ -184,6 +188,16 @@ def _github_pat(value, repos, path, evidence):
         if verdict != OK:
             return verdict, why
         facts.append("can open a pull request on %s" % repo)
+    try:
+        projects = _github_pr_bases(token, repos)
+    except Unreachable as e:
+        return UNVERIFIED, ("could not ask %s which project each fork belongs "
+                            "to (%s); 'wk doctor' asks again." % (GITHUB_API, e))
+    for project in projects:
+        verdict, why = _github_project_accepts(token, project)
+        if verdict != OK:
+            return verdict, why
+        facts.append("%s accepts it" % project)
     if kind == "classic":
         return WIDE, ("a classic token (scopes: %s): its 'repo' scope reaches "
                       "every repository this account can write, not only the "
@@ -275,6 +289,40 @@ def _pull_request_probe(token, repo):
                                     % (GITHUB_API, repo), token, body=b"{}",
                                     headers=GITHUB_HEADERS)
     return status
+
+
+def _github_pr_bases(token, repos):
+    """The repository each fork's pull request is opened on: `git-webkit pr` posts to the project, not to the fork, so the project is what has to accept this token. GitHub names it `parent`; a repository that is nobody's fork is its own base and was probed above."""
+    bases = []
+    for repo in repos:
+        status, _headers, body = _http("GET", "%s/repos/%s" % (GITHUB_API, repo),
+                                       token, headers=GITHUB_HEADERS)
+        if status != 200:
+            raise Unreachable("GET /repos/%s answered HTTP %d" % (repo, status))
+        parent = (_json(body).get("parent") or {}).get("full_name") or ""
+        if parent and parent not in bases and parent not in repos:
+            bases.append(parent)
+    return bases
+
+
+def _github_project_accepts(token, repo):
+    """Wholesale, not per permission: an organization's personal-access-token policy blocks a token it disallows from every call to every repository it owns, a read included -- measured 2026-09-15, WebKit/WebKit answers 403 to a fine-grained token that outlives MAX_PAT_DAYS however the forks answer. GitHub's own message names the token and the page to shorten its lifetime at, so it is the remedy."""
+    try:
+        status, _headers, body = _http("GET", "%s/repos/%s" % (GITHUB_API, repo),
+                                       token, headers=GITHUB_HEADERS)
+    except Unreachable as e:
+        return UNVERIFIED, ("could not reach %s (%s) to ask whether %s accepts "
+                            "this token." % (GITHUB_API, e, repo))
+    if status == 200:
+        return OK, ""
+    if status == 403:
+        return BAD, ("%s refuses this token outright (HTTP 403), so no call a "
+                     "pull request needs reaches it. GitHub says: %s"
+                     % (repo, _json(body).get("message")
+                        or "nothing at all."))
+    return UNVERIFIED, ("GET /repos/%s answered HTTP %d rather than 200 or 403, "
+                        "so whether that project accepts this token is not "
+                        "known." % (repo, status))
 
 
 def _github_pat_can_open_a_pr(token, repo):
@@ -795,7 +843,8 @@ RULES = collections.OrderedDict((
     ("github-pat", Rule(
         spent_by="container/proxy/github-inject.py -- the Authorization header "
                  "a workspace's `git-webkit pr` request is forwarded with",
-        needs="open a pull request on each fork wk pushes to",
+        needs="open a pull request from each fork wk pushes to, on the "
+              "project it is a fork of",
         forbids="delete a repository, or administer a repository, an "
                 "organization or the site",
         what="a GitHub personal access token, so `git-webkit pr` in a "

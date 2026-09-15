@@ -23,7 +23,7 @@ import unittest
 from http.server import HTTPServer
 
 from tests.support import REPO, WkTest, stub_path
-from tests.test_credcheck import CLASSIC, FINE, FakeGitHub
+from tests.test_credcheck import CLASSIC, FINE, POLICY, FakeGitHub
 
 KEY = REPO / "cmd" / "key"
 
@@ -287,6 +287,11 @@ class TestWhatTheTokenCanDoDecidesWhetherItIsKept(_PatRun):
         FakeGitHub.repos = ["justinmichaud/WebKit", "justinmichaud/WPEWebKit"]
         FakeGitHub.repos_status = 200
         FakeGitHub.repos_answer = None
+        FakeGitHub.parents = {
+            "justinmichaud/WebKit": "WebKit/WebKit",
+            "justinmichaud/WPEWebKit": "WebPlatformForEmbedded/WPEWebKit"}
+        FakeGitHub.repo_status = {}
+        FakeGitHub.repo_message = POLICY
         FakeGitHub.seen = []
         self.extra_env = {
             "WK_GITHUB_API": "http://127.0.0.1:%d" % self.server.server_port}
@@ -305,6 +310,19 @@ class TestWhatTheTokenCanDoDecidesWhetherItIsKept(_PatRun):
                          "a token GitHub refuses was stored anyway")
         self.assertIn("Pull requests: write", out)
         self.assertIn("personal-access-tokens/new", out)
+
+    def test_a_token_the_project_refuses_stores_nothing(self):
+        """The fork probes all pass and the token still opens nothing: an
+        organization refuses a fine-grained token that outlives its policy on
+        every call, so the refusal carries GitHub's own words and the link
+        mints one with a lifetime it allows."""
+        FakeGitHub.repo_status = {"WebKit/WebKit": 403}
+        rc, out = self.key_tty("set", "github-pat", paste=FINE)
+        self.assertNotEqual(rc, 0, out)
+        self.assertFalse(self.pat().exists(),
+                         "a token WebKit/WebKit refuses was stored anyway")
+        self.assertIn("WebKit/WebKit refuses this token outright", out)
+        self.assertIn("expires_in=365", out)
 
     def test_a_token_that_could_delete_a_repository_stores_nothing(self):
         FakeGitHub.scopes = "repo, delete_repo"
@@ -373,6 +391,11 @@ class TestATokenGitHubRefusesIsReplaced(_PatRun):
         FakeGitHub.repos = ["justinmichaud/WebKit", "justinmichaud/WPEWebKit"]
         FakeGitHub.repos_status = 200
         FakeGitHub.repos_answer = None
+        FakeGitHub.parents = {
+            "justinmichaud/WebKit": "WebKit/WebKit",
+            "justinmichaud/WPEWebKit": "WebPlatformForEmbedded/WPEWebKit"}
+        FakeGitHub.repo_status = {}
+        FakeGitHub.repo_message = POLICY
         FakeGitHub.seen = []
         self.extra_env = {
             "WK_GITHUB_API": "http://127.0.0.1:%d" % self.server.server_port}

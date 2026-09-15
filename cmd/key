@@ -52,7 +52,11 @@
 #                                     unless it reaches exactly the forks in
 #                                     wk_push_forks: the token page cannot
 #                                     preselect them, so its own answer to
-#                                     `GET /user/repos` is what decides
+#                                     `GET /user/repos` is what decides. Refused
+#                                     too unless each project a fork belongs to
+#                                     accepts it: an organization's token policy
+#                                     caps a fine-grained token's lifetime, so
+#                                     the link mints one for 366 days
 #                       bugzilla-api-key
 #                                     what `git-webkit pr` files and updates the
 #                                     bug with. Never enters a workspace either:

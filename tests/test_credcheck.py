@@ -33,16 +33,26 @@ import credcheck   # noqa: E402 -- the constants a verdict names are read from i
 STORE_SH = (REPO / "lib" / "store.sh").read_text()
 
 FORKS = "wkuser/WebKit wkuser/WPEWebKit"
+PROJECTS = {"wkuser/WebKit": "WebKit/WebKit",
+            "wkuser/WPEWebKit": "WebPlatformForEmbedded/WPEWebKit"}
 FINE = "github_pat_11ABCDEFG_notarealtoken"
 CLASSIC = "ghp_notarealclassictoken0123456789"
+
+# What WebKit/WebKit answered a never-expiring fine-grained token, 2026-09-15.
+POLICY = ("The 'WebKit' organization forbids access via a fine-grained "
+          "personal access tokens if the token's lifetime is greater than 366 "
+          "days. Please adjust your token's lifetime at the following URL: "
+          "https://github.com/settings/personal-access-tokens/19512093")
 
 
 class FakeGitHub(BaseHTTPRequestHandler):
     """`GET /user` answers the token's identity, its classic scope list and its
     expiry; `GET /user/repos` the account's repositories, one page at a time,
-    whatever the token was granted; `POST /repos/<r>/pulls` whether the token
-    can open a pull request there, 403 unless `pulls` says otherwise. All three
-    are what GitHub itself answers."""
+    whatever the token was granted; `GET /repos/<r>` the repository, with the
+    project it is a fork of as `parent`, or `repo_status`'s refusal carrying
+    `repo_message`; `POST /repos/<r>/pulls` whether the token can open a pull
+    request there, 403 unless `pulls` says otherwise. All four are what GitHub
+    itself answers."""
 
     user_status = 200
     scopes = ""
@@ -51,6 +61,9 @@ class FakeGitHub(BaseHTTPRequestHandler):
     repos = []
     repos_status = 200
     repos_answer = None
+    parents = {}
+    repo_status = {}
+    repo_message = ""
     seen = []
 
     def _send(self, code, body, headers=()):
@@ -78,6 +91,15 @@ class FakeGitHub(BaseHTTPRequestHandler):
             page = int(q.get("page", ["1"])[0])
             window = FakeGitHub.repos[(page - 1) * per:page * per]
             return self._send(200, [{"full_name": n} for n in window])
+        if path.startswith("/repos/"):
+            name = path[len("/repos/"):]
+            status = FakeGitHub.repo_status.get(name, 200)
+            if status != 200:
+                return self._send(status, {"message": FakeGitHub.repo_message})
+            body = {"full_name": name}
+            if name in FakeGitHub.parents:
+                body["parent"] = {"full_name": FakeGitHub.parents[name]}
+            return self._send(200, body)
         if path != "/user":
             return self._send(404, {"message": "Not Found"})
         if FakeGitHub.user_status != 200:
@@ -121,6 +143,9 @@ class _Rules(unittest.TestCase):
         FakeGitHub.repos = FORKS.split()
         FakeGitHub.repos_status = 200
         FakeGitHub.repos_answer = None
+        FakeGitHub.parents = dict(PROJECTS)
+        FakeGitHub.repo_status = {}
+        FakeGitHub.repo_message = POLICY
         FakeGitHub.seen = []
         self.tmp = Path(tempfile.mkdtemp(prefix="wk-test-credcheck-"))
         self.addCleanup(lambda: subprocess.run(["rm", "-rf", str(self.tmp)]))
@@ -274,9 +299,14 @@ class TestTheTokenCanDoTheJob(_Rules):
             self.assertIn("can open a pull request on %s" % repo, detail)
 
     def test_the_account_repositories_are_listed_once_per_page(self):
-        """One GET per page, and the identity call before it."""
+        """One GET per page, after the identity call, each fork and each
+        project a fork belongs to."""
         self.check("github-pat", FINE)
-        self.assertEqual(["/user", "/user/repos?per_page=100&page=1"],
+        self.assertEqual(["/user",
+                          "/repos/wkuser/WebKit", "/repos/wkuser/WPEWebKit",
+                          "/repos/WebKit/WebKit",
+                          "/repos/WebPlatformForEmbedded/WPEWebKit",
+                          "/user/repos?per_page=100&page=1"],
                          [p[1] for p in FakeGitHub.seen if p[0] == "GET"])
 
     def test_the_probe_is_a_write_that_creates_nothing(self):
@@ -317,6 +347,83 @@ class TestTheTokenCanDoTheJob(_Rules):
         verdict, detail = self.check("github-pat", FINE)
         self.assertEqual("bad", verdict, detail)
         self.assertIn("does not accept this token (HTTP 401)", detail)
+
+
+class TestTheProjectRefusesIt(_Rules):
+    """A pull request is opened on the project, not on the fork, and an
+    organization's personal-access-token policy refuses a token wholesale:
+    measured 2026-09-15, a fine-grained token that never expires opens nothing
+    on WebKit/WebKit and answers 403 to a plain read there, while every fork
+    probe above it passes. So the forks are not the whole question -- each
+    fork's parent is asked whether it accepts the token at all."""
+
+    def test_a_project_that_refuses_the_token_is_refused_in_githubs_words(self):
+        FakeGitHub.repo_status = {"WebKit/WebKit": 403}
+        verdict, detail = self.check("github-pat", FINE)
+        self.assertEqual("bad", verdict, detail)
+        self.assertIn("WebKit/WebKit refuses this token outright", detail)
+        self.assertIn("366 days", detail)
+        self.assertIn("personal-access-tokens/19512093", detail)
+        self.assertIn("wk key set github-pat", detail)
+
+    def test_a_refusal_with_no_message_still_names_the_project(self):
+        FakeGitHub.repo_status = {"WebKit/WebKit": 403}
+        FakeGitHub.repo_message = ""
+        verdict, detail = self.check("github-pat", FINE)
+        self.assertEqual("bad", verdict, detail)
+        self.assertIn("WebKit/WebKit", detail)
+
+    def test_a_classic_token_is_asked_the_same_question(self):
+        """The policy is the organization's, not the token format's: a classic
+        token it disallows is refused before its reach is reported."""
+        FakeGitHub.scopes = "repo"
+        FakeGitHub.repo_status = {"WebKit/WebKit": 403}
+        verdict, detail = self.check("github-pat", CLASSIC)
+        self.assertEqual("bad", verdict, detail)
+        self.assertIn("WebKit/WebKit", detail)
+
+    def test_every_project_accepting_it_is_named(self):
+        verdict, detail = self.check("github-pat", FINE)
+        self.assertEqual("ok", verdict, detail)
+        for project in PROJECTS.values():
+            self.assertIn("%s accepts it" % project, detail)
+
+    def test_a_fork_of_nothing_has_no_project_to_ask(self):
+        """The parent is what GitHub answers, not a list kept here: a
+        repository that is nobody's fork is its own base, already probed."""
+        FakeGitHub.parents = {}
+        verdict, detail = self.check("github-pat", FINE)
+        self.assertEqual("ok", verdict, detail)
+        self.assertEqual(["/user", "/repos/wkuser/WebKit",
+                          "/repos/wkuser/WPEWebKit",
+                          "/user/repos?per_page=100&page=1"],
+                         [p[1] for p in FakeGitHub.seen if p[0] == "GET"])
+
+    def test_one_project_is_asked_once_however_many_forks_name_it(self):
+        FakeGitHub.parents = dict.fromkeys(PROJECTS, "WebKit/WebKit")
+        self.check("github-pat", FINE)
+        self.assertEqual(1, [p[1] for p in FakeGitHub.seen
+                             if p[0] == "GET"].count("/repos/WebKit/WebKit"))
+
+    def test_a_fork_that_could_not_be_read_is_unverified_not_claimed(self):
+        FakeGitHub.repo_status = {"wkuser/WebKit": 500}
+        verdict, detail = self.check("github-pat", FINE)
+        self.assertEqual("unverified", verdict, detail)
+        self.assertIn("which project each fork belongs to", detail)
+
+    def test_a_project_that_answered_neither_200_nor_403_is_unverified(self):
+        FakeGitHub.repo_status = {"WebKit/WebKit": 500}
+        verdict, detail = self.check("github-pat", FINE)
+        self.assertEqual("unverified", verdict, detail)
+        self.assertIn("rather than 200 or 403", detail)
+
+    def test_the_project_is_asked_before_the_account_is_enumerated(self):
+        """The wholesale answer costs two requests; enumerating the account
+        costs one per repository it owns."""
+        FakeGitHub.repo_status = {"WebKit/WebKit": 403}
+        self.check("github-pat", FINE)
+        self.assertEqual([], [p for p in FakeGitHub.seen
+                              if p[1].startswith("/user/repos")])
 
 
 class TestTheTokenIsNotWiderThanTheJob(_Rules):
@@ -1088,7 +1195,9 @@ class TestOneTableForEveryCredential(_Rules):
     def test_the_token_page_arrives_with_the_permissions_filled_in(self):
         """GitHub takes the name, the expiry and each permission as query
         parameters, so the only thing left to choose is the repository list --
-        which a link cannot carry, and which the remedy therefore names."""
+        which a link cannot carry, and which the remedy therefore names. The
+        expiry is one an organization's token policy allows: a token minted to
+        never expire is refused by every project (TestTheProjectRefusesIt)."""
         fields = self.rule("github-pat")
         url = fields["url"]
         self.assertTrue(url.startswith(
@@ -1096,7 +1205,8 @@ class TestOneTableForEveryCredential(_Rules):
         query = urllib.parse.parse_qs(urllib.parse.urlparse(url).query)
         self.assertEqual(["write"], query["contents"])
         self.assertEqual(["write"], query["pull_requests"])
-        self.assertEqual(["none"], query["expires_in"])
+        self.assertEqual(["366"], query["expires_in"])
+        self.assertEqual(366, credcheck.MAX_PAT_DAYS)
         self.assertEqual(["wkuser"], query["target_name"])
         self.assertNotIn("repositories", query)
         for repo in FORKS.split():
