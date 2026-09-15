@@ -13,6 +13,7 @@ reads for its base URL is the seam.
 
 Run: python3 -m unittest tests.test_credcheck -v
 """
+import copy
 import json
 import os
 import sys
@@ -54,17 +55,19 @@ class FakeGitHub(BaseHTTPRequestHandler):
     request there, 403 unless `pulls` says otherwise. All four are what GitHub
     itself answers."""
 
-    user_status = 200
-    scopes = ""
-    expiry = ""
-    pulls = {}
-    repos = []
-    repos_status = 200
-    repos_answer = None
-    parents = {}
-    repo_status = {}
-    repo_message = ""
-    seen = []
+    # Every field is class state the whole suite shares, so a fixture setting
+    # only what it varies would inherit the rest from whichever module ran
+    # before it. `reset` is what makes each fixture's starting point its own.
+    DEFAULTS = dict(user_status=200, scopes="", expiry="", pulls={}, repos=[],
+                    repos_status=200, repos_answer=None, parents={},
+                    repo_status={}, repo_message="", pulls_message={}, seen=[])
+
+    @classmethod
+    def reset(cls, **fields):
+        # On FakeGitHub itself, never on cls: the handler reads the base class,
+        # so a subclass fixture setting its own would be read by nothing.
+        for name, value in dict(cls.DEFAULTS, **fields).items():
+            setattr(FakeGitHub, name, copy.deepcopy(value))
 
     def _send(self, code, body, headers=()):
         raw = json.dumps(body).encode()
@@ -115,11 +118,16 @@ class FakeGitHub(BaseHTTPRequestHandler):
                                 self.headers.get("Authorization", "")))
         repo = self.path[len("/repos/"):-len("/pulls")]
         code = FakeGitHub.pulls.get(repo, 403)
-        self._send(code, {"message": "Resource not accessible by personal "
-                                     "access token" if code == 403 else "x"})
+        if code != 403:
+            return self._send(code, {"message": "x"})
+        self._send(code, {"message": FakeGitHub.pulls_message.get(
+            repo, "Resource not accessible by personal access token")})
 
     def log_message(self, *a):
         pass
+
+
+FakeGitHub.reset()
 
 
 class _Rules(unittest.TestCase):
@@ -136,17 +144,9 @@ class _Rules(unittest.TestCase):
         cls.server.server_close()
 
     def setUp(self):
-        FakeGitHub.user_status = 200
-        FakeGitHub.scopes = ""
-        FakeGitHub.expiry = ""
-        FakeGitHub.pulls = dict.fromkeys(FORKS.split(), 422)
-        FakeGitHub.repos = FORKS.split()
-        FakeGitHub.repos_status = 200
-        FakeGitHub.repos_answer = None
-        FakeGitHub.parents = dict(PROJECTS)
-        FakeGitHub.repo_status = {}
-        FakeGitHub.repo_message = POLICY
-        FakeGitHub.seen = []
+        FakeGitHub.reset(
+            pulls=dict.fromkeys(FORKS.split() + list(PROJECTS.values()), 422),
+            repos=FORKS.split(), parents=dict(PROJECTS), repo_message=POLICY)
         self.tmp = Path(tempfile.mkdtemp(prefix="wk-test-credcheck-"))
         self.addCleanup(lambda: subprocess.run(["rm", "-rf", str(self.tmp)]))
 
@@ -304,8 +304,6 @@ class TestTheTokenCanDoTheJob(_Rules):
         self.check("github-pat", FINE)
         self.assertEqual(["/user",
                           "/repos/wkuser/WebKit", "/repos/wkuser/WPEWebKit",
-                          "/repos/WebKit/WebKit",
-                          "/repos/WebPlatformForEmbedded/WPEWebKit",
                           "/user/repos?per_page=100&page=1"],
                          [p[1] for p in FakeGitHub.seen if p[0] == "GET"])
 
@@ -314,7 +312,8 @@ class TestTheTokenCanDoTheJob(_Rules):
         422 -- the same probe `wk verify` runs from inside a workspace."""
         self.check("github-pat", FINE)
         posts = [p for p in FakeGitHub.seen if p[0] == "POST"]
-        self.assertEqual(["/repos/%s/pulls" % r for r in FORKS.split()],
+        self.assertEqual(["/repos/%s/pulls" % r
+                          for r in FORKS.split() + list(PROJECTS.values())],
                          [p[1] for p in posts])
         for _m, _p, auth in posts:
             self.assertTrue(auth.startswith("Bearer "), auth[:12])
@@ -333,7 +332,7 @@ class TestTheTokenCanDoTheJob(_Rules):
         self.assertEqual("bad", verdict, detail)
         self.assertIn("wkuser/WPEWebKit", detail)
         self.assertIn("Pull requests: write", detail)
-        self.assertIn("personal-access-tokens/new", detail)
+        self.assertIn("settings/tokens/new", detail)
         self.assertIn("wk key set github-pat", detail)
 
     def test_a_fork_the_token_cannot_see_is_refused_by_name(self):
@@ -350,43 +349,63 @@ class TestTheTokenCanDoTheJob(_Rules):
 
 
 class TestTheProjectRefusesIt(_Rules):
-    """A pull request is opened on the project, not on the fork, and an
-    organization's personal-access-token policy refuses a token wholesale:
-    measured 2026-09-15, a fine-grained token that never expires opens nothing
-    on WebKit/WebKit and answers 403 to a plain read there, while every fork
-    probe above it passes. So the forks are not the whole question -- each
-    fork's parent is asked whether it accepts the token at all."""
+    """A pull request is opened on the project, not on the fork, so the project
+    is asked the same write-shaped question the forks are. A read of it is not
+    the question and would pass a token that cannot do the job: measured
+    2026-09-15, a fine-grained token reads WebKit/WebKit (200) and is refused
+    POST /repos/WebKit/WebKit/pulls, because a fine-grained token reaches only
+    repositories owned by the account that owns it. The organization's
+    token-lifetime policy refuses the same call in its own words, and GitHub's
+    message is what tells the two apart."""
 
-    def test_a_project_that_refuses_the_token_is_refused_in_githubs_words(self):
-        FakeGitHub.repo_status = {"WebKit/WebKit": 403}
+    def test_a_fine_grained_token_is_refused_with_the_reason_it_cannot_be_fixed(self):
+        """The one a person would otherwise chase for an afternoon: every fork
+        probe passes, so the token looks right everywhere except the one call
+        that matters."""
+        FakeGitHub.pulls["WebKit/WebKit"] = 403
         verdict, detail = self.check("github-pat", FINE)
         self.assertEqual("bad", verdict, detail)
-        self.assertIn("WebKit/WebKit refuses this token outright", detail)
+        self.assertIn("WebKit/WebKit refuses this token a pull request", detail)
+        self.assertIn("Resource not accessible by personal access token", detail)
+        self.assertIn("reaches only repositories owned by the account", detail)
+        self.assertIn("A classic one is what can", detail)
+        self.assertIn("settings/tokens/new", detail)
+        self.assertIn("scopes=public_repo", detail)
+
+    def test_the_organizations_lifetime_policy_is_refused_in_its_own_words(self):
+        """The other 403 the same call answers, told apart by GitHub's message
+        alone -- and that message names the token and the page to shorten it
+        at, so it is the remedy."""
+        FakeGitHub.pulls["WebKit/WebKit"] = 403
+        FakeGitHub.pulls_message = {"WebKit/WebKit": POLICY}
+        verdict, detail = self.check("github-pat", FINE)
+        self.assertEqual("bad", verdict, detail)
         self.assertIn("366 days", detail)
         self.assertIn("personal-access-tokens/19512093", detail)
         self.assertIn("wk key set github-pat", detail)
 
     def test_a_refusal_with_no_message_still_names_the_project(self):
-        FakeGitHub.repo_status = {"WebKit/WebKit": 403}
-        FakeGitHub.repo_message = ""
+        FakeGitHub.pulls["WebKit/WebKit"] = 403
+        FakeGitHub.pulls_message = {"WebKit/WebKit": ""}
         verdict, detail = self.check("github-pat", FINE)
         self.assertEqual("bad", verdict, detail)
         self.assertIn("WebKit/WebKit", detail)
 
     def test_a_classic_token_is_asked_the_same_question(self):
-        """The policy is the organization's, not the token format's: a classic
-        token it disallows is refused before its reach is reported."""
+        """The question is the project's, not the token format's -- but the
+        advice to mint a classic one is not repeated at a classic one."""
         FakeGitHub.scopes = "repo"
-        FakeGitHub.repo_status = {"WebKit/WebKit": 403}
+        FakeGitHub.pulls["WebKit/WebKit"] = 403
         verdict, detail = self.check("github-pat", CLASSIC)
         self.assertEqual("bad", verdict, detail)
         self.assertIn("WebKit/WebKit", detail)
+        self.assertNotIn("reaches only repositories owned by the account", detail)
 
-    def test_every_project_accepting_it_is_named(self):
+    def test_every_project_it_can_open_one_on_is_named(self):
         verdict, detail = self.check("github-pat", FINE)
         self.assertEqual("ok", verdict, detail)
         for project in PROJECTS.values():
-            self.assertIn("%s accepts it" % project, detail)
+            self.assertIn("can open a pull request on %s" % project, detail)
 
     def test_a_fork_of_nothing_has_no_project_to_ask(self):
         """The parent is what GitHub answers, not a list kept here: a
@@ -394,16 +413,14 @@ class TestTheProjectRefusesIt(_Rules):
         FakeGitHub.parents = {}
         verdict, detail = self.check("github-pat", FINE)
         self.assertEqual("ok", verdict, detail)
-        self.assertEqual(["/user", "/repos/wkuser/WebKit",
-                          "/repos/wkuser/WPEWebKit",
-                          "/user/repos?per_page=100&page=1"],
-                         [p[1] for p in FakeGitHub.seen if p[0] == "GET"])
+        self.assertEqual(["/repos/%s/pulls" % r for r in FORKS.split()],
+                         [p[1] for p in FakeGitHub.seen if p[0] == "POST"])
 
     def test_one_project_is_asked_once_however_many_forks_name_it(self):
         FakeGitHub.parents = dict.fromkeys(PROJECTS, "WebKit/WebKit")
         self.check("github-pat", FINE)
         self.assertEqual(1, [p[1] for p in FakeGitHub.seen
-                             if p[0] == "GET"].count("/repos/WebKit/WebKit"))
+                             if p[0] == "POST"].count("/repos/WebKit/WebKit/pulls"))
 
     def test_a_fork_that_could_not_be_read_is_unverified_not_claimed(self):
         FakeGitHub.repo_status = {"wkuser/WebKit": 500}
@@ -411,16 +428,16 @@ class TestTheProjectRefusesIt(_Rules):
         self.assertEqual("unverified", verdict, detail)
         self.assertIn("which project each fork belongs to", detail)
 
-    def test_a_project_that_answered_neither_200_nor_403_is_unverified(self):
-        FakeGitHub.repo_status = {"WebKit/WebKit": 500}
+    def test_a_project_that_answered_neither_422_nor_403_is_unverified(self):
+        FakeGitHub.pulls["WebKit/WebKit"] = 500
         verdict, detail = self.check("github-pat", FINE)
         self.assertEqual("unverified", verdict, detail)
-        self.assertIn("rather than 200 or 403", detail)
+        self.assertIn("rather than 422", detail)
 
     def test_the_project_is_asked_before_the_account_is_enumerated(self):
-        """The wholesale answer costs two requests; enumerating the account
-        costs one per repository it owns."""
-        FakeGitHub.repo_status = {"WebKit/WebKit": 403}
+        """Refusing costs one request; enumerating the account costs one per
+        repository it owns."""
+        FakeGitHub.pulls["WebKit/WebKit"] = 403
         self.check("github-pat", FINE)
         self.assertEqual([], [p for p in FakeGitHub.seen
                               if p[1].startswith("/user/repos")])
@@ -480,7 +497,8 @@ class TestTheTokenReachesTheForksAndNothingElse(_Rules):
         FakeGitHub.repos = FORKS.split() + self.OTHERS
         self.check("github-pat", FINE)
         self.assertEqual(["/repos/%s/pulls" % r
-                          for r in FORKS.split() + self.OTHERS],
+                          for r in FORKS.split() + list(PROJECTS.values())
+                          + self.OTHERS],
                          [p[1] for p in FakeGitHub.seen if p[0] == "POST"])
 
     def test_a_token_on_every_repository_is_refused_with_the_count(self):
@@ -489,7 +507,7 @@ class TestTheTokenReachesTheForksAndNothingElse(_Rules):
         verdict, detail = self.check("github-pat", FINE)
         self.assertEqual("bad", verdict, detail)
         self.assertIn("44 repositories beyond the 2 forks", detail)
-        self.assertIn("Only select repositories", detail)
+        self.assertIn("tick nothing but the 'public_repo'", detail)
         for repo in FORKS.split():
             self.assertIn(repo, detail)
 
@@ -1192,28 +1210,24 @@ class TestOneTableForEveryCredential(_Rules):
                     self.assertIn(fields["url"], fields["fix"])
                 self.assertIn(fields["remedy"], fields["fix"])
 
-    def test_the_token_page_arrives_with_the_permissions_filled_in(self):
-        """GitHub takes the name, the expiry and each permission as query
-        parameters, so the only thing left to choose is the repository list --
-        which a link cannot carry, and which the remedy therefore names. The
-        expiry is one an organization's token policy allows: a token minted to
-        never expire is refused by every project (TestTheProjectRefusesIt)."""
+    def test_the_token_page_is_the_one_that_mints_a_token_that_works(self):
+        """The classic page, because a fine-grained token opens a pull request
+        on every fork and on no project (TestTheProjectRefusesIt). It carries
+        the scope; the expiry and the scope list are what a person is left to
+        get right, so the remedy names both."""
         fields = self.rule("github-pat")
         url = fields["url"]
         self.assertTrue(url.startswith(
-            "https://github.com/settings/personal-access-tokens/new?"), url)
+            "https://github.com/settings/tokens/new?"), url)
         query = urllib.parse.parse_qs(urllib.parse.urlparse(url).query)
-        self.assertEqual(["write"], query["contents"])
-        self.assertEqual(["write"], query["pull_requests"])
-        self.assertEqual([str(credcheck.MAX_PAT_DAYS)], query["expires_in"])
-        # The ceiling WebKit's policy states, not a preference: a link that
-        # minted a longer-lived token would mint one every project refuses.
+        self.assertEqual(["public_repo"], query["scopes"])
+        self.assertIn("wk", query["description"][0])
+        # The ceiling WebKit's policy states, not a preference: a remedy that
+        # asked for longer would ask for a token every project refuses.
         self.assertLessEqual(credcheck.MAX_PAT_DAYS, 366)
         self.assertGreater(credcheck.MAX_PAT_DAYS, 0)
-        self.assertEqual(["wkuser"], query["target_name"])
-        self.assertNotIn("repositories", query)
-        for repo in FORKS.split():
-            self.assertIn(repo, fields["remedy"])
+        self.assertIn(str(credcheck.MAX_PAT_DAYS), fields["remedy"])
+        self.assertIn("public_repo", fields["remedy"])
 
     def test_this_machine_knows_where_each_one_is_kept(self):
         """One path table (wk_cred_path), so `wk key set`, `wk key check` and

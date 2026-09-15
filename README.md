@@ -1156,10 +1156,15 @@ on each fork, with a `POST /repos/<fork>/pulls` carrying an empty body: 422 is
 write` here". A credential that reaches *further* than wk ever spends it turns
 any escape from the boundary into the blast radius of a whole account, so a
 classic token's scope list (`x-oauth-scopes` on any answer) is read too: one
-carrying `delete_repo` or an `admin:` scope is refused outright, and a plain
-`repo` classic token is stored with its reach named, because it is the token a
-person most likely already has working elsewhere and refusing it would refuse
-the credential that works. GitHub answers nothing about a fine-grained token's
+carrying `delete_repo` or an `admin:` scope is refused outright, and one whose
+reach is merely broad is stored with that reach named. This token is a classic
+one by necessity -- see below -- so `wide` is the best verdict it can earn, and
+`public_repo` rather than `repo` is what keeps the breadth to public
+repositories.
+
+A fine-grained token is still judged on what it can do rather than on its
+shape, because a fork whose project is the account's own is a job one can do.
+GitHub answers nothing about a fine-grained token's
 *permission* set -- there is no endpoint that enumerates one -- and
 `GET /user/repos` answers for the account, not the token: every public
 repository the account owns or collaborates on is listed with the account's
@@ -1173,16 +1178,25 @@ repositories* unless the person changes that field -- which is one account's
 whole reach sitting behind a workspace boundary.
 
 The forks are not the whole question, because a pull request is opened on the
-*project*, not on the fork it comes from. An organization's personal access
-token policy refuses a token wholesale: not one permission but every call to
-every repository it owns, a plain read included. WebKit's caps a fine-grained
-token's lifetime at 366 days, so a token minted to never expire passes every
-fork probe above and answers `403` on `WebKit/WebKit` -- `git-webkit pr` gets
-nothing open. So the rule asks GitHub which project each fork is a `parent` of
-and reads that project with the token: 200 is accepted, 403 is refused, and
-GitHub's own message -- which names the offending token and the page to shorten
-its lifetime at -- is the verdict's remedy. The link `wk key set github-pat`
-prints mints one for 366 days for the same reason.
+*project*, not on the fork it comes from. So the rule asks GitHub which project
+each fork is a `parent` of and puts the same `POST /repos/<project>/pulls` to
+it. A read of the project is not the question and would pass a token that
+cannot do the job: measured 2026-09-15, a fine-grained token reads
+`WebKit/WebKit` with a 200 and is refused the pull request with a 403.
+
+Two different faults arrive as that 403, and GitHub's own message is what tells
+them apart. An organization's personal access token policy refuses a token
+wholesale -- WebKit's caps a fine-grained token's lifetime at 366 days, so one
+minted to never expire is refused every call, and the message names the token
+and the page to shorten it at. The other is structural: a fine-grained token
+reaches only repositories owned by the account that owns it, and an upstream in
+another organization can never be granted to one, so no fine-grained token of a
+contributor's account opens a pull request on `WebKit/WebKit` however the forks
+answer. That verdict names the classic token page, because a classic token is
+what can -- which is why `wk key set github-pat` asks for one with
+`public_repo`, and why `wide` is the best verdict this credential earns. The
+narrower shape is not available for this job at all, so the reach is named in
+every report rather than designed away.
 
 The claude.ai login is judged the way a session spends it. A stored login
 whose access token has run out is renewed first -- the refresh token posted to

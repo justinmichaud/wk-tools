@@ -75,20 +75,15 @@ def fix_of(rule, repos):
                                    _resolved(rule.remedy, repos)) if x)
 
 
-# The longest lifetime an organization's token policy allows: a fine-grained token minted to never expire reaches the forks and is refused by every project they are forks of (measured against WebKit/WebKit, 2026-09-15).
+# The longest lifetime an organization's token policy allows; a token minted to never expire is refused every call to every repository the organization owns (measured against WebKit/WebKit, 2026-09-15).
 MAX_PAT_DAYS = 365
 
-
-# GitHub takes the name, the expiry and every permission as a query parameter, and the repository list as none.
-def _github_pat_url(repos):
-    q = [("name", "wk"),
-         ("description", "opens pull requests from a wk workspace")]
-    if repos:
-        q.append(("target_name", repos[0].split("/")[0]))
-    q += [("expires_in", str(MAX_PAT_DAYS)), ("contents", "write"),
-          ("pull_requests", "write")]
-    return ("https://github.com/settings/personal-access-tokens/new?"
-            + urllib.parse.urlencode(q))
+# A classic token, because a fine-grained one reaches only repositories owned by the account that owns it and an upstream in another organization can never be granted to one -- so it opens a pull request on every fork and on no project. `scopes` and `description` are what the page takes as query parameters; the expiry is not one of them.
+CLASSIC_TOKEN_PAGE = (
+    "https://github.com/settings/tokens/new?"
+    + urllib.parse.urlencode([("scopes", "public_repo"),
+                              ("description", "wk -- opens pull requests "
+                                              "from a wk workspace")]))
 
 
 class Unreachable(Exception):
@@ -194,20 +189,23 @@ def _github_pat(value, repos, path, evidence):
         return UNVERIFIED, ("could not ask %s which project each fork belongs "
                             "to (%s); 'wk doctor' asks again." % (GITHUB_API, e))
     for project in projects:
-        verdict, why = _github_project_accepts(token, project)
+        verdict, why = _github_project_accepts(token, kind, project)
         if verdict != OK:
             return verdict, why
-        facts.append("%s accepts it" % project)
+        facts.append("can open a pull request on %s" % project)
     if kind == "classic":
-        return WIDE, ("a classic token (scopes: %s): its 'repo' scope reaches "
-                      "every repository this account can write, not only the "
-                      "forks.\n    %s"
-                      % (", ".join(scopes) or "none", "; ".join(facts)))
+        reach = ("every repository this account can write, public and private"
+                 if "repo" in scopes else
+                 "every public repository this account can write")
+        return WIDE, ("a classic token (scopes: %s): it reaches %s, not only "
+                      "the forks -- which is the narrowest a token that can "
+                      "open a pull request on the projects comes.\n    %s"
+                      % (", ".join(scopes) or "none", reach, "; ".join(facts)))
     want = [r.lower() for r in repos]
     try:
         others = [r for r in _github_account_repos(token)
                   if r.lower() not in want]
-        extra = [r for r in others if _pull_request_probe(token, r) == 422]
+        extra = [r for r in others if _pull_request_probe(token, r)[0] == 422]
     except Unreachable as e:
         return UNVERIFIED, ("could not ask %s which repositories this token "
                             "reaches (%s); 'wk doctor' asks again."
@@ -284,11 +282,11 @@ def _github_account_repos(token):
 
 
 def _pull_request_probe(token, repo):
-    """The write-shaped probe that creates nothing: an empty body names no head or base branch, so an authorised call is 422 and an unauthorised one 403 (measured 2026-09-11: a fine-grained token answers 422 on exactly the repositories it was granted with 'Pull requests: write', 403 on every other repository the account has)."""
-    status, _headers, _body = _http("POST", "%s/repos/%s/pulls"
-                                    % (GITHUB_API, repo), token, body=b"{}",
-                                    headers=GITHUB_HEADERS)
-    return status
+    """The write-shaped probe that creates nothing: an empty body names no head or base branch, so an authorised call is 422 and an unauthorised one 403 (measured 2026-09-11: a fine-grained token answers 422 on exactly the repositories it was granted with 'Pull requests: write', 403 on every other repository the account has). GitHub's message comes back with the status because a project's two ways of refusing differ only by it."""
+    status, _headers, body = _http("POST", "%s/repos/%s/pulls"
+                                   % (GITHUB_API, repo), token, body=b"{}",
+                                   headers=GITHUB_HEADERS)
+    return status, _json(body).get("message") or ""
 
 
 def _github_pr_bases(token, repos):
@@ -305,29 +303,37 @@ def _github_pr_bases(token, repos):
     return bases
 
 
-def _github_project_accepts(token, repo):
-    """Wholesale, not per permission: an organization's personal-access-token policy blocks a token it disallows from every call to every repository it owns, a read included -- measured 2026-09-15, WebKit/WebKit answers 403 to a fine-grained token that outlives MAX_PAT_DAYS however the forks answer. GitHub's own message names the token and the page to shorten its lifetime at, so it is the remedy."""
+def _github_project_accepts(token, kind, repo):
+    """Whether a pull request can be opened on the project a fork belongs to -- the call `git-webkit pr` makes, asked of the project rather than of the fork. A read of the same repository is not the question: a token that cannot open one still answers 200 to it. The two ways a project refuses both arrive as 403 and GitHub's own message tells them apart -- an organization's token policy names the policy and the page to fix the token at, and a fine-grained token outside its resource owner is 'Resource not accessible by personal access token'."""
     try:
-        status, _headers, body = _http("GET", "%s/repos/%s" % (GITHUB_API, repo),
-                                       token, headers=GITHUB_HEADERS)
+        status, message = _pull_request_probe(token, repo)
     except Unreachable as e:
-        return UNVERIFIED, ("could not reach %s (%s) to ask whether %s accepts "
-                            "this token." % (GITHUB_API, e, repo))
-    if status == 200:
+        return UNVERIFIED, ("could not reach %s (%s) to ask whether a pull "
+                            "request can be opened on %s."
+                            % (GITHUB_API, e, repo))
+    if status == 422:
         return OK, ""
     if status == 403:
-        return BAD, ("%s refuses this token outright (HTTP 403), so no call a "
-                     "pull request needs reaches it. GitHub says: %s"
-                     % (repo, _json(body).get("message")
-                        or "nothing at all."))
-    return UNVERIFIED, ("GET /repos/%s answered HTTP %d rather than 200 or 403, "
-                        "so whether that project accepts this token is not "
-                        "known." % (repo, status))
+        why = ("%s refuses this token a pull request (HTTP 403). GitHub says: %s"
+               % (repo, message or "nothing at all."))
+        if kind == "fine-grained":
+            why += ("\n    A fine-grained token reaches only repositories owned "
+                    "by the account that owns it, and %s belongs to another "
+                    "organization, so no fine-grained token of this account can "
+                    "open one there -- whatever it is granted on the forks. A "
+                    "classic one is what can, and the link below mints it."
+                    % repo)
+        return BAD, why
+    if status == 401:
+        return BAD, "GitHub does not accept this token (HTTP 401) for %s." % repo
+    return UNVERIFIED, ("POST /repos/%s/pulls answered HTTP %d rather than 422 "
+                        "or 403, so whether a pull request can be opened on "
+                        "that project is not known." % (repo, status))
 
 
 def _github_pat_can_open_a_pr(token, repo):
     try:
-        status = _pull_request_probe(token, repo)
+        status, _message = _pull_request_probe(token, repo)
     except Unreachable as e:
         return UNVERIFIED, ("could not reach %s (%s) to ask whether a pull "
                             "request can be opened on %s." % (GITHUB_API, e, repo))
@@ -849,11 +855,12 @@ RULES = collections.OrderedDict((
                 "organization or the site",
         what="a GitHub personal access token, so `git-webkit pr` in a "
              "workspace can open a pull request",
-        url=_github_pat_url,
-        remedy=lambda repos: (
-            "the one field that link cannot carry: choose 'Only select "
-            "repositories' and pick exactly %s"
-            % (", ".join(repos) or "the forks wk pushes to")),
+        url=CLASSIC_TOKEN_PAGE,
+        remedy=("the two fields that link cannot carry: tick nothing but the "
+                "'public_repo' it preselects ('repo' adds every private "
+                "repository this account can write), and set an expiry of at "
+                "most %d days -- an organization refuses a token that outlives "
+                "its policy" % MAX_PAT_DAYS),
         store_with="wk key set github-pat",
         check=_github_pat)),
     ("bugzilla-api-key", Rule(

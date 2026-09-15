@@ -273,14 +273,8 @@ class _Fleet(_Shared):
             ["bash", "-c", '. "$1/lib/common.sh"; . "$1/lib/store.sh"; '
                            'wk_push_forks | awk "NF {print \\$2}"', "_", str(REPO)],
             capture_output=True, text=True, cwd=str(REPO)).stdout.split()
-        FakeGitHub.user_status = 200
-        FakeGitHub.scopes = ""
-        FakeGitHub.expiry = ""
-        FakeGitHub.repos = list(self.forks)
-        FakeGitHub.repos_status = 200
-        FakeGitHub.repos_answer = None
-        FakeGitHub.pulls = dict.fromkeys(self.forks, 422)
-        FakeGitHub.seen = []
+        FakeGitHub.reset(repos=list(self.forks),
+                         pulls=dict.fromkeys(self.forks, 422))
         self.gh_log = self.tmp / "gh.log"
         self.gh_log.write_text("")
         self.gh_keys = self.tmp / "gh.keys"

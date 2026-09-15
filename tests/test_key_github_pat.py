@@ -27,6 +27,9 @@ from tests.test_credcheck import CLASSIC, FINE, POLICY, FakeGitHub
 
 KEY = REPO / "cmd" / "key"
 
+FORKS = {"justinmichaud/WebKit": "WebKit/WebKit",
+         "justinmichaud/WPEWebKit": "WebPlatformForEmbedded/WPEWebKit"}
+
 
 def _wait_for_echo_off(fd, timeout=5.0):
     """The prompt is printed before `read -rs` turns the terminal's echo off,
@@ -280,19 +283,10 @@ class TestWhatTheTokenCanDoDecidesWhetherItIsKept(_PatRun):
         self.addCleanup(self.server.server_close)
         self.addCleanup(self.server.shutdown)
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
-        FakeGitHub.user_status = 200
-        FakeGitHub.scopes = ""
-        FakeGitHub.expiry = ""
-        FakeGitHub.pulls = {"justinmichaud/WebKit": 422, "justinmichaud/WPEWebKit": 422}
-        FakeGitHub.repos = ["justinmichaud/WebKit", "justinmichaud/WPEWebKit"]
-        FakeGitHub.repos_status = 200
-        FakeGitHub.repos_answer = None
-        FakeGitHub.parents = {
-            "justinmichaud/WebKit": "WebKit/WebKit",
-            "justinmichaud/WPEWebKit": "WebPlatformForEmbedded/WPEWebKit"}
-        FakeGitHub.repo_status = {}
-        FakeGitHub.repo_message = POLICY
-        FakeGitHub.seen = []
+        FakeGitHub.reset(user_status=200, repos=list(FORKS),
+                         pulls=dict.fromkeys(
+                             list(FORKS) + list(FORKS.values()), 422),
+                         parents=dict(FORKS), repo_message=POLICY)
         self.extra_env = {
             "WK_GITHUB_API": "http://127.0.0.1:%d" % self.server.server_port}
 
@@ -309,20 +303,20 @@ class TestWhatTheTokenCanDoDecidesWhetherItIsKept(_PatRun):
         self.assertFalse(self.pat().exists(),
                          "a token GitHub refuses was stored anyway")
         self.assertIn("Pull requests: write", out)
-        self.assertIn("personal-access-tokens/new", out)
+        self.assertIn("settings/tokens/new", out)
 
     def test_a_token_the_project_refuses_stores_nothing(self):
-        """The fork probes all pass and the token still opens nothing: an
-        organization refuses a fine-grained token that outlives its policy on
-        every call, so the refusal carries GitHub's own words and the link
-        mints one with a lifetime it allows."""
-        FakeGitHub.repo_status = {"WebKit/WebKit": 403}
+        """Every fork probe passes and the token still opens nothing on the
+        project, which is the only call `git-webkit pr` needs -- so it is
+        refused at the prompt rather than hours later, in GitHub's own words
+        and with the page that mints one that can."""
+        FakeGitHub.pulls["WebKit/WebKit"] = 403
         rc, out = self.key_tty("set", "github-pat", paste=FINE)
         self.assertNotEqual(rc, 0, out)
         self.assertFalse(self.pat().exists(),
                          "a token WebKit/WebKit refuses was stored anyway")
-        self.assertIn("WebKit/WebKit refuses this token outright", out)
-        self.assertIn("expires_in=365", out)
+        self.assertIn("WebKit/WebKit refuses this token a pull request", out)
+        self.assertIn("settings/tokens/new", out)
 
     def test_a_token_that_could_delete_a_repository_stores_nothing(self):
         FakeGitHub.scopes = "repo, delete_repo"
@@ -384,19 +378,10 @@ class TestATokenGitHubRefusesIsReplaced(_PatRun):
         self.addCleanup(self.server.server_close)
         self.addCleanup(self.server.shutdown)
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
-        FakeGitHub.user_status = 401
-        FakeGitHub.scopes = ""
-        FakeGitHub.expiry = ""
-        FakeGitHub.pulls = {"justinmichaud/WebKit": 422, "justinmichaud/WPEWebKit": 422}
-        FakeGitHub.repos = ["justinmichaud/WebKit", "justinmichaud/WPEWebKit"]
-        FakeGitHub.repos_status = 200
-        FakeGitHub.repos_answer = None
-        FakeGitHub.parents = {
-            "justinmichaud/WebKit": "WebKit/WebKit",
-            "justinmichaud/WPEWebKit": "WebPlatformForEmbedded/WPEWebKit"}
-        FakeGitHub.repo_status = {}
-        FakeGitHub.repo_message = POLICY
-        FakeGitHub.seen = []
+        FakeGitHub.reset(user_status=401, repos=list(FORKS),
+                         pulls=dict.fromkeys(
+                             list(FORKS) + list(FORKS.values()), 422),
+                         parents=dict(FORKS), repo_message=POLICY)
         self.extra_env = {
             "WK_GITHUB_API": "http://127.0.0.1:%d" % self.server.server_port}
         self.pat().write_text("ghp_revokedone\n")

@@ -48,17 +48,16 @@
 #                                     with. Never enters a workspace: only the credential
 #                                     injector reads it, which reads GitHub
 #                                     with it whatever position `wk push` is in
-#                                     and writes only while it is on. Refused
-#                                     unless it reaches exactly the forks in
-#                                     wk_push_forks: the token page cannot
-#                                     preselect them, so its own answer to
-#                                     `GET /user/repos` is what decides. Refused
-#                                     too unless each project a fork belongs to
-#                                     accepts it: an organization's token policy
-#                                     caps a fine-grained token's lifetime, so
-#                                     the link mints one with a lifetime it
-#                                     allows. Rotating it while `wk push` is on
-#                                     hands the new one straight to the injector
+#                                     and writes only while it is on. A classic
+#                                     token with 'public_repo': a fine-grained
+#                                     one opens a pull request on every fork and
+#                                     on no project, because it reaches only
+#                                     repositories this account owns. Refused
+#                                     unless it can open one on each fork and on
+#                                     the project that fork belongs to, each
+#                                     asked with the write itself. Rotating it
+#                                     while `wk push` is on hands the new one
+#                                     straight to the injector
 #                       bugzilla-api-key
 #                                     what `git-webkit pr` files and updates the
 #                                     bug with. Never enters a workspace either:

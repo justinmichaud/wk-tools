@@ -234,8 +234,7 @@ class TestCheckAsksAboutEveryCredential(_KeyRun):
         self.assertNotEqual(0, cp.returncode, cp.stdout)
         actions = cp.stdout.partition("needs you:")[2]
         self.assertRegex(actions, r"\d+\. github-pat\s+wk key set github-pat --replace")
-        self.assertIn("https://github.com/settings/personal-access-tokens/new",
-                      actions)
+        self.assertIn("https://github.com/settings/tokens/new", actions)
 
     def test_a_deploy_key_remedy_is_not_printed_twice(self):
         """The deploy-key rule's remedy *is* the command, so the line naming
