@@ -88,9 +88,9 @@
 #                                     to, so the fleet can tell you it wants
 #                                     you. Minted here, never invented: the
 #                                     topic name is the whole credential, so it
-#                                     is printed once, as it is minted, and
-#                                     never written to a card or held by a
-#                                     workspace
+#                                     is printed as it is minted and by `wk key
+#                                     show`, and never written to a card or held
+#                                     by a workspace
 #
 #   wk key deploy     the deploy keys alone, elected and converged the way
 #                     `setup` does them: the key each fork's repository accepts
@@ -103,7 +103,8 @@
 #                     ones the fleet shares, and whether each holds a claude.ai
 #                     login of its own -- every line asked again at that moment.
 #                     Read-only, and what a bare `wk key` runs
-#   wk key show       print the public halves
+#   wk key show       print the public halves, and the ntfy topic URL to point a
+#                     phone at
 #   wk key ensure     create missing push keys without registering them
 #
 # One key per fork, the same on every workstation and shared by every workspace:
@@ -263,7 +264,7 @@ cred_line() { # <name> <stored|minted|taken|skipped|refused> <path or one-line r
     printf '%-13s %-8s %s%s' "$1" "$2" "$3" "${var:+  (\$$var in a workspace)}"
 }
 
-# One row of `wk key check`, in a column-aligned table: the verdict's summary line, and the fix when the detail carries one (lib/credcheck.py writes it as a `fix:` line for a credential that cannot do its job). The rest of the detail -- what it must be able to do, what it must not -- is what `wk key show <name>` prints.
+# One row of `wk key check`, in a column-aligned table: the verdict's summary line, and the fix when the detail carries one (lib/credcheck.py writes it as a `fix:` line for a credential that cannot do its job). The rest of the detail -- what it must be able to do, what it must not -- is what `wk key set <name>` prints about the one already here.
 cred_row() { # <verdict line>
     printf '%s\n' "$(wk_cred_detail "$1" | sed -n '1p; /^ *fix: /p')"
 }
@@ -778,6 +779,13 @@ show)
         [ -n "$remote" ] || continue
         printf '# %s\n%s\n' "$repo" "$(pub_of "$remote")"
     done
+    # The topic name is the whole ntfy credential, so this is the only reader that prints it: a second phone is subscribed to the topic already minted rather than to a third one 'set --replace' makes, which would leave the first phone silent.
+    if wk_cred_present ntfy; then
+        printf '# ntfy -- %s\n%s%s\n' "$(wk_cred_rule ntfy remedy)" \
+               "$(wk_cred_rule ntfy url)" "$(wk_cred_read ntfy)"
+    else
+        printf '# ntfy -- no topic on this machine: wk key set ntfy\n'
+    fi
     ;;
 
 adopt)

@@ -348,10 +348,12 @@ class TestTheTopicIsMintedNotAsked(_KeyRun):
     deploy key rather than asking for one: a name a person invents is short and
     guessable, which lib/credcheck.py's rule can report and never prevent.
 
-    The topic name is the whole credential, so the mint is the one moment it is
-    shown -- a phone has to be pointed at it once. Every reader of the stored
-    one reports on it without printing it (lib/wknotify.py's _out), which is
-    what makes printing it here safe to do exactly once."""
+    The topic name is the whole credential, so the two moments it is shown are
+    the mint -- a phone has to be pointed at it once -- and `wk key show`, which
+    is how a second phone, or one reinstalled, reaches the topic already minted
+    instead of a fresh one that leaves the first phone silent. Every other
+    reader reports on the stored one without printing it (lib/wknotify.py's
+    _out)."""
 
     SHARED = "a-topic-minted-on-the-first-machine"
 
@@ -389,6 +391,21 @@ class TestTheTopicIsMintedNotAsked(_KeyRun):
             cp, _ = self.key(*args)
             with self.subTest(args=args):
                 self.assertNotIn(topic, cp.stdout + cp.stderr)
+
+    def test_only_show_prints_it_again(self):
+        """`wk key show` is where a phone is pointed at the topic already
+        minted, so the subscribe URL comes out whole."""
+        _cp, secrets = self.key("set", "ntfy")
+        topic = self.topic_path(secrets).read_text().strip()
+        cp, _ = self.key("show")
+        self.assertEqual(0, cp.returncode, cp.stdout + cp.stderr)
+        self.assertIn("https://ntfy.sh/" + topic, cp.stdout)
+
+    def test_show_names_the_mint_when_this_machine_holds_no_topic(self):
+        cp, secrets = self.key("show")
+        self.assertEqual(0, cp.returncode, cp.stdout + cp.stderr)
+        self.assertFalse(self.topic_path(secrets).exists())
+        self.assertIn("wk key set ntfy", cp.stdout)
 
     def test_replacing_it_mints_a_different_one(self):
         _cp, secrets = self.key("set", "ntfy")

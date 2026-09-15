@@ -801,8 +801,10 @@ tailnet, while mac-guest needs `tart` on the Mac itself and still refuses.
 **The lane says when it wants a person.** `wk notify` publishes to ntfy.sh
 under a topic held as this machine's `ntfy` credential -- `wk key set ntfy`
 mints one (it is a secret wk makes, like a deploy key, not one a service
-issues) and prints the URL to subscribe a phone to, once, the only time it is
-ever shown; `wk key setup` mints it with nothing to type. The
+issues) and prints the URL to subscribe a phone to; `wk key setup` mints it
+with nothing to type, and `wk key show` prints that URL again, so a second
+phone reaches the topic already minted rather than a fresh one that would
+leave the first silent. The
 driver calls it when the machine goes down to measure, and when a restart it
 asked for visibly did not take it into bench mode. It is not called on silence,
 because silence is not a state a run is in: each install is its own tailnet node
