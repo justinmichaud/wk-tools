@@ -114,6 +114,15 @@ _sandbox_flags() {
          $gpu"
 }
 
+# podman makes a missing mount destination as container root: the mirror's is inside the home where this machine's store is under $HOME, and a root-owned ~/.local is one the workspace user cannot install an agent CLI into.
+_ensure_home_mountpoint() {   # <ws> <mount destination>
+    local ws="$1" dest="$2" home
+    home=$(t_home)
+    case "$dest" in
+        "$home"/?*) ensure_dir "$ws/home/${dest#"$home"/}" ;;
+    esac
+}
+
 t_create() {
     local name="$1" base_id="$2" arch="${3:-native}"
     local c ws base
@@ -129,6 +138,8 @@ t_create() {
     ensure_dir "$ws/overlay-work"
     ensure_dir "$ws/home"
     ensure_dir "$ws/build"
+
+    _ensure_home_mountpoint "$ws" "$(dirname "$(wk_mirror)")"
 
     printf '%s\n' "$arch" > "$ws/arch"
 
@@ -332,8 +343,7 @@ t_sdk_upstream() {
         | awk 'NR > 1 {print $2}'
 }
 
-# Runs where $WK_SDK lives: locally on Linux, and locally again here once macOS
-# has forwarded `wk new` into the podman VM -- never over an extra ssh hop.
+# Runs where $WK_SDK lives: locally on Linux, and locally again here once macOS has forwarded `wk new` into the podman VM -- never over an extra ssh hop.
 t_sdk_refresh() {
     bash "$WK_ROOT/container/sdk-refresh.sh" "$WK_SDK" \
         || die "refreshing the webkit-container-sdk checkout failed (above); wkdev-create

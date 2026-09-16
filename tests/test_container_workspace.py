@@ -1,7 +1,9 @@
 """Real integration tests against one container workspace: create it,
 exercise the read-only surface, cancel a real build in it, then destroy it.
-Gated on a running podman `wk` VM (this repo's own container target) -- it
-never starts one itself.
+Gated on the container target being there -- podman on Linux, the `wk` podman
+VM on macOS -- and never starting either itself. The lifecycle is the cheap
+half and runs wherever a workspace can be made; cancelling a build compiles
+JSC, so it stays on the machine that keeps the VM.
 
 Run: python3 -m unittest tests.test_container_workspace -v
 """
@@ -13,11 +15,12 @@ import subprocess
 import time
 import unittest
 
-from tests.support import (REPO, WK, WkTest, rand_suffix, requires_podman_vm,
+from tests.support import (REPO, WK, WkTest, rand_suffix,
+                           requires_container_target, requires_podman_vm,
                            run, shell_files)
 
 
-@requires_podman_vm()
+@requires_container_target()
 class TestContainerWorkspaceLifecycle(WkTest):
     """`wk new` (container target) -> `wk ls`/`wk status`/`wk build --dry-run`
     -> `wk rm`, cleaning up in tearDown even if an assertion fails midway."""
@@ -92,6 +95,25 @@ class TestContainerWorkspaceLifecycle(WkTest):
                          "(container/firstrun.sh), so `git-webkit pr` and the "
                          "commit hooks work without being asked for")
 
+    def _assert_a_session_can_run_in_it(self):
+        """The workspace user owns their home -- mountpoints included, and the
+        mirror's is inside it where this machine's store is under $HOME
+        (tests/test_home_mounts.py) -- and the Claude CLI first start installs
+        into ~/.local/bin is on $PATH. Without either, `wk ai claude` refuses
+        the workspace and no session in it can run at all."""
+        cp = run("enter", self.name, "--", "bash", "-c",
+                 'find "$HOME" -xdev -maxdepth 4 ! -user "$(id -un)" -printf "%u %m %p\\n"',
+                 timeout=300)
+        self.assertEqual(cp.returncode, 0, cp.stdout)
+        self.assertEqual(cp.stdout.strip(), "",
+                         "these are in the workspace user's home and are not theirs, "
+                         "so what installs there cannot")
+
+        cp = run("enter", self.name, "--", "bash", "-c", "command -v claude", timeout=300)
+        self.assertEqual(cp.returncode, 0,
+                         f"no 'claude' on $PATH in the workspace: {cp.stdout}")
+        self.assertTrue(cp.stdout.strip().endswith("claude"), cp.stdout)
+
     def test_create_list_status_build_dry_run_remove(self):
         """wk new -> wk ls -> wk status --text --no-fleet -> wk build --dry-run -> wk rm"""
         t0 = time.time()
@@ -101,9 +123,10 @@ class TestContainerWorkspaceLifecycle(WkTest):
         created_s = time.time() - t0
 
         # It may still be finishing in the background; wait for it to settle.
-        run("status", self.name, "--wait", "--timeout", "300")
+        run("status", self.name, "--wait", "--timeout", "900", timeout=960)
 
         self._assert_the_checkout_is_what_wk_new_promises()
+        self._assert_a_session_can_run_in_it()
 
         cp = run("ls")
         self.assertIn(self.name, cp.stdout, f"'wk ls' does not list {self.name}: {cp.stdout}")
@@ -147,7 +170,7 @@ class TestCancellingARealBuild(WkTest):
         cp = run("new", self.name, "--target", "container", timeout=1200)
         self._created = cp.returncode == 0
         self.assertEqual(cp.returncode, 0, f"wk new failed: {cp.stdout}")
-        run("status", self.name, "--wait", "--timeout", "300")
+        run("status", self.name, "--wait", "--timeout", "900", timeout=960)
 
     def tearDown(self):
         run("build", self.name, "--kill", timeout=600)

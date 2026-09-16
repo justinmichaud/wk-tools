@@ -938,7 +938,7 @@ report_fleet_devices() {
 
 if [ -n "$WAIT" ]; then
     _interval="${WK_WAIT_INTERVAL:-5}"
-    _waited=0
+    _start=$(date +%s)
     _last=""
     while :; do
         _rc=0
@@ -949,12 +949,13 @@ if [ -n "$WAIT" ]; then
             info "waiting for${1:+ '$1'} to finish (wk status says busy)"
             _last=running
         fi
-        if [ "$WAIT_TIMEOUT" -gt 0 ] && [ "$_waited" -ge "$WAIT_TIMEOUT" ]; then
-            warn "still busy after ${WAIT_TIMEOUT}s -- the work continues; this only stopped waiting"
+        # Elapsed, not the sum of the sleeps: a poll of a busy workspace costs seconds, and counting only what is slept between polls overshoots by all of it (a 300s timeout returned at ~460s).
+        _elapsed=$(( $(date +%s) - _start ))
+        if [ "$WAIT_TIMEOUT" -gt 0 ] && [ "$_elapsed" -ge "$WAIT_TIMEOUT" ]; then
+            warn "still busy after ${_elapsed}s -- the work continues; this only stopped waiting"
             break
         fi
         sleep "$_interval"
-        _waited=$((_waited + _interval))
     done
 fi
 

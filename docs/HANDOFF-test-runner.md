@@ -3,6 +3,7 @@
 `wk selftest` runs the stdlib unittest suite under `tests/`; below is the behaviour that has no test yet, most of it writable with a stub/fake target driver and no hardware.
 
 - [ ] test: one kill-point test class per command for crash-only convergence: `wk build --babysit`, `wk test`, `wk bench` (seed and run), `wk vm base`/`--refresh`, `wk vm start`/`stop`/`start`, `wk remote setup`/`rm`, `wk pi setup`, `wk key deploy`, `wk skills pull`/`push`, `wk backup`, `./setup`, `wk quiesce on`/`off`, `wk session`, `wk ai claude`
+- [ ] test: the container-touching integration tests run on Linux too, where the container target is podman itself and not a VM: `tests/test_lifecycle.py`, `test_crash_only.py`, `test_zed_url.py`, `test_push_agent.py`, `test_bench_container_run.py`, `test_bench_report.py` and `test_container_workspace.py`'s build-cancelling class are gated on `requires_podman_vm` -- a macOS host's `wk` machine -- so none of them has ever run on a Linux workstation; the three that reach into the VM over ssh (`podman_vm_ssh` in `test_build.py`, `test_commit_wall.py`, `test_machine_mounts.py`) need the probe replaced, not the gate (catches: a `wk new` regression on the machine that runs `wk new`)
 - [ ] test: two `wk build` on one workspace serialize on the workspace lock
 - [ ] test: `wk vm base --refresh` is refused while one is already running
 - [ ] test: two `wk vm start` do not corrupt `~/.ssh/config.d/wk`
@@ -20,7 +21,6 @@
 - [ ] test: every `WK_*` override read with a default is documented where the user meets it and covered by a test, or removed (audit pass)
 - [ ] test: `wk run` starts on GTK/WPE (catches: per-port build dir, `LD_LIBRARY_PATH` replaced instead of prepended)
 - [ ] test: `wk new` waits for and checks the ready marker (catches: firstrun aborting while creation reports success)
-- [ ] test: `.config` in a new workspace is owned by the user (catches: the SDK's systemd mount re-appearing and breaking firstrun)
 - [ ] test: `wk enter <ws> <cmd>` runs the command (catches: `exec`-ing a shell function)
 - [ ] test: an in-workspace build sizes from the whole machine (catches: the desktop reserve subtracted twice inside a guest the host already sized)
 - [ ] test: a bare `wk run` in a macOS guest finds a binary (catches: the container-shaped `jsc-release` default resolving a path an Apple-port guest can't have) [needs the macOS guest]
@@ -34,7 +34,6 @@
 - [ ] test: a container workspace's `Host wk-<name>` alias is a ProxyCommand, not a hostname (catches: a fictional `HostName localhost` pointing zed at the host's own filesystem)
 - [ ] test: `origin` is `WebKit/WebKit` in every target's checkout (catches: a remote build machine pointing origin at its own shared clone)
 - [ ] test: `wk build --cmakeargs` is refused (catches: a hand-written one silently replacing `DEVELOPER_MODE`/`USE_LIBBACKTRACE`/arch flags)
-- [ ] test: `claude` is on `$PATH` in a container workspace (catches: firstrun installing to `~/.local/bin` with no rc putting it on the path)
 - [ ] test: `wk gc` keeps the newest build per profile on a build host (catches: keeping the newest two overall instead, deleting the only un-imported copy of a different profile)
 - [ ] test: a lock outlives the command that took it (catches: a flock inherited by podman's `conmon`, holding a workspace lock for the container's lifetime)
 - [ ] test: two machines sharing one ssh destination get separate bench-lane state (catches: keying the state file by host alone, so one machine's finished lane reads as done for another)

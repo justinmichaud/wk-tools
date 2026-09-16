@@ -23,6 +23,7 @@ Run: python3 -m unittest tests.test_build_liveness -v
 """
 import json
 import os
+import re
 import time
 import unittest
 
@@ -153,8 +154,8 @@ class _FakeWalk(WkTest):
         write_task(self.store, kind=kind, name=name, log=logf, **kw)
         return name
 
-    def walk(self, *args, timeout=90, env=None):
-        with stub_path({"ssh": ANSWERING_SSH}) as binp:
+    def walk(self, *args, timeout=90, env=None, ssh=ANSWERING_SSH):
+        with stub_path({"ssh": ssh}) as binp:
             e = {
                 "XDG_STATE_HOME": str(self.xdg),
                 "WK_REMOTE_ROOT": str(self.tmp / "remote-root"),
@@ -372,8 +373,26 @@ class TestWaitWaitsThroughSilence(_FakeWalk):
     def test_a_silent_build_is_waited_through_until_the_timeout(self):
         cp = self._wait(log="[1/4200] cc\n", log_age=600)
         self.assertIn("wk status says busy", cp.stdout)
-        self.assertIn("still busy after 2s", cp.stdout)
+        self.assertRegex(cp.stdout, r"still busy after \d+s")
         self.assertEqual(cp.returncode, 2, cp.stdout)
+
+    def test_the_timeout_is_elapsed_time_and_the_report_says_how_long(self):
+        """A poll is not free -- one against a real container workspace costs
+        ~3s -- so a timeout counted in sleeps alone overshoots by however long
+        the polling took: `--timeout 300` returned at ~460s, long enough to
+        take the caller's own timeout with it (tests/test_container_workspace
+        .py waits for a workspace to finish being made). A poll made slower
+        than the timeout here, so one is all the loop can afford: what it
+        reports waiting is what a clock says, not 1s of sleeping."""
+        self.task(log="[1/4200] cc\n", log_age=600)
+        cp = self.walk("--wait", "--timeout=1", timeout=180,
+                       env={"WK_WAIT_INTERVAL": "1"},
+                       ssh="#!/bin/sh\nsleep 3\n" + ANSWERING_SSH.split("\n", 1)[1])
+        self.assertEqual(cp.returncode, 2, cp.stdout)
+        waited = re.search(r"still busy after (\d+)s", cp.stdout)
+        self.assertTrue(waited, f"the wait did not report stopping: {cp.stdout}")
+        self.assertGreaterEqual(int(waited.group(1)), 3,
+                                f"the timeout counts sleeps, not elapsed time: {cp.stdout}")
 
     def test_a_stalled_build_ends_the_wait_at_once(self):
         cp = self._wait(end="stalled")
