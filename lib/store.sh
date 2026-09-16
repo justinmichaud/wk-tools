@@ -864,7 +864,7 @@ $(printf '%s\n' "$found" | sed 's/^/    /')
         warn "'$name' has $dirty uncommitted change(s); the checkout carries them across"
     fi
 
-    fetch_step="git fetch --quiet $(sh_quote "$(upstream_direct_url "$url")") $(sh_quote "$src_ref:refs/remotes/$remote/$branch")"
+    fetch_step="git fetch --quiet --no-prune $(sh_quote "$(upstream_direct_url "$url")") $(sh_quote "$src_ref:refs/remotes/$remote/$branch")"
     if [ -n "$add_remote" ]; then
         fetch_step="git remote get-url $(sh_quote "$remote") >/dev/null 2>&1 || git remote add $(sh_quote "$remote") $(sh_quote "$url")
         git remote set-url $(sh_quote "$remote") $(sh_quote "$url")
@@ -875,7 +875,7 @@ $(printf '%s\n' "$found" | sed 's/^/    /')
         set -e
         cd $(sh_quote "$src")
         $fetch_step
-    " || die "could not fetch '$branch' into '$name'; nothing was checked out"   # the upstream by URL, never a remote: it writes refs/remotes/<remote>/<branch> and nothing else, so the local branch is whole while the count below decides what taking the PR head would lose
+    " || die "could not fetch '$branch' into '$name'; nothing was checked out"   # the upstream by URL, never a remote, and --no-prune because `fetch.prune = true` is in every workspace's gitconfig: this adds one ref inside refs/remotes/<remote>/ and must not be able to retire the rest of it, origin/main included. It writes nothing else either, so the local branch is whole while the count below decides what taking the PR head would lose
 
     reset=""
     if [ -n "$local_sha" ] && [ "$local_sha" != "$head_sha" ]; then

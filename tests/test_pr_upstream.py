@@ -305,6 +305,27 @@ class TestTheDirectSpellingEscapesEveryWiredRewrite(unittest.TestCase):
         self.assertEqual(got.stdout.strip(), url, got.stdout)
 
 
+class TestThePrFetchRetiresNothing(unittest.TestCase):
+    """`fetch.prune = true` ships in dotfiles/gitconfig, so every workspace
+    has it. A `wk pr` fetch writes one ref inside refs/remotes/<remote>/ --
+    the namespace that also holds origin/main, which is what git-webkit
+    resolves a pull request's base against -- so it says so rather than
+    leaving that to how the source happens to be spelled."""
+
+    def test_the_gitconfig_every_workspace_gets_turns_prune_on(self):
+        text = (REPO / "dotfiles" / "gitconfig").read_text()
+        self.assertIn("prune", text, "the hazard below is only real while this holds")
+
+    def test_the_fetch_wk_pr_runs_says_no_prune(self):
+        body = bash(PRELUDE + 'declare -f wk_pr_checkout').stdout
+        self.assertIn("git fetch --quiet --no-prune", body, body[-2000:])
+
+    def test_it_is_the_only_fetch_that_command_runs(self):
+        """One fetch, so there is one place for that to be true."""
+        body = bash(PRELUDE + 'declare -f wk_pr_checkout').stdout
+        self.assertEqual(body.count("git fetch"), 1, body[-2000:])
+
+
 class TestTheBrokerServesTheMirrorRefresh(unittest.TestCase):
     """The workspace half of `wk sync` and of `wk pr <wired fork>:<branch>`
     is one request, and the broker's answer to it is one `wk` command with
