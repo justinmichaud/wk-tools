@@ -76,7 +76,7 @@ rewritten file resumes a running process mid-word. Check `wk status` first.
    downloaded distro bases — are not caches of facts. The test: could a read
    recompute this value, or only re-download/rebuild it? A built system image is
    an artifact the workspace already names; it is not imported, catalogued or
-   described by a manifest (`wk help images`).
+   described by a manifest (`wk help architecture`).
 2. **Crash-only, guaranteed final state.** Every mutating command can be killed
    at any point and re-run, and the re-run converges to the declared final
    state. "Already exists" is never the answer to a half-made thing.
@@ -148,8 +148,8 @@ hardware` derives each board's arrangement.
 ## Layering
 
 `home` / `lab` / `wk` / `field` / `stock`, one-way dependency: the lab layer
-(targets, boot, image, bench mechanics) knows nothing about WebKit. `wk help
-design` defines the layers. No CLI is minted until a layer has a second consumer.
+(targets, boot, image, bench mechanics) knows nothing about WebKit. No CLI is
+minted until a layer has a second consumer.
 
 ## One path, not two
 

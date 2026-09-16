@@ -457,12 +457,14 @@ so a first start whose setup did not finish is visible rather than silent:
   only while `wk push` is on.
 - `forkwpe` -- your own fork of WPEWebKit, the same, for that project.
 
-Those URLs are what `git remote -v` and `git-webkit` read, and not what a fetch
-of them reads: the same wiring adds `url.<mirror>.insteadOf` for each, so
-`git fetch origin`, `git fetch fork` and `git pull` in a workspace are local
-reads of the machine's mirror. Each remote asks only for what that mirror
-carries -- `main` of origin, the namespaced branches of the other three -- and
-for no tags. Under git's own default refspec a bare `git fetch origin` asks
+Those URLs are what `remote.<r>.url` records and what `git-webkit` reads, and
+not what a fetch of them reads: the same wiring adds `url.<mirror>.insteadOf`
+for each, so `git fetch origin`, `git fetch fork` and `git pull` in a workspace
+are local reads of the machine's mirror -- and `git remote -v`, which prints
+the rewrite's answer rather than the recorded URL, names the mirror path. Each
+remote asks only for what that mirror carries -- `main` of origin, the
+namespaced branches of the other three -- and for no tags. Under git's own
+default refspec a bare `git fetch origin` asks
 WebKit/WebKit for all 924 of its heads and 8,288 tags and writes a
 remote-tracking ref for each, which is the half-minute that made a fresh
 workspace feel stale. A machine that keeps no mirror of its own (a build box

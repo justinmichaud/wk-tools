@@ -77,6 +77,25 @@ wk_pr_repos() { # repositories `wk pr <user>:<branch>` tries in turn
         | awk '!seen[$0]++'
 }
 
+# What GitHub itself answers, asked from outside every repository: a wired checkout rewrites each wk_remotes URL to this machine's mirror (wk_fetch_config) and a mirror keeps only origin's branches as heads, so the same question asked inside one comes back empty for every fork branch and every pull request head -- silently, and with git's own exit status 0.
+upstream_ls_remote() { # <url> <ref>
+    git -C / ls-remote "$1" "$2"
+}
+
+pr_branch_repo() { # <user> <branch> -- `<repo> <url> <sha>` per repository of that fork carrying the branch; every one is asked, so a branch in two is the caller's to refuse by name
+    local user="$1" branch="$2" repo url sha
+    for repo in $(wk_pr_repos); do
+        url="https://github.com/$user/$repo.git"
+        sha=$(upstream_ls_remote "$url" "refs/heads/$branch" 2>/dev/null | awk '{print $1; exit}') || sha=""   # a fork with no repository of that name answers 128, and pipefail would make it this function's status
+        if [ -n "$sha" ]; then printf '%s %s %s\n' "$repo" "$url" "$sha"; fi
+    done
+    return 0
+}
+
+pr_branch_repo_urls() { # <user> -- what pr_branch_repo asked, for a refusal to name
+    wk_pr_repos | sed "s|^|https://github.com/$1/|; s|\$|.git|"
+}
+
 wk_push_forks() { # <remote> <owner/repo> <ssh-host-alias>
     cat <<'EOF'
 fork     justinmichaud/WebKit      github-webkit
@@ -766,15 +785,22 @@ wk_pr_checkout() {  # <name> <spec> -- fetch it into the mirror once, check it o
 
     case "$PR_KIND" in
     user)
+        found=$(pr_branch_repo "$PR_USER" "$PR_BRANCH")
+        n=$(printf '%s\n' "$found" | grep -c . || true)
+        case "$n" in
+        0) die "no branch '$PR_BRANCH' in $(wk_pr_repos | tr '\n' '/' | sed 's|/$||') under '$PR_USER'.
+    Checked: $(pr_branch_repo_urls "$PR_USER" | tr '\n' ' ')" ;;
+        1) ;;
+        *) die "'$PR_BRANCH' exists in more than one of $PR_USER's repositories:
+$(printf '%s\n' "$found" | sed 's/^/    /')
+    They are different projects; check the PR page for which one it is and
+    fetch that remote by hand." ;;
+        esac
+
         probe=$(t_exec "$name" bash -c "
             cd $(sh_quote "$src") || exit 1
-            for r in $(wk_pr_repos | tr '\n' ' '); do
-                u=https://github.com/$(sh_quote "$PR_USER")/\$r.git
-                sha=\$(git ls-remote \"\$u\" refs/heads/$(sh_quote "$PR_BRANCH") 2>/dev/null | awk '{print \$1}')
-                [ -n \"\$sha\" ] && echo \"found=\$r \$u \$sha\"
-            done
             for rr in \$(git remote); do
-                uu=\$(git remote get-url \"\$rr\")
+                uu=\$(git config --get \"remote.\$rr.url\")
                 case \"\$uu\" in
                     *[:/]$(sh_quote "$PR_USER")/*) echo \"remote=\$rr \$uu\" ;;
                 esac
@@ -782,18 +808,6 @@ wk_pr_checkout() {  # <name> <spec> -- fetch it into the mirror once, check it o
             echo \"local=\$(git rev-parse --verify --quiet refs/heads/$(sh_quote "$PR_BRANCH") || true)\"
             echo \"dirty=\$(git status --porcelain 2>/dev/null | wc -l | tr -d ' ')\"
         " 2>/dev/null | tr -d '\r') || die "could not reach the checkout in '$name'"
-
-        found=$(printf '%s\n' "$probe" | sed -n 's/^found=//p')
-        n=$(printf '%s\n' "$found" | grep -c . || true)
-        case "$n" in
-        0) die "no branch '$PR_BRANCH' in $(wk_pr_repos | tr '\n' '/' | sed 's|/$||') under '$PR_USER'.
-    Checked: $(wk_pr_repos | sed "s|^|https://github.com/$PR_USER/|;s|\$|.git|" | tr '\n' ' ')" ;;
-        1) ;;
-        *) die "'$PR_BRANCH' exists in more than one of $PR_USER's repositories:
-$(printf '%s\n' "$found" | sed 's/^/    /')
-    They are different projects; check the PR page for which one it is and
-    fetch that remote by hand." ;;
-        esac
 
         repo=$(printf '%s' "$found" | awk '{print $1}')
         url=$(printf '%s' "$found"  | awk '{print $2}')
@@ -833,9 +847,7 @@ $(printf '%s\n' "$found" | sed 's/^/    /')
         local_sha=$(kv_get local <<<"$probe")
         dirty=$(kv_get dirty <<<"$probe")
 
-        head_sha=$(t_exec "$name" bash -c "
-            git ls-remote $(sh_quote "$url") $(sh_quote "$src_ref") 2>/dev/null | awk '{print \$1}'
-        " 2>/dev/null | tr -d '\r')
+        head_sha=$(upstream_ls_remote "$url" "$src_ref" 2>/dev/null | awk '{print $1; exit}') || head_sha=""
         [ -n "$head_sha" ] || die "no pull request #$PR_N on $repo (checked $url)"
 
         [ -z "$mirror_ok" ] || mirror_fetch_pull "$remote" "$PR_N" \
@@ -845,34 +857,6 @@ $(printf '%s\n' "$found" | sed 's/^/    /')
 
     if [ "${dirty:-0}" -gt 0 ] 2>/dev/null; then
         warn "'$name' has $dirty uncommitted change(s); the checkout carries them across"
-    fi
-
-    reset=""
-    if [ -n "$local_sha" ] && [ "$local_sha" != "$head_sha" ]; then
-        ahead=$(t_exec "$name" bash -c "
-            cd $(sh_quote "$src") &&
-            git fetch --quiet $(sh_quote "$url") $(sh_quote "$src_ref") 2>/dev/null &&
-            git rev-list --count FETCH_HEAD..$(sh_quote "$branch") 2>/dev/null || echo unknown
-        " 2>/dev/null | tr -d '\r' | tail -1)
-
-        case "$ahead" in
-            0)  reset=1 ;;   # behind or equal: taking the PR head loses nothing
-            unknown)
-                barrier "cannot tell whether '$branch' in '$name' has work the PR head does not.
-    Checking it out will leave it as it is."
-                ;;
-            *)
-                if [ -n "${WK_FORCE:-}" ]; then
-                    barrier "discarding $ahead local commit(s) on '$branch' in '$name'."
-                    reset=1
-                else
-                    warn "local '$branch' has $ahead commit(s) the PR head does not have"
-                    log  "  it is checked out as it is; nothing is discarded."
-                    log  "  to take the PR head instead and lose those commits:"
-                    log  "    wk pr${name:+ $name} $spec --force"
-                fi
-                ;;
-        esac
     fi
 
     net_refspec="$src_ref:refs/remotes/$remote/$branch"
@@ -900,6 +884,38 @@ $(printf '%s\n' "$found" | sed 's/^/    /')
         set -e
         cd $(sh_quote "$src")
         $fetch_step
+    " || die "could not fetch '$branch' into '$name'; nothing was checked out"
+
+    reset=""   # the fetch above writes refs/remotes/<remote>/<branch> and nothing else, so the local branch is still whole while this counts what taking the PR head would lose
+    if [ -n "$local_sha" ] && [ "$local_sha" != "$head_sha" ]; then
+        ahead=$(t_exec "$name" bash -c "
+            cd $(sh_quote "$src") &&
+            git rev-list --count refs/remotes/$(sh_quote "$remote")/$(sh_quote "$branch")..$(sh_quote "$branch") 2>/dev/null || echo unknown
+        " 2>/dev/null | tr -d '\r' | tail -1)
+
+        case "$ahead" in
+            0)  reset=1 ;;   # behind or equal: taking the PR head loses nothing
+            unknown)
+                barrier "cannot tell whether '$branch' in '$name' has work the PR head does not.
+    Checking it out will leave it as it is."
+                ;;
+            *)
+                if [ -n "${WK_FORCE:-}" ]; then
+                    barrier "discarding $ahead local commit(s) on '$branch' in '$name'."
+                    reset=1
+                else
+                    warn "local '$branch' has $ahead commit(s) the PR head does not have"
+                    log  "  it is checked out as it is; nothing is discarded."
+                    log  "  to take the PR head instead and lose those commits:"
+                    log  "    wk pr${name:+ $name} $spec --force"
+                fi
+                ;;
+        esac
+    fi
+
+    t_exec "$name" bash -c "
+        set -e
+        cd $(sh_quote "$src")
         if git show-ref --verify --quiet refs/heads/$(sh_quote "$branch"); then
             git checkout --quiet $(sh_quote "$branch")
             ${reset:+git reset --hard --quiet refs/remotes/$(sh_quote "$remote")/$(sh_quote "$branch")}

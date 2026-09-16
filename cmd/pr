@@ -62,14 +62,14 @@ pr_open_target() {
         return 1
     fi
     up_remote="${up%%/*}"
-    up_url=$(git -C "$src" remote get-url "$up_remote" 2>/dev/null) || up_url=""
+    up_url=$(git -C "$src" config --get "remote.$up_remote.url" 2>/dev/null) || up_url=""   # `git remote get-url` applies the url.<mirror>.insteadOf rewrite a wired checkout carries, under which every remote answers with the mirror path and both projects read as one repository
     up_repo=$(printf '%s' "$up_url" | sed -E 's#(\.git)?$##; s#.*/##')
     fork=$(wk_push_forks | awk -v r="$up_repo" 'NF && $2 ~ ("/" r "$") { print $1; exit }')
     if [ -z "$fork" ]; then
         printf 'error: %s\n' "'$branch' tracks '$up' ($up_url), not a known upstream (origin or wpe) -- 'wk pr open' only knows WebKit and WPEWebKit" >&2
         return 1
     fi
-    url=$(git -C "$src" remote get-url "$fork" 2>/dev/null) || {
+    url=$(git -C "$src" config --get "remote.$fork.url" 2>/dev/null) || {
         printf 'error: %s\n' "no '$fork' remote here -- 'wk remotes --fix' wires it" >&2
         return 1
     }

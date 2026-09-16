@@ -49,7 +49,7 @@ while [ $# -gt 0 ]; do
         --system)  IMAGE="${2:-}"; shift ;;
         --system=*) IMAGE="${1#*=}" ;;
         --image|--image=*) die "renamed: --system <id> (a bootable artifact is a system, never bare
-    'image' -- wk help images)" ;;
+    'image' -- wk help architecture)" ;;
         *)  MACHINE="$1" ;;
     esac
     shift

@@ -9,9 +9,11 @@ and from the files themselves, so a new command is covered the day it lands.
 Run: python3 -m unittest tests.test_cli_shape -v
 """
 import re
+import shlex
+import subprocess
 import unittest
 
-from tests.support import REPO, WkTest, bash, run
+from tests.support import REPO, WK, WkTest, bash, run
 
 # The dispatcher's own flags: taken out of argv before any command sees them.
 GLOBAL_OPTS = {"--force", "--quiet", "--dry-run", "-n", "--yes", "-y",
@@ -168,6 +170,76 @@ class TestTheGlobalFlagsBelongToTheDispatcher(WkTest):
                     self.assertIn("destructive:", out)
                 if d["readonly"] == "yes":
                     self.assertIn("changes things: no", out)
+
+
+# `wk`'s own argument check, lifted and called directly: running an example
+# through the real command would run it, and what an example is judged by is
+# exactly what these functions decide. usage_die is the one refusal path.
+ARGV_FUNCS = ("decl_load", "in_list", "sub_override", "flag_override",
+              "cmd_name", "cmd_takes", "cmd_opts", "name_slot", "argv_check")
+
+
+def argv_refusal(cmd, args):
+    """How the dispatcher refuses `wk <cmd> <args...>`, or "" if it does not."""
+    lifted = "".join(
+        subprocess.run(["sed", "-n", f"/^{f}()/,/^}}/p", str(WK)],
+                       capture_output=True, text=True).stdout
+        for f in ARGV_FUNCS)
+    stub = ('die() { printf "%s\\n" "$*"; exit 9; }\n'
+            'usage_die() { printf "%s\\n" "${3:-}"; exit 2; }\n'
+            'in_workspace() { return 1; }\nwk_self() { printf ""; }\n')
+    script = ("set -uo pipefail\n" + stub + lifted
+              + f'decl_load "{REPO}/cmd/{cmd}"\nargv_check {cmd} "{REPO}/cmd/{cmd}"'
+              + "".join(f" {shlex.quote(a)}" for a in args) + "\n")
+    cp = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
+    return cp.stdout.strip() if cp.returncode else ""
+
+
+class TestTheHelpTextOffersWhatTheDispatcherAccepts(unittest.TestCase):
+    """`wk <cmd> -h` is the command's leading block, so an option named in an
+    example there is a promise. The dispatcher is what keeps it: an option the
+    command does not declare is refused with the usage line before the command
+    runs, whatever its own code would have done with it. Only that refusal is
+    read here -- an example's *positionals* are prose as often as arguments,
+    and the one the dispatcher counts is `takes`, which is tested above."""
+
+    PLACEHOLDER = re.compile(r"<[^>]*>")
+    # A word standing for "the options below", not an argument of its own.
+    STANDS_FOR_MORE = {"options", "flags", "args", "..."}
+
+    def examples(self, path):
+        """Each `wk <cmd> ...` example in the help text, as argv."""
+        head, out = [], []
+        for i, line in enumerate(path.read_text().splitlines()):
+            if i == 0:
+                continue
+            if not line.startswith("#"):
+                break
+            head.append(line[1:])
+        for line in head[2:]:            # past the blank line and the synopsis
+            m = re.match(r"^\s+wk %s(\s.*)?$" % re.escape(path.name), line)
+            if not m:
+                continue
+            args = []
+            for tok in (m.group(1) or "").split("#")[0].split():
+                tok = tok.strip("[]").split("|")[0]
+                tok = self.PLACEHOLDER.sub("X", tok).replace('"', "").replace("'", "")
+                if tok and tok not in self.STANDS_FOR_MORE and tok not in GLOBAL_OPTS:
+                    args.append(tok)
+            if any(a.startswith("--") for a in args):
+                out.append(args)
+        return out
+
+    def test_every_option_in_every_help_text_is_accepted(self):
+        offenders = []
+        for path in CMD_FILES:
+            for args in self.examples(path):
+                why = argv_refusal(path.name, args)
+                if why.startswith("unknown option"):
+                    offenders.append(f"  wk {path.name} {' '.join(args)}: {why}")
+        self.assertEqual(offenders, [], "the help text names options the "
+                         "dispatcher refuses before the command runs:\n"
+                         + "\n".join(offenders))
 
 
 class TestPromptsAndDestructiveDeclarationsAgree(unittest.TestCase):

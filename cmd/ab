@@ -180,21 +180,16 @@ mgit() { git -C "$MIRROR" "$@"; }
 
 # A fork's branch is a head like a pull request's: found in whichever of that fork's repositories carries it, fetched into the mirror, resolved there.
 ab_branch_head() { # <user> <branch> -- `<repo> <url> <sha>` for the one that has it
-    local user="$1" branch="$2" repo url sha found="" n
-    for repo in $(wk_pr_repos); do
-        url="https://github.com/$user/$repo.git"
-        sha=$(git ls-remote "$url" "refs/heads/$branch" 2>/dev/null | awk '{print $1; exit}')
-        if [ -n "$sha" ]; then found="$found$repo $url $sha
-"; fi
-    done
-    n=$(printf '%s' "$found" | grep -c . || true)
+    local user="$1" branch="$2" found n
+    found=$(pr_branch_repo "$user" "$branch")
+    n=$(printf '%s\n' "$found" | grep -c . || true)
     case "$n" in
-        1) printf '%s' "$found" ;;
+        1) printf '%s\n' "$found" ;;
         0) die "no branch '$branch' under '$user'.
-    Checked: $(wk_pr_repos | sed "s|^|https://github.com/$user/|;s|\$|.git|" | tr '\n' ' ')
+    Checked: $(pr_branch_repo_urls "$user" | tr '\n' ' ')
     A pull request is named as wpe:<n> or <n>, a commit as its 40-digit sha." ;;
         *) die "'$branch' exists in more than one of $user's repositories:
-$(printf '%s' "$found" | sed 's/^/    /')
+$(printf '%s\n' "$found" | sed 's/^/    /')
     They are different projects; pass the head sha of the one you mean." ;;
     esac
 }

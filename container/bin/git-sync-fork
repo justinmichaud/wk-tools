@@ -15,7 +15,7 @@ echo "fetching origin/$branch ..."
 git fetch --quiet origin "$branch"
 
 upstream=$(git rev-parse "origin/$branch")
-current=$(git ls-remote "$remote" "refs/heads/$branch" | awk '{print $1}')
+current=$(git -C / ls-remote "$(git config --get "remote.$remote.url")" "refs/heads/$branch" | awk '{print $1}')   # `-C /` and the recorded URL, not the remote's name: a wired checkout rewrites every upstream to this machine's mirror, whose heads are origin's, so in here the fork always reads level with origin and there is never anything to push
 
 if [ "$current" = "$upstream" ]; then
     echo "$remote/$branch is already at $(git --no-pager log -1 --format=%h "$upstream") -- nothing to do"

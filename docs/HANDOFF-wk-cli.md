@@ -4,6 +4,10 @@ General `wk` mechanics not tied to one board, bridge or bench lane.
 
 ## Known defects
 
+- [ ] `docs/help/hardware.txt` and `docs/help/bridge.txt` are 725 lines nothing reads: `wk help <topic>` (the `wk` dispatcher's `help_doc`) serves README.md sections only, and README carries both topics. hardware.txt also stores a bridge segment address, which CLAUDE.md's "how to reach it is not written down" rule refuses. Migrate whatever README lacks, then delete both [decision]
+- [ ] `docs/HANDOFF.md` indexes 21 handoff files by paths that no longer exist -- most moved under `docs/Urgent/`, `docs/Nice to have/` and `docs/Security/`, and `docs/HANDOFF-vocabulary.md` and `docs/HANDOFF-cattle.md` are gone outright [no hardware needed]
+- [ ] README has no section defining the `home`/`lab`/`wk`/`field`/`stock` layers, so CLAUDE.md is the only place they are written down and the design is not in the one document that is supposed to hold it [decision]
+- [ ] `tests/test_pr_workflow.py`'s `TestPrEndToEnd.test_new_then_pr_against_a_local_fork` is an empty `pass`, and that module's docstring sends the reader to it for why the end-to-end path is not exercised. Either it runs `wk new` then `wk pr` against a local fork, or it says why in the place that points at it [needs a workspace]
 - [ ] a remote build's ssh carries no signal on disconnect; ctrl-c or a stall abort leaves the compiler running while the next `wk build` waits behind the lock [needs a remote target]
 - [ ] a delegated `wk status` is answered by the far machine's own, possibly older, wk-tools, which can change the answer and not only the version [needs two machines at different versions]
 - [ ] `wk` auto-starts the podman machine even when a macOS VM is already running, and both do not fit in 32 GB [needs a Mac with 32 GB RAM]

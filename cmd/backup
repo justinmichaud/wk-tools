@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # wk backup -- write live desktop settings back into the repo
-# wk: where=host name=none group=hosts
+# wk: where=host name=none group=hosts opts --candidates readonly --candidates
 #
 # The inverse of ./setup. Reads this host's own live settings and writes
 # whichever files apply --
@@ -178,10 +178,9 @@ PY
 }
 
 main() {
-    if [ "${1:-}" = --candidates ]; then
-        candidates_main
-        return 0
-    fi
+    case "${1:-}" in
+        --candidates) candidates_main; return 0 ;;
+    esac
 
     case "$(wk_os)" in
         macos) macos_backup ;;
