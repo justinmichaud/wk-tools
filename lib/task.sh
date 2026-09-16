@@ -69,14 +69,12 @@ task_set() { # <dir> <field> <value> -- a kind's own field: a build's config, or
     _task_put "$1/$2" "$3"
 }
 
-# One file per step: a graph runs several at once, and two starting together
-# would race a single record. A step with no file of its own has not started.
+# One file per step: two starting together would race a single record.
 task_step_state() { # <dir> <1-based index> <running|done|failed|skipped|pending>
     _task_put "$1/steps/$2" "$3"
 }
 
-# The scheduler's vocabulary (lib/sched.py announces one of these per step), as
-# the state a reader sees. A refused step keeps its place and starts again.
+# lib/sched.py's vocabulary as the state a reader sees; a refused step starts again.
 task_step_event() { # <dir> <1-based index> <scheduler event>
     local state
     case "$3" in

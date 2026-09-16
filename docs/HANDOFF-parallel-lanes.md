@@ -69,6 +69,22 @@ building.
 
 ## Found by running it
 
+- [ ] a test run and a build on one machine starve each other, and only one
+      direction is guarded. The container tests skip while a build is on the
+      machine's books (`requires_podman_vm`, tests/support.py); nothing stops a
+      test run from taking the machine out from under a build. On 2026-09-16 a
+      full `wk selftest` beside this lane's cross build took the podman VM to
+      1536MB free and the build's own floor check killed it. Whether
+      `wk selftest` should refuse to start beside a build is a decision
+      [decision]
+- [ ] build/mem-watchdog.sh reported `peak 96MB of budget 12800MB` for a cross
+      build that had run 8445 of 13213 bitbake tasks, then killed it on the
+      machine floor saying "this build is using 70MB of it". `_tree` walks
+      descendants in eight passes, so the mechanism reads right and what it was
+      not seeing is unmeasured. Until that is known the budget branch cannot
+      fire for a yocto build, and the 12800MB `build_admit` books for one
+      describes nothing that was measured. Sample a live build's tree against
+      the machine's own total before changing anything [needs a running build]
 - [ ] `tests/test_vm_desktop.py`'s `test_the_refusal_can_be_crossed_on_purpose`
       failed once in a full run under a machine-sized build -- the function
       returned 0 and its `WK_VM_FORCE=1` line reached no stderr -- and passes

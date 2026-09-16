@@ -179,8 +179,6 @@ cmd_deploy() {
         || die "usage: wk pi deploy <image-profile> <machine> --slot <name>; see wk pi -h"
     image_check_slot_name "$slot"
     local on; on=$(image_spec_machine "$profile"); profile=$(image_spec_profile "$profile")
-    # A slot's bytes are in the lane that built it, and a deploy streams them at
-    # the board: from anywhere else there is nothing to send.
     [ -z "$on" ] || [ "$on" = "$(wk_machine_name)" ] \
         || die "slot '$slot' of $profile is on $on, and a deploy reads the bytes where
     they were built. Run it there:

@@ -397,8 +397,6 @@ class Writer:
 # The one renderer for a long-running command, whatever wrote the record: its progress against the plan it declared, what stops it, and where it says so.
 LIVE = ("running", "silent", "starting")
 
-# A plan is a graph, so each step carries its own state (lib/task.sh) and any
-# number of them run at once. A task that ended well ran every step of it.
 STEP_MARKS = {"done": ("[x]", "good"), "failed": ("[!]", "bad"),
               "skipped": ("[-]", "dim"), "pending": ("[ ]", "dim")}
 

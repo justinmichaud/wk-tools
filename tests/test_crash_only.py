@@ -44,12 +44,17 @@ def _wait_dead(pid, timeout=60):
     return False
 
 
-def _wait_registered(name, timeout=120):
+def _wait_registered(name, timeout=600):
     """Poll until <name> exists at all. `wk new --no-wait` returns the instant
     the driver is spawned, so a kill sent straight after it can land before the
     driver has created anything -- and `wk rm` is then right that there is no
     such workspace. Rubble is what the test below is about, so it waits for
-    some to exist before killing."""
+    some to exist before killing.
+
+    The budget is generous because creation is not quick and this machine is
+    not idle while the suite runs: `wk new` alone measured 99.3s during a full
+    run, and each poll here is a whole `wk status` (2026-09-16). It returns as
+    soon as the workspace answers, so a fast machine pays none of it."""
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if run("status", name, "--json").returncode == 0:

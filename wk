@@ -532,8 +532,7 @@ resolve_target() {
     done
     decl=$(cmd_name "$@"); slot=$(name_slot "$decl"); takes=$(cmd_takes "$@")
     if [ "${decl%@*}" = derived ]; then
-        # A derived command may name the machine in its own argument, and then
-        # the lane is that machine's whether or not another one holds its name.
+        # Named outright, the lane is that machine's however many hold its name.
         a=$(cmd_wstarget "$impl" "$@")
         [ -z "$a" ] || { printf '%s' "$a"; return 0; }
         name="${derived_name:-}"

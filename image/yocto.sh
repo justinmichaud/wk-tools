@@ -224,11 +224,8 @@ $(sed 's/^/    /' "$log" 2>/dev/null | tail -5)"
     job_pid_adopt "$ws" "$YOCTO_TASK" "$(tr -dc '0-9' < "$pid_host")" '*yocto-build.sh*' \
         || die "the '$stage' build in '$ws' did not announce a pid this end can stop
     (above). Nothing will be signalled for it:  wk enter $ws   and stop it there."
-    # This record covers the one stage it spawned -- each stage begins a new one
-    # and prunes the last -- so only that stage has a state. Marking the ones
-    # before it done would claim work no run of this record did: whether an
-    # earlier stage left anything is what `wk sysimage ls` answers, from the
-    # artifacts themselves.
+    # Each stage begins a record and prunes the last, so this one covers a single
+    # stage: marking the ones before it done would claim work no run of it did.
     task_step_state "$YOCTO_TASK" "$(yocto_stage_index "$stage")" running
     debug "stage $stage running as pid $(task_field "$YOCTO_TASK" pid) inside '$ws'"
 }

@@ -151,11 +151,8 @@ image_fetch_base() {
     echo "$dest"
 }
 
-# A lane spec is <profile>[@<machine>]: the machine is which of the fleet holds
-# the lane, so a second machine can build a profile another one already has a
-# lane of. Without it the lane is wherever it already exists (ws_target, wk).
-image_spec_profile() { printf '%s' "${1%%@*}"; }
-image_spec_machine() { case "$1" in *@?*) printf '%s' "${1#*@}" ;; esac; }
+image_spec_profile() { printf '%s' "${1%%@*}"; }                            # <profile>[@<machine>]: what is built
+image_spec_machine() { case "$1" in *@?*) printf '%s' "${1#*@}" ;; esac; }  # ...and which machine holds the lane, for one nothing holds yet
 
 image_spec_target() { # <machine> -- the target its lanes live on; this machine's own are on its default
     if [ "$1" = "$(wk_machine_name)" ]; then default_target; else printf '%s' "$1"; fi

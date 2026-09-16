@@ -383,8 +383,6 @@ for ((i = 0; i < NDEV; i++)); do
 done
 log ""
 
-# An A/B attributes a number to a commit, so a guessed base further back than one
-# commit measures the branch the head was cut from rather than the change.
 [ "$BASE_HOW" = given ] || [ "$AHEAD" -le 1 ] || barrier \
     "the base was guessed and the patched side is $AHEAD commits ahead of it, so
     the two arms differ by far more than the change under measurement. Name the

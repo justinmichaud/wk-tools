@@ -491,10 +491,7 @@ _forced_summary() {
     printf '%s\n' "$_WK_FORCED" >&2
 }
 
-# The status a refusal the scheduler can come back to exits with, rather than
-# cascading as a failure: lib/sched.py's RETRY_EXIT is the same number, and
-# tests/test_sched.py holds the two to it.
-WK_RETRY_EXIT=75
+WK_RETRY_EXIT=75   # lib/sched.py's RETRY_EXIT is the same number; tests/test_resources.py holds the two to it
 
 barrier() { # [--retry] <message...> -- refuse, or warn loudly and continue under --force; --retry when another step ending is what changes the answer
     local status=1
