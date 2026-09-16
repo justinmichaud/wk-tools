@@ -343,6 +343,10 @@ class Injector:
             uwriter.write(new_head + body)
             await uwriter.drain()
 
+            status = await asyncio.wait_for(ureader.readline(), READ_TIMEOUT)   # read before the rest is piped back: without it an injected credential the far end refused and one it accepted are the same line in this log
+            log("%s %s %s -> %s" % (host, method, target[:120],
+                                    status.decode("latin-1", "replace").strip()))
+            cwriter.write(status)
             await pipe(ureader, cwriter)
         except (asyncio.TimeoutError, ConnectionResetError, OSError) as exc:
             log("connection failed: %s" % exc)

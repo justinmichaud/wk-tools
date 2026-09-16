@@ -251,8 +251,13 @@ def _bugzilla_api_key(value, repos, path, evidence):
         return BAD, ("%s accepts this key, but not as %s: it belongs to another "
                      "account, and `git-webkit pr` would file and assign as that "
                      "one." % (BUGZILLA_API, login))
-    return OK, ("%s accepts it as %s.\n    spent on every bugs.webkit.org request "
-                "a workspace makes while push is on, and on none while it is off"
+    return OK, ("%s accepts it as %s, which is all /rest/valid_login answers: "
+                "whether that account may change a bug -- see_also and assignee "
+                "need editbugs -- is not knowable from here, because Bugzilla "
+                "discloses no group membership to a caller without editusers. "
+                "`git-webkit pr` reports it as \"Failed to modify\" when it "
+                "cannot.\n    spent on every bugs.webkit.org request a workspace "
+                "makes while push is on, and on none while it is off"
                 % (BUGZILLA_API, login))
 
 

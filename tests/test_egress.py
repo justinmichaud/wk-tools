@@ -906,6 +906,47 @@ class TestTheInjectorForwardsBugzilla(WkTest):
         self.assertNotIn("bz-secret", logged)
 
 
+class TestTheInjectorRecordsWhatTheFarEndAnswered(WkTest):
+    """The request log alone cannot tell an injected credential the far end
+    accepted from one it refused -- both read `... inject PUT /rest/bug/<n>`.
+    bugs.webkit.org refusing a write is the case that costs an afternoon, so
+    the status line is read before the reply is piped back, and logged."""
+
+    def drive(self, reply):
+        head = (b"PUT /rest/bug/324270?login=me%40example.test&password=wk-injects-this"
+                b" HTTP/1.1\r\nHost: bugs.webkit.org\r\nContent-Length: 0\r\n\r\n")
+        client, _upstream, _opened, logged = drive_injector(
+            self.tmp, head, token=None, bugzilla_key="not-a-real-bugzilla-key",
+            upstream_reply=reply)
+        return client, logged
+
+    def test_a_refusal_is_named_in_the_log(self):
+        client, logged = self.drive(
+            b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n")
+        self.assertIn("400 Bad Request", logged, logged)
+        self.assertIn("bugs.webkit.org", logged)
+
+    def test_so_is_an_acceptance(self):
+        _client, logged = self.drive(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
+        self.assertIn("200 OK", logged, logged)
+
+    def test_the_reply_still_reaches_the_client_whole(self):
+        """The status line is read off the upstream before the pipe, so it has
+        to be written back or every answer loses its first line."""
+        reply = b"HTTP/1.1 400 Bad Request\r\nContent-Length: 9\r\n\r\n{\"e\":1}\r\n"
+        client, _logged = self.drive(reply)
+        self.assertEqual(client, reply, client)
+
+    def test_no_response_body_is_logged(self):
+        """A status line, never the body: it is the far end's, and this log is
+        not the place to spill it."""
+        reply = (b"HTTP/1.1 403 Forbidden\r\nContent-Length: 21\r\n\r\n"
+                 b'{"message":"secret"}\n')
+        _client, logged = self.drive(reply)
+        self.assertIn("403 Forbidden", logged)
+        self.assertNotIn("secret", logged)
+
+
 class TestTheInjectorForwardsEverything(WkTest):
     """The decision, and it is a decision rather than an oversight: the
     injector refuses nothing on policy. Every method on every path reaches
