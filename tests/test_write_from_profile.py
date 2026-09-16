@@ -21,8 +21,14 @@ from tests.support import REPO, bash
 SYSIMAGE = REPO / "cmd" / "sysimage"
 
 
+# _ws_profile recovers a profile by matching the configurations this checkout
+# defines, so the one library that enumerates them is sourced beside the lifted
+# functions rather than stubbed: the names below are real configurations.
+PRELUDE = '. "$WK_ROOT/image/profiles.sh"\n'
+
+
 def lift(*funcs):
-    out = []
+    out = [PRELUDE]
     for f in funcs:
         body = subprocess.run(
             ["sed", "-n", f"/^{f}()/,/^}}/p", str(SYSIMAGE)],

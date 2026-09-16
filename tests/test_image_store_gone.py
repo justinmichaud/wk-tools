@@ -239,8 +239,9 @@ class TestBootArmDefaultsToDeviceImage(WkTest):
 class TestProfileFromWorkspacePath(unittest.TestCase):
     """_ws_profile (cmd/sysimage) derives a profile from a workspace name for
     both builders that leave images inside one (image_workspace_scan,
-    lib/image.sh); _profile_from_path is the same derivation from a full
-    path and calls through it -- lifted together, sed's the idiom
+    lib/image.sh), by matching the configurations this checkout defines;
+    _profile_from_path is the same derivation from a full path and calls
+    through it -- lifted together, sed's the idiom
     tests/test_quick.py uses for 'bump' (cmd/status)."""
 
     def _lift(self):
@@ -254,7 +255,9 @@ class TestProfileFromWorkspacePath(unittest.TestCase):
             capture_output=True, text=True,
         ).stdout
         self.assertTrue(body2.strip(), "could not lift _profile_from_path from cmd/sysimage")
-        return body + "\n" + body2
+        # The derivation matches the configurations this checkout defines, so
+        # the library that enumerates them is sourced beside the lifted pair.
+        return '. "$WK_ROOT/image/profiles.sh"\n' + body + "\n" + body2
 
     def setUp(self):
         self.prelude = self._lift()
