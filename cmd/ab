@@ -25,7 +25,9 @@
 #   --builder <name>      buildroot or yocto, when the release has both
 #   --bits <32|64>        the default word size for devices named without one
 #   --base <sha|ref>      the unpatched side (default: the merge-base of the PR
-#                         head and the image's own branch, CFG_BRANCH)
+#                         head and the image's own branch, CFG_BRANCH). A
+#                         guessed base more than one commit behind the head is
+#                         refused; --force crosses it
 #   --plan <name>         the benchmark (default speedometer3); repeatable
 #   --rounds <n>          A/B alternations per plan (default 5)
 #   --count <n>           run-benchmark iterations per run (default: the plan's)
@@ -385,6 +387,14 @@ for ((i = 0; i < NDEV; i++)); do
     log "        build      $(_ab_build_note "${PROFILE[$i]}" "${DEV[$i]}")"
 done
 log ""
+
+# An A/B attributes a number to a commit, so a guessed base further back than one
+# commit measures the branch the head was cut from rather than the change.
+[ "$BASE_HOW" = given ] || [ "$AHEAD" -le 1 ] || barrier \
+    "the base was guessed and the patched side is $AHEAD commits ahead of it, so
+    the two arms differ by far more than the change under measurement. Name the
+    commit's own parent: --base <sha>."
+
 log "the plan as a graph -- a step runs when its needs are done and what it holds is free:"
 log ""
 SCHED_FILE=$(mktemp "${TMPDIR:-/tmp}/wk-ab-steps.XXXXXX")
@@ -491,7 +501,7 @@ _ab_end() { task_end "$AB_TASK" "${WK_EXIT_STATUS:-0}"; }
 wk_atexit _ab_end
 
 rc=0
-sched_run --log-dir "$TASK_DIR" --on-start "task_step $(sh_quote "$AB_TASK") {step}" || rc=$?
+sched_run --log-dir "$TASK_DIR" --on-event "task_step_event $(sh_quote "$AB_TASK") {step} {event}" || rc=$?
 [ "$rc" -eq 0 ] || die "A/B incomplete: the steps above say which did not run, and each one's log
     is beside its own resource in $TASK_DIR. Every round that finished is
     recorded ('wk bench ls'; 'wk bench report $TASK'), and re-running

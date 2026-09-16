@@ -491,10 +491,18 @@ _forced_summary() {
     printf '%s\n' "$_WK_FORCED" >&2
 }
 
-barrier() { # <message...> -- refuse, or warn loudly and continue under --force
+# The status a refusal the scheduler can come back to exits with, rather than
+# cascading as a failure: lib/sched.py's RETRY_EXIT is the same number, and
+# tests/test_sched.py holds the two to it.
+WK_RETRY_EXIT=75
+
+barrier() { # [--retry] <message...> -- refuse, or warn loudly and continue under --force; --retry when another step ending is what changes the answer
+    local status=1
+    [ "${1:-}" != --retry ] || { status=$WK_RETRY_EXIT; shift; }
     if [ -z "${WK_FORCE:-}" ]; then
-        die "$*
+        err "$*
     --force proceeds anyway, with a warning."
+        exit "$status"
     fi
     warn "FORCED past a barrier: $*"
     _WK_FORCED="$_WK_FORCED

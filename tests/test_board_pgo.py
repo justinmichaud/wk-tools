@@ -584,12 +584,12 @@ class TestTheCycleSaysWhatItIsDoing(WkTest):
 
     def test_the_driver_declares_the_graphs_steps_as_its_plan(self):
         """One record for the cycle, whose plan is the steps the scheduler
-        reaches in order; `--on-start` moves the record to the one running."""
+        reaches in order; `--on-event` keeps each step's state in the record."""
         cycle = func_body((REPO / "image" / "pgo.sh").read_text(), "image_pgo_slot")
         self.assertIn("image_pgo_graph", cycle)
         self.assertIn("$(sched_steps)", cycle)
         self.assertIn("task_begin pgo here", cycle)
-        self.assertIn('sched_run --on-start "task_step', cycle)
+        self.assertIn('sched_run --on-event "task_step_event', cycle)
 
     def test_the_record_it_writes_is_the_graph_it_then_runs(self):
         """Driven with the scheduler stubbed: one `pgo` record, whose plan is
@@ -609,7 +609,7 @@ class TestTheCycleSaysWhatItIsDoing(WkTest):
             self.assertEqual(len(plan), 7, plan)
             self.assertIn("--slot pr-instr --config wpe-cross-pgo-collect", plan[0])
             self.assertIn("--slot pr --config wpe-cross-pgo-use", plan[-1])
-            self.assertIn("--on-start task_step '%s' {step}" % records[0], cp.stdout)
+            self.assertIn("--on-event task_step_event '%s' {step} {event}" % records[0], cp.stdout)
 
     def test_the_record_names_a_command_a_person_types_to_stop_it(self):
         """Every task record names the command that stops its job, and this

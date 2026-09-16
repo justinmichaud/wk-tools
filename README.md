@@ -159,11 +159,14 @@ same output as the command's result, never left to be inferred.
 Every command that outlives its terminal — a build, a test run, an image
 stage, a profile-guided cycle, claude remote control — writes one record of
 the same shape (`lib/task.sh`): the plan it declared before its first step,
-the step it is on, the machine and pid liveness is asked of, its log, the
+the state of each of those steps, the machine and pid liveness is asked of, its log, the
 command a person types to stop it, and what it **holds** — a board is a fleet
 resource, so the record that drives one says so and that record is the claim. `wk status` renders each the same way, with
 the steps done, running and still to come, so reading one never depends on
-knowing which command wrote it. Liveness is asked of the process table at read
+knowing which command wrote it. A plan is a graph, not a line number: each step
+carries its own state, so a schedule running two arms at once reads as two
+running steps rather than one, and a step that failed is told apart from the
+steps that were never reached for it. Liveness is asked of the process table at read
 time: a pid that no longer answers with no exit recorded reads `died`. A pid
 that lives inside a workspace is asked of that workspace, by `wk status` under
 a cap of `WK_TASK_ASK_SECONDS` (default 5) so a wedged workspace reads
@@ -730,7 +733,11 @@ wk bench report <task> --html                            # paired like any A/B; 
 
 The base is guessed as the merge-base of the PR head and the image's own
 branch (`CFG_BRANCH`), the release from the PR's base branch; `--base` and
-`--release` override either. Every invocation is one task
+`--release` override either. An A/B attributes a number to a commit, so a
+guessed base more than one commit behind the head is refused and names
+`--base`: a branch cut from another release puts the two arms thousands of
+commits apart, which measures the branch rather than the change. `--force`
+crosses it. Every invocation is one task
 (`<stamp>-wpe-pr1725`, or `<stamp>-<sha12>` for a commit): its `task.json`
 records the request and every command, each board's pipeline logs to
 `<board>.log` beside it, and `wk bench report <task>` pairs the rounds each
@@ -1062,10 +1069,20 @@ wk sysimage ls                                         # every lane in the fleet
 ```
 
 A lane that exists nowhere is created on this machine's own target, and one
-that exists on two machines resolves to the local one. There is no way to say
-which machine a *new* lane goes on when another machine already holds one of
-that name: `--workspace <name>` gives it a lane of its own
-(docs/HANDOFF-parallel-lanes.md).
+that exists on two machines cannot be resolved by name alone. **`<profile>@<machine>`
+says which machine**, so a second machine gets a lane of a profile another one
+already holds, and every later command names the same lane the same way:
+
+```sh
+wk sysimage build webkit-2.52-yocto-rpi5-64@moose --detach   # moose's lane of it
+wk sysimage webkit webkit-2.52-yocto-rpi5-64@moose --commit <sha> --slot base
+```
+
+The machine half is the command's answer to the dispatcher's target question,
+so it routes the build and never reaches the builder: what is built is the
+profile. A deploy reads the slot's bytes in the lane that built them, so
+`wk pi deploy <profile>@<machine>` is refused anywhere but that machine, and
+says which one to run it on.
 
 **Add a new fleet device**
 

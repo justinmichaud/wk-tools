@@ -171,14 +171,14 @@ yocto_task() { task_find yocto "$1"; }
 yocto_running() { # <ws> [stage]
     local ws="$1" stage="${2:-}" dir
     dir=$(yocto_task "$ws"); [ -n "$dir" ] || return 1
-    [ -z "$stage" ] || [ "$(task_field "$dir" step)" = "$(yocto_stage_index "$stage")" ] || return 1
+    [ -z "$stage" ] || [ "$(task_step_now "$dir")" = "$(yocto_stage_index "$stage")" ] || return 1
     task_alive "$dir"
 }
 
 yocto_any_running() { # <ws> -- prints the stage it is in
     local ws="$1" dir step s i=0
     yocto_running "$ws" || return 1
-    dir=$(yocto_task "$ws"); step=$(task_field "$dir" step)
+    dir=$(yocto_task "$ws"); step=$(task_step_now "$dir")
     for s in $YOCTO_STAGES; do
         i=$((i + 1))
         [ "$i" = "$step" ] && { printf '%s' "$s"; return 0; }
@@ -224,7 +224,12 @@ $(sed 's/^/    /' "$log" 2>/dev/null | tail -5)"
     job_pid_adopt "$ws" "$YOCTO_TASK" "$(tr -dc '0-9' < "$pid_host")" '*yocto-build.sh*' \
         || die "the '$stage' build in '$ws' did not announce a pid this end can stop
     (above). Nothing will be signalled for it:  wk enter $ws   and stop it there."
-    task_step "$YOCTO_TASK" "$(yocto_stage_index "$stage")"
+    # This record covers the one stage it spawned -- each stage begins a new one
+    # and prunes the last -- so only that stage has a state. Marking the ones
+    # before it done would claim work no run of this record did: whether an
+    # earlier stage left anything is what `wk sysimage ls` answers, from the
+    # artifacts themselves.
+    task_step_state "$YOCTO_TASK" "$(yocto_stage_index "$stage")" running
     debug "stage $stage running as pid $(task_field "$YOCTO_TASK" pid) inside '$ws'"
 }
 

@@ -397,6 +397,20 @@ class Writer:
 # The one renderer for a long-running command, whatever wrote the record: its progress against the plan it declared, what stops it, and where it says so.
 LIVE = ("running", "silent", "starting")
 
+# A plan is a graph, so each step carries its own state (lib/task.sh) and any
+# number of them run at once. A task that ended well ran every step of it.
+STEP_MARKS = {"done": ("[x]", "good"), "failed": ("[!]", "bad"),
+              "skipped": ("[-]", "dim"), "pending": ("[ ]", "dim")}
+
+
+def step_mark(step_state, task_state):
+    if task_state == "ok":
+        return STEP_MARKS["done"]
+    if step_state == "running":
+        # Where it stopped: a plan of empty boxes hides which step ended it.
+        return ("[>]", "busy") if task_state in LIVE else ("[!]", "bad")
+    return STEP_MARKS.get(step_state, STEP_MARKS["pending"])
+
 
 def render_task(wr, t, colour):
     state = t.get("state", "?")
@@ -404,19 +418,10 @@ def render_task(wr, t, colour):
                        paint("%s  since %s" % (t.get("machine", "?"), t.get("since", "?")),
                              "dim", colour))
     wr.kv("%s %s" % (t.get("task_kind", "task"), t.get("name", "?")), head)
-    step = int(t.get("step") or 0)
-    if state == "ok":
-        step = len(t.get("plan") or []) + 1   # every step ran, including the last: cmd/status leaves an `ok` task out of its listing, so this is for any other reader of a finished record
-    for i, line in enumerate(t.get("plan") or [], 1):
-        if i < step:
-            mark, hue = "[x]", "good"
-        elif i > step:
-            mark, hue = "[ ]", "dim"
-        elif state in LIVE:
-            mark, hue = "[>]", "busy"
-        else:
-            # Where it stopped: a plan of empty boxes hides which step ended it.
-            mark, hue = "[!]", "bad"
+    plan = t.get("plan") or []
+    steps = t.get("steps") or []
+    for i, line in enumerate(plan, 1):
+        mark, hue = step_mark(steps[i - 1] if i <= len(steps) else "pending", state)
         wr.out.append("      " + paint("%s %s" % (mark, line), hue, colour))
     if state == "died":
         rc = t.get("exit")
@@ -943,12 +948,14 @@ function tiles(m) {
   for (const b of (m.bench || []))
     t.push(tile("bench", chip(b.state) + ` <span class="sub">${ESC(b.task)} — ${ESC(b.summary || "")}</span>`));
   for (const k of (m.tasks || [])) {
-    const step = parseInt(k.step, 10) || 0;
     const live = ["running", "silent", "starting"].includes(k.state);
+    const MARKS = {done: ["[x]", "good"], failed: ["[!]", "bad"],
+                   skipped: ["[-]", "sub"], pending: ["[ ]", "sub"]};
     const plan = (k.plan || []).map((line, i) => {
-      const n = i + 1;
-      const mark = n < step ? "[x]" : n > step ? "[ ]" : live ? "[&gt;]" : "[!]";
-      const hue = n < step ? "good" : n > step ? "sub" : live ? "busy" : "bad";
+      const st = (k.steps || [])[i] || "pending";
+      const [mark, hue] = k.state === "ok" ? MARKS.done
+        : st === "running" ? (live ? ["[&gt;]", "busy"] : ["[!]", "bad"])
+        : (MARKS[st] || MARKS.pending);
       return `<div class="${hue}">${mark} ${ESC(line)}</div>`;
     }).join("");
     t.push(tile(`${ESC(k.task_kind || "task")} · ${ESC(k.name || "?")}`,

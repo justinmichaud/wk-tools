@@ -217,7 +217,7 @@ EOF
     log  "  collection  $dir"
     log  "  benchmarks  $PGO_BENCHMARKS, mixed at WebKit's own weights (Tools/Scripts/pgo-profile)"
 
-    sched_run --on-start "task_step $(sh_quote "$PGO_TASK") {step}" || rc=$?
+    sched_run --on-event "task_step_event $(sh_quote "$PGO_TASK") {step} {event}" || rc=$?
     [ "$rc" -eq 0 ] || die "the cycle for '$slot' stopped: the steps above say which phase is left
     and why. What was collected is in $dir, and re-running this command takes
     up what is left rather than starting again."

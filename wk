@@ -205,6 +205,11 @@ cmd_wsname() { # <impl> <args...> -- a name=derived command's own answer, empty 
     "$impl" --wsname ${1+"$@"} || true
 }
 
+cmd_wstarget() { # <impl> <args...> -- the target these arguments name outright, empty when they name none and the workspace is to be located
+    local impl="$1"; shift
+    "$impl" --wstarget ${1+"$@"} || true
+}
+
 cmd_readonly() { # <subverb>
     [ -n "$D_READONLY" ] || return 1
     [ "$D_READONLY" = yes ] && return 0
@@ -527,6 +532,10 @@ resolve_target() {
     done
     decl=$(cmd_name "$@"); slot=$(name_slot "$decl"); takes=$(cmd_takes "$@")
     if [ "${decl%@*}" = derived ]; then
+        # A derived command may name the machine in its own argument, and then
+        # the lane is that machine's whether or not another one holds its name.
+        a=$(cmd_wstarget "$impl" "$@")
+        [ -z "$a" ] || { printf '%s' "$a"; return 0; }
         name="${derived_name:-}"
     elif [ "$slot" -gt 0 ]; then
         name=$(argv_name "$slot" "$takes" "$@") || name=$(cwd_workspace) || name=""

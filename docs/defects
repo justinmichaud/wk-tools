@@ -7,3 +7,9 @@ All commands that make irrevrsable changes should prompt.
 Text that explains things to the user should be conscise. We should never embedd facts in text (ex: "one key located on moose" must be derived and must change, you can't put that in text because it makes the user think you actually checked something)
 
 Commands should be clear and concise, consistent with each other, and you should step through the full process of using the command as a new user to ensure it is always clear what to do next. Each command should give enough outupt that if something goes wrong, it can be debugged (for example, the explain mode should print every command it would have executed), instead of needing sketchy debugging commands. This is part of a bigger principle, which is that everything should be constructed by layered levels of abstraction that are never leaky, not by bespoke hacks. Nothing should reach across a logical layer of abstraction.
+
+New workspaces should pre-run git status to ensure files are touched correctly. They should wk sync by default, but not touch existing workspaces (only update the mirror) so the new workspace is up to date.
+
+wk sync is quite slow, especially with multiple workspaces. Profile it and figure out why. It seems like workspaces aren't hard-linking to snapshots after all, and I don't know why we make a new snapshot when we sync. The mirror should be RO other than wk sync.
+
+wk sync should be able to be run inside a workspace, where it will only update the mirror and sync itself. this is the most common use case, and would improve speed.

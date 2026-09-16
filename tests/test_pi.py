@@ -163,6 +163,16 @@ class TestPiSlotRefusals(WkTest):
         self.assertEqual(cp.returncode, 1, cp.stdout)
         self.assertIn("--slot", cp.stdout)
 
+    def test_a_slot_on_another_machine_is_refused_where_its_bytes_are_not(self):
+        """`<profile>@<machine>` is the lane spec `wk sysimage` routes by, and
+        a deploy streams the slot's bytes at the board: from a machine that
+        does not hold the lane there is nothing to send, so it says where."""
+        cp = self.run_wk("pi", "deploy", "webkit-2.52-yocto-rpi5-64@moose",
+                         "not-a-real-machine", "--slot", "base", timeout=15)
+        self.assertEqual(cp.returncode, 1, cp.stdout)
+        self.assertIn("is on moose", cp.stdout)
+        self.assertIn("ssh moose wk pi deploy webkit-2.52-yocto-rpi5-64", cp.stdout)
+
     def test_ab_of_one_slot_twice_is_refused(self):
         cp = self.run_wk("pi", "bench", "not-a-real-machine", "speedometer3", "--ab", "base,base", timeout=15)
         self.assertEqual(cp.returncode, 1, cp.stdout)

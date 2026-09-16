@@ -326,7 +326,7 @@ elif local in tags:
 # One record per long-running command, whatever wrote it (lib/task.sh). The verdict is computed here and never stored; a pid inside a workspace is asked of it under WK_TASK_ASK_SECONDS, since this listing is read-only and must answer about a wedged workspace rather than wait on one.
 _tasks_said=" "
 report_tasks() { # [name] -- the tasks in this target's store, once per store; only <name>'s when named
-    local only="${1:-}" d st _plan _l _abort _age
+    local only="${1:-}" d st _plan _l _abort _age _steps _n _st
     case "$_tasks_said" in *" $(task_root) "*) return 0 ;; esac
     _tasks_said="$_tasks_said$(task_root) "
     while IFS= read -r d; do
@@ -344,7 +344,14 @@ report_tasks() { # [name] -- the tasks in this target's store, once per store; o
         rec_set name      "$(task_field "$d" name)"
         rec_set state     "$st"
         rec_set since     "$(task_field "$d" started)"
-        rec_set step      "$(task_field "$d" step)"
+        _steps=""
+        while IFS="$(printf '\t')" read -r _n _st; do
+            [ -n "$_n" ] || continue
+            _steps="$_steps${_steps:+,}\"$(_jesc "$_st")\""
+        done <<EOF
+$(task_steps "$d")
+EOF
+        rec_json steps "[$_steps]"
         rec_set kill      "$(task_field "$d" kill)"
         rec_opt log       "$(task_field "$d" log)"
         rec_opt holds     "$(task_field "$d" holds)"

@@ -18,6 +18,10 @@ from tests.support import REPO, WkTest, bash, shell_files, stub_path
 
 YOCTO = REPO / "image" / "yocto.sh"
 
+# From the scheduler that reads it, never copied here.
+RETRY_EXIT = int(re.search(r"^RETRY_EXIT = (\d+)",
+                           (REPO / "lib" / "sched.py").read_text(), re.M).group(1))
+
 
 def _lift(func):
     """One function's body, sed'd out of image/yocto.sh: sourcing that file
@@ -67,6 +71,40 @@ jobs=$(build_jobs); echo "jobs=$jobs"
         self.assertIn("jobs=2", cp.stdout)
         self.assertIn("--force proceeds anyway", cp.stdout + cp.stderr)
         self.assertNotIn("admitted", cp.stdout)
+
+    def test_a_machine_spoken_for_is_not_now_rather_than_no(self):
+        """The refusal a scheduled step comes back to: another build ending is
+        what changes the answer, so it exits WK_RETRY_EXIT and lib/sched.py
+        puts the step back in the queue instead of cascading it as a failure."""
+        cp = self._bash('''
+store_free_gb() { echo 999; }   # the disk is asked first, and this rule is about memory
+sleep 300 & live=$!
+trap 'kill $live' EXIT
+build_record "big build" 60 98000 "pid:$live"
+( build_admit "a second build" "$(build_jobs)" ) && st=0 || st=$?
+echo "status=$st"
+''')
+        self.assertIn(f"status={RETRY_EXIT}", cp.stdout,
+                      "a capacity refusal did not exit the scheduler's retry status")
+
+    def test_a_disk_refusal_is_no_rather_than_not_now(self):
+        """A step ending does not give the filesystem its blocks back, so this
+        one is a plain refusal and the scheduler does not come back to it."""
+        cp = self._bash('''
+store_free_gb() { echo 1; }
+( disk_admit "a build" 60 ) && st=0 || st=$?
+echo "status=$st"
+''')
+        self.assertIn("status=1", cp.stdout,
+                      "a disk refusal asked the scheduler to retry it")
+
+    def test_the_two_languages_agree_on_the_retry_status(self):
+        """One protocol number, written in bash and in python: a test rather
+        than a copy, since neither file can read the other's constant."""
+        self.assertEqual(
+            int(re.search(r"^WK_RETRY_EXIT=(\d+)",
+                          (REPO / "lib" / "common.sh").read_text(), re.M).group(1)),
+            RETRY_EXIT)
 
     def test_another_machines_builds_do_not_count(self):
         cp = self._bash('''

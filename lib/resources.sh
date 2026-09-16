@@ -221,10 +221,11 @@ build_admit() {  # <what> <jobs> [disk-gb]: refuse a build the machine cannot fi
     [ -n "$running" ] || return 0
     [ "$jobs" -ge "${WK_MIN_JOBS:-4}" ] && return 0
     avail=$(avail_mem_mb) || return $?
-    barrier "$(build_machine)'s memory is spoken for by the build(s) already running:
+    barrier --retry "$(build_machine)'s memory is spoken for by the build(s) already running:
 $(printf '%s\n' "$running" | awk -F'\t' '{ printf "      %s (%s jobs, %s MB)\n", $1, $2, $3 }')
     $what would get $jobs job(s) of the $avail MB left. Wait for them
-    ('wk status' shows a workspace's build), or --force to build that small."
+    ('wk status' shows a workspace's build), or --force to build that small.
+    A scheduled step comes back to this once one of them ends."
 }
 
 build_jobs() {  # from the memory not already spoken for -- running out of RAM during a link is what hangs a machine -- clamped by the cores left and by load

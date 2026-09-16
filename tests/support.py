@@ -354,12 +354,15 @@ def podman_vm_running(machine="wk"):
 def requires_container_target():
     """Skip decorator for a test that needs the real container target: on
     macOS the podman VM this repo drives must already be up (never started
-    here), on Linux podman itself; skipped by --quick."""
+    here), on Linux podman itself; skipped by --quick, and while this machine
+    has a build on its books."""
     if quick_run():
         return unittest.skip("--quick: needs the container target")
     if sys.platform == "darwin":
         return requires_podman_vm()
-    return unittest.skipUnless(shutil.which("podman"), "podman is not installed")
+    if not shutil.which("podman"):
+        return unittest.skip("podman is not installed")
+    return _not_while_a_build_runs()
 
 
 def quick_run():
@@ -371,13 +374,47 @@ def quick_run():
 def requires_podman_vm(machine="wk"):
     """Skip decorator for a test that needs a real container workspace: it
     runs only when the podman VM this repo drives is already up, never
-    starts it, and is skipped by --quick."""
+    starts it, and is skipped by --quick and while a build is running."""
     if quick_run():
         return unittest.skip("--quick: needs the podman VM")
-    return unittest.skipUnless(
-        podman_vm_running(machine),
-        f"podman machine '{machine}' is not running",
-    )
+    if not podman_vm_running(machine):
+        return unittest.skip(f"podman machine '{machine}' is not running")
+    return _not_while_a_build_runs()
+
+
+# wk_state_dir (lib/common.sh), spelled for the shell that reads the records.
+_BUILD_RECORDS = r'cat "${XDG_STATE_HOME:-$HOME/.local/state}"/wk/builds/* 2>/dev/null || true'
+
+
+def builds_on_the_books():
+    """The builds recorded where a container workspace is really built: inside
+    the podman VM on macOS, on this machine on Linux (build_record,
+    lib/resources.sh). Read and never pruned -- `builds_running` deletes the
+    record of a holder it cannot see, and a reading may not mutate what it
+    reports on."""
+    if sys.platform == "darwin":
+        out = podman_vm_ssh(_BUILD_RECORDS).stdout
+    else:
+        out = subprocess.run(["bash", "-c", _BUILD_RECORDS], capture_output=True,
+                             text=True, timeout=60).stdout
+    return [l.split("=", 1)[1] for l in out.splitlines() if l.startswith("label=")]
+
+
+def _identity(test):
+    return test
+
+
+def _not_while_a_build_runs():
+    """A test that makes a real workspace shares the machine with whatever is
+    building on it: `wk new` takes minutes where it takes seconds, and the
+    build such a test asks for is refused because the memory is spoken for --
+    which is build_admit working, not a fault to be read as a failure. The
+    machine is the evidence, so this is asked at collection, not recorded."""
+    busy = builds_on_the_books()
+    if busy:
+        return unittest.skip("a build is on this machine's books (%s): "
+                             "re-run this on an idle machine" % ", ".join(busy))
+    return _identity
 
 
 def machine_reachable(name, timeout=5):

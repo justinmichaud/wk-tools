@@ -293,7 +293,7 @@ _task() {{  # one yocto record, as yocto_build writes it
     d=$(task_begin yocto target "$1" "wk sysimage build demo --stage $2 --stop" \
         "$(yocto_log "$1" "$2")" $YOCTO_STAGES)
     [ -z "${{3:-}}" ] || task_pid "$d" "$3"
-    task_step "$d" "$(yocto_stage_index "$2")"
+    task_step_state "$d" "$(yocto_stage_index "$2")" running
 }}
 '''
 
@@ -342,7 +342,7 @@ d=$(task_begin yocto target {self.ws} "wk sysimage build demo --stage image --st
     "$(yocto_log {self.ws} image)" $YOCTO_STAGES)
 task_set "$d" pid_match '*yocto-build.sh*'
 task_pid "$d" 4242
-task_step "$d" "$(yocto_stage_index image)"
+task_step_state "$d" "$(yocto_stage_index image)" running
 yocto_stop {self.ws} image
 printf 'exit=%s\n' "$(task_field "$d" exit)"
 ''')
@@ -359,6 +359,21 @@ printf 'exit=%s\n' "$(task_field "$d" exit)"
         cp = self._run(f'yocto_running {self.ws} image && echo RUNNING || echo NOT-RUNNING')
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
         self.assertEqual(cp.stdout.strip(), "NOT-RUNNING", cp.stdout + cp.stderr)
+
+    def test_a_stage_claims_nothing_about_the_stages_before_it(self):
+        """Each stage begins a record of its own and prunes the last, so the
+        stages before the one running were not run by this record. Claiming
+        them done reads as an image that was built when none was: `[x] image`
+        against a lane `wk sysimage ls` says has no image in it."""
+        self._record("webkit", DEAD_PID)
+        cp = self._run(
+            'd=$(task_find yocto %s); task_steps "$d"' % self.ws)
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        states = dict(l.split("\t") for l in cp.stdout.splitlines() if "\t" in l)
+        self.assertEqual(states["5"], "running", cp.stdout)   # webkit
+        for n in ("1", "2", "3", "4", "6"):
+            self.assertEqual(states[n], "pending",
+                             "stage %s is claimed done by a run that never did it" % n)
 
     def test_a_dead_pid_means_no_stage_is_reported_running_at_all(self):
         self._record("image", DEAD_PID)
@@ -419,7 +434,7 @@ _task() {{  # one yocto record, as yocto_build writes it
     d=$(task_begin yocto target "$1" "wk sysimage build demo --stage $2 --stop" \
         "$(yocto_log "$1" "$2")" $YOCTO_STAGES)
     [ -z "${{3:-}}" ] || task_pid "$d" "$3"
-    task_step "$d" "$(yocto_stage_index "$2")"
+    task_step_state "$d" "$(yocto_stage_index "$2")" running
 }}
 IMG_PROFILE=demo-profile
 '''

@@ -284,12 +284,12 @@ def cmd_run(args, steps):
 
     def announce(event, step, rc=0):
         n = index[step.id]
+        if args.on_event:
+            _shell(args.prelude, args.on_event.replace("{step}", str(n))
+                   .replace("{id}", step.id).replace("{event}", event))
         if event == "start":
             where = os.path.join(args.log_dir, _log_name(step)) if args.log_dir else "here"
             say("[%d/%d] %s: %s  (log: %s)" % (n, len(order), step.id, step.command, where))
-            if args.on_start:
-                _shell(args.prelude,
-                       args.on_start.replace("{step}", str(n)).replace("{id}", step.id))
         elif event == "already":
             say("[%d/%d] %s: already done" % (n, len(order), step.id))
         elif event == "unneeded":
@@ -333,8 +333,10 @@ def main(argv=None):
                        help="a shell file sourced before every command and predicate; repeatable")
     run = sub.choices["run"]
     run.add_argument("--log-dir", help="one log per step under this directory")
-    run.add_argument("--on-start", help="a shell snippet run as each step starts; "
-                                        "{step} is its 1-based place in the schedule, {id} its id")
+    run.add_argument("--on-event", help="a shell snippet run as each step's state changes; "
+                                        "{step} is its 1-based place in the schedule, {id} its id, "
+                                        "and {event} one of start, ok, already, unneeded, refused, "
+                                        "failed, skipped")
     run.add_argument("--retry-exit", type=int, default=RETRY_EXIT,
                      help="the exit status that means 'not now' rather than failed: the step "
                           "keeps its place and is tried again once another step ends "

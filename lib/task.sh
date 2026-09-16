@@ -55,7 +55,8 @@ task_begin() { # [--holds <resource>] <kind> <where> <name> <kill-cmd> <log> <pl
     _task_put "$dir/started" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     [ -z "${WK_ABORT_SECONDS:-}" ] || _task_put "$dir/abort_after" "$WK_ABORT_SECONDS"   # past it, a reader knows the watchdog is gone rather than merely quiet
     rm -f "$dir/exit" "$dir/finished"
-    _task_put "$dir/step" 0
+    rm -rf "$dir/steps"
+    ensure_dir "$dir/steps" >/dev/null
     printf '%s' "$dir"
 }
 
@@ -68,8 +69,31 @@ task_set() { # <dir> <field> <value> -- a kind's own field: a build's config, or
     _task_put "$1/$2" "$3"
 }
 
-task_step() { # <dir> <1-based index>
-    _task_put "$1/step" "$2"
+# One file per step: a graph runs several at once, and two starting together
+# would race a single record. A step with no file of its own has not started.
+task_step_state() { # <dir> <1-based index> <running|done|failed|skipped|pending>
+    _task_put "$1/steps/$2" "$3"
+}
+
+# The scheduler's vocabulary (lib/sched.py announces one of these per step), as
+# the state a reader sees. A refused step keeps its place and starts again.
+task_step_event() { # <dir> <1-based index> <scheduler event>
+    local state
+    case "$3" in
+        start)            state=running ;;
+        ok|already)       state=done ;;
+        failed)           state=failed ;;
+        skipped|unneeded) state=skipped ;;
+        refused)          state=pending ;;
+        *) die "task_step_event: '$3' is no scheduler event" ;;
+    esac
+    task_step_state "$1" "$2" "$state"
+}
+
+task_step() { # <dir> <1-based index> -- a plan whose steps run in order: reaching one is the ones before it having ended
+    local i=1
+    while [ "$i" -lt "$2" ]; do task_step_state "$1" "$i" done; i=$((i + 1)); done
+    task_step_state "$1" "$2" running
 }
 
 task_step_named() { # <dir> <plan step> -- by name, so a plan whose earlier step is skipped still steps to the right line
@@ -79,10 +103,25 @@ task_step_named() { # <dir> <plan step> -- by name, so a plan whose earlier step
     task_step "$1" "$n"
 }
 
-task_stage() { # <dir> -- the name of the step now running
-    local n; n=$(task_field "$1" step)
-    case "$n" in ''|0) return 0 ;; esac
-    sed -n "${n}p" "$1/plan"
+task_steps() { # <dir> -- `<index> <state>` per line in plan order, whatever wrote the record
+    local n=1 line state
+    [ -f "$1/plan" ] || return 0
+    while IFS= read -r line; do
+        state=$(task_field "$1" "steps/$n")
+        printf '%s\t%s\n' "$n" "${state:-pending}"
+        n=$((n + 1))
+    done < "$1/plan"
+}
+
+task_step_now() { # <dir> -- the 1-based index of the first step running, empty when none is
+    task_steps "$1" | awk -F'\t' '$2 == "running" { print $1; exit }'
+}
+
+task_stage() { # <dir> -- the name of each step now running, one per line
+    local n
+    for n in $(task_steps "$1" | awk -F'\t' '$2 == "running" { print $1 }'); do
+        sed -n "${n}p" "$1/plan"
+    done
 }
 
 # The first verdict stands: `--kill` records `cancelled` and the driver it stopped cannot overwrite that with the failure the kill caused; task_begin clears the exit, so a re-run is not blocked by it.

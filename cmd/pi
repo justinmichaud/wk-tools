@@ -27,6 +27,9 @@
 #   wk sysimage webkit <profile> --commit <sha> --slot <name>
 #                                                build a WebKit for the image
 #   wk pi deploy <profile> <machine> --slot <name>   put it on the board
+#                                <profile>@<machine> is refused unless the lane
+#                                is here: a deploy reads the slot's bytes where
+#                                they were built
 #   wk pi bench <machine> <plan>                 run a benchmark
 #
 # `wk pi bench --pgo <dir>` is not a measurement: it runs the plan against an
@@ -175,6 +178,13 @@ cmd_deploy() {
     [ -n "$profile" ] && [ -n "$machine" ] \
         || die "usage: wk pi deploy <image-profile> <machine> --slot <name>; see wk pi -h"
     image_check_slot_name "$slot"
+    local on; on=$(image_spec_machine "$profile"); profile=$(image_spec_profile "$profile")
+    # A slot's bytes are in the lane that built it, and a deploy streams them at
+    # the board: from anywhere else there is nothing to send.
+    [ -z "$on" ] || [ "$on" = "$(wk_machine_name)" ] \
+        || die "slot '$slot' of $profile is on $on, and a deploy reads the bytes where
+    they were built. Run it there:
+        ssh $on wk pi deploy $profile $machine --slot $slot"
     case "$profile" in
         yocto-*|buildroot-*) die "'$profile' is a workspace; a slot is named by its image profile:
         wk pi deploy ${profile#*-} $machine --slot $slot" ;;

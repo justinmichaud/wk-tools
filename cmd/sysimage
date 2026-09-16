@@ -22,8 +22,10 @@
 #   A yocto or buildroot profile is built in a lane -- the workspace named
 #   yocto-<profile> or buildroot-<profile> -- and 'build' and 'webkit' run on
 #   the machine holding that workspace, whichever machine they are typed on
-#   ('wk ls' names it). --workspace <name> names a different lane, and the
-#   build follows that one instead.
+#   ('wk ls' names it). <profile>@<machine> says which machine instead: a lane
+#   nothing holds yet, or a second machine's lane of a profile another machine
+#   already has one of. --workspace <name> names a different lane on that
+#   machine, and the build follows that one.
 #
 #   build <profile> [options]    build from the spec in this repo. A yocto
 #                                profile also takes --workspace, --detach,
@@ -120,6 +122,7 @@ _lane() { # <sub> <args...> -- the workspace these arguments act on, nothing whe
     local profile="${2:-}" a prev=""
     shift 2 2>/dev/null || return 0
     case "$profile" in ''|-*) return 0 ;; esac
+    profile=$(image_spec_profile "$profile")
     for a in ${@+"$@"}; do
         case "$prev" in --workspace) printf '%s' "$a"; return 0 ;; esac
         case "$a" in --workspace=?*) printf '%s' "${a#*=}"; return 0 ;; esac
@@ -135,6 +138,15 @@ _lane() { # <sub> <args...> -- the workspace these arguments act on, nothing whe
 if [ "${1:-}" = --wsname ]; then
     shift
     _lane ${@+"$@"}
+    exit 0
+fi
+
+# The dispatcher's target question for a `name=derived` command: the machine the
+# lane spec names, and nothing when it names none.
+if [ "${1:-}" = --wstarget ]; then
+    shift
+    _m=$(image_spec_machine "${2:-}")
+    [ -z "$_m" ] || [ -z "$(_lane ${@+"$@"})" ] || image_spec_target "$_m"
     exit 0
 fi
 
@@ -341,6 +353,7 @@ config_append_text() {
 cmd_build() {
     local profile="${1:-}"
     [ -n "$profile" ] || die "usage: wk sysimage <sub> [args]; see wk sysimage -h"
+    profile=$(image_spec_profile "$profile")   # the machine half routed this here (wk); what is built is the profile
 
     image_profile_load "$profile" || die "unknown profile '$profile'.
     'wk sysimage --list' has every configuration; 'wk sysimage ls' has
@@ -372,6 +385,7 @@ cmd_build() {
 cmd_webkit() {
     local profile="${1:-}"
     [ -n "$profile" ] || die "usage: wk sysimage webkit <profile> --commit <sha> --slot <name> [--detach]; see wk sysimage -h"
+    profile=$(image_spec_profile "$profile")   # the machine half routed this here (wk); what is built is the profile
     image_profile_load "$profile" || die "unknown profile '$profile'.
     'wk sysimage --list' has every configuration."
     shift
@@ -386,12 +400,24 @@ cmd_webkit() {
     esac
 }
 
-_ws_profile() {
+# A lane is named <builder>-<profile>, and may carry a suffix of its own -- a
+# second lane of one profile, one per arm of an A/B. The profile is recovered by
+# matching the configurations this checkout defines, longest first, so a suffix
+# costs no record and no separator reserved for it.
+_ws_profile() { # <workspace>
+    local rest name best=""
     case "$1" in
-        yocto-*)     printf '%s' "${1#yocto-}" ;;
-        buildroot-*) printf '%s' "${1#buildroot-}" ;;
+        yocto-*)     rest="${1#yocto-}" ;;
+        buildroot-*) rest="${1#buildroot-}" ;;
         *) return 1 ;;
     esac
+    for name in $(image_config_names); do
+        case "$rest" in
+            "$name"|"$name"-*) [ "${#name}" -gt "${#best}" ] && best="$name" ;;
+        esac
+    done
+    [ -n "$best" ] || return 1
+    printf '%s' "$best"
 }
 
 _ws_building() { # <workspace>

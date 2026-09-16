@@ -5,13 +5,14 @@ library, and `wk status` renders every kind through one renderer: the steps
 still to come are listed and the command that stops the job is named, so a
 person watching one has no file to know about and nothing to guess at.
 
-A task is a directory under $WK_STORE/task: plan, step, pid, machine, log,
+A task is a directory under $WK_STORE/task: plan, steps/<n>, pid, machine, log,
 kill, argv, started, and on end exit and finished. Each field is one file, so
 every write is one tmp+rename and a reader never sees half a record. Liveness
 is the process table at read time -- a pid that no longer answers with no exit
 recorded reads `died` -- and the renderer (lib/status-view.py render_task) puts
-the plan under the task as [x] done, [>] running, [ ] pending, with the kill
-command and the log beneath it.
+the plan under the task as [x] done, [>] running, [-] skipped, [!] stopped
+there and [ ] pending, with the kill command and the log beneath it. A plan is
+a graph, so each step carries its own state and any number read as running.
 
 Run: python3 -m unittest tests.test_task_record -v
 """
@@ -60,12 +61,20 @@ def render(records, mode="text"):
         os.unlink(path)
 
 
-def task_rec(kind, state, step, plan=None, **extra):
+def in_order(plan, step):
+    """A plan whose steps run in order, stopped at `step`: the ones before it
+    have ended, it is running, the rest have not started."""
+    return ["done" if i < step else "running" if i == step else "pending"
+            for i in range(1, len(plan) + 1)]
+
+
+def task_rec(kind, state, step, plan=None, steps=None, **extra):
+    plan = plan if plan is not None else PLANS[kind]
     rec = {"kind": "task", "machine": "tolken", "task": "%s-ws1-2026" % kind,
-           "task_kind": kind, "name": "ws1", "state": state, "step": str(step),
+           "task_kind": kind, "name": "ws1", "state": state,
+           "steps": steps if steps is not None else in_order(plan, step),
            "since": "2026-09-10T04:00:00Z", "kill": KILLS[kind],
-           "log": "/store/ws/ws1/%s.log" % kind,
-           "plan": plan if plan is not None else PLANS[kind]}
+           "log": "/store/ws/ws1/%s.log" % kind, "plan": plan}
     rec.update(extra)
     return rec
 
@@ -96,17 +105,21 @@ class TestOneRecordPerKind(WkTest):
             with self.subTest(kind=kind):
                 d = self._write(kind)
                 have = sorted(os.listdir(d))
-                for field in ("plan", "step", "kill", "log", "machine",
+                for field in ("plan", "steps", "kill", "log", "machine",
                               "argv", "started", "kind", "name", "where"):
                     self.assertIn(field, have, kind)
+                self.assertEqual(sorted(os.listdir(os.path.join(d, "steps"))),
+                                 ["1", "2"], "one file per step reached, no more")
                 self.assertNotIn("exit", have, "a running task records no exit")
                 self.assertEqual((self.tmp / "store" / "task" / os.path.basename(d)
                                   / "plan").read_text().splitlines(), PLANS[kind])
 
-    def test_the_plan_is_declared_before_step_one(self):
+    def test_the_plan_is_declared_before_any_step_has_a_state(self):
         d = self._sh('task_begin build target ws1 "wk build ws1 --kill" /l a b c').strip()
-        self.assertEqual((self.tmp / "store" / "task" / os.path.basename(d) / "step").read_text().strip(), "0")
-        self.assertEqual((self.tmp / "store" / "task" / os.path.basename(d) / "plan").read_text().split(), ["a", "b", "c"])
+        rec = self.tmp / "store" / "task" / os.path.basename(d)
+        self.assertEqual((rec / "plan").read_text().split(), ["a", "b", "c"])
+        self.assertEqual(os.listdir(rec / "steps"), [],
+                         "a step had a state before it ran")
 
     def test_a_plan_and_a_kill_command_are_both_required(self):
         for body, want in (
@@ -267,6 +280,29 @@ class TestTheRendererSaysWhatIsLeftAndWhatStopsIt(unittest.TestCase):
         self.assertIn("[ ] pgo-mix", out)
         self.assertEqual(out.count("[x]"), 2, out)
         self.assertEqual(out.count("[ ]"), 3, out)
+
+    def test_two_steps_running_at_once_read_as_two(self):
+        """A graph runs what is ready, so a plan is not a line number: with two
+        arms in flight the record says two, not one further on than the other."""
+        plan = ["build base", "build pr", "bench rpi4", "bench rpi5", "report"]
+        out = self._text(task_rec("pgo", "running", 0, plan=plan,
+                                  steps=["done", "running", "running", "pending", "pending"]))
+        self.assertEqual(out.count("[>]"), 2, out)
+        self.assertIn("[>] build pr", out)
+        self.assertIn("[>] bench rpi4", out)
+        self.assertIn("[x] build base", out)
+        self.assertEqual(out.count("[ ]"), 2, out)
+
+    def test_a_step_that_failed_and_one_never_reached_are_told_apart(self):
+        """What the scheduler knows reaches the reader: the step that failed,
+        and the steps it fed that were never run for it."""
+        plan = ["build base", "build pr", "bench rpi4", "report"]
+        out = self._text(task_rec("pgo", "died", 0, plan=plan,
+                                  steps=["done", "failed", "skipped", "skipped"]))
+        self.assertIn("[x] build base", out)
+        self.assertIn("[!] build pr", out)
+        self.assertEqual(out.count("[-]"), 2, out)
+        self.assertNotIn("[>]", out, "nothing is running in a task that died")
 
     def test_it_names_the_kill_command_and_the_log_for_every_kind(self):
         for kind in PLANS:

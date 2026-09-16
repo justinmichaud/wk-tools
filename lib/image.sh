@@ -151,6 +151,16 @@ image_fetch_base() {
     echo "$dest"
 }
 
+# A lane spec is <profile>[@<machine>]: the machine is which of the fleet holds
+# the lane, so a second machine can build a profile another one already has a
+# lane of. Without it the lane is wherever it already exists (ws_target, wk).
+image_spec_profile() { printf '%s' "${1%%@*}"; }
+image_spec_machine() { case "$1" in *@?*) printf '%s' "${1#*@}" ;; esac; }
+
+image_spec_target() { # <machine> -- the target its lanes live on; this machine's own are on its default
+    if [ "$1" = "$(wk_machine_name)" ]; then default_target; else printf '%s' "$1"; fi
+}
+
 image_slot_dir() { # <profile> <slot> -- host path. A slot is one built WebKit beside an image in the image's workspace; where it lives is a fact of the builder, so the caller loads the profile and IMG_BUILDER decides
     case "${IMG_BUILDER:-}" in
         buildroot) echo "$(wk_ws_dir "buildroot-$1")/build/buildroot/$1/output/wk-slots/$2" ;;

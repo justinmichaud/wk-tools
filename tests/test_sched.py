@@ -324,14 +324,28 @@ class TestThroughTheShell(WkTest):
             self.assertEqual((tmp / "rpi4.log").read_text(), "deployed\nbenched\n")
             self.assertEqual((tmp / "report.log").read_text(), "reported\n")
 
-    def test_the_on_start_hook_is_told_where_the_step_is_in_the_plan(self):
-        """What keeps one task record stepping through a graph: `wk status`
-        reads a line number into the flat plan `steps` prints."""
+    def test_the_on_event_hook_is_told_each_steps_place_and_turn(self):
+        """What keeps one task record in step with a graph: every step's own
+        state reaches the record, so two of them running at once read as two
+        (lib/task.sh, `wk status`)."""
         with scratch_dir() as tmp:
             text = records(("a", "m", "", "", "", "true"), ("b", "m", "a", "", "", "true"))
-            cp = self.sched_py("run", text, "--on-start", "echo {step} {id} >> %s/steps" % tmp)
+            cp = self.sched_py("run", text, "--on-event",
+                               "echo {step} {id} {event} >> %s/steps" % tmp)
             self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-            self.assertEqual((tmp / "steps").read_text(), "1 a\n2 b\n")
+            self.assertEqual((tmp / "steps").read_text(),
+                             "1 a start\n1 a ok\n2 b start\n2 b ok\n")
+
+    def test_a_failed_step_and_the_one_it_feeds_both_reach_the_record(self):
+        """A reader is told which step failed and which never ran, rather than
+        being left to infer it from a line number that stopped moving."""
+        with scratch_dir() as tmp:
+            text = records(("a", "m", "", "", "", "false"), ("b", "m", "a", "", "", "true"))
+            cp = self.sched_py("run", text, "--on-event",
+                               "echo {id} {event} >> %s/steps" % tmp)
+            self.assertNotEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+            self.assertEqual((tmp / "steps").read_text(),
+                             "a start\na failed\nb skipped\n")
 
     def test_the_flat_plan_is_the_commands_in_schedule_order(self):
         text = records(("b", "m", "a", "", "", "second"), ("a", "m", "", "", "", "first"))
