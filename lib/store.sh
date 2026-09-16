@@ -77,9 +77,13 @@ wk_pr_repos() { # repositories `wk pr <user>:<branch>` tries in turn
         | awk '!seen[$0]++'
 }
 
-# What GitHub itself answers, asked from outside every repository: a wired checkout rewrites each wk_remotes URL to this machine's mirror (wk_fetch_config) and a mirror keeps only origin's branches as heads, so the same question asked inside one comes back empty for every fork branch and every pull request head -- silently, and with git's own exit status 0.
+# GitHub's own URL for a repository, spelled so no url.<mirror>.insteadOf rewrite catches it: wk_fetch_config keys those on the `.git` form wk_remotes uses, and a mirror carries branches -- never a pull request head, never an account it was not told about. Asked through the rewritten spelling from inside a checkout, both come back empty with git's own exit status 0.
+upstream_direct_url() { # <url>
+    printf '%s' "${1%.git}"
+}
+
 upstream_ls_remote() { # <url> <ref>
-    git -C / ls-remote "$1" "$2"
+    git ls-remote "$(upstream_direct_url "$1")" "$2"
 }
 
 pr_branch_repo() { # <user> <branch> -- `<repo> <url> <sha>` per repository of that fork carrying the branch; every one is asked, so a branch in two is the caller's to refuse by name
@@ -719,6 +723,19 @@ origin_branch_fetch_step() { # <branch> <mirror-dir>; mirror first, empty asks o
         "$net"
 }
 
+mirror_refresh_request() {   # 0 when the machine refreshed its mirror. It is the machine's, and a container mounts it read-only, so from in here the refresh is a request; `wk sync --mirror` is what the far end runs
+    . "$WK_ROOT/lib/broker.sh"
+    if ! broker_present; then
+        warn "no request broker at $WK_BROKER_SOCKET, so this machine's mirror was not
+    refreshed -- only this workspace's own fetch ran, against whatever the
+    mirror already had. Somebody with the workstation opens the door with:
+        ./setup --stage broker     ('wk doctor' says whether it is reachable)
+    The refresh itself, out there:  wk sync --mirror"
+        return 1
+    fi
+    broker_call sync
+}
+
 wk_pr_refname()   { printf '%s/%s/%s' "$1" "$2" "$3"; }  # <user> <repo> <branch>
 wk_pull_refname() { printf '%s/%s' "$1" "$2"; }          # <remote> <n>
 
@@ -772,16 +789,13 @@ pr_parse_spec() {  # <spec>
     esac
 }
 
-wk_pr_checkout() {  # <name> <spec> -- fetch it into the mirror once, check it out
+wk_pr_checkout() {  # <name> <spec> -- fetch the one ref into the workspace, check it out
     local name="$1" spec="$2"
     local src repo url branch remote head_sha local_sha dirty reset ahead
-    local probe found n mirror_ok mirror_dir mirror_ref add_remote="" src_ref net_refspec fetch_step
+    local probe found n add_remote="" src_ref fetch_step
 
     pr_parse_spec "$spec"
     src=$(t_src "$name")
-    mirror_dir=$(t_mirror_dir "$name")
-    mirror_ok=""
-    [ "${WK_TARGET_KIND:-}" = container ] && store_is_local && mirror_ok=1
 
     case "$PR_KIND" in
     user)
@@ -819,14 +833,10 @@ $(printf '%s\n' "$found" | sed 's/^/    /')
         if [ -z "$remote" ]; then
             remote="$PR_USER"
             [ "$repo" = "$(wk_pr_repos | head -1)" ] || remote="$PR_USER-$(printf '%s' "$repo" | tr 'A-Z' 'a-z')"
+            add_remote=1
         fi
         branch="$PR_BRANCH"
-        add_remote=1
-        src_ref="$branch"
-        mirror_ref="refs/remotes/pr/$(wk_pr_refname "$PR_USER" "$repo" "$branch")"
-
-        [ -z "$mirror_ok" ] || mirror_fetch_pr "$url" "$branch" "$(wk_pr_refname "$PR_USER" "$repo" "$branch")" \
-            || die "could not fetch '$branch' from $url into the mirror; nothing was checked out"
+        src_ref="refs/heads/$branch"
         ;;
 
     pull)
@@ -835,9 +845,7 @@ $(printf '%s\n' "$found" | sed 's/^/    /')
         [ -n "$url" ] || die "no such upstream remote '$remote'"
         repo=$(printf '%s' "$url" | sed -E 's#(\.git)?$##; s#.*/##')
         if [ "$remote" = origin ]; then branch="pr/$PR_N"; else branch="pr/$remote-$PR_N"; fi
-        add_remote=""
         src_ref="refs/pull/$PR_N/head"
-        mirror_ref="refs/remotes/pr/$(wk_pull_refname "$remote" "$PR_N")"
 
         probe=$(t_exec "$name" bash -c "
             cd $(sh_quote "$src") || exit 1
@@ -849,9 +857,6 @@ $(printf '%s\n' "$found" | sed 's/^/    /')
 
         head_sha=$(upstream_ls_remote "$url" "$src_ref" 2>/dev/null | awk '{print $1; exit}') || head_sha=""
         [ -n "$head_sha" ] || die "no pull request #$PR_N on $repo (checked $url)"
-
-        [ -z "$mirror_ok" ] || mirror_fetch_pull "$remote" "$PR_N" \
-            || die "could not fetch pull/$PR_N from $url into the mirror; nothing was checked out"
         ;;
     esac
 
@@ -859,23 +864,9 @@ $(printf '%s\n' "$found" | sed 's/^/    /')
         warn "'$name' has $dirty uncommitted change(s); the checkout carries them across"
     fi
 
-    net_refspec="$src_ref:refs/remotes/$remote/$branch"
-    fetch_step="git fetch --quiet $(sh_quote "$remote") $(sh_quote "$net_refspec")"
+    fetch_step="git fetch --quiet $(sh_quote "$(upstream_direct_url "$url")") $(sh_quote "$src_ref:refs/remotes/$remote/$branch")"
     if [ -n "$add_remote" ]; then
         fetch_step="git remote get-url $(sh_quote "$remote") >/dev/null 2>&1 || git remote add $(sh_quote "$remote") $(sh_quote "$url")
-        git remote set-url $(sh_quote "$remote") $(sh_quote "$url")
-        $fetch_step"
-    fi
-    if [ -n "$mirror_ok" ]; then
-        fetch_step="if [ -d $(sh_quote "$mirror_dir") ] && git -C $(sh_quote "$mirror_dir") rev-parse --verify --quiet $(sh_quote "$mirror_ref") >/dev/null 2>&1
-        then git fetch --quiet $(sh_quote "$mirror_dir") $(sh_quote "$mirror_ref:refs/remotes/$remote/$branch")
-        else $fetch_step
-        fi"
-    elif [ -n "$mirror_dir" ]; then
-        # A PR head is not a ref any mirror carries, and this checkout's remotes are rewritten to that mirror (wk_fetch_config), so it is fetched into the mirror -- writable from where the checkout is, unlike a container's read-only /mirror above -- and read from there.
-        fetch_step="git -C $(sh_quote "$mirror_dir") fetch --quiet $(sh_quote "$url") $(sh_quote "+$src_ref:$mirror_ref")
-        git fetch --quiet $(sh_quote "$mirror_dir") $(sh_quote "$mirror_ref:refs/remotes/$remote/$branch")"
-        [ -z "$add_remote" ] || fetch_step="git remote get-url $(sh_quote "$remote") >/dev/null 2>&1 || git remote add $(sh_quote "$remote") $(sh_quote "$url")
         git remote set-url $(sh_quote "$remote") $(sh_quote "$url")
         $fetch_step"
     fi
@@ -884,9 +875,9 @@ $(printf '%s\n' "$found" | sed 's/^/    /')
         set -e
         cd $(sh_quote "$src")
         $fetch_step
-    " || die "could not fetch '$branch' into '$name'; nothing was checked out"
+    " || die "could not fetch '$branch' into '$name'; nothing was checked out"   # the upstream by URL, never a remote: it writes refs/remotes/<remote>/<branch> and nothing else, so the local branch is whole while the count below decides what taking the PR head would lose
 
-    reset=""   # the fetch above writes refs/remotes/<remote>/<branch> and nothing else, so the local branch is still whole while this counts what taking the PR head would lose
+    reset=""
     if [ -n "$local_sha" ] && [ "$local_sha" != "$head_sha" ]; then
         ahead=$(t_exec "$name" bash -c "
             cd $(sh_quote "$src") &&
@@ -920,9 +911,9 @@ $(printf '%s\n' "$found" | sed 's/^/    /')
             git checkout --quiet $(sh_quote "$branch")
             ${reset:+git reset --hard --quiet refs/remotes/$(sh_quote "$remote")/$(sh_quote "$branch")}
         else
-            git checkout --quiet -b $(sh_quote "$branch") --track refs/remotes/$(sh_quote "$remote")/$(sh_quote "$branch")
+            git checkout --quiet -b $(sh_quote "$branch") refs/remotes/$(sh_quote "$remote")/$(sh_quote "$branch")
         fi
-        git branch --quiet --set-upstream-to=refs/remotes/$(sh_quote "$remote")/$(sh_quote "$branch") $(sh_quote "$branch") 2>/dev/null || true
+        git branch --quiet --set-upstream-to=refs/remotes/$(sh_quote "$remote")/$(sh_quote "$branch") $(sh_quote "$branch") 2>/dev/null || true   # a pull head matches no configured refspec, so git will not track it and says so; the branch is still checked out at it
     " || die "could not check out '$branch' in '$name'"
 
     info "'$name' is on $branch ($repo, from $remote)"

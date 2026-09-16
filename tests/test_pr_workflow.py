@@ -244,6 +244,42 @@ class TestPrOpenTarget(unittest.TestCase):
             ["WebPlatformForEmbedded/WPEWebKit", "testuser:eng/wpe-feature", "forkwpe", "eng/wpe-feature"],
         )
 
+    def _branch_tracking_its_fork(self, project, fork_remote, branch, user="testuser"):
+        """What `wk pr <user>:<branch>` leaves behind: the branch tracks the
+        *fork* it came from, not an upstream's main."""
+        fork = self.tmp / f"{project}-fork-{rand_suffix()}"
+        _make_repo(fork, branch)
+        work = self.tmp / f"work-{rand_suffix()}"
+        work.mkdir()
+        _git("init", "-q", "-b", "main", cwd=work)
+        _git("remote", "add", fork_remote, str(fork), cwd=work)
+        _git("fetch", "-q", fork_remote, cwd=work)
+        _git("checkout", "-q", "-b", branch, f"{fork_remote}/{branch}", cwd=work)
+        # The URL the real wiring records, which is what names the project.
+        _git("remote", "set-url", fork_remote, f"https://github.com/{user}/{project}.git", cwd=work)
+        return work
+
+    def test_a_branch_tracking_the_fork_opens_against_the_project(self):
+        """Not against the fork itself: `wk pr` leaves the branch tracking
+        `fork/<branch>`, and a pull request against that is one against you."""
+        work = self._branch_tracking_its_fork("WebKit", "fork", "eng/my-feature")
+        cp = self._target(work)
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertEqual(
+            cp.stdout.strip().split("\t"),
+            ["WebKit/WebKit", "testuser:eng/my-feature", "fork", "eng/my-feature"],
+        )
+
+    def test_a_wpe_branch_tracking_its_fork_opens_against_wpewebkit(self):
+        work = self._branch_tracking_its_fork("WPEWebKit", "forkwpe", "eng/wpe-feature")
+        cp = self._target(work)
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertEqual(
+            cp.stdout.strip().split("\t"),
+            ["WebPlatformForEmbedded/WPEWebKit", "testuser:eng/wpe-feature",
+             "forkwpe", "eng/wpe-feature"],
+        )
+
     def test_refuses_on_main(self):
         """opening 'main' itself as a pull request is refused by name"""
         work = self.tmp / "on-main"

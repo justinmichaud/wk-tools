@@ -9,8 +9,9 @@ request head is not in it at all. So a question about what the upstream itself
 has, asked with a plain `git ls-remote` from inside a checkout, is answered by
 the mirror: empty, and with git's own exit status 0.
 
-`upstream_ls_remote` is the one way that question is asked (`git -C /`, outside
-every repository, where no rewrite is configured); `pr_branch_repo` is the one
+`upstream_direct_url` is the one way past it -- the same repository spelled
+without the `.git` the rewrite is keyed on -- and `upstream_ls_remote` and
+`wk_pr_checkout`'s fetch both go through it. `pr_branch_repo` is the one
 implementation of "which of this fork's repositories carries this branch",
 shared by `wk pr <user>:<branch>` and `wk ab <user>:<branch>`.
 
@@ -60,6 +61,9 @@ class Wired(unittest.TestCase):
 
         for bare in (self.mirror, self.fork):
             git("init", "-q", "--bare", "-b", "main", str(bare))
+        # The same repository under a second name, which is what GitHub's two
+        # spellings of one URL are: the rewrite is keyed on one of them.
+        (self.dir / "fork").symlink_to(self.fork)
         git("push", "-q", str(self.mirror), "main", cwd=seed)
         git("push", "-q", str(self.mirror), "topic:refs/remotes/fork/topic", cwd=seed)
         self.commit(seed, "two")
@@ -186,18 +190,22 @@ class TestGitSyncFork(Wired):
     Through the rewrite the fork reads as whatever the mirror's `main` is --
     which is origin's -- so it would report nothing to push, for ever."""
 
-    def current_line(self):
-        script = (REPO / "container" / "bin" / "git-sync-fork").read_text()
-        line = [l for l in script.splitlines() if l.startswith("current=")]
-        self.assertEqual(len(line), 1, "git-sync-fork no longer has one `current=` line")
-        return line[0]
+    def current_lines(self):
+        """The two lines that decide what the fork is at, lifted and run as
+        they ship -- not a retyped copy of them."""
+        script = (REPO / "container" / "bin" / "git-sync-fork").read_text().splitlines()
+        first = next(i for i, l in enumerate(script) if l.startswith("url="))
+        last = next(i for i, l in enumerate(script) if l.startswith("current="))
+        self.assertLess(first, last, "git-sync-fork reads the URL before it asks")
+        return "\n".join(script[first:last + 1])
 
     def test_it_reads_the_forks_head_not_the_mirrors(self):
         # wk_fetch_config already made a `remote.fork` section (its fetch
         # refspec), so the URL is set rather than the remote added.
         subprocess.run(["git", "config", "remote.fork.url", str(self.fork)],
                        cwd=self.src, check=True, capture_output=True)
-        cp = self.in_src(f'remote=fork\nbranch=main\n{self.current_line()}\necho "$current"')
+        self.assertTrue((self.dir / "fork").exists(), "the direct spelling must resolve")
+        cp = self.in_src(f'remote=fork\nbranch=main\n{self.current_lines()}\necho "$current"')
         self.assertEqual(cp.stdout.strip(), self.fork_main, cp.stderr)
         self.assertNotEqual(self.fork_main, self.origin_main)
 
@@ -254,6 +262,85 @@ class TestPrOpenTarget(unittest.TestCase):
         self.assertEqual(self.target("wpe", "eng/y"),
                          ["WebPlatformForEmbedded/WPEWebKit", "justinmichaud:eng/y",
                           "forkwpe", "eng/y"])
+
+
+class TestTheDirectSpellingEscapesEveryWiredRewrite(unittest.TestCase):
+    """The invariant the whole mechanism rests on, checked against the real
+    wk_remotes and a real wk_fetch_config rather than assumed: for every URL
+    a checkout is wired to rewrite, the `.git`-less spelling of it is left
+    alone. Change wk_remotes to the other spelling and this is what says so,
+    rather than `wk pr` quietly fetching from the mirror again."""
+
+    def setUp(self):
+        self.dir = self.enterContext(scratch_dir(prefix="wk-test-direct-"))
+        self.mirror = self.dir / "WebKit.git"
+        self.src = self.dir / "src"
+        git("init", "-q", "--bare", "-b", "main", str(self.mirror))
+        git("init", "-q", "-b", "main", str(self.src))
+        script = bash(PRELUDE + f'wk_fetch_config {self.mirror}').stdout
+        subprocess.run(["bash", "-c", script], cwd=self.src, check=True, capture_output=True)
+
+    def wired_urls(self):
+        rows = [l.split() for l in bash(PRELUDE + 'wk_remotes').stdout.splitlines() if l.strip()]
+        self.assertTrue(rows)
+        return [url for _, url in rows]
+
+    def test_every_wired_url_is_rewritten_to_the_mirror(self):
+        for url in self.wired_urls():
+            got = bash(PRELUDE + f'cd "{self.src}"\ngit ls-remote --get-url {url}')
+            self.assertEqual(got.stdout.strip(), str(self.mirror), url)
+
+    def test_and_its_direct_spelling_is_not(self):
+        for url in self.wired_urls():
+            direct = bash(PRELUDE + f'upstream_direct_url {url}').stdout.strip()
+            self.assertNotEqual(direct, url, f"{url} is not spelled with .git")
+            got = bash(PRELUDE + f'cd "{self.src}"\ngit ls-remote --get-url {direct}')
+            self.assertEqual(got.stdout.strip(), direct, direct)
+
+    def test_an_account_that_is_not_wired_is_not_rewritten_either(self):
+        """Which is why another account's fork needs no special handling: the
+        rewrite only ever names the four repositories wk wires."""
+        url = "https://github.com/alice/WebKit.git"
+        got = bash(PRELUDE + f'cd "{self.src}"\ngit ls-remote --get-url {url}')
+        self.assertEqual(got.stdout.strip(), url, got.stdout)
+
+
+class TestTheBrokerServesTheMirrorRefresh(unittest.TestCase):
+    """The workspace half of `wk sync` and of `wk pr <wired fork>:<branch>`
+    is one request, and the broker's answer to it is one `wk` command with
+    no argument of its own -- a workspace may ask for this machine's mirror
+    to be brought up to date, never for a URL of its choosing to be fetched."""
+
+    def broker(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "wkbroker", REPO / "container" / "broker" / "wk-broker.py")
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+
+    def test_sync_resolves_to_wk_sync_mirror(self):
+        b = self.broker()
+        subject, argv, what = b.VERBS["sync"][0]({})
+        self.assertEqual(argv[1:], ["sync", "--mirror"])
+        self.assertEqual(subject["name"], "store")
+        self.assertIn("mirror", what)
+
+    def test_it_is_reached_by_being_here_so_no_board_is_probed(self):
+        """run_request takes the subject's own reach when it has one; a
+        store verb must not send `reach` at a machine that does not exist."""
+        b = self.broker()
+        subject, _, _ = b.VERBS["sync"][0]({})
+        self.assertTrue(subject.get("reach"))
+
+    def test_it_takes_no_arguments(self):
+        b = self.broker()
+        with self.assertRaises(b.Refused):
+            b.VERBS["sync"][0]({"machine": "rpi4"})
+
+    def test_it_is_serialised_like_every_other_mutating_verb(self):
+        b = self.broker()
+        self.assertTrue(b.VERBS["sync"][1], "a mirror refresh must hold off a second one")
 
 
 if __name__ == "__main__":

@@ -326,20 +326,28 @@ class TestABranchIsTakenFromTheMirrorFirst(MirrorFixture):
 
 
 class TestTheCommandsAskTheDriver(unittest.TestCase):
-    """Every command that fetches in a workspace reads t_mirror_dir; only the
-    drivers name a path. One path spelled into several commands is fixed in
-    one of them and wrong in the rest."""
+    """Every command that fetches a workspace's mirror reads t_mirror_dir;
+    only the drivers name a path. One path spelled into several commands is
+    fixed in one of them and wrong in the rest."""
 
-    ASKS = ("cmd/sync", "cmd/new", "cmd/pr", "cmd/build", "build/babysit.sh",
-            "lib/store.sh")
+    ASKS = ("cmd/sync", "cmd/new", "cmd/build", "build/babysit.sh")
+
+    # lib/store.sh takes the mirror directory as an argument from those
+    # callers and never resolves one itself, and `wk pr` fetches the one ref
+    # from the upstream rather than through any mirror -- so neither has a
+    # t_mirror_dir call to make, and both are still held to spelling no path.
+    SPELLS_NO_PATH = ASKS + ("lib/store.sh", "cmd/pr")
 
     def test_no_command_spells_a_mirror_path_of_its_own(self):
-        for rel in self.ASKS:
-            text = (REPO / rel).read_text()
+        for rel in self.SPELLS_NO_PATH:
             with self.subTest(file=rel):
-                self.assertNotIn("/mirror/WebKit.git", text,
+                self.assertNotIn("/mirror/WebKit.git", (REPO / rel).read_text(),
                                  f"{rel} names a container's mirror itself")
-                self.assertIn("t_mirror_dir", text,
+
+    def test_every_command_that_fetches_a_mirror_asks_the_driver_for_it(self):
+        for rel in self.ASKS:
+            with self.subTest(file=rel):
+                self.assertIn("t_mirror_dir", (REPO / rel).read_text(),
                               f"{rel} fetches without asking the driver")
 
     # t_spawn (targets/container.sh) execs these directly, with no WK_ROOT and

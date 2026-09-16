@@ -13,10 +13,15 @@
 #
 # <user>:<branch> is a fork's branch; both projects are tried, and a branch existing in both is
 # refused by name. A bare number is a WebKit/WebKit pull request, `wpe:<number>` a WPEWebKit one.
-# Either way it is fetched once into this machine's mirror (under refs/remotes/pr/...) and the
-# workspace fetches that ref from there; a workspace whose mirror is not this machine's fetches
-# the one ref from GitHub itself. Uncommitted changes are named before anything moves, and a local
-# branch with commits the PR head lacks is never overwritten, only named.
+#
+# Either way the one ref is fetched from GitHub straight into the workspace's checkout, and a
+# remote for an account that has none yet is added there. The machine's mirror is not involved:
+# it exists to hold the history the workspaces share, and a PR head is neither shared nor in it.
+# The fetch is thin -- the checkout already has the history those commits sit on -- and it is the
+# same from the host and from inside a workspace.
+#
+# Uncommitted changes are named before anything moves, and a local branch with commits the PR head
+# lacks is never overwritten, only named.
 #
 #   --force   take the PR head even when the local branch has commits it does not, discarding them
 #
@@ -42,7 +47,7 @@ WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 # pr_open_target <src-dir> -- prints "<base-repo>\t<user>:<branch>\t<fork-remote>\t<branch>".
 # No WK_ROOT and no color codes, so it ships via `declare -f` into a workspace.
 pr_open_target() {
-    local src="$1" branch dirty up up_remote up_url up_repo fork url owner base
+    local src="$1" branch dirty up up_remote up_url up_repo fork url owner base _forks _rn _ru
     branch=$(git -C "$src" symbolic-ref --quiet --short HEAD 2>/dev/null) || {
         printf 'error: %s\n' "'wk pr open' needs a branch checked out, not a detached HEAD" >&2
         return 1
@@ -64,6 +69,7 @@ pr_open_target() {
     up_remote="${up%%/*}"
     up_url=$(git -C "$src" config --get "remote.$up_remote.url" 2>/dev/null) || up_url=""   # `git remote get-url` applies the url.<mirror>.insteadOf rewrite a wired checkout carries, under which every remote answers with the mirror path and both projects read as one repository
     up_repo=$(printf '%s' "$up_url" | sed -E 's#(\.git)?$##; s#.*/##')
+    _forks=$(wk_push_forks | awk 'NF {printf " %s", $1}')
     fork=$(wk_push_forks | awk -v r="$up_repo" 'NF && $2 ~ ("/" r "$") { print $1; exit }')
     if [ -z "$fork" ]; then
         printf 'error: %s\n' "'$branch' tracks '$up' ($up_url), not a known upstream (origin or wpe) -- 'wk pr open' only knows WebKit and WPEWebKit" >&2
@@ -74,7 +80,19 @@ pr_open_target() {
         return 1
     }
     owner=$(printf '%s' "$url" | sed -E 's#\.git$##; s#.*[:/]([^/]+)/[^/]+$#\1#')
-    base=$(wk_remotes | awk -v r="$up_remote" '$1 == r { print $2; exit }' | sed -E 's#^https://github.com/##; s#\.git$##')
+    # The project's upstream, not the remote the branch happens to track: `wk pr` leaves a branch tracking the fork it came from, and a pull request against that is one against yourself.
+    base=""
+    while read -r _rn _ru; do
+        [ -n "$_rn" ] || continue
+        case " $_forks " in *" $_rn "*) continue ;; esac
+        case "$_ru" in */"$up_repo".git) base=$(printf '%s' "$_ru" | sed -E 's#^https://github.com/##; s#\.git$##'); break ;; esac
+    done <<EOF
+$(wk_remotes)
+EOF
+    if [ -z "$base" ]; then
+        printf 'error: %s\n' "no upstream in wk_remotes for the project '$up_repo', so there is nothing to open '$branch' against" >&2
+        return 1
+    fi
     printf '%s\t%s\t%s\t%s\n' "$base" "$owner:$branch" "$fork" "$branch"
 }
 

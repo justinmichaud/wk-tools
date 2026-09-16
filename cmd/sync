@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
-# wk sync [<workspace>|--target <t>|--all|--tools] -- bring WebKit and the tooling up to date
-# wk: where=dynamic name=optional group=sources needs git,rsync opts --all,--target=,--tools,--machine
+# wk sync [<workspace>|--mirror|--target <t>|--all|--tools] -- bring WebKit and the tooling up to date
+# wk: where=dynamic name=optional group=sources needs git opts --all,--target=,--tools,--machine,--mirror broker --mirror
 #
 # A fetch, and never a checkout: no branch is switched, merged or rebased, here
 # or in a workspace. Safe to run at any time -- workspaces already made stay
@@ -11,7 +11,13 @@
 #   wk sync                    this machine: its tooling, its one WebKit mirror,
 #                              a new snapshot, then a fetch in every workspace
 #                              here -- the containers and the macOS guests
+#   wk sync                    inside a workspace: the mirror, then a fetch in
+#                              this one. The mirror is mounted read-only in
+#                              there, so the refresh is asked of the machine
+#                              through the request broker
 #   wk sync <workspace>        a fetch in that one workspace, from its mirror
+#   wk sync --mirror           the mirror alone -- no snapshot, no tooling, no
+#                              workspace. What the brokered refresh above runs
 #   wk sync --target <target>  that target's furniture, then its workspaces
 #   wk sync --all              every target's furniture, then its workspaces
 #   wk sync --tools [<target>] the furniture alone: a machine's copy of
@@ -34,7 +40,7 @@ if [ "${1:-}" = --where ]; then
     shift
     for _a in "$@"; do
         case "$_a" in
-            --all|--tools|--tools=*|--target|--target=*|--machine) echo host; exit 0 ;;
+            --all|--tools|--tools=*|--target|--target=*|--machine|--mirror) echo host; exit 0 ;;
             -*) ;;
             *)  echo workspace; exit 0 ;;
         esac
@@ -90,7 +96,7 @@ if (return 0 2>/dev/null); then
     [ "${1:-}" = functions ] && return 0
 fi
 
-USAGE="usage: wk sync [<workspace>|--target <target>|--all|--tools [<target>]]"
+USAGE="usage: wk sync [<workspace>|--mirror|--target <target>|--all|--tools [<target>]]"
 SCOPE=""            # ws | target | all | tools -- what this run brings up to date
 SCOPE_AS=""         # how it was spelled, for a message about two of them
 ONLY="${WK_NAME:-}" # the workspace named, if one was
@@ -105,7 +111,8 @@ scope_set() { # <scope> <as-typed>
 
 while [ $# -gt 0 ]; do
     case "$1" in
-        --all)  scope_set all --all; shift ;;
+        --all)    scope_set all --all; shift ;;
+        --mirror) scope_set mirror --mirror; shift ;;
         --target|--target=*)
             _v=""
             case "$1" in --target=*) _v="${1#*=}" ;; *) _v="${2:-}" ;; esac
@@ -258,9 +265,10 @@ sync_target() { # <target>
 }
 
 if [ "$SCOPE" = ws ]; then
-    in_workspace || store_init
+    WS_MIRROR_RC=0
+    if in_workspace; then mirror_refresh_request || WS_MIRROR_RC=1; else store_init; fi
     sync_workspaces "$ONLY"
-    exit 0
+    exit "$WS_MIRROR_RC"
 fi
 
 sync_mirror() {
@@ -379,6 +387,14 @@ sync_store_of() { # <target>: its snapshot, then (--tools excepted) a fetch in i
     [ "$SCOPE" = tools ] || sync_target "$_t"
     return "$_rc"
 }
+
+if [ "$SCOPE" = mirror ]; then
+    if in_workspace; then mirror_refresh_request; exit $?; fi
+    mirror_is_here || die "the mirror in here is the host's, mounted read-only.
+    Run it on the machine that keeps it."
+    with_lock store -- sync_mirror
+    exit 0
+fi
 
 FURNITURE_RC=0
 sync_furniture || FURNITURE_RC=1

@@ -11,8 +11,11 @@ or a workspace.
 Run: python3 -m unittest tests.test_sync -v
 """
 
+import contextlib
+import json
 import shlex
 import subprocess
+import sys
 import unittest
 from pathlib import Path
 
@@ -726,15 +729,54 @@ class TestDispatcherForwardingRuleForSync(unittest.TestCase):
                          "a flag override decides where= beside the --where answer")
 
 
+# A broker that answers one request and records it: enough for the client in
+# container/broker/wk-broker-client.py to speak to, without a real one.
+STUB_BROKER = """
+import json, os, socket, sys
+sock, record = sys.argv[1], sys.argv[2]
+s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+s.bind(sock)
+s.listen(1)
+sys.stderr.write("ready\\n"); sys.stderr.flush()
+c, _ = s.accept()
+line = b""
+while not line.endswith(b"\\n"):
+    chunk = c.recv(65536)
+    if not chunk:
+        break
+    line += chunk
+open(record, "w").write(line.decode())
+c.sendall(json.dumps({"event": "done", "ok": True, "request": "stub"}).encode() + b"\\n")
+c.close()
+"""
+
+
+@contextlib.contextmanager
+def stub_broker(tmp):
+    """A listening socket at a path, and the request it was sent."""
+    sock, record = tmp / "broker.sock", tmp / "request.json"
+    script = tmp / "stub-broker.py"
+    script.write_text(STUB_BROKER)
+    p = subprocess.Popen([sys.executable, str(script), str(sock), str(record)],
+                         stderr=subprocess.PIPE, text=True)
+    p.stderr.readline()                      # it says "ready" once bound
+    try:
+        yield sock, record
+    finally:
+        p.kill()
+        p.wait()
+
+
 class TestSyncInsideWorkspace(unittest.TestCase):
-    """Inside a workspace `wk sync` has exactly one meaning: fetch in this
-    workspace, from the mirror its machine mounts in read-only (defect: "wk
-    sync should work inside a sandbox too"). cmd/sync no longer declares
-    `outside`; --target/--all/--tools/--machine answer `host` to the
-    dispatcher's `--where` question and are refused before this file even
-    starts (wk's in_workspace-and-where=host refusal), and cmd/sync refuses a
-    name that is not this workspace's own the same way. A bare `wk sync` is
-    the one shape that reaches all the way to a real fetch."""
+    """Inside a workspace `wk sync` means two things: bring this machine's
+    mirror up to date, then fetch in this workspace from it. The mirror is
+    the machine's and a container mounts it read-only, so the refresh is a
+    request over the broker socket (lib/store.sh mirror_refresh_request) --
+    and when no broker is listening the fetch still runs, says so, and the
+    command exits non-zero. cmd/sync declares no `outside`;
+    --target/--all/--tools/--machine answer `host` to the dispatcher's
+    `--where` question and are refused before this file even starts, and
+    cmd/sync refuses a name that is not this workspace's own the same way."""
 
     def _refused(self, *args):
         with fake_workspace() as ws:
@@ -785,6 +827,38 @@ class TestSyncInsideWorkspace(unittest.TestCase):
                               capture_output=True, text=True, check=True).stdout.strip()
         return bare, sha
 
+    def _wired_checkout(self, ws):
+        bare, sha = self._bare_repo_with_a_commit(ws.tmp)
+        src = ws.ws_dir / "WebKit"
+        subprocess.run(["git", "init", "--quiet", "-b", "main", str(src)],
+                        check=True, capture_output=True)
+        subprocess.run(["git", "-C", str(src), "remote", "add", "origin", str(bare)],
+                        check=True, capture_output=True)
+        return src, sha
+
+    def test_bare_sync_asks_the_machine_to_refresh_its_mirror_first(self):
+        with fake_workspace() as ws:
+            src, sha = self._wired_checkout(ws)
+            with stub_broker(ws.tmp) as (sock, record):
+                cp = ws.run("sync", env={"WK_BROKER_SOCKET": str(sock)})
+            self.assertEqual(cp.returncode, 0, cp.stdout)
+            self.assertEqual(json.loads(record.read_text()),
+                             {"verb": "sync", "args": {}}, record.read_text())
+            got = subprocess.run(["git", "-C", str(src), "rev-parse", "refs/remotes/origin/main"],
+                                  capture_output=True, text=True)
+            self.assertEqual(got.stdout.strip(), sha, got.stderr)
+
+    def test_with_no_broker_the_fetch_still_runs_and_the_miss_is_reported(self):
+        with fake_workspace() as ws:
+            src, sha = self._wired_checkout(ws)
+            cp = ws.run("sync", env={"WK_BROKER_SOCKET": str(ws.tmp / "nothing.sock")})
+            self.assertEqual(cp.returncode, 1, cp.stdout)
+            self.assertIn("mirror was not", cp.stdout)
+            self.assertIn("./setup --stage broker", cp.stdout)
+            got = subprocess.run(["git", "-C", str(src), "rev-parse", "refs/remotes/origin/main"],
+                                  capture_output=True, text=True)
+            self.assertEqual(got.stdout.strip(), sha, got.stderr)
+
     def test_bare_sync_fetches_in_this_workspaces_own_checkout(self):
         # No mirror mounted on the machine running this test, so the fetch
         # takes sync_workspaces' other branch -- the workspace's own "origin"
@@ -799,7 +873,8 @@ class TestSyncInsideWorkspace(unittest.TestCase):
             subprocess.run(["git", "-C", str(src), "remote", "add", "origin", str(bare)],
                             check=True, capture_output=True)
 
-            cp = ws.run("sync")
+            with stub_broker(ws.tmp) as (sock, _):
+                cp = ws.run("sync", env={"WK_BROKER_SOCKET": str(sock)})
             self.assertEqual(cp.returncode, 0, cp.stdout)
             self.assertIn("selftest-ws", cp.stdout)
 
@@ -823,7 +898,8 @@ class TestSyncInsideWorkspace(unittest.TestCase):
                             check=True, capture_output=True)
             subprocess.run(["git", "-C", str(src), "remote", "add", "origin", str(bare)],
                             check=True, capture_output=True)
-            cp = ws.run("sync")
+            with stub_broker(ws.tmp) as (sock, _):
+                cp = ws.run("sync", env={"WK_BROKER_SOCKET": str(sock)})
         self.assertEqual(cp.returncode, 0, cp.stdout)
         self.assertNotIn("Permission denied", cp.stdout)
 

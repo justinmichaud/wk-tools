@@ -408,6 +408,24 @@ wk new review-1234 --pr 1234             # a fresh workspace straight onto a PR
 wk pr open bug-238                       # from the host: push the branch, open it with gh
 ```
 
+**A PR head goes straight into the workspace, never through the mirror.** The
+mirror holds the history every workspace here shares, which is why a fetch of
+`origin` or `fork` is a local read; a pull request head and a stranger's fork
+are neither shared nor in it, so `wk pr` fetches the one ref from GitHub into
+the checkout itself and adds a remote for an account that has none yet. The
+fetch is thin -- the checkout already has the history those commits sit on --
+and it is the same command from the host and from inside a workspace.
+
+It names the upstream by its `.git`-less URL, which is the one thing here that
+needs saying: the wiring above rewrites each URL in `wk_remotes` to the mirror,
+and a fetch sent there for a ref the mirror does not carry comes back empty
+with git's own exit status 0.
+
+`wk sync` inside a workspace is the other half of staying current: the machine
+refreshes its mirror -- read-only in there, so it is asked for over the request
+broker -- and then this one workspace fetches from it. Nothing else on the
+machine is touched, which is what makes it the fast one to reach for.
+
 **What a fresh workspace's checkout is**
 
 The base snapshot is published on the branch it was taken from (`origin/main`,

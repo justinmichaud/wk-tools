@@ -15,7 +15,7 @@ broker_no_route() { # <what was asked for> <what a person would run>
     There is no route from here and there is not meant to be one.
     $([ -S "$WK_BROKER_SOCKET" ] \
         && printf '%s' "The request broker is listening, but it does not serve this --
-    its vocabulary is: wk boot, wk pi deploy, wk pi bench." \
+    what it does serve, it will say:  wk-broker-client.py capabilities" \
         || printf '%s' "No request broker is listening at $WK_BROKER_SOCKET either, so
     there is no door for a request like this one. Somebody with the workstation
     opens it with:  ./setup --stage broker   ('wk doctor' then says it is

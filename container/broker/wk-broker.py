@@ -368,7 +368,20 @@ def build_status(args):
     return m, argv, f"read {m['name']}'s mode"
 
 
+# The store, not a board: the subject a request is keyed and serialised by is
+# this machine itself, so two workspaces asking at once queue behind each other
+# on the one mirror. It is reached by being here, so nothing is probed.
+def build_sync(args):
+    for k in args:
+        raise Refused(f"'sync' takes no arguments (got '{str(k)[:40]}')",
+                      "ask for 'sync' alone: it refreshes this machine's one mirror")
+    argv = [os.path.join(WK_ROOT, "wk"), "sync", "--mirror"]
+    return ({"name": "store", "reach": "this workstation"}, argv,
+            "refresh this machine's WebKit mirror")
+
+
 VERBS = {                              # verb -> (builder, takes the machine)
+    "sync": (build_sync, True),
     "arm": (build_arm, True),
     "keep": (build_keep, True),
     "release": (build_release, True),
@@ -459,7 +472,7 @@ class Broker:
         with open(os.path.join(rdir, "request"), "w") as f:
             json.dump({"verb": verb, "args": args, "argv": argv}, f, indent=2)
 
-        where = await asyncio.to_thread(reach, m["name"])
+        where = m.get("reach") or await asyncio.to_thread(reach, m["name"])
         await self.send(
             w,
             {
