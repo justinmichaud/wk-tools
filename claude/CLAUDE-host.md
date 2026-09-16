@@ -65,6 +65,18 @@ only state `--wait` waits through). A pid on this side is not evidence about a
 build driven over ssh, and a `for i in $(seq …); do kill -0 …; sleep 5; done`
 reports "still building" about a build that failed a minute ago.
 
+**Do not reach around `wk` to judge a build.** `wk status <ws>` is the stage
+and the health -- the plan it recorded, the step it is on, and the watchdog
+that calls it silent or stalled; `wk logs <ws>` is the errors, already
+normalised past the carriage returns ninja writes progress with; `wk status
+<ws> --wait` is the outcome. Tailing the raw build log, or sshing into the
+guest to count `.o` files, answers a different question and answers it badly:
+a carriage-returned log has no meaningful tail, and an object count is not a
+stage. There is deliberately no compile percentage -- "how far through" is not
+a question the build records, so an agent that wants one invents it, and
+reports it wrong. The single reading taken outside `wk` is the kill check
+below, where the record is known to lag.
+
 `wk setup` and the other provisioning commands are minutes, not seconds: run
 them in the background too rather than watching a tool call time out.
 
