@@ -165,17 +165,32 @@ done\n' "$(sh_quote '^url\..*\.(push)?insteadof$')"
     printf 'git config fetch.writeCommitGraph false\ngit config gc.writeCommitGraph false\n'   # git-webkit setup fetches every remote in parallel, and two fetches writing the commit graph collide on its lock and fail the setup
 }
 
+wk_hook_levels() {   # what `git-webkit install-hooks --level` is told, so the pre-push hook can classify a wired checkout: it reads the URL `git remote -v` gives for the remote carrying a commit, which is the rewritten one -- a bare mirror path does not parse as a remote at all, and the no-push sentinel does parse and, as the push line, wins over the fetch URL. Either way origin reads as uncategorized and every commit on main is refused as coming from one. Every repository wk wires is public (wk_remotes), hence level 0; a secure remote must never carry this shared sentinel, which would hand it that 0.
+    local remote repo alias out="--level no-push://use-a-fork-remote=0"
+    while read -r remote repo alias; do
+        [ -n "$remote" ] || continue
+        out="$out --level $alias:$repo=0"
+    done <<EOF
+$(wk_push_forks)
+EOF
+    printf '%s' "$out"
+}
+
 # --defaults asks nothing, given GITHUB_COM_USERNAME/GITHUB_COM_TOKEN in the environment (webkitcorepy reads those before any keyring and raises rather than prompting), so this runs where the injector puts them; `webkitscmpy.setup` is the record it writes of having run.
 # On a branch other than main it prompts whatever --defaults says.
 wk_gitwebkit_setup_script() { # <src>
     printf 'cd %s || exit 2\n' "$(sh_quote "$1")"
+    printf 'WK_HOOK_LEVELS=%s\n' "$(sh_quote "$(wk_hook_levels)")"
     cat <<'EOF'
 if [ "$(git config --get webkitscmpy.setup 2>/dev/null)" = true ]; then
-    echo setup=already
-    exit 0
+    state=already
+else
+    Tools/Scripts/git-webkit setup --defaults </dev/null >&2 || { echo setup=failed; exit 1; }
+    state=ok
 fi
-Tools/Scripts/git-webkit setup --defaults </dev/null >&2 || { echo setup=failed; exit 1; }
-echo setup=ok
+# Re-asserted for a checkout already set up, whose hook `setup` baked without the levels; idempotent, since they live in the generated hook rather than in git config. Unquoted to split into flags.
+Tools/Scripts/git-webkit install-hooks $WK_HOOK_LEVELS </dev/null >&2 || { echo setup=hooks-failed; exit 1; }
+echo "setup=$state"
 EOF
 }
 
