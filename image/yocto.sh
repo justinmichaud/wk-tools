@@ -312,6 +312,7 @@ EOF
 
 yocto_build() { # <profile> <args...>
     local profile="$1"; shift
+    local _argv=("$@")   # --detach re-runs this without it
     local dry="" ws="" stage="" detach="" keep_work="" stop=""
     local chromium="" commit="" slot="" cross_config="" pgo_profile=""
 
@@ -456,6 +457,22 @@ EOF
     local pgo_args=""
     [ "$stage" != pgo-mix ] || pgo_args="--pgo-dir $(image_pgo_dir_in "$slot") --pgo-lib $PGO_GLIB_LIB"
 
+    # Before the lock and the spawn: the copy this starts is the one that holds the
+    # workspace, waits, and ends the record, which detaching after the spawn left nobody to do.
+    if [ -n "$detach" ]; then
+        command -v detach_run >/dev/null 2>&1 || . "$WK_ROOT/lib/detach.sh"
+        local _a _det=() _pid
+        for _a in ${_argv[@]+"${_argv[@]}"}; do
+            [ "$_a" = --detach ] || _det+=("$_a")
+        done
+        _pid=$(detach_run "$(wk_ws_dir "$ws")/detached-$stage.log" -- \
+            "$WK_ROOT/wk" sysimage build "$profile" ${_det[@]+"${_det[@]}"})
+        info "stage '$stage' running detached in '$ws' as pid $_pid -- this end can go away"
+        log  "  follow:  tail -f $(yocto_log "$ws" "$stage")"
+        log  "  state:   wk status $ws"
+        return 0
+    fi
+
     hold_lock "ws-$ws" -w 3600  # two builds in one checkout corrupt both, and an hour is how long a stage ahead of this one takes
 
     yocto_check_target "$ws"
@@ -481,13 +498,6 @@ EOF
         --webkit-jobs "$webkit_jobs" \
         --sstate-ns "$(printf '%s' "${WK_SDK_IMAGE##*/}" | tr ':/' '--')" \
         ${commit:+--commit "$commit"} ${slot:+--slot "$slot" --profile "$profile"}
-
-    if [ -n "$detach" ]; then
-        info "running detached in '$ws' -- this end can go away"
-        log  "  follow:  tail -f $(yocto_log "$ws" "$stage")"
-        log  "  then:    wk sysimage build $profile --stage $stage   (once it has finished)"
-        return 0
-    fi
 
     local rc
     set +e; yocto_wait "$ws" "$stage"; rc=$?; set -e

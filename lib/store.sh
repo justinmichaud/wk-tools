@@ -25,6 +25,8 @@ wk_artifact_dir() {
 
 
 WK_CCACHE_MAXSIZE="${WK_CCACHE_MAXSIZE:-40G}"   # shared by every workspace here
+WK_TART_CACHE_GB="${WK_TART_CACHE_GB:-20}"     # tart's pulled-image cache, re-downloadable
+TART_HOME="${TART_HOME:-$HOME/.tart}"          # the guests and that cache, outside every wk directory
 
 ccache_conf_render() { printf 'max_size = %s\n' "$WK_CCACHE_MAXSIZE"; }
 ccache_conf_write() { # <path to ccache.conf>

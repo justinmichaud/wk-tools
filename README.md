@@ -753,11 +753,11 @@ wk bench report <task> --html                            # paired like any A/B; 
 
 The base is guessed as the merge-base of the PR head and the image's own
 branch (`CFG_BRANCH`), the release from the PR's base branch; `--base` and
-`--release` override either. An A/B attributes a number to a commit, so a
-guessed base more than one commit behind the head is refused and names
-`--base`: a branch cut from another release puts the two arms thousands of
-commits apart, which measures the branch rather than the change. `--force`
-crosses it. Every invocation is one task
+`--release` override either. An A/B attributes a number to a commit, so a base
+more than one commit behind the head is refused -- whether it was guessed or
+given -- and names `--base`: two arms further apart than that measure the
+branch rather than the change, and no number says which commit moved it.
+`--force` crosses it. Every invocation is one task
 (`<stamp>-wpe-pr1725`, or `<stamp>-<sha12>` for a commit): its `task.json`
 records the request and every command, each board's pipeline logs to
 `<board>.log` beside it, and `wk bench report <task>` pairs the rounds each
@@ -1073,6 +1073,17 @@ two lanes and build at once, because a slot build books only its own jobs
 under the store is shared between lanes, so an arm's instrumented build is
 largely hits off the arm before it; its measured build is not, a changed
 `-fprofile-use` file being a miss (above).
+
+**An image is built the way its upstream builds it, and a lane is sized for
+that.** The yocto tree in a lane is the whole distribution's build, because
+that is what produces the image the board runs; nothing here substitutes a
+lighter path -- an SDK lifted out and carried between machines, a toolchain
+kept as an artifact -- because a number measured on an image built differently
+is a number about a different system. A lane is therefore ~120 GB (a measured
+84 GB of build tree, plus the machine's shared sstate and download caches), and
+the machine grows to fit rather than the build shrinking to fit the machine.
+Images are rebuilt per run and never reused, so a lane is transient: taking one
+down loses nothing.
 
 **Which machine a lane is on is its workspace's target, and the command
 follows it.** `wk sysimage build` and `wk sysimage webkit` derive the lane
@@ -1656,7 +1667,8 @@ a file and never consults PATH, so the path form is covered by the
 wk doctor                # what is provisioned, what is missing, and the command to fix it
 wk status                # every target and fleet device, without guessing
 wk disk                  # where the disk went, with the total
-wk gc                    # reclaim disk by reference count; never loses work
+wk gc                    # reclaim disk by reference count; never loses work, and names the rubble it will not take by itself
+wk gc --purge-rubble     # also destroy the half-made workspaces nothing is creating
 wk gc --purge-mirror     # also erase the git mirror and every base snapshot (refused with a live workspace)
 ```
 

@@ -168,6 +168,70 @@ class TestWkRmOfRubble(WkTest):
         self.assertNotIn(self.name, ls.stdout, f"'wk rm' left '{self.name}' behind: {ls.stdout}")
 
 
+def _gc_rubble_body():
+    """gc_rubble, lifted out of cmd/gc -- the function is the seam."""
+    text = (REPO / "cmd" / "gc").read_text()
+    start = text.index("gc_rubble() {")
+    end = text.index("\n}\n", start) + 3
+    return text[start:end]
+
+
+func_body = _gc_rubble_body()
+
+
+class TestGcNamesAndClearsRubble(unittest.TestCase):
+    """A creation that stopped leaves a workspace with no finished checkout in
+    it, and clearing those must not be something a person does by hand: a plain
+    `wk gc` names each one, `--purge-rubble` destroys them through `wk rm` --
+    the one removal path -- and neither touches a workspace still being made.
+
+    `gc_rubble` (cmd/gc) is driven directly against stubbed targets, the
+    TestGcReapsDeadCreationRecord idiom above."""
+
+    def _run(self, purge):
+        script = f'''
+set -euo pipefail
+. "{REPO}/lib/common.sh"
+WK_ROOT="{REPO}"
+PURGE_RUBBLE="{purge}"
+target_all() {{ echo fake; }}
+load_target() {{ :; }}
+t_list() {{ printf 'halfmade\\nbeingmade\\nfinished\\n'; }}
+ws_state() {{ case "$1" in finished) echo ready ;; *) echo creating ;; esac; }}
+ws_creating_now() {{ [ "$1" = beingmade ]; }}
+act() {{ echo "ACT: $*"; }}
+{func_body}
+gc_rubble
+'''
+        return bash(script)
+
+    def test_a_plain_run_names_each_one_and_removes_nothing(self):
+        cp = self._run("")
+        out = cp.stdout + cp.stderr
+        self.assertEqual(cp.returncode, 0, out)
+        self.assertIn("halfmade", out, "a plain gc said nothing about the rubble")
+        self.assertIn("--purge-rubble", out, "it did not name what clears them")
+        self.assertNotIn("ACT:", out, "a plain gc destroyed a workspace")
+
+    def test_purge_rubble_destroys_them_through_wk_rm(self):
+        cp = self._run("1")
+        out = cp.stdout + cp.stderr
+        self.assertEqual(cp.returncode, 0, out)
+        self.assertIn("rm halfmade --yes", out,
+                      "it did not go through the one removal path")
+
+    def test_a_workspace_still_being_made_is_left_alone(self):
+        for purge in ("", "1"):
+            with self.subTest(purge=purge):
+                out = self._run(purge).stdout + self._run(purge).stderr
+                self.assertNotIn("beingmade", out,
+                                 "gc touched a workspace that is still being created")
+
+    def test_a_finished_workspace_is_not_rubble(self):
+        out = self._run("1").stdout + self._run("1").stderr
+        self.assertNotIn("finished", out, "gc took a workspace that was fully made")
+
+
 class TestGcReapsDeadCreationRecord(unittest.TestCase):
     """cmd/gc's orphaned-creation-record reaping is a callable seam
     (gc_creation_records, lib/target.sh, next to ws_target/ws_exists), so

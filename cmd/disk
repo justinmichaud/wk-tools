@@ -37,7 +37,6 @@ WK_ROOT="${WK_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
 . "$WK_ROOT/image/pmos.sh"
 
 WK_MACHINE="${WK_MACHINE:-wk}"
-TART_HOME="${TART_HOME:-$HOME/.tart}"
 
 if in_remote_host; then
     load_target "$(wk_remote_field target)" 2>/dev/null || true
@@ -211,7 +210,7 @@ if is_macos && [ -z "${WK_IN_VM:-}" ] && [ -d "$TART_HOME" ]; then
         esac
     done
     kb=$(_kb "$TART_HOME/cache")
-    if [ "$kb" -gt 0 ]; then row "$kb" "pulled image cache" "tart prune --space-budget 0"; fi
+    if [ "$kb" -gt 0 ]; then row "$kb" "pulled image cache" "re-downloadable; wk gc trims it to ${WK_TART_CACHE_GB} GB"; fi
 fi
 
 section "this host"

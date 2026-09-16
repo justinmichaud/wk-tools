@@ -25,9 +25,9 @@
 #   --builder <name>      buildroot or yocto, when the release has both
 #   --bits <32|64>        the default word size for devices named without one
 #   --base <sha|ref>      the unpatched side (default: the merge-base of the PR
-#                         head and the image's own branch, CFG_BRANCH). A
-#                         guessed base more than one commit behind the head is
-#                         refused; --force crosses it
+#                         head and the image's own branch, CFG_BRANCH). A base
+#                         more than one commit behind the head is refused,
+#                         however it was chosen; --force crosses it
 #   --plan <name>         the benchmark (default speedometer3); repeatable
 #   --rounds <n>          A/B alternations per plan (default 5)
 #   --count <n>           run-benchmark iterations per run (default: the plan's)
@@ -383,10 +383,10 @@ for ((i = 0; i < NDEV; i++)); do
 done
 log ""
 
-[ "$BASE_HOW" = given ] || [ "$AHEAD" -le 1 ] || barrier \
-    "the base was guessed and the patched side is $AHEAD commits ahead of it, so
-    the two arms differ by far more than the change under measurement. Name the
-    commit's own parent: --base <sha>."
+[ "$AHEAD" -le 1 ] || barrier \
+    "the patched side is $AHEAD commits ahead of the base, so the two arms differ
+    by more than the change under measurement and no number says which commit
+    moved it. Name the commit's own parent: --base <sha>."
 
 log "the plan as a graph -- a step runs when its needs are done and what it holds is free:"
 log ""

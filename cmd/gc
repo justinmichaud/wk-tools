@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 #
-# wk gc [--purge-mirror] [--purge-pmos] [--purge-builds] -- reclaim disk
+# wk gc [--purge-mirror] [--purge-pmos] [--purge-builds] [--purge-rubble] -- reclaim disk
 #
-# wk: where=host name=none group=sources opts --purge-mirror,--purge-pmos,--purge-builds,--refresh-net
-# wk: destructive --purge-mirror,--purge-pmos,--purge-builds
+# wk: where=host name=none group=sources opts --purge-mirror,--purge-pmos,--purge-builds,--purge-rubble,--refresh-net
+# wk: destructive --purge-mirror,--purge-pmos,--purge-builds,--purge-rubble
 #
 # Reclaims by reference count, so a plain `wk gc` never loses work: unreferenced
 # base snapshots, dangling podman images/volumes, ccache, the pmos build hosts'
@@ -18,6 +18,8 @@
 #   --purge-pmos     erase the pmbootstrap chroots on the pmos build hosts
 #   --purge-builds   erase the build trees images come out of (hours to
 #                    rebuild; the next image build there refetches them)
+#   --purge-rubble   destroy the half-made workspaces nothing is creating; a
+#                    plain run names them and leaves them
 #   --refresh-net    no-op; egress is allowlisted by hostname, not address sets
 
 set -euo pipefail
@@ -45,18 +47,63 @@ REFRESH_NET=""
 PURGE=""
 PURGE_PMOS=""
 PURGE_BUILDS=""
+PURGE_RUBBLE=""
 for _a in "$@"; do
     case "$_a" in
         --refresh-net)  REFRESH_NET=1 ;;
         --purge-mirror) PURGE=1 ;;
         --purge-pmos)   PURGE_PMOS=1 ;;
         --purge-builds) PURGE_BUILDS=1 ;;
+        --purge-rubble) PURGE_RUBBLE=1 ;;
     esac
 done
+
+# A creation that stopped leaves a workspace with no finished checkout in it (`wk new` is crash-only, and `wk status` says to remake rather than repair one). Destroying one is still destroying a workspace, so it is asked for; a plain run names them, which is what keeps clearing them from being something a person does by hand.
+# The guests are pulled from an OCI registry, so what tart keeps beside them is re-downloadable and trimmed to a budget the way ccache is. `--entries caches` is tart's own default: a local VM is a workspace and goes with `wk rm`.
+gc_tart_cache() {
+    have tart || return 0
+    local before after
+    before=$(du -sk "$TART_HOME/cache" 2>/dev/null | cut -f1) || before=""
+    tart prune --space-budget "$WK_TART_CACHE_GB" >/dev/null 2>&1 \
+        || { warn "tart prune failed; its image cache was not trimmed"; return 0; }
+    after=$(du -sk "$TART_HOME/cache" 2>/dev/null | cut -f1) || after=""
+    if [ -n "$before" ] && [ -n "$after" ] && [ "$before" -gt "$after" ]; then
+        changed "tart image cache trimmed to ${WK_TART_CACHE_GB} GB (freed $(( (before - after) / 1048576 )) GB)"
+    else
+        unchanged "tart image cache within ${WK_TART_CACHE_GB} GB"
+    fi
+}
+
+gc_rubble() {
+    local t n st found=""
+    for t in $(target_all 2>/dev/null); do
+        while IFS= read -r n; do
+            [ -n "$n" ] || continue
+            st=$( load_target "$t" >/dev/null 2>&1 && ws_state "$n" ) || continue
+            [ "$st" = creating ] || continue
+            ( load_target "$t" >/dev/null 2>&1 && ws_creating_now "$n" ) && continue
+            found=1
+            if [ -n "$PURGE_RUBBLE" ]; then
+                info "destroying half-made workspace '$n' on $t (--purge-rubble)"
+                WK_TARGET="$t" act "$WK_ROOT/wk" rm "$n" --yes
+            else
+                info "half-made workspace '$n' on $t, and nothing is creating it"
+            fi
+        done <<EOF
+$( load_target "$t" >/dev/null 2>&1 && t_list | cut -f1 )
+EOF
+    done
+    [ -z "$found" ] || [ -n "$PURGE_RUBBLE" ] \
+        || log "  kept -- 'wk gc --purge-rubble' destroys them"
+}
 
 # Asked once, where the person typed it: the container half (WK_IN_VM) is launched by this half after the answer.
 if [ -n "$PURGE_BUILDS" ] && [ -z "${WK_IN_VM:-}" ]; then
     confirm "erase every image build tree (--purge-builds)? the next image build refetches them, and that takes hours" \
+        || die "aborted -- nothing was changed"
+fi
+if [ -n "$PURGE_RUBBLE" ] && [ -z "${WK_IN_VM:-}" ]; then
+    confirm "destroy every half-made workspace nothing is creating (--purge-rubble)?" \
         || die "aborted -- nothing was changed"
 fi
 if [ -n "$PURGE" ] && [ -z "${WK_IN_VM:-}" ]; then
@@ -110,7 +157,7 @@ gc_report_complete() {
     for d in bench cache/bench cache/bench-runner cache/images cache/yocto/sstate cache/yocto/downloads \
              cache/yocto/buildtools cache/buildroot; do
         [ -d "$WK_STORE/$d" ] || continue
-        du -sh "$WK_STORE/$d" 2>/dev/null | awk -v d="$d" '{printf "  %-8s %s (kept; prune by hand if needed)\n", $1, d}' >&2
+        du -sh "$WK_STORE/$d" 2>/dev/null | awk -v d="$d" '{printf "  %-8s %s (kept)\n", $1, d}' >&2
     done
 }
 
@@ -119,6 +166,7 @@ if is_macos && [ -z "${WK_IN_VM:-}" ]; then
     info "this machine's half: the pmos build hosts"
     gc_pmos
     gc_build_outputs
+    gc_tart_cache
 
     if command -v podman >/dev/null 2>&1 \
        && [ "$(podman machine inspect "${WK_MACHINE:-wk}" --format '{{.State}}' 2>/dev/null)" = running ]; then
@@ -245,6 +293,7 @@ if [ -d "$WK_STORE/cache/bench-runner" ]; then
 fi
 
 gc_creation_records
+gc_rubble
 
 gc_retired_trees
 gc_build_outputs

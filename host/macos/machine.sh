@@ -31,8 +31,7 @@ unset _others _m _img _sz
 
 _cores=$(envelope_cores)
 _mem=$(envelope_mem_mb)
-# Set only at creation: podman machine cannot resize a disk afterwards.
-_disk="${WK_DISK_GB:-200}"
+_disk="${WK_DISK_GB:-500}"   # sparse, so it costs what is written; three yocto lanes want ~450 GB (README, "One lane per profile")
 
 # TODO: upstream -- podman 5.4 does not canonicalise a --volume target against
 # the machine OS (ostree, hence /var), and a non-canonical one yields a .mount
@@ -255,18 +254,54 @@ _check_mounts after-init
 
 _cur_cpus=$(podman machine inspect "$WK_MACHINE" --format '{{.Resources.CPUs}}' 2>/dev/null || echo "")
 _cur_mem=$(podman machine inspect "$WK_MACHINE" --format '{{.Resources.Memory}}' 2>/dev/null || echo "")
+_cur_disk=$(podman machine inspect "$WK_MACHINE" --format '{{.Resources.DiskSize}}' 2>/dev/null || echo "")
 
-if [ "$_cur_cpus" = "$_cores" ] && [ "$_cur_mem" = "$_mem" ]; then
-    unchanged "machine resources (${_cores} cpus, ${_mem} MiB)"
+# podman grows a disk and will not shrink one, so a smaller figure is reported rather than applied: the workspaces are on it.
+_grow_disk=""
+case "$_cur_disk" in
+    ''|*[!0-9]*) ;;
+    *)  if [ "$_cur_disk" -lt "$_disk" ]; then _grow_disk=1
+        elif [ "$_cur_disk" -gt "$_disk" ]; then
+            warn "podman machine '$WK_MACHINE' has a ${_cur_disk} GiB disk and WK_DISK_GB asks for
+  ${_disk}; a disk only grows. It is left at ${_cur_disk} GiB."
+        fi ;;
+esac
+
+# podman resizes the disk image and nothing inside it, so the declared size is not usable until the guest's partition and filesystem follow. Both are no-ops once the sizes agree.
+_grow_guest_fs() {
+    local before after
+    before=$(podman machine ssh "$WK_MACHINE" -- df -Pk /var 2>/dev/null | awk 'NR == 2 { print $2 }')
+    podman machine ssh "$WK_MACHINE" -- \
+        'sudo growpart /dev/vda 4 >/dev/null 2>&1; sudo xfs_growfs /var >/dev/null 2>&1; true' \
+        >/dev/null 2>&1 || { warn "could not grow the machine's filesystem to its disk"; return 0; }
+    after=$(podman machine ssh "$WK_MACHINE" -- df -Pk /var 2>/dev/null | awk 'NR == 2 { print $2 }')
+    case "${before:-}${after:-}" in
+        ''|*[!0-9]*) return 0 ;;
+    esac
+    if [ "$after" -gt "$before" ]; then
+        changed "the machine's filesystem grew to $(( after / 1048576 )) GiB"
+    else
+        unchanged "the machine's filesystem is $(( after / 1048576 )) GiB"
+    fi
+}
+
+if [ "$_cur_cpus" = "$_cores" ] && [ "$_cur_mem" = "$_mem" ] && [ -z "$_grow_disk" ]; then
+    unchanged "machine resources (${_cores} cpus, ${_mem} MiB, ${_cur_disk} GiB)"
+    _grow_guest_fs
+elif [ -n "${WK_DRY_RUN:-}" ]; then
+    warn "dry run: machine resources would become ${_cores} cpus, ${_mem} MiB${_grow_disk:+, ${_disk} GiB}"
 else
     _was_running=""
     [ "$(podman machine inspect "$WK_MACHINE" --format '{{.State}}')" = running ] && _was_running=1
     [ -n "$_was_running" ] && podman machine stop "$WK_MACHINE" >/dev/null
-    podman machine set "$WK_MACHINE" --cpus "$_cores" --memory "$_mem"
-    changed "machine resources -> ${_cores} cpus, ${_mem} MiB (host keeps ${WK_RESERVE_CORES} cores / ${WK_RESERVE_MB} MiB)"
+    podman machine set "$WK_MACHINE" --cpus "$_cores" --memory "$_mem" \
+        ${_grow_disk:+--disk-size "$_disk"}
+    changed "machine resources -> ${_cores} cpus, ${_mem} MiB${_grow_disk:+, ${_disk} GiB} (host keeps ${WK_RESERVE_CORES} cores / ${WK_RESERVE_MB} MiB)"
     [ -n "$_was_running" ] && podman machine start "$WK_MACHINE" >/dev/null
+    _grow_guest_fs
 fi
 
 unset _cores _mem _disk _mounts _verdict _absent _cfg _secrets_mount _tools_mount \
-      _agent_rw_mount _mirror_mount _cur_cpus _cur_mem _was_running
+      _agent_rw_mount _mirror_mount _cur_cpus _cur_mem _cur_disk _grow_disk _was_running
+unset -f _grow_guest_fs
 unset -f _mount_state _absent_targets _read_mounts _mount_rows _check_mounts _report_losses

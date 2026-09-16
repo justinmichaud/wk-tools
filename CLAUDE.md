@@ -119,6 +119,11 @@ rewritten file resumes a running process mid-word. Check `wk status` first.
   A `case` statement naming a machine is a bug.
 - Hand-applied settings vanish on a rebuild. Anything missed belongs in
   `./setup` or `wk backup`, not in a person's memory.
+- **Cleanup is never manual.** Anything worth deleting by hand — rubble a
+  killed command left, a stale tree, a workspace nothing is making — is
+  something `wk gc` reclaims or names, and clearing one by hand is a report
+  against `wk gc`, not a chore. A plain run loses no work, so what it cannot
+  take it prints with the flag that does.
 - **No in-place upgrades.** A guest, golden base or image is fixed by changing
   the input that produces it and rebuilding, never by patching the running copy.
 - **A node is reached by its tailnet name, and how to reach it is not written

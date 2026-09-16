@@ -37,7 +37,7 @@ import time
 import unittest
 from pathlib import Path
 
-from tests.support import REPO, WkTest, bash, scratch_dir
+from tests.support import REPO, WkTest, bash, func_body, scratch_dir
 
 YOCTO_BUILD = REPO / "image" / "yocto-build.sh"
 DEAD_PID = "99999999"  # a pid essentially guaranteed not to exist
@@ -416,6 +416,43 @@ printf 'exit=%s\n' "$(task_field "$d" exit)"
              "--workspace", self.ws, "--dry-run"],
             cwd=str(REPO), env=env, capture_output=True, text=True, timeout=60,
         )
+
+
+class TheDetachedArmEndsItsOwnRecord(unittest.TestCase):
+    """A detached stage is a copy of the same command without `--detach`, and
+    that copy holds the workspace lock, waits, and ends the record -- the shape
+    cmd/build and image/pgo.sh already use.
+
+    Detaching *after* the spawn left nobody to write the exit, so a build that
+    printed "stage 'webkit' done" and produced its slot read as `died -- no
+    exit recorded` (2026-09-16), and the lock the spawn took died with the
+    process that returned. Source-level, since driving it wants a container."""
+
+    def setUp(self):
+        self.body = func_body((REPO / "image" / "yocto.sh").read_text(), "yocto_build")
+
+    def test_it_detaches_before_taking_the_lock_and_spawning(self):
+        detach = self.body.index('if [ -n "$detach" ]')
+        lock = self.body.index('hold_lock "ws-$ws"')
+        spawn = self.body.index("yocto_spawn ")
+        self.assertLess(detach, lock,
+                        "the detached copy does not hold the workspace lock")
+        self.assertLess(detach, spawn,
+                        "it detaches after the spawn, so nothing ends the record")
+
+    def test_the_detached_copy_is_the_same_command_without_detach(self):
+        arm = self.body[self.body.index('if [ -n "$detach" ]'):]
+        arm = arm[:arm.index("\n    fi\n")]
+        self.assertIn("detach_run", arm)
+        self.assertIn("sysimage build", arm)
+        self.assertIn('[ "$_a" = --detach ] ||', arm,
+                      "--detach is not stripped, so the copy would detach again")
+
+    def test_every_path_out_of_the_wait_ends_the_record(self):
+        """Once it waits, the record is ended whether the stage failed or not."""
+        after = self.body[self.body.index("yocto_wait "):]
+        self.assertGreaterEqual(after.count("task_end"), 2,
+                                "a path out of the wait leaves the record open")
 
 
 class YoctoSpawnRefusesASecondBuild(WkTest):
