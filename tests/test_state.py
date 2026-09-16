@@ -16,7 +16,7 @@ import subprocess
 import unittest
 from pathlib import Path
 
-from tests.support import REPO, WK, WkTest, bash, run
+from tests.support import REPO, WK, WkTest, bash, requires_container_target, run
 
 
 def _have_podman():
@@ -121,6 +121,7 @@ class TestReadOnlyIsReadOnly(WkTest):
 
 
 class TestListingsAgree(WkTest):
+    @requires_container_target()
     def test_ls_status_same_names(self):
         """print the same workspace-name set on"""
         ls_cp = run("ls")

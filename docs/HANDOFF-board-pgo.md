@@ -3,21 +3,20 @@
 README.md, "The boards' profile-guided build", is the design. This lists what
 is not yet done.
 
-## Never run on hardware
+## What one run on hardware settled
 
-Nothing below has been exercised against a board or a Yocto SDK. The whole
-cycle is owed one end-to-end run of
+The cycle has run end to end once, on rpi5: moose's
+`yocto-webkit-2.52-yocto-rpi5-64` holds `pgo-instr`
+(`build_config=wpe-cross-pgo-collect`), `pgo` (`wpe-cross-pgo-use`) and a
+`plain` slot of the same commit, built 2026-09-10, over a collection
+(`build/wk-pgo/pgo/`) carrying a `.profdata` per plan, the mixed one under
+`output/`, and `profile-check.json` with per-benchmark function counts.
 
-    wk sysimage webkit webkit-2.52-yocto-rpi5-64 --commit <sha> --slot pr --detach
+- The cross build compiles with the SDK's clang, not its GCC: an instrumented
+  configure under GCC stops at `HAVE_CLANG_PROFILE_RUNTIME`, and that build is
+  what produced the profiles `llvm-profdata` then merged.
 
-and three things stand before it: no workspace here has built
-`webkit-2.52-yocto-rpi5-64` (`wk sysimage ls`, 2026-09-09), the board's medium
-does not carry it, and rpi5 is in host mode with a spent arming record for
-`wpewebkit-2.46-yocto-rpi5-32`. So the run starts at `wk sysimage build`, then
-the card, then `wk boot`.
-
-Two of the three things that could have stopped it are settled, measured
-against the SDK this repo built for rpi5 on 2026-09-09:
+Two more, measured against the SDK this repo built for rpi5 on 2026-09-09:
 
 - `llvm-profdata` is in the SDK's host sysroot
   (`sysroots/aarch64-pokysdk-linux/usr/bin`), so `--stage pgo-mix` has the
@@ -31,16 +30,18 @@ against the SDK this repo built for rpi5 on 2026-09-09:
   `HAVE_CLANG_PROFILE_RUNTIME` and the fix is one
   `TOOLCHAIN_TARGET_TASK:append`.
 
-What is left is a distinct way the cycle can still stop:
+What is left:
 
-- [ ] **`CC=clang` reaching the SDK's clang.** `image/yocto-build.sh` exports
-      `CC`/`CXX` because `cross-toolchain-helper` writes an `environment-setup`
-      that branches on them. Confirm the cross build actually compiles with
-      clang and not with the SDK's GCC, which upstream's PGO support refuses.
-- [ ] **What a collection costs on rpi5** -- wall time per plan against an
-      instrumented build, and the size of `/var/wk/pgo` -- so `wk ab` on a
-      2.52 profile can be costed before it is asked for (the Mac lane's costs
-      are in `wk help`).
+- [ ] **What a collection costs, per plan.** The rpi5 run's three plans
+      occupied the board from 21:35 to 21:50 on 2026-09-09 (the collection
+      directory's own file times: speedometer3 21:37, jetstream3 21:44,
+      motionmark 21:50), and each plan's `.profdata` is about 2 MB. What is
+      still unread is the wall time of each leg as the driver measured it and
+      the size `/var/wk/pgo` reaches on the board, so a 2.52 `wk ab` can be
+      costed the way the Mac lane's is in `wk help` [needs a board].
+- [ ] **The same on rpi3, whose image is 32-bit and whose memory is 931 MB**:
+      an instrumented build is several times slower and larger, and
+      speedometer3 already does not complete there at 2.38 [needs the rpi3].
 - [ ] **The coverage floor is the Mac lane's.** `lib/wkpgo.py`'s
       `MIN_COVERAGE` (25% of the combined profile's functions, per leg) was
       calibrated against the Apple ports' three separate frameworks. A GLib

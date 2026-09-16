@@ -8,7 +8,18 @@ command -v job_pid_adopt >/dev/null 2>&1 || . "$WK_ROOT/lib/watchdog.sh"
 
 YOCTO_TASK=""   # the record yocto_spawn steps and yocto_build ends
 
+YOCTO_WEBKIT_MB_PER_JOB=2560   # one cross WebKit compile's working set, sized to WebCore's unified sources rather than to a C++ average; image/yocto-build.sh guards the compile itself at the same figure
+
 yocto_ws_default() { echo "yocto-$1"; }  # per profile: two branches cannot both be checked out in one workspace
+
+# What a stage books on the machine's books is what it is about to use: bitbake parallelises across the whole machine, one cross WebKit build takes its own job count, and the mix is a single llvm-profdata. A stage that books the machine it does not use refuses every build beside it (build_admit), which would hold one machine to one profile.
+yocto_stage_budget() { # <stage> <machine jobs> <machine MB> <webkit jobs> -- the `<jobs> <MB>` it books
+    case "$1" in
+        webkit)  printf '%s %s' "$4" "$(( $4 * YOCTO_WEBKIT_MB_PER_JOB ))" ;;
+        pgo-mix) printf '1 %s' "$YOCTO_WEBKIT_MB_PER_JOB" ;;
+        *)       printf '%s %s' "$2" "$3" ;;
+    esac
+}
 
 yocto_workdir()  { echo "/src/WebKit/WebKitBuild/CrossToolChains/$1"; }  # cross-toolchain-helper's layout, not ours
 yocto_image_dir() { echo "$(yocto_workdir "$1")/build/image"; }
@@ -68,16 +79,18 @@ yocto_ensure_ws() {  # created rather than demanded: the name is derivable from 
     at=$(t_exec "$ws" bash -c "cd /src/WebKit && git rev-parse --abbrev-ref HEAD" 2>/dev/null | tr -d '\r' | tail -1) || at=""
     if [ "$at" != "$branch" ]; then
         info "checking out '$branch' in '$ws' (was ${at:-unknown})"
-        # The mirror carries main only, so a release branch is fetched on demand, from the profile's remote.
+        # A workspace's remotes are rewritten to read the machine's mirror, so this fetch is a local read and reaches GitHub for nothing: a branch the mirror does not carry is absent here however reachable it is upstream.
         local remote="${YOC_REMOTE:-origin}"
         t_exec "$ws" bash -c "cd /src/WebKit && {
             git checkout -q $(sh_quote "$branch") 2>/dev/null ||
             { git fetch -q $(sh_quote "$remote") $(sh_quote "$branch:$branch") &&
               git checkout -q $(sh_quote "$branch"); }; }" \
             || die "could not check out '$branch' from '$remote' in '$ws'.
-    It is fetched from GitHub on demand, so this is usually egress -- or a
-    missing remote, which 'wk remotes' reports and 'wk remotes --fix' repairs.
-    Try:  wk enter $ws  and then  git fetch $remote $branch"
+    That fetch reads this machine's mirror, which carries $(wk_mirror_branches)
+    of origin and nothing else, so a release branch has to be carried in first:
+        WK_MIRROR_BRANCHES=$(sh_quote "$(wk_mirror_branches) $branch") wk sync
+    If the mirror does have it, the remotes in the workspace are what to look
+    at -- 'wk remotes $ws' reports them and '--fix' re-asserts them."
     fi
 }
 
@@ -173,8 +186,8 @@ yocto_any_running() { # <ws> -- prints the stage it is in
     return 1
 }
 
-yocto_spawn() {
-    local ws="$1" stage="$2"; shift 2
+yocto_spawn() { # <ws> <stage> <jobs> <budget MB> <yocto-build.sh args...>
+    local ws="$1" stage="$2" jobs="$3" budget_mb="$4"; shift 4
     local log pid_host
     log=$(yocto_log "$ws" "$stage"); pid_host="$(wk_ws_dir "$ws")/home/yocto.pid"
 
@@ -190,12 +203,8 @@ yocto_spawn() {
     YOCTO_TASK=$(task_begin yocto target "$ws" \
         "wk sysimage build $IMG_PROFILE --stage $stage --stop" "$log" $YOCTO_STAGES)
 
-    local jobs cores mem
-    jobs=$(build_jobs)
-    cores=$(envelope_cores)
-    mem=$(envelope_mem_mb)
     build_admit "the $stage build" "$jobs"
-    build_record "wk sysimage $stage $ws" "$cores" "$mem" "ws:$ws:yocto.pid"
+    build_record "wk sysimage $stage $ws" "$jobs" "$budget_mb" "ws:$ws:yocto.pid"
 
     : > "$log"  # truncated, not unlinked: `tail -f` follows an inode
     rm -f "$pid_host"
@@ -432,11 +441,15 @@ $(config_cross_list | sed 's/^/      /')"
 
     yocto_ensure_ws "$ws" "$YOC_BRANCH"
 
-    local built id cores webkit_jobs
+    local built id cores mem webkit_jobs stage_jobs stage_mb
     built=$(date -u +%Y-%m-%dT%H:%M:%SZ)
     id="$profile-$(date -u +%Y%m%dT%H%M%SZ)"
     cores=$(envelope_cores)
-    webkit_jobs=$(WK_MB_PER_JOB=2560 build_jobs)
+    mem=$(envelope_mem_mb)
+    webkit_jobs=$(WK_MB_PER_JOB=$YOCTO_WEBKIT_MB_PER_JOB build_jobs)
+    read -r stage_jobs stage_mb <<EOF
+$(yocto_stage_budget "$stage" "$cores" "$mem" "$webkit_jobs")
+EOF
 
     local pgo_args=""
     [ "$stage" != pgo-mix ] || pgo_args="--pgo-dir $(image_pgo_dir_in "$slot") --pgo-lib $PGO_GLIB_LIB"
@@ -448,7 +461,7 @@ $(config_cross_list | sed 's/^/      /')"
     info "stage '$stage' for $profile in '$ws'"
     log  "  log: $(yocto_log "$ws" "$stage")"
     # YOC_IMAGE names targets.conf's image_basename in the config too, so a renamed or missing section fails here rather than four hours into bitbake.
-    yocto_spawn "$ws" "$stage" \
+    yocto_spawn "$ws" "$stage" "$stage_jobs" "$stage_mb" \
         --target "$YOC_TARGET" --image "$YOC_IMAGE" --stage "$stage" \
         --jobs "$cores" --rm-work "${YOC_RM_WORK:-0}" \
         ${YOC_PORT_TARGET_FROM:+--port-target-from "$YOC_PORT_TARGET_FROM"} \

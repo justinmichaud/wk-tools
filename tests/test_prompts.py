@@ -99,6 +99,8 @@ EXPECTED_SAFE_RAW_READS = {
         "reads three lines from a heredoc, not a terminal",
     ("admin/wk-card-priv", 'read -r type tran <<EOF'):
         "reads two fields from a heredoc, not a terminal",
+    ("image/yocto.sh", "read -r stage_jobs stage_mb <<EOF"):
+        "reads the stage's job count and memory budget from a heredoc, not a terminal",
     ("cmd/sysimage", 'read -r bytes sha < "$WRITE_META"'):
         "reads the stream meter's byte count and hash from a file, not a terminal",
     ("boot/disk.sh", 'read -r bytes want < "$meta"'):

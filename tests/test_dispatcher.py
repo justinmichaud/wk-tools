@@ -304,11 +304,14 @@ class TestUnknownWorkspaceName(WkTest):
         self.assertNotEqual(cp.returncode, 0, f"'wk stop {name}' was accepted:\n{out}")
         self.assertNotIn("stopping", out, f"'wk stop {name}' acted on something:\n{out}")
 
-    def test_name_declarations_are_one_of_three_words(self):
-        """every `name=` in a declaration is required, optional or none"""
+    def test_name_declarations_are_one_of_the_words_the_dispatcher_reads(self):
+        """every `name=` in a declaration is one of `WK_NAME_VALUES`"""
         import os
         import re
 
+        m = re.search(r'WK_NAME_VALUES="([^"]+)"', (REPO / "wk").read_text())
+        self.assertTrue(m, "wk no longer defines WK_NAME_VALUES")
+        vocabulary = tuple(m.group(1).split())
         bad = []
         for f in sorted((REPO / "cmd").iterdir()):
             if not (f.is_file() and os.access(f, os.X_OK)):
@@ -317,7 +320,7 @@ class TestUnknownWorkspaceName(WkTest):
                 if not line.startswith("# wk:"):
                     continue
                 for tok in re.findall(r"name=(\S*)", line):
-                    if tok.split("@")[0] not in ("required", "optional", "none"):
+                    if tok.split("@")[0] not in vocabulary:
                         bad.append(f"{f.name}: name={tok}")
         self.assertEqual(bad, [], f"declarations the dispatcher cannot read: {bad}")
 

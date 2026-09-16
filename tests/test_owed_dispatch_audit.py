@@ -99,7 +99,10 @@ def takes_a_subverb(path):
     syn = synopsis(path)
     if re.search(r"<verb>|<sub>", syn):
         return True
-    return bool(re.search(r"(^|[ |])[a-z][a-z0-9-]*\|[a-z0-9-]+", syn))
+    # Outside the placeholders: an alternation inside `<...>` is the shape of
+    # one argument (`wk ab <pr-spec|branch|sha>`), not a list of subverbs.
+    return bool(re.search(r"(^|[ |])[a-z][a-z0-9-]*\|[a-z0-9-]+",
+                          re.sub(r"<[^>]*>", "", syn)))
 
 
 def takes_a_config(path):

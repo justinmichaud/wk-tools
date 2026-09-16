@@ -29,7 +29,9 @@ task_field() { # <dir> <field> -- empty when the field is not recorded
     tr -d '\r' < "$1/$2"
 }
 
-task_begin() { # <kind> <where> <name> <kill-cmd> <log> <plan step>... -- prints the dir; <where> is `here` for this machine's pid, `target` for the workspace's
+task_begin() { # [--holds <resource>] <kind> <where> <name> <kill-cmd> <log> <plan step>... -- prints the dir; <where> is `here` for this machine's pid, `target` for the workspace's
+    local holds=""
+    [ "${1:-}" != --holds ] || { holds="${2:-}"; shift 2; }
     local kind="$1" where="$2" name="$3" kill="$4" log="$5"
     shift 5
     case "$where" in here|target) ;; *) die "task_begin: where is here or target, not '$where'" ;; esac
@@ -38,6 +40,7 @@ task_begin() { # <kind> <where> <name> <kill-cmd> <log> <plan step>... -- prints
     local dir; dir="$(task_root)/$(task_id "$kind" "$name")"
     _task_prune "$kind" "$name" "$dir"
     ensure_dir "$dir" >/dev/null
+    [ -z "$holds" ] || _task_put "$dir/holds" "$holds"   # before the plan, which is what publishes the record to task_list: a claim readable a moment later would be a board held by nobody
     local step
     { for step in "$@"; do printf '%s\n' "$step"; done; } > "$dir/plan.tmp.$$"
     mv "$dir/plan.tmp.$$" "$dir/plan"
@@ -221,4 +224,65 @@ task_list() { # every record, oldest id first
         [ -f "$d/plan" ] || continue
         printf '%s\n' "${d%/}"
     done
+}
+
+# A board is a fleet resource: one task drives it at a time, and the claim is the record that declares it (`holds`) -- so there is no second store to keep in step, a holder is live by construction, and a killed driver holds nothing.
+task_holders() { # <resource> -- <id>\t<machine>\t<kind> <name>\t<kill> per live task here holding it
+    local d
+    while IFS= read -r d; do
+        [ -n "$d" ] || continue
+        [ "$(task_field "$d" holds)" = "$1" ] || continue   # before the verdict: a `target` record costs a t_exec to judge
+        task_running "$(task_verdict "$d" capped)" || continue
+        printf '%s\t%s\t%s %s\t%s\n' "${d##*/}" "$(task_field "$d" machine)" \
+            "$(task_field "$d" kind)" "$(task_field "$d" name)" "$(task_field "$d" kill)"
+    done <<INNER
+$(task_list)
+INNER
+}
+
+# A peer that cannot be asked is a row of its own (`unknown`), never silence: an unread machine is not a free board.
+fleet_holders() { # <resource> -- the same question asked of every peer workstation, each through its own wk
+    command -v peer_workstations >/dev/null 2>&1 \
+        || die "fleet_holders: the peers are asked through lib/target.sh, and none is loaded"
+    task_holders "$1"
+    local p why rows
+    for p in $(peer_workstations); do
+        ( load_target "$p" >/dev/null 2>&1
+          why=$(machine_answers "$p" 2>&1) \
+              || { _task_unknown "$p" "$(printf '%s' "$why" | tr '\t' ' ')"; exit 0; }
+          rows=$(t_wk status --holds "$1" 2>/dev/null) \
+              || { _task_unknown "$p" "it answers, but its wk does not read --holds: wk sync --tools $p"; exit 0; }
+          [ -z "$rows" ] || printf '%s\n' "$rows" | tr -d '\r' )
+    done
+}
+
+_task_unknown() { printf '?\t%s\tunknown\t%s\n' "$1" "$2"; }
+
+device_release() { [ -z "${WK_DEVICE_TASK:-}" ] || task_end "$WK_DEVICE_TASK" "${WK_EXIT_STATUS:-0}"; WK_DEVICE_TASK=""; return 0; }
+
+# Sets WK_DEVICE_TASK to the record holding the board, and exports the claim as WK_DEVICE_HELD so the commands one driver runs inherit it: `wk pi bench --ab-systems` runs `wk boot` for each leg, and a claim that refused its own holder would deadlock there.
+device_hold() { # <machine> <kind> <name> <kill-cmd> <log> <plan step>...
+    local machine="$1" kind="$2" name="$3" kill="$4" log="$5"; shift 5
+    local res="device:$machine" id who what stop held="" quiet="" rows
+    WK_DEVICE_TASK=""
+    [ "${WK_DEVICE_HELD:-}" != "$res" ] || return 0
+    rows=$(fleet_holders "$res") || exit $?   # a die inside a substitution ends only that subshell
+    while IFS="$(printf '\t')" read -r id who what stop; do
+        [ -n "$id" ] || continue
+        case "$what" in
+            unknown) quiet="$quiet
+    $who -- $stop" ;;
+            *)       held="$held
+    $what on $who -- stop it there:  $stop" ;;
+        esac
+    done <<INNER
+$rows
+INNER
+    [ -z "$quiet" ] || warn "a machine that could be driving $machine could not be asked:$quiet"
+    [ -z "$held" ] || barrier "$machine is a fleet resource and another live task holds it:$held
+    Two drivers on one board make both results junk."
+    [ -z "${WK_DRY_RUN:-}" ] || return 0
+    WK_DEVICE_HELD="$res"; export WK_DEVICE_HELD
+    WK_DEVICE_TASK=$(task_begin --holds "$res" "$kind" here "$name" "$kill" "$log" "$@")
+    wk_atexit device_release
 }

@@ -1,5 +1,5 @@
 """The boards' profile-guided build: the two cross configs (build/configs.sh),
-the three-phase driver (image/pgo.sh), the collection run (cmd/pi's --pgo) and
+the phases (image/pgo.sh), the collection run (cmd/pi's --pgo) and
 the mixing (lib/wkpgo.py), which is WebKit's own `Tools/Scripts/pgo-profile`
 told that a GLib port carries one library where the Apple ports carry three.
 
@@ -22,6 +22,24 @@ import unittest
 from tests.support import REPO, WkTest, bash, func_body, run, scratch_dir
 
 WKPGO = REPO / "lib" / "wkpgo.py"
+
+PGO_LIBS = "\n".join('. "%s/%s"' % (REPO, f) for f in (
+    "lib/common.sh", "lib/store.sh", "lib/image.sh", "image/profiles.sh",
+    "boot/machines.sh", "lib/bench.sh", "image/pgo.sh"))
+
+PROFILE = "webkit-2.52-yocto-rpi5-64"
+
+
+def pgo_steps(slot="pr", machine="rpi5", commit="a" * 40):
+    """The phases image/pgo.sh declares, one record each, as lib/sched.py reads
+    them: id, machine, needs, holds, done-predicate, command."""
+    with scratch_dir() as tmp:
+        cp = bash('%s\nsched_begin %s/steps\nimage_pgo_steps %s %s %s %s\ncat %s/steps\n'
+                  % (PGO_LIBS, tmp, PROFILE, commit, slot, machine, tmp))
+        assert cp.returncode == 0, cp.stdout + cp.stderr
+        rows = [line.split("\t") for line in cp.stdout.splitlines() if line.strip()]
+    return {r[0]: {"machine": r[1], "needs": r[2], "holds": r[3],
+                   "done": r[4], "command": r[5]} for r in rows}
 
 
 def cross(config, profile=""):
@@ -170,32 +188,47 @@ _pgo_require_board webkit-2.52-yocto-rpi4-32
 
 
 class TestThePhasesAndTheirOrder(WkTest):
-    def _plan(self):
-        cp = bash(f'''
-. "{REPO}/lib/common.sh"
-. "{REPO}/lib/store.sh"
-. "{REPO}/lib/image.sh"
-. "{REPO}/image/profiles.sh"
-. "{REPO}/boot/machines.sh"
-. "{REPO}/image/pgo.sh"
-image_profile_load webkit-2.52-yocto-rpi5-64 >/dev/null 2>&1
-image_pgo_plan webkit-2.52-yocto-rpi5-64 {"a" * 40} pr rpi5
-''')
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        return cp.stdout.strip().splitlines()
+    """Each phase is one `wk` command and one step of the graph: what it needs,
+    what it holds while it runs, and how to ask whether it is already done."""
 
     def test_it_instruments_then_collects_then_rebuilds(self):
-        lines = self._plan()
-        kinds = [l.split()[1] for l in lines]
-        self.assertEqual(kinds[0], "sysimage")
-        self.assertIn("--slot pr-instr   (instrumented)", lines[0])
-        self.assertIn("pi deploy", lines[1])
-        self.assertIn("pgo-mix", lines[-2])
-        self.assertIn("--slot pr   (against the mixed profile)", lines[-1])
+        steps = pgo_steps()
+        instr = steps["instr:%s:pr" % PROFILE]
+        self.assertIn("--slot pr-instr --config wpe-cross-pgo-collect", instr["command"])
+        self.assertEqual(instr["holds"], "lane:%s" % PROFILE)
+        self.assertEqual(steps["deploy:rpi5:pr-instr"]["needs"], "instr:%s:pr" % PROFILE)
+        mix = steps["mix:%s:pr" % PROFILE]
+        self.assertIn("--stage pgo-mix --slot pr", mix["command"])
+        measured = steps["slot:%s:pr" % PROFILE]
+        self.assertIn("--slot pr --config wpe-cross-pgo-use", measured["command"])
+        self.assertEqual(measured["needs"], "mix:%s:pr" % PROFILE)
+
+    def test_the_board_is_held_for_the_collection_and_the_lane_for_the_builds(self):
+        """The whole point of the graph: the builder is not idle through the
+        collection, so nothing may take the board or the lane from under one."""
+        steps = pgo_steps()
+        for phase in ("deploy:rpi5:pr-instr", "collect:rpi5:pr:speedometer3"):
+            self.assertEqual(steps[phase]["holds"], "device:rpi5", phase)
+        for phase in ("instr:%s:pr" % PROFILE, "mix:%s:pr" % PROFILE, "slot:%s:pr" % PROFILE):
+            self.assertEqual(steps[phase]["holds"], "lane:%s" % PROFILE, phase)
+
+    def test_a_phase_already_done_is_asked_about_by_its_own_evidence(self):
+        """The instrumented slot and the measured one each carry the commit and
+        the config they were built with, which is what makes the cycle
+        re-runnable."""
+        steps = pgo_steps()
+        self.assertEqual(steps["instr:%s:pr" % PROFILE]["done"],
+                         "image_pgo_slot_is %s pr-instr %s wpe-cross-pgo-collect"
+                         % (PROFILE, "a" * 40))
+        self.assertEqual(steps["slot:%s:pr" % PROFILE]["done"],
+                         "image_slot_holds %s pr %s" % (PROFILE, "a" * 40))
 
     def test_it_collects_every_benchmark_the_weights_name(self):
-        collected = [l.split()[4] for l in self._plan() if "--pgo " in l]
+        steps = pgo_steps()
+        collected = [id.rsplit(":", 1)[1] for id in steps if id.startswith("collect:")]
         self.assertEqual(collected, ["speedometer3", "jetstream3", "motionmark"])
+        for id in [i for i in steps if i.startswith("collect:")]:
+            self.assertIn("--slot pr-instr --pgo ", steps[id]["command"])
 
     def test_the_collection_lands_in_the_builders_own_bind_mount(self):
         """The host writes it and the cross toolchain reads it back, so it is
@@ -485,10 +518,41 @@ class TestTheUnprofiledSlotIsDeliberate(WkTest):
         return run("sysimage", "webkit", "webkit-2.52-yocto-rpi5-64",
                    "--commit", "a" * 40, *args, timeout=240)
 
-    def test_only_the_plain_cross_config_is_accepted(self):
-        cp = self._webkit("--slot", "plain", "--config", "wpe-cross-pgo-collect")
-        self.assertNotEqual(cp.returncode, 0)
-        self.assertIn("takes 'wpe-cross' here", cp.stdout)
+    def phase(self, slot, config, store):
+        """`wk sysimage webkit <profile> --config <c>` with the build stubbed:
+        one phase of the cycle, or the unprofiled build."""
+        return bash('%s\nyocto_build() { printf \'%%s\\n\' "$*" > %s/called; }\n'
+                    'image_profile_load %s >/dev/null 2>&1\n'
+                    'image_pgo_webkit %s --commit %s --slot %s --config %s\n'
+                    % (PGO_LIBS, store, PROFILE, PROFILE, "a" * 40, slot, config),
+                    env={"WK_STORE": str(store)})
+
+    def test_each_config_the_cycle_builds_with_is_taken_and_nothing_else(self):
+        with scratch_dir() as tmp:
+            for config in ("wpe-cross", "wpe-cross-pgo-collect", "wpe-cross-pgo-use"):
+                cp = self.phase("s", config, tmp)
+                self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+                self.assertIn("--config %s" % config, (tmp / "called").read_text())
+            cp = self.phase("s", "wpe-cross-pgo", tmp)
+            self.assertNotEqual(cp.returncode, 0)
+            self.assertIn("--config takes one of the configs", cp.stdout + cp.stderr)
+
+    def test_the_measured_phase_builds_against_the_profile_the_mix_wrote(self):
+        with scratch_dir() as tmp:
+            self.phase("pr", "wpe-cross-pgo-use", tmp)
+            self.assertIn("--pgo-profile /src/WebKit/WebKitBuild/wk-pgo/pr/output/WPEWebKit.profdata",
+                          (tmp / "called").read_text())
+
+    def test_the_instrumented_phase_clears_the_collection_it_invalidates(self):
+        """A collection is every leg of one run of one build: legs taken
+        against the last instrumented build say nothing about this one."""
+        with scratch_dir() as tmp:
+            stale = tmp / "ws" / ("yocto-%s" % PROFILE) / "build" / "wk-pgo" / "pr"
+            stale.mkdir(parents=True)
+            (stale / "leg.profraw").write_text("old")
+            cp = self.phase("pr-instr", "wpe-cross-pgo-collect", tmp)
+            self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+            self.assertFalse(stale.exists(), "the previous collection is still there")
 
     def test_it_builds_the_slot_with_no_profile_and_says_so(self):
         cp = self._webkit("--slot", "plain", "--config", "wpe-cross", "--dry-run")
@@ -518,14 +582,34 @@ class TestTheCycleSaysWhatItIsDoing(WkTest):
     workspace pid is alive through them -- the driver's own pid is what is
     live for the cycle, which is why the record is `here`."""
 
-    def test_the_driver_declares_the_three_phases_and_steps_through_them(self):
-        text = (REPO / "image" / "pgo.sh").read_text()
-        self.assertIn("task_begin pgo here", text)
-        for phase in ('"instrumented build"', '"collect $PGO_BENCHMARKS on $machine"',
-                      '"measured build against the profile"'):
-            self.assertIn(phase, text, phase)
-        for step in ("pgo_phase 1 ", "pgo_phase 2 ", "pgo_phase 3 "):
-            self.assertIn(step, text, step)
+    def test_the_driver_declares_the_graphs_steps_as_its_plan(self):
+        """One record for the cycle, whose plan is the steps the scheduler
+        reaches in order; `--on-start` moves the record to the one running."""
+        cycle = func_body((REPO / "image" / "pgo.sh").read_text(), "image_pgo_slot")
+        self.assertIn("image_pgo_graph", cycle)
+        self.assertIn("$(sched_steps)", cycle)
+        self.assertIn("task_begin pgo here", cycle)
+        self.assertIn('sched_run --on-start "task_step', cycle)
+
+    def test_the_record_it_writes_is_the_graph_it_then_runs(self):
+        """Driven with the scheduler stubbed: one `pgo` record, whose plan is
+        the steps in the order they will be reached, and a run told to step the
+        record as each one starts."""
+        with scratch_dir() as tmp:
+            cp = bash('%s\nyocto_ws_default() { echo ws; }\nyocto_log() { echo %s/log; }\n'
+                      'sched_run() { echo "RUN $*"; }\n'
+                      'image_profile_load %s >/dev/null 2>&1\n'
+                      'image_pgo_slot %s %s pr rpi5\n'
+                      % (PGO_LIBS, tmp, PROFILE, PROFILE, "a" * 40),
+                      env={"WK_STORE": str(tmp)})
+            self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+            records = list((tmp / "task").glob("pgo-*"))
+            self.assertEqual(len(records), 1, records)
+            plan = (records[0] / "plan").read_text().splitlines()
+            self.assertEqual(len(plan), 7, plan)
+            self.assertIn("--slot pr-instr --config wpe-cross-pgo-collect", plan[0])
+            self.assertIn("--slot pr --config wpe-cross-pgo-use", plan[-1])
+            self.assertIn("--on-start task_step '%s' {step}" % records[0], cp.stdout)
 
     def test_the_record_names_a_command_a_person_types_to_stop_it(self):
         """Every task record names the command that stops its job, and this
@@ -549,10 +633,9 @@ class TestTheCycleSaysWhatItIsDoing(WkTest):
         self.assertIn("takes nothing with it", cp.stdout)
 
     def test_the_phase_is_a_step_of_the_declared_plan_and_not_a_second_record(self):
-        fn = func_body((REPO / "image" / "pgo.sh").read_text(), "pgo_phase")
-        self.assertIn('task_step "$PGO_TASK"', fn)
-        self.assertNotIn("status_write", fn)
-        self.assertNotIn("pgo.status", (REPO / "image" / "pgo.sh").read_text())
+        text = (REPO / "image" / "pgo.sh").read_text()
+        self.assertNotIn("status_write", text)
+        self.assertNotIn("pgo.status", text)
 
     def test_the_record_ends_when_the_cycle_ends(self):
         text = (REPO / "image" / "pgo.sh").read_text()
@@ -592,22 +675,20 @@ class TestTheProfileGateStandsBeforeTheMeasuredBuild(WkTest):
         self.assertIn('|| fail "$what failed"', fn)
 
     def test_the_measured_build_comes_after_the_mix_stage(self):
-        cycle = func_body((REPO / "image" / "pgo.sh").read_text(), "image_pgo_slot")
-        self.assertLess(cycle.index("--stage pgo-mix"),
-                        cycle.index("wpe-cross-pgo-use"),
-                        "the measured build must not precede the gate")
+        """It needs it, so the scheduler cannot reach it until the mix has
+        finished -- and a step whose need failed is not run at all
+        (tests/test_sched.py)."""
+        steps = pgo_steps()
+        self.assertEqual(steps["slot:%s:pr" % PROFILE]["needs"], "mix:%s:pr" % PROFILE)
 
     def test_a_failed_stage_stops_the_cycle(self):
-        """yocto_build dies on a stage that did not finish, and die exits --
-        so nothing after the mix runs when the profile is refused."""
-        driver = (REPO / "image" / "yocto.sh").read_text()
-        self.assertIn('die "  full log:', driver)
+        """yocto_build dies on a stage that did not finish, so the mix step
+        exits non-zero and the measured build is never started."""
+        self.assertIn('die "  full log:', (REPO / "image" / "yocto.sh").read_text())
         cycle = func_body((REPO / "image" / "pgo.sh").read_text(), "image_pgo_slot")
-        # the mix is called bare: no `|| true`, no `if`, so its die propagates
-        line = [l.strip() for l in cycle.splitlines() if "--stage pgo-mix" in l]
+        line = [l.strip() for l in cycle.splitlines() if "sched_run" in l]
         self.assertEqual(len(line), 1, line)
-        self.assertNotIn("||", line[0])
-        self.assertFalse(line[0].startswith("if "), line[0])
+        self.assertIn('rc=$?', line[0])
 
 
 class TestTheMixRunsWhereTheProfileCanBeRead(WkTest):

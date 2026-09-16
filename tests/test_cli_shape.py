@@ -34,7 +34,8 @@ def declarations():
 
 
 def name_slot(decl):
-    if decl.startswith("none"):
+    # A derived name is the command's own answer, in no argument slot (./wk).
+    if decl.split("@")[0] in ("none", "derived"):
         return 0
     return int(decl.split("@")[1]) if "@" in decl else 1
 

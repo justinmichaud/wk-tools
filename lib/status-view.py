@@ -422,9 +422,12 @@ def render_task(wr, t, colour):
         rc = t.get("exit")
         wr.out.append("      " + paint(
             "died -- %s" % ("exit %s" % rc if rc else "no exit recorded"), "bad", colour))
+    if t.get("holds"):
+        wr.out.append("      " + paint("holds: %s" % t["holds"], "dim", colour))
     wr.out.append("      " + paint("kill: %s" % t.get("kill", "?"),
                                    "dim", colour))
-    wr.out.append("      " + paint("log:  %s" % t.get("log", "?"), "dim", colour))
+    if t.get("log"):   # a command that writes to the terminal it was started in has no log of its own
+        wr.out.append("      " + paint("log:  %s" % t["log"], "dim", colour))
 
 
 def render_machine_block(m, colour, widths=None):
@@ -951,8 +954,9 @@ function tiles(m) {
     t.push(tile(`${ESC(k.task_kind || "task")} · ${ESC(k.name || "?")}`,
       chip(k.state) + ` <span class="sub">since ${ESC(k.since || "?")}</span>` + plan +
       (k.state === "died" ? `<div class="bad">died — ${k.exit ? "exit " + ESC(k.exit) : "no exit recorded"}</div>` : "") +
+      (k.holds ? `<div class="sub">holds: ${ESC(k.holds)}</div>` : "") +
       `<div class="sub">kill: <code>${ESC(k.kill || "?")}</code></div>` +
-      `<div class="sub">log: ${ESC(k.log || "?")}</div>`));
+      (k.log ? `<div class="sub">log: ${ESC(k.log)}</div>` : "")));
   }
   return t.length ? `<div class="tiles">${t.join("")}</div>` : "";
 }

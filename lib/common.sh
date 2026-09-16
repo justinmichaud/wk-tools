@@ -224,7 +224,11 @@ WK_STATUS_DEFAULT_MODE=text
 # macOS keeps the hostname's capitalisation; ssh aliases and confs are lower.
 WK_BENCH_ACCOUNT="${WK_BENCH_USER:-bench}"
 
-wk_machine_name() {
+wk_machine_name() {   # in the VM: the workstation that forwarded (vm_wk_cmd), the VM being that machine's container target and not one of its own -- its `localhost` hostname would put a machine nobody can act on in every listing
+    if [ -n "${WK_IN_VM:-}" ] && [ -n "${WK_ROW_LABEL:-}" ]; then
+        printf '%s\n' "$WK_ROW_LABEL"
+        return 0
+    fi
     { hostname -s 2>/dev/null || echo here; } | tr '[:upper:]' '[:lower:]'
 }
 

@@ -181,6 +181,7 @@ cmd_deploy() {
     esac
 
     machine_load "$machine" || die "no such machine '$machine' (boot/machines.sh)"
+    device_hold "$machine" deploy "$machine/$slot" "kill $$" "" "deploy slot $slot to $machine"
     machine_armed_barrier "A deploy now lands in the system that is answering, and the
     machine is about to leave it -- the build would be on the disk nobody boots."
 
@@ -861,8 +862,8 @@ cmd_bench() {
     fi
 
     machine_load "$machine" || die "no such machine '$machine' (boot/machines.sh)"
-    hold_lock "pi-bench-$machine" -w 5 \
-        || die "a benchmark is already running against $machine from this machine."
+    hold_lock "pi-bench-$machine" -w 5   # this machine's own serialization: it refuses by naming the pid here
+    device_hold "$machine" bench "$machine/$plan" "kill $$" "" "$plan on $machine"   # the claim is the board's, and every workstation reads it
 
     # Locals the leg preflight fills (bash dynamic scoping).
     local sysid probe rootdev kind builder

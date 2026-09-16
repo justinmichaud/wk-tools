@@ -2,7 +2,7 @@
 #
 # wk status [<workspace>] -- what is happening, without guessing
 # wk: where=workspace name=optional here readonly group=workspaces
-# wk: opts --no-fleet,--no-devices,--records,--json,--text,--cli,--html=,--web,--port=,--interval=,--wait,--timeout=
+# wk: opts --no-fleet,--no-devices,--records,--json,--text,--cli,--html=,--web,--port=,--interval=,--wait,--timeout=,--holds=
 #
 # The build records its own state, not a process list, and this reads it.
 #
@@ -23,6 +23,12 @@
 #      writer -- don't conflate them). Also what a fleet walk reports for an
 #      unreachable peer, and a workspace that did not answer about its job's
 #      pid within WK_TASK_ASK_SECONDS (default 5): `unanswered`.
+#
+#   wk status --holds device:rpi5    the live tasks in this machine's store
+#                                    holding that resource, one per line, for
+#                                    the machine asking. A board is a fleet
+#                                    resource, and this is the half of the
+#                                    answer this machine owns.
 #
 # At a terminal, with nothing else said, this opens the page (`--web`).
 # Anything else (a pipe, CI, an agent) gets the plain table; `--text` asks
@@ -340,7 +346,8 @@ report_tasks() { # [name] -- the tasks in this target's store, once per store; o
         rec_set since     "$(task_field "$d" started)"
         rec_set step      "$(task_field "$d" step)"
         rec_set kill      "$(task_field "$d" kill)"
-        rec_set log       "$(task_field "$d" log)"
+        rec_opt log       "$(task_field "$d" log)"
+        rec_opt holds     "$(task_field "$d" holds)"
         rec_opt exit      "$(task_field "$d" exit)"
         _plan=""
         while IFS= read -r _l; do
@@ -617,6 +624,7 @@ HTML_OUT=""
 
 WAIT=""
 WAIT_TIMEOUT="${WK_WAIT_TIMEOUT:-0}"
+HOLDS=""
 _args=""
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -631,11 +639,18 @@ while [ $# -gt 0 ]; do
         --interval)  WEB_INTERVAL="${2:-20}"; shift 2 ;;
         --wait)      WAIT=1; shift ;;
         --timeout)   WAIT_TIMEOUT="${2:-0}"; shift 2 ;;
+        --holds)     HOLDS="${2:-}"; shift 2 ;;
         *)           _args="$1"; shift ;;
     esac
 done
 # shellcheck disable=SC2086 -- deliberate re-splitting of the collected words (at most one).
 set -- $_args
+
+# Answered before anything is probed: this reads the records in this store and nothing else, so the machine asking (lib/task.sh device_hold) waits on one file read rather than on a fleet walk of its own.
+if [ -n "$HOLDS" ]; then
+    task_holders "$HOLDS"
+    exit 0
+fi
 
 [ -n "${1:-}" ] || set -- ${WK_NAME:+"$WK_NAME"}
 

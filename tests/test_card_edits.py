@@ -793,7 +793,7 @@ class TestListingAWorkspaceMidRebuild(WkTest):
         self.assertIn(ws, out, out)
         self.assertIn("no image here yet", out, out)
         self.assertIn("'wk sysimage build webkit-2.52-yocto-rpi3-32' builds one", out, out)
-        self.assertNotIn("no workspace here has built an image", out, out)
+        self.assertNotIn("has built an image", out, out)
 
 
 class TestDryRunIsTheSameSteps(WkTest):
@@ -1081,12 +1081,10 @@ class TestListingSaysWhichImagesAreInProgress(WkTest):
 
     def test_a_running_build_is_stated_on_the_row(self):
         cp = bash(f'''
-. "{REPO}/lib/common.sh"
-. "{REPO}/lib/image.sh"
-{_lift(REPO / "cmd" / "sysimage", "_ws_profile")}
-{_lift(REPO / "cmd" / "sysimage", "cmd_ls")}
+. "{REPO}/cmd/sysimage" functions
 image_workspace_scan() {{ printf 'yocto\\tyocto-p\\t-\\t0\\t-\\n'; }}
 _ws_building() {{ return 0; }}
+_fleet_images() {{ :; }}
 cmd_ls
 ''')
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
@@ -1098,12 +1096,10 @@ cmd_ls
 
     def test_an_image_present_while_a_build_runs_says_both(self):
         cp = bash(f'''
-. "{REPO}/lib/common.sh"
-. "{REPO}/lib/image.sh"
-{_lift(REPO / "cmd" / "sysimage", "_ws_profile")}
-{_lift(REPO / "cmd" / "sysimage", "cmd_ls")}
+. "{REPO}/cmd/sysimage" functions
 image_workspace_scan() {{ printf 'yocto\\tyocto-p\\t/img/a.wic.xz\\t1024\\t2026-08-30\\n'; }}
 _ws_building() {{ return 0; }}
+_fleet_images() {{ :; }}
 cmd_ls
 ''')
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
@@ -1114,12 +1110,10 @@ cmd_ls
     def test_a_finished_image_is_ready_and_an_empty_workspace_is_none(self):
         for path, want in (("/img/a.wic.xz", "ready"), ("-", "none")):
             cp = bash(f'''
-. "{REPO}/lib/common.sh"
-. "{REPO}/lib/image.sh"
-{_lift(REPO / "cmd" / "sysimage", "_ws_profile")}
-{_lift(REPO / "cmd" / "sysimage", "cmd_ls")}
+. "{REPO}/cmd/sysimage" functions
 image_workspace_scan() {{ printf 'yocto\\tyocto-p\\t{path}\\t1024\\t2026-08-30\\n'; }}
 _ws_building() {{ return 1; }}
+_fleet_images() {{ :; }}
 cmd_ls
 ''')
             with self.subTest(path=path):
@@ -1129,16 +1123,15 @@ cmd_ls
 
     def test_nothing_to_list_prints_no_header(self):
         cp = bash(f'''
-. "{REPO}/lib/common.sh"
-. "{REPO}/lib/image.sh"
-{_lift(REPO / "cmd" / "sysimage", "_ws_profile")}
-{_lift(REPO / "cmd" / "sysimage", "cmd_ls")}
+. "{REPO}/cmd/sysimage" functions
 image_workspace_scan() {{ :; }}
+_fleet_images() {{ :; }}
 cmd_ls
 ''')
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
         self.assertNotIn("STATE", cp.stdout, "a header over an empty table")
-        self.assertIn("no workspace here has built an image", cp.stdout + cp.stderr)
+        self.assertIn("no workspace on any machine this one knows has built an image",
+                      cp.stdout + cp.stderr)
 
 class TestBootRead(CardEditTest):
     """`boot-read` is how a **workstation** reads its medium at all. The machine

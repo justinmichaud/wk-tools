@@ -16,6 +16,23 @@ import unittest
 
 from tests.support import REPO, WkTest, bash, shell_files, stub_path
 
+YOCTO = REPO / "image" / "yocto.sh"
+
+
+def _lift(func):
+    """One function's body, sed'd out of image/yocto.sh: sourcing that file
+    pulls in the cross configs, the task records and the watchdog, none of
+    which this rule depends on (the tests/test_yocto_stage.py idiom)."""
+    text = subprocess.run(["sed", "-n", f"/^{func}()/,/^}}/p", str(YOCTO)],
+                          capture_output=True, text=True).stdout
+    assert text.strip(), f"could not find {func}() in {YOCTO}"
+    return text
+
+
+# Read from the file that declares it, never copied here.
+MB_PER_JOB = int(re.search(r"^YOCTO_WEBKIT_MB_PER_JOB=(\d+)",
+                           YOCTO.read_text(), re.M).group(1))
+
 
 class TestBuildRecords(WkTest):
     def _bash(self, script):
@@ -147,6 +164,54 @@ class TestDiskAdmit(WkTest):
         cp = self._bash('( build_admit "this build" 64 60 ) && echo admitted || echo refused', 10)
         self.assertIn("refused", cp.stdout)
         self.assertIn("10 GB free", cp.stdout + cp.stderr)
+
+
+class TestImageStageBudget(WkTest):
+    """yocto_stage_budget (image/yocto.sh): what a stage puts on the books is
+    what it uses. A bitbake stage is the machine; a cross WebKit build is its
+    own job count, so several profiles' slots build side by side on one
+    machine instead of the first one refusing the rest."""
+
+    def _budget(self, stage, machine_jobs=79, machine_mb=113000, webkit_jobs=8):
+        cp = bash(f'set -euo pipefail\n{_lift("yocto_stage_budget")}\n'
+                  f'YOCTO_WEBKIT_MB_PER_JOB={MB_PER_JOB}\n'
+                  f'yocto_stage_budget {stage} {machine_jobs} {machine_mb} {webkit_jobs}')
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        jobs, mb = cp.stdout.split()
+        return int(jobs), int(mb)
+
+    def test_a_bitbake_stage_books_the_machine(self):
+        for stage in ("layers", "fetch", "image", "toolchain"):
+            self.assertEqual(self._budget(stage), (79, 113000), stage)
+
+    def test_a_slot_build_books_only_its_own_jobs(self):
+        self.assertEqual(self._budget("webkit"), (8, 8 * MB_PER_JOB))
+
+    def test_the_mix_books_one_job(self):
+        self.assertEqual(self._budget("pgo-mix"), (1, MB_PER_JOB))
+
+    def test_three_slot_builds_fit_a_machine_one_image_build_fills(self):
+        # The point of the split, in the units build_admit works in: with one
+        # slot build booked, a second is still admitted; with a bitbake stage
+        # booked, nothing else fits.
+        def left(booked_mb):
+            cp = bash(f'set -euo pipefail\n. "{REPO}/lib/common.sh"\n'
+                      f'. "{REPO}/lib/resources.sh"\n'
+                      'sleep 300 & live=$!\n'
+                      f'build_record "booked" 8 {booked_mb} "pid:$live"\n'
+                      'build_jobs\n'
+                      'kill $live\n',
+                      env={"XDG_STATE_HOME": str(self.tmp / "state"),
+                           "WK_AVAIL_MB": "113000", "WK_CGROUP_CORES": "80",
+                           "WK_MB_PER_JOB": str(MB_PER_JOB),
+                           "WK_BUILD_MACHINE": "testbox"})
+            self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+            return int(cp.stdout.split()[0])
+
+        self.assertGreaterEqual(left(8 * MB_PER_JOB), 4,
+                                "a second slot build fits beside the first")
+        self.assertLess(left(113000), 4,
+                        "an image build books the machine, and build_admit refuses beside it")
 
 
 # lib/resources.sh's readings: what a refusal has to survive.

@@ -301,3 +301,34 @@ class TestTheRendererSaysWhatIsLeftAndWhatStopsIt(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TheMachineARecordNames(WkTest):
+    """A record names the machine a person can act on. Inside the podman VM
+    that is the workstation that owns it -- the VM is that machine's
+    container target, not a machine of its own -- and the dispatcher passes
+    the name as it forwards. Measured 2026-09-16: an image build running in
+    the VM put a machine called `localhost` in `wk status`."""
+
+    PRELUDE = f'. "{REPO}/lib/common.sh"\n. "{REPO}/lib/store.sh"\n. "{REPO}/lib/task.sh"\n'
+
+    def _machine(self, env):
+        cp = bash(self.PRELUDE +
+                  'd=$(task_begin demo here thing "wk demo --kill" /dev/null step)\n'
+                  'task_field "$d" machine\n',
+                  env=dict(env, WK_STORE=str(self.tmp / "store")))
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        return cp.stdout.strip()
+
+    def test_in_the_vm_it_is_the_workstation_that_forwarded(self):
+        self.assertEqual(self._machine({"WK_IN_VM": "1", "WK_ROW_LABEL": "tolken"}), "tolken")
+
+    def test_on_a_machine_of_its_own_it_is_that_machine(self):
+        # Not the label: a walk labels rows with a target name, and only the
+        # VM is another machine's.
+        self.assertEqual(self._machine({"WK_ROW_LABEL": "container"}),
+                         subprocess.run(["hostname", "-s"], capture_output=True,
+                                        text=True).stdout.strip().lower())
+
+    def test_the_vm_with_nothing_passed_falls_back_to_its_hostname(self):
+        self.assertNotEqual(self._machine({"WK_IN_VM": "1"}), "")

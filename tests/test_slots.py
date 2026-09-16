@@ -273,12 +273,25 @@ class TestSysimageWebkitRefusals(WkTest):
 class TestSysimageLs(WkTest):
     """`wk sysimage ls` is read-only and answers on any host: every function
     it reaches for is defined, and a slot directory with no manifest yet (a
-    build that died) is simply not a slot."""
+    build that died) is simply not a slot.
+
+    The images are in the store, so the machine holding the store answers --
+    on a macOS workstation that is the podman VM, whose `ws` directory this
+    host cannot read at all, and a host-side scan of it reports no image
+    however many the VM holds."""
 
     def test_ls_answers_cleanly(self):
         cp = run("sysimage", "ls", timeout=120)
         self.assertEqual(cp.returncode, 0, cp.stdout)
         self.assertNotIn("command not found", cp.stdout)
+
+    @unittest.skipUnless(sys.platform == "darwin" and shutil.which("podman"),
+                         "only a macOS workstation keeps the store off this machine")
+    def test_a_store_this_machine_cannot_read_is_asked_of_the_machine_holding_it(self):
+        cp = run("sysimage", "ls", env={"WK_STORE": "/nonexistent-store"}, timeout=120)
+        self.assertEqual(cp.returncode, 0, cp.stdout)
+        self.assertNotIn("has built an image", cp.stdout,
+                         "this host answered for a store it cannot read")
 
 
 class TestAbRefusals(WkTest):
@@ -317,10 +330,13 @@ class TestAbRefusals(WkTest):
         self.assertEqual(cp.returncode, 1, cp.stdout)
         self.assertIn("not a plan name", cp.stdout)
 
-    def test_a_forks_branch_is_not_an_ab_spec(self):
+    def test_a_forks_branch_is_a_spec_and_names_the_release_it_needs(self):
+        """A branch is resolved in the mirror like a pull request's head
+        (tests/test_sched.py drives that end to end); what it cannot have is a
+        base branch to read the image off."""
         cp = run("ab", "alice:eng/branch", "--devices", "rpi3", timeout=30)
         self.assertEqual(cp.returncode, 1, cp.stdout)
-        self.assertIn("pull request", cp.stdout)
+        self.assertIn("--release is required for a commit or a branch", cp.stdout)
 
 
 if __name__ == "__main__":

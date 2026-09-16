@@ -159,8 +159,9 @@ same output as the command's result, never left to be inferred.
 Every command that outlives its terminal — a build, a test run, an image
 stage, a profile-guided cycle, claude remote control — writes one record of
 the same shape (`lib/task.sh`): the plan it declared before its first step,
-the step it is on, the machine and pid liveness is asked of, its log, and the
-command a person types to stop it. `wk status` renders each the same way, with
+the step it is on, the machine and pid liveness is asked of, its log, the
+command a person types to stop it, and what it **holds** — a board is a fleet
+resource, so the record that drives one says so and that record is the claim. `wk status` renders each the same way, with
 the steps done, running and still to come, so reading one never depends on
 knowing which command wrote it. Liveness is asked of the process table at read
 time: a pid that no longer answers with no exit recorded reads `died`. A pid
@@ -173,6 +174,18 @@ not the job the record names. `wk stop --tasks` ends every one of them at once
 -- through each record's own kill command, never a signal of its own -- and
 reads the tasks again afterwards rather than believing the exit statuses.
 `--all` asks every other machine too, each through its own wk.
+
+**One board, one driver, whichever machine is driving.** Two workstations can
+each reach a board, and two drivers on one board make both results junk, so
+`wk pi bench`, `wk pi deploy` and `wk boot` take the board's claim before they
+touch it: `wk status --holds device:<board>` is one machine's live holders,
+read from the records rather than from a lock file, and the claim asks every
+other workstation the same question through its own wk. A machine that cannot
+be asked is named as unknown rather than passed over — an unread machine is
+not a free board — and a refusal names the machine, the task and the command
+that stops it. The claim is inherited by the commands one driver runs, so an
+A/B that reboots a board between legs does not refuse itself; `--force`
+crosses it and records that it did.
 
 ## Setup
 
@@ -692,6 +705,7 @@ wk ab wpe:1725 --devices rpi3,rpi4 --bits 32 --plan speedometer2.1 --count 1 --t
                                                          # confirmed here, run by a process no closing terminal ends
 wk ab 20260830T140000Z-wpe-pr1725 --kill                 # stop it: the task's process group, then the record says
                                                          # cancelled; every round already recorded stays
+wk ab <owner>:<branch> --release 2.52 --devices rpi5-64   # a fork's branch: its head in the mirror is the patched side
 wk ab <sha> --base <sha> --release 2.38 --devices rpi3   # A/A: two slots of one commit -- the lane's noise floor
 wk status                                                # the running task: which run it is on, runs ended
 wk bench ls                                              # every task, its state, each run's directory
@@ -733,9 +747,21 @@ Every build `wk` starts -- `wk build`, an image, a slot -- is on the machine's
 books while it runs (a budget record that dies with it), and the next build is
 sized against the memory and cores left, refused when fewer than four jobs
 would fit; inside the target each runs under the same guard (`build/guard.sh`:
-cgroup clamp, memory watchdog, nice). Two machine-sized builds at once is what
-hands a host to the OOM killer, so `wk ab` runs its builds in order.
-Benchmarks on different boards run at once.
+cgroup clamp, memory watchdog, nice). **What a build books is what it uses**:
+an image stage books the machine, because bitbake parallelises across the
+whole of it, and a cross WebKit build books its own job count at 2.5 GB each
+-- so several slot builds fit on one machine and nothing fits beside an image
+build.
+
+**An A/B is a graph, not a sequence.** Each step declares the one `wk` command
+it runs, the machine it runs on, the steps it needs, the resources it holds
+exclusively -- a lane (`lane:<profile>`) and a board (`device:<board>`) -- and
+how to ask whether it is **already done**, which is what makes a re-run pick
+up where the last one stopped rather than rebuild what is there. One scheduler
+(`lib/sched.py`) starts every step whose needs are met and whose resources are
+free, so two boards' lanes build at once and one arm's collection on a board
+runs beside the other arm's build. `wk ab --dry-run` prints the graph and the
+schedule it would produce, and runs none of it.
 
 Or stage a workspace build straight onto bench media without a full image
 rebuild:
@@ -1008,6 +1034,38 @@ profiling the wrong code. And a slot built to collect is refused as a
 measurement: `wk pi bench` reads `build_config` out of the slot's manifest and
 will not take a number from an instrumented build, which runs several times
 slower for the profile it is writing.
+
+**One lane per profile, several lanes at once**
+
+A **lane** is the image workspace -- `yocto-<profile>`, `buildroot-<profile>`
+-- and it is where that profile's checkout, its build directory and its slots
+are. A lane builds one thing at a time: its two arms are two commits in one
+checkout, and a second job in the same workspace is refused. Two profiles are
+two lanes and build at once, because a slot build books only its own jobs
+(above) and they are two workspaces with two build directories. The ccache
+under the store is shared between lanes, so an arm's instrumented build is
+largely hits off the arm before it; its measured build is not, a changed
+`-fprofile-use` file being a miss (above).
+
+**Which machine a lane is on is its workspace's target, and the command
+follows it.** `wk sysimage build` and `wk sysimage webkit` derive the lane
+from the profile and are routed by it, wherever they are typed: a container
+lane on a macOS workstation is forwarded into the podman VM, a lane on
+another workstation is handed to that machine's own wk — the same two paths
+`wk build` takes, since a lane is an ordinary workspace. `wk sysimage ls`
+walks every target and prints one table, `BOARD` being the board an image is
+for and `WHERE` the machine holding the lane.
+
+```sh
+wk sysimage build webkit-2.52-yocto-rpi3-32 --detach   # on whichever machine holds that lane
+wk sysimage ls                                         # every lane in the fleet, and where each is
+```
+
+A lane that exists nowhere is created on this machine's own target, and one
+that exists on two machines resolves to the local one. There is no way to say
+which machine a *new* lane goes on when another machine already holds one of
+that name: `--workspace <name>` gives it a lane of its own
+(docs/HANDOFF-parallel-lanes.md).
 
 **Add a new fleet device**
 

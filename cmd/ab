@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# wk ab <pr-spec|sha> [options] -- an interleaved A/B of a pull request on the fleet's boards
+# wk ab <pr-spec|branch|sha> [options] -- an interleaved A/B of a change on the fleet's boards
 #
 # wk: where=host name=none group=hosts needs ssh,python3 takes=1 destructive dryrun
 # wk: opts --devices=,--release=,--builder=,--bits=,--base=,--plan=,--rounds=,--count=,--timeout=,--task=,--kill,--detach
@@ -11,14 +11,17 @@
 #                                                against each board's image, both
 #                                                deployed, then alternated
 #   wk ab 1234 ...                               a WebKit/WebKit pull request
-#   wk ab <sha> ...                              a bare commit as the patched side
+#   wk ab <sha> --release 2.52 ...               a bare commit as the patched side
+#   wk ab <owner>:<branch> --release 2.52 ...    a fork's branch: its head in the
+#                                                mirror is the patched side
 #
 #   --devices <a,b>       the fleet devices to measure on (required; a name
 #                         from wk boot --list). A device with images of both
 #                         widths says which as a suffix: rpi3-32,rpi4-32,
 #                         rpi5-64 -- one command, mixed widths
 #   --release <x.y>       which WebKit release's image: 2.38, 2.46, 2.52
-#                         (default: read off the PR's base branch, wpe-2.38 -> 2.38)
+#                         (default: read off the PR's base branch, wpe-2.38 ->
+#                         2.38; required for a branch or a commit, which have none)
 #   --builder <name>      buildroot or yocto, when the release has both
 #   --bits <32|64>        the default word size for devices named without one
 #   --base <sha|ref>      the unpatched side (default: the merge-base of the PR
@@ -71,8 +74,9 @@ WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 . "$WK_ROOT/lib/detach.sh"
 . "$WK_ROOT/lib/task.sh"
 . "$WK_ROOT/image/pgo.sh"
+. "$WK_ROOT/lib/sched.sh"
 
-USAGE="usage: wk ab <pr-spec|sha> --devices <a,b> [--release X.Y] [--builder B] [--bits N] [--base <sha>] [--plan P]... [--rounds N] [--count N] [--timeout S] [--detach]; wk ab <task> --kill stops one; see wk ab -h"
+USAGE="usage: wk ab <pr-spec|branch|sha> --devices <a,b> [--release X.Y] [--builder B] [--bits N] [--base <sha>] [--plan P]... [--rounds N] [--count N] [--timeout S] [--detach]; wk ab <task> --kill stops one; see wk ab -h"
 
 _ab_pgid() { ps -o pgid= -p "$1" 2>/dev/null | tr -dc '0-9'; }
 
@@ -156,26 +160,63 @@ case "$ROUNDS" in ''|*[!0-9]*) die "--rounds takes a number (got '$ROUNDS')" ;; 
 [ "${#PLANS[@]}" -gt 0 ] || PLANS=(speedometer3)
 case "$BITS" in ''|32|64) ;; *) die "--bits takes 32 or 64 (got '$BITS')" ;; esac
 
-# Which of the two the spec is settles before the mirror is required, so a
-# malformed spec is refused as the argument error it is.
+# Which of the three the spec is settles before the mirror is required, so a malformed spec is refused as the argument error it is.
 HEAD_SHA="" HEAD_DESC="" PR_BASE_BRANCH="" PR_REMOTE_NAME="" SPEC_SHA=""
 if [ "${#SPEC}" -eq 40 ] && [ -z "${SPEC//[0-9a-f]/}" ]; then
     SPEC_SHA="$SPEC"
 else
     pr_parse_spec "$SPEC"
-    [ "$PR_KIND" = pull ] || die "'$SPEC' names a fork's branch; an A/B takes a pull request
-    (wpe:<n>, <n>) or a commit sha. 'wk pr' can check the branch out; its
-    head's sha is then the thing to pass here."
 fi
+[ -n "$RELEASE" ] || [ "${PR_KIND:-}" = pull ] \
+    || die "--release is required for a commit or a branch: only a pull request
+    has a base branch saying which image it is for ('wk sysimage --list' has
+    every release; --release 2.52)."
 
 MIRROR=$(wk_mirror)
 [ -d "$MIRROR" ] || die "no mirror at $MIRROR; 'wk sync' makes one. Both commits are resolved in it."
 mgit() { git -C "$MIRROR" "$@"; }
 
+# A fork's branch is a head like a pull request's: found in whichever of that fork's repositories carries it, fetched into the mirror, resolved there.
+ab_branch_head() { # <user> <branch> -- `<repo> <url> <sha>` for the one that has it
+    local user="$1" branch="$2" repo url sha found="" n
+    for repo in $(wk_pr_repos); do
+        url="https://github.com/$user/$repo.git"
+        sha=$(git ls-remote "$url" "refs/heads/$branch" 2>/dev/null | awk '{print $1; exit}')
+        if [ -n "$sha" ]; then found="$found$repo $url $sha
+"; fi
+    done
+    n=$(printf '%s' "$found" | grep -c . || true)
+    case "$n" in
+        1) printf '%s' "$found" ;;
+        0) die "no branch '$branch' under '$user'.
+    Checked: $(wk_pr_repos | sed "s|^|https://github.com/$user/|;s|\$|.git|" | tr '\n' ' ')
+    A pull request is named as wpe:<n> or <n>, a commit as its 40-digit sha." ;;
+        *) die "'$branch' exists in more than one of $user's repositories:
+$(printf '%s' "$found" | sed 's/^/    /')
+    They are different projects; pass the head sha of the one you mean." ;;
+    esac
+}
+
+ab_branch_fetch() { # <user> <branch> -- sets HEAD_SHA and HEAD_DESC from the mirror
+    local user="$1" branch="$2" repo url ref head
+    # Into a variable of its own: a die inside a command substitution kills only that subshell.
+    head=$(ab_branch_head "$user" "$branch") || return $?
+    set -- $head
+    repo="$1"; url="$2"
+    ref="refs/remotes/pr/$(wk_pr_refname "$user" "$repo" "$branch")"
+    mirror_fetch_pr "$url" "$branch" "$(wk_pr_refname "$user" "$repo" "$branch")" \
+        || die "could not fetch '$branch' from $url into the mirror"
+    HEAD_SHA=$(mgit rev-parse --verify --quiet "$ref^{commit}") \
+        || die "the mirror has no head for '$branch' after fetching it from $url"
+    HEAD_DESC="$user:$branch (branch of $user/$repo)"
+}
+
 if [ -n "$SPEC_SHA" ]; then
     mgit cat-file -e "$SPEC_SHA^{commit}" 2>/dev/null \
         || die "the mirror does not have commit $SPEC_SHA ('wk sync' fetches the upstream branches)"
     HEAD_SHA="$SPEC_SHA"; HEAD_DESC="commit"
+elif [ "$PR_KIND" = user ]; then
+    ab_branch_fetch "$PR_USER" "$PR_BRANCH"
 else
     PR_REMOTE_NAME="$PR_REMOTE"
     mirror_fetch_pull "$PR_REMOTE" "$PR_N" \
@@ -185,10 +226,8 @@ else
     HEAD_DESC="$SPEC (pull request $PR_N on $PR_REMOTE)"
 fi
 
-# The release names the image: wpe-2.38 -> 2.38, webkitglib/2.52 -> 2.52. A bare
-# sha has no base branch, so --release is required for one.
+# The release names the image: wpe-2.38 -> 2.38, webkitglib/2.52 -> 2.52, off the base branch only a pull request has.
 if [ -z "$RELEASE" ]; then
-    [ -n "$PR_REMOTE_NAME" ] || die "--release is required with a bare commit: nothing says which image it is for."
     url=$(wk_remotes | awk -v r="$PR_REMOTE_NAME" '$1 == r {print $2; exit}')
     repo=$(printf '%s' "$url" | sed -E 's#\.git$##; s#https://github.com/##')
     gh_authenticated || die "reading the pull request's base branch needs gh logged in (gh auth login),
@@ -288,15 +327,6 @@ ab_image_path() { # <profile>
           yocto)     echo "$(wk_ws_dir "yocto-$1")/build/CrossToolChains/$YOC_TARGET/build/image/$YOC_IMAGE.wic.xz" ;;
       esac )
 }
-ab_slot_has()  { # <profile> <slot> <sha>
-    ( image_profile_load "$1" >/dev/null 2>&1 || exit 1
-      if image_pgo_wanted; then
-          image_pgo_slot_is "$1" "$2" "$3" wpe-cross-pgo-use
-      else
-          local sj="$(image_slot_dir "$1" "$2")/slot.json"
-          [ -f "$sj" ] && [ "$(wkslot get "$sj" commit)" = "$3" ]
-      fi )
-}
 _ab_build_note() { # <profile> <device>
     ( image_profile_load "$1" >/dev/null 2>&1
       if image_pgo_wanted; then
@@ -349,54 +379,80 @@ log ""
 for ((i = 0; i < NDEV; i++)); do
     log "  ${DEV[$i]}: image ${PROFILE[$i]}"
     log "        image      $([ -n "${IMG_OK[$i]}" ] && echo built || echo 'NOT BUILT')"
-    log "        $(printf 'slot %-7s' base) $(ab_slot_has "${PROFILE[$i]}" base "$BASE_SHA" && echo "holds $(sha12 "$BASE_SHA")" || echo 'to build')"
-    log "        $(printf 'slot %-7s' "$PR_SLOT") $(ab_slot_has "${PROFILE[$i]}" "$PR_SLOT" "$HEAD_SHA" && echo "holds $(sha12 "$HEAD_SHA")" || echo 'to build')"
+    log "        $(printf 'slot %-7s' base) $(image_slot_holds "${PROFILE[$i]}" base "$BASE_SHA" && echo "holds $(sha12 "$BASE_SHA")" || echo 'to build')"
+    log "        $(printf 'slot %-7s' "$PR_SLOT") $(image_slot_holds "${PROFILE[$i]}" "$PR_SLOT" "$HEAD_SHA" && echo "holds $(sha12 "$HEAD_SHA")" || echo 'to build')"
     log "        board      ${BOARD_MODE[$i]}$(_board_mode_note "$i")"
     log "        build      $(_ab_build_note "${PROFILE[$i]}" "${DEV[$i]}")"
 done
 log ""
-log "commands -- the builds in this order, one at a time; then every board's deploy and bench at once:"
-declare -a CMDS
-n=0
-add() { CMDS[$n]="$1"; n=$((n + 1)); log "  $1"; }
+log "the plan as a graph -- a step runs when its needs are done and what it holds is free:"
+log ""
+SCHED_FILE=$(mktemp "${TMPDIR:-/tmp}/wk-ab-steps.XXXXXX")
+_ab_steps_gone() { rm -f "$SCHED_FILE"; return 0; }
+wk_atexit _ab_steps_gone
+sched_begin "$SCHED_FILE" "$WK_ROOT/image/pgo.sh"
+
+# Every step runs here until a lane can be driven on the machine holding it (docs/HANDOFF-parallel-lanes.md).
+RUNS_ON=$(wk_machine_name)
+BENCH_ARGS="--rounds $ROUNDS${COUNT:+ --count $COUNT}${TIMEOUT:+ --timeout $TIMEOUT} --task $TASK"
+BENCH_IDS=""
 for ((i = 0; i < NDEV; i++)); do
-    [ -n "${IMG_OK[$i]}" ] || add "wk sysimage build ${PROFILE[$i]}"
-done
-for ((i = 0; i < NDEV; i++)); do
-    ab_slot_has "${PROFILE[$i]}" base "$BASE_SHA" \
-        || add "wk sysimage webkit ${PROFILE[$i]} --commit $BASE_SHA --slot base"
-    ab_slot_has "${PROFILE[$i]}" "$PR_SLOT" "$HEAD_SHA" \
-        || add "wk sysimage webkit ${PROFILE[$i]} --commit $HEAD_SHA --slot $PR_SLOT"
-done
-for ((i = 0; i < NDEV; i++)); do
-    machine_load "${DEV[$i]}"
-    case "${BOARD_MODE[$i]}" in
-        "bench ${PROFILE[$i]}-"*) ;;
-        *) log "  # ${DEV[$i]} is not booted into ${PROFILE[$i]} -- by hand, before the commands above:"
-           log "  #   wk sysimage write --from $(ab_image_path "${PROFILE[$i]}") --disk ${DEV[$i]}:<device>"
-           log "  #   wk boot ${DEV[$i]}" ;;
-    esac
-    add "wk pi deploy ${PROFILE[$i]} ${DEV[$i]} --slot base"
-    add "wk pi deploy ${PROFILE[$i]} ${DEV[$i]} --slot $PR_SLOT"
+    p="${PROFILE[$i]}"; d="${DEV[$i]}"; lane="lane:$p"
+    # A profile-guided slot is not one build but the cycle's phases, declared by the lane that owns them (image/pgo.sh).
+    pgo=""
+    if ( image_profile_load "$p" >/dev/null 2>&1 && image_pgo_wanted ); then pgo=1; fi
+    sched_step "image:$p" "$RUNS_ON" "" "$lane" \
+        "[ -f $(sh_quote "$(ab_image_path "$p")") ]" "wk sysimage build $p"
+    for slot in base "$PR_SLOT"; do
+        sha="$BASE_SHA"; [ "$slot" = base ] || sha="$HEAD_SHA"
+        if [ -n "$pgo" ]; then
+            image_pgo_steps "$p" "$sha" "$slot" "$d" "image:$p"
+        else
+            sched_step "slot:$p:$slot" "$RUNS_ON" "image:$p" "$lane" \
+                "image_slot_holds $p $slot $sha" \
+                "wk sysimage webkit $p --commit $sha --slot $slot"
+        fi
+        sched_step "deploy:$d:$slot" "$RUNS_ON" "slot:$p:$slot" "device:$d" "" \
+            "wk pi deploy $p $d --slot $slot"
+    done
     for plan in "${PLANS[@]}"; do
-        add "wk pi bench ${DEV[$i]} $plan --ab base,$PR_SLOT --rounds $ROUNDS${COUNT:+ --count $COUNT}${TIMEOUT:+ --timeout $TIMEOUT} --task $TASK"
+        sched_step "bench:$d:$plan" "$RUNS_ON" "deploy:$d:base,deploy:$d:$PR_SLOT" "device:$d" "" \
+            "wk pi bench $d $plan --ab base,$PR_SLOT $BENCH_ARGS"
+        BENCH_IDS="${BENCH_IDS:+$BENCH_IDS,}bench:$d:$plan"
     done
 done
-add "wk bench report $TASK --html --text"
+sched_step report "$RUNS_ON" "$BENCH_IDS" "" "" "wk bench report $TASK --html --text"
+sched_plan
+for ((i = 0; i < NDEV; i++)); do
+    case "${BOARD_MODE[$i]}" in
+        "bench ${PROFILE[$i]}-"*) ;;
+        *) log ""
+           log "  ${DEV[$i]} is not booted into ${PROFILE[$i]} -- by hand, before the steps above:"
+           log "    wk sysimage write --from $(ab_image_path "${PROFILE[$i]}") --disk ${DEV[$i]}:<device>"
+           log "    wk boot ${DEV[$i]}" ;;
+    esac
+done
 log ""
 log "each 'wk pi bench --ab' checks every result against the slot's build-id in"
 log "the running web process; the report pairs the rounds and writes one"
 log "self-contained html file per board and plan into the task."
+
+# The flat plan a task record holds: the steps in the order the scheduler reaches them, which --on-start steps through below.
+PLAN=()
+while IFS= read -r line; do [ -z "$line" ] || PLAN+=("$line"); done <<EOF
+$(sched_steps)
+EOF
 
 if [ -n "${WK_DRY_RUN:-}" ]; then
     log ""
     log "dry run -- nothing was built or run."
     exit 0
 fi
+
 log ""
 warn "this replaces slots 'base' and '$PR_SLOT' on the boards named, and moves each"
 warn "image workspace's checkout to the commits above."
-confirm "run these ${n} command(s), replacing those slots?" || die "not run"
+confirm "run these ${#PLAN[@]} step(s), replacing those slots?" || die "not run"
 
 # Created, and its lock taken, before any work; a given --task is a --detach
 # parent's task, whose lock this process takes over.
@@ -412,7 +468,7 @@ else
     devs=""
     for ((i = 0; i < NDEV; i++)); do devs="${devs:+$devs,}${DEV[$i]}=${PROFILE[$i]}"; done
     cmd_args=()
-    for ((k = 0; k < n; k++)); do cmd_args+=(--command "${CMDS[$k]}"); done
+    for step in "${PLAN[@]}"; do cmd_args+=(--command "$step"); done
     bench_task_new "$TASK" "${task_fields[@]}" devices="$devs" "${cmd_args[@]}"
 fi
 info "task $TASK  ($TASK_DIR)"
@@ -429,58 +485,20 @@ if [ -n "$DETACH" ]; then
     exit 0
 fi
 
-run_cmd() { info "\$ $1"; eval "$WK_ROOT/$1" || die "'${1%% *}' failed; the steps above it are done and the plan recomputes what is left: re-run wk ab $SPEC ..."; }
-
-# The declared plan: the builds one at a time, then every board's deploy and
-# bench at once (one step, since they run together), then the report.
-declare -a PLAN
-for ((k = 0; k < n; k++)); do
-    case "${CMDS[$k]}" in "wk sysimage "*) PLAN+=("${CMDS[$k]}") ;; esac
-done
-PLAN+=("deploy and benchmark on ${DEVICES//,/, }" "report")
 AB_TASK=$(task_begin ab here "$TASK" "wk ab $TASK --kill" \
     "$TASK_DIR/ab.log" "${PLAN[@]}")
 _ab_end() { task_end "$AB_TASK" "${WK_EXIT_STATUS:-0}"; }
 wk_atexit _ab_end
 
-step=0
-for ((k = 0; k < n; k++)); do
-    case "${CMDS[$k]}" in
-        "wk sysimage "*) step=$((step + 1)); task_step "$AB_TASK" "$step"; run_cmd "${CMDS[$k]}" ;;
-    esac
-done
+rc=0
+sched_run --log-dir "$TASK_DIR" --on-start "task_step $(sh_quote "$AB_TASK") {step}" || rc=$?
+[ "$rc" -eq 0 ] || die "A/B incomplete: the steps above say which did not run, and each one's log
+    is beside its own resource in $TASK_DIR. Every round that finished is
+    recorded ('wk bench ls'; 'wk bench report $TASK'), and re-running
+    wk ab $SPEC ... takes up what is left."
 for ((i = 0; i < NDEV; i++)); do
-    ab_slot_has "${PROFILE[$i]}" base "$BASE_SHA" && ab_slot_has "${PROFILE[$i]}" "$PR_SLOT" "$HEAD_SHA" \
-        || die "${PROFILE[$i]} does not hold both slots after the builds (wk sysimage ls)"
+    image_slot_holds "${PROFILE[$i]}" base "$BASE_SHA" && image_slot_holds "${PROFILE[$i]}" "$PR_SLOT" "$HEAD_SHA" \
+        || die "${PROFILE[$i]} does not hold both slots after the builds (wk sysimage ls),
+    so what ran was not the pair this A/B names. Do not take the report as it stands."
 done
-
-task_step "$AB_TASK" $((step + 1))
-declare -a PIDS LOGS
-for ((i = 0; i < NDEV; i++)); do
-    LOGS[$i]="$TASK_DIR/${DEV[$i]}.log"
-    (
-        for ((k = 0; k < n; k++)); do
-            case "${CMDS[$k]}" in
-                "wk pi deploy "*" ${DEV[$i]} --slot "*|"wk pi bench ${DEV[$i]} "*) run_cmd "${CMDS[$k]}" ;;
-            esac
-        done
-    ) > "${LOGS[$i]}" 2>&1 &
-    PIDS[$i]=$!
-    info "${DEV[$i]}: deploying and benchmarking (log: ${LOGS[$i]})"
-done
-failed=""
-for ((i = 0; i < NDEV; i++)); do
-    if wait "${PIDS[$i]}"; then
-        info "${DEV[$i]}: done"
-    else
-        failed="$failed ${DEV[$i]}"
-        warn "${DEV[$i]}: failed; its log ends:"
-        tail -12 "${LOGS[$i]}" | sed 's/^/    /' >&2
-    fi
-done
-task_step "$AB_TASK" $((step + 2))
-"$WK_ROOT/wk" bench report "$TASK" --html --text || warn "the report did not complete; the runs are recorded:  wk bench report $TASK"
-if [ -n "$failed" ]; then
-    die "A/B incomplete on:$failed. Every run that finished is in $TASK_DIR (wk bench ls); re-run wk ab $SPEC ... for what is left."
-fi
 info "A/B complete: $TASK_DIR  (wk bench ls; wk bench report $TASK)"

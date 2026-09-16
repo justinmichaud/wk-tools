@@ -36,7 +36,7 @@ WK_MACHINE="${WK_MACHINE:-wk}"
 
 # Line 2 of cmd/<name> is `# wk <name> <args> -- <summary>`; `# wk:` lines in its first 15 declare its shape:
 #   where=  host (this workstation's hardware; never forwarded, refused inside a workspace and on a shared build host) | store (the store, on the machine holding it: the podman VM on a macOS workstation, here on Linux and on a build machine; refused inside a workspace) | local (wherever invoked) | workspace (the name resolves here, the target decides where it runs) | dynamic (the command answers `wk <cmd> --where <args>` itself)
-#   name=   required|optional|none -- how the name arrives; a missing one means all of them or none, and one no workspace answers to is refused here
+#   name=   required|optional|none|derived -- how the name arrives; a missing one means all of them or none, and one no workspace answers to is refused here. derived: the command answers `wk <cmd> --wsname <args>` with the workspace these arguments act on (nothing when they name none); it is no positional of its own, stays in argv, and the command -- not this file -- decides what a name no workspace answers to means
 #   takes=<n|*>  positionals of the command's own that follow the name, so `wk pr <ref>` is a ref and `wk pr <ws> <ref>` is both; `*` for any number
 #   ready=yes  wait for the workspace to finish creating.  group=<g>  which block of `wk help` lists it.  lifecycle  creates or destroys the workspace record
 #   readonly [<subverbs>]  changes nothing, never starts the podman machine.  destructive [<subverbs|flags>]  removes, overwrites or revokes something: asks first.  dryrun [<subverbs|flags>]  honours --dry-run (prints, changes nothing); outside the list the flag is refused
@@ -46,8 +46,9 @@ WK_MACHINE="${WK_MACHINE:-wk}"
 #   sub <a,b> / flag <--x,--y>  per-subverb or per-flag override of where=, name= (@2 = the positional after the subverb), takes=, opts=, passthrough= and needs=; an empty needs= clears the command's list
 
 decl_load() { # <impl>
-    # The one `where=` vocabulary; tests read this line and lift the function on its own (tests/test_sync.py's _lift_func).
+    # The one `where=` and `name=` vocabulary; tests read these lines and lift the function on its own (tests/test_sync.py's _lift_func).
     local WK_WHERE_VALUES="host store local workspace dynamic"
+    local WK_NAME_VALUES="required optional none derived"
     D_WHERE=workspace D_NAME=none D_READY=no D_GROUP=other D_LIFECYCLE=""
     D_READONLY="" D_BROKER="" D_FORWARD=yes D_BARE="" D_POST="" D_SUB="" D_FLAG="" D_OUTSIDE="" D_NEEDS=""
     D_HERE="" D_TAKES=0 D_VALUES="" D_DESTRUCTIVE="" D_OPTS="" D_PASSTHROUGH="" D_DRYRUN=""
@@ -73,7 +74,11 @@ ${line# flag }" ; continue ;;
                               *" $D_WHERE "*) ;;
                               *) die "$(basename "$1"): where=$D_WHERE is not one of ${WK_WHERE_VALUES// /|}" ;;
                           esac ;;
-                name=*)   D_NAME=${tok#name=} ;;
+                name=*)   D_NAME=${tok#name=}
+                          case " $WK_NAME_VALUES " in
+                              *" ${D_NAME%@*} "*) ;;
+                              *) die "$(basename "$1"): name=$D_NAME is not one of ${WK_NAME_VALUES// /|}" ;;
+                          esac ;;
                 takes=*)  D_TAKES=${tok#takes=} ;;
                 ready=*)  D_READY=${tok#ready=} ;;
                 group=*)  D_GROUP=${tok#group=} ;;
@@ -195,6 +200,11 @@ cmd_where() { # <impl> <args...>
     printf '%s' "$w"
 }
 
+cmd_wsname() { # <impl> <args...> -- a name=derived command's own answer, empty when these arguments name no workspace
+    local impl="$1"; shift
+    "$impl" --wsname ${1+"$@"} || true
+}
+
 cmd_readonly() { # <subverb>
     [ -n "$D_READONLY" ] || return 1
     [ "$D_READONLY" = yes ] && return 0
@@ -226,11 +236,8 @@ argv_check() { # <cmd> <impl> <args...>
     opts=$(cmd_opts ${1+"$@"})
     pass=$(sub_override passthrough "$sub") || pass="$D_PASSTHROUGH"
     decl=$(cmd_name ${1+"$@"}); takes=$(cmd_takes ${1+"$@"})
-    slot=0
-    if [ "${decl%@*}" != none ]; then
-        slot=$(name_slot "$decl")
-        ! in_workspace || slot=$((slot - 1))   # the name is implicit in there
-    fi
+    slot=$(name_slot "$decl")
+    if [ "$slot" -gt 0 ] && in_workspace; then slot=$((slot - 1)); fi   # the name is implicit in there
     max=$((slot + ${takes/\*/0}))
     while [ $# -gt 0 ]; do
         a="$1"; shift
@@ -339,8 +346,12 @@ without_positional() { # <n> <args...>
     done
 }
 
-name_slot() { # <name-decl>
-    case "$1" in *@*) printf '%s' "${1#*@}" ;; *) printf 1 ;; esac
+name_slot() { # <name-decl> -- which positional is the name, 0 when it is none of them
+    case "$1" in
+        none|derived) printf 0 ;;
+        *@*) printf '%s' "${1#*@}" ;;
+        *) printf 1 ;;
+    esac
 }
 
 
@@ -515,10 +526,12 @@ resolve_target() {
         prev="$a"
     done
     decl=$(cmd_name "$@"); slot=$(name_slot "$decl"); takes=$(cmd_takes "$@")
-    if [ "${decl%@*}" != none ]; then
+    if [ "${decl%@*}" = derived ]; then
+        name="${derived_name:-}"
+    elif [ "$slot" -gt 0 ]; then
         name=$(argv_name "$slot" "$takes" "$@") || name=$(cwd_workspace) || name=""
-        [ -z "$name" ] || { ws_target "$name"; return 0; }
     fi
+    [ -z "$name" ] || { ws_target "$name"; return 0; }
     printf '%s' container
 }
 
@@ -727,8 +740,10 @@ main() {
     fi
     if cmd_destructive ${1+"$@"}; then WK_DESTRUCTIVE=1; export WK_DESTRUCTIVE; fi
 
+    derived_name=""
     if [ "$where" = workspace ]; then
         decl=$(cmd_name "$@"); slot=$(name_slot "$decl"); takes=$(cmd_takes "$@")
+        [ "${decl%@*}" != derived ] || derived_name=$(cmd_wsname "$impl" "$@")
     fi
 
     # Resolved once, here: resolving a name walks every target that could hold it (ws_locate), and three questions below need the same answer.
@@ -797,6 +812,7 @@ main() {
     fi
 
     case "${decl%@*}" in
+        derived)  name="${name:-$derived_name}" ;;   # no positional to take it out of argv: the command still needs the argument it derived the name from
         required|optional)
             if [ -z "$name" ]; then
                 _a=$(argv_name "$slot" "$takes" "$@" || true)
@@ -811,8 +827,8 @@ main() {
         WK_NAME="$name"; export WK_NAME
         command -v wk_ws_dir >/dev/null 2>&1 || . "$WK_ROOT/lib/store.sh"
         # A name nothing answers to is refused here, once, for every command: left to reach the command it is ignored (`wk stop <typo>` stopped every
-        # workspace on the machine) or reported as an argument it never expected. In a workspace the marker is the proof; a lifecycle name has nothing yet.
-        if [ -z "$D_LIFECYCLE" ] && ! in_workspace; then
+        # workspace on the machine) or reported as an argument it never expected. In a workspace the marker is the proof; a lifecycle or derived name has nothing yet.
+        if [ -z "$D_LIFECYCLE" ] && [ "${decl%@*}" != derived ] && ! in_workspace; then
             ws_exists_on "$resolved" "$name" \
                 || usage_die "$cmd" "$impl" "no such workspace: $name -- 'wk ls' lists them"
         fi

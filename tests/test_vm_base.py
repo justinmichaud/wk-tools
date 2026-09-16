@@ -632,8 +632,11 @@ sed "$rw" | HOME="$WK_TEST_GUEST" sh -c "$cmd"
 # records each call and writes the marker the real one writes.
 FAKE_GIT_WEBKIT = '''#!/bin/sh
 echo "$*" >> "$HOME/git-webkit.calls"
-[ "$1 $2" = "setup --defaults" ] || exit 2
-git config webkitscmpy.setup true
+case "$1" in
+    setup)         [ "$2" = --defaults ] || exit 2; git config webkitscmpy.setup true ;;
+    install-hooks) ;;   # re-asserted on every start, whatever setup did
+    *)             exit 2 ;;
+esac
 '''
 
 
@@ -698,7 +701,10 @@ class TestTheCheckoutIsMadeAtFirstStart(WkTest):
         self.assertNotIn("made from its mirror", out)
         self.assertNotIn("git-webkit is set up", out)
         calls = (self.guest / "git-webkit.calls").read_text().splitlines()
-        self.assertEqual(calls, ["setup --defaults"], "setup ran again on a set-up checkout")
+        self.assertEqual([c for c in calls if c.startswith("setup")], ["setup --defaults"],
+                         "setup ran again on a set-up checkout")
+        self.assertEqual(len([c for c in calls if c.startswith("install-hooks")]), 2,
+                         "the hooks are re-asserted on every start (lib/store.sh)")
 
     def test_no_mirror_is_a_failure_that_names_both_remedies(self):
         """The share is mounted at boot and the mirror is made by `wk sync`;

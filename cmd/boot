@@ -31,6 +31,7 @@ WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 . "$WK_ROOT/lib/reach.sh"
 . "$WK_ROOT/boot/machines.sh"
 . "$WK_ROOT/lib/target.sh"
+. "$WK_ROOT/lib/task.sh"
 
 # This acts on a physical machine the sandbox cannot reach, so a sandboxed invocation becomes a request over the one socket a workspace can see.
 . "$WK_ROOT/lib/broker.sh"
@@ -76,6 +77,8 @@ if in_workspace; then
 fi
 
 machine_load "$MACHINE" || die "unknown machine '$MACHINE' (wk boot --list)"
+
+case "$ACTION" in arm|back) device_hold "$MACHINE" boot "$MACHINE" "kill $$" "" "$ACTION $MACHINE" ;; esac   # the two actions that move the board out from under whatever is measuring on it, wherever that is driven from; before the driver loads, since a fleet claim needs no hardware
 
 load_driver "$NODE_DRIVER"
 

@@ -12,7 +12,8 @@ Run: python3 -m unittest tests.test_owed_new -v
 import re
 import unittest
 
-from tests.support import REPO, WkTest, rand_suffix, run, scratch_dir
+from tests.support import (REPO, WkTest, rand_suffix, requires_container_target,
+                          run, scratch_dir)
 
 NEW = REPO / "cmd" / "new"
 CONTAINER = REPO / "targets" / "container.sh"
@@ -121,11 +122,13 @@ class TestNewKillStopsTheCreation(unittest.TestCase):
         cp = run("new", "-h")
         self.assertIn("--kill", cp.stdout)
 
+    @requires_container_target()
     def test_it_takes_nothing_that_belongs_to_a_creation(self):
         cp = run("new", "kill-probe-%s" % rand_suffix(), "--kill", "--no-wait")
         self.assertNotEqual(cp.returncode, 0, cp.stdout)
         self.assertIn("stops the creation already running", cp.stdout)
 
+    @requires_container_target()
     def test_with_no_creation_running_it_says_so_and_ends_well(self):
         cp = run("new", "kill-probe-%s" % rand_suffix(), "--kill")
         self.assertEqual(cp.returncode, 0, cp.stdout)

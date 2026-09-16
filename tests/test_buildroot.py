@@ -127,7 +127,12 @@ class TestDryRun(WkTest):
     def test_names_workspace_defconfig_and_dl_dir(self):
         for profile in PROFILES:
             with self.subTest(profile=profile), tempfile.TemporaryDirectory() as store:
-                cp = run("sysimage", "build", profile, "--dry-run", env={"WK_STORE": store})
+                # The paths under test are the store's, and a build is routed
+                # to the machine holding the lane -- on a macOS workstation
+                # that is the podman VM, whose store is not this scratch one.
+                # WK_IN_VM is what says this machine holds it.
+                cp = run("sysimage", "build", profile, "--dry-run",
+                         env={"WK_STORE": store, "WK_IN_VM": "1"})
                 out = cp.stdout
                 self.assertEqual(cp.returncode, 0, out)
                 self.assertIn(f"buildroot-{profile}", out, out)

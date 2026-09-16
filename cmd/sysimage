@@ -6,6 +6,8 @@
 # wk: readonly ls,disks,--list
 # wk: destructive write
 # wk: flag --list takes=0
+# wk: sub ls,list where=dynamic opts=--continued
+# wk: sub build,webkit where=dynamic name=derived
 # wk: sub build,webkit,disks,rm,flash takes=2
 # wk: sub build,webkit passthrough=tail
 # wk: sub write opts=--from=,--disk=,--profile=,--machine=,--rescue,--grow,--no-grow
@@ -16,6 +18,12 @@
 # builder put them, and `write --from` streams those bytes onto a card in one
 # pass; every edit an image needs is made afterwards, on the card, by the
 # machine holding the reader (admin/wk-card-priv).
+#
+#   A yocto or buildroot profile is built in a lane -- the workspace named
+#   yocto-<profile> or buildroot-<profile> -- and 'build' and 'webkit' run on
+#   the machine holding that workspace, whichever machine they are typed on
+#   ('wk ls' names it). --workspace <name> names a different lane, and the
+#   build follows that one instead.
 #
 #   build <profile> [options]    build from the spec in this repo. A yocto
 #                                profile also takes --workspace, --detach,
@@ -45,8 +53,19 @@
 #                                profile-guided build's.
 #                                --stop, with --slot and nothing else, stops the
 #                                build or cycle running for that slot
-#   ls | list                    every image a workspace here has built, its
-#                                slots, and where it is
+#       --config <name>          which of the builds the profile's toolchain
+#                                makes: wpe-cross (no profile, for measuring
+#                                against one), or one phase of the cycle by
+#                                itself -- wpe-cross-pgo-collect (instrumented)
+#                                or wpe-cross-pgo-use (against the mixed
+#                                profile). Without it a 2.52 profile runs all
+#                                three phases in order
+#   ls | list                    every image a workspace in this fleet has built,
+#                                its slots, and where each one is: this
+#                                machine's store, then every machine it knows
+#                                that answers for a store of its own. WHERE is
+#                                the machine holding the workspace, blank for
+#                                this one; BOARD is the machine the image is for
 #   disks <machine>             removable disks attached to that machine
 #   write --from <configuration|path> --disk <machine>:<device>[@second|@third]
 #                                write that image to that disk and make it a
@@ -77,7 +96,7 @@
 #                                see 'wk sysimage disks' / 'write' / 'wk boot'
 
 set -euo pipefail
-WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+WK_ROOT="${WK_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
 . "$WK_ROOT/lib/common.sh"
 . "$WK_ROOT/lib/store.sh"
 . "$WK_ROOT/lib/image.sh"
@@ -85,6 +104,7 @@ WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 . "$WK_ROOT/boot/machines.sh"
 . "$WK_ROOT/lib/target.sh"
 . "$WK_ROOT/lib/resources.sh"
+. "$WK_ROOT/lib/par.sh"
 
 wkslot() { python3 "$WK_ROOT/lib/wkslot.py" "$@"; }
 . "$WK_ROOT/boot/disk.sh"
@@ -93,6 +113,46 @@ wkslot() { python3 "$WK_ROOT/lib/wkslot.py" "$@"; }
 . "$WK_ROOT/image/buildroot.sh"
 . "$WK_ROOT/image/pmos.sh"
 . "$WK_ROOT/image/fetch.sh"
+
+# The lane is what the dispatcher routes a build by (`name=derived`, wk); a
+# pmos or fetch profile has none, and is built by this host itself.
+_lane() { # <sub> <args...> -- the workspace these arguments act on, nothing when they name none
+    local profile="${2:-}" a prev=""
+    shift 2 2>/dev/null || return 0
+    case "$profile" in ''|-*) return 0 ;; esac
+    for a in ${@+"$@"}; do
+        case "$prev" in --workspace) printf '%s' "$a"; return 0 ;; esac
+        case "$a" in --workspace=?*) printf '%s' "${a#*=}"; return 0 ;; esac
+        prev="$a"
+    done
+    ( image_profile_load "$profile" >/dev/null 2>&1 || exit 0
+      case "${IMG_BUILDER:-}" in
+          yocto)     yocto_ws_default "$profile" ;;
+          buildroot) echo "buildroot-$profile" ;;
+      esac )
+}
+
+if [ "${1:-}" = --wsname ]; then
+    shift
+    _lane ${@+"$@"}
+    exit 0
+fi
+
+# The dispatcher's `where=dynamic` question: `ls` walks the fleet from where it was typed, and answers another machine's walk (--continued) from this machine's store.
+if [ "${1:-}" = --where ]; then
+    shift
+    case "${1:-}" in
+        ls|list)
+            for _a in ${@+"$@"}; do
+                case "$_a" in
+                    --continued) echo store; exit 0 ;;
+                esac
+            done
+            echo local ;;
+        *)  if [ -n "$(_lane ${@+"$@"})" ]; then echo workspace; else echo host; fi ;;
+    esac
+    exit 0
+fi
 
 if in_workspace; then
     die "'wk $(basename "$0")' acts on a host and its hardware, and this is
@@ -339,15 +399,16 @@ _ws_building() { # <workspace>
     ( load_target "$(ws_target "$1" 2>/dev/null)" >/dev/null 2>&1 && ws_busy_reason "$1" >/dev/null ) </dev/null
 }
 
-cmd_ls() {
-    local n=0 builder ws path bytes mtime prof machine note state
-    local rows; rows=$(image_workspace_scan)
+# The machine holding the lane, as the machine that asked names it (cmd/ls).
+LABEL="${WK_ROW_LABEL:-}"
+_ls_row() { # <workspace> <board> <builder> <state> <size> <built> [<where>, the header's]
+    printf '%-40s %-8s %-10s %-10s %-9s %-8s %s\n' "$1" "$2" "${7:-$LABEL}" "$3" "$4" "$5" "$6"
+}
 
+_store_images() {   # every image in this machine's store
+    local builder ws path bytes mtime prof board note state sj
     while IFS="$(printf '\t')" read -r builder ws path bytes mtime; do
         [ -n "${builder:-}" ] || continue
-        n=$((n + 1))
-        [ "$n" -eq 1 ] && printf '%-40s %-10s %-8s %-9s %-8s %s\n' \
-            WORKSPACE MACHINE BUILDER STATE SIZE BUILT
 
         if _ws_building "$ws"; then state=building
         elif [ "$path" = - ];  then state=none
@@ -355,27 +416,24 @@ cmd_ls() {
         fi
 
         prof=$(_ws_profile "$ws" || printf '')
-        machine=""; note=""
+        board=""; note=""
         if [ -n "$prof" ]; then
-            machine=$( image_profile_load "$prof" >/dev/null 2>&1 \
-                       && printf '%s' "${IMG_MACHINE:-}" ) || true
-            [ -n "$machine" ] || note="this checkout does not define '$prof'"
+            board=$( image_profile_load "$prof" >/dev/null 2>&1 \
+                     && printf '%s' "${IMG_MACHINE:-}" ) || true
+            [ -n "$board" ] || note="this checkout does not define '$prof'"
         fi
 
         if [ "$path" = - ]; then
-            printf '%-40s %-10s %-8s %-9s %-8s %s\n' \
-                "$ws" "${machine:-?}" "$builder" "$state" "-" "-"
+            _ls_row "$ws" "${board:-?}" "$builder" "$state" "-" "-"
             printf '    %s\n' "no image here yet"
             [ "$state" = building ] \
                 && printf "    a build is running here -- 'wk logs %s' follows it\n" "$ws" \
                 || printf "    'wk sysimage build %s' builds one\n" "${prof:-<profile>}"
         else
-            printf '%-40s %-10s %-8s %-9s %-8s %s\n' \
-                "$ws" "${machine:-?}" "$builder" "$state" "$(human_bytes "$bytes")" "$mtime"
+            _ls_row "$ws" "${board:-?}" "$builder" "$state" "$(human_bytes "$bytes")" "$mtime"
             printf '    %s\n' "$path"
             [ "$state" = building ] && printf "    a build is running here -- these bytes are the previous image; 'wk logs %s' follows it\n" "$ws"
         fi
-        local sj
         for sj in $( [ -n "$prof" ] && ( image_profile_load "$prof" >/dev/null 2>&1 && dirname "$(image_slot_dir "$prof" x)" ) )/*/slot.json; do
             [ -f "$sj" ] || continue
             printf '    slot %-12s %s  %s  built %s  (%s)\n' \
@@ -385,19 +443,66 @@ cmd_ls() {
         done
         [ -z "$note" ] || printf '    %s\n' "$note"
     done <<ROWS
-$rows
+$(image_workspace_scan)
 ROWS
+}
 
+_target_images() { # <target> -- its own answer, for a target whose machine has a wk
+    local t="$1" label
+    load_target "$t"
+    case "$(t_far_side)" in
+        answering) ;;
+        stopped)   warn "the machine behind target '$t' is stopped, so the images in its
+    store are not listed -- 'wk start' brings it up"; return 0 ;;
+        *)         return 0 ;;
+    esac
+    if target_is_here "$t"; then label=$(wk_machine_name); else label="$t"; fi
+    WK_ROW_LABEL="$label" WK_NO_DELEGATE=1 t_wk sysimage ls --continued 2>/dev/null >&3 \
+        || warn "'$t' did not answer the listing, so the images in its store are not
+    here. Its wk-tools predates a listing that walks the fleet:  wk sync --tools $t"
+}
+
+_fleet_images() {   # every machine this one knows that answers for a store of its own
+    local t targets
+    targets=$(walk_targets)
+    [ -n "$targets" ] || return 0
+    wk_atexit par_cleanup
+    par_begin
+    for t in $targets; do par_run "$t" _target_images "$t"; done
+    par_wait
+    for t in $targets; do par_record "$t"; done
+    par_end
+}
+
+cmd_ls() {
+    local a continued="" body n
+    for a in ${@+"$@"}; do
+        case "$a" in
+            --continued) continued=1 ;;
+        esac
+    done
+
+    body=$( { _store_images; _fleet_images; } )
+
+    if [ -n "$body" ]; then
+        [ -n "$continued" ] || _ls_row WORKSPACE BOARD BUILDER STATE SIZE BUILT WHERE
+        printf '%s\n' "$body"
+    fi
+    [ -z "$continued" ] || return 0
+
+    n=$(printf '%s\n' "$body" | grep -c '^[^[:space:]]') || n=0
     if [ "$n" -eq 0 ]; then
-        log "no workspace here has built an image."
+        log "no workspace on any machine this one knows has built an image."
         log "  'wk sysimage build <profile>' builds one; it stays in the workspace"
-        log "  that built it (wk help)."
+        log "  that built it (wk help), on the machine that built it."
         return 0
     fi
 
     log ""
     log "$n image$([ "$n" = 1 ] || printf s), each in the workspace that built it."
     log "  There is no image store: the workspace is the name (wk help)."
+    log "  WHERE is the machine holding that workspace, blank for this one; BOARD is"
+    log "  the machine the image is for."
     log "  To write one:  wk sysimage write --from <configuration above> --disk <machine>:<device>"
     log "                 add --rescue for the system a board falls back to"
     return 0
@@ -878,6 +983,11 @@ cmd_flash() {
     Booting it is still a separate step, and still one-shot:  wk boot $machine"
 }
 
+
+# tests/test_card_edits.py sources this file for the listing; `wk` always execs it.
+if (return 0 2>/dev/null); then
+    [ "${1:-}" = functions ] && return 0
+fi
 
 case "${1:-}" in
     --list) image_profile_list; exit 0 ;;
