@@ -4,10 +4,11 @@
 #
 # wk: where=host name=none group=hosts broker deploy,bench needs ssh,python3 values=--list takes=* destructive boot-order dryrun boot-order
 # wk: flag --list where=local name=none takes=0 opts=--list
+# wk: flag --pgo where=workspace name=derived
 # wk: sub setup,helper,flash takes=2
 # wk: sub boot-order takes=3 opts=--revert
-# wk: sub deploy takes=3 opts=--slot=,--skeleton,--skeleton-only,--libs-only
-# wk: sub bench takes=3 opts=--keep-session,--slot=,--ab=,--ab-systems=,--rounds=,--count=,--timeout=,--cores=,--subtests=,--exclude-subtests=,--task=,--pgo=,--no-warmup-profile,--jit-tiers
+# wk: sub deploy where=workspace name=derived takes=3 opts=--slot=,--workspace=,--skeleton,--skeleton-only,--libs-only
+# wk: sub bench takes=3 opts=--keep-session,--slot=,--workspace=,--ab=,--ab-systems=,--rounds=,--count=,--timeout=,--cores=,--subtests=,--exclude-subtests=,--task=,--pgo=,--no-warmup-profile,--jit-tiers
 #
 # A board runs a bench system on removable media; its own workstation install
 # is never touched. `wk help` has the per-board arrangement.
@@ -27,13 +28,17 @@
 #   wk sysimage webkit <profile> --commit <sha> --slot <name>
 #                                                build a WebKit for the image
 #   wk pi deploy <profile> <machine> --slot <name>   put it on the board
-#                                <profile>@<machine> is refused unless the lane
-#                                is here: a deploy reads the slot's bytes where
-#                                they were built
+#                                A deploy reads the slot's bytes in the lane
+#                                that built them, so it runs on the machine
+#                                holding that lane wherever it is typed --
+#                                <profile>@<machine> names one of two, and
+#                                --workspace <lane> a lane of a profile that
+#                                has one per arm
 #   wk pi bench <machine> <plan>                 run a benchmark
 #
-# `wk pi bench --pgo <dir>` is not a measurement: it runs the plan against an
-# instrumented slot and keeps what the run wrote, into <dir>/<plan>/. The whole
+# `wk pi bench --pgo <profile>` is not a measurement: it runs the plan against
+# an instrumented slot and keeps what the run wrote, into that profile's lane
+# -- the build directory the next phase reads it back through. The whole
 # collection -- every plan, the mixing and the two builds around it -- is
 # `wk sysimage webkit` on a 2.52+ yocto profile (image/pgo.sh).
 #
@@ -72,6 +77,40 @@ WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 WK_STALL_SECONDS="${WK_STALL_SECONDS:-900}"
 WK_ABORT_SECONDS="${WK_ABORT_SECONDS:-5400}"
 . "$WK_ROOT/lib/watchdog.sh"
+
+# The lane a verb acts in, for the dispatcher's routing (`name=derived`, wk). A deploy reads the slot's bytes in the lane that built them; a --pgo collection writes the board's profiles back into that same lane. Every other verb is about the board alone and names no lane.
+_pi_spec() { # <verb> <args...> -- the <profile>[@<machine>] these name, nothing when they name none
+    local verb="${1:-}" a prev=""
+    shift 2>/dev/null || return 0
+    case "$verb" in
+        deploy) case "${1:-}" in ''|-*) ;; *) printf '%s' "$1" ;; esac ;;
+        bench)  for a in ${@+"$@"}; do
+                    case "$prev" in --pgo) printf '%s' "$a"; return 0 ;; esac
+                    case "$a" in --pgo=?*) printf '%s' "${a#*=}"; return 0 ;; esac
+                    prev="$a"
+                done ;;
+    esac
+    return 0
+}
+
+_pi_lane() { # <verb> <args...>
+    local spec; spec=$(_pi_spec ${@+"$@"})
+    [ -n "$spec" ] || return 0
+    image_lane_arg "$spec" ${@+"$@"}
+}
+
+if [ "${1:-}" = --wsname ]; then
+    shift
+    _pi_lane ${@+"$@"}
+    exit 0
+fi
+
+if [ "${1:-}" = --wstarget ]; then
+    shift
+    _m=$(image_spec_machine "$(_pi_spec ${@+"$@"})")
+    [ -z "$_m" ] || [ -z "$(_pi_lane ${@+"$@"})" ] || image_spec_target "$_m"
+    exit 0
+fi
 
 pi_verbs() {
     printf '%-10s  %s\n' setup      "put a board on the tailnet (pinned tailscale binaries, no image rebuild)"
@@ -166,42 +205,44 @@ _pi_tmp_cleanup() { [ -n "${PI_TMP:-}" ] && rm -rf "$PI_TMP"; PI_TMP=""; return 
 pi_tmp() { [ -n "$PI_TMP" ] || { PI_TMP=$(mktemp -d); wk_atexit _pi_tmp_cleanup; }; }
 
 cmd_deploy() {
-    local profile="${1:-}" machine="${2:-}"; shift $(( $# < 2 ? $# : 2 ))
-    local slot=a
+    local spec="${1:-}" machine="${2:-}"; shift $(( $# < 2 ? $# : 2 ))
+    local slot=a lane=""
     while [ $# -gt 0 ]; do
         case "$1" in
             --slot) slot="${2:-}"; shift ;;
+            --workspace) lane="${2:-}"; shift ;;
             --skeleton|--skeleton-only|--libs-only) die "'$1' is gone: a deploy carries the whole slot; --slot names it" ;;
         esac
         shift
     done
-    [ -n "$profile" ] && [ -n "$machine" ] \
+    [ -n "$spec" ] && [ -n "$machine" ] \
         || die "usage: wk pi deploy <image-profile> <machine> --slot <name>; see wk pi -h"
     image_check_slot_name "$slot"
-    local on; on=$(image_spec_machine "$profile"); profile=$(image_spec_profile "$profile")
-    [ -z "$on" ] || [ "$on" = "$(wk_machine_name)" ] \
-        || die "slot '$slot' of $profile is on $on, and a deploy reads the bytes where
-    they were built. Run it there:
-        ssh $on wk pi deploy $profile $machine --slot $slot"
+    local profile; profile=$(image_spec_profile "$spec")   # the machine half routed this here (wk); what is deployed is the profile's slot
     case "$profile" in
         yocto-*|buildroot-*) die "'$profile' is a workspace; a slot is named by its image profile:
         wk pi deploy ${profile#*-} $machine --slot $slot" ;;
     esac
+
+    ( image_profile_load "$profile" >/dev/null 2>&1 ) \
+        || die "'$profile' is not an image profile ('wk sysimage --list' has them all)."
+    image_profile_load "$profile" >/dev/null 2>&1
+    [ -n "$lane" ] || lane=$(image_lane_ws "$profile")
+    [ -n "$lane" ] || die "$profile is built by ${IMG_BUILDER:-nothing}, which has no WebKit slots"
+
+    image_lane_here "$spec"
 
     machine_load "$machine" || die "no such machine '$machine' (boot/machines.sh)"
     device_hold "$machine" deploy "$machine/$slot" "kill $$" "" "deploy slot $slot to $machine"
     machine_armed_barrier "A deploy now lands in the system that is answering, and the
     machine is about to leave it -- the build would be on the disk nobody boots."
 
-    ( image_profile_load "$profile" >/dev/null 2>&1 ) \
-        || die "'$profile' is not an image profile ('wk sysimage --list' has them all)."
-    image_profile_load "$profile" >/dev/null 2>&1
     local slotdir
-    slotdir=$(image_slot_dir "$profile" "$slot") \
-        || die "$profile is built by ${IMG_BUILDER:-nothing}, which has no WebKit slots"
-    [ -f "$slotdir/slot.json" ] || die "image $profile has no slot '$slot' built.
+    slotdir=$(image_slot_dir "$lane" "$slot") \
+        || die "'$lane' is not a lane this checkout knows ('wk sysimage ls' names them)"
+    [ -f "$slotdir/slot.json" ] || die "lane '$lane' has no slot '$slot' built.
     Build one first:
-        wk sysimage webkit $profile --commit <sha> --slot $slot"
+        wk sysimage webkit $spec --workspace $lane --commit <sha> --slot $slot"
 
     pi_deploy_slot "$slotdir" "$machine" "$slot"
 }
@@ -804,6 +845,7 @@ pi_bench_ab_systems() { # <sysA,sysB> <rounds>
 }
 
 PI_TASK=""; PI_TASK_OWNED=""; PI_PGO_DIR=""; PI_NO_WARMUP_PROFILE=""; PI_JIT_TIERS=""
+PI_PGO_SPEC=""; PI_LANE=""
 SUBTESTS=""; EXCLUDE_SUBTESTS=""
 PI_AB_ROUND=""; PI_AB_ARM=""; PI_AB_A=""; PI_AB_B=""
 cmd_bench() {
@@ -811,14 +853,15 @@ cmd_bench() {
     local count="" timeout_s="" slot=a ab="" ab_systems="" rounds=3 cores="" task=""
     local stamp; stamp=$(task_stamp)
     # --count N is iterations per run, --timeout S the seconds one iteration may take (default: the plan's own).
-    local usage="usage: wk pi bench <machine> <plan> [--slot NAME | --ab A,B | --ab-systems A,B] [--rounds N] [--count N] [--timeout S] [--cores <set>] [--subtests LIST | --exclude-subtests LIST] [--task NAME] [--pgo DIR] [--no-warmup-profile] [--jit-tiers]; see wk pi -h"
+    local usage="usage: wk pi bench <machine> <plan> [--slot NAME | --ab A,B | --ab-systems A,B] [--rounds N] [--count N] [--timeout S] [--cores <set>] [--subtests LIST | --exclude-subtests LIST] [--task NAME] [--pgo <profile>[@<machine>] [--workspace LANE]] [--no-warmup-profile] [--jit-tiers]; see wk pi -h"
     while [ $# -gt 0 ]; do
         case "$1" in
             --count)   count="${2:-}"; shift ;;
             --timeout) timeout_s="${2:-}"; shift ;;
             --task)    task="${2:-}"; shift ;;
             --slot)    slot="${2:-}"; image_check_slot_name "$slot"; shift ;;
-            --pgo)     PI_PGO_DIR="${2:-}"; [ -n "$PI_PGO_DIR" ] || die "--pgo needs a directory"; shift ;;
+            --pgo)     PI_PGO_SPEC="${2:-}"; [ -n "$PI_PGO_SPEC" ] || die "--pgo needs the profile whose lane the collection belongs to"; shift ;;
+            --workspace) PI_LANE="${2:-}"; shift ;;
             --no-warmup-profile) PI_NO_WARMUP_PROFILE=1 ;;
             --jit-tiers) PI_JIT_TIERS=1 ;;
             --cores)   cores="${2:-}"; shift ;;
@@ -861,10 +904,20 @@ cmd_bench() {
         bench_task_attach "$task"
         PI_TASK="$task"
     fi
-    if [ -n "$PI_PGO_DIR" ]; then
+    [ -z "$PI_LANE" ] || [ -n "$PI_PGO_SPEC" ] || die "$usage; --workspace names the lane a --pgo collection is written back into,
+    so it means nothing without --pgo. A measured run reads the slot off the
+    board and no lane at all."
+    if [ -n "$PI_PGO_SPEC" ]; then
         [ -z "$ab$ab_systems$task" ] || die "$usage; --pgo collects a profile from one slot,
     so it is neither arm of a comparison and belongs to no bench task. What
     chains a collection to the builds around it is 'wk sysimage webkit'."
+        # The lane, not a path: the collection lands in the build directory the next phase reads it back through, and which lane that is has to survive the hop to the machine holding it (the dispatcher routed this here by it).
+        local pgo_profile; pgo_profile=$(image_spec_profile "$PI_PGO_SPEC")
+        image_profile_load "$pgo_profile" >/dev/null 2>&1 \
+            || die "--pgo '$PI_PGO_SPEC' is not an image profile ('wk sysimage --list' has them all)."
+        [ -n "$PI_LANE" ] || PI_LANE=$(image_lane_ws "$pgo_profile")
+        image_lane_here "$PI_PGO_SPEC"
+        PI_PGO_DIR=$(image_pgo_dir "$PI_LANE" "$(image_pgo_measured_slot "$slot")")
         count=1   # what upstream collects per benchmark (Tools/Scripts/collect-pgo-profiles), and every extra iteration overwrites the last one's files
         [ -n "$timeout_s" ] || timeout_s="$PGO_COLLECT_TIMEOUT"   # a plan's own is sized for a measured run, and an instrumented build is several times slower
     fi

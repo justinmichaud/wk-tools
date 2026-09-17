@@ -147,7 +147,13 @@ class TestAWorkspaceAnswersForTheKindItIs(WkTest):
 class MirrorFixture(WkTest):
     """A mirror made by the real mirror_refresh_script out of two local
     repositories standing in for the upstreams -- git takes a path as a URL,
-    so nothing here reaches the network."""
+    so nothing here reaches the network.
+
+    The stand-in origin carries `main` alone, so WK_MIRROR_BRANCHES pins the
+    list to it: what wk_mirror_branches derives from this checkout's image
+    configurations is TestWhatTheMirrorCarries's question, not the layout's."""
+
+    ENV = {"WK_MIRROR_BRANCHES": "main"}
 
     def _git(self, *args, cwd, check=True):
         return subprocess.run(["git", *args], cwd=str(cwd), text=True,
@@ -186,7 +192,8 @@ class MirrorFixture(WkTest):
         self.mirror = self.tmp / "m.git"
         cp = bash('set -euo pipefail\n. "$WK_ROOT/lib/common.sh"\n'
                   '. "$WK_ROOT/lib/store.sh"\n' + self.remotes
-                  + f'sh -c "$(mirror_refresh_script {str(self.mirror)!r})"\n')
+                  + f'sh -c "$(mirror_refresh_script {str(self.mirror)!r})"\n',
+                  env=self.ENV)
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
         self.refresh_out = cp.stdout
 
@@ -232,7 +239,8 @@ class TestOneMirrorLayoutEverywhere(MirrorFixture):
         cp = bash('set -euo pipefail\n. "$WK_ROOT/lib/common.sh"\n'
                   '. "$WK_ROOT/lib/store.sh"\n' + self.remotes
                   + f'cd {str(ws)!r}\n'
-                  + f'sh -c "$(wk_fetch_config {str(self.mirror)!r})"\n')
+                  + f'sh -c "$(wk_fetch_config {str(self.mirror)!r})"\n',
+                  env=self.ENV)
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
         for key in ("fetch.writeCommitGraph", "gc.writeCommitGraph"):
             with self.subTest(key=key):
@@ -252,13 +260,14 @@ class TestOneMirrorLayoutEverywhere(MirrorFixture):
         cp = bash('set -euo pipefail\n. "$WK_ROOT/lib/common.sh"\n'
                   '. "$WK_ROOT/lib/store.sh"\n' + self.remotes
                   + f'cd {str(ws)!r}\n'
-                  + f'sh -c "$(wk_fetch_config {str(self.mirror)!r})"\n')
+                  + f'sh -c "$(wk_fetch_config {str(self.mirror)!r})"\n',
+                  env=self.ENV)
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
         for bare in ("up.git", "fk.git"):
             shutil.rmtree(self.tmp / bare)
         cp = bash('set -euo pipefail\ncd "$WK_ROOT"\n. cmd/sync functions\n'
                   + self.remotes
-                  + f'ws_fetch_script {str(ws)!r}\n')
+                  + f'ws_fetch_script {str(ws)!r}\n', env=self.ENV)
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
         out = subprocess.run(["sh", "-c", cp.stdout], cwd=str(self.tmp),
                              capture_output=True, text=True)
@@ -278,7 +287,8 @@ class TestABranchIsTakenFromTheMirrorFirst(MirrorFixture):
     def _step(self, branch, mirror):
         cp = bash('set -euo pipefail\n. "$WK_ROOT/lib/common.sh"\n'
                   '. "$WK_ROOT/lib/store.sh"\n'
-                  f'origin_branch_fetch_step {branch!r} {str(mirror)!r}\n')
+                  f'origin_branch_fetch_step {branch!r} {str(mirror)!r}\n',
+                  env=self.ENV)
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
         return cp.stdout
 
@@ -323,6 +333,52 @@ class TestABranchIsTakenFromTheMirrorFirst(MirrorFixture):
             with self.subTest(file=rel):
                 self.assertIn("origin_branch_fetch_step", text)
                 self.assertNotIn("git fetch -q origin $(sh_quote", text)
+
+
+class TestWhatTheMirrorCarries(WkTest):
+    """wk_mirror_branches (lib/store.sh) is what origin is narrowed to, and
+    the narrowing is the point: WebKit/WebKit advertises 924 heads. A lane
+    reads its release branch from the mirror and from nowhere else
+    (image/yocto.sh), so the list is main plus the branch of every image
+    configuration this checkout defines on origin -- derived from the
+    configurations, never a second list to keep in step with them."""
+
+    def _branches(self, env=None):
+        cp = bash('set -euo pipefail\n. "$WK_ROOT/lib/common.sh"\n'
+                  '. "$WK_ROOT/lib/store.sh"\nwk_mirror_branches\n', env=env)
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        return cp.stdout.split()
+
+    def _configured(self):
+        cp = bash('set -euo pipefail\n. "$WK_ROOT/lib/common.sh"\n'
+                  '. "$WK_ROOT/image/profiles.sh"\nimage_origin_branches\n')
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        return cp.stdout.split()
+
+    def test_main_is_always_carried(self):
+        self.assertIn("main", self._branches())
+
+    def test_every_origin_configurations_branch_is_carried(self):
+        got = self._branches()
+        configured = self._configured()
+        self.assertTrue(configured, "no image configuration names an origin branch")
+        for branch in configured:
+            with self.subTest(branch=branch):
+                self.assertIn(branch, got)
+
+    def test_it_carries_no_branch_no_configuration_names(self):
+        self.assertEqual(sorted(self._branches()),
+                         sorted({"main", *self._configured()}))
+
+    def test_another_upstreams_branch_is_not_one_of_them(self):
+        """Only origin is narrowed; every other upstream is mirrored whole
+        (wk_fetch_refspecs), so a wpe-* branch has nothing to be added to."""
+        for branch in self._branches():
+            self.assertFalse(branch.startswith("wpe-"), branch)
+
+    def test_the_override_replaces_it(self):
+        self.assertEqual(self._branches(env={"WK_MIRROR_BRANCHES": "main only/this"}),
+                         ["main", "only/this"])
 
 
 class TestTheCommandsAskTheDriver(unittest.TestCase):
@@ -454,7 +510,8 @@ class TestASnapshotBorrowsTheMirrorsObjects(MirrorFixture):
         cp = bash('set -euo pipefail\ncd "$WK_ROOT"\n. cmd/sync functions\n'
                   + f'wk_mirror() {{ echo {str(self.mirror)!r}; }}\n'
                   + lifted + "\nsync_snapshot\n",
-                  env={"WK_STORE": str(store), "http_proxy": "http://127.0.0.1:1",
+                  env={**self.ENV, "WK_STORE": str(store),
+                       "http_proxy": "http://127.0.0.1:1",
                        "https_proxy": "http://127.0.0.1:1", "GIT_TERMINAL_PROMPT": "0"})
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
         ids = sorted(d.name for d in (store / "base").iterdir())

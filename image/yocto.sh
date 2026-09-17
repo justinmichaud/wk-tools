@@ -10,9 +10,7 @@ YOCTO_TASK=""   # the record yocto_spawn steps and yocto_build ends
 
 YOCTO_WEBKIT_MB_PER_JOB=2560   # one cross WebKit compile's working set, sized to WebCore's unified sources rather than to a C++ average; image/yocto-build.sh guards the compile itself at the same figure
 
-yocto_ws_default() { echo "yocto-$1"; }  # per profile: two branches cannot both be checked out in one workspace
-
-# What a stage books on the machine's books is what it is about to use: bitbake parallelises across the whole machine, one cross WebKit build takes its own job count, and the mix is a single llvm-profdata. A stage that books the machine it does not use refuses every build beside it (build_admit), which would hold one machine to one profile.
+# What a stage books on the machine's books is what it is about to use: bitbake parallelises across the whole machine, one cross WebKit build takes its own job count, and the mix is a single llvm-profdata. It is the job count and the memory watchdog's budget that this sizes -- whether a build may start at all is one build per machine (build_admit), whatever it books.
 yocto_stage_budget() { # <stage> <machine jobs> <machine MB> <webkit jobs> -- the `<jobs> <MB>` it books
     case "$1" in
         webkit)  printf '%s %s' "$4" "$(( $4 * YOCTO_WEBKIT_MB_PER_JOB ))" ;;
@@ -86,9 +84,12 @@ yocto_ensure_ws() {  # created rather than demanded: the name is derivable from 
             { git fetch -q $(sh_quote "$remote") $(sh_quote "$branch:$branch") &&
               git checkout -q $(sh_quote "$branch"); }; }" \
             || die "could not check out '$branch' from '$remote' in '$ws'.
-    That fetch reads this machine's mirror, which carries $(wk_mirror_branches)
-    of origin and nothing else, so a release branch has to be carried in first:
-        WK_MIRROR_BRANCHES=$(sh_quote "$(wk_mirror_branches) $branch") wk sync
+    That fetch reads this machine's mirror and no upstream, so a branch absent
+    there is absent here however reachable it is elsewhere. The mirror carries
+    every branch a lane in this checkout checks out -- $(wk_mirror_branches) of
+    origin, every head of the other upstreams -- so a missing one means the
+    mirror is behind this checkout:
+        wk sync
     If the mirror does have it, the remotes in the workspace are what to look
     at -- 'wk remotes $ws' reports them and '--fix' re-asserts them."
     fi
@@ -186,8 +187,8 @@ yocto_any_running() { # <ws> -- prints the stage it is in
     return 1
 }
 
-yocto_spawn() { # <ws> <stage> <jobs> <budget MB> <yocto-build.sh args...>
-    local ws="$1" stage="$2" jobs="$3" budget_mb="$4"; shift 4
+yocto_spawn() { # <ws> <stage> <jobs> <budget MB> <subject> <yocto-build.sh args...>
+    local ws="$1" stage="$2" jobs="$3" budget_mb="$4" subject="$5"; shift 5
     local log pid_host
     log=$(yocto_log "$ws" "$stage"); pid_host="$(wk_ws_dir "$ws")/home/yocto.pid"
 
@@ -202,6 +203,7 @@ yocto_spawn() { # <ws> <stage> <jobs> <budget MB> <yocto-build.sh args...>
 
     YOCTO_TASK=$(task_begin yocto target "$ws" \
         "wk sysimage build $IMG_PROFILE --stage $stage --stop" "$log" $YOCTO_STAGES)
+    task_set "$YOCTO_TASK" subject "$subject"
 
     build_admit "the $stage build" "$jobs"
     build_record "wk sysimage $stage $ws" "$jobs" "$budget_mb" "ws:$ws:yocto.pid"
@@ -343,7 +345,7 @@ yocto_build() { # <profile> <args...>
     # YOC_CHROMIUM=0 in a config drops it: measured here, chromium-ozone-wayland and gn-native are 21 GB of TMPDIR *each* and roughly half of the 13,379 tasks.
     [ -n "$chromium" ] || chromium="${YOC_CHROMIUM:-1}"
 
-    [ -n "$ws" ] || ws=$(yocto_ws_default "$profile")
+    [ -n "$ws" ] || ws=$(image_lane_ws "$profile")
     require_name "$ws"
     [ -n "$keep_work" ] && YOC_RM_WORK=0
 
@@ -397,7 +399,7 @@ $(config_cross_list | sed 's/^/      /')"
     if [ -n "$dry" ]; then
         if [ "$stage" = pgo-mix ]; then
             log "would mix the collection for slot '$slot' of $profile"
-            log "  collection  $(image_pgo_dir "$profile" "$slot")"
+            log "  collection  $(image_pgo_dir "$ws" "$slot")"
             log "              $(image_pgo_dir_in "$slot") as the builder sees it -- one directory, two sides of the bind mount"
             log "  benchmarks  $PGO_BENCHMARKS, at WebKit's own weights (Tools/Scripts/pgo-profile)"
             log "  into        $(image_pgo_dir_in "$slot")/output/$PGO_GLIB_LIB.profdata"
@@ -408,7 +410,7 @@ $(config_cross_list | sed 's/^/      /')"
         yocto_dry_run "$ws" "$stage"
         [ -z "$slot" ] || {
             log "  commit      $commit"
-            log "  slot        $slot -> $(image_slot_dir "$profile" "$slot")"
+            log "  slot        $slot -> $(image_slot_dir "$ws" "$slot")"
             log "              WebKit's build-webkit --cross-target of that commit, packed as a slot"
             log "  config      $cross_config -- $(config_cross_list | sed -n "s/^$cross_config  *//p")"
             [ -z "$pgo_profile" ] || log "              against $pgo_profile"
@@ -481,6 +483,7 @@ EOF
     log  "  log: $(yocto_log "$ws" "$stage")"
     # YOC_IMAGE names targets.conf's image_basename in the config too, so a renamed or missing section fails here rather than four hours into bitbake.
     yocto_spawn "$ws" "$stage" "$stage_jobs" "$stage_mb" \
+        "$(image_build_subject "$ws" "$stage" "$slot" "$commit" "$cross_config")" \
         --target "$YOC_TARGET" --image "$YOC_IMAGE" --stage "$stage" \
         --jobs "$cores" --rm-work "${YOC_RM_WORK:-0}" \
         ${YOC_PORT_TARGET_FROM:+--port-target-from "$YOC_PORT_TARGET_FROM"} \

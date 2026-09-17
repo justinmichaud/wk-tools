@@ -3,7 +3,7 @@
 # wk ab <pr-spec|branch|sha> [options] -- an interleaved A/B of a change on the fleet's boards
 #
 # wk: where=host name=none group=hosts needs ssh,python3 takes=1 destructive dryrun
-# wk: opts --devices=,--release=,--builder=,--bits=,--base=,--plan=,--rounds=,--count=,--timeout=,--task=,--kill,--detach
+# wk: opts --devices=,--release=,--builder=,--bits=,--base=,--build-on=,--plan=,--rounds=,--count=,--timeout=,--task=,--kill,--detach
 # wk: flag --kill takes=1 opts=--kill
 #
 #   wk ab wpe:1725 --devices rpi3,rpi4          the A/B of WPEWebKit PR 1725 on
@@ -28,6 +28,12 @@
 #                         head and the image's own branch, CFG_BRANCH). A base
 #                         more than one commit behind the head is refused,
 #                         however it was chosen; --force crosses it
+#   --build-on <a[,b]>    which machine each arm's lane is on, the base arm
+#                         first. A machine builds one thing at a time, so two
+#                         names are what makes the two arms build at once --
+#                         one name, or none, is one machine building them in
+#                         turn. Without it each lane is wherever it already is
+#                         ('wk sysimage ls' says where)
 #   --plan <name>         the benchmark (default speedometer3); repeatable
 #   --rounds <n>          A/B alternations per plan (default 5)
 #   --count <n>           run-benchmark iterations per run (default: the plan's)
@@ -44,7 +50,7 @@
 #
 # Every invocation is one *task*, named for the moment it was requested and
 # what it measures (20260830T140000Z-wpe-pr1725, or <stamp>-<sha12> for a
-# commit). $WK_STORE/bench/<task>/ holds task.json, one directory per run
+# commit). The bench directory's <task>/ holds task.json, one directory per run
 # under runs/, a log per board and the reports; the boards keep nothing.
 # `wk bench ls` lists tasks, `wk bench report <task>` reports the rounds
 # recorded so far and whether the task is complete.
@@ -78,7 +84,7 @@ WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 . "$WK_ROOT/image/pgo.sh"
 . "$WK_ROOT/lib/sched.sh"
 
-USAGE="usage: wk ab <pr-spec|branch|sha> --devices <a,b> [--release X.Y] [--builder B] [--bits N] [--base <sha>] [--plan P]... [--rounds N] [--count N] [--timeout S] [--detach]; wk ab <task> --kill stops one; see wk ab -h"
+USAGE="usage: wk ab <pr-spec|branch|sha> --devices <a,b> [--release X.Y] [--builder B] [--bits N] [--base <sha>] [--build-on <a[,b]>] [--plan P]... [--rounds N] [--count N] [--timeout S] [--detach]; wk ab <task> --kill stops one; see wk ab -h"
 
 _ab_pgid() { ps -o pgid= -p "$1" 2>/dev/null | tr -dc '0-9'; }
 
@@ -129,6 +135,7 @@ ARGS=()
 for a in "$@"; do case "$a" in --*=*) ARGS+=("${a%%=*}" "${a#*=}") ;; *) ARGS+=("$a") ;; esac; done
 set -- ${ARGS[@]+"${ARGS[@]}"}
 DEVICES="" RELEASE="" BUILDER="" BITS="" BASE="" ROUNDS=5 COUNT="" TIMEOUT="" DETACH="" TASK="" KILL="" PLANS=()
+BUILD_ON=""
 while [ $# -gt 0 ]; do
     case "$1" in
         --devices) DEVICES="${2:-}"; shift ;;
@@ -136,6 +143,7 @@ while [ $# -gt 0 ]; do
         --builder) BUILDER="${2:-}"; shift ;;
         --bits)    BITS="${2:-}"; shift ;;
         --base)    BASE="${2:-}"; shift ;;
+        --build-on) BUILD_ON="${2:-}"; shift ;;
         --plan)    valid_name "${2:-}" || die "--plan '${2:-}' is not a plan name (letters, digits, '.', '_' and '-')"
                    PLANS+=("$2"); shift ;;
         --rounds)  ROUNDS="${2:-}"; shift ;;
@@ -161,6 +169,33 @@ case "$ROUNDS" in ''|*[!0-9]*) die "--rounds takes a number (got '$ROUNDS')" ;; 
 [ -z "$TASK" ] || bench_task_attach "$TASK"
 [ "${#PLANS[@]}" -gt 0 ] || PLANS=(speedometer3)
 case "$BITS" in ''|32|64) ;; *) die "--bits takes 32 or 64 (got '$BITS')" ;; esac
+
+# The two arms, base first: the lane each builds in, and the machine that lane is on. Everything a lane holds is keyed on these -- the step's resource, its id, and the machine the step is reported to run on.
+ARM_SLOT=(base "") ARM_ON=("" "")
+ab_parse_build_on() {
+    local i=0 m
+    [ -n "$BUILD_ON" ] || return 0
+    for m in $(printf '%s' "$BUILD_ON" | tr ',' ' '); do
+        [ "$i" -lt 2 ] || die "--build-on names the machine each of the two arms builds on, base
+    first, so it takes one name or two (got '$BUILD_ON')."
+        case " $(target_known | tr '\n' ' ') $(wk_machine_name) " in
+            *" $m "*) ;;
+            *) die "--build-on names a machine this checkout knows (targets/hosts/<name>.conf)
+    or this one, and '$m' is neither.$(_target_known_line)" ;;
+        esac
+        ARM_ON[$i]="$m"; i=$((i + 1))
+    done
+    [ "$i" -ne 1 ] || ARM_ON[1]="${ARM_ON[0]}"   # one name is both arms in that machine's lane
+}
+ab_parse_build_on
+
+ab_lane_spec() { # <profile> <arm index> -- the <profile>[@<machine>] the step's own command names
+    if [ -n "${ARM_ON[$2]}" ]; then printf '%s@%s' "$1" "${ARM_ON[$2]}"; else printf '%s' "$1"; fi
+}
+
+ab_lane_machine() { # <device index> <arm index> -- the machine that arm's lane is on
+    image_lane_machine "$(_lane_at "$1" "$2")" "${ARM_ON[$2]}"
+}
 
 # Which of the three the spec is settles before the mirror is required, so a malformed spec is refused as the argument error it is.
 HEAD_SHA="" HEAD_DESC="" PR_BASE_BRANCH="" PR_REMOTE_NAME="" SPEC_SHA=""
@@ -307,6 +342,7 @@ AHEAD=$(mgit rev-list --count "$BASE_SHA..$HEAD_SHA")
 BEHIND=$(mgit rev-list --count "$HEAD_SHA..$BRANCH_SHA")
 PR_SLOT="pr"
 [ -z "${PR_N:-}" ] || PR_SLOT="pr$PR_N"
+ARM_SLOT[1]="$PR_SLOT"
 if [ -n "$TASK" ]; then
     :
 elif [ -n "${PR_N:-}" ]; then
@@ -316,13 +352,9 @@ else
 fi
 TASK_DIR=$(bench_task_dir "$TASK")
 
-# A subshell each, since this file walks several devices' profiles.
-ab_image_path() { # <profile>
-    ( image_profile_load "$1" >/dev/null 2>&1 || exit 1
-      case "${IMG_BUILDER:-}" in
-          buildroot) echo "$(wk_ws_dir "buildroot-$1")/build/buildroot/$1/output/images/${BR_IMAGE:-sdcard.img}" ;;
-          yocto)     echo "$(wk_ws_dir "yocto-$1")/build/CrossToolChains/$YOC_TARGET/build/image/$YOC_IMAGE.wic.xz" ;;
-      esac )
+ab_holds() { # <lane spec> <lane> [the rest of `holds`'s options] -- true when that lane already holds it, asked on the machine holding it: a slot built on moose reads as missing here, and building it again is the bug that answer causes
+    local spec="$1" lane="$2"; shift 2
+    [ "$("$WK_ROOT/wk" sysimage holds "$spec" --workspace "$lane" ${@+"$@"} 2>/dev/null)" = yes ]
 }
 _ab_build_note() { # <profile> <device>
     ( image_profile_load "$1" >/dev/null 2>&1
@@ -341,11 +373,17 @@ _board_mode_note() { # <i>
         *)                        echo "  <-- not booted into ${PROFILE[$1]}" ;;
     esac
 }
-declare -a IMG_OK BOARD_MODE BOARD_SLOTS
+# One lane per arm per device: which workspace it is, and the spec the steps name it by.
+declare -a BOARD_MODE BOARD_SLOTS LANE LANE_SPEC
+_lane_at() { printf '%s' "${LANE[$(( $1 * 2 + $2 ))]}"; }        # <device index> <arm index>
+_lane_spec_at() { printf '%s' "${LANE_SPEC[$(( $1 * 2 + $2 ))]}"; }
 for ((i = 0; i < NDEV; i++)); do
     image_profile_load "${PROFILE[$i]}" >/dev/null 2>&1
     case "${IMG_BUILDER:-}" in buildroot|yocto) ;; *) die "${PROFILE[$i]} is built by ${IMG_BUILDER:-nothing}, which has no WebKit slots" ;; esac
-    IMG_OK[$i]=""; [ -f "$(ab_image_path "${PROFILE[$i]}")" ] && IMG_OK[$i]=1
+    for ((a = 0; a < 2; a++)); do
+        LANE[$((i * 2 + a))]=$(image_lane_ws "${PROFILE[$i]}")
+        LANE_SPEC[$((i * 2 + a))]=$(ab_lane_spec "${PROFILE[$i]}" "$a")
+    done
     machine_load "${DEV[$i]}"
     b_probe >/dev/null 2>&1 || true
     BOARD_MODE[$i]="${MODE:-unreachable}"
@@ -373,11 +411,10 @@ log "  slots     base, $PR_SLOT -- one image per board, two WebKits beside it"
 log "  task      $TASK"
 log "            $TASK_DIR$([ -n "${WK_DRY_RUN:-}" ] && [ ! -d "$TASK_DIR" ] && echo '  (not created: dry run)')"
 log ""
-for ((i = 0; i < NDEV; i++)); do
+for ((i = 0; i < NDEV; i++)); do   # what is already built is the graph's answer, below, so it is not read a second time here
     log "  ${DEV[$i]}: image ${PROFILE[$i]}"
-    log "        image      $([ -n "${IMG_OK[$i]}" ] && echo built || echo 'NOT BUILT')"
-    log "        $(printf 'slot %-7s' base) $(image_slot_holds "${PROFILE[$i]}" base "$BASE_SHA" && echo "holds $(sha12 "$BASE_SHA")" || echo 'to build')"
-    log "        $(printf 'slot %-7s' "$PR_SLOT") $(image_slot_holds "${PROFILE[$i]}" "$PR_SLOT" "$HEAD_SHA" && echo "holds $(sha12 "$HEAD_SHA")" || echo 'to build')"
+    log "        $(printf 'lane %-7s' base) $(_lane_at "$i" 0) on $(ab_lane_machine "$i" 0)"
+    log "        $(printf 'lane %-7s' "$PR_SLOT") $(_lane_at "$i" 1) on $(ab_lane_machine "$i" 1)"
     log "        board      ${BOARD_MODE[$i]}$(_board_mode_note "$i")"
     log "        build      $(_ab_build_note "${PROFILE[$i]}" "${DEV[$i]}")"
 done
@@ -395,28 +432,37 @@ _ab_steps_gone() { rm -f "$SCHED_FILE"; return 0; }
 wk_atexit _ab_steps_gone
 sched_begin "$SCHED_FILE" "$WK_ROOT/image/pgo.sh"
 
-# Every step runs here until a lane can be driven on the machine holding it (docs/HANDOFF-parallel-lanes.md).
+# The benchmark and the report run on the machine the A/B was typed on, because that is where the task's own directory is; every lane step runs on the machine holding that lane, and says so.
 RUNS_ON=$(wk_machine_name)
 BENCH_ARGS="--rounds $ROUNDS${COUNT:+ --count $COUNT}${TIMEOUT:+ --timeout $TIMEOUT} --task $TASK"
 BENCH_IDS=""
+IMAGED=" "   # the lanes whose image step is already declared: two arms sharing a lane share its image and toolchain, two machines' lanes need one each
 for ((i = 0; i < NDEV; i++)); do
-    p="${PROFILE[$i]}"; d="${DEV[$i]}"; lane="lane:$p"
+    p="${PROFILE[$i]}"; d="${DEV[$i]}"
     # A profile-guided slot is not one build but the cycle's phases, declared by the lane that owns them (image/pgo.sh).
     pgo=""
     if ( image_profile_load "$p" >/dev/null 2>&1 && image_pgo_wanted ); then pgo=1; fi
-    sched_step "image:$p" "$RUNS_ON" "" "$lane" \
-        "[ -f $(sh_quote "$(ab_image_path "$p")") ]" "wk sysimage build $p"
-    for slot in base "$PR_SLOT"; do
-        sha="$BASE_SHA"; [ "$slot" = base ] || sha="$HEAD_SHA"
+    for ((a = 0; a < 2; a++)); do
+        slot="${ARM_SLOT[$a]}"
+        sha="$BASE_SHA"; [ "$a" -eq 0 ] || sha="$HEAD_SHA"
+        lane=$(_lane_at "$i" "$a"); spec=$(_lane_spec_at "$i" "$a")
+        on=$(ab_lane_machine "$i" "$a"); res=$(image_build_resource "$on")
+        case "$IMAGED" in
+            *" $lane@$on "*) ;;
+            *) IMAGED="$IMAGED$lane@$on "
+               sched_step "image:$lane@$on" "$on" "" "$res" \
+                   "$(image_holds_predicate "$spec" "$lane")" \
+                   "wk sysimage build $spec --workspace $lane" ;;
+        esac
         if [ -n "$pgo" ]; then
-            image_pgo_steps "$p" "$sha" "$slot" "$d" "image:$p"
+            image_pgo_steps "$spec" "$lane" "$sha" "$slot" "$d" "image:$lane@$on"
         else
-            sched_step "slot:$p:$slot" "$RUNS_ON" "image:$p" "$lane" \
-                "image_slot_holds $p $slot $sha" \
-                "wk sysimage webkit $p --commit $sha --slot $slot"
+            sched_step "slot:$lane:$slot" "$on" "image:$lane@$on" "$res" \
+                "$(image_holds_predicate "$spec" "$lane" --slot "$slot" --commit "$sha")" \
+                "wk sysimage webkit $spec --workspace $lane --commit $sha --slot $slot"
         fi
-        sched_step "deploy:$d:$slot" "$RUNS_ON" "slot:$p:$slot" "device:$d" "" \
-            "wk pi deploy $p $d --slot $slot"
+        sched_step "deploy:$d:$slot" "$on" "slot:$lane:$slot" "device:$d" "" \
+            "wk pi deploy $spec $d --workspace $lane --slot $slot"
     done
     for plan in "${PLANS[@]}"; do
         sched_step "bench:$d:$plan" "$RUNS_ON" "deploy:$d:base,deploy:$d:$PR_SLOT" "device:$d" "" \
@@ -431,7 +477,7 @@ for ((i = 0; i < NDEV; i++)); do
         "bench ${PROFILE[$i]}-"*) ;;
         *) log ""
            log "  ${DEV[$i]} is not booted into ${PROFILE[$i]} -- by hand, before the steps above:"
-           log "    wk sysimage write --from $(ab_image_path "${PROFILE[$i]}") --disk ${DEV[$i]}:<device>"
+           log "    wk sysimage write --from ${PROFILE[$i]} --disk ${DEV[$i]}:<device>"
            log "    wk boot ${DEV[$i]}" ;;
     esac
 done
@@ -490,6 +536,8 @@ fi
 
 AB_TASK=$(task_begin ab here "$TASK" "wk ab $TASK --kill" \
     "$TASK_DIR/ab.log" "${PLAN[@]}")
+task_set "$AB_TASK" subject \
+    "$HEAD_DESC on ${DEVICES//,/, }: $(sha12 "$BASE_SHA") vs $(sha12 "$HEAD_SHA"), $RELEASE"
 _ab_end() { task_end "$AB_TASK" "${WK_EXIT_STATUS:-0}"; }
 wk_atexit _ab_end
 
@@ -500,7 +548,8 @@ sched_run --log-dir "$TASK_DIR" --on-event "task_step_event $(sh_quote "$AB_TASK
     recorded ('wk bench ls'; 'wk bench report $TASK'), and re-running
     wk ab $SPEC ... takes up what is left."
 for ((i = 0; i < NDEV; i++)); do
-    image_slot_holds "${PROFILE[$i]}" base "$BASE_SHA" && image_slot_holds "${PROFILE[$i]}" "$PR_SLOT" "$HEAD_SHA" \
+    ab_holds "$(_lane_spec_at "$i" 0)" "$(_lane_at "$i" 0)" --slot base --commit "$BASE_SHA" \
+        && ab_holds "$(_lane_spec_at "$i" 1)" "$(_lane_at "$i" 1)" --slot "$PR_SLOT" --commit "$HEAD_SHA" \
         || die "${PROFILE[$i]} does not hold both slots after the builds (wk sysimage ls),
     so what ran was not the pair this A/B names. Do not take the report as it stands."
 done

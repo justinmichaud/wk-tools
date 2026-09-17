@@ -416,6 +416,8 @@ def render_task(wr, t, colour):
                        paint("%s  since %s" % (t.get("machine", "?"), t.get("since", "?")),
                              "dim", colour))
     wr.kv("%s %s" % (t.get("task_kind", "task"), t.get("name", "?")), head)
+    if t.get("subject"):   # which slot, which commit, and which of the builds a profile-guided release makes (image_build_subject)
+        wr.out.append("      " + paint(t["subject"], "dim", colour))
     plan = t.get("plan") or []
     steps = t.get("steps") or []
     for i, line in enumerate(plan, 1):
@@ -957,7 +959,8 @@ function tiles(m) {
       return `<div class="${hue}">${mark} ${ESC(line)}</div>`;
     }).join("");
     t.push(tile(`${ESC(k.task_kind || "task")} · ${ESC(k.name || "?")}`,
-      chip(k.state) + ` <span class="sub">since ${ESC(k.since || "?")}</span>` + plan +
+      chip(k.state) + ` <span class="sub">since ${ESC(k.since || "?")}</span>` +
+      (k.subject ? `<div class="sub">${ESC(k.subject)}</div>` : "") + plan +
       (k.state === "died" ? `<div class="bad">died — ${k.exit ? "exit " + ESC(k.exit) : "no exit recorded"}</div>` : "") +
       (k.holds ? `<div class="sub">holds: ${ESC(k.holds)}</div>` : "") +
       `<div class="sub">kill: <code>${ESC(k.kill || "?")}</code></div>` +

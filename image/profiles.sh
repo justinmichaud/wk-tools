@@ -48,6 +48,17 @@ recovery-pinephone
 EOF
 }
 
+# Which of origin's branches a lane here would check out. A mirror carries these and main, and nothing else of a repository advertising 924 heads (lib/store.sh, wk_mirror_branches); every other upstream is mirrored whole, so only origin's are named.
+image_origin_branches() {
+    local n
+    for n in $(image_config_names); do
+        ( image_profile_load "$n" >/dev/null 2>&1
+          case "${CFG_REMOTE:-}" in
+              origin) [ -z "${CFG_BRANCH:-}" ] || printf '%s\n' "$CFG_BRANCH" ;;
+          esac )
+    done | sort -u
+}
+
 image_pgo_wanted() {   # of the loaded profile. 2.52 is where upstream's cmake support for a profile-guided build arrives (Source/cmake/WebKitFeatures.cmake's USE_PGO_PROFILE, 310954@main); before it there is nothing to turn on, after it every number a board produces is a profile-guided build's (image/pgo.sh)
     [ "${IMG_BUILDER:-}" = yocto ] || return 1
     [ -n "${CFG_RELEASE:-}" ] || return 1

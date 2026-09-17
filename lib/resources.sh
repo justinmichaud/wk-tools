@@ -214,18 +214,18 @@ disk_admit() {
     of, and 'wk disk' says where the rest went."
 }
 
-build_admit() {  # <what> <jobs> [disk-gb]: refuse a build the machine cannot fit beside those running, naming them; under WK_MIN_JOBS left over is a machine spoken for. Disk is asked here, so no build path can forget it
-    local what="$1" jobs="$2" running avail
+build_admit() {  # <what> <jobs> [disk-gb]: one machine builds one thing at a time, so a build beside another is refused whatever would have been left over. Disk is asked here, so no build path can forget it
+    local what="$1" jobs="$2" running
     disk_admit "$what" "${3:-}"
     running=$(builds_running)
     [ -n "$running" ] || return 0
-    [ "$jobs" -ge "${WK_MIN_JOBS:-4}" ] && return 0
-    avail=$(avail_mem_mb) || return $?
-    barrier --retry "$(build_machine)'s memory is spoken for by the build(s) already running:
+    barrier --retry "$(build_machine) is already building:
 $(printf '%s\n' "$running" | awk -F'\t' '{ printf "      %s (%s jobs, %s MB)\n", $1, $2, $3 }')
-    $what would get $jobs job(s) of the $avail MB left. Wait for them
-    ('wk status' shows a workspace's build), or --force to build that small.
-    A scheduled step comes back to this once one of them ends."
+    $what wants $jobs job(s) of it. A machine builds one thing at a time: two
+    builds sharing one take longer together than in turn, and each reports a
+    number the other moved. Wait for it ('wk status' shows a workspace's
+    build), or --force to build beside it anyway.
+    A scheduled step comes back to this once it ends."
 }
 
 build_jobs() {  # from the memory not already spoken for -- running out of RAM during a link is what hangs a machine -- clamped by the cores left and by load

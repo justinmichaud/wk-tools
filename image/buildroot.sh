@@ -231,7 +231,7 @@ buildroot_webkit() {
     ws="${ws:-buildroot-$profile}"
     local image slotdir jobs
     image="$(wk_ws_dir "$ws")/build/buildroot/$profile/output/images/${BR_IMAGE:-sdcard.img}"
-    slotdir=$(image_slot_dir "$profile" "$slot")
+    slotdir=$(image_slot_dir "$ws" "$slot")
     jobs=$(WK_MB_PER_JOB=2048 WK_MAX_JOBS=64 build_jobs)  # WebKit links large; capped where the link steps stop gaining
 
     if [ -n "$dry" ]; then

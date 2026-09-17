@@ -439,11 +439,13 @@ FAKE_BRANCHES = {"WebKit": ("webkitglib/2.52", "wpe-2.38", "feature-x"),
 
 
 @contextlib.contextmanager
-def ab_env(boards):
+def ab_env(boards, registry=()):
     """A mirror, a fleet and a GitHub of this test's own. `boards` is
     {device: profile}; the fake GitHub is two repositories of one commit, and
     the stub `git` rewrites every github.com URL to them, so a fetch, an
-    ls-remote and the merge-base all answer offline."""
+    ls-remote and the merge-base all answer offline. `registry` names build
+    machines for --build-on: each is a remote target driven without ssh
+    (WK_REMOTE_LOCAL, targets/remote.sh), so naming one reaches nothing."""
     with scratch_dir(prefix="wk-test-ab-") as tmp:
         state, store, machines = tmp / "state", tmp / "store", tmp / "machines"
         (state / "wk" / "git").mkdir(parents=True)
@@ -477,11 +479,18 @@ def ab_env(boards):
                            ("wpe", "WPEWebKit"), ("forkwpe", "WPEWebKit")):
             g("-C", str(mirror), "fetch", "-q", str(github / ("%s.git" % repo)),
               "+refs/heads/*:refs/remotes/%s/*" % name)
+        hosts = tmp / "hosts"
+        hosts.mkdir()
+        for name in registry:
+            (hosts / ("%s.conf" % name)).write_text(
+                "WK_TARGET_KIND=remote\nWK_REMOTE_LOCAL=1\n"
+                f"WK_REMOTE_ROOT={tmp / name}\nWK_REMOTE_STORE={tmp / name / 'store'}\n")
         with stub_path({"git": GIT_STUB}) as binp:
             yield {
                 "head": head,
                 "env": {"XDG_STATE_HOME": str(state), "WK_STORE": str(store),
                         "WK_MACHINES_DIR": str(machines),
+                        "WK_TARGET_REGISTRY": str(hosts),
                         "WK_TEST_REAL_GIT": git, "WK_TEST_FAKE_GITHUB": str(github),
                         "PATH": "%s:%s" % (binp, os.environ["PATH"])},
             }
@@ -508,8 +517,9 @@ def wave_lines(out):
 class TestTheAbGraph(WkTest):
     """`wk ab --dry-run` prints the graph and the schedule, and runs nothing."""
 
-    def dry_run(self, spec, *args, boards=None, **kw):
-        with ab_env(boards or {"rpi3": "wpewebkit-2.38-buildroot-rpi3-32"}) as env:
+    def dry_run(self, spec, *args, boards=None, registry=(), **kw):
+        with ab_env(boards or {"rpi3": "wpewebkit-2.38-buildroot-rpi3-32"},
+                    registry=registry) as env:
             spec = env["head"] if spec == "HEAD" else spec
             cp = run("ab", spec, "--dry-run", *args, env=env["env"], timeout=240, **kw)
             return cp, env
@@ -518,20 +528,32 @@ class TestTheAbGraph(WkTest):
         cp, _ = self.dry_run("HEAD", "--release", "2.38", "--devices", "rpi3")
         self.assertEqual(cp.returncode, 0, cp.stdout)
         rows = step_lines(cp.stdout)
-        profile = "wpewebkit-2.38-buildroot-rpi3-32"
-        self.assertIn("holds lane:%s" % profile, rows["image:%s" % profile])
-        self.assertIn("needs image:%s" % profile, rows["slot:%s:base" % profile])
+        lane = "buildroot-wpewebkit-2.38-buildroot-rpi3-32"
+        image = [k for k in rows if k.startswith("image:%s@" % lane)]
+        self.assertEqual(len(image), 1, sorted(rows))
+        self.assertIn("holds machine:", rows[image[0]])
+        self.assertIn("needs %s" % image[0], rows["slot:%s:base" % lane])
         self.assertIn("holds device:rpi3", rows["deploy:rpi3:base"])
         self.assertIn("needs deploy:rpi3:base deploy:rpi3:pr", rows["bench:rpi3:speedometer3"])
         self.assertIn("needs bench:rpi3:speedometer3", rows["report"])
+
+    def test_a_build_is_serialised_by_the_machine_it_runs_on(self):
+        """One machine builds one thing at a time, whichever lane it is for."""
+        cp, _ = self.dry_run("HEAD", "--release", "2.38", "--devices", "rpi3")
+        holds = [w.split("holds ")[1].split(",")[0].strip()
+                 for k, w in step_lines(cp.stdout).items()
+                 if (k.startswith("slot:") or k.startswith("image:")) and "holds " in w]
+        self.assertTrue(holds, cp.stdout)
+        for h in holds:
+            self.assertTrue(h.startswith("machine:"), h)
 
     def test_the_second_arm_builds_while_the_first_is_on_the_board(self):
         """What the old plan could not do: its order was every build in turn,
         then every board."""
         cp, _ = self.dry_run("HEAD", "--release", "2.38", "--devices", "rpi3")
-        profile = "wpewebkit-2.38-buildroot-rpi3-32"
+        lane = "buildroot-wpewebkit-2.38-buildroot-rpi3-32"
         together = [w for w in wave_lines(cp.stdout)
-                    if "deploy:rpi3:base" in w and "slot:%s:pr" % profile in w]
+                    if "deploy:rpi3:base" in w and "slot:%s:pr" % lane in w]
         self.assertTrue(together, cp.stdout)
 
     def test_a_profile_guided_arm_is_the_cycles_phases_not_one_build(self):
@@ -542,23 +564,62 @@ class TestTheAbGraph(WkTest):
                              "--devices", "rpi5-64",
                              boards={"rpi5": "webkit-2.52-yocto-rpi5-64"})
         self.assertEqual(cp.returncode, 0, cp.stdout)
-        profile = "webkit-2.52-yocto-rpi5-64"
+        lane = "yocto-webkit-2.52-yocto-rpi5-64"
         rows = step_lines(cp.stdout)
-        self.assertIn("holds lane:%s" % profile, rows["instr:%s:base" % profile])
+        self.assertIn("holds machine:", rows["instr:%s:base" % lane])
         self.assertIn("holds device:rpi5", rows["collect:rpi5:base:speedometer3"])
         together = [w for w in wave_lines(cp.stdout)
-                    if "deploy:rpi5:base-instr" in w and "instr:%s:pr" % profile in w]
+                    if "deploy:rpi5:base-instr" in w and "instr:%s:pr" % lane in w]
         self.assertTrue(together, cp.stdout)
 
-    def test_two_boards_are_two_lanes_and_two_pipelines(self):
+    def test_two_boards_on_one_machine_build_in_turn(self):
+        """Two lanes, two pipelines -- and one machine, so the builds of the
+        two do not overlap however much of the graph does."""
         cp, _ = self.dry_run("HEAD", "--release", "2.52", "--builder", "yocto",
                              "--devices", "rpi4-64,rpi5-64",
                              boards={"rpi4": "webkit-2.52-yocto-rpi4-64",
                                      "rpi5": "webkit-2.52-yocto-rpi5-64"})
         self.assertEqual(cp.returncode, 0, cp.stdout)
-        first = wave_lines(cp.stdout)[0]
-        self.assertEqual(sorted(first), ["image:webkit-2.52-yocto-rpi4-64",
-                                         "image:webkit-2.52-yocto-rpi5-64"])
+        for wave in wave_lines(cp.stdout):
+            builds = [s for s in wave
+                      if s.split(":")[0] in ("image", "instr", "mix", "slot")]
+            self.assertLessEqual(len(builds), 1, wave)
+        rows = step_lines(cp.stdout)
+        for board in ("rpi4", "rpi5"):
+            self.assertTrue(
+                any(k.startswith("image:yocto-webkit-2.52-yocto-%s-64@" % board)
+                    for k in rows), sorted(rows))
+
+    def test_build_on_puts_each_arm_on_its_own_machine(self):
+        """Two machines are what makes the two arms build at once: each arm's
+        steps run on its own machine, holding it, so neither waits for the
+        other's build."""
+        cp, _ = self.dry_run("HEAD", "--release", "2.52", "--builder", "yocto",
+                             "--devices", "rpi5-64", "--build-on", "one,two",
+                             boards={"rpi5": "webkit-2.52-yocto-rpi5-64"},
+                             registry=("one", "two"))
+        self.assertEqual(cp.returncode, 0, cp.stdout)
+        rows = step_lines(cp.stdout)
+        lane = "yocto-webkit-2.52-yocto-rpi5-64"
+        self.assertIn("image:%s@one" % lane, rows)
+        self.assertIn("image:%s@two" % lane, rows)
+        self.assertIn("on one", rows["instr:%s:base" % lane])
+        self.assertIn("on two", rows["instr:%s:pr" % lane])
+        self.assertIn("holds machine:one", rows["instr:%s:base" % lane])
+        self.assertIn("holds machine:two", rows["instr:%s:pr" % lane])
+        self.assertEqual(sorted(wave_lines(cp.stdout)[0]),
+                         ["image:%s@one" % lane, "image:%s@two" % lane])
+
+    def test_one_machine_named_for_both_arms_builds_them_in_turn(self):
+        cp, _ = self.dry_run("HEAD", "--release", "2.52", "--builder", "yocto",
+                             "--devices", "rpi5-64", "--build-on", "one",
+                             boards={"rpi5": "webkit-2.52-yocto-rpi5-64"},
+                             registry=("one",))
+        self.assertEqual(cp.returncode, 0, cp.stdout)
+        for wave in wave_lines(cp.stdout):
+            builds = [s for s in wave
+                      if s.split(":")[0] in ("image", "instr", "mix", "slot")]
+            self.assertLessEqual(len(builds), 1, wave)
 
     def test_a_dry_run_creates_no_task_and_runs_nothing(self):
         cp, env = self.dry_run("HEAD", "--release", "2.38", "--devices", "rpi3")

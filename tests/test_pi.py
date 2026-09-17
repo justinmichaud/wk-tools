@@ -163,15 +163,16 @@ class TestPiSlotRefusals(WkTest):
         self.assertEqual(cp.returncode, 1, cp.stdout)
         self.assertIn("--slot", cp.stdout)
 
-    def test_a_slot_on_another_machine_is_refused_where_its_bytes_are_not(self):
+    def test_a_lane_on_a_machine_that_did_not_answer_is_refused(self):
         """`<profile>@<machine>` is the lane spec `wk sysimage` routes by, and
-        a deploy streams the slot's bytes at the board: from a machine that
-        does not hold the lane there is nothing to send, so it says where."""
-        cp = self.run_wk("pi", "deploy", "webkit-2.52-yocto-rpi5-64@moose",
-                         "not-a-real-machine", "--slot", "base", timeout=15)
+        a deploy is routed by it too (`name=derived`, the dispatcher). Still
+        running here means the dispatcher found no wk over there to hand it
+        to, so it says which machine and how to give it one."""
+        cp = self.run_wk("pi", "deploy", "webkit-2.52-yocto-rpi5-64@nosuchbox",
+                         "not-a-real-machine", "--slot", "base", timeout=60)
         self.assertEqual(cp.returncode, 1, cp.stdout)
-        self.assertIn("is on moose", cp.stdout)
-        self.assertIn("ssh moose wk pi deploy webkit-2.52-yocto-rpi5-64", cp.stdout)
+        self.assertIn("names machine 'nosuchbox'", cp.stdout)
+        self.assertIn("wk remote setup nosuchbox", cp.stdout)
 
     def test_ab_of_one_slot_twice_is_refused(self):
         cp = self.run_wk("pi", "bench", "not-a-real-machine", "speedometer3", "--ab", "base,base", timeout=15)

@@ -5,9 +5,9 @@
 # wk: where=workspace name=required takes=1 values=--list ready=yes group=workspaces needs python3 dryrun stage,staged,mac,mac-volume
 # wk: opts --list,--config=,--count=,--browser=,--subtests=,--software,--browser-args=,--cores= destructive --install,--all readonly --list,ls,precision
 # wk: flag --list where=store name=none takes=0
-# wk: sub stage,staged,mac,mac-volume,mac-ab,ab-summary,compare,report,precision,ls where=host
+# wk: sub stage,staged,mac,mac-volume,mac-ab,ab-summary,compare,report,precision where=host
 # wk: sub seed where=dynamic name=required@2 takes=1 opts=
-# wk: sub ls name=none takes=1 opts=
+# wk: sub ls where=dynamic name=none takes=1 opts=--continued
 # wk: sub compare,report name=none takes=4 opts=--html,--text
 # wk: sub precision name=none takes=3 opts=--detect=
 # wk: sub stage takes=1 opts=--to=,--config=,--plan=,--payload=
@@ -78,11 +78,18 @@
 #   wk bench compare <run-a> <run-b> [ws]  `wk bench report` in text mode; the
 #                                          third argument is accepted and
 #                                          ignored
-#   wk bench ls                            every task -- one per wk ab, wk pi
-#                                          bench or wk bench invocation, named
-#                                          for when it was requested and what
-#                                          it measures -- with its state and
-#                                          each run's directory
+#   wk bench ls                            every task in the fleet -- one per
+#                                          wk ab, wk pi bench or wk bench
+#                                          invocation, named for when it was
+#                                          requested and what it measures --
+#                                          with its state and each run's
+#                                          directory. This machine's store
+#                                          first, then every machine it knows
+#                                          that answers for a store of its own,
+#                                          each asked through its own wk: a
+#                                          measurement is recorded once, on the
+#                                          machine that took it, and read from
+#                                          anywhere. WHERE names that machine
 #   wk bench --list                        the plans in this machine's WebKit
 #                                          mirror -- no workspace, never starts
 #                                          the podman machine; it says which and
@@ -154,10 +161,12 @@ WK_ABORT_SECONDS="${WK_ABORT_SECONDS:-5400}"
 
 . "$WK_ROOT/lib/target.sh"
 . "$WK_ROOT/lib/arch.sh"
+. "$WK_ROOT/lib/par.sh"
 . "$WK_ROOT/lib/detach.sh"
 . "$WK_ROOT/lib/task.sh"
 
-_bench_where() { # <verb> <args...> -- prints host or workspace
+_bench_where() { # <verb> <args...> -- prints host, store, workspace or local
+    local a
     case "${1:-}" in
         seed)
             if [ "$(ws_target "${2:-}" 2>/dev/null)" = container ]; then
@@ -165,6 +174,11 @@ _bench_where() { # <verb> <args...> -- prints host or workspace
             else
                 printf host
             fi ;;
+        # `ls` walks the fleet from where it was typed, and answers another machine's walk (--continued) from this machine's store -- which on a macOS workstation is the podman VM's, so the walk's own half is forwarded there like any other read of it.
+        ls) for a in ${@+"$@"}; do
+                case "$a" in --continued) printf store; return 0 ;; esac
+            done
+            printf local ;;
         *) printf host ;;
     esac
 }
@@ -284,9 +298,62 @@ SOFTWARE_REASON=""
 BROWSER_ARGS=""
 CORES=""
 
+# The label a row carries: the machine holding the store it was read from, as the machine that asked names it (cmd/ls's idiom).
+_bench_label() { printf '%s' "${WK_ROW_LABEL:-$(wk_machine_name)}"; }
+
+_store_tasks() {   # every task in this machine's store
+    [ -d "$BENCH_DIR" ] || return 0
+    wkdata ls "$BENCH_DIR" --running "$(bench_running_tasks)" --where "$(_bench_label)"
+}
+
+_target_tasks() { # <target> -- its own answer, for a target whose machine has a wk
+    local t="$1" label
+    load_target "$t"
+    case "$(t_far_side)" in
+        answering) ;;
+        stopped)   warn "the machine behind target '$t' is stopped, so the tasks in its
+    store are not listed -- 'wk start' brings it up"; return 0 ;;
+        *)         return 0 ;;
+    esac
+    if target_is_here "$t"; then label=$(wk_machine_name); else label="$t"; fi
+    WK_ROW_LABEL="$label" WK_NO_DELEGATE=1 t_wk bench ls --continued 2>/dev/null >&3 \
+        || warn "'$t' did not answer the listing, so the tasks in its store are not
+    here. Its wk-tools predates a listing that walks the fleet:  wk sync --tools $t"
+}
+
+_fleet_tasks() {   # a measurement is recorded once, on the machine that took it, and recomputed into one listing on every read -- so no workstation carries a second copy of another's numbers to drift from them
+    local t targets
+    targets=$(walk_targets)
+    [ -n "$targets" ] || return 0
+    wk_atexit par_cleanup
+    par_begin
+    for t in $targets; do par_run "$t" _target_tasks "$t"; done
+    par_wait
+    for t in $targets; do par_record "$t"; done
+    par_end
+}
+
 cmd_ls() {
-    [ -d "$BENCH_DIR" ] || { log "(no tasks yet)"; return 0; }
-    wkdata ls "$BENCH_DIR" --running "$(bench_running_tasks)"
+    local a continued="" body
+    for a in ${@+"$@"}; do
+        case "$a" in
+            --continued) continued=1 ;;
+        esac
+    done
+
+    body=$( { _store_tasks; _fleet_tasks; } )
+    [ -z "$body" ] || printf '%s\n' "$body"
+    [ -z "$continued" ] || return 0
+
+    if [ -z "$body" ]; then
+        log "(no tasks on any machine this one knows)"
+        return 0
+    fi
+    log ""
+    log "  each task is on the machine that took it, named after WHERE; nothing is"
+    log "  copied between machines, so what you see here is what that machine has"
+    log "  now.  wk bench report <task>  reports one."
+    return 0
 }
 
 # Through t_src, not the container's /src/WebKit: `wk bench stage` reads a plan out of a macOS guest, where that path does not exist.
@@ -723,9 +790,13 @@ cmd_report() {
     if [ ${#positional[@]} -eq 1 ]; then
         local task="${positional[0]}" dir running=()
         dir=$(bench_task_dir "$task")
+        # A task is on the machine that took it and is copied nowhere, so a name this store does not have is a name to look for in the fleet's listing -- which says which machine to ask.
         [ -f "$dir/task.json" ] \
-            || die "no such task '$task' ($dir has no task.json). 'wk bench ls' lists the tasks;
-    two run directories compare any two runs."
+            || die "no such task '$task' in this machine's store ($dir has no task.json).
+$(cmd_ls 2>/dev/null | grep -F -- "$task" | sed 's/^/    /' | head -3)
+    A task stays on the machine that took it ('wk bench ls' names it in [] at
+    the end of each line); run this there. Two run directories compare any two
+    runs without a task at all."
         [ "$html" != 1 ] && [ -n "$html" ] \
             && die "a task's html reports are named for it (report-<device>-<plan>.html, in $dir); --html takes no file here"
         lock_alive "bench-task-$task" && running=(--running)
@@ -1367,7 +1438,7 @@ mac_aslr_probe() {
 
 case "${1:-}" in
     --list)  bench_plan_list || exit 1; exit 0 ;;
-    ls)      shift; cmd_ls; exit 0 ;;
+    ls)      shift; cmd_ls "$@"; exit 0 ;;
     compare) shift; [ $# -ge 2 ] || die "usage: wk bench compare <run-a> <run-b> [ws]; see wk bench -h"
              cmd_compare "$@"; exit 0 ;;
     report)  shift; cmd_report "$@"; exit 0 ;;

@@ -15,7 +15,7 @@ import subprocess
 import time
 import unittest
 
-from tests.support import (REPO, WK, WkTest, rand_suffix,
+from tests.support import (REPO, WK, WkTest, bash, rand_suffix,
                            requires_container_target, requires_podman_vm,
                            run, shell_files)
 
@@ -63,8 +63,16 @@ class TestContainerWorkspaceLifecycle(WkTest):
                         "@{u}").stdout.strip(),
             "origin/main", "main tracks origin/main, so `git pull` has an upstream")
 
-        self.assertEqual(self._config("--get-all", "remote.origin.fetch"),
-                         "+refs/heads/main:refs/remotes/origin/main")
+        # Asked of the one list rather than retyped: origin is narrowed to the
+        # branches the mirror carries, which is main plus the release branch of
+        # every image configuration this checkout defines (wk_mirror_branches).
+        carried = bash('. "$WK_ROOT/lib/common.sh"\n. "$WK_ROOT/lib/store.sh"\n'
+                       'wk_mirror_branches\n')
+        self.assertEqual(carried.returncode, 0, carried.stdout + carried.stderr)
+        self.assertEqual(
+            self._config("--get-all", "remote.origin.fetch").split("\n"),
+            ["+refs/heads/%s:refs/remotes/origin/%s" % (b, b)
+             for b in carried.stdout.split()])
         self.assertEqual(self._config("remote.origin.url"),
                          "https://github.com/WebKit/WebKit.git",
                          "git-webkit reads this to find the project")

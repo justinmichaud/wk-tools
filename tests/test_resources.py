@@ -60,7 +60,7 @@ kill $live
         # (100000 - 40000) / 1000 = 60 by memory, 64 - 20 = 44 by cores
         self.assertIn("next=44", cp.stdout)
 
-    def test_a_machine_spoken_for_refuses_without_force(self):
+    def test_a_machine_already_building_refuses_without_force(self):
         cp = self._bash('''
 sleep 300 & live=$!
 trap 'kill $live' EXIT
@@ -72,7 +72,27 @@ jobs=$(build_jobs); echo "jobs=$jobs"
         self.assertIn("--force proceeds anyway", cp.stdout + cp.stderr)
         self.assertNotIn("admitted", cp.stdout)
 
-    def test_a_machine_spoken_for_is_not_now_rather_than_no(self):
+    def test_a_second_build_is_refused_however_much_room_is_left(self):
+        """One machine builds one thing at a time. A build that would still
+        get its jobs is refused all the same: two sharing a machine take
+        longer together than in turn, and each moves the other's numbers."""
+        cp = self._bash('''
+sleep 300 & live=$!
+trap 'kill $live' EXIT
+build_record "one small build" 1 1000 "pid:$live"
+jobs=$(build_jobs); echo "jobs=$jobs"
+( build_admit "a second build" "$jobs" ) && echo admitted || echo refused
+''')
+        self.assertNotIn("admitted", cp.stdout, cp.stdout + cp.stderr)
+        self.assertIn("one thing at a time", cp.stdout + cp.stderr)
+        self.assertIn("one small build", cp.stdout + cp.stderr,
+                      "the refusal does not name what is already building")
+
+    def test_nothing_building_is_admitted(self):
+        cp = self._bash('( build_admit "the only build" 8 ) && echo admitted || echo refused')
+        self.assertIn("admitted", cp.stdout, cp.stdout + cp.stderr)
+
+    def test_a_machine_already_building_is_not_now_rather_than_no(self):
         """The refusal a scheduled step comes back to: another build ending is
         what changes the answer, so it exits WK_RETRY_EXIT and lib/sched.py
         puts the step back in the queue instead of cascading it as a failure."""
@@ -206,9 +226,10 @@ class TestDiskAdmit(WkTest):
 
 class TestImageStageBudget(WkTest):
     """yocto_stage_budget (image/yocto.sh): what a stage puts on the books is
-    what it uses. A bitbake stage is the machine; a cross WebKit build is its
-    own job count, so several profiles' slots build side by side on one
-    machine instead of the first one refusing the rest."""
+    what it uses -- a bitbake stage is the machine, a cross WebKit build is its
+    own job count, the mix is one job. It sizes the job count and the memory
+    watchdog's budget; whether a build may start at all is one per machine
+    (build_admit), whatever it books."""
 
     def _budget(self, stage, machine_jobs=79, machine_mb=113000, webkit_jobs=8):
         cp = bash(f'set -euo pipefail\n{_lift("yocto_stage_budget")}\n'
@@ -228,10 +249,10 @@ class TestImageStageBudget(WkTest):
     def test_the_mix_books_one_job(self):
         self.assertEqual(self._budget("pgo-mix"), (1, MB_PER_JOB))
 
-    def test_three_slot_builds_fit_a_machine_one_image_build_fills(self):
-        # The point of the split, in the units build_admit works in: with one
-        # slot build booked, a second is still admitted; with a bitbake stage
-        # booked, nothing else fits.
+    def test_a_slot_build_leaves_jobs_and_an_image_build_leaves_none(self):
+        # What the split is worth in the units build_jobs works in: a build
+        # forced beside a booked slot build still gets jobs, and one forced
+        # beside a booked bitbake stage gets almost none.
         def left(booked_mb):
             cp = bash(f'set -euo pipefail\n. "{REPO}/lib/common.sh"\n'
                       f'. "{REPO}/lib/resources.sh"\n'
@@ -247,9 +268,9 @@ class TestImageStageBudget(WkTest):
             return int(cp.stdout.split()[0])
 
         self.assertGreaterEqual(left(8 * MB_PER_JOB), 4,
-                                "a second slot build fits beside the first")
+                                "a slot build books more of the machine than it uses")
         self.assertLess(left(113000), 4,
-                        "an image build books the machine, and build_admit refuses beside it")
+                        "a bitbake stage does not book the machine it uses")
 
 
 # lib/resources.sh's readings: what a refusal has to survive.

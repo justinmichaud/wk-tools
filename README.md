@@ -489,8 +489,10 @@ not what a fetch of them reads: the same wiring adds `url.<mirror>.insteadOf`
 for each, so `git fetch origin`, `git fetch fork` and `git pull` in a workspace
 are local reads of the machine's mirror -- and `git remote -v`, which prints
 the rewrite's answer rather than the recorded URL, names the mirror path. Each
-remote asks only for what that mirror carries -- `main` of origin, the
-namespaced branches of the other three -- and for no tags. Under git's own
+remote asks only for what that mirror carries -- of origin, `main` and the
+release branch of every image configuration this checkout defines, since a
+lane checks its branch out of the mirror and out of nothing else; of the other
+three, their namespaced branches -- and for no tags. Under git's own
 default refspec a bare `git fetch origin` asks
 WebKit/WebKit for all 924 of its heads and 8,288 tags and writes a
 remote-tracking ref for each, which is the half-minute that made a fresh
@@ -589,13 +591,21 @@ wk bench compare <run-a> <run-b>                 # two run directories; warns if
 ```
 
 Every benchmarking command is one *task*, named for the moment it was
-requested and what it measures, under `$WK_STORE/bench/<task>/`: `task.json`
+requested and what it measures, under `wk_bench_dir`'s `<task>/`: `task.json`
 (the request and every command it ran), `runs/<run>/` (one directory per run:
 `env.json`, `result.json`, `run.log`, the board's `browser.log` and
-`board.log`), the command's logs and its reports. `wk bench ls` lists tasks
-and their runs' directories; nothing about a task's state is stored -- planned,
-ended, usable and complete are recomputed from the runs, and "running" is the
-task's lock.
+`board.log`), the command's logs and its reports. Nothing about a task's state
+is stored -- planned, ended, usable and complete are recomputed from the runs,
+and "running" is the task's lock.
+
+**A task stays on the machine that took it, and every workstation reads them
+all.** `wk bench ls` lists this machine's store and then every machine it knows
+that answers for a store of its own, each asked through its own `wk`, and
+prints one listing with the holding machine against each task. So there is no
+second copy of a measurement anywhere to drift from the first, and no
+remembering which workstation a run was driven from; a machine that cannot be
+asked is a warning naming it, never silence. `wk bench report <task>` runs
+where the task is, and says which machine that is when it is not this one.
 
 **Put a build on a fleet device and bench it there**
 
@@ -1071,17 +1081,35 @@ measurement: `wk pi bench` reads `build_config` out of the slot's manifest and
 will not take a number from an instrumented build, which runs several times
 slower for the profile it is writing.
 
-**One lane per profile, several lanes at once**
+**One lane per profile, one build per machine**
 
 A **lane** is the image workspace -- `yocto-<profile>`, `buildroot-<profile>`
--- and it is where that profile's checkout, its build directory and its slots
-are. A lane builds one thing at a time: its two arms are two commits in one
-checkout, and a second job in the same workspace is refused. Two profiles are
-two lanes and build at once, because a slot build books only its own jobs
-(above) and they are two workspaces with two build directories. The ccache
-under the store is shared between lanes, so an arm's instrumented build is
-largely hits off the arm before it; its measured build is not, a changed
+-- and it is where that profile's checkout, its build directory, its slots and
+its collections are. Everything under a lane is keyed on the lane's name and
+nothing on the profile's, so a second lane of one profile (`--workspace
+<name>`) keeps its own of each.
+
+**One machine builds one thing at a time.** A second job in the same workspace
+is refused, and so is a second build anywhere on the machine: the scheduler
+serialises every build step by the machine it runs on, and `build_admit`
+refuses a build started beside another whatever memory is left over, because
+two builds sharing a machine take longer together than in turn and each moves
+the other's numbers. `--force` crosses that, recorded.
+
+**So the parallelism is across machines.** `wk ab --build-on <a>,<b>` puts each
+arm's lane on a machine of its own, and the two arms build at once; one name,
+or none, is one machine building them in turn. The ccache under the store is
+shared between lanes on a machine, so an arm's instrumented build is largely
+hits off the arm before it; its measured build is not, a changed
 `-fprofile-use` file being a miss (above).
+
+```sh
+wk ab <pr> --devices rpi5-64 --build-on moose,buildbox4   # an arm per machine, at once
+wk ab <pr> --devices rpi5-64                              # one machine, in turn
+```
+
+The first costs a lane on each machine, ~120 GB apiece (below), and buys the
+wall clock of one arm.
 
 **An image is built the way its upstream builds it, and a lane is sized for
 that.** The yocto tree in a lane is the whole distribution's build, because
@@ -1089,14 +1117,18 @@ that is what produces the image the board runs; nothing here substitutes a
 lighter path -- an SDK lifted out and carried between machines, a toolchain
 kept as an artifact -- because a number measured on an image built differently
 is a number about a different system. A lane is therefore ~120 GB (a measured
-84 GB of build tree, plus the machine's shared sstate and download caches), and
-the machine grows to fit rather than the build shrinking to fit the machine.
+84 GB of build tree, plus the machine's shared sstate and download caches) --
+which is also what `disk_admit` refuses an image or toolchain stage under, so a
+lane costs ~120 GB to start and ~120 GB to hold, and three profiles at once on
+one machine is ~400 GB. The machine grows to fit rather than the build
+shrinking to fit the machine.
 Images are rebuilt per run and never reused, so a lane is transient: taking one
 down loses nothing.
 
 **Which machine a lane is on is its workspace's target, and the command
-follows it.** `wk sysimage build` and `wk sysimage webkit` derive the lane
-from the profile and are routed by it, wherever they are typed: a container
+follows it.** `wk sysimage build`, `wk sysimage webkit`, `wk sysimage holds`,
+`wk pi deploy` and a `--pgo` collection derive the lane from the profile and
+are routed by it, wherever they are typed: a container
 lane on a macOS workstation is forwarded into the podman VM, a lane on
 another workstation is handed to that machine's own wk — the same two paths
 `wk build` takes, since a lane is an ordinary workspace. `wk sysimage ls`
@@ -1120,9 +1152,37 @@ wk sysimage webkit webkit-2.52-yocto-rpi5-64@moose --commit <sha> --slot base
 
 The machine half is the command's answer to the dispatcher's target question,
 so it routes the build and never reaches the builder: what is built is the
-profile. A deploy reads the slot's bytes in the lane that built them, so
-`wk pi deploy <profile>@<machine>` is refused anywhere but that machine, and
-says which one to run it on.
+profile. A deploy reads the slot's bytes in the lane that built them and a
+profile-guided collection writes the board's profiles back into it, so both
+are routed the same way and run on that machine wherever they are typed:
+
+```sh
+wk pi deploy webkit-2.52-yocto-rpi5-64@moose rpi5 --slot base
+wk pi bench rpi5 speedometer3 --slot base-instr --pgo webkit-2.52-yocto-rpi5-64@moose
+```
+
+**A profile may have more than one lane, and `--workspace <name>` says which.**
+`<builder>-<profile>-<arm>` is a lane of its own -- its own checkout, build
+directory, slots and collections -- so two arms of one A/B build at once on one
+machine instead of queueing on one checkout. Everything under a lane is keyed
+on the lane's name and nothing on the profile's, so `wk sysimage ls` and
+`write --from` still read one profile's images out of any of them.
+
+**A build is serialised by the machine it runs on.** The scheduler holds
+`machine:<name>` for every build step, so one machine's steps run in turn and
+two machines' run at once -- the same rule `build_admit` holds for the builds
+no one plan knows about.
+
+**A lane's bytes are on the machine whose store holds them**, and a deploy is
+routed to that machine -- forwarded into the podman machine for a container
+lane, handed to a peer for that peer's. The podman machine is a tailnet node
+of its own for exactly this reason (`./setup --stage machine`): the half that
+can read the store has to be the half that can reach the board. gvproxy
+answers a 100.x address itself -- ping replies in 0.13ms and a connection to
+port 22 is accepted -- and delivers nothing, so the machine joins rather than
+being routed (measured 2026-09-16). Its workspaces do not join with it: they
+run `--network none` and reach the world only through the egress proxy's
+socket, so the sandbox is the container and not the VM.
 
 **Add a new fleet device**
 
@@ -2095,7 +2155,7 @@ plan's own is sized for a measured run and an instrumented build is several
 times slower).
 
 **How much of the machine a job may take**
-`WK_MAX_JOBS`, `WK_MIN_JOBS`, `WK_LOAD`, `WK_AVAIL_MB`, `WK_RESERVE_CORES`,
+`WK_MAX_JOBS`, `WK_LOAD`, `WK_AVAIL_MB`, `WK_RESERVE_CORES`,
 `WK_RESERVE_MB`, `WK_HEADLESS_RESERVE_CORES`, `WK_HEADLESS_RESERVE_MB`
 (the envelope a build is allowed), `WK_CGROUP_CORES` and `WK_CGROUP_MB` (what
 a container reports instead of the whole host), `WK_BUILD_MACHINE` and
@@ -2104,12 +2164,23 @@ a container reports instead of the whole host), `WK_BUILD_MACHINE` and
 **Where state lives**
 `WK_LOCAL_STORE`, `WK_REMOTE_STORE`, `WK_LOCK_DIR`, `WK_PREFETCH_DIR`,
 `WK_MARKER`, `WK_REMOTE_MARKER`, `WK_IMAGE_MARKER`, `WK_SESSION_MODE_FILE`,
-`WK_MIRROR_BRANCHES` (which branches the mirror carries), `WK_CMD` (the
+`WK_MIRROR_BRANCHES` (the branches the mirror carries, in place of the derived
+list), `WK_TART_CACHE_GB` (how much of tart's pulled-image cache `wk gc`
+leaves; it is re-downloadable, so nothing is lost above it), `WK_CMD` (the
 command name a delegated `wk` reports itself as).
 
 **The container target**
 `WK_SDK`, `WK_SDK_IMAGE`, `WK_CONTAINER_USER`, `WK_TOOLS_SRC`, `WK_MACHINE`
 (the podman machine), `WK_SANDBOX` (what `wk verify` measures against).
+
+**Where a macOS workstation writes its own records**
+The store is the podman machine's, root-owned and unwritable from the host, so
+what this machine writes for itself and opens again -- a seeded benchmark
+payload, an exported runner tree, a downloaded profiler, a long-running
+command's task record, a bench task's directory -- goes under
+`~/.local/state/wk` instead (`wk_record_dir`). A command forwarded into the
+machine answers the same question from in there and uses the store. On Linux
+the two are the same directory.
 
 **The macOS guest target**
 `WK_VM_IMAGE`, `WK_VM_BASE`, `WK_VM_USER`, `WK_VM_PASSWORD` (the account the

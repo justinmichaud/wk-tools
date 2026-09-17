@@ -8,7 +8,7 @@ definition or a call, under cmd/, lib/, boot/, bench/, image/, container/ or
 host/; the phrase "image store" survives only as cmd/sysimage's own
 tombstones and in this test; `wk sysimage rm` is a tombstone naming `wk rm`;
 `wk boot`'s default system is read off the device rather than looked up, and
-a named --system is checked against it; `_ws_profile`/`_profile_from_path`
+a named --system is checked against it; `image_lane_profile`/`_profile_from_path`
 (cmd/sysimage) derive a profile from both a yocto and a buildroot workspace
 path; image_workspace_scan (lib/image.sh) finds what each builder leaves in
 a workspace laid out the way targets/container.sh mounts one.
@@ -237,27 +237,21 @@ class TestBootArmDefaultsToDeviceImage(WkTest):
 
 
 class TestProfileFromWorkspacePath(unittest.TestCase):
-    """_ws_profile (cmd/sysimage) derives a profile from a workspace name for
-    both builders that leave images inside one (image_workspace_scan,
-    lib/image.sh), by matching the configurations this checkout defines;
-    _profile_from_path is the same derivation from a full path and calls
-    through it -- lifted together, sed's the idiom
-    tests/test_quick.py uses for 'bump' (cmd/status)."""
+    """image_lane_profile (lib/image.sh) derives a profile from a lane's name
+    for both builders that leave images inside one (image_workspace_scan), by
+    matching the configurations this checkout defines; _profile_from_path
+    (cmd/sysimage) is the same derivation from a full path and calls through
+    it -- lifted beside the library, sed's the idiom tests/test_quick.py uses
+    for 'bump' (cmd/status)."""
 
     def _lift(self):
         body = subprocess.run(
-            ["sed", "-n", "/^_ws_profile()/,/^}/p", str(REPO / "cmd" / "sysimage")],
-            capture_output=True, text=True,
-        ).stdout
-        self.assertTrue(body.strip(), "could not lift _ws_profile from cmd/sysimage")
-        body2 = subprocess.run(
             ["sed", "-n", "/^_profile_from_path()/,/^}/p", str(REPO / "cmd" / "sysimage")],
             capture_output=True, text=True,
         ).stdout
-        self.assertTrue(body2.strip(), "could not lift _profile_from_path from cmd/sysimage")
-        # The derivation matches the configurations this checkout defines, so
-        # the library that enumerates them is sourced beside the lifted pair.
-        return '. "$WK_ROOT/image/profiles.sh"\n' + body + "\n" + body2
+        self.assertTrue(body.strip(), "could not lift _profile_from_path from cmd/sysimage")
+        return ('. "$WK_ROOT/lib/common.sh"\n. "$WK_ROOT/lib/store.sh"\n'
+                '. "$WK_ROOT/lib/target.sh"\n. "$WK_ROOT/lib/image.sh"\n' + body)
 
     def setUp(self):
         self.prelude = self._lift()
@@ -267,17 +261,17 @@ class TestProfileFromWorkspacePath(unittest.TestCase):
         return bash(script)
 
     def test_yocto_workspace_name(self):
-        cp = self._run("_ws_profile", "yocto-webkit-2.52-yocto-rpi5-64")
+        cp = self._run("image_lane_profile", "yocto-webkit-2.52-yocto-rpi5-64")
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
         self.assertEqual(cp.stdout.strip(), "webkit-2.52-yocto-rpi5-64")
 
     def test_buildroot_workspace_name(self):
-        cp = self._run("_ws_profile", "buildroot-webkit-2.52-buildroot-rpi5-64")
+        cp = self._run("image_lane_profile", "buildroot-webkit-2.52-buildroot-rpi5-64")
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
         self.assertEqual(cp.stdout.strip(), "webkit-2.52-buildroot-rpi5-64")
 
     def test_unrelated_workspace_name_is_not_a_profile(self):
-        cp = self._run("_ws_profile", "jsc-release")
+        cp = self._run("image_lane_profile", "jsc-release")
         self.assertNotEqual(cp.returncode, 0, cp.stdout + cp.stderr)
 
     def test_profile_from_a_full_yocto_path(self):

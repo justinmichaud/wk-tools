@@ -17,11 +17,18 @@ store_is_local() { # on macOS $WK_STORE is the VM's, and such a command is forwa
     [ -d "$WK_STORE" ] && [ -w "$WK_STORE" ]
 }
 
-# Artifacts this machine opens as files -- a seeded benchmark payload, an exported runner tree, a downloaded profiler -- live in the store, except on a macOS workstation where the store is the podman VM's and nothing this side can read it.
-wk_artifact_dir() {
-    if store_is_local; then printf '%s/cache' "$WK_STORE"
-    else printf '%s/cache' "$(wk_state_dir)"; fi
+# What this machine writes for itself and opens again as files: a seeded benchmark payload, an exported runner tree, a downloaded profiler, a long-running command's task record, a bench task's directory. The store holds them, except the one store no host command can write -- the podman VM's, which is what a macOS workstation's default resolves to, root-owned from this side (`mkdir /var/lib/wk/bench`: Permission denied). Only that one is diverted: a store this machine was pointed at, a target's own or a test's scratch, is where its own records belong, and a command forwarded into the VM answers this from in there.
+wk_record_dir() {
+    if [ -z "${WK_IN_VM:-}" ] && [ "$(uname -s)" = Darwin ] \
+       && [ "$WK_STORE" = "$(_wk_default_store)" ]; then
+        wk_state_dir
+    else
+        printf '%s' "$WK_STORE"
+    fi
 }
+
+wk_artifact_dir() { printf '%s/cache' "$(wk_record_dir)"; }
+wk_bench_dir()    { printf '%s/bench' "$(wk_record_dir)"; }   # the tasks a benchmarking command records, named here so cmd/status and cmd/doctor spell it the way lib/bench.sh does
 
 
 WK_CCACHE_MAXSIZE="${WK_CCACHE_MAXSIZE:-40G}"   # shared by every workspace here
@@ -667,9 +674,11 @@ push_agent_publish_config() { # <dir> is this machine's spelling; paths inside a
     fi
 }
 
-# WebKit/WebKit has ~920 branches, tens of gigabytes to mirror, so only main.
+# WebKit/WebKit has ~920 branches, tens of gigabytes to mirror, so a mirror carries main and the release branch of every image configuration this checkout defines on origin -- the branches a lane checks out, which it reads from the mirror and nowhere else (image/yocto.sh). WK_MIRROR_BRANCHES replaces the list.
 wk_mirror_branches() {
-    echo "${WK_MIRROR_BRANCHES:-main}"
+    [ -z "${WK_MIRROR_BRANCHES:-}" ] || { echo "$WK_MIRROR_BRANCHES"; return 0; }
+    command -v image_origin_branches >/dev/null 2>&1 || . "$WK_ROOT/image/profiles.sh"
+    echo main $(image_origin_branches)
 }
 
 wk_mirror_default_remotes() { wk_remotes | awk 'NF {printf "%s%s", sep, $1; sep=" "} END {print ""}'; }

@@ -158,7 +158,7 @@ EXPECTED = {
     "skills":     ["subverb"],
     "sudo":       ["subverb", "--target"],
     "sync":       ["--target"],
-    "sysimage":   ["subverb"],
+    "sysimage":   ["config", "subverb"],
     "test":       ["config"],
     "vm":         ["subverb"],
 }
@@ -204,10 +204,11 @@ class TestWhatIsStillParsedCommandByCommand(unittest.TestCase):
     @unittest.expectedFailure
     def test_the_build_config_is_not_the_dispatchers(self):
         """defect: cmd/build takes <config> as a positional and cmd/bench,
-        cmd/gui, cmd/profile, cmd/run, cmd/test each parse `--config` and
-        default it from WK_CONFIG themselves -- there is no declaration for a
-        config and no WK_CONFIG the dispatcher sets, so the six agree by
-        being written the same way rather than by construction"""
+        cmd/gui, cmd/profile, cmd/run, cmd/sysimage, cmd/test each parse
+        `--config` and default it from WK_CONFIG themselves -- there is no
+        declaration for a config and no WK_CONFIG the dispatcher sets, so the
+        seven agree by being written the same way rather than by
+        construction"""
         self.assertEqual(offenders("config"), [])
 
     @unittest.expectedFailure

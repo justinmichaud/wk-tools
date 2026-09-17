@@ -31,14 +31,14 @@ image_pgo_mode() {   # <machine> -- what it is running now, recomputed
       printf '%s' "${MODE:-unreachable}" )
 }
 
-image_pgo_slot_is() {   # <profile> <slot> <sha> <cross config> -- is that slot already what this phase would build? The config is half the question: a slot built before this profile was profile-guided holds the right commit and the wrong code
+image_pgo_slot_is() {   # <lane workspace> <slot> <sha> <cross config> -- is that slot already what this phase would build? The config is half the question: a slot built before this profile was profile-guided holds the right commit and the wrong code
     local sj; sj="$(image_slot_dir "$1" "$2")/slot.json"
     [ -f "$sj" ] || return 1
     [ "$(wkslot get "$sj" commit)" = "$3" ] && [ "$(wkslot get "$sj" build_config)" = "$4" ]
 }
 
-image_slot_holds() {   # <profile> <slot> <sha> -- is that slot the one this commit would produce here? On a profile-guided release the build config is half the question, so the A/B and the cycle ask one predicate
-    ( image_profile_load "$1" >/dev/null 2>&1 || exit 1
+image_slot_holds() {   # <lane workspace> <slot> <sha> -- is that slot the one this commit would produce in that lane? On a profile-guided release the build config is half the question, so the A/B and the cycle ask one predicate
+    ( image_profile_load "$(image_lane_profile "$1")" >/dev/null 2>&1 || exit 1
       if image_pgo_wanted; then
           image_pgo_slot_is "$1" "$2" "$3" wpe-cross-pgo-use
       else
@@ -68,47 +68,50 @@ _pgo_require_board() {   # <profile> -- prints the machine, or refuses with the 
     printf '%s' "$machine"
 }
 
-image_pgo_steps() {   # <profile> <commit> <slot> <machine> [the step they wait for] -- the phases as steps of the open graph, each one command
-    local profile="$1" commit="$2" slot="$3" machine="$4" need="${5:-}"
-    local instr="$slot-instr" lane="lane:$profile" board="device:$machine"
-    local on dir plan legs="" id
-    on=$(wk_machine_name)
-    dir=$(image_pgo_dir "$profile" "$slot")
-    sched_step "instr:$profile:$slot" "$on" "$need" "$lane" \
-        "image_pgo_slot_is $profile $instr $commit wpe-cross-pgo-collect" \
-        "wk sysimage webkit $profile --commit $commit --slot $instr --config wpe-cross-pgo-collect"
-    sched_step "deploy:$machine:$instr" "$on" "instr:$profile:$slot" "$board" "" \
-        "wk pi deploy $profile $machine --slot $instr"
+# Every one of these runs on the machine holding the lane, the collection included: the board writes its profiles into that lane's build directory, over the bind mount the builder reads them back through.
+image_pgo_steps() {   # <profile>[@<machine>] <lane workspace> <commit> <slot> <board> [the step they wait for] -- the phases as steps of the open graph, each one command
+    local spec="$1" lane="$2" commit="$3" slot="$4" board="$5" need="${6:-}"
+    local instr on res plan legs="" id w dev="device:$board"
+    instr=$(image_pgo_instr_slot "$slot")
+    on=$(image_lane_machine "$lane" "$(image_spec_machine "$spec")")
+    res=$(image_build_resource "$on")
+    w="--workspace $lane"
+    sched_step "instr:$lane:$slot" "$on" "$need" "$res" \
+        "$(image_holds_predicate "$spec" "$lane" --slot "$instr" --commit "$commit" --config wpe-cross-pgo-collect)" \
+        "wk sysimage webkit $spec $w --commit $commit --slot $instr --config wpe-cross-pgo-collect"
+    sched_step "deploy:$board:$instr" "$on" "instr:$lane:$slot" "$dev" "" \
+        "wk pi deploy $spec $board $w --slot $instr"
     for plan in $PGO_BENCHMARKS; do
-        id="collect:$machine:$slot:$plan"
-        sched_step "$id" "$on" "deploy:$machine:$instr" "$board" "" \
-            "wk pi bench $machine $plan --slot $instr --pgo $dir"
+        id="collect:$board:$slot:$plan"
+        sched_step "$id" "$on" "deploy:$board:$instr" "$dev" "" \
+            "wk pi bench $board $plan --slot $instr --pgo $spec $w"
         legs="${legs:+$legs,}$id"
     done
-    sched_step "mix:$profile:$slot" "$on" "$legs" "$lane" "" \
-        "wk sysimage build $profile --stage pgo-mix --slot $slot"
-    sched_step "slot:$profile:$slot" "$on" "mix:$profile:$slot" "$lane" \
-        "image_slot_holds $profile $slot $commit" \
-        "wk sysimage webkit $profile --commit $commit --slot $slot --config wpe-cross-pgo-use"
+    sched_step "mix:$lane:$slot" "$on" "$legs" "$res" "" \
+        "wk sysimage build $spec $w --stage pgo-mix --slot $slot"
+    sched_step "slot:$lane:$slot" "$on" "mix:$lane:$slot" "$res" \
+        "$(image_holds_predicate "$spec" "$lane" --slot "$slot" --commit "$commit")" \
+        "wk sysimage webkit $spec $w --commit $commit --slot $slot --config wpe-cross-pgo-use"
 }
 
 _PGO_STEPS=""
 _pgo_steps_gone() { [ -z "$_PGO_STEPS" ] || rm -f "$_PGO_STEPS"; _PGO_STEPS=""; return 0; }
 
-image_pgo_graph() {   # <profile> <commit> <slot> <machine> -- the cycle as a graph of its own
+image_pgo_graph() {   # <profile>[@<machine>] <lane workspace> <commit> <slot> <board> -- the cycle as a graph of its own
     _PGO_STEPS=$(mktemp "${TMPDIR:-/tmp}/wk-pgo-steps.XXXXXX")
     wk_atexit _pgo_steps_gone
     sched_begin "$_PGO_STEPS" "$WK_ROOT/image/pgo.sh"
-    image_pgo_steps "$1" "$2" "$3" "$4"
+    image_pgo_steps "$1" "$2" "$3" "$4" "$5"
 }
 
-image_pgo_webkit() {   # <profile> <the rest of `wk sysimage webkit`'s arguments>
-    local profile="$1"; shift
-    local commit="" slot="" dry="" detach="" config="" stop=""
+image_pgo_webkit() {   # <profile>[@<machine>] <the rest of `wk sysimage webkit`'s arguments>
+    local spec="$1" profile; profile=$(image_spec_profile "$1"); shift
+    local commit="" slot="" dry="" detach="" config="" stop="" lane=""
     while [ $# -gt 0 ]; do
         case "$1" in
             --commit) commit="${2:-}"; shift ;;
             --slot)   slot="${2:-}"; image_check_slot_name "$slot"; shift ;;
+            --workspace) lane="${2:-}"; shift ;;
             --dry-run) dry=1 ;;
             --detach)  detach=1 ;;
             --stop)    stop=1 ;;
@@ -123,7 +126,7 @@ image_pgo_webkit() {   # <profile> <the rest of `wk sysimage webkit`'s arguments
     against one." ;;
                       esac
                       shift ;;
-            *) die "usage: wk sysimage webkit $profile --commit <sha> --slot <name> [--detach|--dry-run|--stop]
+            *) die "usage: wk sysimage webkit $profile --commit <sha> --slot <name> [--workspace <lane>] [--detach|--dry-run|--stop]
     unexpected: $1
     $profile is $CFG_RELEASE, so its slots are profile-guided and built in
     three phases (image/pgo.sh); the flags that belong to one phase of an
@@ -131,17 +134,19 @@ image_pgo_webkit() {   # <profile> <the rest of `wk sysimage webkit`'s arguments
         esac
         shift
     done
+    [ -n "$lane" ] || lane=$(image_lane_ws "$profile")
+
     # Before the --commit rule: stopping the cycle running for a slot is about
     # the slot, and the record it stops names exactly this command.
     if [ -n "$stop" ]; then
         [ -n "$slot" ] || die "usage: wk sysimage webkit $profile --slot <name> --stop
     --stop stops the cycle running for one slot, so it needs --slot"
-        [ -z "$commit$dry$detach$config" ] || die "'wk sysimage webkit $profile --slot $slot --stop' stops the cycle already
+        [ -z "$commit$dry$detach$config" ] || die "'wk sysimage webkit $spec --slot $slot --stop' stops the cycle already
     running for that slot and takes nothing with it -- no --commit, --config,
     --detach or --dry-run."
-        local rc=0; job_stop "$profile/$slot" pgo || rc=$?
-        [ "$rc" != 1 ] || die "the driver of '$profile/$slot' outlived a TERM and a KILL:
-        ps -p $(task_field "$(task_find pgo "$profile/$slot")" pid)"
+        local rc=0; job_stop "$lane/$slot" pgo || rc=$?
+        [ "$rc" != 1 ] || die "the driver of '$lane/$slot' outlived a TERM and a KILL:
+        ps -p $(task_field "$(task_find pgo "$lane/$slot")" pid)"
         return 0
     fi
 
@@ -151,7 +156,7 @@ image_pgo_webkit() {   # <profile> <the rest of `wk sysimage webkit`'s arguments
     [ "${#commit}" -eq 40 ] || die "--commit takes a full sha (40 hex digits), got '$commit'"
 
     if [ -n "$config" ]; then
-        image_pgo_phase "$profile" "$commit" "$slot" "$config" "$dry" "$detach"
+        image_pgo_phase "$lane" "$commit" "$slot" "$config" "$dry" "$detach"
         return $?
     fi
 
@@ -159,11 +164,12 @@ image_pgo_webkit() {   # <profile> <the rest of `wk sysimage webkit`'s arguments
     if [ -n "$dry" ]; then   # a dry run reports the board it would need rather than refusing over it
         machine=$(image_pgo_machine "$profile") || machine=""
         log "would build slot '$slot' of $profile as a profile-guided build"
+        log "  lane        $lane"
         log "  board       ${machine:-none declares this image as its NODE_PROFILE, so this refuses}$([ -z "$machine" ] || echo " -- it has to be running this image; wk boot $machine --status")"
-        log "  collection  $(image_pgo_dir "$profile" "$slot")"
+        log "  collection  $(image_pgo_dir "$lane" "$slot")"
         log "  benchmarks  $PGO_BENCHMARKS, mixed at WebKit's own weights"
         log ""
-        image_pgo_graph "$profile" "$commit" "$slot" "${machine:-<board>}"
+        image_pgo_graph "$spec" "$lane" "$commit" "$slot" "${machine:-<board>}"
         sched_plan
         log "dry run -- nothing was built."
         return 0
@@ -171,19 +177,19 @@ image_pgo_webkit() {   # <profile> <the rest of `wk sysimage webkit`'s arguments
     machine=$(_pgo_require_board "$profile")
 
     if [ -n "$detach" ]; then
-        local dlog; dlog="$(wk_ws_dir "$(yocto_ws_default "$profile")")/pgo-$slot.log"
+        local dlog; dlog="$(wk_ws_dir "$lane")/pgo-$slot.log"
         local pid; pid=$(detach_run "$dlog" -- \
-            "$WK_ROOT/wk" sysimage webkit "$profile" --commit "$commit" --slot "$slot")
+            "$WK_ROOT/wk" sysimage webkit "$spec" --workspace "$lane" --commit "$commit" --slot "$slot")
         info "detached as pid $pid -- this end can go away"
         log  "  follow:  tail -f $dlog"
         return 0
     fi
 
-    image_pgo_slot "$profile" "$commit" "$slot" "$machine"
+    image_pgo_slot "$spec" "$lane" "$commit" "$slot" "$machine"
 }
 
-image_pgo_phase() {   # <profile> <commit> <slot> <config> <dry> <detach> -- one phase of the cycle, as one command
-    local profile="$1" commit="$2" slot="$3" config="$4" dry="${5:-}" detach="${6:-}"
+image_pgo_phase() {   # <lane workspace> <commit> <slot> <config> <dry> <detach> -- one phase of the cycle, as one command
+    local lane="$1" commit="$2" slot="$3" config="$4" dry="${5:-}" detach="${6:-}"
     local extra=()
     case "$config" in
         wpe-cross)
@@ -193,27 +199,29 @@ image_pgo_phase() {   # <profile> <commit> <slot> <config> <dry> <detach> -- one
   record it as wpe-cross." ;;
         wpe-cross-pgo-collect)
             # A collection is every leg of one run of one build: what was taken against the last instrumented build says nothing about this one.
-            act rm -rf "$(image_pgo_dir "$profile" "${slot%-instr}")" ;;
+            act rm -rf "$(image_pgo_dir "$lane" "$(image_pgo_measured_slot "$slot")")" ;;
         wpe-cross-pgo-use)
             extra=(--pgo-profile "$(image_pgo_dir_in "$slot")/output/$PGO_GLIB_LIB.profdata") ;;
     esac
-    yocto_build "$profile" --stage webkit --commit "$commit" --slot "$slot" \
+    yocto_build "$(image_lane_profile "$lane")" --workspace "$lane" \
+        --stage webkit --commit "$commit" --slot "$slot" \
         --config "$config" ${extra[@]+"${extra[@]}"} ${dry:+--dry-run} ${detach:+--detach}
 }
 
-image_pgo_slot() {   # <profile> <commit> <slot> <machine> -- the whole cycle, as the graph its phases are
-    local profile="$1" commit="$2" slot="$3" machine="$4" rc=0 line dir
-    dir=$(image_pgo_dir "$profile" "$slot")
-    image_pgo_graph "$profile" "$commit" "$slot" "$machine"
+image_pgo_slot() {   # <profile>[@<machine>] <lane workspace> <commit> <slot> <board> -- the whole cycle, as the graph its phases are
+    local spec="$1" lane="$2" commit="$3" slot="$4" machine="$5" rc=0 line dir profile
+    profile=$(image_spec_profile "$spec")
+    dir=$(image_pgo_dir "$lane" "$slot")
+    image_pgo_graph "$spec" "$lane" "$commit" "$slot" "$machine"
     local plan=()
     while IFS= read -r line; do [ -z "$line" ] || plan+=("$line"); done <<EOF
 $(sched_steps)
 EOF
-    PGO_TASK=$(task_begin pgo here "$profile/$slot" \
-        "wk sysimage webkit $profile --slot $slot --stop" \
-        "$(yocto_log "$(yocto_ws_default "$profile")" webkit)" "${plan[@]}")
+    PGO_TASK=$(task_begin pgo here "$lane/$slot" \
+        "wk sysimage webkit $spec --workspace $lane --slot $slot --stop" \
+        "$(yocto_log "$lane" webkit)" "${plan[@]}")
     wk_atexit _pgo_task_end
-    info "profile-guided slot '$slot' of $profile: instrument, collect on $machine, rebuild"
+    info "profile-guided slot '$slot' of $profile in lane $lane: instrument, collect on $machine, rebuild"
     log  "  collection  $dir"
     log  "  benchmarks  $PGO_BENCHMARKS, mixed at WebKit's own weights (Tools/Scripts/pgo-profile)"
 
@@ -225,5 +233,5 @@ EOF
     info "slot '$slot' is a profile-guided build of ${commit:0:12}"
     log  "  profile     $dir/output/$PGO_GLIB_LIB.profdata"
     log  "  readings    $dir/profile-check.json  ('wk sysimage ls' has the slot)"
-    log  "  next:       wk pi deploy $profile $machine --slot $slot"
+    log  "  next:       wk pi deploy $spec $machine --workspace $lane --slot $slot"
 }

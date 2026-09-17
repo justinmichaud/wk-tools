@@ -30,9 +30,13 @@ from tests.support import REPO, WkTest, bash
 TAB = "\t"
 PRELUDE = '. "%s/lib/common.sh"\n. "%s/lib/task.sh"\n' % (REPO, REPO)
 
+# This machine's store is its own, so the podman machine is not a second store
+# to ask: that arm is TestThePodmanMachineIsAskedToo's.
+OWN_STORE = 'store_is_local() { return 0; }\n'
+
 # What fleet_holders needs of lib/target.sh, with no machine behind it: one
 # peer, reachable, answering about its own store through its own wk.
-PEER = '''
+PEER = OWN_STORE + '''
 peer_workstations() { echo moose; }
 load_target() { :; }
 machine_answers() { return 0; }
@@ -40,9 +44,9 @@ t_wk() { printf '%s\\n' "$PEER_ROWS"; }
 '''
 
 # The same, with nothing to ask: this machine is the whole fleet.
-NO_PEERS = 'peer_workstations() { :; }\n'
+NO_PEERS = OWN_STORE + 'peer_workstations() { :; }\n'
 
-DEAF_PEER = '''
+DEAF_PEER = OWN_STORE + '''
 peer_workstations() { echo moose; }
 load_target() { :; }
 machine_answers() { printf '%s  unreachable over ssh\\n' "$1"; return 1; }
@@ -50,7 +54,7 @@ t_wk() { echo "the peer was asked anyway"; }
 '''
 
 # A peer that answers, with a wk too old to know the flag.
-OLD_PEER = '''
+OLD_PEER = OWN_STORE + '''
 peer_workstations() { echo moose; }
 load_target() { :; }
 machine_answers() { return 0; }
@@ -305,6 +309,59 @@ NODE_NOTE="a board that is not there, for a refusal that needs no hardware"
 '''
 
 
+class TestThePodmanMachineIsAskedToo(WkTest):
+    """A deploy is routed to the machine holding the lane, and on a macOS
+    workstation that is the podman machine -- so a claim can be taken in a
+    store this side does not read. It is asked exactly when the store is not
+    this machine's: on Linux the container target's store is the directory
+    task_holders has already walked, and a board would read as held by
+    itself."""
+
+    ASK = PRELUDE + '''
+peer_workstations() { :; }
+wk_machine_name() { echo tolken; }
+load_target() { :; }
+t_wk() { printf '%s\\n' "$VM_ROWS"; }
+'''
+
+    def _rows(self, local, vm_rows="", store_is_local=True):
+        return bash(self.ASK
+                    + ("store_is_local() { return %d; }\n" % (0 if store_is_local else 1))
+                    + ("task_holders() { %s; }\n" % (("printf '%s\\n' " + repr(local))
+                                                     if local else ":"))
+                    + "fleet_holders device:rpi5\n",
+                    env={"VM_ROWS": vm_rows})
+
+    ROW = "id\ttolken\tbench rpi5/speedometer3\twk pi bench rpi5 --kill"
+
+    def test_a_store_of_this_machines_own_is_asked_once(self):
+        cp = self._rows(self.ROW, vm_rows=self.ROW)
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertEqual(cp.stdout.strip().count("bench rpi5/speedometer3"), 1,
+                         "a board read as held by itself")
+
+    def test_a_store_elsewhere_is_asked_as_well(self):
+        cp = self._rows("", vm_rows=self.ROW, store_is_local=False)
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertIn("bench rpi5/speedometer3", cp.stdout,
+                      "a claim taken in the podman machine was invisible")
+
+    def test_a_machine_that_did_not_answer_is_a_row_of_its_own(self):
+        """Never silence: an unread store is not a free board."""
+        cp = bash(PRELUDE + '''
+peer_workstations() { :; }
+wk_machine_name() { echo tolken; }
+load_target() { :; }
+store_is_local() { return 1; }
+task_holders() { :; }
+t_wk() { return 1; }
+fleet_holders device:rpi5
+''')
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertIn("unknown", cp.stdout)
+        self.assertIn("podman machine", cp.stdout)
+
+
 class TestTheCommandsTakeIt(ClaimTest):
     """The three commands that touch a board take the claim before anything
     reaches the board. Driven against a machine conf of this test's own
@@ -333,11 +390,16 @@ class TestTheCommandsTakeIt(ClaimTest):
         self.assert_refused(
             self.run_wk("pi", "bench", "fakeboard", "speedometer3", env=self.env), pid)
 
-    def test_pi_deploy_refuses(self):
+    def test_pi_deploy_takes_it_where_the_lane_is(self):
+        """A deploy is routed to the machine holding the lane (`name=derived`,
+        the dispatcher), so the claim is taken there and not here -- which is
+        why that machine's store is one fleet_holders asks. Driven with a lane
+        this machine holds, so the routing leaves it here and the refusal is
+        the one this test can see."""
         pid = self.held()
         self.assert_refused(
             self.run_wk("pi", "deploy", "webkit-2.52-yocto-rpi5-64", "fakeboard",
-                        "--slot", "a", env=self.env), pid)
+                        "--slot", "a", env={**self.env, "WK_IN_VM": "1"}), pid)
 
     def test_boot_refuses(self):
         pid = self.held()

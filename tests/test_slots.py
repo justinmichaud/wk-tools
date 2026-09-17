@@ -20,7 +20,8 @@ import unittest
 import unittest.mock
 from pathlib import Path
 
-from tests.support import REPO, WkTest, bash, run
+from tests.support import (REPO, WkTest, bash, podman_vm_ssh,
+                           requires_podman_vm, run)
 
 WKSLOT = REPO / "lib" / "wkslot.py"
 BUILD_ID = "3dca0e504a7438009c3eadf6113833fcc6297428"
@@ -285,11 +286,23 @@ class TestSysimageLs(WkTest):
         self.assertEqual(cp.returncode, 0, cp.stdout)
         self.assertNotIn("command not found", cp.stdout)
 
-    @unittest.skipUnless(sys.platform == "darwin" and shutil.which("podman"),
+    @requires_podman_vm()
+    @unittest.skipUnless(sys.platform == "darwin",
                          "only a macOS workstation keeps the store off this machine")
     def test_a_store_this_machine_cannot_read_is_asked_of_the_machine_holding_it(self):
-        cp = run("sysimage", "ls", env={"WK_STORE": "/nonexistent-store"}, timeout=120)
+        """An image put in the VM's store, and a WK_STORE on this side that
+        does not exist: the row can only have come from asking the VM. An
+        empty answer would prove nothing -- the VM holds no lane most days."""
+        ws = "yocto-webkit-2.52-yocto-rpi5-64"
+        img = ("/var/lib/wk/ws/%s/build/CrossToolChains/rpi5-64bits-mesa"
+               "/build/image/webkit-dev-ci-tools.wic.xz" % ws)
+        made = podman_vm_ssh("mkdir -p %s && : > %s" % (os.path.dirname(img), img))
+        self.assertEqual(made.returncode, 0, made.stdout + made.stderr)
+        self.addCleanup(podman_vm_ssh, "rm -rf /var/lib/wk/ws/%s" % ws)
+        cp = run("sysimage", "ls", env={"WK_STORE": "/nonexistent-store"}, timeout=300)
         self.assertEqual(cp.returncode, 0, cp.stdout)
+        self.assertIn(ws, cp.stdout,
+                      "the machine holding the store was not asked for its images")
         self.assertNotIn("has built an image", cp.stdout,
                          "this host answered for a store it cannot read")
 

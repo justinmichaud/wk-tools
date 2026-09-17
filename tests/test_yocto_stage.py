@@ -494,7 +494,8 @@ IMG_PROFILE=demo-profile
                 cwd=str(REPO), env=env, capture_output=True, text=True, timeout=30,
                 check=True)
             cp = subprocess.run(
-                ["bash", "-c", self.PRELUDE + f'yocto_spawn {self.ws} image 8 20480'],
+                ["bash", "-c", self.PRELUDE
+                 + f'yocto_spawn {self.ws} image 8 20480 "image stage of {self.ws}"'],
                 cwd=str(REPO), env=env, capture_output=True, text=True, timeout=30,
             )
             out = cp.stdout + cp.stderr
@@ -516,9 +517,11 @@ class TheBranchCheckoutReadsTheMirror(WkTest):
     """A workspace's remotes are rewritten to read the machine's mirror, so
     the release-branch checkout `yocto_ensure_ws` makes is a local read and a
     branch the mirror does not carry is absent however reachable it is
-    upstream. Measured 2026-09-16 on a machine whose mirror carried `main`:
+    elsewhere. Measured 2026-09-16 on a machine whose mirror carried `main`:
     `git fetch origin webkitglib/2.52` answered "couldn't find remote ref"
-    while the refusal blamed egress. It names WK_MIRROR_BRANCHES instead."""
+    while the refusal blamed egress. A lane's branch is one wk_mirror_branches
+    derives from the image configurations, so the remedy is the sync that
+    brings the mirror up to this checkout."""
 
     PRELUDE = f'''
 . "{REPO}/lib/common.sh"
@@ -536,20 +539,20 @@ YOC_REMOTE=origin
         # which is the shape a mirror without the branch produces.
         return bash(self.PRELUDE + f'''
 t_exec() {{ case "$*" in *rev-parse*) echo {on_branch} ;; *) return 1 ;; esac; }}
-WK_MIRROR_BRANCHES={mirror_branches} yocto_ensure_ws ws webkitglib/2.52
+WK_MIRROR_BRANCHES='{mirror_branches}' yocto_ensure_ws ws webkitglib/2.52
 ''', env={"WK_STORE": str(self.tmp / "store")})
 
-    def test_it_names_the_mirror_and_the_branch_to_carry_in(self):
+    def test_it_names_the_mirror_and_the_sync_that_fills_it(self):
         cp = self._refusal("main")
         out = cp.stdout + cp.stderr
         self.assertNotEqual(cp.returncode, 0, out)
         self.assertIn("reads this machine's mirror", out, out)
-        self.assertIn("WK_MIRROR_BRANCHES='main webkitglib/2.52' wk sync", out, out)
-        self.assertNotIn("GitHub", out, "the fetch never reaches GitHub")
+        self.assertIn("wk sync", out, out)
+        self.assertNotIn("GitHub", out, "the fetch never reaches an upstream")
 
-    def test_the_remedy_carries_what_the_mirror_already_has(self):
-        cp = self._refusal("main", mirror_branches="main")
-        self.assertIn("carries main\n", cp.stdout + cp.stderr)
+    def test_it_names_the_branches_the_mirror_is_declared_to_carry(self):
+        cp = self._refusal("main", mirror_branches="main webkitglib/2.52")
+        self.assertIn("main webkitglib/2.52 of", cp.stdout + cp.stderr)
 
     def test_a_workspace_already_on_the_branch_is_left_alone(self):
         cp = self._refusal("webkitglib/2.52")

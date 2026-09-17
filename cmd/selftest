@@ -7,6 +7,9 @@
 # VM, a configured machine or a board skip by name when it is absent; a test
 # that creates a workspace removes it in teardown.
 #
+# A full run makes workspaces and builds in them, so it refuses to start beside
+# a build already on the machine's books; --quick makes none and never does.
+#
 #   --quick       every test that needs no VM, machine or board; the rest skip
 #                 by name (WK_TEST_QUICK=1, read by tests/support.py's gates)
 #   -v            one line per test
@@ -26,5 +29,23 @@ while [ $# -gt 0 ]; do
 done
 
 cd "$WK_ROOT"
+
+# The other half of the guard the suite already has one end of: a test that makes a real workspace skips while a build is on the machine's books (tests/support.py), and nothing stopped a run from taking the machine out from under a build. Measured 2026-09-16: a full run beside a cross build took the podman VM to 1536MB free and the build's own floor check killed the build.
+_builds_on_the_books() {   # the suite's own reading, asked here rather than spelled a second time
+    python3 -c 'from tests.support import builds_on_the_books
+print("\n".join(builds_on_the_books()))' 2>/dev/null
+}
+
+if [ -z "$QUICK" ]; then
+    BUSY=$(_builds_on_the_books)
+    [ -z "$BUSY" ] || barrier "a build is on this machine's books:
+$(printf '%s\n' "$BUSY" | sed 's/^/      /')
+    A full run makes workspaces and builds in them, and the two starve each
+    other -- a run beside a cross build took the podman VM to 1536MB free and
+    the build's own floor check killed it (2026-09-16). Wait for it
+    ('wk status' follows it), or run the half that needs no machine:
+        wk selftest --quick"
+fi
+
 [ -z "$QUICK" ] || { WK_TEST_QUICK=1; export WK_TEST_QUICK; }
 exec python3 -m unittest discover -s tests $VERBOSE ${PATTERN[@]+"${PATTERN[@]}"}

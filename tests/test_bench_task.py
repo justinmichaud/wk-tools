@@ -13,6 +13,7 @@ Run: python3 -m unittest tests.test_bench_task -v
 """
 import json
 import subprocess
+import sys
 import unittest
 
 from tests.support import REPO, WkTest, bash, func_body, run, scratch_dir, temp_store
@@ -183,10 +184,27 @@ class TestLs(WkTest):
             self.assertTrue(any(str(a) in l and l.rstrip().endswith("ok") for l in lines), cp.stdout)
             self.assertTrue(any(str(b) in l and l.rstrip().endswith("failed") for l in lines), cp.stdout)
 
-    def test_an_empty_store_says_so(self):
+    def test_an_empty_store_prints_nothing(self):
+        """One store's rows, so several can be concatenated into one listing:
+        the "no tasks anywhere" line belongs to the command that merged them
+        (cmd/bench), which is the only one that knows there were none."""
         with scratch_dir() as tmp:
             cp = wkdata("ls", str(tmp))
-            self.assertEqual(cp.stdout.strip(), "(no tasks yet)")
+            self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+            self.assertEqual(cp.stdout.strip(), "")
+
+    def test_the_machine_holding_the_store_is_printed_against_each_task(self):
+        with scratch_dir() as tmp:
+            make_task(tmp)
+            cp = wkdata("ls", str(tmp), "--where", "moose")
+            self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+            self.assertIn("[moose]", cp.stdout.splitlines()[0])
+
+    def test_without_one_no_machine_is_claimed(self):
+        with scratch_dir() as tmp:
+            make_task(tmp)
+            cp = wkdata("ls", str(tmp))
+            self.assertNotIn("[", cp.stdout.splitlines()[0])
 
 
 class TestThroughWk(WkTest):
@@ -286,25 +304,41 @@ if __name__ == "__main__":
 
 
 class TestReadingTasksStartsNothing(WkTest):
-    """`wk ab` and `wk pi bench` write a task on this host, so the task store is
-    this host's. `wk bench ls` was declared `where=workspace` all the same, so on
-    a macOS host it was handed to the podman VM -- which meant reading a store
-    with no tasks in it, and, because it was not declared read-only, **booting a
-    20GB VM to do it**. Running the test suite started the machine that way.
+    """`wk bench ls` was declared `where=workspace`, so on a macOS host it was
+    handed to the podman VM -- which meant reading a store with no tasks in it,
+    and, because it was not declared read-only, **booting a 20GB VM to do it**.
+    Running the test suite started the machine that way.
 
-    Both halves are asserted here: where it runs, and that it changes nothing."""
+    It walks the fleet now, so it meets the VM again as one machine among
+    several; what must not come back is the boot."""
 
     def _decl(self, key):
-        import re
         text = (REPO / "cmd" / "bench").read_text()
         return [l for l in text.splitlines() if l.startswith("# wk:") and key in l]
 
-    def test_ls_runs_where_its_siblings_do(self):
-        """report and compare read the same store and are `where=host`."""
+    def _where(self, *args):
+        cp = subprocess.run([str(REPO / "cmd" / "bench"), "--where", *args],
+                            capture_output=True, text=True, timeout=120,
+                            env={"WK_ROOT": str(REPO), "HOME": "/tmp",
+                                 "PATH": "/usr/bin:/bin:/usr/sbin:/sbin"})
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        return cp.stdout.strip()
+
+    def test_a_walk_runs_where_it_was_typed(self):
+        """It reads this machine's store and then asks every other machine,
+        so it is this machine's command and not one store's."""
+        self.assertEqual(self._where("ls"), "local")
+
+    def test_answering_another_machines_walk_reads_this_machines_store(self):
+        """--continued is the half a walk asked for, so it is the store's --
+        the podman VM's on a macOS workstation, like any other read of it."""
+        self.assertEqual(self._where("ls", "--continued"), "store")
+
+    def test_report_and_compare_still_read_one_store(self):
         host = [l for l in self._decl("where=host") if l.startswith("# wk: sub ")]
         self.assertTrue(host, self._decl("where=host"))
         subs = host[0].split()[3].split(",")
-        for verb in ("ls", "report", "compare"):
+        for verb in ("report", "compare"):
             self.assertIn(verb, subs, host[0])
 
     def test_ls_is_declared_read_only(self):
@@ -322,28 +356,64 @@ class TestReadingTasksStartsNothing(WkTest):
             bench = store["path"] / "bench"
             bench.mkdir()
             make_task(bench)
-            cp = run("bench", "ls", env={"WK_STORE": store["WK_STORE"]}, timeout=60)
+            cp = run("bench", "ls", env={"WK_STORE": store["WK_STORE"]}, timeout=300)
             self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
             self.assertIn(TASK, cp.stdout)
             self.assertNotIn("starting podman machine", cp.stdout + cp.stderr)
 
+    def test_the_listing_names_the_machine_each_task_is_on(self):
+        """A measurement is recorded once, on the machine that took it; the
+        listing is merged on every read rather than copied between machines,
+        so a reader is told which machine to go to."""
+        with temp_store() as store:
+            bench = store["path"] / "bench"
+            bench.mkdir()
+            make_task(bench)
+            cp = run("bench", "ls", env={"WK_STORE": store["WK_STORE"]}, timeout=300)
+            self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+            row = [l for l in cp.stdout.splitlines() if l.startswith(TASK)]
+            self.assertTrue(row, cp.stdout)
+            self.assertRegex(row[0], r"\[[^\]]+\]$")
+
+    def test_a_task_no_machine_has_is_refused_with_where_to_look(self):
+        with temp_store() as store:
+            (store["path"] / "bench").mkdir()
+            cp = run("bench", "report", "nosuchtask",
+                     env={"WK_STORE": store["WK_STORE"]}, timeout=300)
+            self.assertNotEqual(cp.returncode, 0, cp.stdout)
+            self.assertIn("stays on the machine that took it", cp.stdout)
+
 
 class TestArtifactsLandWhereTheMachineCanReadThem(WkTest):
-    """`wk_artifact_dir` (lib/store.sh): a seeded benchmark payload, an exported
-    runner tree and a downloaded profiler are opened as files by the machine
-    that fetched them. On a Linux host that is the store; on a macOS
-    workstation the store is the podman VM's and nothing on this side can open
-    it, so they go in this machine's own state directory instead."""
+    """`wk_record_dir` (lib/store.sh): what this machine writes for itself and
+    opens again -- a seeded benchmark payload, an exported runner tree, a
+    downloaded profiler, a long-running command's task record, a bench task's
+    directory. On a Linux host that is the store; on a macOS workstation the
+    store is the podman VM's, root-owned and unwritable from this side, so they
+    go in this machine's own state directory instead. `wk ab` and `wk pi bench`
+    are host commands that record a task, and neither could run at all while
+    the answer was the store (measured 2026-09-16: `mkdir /var/lib/wk/bench` is
+    Permission denied)."""
 
     def _dir(self, store, extra=None):
-        env = {"WK_STORE": str(store)}
-        env.update(extra or {})
+        return self._ask({"WK_STORE": str(store), **(extra or {})})
+
+    def _dir_default(self, extra=None):
+        """No WK_STORE at all, so `_wk_default_store` decides -- which on a
+        macOS workstation is the podman machine's."""
+        return self._ask(dict(extra or {}))
+
+    def _ask(self, env):
         cp = bash(f'''
 . "{REPO}/lib/common.sh"
 . "{REPO}/lib/store.sh"
 . "{REPO}/lib/bench.sh"
+. "{REPO}/lib/task.sh"
 . "{REPO}/lib/profiler.sh"
+echo "RECORD=$(wk_record_dir)"
 echo "ARTIFACT=$(wk_artifact_dir)"
+echo "BENCH=$BENCH_DIR"
+echo "TASK=$(task_root)"
 echo "SEED=$SEED_DIR"
 echo "RUNNER=$RUNNER_DIR"
 echo "SAMPLY=$(samply_store_dir aarch64-apple-darwin)"
@@ -354,19 +424,62 @@ echo "SAMPLY=$(samply_store_dir aarch64-apple-darwin)"
     def test_a_writable_store_keeps_them(self):
         with scratch_dir() as tmp:
             f = self._dir(tmp, {"XDG_STATE_HOME": str(tmp / "state")})
+            self.assertEqual(f["RECORD"], str(tmp))
             self.assertEqual(f["ARTIFACT"], f"{tmp}/cache")
+            self.assertEqual(f["BENCH"], f"{tmp}/bench")
+            self.assertEqual(f["TASK"], f"{tmp}/task")
             self.assertEqual(f["SEED"], f"{tmp}/cache/bench")
             self.assertEqual(f["RUNNER"], f"{tmp}/cache/bench-runner")
             self.assertTrue(f["SAMPLY"].startswith(f"{tmp}/cache/samply/"), f["SAMPLY"])
 
+    @unittest.skipUnless(sys.platform == "darwin",
+                         "only a macOS workstation keeps the store off this machine")
+    def test_the_one_store_no_host_command_can_write_sends_them_to_its_own_state(self):
+        """The podman machine's store, which is what this machine's default
+        resolves to: the answer is the machine's own directory, and a task can
+        actually be created there."""
+        with scratch_dir() as tmp:
+            # No WK_STORE: the default is the one that is the VM's.
+            f = self._dir_default({"XDG_STATE_HOME": str(tmp / "state")})
+            state = f"{tmp}/state/wk"
+            self.assertEqual(f["RECORD"], state)
+            for key in ("ARTIFACT", "BENCH", "TASK"):
+                self.assertTrue(f[key].startswith(state + "/"), f"{key}={f[key]}")
+            cp = bash(f'''
+. "{REPO}/lib/common.sh"
+. "{REPO}/lib/store.sh"
+. "{REPO}/lib/bench.sh"
+ensure_dir "$(bench_task_dir probe)/runs" >/dev/null && echo MADE
+''', env={"XDG_STATE_HOME": str(tmp / "state")})
+            self.assertIn("MADE", cp.stdout, cp.stdout + cp.stderr)
+
+    def test_a_store_this_machine_was_pointed_at_keeps_its_own_records(self):
+        """Only the VM's store is diverted. A target's own store, or a test's
+        scratch one, is where its records belong -- diverting those put a
+        record where the command that wrote it would never look again."""
+        with scratch_dir() as tmp:
+            named = tmp / "somewhere" / "store"        # not created: a store is made on demand
+            f = self._dir(named, {"XDG_STATE_HOME": str(tmp / "state")})
+            self.assertEqual(f["RECORD"], str(named))
+            self.assertEqual(f["TASK"], f"{named}/task")
+
     def test_they_are_all_under_the_one_directory(self):
-        """Three artifact stores, one rule -- a second answer to 'where can
-        this machine put a file' is where the macOS lane broke."""
+        """One rule -- a second answer to 'where can this machine put a file'
+        is where the macOS lane broke."""
         with scratch_dir() as tmp:
             f = self._dir(tmp, {"XDG_STATE_HOME": str(tmp / "state")})
-            for key in ("SEED", "RUNNER", "SAMPLY"):
-                self.assertTrue(f[key].startswith(f['ARTIFACT'] + "/"),
-                                f"{key}={f[key]} is not under {f['ARTIFACT']}")
+            for key in ("ARTIFACT", "BENCH", "TASK", "SEED", "RUNNER", "SAMPLY"):
+                self.assertTrue(f[key].startswith(f['RECORD'] + "/"),
+                                f"{key}={f[key]} is not under {f['RECORD']}")
+
+    def test_one_spelling_of_the_bench_directory(self):
+        """cmd/status and cmd/doctor read it without sourcing lib/bench.sh, so
+        the path is a function rather than a second `$WK_STORE/bench`."""
+        for rel in ("cmd/status", "cmd/doctor", "lib/bench.sh"):
+            with self.subTest(file=rel):
+                text = (REPO / rel).read_text()
+                self.assertIn("wk_bench_dir", text)
+                self.assertNotIn("$WK_STORE/bench", text)
 
 
 class TestAStageThatCannotFinishLeavesNothing(WkTest):

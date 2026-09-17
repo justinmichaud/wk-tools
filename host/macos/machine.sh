@@ -301,6 +301,62 @@ else
     _grow_guest_fs
 fi
 
+# The machine holds this workstation's lanes, and a lane's bytes are deployed to a board over the tailnet -- so the half that can read the store has to be the half that can reach the board, or neither can. gvproxy answers a 100.x address itself (ping replies in 0.13ms and a connection to port 22 is accepted) and delivers nothing, so the machine joins as a node of its own. Its workspaces do not: they run --network none and reach the world only through the egress proxy's socket (targets/container.sh).
+_ts() { podman machine ssh "$WK_MACHINE" -- "$@"; }   # `sudo` inside: tailscaled's socket is root's
+_ts_node="$(wk_machine_name)-vm"
+_ts_tag="${WK_PI_TAG:-tag:wk}"
+
+_ts_state() { _ts sudo tailscale status --json 2>/dev/null | python3 -c '
+import json, sys
+try: s = json.load(sys.stdin)
+except Exception: sys.exit(0)
+me = s.get("Self") or {}
+print("%s %s" % (s.get("BackendState", "?"), (me.get("TailscaleIPs") or ["-"])[0]))
+' 2>/dev/null; }
+
+if [ "$(podman machine inspect "$WK_MACHINE" --format '{{.State}}' 2>/dev/null)" != running ]; then
+    warn "podman machine '$WK_MACHINE' is not running, so its tailnet identity was not checked"
+elif ! _ts command -v tailscale >/dev/null 2>&1; then
+    warn "podman machine '$WK_MACHINE' has no tailscale, so it cannot reach a board.
+  Its image used to ship one; without it a lane on this workstation cannot be deployed."
+else
+    read -r _ts_backend _ts_ip <<EOF
+$(_ts_state)
+EOF
+    if [ "${_ts_backend:-}" = Running ] && [ "${_ts_ip:--}" != "-" ]; then
+        unchanged "podman machine on the tailnet as $_ts_node ($_ts_ip)"
+    elif [ -n "${WK_DRY_RUN:-}" ]; then
+        warn "dry run: would bring the podman machine onto the tailnet as $_ts_node ($_ts_tag)"
+    elif ! _ts_key=$(wk_tailscale_authkey); then
+        warn "no tailnet auth key, so the podman machine stays off the tailnet and a lane
+  here cannot be deployed to a board:  wk key set tailnet   (tagged $_ts_tag)"
+    else
+        # Into a 0600 file in the guest, never argv: /proc makes `--authkey=tskey-...` world readable.
+        _ts 'sudo install -m 0600 /dev/null /var/lib/tailscale/wk-authkey' < /dev/null \
+            && podman machine ssh "$WK_MACHINE" -- 'sudo tee /var/lib/tailscale/wk-authkey >/dev/null' < "$_ts_key" \
+            || warn "could not hand the auth key to the podman machine"
+        _ts_rc=0
+        _ts sudo tailscale up --auth-key="file:/var/lib/tailscale/wk-authkey" \
+                --advertise-tags="$_ts_tag" --hostname="$_ts_node" --accept-dns=false \
+            >/dev/null 2>&1 || _ts_rc=$?
+        _ts sudo rm -f /var/lib/tailscale/wk-authkey >/dev/null 2>&1 || true
+        read -r _ts_backend _ts_ip <<EOF
+$(_ts_state)
+EOF
+        if [ "${_ts_backend:-}" = Running ] && [ "${_ts_ip:--}" != "-" ]; then
+            changed "podman machine joined the tailnet as $_ts_node ($_ts_ip)"
+        else
+            warn "tailscale up in the podman machine did not reach Running (exit $_ts_rc).
+  A key that is single-use, expired, or not allowed to advertise $_ts_tag fails
+  exactly here; the machine is left with tailscaled running and no identity,
+  and re-running this stage is safe."
+        fi
+    fi
+fi
+
+unset _ts_node _ts_tag _ts_key _ts_backend _ts_ip _ts_rc
+unset -f _ts _ts_state
+
 unset _cores _mem _disk _mounts _verdict _absent _cfg _secrets_mount _tools_mount \
       _agent_rw_mount _mirror_mount _cur_cpus _cur_mem _cur_disk _grow_disk _was_running
 unset -f _grow_guest_fs

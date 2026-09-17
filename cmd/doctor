@@ -272,7 +272,7 @@ local_state() { # <path> <kind> <how to get it back>
         unk "$disp (absent)" "$kind: $how"
     fi
 }
-local_state "$WK_STORE/bench"                      backed-up   "benchmark runs and their provenance -- not regenerable at any price; a rerun is a different measurement"
+local_state "$(wk_bench_dir)"                      backed-up   "benchmark runs and their provenance -- not regenerable at any price; a rerun is a different measurement"
 local_state "$(wk_mirror)"                         regenerable "wk sync clones WebKit into it again (the one copy here; the podman VM and every tart guest read it)"
 local_state "$(wk_secrets_dir)"                    regenerable "wk key deploy makes new deploy keys (revoke the old ones on GitHub)"
 local_state "$(wk_push_held_dir)"                  regenerable "wk key deploy makes new deploy keys; wk key set github-pat and wk key set bugzilla-api-key store new ones (revoke the old ones on GitHub and Bugzilla)"
@@ -298,6 +298,20 @@ if [ "$(wk_os)" = linux ]; then
         local_state "$WK_ROOT/host/linux/rpi5/rpi5.conf" backed-up "site WiFi identity (gitignored: repo is public); rpi5.conf.example documents the shape"
     fi
     local_state /var/lib/tailscale                 re-authable "tailscale up re-authenticates; the node name survives via the admin console"
+fi
+if is_macos && [ -z "${WK_IN_VM:-}" ]; then
+    # Not through local_state: it is inside the podman machine, under no path the store names, and a state file that exists is not an identity -- the address it answers on is.
+    if ! podman_machine_running; then
+        unk "/var/lib/tailscale (podman VM) -- not visible while the podman machine is stopped" \
+            "re-authable: ./setup --stage machine"
+    elif _ts_ip=$(podman machine ssh "$WK_MACHINE" -- 'sudo tailscale ip -4 2>/dev/null | head -1' \
+                    </dev/null 2>/dev/null | tr -d '\r') && [ -n "$_ts_ip" ]; then
+        ok "/var/lib/tailscale (podman VM) (re-authable) -- on the tailnet at $_ts_ip; ./setup --stage machine re-joins it and the node name survives via the admin console"
+    else
+        miss "/var/lib/tailscale (podman VM) -- the machine holds this workstation's lanes and reaches no board without it" \
+             "./setup --stage machine, which needs a live tailnet auth key: wk key set tailnet"
+    fi
+    unset _ts_ip
 fi
 unset -f local_state
 

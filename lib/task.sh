@@ -1,4 +1,4 @@
-# One record for every long-running command: a directory under $WK_STORE/task,
+# One record for every long-running command: a directory under wk_record_dir's task/,
 # one file per field, so every write is one tmp+rename. Liveness is asked of
 # the process table at read time, never stored.
 
@@ -6,7 +6,7 @@ command -v kv_field >/dev/null 2>&1 || . "$WK_ROOT/lib/common.sh"
 command -v log_age  >/dev/null 2>&1 || . "$WK_ROOT/lib/detach.sh"
 command -v wk_ws_dir >/dev/null 2>&1 || . "$WK_ROOT/lib/store.sh"
 
-task_root() { printf '%s' "$WK_STORE/task"; }
+task_root() { printf '%s/task' "$(wk_record_dir)"; }
 
 # A waiter's stamp precedes its driver, and task_wait ignores every record older than it: the last record of a kind and name is a previous run's until the driver writes its own.
 task_stamp() { date -u +%Y%m%dT%H%M%SZ; }
@@ -278,11 +278,18 @@ INNER
 }
 
 # A peer that cannot be asked is a row of its own (`unknown`), never silence: an unread machine is not a free board.
-fleet_holders() { # <resource> -- the same question asked of every peer workstation, each through its own wk
+fleet_holders() { # <resource> -- the same question asked of every store that can hold a claim, each through its own wk
     command -v peer_workstations >/dev/null 2>&1 \
         || die "fleet_holders: the peers are asked through lib/target.sh, and none is loaded"
     task_holders "$1"
     local p why rows
+    if ! store_is_local; then   # a deploy is routed to the machine holding the lane, and on a macOS workstation that is the podman machine, whose store this side does not read. Only where the store is not this one's: on Linux it is the directory task_holders just walked, and a board would read as held by itself
+        ( load_target container >/dev/null 2>&1
+          rows=$(t_wk status --holds "$1" 2>/dev/null) \
+              || { _task_unknown "$(wk_machine_name)'s podman machine" \
+                       "it did not answer: wk start, or wk sync --tools"; exit 0; }
+          [ -z "$rows" ] || printf '%s\n' "$rows" | tr -d '\r' )
+    fi
     for p in $(peer_workstations); do
         ( load_target "$p" >/dev/null 2>&1
           why=$(machine_answers "$p" 2>&1) \

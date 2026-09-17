@@ -1371,15 +1371,15 @@ def cmd_task_status(args):
 
 def cmd_ls(args):
     running = set(_list_field(args.running or ""))
+    if not os.path.isdir(args.bench_dir):
+        return
     tasks = sorted(d for d in os.listdir(args.bench_dir)
                    if os.path.isfile(os.path.join(args.bench_dir, d, "task.json")))
-    if not tasks:
-        print("(no tasks yet)")
-        return
     for name in tasks:
         taskdir = os.path.join(args.bench_dir, name)
         st = task_state(taskdir, name in running)
-        print("%s  %s" % (name, _subject_line(st["doc"])))
+        print("%s  %s%s" % (name, _subject_line(st["doc"]),
+                            "  [%s]" % args.where if args.where else ""))  # a task lives once, where it was taken; the listing is merged on every read
         print("    %s  %s" % (st["state"], st["summary"]))
         print("    %s" % taskdir)
         for r in st["runs"]:
@@ -1461,6 +1461,7 @@ def main(argv):
     p = sub.add_parser("ls", help="every task in the store, with its runs' paths and states")
     p.add_argument("bench_dir")
     p.add_argument("--running", help="comma-separated task names whose lock is held")
+    p.add_argument("--where", help="the machine holding this store, printed against each task")
     p.set_defaults(func=cmd_ls)
 
     p = sub.add_parser("task-write", help="write a task's task.json")

@@ -14,7 +14,7 @@ import os
 import subprocess
 import unittest
 
-from tests.support import REPO, WkTest, func_body, stub_path
+from tests.support import REPO, WkTest, bash, func_body, stub_path
 from tests.test_credcheck import FINE, login
 
 KEY = REPO / "cmd" / "key"
@@ -764,3 +764,64 @@ class TestABareKeyChangesNothing(_KeyRun):
         setup = self.arm("setup")
         self.assertIn('|| FLEET=""', setup, setup)
         self.assertIn("was left exactly as it is", setup)
+
+
+class TestAnAuthKeyIsMintedNotOnlyHanded(WkTest):
+    """`wk_tailscale_authkey` (lib/common.sh): a stored key expires, and a
+    fleet that finds that out at a board's first boot has lost the board. The
+    machine that can administer the tailnet mints its own; one that cannot
+    uses what it was given.
+
+    The API endpoint is the suite's dead one (WK_TAILNET_API, tests/support.py),
+    so nothing here reaches a real tailnet or makes a real key."""
+
+    LIB = '. "%s/lib/common.sh"\n. "%s/lib/store.sh"\n' % (REPO, REPO)
+
+    def _env(self, authkey=None, api=None):
+        env = {"WK_TS_AUTHKEY": str(authkey or self.tmp / "no-such-key")}
+        env["WK_TS_API_SECRET"] = str(api or self.tmp / "no-such-api")
+        return env
+
+    def _api_key(self):
+        p = self.tmp / "api"
+        p.write_text("tskey-api-kAAAA-secret\n")
+        return p
+
+    def test_a_usable_stored_key_is_used_as_it_is(self):
+        key = self.tmp / "authkey"
+        key.write_text("tskey-auth-kAAAA-secret\n")
+        cp = bash(self.LIB + "wk_tailscale_authkey\n", env=self._env(authkey=key))
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertEqual(cp.stdout.strip(), str(key))
+
+    def test_no_key_and_no_way_to_mint_names_the_one_command_that_stores_one(self):
+        cp = bash(self.LIB + "wk_tailscale_authkey\n", env=self._env())
+        self.assertNotEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertIn("wk key set tailnet", cp.stdout + cp.stderr)
+
+    def test_a_mint_that_failed_names_both_ways_to_a_key(self):
+        """One remedy is replacing the credential that mints, the other is
+        storing a key by hand; naming only the first strands a person whose
+        API credential is fine and whose tailnet simply refused the tag."""
+        cp = bash(self.LIB + "wk_tailscale_authkey\n",
+                  env=self._env(api=self._api_key()))
+        out = cp.stdout + cp.stderr
+        self.assertNotEqual(cp.returncode, 0, out)
+        self.assertIn("wk key set tailnet-api", out)
+        self.assertRegex(out, r"wk key set tailnet(?!-api)")
+
+    def test_asking_whether_a_key_is_available_mints_nothing(self):
+        """`wk sysimage write`'s preflight and its report both ask this, and a
+        reading may not make a credential as a side effect."""
+        cp = bash(self.LIB + 'wk_tailscale_authkey_present && echo YES || echo NO\n',
+                  env=self._env(api=self._api_key()))
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertIn("YES", cp.stdout, "a machine that can mint has a key available")
+        self.assertNotIn("minted", cp.stdout + cp.stderr)
+        self.assertFalse((self.tmp / "no-such-key").exists(),
+                         "a presence check wrote a key file")
+
+    def test_with_neither_a_key_nor_the_power_to_mint_none_is_available(self):
+        cp = bash(self.LIB + 'wk_tailscale_authkey_present && echo YES || echo NO\n',
+                  env=self._env())
+        self.assertIn("NO", cp.stdout, cp.stdout + cp.stderr)

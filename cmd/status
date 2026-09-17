@@ -353,6 +353,7 @@ $(task_steps "$d")
 EOF
         rec_json steps "[$_steps]"
         rec_set kill      "$(task_field "$d" kill)"
+        rec_opt subject   "$(task_field "$d" subject)"   # what the work is of: which slot, which commit, and which of the builds a profile-guided release makes
         rec_opt log       "$(task_field "$d" log)"
         rec_opt holds     "$(task_field "$d" holds)"
         rec_opt exit      "$(task_field "$d" exit)"
@@ -568,9 +569,10 @@ EOF
         fi
     fi
 
-    if [ -d "$WK_STORE/bench" ]; then
+    local _bench; _bench=$(wk_bench_dir)
+    if [ -d "$_bench" ]; then
         local t running="" shown="" newest=""
-        for t in "$WK_STORE/bench"/*/task.json; do
+        for t in "$_bench"/*/task.json; do
             [ -f "$t" ] || continue
             t=$(basename "$(dirname "$t")")
             newest="$t"
@@ -580,11 +582,11 @@ EOF
         for t in $shown; do
             local alive=() st
             case " $running " in *" $t "*) alive=(--running) ;; esac
-            st=$(python3 "$WK_ROOT/lib/wkdata.py" task-status "$WK_STORE/bench/$t" ${alive[@]+"${alive[@]}"} 2>/dev/null) || continue
+            st=$(python3 "$WK_ROOT/lib/wkdata.py" task-status "$_bench/$t" ${alive[@]+"${alive[@]}"} 2>/dev/null) || continue
             rec_start bench
             rec_set machine "$m"
             rec_set task    "$t"
-            rec_set path    "$WK_STORE/bench/$t"
+            rec_set path    "$_bench/$t"
             rec_set state   "$(kv_get state <<<"$st")"
             rec_set summary "$(kv_get summary <<<"$st")"
             rec_set subject "$(kv_get subject <<<"$st")"

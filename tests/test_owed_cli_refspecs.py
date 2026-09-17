@@ -105,7 +105,11 @@ class TestFetchRefspecs(WkTest):
         )
 
     def _specs(self, remote, mirror="/mirror/WebKit.git", env=None):
-        cp = self.bash(self._fn() + f"\nwk_fetch_refspecs {remote!r} {mirror!r}", env=env)
+        # Pinned to main unless a case says otherwise: which branches this
+        # checkout's image configurations add is TestWhatTheMirrorCarries's
+        # question (tests/test_mirror_path.py), and the shape is this one's.
+        cp = self.bash(self._fn() + f"\nwk_fetch_refspecs {remote!r} {mirror!r}",
+                       env=env or {"WK_MIRROR_BRANCHES": "main"})
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
         return cp.stdout.split()
 

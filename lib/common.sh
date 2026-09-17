@@ -371,7 +371,12 @@ wk_cred_reject() { # <rule name> <value> -- exit 0 if accepted, else print why
     return 0
 }
 
-wk_tailscale_authkey_present() { wk_tailscale_authkey >/dev/null 2>&1; }
+# Whether a key can be had, not one in hand: a preflight and a report ask this, and a reading may not mint a credential as a side effect. Either a stored key is usable, or this machine can mint one.
+wk_tailscale_authkey_present() {
+    local p; p=$(wk_tailscale_authkey_path)
+    { [ -s "$p" ] && wk_tailscale_key_reject "$(head -1 "$p" 2>/dev/null)" >/dev/null; } \
+        || wk_tailscale_api_present
+}
 
 wk_tailscale_api_path() { printf '%s' "${WK_TS_API_SECRET:-$HOME/.config/wk/tailscale-api-key}"; }
 
@@ -390,37 +395,80 @@ wk_tailnet_retire() { # <name>
         python3 "$WK_ROOT/lib/tailnet.py" retire "$1"
 }
 
+wk_tailscale_key_id() { # <key> -- tskey-auth-<id>-<secret>
+    printf '%s' "$1" | cut -d- -f3
+}
+
+wk_tailscale_key_live() { # <key file> -- the tailnet is asked, a key carrying no expiry a reader can see. Exit 2 is the only answer worth acting on: 6 is "could not ask", and a network that is down is not evidence against a key
+    local rc=0
+    WK_TS_API_SECRET_FILE="$(wk_tailscale_api_path)" \
+        python3 "$WK_ROOT/lib/tailnet.py" key-live \
+            "$(wk_tailscale_key_id "$(head -1 "$1" 2>/dev/null)")" >/dev/null 2>&1 || rc=$?
+    [ "$rc" != 2 ]
+}
+
+wk_tailscale_authkey_mint() { # <key file> -- a stored key expires, and a fleet that finds that out at a board's first boot has lost the board, so the machine that can administer the tailnet mints its own. One that holds no API credential uses the key it was handed: minting is a power, not a fallback, and one machine here has it
+    local tag="${WK_PI_TAG:-tag:wk}" tmp why
+    tmp="$1.new.$$"
+    ( umask 077; WK_TS_API_SECRET_FILE="$(wk_tailscale_api_path)" \
+        python3 "$WK_ROOT/lib/tailnet.py" key-mint "$tag" > "$tmp" ) || {
+        rm -f "$tmp"
+        warn "the tailnet minted no auth key for $tag (above). An API credential that
+  may not grant that tag fails exactly here:
+      wk key set tailnet-api     replace the credential that mints
+      wk key set tailnet         store a key by hand instead"
+        return 1
+    }
+    if ! why=$(wk_tailscale_key_reject "$(head -1 "$tmp" 2>/dev/null)"); then
+        rm -f "$tmp"
+        warn "the tailnet returned something that is not an auth key: $why"
+        return 1
+    fi
+    mv "$tmp" "$1" || { rm -f "$tmp"; return 1; }
+    info "minted a tailnet auth key for $tag (reusable, 90 days) -- $1"
+    return 0
+}
+
 # The file to read the key out of, never a prompt: `wk key set` is the one command that asks for a credential, so a write that finds none refuses.
 wk_tailscale_authkey() {
     local p why
     p=$(wk_tailscale_authkey_path)
+    if [ -s "$p" ] && why=$(wk_tailscale_key_reject "$(head -1 "$p" 2>/dev/null)") \
+       && { ! wk_tailscale_api_present || wk_tailscale_key_live "$p"; }; then
+        printf '%s' "$p"; return 0
+    fi
+    if wk_tailscale_api_present; then
+        wk_tailscale_authkey_mint "$p" || return 1
+        printf '%s' "$p"; return 0
+    fi
     if [ ! -s "$p" ]; then
         warn "no tailnet auth key on this machine ($p) -- store one: wk key set tailnet"
         return 1
-    fi
-    if why=$(wk_tailscale_key_reject "$(head -1 "$p" 2>/dev/null)"); then
-        printf '%s' "$p"; return 0
     fi
     warn "$p is not usable: $why"
     warn "  Leaving it in place rather than deleting it -- check it and re-run."
     return 1
 }
 
-# bash keeps only the last `trap ... EXIT`, so handlers register here instead.
+# bash keeps only the last `trap ... EXIT`, so handlers register here instead, each one named `<pid>:<function>`. The pid is not decoration: a subshell inherits both the list and the trap, and anything registering a cleanup of its own in there re-arms the trap and would run the *parent's* handlers when the subshell ends -- which deleted cmd/ab's step file halfway through its own graph (measured 2026-09-16, bash 5.2, inside `$(ws_target ...)`). A handler runs in the process that asked for it and in no other.
 _WK_ATEXIT=""
 
 _wk_run_atexit() {
-    local _rc=$? _h
+    local _rc=$? _h _me="${BASHPID:-$$}"   # expanded here, not through a function: a function's answer comes back through a command substitution, whose subshell has a BASHPID of its own and is never the process asking. bash 3.2 has neither BASHPID nor an inherited EXIT trap in a subshell, so $$ is the whole answer there
     WK_EXIT_STATUS=$_rc   # published, not passed: this replaces `trap 'f $?' EXIT`
-    for _h in $_WK_ATEXIT; do "$_h" || true; done
+    for _h in $_WK_ATEXIT; do
+        [ "${_h%%:*}" = "$_me" ] || continue
+        "${_h#*:}" || true
+    done
     return $_rc
 }
 
 wk_atexit() { # <function-name> -- run it when this process ends, whatever ends it
+    local _me="${BASHPID:-$$}:$1"
     case " $_WK_ATEXIT " in
-        *" $1 "*) return 0 ;;   # already registered; registering is idempotent
+        *" $_me "*) return 0 ;;   # already registered here; registering is idempotent
     esac
-    _WK_ATEXIT="$_WK_ATEXIT $1"
+    _WK_ATEXIT="$_WK_ATEXIT $_me"
     trap _wk_run_atexit EXIT
     return 0
 }

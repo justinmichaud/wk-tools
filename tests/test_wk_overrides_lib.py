@@ -282,11 +282,11 @@ echo PASS
 ''')
         self.assertIn("PASS", cp.stdout, cp.stdout + cp.stderr)
 
-    def test_wk_mirror_branches_overrides_the_default_main_only(self):
+    def test_wk_mirror_branches_replaces_the_derived_list(self):
         cp = self.bash('''
 . "$WK_ROOT/lib/common.sh"
 . "$WK_ROOT/lib/store.sh"
-[ "$(wk_mirror_branches)" = main ] || { echo "default: $(wk_mirror_branches)"; exit 1; }
+case " $(wk_mirror_branches) " in *" main "*) ;; *) echo "default: $(wk_mirror_branches)"; exit 1 ;; esac
 WK_MIRROR_BRANCHES="main release/1.0"
 [ "$(wk_mirror_branches)" = "main release/1.0" ] || { echo "override: $(wk_mirror_branches)"; exit 1; }
 echo PASS

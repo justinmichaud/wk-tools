@@ -21,10 +21,12 @@ from tests.support import REPO, bash
 SYSIMAGE = REPO / "cmd" / "sysimage"
 
 
-# _ws_profile recovers a profile by matching the configurations this checkout
-# defines, so the one library that enumerates them is sourced beside the lifted
-# functions rather than stubbed: the names below are real configurations.
-PRELUDE = '. "$WK_ROOT/image/profiles.sh"\n'
+# image_lane_profile (lib/image.sh) recovers a profile by matching the
+# configurations this checkout defines, so the libraries that enumerate them and
+# that own the lane vocabulary are sourced beside the lifted functions rather
+# than stubbed: the names below are real configurations.
+PRELUDE = ('. "$WK_ROOT/lib/common.sh"\n. "$WK_ROOT/lib/store.sh"\n'
+           '. "$WK_ROOT/lib/target.sh"\n. "$WK_ROOT/lib/image.sh"\n')
 
 
 def lift(*funcs):
@@ -53,28 +55,28 @@ image_workspace_scan() {
 
 class TestAConfigurationNamesItsImage(unittest.TestCase):
     def _run(self, call):
-        return bash(lift("_ws_profile", "_profile_image_path", "_built_profiles")
+        return bash(lift("_image_path", "_built_profiles")
                     + STUB_SCAN + "\n" + call)
 
     def test_a_yocto_configuration_resolves_to_its_bytes(self):
-        cp = self._run("_profile_image_path wpewebkit-2.46-yocto-rpi5-64")
+        cp = self._run("_image_path profile wpewebkit-2.46-yocto-rpi5-64")
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
         self.assertEqual("/ws/a/build/image/x.wic.xz", cp.stdout.strip())
 
     def test_a_buildroot_configuration_resolves_too(self):
         """One resolver for both builders, as the scan has one shape."""
-        cp = self._run("_profile_image_path wpewebkit-2.38-buildroot-rpi3-32")
+        cp = self._run("_image_path profile wpewebkit-2.38-buildroot-rpi3-32")
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
         self.assertEqual("/ws/b/output/images/sdcard.img", cp.stdout.strip())
 
     def test_a_workspace_with_no_image_does_not_resolve(self):
         """`-` is the scan's word for "built nothing yet"; it is not a path."""
-        cp = self._run("_profile_image_path webkit-2.52-yocto-rpi3-32")
+        cp = self._run("_image_path profile webkit-2.52-yocto-rpi3-32")
         self.assertNotEqual(cp.returncode, 0)
         self.assertEqual("", cp.stdout.strip())
 
     def test_an_unknown_configuration_does_not_resolve(self):
-        cp = self._run("_profile_image_path nonsense")
+        cp = self._run("_image_path profile nonsense")
         self.assertNotEqual(cp.returncode, 0)
 
     def test_the_refusal_lists_what_has_been_built(self):
@@ -92,7 +94,7 @@ class TestAPathIsStillAPath(unittest.TestCase):
     passes it through untouched, vm: prefix included."""
 
     def _run(self, spec):
-        return bash(lift("_ws_profile", "_profile_image_path", "_from_resolve")
+        return bash(lift("_image_path", "_from_resolve")
                     + STUB_SCAN
                     + '\ninfo() { :; }\ndie() { echo "$*" >&2; exit 1; }\n'
                     + f"_from_resolve {spec}")

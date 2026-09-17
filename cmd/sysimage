@@ -3,12 +3,13 @@
 # wk sysimage <sub> [args] -- build and manage bootable systems
 #
 # wk: where=host name=none values=--list group=hosts takes=1 opts --list dryrun build,webkit,write
-# wk: readonly ls,disks,--list
+# wk: readonly ls,disks,holds,--list
 # wk: destructive write
 # wk: flag --list takes=0
 # wk: sub ls,list where=dynamic opts=--continued
-# wk: sub build,webkit where=dynamic name=derived
-# wk: sub build,webkit,disks,rm,flash takes=2
+# wk: sub build,webkit,holds where=dynamic name=derived
+# wk: sub build,webkit,disks,rm,flash,holds takes=2
+# wk: sub holds opts=--slot=,--commit=,--config=,--workspace=
 # wk: sub build,webkit passthrough=tail
 # wk: sub write opts=--from=,--disk=,--profile=,--machine=,--rescue,--grow,--no-grow
 #
@@ -20,12 +21,13 @@
 # machine holding the reader (admin/wk-card-priv).
 #
 #   A yocto or buildroot profile is built in a lane -- the workspace named
-#   yocto-<profile> or buildroot-<profile> -- and 'build' and 'webkit' run on
-#   the machine holding that workspace, whichever machine they are typed on
-#   ('wk ls' names it). <profile>@<machine> says which machine instead: a lane
-#   nothing holds yet, or a second machine's lane of a profile another machine
-#   already has one of. --workspace <name> names a different lane on that
-#   machine, and the build follows that one.
+#   yocto-<profile> or buildroot-<profile> -- and 'build', 'webkit' and 'holds'
+#   run on the machine holding that workspace, whichever machine they are typed
+#   on ('wk ls' names it). <profile>@<machine> says which machine instead: a
+#   lane nothing holds yet, or a second machine's lane of a profile another
+#   machine already has one of. --workspace <name> names a different lane on
+#   that machine -- <builder>-<profile>-<arm> is a lane of its own, so two arms
+#   build at once -- and the command follows that one.
 #
 #   build <profile> [options]    build from the spec in this repo. A yocto
 #                                profile also takes --workspace, --detach,
@@ -62,6 +64,14 @@
 #                                or wpe-cross-pgo-use (against the mixed
 #                                profile). Without it a 2.52 profile runs all
 #                                three phases in order
+#   holds <profile> [--slot <name> --commit <sha> [--config <c>]]
+#                                prints `yes` when that lane already holds what
+#                                is named -- the built image, or the slot at
+#                                that commit built the way this release builds
+#                                it -- and `no` when it does not. Routed to the
+#                                lane like build and webkit, so a step asks the
+#                                machine that would do the work rather than
+#                                this one (lib/sched.py's done predicate)
 #   ls | list                    every image a workspace in this fleet has built,
 #                                its slots, and where each one is: this
 #                                machine's store, then every machine it knows
@@ -119,20 +129,8 @@ wkslot() { python3 "$WK_ROOT/lib/wkslot.py" "$@"; }
 # The lane is what the dispatcher routes a build by (`name=derived`, wk); a
 # pmos or fetch profile has none, and is built by this host itself.
 _lane() { # <sub> <args...> -- the workspace these arguments act on, nothing when they name none
-    local profile="${2:-}" a prev=""
-    shift 2 2>/dev/null || return 0
-    case "$profile" in ''|-*) return 0 ;; esac
-    profile=$(image_spec_profile "$profile")
-    for a in ${@+"$@"}; do
-        case "$prev" in --workspace) printf '%s' "$a"; return 0 ;; esac
-        case "$a" in --workspace=?*) printf '%s' "${a#*=}"; return 0 ;; esac
-        prev="$a"
-    done
-    ( image_profile_load "$profile" >/dev/null 2>&1 || exit 0
-      case "${IMG_BUILDER:-}" in
-          yocto)     yocto_ws_default "$profile" ;;
-          buildroot) echo "buildroot-$profile" ;;
-      esac )
+    shift 2>/dev/null || return 0
+    image_lane_arg ${@+"$@"}
 }
 
 if [ "${1:-}" = --wsname ]; then
@@ -381,38 +379,60 @@ cmd_build() {
 
 
 cmd_webkit() {
-    local profile="${1:-}"
-    [ -n "$profile" ] || die "usage: wk sysimage webkit <profile> --commit <sha> --slot <name> [--detach]; see wk sysimage -h"
-    profile=$(image_spec_profile "$profile")   # the machine half routed this here (wk); what is built is the profile
+    local spec="${1:-}" profile
+    [ -n "$spec" ] || die "usage: wk sysimage webkit <profile> --commit <sha> --slot <name> [--detach]; see wk sysimage -h"
+    profile=$(image_spec_profile "$spec")   # the machine half routed this here (wk); what is built is the profile
     image_profile_load "$profile" || die "unknown profile '$profile'.
     'wk sysimage --list' has every configuration."
     shift
     case "${IMG_BUILDER:-}" in
         buildroot) load_target "${WK_TARGET:-$(default_target)}"; buildroot_webkit "$profile" ${WK_DRY_RUN:+--dry-run} "$@"; return $? ;;
         yocto)     load_target "${WK_TARGET:-$(default_target)}"
-                   # 2.52 onwards the perf build *is* the profile-guided one, so one command is still one slot and three phases sit behind it (image/pgo.sh).
-                   if image_pgo_wanted; then image_pgo_webkit "$profile" ${WK_DRY_RUN:+--dry-run} "$@"
+                   # 2.52 onwards the perf build *is* the profile-guided one, so one command is still one slot and three phases sit behind it (image/pgo.sh). The spec, not the profile: the cycle's own steps are commands, and each names the lane the way this one was named.
+                   if image_pgo_wanted; then image_pgo_webkit "$spec" ${WK_DRY_RUN:+--dry-run} "$@"
                    else yocto_build "$profile" --stage webkit ${WK_DRY_RUN:+--dry-run} "$@"; fi
                    return $? ;;
         *) die "'$profile' is built by ${IMG_BUILDER:-no builder}, and only a buildroot or yocto image takes WebKit slots" ;;
     esac
 }
 
-# Longest match, so a lane carrying a suffix of its own -- one per arm -- still names its profile.
-_ws_profile() { # <workspace>
-    local rest name best=""
-    case "$1" in
-        yocto-*)     rest="${1#yocto-}" ;;
-        buildroot-*) rest="${1#buildroot-}" ;;
-        *) return 1 ;;
-    esac
-    for name in $(image_config_names); do
-        case "$rest" in
-            "$name"|"$name"-*) [ "${#name}" -gt "${#best}" ] && best="$name" ;;
+# A step's done predicate, asked of the machine holding the lane rather than of the one that drew the graph (lib/sched.py, cmd/ab). The verdict is on stdout, not in the exit status: a readonly command forwarded to a stopped podman machine reports that and exits 0, which as a status would read as `holds` and skip the build.
+cmd_holds() { # <profile>[@<machine>] [--workspace <lane>] [--slot <name> --commit <sha> [--config <c>]]
+    local profile="${1:-}" slot="" commit="" config="" lane=""
+    [ -n "$profile" ] || die "usage: wk sysimage holds <profile> [--slot <name> --commit <sha>]; see wk sysimage -h"
+    profile=$(image_spec_profile "$profile")   # the machine half routed this here (wk); what is asked about is the profile
+    shift
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --slot)   slot="${2:-}"; image_check_slot_name "$slot"; shift ;;
+            --commit) commit="${2:-}"; shift ;;
+            --config) config="${2:-}"; shift ;;
+            --workspace) lane="${2:-}"; shift ;;
         esac
+        shift
     done
-    [ -n "$best" ] || return 1
-    printf '%s' "$best"
+    image_profile_load "$profile" || die "unknown profile '$profile'.
+    'wk sysimage --list' has every configuration."
+    [ -n "$lane" ] || lane=$(image_lane_ws "$profile")
+
+    if [ -z "$slot" ]; then
+        [ -z "$commit$config" ] || die "usage: wk sysimage holds $profile --slot <name> --commit <sha>
+    --commit and --config ask about a slot, so they need --slot; without one
+    the question is whether the image itself is built."
+        _image_path ws "$lane" >/dev/null 2>&1 && echo yes || echo no
+        return 0
+    fi
+
+    { [ "${#commit}" -eq 40 ] && [ -z "${commit//[0-9a-f]/}" ]; } \
+        || die "usage: wk sysimage holds $profile --slot $slot --commit <sha>
+    --commit takes the full 40-digit sha the slot would hold, got '$commit'"
+
+    if [ -n "$config" ]; then
+        image_pgo_slot_is "$lane" "$slot" "$commit" "$config" && echo yes || echo no
+    else
+        image_slot_holds "$lane" "$slot" "$commit" && echo yes || echo no
+    fi
+    return 0
 }
 
 _ws_building() { # <workspace>
@@ -436,7 +456,7 @@ _store_images() {   # every image in this machine's store
         else                        state=ready
         fi
 
-        prof=$(_ws_profile "$ws" || printf '')
+        prof=$(image_lane_profile "$ws" || printf '')
         board=""; note=""
         if [ -n "$prof" ]; then
             board=$( image_profile_load "$prof" >/dev/null 2>&1 \
@@ -455,7 +475,7 @@ _store_images() {   # every image in this machine's store
             printf '    %s\n' "$path"
             [ "$state" = building ] && printf "    a build is running here -- these bytes are the previous image; 'wk logs %s' follows it\n" "$ws"
         fi
-        for sj in $( [ -n "$prof" ] && ( image_profile_load "$prof" >/dev/null 2>&1 && dirname "$(image_slot_dir "$prof" x)" ) )/*/slot.json; do
+        for sj in $(dirname "$(image_slot_dir "$ws" x)" 2>/dev/null)/*/slot.json; do
             [ -f "$sj" ] || continue
             printf '    slot %-12s %s  %s  built %s  (%s)\n' \
                 "$(wkslot get "$sj" slot)" "$(wkslot get "$sj" commit | cut -c1-12)" \
@@ -689,13 +709,18 @@ _from_reader() { # <spec> -- prints a command that emits the source bytes on std
     esac
 }
 
-# The reverse of `_profile_from_path`, off the one scan `wk sysimage ls` prints: a configuration names exactly one built image, so `--from <configuration>` finds its bytes rather than making somebody copy a path out of `ls`. Recomputed, never recorded.
-_profile_image_path() { # <profile> -- the path to its image, if it has one
-    local builder ws path bytes mtime
+# The reverse of `_profile_from_path`, off the one scan `wk sysimage ls` prints. `--from <configuration>` asks by profile, so somebody need not copy a path out of `ls`; a step asks by lane, because which lane built it is the question when a profile has one per arm. Recomputed, never recorded.
+_image_path() { # <ws|profile> <value> -- the path to the image it names, if one is built
+    local builder ws path bytes mtime key
     while IFS="$(printf '\t')" read -r builder ws path bytes mtime; do
         [ -n "${builder:-}" ] || continue
         [ "$path" = - ] && continue
-        [ "$(_ws_profile "$ws" 2>/dev/null || printf '')" = "$1" ] || continue
+        case "$1" in
+            ws)      key="$ws" ;;
+            profile) key=$(image_lane_profile "$ws" 2>/dev/null || printf '') ;;
+            *) die "_image_path: '$1' is neither ws nor profile" ;;
+        esac
+        [ "$key" = "$2" ] || continue
         printf '%s' "$path"
         return 0
     done <<EOF
@@ -709,7 +734,7 @@ _built_profiles() {
     while IFS="$(printf '\t')" read -r builder ws path bytes mtime; do
         [ -n "${builder:-}" ] || continue
         [ "$path" = - ] && continue
-        prof=$(_ws_profile "$ws" 2>/dev/null || printf '')
+        prof=$(image_lane_profile "$ws" 2>/dev/null || printf '')
         [ -n "$prof" ] && printf '%s\n' "$prof"
     done <<EOF
 $(image_workspace_scan)
@@ -722,7 +747,7 @@ _from_resolve() { # <spec> -- prints a path or vm:<path>
     case "$spec" in
         vm:*|/*|./*|../*) printf '%s' "$spec"; return 0 ;;
     esac
-    if path=$(_profile_image_path "$spec"); then
+    if path=$(_image_path profile "$spec"); then
         info "'$spec' is a configuration; its image is at $path"
         printf '%s' "$path"
         return 0
@@ -739,7 +764,7 @@ $(_built_profiles | sed 's/^/      /')
 }
 
 _profile_from_path() { # <path>
-    _ws_profile "$(printf '%s' "$1" | sed -n 's|.*/ws/\([^/]*\)/.*|\1|p')"
+    image_lane_profile "$(printf '%s' "$1" | sed -n 's|.*/ws/\([^/]*\)/.*|\1|p')"
 }
 
 cmd_write_from() { # <from-spec> <disk-spec> <dry> <grow> <profile> <role> <machine override>
@@ -1015,6 +1040,7 @@ case "${1:-}" in
     build) shift; cmd_build "$@" ;;
     webkit) shift; cmd_webkit "$@" ;;
     ls|list) shift; cmd_ls "$@" ;;
+    holds) shift; cmd_holds "$@" ;;
     disks) shift; cmd_disks "$@" ;;
     write) shift; cmd_write "$@" ;;
     flash) shift; cmd_flash "$@" ;;

@@ -1,7 +1,7 @@
 wkdata() { python3 "$WK_ROOT/lib/wkdata.py" "$@"; }
 wkslot() { python3 "$WK_ROOT/lib/wkslot.py" "$@"; }
 
-BENCH_DIR="$WK_STORE/bench"
+BENCH_DIR="$(wk_bench_dir)"
 SEED_DIR="$(wk_artifact_dir)/bench"
 
 # What a driver's b_bench_put never carries onto a benchmark install: a repository's history, and byte-compiled python whose source travels beside it.

@@ -918,7 +918,10 @@ class TestTheResourceEnvelopeIsReapplied(_Stage):
         cp = self._run(cpus=cores, mem=mem)
         out = cp.stdout + cp.stderr
         self.assertEqual(cp.returncode, 0, out)
-        self.assertIn(f"machine resources ({cores} cpus, {mem} MiB)", out)
+        # The disk is part of the envelope too, and only grows: the fake
+        # `podman machine inspect` answers nothing for it, so what the line
+        # reports is that nothing about the machine had to change.
+        self.assertRegex(out, rf"machine resources \({cores} cpus, {mem} MiB, .*GiB\)")
         self.assertNotIn("machine set", self.podman, self.podman)
 
     def test_a_machine_that_differs_is_re_sized_and_says_what_it_kept_back(self):

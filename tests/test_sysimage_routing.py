@@ -421,12 +421,14 @@ class TestTheLaneSpec(unittest.TestCase):
 
 
 class TestTheProfileBehindALane(unittest.TestCase):
-    """`_ws_profile`: a lane is named <builder>-<profile> and may carry a
-    suffix of its own, so the profile is recovered by matching the
-    configurations this checkout defines rather than by stripping a prefix."""
+    """`image_lane_profile` (lib/image.sh): a lane is named <builder>-<profile>
+    and may carry an arm's suffix of its own, so the profile is recovered by
+    matching the configurations this checkout defines rather than by stripping
+    a prefix."""
 
     def _profile_of(self, ws):
-        cp = bash(f'. "{REPO}/cmd/sysimage" functions\n_ws_profile {ws} || echo "REFUSED"\n')
+        cp = bash(f'. "{REPO}/cmd/sysimage" functions\n'
+                  f'image_lane_profile {ws} || echo "REFUSED"\n')
         return cp.stdout.strip()
 
     def test_a_plain_lane_names_its_profile(self):

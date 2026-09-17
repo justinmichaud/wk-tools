@@ -1,5 +1,7 @@
-"""tailnet.py retire <name> | check -- retire an offline node the fleet owns.
-Exit: 0 done, 2 no such node, 3 online, 4 no credential, 5 refused, 6 unreachable."""
+"""tailnet.py retire <name> | check | key-live <id> | key-mint <tag> -- what the
+fleet asks of the tailnet through its API credential; a minted key has the shape
+lib/credcheck.py's `tailnet` rule describes, pre-authorized besides.
+Exit: 0 done, 2 no such node / no such key, 3 online, 4 no credential, 5 refused, 6 unreachable."""
 import json
 import os
 import sys
@@ -25,11 +27,14 @@ def secret():
     return key
 
 
-def call(method, path, key):
-    req = urllib.request.Request(API + path, method=method)
+def call(method, path, key, body=None):
+    data = json.dumps(body).encode() if body is not None else None
+    req = urllib.request.Request(API + path, method=method, data=data)
     import base64
     req.add_header("Authorization",
                    "Basic " + base64.b64encode((key + ":").encode()).decode())
+    if data is not None:
+        req.add_header("Content-Type", "application/json")
     try:
         with urllib.request.urlopen(req, timeout=30) as r:
             body = r.read()
@@ -76,6 +81,30 @@ def cmd_retire(name):
               % (d.get("name", name), d.get("id", "?"), d.get("lastSeen", "unknown")))
 
 
+def cmd_key_live(key_id):
+    keys = (call("GET", "/tailnet/-/keys", secret()) or {}).get("keys") or []
+    if any(k.get("id") == key_id for k in keys):
+        print("ok: the tailnet still has key %s" % key_id)
+        return
+    fail(2, "the tailnet has no key %s (it was deleted, or its expiry passed)" % key_id)
+
+
+KEY_DAYS = 90        # tailscale's own ceiling for an auth key
+
+
+def cmd_key_mint(tag):
+    body = {"capabilities": {"devices": {"create": {
+                "reusable": True, "ephemeral": False,
+                "preauthorized": True, "tags": [tag]}}},
+            "expirySeconds": KEY_DAYS * 86400,
+            "description": "wk fleet key"}
+    out = call("POST", "/tailnet/-/keys", secret(), body) or {}
+    minted = out.get("key")
+    if not minted:
+        fail(5, "the tailnet minted no key for %s: %s" % (tag, json.dumps(out)[:200]))
+    sys.stdout.write(minted)
+
+
 def cmd_check():
     key = secret()
     n = len(devices(key))
@@ -87,7 +116,11 @@ def main(argv):
         return cmd_check()
     if len(argv) == 3 and argv[1] == "retire":
         return cmd_retire(argv[2])
-    fail(1, "usage: tailnet.py retire <name> | check")
+    if len(argv) == 3 and argv[1] == "key-live":
+        return cmd_key_live(argv[2])
+    if len(argv) == 3 and argv[1] == "key-mint":
+        return cmd_key_mint(argv[2])
+    fail(1, "usage: tailnet.py retire <name> | check | key-live <id> | key-mint <tag>")
 
 
 if __name__ == "__main__":

@@ -24,22 +24,32 @@ from tests.support import REPO, WkTest, bash, func_body, run, scratch_dir
 WKPGO = REPO / "lib" / "wkpgo.py"
 
 PGO_LIBS = "\n".join('. "%s/%s"' % (REPO, f) for f in (
-    "lib/common.sh", "lib/store.sh", "lib/image.sh", "image/profiles.sh",
-    "boot/machines.sh", "lib/bench.sh", "image/pgo.sh"))
+    "lib/common.sh", "lib/store.sh", "lib/target.sh", "lib/image.sh",
+    "image/profiles.sh", "boot/machines.sh", "lib/bench.sh", "image/pgo.sh"))
 
 PROFILE = "webkit-2.52-yocto-rpi5-64"
+LANE = "yocto-" + PROFILE
+# The machine the lane is on, which the steps are keyed on: stubbed, so this
+# asks nothing of the fleet and no workspace has to exist.
+ON = "abuilder"
+RES = "machine:" + ON
 
 
-def pgo_steps(slot="pr", machine="rpi5", commit="a" * 40):
+def pgo_steps(slot="pr", machine="rpi5", commit="a" * 40, spec=PROFILE, lane=LANE):
     """The phases image/pgo.sh declares, one record each, as lib/sched.py reads
     them: id, machine, needs, holds, done-predicate, command."""
     with scratch_dir() as tmp:
-        cp = bash('%s\nsched_begin %s/steps\nimage_pgo_steps %s %s %s %s\ncat %s/steps\n'
-                  % (PGO_LIBS, tmp, PROFILE, commit, slot, machine, tmp))
+        cp = bash('%s\nimage_lane_machine() { echo %s; }\n'
+                  'sched_begin %s/steps\nimage_pgo_steps %s %s %s %s %s\ncat %s/steps\n'
+                  % (PGO_LIBS, ON, tmp, spec, lane, commit, slot, machine, tmp))
         assert cp.returncode == 0, cp.stdout + cp.stderr
         rows = [line.split("\t") for line in cp.stdout.splitlines() if line.strip()]
     return {r[0]: {"machine": r[1], "needs": r[2], "holds": r[3],
                    "done": r[4], "command": r[5]} for r in rows}
+
+
+def steps_holds(steps, id):
+    return steps[id]["holds"]
 
 
 def cross(config, profile=""):
@@ -193,15 +203,33 @@ class TestThePhasesAndTheirOrder(WkTest):
 
     def test_it_instruments_then_collects_then_rebuilds(self):
         steps = pgo_steps()
-        instr = steps["instr:%s:pr" % PROFILE]
+        instr = steps["instr:%s:pr" % LANE]
         self.assertIn("--slot pr-instr --config wpe-cross-pgo-collect", instr["command"])
-        self.assertEqual(instr["holds"], "lane:%s" % PROFILE)
-        self.assertEqual(steps["deploy:rpi5:pr-instr"]["needs"], "instr:%s:pr" % PROFILE)
-        mix = steps["mix:%s:pr" % PROFILE]
+        self.assertEqual(instr["holds"], RES)
+        self.assertEqual(steps["deploy:rpi5:pr-instr"]["needs"], "instr:%s:pr" % LANE)
+        mix = steps["mix:%s:pr" % LANE]
         self.assertIn("--stage pgo-mix --slot pr", mix["command"])
-        measured = steps["slot:%s:pr" % PROFILE]
+        measured = steps["slot:%s:pr" % LANE]
         self.assertIn("--slot pr --config wpe-cross-pgo-use", measured["command"])
-        self.assertEqual(measured["needs"], "mix:%s:pr" % PROFILE)
+        self.assertEqual(measured["needs"], "mix:%s:pr" % LANE)
+
+    def test_every_phase_runs_on_the_machine_holding_the_lane(self):
+        """Including the collection: the board writes its profiles back into
+        that lane's build directory, which only that machine can reach."""
+        for step in pgo_steps().values():
+            self.assertEqual(step["machine"], ON, step["command"])
+
+    def test_every_command_names_the_lane_it_acts_in(self):
+        """Two lanes of one profile -- one per arm, or one per machine -- are
+        told apart by nothing else once the command has been routed."""
+        for step in pgo_steps().values():
+            self.assertIn("--workspace %s" % LANE, step["command"], step["command"])
+
+    def test_a_build_is_held_by_its_machine_and_not_by_its_lane(self):
+        """One machine builds one thing at a time, whichever lane it is for;
+        two machines build at once."""
+        self.assertEqual(steps_holds(pgo_steps(), "instr:%s:pr" % LANE), "machine:" + ON)
+        self.assertNotIn(LANE, RES)
 
     def test_the_board_is_held_for_the_collection_and_the_lane_for_the_builds(self):
         """The whole point of the graph: the builder is not idle through the
@@ -209,19 +237,24 @@ class TestThePhasesAndTheirOrder(WkTest):
         steps = pgo_steps()
         for phase in ("deploy:rpi5:pr-instr", "collect:rpi5:pr:speedometer3"):
             self.assertEqual(steps[phase]["holds"], "device:rpi5", phase)
-        for phase in ("instr:%s:pr" % PROFILE, "mix:%s:pr" % PROFILE, "slot:%s:pr" % PROFILE):
-            self.assertEqual(steps[phase]["holds"], "lane:%s" % PROFILE, phase)
+        for phase in ("instr:%s:pr" % LANE, "mix:%s:pr" % LANE, "slot:%s:pr" % LANE):
+            self.assertEqual(steps[phase]["holds"], RES, phase)
 
     def test_a_phase_already_done_is_asked_about_by_its_own_evidence(self):
         """The instrumented slot and the measured one each carry the commit and
         the config they were built with, which is what makes the cycle
         re-runnable."""
         steps = pgo_steps()
-        self.assertEqual(steps["instr:%s:pr" % PROFILE]["done"],
-                         "image_pgo_slot_is %s pr-instr %s wpe-cross-pgo-collect"
-                         % (PROFILE, "a" * 40))
-        self.assertEqual(steps["slot:%s:pr" % PROFILE]["done"],
-                         "image_slot_holds %s pr %s" % (PROFILE, "a" * 40))
+        # Asked of the machine holding the lane, not of the one that drew the
+        # graph: a slot built there reads as missing here (`wk sysimage holds`).
+        self.assertEqual(
+            steps["instr:%s:pr" % LANE]["done"],
+            '[ "$(wk sysimage holds %s --workspace %s --slot pr-instr --commit %s'
+            ' --config wpe-cross-pgo-collect)" = yes ]' % (PROFILE, LANE, "a" * 40))
+        self.assertEqual(
+            steps["slot:%s:pr" % LANE]["done"],
+            '[ "$(wk sysimage holds %s --workspace %s --slot pr --commit %s)" = yes ]'
+            % (PROFILE, LANE, "a" * 40))
 
     def test_it_collects_every_benchmark_the_weights_name(self):
         steps = pgo_steps()
@@ -236,6 +269,7 @@ class TestThePhasesAndTheirOrder(WkTest):
         cp = bash(f'''
 . "{REPO}/lib/common.sh"
 . "{REPO}/lib/store.sh"
+. "{REPO}/lib/target.sh"
 . "{REPO}/lib/image.sh"
 image_pgo_dir_in pr
 ''')
@@ -243,11 +277,25 @@ image_pgo_dir_in pr
         cp = bash(f'''
 . "{REPO}/lib/common.sh"
 . "{REPO}/lib/store.sh"
+. "{REPO}/lib/target.sh"
 . "{REPO}/lib/image.sh"
-image_pgo_dir webkit-2.52-yocto-rpi5-64 pr
+image_pgo_dir yocto-webkit-2.52-yocto-rpi5-64 pr
 ''')
         self.assertTrue(cp.stdout.strip().endswith(
             "ws/yocto-webkit-2.52-yocto-rpi5-64/build/wk-pgo/pr"), cp.stdout)
+
+    def test_the_collection_belongs_to_the_lane_and_not_to_the_profile(self):
+        """Two lanes of one profile collect into two directories: a profile
+        taken in one arm's lane says nothing about the other's."""
+        cp = bash(f'''
+. "{REPO}/lib/common.sh"
+. "{REPO}/lib/store.sh"
+. "{REPO}/lib/target.sh"
+. "{REPO}/lib/image.sh"
+image_pgo_dir yocto-webkit-2.52-yocto-rpi5-64-base pr
+''')
+        self.assertTrue(cp.stdout.strip().endswith(
+            "ws/yocto-webkit-2.52-yocto-rpi5-64-base/build/wk-pgo/pr"), cp.stdout)
 
 
 # A `pgo-profile` of exactly upstream's shape: the two names lib/wkpgo.py reaches
@@ -596,11 +644,12 @@ class TestTheCycleSaysWhatItIsDoing(WkTest):
         the steps in the order they will be reached, and a run told to step the
         record as each one starts."""
         with scratch_dir() as tmp:
-            cp = bash('%s\nyocto_ws_default() { echo ws; }\nyocto_log() { echo %s/log; }\n'
+            cp = bash('%s\nyocto_log() { echo %s/log; }\n'
+                      'image_lane_machine() { echo %s; }\n'
                       'sched_run() { echo "RUN $*"; }\n'
                       'image_profile_load %s >/dev/null 2>&1\n'
-                      'image_pgo_slot %s %s pr rpi5\n'
-                      % (PGO_LIBS, tmp, PROFILE, PROFILE, "a" * 40),
+                      'image_pgo_slot %s %s %s pr rpi5\n'
+                      % (PGO_LIBS, tmp, ON, PROFILE, PROFILE, LANE, "a" * 40),
                       env={"WK_STORE": str(tmp)})
             self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
             records = list((tmp / "task").glob("pgo-*"))
@@ -616,9 +665,9 @@ class TestTheCycleSaysWhatItIsDoing(WkTest):
         one's is real: `--stop` is an arm of the same command, through the one
         implementation (job_stop, lib/watchdog.sh)."""
         text = (REPO / "image" / "pgo.sh").read_text()
-        self.assertIn('"wk sysimage webkit $profile --slot $slot --stop"', text)
+        self.assertIn('"wk sysimage webkit $spec --workspace $lane --slot $slot --stop"', text)
         self.assertNotIn("kill $$ on", text)
-        self.assertIn('job_stop "$profile/$slot" pgo', text)
+        self.assertIn('job_stop "$lane/$slot" pgo', text)
 
     def test_stop_with_no_cycle_running_says_so_and_exits_0(self):
         cp = run("sysimage", "webkit", "webkit-2.52-yocto-rpi5-64",
@@ -679,7 +728,7 @@ class TestTheProfileGateStandsBeforeTheMeasuredBuild(WkTest):
         finished -- and a step whose need failed is not run at all
         (tests/test_sched.py)."""
         steps = pgo_steps()
-        self.assertEqual(steps["slot:%s:pr" % PROFILE]["needs"], "mix:%s:pr" % PROFILE)
+        self.assertEqual(steps["slot:%s:pr" % LANE]["needs"], "mix:%s:pr" % LANE)
 
     def test_a_failed_stage_stops_the_cycle(self):
         """yocto_build dies on a stage that did not finish, so the mix step

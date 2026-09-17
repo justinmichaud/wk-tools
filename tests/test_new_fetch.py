@@ -41,15 +41,21 @@ from pathlib import Path
 
 from tests.support import REPO, bash, func_body, scratch_dir
 
-SYNC_FUNCS = f'set -euo pipefail\ncd "{REPO}"\n. cmd/sync functions\n'
-STORE_FUNCS = f'set -euo pipefail\ncd "{REPO}"\n. lib/common.sh\n. lib/store.sh\n'
+# The stand-in origin below carries `main` and nothing else, so the branch list
+# is pinned to it: which branches this checkout's image configurations add to a
+# real mirror is tests/test_mirror_path.py's question, and the wiring's shape is
+# this file's.
+PIN = 'export WK_MIRROR_BRANCHES=main\n'
+
+SYNC_FUNCS = f'set -euo pipefail\ncd "{REPO}"\n{PIN}. cmd/sync functions\n'
+STORE_FUNCS = f'set -euo pipefail\ncd "{REPO}"\n{PIN}. lib/common.sh\n. lib/store.sh\n'
 
 # Nothing here may reach github.com: the wiring points the four remotes at
 # their real URLs and rewrites them to a local mirror, so a fetch that ignored
 # the rewrite would clone WebKit for real. Port 1 refuses at once.
 OFFLINE = {"http_proxy": "http://127.0.0.1:1", "https_proxy": "http://127.0.0.1:1",
            "GIT_TERMINAL_PROMPT": "0"}
-NEW_FUNCS = f'set -euo pipefail\ncd "{REPO}"\n. cmd/new functions\n'
+NEW_FUNCS = f'set -euo pipefail\ncd "{REPO}"\n{PIN}. cmd/new functions\n'
 
 GIT_ID = ["-c", "user.email=t@example.com", "-c", "user.name=Test"]
 
