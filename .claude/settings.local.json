@@ -3,7 +3,8 @@
     "allow": [
       "Bash(./setup --stage vmtools)",
       "Bash(env -u WK_NAME -u WK_TARGET -u WK_TARGET_KIND ./wk selftest --quick)",
-      "Bash(./wk help *)"
+      "Bash(./wk help *)",
+      "Bash(./wk *)"
     ]
   }
 }

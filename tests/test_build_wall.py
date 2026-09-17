@@ -204,19 +204,43 @@ class TestBitbakeGetsTheRealTools(WkTest):
                       "the yocto build leaves container/bin on PATH, so "
                       "tmp/hosttools captures the wall")
 
-    def test_it_strips_the_wall_and_keeps_everything_else(self):
-        """Both trees -- a person's clone and the one `wk` pushed are routinely
-        both on PATH -- and nothing else touched."""
+    def _stripped(self, path):
         fn = re.search(r"(?ms)^_strip_wall_from_path\(\) \{.*?^\}",
                        (REPO / "image" / "yocto-build.sh").read_text())
         self.assertIsNotNone(fn, "_strip_wall_from_path is not defined")
         cp = subprocess.run(
             ["bash", "-c", fn.group(0) + "\n_strip_wall_from_path"],
-            env={"PATH": "/home/me/wk-tools/container/bin:/usr/local/bin:"
-                         "/opt/wk-tools/container/bin:/usr/bin:/bin"},
-            capture_output=True, text=True, timeout=60)
+            env={"PATH": path}, capture_output=True, text=True, timeout=60)
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertEqual("/usr/local/bin:/usr/bin:/bin", cp.stdout)
+        return cp.stdout
+
+    def test_it_strips_the_wall_and_keeps_everything_else(self):
+        """Both trees -- a person's clone and the one `wk` pushed are routinely
+        both on PATH -- and nothing else touched."""
+        self.assertEqual(
+            "/usr/local/bin:/usr/bin:/bin",
+            self._stripped("/home/me/wk-tools/container/bin:/usr/local/bin:"
+                           "/opt/wk-tools/container/bin:/usr/bin:/bin"))
+
+    def test_the_git_gate_beside_it_comes_off_too(self):
+        """container/bin/ws is the gate shell/path.sh adds inside a workspace,
+        and it is the wall under another name. Left on, poky's scripts/git --
+        which skips every */scripts entry to find "the real git" -- reaches it,
+        and the two exec each other forever."""
+        self.assertEqual(
+            "/usr/bin:/bin",
+            self._stripped("/opt/wk-tools/container/bin:"
+                           "/opt/wk-tools/container/bin/ws:/usr/bin:/bin"))
+
+    def test_the_gate_is_a_wall_so_the_strip_has_to_name_it(self):
+        """Read off the tree rather than spelled here: every name in
+        container/bin/ws is a link to the one wall."""
+        ws = BIN / "ws"
+        names = sorted(p.name for p in ws.iterdir())
+        self.assertTrue(names, "container/bin/ws is empty")
+        for name in names:
+            with self.subTest(tool=name):
+                self.assertEqual(WALL.resolve(), (ws / name).resolve())
 
 
 class TestOneFileUnderEveryName(WallTest):

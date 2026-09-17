@@ -7,6 +7,7 @@ export WK_BUILD=1  # the build wall (container/bin/wk-build-wall) passes ninja/c
 
 # The wall comes off PATH entirely, which WK_BUILD cannot do: bitbake resolves each HOSTTOOLS name once into
 # tmp/hosttools and runs every task with that as the whole PATH, so it captures the wall (ahead of /usr/bin) and gcc-cross-canadian's do_compile dies in oe_runmake with "not on PATH".
+# Every directory under container/bin, not just container/bin: the git gate in container/bin/ws is a wall too, and poky's own scripts/git wrapper skips */scripts to find "the real git", reaches it, and the two exec each other at 100% of a core until bitbake's client gives the server up after 60s (measured).
 _strip_wall_from_path() {
     local out="" d oldifs=$IFS
     IFS=:
@@ -14,7 +15,7 @@ _strip_wall_from_path() {
     IFS=$oldifs
     for d in "$@"; do
         [ -n "$d" ] || continue
-        case "$d" in */container/bin) continue ;; esac
+        case "$d" in */container/bin|*/container/bin/*) continue ;; esac
         out="${out:+$out:}$d"
     done
     printf '%s' "$out"
@@ -34,6 +35,8 @@ while [ $# -gt 0 ]; do
         --image)   IMAGE="${2:-}"; shift 2 ;;
         --stage)   STAGE="${2:-}"; shift 2 ;;
         --jobs)    JOBS="${2:-}"; shift 2 ;;
+        # The budget the stage was admitted against (yocto_stage_budget, image/yocto.sh). Enforced rather than recomputed here: a second formula made the watchdog kill a populate_sdk at 15324MB that had been booked 17899MB.
+        --mem-budget) WK_MEM_BUDGET_MB="${2:-}"; export WK_MEM_BUDGET_MB; shift 2 ;;
         --rm-work) RM_WORK="${2:-}"; shift 2 ;;
         --src)     SRC="${2:-}"; shift 2 ;;
         --chromium) CHROMIUM="${2:-}"; shift 2 ;;

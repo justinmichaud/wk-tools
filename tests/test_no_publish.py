@@ -160,20 +160,22 @@ agent_sessions
         self.assertEqual(cp.stdout.strip(), "")
 
     def test_on_ends_them_before_loading_the_agent(self):
+        """`on)` asks the gate about every session it found, and does it
+        before the keys reach the agent; the gate is where the ending is."""
         on = PUSH[PUSH.index("\non)\n"):PUSH.index("\noff)\n")]
-        self.assertLess(on.index("agent_sessions"), on.index("end_agent_sessions"))
-        self.assertLess(on.index("end_agent_sessions"), on.index("push_agent_load"))
+        self.assertLess(on.index("push_end_sessions_first $(agent_sessions)"),
+                        on.index("push_agent_load"))
+        self.assertIn("end_agent_sessions", _lift("push_end_sessions_first()"))
 
     def test_ending_them_is_asked_first(self):
         """Killing a session is destructive, so it goes through the one
         yes/no helper and the command declares itself to the dispatcher."""
-        on = PUSH[PUSH.index("\non)\n"):PUSH.index("\noff)\n")]
-        self.assertLess(on.index('confirm "'), on.index("end_agent_sessions"))
+        gate = _lift("push_end_sessions_first()")
+        self.assertLess(gate.index('confirm "'), gate.index("end_agent_sessions"))
         self.assertIn("# wk: destructive on", PUSH)
 
     def test_a_declined_prompt_leaves_the_keys_out(self):
-        on = PUSH[PUSH.index("\non)\n"):PUSH.index("\noff)\n")]
-        self.assertIn('die "push stays off', on)
+        self.assertIn('die "push stays off', _lift("push_end_sessions_first()"))
 
 
 def _lift(name):

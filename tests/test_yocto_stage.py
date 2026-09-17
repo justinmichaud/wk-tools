@@ -557,3 +557,28 @@ WK_MIRROR_BRANCHES='{mirror_branches}' yocto_ensure_ws ws webkitglib/2.52
     def test_a_workspace_already_on_the_branch_is_left_alone(self):
         cp = self._refusal("webkitglib/2.52")
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+
+
+class TestTheBudgetIsBookedAndEnforcedOnce(WkTest):
+    """A stage is admitted against `yocto_stage_budget`'s MB and the watchdog
+    inside the target has to enforce that same number. Two formulas -- the
+    booking's, and guard.sh's jobs*WK_MB_PER_JOB -- killed a populate_sdk at
+    15324MB that had been booked 17899MB (2026-09-17)."""
+
+    def test_the_spawn_hands_the_booked_budget_to_the_build(self):
+        text = (REPO / "image" / "yocto.sh").read_text()
+        self.assertIn('--mem-budget "$stage_mb"', text,
+                      "yocto_spawn books stage_mb but the build never sees it")
+
+    def test_the_build_turns_it_into_the_guard_s_budget(self):
+        text = (REPO / "image" / "yocto-build.sh").read_text()
+        self.assertIn("--mem-budget) WK_MEM_BUDGET_MB=", text)
+        self.assertIn("export WK_MEM_BUDGET_MB", text)
+
+    def test_the_guard_prefers_it_over_the_jobs_product(self):
+        text = (REPO / "build" / "guard.sh").read_text()
+        i = text.index("_guard_watch()")
+        body = text[i:i + 600]
+        self.assertLess(body.index("WK_MEM_BUDGET_MB"),
+                        body.index("WK_MB_PER_JOB"),
+                        "the jobs product would win over the booked budget")

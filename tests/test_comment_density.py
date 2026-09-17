@@ -24,6 +24,9 @@ a flag does -- rather than to a ratio.
 A symlink. container/bin's build wall is one script under ten names; it is
 measured once, at its target.
 
+Vendored files. claude/skills/synced/ is written by the skill sync, not here,
+so the ceiling would ask for edits that the next sync undoes.
+
 Run: python3 -m unittest tests.test_comment_density -v
 """
 import ast
@@ -63,7 +66,8 @@ def tracked_source_files():
     out = subprocess.run(["git", "ls-files"], cwd=REPO,
                          capture_output=True, text=True, check=True).stdout.split()
     for rel in out:
-        if rel.startswith(("tests/", "docs/")) or rel in GRANT_STATEMENTS:
+        if rel.startswith(("tests/", "docs/", "claude/skills/synced/")) \
+                or rel in GRANT_STATEMENTS:
             continue
         path = REPO / rel
         if path.is_symlink() or not path.is_file():

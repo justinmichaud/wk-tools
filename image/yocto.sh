@@ -485,7 +485,7 @@ EOF
     yocto_spawn "$ws" "$stage" "$stage_jobs" "$stage_mb" \
         "$(image_build_subject "$ws" "$stage" "$slot" "$commit" "$cross_config")" \
         --target "$YOC_TARGET" --image "$YOC_IMAGE" --stage "$stage" \
-        --jobs "$cores" --rm-work "${YOC_RM_WORK:-0}" \
+        --jobs "$cores" --mem-budget "$stage_mb" --rm-work "${YOC_RM_WORK:-0}" \
         ${YOC_PORT_TARGET_FROM:+--port-target-from "$YOC_PORT_TARGET_FROM"} \
         ${YOC_MACHINE:+--port-machine "$YOC_MACHINE"} \
         ${IMG_MACHINE:+--board "$IMG_MACHINE"} \
