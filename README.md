@@ -227,7 +227,7 @@ wk key setup                   # the deploy keys, then every credential this mac
                                # has not got, and the same working one on every
                                # workstation -- one credential at a time, re-runnable,
                                # and Enter skips one you do not want
-wk push on                     # loads the keys into the agent and gives the injector the write token and the Bugzilla key; ends any claude session first
+wk push on                     # loads the keys into the agent and gives the injector the write token and the Bugzilla key; ends any claude session first (--force keeps them)
 wk sync                        # clones WebKit into the mirror, publishes a snapshot
 eval "$(wk completion bash)"   # shell/bashrc does this for you; zsh: wk completion zsh
 ```
@@ -414,7 +414,16 @@ mirror holds the history every workspace here shares, which is why a fetch of
 are neither shared nor in it, so `wk pr` fetches the one ref from GitHub into
 the checkout itself and adds a remote for an account that has none yet. The
 fetch is thin -- the checkout already has the history those commits sit on --
-and it is the same command from the host and from inside a workspace.
+and it is the same command from the host and from inside a workspace. A branch
+taken from a fork is left tracking that fork's branch **by name**, written as
+`branch.<b>.remote`/`branch.<b>.merge` rather than derived: git derives an
+upstream through the remote's fetch refspec, and a wired checkout fetches a
+fork as `+refs/remotes/fork/*:refs/remotes/fork/*` (the mirror namespaces it),
+so the derivation answers with the tracking ref itself and `git push` in the
+workspace refuses. `wk remotes --fix`'s retarget writes those same two keys,
+so what an upstream is set to has one implementation. A pull request head is
+left tracking nothing -- it is no branch on the remote, and there is nothing
+to push back to.
 
 It names the upstream by its `.git`-less URL, which is the one thing here that
 needs saying: the wiring above rewrites each URL in `wk_remotes` to the mirror,
@@ -1667,7 +1676,9 @@ the read-only binds cannot be unmounted, shadowed or escaped from inside, and
 measures are the one switch: `wk push on` turns them off, and because a session
 already running would be handed that push -- and would keep its commit wall
 until it exited -- it asks once and ends every claude process in every workspace
-first (`--yes` answers; a decline loads nothing). A human `wk enter` shell is
+first (`--yes` answers; a decline loads nothing; `--force` leaves them running
+and loads the keys anyway, which hands that session a push until it exits, and
+says so again when the command ends). A human `wk enter` shell is
 never walled. Only the person at the keyboard pushes or commits.
 
 Nothing an agent runs drives a build directly either. `container/bin/wk-build-wall`

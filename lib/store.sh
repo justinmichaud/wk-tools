@@ -389,9 +389,11 @@ case "$up" in
     done
     printf '  *) exit 0 ;;
 esac
-git fetch -q "$f" "$b" 2>/dev/null || true
+'
+    printf '%s\n' "$(wk_track_branch_fn)"
+    printf 'git fetch -q "$f" "$b" 2>/dev/null || true
 if git rev-parse --verify -q "refs/remotes/$f/$b" >/dev/null; then
-    git branch -u "$f/$b" >/dev/null 2>&1 && echo "retargeted: $b now tracks $f/$b"
+    wk_track_branch "$f" "$b" >/dev/null 2>&1 && echo "retargeted: $b now tracks $f/$b"
 else
     echo "left alone: $b is not on $f yet -- push it first:  git push $f $b"
 fi
@@ -791,6 +793,25 @@ pr_parse_spec() {  # <spec>
     esac
 }
 
+# The one way a branch here is pointed at a remote branch. Written as config, never `git branch -u`: git derives an upstream by mapping the tracking ref back through the remote's fetch refspec, and a wired checkout's for a non-origin remote is `+refs/remotes/<r>/*:refs/remotes/<r>/*` (wk_fetch_refspecs) -- which answers with the tracking ref itself, so the branch is left tracking `refs/remotes/<r>/<b>`, a name that is not the branch's, and `git push` refuses outright rather than guessing (measured, git 2.43).
+wk_track_branch_fn() {   # the function every generated script calls, shipped with it
+    cat <<'EOF'
+wk_track_branch() { # <remote> <branch>
+    git config "branch.$2.remote" "$1" && git config "branch.$2.merge" "refs/heads/$2"
+}
+EOF
+}
+
+pr_track_step() { # <kind> <remote> <branch> -- what the checkout runs to leave the branch pushable
+    local kind="$1" remote="$2" branch="$3"
+    if [ "$kind" = pull ]; then   # a pull request head is no branch on the remote: nothing to track, and nothing to push back to
+        printf 'git branch --quiet --unset-upstream %s 2>/dev/null || true' "$(sh_quote "$branch")"
+        return 0
+    fi
+    printf '%s\nwk_track_branch %s %s' "$(wk_track_branch_fn)" \
+        "$(sh_quote "$remote")" "$(sh_quote "$branch")"
+}
+
 wk_pr_checkout() {  # <name> <spec> -- fetch the one ref into the workspace, check it out
     local name="$1" spec="$2"
     local src repo url branch remote head_sha local_sha dirty reset ahead
@@ -915,7 +936,7 @@ $(printf '%s\n' "$found" | sed 's/^/    /')
         else
             git checkout --quiet -b $(sh_quote "$branch") refs/remotes/$(sh_quote "$remote")/$(sh_quote "$branch")
         fi
-        git branch --quiet --set-upstream-to=refs/remotes/$(sh_quote "$remote")/$(sh_quote "$branch") $(sh_quote "$branch") 2>/dev/null || true   # a pull head matches no configured refspec, so git will not track it and says so; the branch is still checked out at it
+        $(pr_track_step "$PR_KIND" "$remote" "$branch")
     " || die "could not check out '$branch' in '$name'"
 
     info "'$name' is on $branch ($repo, from $remote)"

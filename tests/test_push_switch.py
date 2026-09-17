@@ -1,5 +1,6 @@
-"""`wk push` -- the deploy-key switch: where it runs, what `--all` covers, and
-that it never reports a move it did not make.
+"""`wk push` -- the deploy-key switch: where it runs, what `--all` covers,
+what `on` does about a claude session already running, and that it never
+reports a move it did not make.
 
 Run: python3 -m unittest tests.test_push_switch -v
 """
@@ -8,7 +9,7 @@ import os
 import subprocess
 import unittest
 
-from tests.support import REPO, WK, WkTest, bash
+from tests.support import REPO, WK, WkTest, bash, func_body
 
 
 def decl(name):
@@ -228,3 +229,78 @@ report_health testmachine
         rows = [r for r in self._rows(keys=("fork", "forkwpe"), env={"WK_IN_VM": "1"})
                 if r.get("kind") == "switch"]
         self.assertEqual([], rows)
+
+
+class TestTheClaudeSessionGate(unittest.TestCase):
+    """`wk push on` with a claude session already running in a workspace.
+
+    push_end_sessions_first is lifted out of cmd/push and run against a
+    recording `end_agent_sessions`: the rest of that file needs real deploy
+    keys, a real ssh-agent and a real workspace to reach this branch at all.
+    """
+
+    def _gate(self, args, env=None):
+        text = (REPO / "cmd" / "push").read_text()
+        return bash(
+            f'set -euo pipefail\n. "{REPO}/lib/common.sh"\n'
+            'end_agent_sessions() { printf "ended: %s\\n" "$*" >&2; }\n'
+            "push_end_sessions_first() {"
+            + func_body(text, "push_end_sessions_first")
+            + "}\n"
+            f'push_end_sessions_first {args}\n',
+            env=env)
+
+    def test_no_session_is_nothing_to_do(self):
+        cp = self._gate("")
+        self.assertEqual(cp.returncode, 0, cp.stderr)
+        self.assertNotIn("ended:", cp.stderr)
+
+    def test_an_answered_question_ends_every_session_named(self):
+        cp = self._gate("ws-one ws-two", env={"WK_YES": "1"})
+        self.assertEqual(cp.returncode, 0, cp.stderr)
+        self.assertIn("ended: ws-one ws-two", cp.stderr)
+
+    def test_a_declined_question_ends_nothing_and_loads_nothing(self):
+        """No terminal is a decline (confirm, lib/common.sh), and the decline
+        stops the command rather than falling through to the keys."""
+        cp = self._gate("ws-one")
+        self.assertNotEqual(cp.returncode, 0)
+        self.assertIn("push stays off", cp.stderr)
+        self.assertNotIn("ended:", cp.stderr)
+
+    def test_force_leaves_the_session_running_and_goes_on(self):
+        """The barrier --force crosses: the session keeps its commit wall and
+        gains a push, which is the thing being asked for."""
+        cp = self._gate("ws-one", env={"WK_FORCE": "1"})
+        self.assertEqual(cp.returncode, 0, cp.stderr)
+        self.assertNotIn("ended:", cp.stderr)
+        self.assertIn("FORCED past a barrier", cp.stderr)
+        self.assertIn("ws-one", cp.stderr)
+
+    def test_the_forced_barrier_is_recorded_at_the_end_of_the_run(self):
+        """barrier() registers the summary that prints again when the command
+        ends, so one line atop a long run is not the only record of it."""
+        cp = self._gate("ws-one", env={"WK_FORCE": "1"})
+        self.assertIn("forced past 1 barrier(s)", cp.stderr)
+
+
+class TestForceReachesTheCommand(WkTest):
+    def test_on_takes_force_through_the_dispatcher(self):
+        """--force is the dispatcher's own global flag, stripped before
+        cmd/push parses argv: `wk push on --force` reaches the same place
+        `wk push on` does rather than being refused as an unknown option."""
+        secrets = self.tmp / "store" / "secrets"
+        held = self.tmp / "store" / "push-keys"
+        held.mkdir(parents=True)
+        secrets.mkdir(parents=True)
+        (held / "build_key_fork").write_text("placeholder-not-a-key\n")
+
+        cp = self.run_wk("push", "on", "--force", env={
+            "WK_STORE": str(self.tmp / "store"),
+            "WK_HOST_SECRETS": str(secrets),
+            "WK_PUSH_AGENT_SOCK": str(self.tmp / "no-agent.sock"),
+            "WK_PUSH_PAT_FILE": str(self.tmp / "pat"),
+            "WK_MACHINE": "wk-no-such-machine",
+        })
+        self.assertNotIn("usage:", cp.stdout)
+        self.assertIn("no ssh-agent answers", cp.stdout)

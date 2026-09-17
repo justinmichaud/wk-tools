@@ -17,7 +17,8 @@
 #   on     the keys are in the agent and the token and the Bugzilla key are
 #          where the injector reads them. `git push` and `git-webkit pr` work,
 #          the bug included. A claude session running in any workspace would be
-#          handed that push, so `on` asks once and ends every one of them.
+#          handed that push, so `on` asks once and ends every one of them --
+#          `--force` keeps them and loads the keys anyway.
 #   off    `ssh-add -D` empties the agent and both files are removed. ssh has
 #          no identity to offer, and the injector refuses a write with a 412
 #          naming this switch. Nothing in a workspace can undo any of it.
@@ -36,6 +37,8 @@
 #                        socket, so it reports that there is no switch there
 #   --all                ask everywhere: this machine and every other one
 #                        (wk boot --list names them)
+#   --force              `on` leaves a running claude session alone and loads the
+#                        keys anyway; that session can push until it exits
 #
 #   0  push is on (status), or the action succeeded
 #   1  push is off (status), or the action failed
@@ -196,6 +199,24 @@ end_agent_sessions() { # <ws...> -- 1 when one outlived the KILL. A remote-contr
     return "$rc"
 }
 
+# The gate in front of `on`: --force leaves the sessions running and hands them the push, through a barrier that says so again when the command ends.
+push_end_sessions_first() { # <ws...>
+    [ $# -gt 0 ] || return 0
+    if [ -n "${WK_FORCE:-}" ]; then
+        barrier "a claude session is running in $* -- loading the deploy keys hands it a
+    working push for as long as it runs, and its commit wall stays until it exits."
+        return 0
+    fi
+    warn "a claude session is running in $* -- loading the keys
+    would hand it a working push, and its commit wall stays until it exits, so
+    it is ended first. Whatever it has not written down cannot be undone."
+    confirm "end the claude session(s) in $*?" \
+        || die "push stays off -- nothing was loaded and no session was touched"
+    end_agent_sessions "$@" \
+        || die "a claude session outlived a KILL, so the keys stay out of the agent.
+    Find it:  wk enter <workspace>"
+}
+
 require_agent_target() {
     [ -n "$WS_SOCK" ] && return 0
     warn "'$WK_TARGET' workspaces name no ssh-agent socket (t_agent_sock), so the
@@ -210,17 +231,7 @@ switch_half() {
     case "$ACTION" in
 on)
     require_agent_target
-    busy=$(agent_sessions)
-    if [ -n "$busy" ]; then
-        warn "a claude session is running in $(printf '%s' "$busy" | tr '\n' ' ')-- loading the keys
-    would hand it a working push, and its commit wall stays until it exits, so
-    it is ended first. Whatever it has not written down cannot be undone."
-        confirm "end the claude session(s) in $(printf '%s' "$busy" | tr '\n' ' ')?" \
-            || die "push stays off -- nothing was loaded and no session was touched"
-        end_agent_sessions $busy \
-            || die "a claude session outlived a KILL, so the keys stay out of the agent.
-    Find it:  wk enter <workspace>"
-    fi
+    push_end_sessions_first $(agent_sessions)
 
     if ! push_agent_ensure push_agent_exec "$MACHINE_SOCK"; then
         warn "no ssh-agent answers at $MACHINE_SOCK on the machine that runs the

@@ -25,7 +25,7 @@ Run: python3 -m unittest tests.test_pr_upstream -v
 import subprocess
 import unittest
 
-from tests.support import REPO, bash, scratch_dir
+from tests.support import REPO, bash, func_body, scratch_dir
 
 # Sourced by absolute path: every script below runs in the wired checkout,
 # never in this repository.
@@ -362,6 +362,114 @@ class TestTheBrokerServesTheMirrorRefresh(unittest.TestCase):
     def test_it_is_serialised_like_every_other_mutating_verb(self):
         b = self.broker()
         self.assertTrue(b.VERBS["sync"][1], "a mirror refresh must hold off a second one")
+
+
+class TestThePrBranchIsLeftPushable(Wired):
+    """What `wk pr <user>:<branch>` leaves behind: a branch whose upstream is
+    the fork's branch *by name*, so a bare `git push` in the workspace works.
+
+    The wiring is what makes this need saying. A non-origin remote is fetched
+    as `+refs/remotes/<r>/*:refs/remotes/<r>/*` (wk_fetch_refspecs), because
+    the mirror keeps those namespaced -- and git derives an upstream by
+    mapping the tracking ref back through that refspec, which here answers
+    with the tracking ref itself.
+    """
+
+    def setUp(self):
+        super().setUp()
+        # `wk new` wires the URL beside the refspec the fixture already wrote.
+        git("remote", "set-url", "fork", str(self.fork), cwd=self.src)
+        # The fetch wk_pr_checkout does, past the rewrite (upstream_direct_url).
+        git("fetch", "-q", "--no-prune", str(self.dir / "fork"),
+            "refs/heads/topic:refs/remotes/fork/topic", cwd=self.src)
+        git("checkout", "-q", "-b", "topic", "refs/remotes/fork/topic", cwd=self.src)
+
+    def track(self, kind="user", remote="fork", branch="topic"):
+        # Out of the checkout: what it leaves behind is what is under test.
+        step = self.dir / "step.sh"
+        cp = self.in_src(f'pr_track_step {kind} {remote} {branch} > {step}; bash {step}')
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+
+    def upstream(self, branch="topic"):
+        return (git("config", "--get", f"branch.{branch}.remote", cwd=self.src),
+                git("config", "--get", f"branch.{branch}.merge", cwd=self.src))
+
+    def push(self):
+        return subprocess.run(["git", "push", "--dry-run"], cwd=str(self.src),
+                              capture_output=True, text=True)
+
+    def test_git_derives_the_tracking_ref_itself_as_the_upstream(self):
+        """The defect the step exists for: `git branch --set-upstream-to` over
+        this refspec records `refs/remotes/fork/topic` as the branch's
+        upstream, and `git push` then refuses to guess what that means."""
+        git("branch", "--set-upstream-to=refs/remotes/fork/topic", "topic", cwd=self.src)
+        self.assertEqual(self.upstream(), ("fork", "refs/remotes/fork/topic"))
+        cp = self.push()
+        self.assertNotEqual(cp.returncode, 0, cp.stdout)
+        self.assertIn("does not match", cp.stderr)
+
+    def test_the_branch_tracks_the_forks_branch_by_name(self):
+        self.track()
+        self.assertEqual(self.upstream(), ("fork", "refs/heads/topic"))
+
+    def test_a_bare_push_resolves(self):
+        self.track()
+        cp = self.push()
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertIn("topic -> topic", cp.stderr + cp.stdout)
+
+    def test_it_converges_over_an_upstream_already_recorded_wrong(self):
+        """A branch checked out by an earlier run carries the derived value;
+        the step is re-run on every checkout and overwrites it."""
+        git("branch", "--set-upstream-to=refs/remotes/fork/topic", "topic", cwd=self.src)
+        self.track()
+        self.assertEqual(self.upstream(), ("fork", "refs/heads/topic"))
+
+    def test_a_pull_head_is_left_tracking_nothing(self):
+        """`wk pr 1234` fetches `refs/pull/1234/head`, which is no branch on
+        the remote: there is nothing to push back to, and an upstream naming
+        one would send a bare push at the upstream project."""
+        git("checkout", "-q", "-b", "pr/1234", "refs/remotes/fork/topic", cwd=self.src)
+        git("branch", "--set-upstream-to=origin/main", "pr/1234", cwd=self.src)
+        self.track(kind="pull", remote="origin", branch="pr/1234")
+        cp = subprocess.run(["git", "config", "--get", "branch.pr/1234.remote"],
+                            cwd=str(self.src), capture_output=True, text=True)
+        self.assertEqual(cp.returncode, 1, cp.stdout)
+
+    def test_the_remotes_retarget_points_a_branch_the_same_way(self):
+        """`wk remotes --fix` moves a branch that tracks an upstream onto the
+        fork it can be pushed to (wk_branch_upstream_fix_script), and writes
+        the same two keys through the same function, so what a branch's
+        upstream is set to has one implementation.
+
+        Its upstream arms are live where origin carries git's own refspec
+        rather than the narrowed one wk_fetch_refspecs writes -- a checkout
+        git wired itself -- since a branch tracking `origin/<b>` has no
+        tracking ref under the narrowed one and `@{u}` does not resolve."""
+        git("config", "--replace-all", "remote.origin.fetch",
+            "+refs/heads/*:refs/remotes/origin/*", cwd=self.src)
+        git("update-ref", "refs/remotes/origin/topic", "refs/remotes/fork/topic", cwd=self.src)
+        git("config", "branch.topic.remote", "origin", cwd=self.src)
+        git("config", "branch.topic.merge", "refs/heads/topic", cwd=self.src)
+        script = bash(PRELUDE + f'wk_branch_upstream_fix_script {self.src}').stdout
+        cp = subprocess.run(["sh", "-c", script], cwd=str(self.src),
+                            capture_output=True, text=True)
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertIn("retargeted", cp.stdout)
+        self.assertEqual(self.upstream(), ("fork", "refs/heads/topic"))
+
+    def test_neither_caller_has_a_second_copy_of_it(self):
+        """wk_pr_checkout and the retarget both run the shipped function and
+        neither points a branch itself."""
+        text = (REPO / "lib" / "store.sh").read_text()
+        for fn in ("wk_pr_checkout", "wk_branch_upstream_fix_script"):
+            with self.subTest(fn=fn):
+                body = func_body(text, fn)
+                self.assertNotIn("--set-upstream-to", body)
+                self.assertNotIn("git branch -u", body)
+        self.assertIn('$(pr_track_step "$PR_KIND" "$remote" "$branch")',
+                      func_body(text, "wk_pr_checkout"))
+        self.assertIn("wk_track_branch", func_body(text, "wk_branch_upstream_fix_script"))
 
 
 if __name__ == "__main__":
