@@ -193,10 +193,16 @@ class TestScriptsParse(unittest.TestCase):
 
 class TestOneAliasBlock(WkTest):
     """wk_ssh_alias_blocks is the one implementation of "the ssh config the
-    forks need". Three machines read it: two name a public half and an agent
-    socket, and the third -- a shared build box, a plain checkout with no
-    container and nothing to keep a key away from -- names the private half
-    and gets no IdentityAgent line."""
+    forks need". Three machines read it: two name an agent socket and a path
+    whose private half is not there (only `<path>.pub` is, which ssh reads for
+    itself), and the third -- a shared build box, a plain checkout with no
+    container and nothing to keep a key away from -- names a path whose
+    private half *is* there, and gets no IdentityAgent line.
+
+    IdentityFile never carries the `.pub` suffix: pointed straight at the
+    public file, OpenSSH 10 loads that path as the private key and reports its
+    mode or its format (measured, 10.2p1 in the workspace image) -- a
+    permissions fault where the real answer is that the agent holds nothing."""
 
     def _blocks(self, args):
         cp = bash(f'. "$WK_ROOT/lib/common.sh"; . "$WK_ROOT/lib/store.sh"; '
@@ -211,28 +217,45 @@ class TestOneAliasBlock(WkTest):
         self.assertNotIn("IdentityAgent", out)
         self.assertNotIn("ProxyCommand", out)
 
-    def test_a_container_names_a_public_half_and_the_mounted_socket(self):
-        out = self._blocks("/secrets build_key_ .pub /run/wk/ssh-agent.sock")
-        self.assertIn("IdentityFile /secrets/build_key_fork.pub", out)
+    def test_a_container_names_the_identity_and_the_mounted_socket(self):
+        out = self._blocks("/secrets build_key_ /run/wk/ssh-agent.sock")
+        self.assertIn("IdentityFile /secrets/build_key_fork\n", out)
         self.assertIn("IdentityAgent /run/wk/ssh-agent.sock", out)
         self.assertIn("IdentitiesOnly yes", out)
         self.assertNotIn("ProxyCommand", out)
 
     def test_a_guest_names_its_own_public_copy_and_carries_a_proxy(self):
-        out = self._blocks("'/Users/admin/.ssh' id_ .pub "
+        out = self._blocks("'/Users/admin/.ssh' id_ "
                            "'/Users/admin/.wk-ssh-agent.sock' "
                            "'nc -X connect -x 10.0.0.1:3128 %h %p'")
-        self.assertIn("IdentityFile /Users/admin/.ssh/id_fork.pub", out)
+        self.assertIn("IdentityFile /Users/admin/.ssh/id_fork\n", out)
         self.assertIn("IdentityAgent /Users/admin/.wk-ssh-agent.sock", out)
         self.assertIn("ProxyCommand nc -X connect -x 10.0.0.1:3128 %h %p", out)
 
-    def test_no_caller_ever_names_a_private_half_beside_an_agent(self):
-        """IdentitiesOnly with a private IdentityFile would let ssh sign with
-        the file rather than the agent, which is the whole thing this avoids."""
-        out = self._blocks("/secrets build_key_ .pub /run/wk/ssh-agent.sock")
-        for line in out.splitlines():
-            if line.strip().startswith("IdentityFile"):
-                self.assertTrue(line.strip().endswith(".pub"), line)
+    def test_no_identity_line_ever_carries_the_pub_suffix(self):
+        """The suffix is what made OpenSSH 10 read the public file as a
+        private key; ssh appends `.pub` itself."""
+        for args in ("/secrets build_key_ /run/wk/ssh-agent.sock",
+                     "'~/.ssh' id_ /a/sock 'nc %h %p'",
+                     "/wk/secrets"):
+            with self.subTest(args=args):
+                for line in self._blocks(args).splitlines():
+                    if line.strip().startswith("IdentityFile"):
+                        self.assertFalse(line.strip().endswith(".pub"), line)
+
+    def test_what_keeps_the_agent_signing_is_the_absent_private_half(self):
+        """IdentitiesOnly with a readable private IdentityFile would let ssh
+        sign with the file rather than the agent, which is the whole thing this
+        avoids. Nothing puts one at that path in a workspace -- `wk verify`
+        measures that from inside -- so the named path is the public half's
+        stem and ssh has only the agent to sign with."""
+        out = self._blocks("/secrets build_key_ /run/wk/ssh-agent.sock")
+        named = [l.split(None, 1)[1] for l in out.splitlines()
+                 if l.strip().startswith("IdentityFile")]
+        self.assertTrue(named)
+        for path in named:
+            self.assertIn("IdentitiesOnly yes", out)
+            self.assertTrue(path.startswith("/secrets/"), path)
 
     def test_every_fork_gets_a_block(self):
         cp = bash('. "$WK_ROOT/lib/common.sh"; . "$WK_ROOT/lib/store.sh"; '
@@ -259,8 +282,8 @@ class TestOneAliasBlock(WkTest):
                     out.append(line)
             return "\n".join(out)
 
-        container = self._blocks("/secrets build_key_ .pub /run/wk/ssh-agent.sock")
-        guest = self._blocks("'~/.ssh' id_ .pub /a/sock 'nc %h %p'")
+        container = self._blocks("/secrets build_key_ /run/wk/ssh-agent.sock")
+        guest = self._blocks("'~/.ssh' id_ /a/sock 'nc %h %p'")
         store = self._blocks("/wk/secrets")
         self.assertEqual(norm(container), norm(guest))
         self.assertEqual(norm(container), norm(store))
@@ -362,7 +385,7 @@ _write_deploy_keys demo 1.2.3.4
         text = (home / ".ssh" / "config").read_text()
         self.assertIn("Host github-webkit", text)
         self.assertIn("Host github-wpe", text)
-        self.assertIn("IdentityFile /Users/admin/.ssh/id_fork.pub", text)
+        self.assertIn("IdentityFile /Users/admin/.ssh/id_fork\n", text)
         self.assertIn("IdentityAgent /Users/admin/.wk-ssh-agent.sock", text)
         self.assertIn("-X connect -x 192.168.2.1:3128 %h %p", text)
 

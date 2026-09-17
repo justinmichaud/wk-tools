@@ -401,8 +401,8 @@ fi
 # One deploy key per repository, both on github.com: only an alias per fork makes
 # ssh offer the right one. An empty <dir> is the agent-forward form -- no
 # IdentityFile, so ssh offers whatever a forwarded agent holds and a build machine keeps no key.
-wk_ssh_alias_blocks() { # <dir> <prefix> <suffix> <agent-sock> [<ProxyCommand>]
-    local dir="$1" prefix="${2:-build_key_}" suffix="${3:-}" agent="${4:-}" proxy="${5:-}"
+wk_ssh_alias_blocks() { # <dir> <prefix> <agent-sock> [<ProxyCommand>]. IdentityFile carries no suffix and ssh reads `<path>.pub` for the public half itself: named with the .pub, OpenSSH 10 loads that path as the private key and reports its mode or its format (measured, 10.2p1) -- a permissions fault where the real answer is that the agent holds nothing
+    local dir="$1" prefix="${2:-build_key_}" agent="${3:-}" proxy="${4:-}"
     wk_push_forks | while read -r remote repo alias; do
         [ -n "$remote" ] || continue
         cat <<EOF
@@ -413,7 +413,7 @@ Host $alias
     StrictHostKeyChecking accept-new
 EOF
         if [ -n "$dir" ]; then
-            printf '    IdentityFile %s\n    IdentitiesOnly yes\n' "$dir/$prefix$remote$suffix"
+            printf '    IdentityFile %s\n    IdentitiesOnly yes\n' "$dir/$prefix$remote"
         fi
         [ -z "$agent" ] || printf '    IdentityAgent %s\n' "$agent"
         [ -z "$proxy" ] || printf '    ProxyCommand %s\n' "$proxy"
@@ -643,7 +643,7 @@ push_agent_publish_config() { # <dir> is this machine's spelling; paths inside a
                     "# key per repository and both forks live on github.com. The identity is" \
                     "# a public half; the private one is in an ssh-agent outside this" \
                     "# workspace, and whether it is loaded there is what 'wk push' switches."
-      wk_ssh_alias_blocks /secrets build_key_ .pub "$sock"
+      wk_ssh_alias_blocks /secrets build_key_ "$sock"
     } > "$dir/ssh_config.new" || return 1
     chmod 0644 "$dir/ssh_config.new"
     mv "$dir/ssh_config.new" "$dir/ssh_config"
@@ -959,7 +959,8 @@ secrets_require_published() { # what the owning machine put there, read in the V
 
 # /secrets is what every workspace on this machine reads. What goes in it -- the fork aliases and the account name -- is public and identical whether push is on or off, so it is published with the directory. Left to `wk push`, a machine nobody had switched yet gave every workspace an empty /secrets: no fork alias, and no placeholder for the injector to replace, so `git-webkit` sent no Authorization header at all.
 secrets_publish() {
-    local sock; sock=$(t_agent_sock 2>/dev/null) || sock=""
+    local sock   # the container target's own socket, not whichever target the caller had loaded: this file is what every container Includes, and built from a target naming none it silently loses the IdentityAgent line -- a workspace that cannot push even with the switch on
+    sock=$( . "$WK_ROOT/lib/target.sh"; load_target container >/dev/null 2>&1 && t_agent_sock ) 2>/dev/null || sock=""
     push_agent_publish_config "$(wk_secrets_dir)" "$sock"
     secrets_publish_view container
 }

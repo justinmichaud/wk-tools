@@ -752,7 +752,7 @@ _write_deploy_keys() { # <name> <ip>
     _ssh "$ip" "umask 077 && mkdir -p \$HOME/.ssh && cat > \$HOME/.ssh/config" <<EOF || return 1
 # wk: written by targets/vm.sh on every start. Whether the agent these name
 # holds a key at all is 'wk push'.
-$(wk_ssh_alias_blocks "/Users/$WK_VM_USER/.ssh" id_ .pub "$(t_agent_sock)" "$(_ssh_proxy_command)")
+$(wk_ssh_alias_blocks "/Users/$WK_VM_USER/.ssh" id_ "$(t_agent_sock)" "$(_ssh_proxy_command)")
 EOF
 
     while read -r remote repo alias; do

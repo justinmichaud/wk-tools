@@ -4,8 +4,8 @@ injector would add is not there while push is off, the deploy keys are in an
 ssh-agent nothing in a workspace can take a key out of, `wk verify` measures
 both from inside, `wk ai claude` holds push back before it verifies (and
 refuses a build box that holds a gh login), and `wk push on` is refused while a
-claude process runs in any workspace. The person at the keyboard is the only
-publisher.
+claude process runs in any workspace is ended first. The person at the keyboard
+is the only publisher.
 
 Run: python3 -m unittest tests.test_no_publish -v
 """
@@ -135,15 +135,17 @@ class TestClaudeHoldsPushBackBeforeVerifying(unittest.TestCase):
         self.assertIn('PUSH_WAS_ON=""', rc, "remote-control must disarm restore_push")
 
 
-class TestPushOnRefusesWhileAnAgentRuns(unittest.TestCase):
+class TestPushOnEndsAnyRunningAgent(unittest.TestCase):
     def _sessions(self, t_list_out, running):
-        # agent_sessions now probes with `t_exec "$ws" sh -c '...'`; the stub
-        # answers by workspace name ($1), standing in for "a claude exe is
-        # running in that container".
+        # agent_pids runs the scan with `t_exec "$ws" sh -c '...'` and reads
+        # its stdout; the stub prints a pid for the named workspace, standing
+        # in for "a claude exe is running in that container".
         return bash(f'''
 . "{REPO}/lib/common.sh"
 t_list() {{ printf '%b' "{t_list_out}"; }}
-t_exec() {{ case "$1" in {running}) return 0 ;; *) return 1 ;; esac; }}
+t_exec() {{ case "$1" in {running}) echo 4242 ;; esac; }}
+{_lift("AGENT_PID_SCAN=")}
+{_lift("agent_pids")}
 {_lift("agent_sessions")}
 agent_sessions
 ''')
@@ -157,19 +159,32 @@ agent_sessions
         cp = self._sessions("a\\tUp 2 hours\\n", "none")
         self.assertEqual(cp.stdout.strip(), "")
 
-    def test_on_asks_before_loading_the_agent(self):
+    def test_on_ends_them_before_loading_the_agent(self):
         on = PUSH[PUSH.index("\non)\n"):PUSH.index("\noff)\n")]
-        self.assertLess(on.index("agent_sessions"), on.index("push_agent_load"))
-        # a forceable barrier, not an unconditional die: `wk push on --force`
-        # crosses it while a session runs.
-        self.assertIn("barrier ", on)
+        self.assertLess(on.index("agent_sessions"), on.index("end_agent_sessions"))
+        self.assertLess(on.index("end_agent_sessions"), on.index("push_agent_load"))
+
+    def test_ending_them_is_asked_first(self):
+        """Killing a session is destructive, so it goes through the one
+        yes/no helper and the command declares itself to the dispatcher."""
+        on = PUSH[PUSH.index("\non)\n"):PUSH.index("\noff)\n")]
+        self.assertLess(on.index('confirm "'), on.index("end_agent_sessions"))
+        self.assertIn("# wk: destructive on", PUSH)
+
+    def test_a_declined_prompt_leaves_the_keys_out(self):
+        on = PUSH[PUSH.index("\non)\n"):PUSH.index("\noff)\n")]
+        self.assertIn('die "push stays off', on)
 
 
-def _lift(func):
+def _lift(name):
+    """One shell definition out of cmd/push, by name: a `name()` function up to
+    its closing brace, or a `NAME=` assignment up to the line closing its
+    single-quoted value."""
     import subprocess
-    text = subprocess.run(["sed", "-n", f"/^{func}()/,/^}}/p", str(REPO / "cmd" / "push")],
+    rng = f"/^{name}/,/^}}/p" if name.endswith("()") or "=" not in name else f"/^{name}/,/^done'$/p"
+    text = subprocess.run(["sed", "-n", rng, str(REPO / "cmd" / "push")],
                           capture_output=True, text=True).stdout
-    assert text.strip(), func
+    assert text.strip(), name
     return text
 
 

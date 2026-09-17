@@ -9,10 +9,19 @@
 #   wk ai claude bb4 -r          resume, in bb4
 #   wk ai claude bb4 --continue  and so on
 #   wk ai pi bb4 --help          pi's own help, not this one
+#   wk ai claude                 in a workspace: this one, no name
 #
 # Permissions are relaxed because the workspace is the blast radius, not the
 # machine, so this checks the boundary holds before handing over control. For
 # the session it also holds back the push keys and walls off git commits.
+#
+# Run inside a workspace it is the same command and the same start: `claude`
+# there is a shell function that calls it (shell/bashrc). What differs is that
+# the host's push switch cannot be thrown from in here, so it is measured
+# instead -- a key reaching this workspace, or a GitHub or Bugzilla write that
+# is not refused, stops the session and no --force crosses it. The sandbox
+# probes are `wk verify`'s own, minus the half only the host can answer, and
+# every check runs at once.
 #
 # --rc runs Claude Code Remote Control (claude.ai/code, the mobile app) instead
 # of a foreground session: a persistent server, started detached in the
@@ -71,29 +80,80 @@ wall_available() { # <name>
     t_exec "$1" sh -c 'command -v bwrap >/dev/null 2>&1'
 }
 
-push_measure_here() {
-    local alias sock ident code
+wall_applies() {   # a container, reached from the host or from inside it
+    case "$WK_TARGET_KIND" in
+        container) return 0 ;;
+        local)     [ "$(t_os)" != macos ] ;;
+        *)         return 1 ;;
+    esac
+}
+
+# In a workspace the switch cannot be thrown, so whether a push from in here could sign is measured where it would be spent. What a *write* to GitHub and to Bugzilla answers is the same question `wk verify` asks from the host, and its probes ask it (checks_here); a read is authenticated in either position by design and says nothing about the switch.
+probe_push_here() {
+    local fails=0 alias sock ident
     alias=$(wk_push_forks | awk 'NF {print $3; exit}')
     sock=$(ssh -G "$alias" 2>/dev/null | awk '$1 == "identityagent" {print $2; exit}') || sock=""
-    if [ -n "$sock" ]; then
-        ident=$(SSH_AUTH_SOCK="$sock" ssh-add -l 2>/dev/null | grep -c .) || ident=0
-        [ "$ident" = 0 ] || die "refusing to run: $ident deploy key(s) reach this workspace through
-    $sock, so an agent in here could push. The switch is the host's:  wk push off"
+    ident=0
+    [ -z "$sock" ] || ident=$(SSH_AUTH_SOCK="$sock" ssh-add -l 2>/dev/null | grep -c .) || ident=0
+    if [ "$ident" = 0 ]; then
+        pass "the agent holds nothing, so a push from in here has no identity to offer"
+    else
+        fail "$ident deploy key(s) reach this workspace through $sock, so an agent in
+        here could push. The switch is the host's:  wk push off"
     fi
+    return "$fails"
+}
 
-    code=$(curl -sS -m 20 -o /dev/null -w '%{http_code}' \
-               -H 'Authorization: Basic d2s6d2s=' \
-               https://api.github.com/user 2>/dev/null) || code=""
-    [ "$code" = 401 ] || die "refusing to run: an authenticated GitHub API call from this workspace
-    answered '${code:-nothing}' where it must answer 401, so an agent in here
-    could post. The switch is the host's:  wk push off"
+# The probes a workspace answers about itself are cmd/verify's own, lifted without running it: the half it reads from the host is unanswerable in here. Each is a request with its own timeout, so a session starts in the time of the slowest rather than the sum of eight. Sourcing cmd/verify re-reads lib/target.sh, which restores the driver defaults over this target's, so the target is loaded again.
+checks_here() {
+    local publish=0 sandbox=0 rec
+    WK_VERIFY_LIB=1 . "$WK_ROOT/cmd/verify"
+    load_target "$WK_TARGET"
+    PUSH_ON=0   # `wk push status` is the host's and refused in here, and off is the only position an agent may start in: the probes are told so, and a write that is not refused fails below
+    info "checking workspace '$NAME' from inside it"
 
-    info "measured in here: the agent holds nothing and the API refuses -- an agent
-  in this workspace can publish neither a push nor a comment"
+    wk_atexit par_cleanup
+    par_begin
+    par_run push-keys            probe_push_here
+    par_run github-api           probe_github_api
+    par_run bugzilla-api         probe_bugzilla_api
+    par_run egress-github        probe_github
+    par_run egress-allowlist     probe_allowlist
+    par_run egress-off-allowlist probe_off_allowlist
+    par_run isolation            probe_isolation
+    par_run no-credentials       probe_no_credentials_inside
+    par_run gitwebkit-setup      probe_gitwebkit_setup
+    [ "$(t_os)" = macos ] || par_run commit-wall probe_commit_wall
+    par_wait
+
+    set -- $_par_status
+    while [ $# -gt 0 ]; do
+        rec=$(par_record "$1")
+        if [ -z "$rec" ] && [ "$2" != 0 ]; then
+            fail "the '$1' probe died before it reported anything (exit $2), so what it
+        measures is unmeasured"
+        else
+            [ -z "$rec" ] || printf '%s\n' "$rec" >&2
+        fi
+        case "$1" in
+            push-keys|github-api|bugzilla-api) publish=$((publish + $2)) ;;
+            *)                                 sandbox=$((sandbox + $2)) ;;
+        esac
+        shift 2
+    done
+    par_end
+
+    [ "$publish" -eq 0 ] || die "refusing to run: an agent in '$NAME' could publish (see above).
+    Nothing in here can fix it and --force does not cross it; the switch is the
+    host's:  wk push off"
+    [ "$sandbox" -eq 0 ] || barrier "the sandbox around '$NAME' is not intact (see above), and relaxed
+    permissions are only defensible while it is."
+    info "sandbox intact, and nothing in here can publish"
 }
 
 push_hold_back() { # <name>
-    if in_workspace; then push_measure_here; return 0; fi
+    # In a workspace the measurement stands in for the switch, beside the sandbox probes (checks_here).
+    if in_workspace; then return 0; fi
     local rc=0
     push_switch status || rc=$?
     case "$rc" in
@@ -352,10 +412,6 @@ AGENT_BIN="$AGENT"
 AGENT_MODE=()
 [ "$AGENT" != claude ] || AGENT_MODE=(--dangerously-skip-permissions)
 
-if [ "$WK_TARGET_KIND" = local ]; then
-    die "already inside workspace '$(wk_self)' -- run '$AGENT' directly"
-fi
-
 if [ "$WK_TARGET_KIND" = remote ]; then
     barrier "'$NAME' is on the shared build machine '$TARGET', which has no sandbox at
     all: no container, no separate uid, no filesystem boundary, and other
@@ -422,6 +478,9 @@ container|vm)
         || barrier "the sandbox around '$NAME' is not intact (see above), and relaxed
     permissions are only defensible while it is."
     ;;
+local)
+    checks_here
+    ;;
 remote)
     info "'wk verify' is not run for '$TARGET': there is no sandbox there to
   measure (cmd/verify says so and refuses). The barrier above is the whole of
@@ -466,7 +525,7 @@ if [ -n "$RC" ]; then
 
     rc_alive "$NAME" || claude_workspace_config "$NAME"
 
-    if [ "$WK_TARGET_KIND" = container ]; then
+    if wall_applies; then
         wall_available "$NAME" \
             || die "the commit wall needs bwrap in the workspace image, and '$NAME' has none
     (see 'wk ai claude $NAME' without --rc for the remedy)."
@@ -478,7 +537,7 @@ fi
 wk_atexit restore_push
 
 WALL=""
-if [ "$WK_TARGET_KIND" = container ]; then
+if wall_applies; then
     wall_available "$NAME" \
         || die "the commit wall needs bwrap in the workspace image, and '$NAME' has none.
     Rebuild the workspace from a current base ('wk rm $NAME' then 'wk new'), or

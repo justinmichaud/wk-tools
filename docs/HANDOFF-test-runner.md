@@ -10,6 +10,7 @@
 - [ ] test: a remote workspace whose clone is cut mid-way reads `creating` from any machine that asks, not only the driving one
 - [ ] test: `wk enter --zed` against a `broken` workspace refuses and names the repair command
 - [ ] test: deleting `$WK_STORE/ws/<n>` under a live workspace makes `wk gc` refuse to prune what the survivor still pins
+- [ ] `wk gc` neither reclaims nor names a workspace a killed `wk selftest` left behind: three `wk-test-*` containers survived a `wk gc --yes` and had to go by hand through `wk rm`, which the cleanup rule (CLAUDE.md, "Cattle, not pets") says is a report against `wk gc`. Either it takes a workspace whose creation record is gone and whose name is the suite's, or it prints it with the flag that does
 - [ ] test: `git fetch` into a published base snapshot by hand is detected and refused by name (recorded sha no longer matches)
 - [ ] test: hand-editing `~/.ssh/config.d/wk` — the next `wk vm start` regenerates only its own block
 - [ ] test: a delegated `wk status` from an older wk-tools is flagged by version skew, naming both shas

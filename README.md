@@ -227,7 +227,7 @@ wk key setup                   # the deploy keys, then every credential this mac
                                # has not got, and the same working one on every
                                # workstation -- one credential at a time, re-runnable,
                                # and Enter skips one you do not want
-wk push on                     # loads the keys into the agent and gives the injector the write token and the Bugzilla key
+wk push on                     # loads the keys into the agent and gives the injector the write token and the Bugzilla key; ends any claude session first
 wk sync                        # clones WebKit into the mirror, publishes a snapshot
 eval "$(wk completion bash)"   # shell/bashrc does this for you; zsh: wk completion zsh
 ```
@@ -1230,10 +1230,31 @@ wk ai claude bug-238 -r             # resume
 wk ai claude bug-238 --continue
 wk ai claude bug-238 --rc                   # a Remote Control server the Claude app attaches to; --rc --stop ends it
 wk ai pi bug-238                    # the pi coding agent, installed from npm on first use
+wk ai claude                        # inside a workspace: this one, no name
 ```
 
 A `remote` target has no sandbox to verify; `wk ai claude` there stops at a
 barrier that only an explicit `--force` crosses.
+
+**From inside a workspace it is the same command.** `claude` typed in a
+workspace shell is a function that calls it (`shell/bashrc`, interactive shells
+only, so the start itself still reaches the CLI; `command claude` is the way
+past), and the session that comes up is the walled, measured one rather than a
+raw CLI beside it. What differs from the host side is that a workspace cannot
+throw the host's push switch, so the switch is *measured* instead: the ssh
+config's own agent socket must hold no identity, and a GitHub write and a
+Bugzilla write must each be refused by the injector with 412 -- the last two
+through `wk verify`'s own probes, so the assertion has one wording whichever
+side it was started from. A *read* is not one of them: the injector
+authenticates it from the standing token in either position, so `GET /user`
+answers 200 with the switch off and says nothing about it. Any of the three
+going the wrong way stops the session and no `--force` crosses it -- nothing in
+a workspace could fix it, and a session that starts with a working push is the
+failure the whole arrangement exists to prevent. The sandbox half is `wk
+verify`'s own probes too, minus the ones only the host can answer, and a
+sandbox failure is the same forceable barrier as from the host.
+Every check -- the switch and the probes together -- runs at once (`lib/par.sh`),
+so starting a session costs the slowest of them rather than the sum.
 
 Two agents, one command: the workspace, the sandbox check, the push switch and
 the commit wall below are the same for both, and only `--rc` is Claude Code's
@@ -1643,10 +1664,11 @@ under bwrap with the checkout's `.git` commit-parts (`objects`, `refs`, `logs`,
 or a rebase fails while a build, an edit, `git status`/`diff`/`log` all work --
 the read-only binds cannot be unmounted, shadowed or escaped from inside, and
 `wk verify` proves the recipe blocks a commit in that very container. Both
-measures are the one switch: `wk push on` turns them off (refused while a claude
-session runs -- `wk push on --force` overrides, though a running agent keeps its
-wall until it exits; a human `wk enter` shell is never walled). Only the person
-at the keyboard pushes or commits.
+measures are the one switch: `wk push on` turns them off, and because a session
+already running would be handed that push -- and would keep its commit wall
+until it exited -- it asks once and ends every claude process in every workspace
+first (`--yes` answers; a decline loads nothing). A human `wk enter` shell is
+never walled. Only the person at the keyboard pushes or commits.
 
 Nothing an agent runs drives a build directly either. `container/bin/wk-build-wall`
 lists the tools it wraps and sits on PATH under each of their names, ahead of the
@@ -1660,6 +1682,24 @@ from. It covers a **bare name** and only that: `Tools/Scripts/build-webkit` name
 a file and never consults PATH, so the path form is covered by the
 `Bash(*/<name> *)` deny rules in `claude/settings.json` and
 `claude/settings-host.json` and by nothing else.
+
+**Both refusals say so through git, which otherwise does not.** The commit wall
+is read-only mounts, so `git commit` reports "insufficient permission for adding
+an object to repository database .git/objects", which reads as a broken
+repository; the push switch is an empty ssh-agent, so `git push` reports
+"Permission denied (publickey)". Both are the arrangement working and neither
+says which rule it is. So the same script stands in front of `git` too, through
+`container/bin/ws/git` -- a second symlink directory that `shell/path.sh` adds
+only where the workspace marker is, so a host shell pays no extra exec for a
+question only a workspace has. Under that name it is **never a refusal**: the
+command runs exactly as it would have, with its own output, exit status and
+terminal, and a line is added after a failure naming the rule and the remedy --
+`wk push on`, on the host, for either of them. It is after the fact and not a
+gate in front because refusing up front would need a list of verbs that always
+write, and `git tag`, `git branch` and `git stash list` are the same verbs
+reading. It measures rather than remembers: the wall is `.git/objects` not being
+writable, and the switch is `ssh-add -l` against the socket `~/.ssh/config`'s own
+`Include` names -- an agent that cannot be asked is not "off" and says nothing.
 
 **Housekeeping**
 

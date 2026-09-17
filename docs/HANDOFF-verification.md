@@ -66,6 +66,12 @@ lands; the file goes with its last line.
 
 ## Cross-cutting commands
 
+- `wk ai claude` typed inside a real container workspace: the eight checks run at
+  once, the report is the one `wk verify` gives from the host, and the session
+  comes up walled. Then `claude` typed bare in that shell reaches the same start
+- `git commit` and `git push` in that session each print the wk line naming the
+  rule after git's own error, and `wk push on` on the host ends the session
+
 - `wk backup` → `./setup` round-trips with no spurious changes
 - `wk backup`'s junk filters strip what they claim (weather location, WiFi UUIDs, last-folder paths, timestamps)
 - `wk skills` status/diff/pull/push; pull refuses over uncommitted repo edits

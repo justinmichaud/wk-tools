@@ -1,10 +1,15 @@
 #!/usr/bin/env bash
 # wk-build-wall: _is_wall greps this prefix within the first 5 lines; without it two wk-tools trees on PATH exec each other until the process table gives out (measured).
 # Covers a bare name resolved on PATH in every shell that sources shell/path.sh; a path form is covered instead by the `Bash(*/<name> *)` deny rules in claude/settings.json and claude/settings-host.json.
+# One script under two kinds of name, because finding the real tool past itself on PATH is the same job for both: WALL_NAMES is refused for an agent; GATE_NAMES is never refused -- it runs the tool and explains a failure the sandbox caused.
 
 set -euo pipefail
 
 WALL_NAMES="ninja cmake make xcodebuild build-webkit build-jsc run-javascriptcore-tests run-webkit-tests run-benchmark"
+
+GATE_NAMES="git"   # on a workspace's PATH only (shell/path.sh), where the switch and the wall are what a failure means
+
+GIT_WRITE_VERBS="add am apply branch checkout cherry-pick commit fetch gc merge mv notes prune pull push rebase reset restore revert rm stash switch tag"   # what the commit wall (WK_COMMIT_WALL_PATHS, lib/common.sh) can make fail; read only after the command has failed, so a verb whose read-only form works -- `git tag`, `git stash list` -- costs nothing to name
 
 self=${0##*/}
 
@@ -29,14 +34,15 @@ WALL=$(_resolve_self) || :
     exit 1
 }
 
-case " $WALL_NAMES " in
+case " $WALL_NAMES $GATE_NAMES " in
     *" $self "*) ;;
     *) printf '%s: nothing calls this by its own name -- it runs as one of: %s\n' \
-           "$self" "$WALL_NAMES" >&2
+           "$self" "$WALL_NAMES $GATE_NAMES" >&2
        exit 1 ;;
 esac
 
-if [ -z "${WK_BUILD:-}" ] && { [ -n "${CLAUDECODE:-}" ] || [ -n "${WK_AGENT:-}" ]; }; then
+if [ "$self" != git ] && [ -z "${WK_BUILD:-}" ] \
+   && { [ -n "${CLAUDECODE:-}" ] || [ -n "${WK_AGENT:-}" ]; }; then
     printf '%s: refused. An agent does not drive a build or a test run directly:\n' "$self" >&2
     printf '  wk carries the job count and the nice level this machine needs, and a raw\n' >&2
     printf '  %s has taken shared build machines down.\n' "$self" >&2
@@ -71,5 +77,66 @@ real=$(_real) || {
     printf '%s: not on PATH (only the wall at %s answers to that name)\n' "$self" "$WALL" >&2
     exit 127
 }
+
+_git_verb() {   # git's own global options come before the subcommand, and six of them take a value
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            -C|-c|--git-dir|--work-tree|--namespace|--exec-path)
+                [ $# -ge 2 ] || return 1
+                shift 2 ;;
+            -*) shift ;;
+            *)  printf '%s' "$1"; return 0 ;;
+        esac
+    done
+    return 1
+}
+
+_history_walled() {   # the wall is read-only mounts, so this asks the machine rather than who started the session: a person's own shell in the same workspace is not walled and gets no note
+    local d="$PWD" g=""
+    while [ -n "$d" ]; do
+        [ -e "$d/.git" ] && { g="$d/.git"; break; }
+        d=${d%/*}
+    done
+    [ -n "$g" ] || return 1
+    [ ! -f "$g" ] || g=$(sed -n 's/^gitdir: //p' "$g")
+    [ -d "$g" ] || return 1
+    [ ! -w "$g/objects" ]
+}
+
+_no_deploy_key() {   # the agent the fork aliases name, asked of the agent; the path is followed from ~/.ssh/config's own Include rather than written down here, so this reads the file ssh would (`wk push on|off` rewrites it). Exit 1 is "answered, holds nothing"; 2 is "could not be asked", which proves nothing and says nothing
+    local conf sock rc=0
+    conf=$(sed -n 's/^[[:space:]]*Include[[:space:]]*//p' "$HOME/.ssh/config" 2>/dev/null | head -1)
+    [ -n "$conf" ] || return 1
+    sock=$(sed -n 's/^[[:space:]]*IdentityAgent[[:space:]]*//p' "$conf" 2>/dev/null | head -1)
+    [ -n "$sock" ] || return 1
+    SSH_AUTH_SOCK="$sock" ssh-add -l >/dev/null 2>&1 || rc=$?
+    [ "$rc" = 1 ]
+}
+
+# Never a refusal: the command runs exactly as it would without this file, and what is added is the reason for a failure the sandbox caused. Refusing up front would need a list of verbs that always write, and `git tag`, `git branch` and `git stash list` are the same verbs reading.
+if [ "$self" = git ]; then
+    verb=$(_git_verb "$@") || verb=""
+    case " $GIT_WRITE_VERBS " in
+        *" $verb "*)
+            rc=0
+            "$real" "$@" || rc=$?
+            [ "$rc" != 0 ] || exit 0
+            if [ "$verb" = push ] && _no_deploy_key; then
+                printf '\nwk: no deploy key reaches this workspace. The private halves are in an\n' >&2
+                printf '    ssh-agent on the host, which this workspace can only ask to sign, and\n' >&2
+                printf "    'wk push' is the switch over what it holds -- it is off, so github.com\n" >&2
+                printf '    has no identity to accept.\n' >&2
+                printf '    On the host:  wk push on\n' >&2
+            fi
+            if _history_walled; then
+                printf '\nwk: git history is read-only in this session. An agent runs under bwrap\n' >&2
+                printf "    with this checkout's .git commit parts bound read-only, so nothing it\n" >&2
+                printf '    runs writes history -- a build, an edit and git status/diff/log all work.\n' >&2
+                printf '    A person\x27s own shell here (wk enter) is not walled, and on the host\n' >&2
+                printf "    'wk push on' lifts it for the next session.\n" >&2
+            fi
+            exit "$rc" ;;
+    esac
+fi
 
 exec "$real" "$@"

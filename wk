@@ -316,6 +316,17 @@ positional() { # <n> <args...>
     return 1
 }
 
+args_before_name() { # <slot> <args...> -- the positionals a name follows, so a remedy names the whole command
+    local slot="$1" a i=0; shift
+    for a in ${1+"$@"}; do
+        case "$a" in -*) continue ;; esac
+        i=$((i + 1))
+        [ "$i" -lt "$slot" ] || break
+        printf ' %s' "$a"
+    done
+    return 0
+}
+
 positional_count() { # <args...>
     local a i=0
     for a in ${1+"$@"}; do
@@ -789,7 +800,7 @@ main() {
         name=$(wk_self)
         if [ "${decl%@*}" != none ] && [ "$(argv_name "$slot" "$takes" "$@" || true)" = "$name" ]; then
             die "this is workspace '$name', and there is no workspace argument in here --
-    every command acts on this one. Drop the name: wk $cmd"
+    every command acts on this one. Drop the name: wk $cmd$(args_before_name "$slot" "$@")"
         fi
     elif is_macos && [ -z "${WK_IN_VM:-}" ] && [ "$D_FORWARD" = yes ] \
             && [ "$resolved" = container ]; then

@@ -29,8 +29,8 @@ VERIFY = (REPO / "cmd" / "verify").read_text()
 # pair of statements to slice between: those have to keep being spelled that
 # way, and adding a branch elsewhere in the file that happened to contain one
 # of them emptied this block into a syntax error.
-PROBES = ("probe_no_credentials_inside", "probe_agent_identities",
-          "probe_github_api", "probe_bugzilla_api")
+PROBES = ("probe_no_credentials_inside", "probe_secrets_view",
+          "probe_agent_identities", "probe_github_api", "probe_bugzilla_api")
 
 # Answers for every probe the block makes, keyed by a substring of the command
 # it runs inside the workspace. The defaults are a healthy workspace with the
@@ -64,7 +64,7 @@ FORK = "wkuser/WebKit"
 
 class _Block(WkTest):
     def block(self):
-        """The three probes as definitions, then the calls that run them in
+        """The probes as definitions, then the calls that run them in
         the order cmd/verify's par_run lines do. Each totals its own findings
         into the `fails` it declares local, and returns that count."""
         return ("".join("%s() {%s}\n" % (n, func_body(VERIFY, n)) for n in PROBES)

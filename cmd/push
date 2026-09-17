@@ -3,6 +3,7 @@
 # wk push on|off|status -- whether a workspace can push to git at all
 # wk: where=local name=none group=sources takes=1 opts --target=,--all
 # wk: readonly status
+# wk: destructive on
 #
 # The rule this implements (docs/HANDOFF-sandboxing.md): only the person at the
 # keyboard pushes. An agent in a workspace must not be able to publish anything,
@@ -15,7 +16,8 @@
 #
 #   on     the keys are in the agent and the token and the Bugzilla key are
 #          where the injector reads them. `git push` and `git-webkit pr` work,
-#          the bug included.
+#          the bug included. A claude session running in any workspace would be
+#          handed that push, so `on` asks once and ends every one of them.
 #   off    `ssh-add -D` empties the agent and both files are removed. ssh has
 #          no identity to offer, and the injector refuses a write with a 412
 #          naming this switch. Nothing in a workspace can undo any of it.
@@ -81,9 +83,9 @@ if [ -n "$TARGET" ]; then
         return "$rc"
     }
 
-    _here() {
+    _here() {   # stdin closed like every other row's: a question asked here would go into $out and the person would see a hung command
         local rc=0 out
-        out=$("$WK_ROOT/wk" push "$ACTION" 2>&1) || rc=$?
+        out=$("$WK_ROOT/wk" push "$ACTION" 2>&1 </dev/null) || rc=$?
         printf '%s\n' "$out" | _row "$(wk_machine_name)"
         return "$rc"
     }
@@ -153,21 +155,45 @@ exposed_private_keys() {
 }
 
 # Asked of the machine, not of a record: the process is called `claude`, `node` or a version string, but its exe path resolves under the Claude install.
+AGENT_PID_SCAN='for e in /proc/[0-9]*/exe; do
+    case "$(readlink "$e" 2>/dev/null)" in
+        */claude/versions/*|*/.local/bin/claude) p=${e#/proc/}; printf "%s\n" "${p%/exe}" ;;
+    esac
+done'
+
+agent_pids() { t_exec "$1" sh -c "$AGENT_PID_SCAN" 2>/dev/null | tr -d '\r'; }
+
 agent_sessions() {
     local ws
     while IFS=$(printf '\t') read -r ws _; do
         [ -n "$ws" ] || continue
-        t_exec "$ws" sh -c '
-            for e in /proc/[0-9]*/exe; do
-                case "$(readlink "$e" 2>/dev/null)" in
-                    */claude/versions/*|*/.local/bin/claude) exit 0 ;;
-                esac
-            done
-            exit 1' >/dev/null 2>&1 && printf '%s\n' "$ws"
+        [ -z "$(agent_pids "$ws")" ] || printf '%s\n' "$ws"
     done <<EOF
 $(t_list 2>/dev/null)
 EOF
     return 0
+}
+
+end_agent_sessions() { # <ws...> -- 1 when one outlived the KILL. A remote-control server's task record is not written back: task_alive reads the pid, so it converges on the next read whoever ended the process
+    local ws pids i rc=0
+    for ws in "$@"; do
+        pids=$(agent_pids "$ws")
+        [ -n "$pids" ] || continue
+        info "ending the claude session(s) in '$ws' (pid $(printf '%s' "$pids" | tr '\n' ' '))"
+        act t_exec "$ws" sh -c "kill $pids 2>/dev/null; exit 0" >/dev/null 2>&1 || true
+        i=0
+        while [ "$i" -lt "${WK_KILL_WAIT:-15}" ] && [ -n "$(agent_pids "$ws")" ]; do
+            wk_sleep 1; i=$((i + 1))
+        done
+        pids=$(agent_pids "$ws")
+        [ -n "$pids" ] || continue
+        warn "pid $(printf '%s' "$pids" | tr '\n' ' ')did not stop on TERM after ${i}s -- killing"
+        act t_exec "$ws" sh -c "kill -KILL $pids 2>/dev/null; exit 0" >/dev/null 2>&1 || true
+        i=0
+        while [ "$i" -lt 5 ] && [ -n "$(agent_pids "$ws")" ]; do wk_sleep 1; i=$((i + 1)); done
+        [ -z "$(agent_pids "$ws")" ] || rc=1
+    done
+    return "$rc"
 }
 
 require_agent_target() {
@@ -186,9 +212,14 @@ on)
     require_agent_target
     busy=$(agent_sessions)
     if [ -n "$busy" ]; then
-        barrier "an agent session (a claude process) is running in $(printf '%s' "$busy" | tr '\n' ' ')-- loading
-    the keys hands that session a working push, and its commit wall stays
-    until it exits. End that session first, or force this."
+        warn "a claude session is running in $(printf '%s' "$busy" | tr '\n' ' ')-- loading the keys
+    would hand it a working push, and its commit wall stays until it exits, so
+    it is ended first. Whatever it has not written down cannot be undone."
+        confirm "end the claude session(s) in $(printf '%s' "$busy" | tr '\n' ' ')?" \
+            || die "push stays off -- nothing was loaded and no session was touched"
+        end_agent_sessions $busy \
+            || die "a claude session outlived a KILL, so the keys stay out of the agent.
+    Find it:  wk enter <workspace>"
     fi
 
     if ! push_agent_ensure push_agent_exec "$MACHINE_SOCK"; then

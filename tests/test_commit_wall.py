@@ -50,11 +50,11 @@ class TestWiring(unittest.TestCase):
         self.assertIn("WALL=\"$(commit_wall_prefix", CLAUDE)
         self.assertIn("exec ${WALL}$(sh_quote \"$AGENT_BIN\")", CLAUDE)
 
-    def test_push_on_is_a_forceable_barrier_while_a_session_runs(self):
+    def test_push_on_ends_a_running_session_before_it_loads_the_keys(self):
         seg = PUSH.split("\non)\n", 1)[1]
         self.assertIn("agent_sessions", seg)
-        self.assertIn("barrier ", seg)  # refuse, or --force past with a record
-        self.assertNotIn('die "push stays OFF', seg)
+        self.assertIn("end_agent_sessions", seg)   # the wall goes with the session
+        self.assertIn('confirm "', seg)
 
     def test_verify_measures_the_wall(self):
         self.assertIn("commit wall", VERIFY)

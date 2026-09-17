@@ -313,3 +313,12 @@ case $- in   # after PATH so `command -v wk` sees it, and the interactive test i
     fi
     ;;
 esac
+
+# --- 8. The agent's start ----------------------------------------------------
+case $- in   # a session in a workspace starts through `wk ai claude`, which measures the sandbox and the push switch first. A function and not a name on PATH, because only a person typing it is covered: the start itself runs the CLI from a non-interactive shell, where this is not defined, and `command claude` is the way past
+  *i*)
+    if [ -f "$HOME/.wk-workspace" ] && command -v wk >/dev/null 2>&1; then
+      claude() { wk ai claude "$@"; }
+    fi
+    ;;
+esac

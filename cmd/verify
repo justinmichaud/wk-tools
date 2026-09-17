@@ -129,7 +129,7 @@ probe_commit_wall() {
 }
 
 probe_no_credentials_inside() {
-    local fails=0 material _var tok ghcred _sname _sfile _spath _kept=""
+    local fails=0 material _var tok ghcred
     # Named places, never the checkout: WebKit ships PEM fixtures.
     material=$(inside "{ grep -rl 'PRIVATE KEY' \$HOME/.ssh \$HOME/.claude /secrets /run/wk;
                      grep -l  'PRIVATE KEY' \$HOME/* ; } 2>/dev/null | head -5")
@@ -154,6 +154,15 @@ probe_no_credentials_inside() {
         esac
     done
 
+    ghcred=$(inside "test -e ~/.config/gh/hosts.yml && echo ~/.config/gh/hosts.yml; env | grep -E '^(GITHUB_TOKEN|GH_ENTERPRISE_TOKEN)=' | cut -d= -f1")
+    [ -z "$ghcred" ] && pass "no stored GitHub credential inside: gh has only the placeholder" \
+                     || fail "GitHub credential inside the workspace: $ghcred -- remove it (rm ~/.config/gh/hosts.yml; unset the token) before an agent runs"
+    return "$fails"
+}
+
+# Split from the probe above: this one needs the host's delivery table, so only a run from outside can ask it (`wk ai claude` in a workspace runs the rest).
+probe_secrets_view() {
+    local fails=0 _sname _sfile _spath _kept=""
     # The delivery column decides which rows reach this kind, and this asks the workspace whether it can read one it is not given: a container mounts a per-kind view of the store rather than the store itself (wk_secrets_view_dir).
     for _sname in $(wk_agent_secret_names); do
         wk_agent_secret_delivered "$_sname" "$WK_TARGET_KIND" && continue
@@ -172,10 +181,6 @@ probe_no_credentials_inside() {
         fi
     done
     [ -z "$_kept" ] || pass "no credential this kind is not given is readable in here ($_kept )"
-
-    ghcred=$(inside "test -e ~/.config/gh/hosts.yml && echo ~/.config/gh/hosts.yml; env | grep -E '^(GITHUB_TOKEN|GH_ENTERPRISE_TOKEN)=' | cut -d= -f1")
-    [ -z "$ghcred" ] && pass "no stored GitHub credential inside: gh has only the placeholder" \
-                     || fail "GitHub credential inside the workspace: $ghcred -- remove it (rm ~/.config/gh/hosts.yml; unset the token) before an agent runs"
     return "$fails"
 }
 
@@ -476,6 +481,7 @@ if [ "${WK_SANDBOX:-}" = rootless-proxy ]; then
 fi
 
 par_run no-credentials-inside probe_no_credentials_inside
+par_run secrets-view probe_secrets_view
 par_run agent-identities probe_agent_identities
 par_run github-api probe_github_api
 par_run bugzilla-api probe_bugzilla_api

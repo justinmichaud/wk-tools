@@ -20,6 +20,9 @@ _wk_path_add() {   # an entry already on PATH is moved to the front, an inherite
 
 _wk_path_add "$HOME/.local/bin"
 _wk_path_add "$WK_TOOLS_DIR/container/bin"   # the build wall (wk-build-wall and the symlinks named after the tools it wraps), which works only ahead of /usr/bin
+if [ -f "$HOME/.wk-workspace" ]; then   # ws/ is the same wall under the names whose answer is a workspace's alone, so a host shell pays no exec for them
+    _wk_path_add "$WK_TOOLS_DIR/container/bin/ws"
+fi
 _wk_path_add "$WK_TOOLS_DIR/bin"
 
 export PATH

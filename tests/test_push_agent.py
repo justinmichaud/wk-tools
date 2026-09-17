@@ -652,14 +652,16 @@ class TestTheConfigEveryWorkspaceIncludes(_Agent):
                 text = (self.secrets / "ssh_config").read_text()
                 self.assertIn("Host github-webkit", text)
                 self.assertIn("IdentityAgent /run/wk/ssh-agent.sock", text)
-                self.assertIn("IdentityFile /secrets/build_key_fork.pub", text)
+                self.assertIn("IdentityFile /secrets/build_key_fork\n", text)
                 self.assertIn("IdentitiesOnly yes", text)
 
-    def test_it_names_a_public_half_and_never_a_private_one(self):
+    def test_no_identity_line_carries_the_pub_suffix(self):
+        """ssh appends `.pub` itself; naming it makes OpenSSH 10 read the
+        public file as a private key and report a permissions fault."""
         self.run_wk("push", "on", env=self.env())
         for line in (self.secrets / "ssh_config").read_text().splitlines():
             if line.strip().startswith("IdentityFile"):
-                self.assertTrue(line.strip().endswith(".pub"), line)
+                self.assertFalse(line.strip().endswith(".pub"), line)
 
     def test_the_account_name_goes_beside_it_for_the_injector(self):
         self.run_wk("push", "on", env=self.env())
