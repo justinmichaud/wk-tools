@@ -35,10 +35,11 @@ _remote_require() {
 }
 
 # Multiplexed and never interactive: several round trips per command, each a handshake.
+# ServerAliveInterval/CountMax because ConnectTimeout covers the TCP connect and nothing after it: a machine that accepts the connection and then stops answering -- a wedged sshd, a box deep in swap -- held `wk status <ws>` and `wk logs <ws>` past a 300s wait with no bound of their own (measured 2026-09-17, with moose down). Four missed keepalives at 15s is a session given up inside a minute, and a healthy long build answers them at the protocol level however busy the box is.
 _ssh_opts() {
     local d; d="$(wk_state_dir)/ssh"
     mkdir -p "$d" 2>/dev/null || true
-    printf '%s' "$(_ssh_opts_base "$(wk_ssh_timeout)") -o ControlMaster=auto -o ControlPath=$d/%h-%p-%r -o ControlPersist=60"
+    printf '%s' "$(_ssh_opts_base "$(wk_ssh_timeout)") -o ServerAliveInterval=15 -o ServerAliveCountMax=4 -o ControlMaster=auto -o ControlPath=$d/%h-%p-%r -o ControlPersist=60"
 }
 
 _rsh() {
@@ -142,7 +143,8 @@ t_prefetch() {
 # ssh's stderr is the measurement: "Host key verification failed" and "Connection timed out" call for different remedies, and neither is "off".
 _remote_probe_ssh() { # <why-file> -- the probe's stdout; on failure the reason is left in <why-file>
     local why="$1" out rc=0
-    out=$(_rsh_q "$(_remote_probe_cmd)" 2>"$why") || rc=$?
+    # Under a ceiling of its own, the way wk_tailscale_peers reads the tailnet: every report of the fleet waits on this one round trip, and a machine that answers its TCP connect and then nothing has no timeout to offer.
+    out=$(capped "${WK_PROBE_SECONDS:-20}" _rsh_q "$(_remote_probe_cmd)" 2>"$why") || rc=$?
     if [ "$rc" -ne 0 ]; then
         _ssh_last_word "$rc" < "$why" > "$why.tmp" && mv "$why.tmp" "$why"
         return 1

@@ -83,6 +83,32 @@ echo "exit=$?"
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
         self.assertIn("exit=0", cp.stdout, cp.stdout + cp.stderr)
 
+    def test_a_board_that_could_not_be_probed_is_not_read_as_unarmed(self):
+        """`MODE=unreachable` is not "not in host mode": a deploy routed to a
+        podman machine reaches a board in bench mode and not one in host mode
+        -- the tailnet grants tag:wk -> tag:wk, and a host-mode board is
+        tag:workstation (measured 2026-09-16) -- so this is exactly where the
+        check was skipped, and skipping in silence is the one thing a barrier
+        may not do."""
+        for mode in ("unreachable", ""):
+            with self.subTest(mode=mode or "unset"):
+                cp = self.bash(self._script(
+                    mode=mode,
+                    record=["image=demo-system", "armed_boot_id=boot-1"],
+                    boot_id="boot-1",
+                    what="Doing the thing now would race the reboot.",
+                ))
+                out = cp.stdout + cp.stderr
+                self.assertNotEqual(cp.returncode, 0, out)
+                self.assertIn("could not tell what testmach is running", out)
+                self.assertIn("wk boot testmach --status", out)
+
+    def test_an_unprobeable_board_is_crossable_like_any_barrier(self):
+        cp = self.bash(self._script(mode="unreachable", record=[],
+                                    boot_id="boot-1"), env={"WK_FORCE": "1"})
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertIn("FORCED past a barrier", cp.stdout + cp.stderr)
+
     def test_force_proceeds_with_a_warning(self):
         script = self._script(
             mode="host",

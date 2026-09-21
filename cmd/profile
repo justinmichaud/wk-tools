@@ -112,6 +112,19 @@ esac
 
 require_name "$NAME"
 
+# Every refusal that reads only the arguments comes first: resolving the
+# workspace walks the fleet, and an argument error paid for that walk before
+# saying what was wrong with the command line.
+[ -n "$ATTACH" ] && [ -n "$BROWSER" ] && \
+    die "--attach and --browser are two ways to name the same thing: one starts
+    the browser under the profiler, the other profiles a process that is
+    already running. Pick one."
+
+[ -n "$PROCESS_EXPLICIT" ] && [ -z "$BROWSER" ] && \
+    die "--process only makes sense with --browser: it names which of
+    MiniBrowser's own processes (ui, web, network, gpu) to point the profiler
+    at, and without --browser there is no MiniBrowser to name one of."
+
 [ -n "$CONFIG" ] || CONFIG=$(default_config "$NAME")
 # The target first: on macOS a config does not choose its own build system, so config_load needs t_os.
 TARGET="$(ws_target "$NAME")"
@@ -124,16 +137,6 @@ case " $MODES " in
     *" $MODE "*) ;;
     *) die "no such mode '$MODE' -- there are: $MODES (and 'native')" ;;
 esac
-
-[ -n "$ATTACH" ] && [ -n "$BROWSER" ] && \
-    die "--attach and --browser are two ways to name the same thing: one starts
-    the browser under the profiler, the other profiles a process that is
-    already running. Pick one."
-
-[ -n "$PROCESS_EXPLICIT" ] && [ -z "$BROWSER" ] && \
-    die "--process only makes sense with --browser: it names which of
-    MiniBrowser's own processes (ui, web, network, gpu) to point the profiler
-    at, and without --browser there is no MiniBrowser to name one of."
 
 SRC=$(t_src "$NAME")
 VAR=$(config_run_var)

@@ -17,7 +17,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from tests.support import REPO, WK, fake_workspace, run
+from tests.support import REPO, WK, clean_env, fake_workspace, run
 
 PROFILE = REPO / "cmd" / "profile"
 QUIESCE_PRIV = REPO / "admin" / "wk-quiesce-priv"
@@ -39,12 +39,7 @@ def run_profile(*args, env=None, timeout=30):
     dispatcher's own name resolution (`ws_exists`) never gets a chance to
     reject the name first, and cmd/profile's own mode check runs (and dies)
     before anything in it needs a workspace to actually exist."""
-    e = dict(os.environ)
-    e.pop("WK_MARKER", None)
-    e.pop("XDG_STATE_HOME", None)
-    e.pop("WK_STORE", None)
-    if env:
-        e.update(env)
+    e = clean_env(env)
     cp = subprocess.run(
         [str(PROFILE), *args],
         cwd=str(REPO),

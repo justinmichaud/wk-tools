@@ -142,3 +142,56 @@ class TestRemoteProbeParseRobustness(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestTheProbeIsBounded(unittest.TestCase):
+    """Every report of the fleet waits on one ssh round trip, and
+    ConnectTimeout bounds the TCP connect and nothing after it: a machine
+    that accepts the connection and then answers nothing -- a wedged sshd, a
+    box deep in swap -- held `wk status <ws>` and `wk logs <ws>` past a 300s
+    wait (measured 2026-09-17, with moose down). So the probe runs under a
+    ceiling of its own, the way lib/reach.sh reads the tailnet."""
+
+    _HANGS = "#!/bin/sh\nsleep 300\n"
+
+    def test_a_machine_that_connects_and_says_nothing_is_given_up_on(self):
+        import time
+        from tests.support import stub_path
+        with stub_path({"ssh": self._HANGS}) as binp:
+            started = time.time()
+            cp = subprocess.run(
+                ["bash", "-c", _SOURCE + '''
+WK_TARGET=hangs
+WK_REMOTE_HOST=hangs.example
+t_answers && echo ANSWERS || echo "silent: $WK_FAR_WHY"
+'''],
+                capture_output=True, text=True, timeout=60,
+                env=_clean_env({"PATH": "%s:%s" % (binp, __import__("os").environ["PATH"]),
+                                "WK_PROBE_SECONDS": "2"}, wk_root=True),
+            )
+            took = time.time() - started
+        self.assertIn("silent:", cp.stdout, cp.stdout + cp.stderr)
+        self.assertLess(took, 30, "the probe outlived its own ceiling")
+
+    def test_the_ceiling_is_not_reached_when_the_machine_answers(self):
+        """A bound that also delays a machine that does answer would make
+        every report slower than the thing it reports on."""
+        import time
+        from tests.support import stub_path
+        answers = ('#!/bin/sh\nprintf "/home/t\\nLinux\\n8\\n0.1 0.1 0.1 1/1 1\\n'
+                   '===MEM===\\nMemAvailable: 1024 kB\\n===IONICE===\\nyes\\n"\n')
+        with stub_path({"ssh": answers}) as binp:
+            started = time.time()
+            cp = subprocess.run(
+                ["bash", "-c", _SOURCE + '''
+WK_TARGET=quick
+WK_REMOTE_HOST=quick.example
+t_answers && echo ANSWERS || echo "silent: $WK_FAR_WHY"
+'''],
+                capture_output=True, text=True, timeout=60,
+                env=_clean_env({"PATH": "%s:%s" % (binp, __import__("os").environ["PATH"]),
+                                "WK_PROBE_SECONDS": "20"}, wk_root=True),
+            )
+            took = time.time() - started
+        self.assertIn("ANSWERS", cp.stdout, cp.stdout + cp.stderr)
+        self.assertLess(took, 10, "a probe that answered still waited on the ceiling")

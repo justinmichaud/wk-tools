@@ -681,11 +681,16 @@ _tailnet_name_preflight() { # <name> <bench|rescue>
     [ -n "$name" ] || return 0
 
     peers=$(wk_tailscale_peers)
-    [ -n "$peers" ] || die "could not read this machine's tailnet view (tailscale status --json
+    if [ -z "$peers" ]; then
+        disk_would "read this machine's tailnet view and retire whatever node holds
+              '$name', so the card can join under it (the real write refuses
+              when that view cannot be read)" && return 0
+        die "could not read this machine's tailnet view (tailscale status --json
     returned nothing -- no CLI, not logged in, or the daemon did not answer), so
     there is no way to tell whether '$name' is already on the tailnet. This
     check cannot be skipped: writing anyway could join renamed to '$name-1',
     and everything here reaches a board by its tailnet name."
+    fi
 
     hit=$(printf '%s\n' "$peers" | _tailnet_name_collides "$name") || hit=""
     [ -n "$hit" ] || return 0
@@ -701,6 +706,9 @@ _tailnet_name_preflight() { # <name> <bench|rescue>
     fi
     local out
     if ! wk_tailscale_api_present; then
+        disk_would "retire the stale tailnet node '$name' -- which the real write
+              refuses to do without a stored token (wk key set tailnet-api)" \
+            && return 0
         die "'$name' is already on the tailnet (${hit#*:}), online or offline.
     Joining under it again does not keep the name -- Tailscale renames the
     collision to '$name-1', and everything here reaches a board by its
@@ -894,13 +902,18 @@ EOF
         [ "$DISK_DEV" = "${NODE_DEVICE:-}" ] && log "  note      $DISK_MACHINE is configured to boot from this disk (wk boot $DISK_MACHINE)"
         log "then, in order:"
         DISK_DRY=1
+    fi
+
+    # Both branches: retiring a stale node is a state change made outside this
+    # machine, so it belongs in the list a dry run prints (through disk_would).
+    if [ "$kept" = yes ]; then
+        log "  '$(_tailnet_name_for "${IMG_MACHINE:-}" "$role")' on the tailnet is this system's own node, kept across the rewrite"
     else
+        _tailnet_name_preflight "$(_tailnet_name_for "${IMG_MACHINE:-}" "$role")" "$role"
+    fi
+
+    if [ -z "$dry" ]; then
         _tailnet_key_preflight "${IMG_MACHINE:-}" "$role"
-        if [ "$kept" = yes ]; then
-            log "  '$(_tailnet_name_for "${IMG_MACHINE:-}" "$role")' on the tailnet is this system's own node, kept across the rewrite"
-        else
-            _tailnet_name_preflight "$(_tailnet_name_for "${IMG_MACHINE:-}" "$role")" "$role"
-        fi
         _wifi_creds_preflight "${IMG_MACHINE:-}"
 
         if disk_is_second "$DISK_DEV"; then

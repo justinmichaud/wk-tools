@@ -881,6 +881,10 @@ esac
         out = cp.stdout
         self.assertEqual(cp.returncode, 0, out)
         want = [
+            # Before the bytes: retiring a node this card's name is held by
+            # is a state change made outside this machine, and a dry run that
+            # left it out printed no sign of it at all.
+            "would read this machine's tailnet view",
             "would unmount",
             "would stream the image onto /dev/sdX",
             "would read /dev/sdX back",

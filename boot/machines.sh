@@ -263,7 +263,20 @@ record_clear() {
 machine_armed_barrier() { # <what this command would do>
     local what="$1" rec img armed_boot now_boot
     b_probe >/dev/null 2>&1 || true
-    [ "${MODE:-}" = host ] || return 0
+    # A barrier may not skip in silence, and `MODE=unreachable` (or an unset MODE, from a probe that died) is not "the board is not in host mode": a deploy routed to a podman machine reaches a board in bench mode and not one in host mode, since the tailnet grants tag:wk -> tag:wk and a host-mode board is tag:workstation (measured 2026-09-16), so exactly there the check was being skipped.
+    case "${MODE:-}" in
+        host) ;;
+        ""|unreachable)
+            barrier "could not tell what $NODE_NAME is running, so whether it is armed for a
+    one-shot boot is unknown -- and if it is, the filesystem answering ssh is
+    not the one about to run:
+    $what
+    Ask from a machine that can reach it:  wk boot $NODE_NAME --status
+    A board in bench mode answers a workspace; one in host mode answers only a
+    workstation."
+            return 0 ;;
+        *) return 0 ;;   # its bench system answered, and an arming record lives on the host install
+    esac
     rec=$(record_read 2>/dev/null || true)
     img=$(kv_get image <<<"$rec")
     [ -n "$img" ] || return 0

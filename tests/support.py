@@ -158,6 +158,15 @@ def _clean_env(extra=None, wk_root=False):
     return env
 
 
+def clean_env(extra=None, wk_root=True):
+    """`_clean_env` for a test that invokes a cmd/* file directly instead of
+    through ./wk -- the fleet-blindness above is the suite's, not the
+    dispatcher's: cmd/profile resolving a workspace name against the real
+    registry asked moose over ssh three times before refusing an argument,
+    and outlived a 30s timeout while moose was down (2026-09-17)."""
+    return _clean_env(extra, wk_root=wk_root)
+
+
 def run(*args, env=None, check=False, timeout=120, input=None):
     """Run ./wk <args> and return a CompletedProcess with text output.
 
