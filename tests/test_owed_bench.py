@@ -1,4 +1,4 @@
-"""Two `--dry-run` plans owed by docs/HANDOFF-test-runner.md:
+"""Two `--dry-run` plans owed (docs/PLAN.md):
 
   - `wk bench mac <ws> --dry-run` on a fresh lane (no state file yet) prints
     the whole plan rather than dying on `set -o pipefail` reading a state

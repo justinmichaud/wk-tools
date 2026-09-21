@@ -1,4 +1,4 @@
-"""Boot-image write logic owed by docs/HANDOFF-test-runner.md:
+"""Boot-image write logic owed (docs/PLAN.md):
 
   - `_from_filter`'s decompressor selection by extension (cmd/sysimage)
   - `disk_unique_identity` gives two disks written from one image distinct

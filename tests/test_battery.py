@@ -9,7 +9,7 @@ charging has no CLI knob -- so `wk doctor --all` prints the honest
 Every test here lifts the exact code that runs in production (the phone-side
 apply script, and the two pure verdict functions in cmd/doctor) rather than
 re-typing a second copy of the logic; see tests/test_wifi_seed.py and
-tests/test_quick.py's _ls_classify for the same technique. No test needs a
+tests/test_bridge.py's _ls_classify for the same technique. No test needs a
 phone or a Mac's real /sys or /etc: the apply script's CONF path is
 overridden via WK_BRIDGE_BATTERY_CONF (bridge/bin/wk-bridge-battery), and the
 verdict functions take their input as plain strings.
@@ -33,7 +33,7 @@ PROVISION = REPO / "bridge" / "provision.sh"
 
 def _lift_func(path, name):
     """A function's body, sed'd out of a shell file -- the same technique
-    tests/test_wifi_seed.py's _lift and tests/test_quick.py's _ls_classify
+    tests/test_wifi_seed.py's _lift and tests/test_bridge.py's _ls_classify
     lift use, so the exact code that runs in production is what is called."""
     text = subprocess.run(
         ["sed", "-n", f"/^{name}()/,/^}}/p", str(path)],

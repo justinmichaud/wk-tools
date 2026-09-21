@@ -86,7 +86,7 @@
 #                       tailnet-api   the tailnet API token a workstation
 #                                     retires a stale fleet node with; never
 #                                     written to a card
-#                       ntfy          the ntfy.sh topic `wk notify` publishes
+#                       ntfy          the ntfy.sh topic wk_notify (lib/store.sh) publishes to
 #                                     to, so the fleet can tell you it wants
 #                                     you. Minted here, never invented: the
 #                                     topic name is the whole credential, so it

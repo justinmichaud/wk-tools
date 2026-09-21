@@ -19,7 +19,7 @@ import textwrap
 import types
 import unittest
 
-from tests.support import REPO, WkTest, bash, func_body, run, scratch_dir
+from tests.support import REPO, WkTest, bash, func_body, requires_podman_vm, run, scratch_dir
 
 WKPGO = REPO / "lib" / "wkpgo.py"
 
@@ -160,7 +160,7 @@ class TestWhichProfilesAreProfileGuided(WkTest):
 
     def test_a_2_52_buildroot_profile_is_not_yet(self):
         """buildroot builds WebKit its own way (image/buildroot-webkit.sh) and
-        no lane collects for it; docs/HANDOFF-board-pgo.md owns that."""
+        no lane collects for it; owed (docs/PLAN.md)."""
         self.assertEqual(wanted("webkit-2.52-buildroot-rpi5-64").stdout.strip(), "no")
 
 
@@ -557,6 +557,7 @@ class TestAnInstrumentedSlotIsNeverMeasured(WkTest):
         self.assertIn("pi_check_instrumented", body)
 
 
+@requires_podman_vm()
 class TestTheUnprofiledSlotIsDeliberate(WkTest):
     """A 2.52 slot has a profile by default and there is no --no-pgo. The one
     way to an unprofiled one is naming the plain cross config, because the

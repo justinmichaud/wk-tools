@@ -6,9 +6,10 @@ so they live together.
 
 Nothing here is installed by hand. `./setup` links `~/.claude/skills` to this
 directory on the host (claude/install.sh); a container workspace mounts the
-shared mutable copy at `/skills` (container/firstrun.sh), which `wk skills
-status|diff|pull|push` reconciles with this directory; a macOS guest gets a
-read-only symlink into its synced wk-tools tree (vm/provision-base.sh).
+shared mutable copy at `/skills` (container/firstrun.sh), which `./setup`
+seeds from this directory once and never overwrites (host/linux/machine.sh,
+host/macos/vmtools.sh); a macOS guest gets a read-only symlink into its synced
+wk-tools tree (vm/provision-base.sh).
 
 Settings and hooks follow the same scheme, with one split that matters: the
 host gets `claude/settings-host.json` and `claude/CLAUDE-host.md`, workspaces

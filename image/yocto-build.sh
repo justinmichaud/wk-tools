@@ -4,6 +4,7 @@
 set -euo pipefail
 
 export WK_BUILD=1  # the build wall (container/bin/wk-build-wall) passes ninja/cmake/make for a wk build
+MIRROR="${WK_MIRROR:?WK_MIRROR names the mirror this container mounts, set by targets/container.sh}"   # t_spawn execs this with no WK_ROOT and no lib/target.sh, so there is no t_mirror_dir to ask: the container driver names the mirror in the environment (mirror_in_container, lib/target.sh)
 
 # The wall comes off PATH entirely, which WK_BUILD cannot do: bitbake resolves each HOSTTOOLS name once into
 # tmp/hosttools and runs every task with that as the whole PATH, so it captures the wall (ahead of /usr/bin) and gcc-cross-canadian's do_compile dies in oe_runmake with "not on PATH".
@@ -86,10 +87,7 @@ refresh_git_index() { # <dir> -- leave an index libgit2 can open, and keep it so
     [ -e "$1/.git" ] || return 0
     git -C "$1" config index.skipHash false >/dev/null 2>&1 || true
     git -C "$1" config index.version 2     >/dev/null 2>&1 || true
-    # A killed stage can leave an index no git can read at all -- 0 bytes,
-    # "index file smaller than expected", measured in this lane 2026-09-21 --
-    # and then every command in that checkout fails on it and nothing
-    # converged it. Rebuilt from HEAD, which is what an index is a cache of.
+    # A killed stage can leave a 0-byte index ("index file smaller than expected", measured); rebuild it from HEAD.
     if ! git -C "$1" ls-files >/dev/null 2>&1; then
         d=$(git -C "$1" rev-parse --absolute-git-dir 2>/dev/null) || d=""
         [ -z "$d" ] || rm -f "$d/index"
@@ -184,7 +182,7 @@ cd "$SRC"
 checkout_slot_commit() {
     local dirty
     git cat-file -e "$COMMIT^{commit}" 2>/dev/null \
-        || git fetch --quiet "${WK_MIRROR:?WK_MIRROR names the mirror this container mounts, set by targets/container.sh}" "$COMMIT" \
+        || git fetch --quiet "$MIRROR" "$COMMIT" \
         || fail "$COMMIT is not in this machine's mirror; 'wk ab' and 'wk pr' fetch a PR head into it first"
     dirty=$(git status --porcelain | wc -l | tr -d ' ') || dirty=0
     [ "$dirty" = 0 ] \

@@ -209,13 +209,6 @@ class TestWhatStaysTheCommandsOwn(WkTest):
         text = (REPO / "cmd" / "run").read_text()
         self.assertIn("Everything after `--` goes to jsc verbatim.", text)
 
-    def test_pick_requires_at_least_one_commit(self):
-        """wk pick's grammar is variadic commit specs with no flags to typo;
-        the equivalent refusal is a missing commit argument."""
-        cp = run_impl("pick", env={"WK_NAME": "fakews"})
-        self.assertNotEqual(cp.returncode, 0)
-        self.assertIn("usage:", cp.stdout)
-
     def test_enter_passthrough_is_documented(self):
         text = (REPO / "cmd" / "enter").read_text()
         self.assertIn("run one command there and exit", text)
@@ -255,11 +248,4 @@ class TestWhatStaysTheCommandsOwn(WkTest):
         text = (REPO / "cmd" / "pi").read_text()
         self.assertIn("it lives with wk sysimage", text)
         self.assertNotIn("it lives with the image store", text)
-
-    def test_pick_help_prints_synopsis(self):
-        """bare `wk pick -h`-shaped help (run with no args and no name) is
-        the dispatcher's job; this confirms cmd/pick's own header still
-        carries the synopsis the dispatcher's -h reads out of it."""
-        text = (REPO / "cmd" / "pick").read_text()
-        self.assertIn("wk pick [<workspace>] <commit>...", text)
 

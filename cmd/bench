@@ -886,7 +886,7 @@ cmd_stage() {
         || die "$machine has no place to stage a build onto from here.
     Its other role is reached over the network rather than mounted, so the
     payload is pushed to it while it runs rather than copied to it while it
-    does not -- see docs/HANDOFF-boot.md, 'Storage'."
+    does not."
     local root
     root=$(b_bench_root) || die "$machine's benchmark disk is not attached, so there is nowhere to
     stage a build onto. 'wk boot $machine --status' says what it can see."

@@ -1,7 +1,7 @@
 # The buildroot builder: sourced by cmd/sysimage, dispatched on IMG_BUILDER; the
 # in-workspace half is image/buildroot-build.sh, run from /opt/wk-tools so the
 # two halves cannot skew. The tree is a fork: the release-pinned `cog` defconfigs
-# exist nowhere else. TODO: whether the rpi3 defconfig compiles wpa_supplicant at all is unverified. Owed work: docs/HANDOFF-ab-bench.md #3.
+# exist nowhere else. TODO: whether the rpi3 defconfig compiles wpa_supplicant at all is unverified. Owed (docs/PLAN.md).
 
 BUILDROOT_BASE_IMAGE="${WK_BUILDROOT_BASE:-docker.io/library/ubuntu:22.04}"  # WK_BUILDROOT_BASE tests a newer host ahead of a buildroot repin
 

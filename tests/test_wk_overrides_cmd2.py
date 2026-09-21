@@ -1,9 +1,9 @@
 """Coverage for the WK_* overrides read (with a default) in this agent's
-files: cmd/mcp, cmd/new, cmd/pi, cmd/pick, cmd/pr, cmd/profile, cmd/push,
+files: cmd/new, cmd/pi, cmd/pr, cmd/profile, cmd/push,
 cmd/quiesce, cmd/remote, cmd/remotes, cmd/rm, cmd/run, cmd/selftest,
-cmd/session, cmd/skills, cmd/start, cmd/status, cmd/stop, cmd/sudo, cmd/sync,
+cmd/session, cmd/start, cmd/status, cmd/stop, cmd/sudo, cmd/sync,
 cmd/test, cmd/verify, cmd/version, cmd/vm, cmd/zed, the `wk` dispatcher, and
-`setup` (docs/HANDOFF-test-runner.md's "every WK_* override ... documented
+`setup` (docs/PLAN.md's "every WK_* override ... documented
 ... and covered by a test, or removed").
 
 Each override kept here is a genuine tunable, already documented in the -h
@@ -201,7 +201,7 @@ class TestQuiesceStateReadSitesPointAtTheTest(unittest.TestCase):
 
 class TestStatusFleetTimeout(unittest.TestCase):
     """WK_FLEET_TIMEOUT (cmd/status -h): already exercised end to end by
-    tests/test_quick.py's test_no_fleet_probe_can_outlive_its_ceiling; this
+    tests/test_ceilings.py's test_no_fleet_probe_can_outlive_its_ceiling; this
     only checks the -h documents it (the audit's other half)."""
 
     def test_h_documents_it(self):
@@ -214,7 +214,7 @@ class TestStatusBridgeTimeout(unittest.TestCase):
     """WK_BRIDGE_TIMEOUT (cmd/status -h): the ceiling on one bridge phone's
     health check (_bridge_probe), which calls ssh directly rather than
     through report_fleet_device's probe wrapper -- so it needs its own
-    ceiling test, built the same way test_quick.py's fleet-probe one is."""
+    ceiling test, built the same way test_ceilings.py's fleet-probe one is."""
 
     def test_h_documents_it(self):
         cp = subprocess.run([str(WK), "status", "-h"], cwd=str(REPO),

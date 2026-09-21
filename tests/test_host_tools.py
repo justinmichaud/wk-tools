@@ -110,7 +110,7 @@ def _tart_lines(path):
 class TestTartVerifiedNeverInstalled(unittest.TestCase):
     """`./setup` and the macOS host stages only ever check for Tart
     (~/.local/share/tart/tart.app, ~/.local/bin/tart symlinked into the
-    bundle); nothing here installs it (docs/HANDOFF-reprovision.md)."""
+    bundle); nothing here installs it."""
 
     def _files(self):
         files = [REPO / "setup"]

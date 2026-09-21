@@ -1,6 +1,6 @@
 """What `wk logs` says about a build: `(none)` on a good one, and the
-readings the build was collected under. The first is owed by
-docs/HANDOFF-test-runner.md: "catches: `error:` matching inside message
+readings the build was collected under. The first is owed
+(docs/PLAN.md): "catches: `error:` matching inside message
 text". `first_error` (lib/watchdog.sh) greps a build.log for lines that look
 like a compiler/ninja failure; the risk this guards is a bare, unanchored
 `error:` matching a line that merely *talks about* an error (a log message

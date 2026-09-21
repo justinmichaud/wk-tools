@@ -376,7 +376,7 @@ if [ "$MODE" = samply ] && [ -z "$DRY" ]; then
     sysctl is not namespaced -- sudo in there fails with 'permission denied on
     key'). On the machine that runs the workspace:
         echo 1 | sudo tee /proc/sys/kernel/perf_event_paranoid
-    On a booted benchmark image it is set already (docs/HANDOFF-boot.md)."
+    On a booted benchmark image it is set already."
         elif [ ! -x "$PRIV" ]; then
             die "perf_event_paranoid is $_par in '$NAME', and samply needs 1 or less.
     The privileged helper that can lower it is not installed on this host.

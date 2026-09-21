@@ -508,9 +508,9 @@ explain_cmd() { # <cmd> <impl>
     elif [ "$D_DRYRUN" = yes ]; then
         printf '  changes things: yes -- wk %s ... --dry-run prints what it would run and runs none of it\n' "$cmd"
     elif [ -n "$D_DRYRUN" ]; then
-        printf '  changes things: yes -- %s honour --dry-run; the rest have no dry run yet (docs/HANDOFF-cli.md)\n' "${D_DRYRUN//,/, }"
+        printf '  changes things: yes -- %s honour --dry-run; the rest have no dry run yet (docs/PLAN.md)\n' "${D_DRYRUN//,/, }"
     else
-        printf '  changes things: yes -- and has no dry run yet (docs/HANDOFF-cli.md)\n'
+        printf '  changes things: yes -- and has no dry run yet (docs/PLAN.md)\n'
     fi
     if ! cmd_readonly; then
         case "$D_DESTRUCTIVE" in
@@ -703,6 +703,8 @@ main() {
         help|-h|--help) help_doc "${1:-}" ;;
         setup) exec "$WK_ROOT/setup" "$@" ;;
         image) die "'wk image' is renamed: wk sysimage" ;;
+        mcp|pick|skills) die "'wk $cmd' is removed" ;;
+        notify) die "'wk notify' is removed: a program calls wk_notify (lib/store.sh)" ;;
         claude) die "'wk claude' is renamed: wk ai claude${1:+ $1}
     One command for every coding agent (wk ai -h)." ;;
         --declarations) dump_declarations; exit 0 ;;
@@ -756,7 +758,7 @@ main() {
     set -- ${ARGS[@]+"${ARGS[@]}"}
     if [ -n "${WK_DRY_RUN:-}" ] && ! cmd_dryrun ${1+"$@"} && ! cmd_readonly "${1:-}"; then
         usage_die "$cmd" "$impl" "'wk $cmd' has no dry run yet: not every change it makes goes through
-    the one path --dry-run intercepts (docs/HANDOFF-cli.md names it as owed)"
+    the one path --dry-run intercepts (owed, docs/PLAN.md)"
     fi
     if cmd_destructive ${1+"$@"}; then WK_DESTRUCTIVE=1; export WK_DESTRUCTIVE; fi
 

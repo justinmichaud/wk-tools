@@ -169,7 +169,7 @@ b_arm() {
     for this Mac -- an image copied onto a disk will not boot (the boot policy
     lives in this machine's secure storage). Install it from Recovery or with
     the macOS installer app, name the volume '$NODE_VOLUME', and see
-    docs/HANDOFF-mac-perf-mode.md for what to turn off on it.
+    'wk help hardware' for what to turn off on it.
     A different name:  WK_BENCH_VOLUME='...' wk boot $NODE_NAME"
 
     m_ssh "test -x $(sh_quote "$BOOT_HELPER")" 2>/dev/null || die "the privileged boot helper is not installed on that Mac, so nothing here
@@ -319,7 +319,7 @@ b_media() {
         return 0
     fi
     if m_reachable; then
-        printf "%s MISSING on %s -- docs/HANDOFF-mac-perf-mode.md creates it" "$what" "$NODE_SSH"
+        printf "%s MISSING on %s -- see 'wk help hardware'" "$what" "$NODE_SSH"
         return 0
     fi
     printf "%s: neither %s nor %s answers, so this Mac is between its two installs or off" \

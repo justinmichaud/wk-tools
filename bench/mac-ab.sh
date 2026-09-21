@@ -157,9 +157,9 @@ else:
     [ "$(kv_get ok <<<"$st")" = yes ]
 }
 
-# `wk notify` publishes off this machine; a notification that did not go out must never cost a measurement, so every failure here is a warning and nothing else.
+# wk_notify publishes off this machine; a notification that did not go out must never cost a measurement, so every failure here is a warning and nothing else.
 notify() {  # <headline> <detail>
-    "$WK_ROOT/wk" notify "$1" --detail "$2" --tag mac-ab >/dev/null \
+    wk_notify "$1" --detail "$2" --tag mac-ab >/dev/null \
         || warn "  could not send the notification '$1' (above)"
 }
 

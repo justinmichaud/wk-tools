@@ -133,8 +133,7 @@ wkslot() { python3 "$WK_ROOT/lib/wkslot.py" "$@"; }
 . "$WK_ROOT/image/pmos.sh"
 . "$WK_ROOT/image/fetch.sh"
 
-# The lane is what the dispatcher routes a build by (`name=derived`, wk); a
-# pmos or fetch profile has none, and is built by this host itself.
+# A pmos or fetch profile has no lane and is built by this host itself.
 _lane() { # <sub> <args...> -- the workspace these arguments act on, nothing when they name none
     shift 2>/dev/null || return 0
     image_lane_arg ${@+"$@"}

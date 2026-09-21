@@ -957,7 +957,7 @@ RULES = collections.OrderedDict((
         store_with="wk key deploy",
         check=_deploy_key)),
     ("ntfy", Rule(
-        spent_by="lib/wknotify.py -- the topic `wk notify` publishes a "
+        spent_by="lib/wknotify.py -- the topic wk_notify (lib/store.sh) publishes a "
                  "headline to",
         needs="publish a notification a person sees",
         forbids="be a name someone could arrive at by guessing: the topic is "

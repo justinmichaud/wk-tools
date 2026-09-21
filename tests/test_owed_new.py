@@ -1,5 +1,5 @@
-"""`wk new` over a workspace with no `base-id` remakes it, owed by
-docs/HANDOFF-test-runner.md: "catches: 'already exists' answered about a
+"""`wk new` over a workspace with no `base-id` remakes it, owed
+(docs/PLAN.md): "catches: 'already exists' answered about a
 half-made thing". The decision lives in `ws_state` (lib/target.sh): a
 target that needs a base snapshot (`t_needs_base`) but whose workspace
 directory has no `base-id` file reports `creating`, not `present` -- so

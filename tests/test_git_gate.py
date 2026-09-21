@@ -229,7 +229,7 @@ class TestWhereItSitsOnPath(unittest.TestCase):
         lines = SHIM.read_text().splitlines()
         self.assertTrue(any(l.startswith("# wk-build-wall:") for l in lines[:5]),
                         "_real() skips a wall it can recognise; this one has to be one")
-        body = [l for l in lines if l and not l.startswith("#")]
+        body = [l for l in lines if l and not l.startswith("#") and l != "set -euo pipefail"]
         self.assertEqual(len(body), 1, body)
         self.assertTrue(body[0].startswith(". "), body[0])
         self.assertIn("/../wk-build-wall", body[0])

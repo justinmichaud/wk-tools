@@ -10,6 +10,7 @@ only function that uses a variable as a pattern; every other site calls it.
 
 Run: python3 -m unittest tests.test_pattern_matching -v
 """
+TIER = "lint"
 import re
 import shlex
 import unittest

@@ -1,5 +1,5 @@
 """WK_* override coverage for cmd/bench, cmd/bridge and cmd/build (the
-docs/HANDOFF-test-runner.md item: "every WK_* override read with a default is
+docs/PLAN.md item: "every WK_* override read with a default is
 documented where the user meets it and covered by a test, or removed").
 
 Each test lifts the exact expression or function it exercises out of the
@@ -159,7 +159,7 @@ class TestBenchVarianceKnobs(WkTest):
 class TestBenchRootAndMachine(WkTest):
     """staged_root: WK_BENCH_ROOT is the escape hatch host mode uses to
     reach bench mode's code path without rebooting into it (tested already
-    by tests/test_quick.py's test_bench_role_required_or_it_does_not_run);
+    by tests/test_host_only.py's test_bench_role_required_or_it_does_not_run);
     WK_BENCH_MACHINE is the only way host mode can tell which fleet Mac it
     is running on -- there is no default, by design."""
 

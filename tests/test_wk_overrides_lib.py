@@ -45,7 +45,7 @@ class TestRemovedOverridesStayRemoved(unittest.TestCase):
         mbp = _src("boot", "machines", "mbp.conf")
         self.assertNotIn("WK_MAC_SSH", mbp)
         self.assertNotIn("WK_MAC_BENCH_SSH", mbp)
-        # WK_BENCH_VOLUME survives: tests/test_quick.py drives it.
+        # WK_BENCH_VOLUME survives: tests/test_host_only.py drives it.
         self.assertIn("WK_BENCH_VOLUME", mbp)
 
 
@@ -191,7 +191,7 @@ printf '[%s]\\n' "$(screen_blocker)"
 
 class TestReachLib(WkTest):
     def test_wk_tailscale_timeout_bounds_a_wedged_cli(self):
-        """Mirrors tests/test_quick.py's own check of this override, for the
+        """Mirrors tests/test_host_only.py's own check of this override, for the
         function this agent's audit entry covers (wk_tailscale_peers)."""
         with stub_path({"tailscale": "#!/bin/sh\nsleep 30\n"}) as binp:
             cp = self.bash(

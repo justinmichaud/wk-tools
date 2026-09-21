@@ -25,16 +25,17 @@ who decides each:
                   override and leaves it in argv, so each command re-reads it
 
 The three tests below hold what is already true; the three
-`expectedFailure`s name what is not, file by file, and are the audit's
+`owed` marks name what is not, file by file, and are the audit's
 answer to the defects line.
 
 Run: python3 -m unittest tests.test_owed_dispatch_audit -v
 """
+TIER = "lint"
 import os
 import re
 import unittest
 
-from tests.support import REPO
+from tests.support import REPO, owed
 
 
 def commands():
@@ -155,7 +156,6 @@ EXPECTED = {
     "remote":     ["subverb"],
     "run":        ["config"],
     "session":    ["subverb"],
-    "skills":     ["subverb"],
     "sudo":       ["subverb", "--target"],
     "sync":       ["--target"],
     "sysimage":   ["config", "subverb"],
@@ -198,10 +198,10 @@ class TestTheAuditList(unittest.TestCase):
 
 
 class TestWhatIsStillParsedCommandByCommand(unittest.TestCase):
-    """Three arguments the dispatcher hands nobody. Each `expectedFailure`
+    """Three arguments the dispatcher hands nobody. Each `owed` mark
     names the files, and is the audit's entry for docs/defects."""
 
-    @unittest.expectedFailure
+    @owed("the build config is parsed by seven commands, declared to the dispatcher by none")
     def test_the_build_config_is_not_the_dispatchers(self):
         """defect: cmd/build takes <config> as a positional and cmd/bench,
         cmd/gui, cmd/profile, cmd/run, cmd/sysimage, cmd/test each parse
@@ -211,17 +211,17 @@ class TestWhatIsStillParsedCommandByCommand(unittest.TestCase):
         construction"""
         self.assertEqual(offenders("config"), [])
 
-    @unittest.expectedFailure
+    @owed("the subverb is re-read and refused by each command, not by the dispatcher")
     def test_the_subverb_is_not_the_dispatchers(self):
         """defect: the dispatcher reads ${1:-} to apply a `sub` override and
         leaves it in argv, so cmd/ai, cmd/bench, cmd/boot, cmd/bridge,
         cmd/completion, cmd/key, cmd/pi, cmd/pr, cmd/push, cmd/quiesce,
-        cmd/remote, cmd/session, cmd/skills, cmd/sudo, cmd/sysimage and
+        cmd/remote, cmd/session, cmd/sudo, cmd/sysimage and
         cmd/vm each re-read it and each write their own refusal for an
         unknown one"""
         self.assertEqual(offenders("subverb"), [])
 
-    @unittest.expectedFailure
+    @owed("cmd/new and cmd/sync re-parse --target after the dispatcher resolved it")
     def test_the_workspace_target_is_not_re_parsed(self):
         """defect: cmd/new and cmd/sync parse `--target` for the same fact
         the dispatcher resolved (resolve_target reads the flag and hands the

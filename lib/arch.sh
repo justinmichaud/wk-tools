@@ -44,7 +44,7 @@ arch_wrapper() {  # CMake takes CMAKE_SYSTEM_PROCESSOR from uname, which without
     esac
 }
 
-arch_cflags() {  # JSC's ARMv7 JIT requires VFP; WTF's vectorize pragmas fail on ARMv7 regardless of -mfpu (docs/HANDOFF-linux-arm32.md)
+arch_cflags() {  # JSC's ARMv7 JIT requires VFP; WTF's vectorize pragmas fail on ARMv7 regardless of -mfpu
     case "$1" in
         armhf) echo "-mthumb -march=armv7-a+fp -Wno-pass-failed" ;;
         *)     echo "" ;;

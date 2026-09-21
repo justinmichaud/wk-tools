@@ -387,7 +387,8 @@ zed_key_pub() { # WK_ZED_PUBKEY when preparing a workspace for the machine that 
 target_all() { # container, vm, this machine's own target, and targets/hosts/*.conf
     local d f t seen=" container vm "
     echo container
-    if is_macos; then echo vm; fi   # tart is Apple's, so a guest exists only on a macOS host; elsewhere -- a Linux workstation, the podman VM -- this target has no store of its own either (wk_record_dir resolves to the container store), and every container workspace was listed a second time as a `broken` vm guest
+    command -v wk_record_dir >/dev/null 2>&1 || . "$WK_ROOT/lib/store.sh"
+    if is_macos && { [ -n "${WK_VM_STORE:-}" ] || [ "$(wk_record_dir)" != "$WK_STORE" ]; }; then echo vm; fi   # tart is Apple's, so a guest exists only on a macOS host, and only where its store (targets/vm.sh) is not the container's: elsewhere -- a Linux workstation, the podman VM, a macOS host pointed at a local store -- wk_record_dir resolves to the container store, and every container workspace would answer a second time as a vm guest
 
     t=$(wk_remote_field target)
     if [ -n "$t" ]; then seen="$seen$t "; echo "$t"; fi

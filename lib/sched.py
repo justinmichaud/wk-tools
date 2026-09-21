@@ -104,9 +104,8 @@ def plan_order(steps):
 
 
 def needed(steps, done=()):
-    """What is left: a step is needed when it is not done and something needed
-    still needs it -- a phase feeding a slot that already holds the commit is
-    not run again."""
+    """Steps not done that a needed step still needs; a phase feeding a slot
+    that already holds the commit is not run again."""
     done = set(done)
     dependents = {s.id: [] for s in steps}
     for s in steps:
@@ -135,8 +134,6 @@ class Scheduler:
         self.failed, self.skipped, self.left = [], [], []
 
     def run_all(self):
-        # Asked once, before anything starts: what is done decides what is
-        # worth running.
         done = self._done_already()
         want = needed(self.steps, done)
         self.already = [s for s in self.steps if s.id in done]
@@ -160,13 +157,8 @@ class Scheduler:
                 self.left.append(s)
         return 0 if not (self.failed or self.skipped or self.left) else 1
 
-    # All at once, not one after another: each question is routed to the machine
-    # holding the lane it asks about, and on a macOS workstation that is a
-    # forwarded call into the podman machine -- 0.8-1.1s each against a lane
-    # that exists (measured 2026-09-17), five per board, growing with the
-    # graph. Asked together, the plan waits for the slowest one instead of the
-    # sum. They are read-only by declaration (`wk sysimage holds`), so nothing
-    # here serialises them.
+    # Asked all at once: a question forwarded into the podman machine costs
+    # 0.8-1.1 s (measured), so the plan waits for the slowest, not the sum.
     def _done_already(self):
         asked = [s for s in self.steps if s.done]
         if not asked:

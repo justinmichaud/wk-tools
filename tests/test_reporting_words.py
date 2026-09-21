@@ -13,6 +13,7 @@ what its reporting words are.
 
 Run: python3 -m unittest tests.test_reporting_words -v
 """
+TIER = "lint"
 import re
 import unittest
 

@@ -19,7 +19,7 @@ import json
 import subprocess
 import unittest
 
-from tests.support import REPO, WkTest, bash, func_body
+from tests.support import REPO, WkTest, bash, builds_on_the_books_env, func_body, run
 
 LIBS = "\n".join('. "%s/%s"' % (REPO, f) for f in (
     "lib/common.sh", "lib/store.sh", "lib/target.sh", "lib/image.sh"))
@@ -177,32 +177,32 @@ class TestTheWatchdogMeasuresWhatDetached(WkTest):
 
 class TestSelftestRefusesBesideABuild(WkTest):
     """Both directions or neither: a test that makes a real workspace already
-    skips while a build is on the machine's books (tests/support.py)."""
-
-    TEXT = (REPO / "cmd" / "selftest").read_text()
+    skips while a build is on the machine's books (tests/support.py), so a
+    live run refuses to start beside one. Driven against a fake reading
+    (builds_on_the_books_env), never this machine's books."""
 
     def test_it_asks_the_suites_own_reading(self):
         """One implementation: the suite already reads the records where a
         container workspace is really built, and this asks that rather than
         spelling the location a second time."""
-        self.assertIn("from tests.support import builds_on_the_books", self.TEXT)
+        self.assertIn("from tests.support import builds_on_the_books",
+                      (REPO / "cmd" / "selftest").read_text())
 
-    def test_it_is_a_barrier_and_not_a_refusal_nothing_crosses(self):
-        self.assertIn("barrier ", self.TEXT)
+    def test_a_live_run_is_a_barrier_naming_the_build_and_the_way_on(self):
+        env = builds_on_the_books_env(self.tmp, "wk-test-fake-build")
+        cp = run("selftest", "--live", "nosuchtestzz", env=env)
+        self.assertEqual(cp.returncode, 1, cp.stdout)
+        self.assertIn("a build is on this machine's books", cp.stdout)
+        self.assertIn("wk-test-fake-build", cp.stdout)
+        self.assertIn("--force proceeds anyway", cp.stdout)
+        self.assertIn("wk selftest\n", cp.stdout)
+        self.assertNotIn("tiers:", cp.stdout)
 
-    def test_quick_never_refuses(self):
-        """--quick makes no workspace and builds in none, so it takes nothing
-        from a build running beside it."""
-        self.assertIn('if [ -z "$QUICK" ]; then', self.TEXT)
-
-    def test_the_refusal_names_the_measurement_and_the_way_on(self):
-        self.assertIn("1536MB free", self.TEXT)
-        self.assertIn("wk selftest --quick", self.TEXT)
-
-    def test_a_clear_machine_runs(self):
-        cp = bash('cd "%s" && ./wk selftest --quick test_the_two_are_not_the_same_words'
-                  % REPO, timeout=300)
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+    def test_the_tiers_that_need_no_machine_run_beside_a_build(self):
+        env = builds_on_the_books_env(self.tmp, "wk-test-fake-build")
+        cp = run("selftest", "test_the_two_are_not_the_same_words", env=env)
+        self.assertEqual(cp.returncode, 0, cp.stdout)
+        self.assertIn("tiers: lint,unit  tests: 1 ", cp.stdout)
 
 
 if __name__ == "__main__":

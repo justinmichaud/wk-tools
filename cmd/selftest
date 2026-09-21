@@ -1,19 +1,17 @@
 #!/usr/bin/env bash
 #
-# wk selftest [--quick] [-v] [<pattern>] -- run the test suite in tests/
-# wk: where=local name=none group=hosts needs python3 takes=1 opts --quick,-v
+# wk selftest [--lint] [--unit] [--live] [-v] [<pattern>] -- run the test suite in tests/
+# wk: where=local name=none group=hosts needs python3 takes=1 opts --lint,--unit,--live,--quick,-v
 #
-# Real tests, stdlib unittest, one per behaviour. Tests that need the podman
-# VM, a configured machine or a board skip by name when it is absent; a test
-# that creates a workspace removes it in teardown.
+# Three tiers, any combination; with none named, lint then unit run. A test
+# over WK_TEST_BUDGET seconds (30) fails; the summary prints the owed count and
+# the slowest tests.
 #
-# A full run makes workspaces and builds in them, so it refuses to start beside
-# a build already on the machine's books; --quick makes none and never does.
-#
-#   --quick       every test that needs no VM, machine or board; the rest skip
-#                 by name (WK_TEST_QUICK=1, read by tests/support.py's gates).
-#                 A full run takes a lock and refuses a second one; --quick
-#                 takes none
+#   --lint        the static rules: one pass over the tree
+#   --unit        every test that needs no VM, machine or board
+#   --live        the tests that make a real workspace or reach a real machine;
+#                 each skips by name when its machine is absent. One run at a
+#                 time, and never beside a build on this machine's books
 #   -v            one line per test
 #   <pattern>     only tests whose name matches (unittest -k)
 
@@ -21,46 +19,40 @@ set -euo pipefail
 WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 . "$WK_ROOT/lib/common.sh"
 
-QUICK="" VERBOSE="" PATTERN=()
+LIVE="" ARGS=()
 while [ $# -gt 0 ]; do
     case "$1" in
-        --quick) QUICK=1; shift ;;
-        -v)      VERBOSE=-v; shift ;;
-        *)       PATTERN+=(-k "$1"); shift ;;
+        --quick) die "--quick is gone: 'wk selftest' with no tier named runs lint then unit and makes no workspace" ;;
+        --live)  LIVE=1; ARGS+=("$1"); shift ;;
+        --lint|--unit|-v) ARGS+=("$1"); shift ;;
+        *)       ARGS+=(-k "$1"); shift ;;
     esac
 done
 
 cd "$WK_ROOT"
 
-# The other half of the guard the suite already has one end of: a test that makes a real workspace skips while a build is on the machine's books (tests/support.py), and nothing stopped a run from taking the machine out from under a build. Measured 2026-09-16: a full run beside a cross build took the podman VM to 1536MB free and the build's own floor check killed the build.
 _builds_on_the_books() {   # the suite's own reading, asked here rather than spelled a second time
     python3 -c 'from tests.support import builds_on_the_books
 print("\n".join(builds_on_the_books()))' 2>/dev/null
 }
 
-if [ -z "$QUICK" ]; then
+if [ -n "$LIVE" ]; then
     BUSY=$(_builds_on_the_books)
     [ -z "$BUSY" ] || barrier "a build is on this machine's books:
 $(printf '%s\n' "$BUSY" | sed 's/^/      /')
-    A full run makes workspaces and builds in them, and the two starve each
-    other -- a run beside a cross build took the podman VM to 1536MB free and
-    the build's own floor check killed it (2026-09-16). Wait for it
-    ('wk status' follows it), or run the half that needs no machine:
-        wk selftest --quick"
-fi
-
-# One full run at a time, for the same reason a run refuses to start beside a build: two of them contend for the one podman machine. What it costs is wall-clock assertions failing in the loaded run and nowhere else -- test_interrupt's 10s bound on a prompt exit, and test_wk_overrides_cmd2 seeing 3 polls where it wants 4, both 2026-09-16, both passing 5/5 alone. Refused rather than queued: a suite that starts when the other finishes is not an answer anyone is still waiting for. --quick makes no workspace and takes no machine, so it takes no lock either.
-if [ -z "$QUICK" ]; then
-    lock_alive selftest && die "a full 'wk selftest' is already running here (pid $(lock_holder_pid "$(_lock_path selftest)")).
+    A live run makes workspaces and builds in them, and a live run and a
+    build starve each other. Wait for it ('wk status' follows it), or run
+    the tiers that need no machine:
+        wk selftest"
+    lock_alive selftest && die "a live 'wk selftest' is already running here (pid $(lock_holder_pid "$(_lock_path selftest)")).
     Two of them take the same podman machine, and the loaded one fails
-    wall-clock assertions that pass alone. Wait for it, or run the half that
-    needs no machine:
-        wk selftest --quick"
+    wall-clock assertions that pass alone. Wait for it, or run the tiers
+    that need no machine:
+        wk selftest"
     hold_lock selftest -w 0
 fi
 
-[ -z "$QUICK" ] || { WK_TEST_QUICK=1; export WK_TEST_QUICK; }
 # Not exec'd: the EXIT trap that drops the lock has to outlive the run (lib/lockrun.sh).
 rc=0
-python3 -m unittest discover -s tests $VERBOSE ${PATTERN[@]+"${PATTERN[@]}"} || rc=$?
+python3 tests/run.py ${ARGS[@]+"${ARGS[@]}"} || rc=$?
 exit "$rc"

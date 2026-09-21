@@ -2,7 +2,7 @@
 host/{linux,macos}/*.sh, container/{gpu/gpu-probe.sh,proxy/ensure-bridge.sh}
 and admin/wk-quiesce-priv.
 
-docs/HANDOFF-test-runner.md's owed item: every WK_* override read with a
+docs/PLAN.md's owed item: every WK_* override read with a
 default is documented where the user meets it and covered by a test, or
 removed. This module covers the overrides in the files above.
 

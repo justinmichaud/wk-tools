@@ -1271,6 +1271,11 @@ wk_cred_read() { # <name> -- every byte of it, nothing when it is absent
     _wk_secret_read "$(wk_cred_path "$1")"
 }
 
+wk_notify() { # <headline> [--detail <text>] [--tag <name>] -- to this machine's ntfy topic; 0 only when ntfy.sh took it, and a caller warns on anything else rather than ending a run
+    wk_cred_present ntfy || { warn "no ntfy topic on this machine: wk key set ntfy"; return 1; }
+    wk_cred_read ntfy | python3 "$WK_ROOT/lib/wknotify.py" publish "$@"
+}
+
 wk_cred_fingerprint() { # <name> -- what an election compares: one credential on two machines fingerprints alike, and the value cannot be got back from it
     python3 "$WK_ROOT/lib/secretfile.py" fingerprint "$(wk_cred_path "$1")"
 }

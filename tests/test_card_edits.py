@@ -552,7 +552,7 @@ class TestBootCheck(CardEditTest):
 
 
 class TestHelperShape(unittest.TestCase):
-    """The rules every verb is held to, checked the way tests/test_quick.py's
+    """The rules every verb is held to, checked the way tests/test_static_rules.py's
     test_card_helper_gate checks the older ones."""
 
     def setUp(self):

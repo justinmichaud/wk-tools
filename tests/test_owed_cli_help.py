@@ -1,5 +1,5 @@
 """Every command's `--help` prints the actual command line it would run and
-the configurations it accepts -- owed by docs/HANDOFF-wk-cli.md: "every
+the configurations it accepts -- owed (docs/PLAN.md): "every
 command's `--help` prints the actual command line it would run and the
 configurations it accepts [needs a test]".
 
@@ -27,7 +27,7 @@ Run: python3 -m unittest tests.test_owed_cli_help -v
 """
 import unittest
 
-from tests.support import WkTest, run
+from tests.support import WkTest, owed, run
 
 
 def _help_text(cmd):
@@ -59,37 +59,37 @@ class TestBuildDocumentsBothThePreviewAndTheConfigs(WkTest):
 class TestOtherConfigCommandsDoNotFullyMeetTheClaim(WkTest):
     """bench/gui/profile/run/test all take a build `--config`, but none of
     them reuse build's `values=`/`--dry-run` mechanism for it -- each
-    `expectedFailure` below names exactly what its own `-h` is missing."""
+    `owed` mark below names exactly what its own `-h` is missing."""
 
-    @unittest.expectedFailure
+    @owed("cmd/run has no --dry-run and declares no values=")
     def test_run_has_neither_a_dry_run_preview_nor_a_config_list(self):
         """defect: cmd/run has no --dry-run and declares no values=, so `wk run -h` shows neither the command it would run nor the configs it accepts"""
         text = _help_text("run")
         self.assertIn("--dry-run prints what it would run", text, text)
         self.assertIn("valid values", text, text)
 
-    @unittest.expectedFailure
+    @owed("cmd/gui has no --dry-run and declares no values=")
     def test_gui_has_neither_a_dry_run_preview_nor_a_config_list(self):
         """defect: cmd/gui has no --dry-run and declares no values=, so `wk gui -h` shows neither the command it would run nor the configs it accepts"""
         text = _help_text("gui")
         self.assertIn("--dry-run prints what it would run", text, text)
         self.assertIn("valid values", text, text)
 
-    @unittest.expectedFailure
+    @owed("cmd/bench's values= lists plans, not the build configs its --config takes")
     def test_bench_lists_plans_not_the_build_configs_its_own_flag_takes(self):
         """defect: cmd/bench's values=--list enumerates benchmark plans, so `wk bench -h`'s 'valid values' section never names a build config despite --config being one of its own flags"""
         text = _help_text("bench")
         self.assertIn("--dry-run prints what it would run", text, text)  # true already
         self.assertIn("jsc-release", _values_section(text), text)  # only plans are listed -- fails
 
-    @unittest.expectedFailure
+    @owed("cmd/test declares no values= for the configs its --config takes")
     def test_test_previews_the_run_but_not_the_config_list(self):
         """defect: cmd/test has --dry-run (prints a 'would run' line) but declares no values=, so `wk test -h` never lists the configs its own --config accepts"""
         text = _help_text("test")
         self.assertIn("--dry-run prints what it would run", text, text)  # true already
         self.assertIn("valid values", text, text)  # not declared -- fails
 
-    @unittest.expectedFailure
+    @owed("cmd/profile's values= lists modes, not the build configs its --config takes")
     def test_profile_lists_modes_not_the_build_configs_its_own_flag_takes(self):
         """defect: cmd/profile's values=--list enumerates profiler modes, so `wk profile -h`'s 'valid values' section never names a build config despite --config being one of its own flags"""
         text = _help_text("profile")

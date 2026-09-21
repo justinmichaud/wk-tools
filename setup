@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Bootstrap this machine. Idempotent: running it twice in a row must report no changes the second time, and it must never install software the host does not strictly need. Everything mutable belongs in a workspace, not here.
 #   ./setup              everything for this OS
-#   ./setup --stage X    just one stage (tools, settings, dotfiles, claude, mcp, sharing, machine, vmtools, softnet, sdk, broker, quiesce)
+#   ./setup --stage X    just one stage (tools, settings, dotfiles, claude, sharing, machine, vmtools, softnet, sdk, broker, quiesce)
 #   ./setup --dry-run    report what would change (WK_DRY_RUN=1; host/macos/sharing.sh reads the same variable)
 
 set -euo pipefail
@@ -102,7 +102,6 @@ run_stage tools    "$HOST_DIR/tools.sh"
 run_stage settings "$HOST_DIR/settings.sh"
 run_stage dotfiles "$WK_ROOT/host/dotfiles.sh"
 run_stage claude   "$WK_ROOT/claude/install.sh"
-run_stage mcp      "$HOST_DIR/mcp.sh"
 run_stage sharing  "$HOST_DIR/sharing.sh"
 run_stage machine  "$HOST_DIR/machine.sh"
 run_stage vmtools  "$HOST_DIR/vmtools.sh"

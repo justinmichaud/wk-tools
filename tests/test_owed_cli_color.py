@@ -1,5 +1,5 @@
 """`NO_COLOR` and a redirected stdout both drop the colour from `wk status`'s
-text table -- owed by docs/HANDOFF-wk-cli.md: "`NO_COLOR` and a redirected
+text table -- owed (docs/PLAN.md): "`NO_COLOR` and a redirected
 stdout both drop the colour from the table [needs a test]".
 
 Colour is decided in two places, and this drives both directly:
@@ -188,6 +188,10 @@ class TestEndToEndTextModeHasNoEscBytes(WkTest):
                 "WK_REMOTE_HOST": "fake-reachable-machine",
                 "WK_REMOTE_ROOT": str(root),
                 "PATH": f"{binp}:{os.environ.get('PATH', '/usr/bin:/bin')}",
+                # The probe's cap (targets/remote.sh): the stub answers at once, and
+                # `capped` leaves its watchdog sleeping on the walk's stdout for the
+                # whole cap after the walk has exited.
+                "WK_PROBE_SECONDS": "1",
             }
             if no_color:
                 env["NO_COLOR"] = "1"

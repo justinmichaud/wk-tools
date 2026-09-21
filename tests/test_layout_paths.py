@@ -12,6 +12,7 @@ The block is lifted from cmd/test by its opening statement, and driven with
 
 Run: python3 -m unittest tests.test_layout_paths -v
 """
+TIER = "lint"
 import subprocess
 import unittest
 

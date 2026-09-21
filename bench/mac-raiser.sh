@@ -22,7 +22,7 @@ mac_raiser_on() {  # <state dir>
     if ! /usr/bin/python3 -c 'import AppKit' >/dev/null 2>&1; then
         warn "no python3 AppKit here, so no raiser: MiniBrowser can be backgrounded and
     its rAF throttled. /usr/bin/python3 with pyobjc is what a benchmark install needs
-    anyway -- see docs/HANDOFF-mac-perf-mode.md."
+    anyway."
         return 0
     fi
     cat > "$state/raiser.py" <<'RAISEREOF'

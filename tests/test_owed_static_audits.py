@@ -15,6 +15,7 @@ shell in general.
 
 Run: python3 -m unittest tests.test_owed_static_audits -v
 """
+TIER = "lint"
 import re
 import unittest
 

@@ -4,6 +4,7 @@ phrase of the behaviour it checks.
 
 Run: python3 -m unittest tests.test_dispatcher -v
 """
+TIER = "lint"
 import os
 import subprocess
 import unittest
@@ -100,6 +101,17 @@ class TestHelpAndDeclarations(WkTest):
         cp = run("nosuchcommand")
         self.assertEqual(cp.returncode, 2, cp.stdout + cp.stderr)
         self.assertIn("unknown command", cp.stdout + cp.stderr)
+
+    def test_a_removed_command_is_refused_by_name(self):
+        """the tombstone: a name the tree no longer implements is refused
+        with the one line saying so, not with the usage for a typo"""
+        for cmd in ("mcp", "pick", "skills", "notify"):
+            with self.subTest(cmd=cmd):
+                cp = run(cmd, "x")
+                self.assertNotEqual(cp.returncode, 0, cp.stdout)
+                self.assertIn("'wk %s' is removed" % cmd, cp.stdout)
+                self.assertNotIn("unknown command", cp.stdout)
+        self.assertIn("wk_notify", run("notify", "x").stdout)
 
     def test_unknown_target_names_the_conf_to_write(self):
         """an unconfigured name is refused, and the error prints the conf to write"""
@@ -233,7 +245,7 @@ class TestUnknownWorkspaceName(WkTest):
     # which is why `start`/`stop` (needs podman) and `bench` (needs a plan) are
     # exercised through the declaration check below rather than by running.
     COMMANDS = (
-        "build", "enter", "gui", "logs", "pick", "pr", "profile",
+        "build", "enter", "gui", "logs", "pr", "profile",
         "remotes", "run", "status", "sync", "test", "verify", "zed",
     )
 
@@ -512,7 +524,7 @@ class TestWhereTheNameSitsInArgv(WkTest):
         it must declare takes=, or that positional is read as a workspace name
         and refused as a typo. name=required is a different shape: from a host
         the name really is the first positional, and the `[<workspace>]` in
-        those synopses means "omitted inside a workspace" (`wk pick <commit>`)."""
+        those synopses means "omitted inside a workspace" (`wk scp <src> <dst>`)."""
         import re
         bad = []
         for f in sorted((REPO / "cmd").iterdir()):

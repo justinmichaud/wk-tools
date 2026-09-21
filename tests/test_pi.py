@@ -8,7 +8,7 @@ Unit tests only -- no board, no ssh, no hardware. Bare `wk pi` and `wk pi
 bogus` are run for real: nothing before the subcommand dispatch in cmd/pi
 touches a board, so both are as safe as any other refusal. pi_launch_cmd is
 lifted verbatim out of cmd/pi with `sed -n '/^fn()/,/^}/p'`, the idiom
-tests/test_quick.py uses to lift cmd/status's `bump`.
+tests/test_ceilings.py uses to lift cmd/status's `bump`.
 
 Run: python3 -m unittest tests.test_pi -v
 """

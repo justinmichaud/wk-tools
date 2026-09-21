@@ -1,5 +1,5 @@
-"""The fleet exit code aggregates the worst state found anywhere -- owed by
-docs/HANDOFF-wk-cli.md: "the fleet exit code aggregates the worst state
+"""The fleet exit code aggregates the worst state found anywhere -- owed
+(docs/PLAN.md): "the fleet exit code aggregates the worst state
 found anywhere [needs a test]".
 
 Two things are driven:
@@ -149,6 +149,10 @@ class TestFleetExitCodeIsTheWorst(WkTest):
                 "WK_TARGET": "remote",
                 "WK_REMOTE_HOST": "fake-reachable-machine",
                 "PATH": f"{binp}:{self._real_path()}",
+                # The probe's cap (targets/remote.sh): the stub answers at once, and
+                # `capped` leaves its watchdog sleeping on the walk's stdout for the
+                # whole cap after the walk has exited.
+                "WK_PROBE_SECONDS": "1",
             }
             if extra_env:
                 env.update(extra_env)
@@ -237,6 +241,7 @@ class TestAFailedRecordSurvivesAWorkspaceThatBumpedFourAlready(WkTest):
                     "WK_TARGET": "remote",
                     "WK_REMOTE_HOST": "fake-reachable-machine",
                     "PATH": f"{binp}:{self._real_path()}",
+                    "WK_PROBE_SECONDS": "1",
                 }
                 cp = run("status", "--records", env=env, timeout=45)
             self.assertIn(name, cp.stdout, cp.stdout)

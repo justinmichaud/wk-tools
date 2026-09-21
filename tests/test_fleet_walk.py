@@ -59,6 +59,10 @@ class TestFleetWalkNamedFormRendersAFakedMachine(WkTest):
                 "WK_REMOTE_HOST": "fake-reachable-machine",
                 "WK_REMOTE_ROOT": str(root),
                 "PATH": f"{binp}:{self._real_path()}",
+                # The probe's cap (targets/remote.sh): every stub here answers at
+                # once, and `capped` leaves its watchdog sleeping on the walk's
+                # stdout for the whole cap after the walk has exited.
+                "WK_PROBE_SECONDS": "1",
             }
             cp = run("status", name, "--text", env=env, timeout=30)
             self.assertEqual(cp.returncode, 0, cp.stdout)
@@ -74,6 +78,7 @@ class TestFleetWalkNamedFormRendersAFakedMachine(WkTest):
                 "WK_REMOTE_HOST": "fake-down-machine",
                 "PATH": f"{binp}:{self._real_path()}",
                 "WK_SSH_TIMEOUT": "2",
+                "WK_PROBE_SECONDS": "1",
             }
             cp = run("status", name, "--text", env=env, timeout=30)
             # cmd/status's own documented contract (cmd/status header): exit
@@ -131,6 +136,7 @@ class TestFleetWalkBareFormMultiMachine(WkTest):
                 "WK_TARGET": "remote",
                 "WK_REMOTE_HOST": "fake-reachable-machine",
                 "PATH": f"{binp}:{os.environ.get('PATH', '/usr/bin:/bin')}",
+                "WK_PROBE_SECONDS": "1",
             }
             cp = run("status", "--text", env=env, timeout=45)
             self.assertEqual(cp.returncode, 0, cp.stdout)

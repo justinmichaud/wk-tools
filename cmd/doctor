@@ -295,7 +295,7 @@ done
 unset _sname
 local_state "${WK_TS_AUTHKEY:-$HOME/.config/wk/tailscale-authkey}" re-authable "wk key set tailnet asks for one (tag:wk, reusable, not ephemeral, longest expiry); joined nodes are unaffected"
 local_state "$(wk_tailscale_api_path)" re-authable "wk key set tailnet-api asks for one; only this machine holds it, and only writes that must retire a stale node need it"
-local_state "$(wk_ntfy_topic_path)" re-authable "wk key set ntfy mints the ntfy.sh topic 'wk notify' publishes to; only this machine holds it, and a new one is one subscription away"
+local_state "$(wk_ntfy_topic_path)" re-authable "wk key set ntfy mints the ntfy.sh topic wk_notify (lib/store.sh) publishes to; only this machine holds it, and a new one is one subscription away"
 local_state "$(wk_state_dir)/broker"               regenerable "request records (argv, log, status) the fleet-request broker writes; the next request makes new ones"
 local_state "$HOME/.ssh/config.d/local"            backed-up   "hand-written ssh entries (host/dotfiles.sh moves them here and owns the rest)"
 local_state "$(wk_state_dir)/ssh/zed_ed25519"      regenerable "wk zed makes a new one and re-authorises it in the workspace"
@@ -338,7 +338,7 @@ report_store() { # <probe output> [container-machine git remedy]
     # Read here, not in the probe: the deploy keys are this machine's own, which on macOS is the directory the podman machine mounts.
     [ -f "$(wk_push_held_dir)/build_key_fork" ] \
         && ok "fork push key" || miss "fork push key" "wk key deploy  (needs gh auth)"
-    [ "$(v skills)" = ok ] && ok "shared skills seeded"   || miss "shared skills seeded" "wk skills push"
+    [ "$(v skills)" = ok ] && ok "shared skills seeded"   || miss "shared skills seeded" "$(is_macos && echo "./setup --stage vmtools" || echo "./setup --stage machine")"
     [ "$(v proxy)" = ok ]  && ok "egress proxy running"   || miss "egress proxy running" "./setup --stage sdk, then systemctl --user status wk-proxy"
     [ "$(v pihosts)" = ok ] && ok "pi-hosts populated"    || miss "pi-hosts populated" "wk pi setup rpi5 / rpi4  (skip if no Pi devices)"
     [ "$(v broker)" = ok ]  && ok "fleet-request broker reachable from workspaces" \

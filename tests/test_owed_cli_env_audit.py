@@ -1,6 +1,5 @@
 """Every `WK_*` override read with a default under wk/lib/cmd/targets/build
-is documented where the user meets it, or removed -- docs/HANDOFF-wk-cli.md
-names the three this repo cannot reach from here.
+is documented where the user meets it, or removed (owed, docs/PLAN.md).
 
 A static audit, not a retyped list: every `${WK_[A-Z_]+:-...}` occurrence
 under wk, lib/, cmd/, targets/, build/ is collected by regex (the same
@@ -17,6 +16,7 @@ assertion so that a new name added to it is a visible diff. It is empty.
 
 Run: python3 -m unittest tests.test_owed_cli_env_audit -v
 """
+TIER = "lint"
 import re
 import unittest
 

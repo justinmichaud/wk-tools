@@ -1,4 +1,5 @@
-"""`wk notify`: telling a person the fleet wants them, and never silently not.
+"""wk_notify (lib/store.sh) over lib/wknotify.py: telling a person the fleet
+wants them, and never silently not.
 
 This is how the fleet reaches a person: a plant waiting at the startup manager,
 a run handing a machine back, a refusal that arrives in bench mode. A line in a
@@ -18,6 +19,7 @@ Run: python3 -m unittest tests.test_notify -v
 """
 import ast
 import json
+import shlex
 import socket
 import subprocess
 import sys
@@ -27,10 +29,10 @@ import unittest
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-from tests.support import REPO, WkTest, bash, run
+from tests.support import REPO, WkTest, bash, func_body
 
 WKNOTIFY = REPO / "lib" / "wknotify.py"
-CMD_NOTIFY = REPO / "cmd" / "notify"
+STORE_SH = REPO / "lib" / "store.sh"
 CREDCHECK = REPO / "lib" / "credcheck.py"
 
 # The grammar and the guessable bound come from the module that enforces them,
@@ -172,15 +174,16 @@ class TestTheTopicNeverLeaks(_Ntfy):
 
     def test_the_topic_is_not_an_argument_to_anything(self):
         """`ps` shows every argument to every account on the machine, so the
-        one way in is stdin -- in cmd/notify as well as here."""
-        self.assertIn("wk_cred_read ntfy", CMD_NOTIFY.read_text())
-        self.assertNotIn('"$(wk_cred_read ntfy)"', CMD_NOTIFY.read_text())
+        one way in is stdin -- in wk_notify as well as here."""
+        body = func_body(STORE_SH.read_text(), "wk_notify")
+        self.assertIn("wk_cred_read ntfy |", body)
+        self.assertNotIn('"$(wk_cred_read ntfy)"', body)
 
     def test_nothing_in_the_tree_holds_a_topic_to_leak(self):
         """The repository is public. The topic reaches the code from one
         machine-local file and nowhere else, so no source file, help block or
         rule carries a topic name at all."""
-        for f in (WKNOTIFY, CMD_NOTIFY, REPO / "lib" / "credcheck.py"):
+        for f in (WKNOTIFY, STORE_SH, REPO / "lib" / "credcheck.py"):
             with self.subTest(source=f.name):
                 text = f.read_text()
                 self.assertNotRegex(text, r"ntfy\.sh/[A-Za-z0-9]")
@@ -343,19 +346,16 @@ class TestTheTopicIsMintedNotInvented(_Ntfy):
         self.assertEqual("", cp.stdout)
 
 
-class TestTheCommand(_Ntfy):
-    """`wk notify` end to end: the credential this machine holds, read the one
+class TestTheLibraryCall(_Ntfy):
+    """wk_notify end to end: the credential this machine holds, read the one
     way, published to the stub."""
 
-    def env(self, extra=None):
+    def env(self):
         # wk_secrets_dir (lib/store.sh) reads WK_HOST_SECRETS on macOS, not
         # WK_STORE -- store_topic below must land where wk_ntfy_topic_path
         # (dirname of the secrets dir) actually looks.
-        e = {"WK_STORE": str(self.tmp / "store"), "WK_NTFY_API": self.url,
-             "WK_HOST_SECRETS": str(self.tmp / "store" / "secrets")}
-        if extra:
-            e.update(extra)
-        return e
+        return {"WK_STORE": str(self.tmp / "store"), "WK_NTFY_API": self.url,
+                "WK_HOST_SECRETS": str(self.tmp / "store" / "secrets")}
 
     def store_topic(self, topic=TOPIC):
         d = self.tmp / "store" / "notify"
@@ -365,47 +365,39 @@ class TestTheCommand(_Ntfy):
         p.chmod(0o600)
         return p
 
+    def wk_notify(self, *args):
+        script = ('. "$WK_ROOT/lib/common.sh"\n. "$WK_ROOT/lib/store.sh"\n'
+                  'wk_notify ' + " ".join(shlex.quote(a) for a in args))
+        return bash(script, env=self.env())
+
     def test_no_topic_here_names_the_remedy_and_publishes_nothing(self):
-        cp = run("notify", "the plant is waiting", env=self.env())
-        self.assertNotEqual(0, cp.returncode, cp.stdout)
-        self.assertIn("no ntfy topic on this machine: wk key set ntfy", cp.stdout)
+        cp = self.wk_notify("the plant is waiting")
+        self.assertNotEqual(0, cp.returncode, cp.stdout + cp.stderr)
+        self.assertIn("no ntfy topic on this machine: wk key set ntfy", cp.stderr)
         self.assertEqual([], FakeNtfy.published)
 
     def test_a_stored_topic_publishes(self):
         self.store_topic()
-        cp = run("notify", "the plant is waiting", "--detail", "round 17",
-                 env=self.env())
-        self.assertEqual(0, cp.returncode, cp.stdout)
+        cp = self.wk_notify("the plant is waiting", "--detail", "round 17")
+        self.assertEqual(0, cp.returncode, cp.stdout + cp.stderr)
         self.assertEqual([{"topic": TOPIC, "title": "the plant is waiting",
                            "message": "round 17"}], FakeNtfy.published)
-        self.assertNotIn(TOPIC, cp.stdout)
+        self.assertNotIn(TOPIC, cp.stdout + cp.stderr)
 
-    def test_a_refused_publish_exits_one_with_a_reason(self):
+    def test_a_refused_publish_fails_with_a_reason(self):
         self.store_topic()
         FakeNtfy.post_status = 400
-        cp = run("notify", "the plant is waiting", env=self.env())
-        self.assertEqual(1, cp.returncode, cp.stdout)
-        self.assertIn("did not go out", cp.stdout)
-        self.assertNotIn(TOPIC, cp.stdout)
-
-    def test_it_is_refused_inside_a_workspace(self):
-        """A notification a person acts on must not be forgeable from inside a
-        workspace, so the credential is not in one and the command says so."""
-        from tests.support import fake_workspace
-        with fake_workspace() as ws:
-            cp = ws.run("notify", "the plant is waiting")
-            self.assertNotEqual(0, cp.returncode, cp.stdout)
-            self.assertIn("acts on a host", cp.stdout)
-
-    def test_an_unknown_flag_is_refused(self):
-        cp = run("notify", "headline", "--bogus", env=self.env())
-        self.assertNotEqual(0, cp.returncode, cp.stdout)
-        self.assertIn("usage:", cp.stdout)
+        cp = self.wk_notify("the plant is waiting")
+        self.assertNotEqual(0, cp.returncode, cp.stdout + cp.stderr)
+        self.assertIn("refused the publish", cp.stderr)
+        self.assertNotIn(TOPIC, cp.stdout + cp.stderr)
 
     def test_a_flag_with_no_value_is_refused(self):
-        cp = run("notify", "headline", "--detail", env=self.env())
-        self.assertNotEqual(0, cp.returncode, cp.stdout)
-        self.assertIn("--detail needs a value", cp.stdout)
+        self.store_topic()
+        cp = self.wk_notify("headline", "--detail")
+        self.assertNotEqual(0, cp.returncode, cp.stdout + cp.stderr)
+        self.assertIn("usage:", cp.stderr)
+        self.assertEqual([], FakeNtfy.published)
 
 
 class TestTheCredentialIsDeclaredWhereARebuildLooks(unittest.TestCase):
@@ -436,13 +428,14 @@ class TestTheCredentialIsDeclaredWhereARebuildLooks(unittest.TestCase):
         for mounted in (secrets, agent_rw):
             self.assertFalse(topic.startswith(mounted + "/"), topic)
 
-    def test_the_help_block_says_a_failed_notify_is_a_warning(self):
-        """What `wk notify -h` prints, so no caller decides for itself whether
-        a notification that did not go out should end a run."""
-        text = CMD_NOTIFY.read_text()
-        head = text[:text.index("\nset -euo pipefail")]
-        self.assertIn("warning", head)
-        self.assertIn("cannot cost a measurement", head)
+    def test_the_function_header_says_a_failed_notify_is_a_warning(self):
+        """wk_notify's own line states the caller's contract, so no caller
+        decides for itself whether a notification that did not go out should
+        end a run."""
+        header = [l for l in STORE_SH.read_text().splitlines()
+                  if l.startswith("wk_notify() {")]
+        self.assertEqual(1, len(header))
+        self.assertIn("a caller warns", header[0])
 
 
 class TestSdNotifyIsUntouched(unittest.TestCase):

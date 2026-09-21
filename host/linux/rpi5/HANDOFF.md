@@ -30,14 +30,14 @@ Governor and swap-off are already baked into every system by `cmd/sysimage`.
   `/proc/device-tree/model`), so a rebuild reapplies fan, wifi powersave, the
   BSSID pin, fstab, the NM/regdom drop-ins and the NUMA kernel; only what
   `wk backup` would still need to restore first (the NUMA kernel build, the
-  ssh key shipped beside the script) is manual. `docs/HANDOFF-settings-audit.md`
-  and cattle-not-pets' obligation 2 track the remaining gap.
+  ssh key shipped beside the script) is manual. docs/PLAN.md
+  tracks the remaining gap.
 - **Re-flashing this board from nothing** still needs another provisioned
-  machine, pending `wk sysimage flash --reader` (`docs/HANDOFF-sdcard.md`).
+  machine, pending `wk sysimage flash --reader` (docs/PLAN.md).
 - **Path A is unfiled** — the Launchpad request to enable `CONFIG_NUMA_EMU` in
   stock linux-raspi, so the custom kernel is not needed long-term (Igalia
   authored the feature). Path B has validated the approach. An upstreaming item
-  in `docs/HANDOFF-architecture-review.md`.
+  in docs/PLAN.md.
 - **The 26.04 re-check list has never been walked**: are
   `/boot/firmware/config.txt` and `cmdline.txt` still the right paths (A/B boot
   may relocate them), the root fstab label (was `writable`) and its `discard`

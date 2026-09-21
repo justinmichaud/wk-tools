@@ -19,7 +19,7 @@ DENIED_HOSTS = {
 }
 
 # The hosts whose TLS is not tunnelled: CONNECT goes to the credential injector (github-inject.py). Exact, and first, or the `github.com` and `webkit.org` suffixes tunnel them.
-# SANDBOX AUDIT (docs/HANDOFF-sandboxing.md): a workspace reaches GitHub's API and Bugzilla but cannot authenticate -- under `wk push off`, which `wk ai claude` sets, the injector holds no write token and no Bugzilla key, so GitHub answers 401 and Bugzilla 410. `wk verify` measures both halves of each.
+# SANDBOX AUDIT (docs/PLAN.md): a workspace reaches GitHub's API and Bugzilla but cannot authenticate -- under `wk push off`, which `wk ai claude` sets, the injector holds no write token and no Bugzilla key, so GitHub answers 401 and Bugzilla 410. `wk verify` measures both halves of each.
 INJECTED_HOSTS = {
     "api.github.com": 443,
     "bugs.webkit.org": 443,

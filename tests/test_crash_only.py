@@ -375,9 +375,9 @@ if __name__ == "__main__":
 # is a whole machine for them and the tests below drive the real script.
 HOME_SCOPED = ("dotfiles", "claude")
 # The rest write sudoers rules, launchd/systemd units, packages and machine
-# defaults. Their convergence is owed work (docs/HANDOFF-mac-ab-first-result.md),
+# defaults. Their convergence is owed (docs/PLAN.md),
 # not something a test suite may take on this machine.
-NEEDS_THE_MACHINE = ("tools", "settings", "mcp", "sharing", "machine",
+NEEDS_THE_MACHINE = ("tools", "settings", "sharing", "machine",
                      "vmtools", "softnet", "sdk", "broker", "quiesce")
 
 

@@ -73,7 +73,7 @@ _pgo_collect() {   # <instrumented products> <profile dir> <arch>
     if [ -n "$faults" ]; then
         echo "wk: this machine cannot present an unthrottled browser, so every profile it collected would be of a throttled one:" >&2
         printf '%s\n' "$faults" >&2
-        echo "  Collect on a machine that can -- the benchmark install (docs/HANDOFF-mac-perf-mode.md)." >&2
+        echo "  Collect on a machine that can -- the benchmark install." >&2
         return 1
     fi
 

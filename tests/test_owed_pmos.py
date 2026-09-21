@@ -1,4 +1,4 @@
-"""pmos build-host behaviour owed by docs/HANDOFF-test-runner.md:
+"""pmos build-host behaviour owed (docs/PLAN.md):
 
   - `wk sysimage build <pmos profile>` prints something on failure, rather
     than `set -o pipefail` swallowing the remote build's own output

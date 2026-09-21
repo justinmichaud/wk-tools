@@ -1,14 +1,15 @@
 """Shared test support for the wk-tools unittest suite.
 
-Run the whole suite:      python3 -m unittest discover -s tests -v
+Run the whole suite:      python3 tests/run.py -v      (wk selftest)
 Run one module:            python3 -m unittest tests.test_dispatcher -v
-Skip the podman-gated integration test: it self-skips when no `wk`
-podman machine is `running` (see requires_podman_vm below); nothing extra
-to pass. Every test that touches real state cleans up after itself.
+A live test (requires_podman_vm and the other gates below) runs only when
+the runner selected the live tier and its machine is up; it never starts
+one. Every test that touches real state cleans up after itself.
 """
 
 import atexit
 import contextlib
+import functools
 import os
 import random
 import re
@@ -206,6 +207,33 @@ def bash(script, env=None, timeout=60, cwd=None):
     )
 
 
+def lock_bash(script, lock_dir, env=None, timeout=60):
+    """Run a bash script with lib/common.sh sourced and every lock under
+    `lock_dir`, so nothing it takes or breaks is this machine's."""
+    e = {"WK_LOCK_DIR": str(lock_dir)}
+    if env:
+        e.update(env)
+    return bash(f'. "{REPO}/lib/common.sh"; set +e\n{script}', env=e, timeout=timeout)
+
+
+def builds_on_the_books_env(tmp, *labels):
+    """An environment in which builds_on_the_books() reads exactly `labels`:
+    a stub podman answers `machine ssh` with them and reports no running
+    machine (macOS), and a state directory holds one record each (Linux)."""
+    tmp = Path(tmp)
+    records = tmp / "wk" / "builds"
+    records.mkdir(parents=True, exist_ok=True)
+    for i, label in enumerate(labels):
+        (records / str(i)).write_text(f"label={label}\n")
+    binp = tmp / "bin"
+    binp.mkdir(exist_ok=True)
+    lines = "".join(f"    echo 'label={label}'\n" for label in labels)
+    (binp / "podman").write_text(
+        '#!/bin/sh\ncase "$1 $2" in "machine ssh")\n' + lines + "    ;;\nesac\nexit 0\n")
+    (binp / "podman").chmod(0o755)
+    return {"PATH": f"{binp}:{os.environ['PATH']}", "XDG_STATE_HOME": str(tmp)}
+
+
 def bench_ls_runs(stdout):
     """The run directories `wk bench ls` printed, oldest first: the indented
     lines under each task whose first word is a path containing /runs/. What
@@ -369,35 +397,116 @@ def podman_vm_running(machine="wk"):
     return cp.returncode == 0 and cp.stdout.strip() == "running"
 
 
+def selected_tiers():
+    """The tiers this run selected, as tests/run.py exports them in
+    WK_TEST_TIERS; a module run on its own gets the runner's default."""
+    return set(os.environ.get("WK_TEST_TIERS", "lint,unit").split(","))
+
+
+def live_selected():
+    """Whether the live tier is in: without it every test that needs a VM, a
+    machine or a board skips by name, whatever is actually reachable."""
+    return "live" in selected_tiers()
+
+
+def owed(reason):
+    """Mark a test for behaviour still owed: it is expected to fail, and the
+    runner fails when it passes, naming this mark and `reason`."""
+    def mark(test):
+        test = unittest.expectedFailure(test)
+        test.wk_owed = reason
+        return test
+    return mark
+
+
+def _live(need, *args):
+    """Mark a test or class live (wk_tier, read by tests/run.py) and skip it
+    at run time with the reason `need(*args)` gives; nothing is probed at
+    import, and each need is probed once per run."""
+    def decorate(obj):
+        obj.wk_tier = "live"
+        if isinstance(obj, type):
+            inherited = obj.setUpClass.__func__
+
+            def setUpClass(cls):
+                reason = need(*args)
+                if reason:
+                    raise unittest.SkipTest(reason)
+                inherited(cls)
+            obj.setUpClass = classmethod(setUpClass)
+            return obj
+
+        @functools.wraps(obj)
+        def wrapper(self, *a, **kw):
+            reason = need(*args)
+            if reason:
+                raise unittest.SkipTest(reason)
+            return obj(self, *a, **kw)
+        return wrapper
+    return decorate
+
+
 def requires_container_target():
-    """Skip decorator for a test that needs the real container target: on
-    macOS the podman VM this repo drives must already be up (never started
-    here), on Linux podman itself; skipped by --quick, and while this machine
-    has a build on its books."""
-    if quick_run():
-        return unittest.skip("--quick: needs the container target")
-    if sys.platform == "darwin":
-        return requires_podman_vm()
-    if not shutil.which("podman"):
-        return unittest.skip("podman is not installed")
-    return _not_while_a_build_runs()
-
-
-def quick_run():
-    """`wk selftest --quick` sets WK_TEST_QUICK=1: every test that needs a
-    VM, a machine or a board skips by name, whatever is actually reachable."""
-    return os.environ.get("WK_TEST_QUICK") == "1"
+    """Gate for a test that needs the real container target: on macOS the
+    podman VM this repo drives must already be up (never started here), on
+    Linux podman itself; skipped while the live tier is out, and while this
+    machine has a build on its books."""
+    return _live(_needs_container_target)
 
 
 def requires_podman_vm(machine="wk"):
-    """Skip decorator for a test that needs a real container workspace: it
-    runs only when the podman VM this repo drives is already up, never
-    starts it, and is skipped by --quick and while a build is running."""
-    if quick_run():
-        return unittest.skip("--quick: needs the podman VM")
+    """Gate for a test that needs a real container workspace: the podman VM
+    this repo drives must already be up, and is never started here."""
+    return _live(_needs_podman_vm, machine)
+
+
+def requires_machine(name, timeout=5):
+    """Gate for a test that reaches a configured machine over ssh: it never
+    provisions, reboots or otherwise mutates the machine, and skips rather
+    than hangs when the machine does not answer."""
+    return _live(_needs_machine, name, timeout)
+
+
+@functools.lru_cache(maxsize=None)
+def _needs_container_target():
+    if not live_selected():
+        return "live tier not selected: needs the container target"
+    if sys.platform == "darwin":
+        return _needs_podman_vm("wk")
+    if not shutil.which("podman"):
+        return "podman is not installed"
+    return _build_in_the_way()
+
+
+@functools.lru_cache(maxsize=None)
+def _needs_podman_vm(machine):
+    if not live_selected():
+        return "live tier not selected: needs the podman VM"
     if not podman_vm_running(machine):
-        return unittest.skip(f"podman machine '{machine}' is not running")
-    return _not_while_a_build_runs()
+        return f"podman machine '{machine}' is not running"
+    return _build_in_the_way()
+
+
+@functools.lru_cache(maxsize=None)
+def _needs_machine(name, timeout):
+    if not live_selected():
+        return f"live tier not selected: needs '{name}'"
+    if not machine_reachable(name, timeout=timeout):
+        return f"'{name}' is not reachable over ssh (BatchMode)"
+    return None
+
+
+@functools.lru_cache(maxsize=None)
+def _build_in_the_way():
+    """A test that makes a real workspace shares the machine with whatever is
+    building on it: `wk new` takes minutes where it takes seconds, and the
+    build such a test asks for is refused because the memory is spoken for --
+    build_admit working, not a fault to be read as a failure."""
+    busy = builds_on_the_books()
+    if busy:
+        return ("a build is on this machine's books (%s): re-run this on an "
+                "idle machine" % ", ".join(busy))
+    return None
 
 
 # wk_state_dir (lib/common.sh), spelled for the shell that reads the records.
@@ -416,23 +525,6 @@ def builds_on_the_books():
         out = subprocess.run(["bash", "-c", _BUILD_RECORDS], capture_output=True,
                              text=True, timeout=60).stdout
     return [l.split("=", 1)[1] for l in out.splitlines() if l.startswith("label=")]
-
-
-def _identity(test):
-    return test
-
-
-def _not_while_a_build_runs():
-    """A test that makes a real workspace shares the machine with whatever is
-    building on it: `wk new` takes minutes where it takes seconds, and the
-    build such a test asks for is refused because the memory is spoken for --
-    which is build_admit working, not a fault to be read as a failure. The
-    machine is the evidence, so this is asked at collection, not recorded."""
-    busy = builds_on_the_books()
-    if busy:
-        return unittest.skip("a build is on this machine's books (%s): "
-                             "re-run this on an idle machine" % ", ".join(busy))
-    return _identity
 
 
 def machine_reachable(name, timeout=5):
@@ -480,19 +572,6 @@ def podman_vm_ssh(command, machine="wk", timeout=60):
     return subprocess.run(
         ["podman", "machine", "ssh", machine, "--", command],
         capture_output=True, text=True, timeout=timeout,
-    )
-
-
-def requires_machine(name, timeout=5):
-    """Skip decorator for a test that reaches a configured machine over
-    ssh: it never provisions, reboots or otherwise mutates the machine, and
-    self-skips rather than hanging when the machine does not answer, and is
-    skipped by --quick."""
-    if quick_run():
-        return unittest.skip(f"--quick: needs '{name}'")
-    return unittest.skipUnless(
-        machine_reachable(name, timeout=timeout),
-        f"'{name}' is not reachable over ssh (BatchMode)",
     )
 
 

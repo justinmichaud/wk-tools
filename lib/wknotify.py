@@ -1,4 +1,4 @@
-"""sd_notify for the Type=notify services here -- a no-op without NOTIFY_SOCKET, since the same programs run under nohup on the macOS host, whose python3 has no python3-systemd -- and the ntfy.sh publish `wk notify` reaches a person with."""
+"""sd_notify for the Type=notify services here -- a no-op without NOTIFY_SOCKET, since the same programs run under nohup on the macOS host, whose python3 has no python3-systemd -- and the ntfy.sh publish wk_notify (lib/store.sh) reaches a person with."""
 
 import json
 import os

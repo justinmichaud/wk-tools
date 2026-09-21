@@ -28,7 +28,7 @@ Host devbox-armhf-2
 Host rpi5
   User jmichaud
 
-# User justinmichaud, not the fleet's jmichaud: this install's account, corrected only at the next reprovision (docs/HANDOFF-reprovision.md) -- do not tidy it, the login would break.
+# User justinmichaud, not the fleet's jmichaud: this install's account, corrected only at the next reprovision (docs/PLAN.md) -- do not tidy it, the login would break.
 Host tolken
   User justinmichaud
   ServerAliveInterval 30

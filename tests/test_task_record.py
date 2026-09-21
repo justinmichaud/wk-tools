@@ -219,13 +219,15 @@ class TestOneRecordPerKind(WkTest):
         """`capped` asks the workspace through t_exec for WK_TASK_ASK_SECONDS at
         most: 0 is alive, 1 is no such process, and anything else -- an ssh
         that failed, a podman exec that did not, the cap -- is `unanswered`."""
-        for answer, word in (("return 0", "running"), ("return 1", "died"),
-                             ("return 255", "unanswered"), ("sleep 30", "unanswered")):
+        # A name of its own per answer: task_begin prunes an earlier record of
+        # the same name through an uncapped task_alive, which is this stub too.
+        for i, (answer, word) in enumerate((("return 0", "running"), ("return 1", "died"),
+                                            ("return 255", "unanswered"), ("sleep 30", "unanswered"))):
             with self.subTest(answer=answer):
                 out = self._sh(
-                    'd=$(task_begin rc target ws1 "k" /l one)\n'
+                    'd=$(task_begin rc target ws%d "k" /l one)\n'
                     'task_pid "$d" 4242\n'
-                    'printf "%s\\n" "$(task_verdict "$d" capped)"',
+                    'printf "%%s\\n" "$(task_verdict "$d" capped)"' % i,
                     env='WK_TASK_ASK_SECONDS=1\nt_exec() { %s; }' % answer)
                 self.assertEqual(out.strip(), word)
 

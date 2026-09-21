@@ -25,7 +25,7 @@ import time
 import unittest
 from pathlib import Path
 
-from tests.support import REPO, WkTest, bash
+from tests.support import REPO, WkTest, bash, clean_env
 
 TAB = "\t"
 PRELUDE = '. "%s/lib/common.sh"\n. "%s/lib/task.sh"\n' % (REPO, REPO)
@@ -433,7 +433,7 @@ class TestTheCommandsTakeIt(ClaimTest):
             ["bash", "-c",
              '. "%s/lib/common.sh"; hold_lock pi-bench-fakeboard -w 5 || exit 1; '
              'touch %s; sleep 60' % (REPO, shlex.quote(str(ready)))],
-            env=dict(os.environ, WK_STORE=str(self.store)),
+            env=clean_env({"WK_STORE": str(self.store)}),
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         self.addCleanup(holder.wait)
         self.addCleanup(holder.kill)

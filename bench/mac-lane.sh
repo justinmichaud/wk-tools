@@ -128,7 +128,7 @@ rwk() {
             discover_tools "$mode" || die "no wk-tools checkout found on the $mode install ($dest).
   \`wk bench staged\` runs from it, so the benchmark install needs this
   repository even though it must never carry a WebKit checkout
-  (docs/HANDOFF-mac-perf-mode.md). Clone it there, or set WK_MAC_BENCH_TOOLS."
+  (wk help hardware). Clone it there, or set WK_MAC_BENCH_TOOLS."
             case "$mode" in
                 host)  tools="$TOOLS" ;;
                 bench) tools="$BENCH_TOOLS" ;;
@@ -233,7 +233,7 @@ preflight() {
             log  "  the lane builds in host mode. Reboot back first: wk bench mac --resume covers it" ;;
         bench-unmarked)
             warn "  a marker file exists but has no id= line, so the mode is undecidable"
-            log  "  /etc/wk-image needs at least 'id=<something>' -- docs/HANDOFF-mac-perf-mode.md"
+            log  "  /etc/wk-image needs at least 'id=<something>'"
             fail=1 ;;
     esac
 

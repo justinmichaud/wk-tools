@@ -867,7 +867,7 @@ class TestTheWaitReadsBothNodes(WkTest):
                   'BOOT_BEFORE=1786800000\n'
                   'b_boot_id() { printf "%s" "${BOOT_NOW:-1786900000}"; }\n'
                   + probe
-                  + 'MACHINE=mbp\nphase_wait() {%s}\nphase_wait 40\n'
+                  + 'MACHINE=mbp\nphase_wait() {%s}\nphase_wait 1\n'   # the limit is wall-clock time, and `sleep` is stubbed out above
                   % func_body(MACAB.read_text(), "phase_wait"))
         return bash(script)
 
@@ -1165,18 +1165,14 @@ class TestTheMeasuredHomeIsTheDrivers(WkTest):
 class TestAFailedNotifyCostsNothing(WkTest):
     """A notification that did not go out must not cost a measurement."""
 
-    def _notify(self, wk_exit):
-        with scratch_dir() as tmp:
-            wk = tmp / "wk"
-            wk.write_text("#!/bin/sh\necho 'no ntfy topic on this machine' >&2\nexit %d\n" % wk_exit)
-            wk.chmod(0o755)
-            script = """. "$WK_ROOT/lib/common.sh"
-WK_ROOT=%s
+    def _notify(self, notify_exit):
+        script = """. "$WK_ROOT/lib/common.sh"
+wk_notify() { echo 'wk-notify: no ntfy topic on this machine' >&2; return %d; }
 notify() {%s}
 notify "a headline" "a detail"
 printf 'rc=%%s' "$?"
-""" % (shlex.quote(str(tmp)), macab_func("notify"))
-            return bash(script)
+""" % (notify_exit, macab_func("notify"))
+        return bash(script)
 
     def test_a_failing_notify_returns_zero_and_warns(self):
         cp = self._notify(1)

@@ -126,7 +126,7 @@ _verify_mounts
 if _rsh 'test -d /var/lib/wk/skills && test -n "$(ls -A /var/lib/wk/skills 2>/dev/null)"'; then
     unchanged "shared skills present (not overwritten)"
     _rsh 'diff -rq /opt/wk-tools/claude/skills /var/lib/wk/skills >/dev/null 2>&1' \
-        || log "note: shared skills differ from the repo -- 'wk skills status' inside the VM"
+        || log "note: shared skills differ from the repo: diff -r /opt/wk-tools/claude/skills /var/lib/wk/skills inside the VM"
 else
     info "seeding the shared skills directory"
     _rsh 'mkdir -p /var/lib/wk/skills && cp -a /opt/wk-tools/claude/skills/. /var/lib/wk/skills/'

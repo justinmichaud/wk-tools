@@ -225,7 +225,7 @@ class TestDevelopmentAllowlist(unittest.TestCase):
                 self.assertFalse(p.host_allowed(host, 443)[0])
 
     def test_each_widening_is_declared_for_the_audit(self):
-        """docs/HANDOFF-sandboxing.md audits the allowlist; every widening
+        """The sandbox audit (docs/PLAN.md) covers the allowlist; every widening
         says so in the file, where the next person reading it will look."""
         text = PROXY.read_text()
         self.assertIn("SANDBOX AUDIT", text[:text.index('"registry.npmjs.org"')][-2000:])

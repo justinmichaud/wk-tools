@@ -17,6 +17,7 @@ the list comes from instead.
 
 Run: python3 -m unittest tests.test_help_values -v
 """
+TIER = "lint"
 import subprocess
 from pathlib import Path
 import unittest

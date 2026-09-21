@@ -163,6 +163,10 @@ class _FakeWalk(WkTest):
                 "WK_TARGET": "remote",
                 "WK_REMOTE_HOST": "fake-reachable-machine",
                 "PATH": f"{binp}:{os.environ.get('PATH', '/usr/bin:/bin')}",
+                # The probe's cap (targets/remote.sh): the stub answers at once, and
+                # `capped` leaves its watchdog sleeping on the walk's stdout for the
+                # whole cap after the walk has exited.
+                "WK_PROBE_SECONDS": "1",
             }
             e.update(env or {})
             return run("status", *args, env=e, timeout=timeout)
@@ -385,13 +389,23 @@ class TestWaitWaitsThroughSilence(_FakeWalk):
         than the timeout here, so one is all the loop can afford: what it
         reports waiting is what a clock says, not 1s of sleeping."""
         self.task(log="[1/4200] cc\n", log_age=600)
+        # The machine is slow to answer its first probe (`_remote_probe_cmd`,
+        # targets/remote.sh) and nothing else: one poll slower than the interval is
+        # what the assertion needs, and a walk makes several ssh calls and probes more
+        # than once. The probe's cap has to outlast the sleep, or the slow machine
+        # reads unreachable.
+        slow_probe = ('#!/bin/sh\nfor last; do :; done\n'
+                      'case "$last" in *.wk-remote*)\n'
+                      f'    [ -e "{self.tmp}/probed" ] || {{ : > "{self.tmp}/probed"; sleep 2; }} ;;\n'
+                      'esac\n'
+                      'exec bash -c "$last"\n')
         cp = self.walk("--wait", "--timeout=1", timeout=180,
-                       env={"WK_WAIT_INTERVAL": "1"},
-                       ssh="#!/bin/sh\nsleep 3\n" + ANSWERING_SSH.split("\n", 1)[1])
+                       env={"WK_WAIT_INTERVAL": "1", "WK_PROBE_SECONDS": "3"},
+                       ssh=slow_probe)
         self.assertEqual(cp.returncode, 2, cp.stdout)
         waited = re.search(r"still busy after (\d+)s", cp.stdout)
         self.assertTrue(waited, f"the wait did not report stopping: {cp.stdout}")
-        self.assertGreaterEqual(int(waited.group(1)), 3,
+        self.assertGreaterEqual(int(waited.group(1)), 2,
                                 f"the timeout counts sleeps, not elapsed time: {cp.stdout}")
 
     def test_a_stalled_build_ends_the_wait_at_once(self):

@@ -1,6 +1,6 @@
 """A test that makes a workspace removes it, however the test ends.
 
-`wk selftest --quick` left `wk-test-<rnd>` running on the container target:
+`wk selftest default` left `wk-test-<rnd>` running on the container target:
 the class that made it removed it in the body of its one test, so an
 assertion failing first -- or the `wk rm` under test not converging -- left
 the workspace, its container and its build tree behind for a person to find
@@ -15,6 +15,7 @@ machine that skips every one of them.
 
 Run: python3 -m unittest tests.test_workspace_cleanup -v
 """
+TIER = "lint"
 import ast
 import unittest
 

@@ -99,7 +99,7 @@ unset _uid _gid _user _deleg _want_groups g _missing_keys _remote _repo _alias
 if [ -n "$(ls -A "$WK_STORE/skills" 2>/dev/null)" ]; then
     unchanged "shared skills present (not overwritten)"
     diff -rq "$WK_ROOT/claude/skills" "$WK_STORE/skills" >/dev/null 2>&1 \
-        || log "note: shared skills differ from the repo -- 'wk skills status'"
+        || log "note: shared skills differ from the repo: diff -r $WK_ROOT/claude/skills $WK_STORE/skills"
 elif [ -n "${WK_DRY_RUN:-}" ]; then
     changed "would seed $WK_STORE/skills from $WK_ROOT/claude/skills"
 else

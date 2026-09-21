@@ -1,6 +1,6 @@
 """`wk ai <agent> <ws>` holds the push keys back, on every target.
 
-The rule (cmd/push, docs/HANDOFF-sandboxing.md): only the person at the
+The rule (cmd/push): only the person at the
 keyboard pushes. So before control is handed to an agent, the switch is thrown
 off -- and it has to be thrown for *every* target, because every one of them
 can push:

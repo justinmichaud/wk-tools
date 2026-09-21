@@ -8,7 +8,7 @@ and `image_root_class` (lib/image.sh: what kind of device a kernel cmdline's
 network -- these are the pure decisions the rest of the driver machinery
 calls through.
 
-Owed by docs/HANDOFF-test-runner.md: "the target-kind dispatch
+Owed (docs/PLAN.md): "the target-kind dispatch
 (container|vm|remote|local), arch_is_native, _remote_is_local,
 image_root_class".
 

@@ -234,13 +234,19 @@ class TestBitbakeGetsTheRealTools(WkTest):
 
     def test_the_gate_is_a_wall_so_the_strip_has_to_name_it(self):
         """Read off the tree rather than spelled here: every name in
-        container/bin/ws is a link to the one wall."""
+        container/bin/ws is the one wall, by the wall's own test for a copy
+        (`_is_wall`): the marker line in its head, and it sources the wall
+        beside it rather than linking to it, because webkitcorepy runs the
+        realpath of `which('git')`, which would reach the wall under its own
+        name and be refused."""
         ws = BIN / "ws"
         names = sorted(p.name for p in ws.iterdir())
         self.assertTrue(names, "container/bin/ws is empty")
         for name in names:
             with self.subTest(tool=name):
-                self.assertEqual(WALL.resolve(), (ws / name).resolve())
+                text = (ws / name).read_text()
+                self.assertIn("# wk-build-wall:", "\n".join(text.splitlines()[:5]))
+                self.assertRegex(text, r'(?m)^\. ".*/wk-build-wall"$')
 
 
 class TestOneFileUnderEveryName(WallTest):
@@ -465,27 +471,25 @@ class TestTheAgentIsToldUpFront(unittest.TestCase):
             deny = sorted(json.loads(f.read_text())["permissions"]["deny"])
             self.assertEqual(want, deny, f.name)
 
-    def test_the_wall_and_the_readme_say_what_it_covers(self):
-        """The wall covers a bare name on PATH, in every shell that sources
-        shell/path.sh -- the workstation's own shells included. Both places
-        that describe it say so, and name the file rather than re-listing the
-        wrapped names in prose."""
-        for text, where in ((WALL.read_text(), "the wall's header"),
-                            ((REPO / "README.md").read_text(), "README.md")):
-            with self.subTest(where=where):
-                self.assertIn("shell/path.sh", text)
-                self.assertIn("bare name", text)
-                self.assertIn("Bash(*/<name> *)", text)
+    def test_the_wall_names_what_covers_each_spelling(self):
+        """The wall's header points at the two things outside it that its
+        cover depends on: the file that puts it first on PATH (a bare name)
+        and the deny-rule form that covers the path spelling it cannot see.
+        Each is checked against what exists, not against prose."""
+        header = WALL.read_text().split('WALL_NAMES="')[0]
+        self.assertIn("shell/path.sh", header)
+        self.assertTrue((REPO / "shell" / "path.sh").is_file())
+        self.assertIn("Bash(*/<name> *)", header)
+        for f in SETTINGS_ALL:
+            deny = json.loads(f.read_text())["permissions"]["deny"]
+            self.assertTrue(any(r.startswith("Bash(*/") for r in deny), f.name)
 
     def test_no_prose_re_lists_the_wrapped_names(self):
         """WALL_NAMES is the one list, and a prose copy of it drifts. Each of
         these names the file instead; an example or two is not a list."""
         header = WALL.read_text().split('WALL_NAMES="')[0]
-        readme = (REPO / "README.md").read_text()
-        para = readme[readme.index("Nothing an agent runs drives a build"):][:1400]
         briefing = (REPO / "claude" / "CLAUDE.md").read_text()
         for text, where in ((header, "the wall's header"),
-                            (para, "README.md"),
                             (briefing, "claude/CLAUDE.md")):
             with self.subTest(where=where):
                 self.assertIn("wk-build-wall", text)
@@ -500,9 +504,6 @@ class TestTheAgentIsToldUpFront(unittest.TestCase):
         self.assertIn("refuse", text)
         for remedy in ("wk build", "wk test", "wk bench", "wk run"):
             self.assertIn(remedy, text)
-
-    def test_the_readme_states_it(self):
-        self.assertIn("wk-build-wall", (REPO / "README.md").read_text())
 
 
 class TestCmdAiSetsTheVariable(unittest.TestCase):

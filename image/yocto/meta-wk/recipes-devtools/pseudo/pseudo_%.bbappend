@@ -13,7 +13,7 @@
 # plain `podman run` with default seccomp and no sandbox, so it is a property of
 # pseudo and this host and nothing to do with how wk builds. The four other
 # candidates (mixed sstate, the host's tar, the overlay checkout, wk's sandbox)
-# were each tested and refuted; docs/HANDOFF-yocto.md records how.
+# were each tested and refuted.
 #
 # Upstream has fixed this class of bug repeatedly since that pin, and two of the
 # commits name our exact symptom:

@@ -1,7 +1,0 @@
-# HANDOFF — audit non-default host settings, ask before persisting
-
-`wk backup` writes live settings into `host/linux/config.dconf` and `host/macos/defaults.conf`; this audits whether what's tracked is still deliberate.
-
-- [ ] run `wk backup` on a configured Linux workstation, then `git diff` it; ask about everything the filter leaves that config.dconf's header marks `why: unknown`, keep or drop, and write the kept set back [needs a Linux workstation]
-- [ ] decide the `why: unknown` entries config.dconf's header lists (deja-dup's prompt-check, the app-folders/notifications auto-discovered entries, every remembered window/column/sidebar geometry group, apps/update-manager, com/mattjakeman/ExtensionManager, com/ubuntu/update-notifier, org/gnome/Disks, org/gnome/software) -- keep with a real why, or drop and extend `dconf_filter` [needs a maintainer decision, not a Linux workstation]
-- [ ] review `wk backup --candidates`' output on tolken and decide which macOS domains/keys to add to `host/macos/defaults.conf` -- appearance (none clearly non-default), keyboard (com.apple.Accessibility KeyRepeatInterval, at the fastest setting), dock (magnification/largesize/tilesize, no-bouncing, show-recents, mru-spaces, the hot-corner wvous-* keys), screensaver (askForPassword) all look deliberate but nothing here should be added without confirming with the maintainer [needs a maintainer decision]

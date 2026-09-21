@@ -6,6 +6,7 @@ read or write machine state silently.
 
 Run: python3 -m unittest tests.test_support -v
 """
+TIER = "lint"
 import os
 import stat
 import subprocess

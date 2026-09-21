@@ -184,8 +184,7 @@ sync_furniture() {
     return 0
 }
 
-# One workspace's fetch, whole, into its par job's record: the fetches are
-# independent, and each one is a round trip to the machine holding it.
+# One fetch per par job: each is a round trip to the machine holding the workspace.
 ws_fetch_one() { # <ws>
     local ws="$1" st rc mirror said
     load_target "$(ws_target "$ws")" >/dev/null 2>&1 || return 3

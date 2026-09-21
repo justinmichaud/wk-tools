@@ -1,4 +1,4 @@
-"""The image store is gone (docs/HANDOFF-fleet.md, "Images without a store"):
+"""The image store is gone:
 a build's output lives wherever its builder left it -- a workspace, a build
 host -- and every reader gets there by scanning or by `--from <path>`, never
 by looking an id up in a catalogue.
@@ -241,7 +241,7 @@ class TestProfileFromWorkspacePath(unittest.TestCase):
     for both builders that leave images inside one (image_workspace_scan), by
     matching the configurations this checkout defines; _profile_from_path
     (cmd/sysimage) is the same derivation from a full path and calls through
-    it -- lifted beside the library, sed's the idiom tests/test_quick.py uses
+    it -- lifted beside the library, sed's the idiom tests/test_bridge.py uses
     for 'bump' (cmd/status)."""
 
     def _lift(self):

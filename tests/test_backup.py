@@ -1,5 +1,5 @@
 """`wk backup`: the dconf junk filter, the atomic tmp-file-then-`mv` writer,
-and the `--candidates` scanner (docs/HANDOFF-settings-audit.md).
+and the `--candidates` scanner.
 
 Run: python3 -m unittest tests.test_backup -v
 """

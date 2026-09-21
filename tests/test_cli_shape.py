@@ -8,6 +8,7 @@ and from the files themselves, so a new command is covered the day it lands.
 
 Run: python3 -m unittest tests.test_cli_shape -v
 """
+TIER = "lint"
 import re
 import shlex
 import subprocess
@@ -270,8 +271,6 @@ class TestPromptsAndDestructiveDeclarationsAgree(unittest.TestCase):
                     offenders.append(f"{d}/{p.name}")
         self.assertEqual(offenders, [], f"prompting helper not named by any destructive command: {offenders}")
 
-    def test_the_agent_gateway_does_not_answer_yes_for_everyone(self):
-        self.assertNotIn("WK_YES", (REPO / "cmd" / "mcp").read_text())
 
 
 class TestActAndConfirm(unittest.TestCase):

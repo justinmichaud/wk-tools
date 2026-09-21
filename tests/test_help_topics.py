@@ -5,6 +5,7 @@ a bare Pi to an automated A/B, so it has to name every command on that path.
 
 Run: python3 -m unittest tests.test_help_topics -v
 """
+TIER = "lint"
 import re
 import unittest
 

@@ -12,7 +12,7 @@ check is exercised the same way test_bench_report.py's own axis-mismatch
 test is: two synthetic env.json fixtures through `wkdata.py report --text`.
 bench_cores_refusal is a pure function of (target, os), so it is lifted
 verbatim out of cmd/bench and called directly -- the same `sed -n
-'/^fn()/,/^}/p'` idiom tests/test_quick.py uses to lift cmd/status's `bump`.
+'/^fn()/,/^}/p'` idiom tests/test_ceilings.py uses to lift cmd/status's `bump`.
 
 Run: python3 -m unittest tests.test_bench_cores -v
 """

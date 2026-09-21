@@ -1,4 +1,4 @@
-"""cmd/gc owed by docs/HANDOFF-test-runner.md:
+"""cmd/gc owed (docs/PLAN.md):
 
   - honours a pre-set $WK_ROOT (its own comment: the container half pipes
     this file into `bash -s`, which sets $0 to "bash" -- a wrong root

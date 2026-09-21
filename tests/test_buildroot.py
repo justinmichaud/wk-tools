@@ -1,7 +1,7 @@
 """The buildroot builder: image/buildroot.sh (host half, drives a container
 workspace) and image/buildroot-build.sh (runs inside it), the same
 host/worker split image/yocto.sh and image/yocto-build.sh use. See
-docs/HANDOFF-ab-bench.md item 3 for what this exists to close out.
+docs/PLAN.md for what this exists to close out.
 
 Four things are checked by the classes down to TestDerivedDefconfigs,
 matching the four real defects found while writing this lane:

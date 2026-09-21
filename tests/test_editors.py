@@ -54,7 +54,7 @@ def _strip_json_comments(text):
 
 def _lift(path, func):
     """A function's body, sed'd out of a shell file -- the technique
-    tests/test_wifi_seed.py and tests/test_quick.py use to call one function
+    tests/test_wifi_seed.py and tests/test_bridge.py use to call one function
     from a script directly rather than sourcing (and running) the whole
     file. Only works for a function whose closing brace is on its own line,
     which _install_helix and _install_lazygit both are."""

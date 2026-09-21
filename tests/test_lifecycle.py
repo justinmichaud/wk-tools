@@ -46,7 +46,11 @@ class TestStartExitsOnItsOwnResult(WkTest):
                 "WK_MACHINES_DIR": str(self.tmp / "machines"),
                 "WK_TARGET": "remote",
                 "WK_REMOTE_HOST": "fake-unreachable-machine",
-                "WK_NO_CLAUDE_RC": "1"}
+                "WK_NO_CLAUDE_RC": "1",
+                # The probe's cap (targets/remote.sh): the stub refuses at once, and
+                # `capped` leaves its watchdog sleeping on the walk's stdout for the
+                # whole cap after the walk has exited.
+                "WK_PROBE_SECONDS": "1"}
 
     def setUp(self):
         super().setUp()

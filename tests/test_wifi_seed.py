@@ -46,7 +46,7 @@ def _netplan_parser_source():
 
 
 def _lift(path, func):
-    """A function's body, sed'd out of a shell file the way tests/test_quick.py
+    """A function's body, sed'd out of a shell file the way tests/test_bridge.py
     lifts _ls_classify, _reaches and friends -- so it can be called directly
     without sourcing the whole file (some of these files require root, or
     ssh, at the top)."""
@@ -93,7 +93,7 @@ gate /dev/null
 
     def test_wifi_from_host_and_wifi_joins_call_the_gate(self):
         """v_wifi_from_host and v_wifi_joins call gate, like every other device verb"""
-        # static, the same shape as test_quick.py's test_card_helper_gate
+        # static, the same shape as test_static_rules.py's test_card_helper_gate
         text = CARD_PRIV.read_text(errors="replace")
         bad = []
         for v in ("v_wifi_from_host", "v_wifi_joins"):

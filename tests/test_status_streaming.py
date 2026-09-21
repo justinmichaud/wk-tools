@@ -255,6 +255,10 @@ class TestCollectorMarkers(WkTest):
                 "WK_TARGET": "remote",
                 "WK_REMOTE_HOST": "fake-reachable-" + rand_suffix(4),
                 "PATH": f"{binp}:{os.environ.get('PATH', '/usr/bin:/bin')}",
+                # The probe's cap (targets/remote.sh): the stub answers at once, and
+                # `capped` leaves its watchdog sleeping on the walk's stdout for the
+                # whole cap after the walk has exited.
+                "WK_PROBE_SECONDS": "1",
             }
             return run("status", *args, env=env, timeout=60)
 
@@ -302,6 +306,7 @@ class TestARemotesMarkersStayItsOwn(WkTest):
                 "WK_TARGET": "remote",
                 "WK_REMOTE_HOST": "fake-leaky-" + rand_suffix(4),
                 "PATH": f"{binp}:{os.environ.get('PATH', '/usr/bin:/bin')}",
+                "WK_PROBE_SECONDS": "1",
             }, timeout=60)
         self.assertEqual(cp.returncode, 0, cp.stdout)
         self.assertEqual(len([l for l in cp.stdout.splitlines() if l.startswith("remote")]), 1, cp.stdout)

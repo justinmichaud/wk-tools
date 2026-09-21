@@ -5,7 +5,7 @@
 # wk: readonly status
 # wk: destructive on
 #
-# The rule this implements (docs/HANDOFF-sandboxing.md): only the person at the
+# The rule this implements: only the person at the
 # keyboard pushes. An agent in a workspace must not be able to publish anything,
 # while a shell in the same workspace, run by a human, should push normally.
 #
@@ -222,7 +222,7 @@ require_agent_target() {
     warn "'$WK_TARGET' workspaces name no ssh-agent socket (t_agent_sock), so the
     deploy keys have nowhere to live outside one and there is no switch here.
     Giving this target one -- wk-ssh-agent.service, the way host/linux/sdk.sh
-    installs it -- is owed work (docs/HANDOFF-sandboxing.md). Until then, push
+    installs it -- is owed (docs/PLAN.md). Until then, push
     from the workstation that holds the keys."
     exit 5
 }
@@ -357,7 +357,7 @@ status)
     and its core.sshCommand names the private half directly
     (remote/provision.sh). The key above is live whatever the switch says
     anywhere else, and 'wk push on|off' here refuses rather than pretending.
-    Installing wk-ssh-agent.service here is owed work (docs/HANDOFF-sandboxing.md)."
+    Installing wk-ssh-agent.service here is owed (docs/PLAN.md)."
     elif [ "$held" -gt 0 ] || [ "$loaded" -gt 0 ]; then
         push_agent_ensure push_agent_exec "$MACHINE_SOCK" \
             || log "  no ssh-agent answers at $MACHINE_SOCK ('./setup' installs it there)"

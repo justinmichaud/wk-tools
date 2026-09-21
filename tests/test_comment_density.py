@@ -29,6 +29,7 @@ so the ceiling would ask for edits that the next sync undoes.
 
 Run: python3 -m unittest tests.test_comment_density -v
 """
+TIER = "lint"
 import ast
 import io
 import os
