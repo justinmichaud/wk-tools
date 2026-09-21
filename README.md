@@ -119,11 +119,14 @@ command a person types to stop it, and what resources it holds.
 
 We never run more than one task at a time.
 
+*** Claude edit below here ***
+
 ## Setup
 
 Prerequisites:
 
-- macOS: Xcode command line tools (`xcode-select --install`), podman from
+- macOS: 
+- Xcode command line tools (`xcode-select --install`), podman from
   <https://podman.io> (the official installer, not Homebrew), Tailscale
   (<https://tailscale.com/download/macos>), Zed (<https://zed.dev/download>,
   only for `wk zed`), Tart (<https://tart.run>, only for building Apple
