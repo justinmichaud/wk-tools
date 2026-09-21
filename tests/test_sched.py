@@ -215,6 +215,37 @@ class TestTheScheduler(WkTest):
         self.assertEqual(runs.started, ["b"], "the done step ran anyway")
         self.assertEqual([x.id for x in s.already], ["a"])
 
+    def test_the_predicates_are_asked_all_at_once(self):
+        """Each is routed to the machine holding the lane it asks about, and on
+        a macOS workstation that is a forwarded call into the podman machine --
+        0.8-1.1s each against a lane that exists (measured 2026-09-17), five
+        per board. Asked in turn, the plan's own cost grew with the graph."""
+        import threading as _t
+        gate, peak, at = _t.Event(), [0], [0]
+        guard = _t.Lock()
+
+        def is_done(step):
+            with guard:
+                at[0] += 1
+                peak[0] = max(peak[0], at[0])
+            gate.wait(10)
+            with guard:
+                at[0] -= 1
+            return False
+
+        steps = [step("a", done="true"), step("b", done="true"),
+                 step("c", done="true")]
+        s = sched.Scheduler(steps, FakeRuns(), is_done)
+        thread = _t.Thread(target=s.run_all)
+        thread.start()
+        for _ in range(200):
+            if peak[0] >= 3:
+                break
+            _t.Event().wait(0.02)
+        gate.set()
+        thread.join(30)
+        self.assertEqual(peak[0], 3, "the done-predicates were asked one at a time")
+
     def test_a_predicate_is_only_asked_of_a_step_that_declares_one(self):
         asked = []
 

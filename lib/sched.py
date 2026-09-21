@@ -135,8 +135,9 @@ class Scheduler:
         self.failed, self.skipped, self.left = [], [], []
 
     def run_all(self):
-        # Asked once, before anything starts: what is done decides what is worth running.
-        done = {s.id for s in self.steps if s.done and self.is_done(s)}
+        # Asked once, before anything starts: what is done decides what is
+        # worth running.
+        done = self._done_already()
         want = needed(self.steps, done)
         self.already = [s for s in self.steps if s.id in done]
         self.unneeded = [s for s in self.steps if s.id not in done and s.id not in want]
@@ -158,6 +159,21 @@ class Scheduler:
             if s.id in pending:
                 self.left.append(s)
         return 0 if not (self.failed or self.skipped or self.left) else 1
+
+    # All at once, not one after another: each question is routed to the machine
+    # holding the lane it asks about, and on a macOS workstation that is a
+    # forwarded call into the podman machine -- 0.8-1.1s each against a lane
+    # that exists (measured 2026-09-17), five per board, growing with the
+    # graph. Asked together, the plan waits for the slowest one instead of the
+    # sum. They are read-only by declaration (`wk sysimage holds`), so nothing
+    # here serialises them.
+    def _done_already(self):
+        asked = [s for s in self.steps if s.done]
+        if not asked:
+            return set()
+        with futures.ThreadPoolExecutor(max_workers=len(asked)) as pool:
+            answers = list(pool.map(self.is_done, asked))
+        return {s.id for s, yes in zip(asked, answers) if yes}
 
     def _start_ready(self, pending, done, bad, refused, holding, live, pool):
         progress = True

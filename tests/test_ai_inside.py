@@ -16,6 +16,7 @@ conjure one (tests/test_verify_credentials.py drives those).
 
 Run: python3 -m unittest tests.test_ai_inside -v
 """
+import platform
 import re
 import time
 import unittest
@@ -143,9 +144,23 @@ class TestEveryCheckRunsAtOnce(_Inside):
         cp = self._checks()
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
         for name in ("push_here", "github_api", "bugzilla_api", "isolation",
-                     "commit_wall", "github"):
+                     "github"):
             self.assertIn(f"{name} is fine", cp.stderr)
         self.assertIn("nothing in here can publish", cp.stderr)
+
+    def test_the_commit_wall_is_probed_exactly_where_it_applies(self):
+        """The wall is bwrap's read-only .git, and bwrap is Linux's:
+        `wall_applies` (cmd/ai) says a `local` workspace on macOS has no wall,
+        and checks_here probes what applies rather than the same ten
+        everywhere. This runs against the `local` target, so the platform
+        under the test is this machine's."""
+        cp = self._checks()
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        if platform.system() == "Darwin":
+            self.assertNotIn("commit_wall", cp.stderr,
+                             "a wall that cannot be applied was reported on")
+        else:
+            self.assertIn("commit_wall is fine", cp.stderr)
 
 
 class TestWhatEachKindOfFailureDoes(_Inside):

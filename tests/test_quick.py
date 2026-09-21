@@ -286,6 +286,46 @@ true
 # commands that resolve a build without one
 # --------------------------------------------------------------------------- #
 
+class TestOneFullSelftestAtATime(WkTest):
+    """`wk selftest` refuses to start beside a build, and a second full run is
+    the same contention from the other side: two of them take the one podman
+    machine, and what it costs is wall-clock assertions failing in the loaded
+    run and nowhere else (test_interrupt's 10s bound, test_wk_overrides_cmd2's
+    poll count; both 2026-09-16, both passing 5/5 alone)."""
+
+    def test_a_second_full_run_is_refused_naming_the_holder(self):
+        script = f'''
+bash -c '. {REPO}/lib/common.sh; hold_lock selftest; sleep 20' &
+p=$!; sleep 1
+"{WK}" selftest nosuchtest 2>&1
+kill $p 2>/dev/null; wait $p 2>/dev/null
+'''
+        cp = _lock_sh(script, self.tmp, timeout=90)
+        out = cp.stdout + cp.stderr
+        self.assertIn("already running here", out, out)
+        self.assertIn("wk selftest --quick", out, out)
+
+    def test_quick_takes_no_lock_so_two_of_them_run(self):
+        """--quick makes no workspace and takes no machine."""
+        script = f'''
+bash -c '. {REPO}/lib/common.sh; hold_lock selftest; sleep 20' &
+p=$!; sleep 1
+"{WK}" selftest --quick test_a_lane_with_no_image_answers 2>&1 | tail -2
+kill $p 2>/dev/null; wait $p 2>/dev/null
+'''
+        cp = _lock_sh(script, self.tmp, timeout=120)
+        out = cp.stdout + cp.stderr
+        self.assertNotIn("already running here", out, out)
+        self.assertIn("OK", out, out)
+
+    def test_the_run_is_not_execd_so_the_lock_is_dropped(self):
+        """An `exec`d python3 keeps the pid and so keeps the lock looking
+        live, but leaves nothing to release it: the next run has to break a
+        lock rather than find none."""
+        text = (REPO / "cmd" / "selftest").read_text()
+        self.assertNotRegex(text, r"(?m)^exec python3\b")
+
+
 class TestResolveWithoutABuild(WkTest):
     # The Apple-port half of this: a `mac-*` config on a Linux workspace is
     # refused before any environment is composed (cmd/build's own classifier),

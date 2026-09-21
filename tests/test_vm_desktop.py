@@ -675,7 +675,7 @@ class TestTheStartReport(WkTest):
 . "$WK_ROOT/lib/target.sh"
 load_target vm >/dev/null 2>&1
 _ip()  {{ echo 10.0.0.2; }}
-_ssh() {{ cat {str(canned)!r}; }}
+_ssh() {{ cat > /dev/null; cat {str(canned)!r}; }}
 _report_desktop demo
 ''')
         self.assertEqual(cp.returncode, rc, cp.stdout + cp.stderr)
@@ -711,7 +711,7 @@ _report_desktop demo
 . "$WK_ROOT/lib/target.sh"
 load_target vm >/dev/null 2>&1
 _ip()  {{ echo 10.0.0.2; }}
-_ssh() {{ cat {str(canned)!r}; }}
+_ssh() {{ cat > /dev/null; cat {str(canned)!r}; }}
 _report_desktop demo
 ''')
         self.assertEqual("", cp.stdout, cp.stdout)
@@ -752,6 +752,14 @@ _report_desktop demo && echo "rc=0"
         guest with the wrong pyobjc still builds."""
         self._report(SETTLED, rc=0)
 
+    # `vm_desktop_probe` pipes 32 KB of probe script into `_ssh <ip> 'bash -s'`,
+    # so a stub that answers without reading stdin leaves that writer with no
+    # reader: the write completes only while macOS grows the pipe buffer to
+    # 64 KB, and when it does not the writer takes EPIPE, `set -o pipefail`
+    # makes the substitution non-zero, and `_report_desktop` returns 0 having
+    # printed nothing -- which is how this passed alone and failed once inside
+    # a full run under a machine-sized build (2026-09-16). The real ssh reads
+    # its stdin; so does the stub.
     def test_the_refusal_can_be_crossed_on_purpose(self):
         """A barrier that can be crossed is crossed by something that records
         itself, never by the command deciding on its own that it does not
@@ -766,7 +774,7 @@ _report_desktop demo && echo "rc=0"
 load_target vm >/dev/null 2>&1
 export WK_VM_FORCE=1
 _ip()  {{ echo 10.0.0.2; }}
-_ssh() {{ cat {str(canned)!r}; }}
+_ssh() {{ cat > /dev/null; cat {str(canned)!r}; }}
 _report_desktop demo && echo "rc=0"
 ''')
         self.assertIn("rc=0", cp.stdout, cp.stdout + cp.stderr)

@@ -11,7 +11,9 @@
 # a build already on the machine's books; --quick makes none and never does.
 #
 #   --quick       every test that needs no VM, machine or board; the rest skip
-#                 by name (WK_TEST_QUICK=1, read by tests/support.py's gates)
+#                 by name (WK_TEST_QUICK=1, read by tests/support.py's gates).
+#                 A full run takes a lock and refuses a second one; --quick
+#                 takes none
 #   -v            one line per test
 #   <pattern>     only tests whose name matches (unittest -k)
 
@@ -47,5 +49,18 @@ $(printf '%s\n' "$BUSY" | sed 's/^/      /')
         wk selftest --quick"
 fi
 
+# One full run at a time, for the same reason a run refuses to start beside a build: two of them contend for the one podman machine. What it costs is wall-clock assertions failing in the loaded run and nowhere else -- test_interrupt's 10s bound on a prompt exit, and test_wk_overrides_cmd2 seeing 3 polls where it wants 4, both 2026-09-16, both passing 5/5 alone. Refused rather than queued: a suite that starts when the other finishes is not an answer anyone is still waiting for. --quick makes no workspace and takes no machine, so it takes no lock either.
+if [ -z "$QUICK" ]; then
+    lock_alive selftest && die "a full 'wk selftest' is already running here (pid $(lock_holder_pid "$(_lock_path selftest)")).
+    Two of them take the same podman machine, and the loaded one fails
+    wall-clock assertions that pass alone. Wait for it, or run the half that
+    needs no machine:
+        wk selftest --quick"
+    hold_lock selftest -w 0
+fi
+
 [ -z "$QUICK" ] || { WK_TEST_QUICK=1; export WK_TEST_QUICK; }
-exec python3 -m unittest discover -s tests $VERBOSE ${PATTERN[@]+"${PATTERN[@]}"}
+# Not exec'd: the EXIT trap that drops the lock has to outlive the run (lib/lockrun.sh).
+rc=0
+python3 -m unittest discover -s tests $VERBOSE ${PATTERN[@]+"${PATTERN[@]}"} || rc=$?
+exit "$rc"
