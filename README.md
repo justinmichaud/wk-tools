@@ -1,94 +1,55 @@
 # wk-tools
 
+Note: this document should only be edited by humans.
+
 `wk` builds, runs, tests and benchmarks WebKit/JSC in disposable, sandboxed
-workspaces so the host stays clean, and it drives a small fleet of build
-machines and Raspberry Pi/Mac benchmark boards, each reached by its tailnet
-name. One CLI, `wk`, covers every workflow below.
+workspaces. It also drives a small fleet of build
+machines and Raspberry Pi/Mac benchmark boards connected by tailnet.
 
 ## Architecture
 
-**workspace** — a named, disposable environment for one task: a checkout, a
-build tree, an agent's blast radius. `wk new` creates one, `wk rm` destroys it
-completely. It remembers the target it was created on.
+**workspace** — a named, disposable environment for one task, sitting on one computer.
 
-**target** — where a command's work actually happens. Four kinds behind one
-driver contract: `container` (rootless podman, the default, the only sandboxed
-target on Linux — on macOS it lives inside a podman VM), `vm` (a macOS guest
-under Tart, for the Apple ports only), `remote` (a shared build machine or
-another workstation, named after the machine, no sandbox), `local` (the
-degenerate driver a workspace uses on itself, which is what makes `wk build`
-work from inside one). A workspace remembers its target; `--target` belongs to
-`wk new` alone.
+`wk new`, `wk rm`
 
-**machine** — a computer `wk` drives as a build target, declared once in
-`targets/hosts/<name>.conf`: a shared build box, or a peer workstation. This
-registry is distinct from two others: a **fleet device** (a board or Mac `wk`
-can boot into a measured system, `boot/machines/<name>.conf`) and a **bridge**
-(a phone routing an unreachable segment onto the tailnet,
-`bridge/hosts/<name>.conf`). Never call a fleet device or a bridge a bare
-"machine".
+Credentials required for git, git-webkit, github, claude, etc are shared or revoked using `wk push`.
 
-**bench system** — the system on a fleet device that gets measured: built by
-`wk sysimage build`, written to a card by `wk sysimage write`, armed for one
-boot by `wk boot`. It never shares a medium with the device's own recovery
-path where the hardware allows separating them.
+**target** — How to execute a workspace
 
-**rescue** — what a board falls back to, and is reached by, whenever its bench
+- `container` (rootless podman or podman VM on macOS)
+- `vm` (a macOS guest under Tart)
+- `remote` (a shared build machine or unsandboxed computer, borrowed but not managed by wk)
+- `local` (used for routing commands only when already inside a workspace)
+
+**build machine** — a computer `wk` drives as a build target, declared once in
+`targets/hosts/<name>.conf`
+
+**bench machine** - a board or Mac that can be booted into a system for perf testing, in `boot/machines/<name>.conf`
+
+**bridge** - a device running pmOS connecting an ethernet port to the network, in `bridge/hosts/<name>.conf`. This is currently only used to connect my bmc to tailnet.
+
+**bench system** — the OS image on a bench machine that gets measured
+
+built by `wk sysimage build`, written to a card by `wk sysimage write`, armed for one
+boot by `wk boot`
+
+**rescue** — what a bench machine falls back to, and is reached by, whenever its bench
 system is disarmed, unbootable, or was never written. On a workstation the
 rescue is the host install itself; on a bench-device it is a system `wk` owns
-on its own medium. A rescue is also the board's own card writer: it carries
-`admin/wk-card-priv` (the yocto `meta-wk-rescue` layer), so
-`wk sysimage write --from <image> --disk <board>:<device>` and `wk boot`
-put a bench system on the board's *other* medium from the rescue itself, and
-an A/B never needs a card carried to a reader. The two systems are two
+on its own medium.
+
+A rescue must provide a way to write, arm and boot the bench system.
+
+The two systems are two
 tailnet nodes with two names -- the rescue `<board>-rescue` (`NODE_SSH`), the
-bench system `<board>-bench` (`NODE_BENCH_SSH`) -- since each written card
-joins as its own node and a second join under one name comes up renamed. A rescue written from an image
-that predates that layer (the rpi3's) cannot; it is
-rewritten once, from a reader, and never again. The only card a person
-handles is a board's first rescue.
+bench system `<board>-bench` (`NODE_BENCH_SSH`)
 
-**arm/disarm** — select, or deselect, what a fleet device boots next
-(`wk boot`). Every armed system disarms and reverts itself after one boot;
-nothing here is a persistent switch.
+**arm/disarm** — select, or deselect, what a bench machine boots next
+(`wk boot`). Every armed system disarms and reverts itself after one boot
 
-**bridge** — a phone with two network legs (house WiFi, USB-C Ethernet to an
-isolated segment) that routes that segment onto the tailnet, so a bench device
-or a BMC behind it is reachable without the house network reaching either.
-Provisioned with `wk bridge`. `wk bridge setup` also caps how far it charges
-(`charge_control_end_threshold`, 80% by default, `BR_BATTERY_LIMIT` in the
-host conf to change it) so a phone left on a charger for months does not
-swell its cell; `wk doctor --all` reads the cap back on both phones, and
-prints the honest "no OS limit exists" for this machine's own battery, since
-macOS has no CLI knob for its optimized charging.
+**state** — We always re-compute status, we never store state. Everything is stateless when possible. When state is required, it is carefully managed so that any command can be re-started if killed, and it is trivial to clean up after getting killed or having an error. For example, there is no list of workspaces: these are enumerated each time.
 
-**store** — `$WK_STORE`, the one place on a machine for artifacts kept by
-reference count or content key, never by hand: base snapshots, seeded
-benchmark payloads, bench results. On macOS it is the podman VM's
-`/var/lib/wk`, because a Mac cannot write that path itself, and this device
-keeps its own half beside it (logs, remote build status, the credentials
-every workspace needs, and the WebKit mirror -- the one copy of WebKit's
-history on the machine, which the VM and every tart guest mount read-only
-rather than holding).
-The artifacts the machine has to *open as files* -- a seeded benchmark
-payload, an exported runner tree, a downloaded profiler -- come from
-`wk_artifact_dir`: the store where it is this machine's, and this machine's
-own state directory where it is the VM's. One rule, so a Mac lane cannot
-find itself pointed at a path only the VM can read.
-A built system image is deliberately *not* in it: it is an artifact the
-workspace that built it already names, so a second, catalogued copy would be
-one fact kept twice.
-
-**the state rules** — every mutating command keeps the smallest possible
-state (a fact is recomputed from evidence at read time, never cached, except
-for re-fetchable/re-derivable artifacts like ccache or a base snapshot); is
-crash-only (killed at any point, a re-run converges to the declared final
-state, "already exists" is never the answer to a half-made thing); wipes
-rather than repairs (destroying and recreating beats patching around an
-unexpected state); takes one lock per mutated resource; believes the machine
-over its own record when the two disagree; and never lets a read-only command
-(`wk status`, `wk ls`, `wk logs`, `wk doctor`) change anything or block on a
-run it is only reporting.
+**results** - Results (like A/B task results) are collected and stored in the worspace for that task. A task keeps track of its progress and can be restarted at any time. Once the final report is generated, we can copy out the deliverables as a zip file to a location specified by the user (defaulting to Downloads) (the report, the individual run jsons, and the sampler profiles). The report confirms the git hash built, and the status of checks (like the check that the pgo profile is valid).
 
 ## Every command, the same way
 
@@ -133,7 +94,7 @@ groups:
   machine's own `wk` resolves the name and does the work. `wk zed` is the one
   exception, since the editor runs where you typed the command: it asks the
   machine holding the workspace for a route and opens that from here.
-- **This host's own store or hardware, refused inside a workspace and on a
+- **This host's own hardware, refused inside a workspace and on a
   build machine.** `remote`, `key`, `push`, `sudo`, `quiesce`, `session`,
   `boot`, `pi`, `sysimage`, `bridge`, `vm`, `find`, `backup`, `start`, `stop`,
   `gc`. These act on fleet devices, bridges, or this machine's own
@@ -143,52 +104,20 @@ groups:
 - **This machine, never forwarded.** `disk`, `doctor`, `version`, `selftest` —
   read-only reports about the machine you typed the command on.
 
-`wk new` and `wk rm` run on "the workstation that keeps the workspace record"
-— even for a `remote` workspace, because the record of which target a
-workspace belongs to lives here, not on the machine doing the build. A peer
-workstation keeps its own records, so it makes and destroys its own
-workspaces: `wk new <name> --target <peer>` and `wk rm` of one of its
-workspaces refuse here and name the command to run there.
+# Tailnet
 
-A machine is named by its tailnet name and nothing else — no `.local`
-address, no IP, no ssh `ProxyJump` stored anywhere in this repo. `wk ls` and
-`wk status` show every target and every fleet device in one listing with a
-`TARGET`/machine column, so which machine answered a command is always in the
-same output as the command's result, never left to be inferred.
+A machine is named by its tailnet name and nothing else. Only reach machines by tailnet.
 
-Every command that outlives its terminal — a build, a test run, an image
-stage, a profile-guided cycle, claude remote control — writes one record of
+# Detatched commands
+
+Every command that outlives its terminal writes one record of
 the same shape (`lib/task.sh`): the plan it declared before its first step,
 the state of each of those steps, the machine and pid liveness is asked of, its log, the
-command a person types to stop it, and what it **holds** — a board is a fleet
-resource, so the record that drives one says so and that record is the claim. `wk status` renders each the same way, with
-the steps done, running and still to come, so reading one never depends on
-knowing which command wrote it. A plan is a graph, not a line number: each step
-carries its own state, so a schedule running two arms at once reads as two
-running steps rather than one, and a step that failed is told apart from the
-steps that were never reached for it. Liveness is asked of the process table at read
-time: a pid that no longer answers with no exit recorded reads `died`. A pid
-that lives inside a workspace is asked of that workspace, by `wk status` under
-a cap of `WK_TASK_ASK_SECONDS` (default 5) so a wedged workspace reads
-`unanswered` rather than being waited on, and by the commands that act on it
-(`--kill`) for as long as it takes. The pid such a job announces is the
-workspace's own claim, so nothing signals it while its command line in there is
-not the job the record names. `wk stop --tasks` ends every one of them at once
--- through each record's own kill command, never a signal of its own -- and
-reads the tasks again afterwards rather than believing the exit statuses.
-`--all` asks every other machine too, each through its own wk.
+command a person types to stop it, and what resources it holds.
 
-**One board, one driver, whichever machine is driving.** Two workstations can
-each reach a board, and two drivers on one board make both results junk, so
-`wk pi bench`, `wk pi deploy` and `wk boot` take the board's claim before they
-touch it: `wk status --holds device:<board>` is one machine's live holders,
-read from the records rather than from a lock file, and the claim asks every
-other workstation the same question through its own wk. A machine that cannot
-be asked is named as unknown rather than passed over — an unread machine is
-not a free board — and a refusal names the machine, the task and the command
-that stops it. The claim is inherited by the commands one driver runs, so an
-A/B that reboots a board between legs does not refuse itself; `--force`
-crosses it and records that it did.
+`wk status` renders this, and each task can always be killed or restarted.
+
+We never run more than one task at a time.
 
 ## Setup
 

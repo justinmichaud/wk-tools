@@ -1,13 +1,22 @@
 #!/usr/bin/env bash
 #
-# wk rm <name>... -- destroy one or more workspaces and everything they created
-# wk: where=workspace name=required lifecycle post=ssh-alias-remove group=workspaces takes=* destructive
+# wk rm <name>... | --all -- destroy workspaces and everything they created
+# wk: where=workspace name=required lifecycle post=ssh-alias-remove group=workspaces takes=* destructive dryrun --all opts --all
+# wk: flag --all where=host name=none
 #
 # The container, the overlay, the home directory and the ssh alias all go;
 # shared caches (ccache, yocto, buildroot) survive.
 #
-# `wk rm a b c` is three removals: one confirmation for all, each destroyed
-# independently.
+#   wk rm a b c   three removals: one confirmation for all, each destroyed
+#                 independently
+#   wk rm --all   every workspace `wk ls` finds: every target on this machine,
+#                 and every machine that keeps workspaces of its own.
+#                 --dry-run prints the removals and runs none of them
+#
+# The question names each one as <name>@<target> before it asks, so which
+# machine it is on is part of what is answered -- a target that is a machine of
+# its own is that machine. A workspace another workstation keeps the record of
+# is destroyed by that machine's own `wk`, asked from here.
 
 set -euo pipefail
 WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -18,16 +27,23 @@ WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 . "$WK_ROOT/lib/task.sh"
 . "$WK_ROOT/lib/watchdog.sh"
 
-NAME="${WK_NAME:-}"
-require_name "$NAME"
-
-NAMES=("$NAME")
+ALL=""
+NAMES=()
 for _a in ${@+"$@"}; do
     case "$_a" in
+        --all) ALL=1; continue ;;
     esac
     require_name "$_a"
     NAMES+=("$_a")
 done
+if [ -n "$ALL" ]; then
+    [ "${#NAMES[@]}" -eq 0 ] \
+        || die "'--all' is every workspace there is, and '${NAMES[0]}' is one of them:
+    one or the other."
+else
+    require_name "${WK_NAME:-}"
+    NAMES=("${WK_NAME:-}" ${NAMES[@]+"${NAMES[@]}"})
+fi
 
 ws_task_records() { # <name> -- every task record written for it (lib/task.sh)
     local d
@@ -124,8 +140,8 @@ $_live"
         if [ "$n" -gt 0 ]; then warn "$NAME has $n modified file(s) in its overlay"; fi
     fi
 
-    # t_destroy kills claude remote-control with a container or guest, not with a checkout.
-    [ "$WK_TARGET_KIND" != remote ] || rc_stop "$NAME"
+    # t_destroy kills claude remote-control with a container or guest, not with a checkout; a machine that keeps its own records stops its own session, in the `wk rm` t_destroy asks of it.
+    if [ "$WK_TARGET_KIND" = remote ] && ! t_owns_records; then rc_stop "$NAME"; fi
 
     rc=0
     t_destroy "$NAME" || rc=$?
@@ -147,6 +163,49 @@ $_live"
     info "workspace '$NAME' destroyed"
 )
 
+confirm_destroy() { # <count> <a "    <name>@<target>" line each>
+    confirm "these $1 workspace(s), and every change in them, go:
+$2
+destroy them?" || die "aborted"
+}
+
+# `wk ls` is the one listing of what exists where, so it is what `--all` means; a row another machine's own wk answered carries that machine's label (cmd/ls's _col), and the label is this machine's target for it.
+all_workspaces() { # "<target><tab><name>" a line
+    "$WK_ROOT/wk" ls --json | python3 -c '
+import json, sys
+label = sys.argv[1] + ":"
+for w in json.load(sys.stdin).get("workspaces", []):
+    target, name = w.get("target", ""), w.get("name", "")
+    if target.startswith(label):
+        target = target[len(label):]
+    target = target.split(":")[0]
+    if target and name:
+        print("%s\t%s" % (target, name))
+' "$(wk_machine_name)"
+}
+
+if [ -n "$ALL" ]; then
+    ROWS=$(all_workspaces) \
+        || die "'wk ls --json' did not answer with the workspaces to destroy, so
+    nothing here knows what every workspace is"
+    [ -n "$ROWS" ] || { info "no workspaces -- nothing to destroy"; exit 0; }
+
+    confirm_destroy "$(printf '%s\n' "$ROWS" | grep -c .)" \
+        "$(printf '%s\n' "$ROWS" | awk -F'\t' 'NF { printf "    %s@%s\n", $2, $1 }')"
+
+    worst=0
+    # Each through the one path a named removal takes, so the target decides how: forwarded into the podman VM, over ssh, or asked of the machine that keeps it.
+    while IFS="$(printf '\t')" read -r _t _n; do
+        [ -n "$_n" ] || continue
+        rc=0
+        act env WK_TARGET="$_t" "$WK_ROOT/wk" rm "$_n" --yes </dev/null || rc=$?
+        if [ "$rc" -gt "$worst" ]; then worst="$rc"; fi
+    done <<EOF
+$ROWS
+EOF
+    exit "$worst"
+fi
+
 worst=0
 FOUND=(); TARGETS=(); WHATS=(); _list=""
 for _n in "${NAMES[@]}"; do
@@ -154,14 +213,16 @@ for _n in "${NAMES[@]}"; do
     case "$rc" in
         0) # shellcheck disable=SC2086 -- "<target> <what>" is two words by construction.
            set -- $_p
-           FOUND+=("$_n"); TARGETS+=("$1"); WHATS+=("$2"); _list="$_list '$_n'" ;;
+           FOUND+=("$_n"); TARGETS+=("$1"); WHATS+=("$2")
+           _list="${_list:+$_list
+}    $_n@$1" ;;
         1) err "no such workspace: $_n"; worst=1 ;;
         *) worst=1 ;;
     esac
 done
 [ "${#FOUND[@]}" -gt 0 ] || exit "$worst"
 
-confirm "destroy workspace(s)${_list} and all their changes?" || die "aborted"
+confirm_destroy "${#FOUND[@]}" "$_list"
 
 _i=0
 for _n in "${FOUND[@]}"; do

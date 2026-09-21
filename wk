@@ -397,8 +397,9 @@ usage() {
   takes, is refused with its usage line.
   wk <command> --all       every one of what the command acts on -- every
                            machine ('wk push'/'wk sudo'), every workspace on
-                           every target ('wk sync'), every line of the log
-                           ('wk logs'); a command's own -h says what its --all covers
+                           every target ('wk sync', 'wk rm'), every line of
+                           the log ('wk logs'); a command's own -h says what
+                           its --all covers
   WK_DEBUG=1               verbose output
 EOF
         printf '\n  wk help                  README.md: architecture, setup, every workflow by example\n'

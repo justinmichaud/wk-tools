@@ -543,6 +543,11 @@ t_delegates() {
     t_has_wk
 }
 
+t_owns_records() {   # a build box's workspaces are recorded on the workstation that made them; a workstation's are its own
+    _remote_is_local && return 1
+    _remote_peer
+}
+
 t_far_side() {
     if _remote_is_local; then echo none
     elif ! _remote_probe_try; then echo unreachable
@@ -703,8 +708,14 @@ t_sync() {
 # The record here outlives anything the far side has not confirmed gone: a re-run finds it and retries.
 t_destroy() {
     local name="$1" ws
-    _remote_peer && die "'$WK_REMOTE_HOST' is a workstation: its workspaces are removed there,
-    by the machine that made them.  ssh $WK_REMOTE_HOST wk rm $name"
+    if _remote_peer; then   # a workstation's workspaces are its own store's, so its `wk` is what destroys one; the answer given here crosses as WK_YES (wk_forwarded_env), and the t_info that follows in cmd/rm is what says it took
+        WK_YES=1 t_wk rm "$name" >&2 \
+            || die "$WK_REMOTE_HOST did not destroy '$name'; what its own wk said is above.
+    Nothing here was changed -- re-run 'wk rm $name' once that is settled."
+        rm -rf "$(wk_ws_dir "$name")"
+        info "'$name' destroyed on $WK_REMOTE_HOST, by that machine's own wk"
+        return 0
+    fi
     _remote_probe
     ws=$(_remote_ws "$name")
     _rsh_q "rm -rf $(sh_quote "$ws")" \

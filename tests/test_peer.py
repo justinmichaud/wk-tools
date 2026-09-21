@@ -45,21 +45,26 @@ done
 exec /bin/sh -c "$*"
 """
 
-# The peer's own `wk`. It answers the two questions the driver asks --
-# `wk ls --json` for what it holds, `wk zed <ws> --route` for how to reach
-# one -- and records every invocation, so a test can prove a command was
-# handed over rather than run here.
+# The peer's own `wk`. It answers the questions the driver asks -- `wk ls
+# --json` for what it holds, `wk zed <ws> --route` for how to reach one --
+# destroys what it is asked to destroy, and records every invocation, so a
+# test can prove a command was handed over rather than run here. Its `rm`
+# converges: what it has removed it stops listing, which is the evidence
+# `wk rm` reads back before it reports a workspace gone.
 _PEER_WK = """#!/bin/sh
-printf '%s\\n' "$* ${{WK_ZED_PUBKEY:+key=$WK_ZED_PUBKEY}}${{WK_FORCE:+force=1 }}${{WK_QUIET:+quiet=1 }}" >> "{log}"
+printf '%s\\n' "$* ${{WK_ZED_PUBKEY:+key=$WK_ZED_PUBKEY}}${{WK_FORCE:+force=1 }}${{WK_QUIET:+quiet=1 }}${{WK_YES:+yes=1 }}" >> "{log}"
 case "$1 $2" in
 "ls --json")
-    printf '%s\\n' '{listing}'
+    if [ -f "{removed}" ]; then printf '%s\\n' '{{"workspaces": []}}'; else printf '%s\\n' '{listing}'; fi
     exit 0 ;;
 esac
 case "$1 $3" in
 "zed --route")
     printf 'user=dev\\nsrc=/src/WebKit\\nproxy=/opt/wk-tools/container/ssh-transport.sh %s\\n' "$2"
     exit 0 ;;
+esac
+case "$1" in
+rm) : > "{removed}"; exit 0 ;;
 esac
 exit 0
 """
@@ -88,8 +93,10 @@ class PeerFixture(WkTest):
         self.tools = self.tmp / "peer-tools"
         self.tools.mkdir()
         self.calls = self.tmp / "peer-calls"
+        self.removed = self.tmp / "peer-removed"
         peer_wk = self.tools / "wk"
-        peer_wk.write_text(_PEER_WK.format(log=self.calls, listing=_LISTING))
+        peer_wk.write_text(_PEER_WK.format(log=self.calls, listing=_LISTING,
+                                           removed=self.removed))
         peer_wk.chmod(0o755)
 
         (self.root / "targets" / "hosts" / "peerbox.conf").write_text(
@@ -142,6 +149,29 @@ t=$(ws_target peerws)
 ''', binp)
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
 
+    def test_only_a_workstation_keeps_its_own_records(self):
+        """t_owns_records, which is what makes a removal the far side's own: a
+        build box's workspaces are recorded on the workstation that made them,
+        and destroying one is that workstation's own work"""
+        (self.root / "targets" / "hosts" / "buildbox.conf").write_text(
+            "WK_TARGET_KIND=remote\nWK_REMOTE_HOST=buildbox\n")
+        with stub_path({"ssh": _FAKE_SSH}) as binp:
+            cp = self._bash('''
+set -euo pipefail
+. "$WK_ROOT/lib/common.sh"
+. "$WK_ROOT/lib/target.sh"
+load_target peerbox
+echo "peer=$(t_owns_records && echo yes || echo no)"
+load_target buildbox
+echo "buildbox=$(t_owns_records && echo yes || echo no)"
+load_target vm
+echo "vm=$(t_owns_records && echo yes || echo no)"
+''', binp)
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertIn("peer=yes", cp.stdout)
+        self.assertIn("buildbox=no", cp.stdout)
+        self.assertIn("vm=no", cp.stdout)
+
     def test_peer_info_and_list(self):
         """t_info answers present/absent for a peer, and t_list names what it holds"""
         with stub_path({"ssh": _FAKE_SSH}) as binp:
@@ -182,12 +212,44 @@ class TestPeerDelegation(PeerFixture):
         self.assertEqual(cp.returncode, 0, cp.stdout)
         self.assertIn("logs peerws ", self.peer_calls())
 
-    def test_making_and_destroying_stays_with_the_owner(self):
-        """a lifecycle command is not handed over: a peer owns its own workspaces"""
+    def test_destroying_one_is_asked_of_the_peer(self):
+        """`wk rm <ws>` of a workspace a peer keeps the record of is that
+        peer's own `wk rm`, run over there with the answer given here"""
         cp = self._wk("rm", "peerws", extra_env={"WK_YES": "1"})
+        self.assertEqual(cp.returncode, 0, cp.stdout)
+        asked = [c for c in self.peer_calls() if c.startswith("rm ")]
+        self.assertEqual(len(asked), 1, self.peer_calls())
+        self.assertIn("rm peerws", asked[0])
+        self.assertIn("yes=1", asked[0],
+                      "the peer was left a question with no terminal to ask it on")
+        self.assertIn("destroyed on peerbox", cp.stdout, cp.stdout)
+        self.assertIn("workspace 'peerws' destroyed", cp.stdout, cp.stdout)
+
+    def test_the_question_is_asked_here_and_names_the_machine(self):
+        """one confirmation, on the machine the person typed it on, naming the
+        workspace and the machine it is on -- nothing crosses until it is
+        answered"""
+        cp = self._wk("rm", "peerws")
         self.assertNotEqual(cp.returncode, 0, cp.stdout)
-        self.assertIn("workstation", cp.stdout)
-        self.assertFalse(any(c.startswith("rm ") for c in self.peer_calls()),
+        self.assertIn("peerws@peerbox", cp.stdout, cp.stdout)
+        self.assertFalse([c for c in self.peer_calls() if c.startswith("rm ")],
+                         self.peer_calls())
+
+    def test_making_one_stays_with_the_owner(self):
+        """the other half of the lifecycle is still typed over there: this
+        driver would make a plain checkout under ~/wk, which is not what a
+        workstation's workspaces are"""
+        with stub_path({"ssh": _FAKE_SSH}) as binp:
+            cp = bash('''
+set -euo pipefail
+. "$WK_ROOT/lib/common.sh"
+. "$WK_ROOT/lib/target.sh"
+load_target peerbox
+t_create newws
+''', env=self.env({"PATH": f"{binp}:{os.environ['PATH']}"}), cwd=str(self.root))
+        self.assertNotEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertIn("wk new newws", cp.stderr, cp.stderr)
+        self.assertFalse([c for c in self.peer_calls() if c.startswith("new ")],
                          self.peer_calls())
 
     def test_a_here_command_stays_here(self):

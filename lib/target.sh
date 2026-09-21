@@ -175,6 +175,7 @@ t_task_put()  { :; }   # <name> <task dir>; nothing to do where the record alrea
 t_has_wk()    { return 1; }         # is there a far side that can answer?
 
 t_delegates() { return 1; }         # must a command about a workspace here run there?
+t_owns_records() { return 1; }      # does the far side keep the record of its own workspaces, so one is made and destroyed by its `wk` and not by this one?
 t_far_side()  { echo none; }        # answering | unreachable | stopped | no-wk | none (not a machine of its own)
 t_answers()   { WK_FAR_WHY=""; return 0; }   # 0 when the machine behind this target answers; else 1, with why in WK_FAR_WHY. By exit status in the caller's shell, so the driver's one probe is memoised for every question after it
 t_wk()        { return 1; }         # t_wk <args...>, its exit status is the answer
@@ -386,7 +387,7 @@ zed_key_pub() { # WK_ZED_PUBKEY when preparing a workspace for the machine that 
 target_all() { # container, vm, this machine's own target, and targets/hosts/*.conf
     local d f t seen=" container vm "
     echo container
-    echo vm
+    if is_macos; then echo vm; fi   # tart is Apple's, so a guest exists only on a macOS host; elsewhere -- a Linux workstation, the podman VM -- this target has no store of its own either (wk_record_dir resolves to the container store), and every container workspace was listed a second time as a `broken` vm guest
 
     t=$(wk_remote_field target)
     if [ -n "$t" ]; then seen="$seen$t "; echo "$t"; fi
@@ -548,6 +549,7 @@ _target_reset_vars() {
     WK_REMOTE_ROOT="$_WK_ENV_REMOTE_ROOT"
     WK_REMOTE_REFERENCE="$_WK_ENV_REMOTE_REFERENCE"
     WK_REMOTE_LOCAL=""
+    WK_REMOTE_PEER=""
     WK_MAX_JOBS=""
     WK_TARGET_CMAKE=""
     WK_TARGET_LIBCXX=""

@@ -1,17 +1,13 @@
 # HANDOFF — several lanes, several machines, one experiment
 
-README.md ("One lane per profile, one build per machine", "The boards'
-profile-guided build") is the design.
+## The vocabulary
 
-## The vocabulary this is to be rebuilt in
+This repo uses confusing vocabulary made by a bunch of different agents. Make everything in the repo conform to this:
 
-The words below are the ones to use; each line that differs from the tree is
-owed work, and the whole of it is one decision because "target" already names
-something else.
-
-- **perf task** — a name, a timestamp, a description, and a PR, commit or
-  branch to measure. Its workspaces are deletable once its results are in.
-  `wk ab`'s bench task is this without the description.
+- **lane** - NOTHING! This means nothing, you should never use this word!
+- **perf task** — a name, a timestamp, a description, and a (PR, commit or
+  branch) to measure. Its workspaces are deletable once its results are in.
+  `wk ab`'s bench task should be this.
 - **target** — a device configuration: rpi3, rpi4, rpi5, macOS. The tree calls
   this a device or a board, and spends "target" on the *execution* target
   (`targets/hosts/*.conf`, `ws_target`, `default_target`, `where=` in every
