@@ -484,10 +484,9 @@ _machine_state() {
     podman machine inspect "$1" --format '{{.State}}' 2>/dev/null || echo absent
 }
 
-# The one command line a podman-machine child runs, for the dispatcher's forward and the container driver's delegation alike. The VM is part of this machine, so its records name this host as itself -- and a store this machine was pointed at is the store its VM answers for, which is what lets a test point the pair at a scratch directory and ask a routed question about a lane nothing has built (tests/support.py). Unset, both sides resolve the same default.
+# The one command line a podman-machine child runs, for the dispatcher's forward and the container driver's delegation alike. The VM is part of this machine, so its records name this host as itself. WK_STORE is not forwarded: it names the store of whichever machine reads it, and the VM's is its own -- `wk sysimage ls` with a WK_STORE here that does not exist is how a test proves the VM was asked at all (tests/test_slots.py).
 vm_wk_cmd() { # <wk args...>
-    printf 'WK_IN_VM=1 %s%sWK_ROW_LABEL=%s WK_HOST_SELF=1 %s%s/opt/wk-tools/wk %s' \
-        "${WK_STORE:+WK_STORE=$(sh_quote "$WK_STORE") }" \
+    printf 'WK_IN_VM=1 %sWK_ROW_LABEL=%s WK_HOST_SELF=1 %s%s/opt/wk-tools/wk %s' \
         "$(wk_forwarded_env)" \
         "$(sh_quote "${WK_ROW_LABEL:-$(wk_machine_name)}")" \
         "${WK_NO_DELEGATE:+WK_NO_DELEGATE=1 }" \

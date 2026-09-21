@@ -24,13 +24,22 @@ import unittest
 from tests.support import REPO, WkTest, bash
 
 AI = (REPO / "cmd" / "ai").read_text()
+VERIFY = (REPO / "cmd" / "verify").read_text()
+
+# cmd/verify's own definition, lifted rather than copied: which probes a
+# sandbox has to answer is one rule, and a copy here could pass while the
+# command it stands in for had changed its mind.
+ISOLATION_APPLIES = re.search(r"^isolation_applies\(\) \{.*\}$",
+                              VERIFY, re.M).group(0)
 BASHRC = (REPO / "shell" / "bashrc").read_text()
 
 # Stands in for cmd/verify's library half: the reporting helpers cmd/ai's
 # probes and its own totalling use, lib/par.sh, and one stub per probe
 # checks_here names. Each sleeps, so a serial assembly is visible on the clock,
 # fails as many times as $WK_TEST_FAIL_<name> says, and exits reporting nothing
-# under $WK_TEST_DIE_<name>.
+# under $WK_TEST_DIE_<name>. The one thing not stubbed is the predicate that
+# says which probes this sandbox has to answer: that is cmd/verify's own, so
+# the gate under test is the real one.
 FAKE_VERIFY = '''#!/usr/bin/env bash
 exec 3>&2
 fails=0
@@ -51,13 +60,15 @@ _stub() {
     [ "$want" -gt 0 ] || pass "$n is fine"
     return "$want"
 }
-for _p in push_here github_api bugzilla_api github allowlist off_allowlist \\
-          isolation no_credentials_inside gitwebkit_setup commit_wall; do
+for _p in push_here github_read github_write bugzilla_read bugzilla_write \\
+          github allowlist off_allowlist isolation no_credentials_inside \\
+          gitwebkit_setup commit_wall; do
     eval "probe_$_p() { _stub $_p; }"
 done
+__ISOLATION_APPLIES__
 [ "${WK_VERIFY_LIB:-}" != 1 ] || return 0
 echo "the real wk verify would have run" >&2
-'''
+'''.replace("__ISOLATION_APPLIES__", ISOLATION_APPLIES)
 
 
 class _Inside(WkTest):
@@ -138,15 +149,27 @@ class TestEveryCheckRunsAtOnce(_Inside):
         cp = self._checks(secs="0.6")
         elapsed = time.monotonic() - started
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertLess(elapsed, 3.0, f"{elapsed:.1f}s for 10 probes of 0.6s each")
+        self.assertLess(elapsed, 3.0, f"{elapsed:.1f}s for probes of 0.6s each")
 
     def test_every_probes_verdict_is_reported(self):
         cp = self._checks()
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        for name in ("push_here", "github_api", "bugzilla_api", "isolation",
-                     "github"):
+        for name in ("push_here", "github_read", "github_write",
+                     "bugzilla_read", "bugzilla_write", "github"):
             self.assertIn(f"{name} is fine", cp.stderr)
         self.assertIn("nothing in here can publish", cp.stderr)
+
+    def test_the_container_only_probes_are_asked_only_of_a_container(self):
+        """probe_isolation measures a network namespace of the workspace's own
+        and the host paths a bind mount could expose. A guest has neither and
+        no /proc/net/dev to read, so asked there it reports a workspace that
+        cannot enumerate its interfaces -- a FAIL for a property nothing ever
+        promised, and one that stopped every session in a guest. This runs
+        against the `local` target, which is no more a container than a guest
+        is."""
+        cp = self._checks()
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertNotIn("isolation", cp.stderr)
 
     def test_the_commit_wall_is_probed_exactly_where_it_applies(self):
         """The wall is bwrap's read-only .git, and bwrap is Linux's:
@@ -167,12 +190,13 @@ class TestWhatEachKindOfFailureDoes(_Inside):
     def test_a_sandbox_failure_is_a_barrier(self):
         """The same verdict `wk ai claude <ws>` reaches from the host: it
         refuses, and an explicit --force crosses it."""
-        cp = self._checks(env={"WK_TEST_FAIL_isolation": "1"})
+        cp = self._checks(env={"WK_TEST_FAIL_no_credentials_inside": "1"})
         self.assertNotEqual(cp.returncode, 0, cp.stdout + cp.stderr)
         self.assertIn("the sandbox around 'demo' is not intact", cp.stderr)
         self.assertIn("--force", cp.stderr)
 
-        forced = self._checks(env={"WK_TEST_FAIL_isolation": "1", "WK_FORCE": "1"})
+        forced = self._checks(env={"WK_TEST_FAIL_no_credentials_inside": "1",
+                                   "WK_FORCE": "1"})
         self.assertEqual(forced.returncode, 0, forced.stdout + forced.stderr)
 
     def test_a_way_to_publish_is_not_forceable(self):
@@ -180,8 +204,8 @@ class TestWhatEachKindOfFailureDoes(_Inside):
         arrangement exists to prevent, and nothing in here could fix it. All
         three ways count: a key that signs, a GitHub write, a Bugzilla write."""
         for env in ({"WK_TEST_FAIL_push_here": "1"},
-                    {"WK_TEST_FAIL_github_api": "1"},
-                    {"WK_TEST_FAIL_bugzilla_api": "1"},
+                    {"WK_TEST_FAIL_github_write": "1"},
+                    {"WK_TEST_FAIL_bugzilla_write": "1"},
                     {"WK_TEST_FAIL_push_here": "1", "WK_FORCE": "1"}):
             with self.subTest(env=env):
                 cp = self._checks(env=env)
@@ -189,13 +213,25 @@ class TestWhatEachKindOfFailureDoes(_Inside):
                 self.assertIn("could publish", cp.stderr)
                 self.assertIn("wk push off", cp.stderr)
 
+    def test_a_read_that_is_not_authenticated_is_not_a_way_to_publish(self):
+        """The injector authenticates a read from a standing token in either
+        position of the switch, so what a read answers says nothing about
+        whether this workspace could publish. Refusing a session for one --
+        and telling the person the agent could publish -- sends them after a
+        switch that is already off."""
+        cp = self._checks(env={"WK_TEST_FAIL_github_read": "1",
+                               "WK_TEST_FAIL_bugzilla_read": "1"})
+        self.assertNotEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertNotIn("could publish", cp.stderr)
+        self.assertIn("the sandbox around 'demo' is not intact", cp.stderr)
+
     def test_a_probe_that_dies_without_reporting_is_named(self):
         """Unmeasured is not the same as passed: a probe killed by its own
         `set -e` leaves an exit status and no record, and a count that only
         added the status would show a number with no FAIL line under it."""
-        cp = self._checks(env={"WK_TEST_DIE_isolation": "1"})
+        cp = self._checks(env={"WK_TEST_DIE_no_credentials_inside": "1"})
         self.assertNotEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertIn("the 'isolation' probe died before it reported anything",
+        self.assertIn("the 'no-credentials' probe died before it reported anything",
                       cp.stderr)
         self.assertIn("the sandbox around 'demo' is not intact", cp.stderr)
 

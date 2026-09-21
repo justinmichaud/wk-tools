@@ -162,8 +162,17 @@ class TestCloningAStaleBaseIsRefused(WkTest):
     def _create(self, mark_ready, force=False, rc=0):
         store = self.tmp / "store"
         store.mkdir(exist_ok=True)
+        # A clone is refused outright without a mirror on this machine to
+        # clone from ([ -d "$(wk_mirror)" ], targets/vm.sh), and on macOS the
+        # mirror lives under XDG_STATE_HOME -- which the suite points at a
+        # scratch directory so no test writes into the real one. What the
+        # driver checks is that the directory is there; the clone itself is
+        # the guest's, through the stubbed tart.
+        state = self.tmp / "state"
+        (state / "wk" / "git" / "WebKit.git").mkdir(parents=True, exist_ok=True)
         with stub_path({"tart": TART_WITH_BASE}) as binp:
             env = {"WK_VM_STORE": str(store),
+                   "XDG_STATE_HOME": str(state),
                    "PATH": f"{binp}:{os.environ['PATH']}"}
             if force:
                 env["WK_VM_FORCE"] = "1"

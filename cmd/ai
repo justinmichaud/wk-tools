@@ -104,7 +104,7 @@ probe_push_here() {
     return "$fails"
 }
 
-# The probes a workspace answers about itself are cmd/verify's own, lifted without running it: the half it reads from the host is unanswerable in here. Each is a request with its own timeout, so a session starts in the time of the slowest rather than the sum of eight. Sourcing cmd/verify re-reads lib/target.sh, which restores the driver defaults over this target's, so the target is loaded again.
+# The probes a workspace answers about itself are cmd/verify's own, lifted without running it: the half it reads from the host is unanswerable in here. Each is a request with its own timeout, so a session starts in the time of the slowest rather than their sum. Sourcing cmd/verify re-reads lib/target.sh, which restores the driver defaults over this target's, so the target is loaded again.
 checks_here() {
     local publish=0 sandbox=0 rec
     WK_VERIFY_LIB=1 . "$WK_ROOT/cmd/verify"
@@ -115,15 +115,17 @@ checks_here() {
     wk_atexit par_cleanup
     par_begin
     par_run push-keys            probe_push_here
-    par_run github-api           probe_github_api
-    par_run bugzilla-api         probe_bugzilla_api
+    par_run github-read          probe_github_read
+    par_run github-write         probe_github_write
+    par_run bugzilla-read        probe_bugzilla_read
+    par_run bugzilla-write       probe_bugzilla_write
     par_run egress-github        probe_github
     par_run egress-allowlist     probe_allowlist
     par_run egress-off-allowlist probe_off_allowlist
-    par_run isolation            probe_isolation
     par_run no-credentials       probe_no_credentials_inside
     par_run gitwebkit-setup      probe_gitwebkit_setup
-    [ "$(t_os)" = macos ] || par_run commit-wall probe_commit_wall
+    ! isolation_applies || par_run isolation   probe_isolation
+    ! wall_applies      || par_run commit-wall probe_commit_wall
     par_wait
 
     set -- $_par_status
@@ -136,8 +138,8 @@ checks_here() {
             [ -z "$rec" ] || printf '%s\n' "$rec" >&2
         fi
         case "$1" in
-            push-keys|github-api|bugzilla-api) publish=$((publish + $2)) ;;
-            *)                                 sandbox=$((sandbox + $2)) ;;
+            push-keys|github-write|bugzilla-write) publish=$((publish + $2)) ;;
+            *)                                     sandbox=$((sandbox + $2)) ;;
         esac
         shift 2
     done

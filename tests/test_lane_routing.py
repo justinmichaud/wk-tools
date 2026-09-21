@@ -28,6 +28,7 @@ LIBS = "\n".join('. "%s/%s"' % (REPO, f) for f in (
 PROFILE = "webkit-2.52-yocto-rpi5-64"
 LANE = "yocto-" + PROFILE
 BUILDROOT_PROFILE = "wpewebkit-2.38-buildroot-rpi3-32"
+LANE_NOBODY_BUILT = LANE + "-selftest"   # an arm of that lane, and no run of anything makes one
 BUILDROOT_LANE = "buildroot-" + BUILDROOT_PROFILE
 
 
@@ -186,14 +187,16 @@ class TestHoldsAnswersOnStdout(WkTest):
     which as a status would read as `holds` and skip the build."""
 
     def _holds(self, *args):
-        """Against a store of this test's own: `holds` is routed to the
-        machine holding the lane, and on a macOS workstation that is the
-        podman VM -- whose real store answers `yes` for whatever this
-        maintainer last built, which is not what any of these assert. The
-        store reaches the far side with the command (vm_wk_cmd,
-        lib/target.sh), so both sides read the scratch one."""
-        cp = run("sysimage", "holds", *args, timeout=240,
-                 env={"WK_STORE": str(self.tmp / "store")})
+        """Against a lane of this test's own: `holds` is routed to the machine
+        holding the lane, and on a macOS workstation that is the podman VM,
+        whose real store answers `yes` for whatever this maintainer last built
+        -- which is not what any of these assert. A lane name is what a test
+        can have to itself; a store is not, because WK_STORE names the store
+        of whichever machine reads it and the machine answering here is not
+        this one. `<builder>-<profile>-<arm>` is a lane of its own, so this is
+        a name of the shape the A/B's own arms use."""
+        cp = run("sysimage", "holds", *args, "--workspace", LANE_NOBODY_BUILT,
+                 timeout=240)
         return cp.stdout.strip(), cp
 
     def test_an_image_nothing_has_built_is_no(self):

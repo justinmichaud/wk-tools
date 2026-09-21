@@ -103,29 +103,43 @@ class TestAKeyThatReachesTheWorkspaceIsARefusal(_Measure):
 
 
 class TestTheWriteHalvesAreVerifysOwnProbes(_Measure):
-    """Not asked twice. cmd/ai names probe_github_api and probe_bugzilla_api in
-    the same parallel pass, and counts their failures as ways to publish -- so
-    the 412 the injector answers with the switch off is asserted in one place,
-    with one wording, whichever side the check was started from."""
+    """Not asked twice. cmd/ai names probe_github_write and probe_bugzilla_write
+    in the same parallel pass, and counts their failures as ways to publish --
+    so the 412 the injector answers with the switch off is asserted in one
+    place, with one wording, whichever side the check was started from."""
 
     AI = (REPO / "cmd" / "ai").read_text()
 
-    def test_it_runs_verifys_probes_rather_than_repeating_them(self):
+    def _checks_here(self):
         body = self.AI[self.AI.index("checks_here() {"):]
-        body = body[:body.index("\n}\n")]
-        for probe in ("probe_github_api", "probe_bugzilla_api"):
+        return body[:body.index("\n}\n")]
+
+    def test_it_runs_verifys_probes_rather_than_repeating_them(self):
+        body = self._checks_here()
+        for probe in ("probe_github_write", "probe_bugzilla_write"):
             self.assertIn(probe, body, probe)
         self.assertNotIn("api.github.com", self.AI,
                          "cmd/ai asks GitHub itself; cmd/verify's probe is the one asking")
         self.assertNotIn("bugs.webkit.org", self.AI)
 
     def test_their_failures_are_ways_to_publish_and_not_sandbox_faults(self):
-        body = self.AI[self.AI.index("checks_here() {"):]
-        body = body[:body.index("\n}\n")]
-        line = [l for l in body.splitlines() if "publish=$((publish" in l]
+        line = [l for l in self._checks_here().splitlines()
+                if "publish=$((publish" in l]
         self.assertEqual(1, len(line), line)
-        for job in ("push-keys", "github-api", "bugzilla-api"):
+        for job in ("push-keys", "github-write", "bugzilla-write"):
             self.assertIn(job, line[0], job)
+
+    def test_a_read_is_not_one_of_them(self):
+        """A read is authenticated in either position of the switch, so a read
+        that answers 401 is a workspace on public GitHub -- not a way to
+        publish, and not a reason to refuse a session. The probes are split at
+        that line so the count can be."""
+        body = self._checks_here()
+        for job in ("github-read", "bugzilla-read"):
+            self.assertIn("par_run " + job, body, job)
+        line = [l for l in body.splitlines() if "publish=$((publish" in l][0]
+        for job in ("github-read", "bugzilla-read"):
+            self.assertNotIn(job, line, job)
 
 
 class TestOnlyAWorkspaceMeasuresInsteadOfSwitching(_Measure):

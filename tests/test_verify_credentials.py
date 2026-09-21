@@ -23,14 +23,15 @@ from tests.support import REPO, WkTest, bash, func_body
 
 VERIFY = (REPO / "cmd" / "verify").read_text()
 
-# The block under test is cmd/verify's own three credential probes, lifted
+# The block under test is cmd/verify's own credential probes, lifted
 # whole rather than copied, so a check added there is a check this file runs
 # and one whose behaviour drifts is a failure here. Function boundaries, not a
 # pair of statements to slice between: those have to keep being spelled that
 # way, and adding a branch elsewhere in the file that happened to contain one
 # of them emptied this block into a syntax error.
 PROBES = ("probe_no_credentials_inside", "probe_secrets_view",
-          "probe_agent_identities", "probe_github_api", "probe_bugzilla_api")
+          "probe_agent_identities", "probe_github_read", "probe_github_write",
+          "probe_bugzilla_read", "probe_bugzilla_write")
 
 # Answers for every probe the block makes, keyed by a substring of the command
 # it runs inside the workspace. The defaults are a healthy workspace with the
@@ -293,6 +294,27 @@ class TestAReadIsAuthenticatedFromTheStandingToken(_Block):
         self.assertIn("wk key set github-pat", out)
         self.assertIn("./setup", out)
 
+    def test_a_token_github_refuses_is_reported_and_is_not_a_failure_either(self):
+        """GET / answers 200 without any credential, so a 401 there is the
+        standing token being turned away -- the injector is in the path, it is
+        what put the token in the request. What that costs is the rate limit;
+        the boundary is untouched, and a session must not be refused for it."""
+        out = self.run_block(answers={"https://api.github.com/ ": "401",
+                                      "api.github.com/user": "401"})
+        self.assertEqual(0, self.fails(out), out)
+        self.assertIn("GitHub refused the standing read token", out)
+        # Not the other 401's words: a token nothing holds degrades a read to
+        # public GitHub, and one GitHub refuses is sent with the request and
+        # fails it. Saying "60 requests an hour" here promised reads that do
+        # not happen.
+        self.assertIn("every API read in here is refused", out)
+        self.assertNotIn("60 requests an hour", out.split("GitHub refused")[1])
+        # The two causes are not distinguishable from in here, and the
+        # command that tells them apart is named rather than guessed at.
+        self.assertIn("wk key check github-pat", out)
+        self.assertIn("wk start demo", out)
+        self.assertIn("wk key set github-pat --replace", out)
+
     def test_neither_arm_asks_this_device_for_a_token(self):
         self.assertNotIn("wk_github_pat", self.block())
 
@@ -482,15 +504,16 @@ class TestBothTargetsAreMeasured(unittest.TestCase):
         """A guest reaches the agent through an `ssh -R` and a container
         through a bind-mounted socket, but every probe is the same command run
         by t_exec -- so the credential checks are not inside the
-        $WK_SANDBOX guard, which is about container properties."""
-        guard = VERIFY.index('if [ "${WK_SANDBOX:-}" = rootless-proxy ]')
+        `isolation_applies` guard, which is about container properties."""
+        guard = VERIFY.index("if isolation_applies; then")
         block = VERIFY.index("par_run no-credentials-inside")
         self.assertGreater(block, guard)
         # The guard's own `fi` closes before the probes are queued.
         self.assertIn("\nfi\n", VERIFY[guard:block])
         outside = VERIFY[block:VERIFY.index(
             'if [ "${WK_SANDBOX:-}" = rootless-proxy ]', block)]
-        for name in ("no-credentials-inside", "agent-identities", "github-api"):
+        for name in ("no-credentials-inside", "agent-identities",
+                     "github-read", "github-write"):
             self.assertIn("par_run " + name, outside)
 
     def test_a_guest_is_not_excluded_from_the_network_checks(self):

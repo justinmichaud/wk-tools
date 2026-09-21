@@ -82,9 +82,20 @@ export GIT_CONFIG_KEY_1=index.skipHash  GIT_CONFIG_VALUE_1=false
 
 # cargo reads whichever index is already on disk, so each repo is rewritten and pinned in its own config too: the helper re-initialises its workdir inside every action, running git in an environment this script does not govern. `--really-refresh` keeps work in progress, and its status is non-zero whenever a path differs from the index, as targets.conf does.
 refresh_git_index() { # <dir> -- leave an index libgit2 can open, and keep it so
+    local d
     [ -e "$1/.git" ] || return 0
     git -C "$1" config index.skipHash false >/dev/null 2>&1 || true
     git -C "$1" config index.version 2     >/dev/null 2>&1 || true
+    # A killed stage can leave an index no git can read at all -- 0 bytes,
+    # "index file smaller than expected", measured in this lane 2026-09-21 --
+    # and then every command in that checkout fails on it and nothing
+    # converged it. Rebuilt from HEAD, which is what an index is a cache of.
+    if ! git -C "$1" ls-files >/dev/null 2>&1; then
+        d=$(git -C "$1" rev-parse --absolute-git-dir 2>/dev/null) || d=""
+        [ -z "$d" ] || rm -f "$d/index"
+        git -C "$1" read-tree HEAD >/dev/null 2>&1 || true
+        say "rebuilt an unreadable git index in $1 from HEAD"
+    fi
     git -C "$1" update-index --really-refresh >/dev/null 2>&1 || true
 }
 refresh_git_index "$SRC"
@@ -175,7 +186,7 @@ checkout_slot_commit() {
     git cat-file -e "$COMMIT^{commit}" 2>/dev/null \
         || git fetch --quiet "${WK_MIRROR:?WK_MIRROR names the mirror this container mounts, set by targets/container.sh}" "$COMMIT" \
         || fail "$COMMIT is not in this machine's mirror; 'wk ab' and 'wk pr' fetch a PR head into it first"
-    dirty=$(git status --porcelain | wc -l | tr -d ' ')
+    dirty=$(git status --porcelain | wc -l | tr -d ' ') || dirty=0
     [ "$dirty" = 0 ] \
         || say "discarding $dirty uncommitted path(s) in $SRC -- a slot is built from a commit and nothing else"
     git checkout --force --detach --quiet "$COMMIT" \

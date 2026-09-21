@@ -724,6 +724,59 @@ class TestRequireToolchain(WkTest):
                         "reached, or the SDK is built under this stage's budget")
 
 
+class TestRefreshGitIndexRepairsWhatAKillLeft(WkTest):
+    """A killed stage can leave an index no git can read -- 0 bytes in this
+    lane, measured 2026-09-21 -- and then every command in that checkout
+    fails on it ("index file smaller than expected") and nothing in wk
+    converged it. Every stage calls refresh_git_index, so whichever runs next
+    is what repairs it."""
+
+    def setUp(self):
+        super().setUp()
+        self.func = _lift("refresh_git_index")
+
+    def _repo(self, d):
+        def git(*a):
+            subprocess.run(["git", "-C", str(d), *a], check=True,
+                           capture_output=True, text=True)
+        git("init", "-q")
+        git("config", "user.email", "t@example.com")
+        git("config", "user.name", "t")
+        (d / "tracked").write_text("one")
+        git("add", "-A"); git("commit", "-qm", "one")
+
+    def _readable(self, d):
+        return subprocess.run(["git", "-C", str(d), "ls-files"],
+                              capture_output=True, text=True).returncode == 0
+
+    def test_a_truncated_index_is_rebuilt_from_head(self):
+        with scratch_dir() as d:
+            self._repo(d)
+            (d / ".git" / "index").write_bytes(b"")
+            self.assertFalse(self._readable(d), "a 0-byte index read fine")
+            cp = _run(self.func, "refresh_git_index", str(d))
+            self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+            self.assertTrue(self._readable(d), cp.stdout + cp.stderr)
+            self.assertEqual(
+                subprocess.run(["git", "-C", str(d), "ls-files"],
+                               capture_output=True, text=True).stdout.split(),
+                ["tracked"])
+
+    def test_a_readable_index_is_left_alone(self):
+        with scratch_dir() as d:
+            self._repo(d)
+            before = (d / ".git" / "index").stat().st_size
+            cp = _run(self.func, "refresh_git_index", str(d))
+            self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+            self.assertTrue(self._readable(d))
+            self.assertEqual((d / ".git" / "index").stat().st_size, before)
+
+    def test_a_directory_that_is_no_repository_is_a_noop(self):
+        with scratch_dir() as d:
+            cp = _run(self.func, "refresh_git_index", str(d))
+            self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+
+
 class TestCheckoutSlotCommit(WkTest):
     """checkout_slot_commit: the lane's checkout converges onto the slot's
     commit however the last run left it.  A killed webkit stage left 4819

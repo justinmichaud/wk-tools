@@ -267,5 +267,37 @@ class TestGitWebkitSetupIsMeasured(WkTest):
         self.assertIn("git -C /src/WebKit config --get webkitscmpy.setup", cp.stderr)
 
 
+class TestTheContainerOnlyProbesAreGated(WkTest):
+    """probe_isolation reads /proc/net/dev and looks for the host paths a bind
+    mount could expose: a guest has neither, and running it there reports a
+    workspace that cannot enumerate its interfaces rather than a property that
+    was ever promised. One predicate says where those properties exist, and
+    both this command and a session started inside a workspace (cmd/ai) ask it
+    rather than each testing $WK_SANDBOX for itself."""
+
+    AI = (REPO / "cmd" / "ai").read_text()
+
+    def _applies(self, sandbox):
+        cp = probe("WK_SANDBOX=%s\nisolation_applies && echo YES || echo NO" % sandbox)
+        self.assertEqual(0, cp.returncode, cp.stdout + cp.stderr)
+        return cp.stdout.strip()
+
+    def test_a_container_has_them(self):
+        self.assertEqual("YES", self._applies("rootless-proxy"))
+
+    def test_a_guest_does_not(self):
+        """targets/vm.sh sets no sandbox name: the guest is the boundary."""
+        self.assertEqual("NO", self._applies(""))
+
+    def test_a_local_workspace_does_not_either(self):
+        self.assertEqual("NO", self._applies("self"))
+
+    def test_both_commands_ask_the_one_predicate(self):
+        self.assertIn("if isolation_applies; then", VERIFY)
+        self.assertIn("! isolation_applies || par_run isolation", self.AI)
+        self.assertEqual(1, VERIFY.count("isolation_applies() {"))
+        self.assertNotIn("isolation_applies() {", self.AI)
+
+
 if __name__ == "__main__":
     unittest.main()

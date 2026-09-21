@@ -1730,22 +1730,27 @@ of it from inside the workspace -- no private key material in the home,
 `/secrets` or `/run/wk`; no credential the delivery column withholds from that
 kind readable in there; the agent socket holding nothing; a write answering
 401 rather than being authenticated; `GITHUB_COM_TOKEN` and `GH_TOKEN` being
-the placeholders, with no stored `gh` credential beside them. A read answering 200
-is the arrangement working, and is measured against whether this device holds a
-token at all. On a build box a `gh` login in the agent's account is a
-refusal. Committing: a container `wk ai claude` session runs the agent
-under bwrap with the checkout's `.git` commit-parts (`objects`, `refs`, `logs`,
-`HEAD`, `packed-refs`) read-only, so a commit, a stage, a stash, a branch move
-or a rebase fails while a build, an edit, `git status`/`diff`/`log` all work --
-the read-only binds cannot be unmounted, shadowed or escaped from inside, and
-`wk verify` proves the recipe blocks a commit in that very container. Both
-measures are the one switch: `wk push on` turns them off, and because a session
-already running would be handed that push -- and would keep its commit wall
-until it exited -- it asks once and ends every claude process in every workspace
-first (`--yes` answers; a decline loads nothing; `--force` leaves them running
-and loads the keys anyway, which hands that session a push until it exits, and
-says so again when the command ends). A human `wk enter` shell is
-never walled. Only the person at the keyboard pushes or commits.
+the placeholders, with no stored `gh` credential beside them. A read is the
+other half and is judged apart from all of it: 200 is the arrangement working,
+and 401 -- no standing token where the injector reads one, or one GitHub
+refuses -- is reported with what converges or replaces it and refuses nothing:
+the first leaves the workspace on public GitHub's 60 requests an hour and the
+second leaves it unable to read the API at all, and neither is a way to
+publish. On a build box a `gh` login in the
+agent's account is a refusal. Committing: a container `wk ai claude` session
+runs the agent under bwrap with the checkout's `.git` commit-parts (`objects`,
+`refs`, `logs`, `HEAD`, `packed-refs`) read-only, so a commit, a stage, a
+stash, a branch move or a rebase fails while a build, an edit,
+`git status`/`diff`/`log` all work -- the read-only binds cannot be unmounted,
+shadowed or escaped from inside, and `wk verify` proves the recipe blocks a
+commit in that very container. Both measures are the one switch: `wk push on`
+turns them off, and because a session already running would be handed that
+push -- and would keep its commit wall until it exited -- it asks once and
+ends every claude process in every workspace first (`--yes` answers; a decline
+loads nothing; `--force` leaves them running and loads the keys anyway, which
+hands that session a push until it exits, and says so again when the command
+ends). A human `wk enter` shell is never walled. Only the person at the
+keyboard pushes or commits.
 
 Nothing an agent runs drives a build directly either. `container/bin/wk-build-wall`
 lists the tools it wraps and sits on PATH under each of their names, ahead of the

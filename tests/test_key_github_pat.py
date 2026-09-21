@@ -22,7 +22,7 @@ import time
 import unittest
 from http.server import HTTPServer
 
-from tests.support import REPO, WkTest, stub_path
+from tests.support import REPO, WkTest, clean_env, stub_path
 from tests.test_credcheck import CLASSIC, FINE, POLICY, FakeGitHub
 
 KEY = REPO / "cmd" / "key"
@@ -66,18 +66,16 @@ class _PatRun(WkTest):
         self.extra_env = {}
 
     def _env(self, binp):
-        env = dict(os.environ)
-        for var in ("WK_NAME", "WK_TARGET", "WK_TARGET_KIND", "WK_MARKER",
-                    "WK_STORE", "WK_IN_VM"):
-            env.pop(var, None)
+        # tests/support's environment, not one built here: which variables a
+        # command must not inherit from the person running the suite is one
+        # rule, and the store this command writes through is only half of it.
         reg = self.tmp / "no-registry"
         reg.mkdir(exist_ok=True)
-        env.update({"WK_HOST_SECRETS": str(self.secrets),
-                    "WK_STORE": str(self.store),
-                    "WK_TARGET_REGISTRY": str(reg),
-                    "PATH": f"{binp}:/usr/bin:/bin:/usr/sbin:/sbin"})
-        env.update(self.extra_env)
-        return env
+        return clean_env({"WK_HOST_SECRETS": str(self.secrets),
+                          "WK_STORE": str(self.store),
+                          "WK_TARGET_REGISTRY": str(reg),
+                          "PATH": f"{binp}:/usr/bin:/bin:/usr/sbin:/sbin",
+                          **self.extra_env})
 
     def key(self, *args):
         """No terminal: what a script, a hook or a headless run gets."""
@@ -252,6 +250,21 @@ class TestTheStandingReadTokenReachesTheMachine(_PatRun):
         rc, out = self.key_tty("set", "github-pat", paste=TOKEN)
         self.assertEqual(rc, 0, out)
         self.assertNotIn(TOKEN, out)
+
+    @unittest.skipUnless(os.uname().sysname == "Darwin",
+                         "the injector that serves the guests is a macOS host's")
+    def test_the_guests_injector_takes_it_from_this_store_and_no_other(self):
+        """A macOS workstation runs two injectors -- one in the podman machine
+        for the containers, one on the host for the guests -- and this command
+        converges both. Measured: the guests' half took its directory from the
+        state directory rather than from the store it was given, so this very
+        test delivered its fixture token to the real injector on the machine
+        running the suite, and every read from a real guest answered 401 until
+        the next `wk start`."""
+        rc, out = self.key_tty("set", "github-pat", paste=TOKEN)
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(TOKEN,
+                         (self.store / "vm" / "read-github-pat").read_text().strip())
 
     def test_a_machine_that_cannot_take_it_is_a_warning_naming_the_other_delivery(self):
         """Best effort: the token is stored either way, and ./setup converges

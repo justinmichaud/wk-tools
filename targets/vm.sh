@@ -40,6 +40,7 @@ case ":$PATH:" in
 esac
 
 command -v envelope_mem_mb >/dev/null 2>&1 || . "$WK_ROOT/lib/resources.sh"
+command -v wk_record_dir  >/dev/null 2>&1 || . "$WK_ROOT/lib/store.sh"
 WK_VM_BASE_CPUS="${WK_VM_BASE_CPUS:-}"
 WK_VM_BASE_MEM_MB="${WK_VM_BASE_MEM_MB:-}"
 _base_cpus()   { [ -n "$WK_VM_BASE_CPUS" ] && echo "$WK_VM_BASE_CPUS" || envelope_cores; }
@@ -65,7 +66,7 @@ WK_VM_DISPLAY="${WK_VM_DISPLAY:-1280x800}"
 WK_HOST_FREE_WARN_GB="${WK_HOST_FREE_WARN_GB:-80}"
 WK_HOST_FREE_MIN_GB="${WK_HOST_FREE_MIN_GB:-25}"
 
-WK_STORE="${WK_VM_STORE:-$(wk_state_dir)}"
+WK_STORE="${WK_VM_STORE:-$(wk_record_dir)}"
 WK_VM_DIR="$WK_STORE/vm"
 WK_VM_KEY="$WK_VM_DIR/id_ed25519"
 

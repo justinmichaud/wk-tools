@@ -81,6 +81,9 @@ probe_softwareupdate() {
     return "$fails"
 }
 
+# A namespace of its own and the host paths a bind mount could expose: what a container is given and a guest is not, which has no /proc/net/dev to read and no /host anything to find.
+isolation_applies() { [ "${WK_SANDBOX:-}" = rootless-proxy ]; }
+
 probe_isolation() {
     local fails=0 ifaces path found paths=0
     # iproute2 is not in the SDK image.
@@ -213,33 +216,35 @@ probe_agent_identities() {
     return "$fails"
 }
 
-# One job for the three: each is one request to one host, and a target reached over ssh pays a connection per probe.
-probe_github_api() {
-    local fails=0 code fork
-    code=$(inside "curl -sS -m 20 -o /dev/null -w '%{http_code}' https://api.github.com/ 2>/dev/null")
-    case "$code" in
-        200) pass "api.github.com reachable through the injector (HTTP $code)" ;;
-        # 401 is GitHub's own answer, so the tunnel and the injector both carried the request; what failed is the credential. Saying "not in the path" here sends a reader after a service that is running.
-        401) fail "api.github.com answered 401: the injector is in the path and the read
-        token it holds was refused, so nothing in a workspace can read the API
-        either. The standing token is spent, revoked or expired -- replace it
-        with 'wk key set github-pat --replace', then './setup'" ;;
-        *)   fail "api.github.com answered '${code:-nothing}' -- the injector is not in the path
-        (systemctl --user status wk-github-inject; the CA is /run/wk/wk-github-ca.pem)" ;;
-    esac
-
-    code=$(inside "curl -sS -m 20 -o /dev/null -w '%{http_code}' https://api.github.com/user 2>/dev/null")
-    case "$code" in
-        200) pass "a read is authenticated (HTTP 200) from a token this workspace never holds" ;;
-        401) note "reads are unauthenticated (HTTP 401): no standing read token where the
+# Two requests to one host, and the pair separates the two states a read can be in: GET / answers 200 unauthenticated and 401 only for a token GitHub refuses, which is the injector's own standing one. Neither is a fault of this workspace or of the switch -- a read is authenticated in either position by design -- and neither is a way to publish: no standing token leaves the workspace on public GitHub at 60 requests an hour, and one GitHub refuses leaves it unable to read the API at all.
+probe_github_read() {
+    local fails=0 root user
+    root=$(inside "curl -sS -m 20 -o /dev/null -w '%{http_code}' https://api.github.com/ 2>/dev/null")
+    user=$(inside "curl -sS -m 20 -o /dev/null -w '%{http_code}' https://api.github.com/user 2>/dev/null")
+    case "$root:$user" in
+        200:200) pass "a read is authenticated (HTTP 200) from a token this workspace never holds" ;;
+        200:401) note "reads are unauthenticated (HTTP 401): no standing read token where the
         injector reads one, so a workspace sees public GitHub at 60 requests an
         hour ('wk key set github-pat', then './setup')" ;;
-        *)   fail "a read answered '${code:-nothing}' rather than 200 or 401 -- the injector
+        401:*)   note "GitHub refused the standing read token the injector holds (HTTP 401), so
+        every API read in here is refused with it -- 'gh', and 'git-webkit pr',
+        which reports it as a token of its own being out of date. A token this
+        machine holds and GitHub still accepts ('wk key check github-pat')
+        means the injector was handed an older one: 'wk start $NAME' converges
+        a guest's copy and './setup' the podman machine's. One refused there
+        too is 'wk key set github-pat --replace'" ;;
+        200:*)   fail "a read answered '${user:-nothing}' rather than 200 or 401 -- the injector
         is in the path but not answering for api.github.com/user" ;;
+        *)       fail "api.github.com answered '${root:-nothing}' -- the injector is not in the path
+        (systemctl --user status wk-github-inject; the CA is /run/wk/wk-github-ca.pem)" ;;
     esac
+    return "$fails"
+}
 
+# The half the switch governs, and the one a workspace is judged on: with push off the injector refuses the write itself and nothing leaves the machine, and with it on the request reaches GitHub, where an empty body names no branch -- so 422 is the authenticated answer and no pull request is created.
+probe_github_write() {
+    local fails=0 code fork
     fork=$(wk_push_forks | awk 'NF {print $2; exit}')
-    # An empty body names no branch: authenticated GitHub answers 422, otherwise 401.
     code=$(inside "curl -sS -m 20 -o /dev/null -w '%{http_code}' -X POST -d '{}' https://api.github.com/repos/$fork/pulls 2>/dev/null")
     if [ "$PUSH_ON" = 1 ]; then
         case "$code" in
@@ -346,8 +351,8 @@ probe_gitwebkit_setup() {
     return "$fails"
 }
 
-# Two requests to one host. Bugzilla names its own refusal in the body (`code`): 410 is "log in first", 306 a key it does not know, and anything else is an authenticated request refused for being an empty bug -- so the empty POST measures the key and files nothing.
-probe_bugzilla_api() {
+# The anonymous read that says the injector terminates the second host it is in the path for; Bugzilla has no read-only key, so this asks nothing else.
+probe_bugzilla_read() {
     local fails=0 code
     code=$(inside "curl -sS -m 20 -o /dev/null -w '%{http_code}' https://bugs.webkit.org/rest/version 2>/dev/null")
     case "$code" in
@@ -355,7 +360,12 @@ probe_bugzilla_api() {
         *)   fail "bugs.webkit.org answered '${code:-nothing}' -- the injector is not in the path for it
         (systemctl --user status wk-github-inject; the CA is /run/wk/wk-github-ca.pem)" ;;
     esac
+    return "$fails"
+}
 
+# Bugzilla names its own refusal in the body (`code`): 410 is "log in first", 306 a key it does not know, and anything else is an authenticated request refused for being an empty bug -- so the empty POST measures the key and files nothing.
+probe_bugzilla_write() {
+    local fails=0 code
     if [ "$PUSH_ON" = 1 ]; then
         code=$(inside "curl -sS -m 20 -X POST -H 'Content-Type: application/json' -d '{}' https://bugs.webkit.org/rest/bug 2>/dev/null \
         | python3 -c 'import json, sys; print(json.load(sys.stdin).get(\"code\", \"\"))' 2>/dev/null")
@@ -475,7 +485,7 @@ elif [ "$WK_TARGET_KIND" = vm ]; then
         wk vm stop $NAME && wk vm start $NAME   (without that variable)"
 fi
 
-if [ "${WK_SANDBOX:-}" = rootless-proxy ]; then
+if isolation_applies; then
     par_run isolation probe_isolation
     par_run commit-wall probe_commit_wall
 fi
@@ -483,8 +493,10 @@ fi
 par_run no-credentials-inside probe_no_credentials_inside
 par_run secrets-view probe_secrets_view
 par_run agent-identities probe_agent_identities
-par_run github-api probe_github_api
-par_run bugzilla-api probe_bugzilla_api
+par_run github-read probe_github_read
+par_run github-write probe_github_write
+par_run bugzilla-read probe_bugzilla_read
+par_run bugzilla-write probe_bugzilla_write
 par_run gitwebkit-setup probe_gitwebkit_setup
 par_run agent-credential probe_agent_credential
 par_run gpu probe_gpu
