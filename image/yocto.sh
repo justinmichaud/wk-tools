@@ -209,7 +209,8 @@ yocto_spawn() { # <ws> <stage> <jobs> <budget MB> <subject> <yocto-build.sh args
     build_record "wk sysimage $stage $ws" "$jobs" "$budget_mb" "ws:$ws:yocto.pid"
 
     : > "$log"  # truncated, not unlinked: `tail -f` follows an inode
-    rm -f "$pid_host"
+    rm -f "$pid_host" "$pid_host.exit"
+    task_set "$YOCTO_TASK" exit_file "$pid_host.exit"   # where t_spawn has the stage record its own status, so a driver that is killed mid-wait does not leave a finished stage reading `died`
 
     t_spawn "$ws" "$(t_home "$ws")/$(basename "$log")" \
                   "$(t_home "$ws")/$(basename "$pid_host")" \
@@ -232,6 +233,37 @@ $(sed 's/^/    /' "$log" 2>/dev/null | tail -5)"
     debug "stage $stage running as pid $(task_field "$YOCTO_TASK" pid) inside '$ws'"
 }
 
+# bitbake's own lock in the lane's build directory holds the cooker's pid. A driver killed mid-stage leaves that cooker and its workers behind: the record then holds no live job, `--stop` answered "no 'image' build is running" while both were still in the container (measured 2026-09-17), and the next stage refuses on the lock instead of starting. The pid is believed only while its command line inside the workspace says bitbake, the way an adopted one is (job_pid_adopt) -- a wkdev container shares the host's PID namespace, so an unchecked pid is a signal at anything on the machine. A stale lock left by a cooker that did exit is the ordinary case and reads as no cooker.
+yocto_cooker_pid() { # <ws> -- the live bitbake this lane's lock names, or nothing
+    local ws="$1" lock pid
+    lock="$(wk_ws_dir "$ws")/build/CrossToolChains/$YOC_TARGET/build/bitbake.lock"
+    [ -s "$lock" ] || return 1
+    pid=$(tr -dc '0-9' < "$lock")
+    [ -n "$pid" ] || return 1
+    match_any "$(_job_pid_args "$ws" "$pid")" '*bitbake*' || return 1
+    printf '%s' "$pid"
+}
+
+yocto_stop_cooker() { # <ws> -- what the record does not hold, asked of the machine
+    local ws="$1" pid i=0
+    pid=$(yocto_cooker_pid "$ws") || return 0
+    info "a bitbake cooker (pid $pid) is still in '$ws' with no record holding it, so a
+  killed driver left it -- and the next stage refuses on its lock. Stopping it."
+    t_kill_tree "$ws" "$pid" TERM
+    while [ "$i" -lt 120 ] && yocto_cooker_pid "$ws" >/dev/null; do wk_sleep 1; i=$((i + 1)); done
+    if yocto_cooker_pid "$ws" >/dev/null; then
+        t_kill_tree "$ws" "$pid" KILL
+        i=0
+        while [ "$i" -lt 5 ] && yocto_cooker_pid "$ws" >/dev/null; do wk_sleep 1; i=$((i + 1)); done
+    fi
+    if yocto_cooker_pid "$ws" >/dev/null; then
+        warn "pid $pid outlived a TERM and a KILL. What ends it is the container:
+  wk stop $ws"
+        return 1
+    fi
+    info "the cooker is gone; sstate is written as it goes, so what it had done stands."
+}
+
 # Through job_kill (lib/watchdog.sh): the descendants of the pid the record holds, and no pattern kill, since a wkdev container shares the host's PID namespace. The TERM's grace is two minutes -- bitbake writes its state and sstate as it goes and shuts down slowly, and closing them cleanly is the difference between resuming and redoing the task it was in.
 yocto_stop() {
     local ws="$1" stage="$2" dir
@@ -239,12 +271,14 @@ yocto_stop() {
     dir=$(yocto_task "$ws")
     if ! yocto_running "$ws" "$stage"; then
         log "no '$stage' build is running in '$ws'"
-        return 0
+        yocto_stop_cooker "$ws"
+        return $?
     fi
     info "stopping the '$stage' build in '$ws' (pid $(task_field "$dir" pid))"
     job_kill "$ws" "$dir" stopped \
         || { warn "it outlived a TERM and a KILL; bitbake shuts down slowly.
   Look:  wk enter $ws  and then  pgrep -af bitbake"; return 1; }
+    yocto_stop_cooker "$ws" || return 1
     info "stopped. sstate is written as it goes, so restarting resumes rather than
   starting over -- only the task it was in the middle of is redone."
 }

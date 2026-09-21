@@ -157,3 +157,61 @@ class TestAnAutomountedCardIsCleared(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestAConfigurationTheLaneHoldsAndThisMachineCannotRead(unittest.TestCase):
+    """`write` runs on the host holding the card reader, and on a macOS
+    workstation the lane is in the podman VM, whose store this side cannot
+    read: `--from <configuration>` refused with "no workspace here has built
+    it yet" while `wk sysimage ls` was printing that very image, and the only
+    spelling that worked was the `--from vm:<path> --profile <name>` pair
+    (measured 2026-09-17). So the lane is asked for the path in its own
+    spelling -- `wk sysimage path`, routed like `holds` -- and `vm:` says
+    whose filesystem it is on."""
+
+    STUB_WK = '#!/bin/sh\nprintf "%s" "$WK_TEST_ANSWER"\nexit $WK_TEST_RC\n'
+
+    def _run(self, spec, answer, local="", wk_rc=0):
+        """The routed question stubbed: what the machine holding the lane
+        answers is not what _image_path can see from here. WK_ROOT points at
+        a tree of symlinks to this one whose `wk` is the stub, since that is
+        how _from_resolve asks."""
+        import os
+        import tempfile
+        script = (lift("_image_path", "_built_profiles", "_from_resolve")
+                  + '. "$WK_ROOT/image/profiles.sh"\n'
+                  + 'info() { :; }\ndie() { echo "$*" >&2; exit 1; }\n'
+                  + 'image_workspace_scan() { :; }\n'
+                  + 'store_is_local() { [ -n "$WK_TEST_LOCAL" ]; }\n'
+                  + "_from_resolve " + spec)
+        with tempfile.TemporaryDirectory() as d:
+            for entry in os.listdir(REPO):
+                if entry != "wk":
+                    os.symlink(REPO / entry, os.path.join(d, entry))
+            wk = os.path.join(d, "wk")
+            with open(wk, "w") as f:
+                f.write(self.STUB_WK)
+            os.chmod(wk, 0o755)
+            return bash(script, env={
+                "WK_ROOT": d, "WK_TEST_ANSWER": answer,
+                "WK_TEST_RC": str(wk_rc), "WK_TEST_LOCAL": local,
+            })
+
+    def test_the_lanes_answer_is_read_as_the_vms_own_path(self):
+        cp = self._run("webkit-2.52-yocto-rpi5-64",
+                       "/var/lib/wk/ws/yocto-webkit-2.52-yocto-rpi5-64/build/i.wic.xz")
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertEqual(
+            "vm:/var/lib/wk/ws/yocto-webkit-2.52-yocto-rpi5-64/build/i.wic.xz",
+            cp.stdout)
+
+    def test_a_store_this_machine_can_read_needs_no_prefix(self):
+        cp = self._run("webkit-2.52-yocto-rpi5-64", "/var/lib/wk/ws/x/i.wic.xz",
+                       local="yes")
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertEqual("/var/lib/wk/ws/x/i.wic.xz", cp.stdout)
+
+    def test_a_lane_that_holds_no_image_is_refused_naming_the_build(self):
+        cp = self._run("webkit-2.52-yocto-rpi5-64", "", wk_rc=1)
+        self.assertNotEqual(cp.returncode, 0, cp.stdout)
+        self.assertIn("wk sysimage build webkit-2.52-yocto-rpi5-64", cp.stderr)

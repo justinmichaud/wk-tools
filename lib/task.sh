@@ -133,6 +133,7 @@ task_end() { # <dir> <exit status or word>
 task_alive() { # <dir> -- a `target` pid means nothing to this kernel
     local dir="$1" pid
     [ -f "$dir/exit" ] && return 1
+    [ -n "$(_task_job_exit "$dir")" ] && return 1
     pid=$(task_field "$dir" pid)
     [ -n "$pid" ] || return 1
     if [ "$(task_field "$dir" where)" = target ]; then
@@ -152,12 +153,19 @@ task_running() { # <verdict>
     return 1
 }
 
+_task_job_exit() { # <dir> -- the status the job wrote beside its pid file (`exit_file`, t_spawn_script), empty when it wrote none: the verdict for a job whose driver is gone, read and never copied into the record, since a reporting command changes nothing
+    local f; f=$(task_field "$1" exit_file)
+    [ -n "$f" ] && [ -s "$f" ] || return 0
+    tr -dc '0-9' < "$f"
+}
+
 # <how> decides how long a `target` pid's workspace is waited on: `pid` for as long as it takes, which is what a command about to signal it needs; `capped` for WK_TASK_ASK_SECONDS, so a read-only report about a wedged workspace says `unanswered` rather than waiting on it (a `t_exec` has no bound of its own).
 task_verdict() { # <dir> [pid|capped] -- starting|running|silent|died|unanswered|ok|the word task_end took
     local dir="$1" how="${2:-pid}" rc age
     case "$how" in pid|capped) ;; *) die "task_verdict: the pid is asked for as long as it takes or capped, not '$how'" ;; esac
-    if [ -f "$dir/exit" ]; then
-        rc=$(task_field "$dir" exit)
+    rc=""
+    if [ -f "$dir/exit" ]; then rc=$(task_field "$dir" exit); else rc=$(_task_job_exit "$dir"); fi
+    if [ -n "$rc" ]; then
         case "$rc" in
             0) printf 'ok' ;;
             ''|*[!0-9]*) printf '%s' "$rc" ;;

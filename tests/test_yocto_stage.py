@@ -130,26 +130,88 @@ class TestVerifyImageFreshness(WkTest):
             self.assertIn("left nothing behind", cp.stderr)
 
 
-class TestClearStaleImageCopies(WkTest):
+class TestImageCopiesAsideAndBack(WkTest):
+    """The image directory has to be empty before the helper is called, or
+    build_image() reports the previous run's copy as this one's.  Emptying it
+    by deleting it leaves a killed image stage with a lane that holds no image
+    at all, `wk sysimage holds` answering no, and the next A/B rebuilding
+    hours of image it already had -- so it is moved aside, and the next stage
+    in that lane puts it back when nothing replaced it."""
+
     def setUp(self):
         super().setUp()
-        self.func = _lift("clear_stale_image_copies")
+        self.func = _lift("image_copies_aside") + _lift("image_copies_kept") \
+            + _lift("image_copies_back") + "say() { :; }\n"
 
-    def test_removes_a_directory_left_by_a_previous_run(self):
+    def _wic(self, d, text):
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "webkit-dev-ci-tools.wic.xz").write_text(text)
+
+    def test_aside_empties_the_directory_the_helper_looks_at(self):
         with scratch_dir() as d:
             target = d / "image"
-            target.mkdir()
-            (target / "webkit-dev-ci-tools.wic.xz").write_text("old")
-            cp = _run(self.func, "clear_stale_image_copies", str(target))
+            self._wic(target, "old")
+            cp = _run(self.func, "image_copies_aside", str(target))
             self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
             self.assertFalse(target.exists())
 
-    def test_is_a_noop_when_nothing_is_there_yet(self):
+    def test_aside_keeps_the_image_it_moved(self):
         with scratch_dir() as d:
             target = d / "image"
-            cp = _run(self.func, "clear_stale_image_copies", str(target))
+            self._wic(target, "old")
+            _run(self.func, "image_copies_aside", str(target))
+            self.assertEqual(
+                (d / "image.previous" / "webkit-dev-ci-tools.wic.xz").read_text(),
+                "old")
+
+    def test_a_killed_stage_gets_its_previous_image_back(self):
+        with scratch_dir() as d:
+            target = d / "image"
+            self._wic(target, "old")
+            _run(self.func, "image_copies_aside", str(target))   # and then killed
+            cp = _run(self.func, "image_copies_back", str(target))
+            self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+            self.assertEqual((target / "webkit-dev-ci-tools.wic.xz").read_text(),
+                             "old")
+            self.assertFalse((d / "image.previous").exists())
+
+    def test_a_stage_that_built_one_keeps_the_new_image(self):
+        with scratch_dir() as d:
+            target = d / "image"
+            self._wic(target, "old")
+            _run(self.func, "image_copies_aside", str(target))
+            self._wic(target, "new")                             # bitbake's own
+            cp = _run(self.func, "image_copies_back", str(target))
+            self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+            self.assertEqual((target / "webkit-dev-ci-tools.wic.xz").read_text(),
+                             "new")
+            self.assertFalse((d / "image.previous").exists())
+
+    def test_kept_drops_the_aside_copy(self):
+        with scratch_dir() as d:
+            target = d / "image"
+            self._wic(target, "old")
+            _run(self.func, "image_copies_aside", str(target))
+            self._wic(target, "new")
+            cp = _run(self.func, "image_copies_kept", str(target))
+            self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+            self.assertFalse((d / "image.previous").exists())
+
+    def test_aside_is_a_noop_when_nothing_is_there_yet(self):
+        with scratch_dir() as d:
+            target = d / "image"
+            cp = _run(self.func, "image_copies_aside", str(target))
             self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
             self.assertFalse(target.exists())
+
+    def test_back_is_a_noop_when_nothing_was_moved_aside(self):
+        with scratch_dir() as d:
+            target = d / "image"
+            self._wic(target, "only")
+            cp = _run(self.func, "image_copies_back", str(target))
+            self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+            self.assertEqual((target / "webkit-dev-ci-tools.wic.xz").read_text(),
+                             "only")
 
 
 class TestRefreshGitIndex(WkTest):
@@ -248,13 +310,20 @@ class TestImageStageIsEvidenceBased(unittest.TestCase):
 
     def test_image_stage_clears_the_shortcut_before_calling_build_image(self):
         arm = self._case_arm("image|all")
-        clear_at = arm.find("clear_stale_image_copies")
+        clear_at = arm.find("image_copies_aside")
         helper_at = arm.find("--build-image")
         self.assertNotEqual(clear_at, -1, arm)
         self.assertNotEqual(helper_at, -1, arm)
         self.assertLess(clear_at, helper_at,
-                         "clear_stale_image_copies must run before --build-image, "
+                         "image_copies_aside must run before --build-image, "
                          "or the helper still finds yesterday's copy")
+
+    def test_every_stage_puts_back_an_image_a_killed_one_moved_aside(self):
+        """Not the image arm: whichever stage runs next in that lane is what
+        converges it, and after a killed image stage that is usually a
+        toolchain or webkit stage."""
+        self.assertRegex(self.text,
+                         r'(?m)^image_copies_back "\$WORKDIR/build/image"$')
 
     def test_image_stage_verifies_freshness_after_calling_build_image(self):
         arm = self._case_arm("image|all")
@@ -582,3 +651,138 @@ class TestTheBudgetIsBookedAndEnforcedOnce(WkTest):
         self.assertLess(body.index("WK_MEM_BUDGET_MB"),
                         body.index("WK_MB_PER_JOB"),
                         "the jobs product would win over the booked budget")
+
+
+class TestTheLaneKeepsWhatItBuilt(WkTest):
+    """cross-toolchain-helper hashes the target's section of
+    Tools/yocto/targets.conf, the local.conf it names and its own source, and
+    wipes WebKitBuild/CrossToolChains/<target> whole when that hash moves.
+    The webkit stage checks out the slot's commit in the lane, and those
+    three files differ between an image's release branch and a commit on
+    main -- measured 2026-09-17, when a webkit stage took the lane's image
+    and SDK with it (the workdir re-created at 23:33, nine minutes after that
+    stage's last output) and then rebuilt the nativesdk stack inside a budget
+    sized for one WebKit compile, where the memory watchdog killed it."""
+
+    def test_the_helpers_wipe_on_change_is_off(self):
+        self.assertRegex(YOCTO_BUILD.read_text(),
+                         r"(?m)^export WEBKIT_CROSS_WIPE_ON_CHANGE=0$")
+
+
+class TestRequireToolchain(WkTest):
+    """require_toolchain: the webkit stage builds against an installed SDK or
+    refuses, naming the stage that installs one.  Without it, build-webkit
+    has the helper bitbake the whole nativesdk stack under the webkit
+    stage's own memory budget."""
+
+    def setUp(self):
+        super().setUp()
+        self.func = _lift("require_toolchain")
+
+    def _sdk(self, workdir, configured=True, env_setup=True):
+        d = workdir / "build" / "toolchain"
+        d.mkdir(parents=True)
+        if configured:
+            (d / ".toolchain_path_configured").write_text(str(d))
+        if env_setup:
+            (d / "environment-setup-cortexa76-poky-linux").write_text("")
+
+    def _run_in(self, workdir):
+        return _run(f'WORKDIR={workdir}\n' + self.func, "require_toolchain")
+
+    def test_ok_when_the_sdk_is_installed(self):
+        with scratch_dir() as d:
+            self._sdk(d)
+            cp = self._run_in(d)
+            self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+
+    def test_refuses_when_no_toolchain_was_ever_built(self):
+        with scratch_dir() as d:
+            cp = self._run_in(d)
+            self.assertNotEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+            self.assertIn("--stage toolchain", cp.stderr)
+
+    def test_refuses_a_half_installed_sdk(self):
+        """The helper's own two files, both of them: a marker with no
+        environment-setup script beside it is an install that did not finish,
+        and build-webkit cannot build against it."""
+        for missing in ("configured", "env_setup"):
+            with self.subTest(missing=missing), scratch_dir() as d:
+                self._sdk(d, **{missing: False})
+                cp = self._run_in(d)
+                self.assertNotEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+                self.assertIn("--stage toolchain", cp.stderr)
+
+    def test_the_webkit_stage_asks_before_it_builds(self):
+        text = YOCTO_BUILD.read_text()
+        import re
+        m = re.search(r"(?ms)^\s*webkit\)\n(.*?)\n\s*;;", text)
+        self.assertIsNotNone(m)
+        arm = m.group(1)
+        self.assertLess(arm.find("require_toolchain"), arm.find("build-webkit"),
+                        "require_toolchain must run before build-webkit is "
+                        "reached, or the SDK is built under this stage's budget")
+
+
+class TestCheckoutSlotCommit(WkTest):
+    """checkout_slot_commit: the lane's checkout converges onto the slot's
+    commit however the last run left it.  A killed webkit stage left 4819
+    modified and 741 untracked paths (measured 2026-09-17) and every later
+    command refused with "your local changes would be overwritten by
+    checkout"; nothing in wk repaired it."""
+
+    def setUp(self):
+        super().setUp()
+        self.func = _lift("checkout_slot_commit") + _lift("refresh_git_index")
+
+    def _repo(self, d):
+        def git(*a):
+            subprocess.run(["git", "-C", str(d), *a], check=True,
+                           capture_output=True, text=True)
+        git("init", "-q")
+        git("config", "user.email", "t@example.com")
+        git("config", "user.name", "t")
+        (d / ".gitignore").write_text("/WebKitBuild/\n")
+        (d / "tracked").write_text("one")
+        git("add", "-A"); git("commit", "-qm", "one")
+        first = subprocess.run(["git", "-C", str(d), "rev-parse", "HEAD"],
+                               capture_output=True, text=True).stdout.strip()
+        (d / "tracked").write_text("two")
+        git("commit", "-aqm", "two")
+        return first
+
+    def _run_in(self, d, commit):
+        script = (f'SRC={d}\nCOMMIT={commit}\nWK_MIRROR={d}\n'
+                  + self.func + '\ncd "$SRC"\ncheckout_slot_commit')
+        return subprocess.run(["bash", "-c", PRELUDE + script],
+                              capture_output=True, text=True, timeout=30)
+
+    def test_it_checks_out_the_commit(self):
+        with scratch_dir() as d:
+            first = self._repo(d)
+            cp = self._run_in(d, first)
+            self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+            self.assertEqual((d / "tracked").read_text(), "one")
+
+    def test_it_converges_a_tree_a_killed_checkout_left(self):
+        with scratch_dir() as d:
+            first = self._repo(d)
+            (d / "tracked").write_text("half-written by a killed checkout")
+            (d / "LayoutTests").mkdir()
+            (d / "LayoutTests" / "stray").write_text("untracked")
+            cp = self._run_in(d, first)
+            self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+            self.assertEqual((d / "tracked").read_text(), "one")
+            self.assertFalse((d / "LayoutTests" / "stray").exists())
+
+    def test_it_keeps_the_build_products_the_lane_holds(self):
+        """`clean -fd`, never `-fdx`: WebKit's .gitignore carries
+        /WebKitBuild/, where the image, the SDK and the slots live."""
+        with scratch_dir() as d:
+            first = self._repo(d)
+            build = d / "WebKitBuild" / "CrossToolChains"
+            build.mkdir(parents=True)
+            (build / "sdk").write_text("hours of it")
+            cp = self._run_in(d, first)
+            self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+            self.assertEqual((build / "sdk").read_text(), "hours of it")

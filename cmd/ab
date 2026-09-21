@@ -258,15 +258,24 @@ else
     HEAD_DESC="$SPEC (pull request $PR_N on $PR_REMOTE)"
 fi
 
-# The release names the image: wpe-2.38 -> 2.38, webkitglib/2.52 -> 2.52, off the base branch only a pull request has.
-if [ -z "$RELEASE" ]; then
+# The branch a pull request was written against: which release's image to measure it on when --release does not say, and the branch its base is taken from whatever --release says. Read once, from GitHub, because it is not in the head a PR ref carries.
+ab_pr_base_branch() {   # sets PR_BASE_BRANCH
+    [ -z "$PR_BASE_BRANCH" ] || return 0
+    local url repo out
     url=$(wk_remotes | awk -v r="$PR_REMOTE_NAME" '$1 == r {print $2; exit}')
     repo=$(printf '%s' "$url" | sed -E 's#\.git$##; s#https://github.com/##')
-    gh_authenticated || die "reading the pull request's base branch needs gh logged in (gh auth login),
-    or say the release yourself: --release 2.38"
-    PR_BASE_BRANCH=$(gh pr view "$PR_N" --repo "$repo" --json baseRefName --jq .baseRefName 2>&1) \
-        || die "could not read pull request $PR_N's base branch from $repo: $PR_BASE_BRANCH
-    Say the release yourself: --release 2.38"
+    gh_authenticated || die "reading pull request $PR_N's base branch needs gh logged in (gh auth login).
+    Without it, say both of the things it answers yourself:
+        --release <x.y>   which image to measure on (wk sysimage --list)
+        --base <sha>      the unpatched side, usually the head's own parent"
+    out=$(gh pr view "$PR_N" --repo "$repo" --json baseRefName --jq .baseRefName 2>&1) \
+        || die "could not read pull request $PR_N's base branch from $repo: $out
+    Say the release yourself (--release 2.38) and the base (--base <sha>)."
+    PR_BASE_BRANCH="$out"
+}
+
+if [ -z "$RELEASE" ]; then
+    ab_pr_base_branch
     RELEASE=$(printf '%s' "$PR_BASE_BRANCH" | sed -nE 's#^(wpe-|webkitglib/)([0-9]+\.[0-9]+)$#\2#p')
     [ -n "$RELEASE" ] || die "pull request $PR_N targets '$PR_BASE_BRANCH', which names no release.
     Say which image to measure on: --release 2.38 (wk sysimage --list)"
@@ -274,6 +283,26 @@ fi
 
 # One profile per device, matched as <project>-<release>-<builder>-<device>-<bits>.
 declare -a DEV PROFILE MACHINE_OK
+
+_ab_or() { local w out=""; for w in $1; do out="${out:+$out or }$w"; done; printf '%s' "$out"; }
+
+# What tells the matches apart is what to ask for. A board at one release can have a buildroot image and a yocto one of the same width, where naming the width narrows nothing: '--devices rpi5-64 --release 2.52' was answered with '--devices rpi5-32 or rpi5-64'.
+_ab_narrow() { # <device> <profile>... -- the option that picks one of them
+    local dev="$1"; shift
+    local c rest b w builders="" widths="" out=""
+    for c in "$@"; do
+        rest="${c#*-"$RELEASE"-}"; b="${rest%%-*}"; w="${c##*-}"
+        case " $builders " in *" $b "*) ;; *) builders="$builders $b" ;; esac
+        case " $widths "   in *" $dev-$w "*) ;; *) widths="$widths $dev-$w" ;; esac
+    done
+    set -- $builders
+    [ $# -lt 2 ] || out="--builder $(_ab_or "$builders")"
+    set -- $widths
+    [ $# -lt 2 ] || out="${out:+$out, and }--devices $(_ab_or "$widths")"
+    printf '%s' "${out:-nothing -- they differ in neither builder nor width, so no option here
+    tells them apart, and two such configurations at one release is a bug in
+    image/configs rather than in this command}"
+}
 ab_profile_for() { # <device> <bits or empty> -- prints the one profile, or dies naming the choices
     local dev="$1" bits="$2" c matches="" pattern
     # Unquoted on purpose: an empty --builder or width is a wildcard here.
@@ -288,7 +317,7 @@ ab_profile_for() { # <device> <bits or empty> -- prints the one profile, or dies
     'wk sysimage --list' has every configuration this checkout defines." ;;
         *) die "$dev has more than one image at release $RELEASE:
 $(printf '    %s\n' "$@")
-    Say which: --devices $dev-32 or $dev-64 (and --builder when both builders have one)." ;;
+    Say which: $(_ab_narrow "$dev" "$@")" ;;
     esac
 }
 i=0
@@ -319,14 +348,21 @@ done
 [ -n "$CFG_BRANCH0" ] && [ -n "$CFG_REMOTE0" ] \
     || die "${PROFILE[0]} declares no CFG_BRANCH/CFG_REMOTE, so there is no branch to take a base from"
 
+# The base comes off the branch the change was written against, which for a pull request is its own base branch and not the image's: a PR against main measured on a 2.52 image had 15374 commits between its head and the merge-base with webkitglib/2.52, so the one-commit barrier refused every such run and each needed --base by hand. The image's branch says which image to measure on and nothing about where the change begins.
+BASE_REMOTE="$CFG_REMOTE0"; BASE_BRANCH="$CFG_BRANCH0"
+if [ -z "$BASE" ] && [ "${PR_KIND:-}" = pull ]; then
+    ab_pr_base_branch
+    BASE_REMOTE="$PR_REMOTE_NAME"; BASE_BRANCH="$PR_BASE_BRANCH"
+fi
+
 # Refreshed before the merge-base is taken: a stale mirror would pick an older
 # base than the PR was made against.
-BRANCH_URL=$(wk_remotes | awk -v r="$CFG_REMOTE0" '$1 == r {print $2; exit}')
-[ -n "$BRANCH_URL" ] || die "no upstream remote '$CFG_REMOTE0' (lib/store.sh wk_remotes) to fetch $CFG_BRANCH0 from"
-_mirror_fetch_into "$BRANCH_URL" "refs/heads/$CFG_BRANCH0" "refs/remotes/$CFG_REMOTE0/$CFG_BRANCH0" \
-    || die "could not refresh $CFG_REMOTE0/$CFG_BRANCH0 in the mirror"
-BRANCH_SHA=$(mgit rev-parse --verify --quiet "refs/remotes/$CFG_REMOTE0/$CFG_BRANCH0^{commit}") \
-    || die "the mirror has no $CFG_REMOTE0/$CFG_BRANCH0 after fetching it"
+BRANCH_URL=$(wk_remotes | awk -v r="$BASE_REMOTE" '$1 == r {print $2; exit}')
+[ -n "$BRANCH_URL" ] || die "no upstream remote '$BASE_REMOTE' (lib/store.sh wk_remotes) to fetch $BASE_BRANCH from"
+_mirror_fetch_into "$BRANCH_URL" "refs/heads/$BASE_BRANCH" "refs/remotes/$BASE_REMOTE/$BASE_BRANCH" \
+    || die "could not refresh $BASE_REMOTE/$BASE_BRANCH in the mirror"
+BRANCH_SHA=$(mgit rev-parse --verify --quiet "refs/remotes/$BASE_REMOTE/$BASE_BRANCH^{commit}") \
+    || die "the mirror has no $BASE_REMOTE/$BASE_BRANCH after fetching it"
 BASE_HOW=""
 if [ -n "$BASE" ]; then
     BASE_SHA=$(mgit rev-parse --verify --quiet "$BASE^{commit}") \
@@ -334,9 +370,9 @@ if [ -n "$BASE" ]; then
     BASE_HOW="given"
 else
     BASE_SHA=$(mgit merge-base "$HEAD_SHA" "$BRANCH_SHA") \
-        || die "$HEAD_SHA and $CFG_REMOTE0/$CFG_BRANCH0 share no history; is this PR against that branch?
+        || die "$HEAD_SHA and $BASE_REMOTE/$BASE_BRANCH share no history; is this PR against that branch?
     Say the base yourself: --base <sha>"
-    BASE_HOW="merge-base of the head and $CFG_REMOTE0/$CFG_BRANCH0 (guessed)"
+    BASE_HOW="merge-base of the head and $BASE_REMOTE/$BASE_BRANCH (guessed)"
 fi
 AHEAD=$(mgit rev-list --count "$BASE_SHA..$HEAD_SHA")
 BEHIND=$(mgit rev-list --count "$HEAD_SHA..$BRANCH_SHA")
@@ -403,7 +439,7 @@ log ""
 log "  patched   $(sha12 "$HEAD_SHA")  $(subject "$HEAD_SHA")"
 log "  base      $(sha12 "$BASE_SHA")  $(subject "$BASE_SHA")"
 log "            $BASE_HOW; the patched side is $AHEAD commit(s) ahead of it"
-[ "$BEHIND" -eq 0 ] || log "            $CFG_REMOTE0/$CFG_BRANCH0 has moved $BEHIND commit(s) past the base since"
+[ "$BEHIND" -eq 0 ] || log "            $BASE_REMOTE/$BASE_BRANCH has moved $BEHIND commit(s) past the base since"
 log "  release   $RELEASE (${CFG_PROJECT0:-WebKit} $CFG_REMOTE0/$CFG_BRANCH0)"
 log "  plans     ${PLANS[*]}"
 log "  rounds    $ROUNDS per plan, interleaved A B A B ...${COUNT:+; --count $COUNT iterations per run}"
@@ -423,7 +459,8 @@ log ""
 [ "$AHEAD" -le 1 ] || barrier \
     "the patched side is $AHEAD commits ahead of the base, so the two arms differ
     by more than the change under measurement and no number says which commit
-    moved it. Name the commit's own parent: --base <sha>."
+    moved it. Name the commit's own parent:
+        --base $(mgit rev-parse --short=12 "$HEAD_SHA^" 2>/dev/null || printf '<sha>')"
 
 log "the plan as a graph -- a step runs when its needs are done and what it holds is free:"
 log ""
@@ -440,24 +477,31 @@ IMAGED=" "   # the lanes whose image step is already declared: two arms sharing 
 for ((i = 0; i < NDEV; i++)); do
     p="${PROFILE[$i]}"; d="${DEV[$i]}"
     # A profile-guided slot is not one build but the cycle's phases, declared by the lane that owns them (image/pgo.sh).
-    pgo=""
+    pgo=""; sdk=""
     if ( image_profile_load "$p" >/dev/null 2>&1 && image_pgo_wanted ); then pgo=1; fi
+    if [ "$(image_profile_load "$p" >/dev/null 2>&1; printf '%s' "${IMG_BUILDER:-}")" = yocto ]; then sdk=1; fi
     for ((a = 0; a < 2; a++)); do
         slot="${ARM_SLOT[$a]}"
         sha="$BASE_SHA"; [ "$a" -eq 0 ] || sha="$HEAD_SHA"
         lane=$(_lane_at "$i" "$a"); spec=$(_lane_spec_at "$i" "$a")
         on=$(ab_lane_machine "$i" "$a"); res=$(image_build_resource "$on")
+        built="image:$lane@$on"
+        [ -z "$sdk" ] || built="toolchain:$lane@$on"
         case "$IMAGED" in
             *" $lane@$on "*) ;;
             *) IMAGED="$IMAGED$lane@$on "
                sched_step "image:$lane@$on" "$on" "" "$res" \
                    "$(image_holds_predicate "$spec" "$lane")" \
-                   "wk sysimage build $spec --workspace $lane" ;;
+                   "wk sysimage build $spec --workspace $lane"
+               # A yocto lane cross-builds against an SDK it bitbakes itself, as a step of its own because it is machine-sized: the webkit stage books one cross compile's working set and the nativesdk stack does not fit in it, where the watchdog killed one 46 MB over (image/yocto-build.sh's require_toolchain refuses rather than letting it try). buildroot's toolchain is part of its one build.
+               [ -z "$sdk" ] || sched_step "toolchain:$lane@$on" "$on" "image:$lane@$on" "$res" \
+                   "$(image_holds_predicate "$spec" "$lane" --toolchain)" \
+                   "wk sysimage build $spec --workspace $lane --stage toolchain" ;;
         esac
         if [ -n "$pgo" ]; then
-            image_pgo_steps "$spec" "$lane" "$sha" "$slot" "$d" "image:$lane@$on"
+            image_pgo_steps "$spec" "$lane" "$sha" "$slot" "$d" "$built"
         else
-            sched_step "slot:$lane:$slot" "$on" "image:$lane@$on" "$res" \
+            sched_step "slot:$lane:$slot" "$on" "$built" "$res" \
                 "$(image_holds_predicate "$spec" "$lane" --slot "$slot" --commit "$sha")" \
                 "wk sysimage webkit $spec --workspace $lane --commit $sha --slot $slot"
         fi

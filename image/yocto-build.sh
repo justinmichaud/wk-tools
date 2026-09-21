@@ -89,6 +89,9 @@ refresh_git_index() { # <dir> -- leave an index libgit2 can open, and keep it so
 }
 refresh_git_index "$SRC"
 
+# cross-toolchain-helper hashes the target's section of Tools/yocto/targets.conf, the local.conf that section names and its own source, and wipes WebKitBuild/CrossToolChains/<target> whole -- image, synced layers and installed SDK -- whenever that hash moves (_initialize_workdir). The webkit stage checks out the slot's commit in this lane, and between webkitglib/2.52 and a commit on main all three of those files differ (measured 2026-09-17), so without this a webkit stage takes the lane's image and SDK with it and rebuilds the nativesdk stack inside the webkit stage's budget (measured 2026-09-17: the workdir re-created at 23:33, nine minutes after the webkit stage's last output, and 13213 bitbake tasks where a WebKit compile has none). The image belongs to the image's branch and the slot is only its source: keeping the workdir is the point.
+export WEBKIT_CROSS_WIPE_ON_CHANGE=0
+
 # bitbake filters the environment, so DL_DIR/SSTATE_DIR and the GIT_CONFIG_* pin are named here or dropped: without them the cache meant to survive `wk rm` is never written, and a task that runs git unpinned writes an index the next recipe's cargo refuses ("invalid data in index"), which is librsvg's do_compile.
 export BB_ENV_PASSTHROUGH_ADDITIONS="${BB_ENV_PASSTHROUGH_ADDITIONS:-} DL_DIR SSTATE_DIR GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0 GIT_CONFIG_KEY_1 GIT_CONFIG_VALUE_1"
 
@@ -165,6 +168,25 @@ CONF="$WORKDIR/build/conf/local.conf"
 
 
 cd "$SRC"
+
+# The slot's commit goes in before anything reads the checkout: the port below writes into it, the availability check and build-webkit read Tools/yocto out of it, and cross-toolchain-helper hashes it. Forced and cleaned rather than refused when dirty -- a killed webkit stage leaves the checkout mid-checkout (4819 modified and 741 untracked paths, measured 2026-09-17) and every later command refused it with "your local changes would be overwritten by checkout", so a re-run has to converge. `-fd`, never `-fdx`: WebKit's .gitignore carries /WebKitBuild/, where the image, the SDK and the slots live.
+checkout_slot_commit() {
+    local dirty
+    git cat-file -e "$COMMIT^{commit}" 2>/dev/null \
+        || git fetch --quiet "${WK_MIRROR:?WK_MIRROR names the mirror this container mounts, set by targets/container.sh}" "$COMMIT" \
+        || fail "$COMMIT is not in this machine's mirror; 'wk ab' and 'wk pr' fetch a PR head into it first"
+    dirty=$(git status --porcelain | wc -l | tr -d ' ')
+    [ "$dirty" = 0 ] \
+        || say "discarding $dirty uncommitted path(s) in $SRC -- a slot is built from a commit and nothing else"
+    git checkout --force --detach --quiet "$COMMIT" \
+        || fail "could not check out $COMMIT in $SRC"
+    git clean -qfd || fail "could not clean $SRC after checking out $COMMIT"
+    refresh_git_index "$SRC"
+    say "source        $SRC @ $(git rev-parse --short HEAD) ($(git log -1 --format=%s | cut -c1-60))"
+}
+if [ "$STAGE" = webkit ] && [ -n "$COMMIT" ]; then
+    checkout_slot_commit
+fi
 
 say "target        $TARGET"
 say "image recipe  ${IMAGE:-<from targets.conf>}"
@@ -344,13 +366,52 @@ run_helper() {
         || fail "$what failed"
 }
 
-# The helper's build_image() treats a file at build/image/<recipe>.<ext> as proof the image is current and returns without calling bitbake, and no flag turns that off.
-clear_stale_image_copies() {
-    local dir="$1"
-    if [ -d "$dir" ]; then
-        say "clearing $dir so the helper cannot report a previous run's image as this one's"
-        rm -rf "$dir"
+# The helper's own test for an installed SDK: `.toolchain_path_configured` beside the environment-setup script its install wrote. Asked here rather than left to build-webkit, which bitbakes the whole nativesdk stack through the helper when it is missing -- inside this stage, whose budget is WEBKIT_JOBS * 2560 MB for one cross WebKit compile (yocto_stage_budget, image/yocto.sh). One such build peaked 15406 MB against a 15360 MB book and the memory watchdog killed it at bitbake task 7658 of 13213 (measured 2026-09-17), where the toolchain stage books the machine envelope and would have had 17899 MB.
+require_toolchain() {
+    local dir="$WORKDIR/build/toolchain" env_setup="" f
+    if [ -f "$dir/.toolchain_path_configured" ]; then
+        for f in "$dir"/environment-setup-*; do
+            if [ -f "$f" ]; then env_setup="$f"; break; fi
+        done
     fi
+    [ -n "$env_setup" ] || fail "this lane has no cross toolchain installed, so cross-building WebKit here
+    would bitbake the whole nativesdk stack under a budget sized for one
+    WebKit compile, and the watchdog kills it hours in. Build it as its own
+    stage first, which books the whole machine:
+
+        wk sysimage build <profile> --stage toolchain
+
+    ('wk ab' declares that step itself; this is the path a hand-run
+    'wk sysimage webkit' takes.) What is looked for is
+    $dir/.toolchain_path_configured and an
+    environment-setup script beside it."
+    say "SDK           $env_setup"
+}
+
+# The helper's build_image() treats a file at build/image/<recipe>.<ext> as proof the image is current and returns without calling bitbake, and no flag turns that off, so the directory is empty before every image stage. Moved aside rather than deleted, and moved back by the next stage that finds no image in its place: deleting it leaves a killed or wedged image stage with a lane that holds nothing, `wk sysimage holds` answering no, and the next A/B rebuilding an image the lane already had. One image stage wedged in bitbake for 22800s and was killed with the directory already gone (measured 2026-09-17).
+image_copies_aside() { # <build/image dir>
+    local dir="$1"
+    rm -rf "$dir.previous"
+    if [ -d "$dir" ]; then
+        say "moving $dir aside to $dir.previous, so the helper cannot report a previous run's image as this one's"
+        mv "$dir" "$dir.previous"
+    fi
+}
+
+image_copies_kept() { # <build/image dir> -- the last good image, once this one is built
+    rm -rf "$1.previous"
+}
+
+# Every stage, not just the image one: whichever runs next in this lane is what converges the lane back onto the image it last built.
+image_copies_back() { # <build/image dir>
+    local dir="$1" f
+    [ -d "$dir.previous" ] || return 0
+    for f in "$dir"/*; do
+        [ -f "$f" ] && { rm -rf "$dir.previous"; return 0; }   # this lane built one since: the aside copy is the older
+    done
+    say "putting the image an earlier stage moved aside back at $dir (it built no replacement)"
+    rm -rf "$dir"
+    mv "$dir.previous" "$dir"
 }
 
 verify_image_freshness() { # <dir> <start-epoch-seconds>
@@ -370,11 +431,13 @@ verify_image_freshness() { # <dir> <start-epoch-seconds>
     [ "$newest" -ge "$start" ] \
         || fail "bitbake produced no new image; the helper reported a stale one.
     Newest file in $dir is older than this stage's own start time, which should
-    be impossible: yocto-build.sh clears that directory before every image
+    be impossible: yocto-build.sh empties that directory before every image
     stage precisely so the helper cannot hand back an old copy. If this fires,
     cross-toolchain-helper changed how it decides an image is built, and
-    clear_stale_image_copies (image/yocto-build.sh) needs to change with it."
+    image_copies_aside (image/yocto-build.sh) needs to change with it."
 }
+
+image_copies_back "$WORKDIR/build/image"
 
 case "$STAGE" in
     layers)
@@ -404,10 +467,11 @@ case "$STAGE" in
         configure_local_conf
         configure_bblayers
         clear_hosttools
-        clear_stale_image_copies "$WORKDIR/build/image"
+        image_copies_aside "$WORKDIR/build/image"
         image_stage_start=$(date +%s)
         run_helper "bitbake ${IMAGE:-the image} (rootfs + kernel + wic)" --build-image
         verify_image_freshness "$WORKDIR/build/image" "$image_stage_start"
+        image_copies_kept "$WORKDIR/build/image"
         ;;
     toolchain)
         init_workdir
@@ -421,21 +485,7 @@ case "$STAGE" in
         configure_local_conf
         configure_bblayers
         clear_hosttools
-        if [ -n "$COMMIT" ]; then  # a slot is reproducible from its sha alone, so this is refused dirty
-            # Porting a cross-target modifies targets.conf and adds a local.conf, so such a workspace is dirty by construction: those files are excluded by name and everything else still counts.
-            dirty=$(git -C "$SRC" status --porcelain -- . \
-                ':(exclude)Tools/yocto/targets.conf' \
-                ':(exclude)Tools/yocto/*/local-*.conf' \
-                2>/dev/null | wc -l | tr -d ' ')
-            [ "$dirty" = 0 ] || fail "$SRC has $dirty uncommitted change(s); a slot is built from a
-    commit and nothing else. Commit or discard them in the workspace first."
-            # t_spawn execs this with no WK_ROOT and no lib/target.sh, so there is no t_mirror_dir to ask: the container driver names the mirror in the environment (mirror_in_container, lib/target.sh).
-            git -C "$SRC" cat-file -e "$COMMIT^{commit}" 2>/dev/null \
-                || git -C "$SRC" fetch --quiet "${WK_MIRROR:?WK_MIRROR names the mirror this container mounts, set by targets/container.sh}" "$COMMIT" \
-                || fail "$COMMIT is not in this machine's mirror; 'wk ab' and 'wk pr' fetch a PR head into it first"
-            git -C "$SRC" checkout --detach --quiet "$COMMIT" || fail "could not check out $COMMIT in $SRC"
-            say "source        $SRC @ $(git -C "$SRC" rev-parse --short HEAD) ($(git -C "$SRC" log -1 --format=%s | cut -c1-60))"
-        fi
+        require_toolchain
         say "cross-building WebKit (WPE, Release) for $TARGET"
         # wpe-2.46 defaults ENABLE_WPE_1_1_API and ENABLE_WPE_PLATFORM both on and CMake refuses the pair, while run-benchmark's WPE driver hardcodes --use-wpe-platform-api. build-webkit takes only one --cmakeargs and the last wins, so the target's own (bwrap, xdg-dbus-proxy) are read out of targets.conf and ours appended.
         tgt_args=$(python3 - "$TARGET" <<'PYEOF'

@@ -438,8 +438,20 @@ FAKE_BRANCHES = {"WebKit": ("webkitglib/2.52", "wpe-2.38", "feature-x"),
                  "WPEWebKit": ("webkitglib/2.52", "wpe-2.38")}
 
 
+# `gh pr view <n> --json baseRefName`: the one GitHub question cmd/ab asks
+# about a pull request, since the branch a PR was written against is not in
+# the head its ref carries.
+GH_STUB = '''#!/bin/sh
+case "$1 $2" in
+"api user") echo '{"login":"t"}' ;;
+"pr view")  echo "$WK_TEST_PR_BASE" ;;
+*)          exit 0 ;;
+esac
+'''
+
+
 @contextlib.contextmanager
-def ab_env(boards, registry=()):
+def ab_env(boards, registry=(), pull=None):
     """A mirror, a fleet and a GitHub of this test's own. `boards` is
     {device: profile}; the fake GitHub is two repositories of one commit, and
     the stub `git` rewrites every github.com URL to them, so a fetch, an
@@ -473,6 +485,21 @@ def ab_env(boards, registry=()):
             g("init", "-q", "--bare", str(path))
             for branch in branches:
                 g("push", "-q", str(path), "HEAD:refs/heads/%s" % branch, cwd=src)
+        # A pull request written against one branch while another carries the
+        # image: its base branch moves on by a commit, and its head is one
+        # commit on top of that.
+        pr_head = ""
+        if pull:
+            for msg, ref in (("the branch moved on",
+                              "refs/heads/%s" % pull["base"]),
+                             ("the change under measurement",
+                              "refs/pull/%s/head" % pull["n"])):
+                g("-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q",
+                  "--allow-empty", "-m", msg, cwd=src)
+                g("push", "-qf", str(github / "WebKit.git"), "HEAD:%s" % ref,
+                  cwd=src)
+            pr_head = g("rev-parse", "HEAD", cwd=src)
+            g("checkout", "-q", head, cwd=src)
         mirror = state / "wk" / "git" / "WebKit.git"
         g("init", "-q", "--bare", str(mirror))
         for name, repo in (("origin", "WebKit"), ("fork", "WebKit"),
@@ -485,10 +512,15 @@ def ab_env(boards, registry=()):
             (hosts / ("%s.conf" % name)).write_text(
                 "WK_TARGET_KIND=remote\nWK_REMOTE_LOCAL=1\n"
                 f"WK_REMOTE_ROOT={tmp / name}\nWK_REMOTE_STORE={tmp / name / 'store'}\n")
-        with stub_path({"git": GIT_STUB}) as binp:
+        stubs = {"git": GIT_STUB}
+        if pull:
+            stubs["gh"] = GH_STUB
+        with stub_path(stubs) as binp:
             yield {
                 "head": head,
+                "pr_head": pr_head,
                 "env": {"XDG_STATE_HOME": str(state), "WK_STORE": str(store),
+                        "WK_TEST_PR_BASE": (pull or {}).get("base", ""),
                         "WK_MACHINES_DIR": str(machines),
                         "WK_TARGET_REGISTRY": str(hosts),
                         "WK_TEST_REAL_GIT": git, "WK_TEST_FAKE_GITHUB": str(github),
@@ -572,6 +604,76 @@ class TestTheAbGraph(WkTest):
                     if "deploy:rpi5:base-instr" in w and "instr:%s:pr" % lane in w]
         self.assertTrue(together, cp.stdout)
 
+    def test_a_yocto_lane_builds_its_cross_toolchain_as_a_step_of_its_own(self):
+        """The webkit stage books one cross compile's working set, and the
+        nativesdk stack does not fit in it: one such build peaked 15406 MB
+        against a 15360 MB book and the memory watchdog killed it at bitbake
+        task 7658 of 13213 (measured 2026-09-17), while the toolchain stage
+        books the machine envelope. So the SDK is a step, before anything
+        that cross-builds WebKit."""
+        cp, _ = self.dry_run("HEAD", "--release", "2.52", "--builder", "yocto",
+                             "--devices", "rpi5-64",
+                             boards={"rpi5": "webkit-2.52-yocto-rpi5-64"})
+        self.assertEqual(cp.returncode, 0, cp.stdout)
+        lane = "yocto-webkit-2.52-yocto-rpi5-64"
+        rows = step_lines(cp.stdout)
+        sdk = [k for k in rows if k.startswith("toolchain:%s@" % lane)]
+        self.assertEqual(len(sdk), 1, sorted(rows))
+        image = [k for k in rows if k.startswith("image:%s@" % lane)]
+        self.assertIn("needs %s" % image[0], rows[sdk[0]])
+        self.assertIn("holds machine:", rows[sdk[0]])
+        for arm in ("base", "pr"):
+            self.assertIn("needs %s" % sdk[0], rows["instr:%s:%s" % (lane, arm)])
+
+    def test_the_toolchain_step_is_asked_of_the_lane_that_would_build_it(self):
+        cp, _ = self.dry_run("HEAD", "--release", "2.52", "--builder", "yocto",
+                             "--devices", "rpi5-64",
+                             boards={"rpi5": "webkit-2.52-yocto-rpi5-64"})
+        self.assertIn("wk sysimage build webkit-2.52-yocto-rpi5-64 "
+                      "--workspace yocto-webkit-2.52-yocto-rpi5-64 "
+                      "--stage toolchain", cp.stdout)
+
+    def test_a_board_with_two_builders_at_one_release_asks_for_the_builder(self):
+        """What tells the matches apart is what to ask for. rpi5 at 2.52 has a
+        buildroot image and a yocto one, both 64-bit, and the refusal offered
+        `--devices rpi5-32 or rpi5-64` -- the width that had just been given."""
+        cp, _ = self.dry_run("HEAD", "--release", "2.52", "--devices", "rpi5-64",
+                             boards={"rpi5": "webkit-2.52-yocto-rpi5-64"})
+        self.assertNotEqual(cp.returncode, 0, cp.stdout)
+        self.assertIn("--builder buildroot or yocto", cp.stdout)
+        self.assertNotIn("rpi5-64 or rpi5-64", cp.stdout)
+
+    def test_a_board_with_two_widths_at_one_release_asks_for_the_width(self):
+        cp, _ = self.dry_run("HEAD", "--release", "2.52", "--builder", "yocto",
+                             "--devices", "rpi4",
+                             boards={"rpi4": "webkit-2.52-yocto-rpi4-64"})
+        self.assertNotEqual(cp.returncode, 0, cp.stdout)
+        self.assertIn("--devices rpi4-32 or rpi4-64", cp.stdout)
+
+    def test_a_pull_requests_base_comes_off_its_own_base_branch(self):
+        """Not the image's branch: a PR against main measured on a 2.52 image
+        had 15374 commits between its head and the merge-base with
+        webkitglib/2.52, so the one-commit barrier refused every such run and
+        each one needed --base by hand (measured 2026-09-17). The release says
+        which image to measure on; the PR's base branch says where the change
+        begins."""
+        with ab_env({"rpi5": "webkit-2.52-yocto-rpi5-64"},
+                    pull={"n": 990, "base": "feature-x"}) as env:
+            cp = run("ab", "990", "--dry-run", "--release", "2.52",
+                     "--builder", "yocto", "--devices", "rpi5-64",
+                     env=env["env"], timeout=240)
+        self.assertEqual(cp.returncode, 0, cp.stdout)
+        self.assertIn("origin/feature-x (guessed)", cp.stdout)
+        self.assertIn("1 commit(s) ahead of it", cp.stdout)
+
+    def test_a_buildroot_lane_has_no_toolchain_step(self):
+        """buildroot builds its toolchain inside its one build, so there is
+        no separate SDK for a step to wait on."""
+        cp, _ = self.dry_run("HEAD", "--release", "2.38", "--devices", "rpi3")
+        self.assertEqual(cp.returncode, 0, cp.stdout)
+        self.assertFalse([k for k in step_lines(cp.stdout)
+                          if k.startswith("toolchain:")], cp.stdout)
+
     def test_two_boards_on_one_machine_build_in_turn(self):
         """Two lanes, two pipelines -- and one machine, so the builds of the
         two do not overlap however much of the graph does."""
@@ -582,7 +684,8 @@ class TestTheAbGraph(WkTest):
         self.assertEqual(cp.returncode, 0, cp.stdout)
         for wave in wave_lines(cp.stdout):
             builds = [s for s in wave
-                      if s.split(":")[0] in ("image", "instr", "mix", "slot")]
+                      if s.split(":")[0] in ("image", "toolchain", "instr",
+                                             "mix", "slot")]
             self.assertLessEqual(len(builds), 1, wave)
         rows = step_lines(cp.stdout)
         for board in ("rpi4", "rpi5"):
@@ -618,7 +721,8 @@ class TestTheAbGraph(WkTest):
         self.assertEqual(cp.returncode, 0, cp.stdout)
         for wave in wave_lines(cp.stdout):
             builds = [s for s in wave
-                      if s.split(":")[0] in ("image", "instr", "mix", "slot")]
+                      if s.split(":")[0] in ("image", "toolchain", "instr",
+                                             "mix", "slot")]
             self.assertLessEqual(len(builds), 1, wave)
 
     def test_a_dry_run_creates_no_task_and_runs_nothing(self):

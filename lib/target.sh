@@ -121,11 +121,20 @@ _ssh_opts_base() { # never interactive, bounded connect; drivers add their own
     printf '%s' "-o BatchMode=yes -o ConnectTimeout=${1:-10}"
 }
 
+# What every t_spawn runs, whichever driver detaches it: the job announces the pid this end signals -- the command's own, not this shell's, since what may be signalled is checked against the command line it must have (job_pid_adopt) -- and writes its own exit status beside it. That status is the only thing that can tell a job that finished from a job that was killed once the driver is gone -- a driver SIGTERMed mid-wait leaves the record with a pid the far side no longer has and no exit, which reads `died` for a build that succeeded (measured 2026-09-17, a toolchain stage that had installed its SDK). task_verdict reads it as the record's `exit_file`. The stale status goes before the pid is announced, so a reader that has seen the pid is never looking at the last run's.
+t_spawn_script() { # <log> <pidf> <cmd...> -- the shell text the job runs under
+    local log="$1" pidf="$2"; shift 2
+    printf 'rm -f %s; %s > %s 2>&1 < /dev/null & _wk_job=$!; echo $_wk_job > %s; wait $_wk_job; echo $? > %s' \
+        "$(sh_quote "$pidf.exit")" \
+        "$(sh_quote "$@")" "$(sh_quote "$log")" \
+        "$(sh_quote "$pidf")" "$(sh_quote "$pidf.exit")"
+}
+
 # The far side is reached over ssh: nohup outlives the session's SIGHUP and disown drops it from the job table (detach_remote, lib/detach.sh). No setsid: macOS ships none.
 t_spawn() { # <name> <log> <pidf> <cmd...> -- detached from this process
     local name="$1" log="$2" pidf="$3"; shift 3
-    t_exec "$name" bash -lc "nohup $(sh_quote "$@") \
-        > $(sh_quote "$log") 2>&1 < /dev/null & echo \$! > $(sh_quote "$pidf"); disown"
+    t_exec "$name" bash -lc "nohup bash -c $(sh_quote "$(t_spawn_script "$log" "$pidf" "$@")") \
+        > /dev/null 2>&1 < /dev/null & disown"
 }
 
 t_branch() { # `-` when unknowable without starting something
@@ -475,9 +484,10 @@ _machine_state() {
     podman machine inspect "$1" --format '{{.State}}' 2>/dev/null || echo absent
 }
 
-# The one command line a podman-machine child runs, for the dispatcher's forward and the container driver's delegation alike. The VM is part of this machine, so its records name this host as itself.
+# The one command line a podman-machine child runs, for the dispatcher's forward and the container driver's delegation alike. The VM is part of this machine, so its records name this host as itself -- and a store this machine was pointed at is the store its VM answers for, which is what lets a test point the pair at a scratch directory and ask a routed question about a lane nothing has built (tests/support.py). Unset, both sides resolve the same default.
 vm_wk_cmd() { # <wk args...>
-    printf 'WK_IN_VM=1 %sWK_ROW_LABEL=%s WK_HOST_SELF=1 %s%s/opt/wk-tools/wk %s' \
+    printf 'WK_IN_VM=1 %s%sWK_ROW_LABEL=%s WK_HOST_SELF=1 %s%s/opt/wk-tools/wk %s' \
+        "${WK_STORE:+WK_STORE=$(sh_quote "$WK_STORE") }" \
         "$(wk_forwarded_env)" \
         "$(sh_quote "${WK_ROW_LABEL:-$(wk_machine_name)}")" \
         "${WK_NO_DELEGATE:+WK_NO_DELEGATE=1 }" \

@@ -238,12 +238,17 @@ _job_signal() { # <ws> <task dir> <pid> <signal>
     '$args', not $want. The pid is what the workspace announced, and this one
     is another process -- in a shared PID namespace it could be another
     workspace's build. Stop the job where it runs:  wk enter $ws"
-        t_exec "$ws" bash -c "$(declare -f _watched_descendants)
-for p in \$(_watched_descendants $pid); do kill -$sig \"\$p\" 2>/dev/null || true; done
-true" >/dev/null 2>&1 || true
+        t_kill_tree "$ws" "$pid" "$sig"
         return 0
     fi
     watched_kill "$pid" "$sig"
+}
+
+# Descendants first, inside the workspace, for a pid whose command line the caller has already checked (_job_signal, yocto_stop_cooker).
+t_kill_tree() { # <ws> <pid> <signal>
+    t_exec "$1" bash -c "$(declare -f _watched_descendants)
+for p in \$(_watched_descendants $2); do kill -$3 \"\$p\" 2>/dev/null || true; done
+true" >/dev/null 2>&1 || true
 }
 
 # Anchored, since a bare `error:` matches selector text (unarchivedObjectOfClass:fromData:error:) in every deprecation warning; warnings are dropped because Xcode emits hundreds of harmless "warning: llvmcas://...: No such file or directory".

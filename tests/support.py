@@ -40,6 +40,15 @@ atexit.register(shutil.rmtree, NO_REGISTRY, True)
 NO_SECRETS = tempfile.mkdtemp(prefix="wk-test-no-secrets-")
 atexit.register(shutil.rmtree, NO_SECRETS, True)
 
+# Same reasoning, for wk_state_dir (lib/common.sh): on a macOS workstation
+# that is where wk_record_dir sends a task record and where the mirror lives,
+# so a suite that merely popped XDG_STATE_HOME wrote into the real one -- 85
+# task records under ~/.local/state/wk/task, from tests about commands that
+# record a task. A test that wants this machine's own passes REAL_STATE.
+NO_STATE = tempfile.mkdtemp(prefix="wk-test-no-state-")
+REAL_STATE = os.environ.get("XDG_STATE_HOME") or str(Path.home() / ".local" / "state")
+atexit.register(shutil.rmtree, NO_STATE, True)
+
 # The credential rules (lib/credcheck.py) ask GitHub what a token can do, so
 # without a default of its own a test that stores one would spend a request
 # against the real API. Port 1 refuses at once, which is the same answer a
@@ -129,8 +138,8 @@ def _clean_env(extra=None, wk_root=False):
     for var in DISPATCH_VARS:
         env.pop(var, None)
     env.pop("WK_MARKER", None)
-    env.pop("XDG_STATE_HOME", None)
     env.pop("WK_STORE", None)
+    env["XDG_STATE_HOME"] = NO_STATE
     env["WK_TARGET_REGISTRY"] = NO_REGISTRY
     env["WK_HOST_SECRETS"] = NO_SECRETS
     env["WK_GITHUB_API"] = NO_GITHUB

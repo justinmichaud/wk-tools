@@ -209,6 +209,17 @@ image_slot_dir() { # <lane workspace> <slot> -- host path. A slot is one built W
     esac
 }
 
+# The cross SDK the webkit stage builds against, installed by cross-toolchain-helper into its own workdir (the layout yocto_workdir names, seen from the host's side of the bind mount). `.toolchain_path_configured` beside an environment-setup script is the helper's own test for an installed one, and image/yocto-build.sh's require_toolchain reads the same two files from inside the workspace.
+image_toolchain_holds() { # <lane workspace> <cross target> -- 0 when that lane has an SDK installed
+    local dir f
+    dir="$(wk_ws_dir "$1")/build/CrossToolChains/$2/build/toolchain"
+    [ -f "$dir/.toolchain_path_configured" ] || return 1
+    for f in "$dir"/environment-setup-*; do
+        [ -f "$f" ] && return 0
+    done
+    return 1
+}
+
 IMAGE_PGO_SUBDIR=wk-pgo   # the collection the next build reads, beside the slots and in the same bind mount: the host writes it (`wk pi bench --pgo`) and the builder reads it back through the cross toolchain (image/yocto-build.sh's pgo-mix)
 image_pgo_dir()    { echo "$(wk_ws_dir "$1")/build/$IMAGE_PGO_SUBDIR/$2"; }              # <lane workspace> <slot>, host side
 image_pgo_dir_in() { echo "/src/WebKit/WebKitBuild/$IMAGE_PGO_SUBDIR/$1"; }              # <slot>, as the builder sees it (targets/container.sh binds the one at the other)

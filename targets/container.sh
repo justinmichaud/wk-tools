@@ -296,7 +296,7 @@ t_spawn() {
     _hpodman exec -d --user "$u" "$c" \
         /opt/wk-tools/container/proxy/ensure-bridge.sh \
         /usr/bin/env "USER=$u" "HOME=/home/$u" bash --login -c \
-        "echo \$\$ > $(sh_quote "$pidf"); exec $(sh_quote "$@") > $(sh_quote "$log") 2>&1 < /dev/null" \
+        "$(t_spawn_script "$log" "$pidf" "$@")" \
         >/dev/null
 }
 

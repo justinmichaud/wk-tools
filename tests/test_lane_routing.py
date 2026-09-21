@@ -186,13 +186,37 @@ class TestHoldsAnswersOnStdout(WkTest):
     which as a status would read as `holds` and skip the build."""
 
     def _holds(self, *args):
-        cp = run("sysimage", "holds", *args, timeout=240)
+        """Against a store of this test's own: `holds` is routed to the
+        machine holding the lane, and on a macOS workstation that is the
+        podman VM -- whose real store answers `yes` for whatever this
+        maintainer last built, which is not what any of these assert. The
+        store reaches the far side with the command (vm_wk_cmd,
+        lib/target.sh), so both sides read the scratch one."""
+        cp = run("sysimage", "holds", *args, timeout=240,
+                 env={"WK_STORE": str(self.tmp / "store")})
         return cp.stdout.strip(), cp
 
     def test_an_image_nothing_has_built_is_no(self):
         got, cp = self._holds(PROFILE)
         self.assertEqual(cp.returncode, 0, cp.stdout)
         self.assertEqual(got, "no")
+
+    def test_a_toolchain_nothing_has_built_is_no(self):
+        got, cp = self._holds(PROFILE, "--toolchain")
+        self.assertEqual(cp.returncode, 0, cp.stdout)
+        self.assertEqual(got, "no")
+
+    def test_the_toolchain_question_takes_nothing_else(self):
+        got, cp = self._holds(PROFILE, "--toolchain", "--slot", "base",
+                              "--commit", "a" * 40)
+        self.assertNotEqual(cp.returncode, 0, cp.stdout)
+        self.assertIn("--toolchain", cp.stdout)
+
+    def test_a_buildroot_profile_has_no_toolchain_to_ask_about(self):
+        """buildroot builds its own toolchain inside its one build, so there
+        is no separately installed SDK for a step to wait on."""
+        got, cp = self._holds(BUILDROOT_PROFILE, "--toolchain")
+        self.assertNotEqual(cp.returncode, 0, cp.stdout)
 
     def test_a_slot_nothing_has_built_is_no(self):
         got, cp = self._holds(PROFILE, "--slot", "base", "--commit", "a" * 40)
@@ -220,6 +244,30 @@ class TestHoldsAnswersOnStdout(WkTest):
         machine to answer a question about it."""
         cp = run("sysimage", "-h", timeout=120)
         self.assertIn("holds", cp.stdout)
+
+
+class TestThePathQuestionIsRoutedToo(WkTest):
+    """`wk sysimage path <profile>` is how `write --from <configuration>`
+    finds the bytes: the lane answers in its own spelling, because on a macOS
+    workstation the image is in the podman VM and the write runs out here."""
+
+    def _path(self, *args):
+        return run("sysimage", "path", *args, timeout=240,
+                   env={"WK_STORE": str(self.tmp / "store")})
+
+    def test_a_lane_with_no_image_answers_nothing_and_says_so(self):
+        cp = self._path(PROFILE)
+        self.assertNotEqual(cp.returncode, 0, cp.stdout)
+        self.assertEqual(cp.stdout.strip(), "")
+
+    def test_an_unknown_profile_is_refused(self):
+        cp = self._path("nosuchprofile-at-all")
+        self.assertNotEqual(cp.returncode, 0, cp.stdout)
+
+    def test_it_names_the_lane_for_the_dispatcher(self):
+        got, cp = hook("sysimage", "--wsname", "path", PROFILE)
+        self.assertEqual(cp.returncode, 0, cp.stderr)
+        self.assertEqual(got, LANE)
 
 
 class TestTheRoutingHooks(WkTest):

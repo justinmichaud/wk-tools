@@ -3,13 +3,14 @@
 # wk sysimage <sub> [args] -- build and manage bootable systems
 #
 # wk: where=host name=none values=--list group=hosts takes=1 opts --list dryrun build,webkit,write
-# wk: readonly ls,disks,holds,--list
+# wk: readonly ls,disks,holds,path,--list
 # wk: destructive write
 # wk: flag --list takes=0
 # wk: sub ls,list where=dynamic opts=--continued
-# wk: sub build,webkit,holds where=dynamic name=derived
-# wk: sub build,webkit,disks,rm,flash,holds takes=2
-# wk: sub holds opts=--slot=,--commit=,--config=,--workspace=
+# wk: sub build,webkit,holds,path where=dynamic name=derived
+# wk: sub build,webkit,disks,rm,flash,holds,path takes=2
+# wk: sub holds opts=--slot=,--commit=,--config=,--workspace=,--toolchain
+# wk: sub path opts=--workspace=
 # wk: sub build,webkit passthrough=tail
 # wk: sub write opts=--from=,--disk=,--profile=,--machine=,--rescue,--grow,--no-grow
 #
@@ -64,14 +65,20 @@
 #                                or wpe-cross-pgo-use (against the mixed
 #                                profile). Without it a 2.52 profile runs all
 #                                three phases in order
-#   holds <profile> [--slot <name> --commit <sha> [--config <c>]]
+#   holds <profile> [--toolchain | --slot <name> --commit <sha> [--config <c>]]
 #                                prints `yes` when that lane already holds what
-#                                is named -- the built image, or the slot at
-#                                that commit built the way this release builds
-#                                it -- and `no` when it does not. Routed to the
+#                                is named -- the built image, the cross SDK
+#                                (--toolchain), or the slot at that commit
+#                                built the way this release builds it -- and
+#                                `no` when it does not. Routed to the
 #                                lane like build and webkit, so a step asks the
 #                                machine that would do the work rather than
 #                                this one (lib/sched.py's done predicate)
+#   path <profile>               the path of the image that lane built, as the
+#                                machine holding the lane spells it, and
+#                                nothing (exit 1) when it has none. What
+#                                'write --from <configuration>' resolves
+#                                through
 #   ls | list                    every image a workspace in this fleet has built,
 #                                its slots, and where each one is: this
 #                                machine's store, then every machine it knows
@@ -397,9 +404,9 @@ cmd_webkit() {
 }
 
 # A step's done predicate, asked of the machine holding the lane rather than of the one that drew the graph (lib/sched.py, cmd/ab). The verdict is on stdout, not in the exit status: a readonly command forwarded to a stopped podman machine reports that and exits 0, which as a status would read as `holds` and skip the build.
-cmd_holds() { # <profile>[@<machine>] [--workspace <lane>] [--slot <name> --commit <sha> [--config <c>]]
-    local profile="${1:-}" slot="" commit="" config="" lane=""
-    [ -n "$profile" ] || die "usage: wk sysimage holds <profile> [--slot <name> --commit <sha>]; see wk sysimage -h"
+cmd_holds() { # <profile>[@<machine>] [--workspace <lane>] [--toolchain | --slot <name> --commit <sha> [--config <c>]]
+    local profile="${1:-}" slot="" commit="" config="" lane="" toolchain=""
+    [ -n "$profile" ] || die "usage: wk sysimage holds <profile> [--toolchain|--slot <name> --commit <sha>]; see wk sysimage -h"
     profile=$(image_spec_profile "$profile")   # the machine half routed this here (wk); what is asked about is the profile
     shift
     while [ $# -gt 0 ]; do
@@ -408,12 +415,23 @@ cmd_holds() { # <profile>[@<machine>] [--workspace <lane>] [--slot <name> --comm
             --commit) commit="${2:-}"; shift ;;
             --config) config="${2:-}"; shift ;;
             --workspace) lane="${2:-}"; shift ;;
+            --toolchain) toolchain=1 ;;
         esac
         shift
     done
     image_profile_load "$profile" || die "unknown profile '$profile'.
     'wk sysimage --list' has every configuration."
     [ -n "$lane" ] || lane=$(image_lane_ws "$profile")
+
+    if [ -n "$toolchain" ]; then
+        [ -z "$slot$commit$config" ] || die "usage: wk sysimage holds $profile --toolchain
+    --toolchain asks whether the lane has the cross SDK the webkit stage builds
+    against, which is one question about the lane and takes nothing else."
+        [ -n "${YOC_TARGET:-}" ] || die "$profile is built by ${IMG_BUILDER:-no builder}, which has no cross toolchain
+    of its own to ask about -- only a yocto profile installs one (YOC_TARGET)."
+        image_toolchain_holds "$lane" "$YOC_TARGET" && echo yes || echo no
+        return 0
+    fi
 
     if [ -z "$slot" ]; then
         [ -z "$commit$config" ] || die "usage: wk sysimage holds $profile --slot <name> --commit <sha>
@@ -433,6 +451,25 @@ cmd_holds() { # <profile>[@<machine>] [--workspace <lane>] [--slot <name> --comm
         image_slot_holds "$lane" "$slot" "$commit" && echo yes || echo no
     fi
     return 0
+}
+
+# Routed to the lane like `holds`, so the path is the one the machine holding the lane can open -- which is the whole point on a macOS workstation, where the image is in the podman VM and `write` runs out here.
+cmd_path() { # <profile>[@<machine>] [--workspace <lane>]
+    local profile="${1:-}" lane="" path
+    [ -n "$profile" ] || die "usage: wk sysimage path <profile>; see wk sysimage -h"
+    profile=$(image_spec_profile "$profile")
+    shift
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --workspace) lane="${2:-}"; shift ;;
+        esac
+        shift
+    done
+    image_profile_load "$profile" || die "unknown profile '$profile'.
+    'wk sysimage --list' has every configuration."
+    [ -n "$lane" ] || lane=$(image_lane_ws "$profile")
+    path=$(_image_path ws "$lane") || return 1
+    printf '%s\n' "$path"
 }
 
 _ws_building() { # <workspace>
@@ -752,10 +789,18 @@ _from_resolve() { # <spec> -- prints a path or vm:<path>
         printf '%s' "$path"
         return 0
     fi
+    # `write` runs on the host holding the card reader, and on a macOS workstation the lane is in the podman VM, whose store this side cannot read: the lane is asked for the path in its own spelling, and `vm:` says whose filesystem that is (_from_reader streams it from there).
     if image_profile_load "$spec" >/dev/null 2>&1; then
-        die "'$spec' is a configuration this checkout defines, but no workspace here
-    has built it yet:
-        wk sysimage build $spec"
+        if path=$("$WK_ROOT/wk" sysimage path "$spec" 2>/dev/null | tr -d '\r') && [ -n "$path" ]; then
+            store_is_local || path="vm:$path"
+            info "'$spec' is a configuration; its image is at $path"
+            printf '%s' "$path"
+            return 0
+        fi
+        die "'$spec' is a configuration this checkout defines, and the lane that would
+    build it holds no image:
+        wk sysimage build $spec
+    'wk sysimage ls' lists every image this fleet has built, with its path."
     fi
     die "'$spec' is neither a path nor a configuration this checkout defines.
     Configurations with an image on this machine:
@@ -1041,6 +1086,7 @@ case "${1:-}" in
     webkit) shift; cmd_webkit "$@" ;;
     ls|list) shift; cmd_ls "$@" ;;
     holds) shift; cmd_holds "$@" ;;
+    path) shift; cmd_path "$@" ;;
     disks) shift; cmd_disks "$@" ;;
     write) shift; cmd_write "$@" ;;
     flash) shift; cmd_flash "$@" ;;

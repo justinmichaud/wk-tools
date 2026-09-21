@@ -430,3 +430,109 @@ PY''')
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestAJobsOwnExitStatusOutlivesItsDriver(WkTest):
+    """t_spawn has the job write its exit status beside its pid file, and the
+    record names that file as `exit_file`: a driver SIGTERMed mid-wait --
+    which is what a two-minute tool timeout does to `wk sysimage build` --
+    otherwise leaves a stage that finished reading `died -- no exit
+    recorded`. Measured 2026-09-17: a toolchain stage that had written
+    "stage 'toolchain' done" and installed its SDK read `died`."""
+
+    def _verdict(self, job_exit=None, pid=DEAD_PID):
+        store = self.tmp / "store"
+        exitf = self.tmp / f"yocto-{rand_suffix()}.pid.exit"
+        if job_exit is not None:
+            exitf.write_text("%s\n" % job_exit)
+        d = write_task(store, kind="yocto", pid=pid)
+        cp = bash(f'''
+. "{REPO}/lib/common.sh"
+. "{REPO}/lib/task.sh"
+{STUB_PS}
+task_set "{d}" exit_file "{exitf}"
+task_verdict "{d}"
+''', env={"WK_STORE": str(store)})
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        return cp.stdout.strip()
+
+    def test_a_finished_job_whose_driver_is_gone_is_not_died(self):
+        self.assertEqual(self._verdict(job_exit=0), "ok")
+
+    def test_a_failed_job_whose_driver_is_gone_says_failed(self):
+        self.assertEqual(self._verdict(job_exit=1), "failed")
+
+    def test_a_job_that_recorded_nothing_still_reads_died(self):
+        self.assertEqual(self._verdict(), "died")
+
+    def test_the_drivers_own_word_wins_over_the_jobs(self):
+        """`--kill` records `cancelled` and the job it stopped cannot
+        overwrite that with the status the kill caused."""
+        store = self.tmp / "store"
+        exitf = self.tmp / "job.pid.exit"
+        exitf.write_text("143\n")
+        d = write_task(store, kind="yocto", pid=DEAD_PID, end="cancelled")
+        cp = bash(f'''
+. "{REPO}/lib/common.sh"
+. "{REPO}/lib/task.sh"
+task_set "{d}" exit_file "{exitf}"
+task_verdict "{d}"
+''', env={"WK_STORE": str(store)})
+        self.assertEqual(cp.stdout.strip(), "cancelled", cp.stdout + cp.stderr)
+
+    def test_reading_the_verdict_writes_nothing_into_the_record(self):
+        """A reporting command changes nothing: the job's status is read,
+        never copied into the record."""
+        store = self.tmp / "store"
+        exitf = self.tmp / "job.pid.exit"
+        exitf.write_text("0\n")
+        d = write_task(store, kind="yocto", pid=DEAD_PID)
+        cp = bash(f'''
+. "{REPO}/lib/common.sh"
+. "{REPO}/lib/task.sh"
+task_set "{d}" exit_file "{exitf}"
+task_verdict "{d}" >/dev/null
+[ -f "{d}/exit" ] && echo WROTE || echo clean
+''', env={"WK_STORE": str(store)})
+        self.assertEqual(cp.stdout.strip(), "clean", cp.stdout + cp.stderr)
+
+
+class TestTheSpawnScriptRecordsBoth(WkTest):
+    """t_spawn_script (lib/target.sh) is what both drivers run: the command's
+    own pid where this end can signal it, and the command's exit status where
+    a driver that is gone can still be told a finished job from a killed
+    one."""
+
+    def _spawn(self, cmd):
+        d = self.tmp / rand_suffix()
+        d.mkdir()
+        log, pidf = d / "log", d / "pid"
+        cp = bash(f'''
+. "{REPO}/lib/common.sh"
+. "{REPO}/lib/target.sh"
+bash -c "$(t_spawn_script "{log}" "{pidf}" {cmd})"
+''')
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        return log, pidf
+
+    def test_it_records_a_success(self):
+        log, pidf = self._spawn("sh -c 'echo out'")
+        self.assertEqual((pidf.with_suffix(".exit")).read_text().strip(), "0")
+        self.assertEqual(log.read_text().strip(), "out")
+
+    def test_it_records_a_failure(self):
+        log, pidf = self._spawn("sh -c 'exit 7'")
+        self.assertEqual((pidf.with_suffix(".exit")).read_text().strip(), "7")
+
+    def test_the_pid_is_the_commands_own_and_not_the_wrappers(self):
+        log, pidf = self._spawn("sh -c 'echo $$ > %s/inner'" % self.tmp)
+        self.assertEqual(pidf.read_text().strip(),
+                         (self.tmp / "inner").read_text().strip())
+
+    def test_a_previous_runs_status_is_gone_before_the_pid_appears(self):
+        """Ordering, so a reader that has seen the pid is never looking at
+        the last run's status."""
+        script = (REPO / "lib" / "target.sh").read_text()
+        body = script[script.index("t_spawn_script()"):]
+        body = body[:body.index("\n}")]
+        self.assertLess(body.index("rm -f"), body.index("echo $_wk_job"))
