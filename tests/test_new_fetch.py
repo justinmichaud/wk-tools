@@ -133,21 +133,29 @@ class MirrorFixture(unittest.TestCase):
         """cmd/sync's snapshot_checkout, run for real."""
         return bash(SYNC_FUNCS + f'snapshot_checkout {str(tree)!r} {branch!r}')
 
-    def wire(self, tree, mirror=None):
+    def store_funcs(self, branches=None):
+        """STORE_FUNCS with another branch list pinned: what this checkout
+        declares (image/configs) is what a wiring asks origin for."""
+        if branches is None:
+            return STORE_FUNCS
+        return STORE_FUNCS.replace(PIN, f'export WK_MIRROR_BRANCHES={branches!r}\n')
+
+    def wire(self, tree, mirror=None, branches=None):
         """lib/store.sh's wk_wiring_script -- the one authority every target
         wires from -- run for real against this fixture's mirror."""
         m = str(self.mirror if mirror is None else mirror)
-        cp = bash(STORE_FUNCS + f'wk_wiring_script {str(tree)!r} {m!r}')
+        cp = bash(self.store_funcs(branches) + f'wk_wiring_script {str(tree)!r} {m!r}')
         assert cp.returncode == 0, cp.stdout + cp.stderr
         out = subprocess.run(["sh", "-c", cp.stdout], cwd=str(tree),
                              capture_output=True, text=True)
         assert out.returncode == 0, out.stdout + out.stderr
         return cp.stdout
 
-    def check(self, tree, mirror=None):
+    def check(self, tree, mirror=None, branches=None):
         """wk_wiring_check_script, the other half of the wiring, run for real."""
         m = str(self.mirror if mirror is None else mirror)
-        cp = bash(STORE_FUNCS + f'wk_wiring_check_script {str(tree)!r} {m!r} skip-env')
+        cp = bash(self.store_funcs(branches)
+                  + f'wk_wiring_check_script {str(tree)!r} {m!r} skip-env')
         assert cp.returncode == 0, cp.stdout + cp.stderr
         return subprocess.run(["sh", "-c", cp.stdout], cwd=str(tree),
                               capture_output=True, text=True)
@@ -346,6 +354,20 @@ class TestWsFetchScript(WorkspaceFixture):
                     cwd=self.ws).stdout.split()
         self.assertIn("refs/remotes/origin/main", refs)
         self.assertNotIn("refs/remotes/origin/safari-1-branch", refs)
+
+    def test_a_ref_the_mirror_cannot_answer_fails_the_script(self):
+        """The defect: `git fetch --all` said `fatal: couldn't find remote
+        ref`, the script exited 0 on the `from=` line after it, and `wk new`
+        reported the fetch ok in a workspace whose `git-webkit setup` had
+        died on the same ref."""
+        _git("config", "--add", "remote.origin.fetch",
+             "+refs/heads/webkitglib/9.9:refs/remotes/origin/webkitglib/9.9",
+             cwd=self.ws)
+        cp = self.run_fetch()
+        self.assertNotEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertIn("couldn't find remote ref", cp.stderr)
+        self.assertIn("from=mirror", cp.stdout,
+                      "which source it read is still reported")
 
     def test_it_is_one_fetch_of_every_remote_git_has(self):
         """No second refspec list in the script: what is asked for lives in the
@@ -571,6 +593,22 @@ class TestTheWiringCheck(MirrorFixture):
         for remote in ("origin", "wpe", "fork", "forkwpe"):
             self.assertIn(f"problem: {remote} is not rewritten to {self.mirror}",
                           out.stdout)
+
+    def test_a_mirror_without_a_branch_this_tree_declares_is_a_fault_of_its_own(self):
+        """Declaring a branch (an image configuration's CFG_BRANCH) wires
+        every workspace to ask origin for it; the mirror carries it only
+        once it has been refreshed. Between the two, `git fetch --all` in
+        the workspace -- which is the fetch `git-webkit setup` does -- dies
+        on that one ref, so the checkout is named for what it is missing."""
+        tree = self.clone_snapshot(self.tmp / "gap")
+        self.wire(tree, branches="main webkitglib/9.9")
+        out = self.check(tree, branches="main webkitglib/9.9")
+        self.assertNotEqual(out.returncode, 0, out.stdout)
+        self.assertIn(f"the mirror {self.mirror} carries no refs/heads/webkitglib/9.9",
+                      out.stdout)
+        self.assertIn("wk sync --mirror", out.stdout)
+        self.assertEqual(out.stdout.count("problem:"), 1,
+                         "the branch the mirror does carry is not a fault")
 
     def test_a_checkout_with_no_mirror_is_checked_against_the_upstreams(self):
         """No rewrite is expected of it, and origin is still narrowed."""

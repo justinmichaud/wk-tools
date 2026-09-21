@@ -1,1 +1,3 @@
-../wk-build-wall
+#!/usr/bin/env bash
+# wk-build-wall: a file rather than a symlink to it, and sourced rather than exec'd -- webkitcorepy runs the realpath of `which('git')` for every git call (Scm.executable), which reaches a symlinked wall under its own name and is refused, and `.` keeps $0 this file, so the wall reads the name it was called by.
+. "${BASH_SOURCE[0]%/*}/../wk-build-wall"

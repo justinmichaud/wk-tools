@@ -316,6 +316,65 @@ probe_store
             shutil.rmtree(d, ignore_errors=True)
 
 
+class TestProbeStoreMirror(unittest.TestCase):
+    """The mirror is reported by what it carries. Every workspace on this
+    machine asks it for a head per branch this tree declares
+    (wk_fetch_refspecs), so one it does not have is a fetch that fails in
+    every one of them -- and a directory that exists says nothing about
+    that."""
+
+    def _mirror(self, heads):
+        d = Path(tempfile.mkdtemp(prefix="wk-test-doctor-mirror-"))
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        mirror = d / "git" / "WebKit.git"
+        git = ["git", "-c", "user.email=t@example.com", "-c", "user.name=Test"]
+        subprocess.run(["git", "init", "-q", "--bare", str(mirror)], check=True)
+        tree = subprocess.run(git + ["-C", str(mirror), "hash-object", "-t", "tree",
+                                     "-w", "/dev/null"],
+                              capture_output=True, text=True, check=True).stdout.strip()
+        for head in heads:
+            sha = subprocess.run(git + ["-C", str(mirror), "commit-tree", tree,
+                                        "-m", head],
+                                 capture_output=True, text=True, check=True).stdout.strip()
+            subprocess.run(git + ["-C", str(mirror), "update-ref",
+                                  f"refs/heads/{head}", sha], check=True)
+        return d
+
+    def _probe(self, branches, heads):
+        store = self._mirror(heads)
+        cp = bash(f'''
+set -euo pipefail
+. "$WK_ROOT/lib/common.sh"
+. "$WK_ROOT/lib/store.sh"
+{_lift_func(CMD_DOCTOR, "probe_store")}
+WK_STORE={_sq(str(store))}
+probe_store
+''', env={"WK_MIRROR_BRANCHES": branches})
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        return [l for l in cp.stdout.splitlines() if l.startswith("mirror=")][0]
+
+    def test_every_declared_branch_present_is_ok(self):
+        self.assertEqual(self._probe("main webkitglib/2.52",
+                                     ["main", "webkitglib/2.52"]), "mirror=ok")
+
+    def test_a_declared_branch_the_mirror_lacks_is_named(self):
+        self.assertEqual(self._probe("main webkitglib/2.52", ["main"]),
+                         "mirror=gap webkitglib/2.52")
+
+    def test_no_mirror_at_all_is_still_the_answer_it_was(self):
+        d = Path(tempfile.mkdtemp(prefix="wk-test-doctor-nomirror-"))
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        cp = bash(f'''
+set -euo pipefail
+. "$WK_ROOT/lib/common.sh"
+. "$WK_ROOT/lib/store.sh"
+{_lift_func(CMD_DOCTOR, "probe_store")}
+WK_STORE={_sq(str(d))}
+probe_store
+''', env={"WK_MIRROR_BRANCHES": "main"})
+        self.assertIn("mirror=no", cp.stdout)
+
+
 REPORT_STORE = _lift_func(CMD_DOCTOR, "report_store")
 DOCTOR_OK_MISS_UNK = _lift_one_liners(CMD_DOCTOR, ["ok", "miss", "unk"])
 
@@ -359,6 +418,19 @@ report_store {_sq(blob)} {_sq(gitremedy)}
         out = self._run(FULL_STORE_BLOB, "")
         self.assertNotIn("container machine", out)
         self.assertNotIn("git user.name", out)
+
+    def test_a_mirror_missing_a_branch_is_a_row_naming_it_and_the_refresh(self):
+        """Not `wk sync`, which fetches in a workspace against the mirror as
+        it is: the branch arrives only where the mirror is refreshed."""
+        out = self._run(FULL_STORE_BLOB.replace("mirror=ok",
+                                                "mirror=gap webkitglib/2.52"), "")
+        self.assertIn("carries no webkitglib/2.52", out)
+        self.assertIn("wk sync --mirror", out)
+
+    def test_no_mirror_at_all_names_the_command_that_clones_one(self):
+        out = self._run(FULL_STORE_BLOB.replace("mirror=ok", "mirror=no"), "")
+        self.assertIn("WebKit mirror", out)
+        self.assertNotIn("wk sync --mirror", out)
 
 
 class TestTheCredentialsSection(unittest.TestCase):

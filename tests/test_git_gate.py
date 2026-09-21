@@ -25,6 +25,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import unittest
 from pathlib import Path
 
@@ -47,9 +48,7 @@ class _Gate(WkTest):
         super().setUp()
         if not shutil.which("git"):
             raise unittest.SkipTest("no git")
-        self.bin = self.tmp / "bin"
-        self.bin.mkdir()
-        (self.bin / "git").symlink_to(WALL)
+        self.bin = SHIM.parent   # the shipped gate, in the arrangement it ships in
         self.home = self.tmp / "home"
         (self.home / ".ssh").mkdir(parents=True)
         self.repo = self.tmp / "repo"
@@ -199,10 +198,41 @@ class TestThePushSwitchExplainsItself(_Gate):
         self.assertNotIn("no deploy key", cp.stderr)
 
 
+class TestWhatAToolResolvesGitTo(_Gate):
+    """The shape webkitcorepy uses, end to end: resolve `git` on PATH,
+    follow it to a real file, and run that path for every git call after --
+    which is what `git-webkit setup` (and so `wk new`'s verify) rests on."""
+
+    def test_the_resolved_path_is_named_git_and_is_still_git(self):
+        env = dict(os.environ, HOME=str(self.home),
+                   PATH=f"{self.bin}:{os.environ['PATH']}")
+        resolved = subprocess.run(
+            [sys.executable, "-c",
+             "import os, shutil; print(os.path.realpath(shutil.which('git')))"],
+            env=env, capture_output=True, text=True, check=True).stdout.strip()
+        self.assertEqual(os.path.basename(resolved), "git", resolved)
+        cp = subprocess.run([resolved, "log", "--oneline"], cwd=str(self.repo),
+                            env=env, capture_output=True, text=True)
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertIn("one", cp.stdout)
+
+
 class TestWhereItSitsOnPath(unittest.TestCase):
-    def test_the_shim_is_the_wall_itself_and_not_a_second_copy(self):
-        self.assertTrue(SHIM.is_symlink(), SHIM)
-        self.assertEqual(os.readlink(SHIM), "../wk-build-wall")
+    def test_the_shim_is_the_wall_under_a_name_a_realpath_can_land_on(self):
+        """A symlink here is resolved away: webkitcorepy runs
+        `os.path.realpath(shutil.which('git'))` once and every git call
+        after it is that path (webkitscmpy's Scm.executable), so the wall
+        arrived under its own name, refused, and left `git-webkit setup`
+        reporting "No repository found" in every workspace. A file named
+        `git`, holding no second copy of the gate: it sources the wall."""
+        self.assertFalse(SHIM.is_symlink(), SHIM)
+        lines = SHIM.read_text().splitlines()
+        self.assertTrue(any(l.startswith("# wk-build-wall:") for l in lines[:5]),
+                        "_real() skips a wall it can recognise; this one has to be one")
+        body = [l for l in lines if l and not l.startswith("#")]
+        self.assertEqual(len(body), 1, body)
+        self.assertTrue(body[0].startswith(". "), body[0])
+        self.assertIn("/../wk-build-wall", body[0])
 
     def test_a_host_shell_does_not_pay_for_it(self):
         """The workstation sources the same path.sh, and `git` there has no

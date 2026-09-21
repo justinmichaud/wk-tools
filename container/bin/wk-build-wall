@@ -13,9 +13,9 @@ GIT_WRITE_VERBS="add am apply branch checkout cherry-pick commit fetch gc merge 
 
 self=${0##*/}
 
-# Follows $0 because bitbake's tmp/hosttools copies have no sibling wall to find; not `readlink -f`, which macOS lacks.
+# Follows the file bash is running, not $0, which the gate replaces with the tool's name (container/bin/ws/git); bitbake's tmp/hosttools copies have no sibling wall to find, and `readlink -f` is what macOS lacks.
 _resolve_self() {
-    local p="$0" t n=0 d
+    local p="${BASH_SOURCE[0]}" t n=0 d
     while [ -L "$p" ] && [ "$n" -lt 40 ]; do
         t=$(readlink "$p") || break
         case "$t" in

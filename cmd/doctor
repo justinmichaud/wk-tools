@@ -35,7 +35,18 @@ WK_MACHINE="${WK_MACHINE:-wk}"
 
 # The store lives where the containers do -- inside the podman VM on macOS -- so the macOS host asks the VM to run this probe.
 probe_store() {
-    [ -d "$WK_STORE/git/WebKit.git" ] && echo mirror=ok || echo mirror=no
+    local _gap _b
+    # Named, not counted: a workspace asks the mirror for a head per branch this tree declares (wk_fetch_refspecs), and the one it does not carry is what every fetch in every workspace dies on.
+    if [ ! -d "$WK_STORE/git/WebKit.git" ]; then
+        echo mirror=no
+    else
+        _gap=""
+        for _b in $(wk_mirror_branches); do
+            git -C "$WK_STORE/git/WebKit.git" rev-parse --verify --quiet "refs/heads/$_b" \
+                >/dev/null 2>&1 || _gap="${_gap:+$_gap }$_b"
+        done
+        [ -z "$_gap" ] && echo mirror=ok || echo "mirror=gap $_gap"
+    fi
     [ -n "$(ls -1 "$WK_STORE/base" 2>/dev/null)" ] && echo base=ok || echo base=no
     [ -n "$(ls -1 "$WK_STORE/skills" 2>/dev/null)" ] && echo skills=ok || echo skills=no
     # The socket is proof too: systemctl --user over a bare ssh session can fail to find the user bus even when the service is fine.
@@ -318,7 +329,11 @@ unset -f local_state
 report_store() { # <probe output> [container-machine git remedy]
     local out="$1" gitremedy="${2:-}" v _gs _gw _gr
     v() { printf '%s' "$out" | sed -n "s/^$1=//p"; }
-    [ "$(v mirror)" = ok ] && ok "WebKit mirror"          || miss "WebKit mirror" "wk sync"
+    case "$(v mirror)" in
+        ok)    ok "WebKit mirror" ;;
+        gap*)  miss "WebKit mirror carries no $(v mirror | cut -d' ' -f2-)" "wk sync --mirror" ;;
+        *)     miss "WebKit mirror" "wk sync" ;;
+    esac
     [ "$(v base)" = ok ]   && ok "base snapshot"          || miss "base snapshot" "wk sync"
     # Read here, not in the probe: the deploy keys are this machine's own, which on macOS is the directory the podman machine mounts.
     [ -f "$(wk_push_held_dir)/build_key_fork" ] \

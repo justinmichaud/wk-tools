@@ -14,8 +14,10 @@ Run: python3 -m unittest tests.test_sync -v
 import contextlib
 import json
 import shlex
+import shutil
 import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -902,6 +904,66 @@ class TestSyncInsideWorkspace(unittest.TestCase):
                 cp = ws.run("sync", env={"WK_BROKER_SOCKET": str(sock)})
         self.assertEqual(cp.returncode, 0, cp.stdout)
         self.assertNotIn("Permission denied", cp.stdout)
+
+
+class TestTheMirrorAnswersForWhatThisTreeDeclares(unittest.TestCase):
+    """wk_mirror_branches is what every workspace's origin refspecs ask the
+    mirror for (lib/store.sh), and the refresh is the one thing that puts
+    those heads in it. So a declared branch still missing when the refresh
+    has run is named here, once, at the producer -- rather than as a
+    `couldn't find remote ref` in every fetch in every workspace on the
+    machine afterwards.
+
+    The refresh itself is stubbed: what is under test is the reading taken
+    after it, against a bare repository carrying exactly the heads each
+    case names."""
+
+    SYNC_MIRROR = _lift_func(REPO / "cmd" / "sync", "sync_mirror")
+    STUBS = """
+mirror_init()           { :; }
+mirror_refresh_script() { printf ':\\n'; }
+stage_begin()           { :; }
+stage_end()             { :; }
+"""
+
+    def _mirror(self, heads):
+        d = Path(tempfile.mkdtemp(prefix="wk-test-sync-mirror-"))
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        m = d / "WebKit.git"
+        git = ["git", "-c", "user.email=t@example.com", "-c", "user.name=Test",
+               "-C", str(m)]
+        subprocess.run(["git", "init", "-q", "--bare", str(m)], check=True)
+        tree = subprocess.run(git + ["hash-object", "-t", "tree", "-w", "/dev/null"],
+                              capture_output=True, text=True, check=True).stdout.strip()
+        for head in heads:
+            sha = subprocess.run(git + ["commit-tree", tree, "-m", head],
+                                 capture_output=True, text=True, check=True).stdout.strip()
+            subprocess.run(git + ["update-ref", f"refs/heads/{head}", sha], check=True)
+        return m
+
+    def _run(self, heads, branches):
+        m = self._mirror(heads)
+        return bash(". lib/common.sh\n. lib/store.sh\n"
+                    + f"wk_mirror() {{ printf '%s' {shlex.quote(str(m))}; }}\n"
+                    + self.STUBS + self.SYNC_MIRROR + "\nsync_mirror\n",
+                    env={"WK_MIRROR_BRANCHES": branches})
+
+    def test_every_declared_branch_in_the_mirror_says_nothing(self):
+        cp = self._run(["main", "webkitglib/2.52"], "main webkitglib/2.52")
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertNotIn("advertises no", cp.stderr)
+
+    def test_a_declared_branch_the_upstream_does_not_have_is_named(self):
+        cp = self._run(["main"], "main webkitglib/2.52")
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertIn("advertises no webkitglib/2.52", cp.stderr)
+        self.assertIn("CFG_BRANCH", cp.stderr)
+
+    def test_no_main_at_all_is_fatal_and_not_a_warning(self):
+        """Nothing can be published from a mirror without it."""
+        cp = self._run([], "main")
+        self.assertNotEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertIn("main was not fetched", cp.stderr)
 
 
 if __name__ == "__main__":

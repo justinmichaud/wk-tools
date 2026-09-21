@@ -81,7 +81,7 @@ snapshot_checkout() { # <tree> <branch>
 # Portable `sh`: the checkout is behind a container exec or an ssh. Every remote as git has it configured (wk_fetch_config), so this is the same fetch a person's own `git fetch --all` in there is, with no second refspec list to keep in step with it.
 ws_fetch_script() { # <src> <mirror-dir, or empty for a checkout with no mirror in reach>
     printf 'cd %s || exit 1\n' "$(sh_quote "$1")"
-    printf 'git fetch --all --prune --quiet\n'
+    printf 'rc=0\ngit fetch --all --prune --quiet || rc=1\n'
     if [ -n "${2:-}" ]; then
         printf 'if [ -n "$(git config --get-all %s 2>/dev/null)" ]; then echo from=mirror; else echo from=github; fi\n' \
             "$(sh_quote "url.$2.insteadOf")"
@@ -89,6 +89,7 @@ ws_fetch_script() { # <src> <mirror-dir, or empty for a checkout with no mirror 
         printf 'if [ -n "$(git config --get-regexp %s 2>/dev/null)" ]; then echo from=mirror; else echo from=github; fi\n' \
             "$(sh_quote '^url\..*\.insteadof$')"
     fi
+    printf 'exit $rc\n'
 }
 
 # tests/test_sync.py and tests/test_new_fetch.py source this file for its helpers; `wk` always execs it, so a real run cannot take this arm.
@@ -210,6 +211,9 @@ ws_fetch_one() { # <ws>
         return 0
     fi
     echo "FAILED (continuing)" >&3
+    # The fetch is `git fetch --all` as this checkout is wired, so the wiring check is what says which ref it died on -- a mirror missing a branch origin's refspec names, before anything else.
+    t_exec "$ws" sh -c "$(wk_wiring_check_script "$(t_src "$ws")" "$mirror")" 2>/dev/null \
+        | tr -d '\r' | sed -n 's/^problem: /    /p' >&3 || true
     return 1
 }
 
@@ -272,7 +276,7 @@ if [ "$SCOPE" = ws ]; then
 fi
 
 sync_mirror() {
-    local MIRROR _tag _name _state
+    local MIRROR _tag _name _state _b _gap
     MIRROR=$(wk_mirror)
     mirror_init
 
@@ -298,6 +302,16 @@ sync_mirror() {
 
     git -C "$MIRROR" rev-parse --verify --quiet refs/heads/main >/dev/null \
         || die "main was not fetched into the mirror; nothing can be published from it"
+
+    # The refresh is the one producer of what every workspace's refspecs ask for, so a branch still absent after it is a branch origin does not advertise -- named here rather than in each fetch it goes on to fail.
+    _gap=""
+    for _b in $(wk_mirror_branches); do
+        git -C "$MIRROR" rev-parse --verify --quiet "refs/heads/$_b" >/dev/null \
+            || _gap="$_gap $_b"
+    done
+    [ -z "$_gap" ] || warn "origin advertises no$_gap, so the mirror carries none of it and every
+    workspace wired to ask for it fails its fetch. An image configuration names
+    it (image/configs, CFG_BRANCH); 'wk doctor' reports the mirror the same way."
 }
 
 # `--shared`: the snapshot borrows the mirror's objects, so a machine holds WebKit's history once and every workspace overlaid on the snapshot borrows them too -- which is why `wk gc` never prunes the mirror.

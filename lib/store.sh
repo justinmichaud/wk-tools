@@ -349,7 +349,7 @@ fi
 
 # The other half of wk_fetch_config, asked of a checkout: one wired before it fetches every branch of every upstream over the network, and `wk remotes --fix` re-asserts it.
 wk_fetch_check() { # <mirror-dir>
-    local mirror="$1" name url
+    local mirror="$1" name url _b
     [ -z "$mirror" ] || printf 'ins=" $(git config --get-all %s 2>/dev/null | tr "\\n" " ")"\n' \
         "$(sh_quote "url.$mirror.insteadOf")"
     wk_remotes | while read -r name url; do
@@ -363,6 +363,11 @@ wk_fetch_check() { # <mirror-dir>
             "$name"
         [ -z "$mirror" ] || printf 'case "$ins" in *" %s "*) ;; *) echo "problem: %s is not rewritten to %s, so a fetch of it goes to github.com"; bad=1 ;; esac\n' \
             "$url" "$name" "$mirror"
+    done
+    # origin's refspecs name one head each (wk_fetch_refspecs), and a fetch dies on the first the mirror does not carry -- a branch this tree declared after the mirror's last refresh -- taking `git-webkit setup`'s fetch of all four remotes with it.
+    [ -z "$mirror" ] || for _b in $(wk_mirror_branches); do
+        printf 'git -C %s rev-parse --verify --quiet %s >/dev/null 2>&1 || { echo "problem: the mirror %s carries no %s, which origin asks it for -- every fetch in here fails on it; '"'"'wk sync --mirror'"'"' on the machine that keeps it"; bad=1; }\n' \
+            "$(sh_quote "$mirror")" "$(sh_quote "refs/heads/$_b")" "$mirror" "refs/heads/$_b"
     done
 }
 

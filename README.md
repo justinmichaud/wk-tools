@@ -492,7 +492,12 @@ the rewrite's answer rather than the recorded URL, names the mirror path. Each
 remote asks only for what that mirror carries -- of origin, `main` and the
 release branch of every image configuration this checkout defines, since a
 lane checks its branch out of the mirror and out of nothing else; of the other
-three, their namespaced branches -- and for no tags. Under git's own
+three, their namespaced branches -- and for no tags. Declaring one of those
+release branches and refreshing the mirror are two commands, and between them
+every fetch in every workspace on that machine dies on the ref the mirror does
+not have, `git-webkit setup`'s fetch included: `wk doctor` names the branch,
+`wk remotes <ws>` names it of a checkout, and `wk sync --mirror` is the
+refresh. Under git's own
 default refspec a bare `git fetch origin` asks
 WebKit/WebKit for all 924 of its heads and 8,288 tags and writes a
 remote-tracking ref for each, which is the half-minute that made a fresh
@@ -564,6 +569,7 @@ against `/proc/<pid>`, on every machine that carries them.
 ```sh
 wk sync                                 # this machine: tooling, mirror, snapshot, then every workspace here -- containers and guests
 wk sync bug-238                         # one workspace's fetch, and nothing else
+wk sync --mirror                        # the mirror alone -- no snapshot, no tooling, no workspace
 wk sync --target moose                  # that machine's furniture, then its workspaces
 wk sync --all                           # every target's, in turn
 wk sync --tools                         # every machine's wk-tools, mirror and snapshot, and no fetches
@@ -1760,9 +1766,13 @@ an object to repository database .git/objects", which reads as a broken
 repository; the push switch is an empty ssh-agent, so `git push` reports
 "Permission denied (publickey)". Both are the arrangement working and neither
 says which rule it is. So the same script stands in front of `git` too, through
-`container/bin/ws/git` -- a second symlink directory that `shell/path.sh` adds
+`container/bin/ws/git` -- a second directory that `shell/path.sh` adds
 only where the workspace marker is, so a host shell pays no extra exec for a
-question only a workspace has. Under that name it is **never a refusal**: the
+question only a workspace has. That one is a file rather than a symlink to the
+wall, and holds nothing but a `.` of it: webkitcorepy resolves `git` on PATH to
+its real file once and runs that path for every git call after, so a symlink
+reached the wall under its own name -- which it refuses, leaving every
+`git-webkit` command in a workspace reporting "No repository found". Under that name it is **never a refusal**: the
 command runs exactly as it would have, with its own output, exit status and
 terminal, and a line is added after a failure naming the rule and the remedy --
 `wk push on`, on the host, for either of them. It is after the fact and not a
