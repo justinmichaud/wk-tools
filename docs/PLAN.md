@@ -186,9 +186,9 @@ exist.
      and vm implementations, landing with the first command that needs each
      (steps 2 and 3); the bridge is deleted with the last bash caller of
      `lib/target.sh`.
-2. **Reports.** `status`, `ls`, `logs`, `stop`, `start`, `doctor`, `disk`,
-   `version`: readers of the one record. Done when no bash file parses
-   JSON.
+2. **Reports.** `status`, `ls`, `logs`, `start`, `doctor`, `disk`,
+   `version`: readers of the one record (`stop` is). Done when no bash file
+   parses JSON.
 3. **Workspaces.** `new`, `rm`, `build`, `run`, `test`, `enter`, `scp`,
    `sync`, `pr`, `remotes`, `verify`, `ai`, `zed`, `gui`, `profile`. Done
    when `targets/*.sh` is gone and each has a kill-point test.

@@ -1,14 +1,9 @@
 """A command's declaration: the `# wk:` lines in the first 15 lines of
-cmd/<name>, and the synopsis on its `# wk <name> ... -- <summary>` line.
-
-Keys: where= host|store|local|workspace|dynamic; name= required|optional|
-none|derived, with @N for the positional slot; takes=<n|*>; ready=yes;
-group=<g>; lifecycle; readonly [<subverbs>]; destructive [<subverbs|flags>];
-dryrun [<subverbs|flags>]; opts <--a,--b=,-c>; passthrough[=tail];
-broker <subverbs>|*; outside; forward=no; here; bare=merged; post=<hook>;
-values=<flag>; needs <a,b>. `sub <verbs> k=v...` and `flag <--x,--y> k=v...`
-override where, name, takes, opts, passthrough and needs per subverb or flag.
-"""
+cmd/<name> and the `# wk <name> ... -- <summary>` synopsis. Keys: where=,
+name= (with @N for the slot), takes=, ready=yes, group=, lifecycle, readonly,
+destructive, dryrun, opts, passthrough[=tail], broker, outside, forward=no,
+here, bare=merged, post=, values=, needs; `sub`/`flag` lines override per
+subverb or flag."""
 
 import re
 from pathlib import Path

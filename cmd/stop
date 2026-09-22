@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/usr/bin/env python3
 #
 # wk stop [<workspace>|--keep-vm|--tasks [--all]] -- shut down one workspace, or everything
 # wk: where=workspace name=optional forward=no group=hosts needs podman opts --keep-vm,--tasks,--all destructive --tasks dryrun --tasks
@@ -24,151 +24,145 @@
 #   1  a task was still there after its kill command ran
 #   3  a machine did not answer, so what runs there is unknown
 
-set -euo pipefail
-WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-. "$WK_ROOT/lib/common.sh"
-. "$WK_ROOT/lib/resources.sh"
-. "$WK_ROOT/lib/store.sh"
-. "$WK_ROOT/lib/target.sh"
-. "$WK_ROOT/lib/task.sh"
-. "$WK_ROOT/lib/detach.sh"
-. "$WK_ROOT/lib/watchdog.sh"
+import os
+import sys
 
-WK_MACHINE="${WK_MACHINE:-wk}"
+ROOT = os.environ.get("WK_ROOT") or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(ROOT, "lib"))
 
-NAME="${WK_NAME:-}"
-KEEP_VM="" TASKS="" EVERYWHERE=""
-while [ $# -gt 0 ]; do
-    case "$1" in
-        --keep-vm)  KEEP_VM=1; shift ;;
-        --tasks)    TASKS=1; shift ;;
-        --all)      EVERYWHERE=1; shift ;;
-        *)          shift ;;
-    esac
-done
+from wk import act, record, shell  # noqa: E402
+from wk.act import Refused, confirm, die, info, log, warn  # noqa: E402
 
-# A task's record names the command that stops it, and that command is its kind's own: nothing here knows how to end a build, a creation or an agent session.
-tasks_running() {   # <dir>\t<kind> <name>\t<kill> for each task still going
-    local d st
-    while IFS= read -r d; do
-        [ -n "$d" ] || continue
-        st=$(task_verdict "$d" capped)
-        task_running "$st" || continue
-        printf '%s\t%s %s\t%s\n' "$d" "$(task_field "$d" kind)" \
-               "$(task_field "$d" name)" "$(task_field "$d" kill)"
-    done <<EOF
-$(task_list)
-EOF
-}
+MACHINE = os.environ.get("WK_MACHINE", "wk")
 
-stop_tasks_here() {
-    local rows left d what kill n
-    rows=$(tasks_running)
-    if [ -z "$rows" ]; then
-        info "no task is running on $(wk_machine_name)"
+
+def is_macos():
+    return os.uname().sysname == "Darwin"
+
+
+def here():
+    return is_macos() and not os.environ.get("WK_IN_VM")
+
+
+def running_tasks(records):
+    """(task, 'kind name', kill) for each task still going: the record names
+    the command that stops it, and that command is its kind's own."""
+    rows = []
+    for t in records.list():
+        if t.verdict("capped") in record.RUNNING:
+            rows.append((t, "%s %s" % (t.field("kind"), t.field("name")), t.field("kill")))
+    return rows
+
+
+def stop_tasks_here(records):
+    machine = record.machine_name()
+    rows = running_tasks(records)
+    if not rows:
+        info("no task is running on %s" % machine)
         return 0
-    fi
-    n=$(printf '%s\n' "$rows" | grep -c .) || n=0
-    while IFS="$(printf '\t')" read -r d what kill; do
-        [ -n "$d" ] || continue
-        log "  $what -- $kill"
-    done <<EOF
-$rows
-EOF
-    confirm "stop $n task(s) on $(wk_machine_name)? What they have not finished is dropped" \
-        || die "nothing stopped"
-
-    # Answered once, here: a kill command of its own would ask again with no terminal to ask in.
-    WK_YES=1; export WK_YES
-    while IFS="$(printf '\t')" read -r d what kill; do
-        [ -n "$d" ] || continue
-        act env PATH="$WK_ROOT/bin:$PATH" sh -c "$kill" || warn "'$kill' exited non-zero"
-    done <<EOF
-$rows
-EOF
-    [ -z "${WK_DRY_RUN:-}" ] || return 0   # nothing was stopped, so nothing is read back
-
-    # Asked again rather than believed: a kill command that exited 0 is not evidence the task ended.
-    left=$(tasks_running)
-    if [ -n "$left" ]; then
-        warn "still running on $(wk_machine_name):"
-        printf '%s\n' "$left" | cut -f2 | sed 's/^/    /' >&2
+    for _, what, kill in rows:
+        log("  %s -- %s" % (what, kill))
+    if not confirm("stop %d task(s) on %s? What they have not finished is dropped" % (len(rows), machine)):
+        die("nothing stopped")
+    os.environ["WK_YES"] = "1"   # answered once, here: a kill command of its own would ask again with no terminal
+    path = "%s/bin:%s" % (ROOT, os.environ.get("PATH", ""))
+    for _, what, kill in rows:
+        cp = act.act(["env", "PATH=" + path, "sh", "-c", kill])
+        if cp is not None and cp.returncode != 0:
+            warn("'%s' exited non-zero" % kill)
+    if act.dry_run():
+        return 0   # nothing was stopped, so nothing is read back
+    left = running_tasks(records)   # asked again rather than believed
+    if left:
+        warn("still running on %s:" % machine)
+        for _, what, _ in left:
+            sys.stderr.write("    %s\n" % what)
         return 1
-    fi
-    changed "no task is running on $(wk_machine_name)"
-}
+    info("no task is running on %s" % machine)
+    return 0
 
-if [ -n "$TASKS" ]; then
-    [ -z "$KEEP_VM" ] || die "'--keep-vm' is about the podman machine, which 'wk stop --tasks' leaves alone"
 
-    rc=0
-    if [ -z "$EVERYWHERE" ]; then
-        stop_tasks_here || rc=$?
-        exit "$rc"
-    fi
+def stop_tasks_everywhere(records):
+    if not confirm("stop every task on this machine and every other one? What they have not finished is dropped"):
+        die("nothing stopped")
+    os.environ["WK_YES"] = "1"
+    rc = stop_tasks_here(records)
+    for m in shell.machines(ROOT):
+        answers, why = shell.machine_answers(ROOT, m)
+        if not answers:
+            sys.stderr.write(why)
+            rc = max(rc, 3)   # a machine that cannot be asked may be running something
+            continue
+        status, out = shell.machine_wk(ROOT, m, "stop", "--tasks")
+        for line in out.splitlines():
+            sys.stdout.write("%-22s%s\n" % (m, line))
+        rc = max(rc, status)
+    return rc
 
-    _tasks_one() {   # <machine>
-        local t="$1" rc=0 out
-        load_target "$t"
-        # A machine that cannot be asked may be running something, so it is 3 and not 0.
-        machine_answers "$t" || return 3
-        out=$(t_wk stop --tasks 2>&1) || rc=$?
-        printf '%s\n' "$out" | sed "s/^/$(printf '%-22s' "$t")/"
-        return "$rc"
-    }
 
-    confirm "stop every task on this machine and every other one? What they have not finished is dropped" \
-        || die "nothing stopped"
-    WK_YES=1; export WK_YES
-    stop_tasks_here || rc=$?
-    fan=0; for_each_machine _tasks_one || fan=$?
-    [ "$fan" -le "$rc" ] || rc="$fan"
-    exit "$rc"
-fi
+def stop_workspace(name):
+    target = shell.ws_target(ROOT, name)
+    if target is None:
+        raise Refused(1)
+    if shell.ws_info(ROOT, target, name) == "absent":
+        die("no such workspace: %s" % name)
+    kind = shell.ask(ROOT, "target_kind", target)
+    if kind == "remote":
+        rc = shell.rc_stop(ROOT, target, name)
+        if rc != 0:
+            raise Refused(rc)
+    rc = shell.ws_stop(ROOT, target, name)
+    if rc != 0:
+        raise Refused(rc)
+    return 0
 
-if [ -n "$NAME" ]; then
-    TARGET="$(ws_target "$NAME")"
-    load_target "$TARGET"
-    [ "$(t_info "$NAME")" != absent ] || die "no such workspace: $NAME"
 
-    [ "$WK_TARGET_KIND" != remote ] || rc_stop "$NAME"
+def stop_everything(keep_vm):
+    if here():
+        for guest, state in shell.guests(ROOT):   # a guest holds its memory even with the machine stopped
+            if state == "running":
+                shell.guest_stop(ROOT, guest)
+        state = shell.machine_state(ROOT, MACHINE)
+        if state != "running":
+            info("machine '%s' is already %s -- nothing to do" % (MACHINE, state))
+            return 0
+    running = shell.in_machine(ROOT, 'podman ps --filter "name=^wk-" --format "{{.Names}}"') or ""
+    names = running.split()
+    if names:
+        for n in names:
+            sys.stderr.write("  stopping %s\n" % n)
+        shell.in_machine(ROOT, 'podman stop --time 30 $(podman ps --filter "name=^wk-" --format "{{.Names}}" | tr "\\n" " ") >/dev/null')
+        info("stopped %d container(s)" % len(names))
+    else:
+        info("no running containers")
+    if keep_vm:
+        log("leaving the machine running (--keep-vm)")
+    elif here():
+        info("stopping the machine")
+        act.act(["podman", "machine", "stop", MACHINE], stdout=sys.stderr)
+        info("machine stopped -- CPU and memory returned to the host")
+    return 0
 
-    t_stop "$NAME"
-    exit 0
-fi
 
-# Before the podman-machine check: a macOS VM holds its memory even with the machine stopped.
-if is_macos && [ -z "${WK_IN_VM:-}" ]; then
-    . "$WK_ROOT/targets/vm.sh"
-    if _tart_bin >/dev/null 2>&1; then
-        for _guest in $(t_list 2>/dev/null | awk -F'\t' '$2 == "running" { print $1 }'); do
-            t_stop "$_guest"
-        done
-    fi
-fi
+def main(argv):
+    keep_vm = "--keep-vm" in argv
+    tasks = "--tasks" in argv
+    everywhere = "--all" in argv
+    name = os.environ.get("WK_NAME", "")
+    if tasks:
+        if keep_vm:
+            die("'--keep-vm' is about the podman machine, which 'wk stop --tasks' leaves alone")
+        records = record.Records(ask_target=lambda n, pid, cap: shell.target_pid_alive(ROOT, n, pid, cap))
+        return stop_tasks_everywhere(records) if everywhere else stop_tasks_here(records)
+    if name:
+        return stop_workspace(name)
+    return stop_everything(keep_vm)
 
-if is_macos && [ -z "${WK_IN_VM:-}" ]; then
-    state=$(_machine_state "$WK_MACHINE")
-    if [ "$state" != running ]; then
-        info "machine '$WK_MACHINE' is already $state -- nothing to do"
-        exit 0
-    fi
-fi
 
-# Plain podman: workspaces are rootless, so `sudo podman` sees root's empty storage.
-running=$(_in_machine 'podman ps --filter "name=^wk-" --format "{{.Names}}"' || true)
-if [ -n "$running" ]; then
-    printf '%s\n' "$running" | sed 's/^/  stopping /' >&2
-    _in_machine 'podman stop --time 30 $(podman ps --filter "name=^wk-" --format "{{.Names}}" | tr "\n" " ") >/dev/null'
-    info "stopped $(printf '%s\n' "$running" | wc -l | tr -d ' ') container(s)"
-else
-    info "no running containers"
-fi
-
-if [ -n "$KEEP_VM" ]; then
-    log "leaving the machine running (--keep-vm)"
-elif is_macos && [ -z "${WK_IN_VM:-}" ]; then
-    info "stopping the machine"
-    podman machine stop "$WK_MACHINE" >/dev/null
-    info "machine stopped -- CPU and memory returned to the host"
-fi
+if __name__ == "__main__":
+    try:
+        sys.exit(main(sys.argv[1:]))
+    except Refused as e:
+        sys.exit(e.status)
+    except KeyboardInterrupt:
+        sys.exit(130)

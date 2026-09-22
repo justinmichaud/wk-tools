@@ -1165,5 +1165,6 @@ class TestStopAndRmStopItThroughTheOneImplementation(unittest.TestCase):
         for rel in ("cmd/stop", "cmd/rm"):
             text = (REPO / rel).read_text()
             with self.subTest(cmd=rel):
-                self.assertIn('rc_stop "$NAME"', text)
+                self.assertTrue('rc_stop "$NAME"' in text or "shell.rc_stop(" in text, rel)
                 self.assertNotIn('t_exec "$NAME" kill', text)
+                self.assertNotIn('"kill", "-', text)
