@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/usr/bin/env python3
 #
 # wk start [<workspace>] -- bring one workspace back up, or everything
 # wk: where=workspace name=optional forward=no group=hosts needs podman
@@ -13,66 +13,83 @@
 # WK_NO_CLAUDE_RC=1 skips restarting claude remote control in the containers
 # that came back up.
 
-set -euo pipefail
-WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-. "$WK_ROOT/lib/common.sh"
-. "$WK_ROOT/lib/resources.sh"
-. "$WK_ROOT/lib/store.sh"
-. "$WK_ROOT/lib/target.sh"
+import os
+import subprocess
+import sys
 
-WK_MACHINE="${WK_MACHINE:-wk}"
+ROOT = os.environ.get("WK_ROOT") or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(ROOT, "lib"))
 
-NAME="${WK_NAME:-}"
+from wk import act, shell, targets  # noqa: E402
+from wk.act import Refused, die, info, log, warn  # noqa: E402
 
-if [ -n "$NAME" ]; then
-    TARGET="$(ws_target "$NAME")"
-    load_target "$TARGET"
-    [ "$WK_TARGET_KIND" != vm ] || exec "$WK_ROOT/wk" vm start "$NAME"
-    [ "$(t_info "$NAME")" != absent ] || die "no such workspace: $NAME"
-    t_start "$NAME"
-    exit 0
-fi
+MACHINE = os.environ.get("WK_MACHINE", "wk")
+STOPPED = 'podman ps -a --filter "name=^wk-" --filter "status=exited" --filter "status=created" --format "{{.Names}}"'
 
-if is_macos && [ -z "${WK_IN_VM:-}" ]; then
-    state=$(_machine_state "$WK_MACHINE")
-    [ "$state" = absent ] && die "no machine '$WK_MACHINE' -- run ./setup"
-    if [ "$state" != running ]; then
-        info "starting machine '$WK_MACHINE'"
-        podman machine start "$WK_MACHINE" >/dev/null
-    else
-        unchanged "machine already running"
-    fi
-fi
-push_agent_pat_converge_machine
 
-stopped=$(_in_machine 'podman ps -a --filter "name=^wk-" --filter "status=exited" --filter "status=created" --format "{{.Names}}"' || true)
-if [ -n "$stopped" ]; then
-    printf '%s\n' "$stopped" | sed 's/^/  starting /' >&2
-    _in_machine 'podman start $(podman ps -a --filter "name=^wk-" --filter "status=exited" --filter "status=created" --format "{{.Names}}" | tr "\n" " ") >/dev/null'
-    info "started $(printf '%s\n' "$stopped" | wc -l | tr -d ' ') container(s)"
-else
-    info "no stopped containers"
-fi
+def here():
+    return os.uname().sysname == "Darwin" and not os.environ.get("WK_IN_VM")
 
-if [ -n "$stopped" ] && [ -z "${WK_NO_CLAUDE_RC:-}" ]; then
-    printf '%s\n' "$stopped" | sed 's/^wk-//' | while read -r _ws; do
-        [ -n "$_ws" ] || continue
-        "$WK_ROOT/wk" ai claude "$_ws" --rc >/dev/null 2>&1 \
-            || warn "claude remote control did not start in '$_ws' -- 'wk ai claude $_ws --rc' says why"
-    done
-fi
 
-if is_macos && [ -z "${WK_IN_VM:-}" ]; then
-    . "$WK_ROOT/targets/vm.sh"
-    if _tart_bin >/dev/null 2>&1; then
-        _guests=$(t_list 2>/dev/null | awk -F'\t' '$2 != "running" { print $1 }' | tr '\n' ' ')
-        [ -n "${_guests// /}" ] && \
-            log "macOS VM(s) not started (they compete with the machine for memory): $_guests
-  wk vm start <name>"
-    fi
-fi
+def start_workspace(reg, name):
+    target = reg.load(reg.ws_target(name))
+    if target.kind == "vm":
+        os.execv(os.path.join(ROOT, "wk"), [os.path.join(ROOT, "wk"), "vm", "start", name])
+    if target.info(name) == "absent":
+        die("no such workspace: %s" % name)
+    return 0 if target.start(name) else 1
 
-# Not `exec`: `wk start` reports its own result. `wk status` exits 4 for a peer
-# that will not answer, which says nothing about whether this started anything.
-log "status (information only)"
-"$WK_ROOT/wk" status --no-fleet || true
+
+def start_everything(reg):
+    if here():
+        state = shell.machine_state(ROOT, MACHINE)
+        if state == "absent":
+            die("no machine '%s' -- run ./setup" % MACHINE)
+        if state != "running":
+            info("starting machine '%s'" % MACHINE)
+            act.act(["podman", "machine", "start", MACHINE], stdout=subprocess.DEVNULL)
+        else:
+            act.debug("ok: machine already running")
+    shell.run(ROOT, "push_agent_pat_converge_machine")
+    stopped = (shell.in_machine(ROOT, STOPPED) or "").split()
+    if stopped:
+        for n in stopped:
+            sys.stderr.write("  starting %s\n" % n)
+        shell.in_machine(ROOT, "podman start $(%s | tr \"\\n\" \" \") >/dev/null" % STOPPED)
+        info("started %d container(s)" % len(stopped))
+    else:
+        info("no stopped containers")
+    if stopped and not os.environ.get("WK_NO_CLAUDE_RC"):
+        for n in stopped:
+            ws = n[3:] if n.startswith("wk-") else n
+            rc = subprocess.call([os.path.join(ROOT, "wk"), "ai", "claude", ws, "--rc"],
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            if rc != 0:
+                warn("claude remote control did not start in '%s' -- 'wk ai claude %s --rc' says why" % (ws, ws))
+    if here():
+        try:
+            vm = reg.load("vm")
+            guests = [n for n, state in vm.list() if state != "running"]
+        except LookupError:
+            guests = []
+        if guests:
+            log("macOS VM(s) not started (they compete with the machine for memory): %s\n  wk vm start <name>" % " ".join(guests))
+    log("status (information only)")
+    subprocess.call([os.path.join(ROOT, "wk"), "status", "--no-fleet"])
+    return 0
+
+
+def main(argv):
+    reg = targets.Registry(ROOT)
+    name = os.environ.get("WK_NAME", "")
+    try:
+        return start_workspace(reg, name) if name else start_everything(reg)
+    except LookupError as e:
+        die(str(e))
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main(sys.argv[1:]))
+    except Refused as e:
+        sys.exit(e.status)

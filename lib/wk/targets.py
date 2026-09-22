@@ -104,6 +104,45 @@ class Registry:
     def machines(self):
         return [t for t in self.all() if t not in ("container", "vm", "local")]
 
+    def here(self):
+        return [t for t in self.all() if t not in self.machines()]
+
+    def on_target(self, name, ws):
+        """Whether `ws` is on `name`: its directory, its environment, or a creation still running."""
+        try:
+            t = self.load(name)
+        except LookupError:
+            return False
+        if os.path.isdir(t.store.ws_dir(ws)):
+            return True
+        if t.info(ws) not in ("absent", "unreachable", ""):
+            return True
+        from wk.record import Records
+        rec = Records(t.store.record_dir(), env=t.env).find("new", ws)
+        return bool(rec and rec.alive(None))
+
+    def locate(self, ws):
+        """Every target that answers for `ws`; the machines are asked at once."""
+        hits = [t for t in self.here() if self.on_target(t, ws)]
+        if hits or not self.machines():
+            return hits
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=len(self.machines())) as pool:
+            answers = list(pool.map(lambda m: (m, self.on_target(m, ws)), self.machines()))
+        return [m for m, hit in answers if hit]
+
+    def ws_target(self, ws):
+        """The one target holding `ws`; the default when none does."""
+        if self.env.get("WK_TARGET"):
+            return self.env["WK_TARGET"]
+        hits = self.locate(ws)
+        if not hits:
+            return self.default()
+        if len(hits) == 1:
+            return hits[0]
+        raise LookupError("workspace '%s' exists on targets: %s -- this cannot be\n    resolved; remove one, or set WK_TARGET"
+                          % (ws, " ".join(hits)))
+
     def load(self, name):
         kind = self.kind(name)
         if kind is None:
@@ -281,6 +320,10 @@ class Vm(Target):
     egress_filtered = True
     needs_base = False
 
+    def __init__(self, name, root, env, machine):
+        super().__init__(name, root, env, machine)
+        self.store = Store(dict(env, WK_STORE=self.vm_store()))
+
     def user(self):
         return self.env.get("WK_VM_USER") or "admin"
 
@@ -340,7 +383,7 @@ class Vm(Target):
         return next((v.get("State", "absent") for v in self._vms() if v.get("Name") == self.vm(ws)), "absent")
 
     def created(self, ws):
-        return self.machine.exists(os.path.join(Store(dict(self.env, WK_STORE=self.vm_store())).ws_dir(ws), READY_MARKER))
+        return self.machine.exists(os.path.join(self.store.ws_dir(ws), READY_MARKER))
 
     def info(self, ws):
         st = self.vm_state(ws)

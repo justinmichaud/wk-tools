@@ -190,9 +190,9 @@ exist.
    registry and the read side of the container, guest and workspace-local
    drivers are Python (`lib/wk/targets.py`), the remote driver's probe and
    every driver's create and destroy still bridge to `targets/*.sh`. The
-   readers port first as the drivers' smallest callers: `ls` is; `version`,
-   `logs`, `start`, `disk`, `status` (with `lib/status-view.py` folded in)
-   and `doctor` follow, then the write side of each driver. Done when
+   readers port first as the drivers' smallest callers: `ls`, `version`,
+   `logs`, `start` and `disk` are; `status` (with `lib/status-view.py`
+   folded in) and `doctor` follow, then the write side of each driver. Done when
    `lib/target.sh` and `targets/*.sh` are gone and no bash file parses
    JSON.
 3. **Workspaces.** `new`, `rm`, `build`, `run`, `test`, `enter`, `scp`,

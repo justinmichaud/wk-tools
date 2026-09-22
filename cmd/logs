@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/usr/bin/env python3
 #
 # wk logs <workspace> [--follow] -- the build or image-stage log, with the noise stripped
 # wk: where=workspace name=required group=workspaces readonly opts --follow,-f,--all,-a,--gates,-g
@@ -11,42 +11,23 @@
 #   --gates, -g    the readings this build was collected under: the browser
 #                  check, the profile check, and the pinned benchmark payloads
 
-set -euo pipefail
-WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-. "$WK_ROOT/lib/common.sh"
-. "$WK_ROOT/lib/store.sh"
-. "$WK_ROOT/lib/watchdog.sh"
-. "$WK_ROOT/lib/target.sh"
+import glob
+import os
+import re
+import sys
 
-NAME="${WK_NAME:-}"
-require_name "$NAME"
+ROOT = os.environ.get("WK_ROOT") or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(ROOT, "lib"))
 
-load_target "$(ws_target "$NAME")"
+from wk import shell, targets  # noqa: E402
+from wk.act import Refused, die, info, log  # noqa: E402
 
-WSDIR="$(wk_ws_dir "$NAME")"
-LOG="$WSDIR/build.log"
+ERROR = re.compile(r"(^FAILED:|^error:|: error:|: fatal error:|ninja: build stopped|No such file or directory)")
+NOT_ERROR = re.compile(r"Performing Test|-- Failed|check for working|(^|[: ])warning:")
 
-resolve_log() {
-    local shown=""
-    if [ ! -f "$LOG" ]; then
-        shopt -s nullglob
-        local stage_logs=("$WSDIR"/home/yocto-*.log "$WSDIR"/home/buildroot-*.log)
-        shopt -u nullglob
-        if [ "${#stage_logs[@]}" -gt 0 ]; then
-            LOG=$(ls -1t "${stage_logs[@]}" | head -1) || LOG=""
-            shown="$LOG"
-        else
-            die "no build log and no image-stage log for '$NAME' -- has it been
-    built? ('wk build', 'wk sysimage build')"
-        fi
-    fi
-    [ -z "$shown" ] || info "showing $shown"
-}
-
-# The readings travel beside the products (build/mac-pgo.sh's `_pgo_evidence`), so they are read from the build this workspace holds now, on the machine holding it, and each verdict is re-derived by the checker that took the reading rather than remembered from the build.
-gates() {
-    local script
-    script=$(cat <<'GATES'
+# The readings travel beside the products (build/mac-pgo.sh's `_pgo_evidence`), read from the build
+# the workspace holds now, on the machine holding it, each verdict re-derived by its own checker.
+GATES = r'''
 set -u
 shopt -s nullglob
 seen=0
@@ -66,27 +47,83 @@ done
 [ "$seen" = 1 ] || printf 'no readings under %s/WebKitBuild -- only a profile-guided build
 collects them (build/mac-pgo.sh beside the products, image/pgo.sh under
 wk-pgo/); every other build has no gates.\n' "$SRC"
-GATES
-)
-    t_exec "$NAME" bash -c "SRC=$(sh_quote "$(t_src "$NAME")") TOOLS=$(sh_quote "$(t_tools "$NAME")")
-$script"
-}
+'''
 
-[ $# -le 1 ] || die "wk logs shows one of --follow, --all or --gates at a time; see wk logs -h"
-case "${1:-}" in
---gates|-g)  gates; exit 0 ;;
---follow|-f) resolve_log; exec tail -f "$LOG" ;;
---all|-a)    resolve_log; exec tr '\r' '\n' < "$LOG" ;;
-"")          resolve_log ;;
-esac
 
-log "errors:"
-first_error "$LOG" | sed 's/^/  /' || log "  (none)"
-log ""
-log "last output:"
-tr '\r' '\n' < "$LOG" | grep -v '^$' | tail -15 | sed 's/^/  /'
-log ""
-_hint=""; in_workspace || _hint=" $NAME"
-log "  wk logs$_hint --all     full log"
-log "  wk logs$_hint --follow  live"
-log "  wk logs$_hint --gates   the readings this build was collected under"
+def normalised(path):
+    with open(path, errors="replace") as f:
+        return f.read().replace("\r", "\n")
+
+
+def first_error(path):
+    out = []
+    for n, line in enumerate(normalised(path).split("\n"), 1):
+        if ERROR.search(line) and not NOT_ERROR.search(line):
+            out.append("%d:%s" % (n, line))
+            if len(out) == 5:
+                break
+    return out
+
+
+def resolve_log(target, name):
+    ws_dir = target.store.ws_dir(name)
+    build_log = os.path.join(ws_dir, "build.log")
+    if os.path.isfile(build_log):
+        return build_log, False
+    stage_logs = glob.glob(os.path.join(ws_dir, "home", "yocto-*.log")) + glob.glob(os.path.join(ws_dir, "home", "buildroot-*.log"))
+    if not stage_logs:
+        die("no build log and no image-stage log for '%s' -- has it been\n    built? ('wk build', 'wk sysimage build')" % name)
+    return max(stage_logs, key=os.path.getmtime), True
+
+
+def main(argv):
+    name = os.environ.get("WK_NAME", "")
+    if not name:
+        die("wk logs needs a workspace name")
+    if len(argv) > 1:
+        die("wk logs shows one of --follow, --all or --gates at a time; see wk logs -h")
+    reg = targets.Registry(ROOT)
+    try:
+        target = reg.load(reg.ws_target(name))
+    except LookupError as e:
+        die(str(e))
+    gates = "--gates" in argv or "-g" in argv
+    follow = "--follow" in argv or "-f" in argv
+    whole = "--all" in argv or "-a" in argv
+    if gates:
+        r = target.exec(name, ["bash", "-c", "SRC=%s TOOLS=%s\n%s" % (shell.sh_quote(target.src(name)), shell.sh_quote(target.tools(name)), GATES)])
+        sys.stdout.write(r.out)
+        sys.stderr.write(r.err)
+        return r.rc
+    path, shown = resolve_log(target, name)
+    if shown:
+        info("showing %s" % path)
+    if follow:
+        sys.stdout.flush()
+        os.execvp("tail", ["tail", "-f", path])
+    if whole:
+        sys.stdout.write(normalised(path))
+        return 0
+    log("errors:")
+    errors = first_error(path)
+    for e in errors:
+        log("  " + e)
+    if not errors:
+        log("  (none)")
+    log("")
+    log("last output:")
+    for line in [l for l in normalised(path).split("\n") if l][-15:]:
+        log("  " + line)
+    log("")
+    hint = "" if reg.in_workspace() else " " + name
+    log("  wk logs%s --all     full log" % hint)
+    log("  wk logs%s --follow  live" % hint)
+    log("  wk logs%s --gates   the readings this build was collected under" % hint)
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main(sys.argv[1:]))
+    except Refused as e:
+        sys.exit(e.status)

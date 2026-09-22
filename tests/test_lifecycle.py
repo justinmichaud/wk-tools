@@ -72,8 +72,8 @@ class TestStartExitsOnItsOwnResult(WkTest):
 
     def test_it_does_not_hand_its_exit_code_to_status(self):
         text = (Path(__file__).resolve().parent.parent / "cmd" / "start").read_text()
-        self.assertNotIn("exec \"$WK_ROOT/wk\" status", text)
-        self.assertIn("status --no-fleet", text)
+        self.assertNotIn("execv", text.split("def main", 1)[-1].split('"status"', 1)[0][-200:])
+        self.assertIn('"status", "--no-fleet"', text)
 
 
 class TestExplainStatic(unittest.TestCase):

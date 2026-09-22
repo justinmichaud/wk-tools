@@ -371,7 +371,7 @@ class TestRemoteControlIsOnByDefault(WkTest):
     START = (REPO / "cmd" / "start").read_text()
     VM = (REPO / "cmd" / "vm").read_text()
     CALLS = (("new", NEW, 'ai claude "$NAME" --rc'),
-             ("start", START, 'ai claude "$_ws" --rc'),
+             ("start", START, '"ai", "claude", ws, "--rc"'),
              ("vm", VM, 'ai claude "$NAME" --rc'))
 
     def test_new_starts_it_through_the_one_command(self):
@@ -382,7 +382,7 @@ class TestRemoteControlIsOnByDefault(WkTest):
                          "calling `wk ai claude --rc`")
 
     def test_start_starts_it_for_every_container_it_brings_back(self):
-        self.assertIn('ai claude "$_ws" --rc', self.START,
+        self.assertIn('"ai", "claude", ws, "--rc"', self.START,
                       "wk start no longer starts remote control")
 
     def test_vm_start_starts_it_in_the_guest_it_boots(self):
@@ -404,8 +404,8 @@ class TestRemoteControlIsOnByDefault(WkTest):
     def test_start_of_a_guest_is_vm_start(self):
         """One boot path: `wk start <guest>` hands over to `wk vm start`, which
         writes the alias and starts remote control."""
-        self.assertIn('[ "$WK_TARGET_KIND" != vm ] || exec "$WK_ROOT/wk" vm start "$NAME"',
-                      self.START)
+        self.assertIn('"vm", "start", name', self.START)
+        self.assertIn('target.kind == "vm"', self.START)
 
     def test_all_honour_one_switch(self):
         for name, text, _ in self.CALLS:
@@ -425,7 +425,7 @@ class TestRemoteControlIsOnByDefault(WkTest):
             self.assertEqual(len(idx), 1, f"wk {name}: {len(idx)} invocations, expected 1")
             tail = "\n".join(lines[idx[0]:idx[0] + 5])
             with self.subTest(cmd=name):
-                self.assertRegex(tail, r'\bwarn "',
+                self.assertRegex(tail, r'\bwarn[ (]',
                               f"wk {name} does not warn when the agent will not start")
                 self.assertNotIn("|| die", tail,
                                  f"wk {name} dies when the agent will not start")

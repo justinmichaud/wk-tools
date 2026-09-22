@@ -69,7 +69,7 @@ def code_opts(path):
     out = set()
     text = path.read_text()
     if text.startswith("#!/usr/bin/env python3"):
-        return set(re.findall(r'"(--[a-z][a-z-]*=?)"', text)) | set(re.findall(r'"(-[a-z])" in ', text))
+        return set(re.findall(r'"(-{1,2}[a-z][a-z-]*=?)" in ', text))
     for line in text.splitlines():
         m = ARM.match(line)
         if not m:

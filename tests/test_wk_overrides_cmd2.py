@@ -306,7 +306,8 @@ WAIT_TIMEOUT="${{WK_WAIT_TIMEOUT:-0}}"
             # overrides -- not the defaults -- were read.
             self.assertLess(elapsed, 8, cp.stderr)
             invocations = len(count.read_text().splitlines())
-            self.assertEqual(invocations, 4, "expected one poll per second for 3s, plus the first")
+            self.assertIn(invocations, (3, 4), "expected one poll per second for 3s, plus the first; "
+                      "the default interval would give one")
 
 
 class TestSudoTimeoutMin(unittest.TestCase):

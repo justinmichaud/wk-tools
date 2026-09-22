@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/usr/bin/env python3
 #
 # wk disk -- everything wk is storing on this machine, with the total
 #
@@ -25,235 +25,221 @@
 # Erasing is elsewhere -- `wk gc`, `wk gc --purge-mirror`, `wk vm base --rm`,
 # `wk rm` -- named per row.
 
-set -euo pipefail
-# From the environment, not $0: the probe below pipes this file into the VM's bash.
-WK_ROOT="${WK_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
-. "$WK_ROOT/lib/common.sh"
-. "$WK_ROOT/lib/store.sh"
-. "$WK_ROOT/lib/target.sh"
-. "$WK_ROOT/lib/image.sh"
-. "$WK_ROOT/image/profiles.sh"
-. "$WK_ROOT/boot/machines.sh"
-. "$WK_ROOT/image/pmos.sh"
+import glob
+import os
+import subprocess
+import sys
 
-WK_MACHINE="${WK_MACHINE:-wk}"
+ROOT = os.environ.get("WK_ROOT") or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(ROOT, "lib"))
 
-if in_remote_host; then
-    load_target "$(wk_remote_field target)" 2>/dev/null || true
-fi
+from wk import shell, targets  # noqa: E402
+from wk.act import info, log  # noqa: E402
+from wk.machine import Local  # noqa: E402
+from wk.store import Store  # noqa: E402
 
-# KiB allocated, 0 for an absent path. `sudo -n` only: this must never prompt.
-_kb() {
-    local p="$1" err out
-    [ -e "$p" ] || { echo 0; return 0; }
-    err=$(mktemp)
-    out=$(du -sk "$p" 2>"$err" | awk 'NR==1 { print $1 + 0 }')
-    if [ -s "$err" ] && sudo -n true 2>/dev/null; then
-        out=$(sudo -n du -sk "$p" 2>/dev/null | awk 'NR==1 { print $1 + 0 }')
-    fi
-    rm -f "$err"
-    echo "${out:-0}"
-}
+MACHINE = os.environ.get("WK_MACHINE", "wk")
+HOME = os.environ.get("HOME", os.path.expanduser("~"))
+DATA = os.environ.get("XDG_DATA_HOME") or os.path.join(HOME, ".local", "share")
+TART_HOME = os.environ.get("TART_HOME") or os.path.join(HOME, ".tart")
+here = Local()
 
-# numfmt is not on macOS and never will be.
-_human() {
-    awk -v k="${1:-0}" 'BEGIN {
-        split("K M G T P", u, " ")
-        v = k; i = 1
-        while (v >= 1024 && i < 5) { v /= 1024; i++ }
-        if (i > 1 && v < 10) printf "%.1f%s\n", v, u[i]
-        else                 printf "%.0f%s\n", v, u[i]
-    }'
-}
 
-_line() { # <size> <what> [note]
-    if [ -n "${3:-}" ]; then printf '  %7s  %-28s %s\n' "$1" "$2" "$3" >&2
-    else                     printf '  %7s  %s\n' "$1" "$2" >&2; fi
-}
+def kb(path):
+    """KiB allocated, 0 for an absent path; `sudo -n` only, so this never prompts."""
+    if not os.path.exists(path):
+        return 0
+    r = here.run(["du", "-sk", path])
+    if r.err and here.run(["sudo", "-n", "true"]).ok:
+        r = here.run(["sudo", "-n", "du", "-sk", path])
+    try:
+        return int(r.out.split()[0])
+    except (IndexError, ValueError):
+        return 0
 
-TOTAL=0
-row() { # <kb> <what> [note] -- measured, printed, added to the total
-    TOTAL=$((TOTAL + $1))
-    _line "$(_human "$1")" "$2" "${3:-}"
-}
-NOTED=""
-noted() { # <kb> <what> [note] -- measured and printed, not added: already counted elsewhere
-    NOTED=1
-    _line "($(_human "$1"))" "$2" "${3:-}"
-}
-unknown() { _line '??' "$1" "$2"; }
-section() { printf '\n%s\n' "$*" >&2; }
 
-# Emits `kb<TAB>label<TAB>note`: on macOS this runs in the VM, rendering out here.
-probe_store() {
-    local d id n
-    printf '%s\t%s\t%s\n' "$(_kb "$(wk_mirror)")" "the WebKit mirror" "git/WebKit.git -- refetchable (wk sync)"
+def human(k):
+    units = "KMGTP"
+    v, i = float(k), 0
+    while v >= 1024 and i < 4:
+        v /= 1024
+        i += 1
+    return ("%.1f%s" if i > 0 and v < 10 else "%.0f%s") % (v, units[i])
 
-    n=$(ls -1 "$(wk_base_dir)" 2>/dev/null | wc -l | tr -d ' ') || n=0
-    printf '%s\t%s\t%s\n' "$(_kb "$(wk_base_dir)")" "base snapshots" \
-        "$n of them; unreferenced ones go with wk gc"
 
-    for d in "$WK_STORE"/ws/*; do
-        [ -d "$d" ] || continue
-        id=$(basename "$d")
-        printf '%s\t%s\t%s\n' "$(_kb "$d")" "workspace $id" "wk rm $id"
-    done
+class Report:
+    def __init__(self):
+        self.total = 0
+        self.noted = False
 
-    for d in cache/ccache cache/bench cache/images cache/yocto cache/buildroot \
-             images bench skills tools; do
-        [ -d "$WK_STORE/$d" ] || continue
-        printf '%s\t%s\t%s\n' "$(_kb "$WK_STORE/$d")" "$d" ""
-    done
+    def line(self, size, what, note=""):
+        sys.stderr.write(("  %7s  %-28s %s\n" % (size, what, note)) if note else ("  %7s  %s\n" % (size, what)))
 
-    # Not under $WK_STORE, and still the store: podman's own rootless tree.
-    d="${XDG_DATA_HOME:-$HOME/.local/share}/containers/storage"
-    if [ -d "$d" ]; then
-        printf '%s\t%s\t%s\n' "$(_kb "$d")" "container images" \
-            "wk gc prunes the dangling ones"
-    fi
-}
+    def row(self, k, what, note=""):
+        self.total += k
+        self.line(human(k), what, note)
 
-# `noted` on a macOS host: those bytes are already inside the charged disk image.
-render_probe() { # <add|noted> [input file]
-    local mode="$1" kb what note
-    while IFS=$'\t' read -r kb what note; do
-        [ -n "${kb:-}" ] || continue
-        [ "$kb" = 0 ] && [ -z "$note" ] && continue
-        if [ "$mode" = add ]; then row "$kb" "$what" "$note"
-        else noted "$kb" "$what" "$note"; fi
-    done < "${2:-/dev/stdin}"
-}
+    def note(self, k, what, note=""):
+        self.noted = True
+        self.line("(%s)" % human(k), what, note)
 
-case "${1:-}" in
-    --probe-store) probe_store; exit 0 ;;
-esac
+    def unknown(self, what, note):
+        self.line("??", what, note)
 
-info "wk disk on $(wk_os) ($(hostname -s 2>/dev/null || hostname))"
+    def section(self, title):
+        sys.stderr.write("\n%s\n" % title)
 
-if in_workspace; then
-    src=$(wk_marker_field src)
-    section "workspace '$(wk_self)'"
-    row "$(_kb "$src/.git")"       "the checkout's .git"
-    for d in "$src"/WebKitBuild/*/*; do
-        [ -d "$d" ] || continue
-        row "$(_kb "$d")" "build tree ${d#"$src"/WebKitBuild/}"
-    done
-    for d in "$HOME/Library/Developer/Xcode/DerivedData" "$HOME/Library/Caches/clang"; do
-        [ -d "$d" ] || continue
-        row "$(_kb "$d")" "$(basename "$d")" "compilation cache"
-    done
-    for d in /ccache "$HOME/.cache/ccache"; do
-        [ -d "$d" ] || continue
-        noted "$(_kb "$d")" "ccache" "shared, and the host's -- 'wk gc' trims it"
-    done
-    section "total"
-    printf '  %7s  %s\n' "$(_human "$TOTAL")" "this workspace" >&2
-    if [ -n "$NOTED" ]; then log "           parenthesised rows are shared and not this workspace's"; fi
-    log ""
-    df -h "$src" 2>/dev/null | sed 's/^/  /' >&2 || true
-    log ""
-    log "  This workspace is disposable: 'wk rm $(wk_self)' on the host reclaims"
-    log "  all of it at once. 'wk help' is the whole-machine picture."
-    exit 0
-fi
+    def render(self, rows, add):
+        for line in rows.splitlines():
+            parts = line.split("\t")
+            if len(parts) < 2 or not parts[0]:
+                continue
+            k, what, note = parts[0], parts[1], parts[2] if len(parts) > 2 else ""
+            if k == "0" and not note:
+                continue
+            (self.row if add else self.note)(int(k), what, note)
 
-if is_macos && [ -z "${WK_IN_VM:-}" ]; then
-    section "the podman VM (container workspaces)"
-    mdir="${XDG_DATA_HOME:-$HOME/.local/share}/containers/podman/machine"
-    found=""
-    for f in "$mdir"/*/"$WK_MACHINE"-*.raw "$mdir"/*/"$WK_MACHINE".raw; do
-        [ -f "$f" ] || continue
-        found=1
-        row "$(_kb "$f")" "disk image" \
-            "sparse, $(podman machine inspect "$WK_MACHINE" --format '{{.Resources.DiskSize}}' 2>/dev/null || echo '?') GB ceiling; grows, never shrinks"
-    done
-    [ -n "$found" ] || unknown "disk image" "not found under $mdir"
-    for f in "$mdir"/*/cache; do
-        [ -d "$f" ] || continue
-        kb=$(_kb "$f"); [ "$kb" -gt 0 ] || continue
-        row "$kb" "downloaded machine image" "re-downloadable"
-    done
 
-    section "the container store, inside that image (already counted above)"
-    if [ "$(podman machine inspect "$WK_MACHINE" --format '{{.State}}' 2>/dev/null)" = running ]; then
-        tmp=$(mktemp)
-        # This file, not the VM's copy: that is only as new as `wk sync --tools container`.
-        podman machine ssh "$WK_MACHINE" -- \
-            "WK_ROOT=/opt/wk-tools WK_STORE=/var/lib/wk bash -s -- --probe-store" \
-            <"$0" >"$tmp" 2>/dev/null || true
-        if [ -s "$tmp" ]; then
-            render_probe noted "$tmp"
-        else
-            unknown "the store inside the VM" \
-                "the VM answered nothing; its tooling may be missing: wk sync --tools container"
-        fi
-        rm -f "$tmp"
-    else
-        unknown "the store inside the VM" "the machine is stopped: 'wk start', then re-run"
-    fi
+def probe_store(store):
+    """kb<TAB>label<TAB>note per store row; on macOS this runs in the VM and renders out here."""
+    rows = [(kb(store.mirror()), "the WebKit mirror", "git/WebKit.git -- refetchable (wk sync)")]
+    bases = len(os.listdir(store.base_dir())) if os.path.isdir(store.base_dir()) else 0
+    rows.append((kb(store.base_dir()), "base snapshots", "%d of them; unreferenced ones go with wk gc" % bases))
+    for ws in store.workspaces():
+        rows.append((kb(store.ws_dir(ws)), "workspace %s" % ws, "wk rm %s" % ws))
+    for d in ("cache/ccache", "cache/bench", "cache/images", "cache/yocto", "cache/buildroot", "images", "bench", "skills", "tools"):
+        p = os.path.join(store.root(), d)
+        if os.path.isdir(p):
+            rows.append((kb(p), d, ""))
+    containers = os.path.join(DATA, "containers", "storage")   # podman's own rootless tree: not under the store, still the store
+    if os.path.isdir(containers):
+        rows.append((kb(containers), "container images", "wk gc prunes the dangling ones"))
+    return "".join("%d\t%s\t%s\n" % r for r in rows)
 
-else
-    section "the store ($WK_STORE)"
-    render_probe add < <(probe_store)
-fi
 
-if is_macos && [ -z "${WK_IN_VM:-}" ] && [ -d "$TART_HOME" ]; then
-    section "macOS guests (vm target, $TART_HOME)"
-    base="${WK_VM_BASE:-wk-base}"
-    for d in "$TART_HOME"/vms/*; do
-        [ -d "$d" ] || continue
-        v=$(basename "$d")
-        case "$v" in
-            "$base")  row "$(_kb "$d")" "golden base '$v'" "the expensive one: wk vm base --rm" ;;
-            wk-*)     row "$(_kb "$d")" "guest '${v#wk-}'" "wk rm ${v#wk-}" ;;
-            *)        row "$(_kb "$d")" "guest '$v'" "not wk's" ;;
-        esac
-    done
-    kb=$(_kb "$TART_HOME/cache")
-    if [ "$kb" -gt 0 ]; then row "$kb" "pulled image cache" "re-downloadable; wk gc trims it to ${WK_TART_CACHE_GB} GB"; fi
-fi
+def workspace_report(reg, rep):
+    marker = targets.read_conf(reg.marker_path())
+    src = marker.get("src", "")
+    rep.section("workspace '%s'" % marker.get("name", ""))
+    rep.row(kb(os.path.join(src, ".git")), "the checkout's .git")
+    for d in sorted(glob.glob(os.path.join(src, "WebKitBuild", "*", "*"))):
+        if os.path.isdir(d):
+            rep.row(kb(d), "build tree %s" % os.path.relpath(d, os.path.join(src, "WebKitBuild")))
+    for d in (os.path.join(HOME, "Library/Developer/Xcode/DerivedData"), os.path.join(HOME, "Library/Caches/clang")):
+        if os.path.isdir(d):
+            rep.row(kb(d), os.path.basename(d), "compilation cache")
+    for d in ("/ccache", os.path.join(HOME, ".cache", "ccache")):
+        if os.path.isdir(d):
+            rep.note(kb(d), "ccache", "shared, and the host's -- 'wk gc' trims it")
+    rep.section("total")
+    sys.stderr.write("  %7s  %s\n" % (human(rep.total), "this workspace"))
+    if rep.noted:
+        log("           parenthesised rows are shared and not this workspace's")
+    log("")
+    df = here.run(["df", "-h", src])
+    sys.stderr.write("".join("  " + l + "\n" for l in df.out.splitlines()))
+    log("")
+    log("  This workspace is disposable: 'wk rm %s' on the host reclaims" % marker.get("name", ""))
+    log("  all of it at once. 'wk help' is the whole-machine picture.")
 
-section "this host"
-if [ -d "$(wk_state_dir)" ]; then
-    row "$(_kb "$(wk_state_dir)")" "host-side state" "logs, keys, remote build status"
-    # On a macOS host $WK_STORE is the VM's path, so the fetch cache lives here instead.
-    if [ -d "$(image_cache_dir)" ] && case "$(image_cache_dir)" in "$(wk_state_dir)"/*) true ;; *) false ;; esac; then
-        kb=$(_kb "$(image_cache_dir)")
-        [ "$kb" -gt 0 ] && noted "$kb" "fetched base images" \
-            "inside the row above; a re-fetchable input, kept by wk gc"
-    fi
-fi
-row "$(_kb "$WK_ROOT")" "wk-tools checkout" "$WK_ROOT"
 
-# A pmos build host holds chroots and builds its own `wk disk` cannot see are wk's.
-if [ -z "${WK_IN_VM:-}" ] && ! in_remote_host; then
-    _pmos_rows=$(for h in $(pmos_build_hosts); do pmos_cache_probe "$h"; done)
-    if [ -n "$_pmos_rows" ]; then
-        section "pmos build hosts (not this machine, not in the total)"
-        while IFS=$'\t' read -r kb what note; do
-            [ -n "${kb:-}" ] || continue
-            if [ "$kb" = '??' ]; then unknown "$what" "$note"
-            else noted "$kb" "$what" "$note"; fi
-        done <<EOF
-$_pmos_rows
-EOF
-    fi
-fi
+def main(argv):
+    store = Store()
+    if "--probe-store" in argv:
+        sys.stdout.write(probe_store(store))
+        return 0
+    reg = targets.Registry(ROOT)
+    rep = Report()
+    macos_host = store.macos_host
+    hostname = here.run(["hostname", "-s"]).out.strip() or here.run(["hostname"]).out.strip()
+    info("wk disk on %s (%s)" % ("macos" if os.uname().sysname == "Darwin" else "linux", hostname))
+    if reg.in_workspace():
+        workspace_report(reg, rep)
+        return 0
+    if macos_host:
+        rep.section("the podman VM (container workspaces)")
+        mdir = os.path.join(DATA, "containers", "podman", "machine")
+        images = glob.glob(os.path.join(mdir, "*", MACHINE + "-*.raw")) + glob.glob(os.path.join(mdir, "*", MACHINE + ".raw"))
+        for f in images:
+            ceiling = here.run(["podman", "machine", "inspect", MACHINE, "--format", "{{.Resources.DiskSize}}"]).out.strip() or "?"
+            rep.row(kb(f), "disk image", "sparse, %s GB ceiling; grows, never shrinks" % ceiling)
+        if not images:
+            rep.unknown("disk image", "not found under %s" % mdir)
+        for f in glob.glob(os.path.join(mdir, "*", "cache")):
+            k = kb(f)
+            if k > 0:
+                rep.row(k, "downloaded machine image", "re-downloadable")
+        rep.section("the container store, inside that image (already counted above)")
+        if shell.machine_state(ROOT, MACHINE) == "running":
+            with open(__file__, "rb") as me:   # this file, not the VM's copy, which is only as new as `wk sync --tools container`
+                cp = subprocess.run(["podman", "machine", "ssh", MACHINE, "--",
+                                     "WK_ROOT=/opt/wk-tools WK_STORE=/var/lib/wk python3 - --probe-store"],
+                                    stdin=me, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+            if cp.stdout.strip():
+                rep.render(cp.stdout, add=False)
+            else:
+                rep.unknown("the store inside the VM", "the VM answered nothing; its tooling may be missing: wk sync --tools container")
+        else:
+            rep.unknown("the store inside the VM", "the machine is stopped: 'wk start', then re-run")
+    else:
+        rep.section("the store (%s)" % store.root())
+        rep.render(probe_store(store), add=True)
+    if macos_host and os.path.isdir(TART_HOME):
+        rep.section("macOS guests (vm target, %s)" % TART_HOME)
+        base = os.environ.get("WK_VM_BASE") or "wk-base"
+        for d in sorted(glob.glob(os.path.join(TART_HOME, "vms", "*"))):
+            if not os.path.isdir(d):
+                continue
+            v = os.path.basename(d)
+            if v == base:
+                rep.row(kb(d), "golden base '%s'" % v, "the expensive one: wk vm base --rm")
+            elif v.startswith("wk-"):
+                rep.row(kb(d), "guest '%s'" % v[3:], "wk rm %s" % v[3:])
+            else:
+                rep.row(kb(d), "guest '%s'" % v, "not wk's")
+        k = kb(os.path.join(TART_HOME, "cache"))
+        if k > 0:
+            rep.row(k, "pulled image cache", "re-downloadable; wk gc trims it to %s GB" % (os.environ.get("WK_TART_CACHE_GB") or "20"))
+    rep.section("this host")
+    if os.path.isdir(store.state_dir()):
+        rep.row(kb(store.state_dir()), "host-side state", "logs, keys, remote build status")
+        cache = shell.ask(ROOT, '. "$WK_ROOT/lib/image.sh"; image_cache_dir') or ""
+        if cache.startswith(store.state_dir() + "/") and os.path.isdir(cache):
+            k = kb(cache)
+            if k > 0:
+                rep.note(k, "fetched base images", "inside the row above; a re-fetchable input, kept by wk gc")
+    rep.row(kb(ROOT), "wk-tools checkout", ROOT)
+    if not os.environ.get("WK_IN_VM") and not reg.remote_marker_field("target"):
+        rows = shell.ask(ROOT, '. "$WK_ROOT/lib/image.sh"; . "$WK_ROOT/image/profiles.sh"; . "$WK_ROOT/image/pmos.sh"; '
+                               'for h in $(pmos_build_hosts); do pmos_cache_probe "$h"; done; :') or ""
+        if rows.strip():
+            rep.section("pmos build hosts (not this machine, not in the total)")
+            for line in rows.splitlines():
+                parts = line.split("\t")
+                if len(parts) < 2 or not parts[0]:
+                    continue
+                if parts[0] == "??":
+                    rep.unknown(parts[1], parts[2] if len(parts) > 2 else "")
+                else:
+                    rep.note(int(parts[0]), parts[1], parts[2] if len(parts) > 2 else "")
+    rep.section("total")
+    sys.stderr.write("  %7s  %s\n" % (human(rep.total), "wk's storage on this machine"))
+    if rep.noted:
+        log("           parenthesised rows are not in the total: they are inside a row")
+        log("           above, or on another machine (the build-host section)")
+    if os.uname().sysname == "Darwin":
+        log("           du counts allocated blocks; APFS clones share them, so this is")
+        log("           an upper bound -- df below is the filesystem's own answer")
+    else:
+        log("           du counts allocated blocks, and hardlinked snapshots are counted")
+        log("           once -- df below is the filesystem's own answer")
+    log("")
+    df = here.run(["df", "-h", store.root() if os.path.isdir(store.root()) else HOME])
+    sys.stderr.write("".join("  " + l + "\n" for l in df.out.splitlines()))
+    log("")
+    log("  What to erase, and how:  wk help")
+    return 0
 
-section "total"
-printf '  %7s  %s\n' "$(_human "$TOTAL")" "wk's storage on this machine" >&2
-if [ -n "$NOTED" ]; then
-    log "           parenthesised rows are not in the total: they are inside a row"
-    log "           above, or on another machine (the build-host section)"
-fi
-if is_macos; then
-    log "           du counts allocated blocks; APFS clones share them, so this is"
-    log "           an upper bound -- df below is the filesystem's own answer"
-else
-    log "           du counts allocated blocks, and hardlinked snapshots are counted"
-    log "           once -- df below is the filesystem's own answer"
-fi
-log ""
-df -h "$([ -d "$WK_STORE" ] && echo "$WK_STORE" || echo "$HOME")" 2>/dev/null | sed 's/^/  /' >&2 || true
-log ""
-log "  What to erase, and how:  wk help"
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
