@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/usr/bin/env python3
 #
 # wk ls -- workspaces, what they are pinned to, and what they cost on disk
 # wk: where=workspace name=none bare=merged readonly group=workspaces opts --json,--continued,--more-follows,--empty-so-far
@@ -17,142 +17,173 @@
 #   --json    one JSON document ({"workspaces": [...]}), the same fields as
 #             the table's columns, lower-cased; nothing else on stdout
 
-set -euo pipefail
-WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-. "$WK_ROOT/lib/common.sh"
-. "$WK_ROOT/lib/store.sh"
-. "$WK_ROOT/lib/target.sh"
-. "$WK_ROOT/lib/par.sh"
+import json
+import os
+import re
+import sys
+from concurrent.futures import ThreadPoolExecutor
 
-ws_git_base() { # <ws>
-    case "$(t_info "$1")" in
-        absent|creating|broken|unreachable) return 0 ;;
+ROOT = os.environ.get("WK_ROOT") or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(ROOT, "lib"))
+
+from wk import shell, targets  # noqa: E402
+from wk.act import Refused, die, log  # noqa: E402
+from wk.machine import Local  # noqa: E402
+
+FORMAT = "%-20s %-18s %-10s %-8s %-20s %-8s %8s"
+
+# Run with $PWD inside the checkout: `main`, a release like `2.52`, or `?`.
+UPSTREAM_LINE = r'''
+_u=$(git rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null) || _u=''
+_b=''
+if [ -n "$_u" ]; then
+    _br=${_u#*/}
+    case "$_br" in
+        main) _b=main ;;
+        webkitglib/*) _b=${_br#webkitglib/} ;;
     esac
-    t_exec "$1" sh -c "cd $(sh_quote "$(t_src "$1")") 2>/dev/null || exit 0
-        $(declare -f ws_upstream_line)
-        ws_upstream_line" 2>/dev/null | tr -d '\r'
-}
-
-ws_base() { # <ws>
-    local b
-    b=$(ws_image_base "$1" 2>/dev/null) || b=""
-    [ -n "$b" ] || b=$(ws_git_base "$1" 2>/dev/null) || b=""
-    printf '%s' "${b:-?}"
-}
-
-# --continued/--more-follows/--empty-so-far are the dispatcher's (bare_report),
-# not a person's: they join this machine's rows and the podman VM's into one table.
-CONTINUED=""
-MORE_FOLLOWS=""
-EMPTY_SO_FAR=""
-JSON=""
-for _a in ${@+"$@"}; do
-    case "$_a" in
-        --continued)    CONTINUED=1 ;;
-        --more-follows) MORE_FOLLOWS=1 ;;
-        --empty-so-far) EMPTY_SO_FAR=1 ;;
-        --json)         JSON=1 ;;
-    esac
-done
-
-if [ -n "$JSON" ]; then
-    JSON_DOCS=$(mktemp)
-    _ls_json_cleanup() { rm -f "$JSON_DOCS"; }
-    wk_atexit _ls_json_cleanup
 fi
-
-# WK_ROW_LABEL: the name the *asking* machine knows this one by, qualifying rows
-# as `moose:container`. An env var, since an older far-side checkout would die on a flag.
-LABEL="${WK_ROW_LABEL:-}"
-_col() { if [ -z "$LABEL" ] || [ "$1" = "$LABEL" ]; then printf '%s' "$1"; else printf '%s:%s' "$LABEL" "$1"; fi; }
-
-if [ -z "$CONTINUED" ] && [ -z "$JSON" ]; then
-    printf '%-20s %-18s %-10s %-8s %-20s %-8s %8s\n' \
-        NAME TARGET STATE BASE SNAP ARCH CHANGES
+if [ -z "$_b" ]; then
+    _rel=$(git for-each-ref --format='%(refname)' --contains HEAD 'refs/remotes/*/webkitglib/*' 2>/dev/null \
+        | sed 's#.*/webkitglib/##' | sort -t. -k1,1n -k2,2n | tail -1)
+    if [ -n "$_rel" ]; then _b=$_rel
+    elif git for-each-ref --format='%(refname)' --contains HEAD 'refs/remotes/*/main' 2>/dev/null | grep -q .; then _b=main
+    fi
 fi
+printf '%s' "${_b:-?}"
+'''
 
-ws_row() { # <target> <ws>
-    local TARGET="$1" ws="$2" state base snap size
-    state=$(ws_display_state "$ws")
-    base=$(ws_base "$ws")
-    snap=$(ws_base_id "$ws" 2>/dev/null || echo '-')
-    size=$(du -sh "$(wk_ws_dir "$ws")/changes" 2>/dev/null | cut -f1 || echo -)
-    if [ -n "$JSON" ]; then
-        python3 -c '
-import json, sys
-print(json.dumps({"workspaces": [{
-    "name": sys.argv[1], "target": sys.argv[2], "state": sys.argv[3],
-    "base": sys.argv[4], "snap": sys.argv[5], "arch": sys.argv[6], "changes": sys.argv[7],
-}]}))' "$ws" "$(_col "$TARGET")" "$state" "$base" "$snap" "$(t_arch "$ws")" "$size" >&3
+
+def image_base(ws):
+    """CFG_RELEASE of an image workspace's profile, or None."""
+    for prefix in ("yocto-", "buildroot-"):
+        if ws.startswith(prefix):
+            conf = os.path.join(ROOT, "image", "configs", ws[len(prefix):] + ".conf")
+            return targets.read_conf(conf).get("CFG_RELEASE") or None
+    return None
+
+
+def git_base(target, ws):
+    if target.info(ws) in targets.STATES_NOT_THERE:
+        return None
+    r = target.exec(ws, ["sh", "-c", "cd %s 2>/dev/null || exit 0\n%s" % (shell.sh_quote(target.src(ws)), UPSTREAM_LINE)])
+    out = r.out.replace("\r", "").strip().splitlines()
+    return out[-1] if r.ok and out else None
+
+
+def base_of(target, ws):
+    return image_base(ws) or git_base(target, ws) or "?"
+
+
+def col(label, target):
+    return target if not label or target == label else "%s:%s" % (label, target)
+
+
+def row(target, ws, label, as_json):
+    state = target.display_state(ws)
+    base = base_of(target, ws)
+    snap = target.store.ws_base_id(ws) or "-"
+    r = Local().run(["du", "-sh", os.path.join(target.store.ws_dir(ws), "changes")])
+    size = r.out.split("\t")[0].strip() if r.ok and r.out.strip() else "-"
+    arch = target.arch(ws)
+    fields = (ws, col(label, target.name), state, base, snap, arch, size)
+    if as_json:
+        return json.dumps({"workspaces": [dict(zip(("name", "target", "state", "base", "snap", "arch", "changes"), fields))]})
+    return FORMAT % fields
+
+
+def target_rows(reg, name, label, as_json):
+    """The rows one target contributes: its own machine's `wk ls` when it has one."""
+    target = reg.load(name)
+    if target.has_wk() and target.kind == "remote":
+        args = ["ls", "--continued"] + (["--json"] if as_json else [])
+        os.environ["WK_ROW_LABEL"] = name
+        os.environ["WK_NO_DELEGATE"] = "1"
+        rc, out = target.wk(*args)
+        return out.rstrip("\n")
+    names = sorted(set(target.store.workspaces()) | {n for n, _ in target.list()})
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        rows = list(pool.map(lambda ws: row(target, ws, label, as_json), names))
+    return "\n".join(rows)
+
+
+def walk_targets(reg):
+    if os.environ.get("WK_TARGET"):
+        return os.environ["WK_TARGET"].split()
+    if reg.in_workspace():
+        return [reg.default()]
+    if os.environ.get("WK_NO_DELEGATE"):
+        return [t for t in reg.all() if t not in reg.machines()]
+    return reg.all()
+
+
+def footer(reg, names):
+    multi = len(names) > 1
+    spaced = False
+    for name in names:
+        try:
+            target = reg.load(name)
+        except LookupError:
+            continue
+        if not target.needs_base:
+            continue
+        if not spaced:
+            print()
+            spaced = True
+        prefix = "%s: " % name if multi else ""
+        cur = shell.ask(ROOT, "load_target %s >/dev/null 2>&1; current_base" % shell.sh_quote(name)) or "none"
+        log("%scurrent base: %s" % (prefix, cur))
+        unref = shell.ask(ROOT, "load_target %s >/dev/null 2>&1; unreferenced_bases | wc -l" % shell.sh_quote(name)) or "0"
+        if int(unref.strip() or 0) > 0:
+            log("%s%s unreferenced snapshot(s) reclaimable with 'wk gc'" % (prefix, unref.strip()))
+
+
+def main(argv):
+    continued = "--continued" in argv
+    more_follows = "--more-follows" in argv
+    empty_so_far = "--empty-so-far" in argv
+    as_json = "--json" in argv
+    label = os.environ.get("WK_ROW_LABEL", "")
+    reg = targets.Registry(ROOT)
+    if not continued and not as_json:
+        print(FORMAT % ("NAME", "TARGET", "STATE", "BASE", "SNAP", "ARCH", "CHANGES"))
+    names = walk_targets(reg)
+    try:
+        with ThreadPoolExecutor(max_workers=max(1, len(names))) as pool:
+            outputs = list(pool.map(lambda n: target_rows(reg, n, label, as_json), names))
+    except LookupError as e:
+        die(str(e))
+    found = False
+    docs = []
+    for out in outputs:
+        if not out:
+            continue
+        found = True
+        if as_json:
+            docs.append(out)
+        else:
+            print(out)
+    if as_json:
+        items = []
+        for doc in docs:
+            for chunk in re.split(r"(?<=})\s*(?={)", doc.strip()):
+                if chunk.strip():
+                    items.extend(json.loads(chunk).get("workspaces", []))
+        print(json.dumps({"workspaces": items}))
         return 0
-    fi
-    printf '%-20s %-18s %-10s %-8s %-20s %-8s %8s\n' \
-        "$ws" "$(_col "$TARGET")" "$state" "$base" "$snap" "$(t_arch "$ws")" "$size" >&3
-}
+    if not found and not more_follows and (not continued or empty_so_far):
+        if reg.remote_marker_field("target"):
+            log("(no workspaces here -- from the workstation: wk new <name> --target %s)" % reg.remote_marker_field("target"))
+        else:
+            log("(no workspaces -- 'wk new <name>' to create one)")
+    if label:
+        return 0   # that machine's store is not the reader's to act on
+    footer(reg, names)
+    return 0
 
-target_rows() { # <target>
-    local TARGET="$1" ws list
-    load_target "$TARGET"
-    if t_has_wk; then
-        if [ -n "$JSON" ]; then
-            WK_ROW_LABEL="$TARGET" WK_NO_DELEGATE=1 t_wk ls --continued --json >&3
-        else
-            WK_ROW_LABEL="$TARGET" WK_NO_DELEGATE=1 t_wk ls --continued >&3
-        fi
-        return $?
-    fi
 
-    list=$(target_workspaces)
-    [ -n "$list" ] || return 0
-    par_begin
-    for ws in $list; do par_run "$ws" ws_row "$TARGET" "$ws"; done
-    par_wait
-    for ws in $list; do par_record "$ws" >&3; done
-    par_end
-}
-
-found=0
-TARGETS=$(walk_targets)
-# Every target at once: a machine that will not answer costs only its own timeout.
-wk_atexit par_cleanup
-par_begin
-for TARGET in $TARGETS; do par_run "$TARGET" target_rows "$TARGET"; done
-par_wait
-for TARGET in $TARGETS; do
-    rows=$(par_record "$TARGET")
-    [ -n "$rows" ] || continue
-    found=1
-    if [ -n "$JSON" ]; then printf '%s\n' "$rows" >> "$JSON_DOCS"; else printf '%s\n' "$rows"; fi
-done
-par_end
-
-if [ -n "$JSON" ]; then
-    json_merge_list workspaces "$JSON_DOCS"
-    exit 0
-fi
-
-if [ "$found" -ne 1 ] && [ -z "$MORE_FOLLOWS" ] && { [ -z "$CONTINUED" ] || [ -n "$EMPTY_SO_FAR" ]; }; then
-    if in_remote_host; then
-        log "(no workspaces here -- from the workstation: wk new <name> --target $(wk_remote_field target))"
-    else
-        log "(no workspaces -- 'wk new <name>' to create one)"
-    fi
-fi
-
-# With a label, that machine's store is not the reader's to act on.
-[ -z "$LABEL" ] || exit 0
-
-_multi=""
-if [ "$(printf '%s\n' $TARGETS | wc -l | tr -d ' ')" -gt 1 ]; then _multi=1; fi
-for TARGET in $TARGETS; do
-    load_target "$TARGET"
-    t_needs_base || continue
-    [ -n "${_spaced:-}" ] || { echo; _spaced=1; }
-    cur=$(current_base 2>/dev/null || echo none)
-    log "${_multi:+$TARGET: }current base: $cur"
-    unref=$(unreferenced_bases | wc -l | tr -d ' ')
-    if [ "$unref" -gt 0 ]; then
-        log "${_multi:+$TARGET: }$unref unreferenced snapshot(s) reclaimable with 'wk gc'"
-    fi
-done
-exit 0
+if __name__ == "__main__":
+    try:
+        sys.exit(main(sys.argv[1:]))
+    except Refused as e:
+        sys.exit(e.status)

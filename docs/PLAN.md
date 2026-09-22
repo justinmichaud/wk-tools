@@ -186,13 +186,15 @@ exist.
      and vm implementations, landing with the first command that needs each
      (steps 2 and 3); the bridge is deleted with the last bash caller of
      `lib/target.sh`.
-2. **The seam and the drivers.** `Machine` with its fake, then the local,
-   container, remote and vm drivers as Python, each replacing its
-   `targets/*.sh` when the commands that need it have ported. The readers
-   go first because they are the drivers' smallest callers: `version`,
-   `logs`, `ls`, `start`, `disk`, `status` (with `lib/status-view.py`
-   folded in), `doctor`. Done when `lib/target.sh` and `targets/*.sh` are
-   gone and no bash file parses JSON.
+2. **The seam and the drivers.** `Machine` and its fake are in; the
+   registry and the read side of the container, guest and workspace-local
+   drivers are Python (`lib/wk/targets.py`), the remote driver's probe and
+   every driver's create and destroy still bridge to `targets/*.sh`. The
+   readers port first as the drivers' smallest callers: `ls` is; `version`,
+   `logs`, `start`, `disk`, `status` (with `lib/status-view.py` folded in)
+   and `doctor` follow, then the write side of each driver. Done when
+   `lib/target.sh` and `targets/*.sh` are gone and no bash file parses
+   JSON.
 3. **Workspaces.** `new`, `rm`, `build`, `run`, `test`, `enter`, `scp`,
    `sync`, `pr`, `remotes`, `verify`, `ai`, `zed`, `gui`, `profile`. Done
    when `lib/store.sh`'s workspace half is gone and each has a kill-point

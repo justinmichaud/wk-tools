@@ -1,8 +1,6 @@
 """The one seam for every effect: a Machine runs processes and touches files
-somewhere -- this host, a host over ssh, the podman machine -- and every
-mutating call goes through act (dry-run prints, a destructive command must
-have asked). `Fake` is the same interface over an in-memory host, answering
-as a test tells it and recording every effect in order."""
+on this host, a host over ssh, or an in-memory fake; a mutating call prints
+under --dry-run and refuses before a destructive command has asked."""
 
 import os
 import shlex
@@ -32,8 +30,6 @@ TIMED_OUT = 124
 
 
 class Machine:
-    """What every transport provides. `run` and the file reads change nothing;
-    `act_run`, `write`, `remove`, `mkdir`, `kill` and `spawn` are effects."""
 
     name = "machine"
 
@@ -58,7 +54,6 @@ class Machine:
 
     # -- effects
     def act_run(self, argv, **kw):
-        """A state-changing process, through act: printed under --dry-run."""
         if act.dry_run():
             sys.stderr.write("would run%s: %s\n" % (self._where(), " ".join(shlex.quote(a) for a in argv)))
             return Result(0)
@@ -80,7 +75,6 @@ class Machine:
         raise NotImplementedError
 
     def spawn(self, argv, log):
-        """Start argv detached, stdout and stderr to `log`; returns the pid."""
         raise NotImplementedError
 
     def _where(self):
@@ -88,8 +82,6 @@ class Machine:
 
 
 class Local(Machine):
-    """This host."""
-
     name = "here"
 
     def run(self, argv, input=None, timeout=None):
@@ -176,9 +168,6 @@ class Local(Machine):
 
 
 class Ssh(Machine):
-    """A host over ssh: `dest` as ssh takes it, `opts` the options every call
-    carries (never interactive, a bounded connect)."""
-
     def __init__(self, dest, opts=None, timeout=10):
         self.dest = dest
         self.name = dest
@@ -250,10 +239,8 @@ class Ssh(Machine):
 
 
 class Fake(Machine):
-    """An in-memory host. Files live in `files` ({path: text}), directories in
-    `dirs`, processes in `pids` (a set of live pids). A command answers what
-    `answer(prefix, rc, out, err)` registered for the longest matching argv
-    prefix, else exit 127. Every effect is appended to `effects`."""
+    """An in-memory host: a command answers what `answer()` registered for the
+    longest matching argv prefix, and every effect lands in `effects`."""
 
     def __init__(self, name="fake"):
         self.name = name

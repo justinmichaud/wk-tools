@@ -209,7 +209,7 @@ class TestTouchedFilesParse(unittest.TestCase):
 
     def test_bash_n(self):
         for rel in ("lib/target.sh", "lib/par.sh", "lib/common.sh",
-                    "lib/reach.sh", "cmd/ls", "cmd/enter"):
+                    "lib/reach.sh", "cmd/enter"):
             with self.subTest(file=rel):
                 cp = subprocess.run(["bash", "-n", str(REPO / rel)],
                                     capture_output=True, text=True)
