@@ -111,12 +111,12 @@ with open(os.devnull, "rb") as _devnull:
 
 
 def where_values():
-    """The `where=` vocabulary, read from the dispatcher that enforces it
-    (`WK_WHERE_VALUES` in ./wk) rather than copied into a test."""
+    """The `where=` vocabulary, read from the module that enforces it
+    (`WHERE_VALUES` in lib/wk/decl.py) rather than copied into a test."""
     import re
-    m = re.search(r'WK_WHERE_VALUES="([^"]+)"', (REPO / "wk").read_text())
-    assert m, "wk no longer defines WK_WHERE_VALUES"
-    return tuple(m.group(1).split())
+    m = re.search(r'WHERE_VALUES = \(([^)]+)\)', (REPO / "lib" / "wk" / "decl.py").read_text())
+    assert m, "lib/wk/decl.py no longer defines WHERE_VALUES"
+    return tuple(w.strip().strip('"') for w in m.group(1).split(",") if w.strip())
 
 
 def _clean_env(extra=None, wk_root=False):

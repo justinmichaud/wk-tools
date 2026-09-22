@@ -67,14 +67,14 @@ class TestDispatcherProtocolDocumented(unittest.TestCase):
     header, per CLAUDE.md ("Nothing is ad-hoc ... documented once")."""
 
     def test_wk_header_names_every_dispatcher_set_variable(self):
-        header = "\n".join(WK.read_text().splitlines()[:40])
+        header = "\n".join((REPO / "lib" / "wk" / "dispatch.py").read_text().splitlines()[:40])
         names = [
             "WK_NAME", "WK_IN_VM", "WK_ROW_LABEL", "WK_HOST_SELF",
             "WK_NO_DELEGATE", "WK_QUIET", "WK_FORCE",
             "WK_TARGET", "WK_CONFIG",
         ]
         missing = [n for n in names if n not in header]
-        self.assertEqual(missing, [], f"not documented in wk's header: {missing}")
+        self.assertEqual(missing, [], f"not documented in the dispatcher's header: {missing}")
 
 
 class TestNewExitStatus(unittest.TestCase):

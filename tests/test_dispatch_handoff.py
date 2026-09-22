@@ -165,10 +165,10 @@ class TestTheResolvedTargetIsHandedOn(WkTest):
 
 
 class TestWhatIsNotToldTheTarget(unittest.TestCase):
-    """The two paths the export must not be on, read from `wk` itself: a
-    forwarded child resolves inside the podman VM and a delegated one on the
-    machine that owns the workspace, so WK_TARGET travels on neither, and a
-    lifecycle command resolves each of its own names."""
+    """The two paths the export must not be on, read from the dispatcher
+    itself: a forwarded child resolves inside the podman VM and a delegated
+    one on the machine that owns the workspace, so WK_TARGET travels on
+    neither, and a lifecycle command resolves each of its own names."""
 
     def test_the_forwarded_environment_carries_no_target(self):
         text = (REPO / "lib" / "target.sh").read_text()
@@ -179,11 +179,12 @@ class TestWhatIsNotToldTheTarget(unittest.TestCase):
                          "a forwarded command is told a target it must resolve itself")
 
     def test_the_export_is_on_the_running_here_path_only(self):
-        text = (REPO / "wk").read_text()
-        exports = [l for l in text.splitlines() if 'WK_TARGET="$resolved"' in l]
-        self.assertEqual(len(exports), 1, f"more than one place exports it: {exports}")
-        self.assertIn("D_LIFECYCLE", exports[0],
-                      "a lifecycle command is handed a target it resolves per name")
+        lines = (REPO / "lib" / "wk" / "dispatch.py").read_text().splitlines()
+        exports = [i for i, l in enumerate(lines) if 'os.environ["WK_TARGET"] = resolved' in l]
+        self.assertEqual(len(exports), 1,
+                         f"more than one place exports it: {[lines[i] for i in exports]}")
+        self.assertEqual(lines[exports[0] - 1].strip(), "if not d.lifecycle:",
+                         "a lifecycle command is handed a target it resolves per name")
 
 
 if __name__ == "__main__":

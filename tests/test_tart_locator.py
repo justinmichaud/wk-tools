@@ -13,7 +13,7 @@ import os
 import stat
 import unittest
 
-from tests.support import REPO, WkTest, bash, scratch_dir
+from tests.support import REPO, WkTest, bash, run, scratch_dir
 
 
 def locate(home, path_dirs=""):
@@ -69,7 +69,7 @@ class TestEveryReaderAsksIt(WkTest):
     could do: the dispatcher's gate ran `command -v` while the vm target ran
     the bundle, so `wk vm start` over ssh was refused with tart installed."""
 
-    READERS = ("wk", "targets/vm.sh", "boot/mac-guest.sh",
+    READERS = ("lib/wk/dispatch.py", "targets/vm.sh", "boot/mac-guest.sh",
                "host/macos/tools.sh", "host/macos/softnet.sh")
 
     def test_no_reader_spells_it_for_itself(self):
@@ -81,10 +81,15 @@ class TestEveryReaderAsksIt(WkTest):
 
     def test_the_dispatcher_gate_is_the_locator(self):
         """`needs tart` on cmd/vm is what refuses; it must not fall to the
-        generic `command -v` arm."""
-        from tests.support import func_body
-        body = func_body((REPO / "wk").read_text(), "check_needs")
-        self.assertIn("tart_bin", body)
+        generic `command -v` arm: a bundle off the PATH, which only the
+        locator finds, is enough to pass the gate."""
+        with scratch_dir() as home:
+            env = {"HOME": str(home), "PATH": "/usr/bin:/bin"}
+            cp = run("vm", "ls", env=env)
+            self.assertIn("tart    not installed here", cp.stdout, cp.stdout)
+            plant(home, ".local/share/tart/tart.app/Contents/MacOS/tart")
+            cp = run("vm", "ls", env=env)
+            self.assertNotIn("not installed here", cp.stdout, cp.stdout)
 
 
 if __name__ == "__main__":

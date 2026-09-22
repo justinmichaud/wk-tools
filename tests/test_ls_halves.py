@@ -7,10 +7,20 @@ empty too).
 
 Run: python3 -m unittest tests.test_ls_halves -v
 """
+import contextlib
+import io
+import sys
+import tempfile
 import unittest
+from pathlib import Path
+from unittest import mock
 
 from tests.support import REPO, temp_store
 from tests.test_options import run_impl
+
+sys.path.insert(0, str(REPO / "lib"))
+from wk import decl as D  # noqa: E402
+from wk import dispatch  # noqa: E402
 
 
 class TestTheEmptyNoteIsDecidedOnce(unittest.TestCase):
@@ -50,10 +60,37 @@ class TestTheEmptyNoteIsDecidedOnce(unittest.TestCase):
         cp = self._ls()
         self.assertIn("no workspaces", cp.stdout)
 
+    def _halves(self, first_half_lines):
+        """The arguments `bare_report` (lib/wk/dispatch.py) hands each half
+        of a bare `wk ls` when the first half prints `first_half_lines`: a
+        stub `ls` is the first half and records its argv, and the
+        dispatcher's own seams -- which targets are here, whether the machine
+        runs, the forward -- answer as told."""
+        with tempfile.TemporaryDirectory(prefix="wk-test-halves-") as tmp:
+            stub, argv = Path(tmp) / "ls", Path(tmp) / "argv"
+            stub.write_text("#!/bin/sh\n# wk ls -- a stub\n# wk: where=workspace name=none bare=merged readonly\n"
+                            f'echo "$@" > {argv}\n'
+                            + "".join(f"echo '{l}'\n" for l in first_half_lines))
+            stub.chmod(0o755)
+            inv = dispatch.Invocation("ls", D.Decl(stub), [])
+            forwarded = mock.Mock(return_value=0)
+            with mock.patch.object(dispatch, "target_all", return_value=["fakelocal"]), \
+                 mock.patch.object(dispatch, "machine_running", return_value=True), \
+                 mock.patch.object(dispatch, "forward_status", forwarded), \
+                 contextlib.redirect_stdout(io.StringIO()):
+                with self.assertRaises(dispatch.Exit):
+                    dispatch.bare_report(inv, "ls", [])
+            return argv.read_text().split(), forwarded.call_args[0][2]
+
     def test_the_dispatcher_owns_the_flags(self):
-        text = (REPO / "wk").read_text()
-        self.assertIn('"$impl" --more-follows', text)
-        self.assertIn('--continued ${_ls_empty:+"$_ls_empty"}', text)
+        """the first half is told more follows, and the second whether the
+        first was empty -- decided once, by the dispatcher"""
+        first, second = self._halves(["NAME"])
+        self.assertEqual(first, ["--more-follows"])
+        self.assertEqual(second, ["--continued", "--empty-so-far"])
+        first, second = self._halves(["NAME", "a-workspace"])
+        self.assertEqual(first, ["--more-follows"])
+        self.assertEqual(second, ["--continued"])
 
 
 if __name__ == "__main__":

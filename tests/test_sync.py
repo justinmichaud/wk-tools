@@ -23,6 +23,9 @@ from pathlib import Path
 
 from tests.support import REPO, bash, fake_workspace, run
 
+sys.path.insert(0, str(REPO / "lib"))
+from wk.decl import Decl  # noqa: E402
+
 
 def _lift_range(path, start_pattern, end_pattern):
     """Lines from the first line matching start_pattern through the first
@@ -686,22 +689,18 @@ class TestDispatcherForwardingRuleForSync(unittest.TestCase):
     `wk sync --where <args>` itself: a workspace's name goes to the machine
     holding it (the podman VM for a container workspace on a macOS host), and
     every other shape is this host's -- the mirror is written here, and the
-    VM and the guests read it. Driven through the dispatcher's own cmd_where,
-    lifted, and through cmd/sync's answer directly; nothing is forwarded."""
-
-    FUNCS = "\n".join(
-        _lift_func(REPO / "wk", f)
-        for f in ("decl_load", "in_list", "sub_override", "flag_override", "cmd_where")
-    )
+    VM and the guests read it. Driven the way the dispatcher does it
+    (Invocation.where, lib/wk/dispatch.py): the declaration's answer for
+    these arguments, and when that is `dynamic`, cmd/sync's own; nothing is
+    forwarded."""
 
     def _where(self, *args, env=None):
-        script = (
-            ". lib/common.sh\n" + self.FUNCS
-            + "\ndecl_load cmd/sync\ncmd_where cmd/sync " + " ".join(shlex.quote(a) for a in args) + "\n"
-        )
-        cp = bash(script, env=env)
+        where = Decl(REPO / "cmd" / "sync").where_for(list(args))
+        if where != "dynamic":
+            return where
+        cp = bash("cmd/sync --where " + " ".join(shlex.quote(a) for a in args) + "\n", env=env)
         self.assertEqual(cp.returncode, 0, cp.stderr)
-        return cp.stdout
+        return cp.stdout.strip()
 
     def test_bare_sync_is_this_host(self):
         self.assertEqual(self._where(), "host")

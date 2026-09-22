@@ -22,8 +22,13 @@ import re
 import subprocess
 import sys
 import unittest
+from unittest import mock
 
 from tests.support import REPO, WkTest, bash, rand_suffix, run, stub_path
+
+sys.path.insert(0, str(REPO / "lib"))
+from wk import decl as D  # noqa: E402
+from wk import dispatch  # noqa: E402
 
 SYSIMAGE = REPO / "cmd" / "sysimage"
 
@@ -47,11 +52,6 @@ def _hook(*args):
     cp = subprocess.run([str(SYSIMAGE), *args], capture_output=True, text=True,
                         cwd=str(REPO))
     return cp.stdout.strip(), cp
-
-
-def _lift(func):
-    return subprocess.run(["sed", "-n", f"/^{func}()/,/^}}/p", str(REPO / "wk")],
-                          capture_output=True, text=True).stdout
 
 
 class TestTheLaneAnswer(unittest.TestCase):
@@ -101,76 +101,55 @@ class TestTheDispatcherReadsDerived(unittest.TestCase):
     """`name=derived` in the dispatcher: what it declares, what it refuses,
     and the three places it is not the same as a positional name."""
 
-    DECL = _lift("decl_load")
-    SUB = _lift("sub_override") + _lift("flag_override") + _lift("in_list")
-    NAME = _lift("cmd_name") + _lift("name_slot")
-
-    def _decl(self, script, impl="cmd/sysimage"):
-        return bash(f'. "{REPO}/lib/common.sh"\n{self.DECL}{self.SUB}{self.NAME}\n'
-                    f'decl_load "{REPO}/{impl}"\n{script}\n')
+    def _decl(self, impl="cmd/sysimage"):
+        return D.Decl(REPO / impl)
 
     def test_build_and_webkit_derive_their_name_and_nothing_else_does(self):
         """cmd/sysimage declares name=derived for build and webkit alone"""
-        cp = self._decl('for s in build webkit ls write disks rm flash; do '
-                        'printf "%s=%s\\n" "$s" "$(cmd_name "$s")"; done')
-        self.assertEqual(cp.returncode, 0, cp.stderr)
-        self.assertEqual(
-            cp.stdout.split(),
-            ["build=derived", "webkit=derived", "ls=none", "write=none",
-             "disks=none", "rm=none", "flash=none"])
+        d = self._decl()
+        got = ["%s=%s" % (s, d.name_for([s])) for s in ("build", "webkit", "ls", "write", "disks", "rm", "flash")]
+        self.assertEqual(got, ["build=derived", "webkit=derived", "ls=none", "write=none",
+                               "disks=none", "rm=none", "flash=none"])
 
     def test_a_derived_name_is_no_positional_of_its_own(self):
         """name_slot: a derived name is in no argument slot, like none"""
-        cp = self._decl('for d in derived none required optional optional@2; do '
-                        'printf "%s=%s\\n" "$d" "$(name_slot "$d")"; done')
-        self.assertEqual(
-            cp.stdout.split(),
-            ["derived=0", "none=0", "required=1", "optional=1", "optional@2=2"])
+        got = ["%s=%s" % (n, D.name_slot(n)) for n in ("derived", "none", "required", "optional", "optional@2")]
+        self.assertEqual(got, ["derived=0", "none=0", "required=1", "optional=1", "optional@2=2"])
 
     def test_a_name_outside_the_vocabulary_is_refused(self):
-        """decl_load refuses a name= the dispatcher cannot read"""
-        d = REPO / "cmd"
-        impl = d / f"faux-{rand_suffix()}"
+        """a name= the dispatcher cannot read is refused by name"""
+        impl = REPO / "cmd" / f"faux-{rand_suffix()}"
         impl.write_text("#!/usr/bin/env bash\n#\n# wk faux -- x\n"
                         "# wk: where=workspace name=inferred group=other\n")
         try:
-            cp = self._decl("", impl=impl.relative_to(REPO))
+            with self.assertRaises(D.DeclError) as cm:
+                self._decl(impl.relative_to(REPO))
         finally:
             impl.unlink()
-        self.assertNotEqual(cp.returncode, 0, cp.stdout)
-        self.assertIn("name=inferred is not one of", cp.stdout + cp.stderr)
+        self.assertIn("name=inferred is not one of", str(cm.exception))
 
-    def _resolve(self, *, wstarget, tail):
-        """resolve_target with its two collaborators stubbed: what the command
-        answers for a target, and what a located workspace resolves to."""
-        script = (f'. "{REPO}/lib/common.sh"\n{self.DECL}{self.SUB}{self.NAME}\n'
-                  + _lift("resolve_target") + _lift("argv_name")
-                  + _lift("positional") + _lift("positional_count")
-                  + _lift("cmd_takes") + _lift("cwd_workspace")
-                  + 'ws_target() { printf "target-of:$1"; }\n'
-                  + f'cmd_wstarget() {{ printf "%s" {wstarget}; }}\n'
-                  + f'impl="{REPO}/cmd/sysimage"\n'
-                  + f'decl_load "{REPO}/cmd/sysimage"\n' + tail)
-        cp = bash(script)
-        self.assertEqual(cp.returncode, 0, cp.stderr)
-        return cp.stdout.split()
+    def _resolve(self, *, wstarget, derived, args):
+        """resolve_target with its two collaborators answering as told: what
+        the command names as the target, and what a located workspace
+        resolves to."""
+        inv = dispatch.Invocation("sysimage", self._decl(), args)
+        with mock.patch.object(dispatch.Invocation, "named_target", lambda self: wstarget), \
+                mock.patch.object(dispatch.shell, "ask", lambda root, fn, *a, **kw: "target-of:" + a[0]), \
+                mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("WK_TARGET", None)
+            return dispatch.resolve_target(inv, "derived", 0, "2", derived)
 
     def test_the_derived_name_decides_the_target(self):
         """resolve_target asks the command, not the argument list"""
-        got = self._resolve(wstarget="''", tail=(
-            'derived_name="yocto-demo"\n'
-            "resolve_target build demo; echo\n"
-            'derived_name=""\n'
-            "resolve_target build demo; echo\n"))
-        self.assertEqual(got, ["target-of:yocto-demo", "container"])
+        self.assertEqual(self._resolve(wstarget="", derived="yocto-demo", args=["build", "demo"]),
+                         "target-of:yocto-demo")
+        self.assertEqual(self._resolve(wstarget="", derived="", args=["build", "demo"]), "container")
 
     def test_a_target_the_command_names_outright_wins(self):
         """A lane spec that names its machine is not located: that machine
         holds the lane whether or not another one holds its name."""
-        got = self._resolve(wstarget="moose", tail=(
-            'derived_name="yocto-demo"\n'
-            "resolve_target build demo@moose; echo\n"))
-        self.assertEqual(got, ["moose"])
+        self.assertEqual(self._resolve(wstarget="moose", derived="yocto-demo", args=["build", "demo@moose"]),
+                         "moose")
 
 
 class TestALaneOnAnotherMachine(WkTest):

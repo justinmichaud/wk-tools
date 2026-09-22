@@ -194,13 +194,13 @@ class TestTheDispatcherResolvesOnce(unittest.TestCase):
     """the target is resolved once per invocation, not once per question"""
 
     def test_only_one_call_site_resolves_the_target(self):
-        text = (REPO / "wk").read_text()
-        calls = text.count('resolve_target "$@"')
+        text = (REPO / "lib" / "wk" / "dispatch.py").read_text()
+        calls = text.count("resolve_target(") - text.count("def resolve_target(")
         self.assertEqual(
             calls, 1,
-            "resolve_target is called from more than one place in `wk`: each call "
-            "walks every target that could hold the name, so a second one doubles "
-            "what `wk enter` costs. Reuse $resolved.",
+            "resolve_target is called from more than one place in the dispatcher: each "
+            "call walks every target that could hold the name, so a second one doubles "
+            "what `wk enter` costs. Reuse `resolved`.",
         )
 
 
@@ -208,7 +208,7 @@ class TestTouchedFilesParse(unittest.TestCase):
     """every file the walk lives in is syntactically valid bash"""
 
     def test_bash_n(self):
-        for rel in ("wk", "lib/target.sh", "lib/par.sh", "lib/common.sh",
+        for rel in ("lib/target.sh", "lib/par.sh", "lib/common.sh",
                     "lib/reach.sh", "cmd/ls", "cmd/enter"):
             with self.subTest(file=rel):
                 cp = subprocess.run(["bash", "-n", str(REPO / rel)],

@@ -10,7 +10,7 @@ Measured 2026-09-21 on this workstation.
 
 | | |
 | --- | --- |
-| code | 39k lines of bash, 8k of Python; 41 commands, 7 of them over 500 lines and holding 55% of command code |
+| code | 38k lines of bash, 9k of Python (the dispatcher among it); 41 commands, 7 of them over 500 lines and holding 55% of command code |
 | tests | 70k lines, 188 modules, 4273 tests in the lint and unit tiers, 39 in the live tier |
 | `wk selftest` (lint then unit) | 13.7 minutes, green; the lint tier alone 27 s |
 | the slowest unit test | 16 s, under a 30 s budget the runner enforces |
@@ -38,10 +38,7 @@ Why bugs come back:
    modules and the credential store in ten, because each agent wrote its own. The
    design lives in 2,000 lines of prose and each agent reads a different
    part of it.
-5. **Owed work is written 25 times.** The same items appear in three to six
-   handoffs (crash-only convergence, `wk gc` not reclaiming, version skew
-   across machines, the profiler). Nothing says what is done.
-6. **Hardware code has never run under a test.** The card edits, the
+5. **Hardware code has never run under a test.** The card edits, the
    two-system layouts, the rpi4 boot path, every `b_*` driver: each fails on
    the board, where a fix costs a walk to a card reader.
 
@@ -181,10 +178,14 @@ replaces in the same change, and ends with the live tier run against the
 container target. A bash command and its Python replacement never both
 exist.
 
-1. **The core.** Dispatcher and declarations, task record, `Machine` with
-   its fake and the local, container, remote and vm implementations, the
-   clock. Bash commands run unchanged under the new dispatcher. Done when
-   `./wk` the bash file is gone and the dispatcher tests run in under 5 s.
+1. **The core.** The dispatcher is Python (`lib/wk/`); two parts remain, each landing on its own.
+   - *The record and the clock*: the task record as a Python module reading
+     and writing the same directory the bash one does, and the clock every
+     wait takes. Done when `wk status` reads records through it (step 2).
+   - *`Machine`*: the one seam, its fake, and the local, container, remote
+     and vm implementations, landing with the first command that needs each
+     (steps 2 and 3); the bridge is deleted with the last bash caller of
+     `lib/target.sh`.
 2. **Reports.** `status`, `ls`, `logs`, `stop`, `start`, `doctor`, `disk`,
    `version`: readers of the one record. Done when no bash file parses
    JSON.

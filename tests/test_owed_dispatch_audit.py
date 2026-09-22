@@ -9,8 +9,9 @@ who decides each:
   workspace name  the dispatcher's, always: it resolves the name, refuses one
                   no workspace answers to, lifts it out of argv and exports
                   WK_NAME (`wk`'s declarations and main)
-  --force         the dispatcher's: `--force)` sets WK_FORCE and *consumes*
-                  the flag, so a command's own arm for it could never fire
+  --force         the dispatcher's: `GLOBALS` (lib/wk/dispatch.py) maps it to
+                  WK_FORCE and `main` *consumes* the flag, so a command's own
+                  arm for it could never fire
   --quiet         the same, WK_QUIET
   --target        the dispatcher reads it (resolve_target) and leaves it in
                   argv. For a `where=workspace` command that is the same fact
@@ -33,9 +34,13 @@ Run: python3 -m unittest tests.test_owed_dispatch_audit -v
 TIER = "lint"
 import os
 import re
+import sys
 import unittest
 
-from tests.support import REPO, owed
+from tests.support import REPO, owed, run
+
+sys.path.insert(0, str(REPO / "lib"))
+from wk import dispatch  # noqa: E402
 
 
 def commands():
@@ -170,15 +175,18 @@ class TestWhatTheDispatcherAlreadyDecides(unittest.TestCase):
 
     def test_the_dispatcher_sets_force_and_quiet_and_eats_them(self):
         """`--force`/`--quiet` set WK_FORCE/WK_QUIET and leave argv"""
-        text = (REPO / "wk").read_text()
-        for flag, var in (("--force", "WK_FORCE"), ("--quiet", "WK_QUIET")):
-            arm = [l.strip() for l in text.splitlines()
-                   if l.strip().startswith(f":{flag})")]
-            self.assertEqual(len(arm), 1, f"{flag} is not the dispatcher's: {arm}")
-            self.assertIn(f"{var}=1", arm[0], arm[0])
-            self.assertIn("export", arm[0], arm[0])
-            # `continue` is what keeps it out of the argv the command sees.
-            self.assertIn("continue", arm[0], arm[0])
+        self.assertEqual(dispatch.GLOBALS["--force"], "WK_FORCE")
+        self.assertEqual(dispatch.GLOBALS["--quiet"], "WK_QUIET")
+        # `wk version` declares no option at all, so a flag that reached its
+        # argv would be refused as unknown; one the dispatcher ate is not.
+        plain = run("version")
+        self.assertEqual(plain.returncode, 0, plain.stdout)
+        cp = run("version", "--force", "--quiet")
+        self.assertEqual(cp.returncode, 0, cp.stdout)
+        self.assertEqual(cp.stdout, plain.stdout)
+        cp = run("version", "--bogus")
+        self.assertEqual(cp.returncode, 2, cp.stdout)
+        self.assertIn("unknown option: --bogus", cp.stdout)
 
     def test_no_command_parses_force_or_quiet_again(self):
         """a second parse of a consumed flag is an arm that can never fire"""

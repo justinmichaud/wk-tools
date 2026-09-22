@@ -2,14 +2,16 @@
 (docs/PLAN.md): "the fleet exit code aggregates the worst state
 found anywhere [needs a test]".
 
-Two things are driven:
+Three things are driven:
 
-  - `bump` (cmd/status) and `_bump` (the `wk` dispatcher's own copy inside
-    `bare_report`, for the macOS `wk ls` it assembles from two machines): lifted with sed (the
-    tests/test_wifi_seed.py idiom) and called directly, in and out of
-    range, so this tracks the exact code that ships rather than a retyped
-    copy. cmd/status's `bump` additionally folds anything outside 0-4 to 4
-    (never to 0) -- the two are not the same function.
+  - `bump` (cmd/status), lifted with sed (the tests/test_wifi_seed.py idiom)
+    and called directly, in and out of range, so this tracks the exact code
+    that ships rather than a retyped copy: it folds anything outside 0-4 to
+    4 (never to 0).
+  - `bare_report` (lib/wk/dispatch.py), the macOS `wk ls` assembled from
+    this host's targets and the podman VM: run for real with a stub command
+    as one half and a faked forward as the other, so its exit status is the
+    worse of the two.
   - A real, bare `wk status --records` walk over one faked target
     (WK_TARGET=remote, the tests/test_fleet_walk.py technique: a stub
     `ssh` that runs the probe locally) carrying two build task records
@@ -18,14 +20,21 @@ Two things are driven:
 
 Run: python3 -m unittest tests.test_owed_cli_exit_code -v
 """
+import contextlib
+import io
 import subprocess
+import sys
 import unittest
+from unittest import mock
 
 from tests.support import REPO, WkTest, bash, rand_suffix, run, scratch_dir, stub_path
 from tests.test_build_liveness import write_task
 
+sys.path.insert(0, str(REPO / "lib"))
+from wk import decl as D  # noqa: E402
+from wk import dispatch  # noqa: E402
+
 CMD_STATUS = REPO / "cmd" / "status"
-WK = REPO / "wk"
 
 
 def _lift_func(path, name):
@@ -35,16 +44,6 @@ def _lift_func(path, name):
     ).stdout
     assert text.strip(), f"{name}() not found in {path}"
     return text
-
-
-def _lift_line(path, needle):
-    """The one line containing `needle`, exactly as written -- for `_bump`,
-    which (unlike cmd/status's top-level `bump`) is a single line nested
-    inside `bare_report`, indented rather than starting a fresh line."""
-    for line in path.read_text().splitlines():
-        if needle in line:
-            return line.strip()
-    raise AssertionError(f"{needle!r} not found in {path}")
 
 
 class TestCmdStatusBump(WkTest):
@@ -87,22 +86,33 @@ class TestCmdStatusBump(WkTest):
 
 
 class TestDispatcherBump(WkTest):
-    """`wk`'s own `_bump`, defined inside `bare_report` for the macOS `wk ls`
-    assembled from the podman VM and the host: simpler than cmd/status's --
-    no folding, just "raise worst to whichever side reported worse"."""
+    """The dispatcher's `bare_report`, for the macOS `wk ls` assembled from
+    the podman VM and the host: simpler than cmd/status's -- no folding, just
+    "raise worst to whichever side reported worse"."""
 
-    def _fn(self):
-        return _lift_line(WK, "_bump() {")
+    def _report(self, here, vm):
+        """bare_report's exit status when the half run here exits `here` and
+        the half forwarded into the VM exits `vm`: a stub command is the first
+        half, and the dispatcher's own seams -- which targets are here, whether
+        the machine runs, what the forward returned -- answer as told."""
+        stub = self.tmp / "probe"
+        stub.write_text("#!/bin/sh\n# wk probe -- a stub\n# wk: where=workspace name=none bare=merged readonly\n"
+                        f"exit {here}\n")
+        stub.chmod(0o755)
+        inv = dispatch.Invocation("probe", D.Decl(stub), [])
+        with mock.patch.object(dispatch, "target_all", return_value=["fakelocal"]), \
+             mock.patch.object(dispatch, "machine_running", return_value=True), \
+             mock.patch.object(dispatch, "forward_status", return_value=vm), \
+             contextlib.redirect_stdout(io.StringIO()):
+            with self.assertRaises(dispatch.Exit) as raised:
+                dispatch.bare_report(inv, "probe", [])
+        return raised.exception.status
 
     def test_raises_to_the_larger_of_two_halves(self):
-        cp = self.bash(f'worst=0\n{self._fn()}\n_bump 1\n_bump 3\necho "$worst"')
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertEqual(cp.stdout.strip(), "3")
+        self.assertEqual(self._report(here=1, vm=3), 3)
 
     def test_a_lower_second_half_does_not_undo_the_first(self):
-        cp = self.bash(f'worst=0\n{self._fn()}\n_bump 2\n_bump 0\necho "$worst"')
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertEqual(cp.stdout.strip(), "2")
+        self.assertEqual(self._report(here=2, vm=0), 2)
 
 
 _ANSWERING_SSH = '''#!/bin/sh
