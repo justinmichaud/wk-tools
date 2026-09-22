@@ -19,7 +19,7 @@ Run: python3 -m unittest tests.test_lane_routing -v
 import subprocess
 import unittest
 
-from tests.support import REPO, WkTest, bash, run
+from tests.support import REPO, WkTest, bash, run, run_here
 
 LIBS = "\n".join('. "%s/%s"' % (REPO, f) for f in (
     "lib/common.sh", "lib/store.sh", "lib/target.sh", "lib/image.sh",
@@ -187,16 +187,11 @@ class TestHoldsAnswersOnStdout(WkTest):
     which as a status would read as `holds` and skip the build."""
 
     def _holds(self, *args):
-        """Against a lane of this test's own: `holds` is routed to the machine
-        holding the lane, and on a macOS workstation that is the podman VM,
-        whose real store answers `yes` for whatever this maintainer last built
-        -- which is not what any of these assert. A lane name is what a test
-        can have to itself; a store is not, because WK_STORE names the store
-        of whichever machine reads it and the machine answering here is not
-        this one. `<builder>-<profile>-<arm>` is a lane of its own, so this is
-        a name of the shape the A/B's own arms use."""
-        cp = run("sysimage", "holds", *args, "--workspace", LANE_NOBODY_BUILT,
-                 timeout=240)
+        """Against a scratch store and a lane of this test's own, so nothing
+        anyone built answers. `<builder>-<profile>-<arm>` is a lane of its
+        own, the shape the A/B's arms use."""
+        cp = run_here("sysimage", "holds", *args, "--workspace", LANE_NOBODY_BUILT,
+                      timeout=240)
         return cp.stdout.strip(), cp
 
     def test_an_image_nothing_has_built_is_no(self):
@@ -255,8 +250,8 @@ class TestThePathQuestionIsRoutedToo(WkTest):
     workstation the image is in the podman VM and the write runs out here."""
 
     def _path(self, *args):
-        return run("sysimage", "path", *args, timeout=240,
-                   env={"WK_STORE": str(self.tmp / "store")})
+        return run_here("sysimage", "path", *args, timeout=240,
+                        env={"WK_STORE": str(self.tmp / "store")})
 
     def test_a_lane_with_no_image_answers_nothing_and_says_so(self):
         cp = self._path(PROFILE)
@@ -386,7 +381,7 @@ class TestACollectionNamesItsLaneNotAPath(WkTest):
         self.assertNotIn("[--pgo DIR]", text)
 
     def test_the_workspace_option_means_nothing_without_pgo(self):
-        cp = run("pi", "bench", "rpi5", "speedometer3", "--workspace", LANE, timeout=240)
+        cp = run_here("pi", "bench", "rpi5", "speedometer3", "--workspace", LANE, timeout=240)
         self.assertNotEqual(cp.returncode, 0, cp.stdout)
         self.assertIn("--workspace names the lane", cp.stdout)
 

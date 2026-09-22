@@ -16,8 +16,10 @@ REPO = HERE.parent
 TIERS = ("lint", "unit", "live")
 BUDGET = {"lint": 30.0, "unit": 30.0, "live": 1800.0}
 SLOWEST = 10
-MACHINE_TOOLS = ("ssh", "scp", "rsync", "podman", "tart", "tailscale", "nmap", "gh", "sudo")
+MACHINE_TOOLS = ("ssh", "scp", "podman", "tart", "tailscale", "nmap", "gh", "sudo")
 SHIM = '#!/bin/sh\necho "unit tier reached %s $*" >&2\nexit 97\n'
+# `ssh -G` prints the resolved config and never connects, so it is the one call handed to the real ssh.
+SSH_SHIM = '#!/bin/sh\nfor a; do [ "$a" = -G ] && exec %s "$@"; done\n' + SHIM
 
 
 def parse_args(argv):
@@ -73,9 +75,10 @@ def shim_machine_tools():
     with exit 97 and names the caller; a test's own stub goes ahead of it."""
     d = tempfile.mkdtemp(prefix="wk-test-shims-")
     atexit.register(shutil.rmtree, d, True)
+    real_ssh = shutil.which("ssh") or "/usr/bin/ssh"
     for tool in MACHINE_TOOLS:
         p = Path(d) / tool
-        p.write_text(SHIM % tool)
+        p.write_text((SSH_SHIM % (real_ssh, tool)) if tool == "ssh" else (SHIM % tool))
         p.chmod(0o755)
     os.environ["PATH"] = d + os.pathsep + os.environ.get("PATH", "")
 

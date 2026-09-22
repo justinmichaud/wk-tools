@@ -477,6 +477,7 @@ printf 'exit=%s\n' "$(task_field "$d" exit)"
     def _run_wk_sysimage_dry_run(self):
         env = dict(os.environ)
         env["WK_STORE"] = str(self.store)
+        env["WK_IN_VM"] = "1"   # this machine holds the store: no forward into the podman VM
         env["WK_TARGET"] = "container"
         for var in ("WK_NAME", "WK_TARGET_KIND"):
             env.pop(var, None)

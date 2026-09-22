@@ -67,7 +67,7 @@ import time
 import unittest
 from pathlib import Path
 
-from tests.support import REPO, WkTest, run, scratch_dir
+from tests.support import REPO, WkTest, run, run_here, scratch_dir
 
 BUILDROOT_SH = REPO / "image" / "buildroot.sh"
 BUILDROOT_BUILD = REPO / "image" / "buildroot-build.sh"
@@ -127,12 +127,8 @@ class TestDryRun(WkTest):
     def test_names_workspace_defconfig_and_dl_dir(self):
         for profile in PROFILES:
             with self.subTest(profile=profile), tempfile.TemporaryDirectory() as store:
-                # The paths under test are the store's, and a build is routed
-                # to the machine holding the lane -- on a macOS workstation
-                # that is the podman VM, whose store is not this scratch one.
-                # WK_IN_VM is what says this machine holds it.
-                cp = run("sysimage", "build", profile, "--dry-run",
-                         env={"WK_STORE": store, "WK_IN_VM": "1"})
+                cp = run_here("sysimage", "build", profile, "--dry-run",
+                              env={"WK_STORE": store})
                 out = cp.stdout
                 self.assertEqual(cp.returncode, 0, out)
                 self.assertIn(f"buildroot-{profile}", out, out)
@@ -150,7 +146,7 @@ class TestDryRun(WkTest):
 
     def test_names_the_containerfile_and_base_image(self):
         with tempfile.TemporaryDirectory() as store:
-            cp = run("sysimage", "build", PROFILES[0], "--dry-run", env={"WK_STORE": store})
+            cp = run_here("sysimage", "build", PROFILES[0], "--dry-run", env={"WK_STORE": store})
             self.assertEqual(cp.returncode, 0, cp.stdout)
             self.assertIn("container/buildroot/Containerfile", cp.stdout)
 
@@ -160,8 +156,8 @@ class TestDryRun(WkTest):
         buildroot_build ever runs, and that refusal must keep naming the
         remedy rather than becoming a bare 'unknown profile' or a traceback."""
         with tempfile.TemporaryDirectory() as store:
-            cp = run("sysimage", "build", "wpewebkit-2.38-buildroot-rpi5-64",
-                      "--dry-run", env={"WK_STORE": store})
+            cp = run_here("sysimage", "build", "wpewebkit-2.38-buildroot-rpi5-64",
+                           "--dry-run", env={"WK_STORE": store})
             self.assertNotEqual(cp.returncode, 0, cp.stdout)
             self.assertIn("no defconfig for rpi5", cp.stdout)
 
@@ -530,6 +526,7 @@ IMG_PROFILE=demo-profile
         env["WK_TARGET"] = "container"
         for var in ("WK_NAME", "WK_TARGET_KIND"):
             env.pop(var, None)
+        env["WK_IN_VM"] = "1"   # this machine holds the store: no forward into the podman VM
         cp = subprocess.run(
             [str(REPO / "wk"), "sysimage", "build", "wpewebkit-2.46-buildroot-rpi3-32",
              "--workspace", self.ws, "--dry-run"],

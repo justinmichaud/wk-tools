@@ -15,7 +15,7 @@ Run: python3 -m unittest tests.test_pi -v
 import re
 import unittest
 
-from tests.support import REPO, WkTest, bash, run
+from tests.support import REPO, WkTest, bash, run, run_here
 
 CMD_PI = REPO / "cmd" / "pi"
 
@@ -159,7 +159,7 @@ class TestPiSlotRefusals(WkTest):
     disguise -- both before any board is reached."""
 
     def test_skeleton_is_a_tombstone(self):
-        cp = self.run_wk("pi", "deploy", "some-image", "not-a-real-machine", "--skeleton", timeout=15)
+        cp = run_here("pi", "deploy", "some-image", "not-a-real-machine", "--skeleton", timeout=15)
         self.assertEqual(cp.returncode, 1, cp.stdout)
         self.assertIn("--slot", cp.stdout)
 

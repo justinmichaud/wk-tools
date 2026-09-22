@@ -9,9 +9,10 @@ mutates it -- these are read-only probes only.
 
 Run: python3 -m unittest tests.test_remote -v
 """
+import os
 import unittest
 
-from tests.support import (REAL_REGISTRY, REPO, WkTest, bash, func_body,
+from tests.support import (REAL_REGISTRY, REPO, WkTest, bash, func_body, stub_path,
                            requires_machine)
 
 
@@ -66,13 +67,18 @@ class TestMachineAnswers(WkTest):
         return registry
 
     def _machine_answers(self, conf):
-        return bash('''
+        # ssh answers as it does for a name nothing resolves; no network is asked.
+        ssh = ('echo "ssh: Could not resolve hostname wk-test-unreachable.invalid:'
+               ' nodename nor servname provided, or not known" >&2; exit 255')
+        with stub_path({"ssh": ssh}) as binp:
+            return bash('''
 . "$WK_ROOT/lib/common.sh"
 . "$WK_ROOT/lib/target.sh"
 load_target fakebox
 machine_answers fakebox && echo "rc=0" || echo "rc=$?"
 ''', env={"WK_TARGET_REGISTRY": str(self._registry(conf)),
-            "XDG_STATE_HOME": str(self.tmp / "state"), "WK_SSH_TIMEOUT": "3"})
+            "XDG_STATE_HOME": str(self.tmp / "state"), "WK_SSH_TIMEOUT": "3",
+            "PATH": f"{binp}:{os.environ.get('PATH', '/usr/bin:/bin')}"})
 
     def test_an_unreachable_machine_is_reported_as_unreachable(self):
         """an ssh destination nothing resolves is 'unreachable', not 'no

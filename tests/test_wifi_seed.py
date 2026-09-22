@@ -20,7 +20,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from tests.support import REPO, WkTest, bash, requires_machine, run
+from tests.support import REPO, WkTest, bash, requires_machine, run, run_here
 
 
 CARD_PRIV = REPO / "admin" / "wk-card-priv"
@@ -408,7 +408,7 @@ class TestSysimageWriteDryRun(WkTest):
             ("wpewebkit-2.46-buildroot-rpi3-32", "wk-wifi-join (image/buildroot/wifi-overlay.sh)"),
         ]:
             with self.subTest(profile=profile), tempfile.TemporaryDirectory() as store:
-                cp = run("sysimage", "build", profile, "--dry-run", env={"WK_STORE": store})
+                cp = run_here("sysimage", "build", profile, "--dry-run", env={"WK_STORE": store})
                 self.assertEqual(cp.returncode, 0, cp.stdout)
                 self.assertIn(want, cp.stdout, f"{profile}: {cp.stdout}")
 

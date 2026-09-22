@@ -17,6 +17,7 @@ directory in a scratch tree.
 Run: python3 -m unittest tests.test_machine_prepare -v
 """
 import os
+from pathlib import Path
 import pty
 import subprocess
 import sys
@@ -292,7 +293,7 @@ class TheHostOsGateAsksWhetherTheDriverCanReachIt(WkTest):
         with scratch_dir() as tmp:
             no_tart = os.pathsep.join(
                 p for p in os.environ.get("PATH", "").split(os.pathsep)
-                if "tart" not in p and ".local/bin" not in p)
+                if p and not (Path(p) / "tart").exists())
             cp = self._boot("benchvm", "--dry-run", env={"HOME": str(tmp), "PATH": no_tart})
         out = cp.stdout + cp.stderr
         self.assertIn("cannot reach benchvm from here", out, out)

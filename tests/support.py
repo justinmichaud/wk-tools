@@ -191,6 +191,19 @@ def run(*args, env=None, check=False, timeout=120, input=None):
     return cp
 
 
+def run_here(*args, env=None, **kw):
+    """`run`, as the machine that holds the store. WK_IN_VM=1 keeps the
+    dispatcher from forwarding into the podman VM, and WK_STORE is a scratch
+    store unless the caller names one, so no real machine's store answers."""
+    e = {"WK_IN_VM": "1"}
+    if not (env and env.get("WK_STORE")):
+        store = tempfile.mkdtemp(prefix="wk-test-store-")
+        atexit.register(shutil.rmtree, store, True)
+        e["WK_STORE"] = store
+    e.update(env or {})
+    return run(*args, env=e, **kw)
+
+
 def bash(script, env=None, timeout=60, cwd=None):
     """Run a bash script (mirrors cmd/selftest's `bash -c '...'` idiom for
     lifting a function out of a file and calling it). WK_ROOT is set in the

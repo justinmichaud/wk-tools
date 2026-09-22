@@ -20,7 +20,7 @@ import unittest
 import unittest.mock
 from pathlib import Path
 
-from tests.support import (REPO, WkTest, bash, podman_vm_ssh,
+from tests.support import (REPO, WkTest, bash, podman_vm_ssh, run_here,
                            requires_podman_vm, run)
 
 WKSLOT = REPO / "lib" / "wkslot.py"
@@ -246,27 +246,27 @@ class TestSysimageWebkitRefusals(WkTest):
     def test_a_yocto_slot_is_the_webkit_stage(self):
         """A yocto image's slot is WebKit's own build-webkit --cross-target
         (the workspace's `webkit` stage), planned by the yocto dry run."""
-        cp = run("sysimage", "webkit", "webkit-2.52-yocto-rpi3-32", "--commit", "a" * 40, "--slot", "base", "--dry-run", timeout=60)
+        cp = run_here("sysimage", "webkit", "webkit-2.52-yocto-rpi3-32", "--commit", "a" * 40, "--slot", "base", "--dry-run", timeout=60)
         self.assertEqual(cp.returncode, 0, cp.stdout)
         self.assertIn("webkit", cp.stdout)
 
     def test_a_yocto_slot_needs_both_commit_and_slot(self):
-        cp = run("sysimage", "webkit", "webkit-2.52-yocto-rpi3-32", "--slot", "base", "--dry-run", timeout=60)
+        cp = run_here("sysimage", "webkit", "webkit-2.52-yocto-rpi3-32", "--slot", "base", "--dry-run", timeout=60)
         self.assertEqual(cp.returncode, 1, cp.stdout)
         self.assertIn("both --commit", cp.stdout)
 
     def test_commit_and_slot_are_required(self):
-        cp = run("sysimage", "webkit", "wpewebkit-2.38-buildroot-rpi3-32", timeout=30)
+        cp = run_here("sysimage", "webkit", "wpewebkit-2.38-buildroot-rpi3-32", timeout=30)
         self.assertEqual(cp.returncode, 1, cp.stdout)
         self.assertIn("usage: wk sysimage webkit", cp.stdout)
 
     def test_a_short_sha_is_refused(self):
-        cp = run("sysimage", "webkit", "wpewebkit-2.38-buildroot-rpi3-32", "--commit", "04abe098", "--slot", "base", timeout=30)
+        cp = run_here("sysimage", "webkit", "wpewebkit-2.38-buildroot-rpi3-32", "--commit", "04abe098", "--slot", "base", timeout=30)
         self.assertEqual(cp.returncode, 1, cp.stdout)
         self.assertIn("40 hex digits", cp.stdout)
 
     def test_a_slot_name_is_a_directory_name(self):
-        cp = run("sysimage", "webkit", "wpewebkit-2.38-buildroot-rpi3-32", "--commit", "a" * 40, "--slot", "../x", timeout=30)
+        cp = run_here("sysimage", "webkit", "wpewebkit-2.38-buildroot-rpi3-32", "--commit", "a" * 40, "--slot", "../x", timeout=30)
         self.assertEqual(cp.returncode, 1, cp.stdout)
         self.assertIn("not usable", cp.stdout)
 

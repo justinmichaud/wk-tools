@@ -72,6 +72,10 @@ MODULES = {
                     cp = subprocess.run(["ssh", "somehost", "true"], capture_output=True, text=True,
                                         env=dict(os.environ, PATH=f"{binp}:{os.environ['PATH']}"))
                 self.assertEqual(cp.stdout.strip(), "stubbed", cp.stderr)
+            def test_ssh_config_query(self):
+                cp = subprocess.run(["ssh", "-G", "somehost"], capture_output=True, text=True)
+                self.assertEqual(cp.returncode, 0, cp.stderr)
+                self.assertIn("hostname somehost", cp.stdout)
     ''',
 }
 
@@ -182,6 +186,10 @@ class TestMachineToolsAreShimmed(RunnerTest):
 
     def test_a_tests_own_stub_goes_ahead_of_the_shim(self):
         rc, out = self.runner("--unit", "-k", "ssh_with_its_own_stub")
+        self.assertEqual(rc, 0, out)
+
+    def test_ssh_dash_g_is_the_real_ssh(self):
+        rc, out = self.runner("--unit", "-k", "ssh_config_query")
         self.assertEqual(rc, 0, out)
 
     def test_the_live_tier_is_not_shimmed(self):

@@ -10,13 +10,12 @@ Measured 2026-09-21 on this workstation.
 
 | | |
 | --- | --- |
-| code | 40k lines of bash, 8k of Python; 46 commands, 7 of them over 500 lines and holding 55% of command code |
-| tests | 70k lines, 182 modules, 4298 tests |
-| the suite without its machine tests | 34 minutes, of which 11 are CPU; 8 failures; 81 skipped |
-| the 42 tests that wait on a real timeout | 20 to 40 s each; 57% of the run |
-| the 73 tests over 5 s | 68% of the run |
-| the median test | 0.03 s |
-| places a test starts a process | 1,613 |
+| code | 39k lines of bash, 8k of Python; 41 commands, 7 of them over 500 lines and holding 55% of command code |
+| tests | 70k lines, 188 modules, 4273 tests in the lint and unit tiers, 39 in the live tier |
+| `wk selftest` (lint then unit) | 13.7 minutes, green; the lint tier alone 27 s |
+| the slowest unit test | 16 s, under a 30 s budget the runner enforces |
+| owed tests | 8 |
+| places a test starts a process | 1,600 |
 
 Why bugs come back:
 
@@ -30,16 +29,13 @@ Why bugs come back:
    it under `bash -c`. Tools are faked four ways (a stub on `PATH`, a shell
    function shadowing the real one, an environment variable pointing at a
    dead port, a hand-written executable) and no production code has a test
-   seam. A run meant to touch no machine still forwards into the podman VM: one such call took
-   67 s. So the suite waits, and a rule that does not show at the process
-   boundary is not tested.
+   seam. A rule that does not show at the process boundary is not tested.
 3. **`act` and `t_*` are asked for, not enforced.** `stop`, `start`, `gc`,
    `doctor`, `bridge` and `pi` call podman, ssh and rm directly. `--dry-run`
    is a per-command promise, and 25 commands refuse it.
 4. **Tests remember incidents.** Names carry the bug that was found by hand;
-   dated measurements sit in comments; tests assert README phrases. The same
-   `bash -n` test exists in seven modules, the push switch is tested in nine
-   and the credential store in ten, because each agent wrote its own. The
+   dated measurements sit in comments. The push switch is tested in nine
+   modules and the credential store in ten, because each agent wrote its own. The
    design lives in 2,000 lines of prose and each agent reads a different
    part of it.
 5. **Owed work is written 25 times.** The same items appear in three to six
@@ -185,11 +181,6 @@ replaces in the same change, and ends with the live tier run against the
 container target. A bash command and its Python replacement never both
 exist.
 
-0. **Green, measured, pruned.** Fix the 8 failures. Add the per-test
-   budget at 30 s and lower it each step. Split lint out. Fold the 25
-   handoffs into owed tests or delete them; the ten items that appear in
-   more than one are the first rows. Decide the fate of every command and
-   image kind (the merge table above) and delete what is going.
 1. **The core.** Dispatcher and declarations, task record, `Machine` with
    its fake and the local, container, remote and vm implementations, the
    clock. Bash commands run unchanged under the new dispatcher. Done when

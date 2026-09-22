@@ -19,7 +19,7 @@ import textwrap
 import types
 import unittest
 
-from tests.support import REPO, WkTest, bash, func_body, requires_podman_vm, run, scratch_dir
+from tests.support import REPO, WkTest, bash, func_body, requires_podman_vm, run, run_here, scratch_dir
 
 WKPGO = REPO / "lib" / "wkpgo.py"
 
@@ -564,8 +564,8 @@ class TestTheUnprofiledSlotIsDeliberate(WkTest):
     only reason to want one is to measure it against a profiled one."""
 
     def _webkit(self, *args):
-        return run("sysimage", "webkit", "webkit-2.52-yocto-rpi5-64",
-                   "--commit", "a" * 40, *args, timeout=240)
+        return run_here("sysimage", "webkit", "webkit-2.52-yocto-rpi5-64",
+                        "--commit", "a" * 40, *args, timeout=240)
 
     def phase(self, slot, config, store):
         """`wk sysimage webkit <profile> --config <c>` with the build stubbed:
@@ -671,14 +671,14 @@ class TestTheCycleSaysWhatItIsDoing(WkTest):
         self.assertIn('job_stop "$lane/$slot" pgo', text)
 
     def test_stop_with_no_cycle_running_says_so_and_exits_0(self):
-        cp = run("sysimage", "webkit", "webkit-2.52-yocto-rpi5-64",
-                 "--slot", "pgo", "--stop", timeout=240)
+        cp = run_here("sysimage", "webkit", "webkit-2.52-yocto-rpi5-64",
+                      "--slot", "pgo", "--stop", timeout=240)
         self.assertEqual(cp.returncode, 0, cp.stdout)
         self.assertIn("no pgo is running", cp.stdout)
 
     def test_stop_takes_nothing_with_it(self):
-        cp = run("sysimage", "webkit", "webkit-2.52-yocto-rpi5-64", "--slot", "pgo",
-                 "--commit", "a" * 40, "--stop", timeout=240)
+        cp = run_here("sysimage", "webkit", "webkit-2.52-yocto-rpi5-64", "--slot", "pgo",
+                      "--commit", "a" * 40, "--stop", timeout=240)
         self.assertNotEqual(cp.returncode, 0, cp.stdout)
         self.assertIn("takes nothing with it", cp.stdout)
 
