@@ -404,15 +404,23 @@ class TestTheCredentialIsDeclaredWhereARebuildLooks(unittest.TestCase):
     """New machine-local state is a line in `wk doctor`'s machine-local
     section, or a reinstall loses it silently (CLAUDE.md)."""
 
-    DOCTOR = (REPO / "cmd" / "doctor").read_text()
-
     def test_the_machine_local_section_names_the_topic(self):
-        for line in self.DOCTOR.splitlines():
-            if line.startswith('local_state "$(wk_ntfy_topic_path)"'):
-                self.assertIn("re-authable", line)
-                self.assertIn("wk key set ntfy", line)
-                return
-        raise AssertionError("the machine-local section does not name the topic")
+        from tests.test_doctor import PATHS, fake_doctor
+        rows = [w + " -> " + r for _, w, r in fake_doctor(True).machine_local()]
+        line = [l for l in rows if l.startswith(PATHS["ntfy_topic"] + " ")]
+        self.assertEqual(1, len(line), rows)
+        self.assertIn("re-authable", line[0])
+        self.assertIn("wk key set ntfy", line[0])
+
+    def test_the_topic_path_doctor_reads_is_the_library_s(self):
+        cp = bash('. "$WK_ROOT/lib/common.sh"\n. "$WK_ROOT/lib/store.sh"\nwk_ntfy_topic_path',
+                  env={"WK_STORE": "/scratch/store", "WK_HOST_SECRETS": "/scratch/store/secrets"})
+        sys.path.insert(0, str(REPO / "lib"))
+        from wk import shell
+        from tests.support import clean_env
+        paths = shell.local_state_paths(str(REPO), env=clean_env({"WK_STORE": "/scratch/store",
+                                                                  "WK_HOST_SECRETS": "/scratch/store/secrets"}))
+        self.assertEqual(cp.stdout.strip(), paths["ntfy_topic"])
 
     def test_it_is_not_in_a_directory_a_workspace_can_read(self):
         """The secrets directory is mounted read-only into every container, so

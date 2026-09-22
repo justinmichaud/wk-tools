@@ -42,7 +42,7 @@ def start_workspace(reg, name):
 
 def start_everything(reg):
     if here():
-        state = shell.machine_state(ROOT, MACHINE)
+        state = reg.load("container").machine_state()
         if state == "absent":
             die("no machine '%s' -- run ./setup" % MACHINE)
         if state != "running":

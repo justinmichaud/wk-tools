@@ -105,12 +105,6 @@ class TestQuietFlag(WkTest):
 
 
 class TestSudoQuietGoesThroughEnv(WkTest):
-    def test_doctor_calls_sudo_directly_with_env_not_a_literal_flag(self):
-        """cmd/doctor no longer passes a literal --quiet to cmd/sudo"""
-        text = (REPO / "cmd" / "doctor").read_text()
-        self.assertNotIn('"$WK_ROOT/cmd/sudo" status --quiet', text)
-        self.assertIn("WK_QUIET=1", text)
-
     def test_sudo_no_longer_parses_a_local_quiet_flag(self):
         """cmd/sudo reads WK_QUIET, not its own --quiet case arm"""
         text = (REPO / "cmd" / "sudo").read_text()

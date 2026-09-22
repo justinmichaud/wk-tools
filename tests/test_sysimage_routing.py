@@ -134,7 +134,7 @@ class TestTheDispatcherReadsDerived(unittest.TestCase):
         resolves to."""
         inv = dispatch.Invocation("sysimage", self._decl(), args)
         with mock.patch.object(dispatch.Invocation, "named_target", lambda self: wstarget), \
-                mock.patch.object(dispatch.shell, "ask", lambda root, fn, *a, **kw: "target-of:" + a[0]), \
+                mock.patch.object(dispatch, "registry", lambda: mock.Mock(ws_target=lambda name: "target-of:" + name)), \
                 mock.patch.dict(os.environ, {}, clear=False):
             os.environ.pop("WK_TARGET", None)
             return dispatch.resolve_target(inv, "derived", 0, "2", derived)

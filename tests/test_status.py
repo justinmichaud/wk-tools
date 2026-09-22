@@ -13,11 +13,13 @@ import tempfile
 import types
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from tests.support import REPO, WkTest, bash, owed
+from tests.test_wk_targets import LINUX_PROBE, SshFake
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import status, statusview  # noqa: E402
+from wk import status, statusview, targets  # noqa: E402
 from wk.clock import FakeClock  # noqa: E402
 from wk.record import Records  # noqa: E402
 from wk.store import Store  # noqa: E402
@@ -554,6 +556,44 @@ class TestHealthRecords(unittest.TestCase):
             recs = status.service_records(REPO, "m", run)
             self.assertEqual([r["state"] for r in recs], ["stopped", "stopped"])
             self.assertIn("systemctl --user start wk-proxy   (workspaces have no network without it)", recs[0]["fix"])
+
+
+class TestTheWalkProbesAMachineOnce(unittest.TestCase):
+    """One remote target in the walk: the driver object is the walk's, so its
+    probe is paid once and capacity, delegation and tooling read the memo."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="wk-test-walk-"))
+        (self.tmp / "hosts").mkdir()
+        (self.tmp / "hosts" / "box.conf").write_text("WK_REMOTE_HOST=box.example\nWK_REMOTE_ROOT=/home/u/wk\n")
+        self.env = {"HOME": str(self.tmp), "XDG_STATE_HOME": str(self.tmp / "state"), "WK_STORE": str(self.tmp / "store"),
+                    "WK_TARGET_REGISTRY": str(self.tmp / "hosts"), "WK_TARGET": "box", "WK_IN_VM": "1",
+                    "PATH": os.environ.get("PATH", "")}
+        self.fake = SshFake()
+        self.fake.answer_remote("uname -s", out=LINUX_PROBE)
+        self.fake.answer_remote("test -f $HOME/.wk-remote", rc=0)
+        self.fake.answer_remote("tools/wk", out="sha=abc\ndirty=no\n")
+
+    def tearDown(self):
+        subprocess.run(["rm", "-rf", str(self.tmp)])
+
+    def test_one_ssh_probe_for_the_whole_walk(self):
+        reg = targets.Registry(REPO, env=self.env, machine=self.fake)
+        walk = status.Walk(REPO, fleet=True, devices=False, env=self.env, reg=reg)
+        with mock.patch.object(status.Walk, "reach", return_value=("", "")):
+            recs = [r for r in walk.records() if r.get("kind") not in ("plan", "flush", "exit")]
+        self.assertIs(walk.target("box"), walk.target("box"))
+        self.assertEqual(len(self.fake.ssh_calls("uname -s")), 1)
+        self.assertEqual(len(self.fake.ssh_calls("test -f $HOME/.wk-remote")), 1)
+        wk_calls = [c[-1] for c in self.fake.ssh_calls("tools/wk ")]
+        self.assertEqual([c.split("tools/wk ", 1)[1].split(" 2>&1")[0].rstrip("'") for c in wk_calls],
+                         ["status --no-fleet --records", "version", "key fingerprints"])
+        self.assertEqual(len(self.fake.ssh_calls()), 5)
+        cap = [r for r in recs if r["kind"] == "capacity"]
+        self.assertEqual(len(cap), 1)
+        self.assertEqual((cap[0]["machine"], cap[0]["cores"], cap[0]["free_mb"], cap[0]["load"]), ("box", "8", "20000", "0"))
+        self.assertNotIn("mem_mb", cap[0])
+        self.assertIn("box", {r["name"] for r in recs if r["kind"] == "machine"})
 
 
 class TestSdkDecision(unittest.TestCase):

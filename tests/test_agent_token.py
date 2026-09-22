@@ -398,7 +398,7 @@ class TestEveryTargetDeliversIt(unittest.TestCase):
         """It was Linux-only and needed a `claude login` from inside a
         workspace to exist at all, so it could never be the answer for a macOS
         guest or a build box. Two ways to authenticate is one too many."""
-        for f in ("container/firstrun.sh", "cmd/doctor"):
+        for f in ("container/firstrun.sh", "lib/wk/doctor.py"):
             self.assertNotIn("claude-credentials.json", (REPO / f).read_text(), f)
 
 

@@ -1,16 +1,15 @@
 """The targets: where a workspace lives and how it is driven. A `Registry`
 names them (container, vm on a macOS host, this machine inside a workspace,
 and every `targets/hosts/<name>.conf`); each driver answers the same
-contract over a `Machine`. The remote driver's probe still goes through the
-bash library."""
+contract over a `Machine`."""
 
 import json
 import os
 import re
 import shlex
 
-from wk import shell
-from wk.machine import Local, Result
+from wk import act, record, shell
+from wk.machine import TIMED_OUT, Local, Result, Ssh
 from wk.store import Store
 
 BUILTIN = ("container", "vm", "remote", "local")
@@ -112,9 +111,14 @@ class Registry:
     def in_workspace(self):
         return os.path.isfile(self.marker_path())
 
+    def remote_marker_path(self):
+        return self.env.get("WK_REMOTE_MARKER") or os.path.join(self.env.get("HOME", os.path.expanduser("~")), ".wk-remote")
+
+    def in_remote_host(self):
+        return os.path.isfile(self.remote_marker_path())
+
     def remote_marker_field(self, key):
-        path = self.env.get("WK_REMOTE_MARKER") or os.path.join(self.env.get("HOME", os.path.expanduser("~")), ".wk-remote")
-        return read_conf(path).get(key, "")
+        return read_conf(self.remote_marker_path()).get(key, "")
 
     def default(self):
         if self.in_workspace():
@@ -134,8 +138,12 @@ class Registry:
         t = self.remote_marker_field("target")
         if t:
             out.append(t)
+        # Skipped on the far end of a target: a delegated listing would pay an ssh timeout per machine it has no route to.
+        if self.in_remote_host() or self.env.get("WK_IN_VM"):
+            return out
+        me = record.machine_name(self.env)
         for name in self.known():
-            if name not in out:
+            if name not in out and name.lower() != me:
                 out.append(name)
         return out
 
@@ -161,6 +169,9 @@ class Registry:
             t = self.load(name)
         except LookupError:
             return False
+        return self._holds(t, ws)
+
+    def _holds(self, t, ws):
         if os.path.isdir(t.store.ws_dir(ws)):
             return True
         if t.info(ws) not in ("absent", "unreachable", ""):
@@ -169,6 +180,20 @@ class Registry:
         rec = Records(t.store.record_dir(), env=t.env).find("new", ws)
         return bool(rec and rec.alive(None))
 
+    def _asked(self, name, ws):
+        """A machine's answer for `ws`, its one probe paid here; one that does not answer is named, since what is there is not in the answer."""
+        try:
+            t = self.load(name)
+        except LookupError:
+            return False
+        if os.path.isdir(t.store.ws_dir(ws)):
+            return True
+        ok, why = t.answers()
+        if not ok:
+            act.warn("could not ask %s over ssh: %s -- what is there is not in this answer" % (name, why))
+            return False
+        return self._holds(t, ws)
+
     def locate(self, ws):
         """Every target that answers for `ws`; the machines are asked at once."""
         hits = [t for t in self.here() if self.on_target(t, ws)]
@@ -176,7 +201,7 @@ class Registry:
             return hits
         from concurrent.futures import ThreadPoolExecutor
         with ThreadPoolExecutor(max_workers=len(self.machines())) as pool:
-            answers = list(pool.map(lambda m: (m, self.on_target(m, ws)), self.machines()))
+            answers = list(pool.map(lambda m: (m, self._asked(m, ws)), self.machines()))
         return [m for m, hit in answers if hit]
 
     def ws_target(self, ws):
@@ -259,6 +284,10 @@ class Target:
         """Whether the machine behind this target is the one running this process."""
         return True
 
+    def answers(self):
+        """(whether the machine behind this target answers, why not)."""
+        return True, ""
+
     def probe(self):
         """(far side, why it does not answer)."""
         return self.far_side(), ""
@@ -268,7 +297,7 @@ class Target:
 
     def wk(self, *args, env=None, quiet=False):
         """(status, output) of the far side's own wk."""
-        return shell.machine_wk(self.root, self.name, *args, env=env, quiet=quiet)
+        return 1, ""
 
     def branch(self, ws):
         if self.info(ws) in STATES_NOT_THERE:
@@ -384,11 +413,20 @@ class Container(Target):
     def is_here(self):
         return bool(self.env.get("WK_IN_VM")) or os.uname().sysname != "Darwin"
 
+    def machine_name(self):
+        return self.env.get("WK_MACHINE", "wk")
+
+    def machine_state(self):
+        """running | stopped | absent | ...: podman's own word for the machine, asked once per Container."""
+        if not hasattr(self, "_machine_state"):
+            r = self.machine.run(["podman", "machine", "inspect", self.machine_name(), "--format", "{{.State}}"])
+            self._machine_state = r.out.strip() if r.ok else "absent"
+        return self._machine_state
+
     def far_side(self):
         if self.is_here():
             return "none"
-        r = self.machine.run(["podman", "machine", "inspect", self.env.get("WK_MACHINE", "wk"), "--format", "{{.State}}"])
-        return "answering" if r.ok and r.out.strip() == "running" else "stopped"
+        return "answering" if self.machine_state() == "running" else "stopped"
 
     def has_wk(self):
         return self.far_side() == "answering"
@@ -498,7 +536,7 @@ class Vm(Target):
         return shell.guest_stop(self.root, ws) == 0
 
     def start(self, ws):
-        return shell.run(self.root, '. "$WK_ROOT/targets/vm.sh"; t_start', ws) == 0
+        return shell.guest_start(self.root, ws) == 0
 
 
 class LocalWorkspace(Target):
@@ -541,8 +579,7 @@ class LocalWorkspace(Target):
 
 
 class Remote(Target):
-    """A machine of its own. Its probe (is it answering, does it run wk) is
-    the bash driver's, asked through the bridge."""
+    """A machine of its own, reached over ssh (or this machine, when ~/.wk-remote names the target)."""
 
     kind = "remote"
 
@@ -559,61 +596,258 @@ class Remote(Target):
         else:
             store = env.get("WK_REMOTE_STORE") or os.path.join(Store(env).state_dir(), "remote", name)
         self.store = Store(dict(env, WK_STORE=store))
+        self.probe_seconds = int(env.get("WK_PROBE_SECONDS") or 20)
+        self.here = machine
+        if not self.is_local and self.host:
+            self.machine = Ssh(self.host, opts=self.ssh_opts(), timeout=int(env.get("WK_SSH_TIMEOUT") or 10), via=machine)
+        self._probed = None
+        self._has_wk = None
+        self._peer_rows = None
 
-    def _ask(self, fn, *args):
-        return shell.ask(self.root, "load_target %s >/dev/null 2>&1; %s" % (shlex.quote(self.name), fn), *args)
+    # ServerAliveInterval/CountMax because ConnectTimeout covers the TCP connect and nothing after it: a machine that accepts the connection and then stops answering -- a wedged sshd, a box deep in swap -- held `wk status <ws>` and `wk logs <ws>` past a 300s wait with no bound of their own (measured 2026-09-17, with moose down). Four missed keepalives at 15s is a session given up inside a minute, and a healthy long build answers them at the protocol level however busy the box is.
+    def ssh_opts(self):
+        d = os.path.join(Store(self.env).state_dir(), "ssh")
+        os.makedirs(d, exist_ok=True)
+        return ["-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=4", "-o", "ControlMaster=auto",
+                "-o", "ControlPath=%s/%%h-%%p-%%r" % d, "-o", "ControlPersist=60"]
 
-    def src(self, ws):
-        return self._ask("t_src", ws) or ""
+    def _far(self):
+        if self.is_local or self.host:
+            return self.machine
+        act.die("target '%s' has no host to reach.\n    Set WK_REMOTE_HOST in %s, or\n"
+                "    name the target after a machine your ~/.ssh/config already knows:\n        wk new <name> --target devbox-arm64-2"
+                % (self.name, Registry(self.root, self.env).conf_path(self.name)))
 
-    def tools(self, ws):
-        return self._ask("t_tools", ws) or ""
+    def _sh(self, text, timeout=None):
+        return self._far().run(["sh", "-c", text], timeout=timeout)
+
+    def probed(self):
+        """The one round trip, memoised: home, cores, load, mem_mb, ionice, os, root; `why` when the machine did not answer."""
+        if self._probed is not None:
+            return self._probed
+        r = self._sh(PROBE_SCRIPT, timeout=self.probe_seconds)
+        if r.rc == TIMED_OUT:
+            self._probed = {"why": "timed out after %ss" % self.probe_seconds}
+        elif not r.ok:
+            self._probed = {"why": ssh_last_word(r)}
+        else:
+            self._probed = parse_probe(r.out, self.env.get("WK_REMOTE_ROOT", ""))
+        return self._probed
+
+    def _probe_or_die(self):
+        p = self.probed()
+        if p.get("why") is not None:
+            act.die("cannot reach '%s' over ssh: %s\n    This target has no way in but ssh, and it is not interactive: the key,\n"
+                    "    the ProxyJump and the host entry all have to work non-interactively.\n"
+                    "    What BatchMode refuses to ask -- a new host key, a passphrase -- one\n"
+                    "    interactive  ssh %s true  asks and settles." % (self.host, p["why"], self.host))
+        return p
+
+    def answers(self):
+        if self.is_local:
+            return True, ""
+        why = self.probed().get("why")
+        return why is None, why or ""
+
+    def root_there(self):
+        return self._probe_or_die()["root"]
+
+    def ws_dir_there(self, ws):
+        return "%s/ws/%s" % (self.root_there(), ws)
 
     def home(self):
-        return self._ask("t_home") or ""
+        return self._probe_or_die()["home"]
 
     def os(self):
-        return self._ask("t_os") or "linux"
+        return self._probe_or_die().get("os") or "linux"
+
+    def cores(self):
+        return self._probe_or_die().get("cores") or 1
+
+    def load(self):
+        return self._probe_or_die().get("load") or 0
+
+    def mem_mb(self):
+        return self._probe_or_die().get("mem_mb") or 1024
+
+    def src(self, ws):
+        if self.peer and ws:
+            return shell.peer_src(self.root, self.name, ws) or ""
+        return self.ws_dir_there(ws) + "/WebKit"
+
+    def tools(self, ws):
+        t = self.env.get("WK_REMOTE_TOOLS", "")
+        if not t:
+            return self.root_there() + "/tools"
+        return t if t.startswith("/") else "%s/%s" % (self.home(), t)
+
+    def _peer_list(self):
+        if self._peer_rows is None:
+            self._peer_rows = []
+            rc, out = self.wk("ls", "--json", env=dict(self.env, WK_NO_DELEGATE="1"), quiet=True)
+            if rc == 0:
+                try:
+                    doc = json.loads(out)
+                except ValueError:
+                    doc = {}
+                self._peer_rows = [(w.get("name", ""), w.get("state", "")) for w in doc.get("workspaces", [])]
+        return self._peer_rows
 
     def list(self):
-        out = self._ask("t_list") or ""
-        return [tuple(line.split("\t", 1)) for line in out.splitlines() if "\t" in line]
+        if self.peer:
+            return self._peer_list()
+        if not self.answers()[0]:
+            return []
+        try:
+            names = self._far().listdir(self.root_there() + "/ws")
+        except OSError:
+            return []
+        return [(n, "present") for n in names if n and not n.startswith(".")]
 
     def info(self, ws):
-        return self._ask("t_info", ws) or "unreachable"
+        """One round trip: no directory is absent, no `.wk-ready` is creating, and no answer is unreachable, never absent."""
+        if not self.answers()[0]:
+            return "unreachable"
+        if self.peer:
+            st = next((state for n, state in self._peer_list() if n == ws), "")
+            if st in ("creating", "unreachable"):
+                return st
+            return "present" if st else "absent"
+        d = shlex.quote(self.ws_dir_there(ws))
+        r = self._sh("if [ ! -d %s ]; then echo absent; elif [ -f %s/%s ]; then echo present; else echo creating; fi"
+                     % (d, d, READY_MARKER))
+        return (r.out.strip() if r.ok else "") or "unreachable"
 
     def created(self, ws):
         return self.info(ws) == "present"
 
     def exec(self, ws, argv, tty=False, timeout=None):
-        script = shell._script("load_target %s >/dev/null 2>&1; t_exec" % shlex.quote(self.name), self.root)
-        return self.machine.run(["bash", "-c", script, "wk", ws, *argv], timeout=timeout)
+        return self._sh("cd %s && %s" % (shlex.quote(self.src(ws)), " ".join(shlex.quote(a) for a in argv)), timeout=timeout)
 
     def is_here(self):
         return self.is_local
 
+    def has_wk(self):
+        if self.is_local or not self.answers()[0]:
+            return False
+        if self._has_wk is None:
+            wk = shlex.quote(self.tools("") + "/wk")
+            test = "test -x %s" % wk if self.peer else "test -f $HOME/.wk-remote && test -x %s" % wk
+            self._has_wk = self._sh(test).ok
+        return self._has_wk
+
     def far_side(self):
-        return self._ask("t_far_side") or "unreachable"
+        if self.is_local:
+            return "none"
+        if not self.answers()[0]:
+            return "unreachable"
+        return "answering" if self.has_wk() else "no-wk"
 
     def probe(self):
-        out = self._ask("_probe() { if t_answers; then printf 'side=%s\\n' \"$(t_far_side)\"; "
-                        "else printf 'side=unreachable\\nwhy=%s\\n' \"$WK_FAR_WHY\"; fi; }; _probe") or ""
-        fields = dict(line.partition("=")[::2] for line in out.splitlines() if "=" in line)
-        return fields.get("side") or "unreachable", fields.get("why", "")
-
-    def has_wk(self):
-        return self.far_side() == "answering"
+        ok, why = self.answers()
+        return (self.far_side(), "") if ok else ("unreachable", why)
 
     def delegates(self):
         if self.is_local:
             return False
         return self.peer or self.has_wk()
 
-    def stop(self, ws):
-        return shell.ws_stop(self.root, self.name, ws) == 0
+    def wk_cmd(self, args, env):
+        """The far machine's own wk; the flags travel as environment, since an unknown argument is fatal on an old copy of wk over there."""
+        pre = "".join("%s=1 " % v for v in ("WK_DEBUG", "WK_QUIET", "WK_YES", "WK_FORCE", "WK_DRY_RUN") if env.get(v))
+        for v in ("WK_ROW_LABEL", "WK_NO_DELEGATE", "WK_ZED_PUBKEY"):
+            if env.get(v):
+                pre += "%s=%s " % (v, "1" if v == "WK_NO_DELEGATE" else shlex.quote(env[v]))
+        return "cd $HOME && %s%s %s" % (pre, shlex.quote(self.tools("") + "/wk"), " ".join(shlex.quote(a) for a in args))
+
+    def wk(self, *args, env=None, quiet=False):
+        env = os.environ if env is None else env
+        r = self._sh(self.wk_cmd(args, env) + ("" if quiet else " 2>&1"))
+        return r.rc, r.out
 
     def start(self, ws):
-        return shell.run(self.root, "load_target %s >/dev/null 2>&1; t_start" % shlex.quote(self.name), ws) == 0
+        act.info("'%s' has no notion of starting a single workspace -- nothing to bring up for '%s'" % (self.name, ws))
+        return True
+
+    def stop(self, ws):
+        act.err("the '%s' target has no notion of stopping a single workspace -- '%s' is left running" % (self.name, ws))
+        return False
+
+
+PROBE_SCRIPT = """
+        echo "$HOME"
+        u=$(uname -s)
+        echo "$u"
+        if [ "$u" = Linux ]; then
+            nproc
+            cat /proc/loadavg
+            echo "===MEM==="
+            cat /proc/meminfo
+        else
+            sysctl -n hw.ncpu
+            sysctl -n vm.loadavg
+            echo "===MEM==="
+            vm_stat
+        fi
+        echo "===IONICE==="
+        command -v ionice >/dev/null 2>&1 && echo yes || echo no"""
+
+
+def ssh_last_word(r):
+    """The one line a person acts on: ssh's last non-blank stderr line, its prefixes stripped."""
+    lines = [l for l in r.err.splitlines() if l.strip()]
+    line = lines[-1] if lines else ""
+    for prefix in ("ssh: ", "kex_exchange_identification: "):
+        if line.startswith(prefix):
+            line = line[len(prefix):]
+    return line or "ssh exited %d and said nothing" % r.rc
+
+
+def parse_probe(text, root=""):
+    """`sysctl -n vm.loadavg` puts the load average second where /proc/loadavg puts it first, and `vm_stat` reports pages where /proc/meminfo has MemAvailable in kB."""
+    lines = text.splitlines()
+    home = lines[0] if lines else ""
+    uname = lines[1] if len(lines) > 1 else ""
+    cores = _int(lines[2] if len(lines) > 2 else "") or 1
+    section, head, mem, ionice = "head", [], [], "no"
+    for line in lines[3:]:
+        if line == "===MEM===":
+            section = "mem"
+        elif line == "===IONICE===":
+            section = "ionice"
+        elif section == "head":
+            head.append(line)
+        elif section == "mem":
+            mem.append(line)
+        elif line:
+            ionice = line
+    load, mem_mb = 0, 0
+    if uname == "Linux":
+        load = _int(head[0].split()[0]) if head and head[0].split() else 0
+        for l in mem:
+            if l.startswith("MemAvailable:"):
+                mem_mb = _int(l.split()[1]) // 1024
+                break
+    else:
+        f = head[0].split() if head else []
+        load = _int(f[1]) if len(f) > 1 else 0
+        ps, pages = 0, 0
+        for l in mem:
+            if "page size of" in l:
+                ps = int(re.search(r"[0-9]+", l).group(0))
+            for key in ("Pages free:", "Pages inactive:", "Pages speculative:"):
+                if l.startswith(key):
+                    pages += _int(l.split()[-1].rstrip("."))
+        mem_mb = pages * ps // 1024 // 1024 if ps else 0
+    return {"home": home, "cores": cores, "load": load, "mem_mb": mem_mb, "ionice": ionice,
+            "os": "macos" if uname == "Darwin" else "linux", "root": root or home + "/wk"}
+
+
+def _int(s):
+    try:
+        return int(float(s))
+    except (TypeError, ValueError):
+        return 0
 
 
 def shell_which(name):

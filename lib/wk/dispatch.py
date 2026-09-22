@@ -3,8 +3,9 @@
 Reads the command's declaration (decl.py), refuses what it does not declare,
 resolves the workspace name and the machine holding it, and runs the command
 there: here, forwarded into the podman VM on a macOS host, or handed to the
-machine's own wk. The target questions go through shell.py into the bash
-library until that layer is Python.
+machine's own wk. The targets are asked through one Registry (wk.targets);
+the workspace-existence, readiness and forwarding questions still go through
+shell.py into the bash library.
 """
 
 import os
@@ -15,9 +16,11 @@ from pathlib import Path
 
 from wk import decl as D
 from wk import shell
+from wk.targets import Registry
 
 ROOT = Path(os.environ.get("WK_ROOT") or Path(__file__).resolve().parents[2])
 MACHINE = os.environ.get("WK_MACHINE", "wk")
+_registry = None
 TOMBSTONES = {
     "image": "'wk image' is renamed: wk sysimage",
     "mcp": "'wk mcp' is removed",
@@ -511,16 +514,26 @@ def forward_status(inv, cmd, args, env=None):
     return cp.returncode
 
 
+def registry():
+    """This invocation's one Registry: every target is loaded, and every machine probed, at most once."""
+    global _registry
+    if _registry is None:
+        _registry = Registry(ROOT)
+    return _registry
+
+
 def delegate_target(target):
-    """The target back when it is a machine that runs commands itself."""
-    cp = subprocess.run(["bash", "-c", shell._script("load_target", str(ROOT)).replace(
-        'load_target "$@"', 'load_target "$1" >/dev/null 2>&1 && t_delegates'), "wk", target],
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    return target if cp.returncode == 0 else ""
+    """The target's driver when it is a machine that runs commands itself, else None."""
+    try:
+        t = registry().load(target)
+    except LookupError:
+        return None
+    return t if t.delegates() else None
 
 
-def delegate_run(machine, cmd, args):
-    far = _far_side(machine)
+def delegate_run(target, cmd, args):
+    machine = target.name
+    far = target.far_side()
     if far == "unreachable":
         die("'%s' acts on a workspace on %s, and %s did not answer.\n"
             "    Nothing here can reach into it: the workspace is that machine's own." % (cmd, machine, machine))
@@ -532,18 +545,6 @@ def delegate_run(machine, cmd, args):
     shell.exec_fn(str(ROOT), 'load_target %s >/dev/null 2>&1; %s' % (shell.sh_quote(machine), fn), cmd, *args)
 
 
-def _far_side(machine):
-    cp = subprocess.run(["bash", "-c", shell._script("true", str(ROOT)).replace(
-        'true "$@"', 'load_target "$1" >/dev/null 2>&1; t_far_side'), "wk", machine],
-        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
-    return cp.stdout.strip()
-
-
-def target_all():
-    out = shell.ask(str(ROOT), "target_all")
-    return out.split() if out else []
-
-
 def machine_name():
     if os.environ.get("WK_IN_VM") and os.environ.get("WK_ROW_LABEL"):
         return os.environ["WK_ROW_LABEL"]
@@ -553,7 +554,7 @@ def machine_name():
 
 def bare_report(inv, cmd, args):
     """A report with no subject, merged over every target here and the VM."""
-    hosts = [t for t in target_all() if t != "container"]
+    hosts = [t for t in registry().all() if t != "container"]
     worst = 0
     ls_json = cmd == "ls" and "--json" in args
     ls_local = ls_vm = None
@@ -691,14 +692,14 @@ def main(argv):
     if where == "workspace" and not in_workspace():
         resolved = resolve_target(inv, name_decl, slot, takes, derived)
 
-    delegate = ""
+    delegate = None
     if (where == "workspace" and name_decl.split("@")[0] != "none" and not in_workspace()
             and not os.environ.get("WK_IN_VM") and not d.here and not d.lifecycle):
         delegate = delegate_target(resolved)
 
     forwards = (where == "workspace" and is_macos() and not os.environ.get("WK_IN_VM")
                 and not in_workspace() and d.forward and resolved == "container")
-    if not forwards and not delegate:
+    if not forwards and delegate is None:
         inv.check_needs()
 
     if where == "store" and not os.environ.get("WK_IN_VM"):
@@ -708,7 +709,7 @@ def main(argv):
     if where != "workspace":
         os.execv(str(impl), [str(impl), *argv_split(d.opts_for(args), args)])
 
-    if delegate:
+    if delegate is not None:
         delegate_run(delegate, cmd, args)
 
     name = ""
@@ -793,10 +794,10 @@ def resolve_target(inv, name_decl, slot, takes, derived):
     elif slot > 0:
         name = argv_name(slot, takes, args) or cwd_workspace() or ""
     if name:
-        t = shell.ask(str(ROOT), "ws_target", name)
-        if t is None:
-            raise Exit(1)
-        return t
+        try:
+            return registry().ws_target(name)
+        except LookupError as e:
+            die(str(e))
     return "container"
 
 

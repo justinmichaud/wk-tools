@@ -7,7 +7,7 @@ charging has no CLI knob -- so `wk doctor --all` prints the honest
 `pmset -g batt` line instead.
 
 Every test here lifts the exact code that runs in production (the phone-side
-apply script, and the two pure verdict functions in cmd/doctor) rather than
+apply script, and the two verdict functions in lib/wk/doctor.py) rather than
 re-typing a second copy of the logic; see tests/test_wifi_seed.py and
 tests/test_bridge.py's _ls_classify for the same technique. No test needs a
 phone or a Mac's real /sys or /etc: the apply script's CONF path is
@@ -22,25 +22,12 @@ import unittest
 from pathlib import Path
 
 from tests.support import REPO, scratch_dir
+from tests.test_doctor import MISS, OK, doctor
 
 BATTERY_BIN = REPO / "bridge" / "bin" / "wk-bridge-battery"
 BATTERY_INIT = REPO / "bridge" / "init.d" / "wk-bridge-battery"
 CMD_BRIDGE = REPO / "cmd" / "bridge"
-CMD_DOCTOR = REPO / "cmd" / "doctor"
-LIB_COMMON = REPO / "lib" / "common.sh"
 PROVISION = REPO / "bridge" / "provision.sh"
-
-
-def _lift_func(path, name):
-    """A function's body, sed'd out of a shell file -- the same technique
-    tests/test_wifi_seed.py's _lift and tests/test_bridge.py's _ls_classify
-    lift use, so the exact code that runs in production is what is called."""
-    text = subprocess.run(
-        ["sed", "-n", f"/^{name}()/,/^}}/p", str(path)],
-        capture_output=True, text=True,
-    ).stdout
-    assert text.strip(), f"{name}() not found in {path}"
-    return text
 
 
 class TestWkBridgeBatteryScript(unittest.TestCase):
@@ -181,47 +168,32 @@ class TestBatteryAppliedThroughFakeSsh(unittest.TestCase):
 
 
 class TestBatteryVerdict(unittest.TestCase):
-    """battery_verdict (cmd/doctor): the ok/mismatch line `wk doctor --all`
-    prints for one bridge phone, from `wk bridge battery <name>`'s
-    key=value blob. Lifted so the exact function is what is tested; kv_get
-    (lib/common.sh) is lifted alongside it, since battery_verdict reads its
-    blob through the one parser rather than its own sed."""
-
-    def _verdict(self, name, blob):
-        script = (_lift_func(LIB_COMMON, "kv_get")
-                  + _lift_func(CMD_DOCTOR, "battery_verdict")
-                  + f'\nbattery_verdict {name!r} "$1"\n')
-        cp = subprocess.run(["bash", "-c", script, "_", blob],
-                             capture_output=True, text=True, timeout=10)
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        return cp.stdout
+    """battery_verdict (lib/wk/doctor.py): the row `wk doctor --all` prints for
+    one bridge phone, from `wk bridge battery <name>`'s key=value blob."""
 
     def test_ok_when_current_equals_the_configured_limit(self):
-        out = self._verdict("tailnet-bridge-generic",
-                             "percent=87\nstatus=Charging\nlimit=80\ncurrent=80\n")
-        verdict, line = out.rstrip("\n").split("\t", 1)
-        self.assertEqual(verdict, "ok")
+        state, line, _ = doctor.battery_verdict("tailnet-bridge-generic",
+                                                "percent=87\nstatus=Charging\nlimit=80\ncurrent=80\n")
+        self.assertEqual(state, OK)
         self.assertIn("87%", line)
         self.assertIn("capped at 80%", line)
 
     def test_miss_when_current_does_not_match_the_limit(self):
-        out = self._verdict("tailnet-bridge-generic",
-                             "percent=100\nstatus=Full\nlimit=80\ncurrent=100\n")
-        verdict, line, remedy = out.rstrip("\n").split("\t", 2)
-        self.assertEqual(verdict, "miss")
+        state, line, remedy = doctor.battery_verdict("tailnet-bridge-generic",
+                                                     "percent=100\nstatus=Full\nlimit=80\ncurrent=100\n")
+        self.assertEqual(state, MISS)
         self.assertIn("cap reads 100", line)
         self.assertIn("want 80", line)
-        self.assertIn("wk bridge setup tailnet-bridge-generic", remedy)
+        self.assertEqual("wk bridge setup tailnet-bridge-generic", remedy)
 
     def test_miss_when_the_node_never_answered_a_current_value(self):
-        out = self._verdict("tailnet-bridge-moose-bmc",
-                             "percent=42\nstatus=Discharging\nlimit=80\ncurrent=?\n")
-        verdict = out.split("\t", 1)[0]
-        self.assertEqual(verdict, "miss")
+        state = doctor.battery_verdict("tailnet-bridge-moose-bmc",
+                                       "percent=42\nstatus=Discharging\nlimit=80\ncurrent=?\n")[0]
+        self.assertEqual(state, MISS)
 
 
 class TestMacBatteryLine(unittest.TestCase):
-    """mac_battery_line (cmd/doctor): the honest line for this Mac itself,
+    """mac_battery_line (lib/wk/doctor.py): the honest line for this Mac itself,
     parsed from a captured `pmset -g batt`. No settable limit exists on
     macOS, so every case ends in the same disclaimer."""
 
@@ -235,25 +207,14 @@ class TestMacBatteryLine(unittest.TestCase):
     )
     NO_BATTERY = "Now drawing from 'AC Power'\n"
 
-    def _line(self, sample):
-        script = _lift_func(CMD_DOCTOR, "mac_battery_line") + '\nmac_battery_line "$1"\n'
-        return subprocess.run(["bash", "-c", script, "_", sample],
-                               capture_output=True, text=True, timeout=10)
-
     def test_plugged_in(self):
-        cp = self._line(self.PLUGGED_IN)
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertEqual(cp.stdout, "plugged in, 87% -- no OS limit exists")
+        self.assertEqual("plugged in, 87% -- no OS limit exists", doctor.mac_battery_line(self.PLUGGED_IN))
 
     def test_on_battery(self):
-        cp = self._line(self.ON_BATTERY)
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertEqual(cp.stdout, "on battery, 62% -- no OS limit exists")
+        self.assertEqual("on battery, 62% -- no OS limit exists", doctor.mac_battery_line(self.ON_BATTERY))
 
-    def test_no_battery_prints_nothing_and_fails(self):
-        cp = self._line(self.NO_BATTERY)
-        self.assertNotEqual(cp.returncode, 0)
-        self.assertEqual(cp.stdout, "")
+    def test_no_battery_is_no_line(self):
+        self.assertIsNone(doctor.mac_battery_line(self.NO_BATTERY))
 
 
 class TestSyntax(unittest.TestCase):
@@ -263,7 +224,6 @@ class TestSyntax(unittest.TestCase):
     def test_touched_files_parse(self):
         for path, shell in (
             (CMD_BRIDGE, "bash"),
-            (CMD_DOCTOR, "bash"),
             (PROVISION, "sh"),
             (BATTERY_BIN, "sh"),
             (BATTERY_INIT, "sh"),

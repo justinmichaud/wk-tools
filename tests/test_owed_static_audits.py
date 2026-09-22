@@ -36,8 +36,6 @@ DELIBERATE_PREDICATES = {
     ("lib/target.sh", "ws_creation_finished"),
     ("lib/store.sh", "store_is_local"),
     ("cmd/sync", "snapshot_current"),
-    ("cmd/doctor", "podman_machine_running"),
-    ("cmd/doctor", "git_speed_ok"),
     ("cmd/key", "row_agrees"),
     ("image/pgo.sh", "image_pgo_slot_is"),
     ("cmd/push", "_in_vm_driver"),

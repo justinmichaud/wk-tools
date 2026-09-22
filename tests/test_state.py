@@ -54,10 +54,16 @@ fi
 
 
 def _tart_guests():
+    """The guests as data: tart orders a listing's keys differently on every run."""
     if shutil.which("tart") is None:
         return ""
     cp = subprocess.run(["tart", "list", "--format", "json"], capture_output=True, text=True)
-    return cp.stdout if cp.returncode == 0 else ""
+    if cp.returncode != 0:
+        return ""
+    try:
+        return json.dumps(json.loads(cp.stdout), sort_keys=True)
+    except ValueError:
+        return cp.stdout
 
 
 def _readonly_commands():

@@ -74,7 +74,7 @@ class TestTheEmptyNoteIsDecidedOnce(unittest.TestCase):
             stub.chmod(0o755)
             inv = dispatch.Invocation("ls", D.Decl(stub), [])
             forwarded = mock.Mock(return_value=0)
-            with mock.patch.object(dispatch, "target_all", return_value=["fakelocal"]), \
+            with mock.patch.object(dispatch, "registry", return_value=mock.Mock(all=mock.Mock(return_value=["container", "fakelocal"]))), \
                  mock.patch.object(dispatch, "machine_running", return_value=True), \
                  mock.patch.object(dispatch, "forward_status", forwarded), \
                  contextlib.redirect_stdout(io.StringIO()):

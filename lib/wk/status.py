@@ -11,7 +11,6 @@ import shutil
 import stat
 import subprocess
 import sys
-import tempfile
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -658,6 +657,7 @@ class Walk:
         self.health_owner = None
         self.worst = 0
         self._git = None
+        self._loaded = {}
 
     # -- the walk
 
@@ -665,18 +665,16 @@ class Walk:
         names = self.reg.walk()
         return sorted(names, key=lambda t: (RANK.get(self.reg.kind(t), 3), t))
 
-    def prefetch(self, names):
-        """Every remote probed once, in parallel, into files the drivers read for the rest of the walk."""
-        d = tempfile.mkdtemp(prefix="wk-probe.")
-        os.environ["WK_PREFETCH_DIR"] = d
-        import atexit
-        atexit.register(shutil.rmtree, d, True)
-        with ThreadPoolExecutor(max_workers=max(1, len(names))) as pool:
-            list(pool.map(lambda t: _bash(self.root, "load_target %s >/dev/null 2>&1 && t_prefetch" % shell.sh_quote(t)), names))
+    def target(self, name):
+        """The one driver object per target for this walk, so a machine is probed at most once."""
+        with self.lock:
+            if name not in self._loaded:
+                self._loaded[name] = self.reg.load(name)
+            return self._loaded[name]
 
     def machine_of_target(self, name):
         try:
-            return self.machine_of(self.reg.load(name))
+            return self.machine_of(self.target(name))
         except LookupError:
             return self.this_machine
 
@@ -688,7 +686,7 @@ class Walk:
     def _job(self, tname, name):
         def run():
             try:
-                target = self.reg.load(tname)
+                target = self.target(tname)
             except LookupError as e:
                 return [Rec("raw", machine=self.this_machine, text=str(e)).done()], 4
             try:
@@ -704,7 +702,6 @@ class Walk:
             jobs = [(tname, self._job(tname, self.name))]
         else:
             names = self.targets()
-            self.prefetch(names)
             self.health_owner = next((t for t in names if self._is_here(t)), None)
             jobs = [(t, self._job(t, None)) for t in names]
             if self.devices:
@@ -740,7 +737,7 @@ class Walk:
 
     def _is_here(self, tname):
         try:
-            return self.reg.load(tname).is_here()
+            return self.target(tname).is_here()
         except LookupError:
             return False
 
@@ -961,10 +958,7 @@ class Walk:
         return [r.done()]
 
     def capacity_remote(self, target, m):
-        r = _bash(self.root, 'load_target %s >/dev/null 2>&1; printf "%%s\\n%%s\\n%%s\\n" "$(t_cores)" "$(t_load)" "$(t_mem_mb)"'
-                  % shell.sh_quote(target.name))
-        lines = r.out.split("\n") + ["", "", ""]
-        return capacity_record(m, None, lines[0] if r.ok else "", "", lines[2] if r.ok else "", lines[1])
+        return capacity_record(m, None, str(target.cores()), "", str(target.mem_mb()), str(target.load()))
 
     def health(self, target, m):
         store = target.store

@@ -366,13 +366,17 @@ class TestNoForwardingIsLeftInTheSource(unittest.TestCase):
         wrong on the host that mounts it there."""
         text = (REPO / "lib" / "store.sh").read_text()
         self.assertEqual(1, text.count("wk_secrets_dir() {"))
-        for f in ("cmd/key", "cmd/push", "cmd/doctor"):
+        for f in ("cmd/key", "cmd/push"):
             with self.subTest(script=f):
                 body = (REPO / f).read_text()
                 # The mount source in targets/container.sh is the container's
-                # view and stays store-relative; these three read the files.
+                # view and stays store-relative; these read the files.
                 self.assertNotIn('$WK_STORE/secrets', body)
                 self.assertNotIn('$WK_STORE/push-keys', body)
+        body = (REPO / "lib" / "wk" / "doctor.py").read_text()
+        self.assertIn("secrets_dir()", body)
+        self.assertNotIn('"secrets"', body)
+        self.assertNotIn('"push-keys"', body)
 
 
 if __name__ == "__main__":

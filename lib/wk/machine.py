@@ -168,14 +168,17 @@ class Local(Machine):
 
 
 class Ssh(Machine):
-    def __init__(self, dest, opts=None, timeout=10):
+    """A host over ssh, each call one bounded non-interactive round trip run by `via` (this host)."""
+
+    def __init__(self, dest, opts=None, timeout=10, via=None):
         self.dest = dest
         self.name = dest
         self.opts = list(opts or []) + ["-o", "BatchMode=yes", "-o", "ConnectTimeout=%d" % timeout]
+        self.via = via or Local()
 
     def _ssh(self, remote, input=None, timeout=None):
-        local = Local()
-        return local.run(["ssh", *self.opts, self.dest, remote], input=input, timeout=timeout)
+        # An empty stdin, not the caller's: ssh drinks whatever it is handed.
+        return self.via.run(["ssh", *self.opts, self.dest, remote], input="" if input is None else input, timeout=timeout)
 
     def run(self, argv, input=None, timeout=None):
         return self._ssh(" ".join(shlex.quote(a) for a in argv), input=input, timeout=timeout)

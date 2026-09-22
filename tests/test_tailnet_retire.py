@@ -172,9 +172,16 @@ class TestWiring(unittest.TestCase):
         self.assertIn("wk_tailscale_api_reject", common)
 
     def test_doctor_declares_it_machine_local(self):
-        text = (REPO / "cmd" / "doctor").read_text()
-        self.assertIn("$(wk_tailscale_api_path)", text)  # one path, lib/common.sh's
-        self.assertIn("re-authable", text)
+        """One path, lib/common.sh's: doctor reads it through shell.local_state_paths."""
+        from tests.support import clean_env
+        from tests.test_doctor import UNK, doctor, shell
+        key = str(Path(tempfile.mkdtemp(prefix="wk-test-tailnet-")) / "api-key")
+        env = clean_env({"WK_TS_API_SECRET": key, "WK_IN_VM": "1"})
+        self.assertEqual(key, shell.local_state_paths(str(REPO), env=env)["tailscale_api"])
+        rows = [r for r in doctor.Doctor(str(REPO), env=env).machine_local() if r[1].startswith(key)]
+        self.assertEqual(1, len(rows), rows)
+        self.assertEqual(UNK, rows[0][0])
+        self.assertIn("re-authable: wk key set tailnet-api", rows[0][2])
 
 
 if __name__ == "__main__":

@@ -5,10 +5,13 @@ phrase of the behaviour it checks.
 Run: python3 -m unittest tests.test_dispatcher -v
 """
 TIER = "lint"
+import contextlib
+import io
 import os
 import subprocess
 import sys
 import unittest
+from unittest import mock
 
 from tests.support import (
     REAL_REGISTRY, REPO, WkTest, fake_workspace, rand_suffix, run, stub_path,
@@ -17,7 +20,8 @@ from tests.support import (
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk import decl as D  # noqa: E402
-from wk import dispatch  # noqa: E402
+from wk import dispatch, targets  # noqa: E402
+from wk.machine import Fake  # noqa: E402
 
 DISPATCH = REPO / "lib" / "wk" / "dispatch.py"
 
@@ -131,6 +135,42 @@ class TestHelpAndDeclarations(WkTest):
         self.assertIn(
             "targets/hosts/nosuchtarget-selftest.conf", cp.stdout + cp.stderr
         )
+
+
+class TestDelegationReadsTheRegistry(WkTest):
+    """Whether a command about a workspace on a machine runs there is the machine
+    driver's `delegates()`, read through the dispatcher's one Registry."""
+
+    def setUp(self):
+        super().setUp()
+        (self.tmp / "hosts").mkdir()
+        (self.tmp / "hosts" / "peer.conf").write_text("WK_REMOTE_PEER=1\nWK_REMOTE_TOOLS=/opt/wk-tools\n")
+        (self.tmp / "hosts" / "me.conf").write_text("WK_REMOTE_LOCAL=1\nWK_REMOTE_ROOT=%s\n" % (self.tmp / "rr"))
+        env = {"HOME": str(self.tmp), "XDG_STATE_HOME": str(self.tmp / "state"), "WK_STORE": str(self.tmp / "store"),
+               "WK_TARGET_REGISTRY": str(self.tmp / "hosts"), "WK_IN_VM": "1", "PATH": os.environ.get("PATH", "")}
+        self.fake = Fake("host")
+        self.reg = targets.Registry(REPO, env=env, machine=self.fake)
+
+    def test_a_peer_delegates_this_machine_and_an_unknown_name_do_not(self):
+        with mock.patch.object(dispatch, "_registry", self.reg):
+            self.assertIs(dispatch.registry(), self.reg)
+            peer = dispatch.delegate_target("peer")
+            self.assertEqual((peer.name, peer.delegates()), ("peer", True))
+            self.assertIsNone(dispatch.delegate_target("me"))
+            self.assertIsNone(dispatch.delegate_target("nosuch"))
+            self.assertIsNone(dispatch.delegate_target("container"))
+        self.assertEqual(self.fake.effects, [])
+
+    def test_a_peer_that_does_not_answer_is_refused_with_its_name(self):
+        with mock.patch.object(dispatch, "_registry", self.reg):
+            peer = dispatch.delegate_target("peer")
+            with contextlib.redirect_stderr(io.StringIO()) as err:
+                with self.assertRaises(dispatch.Exit) as raised:
+                    dispatch.delegate_run(peer, "logs", ["ws"])
+        self.assertEqual(raised.exception.status, 1)
+        self.assertIn("'logs' acts on a workspace on peer, and peer did not answer.", err.getvalue())
+        self.assertIn("the workspace is that machine's own", err.getvalue())
+        self.assertEqual(len([e for e in self.fake.effects if e[1][0] == "ssh"]), 1)
 
 
 class TestWorkspaceRefusals(WkTest):

@@ -6,16 +6,16 @@ last step lands.
 
 ## Where we are
 
-Measured 2026-09-21 on this workstation.
+Measured 2026-09-22 on this workstation.
 
 | | |
 | --- | --- |
-| code | 38k lines of bash, 9k of Python (the dispatcher among it); 41 commands, 7 of them over 500 lines and holding 55% of command code |
-| tests | 70k lines, 188 modules, 4273 tests in the lint and unit tiers, 39 in the live tier |
-| `wk selftest` (lint then unit) | 13.7 minutes, green; the lint tier alone 27 s |
+| code | 39k lines of bash, 13k of Python (the dispatcher, the registry and drivers, the record, status and doctor among it); 41 commands, 8 of them Python, 8 over 500 lines and holding 53% of command code |
+| tests | 71k lines, 194 modules, 4434 tests in the lint and unit tiers, 40 in the live tier |
+| `wk selftest` (lint then unit) | 13.4 minutes, green; the lint tier alone 27 s |
 | the slowest unit test | 16 s, under a 30 s budget the runner enforces |
-| owed tests | 8 |
-| places a test starts a process | 1,600 |
+| owed tests | 11 |
+| places a test starts a process | 1,540 |
 
 Why bugs come back:
 
@@ -93,7 +93,9 @@ Ten rules. Each is held by a test, not by asking.
 Python core, agreed 2026-09-21. Stdlib only, Python 3.9 syntax: the Mac's
 system Python is 3.9, and every other host, guest and image has newer with
 nothing installed. Work lands on the `python-core` branch, committed at the
-end of each step and each merged command, never pushed by an agent.
+end of each step and each merged command, never pushed by an agent. The
+session's permission classifier refuses an agent's `git commit`, so the
+user commits what an agent leaves green in the tree.
 
 Moving the core to Python is the one call that cannot be made a step at a
 time later. The alternative, keeping bash and faking tools on `PATH`, does
@@ -186,16 +188,27 @@ exist.
      and vm implementations, landing with the first command that needs each
      (steps 2 and 3); the bridge is deleted with the last bash caller of
      `lib/target.sh`.
-2. **The seam and the drivers.** `Machine` and its fake are in; the
-   registry and the read side of the container, guest and workspace-local
-   drivers are Python (`lib/wk/targets.py`), the remote driver's probe and
-   every driver's create and destroy still bridge to `targets/*.sh`. The
-   readers port first as the drivers' smallest callers: `ls`, `version`,
-   `logs`, `start`, `disk` and `status` (the walk in `lib/wk/status.py`, the
-   renderer in `lib/wk/statusview.py`; the boot drivers' probe and the reach
-   probes still bridge to bash) are; `doctor` follows, then the write side
-   of each driver. Done when `lib/target.sh` and `targets/*.sh` are gone and
-   no bash file parses JSON.
+2. **The seam and the drivers.** `Machine` and its fake are in. The
+   registry and the read side of every driver are Python
+   (`lib/wk/targets.py`): container, guest and workspace-local whole, and
+   the remote driver's probe (one memoised ssh round trip), list, info,
+   exec, `wk`, start and stop. The readers are Python as the drivers'
+   smallest callers: `ls`, `version`, `logs`, `start`, `stop`, `disk`,
+   `status` (the walk in `lib/wk/status.py`, the renderer in
+   `lib/wk/statusview.py`) and `doctor` (`lib/wk/doctor.py`: rows of state,
+   what and remedy, one renderer). What still bridges to bash through
+   `lib/wk/shell.py`, each a named helper: every driver's create, destroy
+   and sync; the guest's start and stop (`targets/vm.sh`); a peer
+   workspace's checkout path (`t_src` through `wk zed --route`); the
+   remote-control watchdog stop (`rc_stop`); the boot drivers' probe and
+   the reach probes; the credential verdicts (`wk_cred_check`,
+   `peer_cred_verdict`), the privileged-helper table, `wk_remote_probe`,
+   `wk_remote_findings`, `remote_provision_stale`, `vm_base_findings` and
+   the store paths `lib/store.sh` names; in `lib/wk/status.py`,
+   `current_base`, `unreferenced_bases` and this host's envelope from
+   `lib/resources.sh`. The write side of each driver lands with its first
+   Python caller (`new` and `rm`, step 3). Done when `lib/target.sh` and
+   `targets/*.sh` are gone and no bash file parses JSON.
 3. **Workspaces.** `new`, `rm`, `build`, `run`, `test`, `enter`, `scp`,
    `sync`, `pr`, `remotes`, `verify`, `ai`, `zed`, `gui`, `profile`. Done
    when `lib/store.sh`'s workspace half is gone and each has a kill-point
@@ -240,6 +253,7 @@ decides is a row; one still open is listed under "Decisions for the user".
 | The live tier runs against the container target on Linux and macOS alike; no test is gated on the podman VM | 1 | `live` runner rule |
 | A hold is released only when its holder is provably gone, an unreadable holder keeps it, and no child process inherits one | 1 | `unit record.hold_follows_holder` |
 | A workspace name is resolved once per invocation and every machine probed at most once | 1 | `unit machine.probed_once_per_invocation` |
+| This machine's name is read by one function (`record.machine_name`); `store.lock_path` reads it there too | 1 | `lint.one_machine_name_reader` |
 | Interrupting a command (Ctrl-C, a lost ssh) stops the process it started on the far machine and releases its holds | 1 | `unit machine.interrupt_stops_remote_process` |
 | The vm target's records live in a store of their own; a scratch store never puts two targets on one directory | 1 | `unit record.one_store_per_target` |
 | Every mutating command honours `--dry-run` as the recorder: the plan and the run cannot differ, and a dry run fetches nothing | 1 | `unit dispatch.dry_run_is_the_recorder[<cmd>]` |

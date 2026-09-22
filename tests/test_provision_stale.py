@@ -333,9 +333,20 @@ class TestTheWriteSideRecordsIt(unittest.TestCase):
             self.assertEqual(defs, [owner], f"{func}: {defs}")
 
     def test_doctor_reports_the_machine_through_that_one_function(self):
-        text = (REPO / "cmd" / "doctor").read_text()
-        self.assertIn("remote_provision_stale", text)
-        self.assertIn("wk remote setup $_t", text)
+        """One row per machine, from remote_provision_stale's answer alone: a
+        reason is a miss naming `wk remote setup`, none is the ok row."""
+        from tests.test_doctor import MISS, OK, fake_doctor, stub_shell
+        asked = []
+
+        def stale(root, target, env=None):
+            asked.append(target)
+            return "provisioned before this record existed" if target == "old" else None
+        sh = stub_shell(remote_probe=lambda root, t, env=None: "family=debian\n", remote_provision_stale=stale)
+        doc = fake_doctor(False, sh=sh)
+        self.assertEqual([(MISS, "provisioning on old predates its inputs: provisioned before this record existed", "wk remote setup old")],
+                         list(doc.build_machine("old")))
+        self.assertEqual([(OK, "provisioned from this tree's remote/provision.sh + remote/deps.sh", "")], list(doc.build_machine("fresh")))
+        self.assertEqual(["old", "fresh"], asked)
 
 
 if __name__ == "__main__":

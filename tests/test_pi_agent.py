@@ -19,6 +19,7 @@ Run: python3 -m unittest tests.test_pi_agent -v
 import json
 import shutil
 import subprocess
+import sys
 import unittest
 from pathlib import Path
 
@@ -641,9 +642,9 @@ t_exec() {{
 
 class TestDoctorReportsEveryName(WkTest):
     """`wk doctor`'s machine-local section is the checklist a reinstall works
-    from, so every named credential is one line in it -- looped from the table
-    rather than the claude row alone, which is what "one implementation per
-    behaviour" means here.
+    from, so every named credential is one line in it -- read from the table
+    (shell.local_state_paths) rather than a list of its own, which is what
+    "one implementation per behaviour" means here.
 
     Each is `re-authable`: a fresh value from the provider is as good as the
     old one, so it is neither backed up nor regenerable by this repo. And an
@@ -651,60 +652,41 @@ class TestDoctorReportsEveryName(WkTest):
     to log in, which still works, so counting it as missing would report a
     healthy machine as broken."""
 
-    DOCTOR = (REPO / "cmd" / "doctor").read_text()
-
-    def test_it_loops_the_table(self):
-        self.assertIn("wk_agent_secret_names", self.DOCTOR)
-        self.assertIn('local_state "$(wk_agent_secret_path "$_sname")" re-authable',
-                      self.DOCTOR)
+    def test_it_reads_the_table(self):
+        from tests.support import clean_env
+        sys.path.insert(0, str(REPO / "lib"))
+        from wk import shell
+        text = (REPO / "lib" / "wk" / "doctor.py").read_text()
         for row in TABLE:
             with self.subTest(name=row[0]):
-                self.assertNotIn(row[1], self.DOCTOR,
-                                 f"cmd/doctor names the {row[0]} row itself")
+                self.assertNotIn(row[1], text, f"lib/wk/doctor.py names the {row[0]} row itself")
+        paths = shell.local_state_paths(str(REPO), env=clean_env({"WK_STORE": "/scratch", "WK_IN_VM": "1"}))
+        self.assertEqual(NAMES, [k[7:] for k in paths if k.startswith("secret.")])
 
     def test_it_prints_one_line_per_name_and_none_of_them_as_missing(self):
-        """Driven: the real `local_state` and the real loop, against a scratch
-        store with one of the two stored. WK_IN_VM=1 because on a macOS host
-        local_state forwards a store path into the podman machine, and doctor
-        never starts one -- inside the VM (where its probe runs) the read is
-        the plain one."""
+        """Driven: the real section against a scratch store with one of the two
+        stored. WK_IN_VM=1 because on a macOS host a store path is asked for
+        inside the podman machine, and doctor never starts one -- inside the VM
+        (where its probe runs) the read is the plain one."""
+        from tests.support import clean_env
+        sys.path.insert(0, str(REPO / "lib"))
+        from wk import doctor
         store = self.tmp / "store"
         (store / "secrets").mkdir(parents=True)
         (store / "agent-rw").mkdir(parents=True)
         first = TABLE[0]
         store_path(store, first).write_text(PLACEHOLDER + "\n")
-
-        text = self.DOCTOR
-        fn = text[text.index("local_state() { # <path> <kind> <how to get it back>"):]
-        fn = fn[:fn.index("\n}\n") + 3]
-        loop = text[text.index("for _sname in $(wk_agent_secret_names); do"):]
-        loop = loop[:loop.index("done\n") + 5]
-
-        cp = bash(f'''
-. "$WK_ROOT/lib/common.sh"
-WK_STORE={store}
-. "$WK_ROOT/lib/store.sh"
-missing=0
-ok()   {{ printf 'ok %s\\n' "$*"; }}
-miss() {{ printf 'miss %s -> %s\\n' "$1" "$2"; missing=$((missing + 1)); }}
-unk()  {{ printf 'unk %s -> %s\\n' "$1" "$2"; }}
-{fn}
-{loop}
-printf 'missing=%s\\n' "$missing"
-''', env={"WK_IN_VM": "1"})
-        self.assertEqual(0, cp.returncode, cp.stdout + cp.stderr)
-        out = cp.stdout + cp.stderr
-        self.assertIn("missing=0", out, out)
-        for row in TABLE:
-            name, sfile = row[0], row[1]
+        doc = doctor.Doctor(str(REPO), env=clean_env({"WK_STORE": str(store), "WK_IN_VM": "1"}))
+        rows = list(doc.machine_local())
+        self.assertEqual([], [r for r in rows if r[0] == doctor.MISS], rows)
+        for name, sfile in ((r[0], r[1]) for r in TABLE):
             with self.subTest(name=name):
-                line = [l for l in out.splitlines() if f"/{sfile} " in l + " "]
-                self.assertEqual(1, len(line), out)
-                self.assertIn("re-authable", line[0])
-                self.assertIn(f"wk key set {name}", line[0])
-                self.assertTrue(line[0].startswith("ok " if name == first[0]
-                                                   else "unk "), line[0])
-        self.assertNotIn(PLACEHOLDER, out)
+                line = [r for r in rows if f"/{sfile} " in r[1] + " "]
+                self.assertEqual(1, len(line), rows)
+                self.assertIn("re-authable", line[0][1] + line[0][2])
+                self.assertIn(f"wk key set {name}", line[0][1] + line[0][2])
+                self.assertEqual(doctor.OK if name == first[0] else doctor.UNK, line[0][0], line[0])
+        self.assertNotIn(PLACEHOLDER, "".join(w + r for _, w, r in rows))
 
 
 if __name__ == "__main__":

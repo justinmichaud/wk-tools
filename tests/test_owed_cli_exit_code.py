@@ -84,7 +84,7 @@ class TestDispatcherBump(WkTest):
                         f"exit {here}\n")
         stub.chmod(0o755)
         inv = dispatch.Invocation("probe", D.Decl(stub), [])
-        with mock.patch.object(dispatch, "target_all", return_value=["fakelocal"]), \
+        with mock.patch.object(dispatch, "registry", return_value=mock.Mock(all=mock.Mock(return_value=["container", "fakelocal"]))), \
              mock.patch.object(dispatch, "machine_running", return_value=True), \
              mock.patch.object(dispatch, "forward_status", return_value=vm), \
              contextlib.redirect_stdout(io.StringIO()):

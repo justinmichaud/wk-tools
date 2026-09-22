@@ -20,6 +20,7 @@ import os
 import shutil
 import signal
 import subprocess
+import sys
 import unittest
 from pathlib import Path
 
@@ -420,50 +421,32 @@ class TestDoctorNamesTheReadToken(WkTest):
     `regenerable`, because both ./setup and `wk key set github-pat` write it
     again from the token this device holds -- losing it costs nothing."""
 
-    DOCTOR = (REPO / "cmd" / "doctor").read_text()
-    ROW = 'local_state "$(push_agent_machine_read_pat)"'
-
-    def row(self):
-        for line in self.DOCTOR.splitlines():
-            if line.startswith(self.ROW):
-                return line
-        raise AssertionError("the machine-local section does not name the read token")
-
-    def test_it_is_regenerable_and_the_line_names_what_writes_it(self):
-        line = self.row()
-        self.assertIn("regenerable", line)
-        self.assertIn("./setup", line)
-        self.assertIn("wk key set github-pat", line)
+    def rows(self, store):
+        from tests.support import clean_env
+        sys.path.insert(0, str(REPO / "lib"))
+        from wk import doctor
+        doc = doctor.Doctor(str(REPO), env=clean_env({"WK_STORE": str(store), "WK_IN_VM": "1"}))
+        return [r for r in doc.machine_local() if "read-github-pat" in r[1]]
 
     def test_it_is_reported_from_the_machine_and_absent_is_not_a_fault(self):
-        """Driven: the real `local_state` and the real row against a scratch
-        store. WK_IN_VM=1 for the reason tests/test_pi_agent.py gives -- on a
-        macOS host that function forwards a store path into the podman machine,
-        and doctor never starts one."""
+        """Driven against a scratch store. WK_IN_VM=1 for the reason
+        tests/test_pi_agent.py gives -- on a macOS host a store path is asked for
+        inside the podman machine, and doctor never starts one."""
         store = self.tmp / "store"
         store.mkdir()
-        fn = self.DOCTOR[self.DOCTOR.index("local_state() { # <path> <kind>"):]
-        fn = fn[:fn.index("\n}\n") + 3]
-        script = ('. "$WK_ROOT/lib/common.sh"\n'
-                  f'WK_STORE={store}\n'
-                  '. "$WK_ROOT/lib/store.sh"\n'
-                  "ok()   { printf 'ok %s\\n' \"$*\"; }\n"
-                  "miss() { printf 'miss %s -> %s\\n' \"$1\" \"$2\"; }\n"
-                  "unk()  { printf 'unk %s -> %s\\n' \"$1\" \"$2\"; }\n"
-                  + fn + self.row() + "\n")
-
-        cp = bash(script, env={"WK_IN_VM": "1"})
-        self.assertEqual(0, cp.returncode, cp.stdout + cp.stderr)
-        out = cp.stdout + cp.stderr
-        self.assertTrue(out.startswith("unk "), out)
-        self.assertIn("read-github-pat", out)
+        rows = self.rows(store)
+        self.assertEqual(1, len(rows), rows)
+        state, what, remedy = rows[0]
+        self.assertEqual("unk", state, rows)
+        self.assertIn("regenerable", remedy)
+        self.assertIn("./setup", remedy)
+        self.assertIn("wk key set github-pat", remedy)
 
         (store / "read-github-pat").write_text("ghp-not-a-real-token\n")
-        cp = bash(script, env={"WK_IN_VM": "1"})
-        out = cp.stdout + cp.stderr
-        self.assertTrue(out.startswith("ok "), out)
-        self.assertIn("regenerable", out)
-        self.assertNotIn("ghp-not-a-real-token", out)
+        state, what, remedy = self.rows(store)[0]
+        self.assertEqual("ok", state, what)
+        self.assertIn("regenerable", what)
+        self.assertNotIn("ghp-not-a-real-token", what + remedy)
 
 
 class TestAPathWithASpaceInIt(_Agent):

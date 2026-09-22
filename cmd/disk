@@ -170,7 +170,7 @@ def main(argv):
             if k > 0:
                 rep.row(k, "downloaded machine image", "re-downloadable")
         rep.section("the container store, inside that image (already counted above)")
-        if shell.machine_state(ROOT, MACHINE) == "running":
+        if targets.Registry(ROOT).load("container").machine_state() == "running":
             with open(__file__, "rb") as me:   # this file, not the VM's copy, which is only as new as `wk sync --tools container`
                 cp = subprocess.run(["podman", "machine", "ssh", MACHINE, "--",
                                      "WK_ROOT=/opt/wk-tools WK_STORE=/var/lib/wk python3 - --probe-store"],

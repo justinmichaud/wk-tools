@@ -30,7 +30,7 @@ import sys
 ROOT = os.environ.get("WK_ROOT") or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "lib"))
 
-from wk import act, record, shell  # noqa: E402
+from wk import act, record, shell, status, targets  # noqa: E402
 from wk.act import Refused, confirm, die, info, log, warn  # noqa: E402
 
 MACHINE = os.environ.get("WK_MACHINE", "wk")
@@ -82,47 +82,45 @@ def stop_tasks_here(records):
     return 0
 
 
-def stop_tasks_everywhere(records):
+def stop_tasks_everywhere(reg, records):
     if not confirm("stop every task on this machine and every other one? What they have not finished is dropped"):
         die("nothing stopped")
     os.environ["WK_YES"] = "1"
     rc = stop_tasks_here(records)
-    for m in shell.machines(ROOT):
-        answers, why = shell.machine_answers(ROOT, m)
-        if not answers:
-            sys.stderr.write(why)
+    for m in reg.machines():
+        target = reg.load(m)
+        side, why = target.probe()
+        if side != "answering":
+            sys.stderr.write("%-22s %s\n" % (m, status.far_side_reason(target, side, why)))
             rc = max(rc, 3)   # a machine that cannot be asked may be running something
             continue
-        status, out = shell.machine_wk(ROOT, m, "stop", "--tasks")
+        rc_there, out = target.wk("stop", "--tasks")
         for line in out.splitlines():
             sys.stdout.write("%-22s%s\n" % (m, line))
-        rc = max(rc, status)
+        rc = max(rc, rc_there)
     return rc
 
 
-def stop_workspace(name):
-    target = shell.ws_target(ROOT, name)
-    if target is None:
-        raise Refused(1)
-    if shell.ws_info(ROOT, target, name) == "absent":
+def stop_workspace(reg, name):
+    target = reg.load(reg.ws_target(name))
+    if target.info(name) == "absent":
         die("no such workspace: %s" % name)
-    kind = shell.ask(ROOT, "target_kind", target)
-    if kind == "remote":
-        rc = shell.rc_stop(ROOT, target, name)
+    if target.kind == "remote":
+        rc = shell.rc_stop(ROOT, target.name, name)
         if rc != 0:
             raise Refused(rc)
-    rc = shell.ws_stop(ROOT, target, name)
-    if rc != 0:
-        raise Refused(rc)
+    if not target.stop(name):
+        raise Refused(1)
     return 0
 
 
-def stop_everything(keep_vm):
+def stop_everything(reg, keep_vm):
     if here():
-        for guest, state in shell.guests(ROOT):   # a guest holds its memory even with the machine stopped
+        vm = reg.load("vm")
+        for guest, state in vm.list():   # a guest holds its memory even with the machine stopped
             if state == "running":
-                shell.guest_stop(ROOT, guest)
-        state = shell.machine_state(ROOT, MACHINE)
+                vm.stop(guest)
+        state = reg.load("container").machine_state()
         if state != "running":
             info("machine '%s' is already %s -- nothing to do" % (MACHINE, state))
             return 0
@@ -149,14 +147,18 @@ def main(argv):
     tasks = "--tasks" in argv
     everywhere = "--all" in argv
     name = os.environ.get("WK_NAME", "")
-    if tasks:
-        if keep_vm:
-            die("'--keep-vm' is about the podman machine, which 'wk stop --tasks' leaves alone")
-        records = record.Records(ask_target=lambda n, pid, cap: shell.target_pid_alive(ROOT, n, pid, cap))
-        return stop_tasks_everywhere(records) if everywhere else stop_tasks_here(records)
-    if name:
-        return stop_workspace(name)
-    return stop_everything(keep_vm)
+    reg = targets.Registry(ROOT)
+    try:
+        if tasks:
+            if keep_vm:
+                die("'--keep-vm' is about the podman machine, which 'wk stop --tasks' leaves alone")
+            records = record.Records(ask_target=lambda n, pid, cap: shell.target_pid_alive(ROOT, n, pid, cap))
+            return stop_tasks_everywhere(reg, records) if everywhere else stop_tasks_here(records)
+        if name:
+            return stop_workspace(reg, name)
+        return stop_everything(reg, keep_vm)
+    except LookupError as e:
+        die(str(e))
 
 
 if __name__ == "__main__":
