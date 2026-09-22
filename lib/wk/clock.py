@@ -1,5 +1,4 @@
-"""Time as a parameter: every wait in the core takes a clock, and a test
-hands it one that advances when asked to sleep."""
+"""Time as a parameter: a fake clock advances when asked to sleep."""
 
 import time
 

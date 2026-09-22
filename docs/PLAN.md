@@ -186,12 +186,17 @@ exist.
      and vm implementations, landing with the first command that needs each
      (steps 2 and 3); the bridge is deleted with the last bash caller of
      `lib/target.sh`.
-2. **Reports.** `status`, `ls`, `logs`, `start`, `doctor`, `disk`,
-   `version`: readers of the one record (`stop` is). Done when no bash file
-   parses JSON.
+2. **The seam and the drivers.** `Machine` with its fake, then the local,
+   container, remote and vm drivers as Python, each replacing its
+   `targets/*.sh` when the commands that need it have ported. The readers
+   go first because they are the drivers' smallest callers: `version`,
+   `logs`, `ls`, `start`, `disk`, `status` (with `lib/status-view.py`
+   folded in), `doctor`. Done when `lib/target.sh` and `targets/*.sh` are
+   gone and no bash file parses JSON.
 3. **Workspaces.** `new`, `rm`, `build`, `run`, `test`, `enter`, `scp`,
    `sync`, `pr`, `remotes`, `verify`, `ai`, `zed`, `gui`, `profile`. Done
-   when `targets/*.sh` is gone and each has a kill-point test.
+   when `lib/store.sh`'s workspace half is gone and each has a kill-point
+   test.
 4. **Credentials.** `key`, `push`, `sudo`, `backup`, `skills`. Done when
    `lib/store.sh` is gone.
 5. **Fleet and bench.** `sysimage`, `boot`, `pi`, `bench`, `ab`, `quiesce`,
@@ -227,6 +232,7 @@ decides is a row; one still open is listed under "Decisions for the user".
 | A failed leg on a board leaves evidence readable afterwards: a persistent journal, browser and tunnel logs on every leg, a board-at-failure capture, and warmup evidence on a leg that timed out | 5 | `unit bench.failed_leg_keeps_evidence`, `live bench.evidence[<board>]` |
 | Bash mechanics the Python core removes: a script read mid-edit, `capped`'s orphaned sleep holding `wk status` open, `wk key`'s two hops into the VM, `wk help hardware` tracking the drivers, `wk pick`, `wk mcp` | — | delete |
 | Every `WK_*` override is read once, documented where the user meets it and tested, or removed | 1 | `lint.wk_overrides` |
+| No unit test asserts a wall-clock bound of its own (the interrupt test's 10 s, the lock tests' polls): the runner's budget is the one bound, and a test proves ordering with a fake clock | 1 | `lint.no_wall_clock_assertions` |
 | A workspace whose creation died (container up, directory gone, nothing creating it) is refused at once by every command, naming `wk rm`; nothing asks the SDK's `wkdev-enter`, which waits 182 s on such a container before aborting, and `wk gc` names it as rubble | 1 | `unit machine.dead_creation_refused_at_once` |
 | The live tier runs against the container target on Linux and macOS alike; no test is gated on the podman VM | 1 | `live` runner rule |
 | A hold is released only when its holder is provably gone, an unreadable holder keeps it, and no child process inherits one | 1 | `unit record.hold_follows_holder` |

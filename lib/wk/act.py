@@ -1,8 +1,6 @@
-"""Every state change goes through `act`, and nowhere else: under --dry-run
-it is printed and not run, and a command the dispatcher declared destructive
-cannot act before `confirm` has been answered. The same rules lib/common.sh's
-act/confirm/barrier hold, read from the same variables, so a bash command
-and a Python one behave alike under the one dispatcher."""
+"""act, confirm and barrier: the rules lib/common.sh holds, from the same
+variables, so a bash and a Python command behave alike under --dry-run,
+--yes, --force and a destructive declaration."""
 
 import os
 import shlex
@@ -57,7 +55,6 @@ def dry_run():
 
 
 def confirm(prompt, stdin=None):
-    """Ask once; --dry-run and --yes answer it; no terminal declines."""
     if dry_run():
         sys.stderr.write("would ask: %s [y/N]\n" % prompt)
         os.environ["WK_CONFIRMED"] = "1"
@@ -83,8 +80,7 @@ def confirm(prompt, stdin=None):
 
 
 def act(argv, **kw):
-    """Run a state-changing command, or print it under --dry-run. Returns
-    the CompletedProcess, or None when nothing ran."""
+    """The CompletedProcess, or None under --dry-run."""
     if dry_run():
         sys.stderr.write("would run: %s\n" % " ".join(shlex.quote(a) for a in argv))
         return None
@@ -99,7 +95,6 @@ _forced = []
 
 
 def barrier(message, retry=False):
-    """Refuse, or under --force warn and go on, and say so again at exit."""
     if not os.environ.get("WK_FORCE"):
         err("%s\n    --force proceeds anyway, with a warning." % message)
         raise Refused(RETRY_EXIT if retry else 1)

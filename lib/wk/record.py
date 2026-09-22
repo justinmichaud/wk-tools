@@ -1,12 +1,6 @@
 """The task record: one directory per long-running command under
-<record dir>/task/, one file per field, each written by tmp+rename. The
-same directory lib/task.sh writes, so a bash and a Python reader agree.
-Liveness is asked of the process table at read time, never stored.
-
-Fields: kind, where (here|target), name, kill, log, machine, pid, argv,
-started, plan (one step per line), steps/<n>, holds, abort_after, exit,
-finished, and a kind's own (config, subject, exit_file).
-"""
+<record dir>/task/, one file per field, the same directory lib/task.sh
+writes. Liveness is asked of the process table at read time, never stored."""
 
 import os
 import re
@@ -15,6 +9,7 @@ import sys
 from pathlib import Path
 
 from wk.clock import Clock
+from wk.store import Store
 
 RUNNING = ("starting", "running", "silent", "unanswered")
 STEP_EVENTS = {"start": "running", "ok": "done", "already": "done", "failed": "failed",
@@ -27,14 +22,7 @@ def slug(text):
 
 
 def record_dir(env=None):
-    """Where this machine's records live: the store, except a macOS
-    workstation's default store, which is the podman VM's and unwritable
-    from the host, so that one is diverted to the state directory."""
-    env = os.environ if env is None else env
-    store = env.get("WK_STORE") or "/var/lib/wk"
-    if not env.get("WK_IN_VM") and os.uname().sysname == "Darwin" and store == "/var/lib/wk":
-        return os.path.join(env.get("XDG_STATE_HOME") or os.path.expanduser("~/.local/state"), "wk")
-    return store
+    return Store(env).record_dir()
 
 
 def machine_name(env=None):
@@ -63,9 +51,8 @@ def _local_alive(pid):
 
 
 class Task:
-    """One record. `ask_target(name, pid, cap)` says whether a pid inside
-    the workspace is alive: True, False, or None when the workspace did not
-    answer within `cap` seconds."""
+    """One record; `ask_target(name, pid, cap)` answers True, False or None
+    (no answer within cap seconds) for a pid inside the workspace."""
 
     def __init__(self, path, clock=None, ask_target=None):
         self.path = Path(path)
@@ -123,8 +110,7 @@ class Task:
         return [plan[i - 1] for i, state in self.steps() if state == "running"]
 
     def end(self, status):
-        """The first verdict stands: a kill's `cancelled` is not overwritten
-        by the failure the kill caused."""
+        """The first verdict stands."""
         if (self.path / "exit").is_file():
             return
         self.set("finished", self.clock.iso())
@@ -137,8 +123,6 @@ class Task:
         return re.sub(r"[^0-9]", "", Path(f).read_text())
 
     def alive(self, cap=None):
-        """True, False, or None when the workspace holding the pid did not
-        answer within `cap` seconds."""
         if (self.path / "exit").is_file() or self.job_exit():
             return False
         pid = self.field("pid")
@@ -151,7 +135,6 @@ class Task:
         return _local_alive(int(pid))
 
     def verdict(self, how="pid", stall_seconds=None, ask_seconds=None):
-        """starting|running|silent|died|unanswered|ok|failed|<the word end took>."""
         if how not in ("pid", "capped"):
             raise ValueError("the pid is asked for as long as it takes or capped, not '%s'" % how)
         rc = self.field("exit") if (self.path / "exit").is_file() else self.job_exit()
@@ -184,8 +167,6 @@ class Task:
 
 
 class Records:
-    """Every record under one record directory."""
-
     def __init__(self, root=None, clock=None, ask_target=None, env=None):
         self.env = os.environ if env is None else env
         self.root = Path(root or record_dir(self.env)) / "task"
@@ -196,13 +177,11 @@ class Records:
         return Task(path, self.clock, self.ask_target)
 
     def list(self):
-        """Every record, oldest id first."""
         if not self.root.is_dir():
             return []
         return [self._task(p) for p in sorted(self.root.iterdir()) if (p / "plan").is_file()]
 
     def stamp_of(self, record_id, kind, name):
-        """The id's stamp, or None when the id is another task's."""
         prefix = "%s-%s-" % (slug(kind), slug(name))
         if not record_id.startswith(prefix):
             return None
@@ -216,7 +195,6 @@ class Records:
         return stamp
 
     def find(self, kind, name, floor=""):
-        """The newest record of this kind and name at or after the floor stamp."""
         last = None
         for t in self.list():
             stamp = self.stamp_of(t.id, kind, name)
@@ -233,8 +211,6 @@ class Records:
                 _rmtree(t.path)
 
     def begin(self, kind, where, name, kill, log, plan, holds=None, pid=None, argv=None):
-        """A new record; prints nothing, returns the Task. `where` is `here`
-        for this machine's pid, `target` for the workspace's."""
         if where not in ("here", "target"):
             raise ValueError("where is here or target, not '%s'" % where)
         if not plan:
@@ -273,7 +249,6 @@ class Records:
         return t
 
     def holders(self, resource):
-        """(id, machine, 'kind name', kill) per live record here holding it."""
         out = []
         for t in self.list():
             if t.field("holds") != resource:
@@ -284,8 +259,7 @@ class Records:
         return out
 
     def wait(self, kind, name, log, timeout=0, pid=None, floor="", stream=None):
-        """The verdict the task ended on, or crashed/timeout. `stream`, when
-        given, receives the log's bytes as they arrive."""
+        """The verdict it ended on, or crashed/timeout; `stream` gets the log as it grows."""
         offset = 0
         waited = 0
 
