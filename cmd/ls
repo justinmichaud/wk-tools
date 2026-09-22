@@ -32,47 +32,8 @@ from wk.machine import Local  # noqa: E402
 
 FORMAT = "%-20s %-18s %-10s %-8s %-20s %-8s %8s"
 
-# Run with $PWD inside the checkout: `main`, a release like `2.52`, or `?`.
-UPSTREAM_LINE = r'''
-_u=$(git rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null) || _u=''
-_b=''
-if [ -n "$_u" ]; then
-    _br=${_u#*/}
-    case "$_br" in
-        main) _b=main ;;
-        webkitglib/*) _b=${_br#webkitglib/} ;;
-    esac
-fi
-if [ -z "$_b" ]; then
-    _rel=$(git for-each-ref --format='%(refname)' --contains HEAD 'refs/remotes/*/webkitglib/*' 2>/dev/null \
-        | sed 's#.*/webkitglib/##' | sort -t. -k1,1n -k2,2n | tail -1)
-    if [ -n "$_rel" ]; then _b=$_rel
-    elif git for-each-ref --format='%(refname)' --contains HEAD 'refs/remotes/*/main' 2>/dev/null | grep -q .; then _b=main
-    fi
-fi
-printf '%s' "${_b:-?}"
-'''
-
-
-def image_base(ws):
-    """CFG_RELEASE of an image workspace's profile, or None."""
-    for prefix in ("yocto-", "buildroot-"):
-        if ws.startswith(prefix):
-            conf = os.path.join(ROOT, "image", "configs", ws[len(prefix):] + ".conf")
-            return targets.read_conf(conf).get("CFG_RELEASE") or None
-    return None
-
-
-def git_base(target, ws):
-    if target.info(ws) in targets.STATES_NOT_THERE:
-        return None
-    r = target.exec(ws, ["sh", "-c", "cd %s 2>/dev/null || exit 0\n%s" % (shell.sh_quote(target.src(ws)), UPSTREAM_LINE)])
-    out = r.out.replace("\r", "").strip().splitlines()
-    return out[-1] if r.ok and out else None
-
-
 def base_of(target, ws):
-    return image_base(ws) or git_base(target, ws) or "?"
+    return targets.image_base(ROOT, ws) or targets.git_base(target, ws) or "?"
 
 
 def col(label, target):
@@ -107,16 +68,6 @@ def target_rows(reg, name, label, as_json):
     return "\n".join(rows)
 
 
-def walk_targets(reg):
-    if os.environ.get("WK_TARGET"):
-        return os.environ["WK_TARGET"].split()
-    if reg.in_workspace():
-        return [reg.default()]
-    if os.environ.get("WK_NO_DELEGATE"):
-        return [t for t in reg.all() if t not in reg.machines()]
-    return reg.all()
-
-
 def footer(reg, names):
     multi = len(names) > 1
     spaced = False
@@ -147,7 +98,7 @@ def main(argv):
     reg = targets.Registry(ROOT)
     if not continued and not as_json:
         print(FORMAT % ("NAME", "TARGET", "STATE", "BASE", "SNAP", "ARCH", "CHANGES"))
-    names = walk_targets(reg)
+    names = reg.walk()
     try:
         with ThreadPoolExecutor(max_workers=max(1, len(names))) as pool:
             outputs = list(pool.map(lambda n: target_rows(reg, n, label, as_json), names))

@@ -4,15 +4,11 @@ stdout both drop the colour from the table [needs a test]".
 
 Colour is decided in two places, and this drives both directly:
 
-  - lib/status-view.py: `colour = sys.stdout.isatty() and not
-    os.environ.get("NO_COLOR")`, read once per rendering mode (text and the
-    non-text/non-json/non-html/non-web fallback) in `main()`. Lifted as a
-    literal expression (the same technique tests/test_wifi_seed.py's `_lift`
-    uses for a function) so this tracks the real source, not a retyped copy.
-  - lib/common.sh's `status_default_mode`: decides web vs. text for a bare
-    `wk status` with nothing else said, and `NO_COLOR` is one of the signals
-    that keeps it out of the browser (a page has no ANSI to drop, but the
-    same environment that says "no colour" also says "no browser").
+  - wk.statusview.colour_wanted: a terminal on stdout and NO_COLOR unset.
+  - wk.statusview.default_mode: decides web vs. text for a bare `wk status`
+    with nothing else said, and `NO_COLOR` is one of the signals that keeps
+    it out of the browser (a page has no ANSI to drop, but the same
+    environment that says "no colour" also says "no browser").
 
 And end to end: `wk status <name> --text` against a faked, answering machine
 (the technique tests/test_fleet_walk.py uses -- WK_TARGET=remote, a stub
@@ -33,46 +29,26 @@ import json
 import os
 import re
 import tempfile
+import sys
 import types
 import unittest
 
 from tests.support import REPO, WkTest, bash, rand_suffix, run, scratch_dir, stub_path
 
-STATUS_VIEW = REPO / "lib" / "status-view.py"
+sys.path.insert(0, str(REPO / "lib"))
+from wk import statusview  # noqa: E402
 
 ESC = "\033["
 
 
 def _load_status_view():
-    spec = importlib.util.spec_from_file_location("wk_status_view", STATUS_VIEW)
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
+    return statusview
 
 
-def _colour_decision_expr():
-    """The literal `colour = ...` right-hand side, lifted from the source so
-    a change to the expression is what this test tracks, not a retyped
-    copy -- and both occurrences (text mode, the bare-mode fallback) must
-    still agree."""
-    text = STATUS_VIEW.read_text()
-    exprs = re.findall(
-        r'colour = (sys\.stdout\.isatty\(\) and not os\.environ\.get\("NO_COLOR"\))',
-        text,
-    )
-    assert len(exprs) == 2, f"expected the colour decision written twice, found {len(exprs)}"
-    assert exprs[0] == exprs[1], "the two colour decisions in lib/status-view.py have drifted apart"
-    return exprs[0]
 
-
-def _decide(expr, is_tty, no_color_set):
-    fake_sys = types.SimpleNamespace(
-        stdout=types.SimpleNamespace(isatty=lambda: is_tty)
-    )
-    fake_os = types.SimpleNamespace(
-        environ={"NO_COLOR": "1"} if no_color_set else {}
-    )
-    return eval(expr, {"sys": fake_sys, "os": fake_os})
+def _decide(is_tty, no_color_set):
+    stdout = types.SimpleNamespace(isatty=lambda: is_tty)
+    return statusview.colour_wanted(stdout, {"NO_COLOR": "1"} if no_color_set else {})
 
 
 _ANSWERING_SSH = '''#!/bin/sh
@@ -82,22 +58,19 @@ exec bash -c "$last"
 
 
 class TestColourDecisionLiftedDirectly(unittest.TestCase):
-    """lib/status-view.py's own decision, driven with no subprocess and no
-    real tty at all -- so a real tty (which the test harness itself may or
-    may not have) can never make this test flaky in either direction."""
+    """The renderer's own decision, driven with no subprocess and no real
+    tty at all -- so a real tty (which the test harness itself may or may
+    not have) can never make this test flaky in either direction."""
 
     def test_a_real_terminal_with_no_color_unset_gets_colour(self):
-        expr = _colour_decision_expr()
-        self.assertTrue(_decide(expr, is_tty=True, no_color_set=False))
+        self.assertTrue(_decide(is_tty=True, no_color_set=False))
 
     def test_no_color_wins_even_at_a_terminal(self):
-        expr = _colour_decision_expr()
-        self.assertFalse(_decide(expr, is_tty=True, no_color_set=True))
+        self.assertFalse(_decide(is_tty=True, no_color_set=True))
 
     def test_a_redirected_stdout_drops_colour_regardless_of_no_color(self):
-        expr = _colour_decision_expr()
-        self.assertFalse(_decide(expr, is_tty=False, no_color_set=False))
-        self.assertFalse(_decide(expr, is_tty=False, no_color_set=True))
+        self.assertFalse(_decide(is_tty=False, no_color_set=False))
+        self.assertFalse(_decide(is_tty=False, no_color_set=True))
 
 
 def _sample_doc(mod):
@@ -145,25 +118,16 @@ class TestRenderTextHonoursTheColourFlag(unittest.TestCase):
 
 
 class TestStatusDefaultModeStaysOutOfTheBrowser(WkTest):
-    """lib/common.sh's status_default_mode: NO_COLOR is one of the signals
+    """wk.statusview.default_mode: NO_COLOR is one of the signals
     that keeps a bare `wk status` out of --web (a page has nothing to drop,
     but the same "plain output" request applies to both)."""
 
     def _mode(self, env):
-        cp = self.bash(
-            '. "$WK_ROOT/lib/common.sh"\nstatus_default_mode\necho "$WK_STATUS_DEFAULT_MODE"',
-            env=env,
-        )
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        return cp.stdout.strip()
+        return statusview.default_mode(dict(env, HOME="/nonexistent"), True)
 
-    def test_no_color_keeps_it_text_even_with_a_tty_recorded(self):
-        # [ -t 1 ] cannot be forced true from a script with no real tty; this
-        # asserts the NO_COLOR branch is reached and decisive by checking it
-        # is checked *before* WK_STATUS_DEFAULT_MODE could become web -- the
-        # function already returns "text" the instant stdout is not a tty,
-        # which every test harness invocation gives it for free.
+    def test_no_color_keeps_it_text_even_at_a_tty(self):
         self.assertEqual(self._mode({"NO_COLOR": "1"}), "text")
+        self.assertEqual(self._mode({}), "web")
 
     def test_wk_status_view_override_still_wins_over_no_color(self):
         self.assertEqual(

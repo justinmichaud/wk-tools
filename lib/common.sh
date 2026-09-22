@@ -192,35 +192,6 @@ kv_field() {
 }
 
 
-status_render() {
-    local mode="$1" recs="$2"
-    require python3 "python3 renders 'wk status'; it ships with macOS and with every
-    distribution here, so a machine without it is a machine with something else wrong"
-    python3 "$WK_ROOT/lib/status-view.py" "$mode" "$recs" \
-        ${WK_STATUS_PORT:+--port "$WK_STATUS_PORT"} \
-        ${WK_STATUS_INTERVAL:+--interval "$WK_STATUS_INTERVAL"} \
-        ${WK_STATUS_HTML_OUT:+--out "$WK_STATUS_HTML_OUT"}
-}
-
-status_records_strip() { python3 "$WK_ROOT/lib/status-view.py" strip -; }   # stdin to stdout, minus the stream's plan and flush markers
-
-# Sets a variable, not stdout: in `$(...)` fd 1 is a pipe and `[ -t 1 ]` lies.
-status_default_mode() {
-    WK_STATUS_DEFAULT_MODE=text
-    if [ -n "${WK_STATUS_VIEW:-}" ]; then
-        WK_STATUS_DEFAULT_MODE="$WK_STATUS_VIEW"
-        return 0
-    fi
-    [ -t 1 ]               || return 0
-    [ -z "${CI:-}" ]       || return 0
-    [ -z "${NO_COLOR:-}" ] || return 0
-    if command -v in_workspace >/dev/null 2>&1 && in_workspace; then return 0; fi
-    if [ -n "${SSH_CONNECTION:-}${SSH_TTY:-}" ] && [ -z "${DISPLAY:-}" ]; then return 0; fi
-    WK_STATUS_DEFAULT_MODE=web
-    return 0
-}
-WK_STATUS_DEFAULT_MODE=text
-
 # macOS keeps the hostname's capitalisation; ssh aliases and confs are lower.
 WK_BENCH_ACCOUNT="${WK_BENCH_USER:-bench}"
 

@@ -90,11 +90,10 @@ class TestTheRecordCarriesIt(WkTest):
         self.assertIn('task_set "$AB_TASK" subject', (REPO / "cmd" / "ab").read_text())
 
     def test_status_emits_it(self):
-        self.assertIn('rec_opt subject   "$(task_field "$d" subject)"',
-                      (REPO / "cmd" / "status").read_text())
+        self.assertIn('r.opt("subject", t.field("subject"))', (REPO / "lib" / "wk" / "status.py").read_text())
 
     def test_both_renderers_print_it(self):
-        text = (REPO / "lib" / "status-view.py").read_text()
+        text = (REPO / "lib" / "wk" / "statusview.py").read_text()
         self.assertIn('if t.get("subject"):', text)
         self.assertIn("k.subject ?", text)
 
@@ -104,18 +103,11 @@ class TestTheRecordCarriesIt(WkTest):
         above its plan."""
         subject = ("slot base in yocto-p at 6f7bb97a3e06 -- instrumented, "
                    "to collect a profile from -- not a measurement")
-        recs = self.tmp / "records.jsonl"
-        recs.write_text(json.dumps({"kind": "machine", "name": "moose"}) + "\n"
-                        + json.dumps({"kind": "task", "machine": "moose",
-                                      "task": "yocto-x", "task_kind": "yocto",
-                                      "name": "yocto-p", "state": "running",
-                                      "since": "2026-09-16T20:00:00Z",
-                                      "subject": subject, "steps": ["running"],
-                                      "plan": ["wk sysimage webkit ..."],
-                                      "kill": "wk ... --stop"}) + "\n")
-        cp = subprocess.run(["python3", str(REPO / "lib" / "status-view.py"),
-                             "text", str(recs)], capture_output=True, text=True)
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        from tests.test_status import render
+        cp = render([{"kind": "machine", "name": "moose"},
+                     {"kind": "task", "machine": "moose", "task": "yocto-x", "task_kind": "yocto", "name": "yocto-p",
+                      "state": "running", "since": "2026-09-16T20:00:00Z", "subject": subject, "steps": ["running"],
+                      "plan": ["wk sysimage webkit ..."], "kill": "wk ... --stop"}])
         lines = [l.strip() for l in cp.stdout.splitlines() if l.strip()]
         self.assertIn(subject, lines)
         self.assertLess(lines.index(subject), lines.index("[>] wk sysimage webkit ..."))

@@ -695,17 +695,17 @@ class TestTheCycleSaysWhatItIsDoing(WkTest):
     def test_status_asks_the_process_table_rather_than_believing_the_record(self):
         """A cycle whose driver is gone reads `died`, computed at read time:
         lib/task.sh holds no verdict and cmd/status stores none."""
-        fn = func_body((REPO / "cmd" / "status").read_text(), "report_tasks")
-        self.assertIn("task_verdict", fn)
-        self.assertIn("died", fn)
+        fn = (REPO / "lib" / "wk" / "status.py").read_text()
+        self.assertIn('.verdict("capped")', fn)
+        self.assertIn('"died"', fn)
         lib = func_body((REPO / "lib" / "task.sh").read_text(), "task_verdict")
         self.assertIn("task_alive", lib)
         self.assertIn("died", lib)
 
     def test_a_workspace_walk_asks_for_it_once_per_store(self):
-        text = (REPO / "cmd" / "status").read_text()
-        self.assertIn('report_tasks "${2:-}"', text)
-        self.assertIn("_tasks_said", text)
+        text = (REPO / "lib" / "wk" / "status.py").read_text()
+        self.assertIn("self.tasks(records, name)", text)
+        self.assertIn("tasks_said", text)
 
 
 class TestTheProfileGateStandsBeforeTheMeasuredBuild(WkTest):

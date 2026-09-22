@@ -191,10 +191,11 @@ exist.
    drivers are Python (`lib/wk/targets.py`), the remote driver's probe and
    every driver's create and destroy still bridge to `targets/*.sh`. The
    readers port first as the drivers' smallest callers: `ls`, `version`,
-   `logs`, `start` and `disk` are; `status` (with `lib/status-view.py`
-   folded in) and `doctor` follow, then the write side of each driver. Done when
-   `lib/target.sh` and `targets/*.sh` are gone and no bash file parses
-   JSON.
+   `logs`, `start`, `disk` and `status` (the walk in `lib/wk/status.py`, the
+   renderer in `lib/wk/statusview.py`; the boot drivers' probe and the reach
+   probes still bridge to bash) are; `doctor` follows, then the write side
+   of each driver. Done when `lib/target.sh` and `targets/*.sh` are gone and
+   no bash file parses JSON.
 3. **Workspaces.** `new`, `rm`, `build`, `run`, `test`, `enter`, `scp`,
    `sync`, `pr`, `remotes`, `verify`, `ai`, `zed`, `gui`, `profile`. Done
    when `lib/store.sh`'s workspace half is gone and each has a kill-point

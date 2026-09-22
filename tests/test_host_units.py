@@ -504,7 +504,7 @@ class TestTheReportNamesBothServices(WkTest):
     no network and no credential, and both are units this tree's code runs."""
 
     def test_status_reports_each_one_and_asks_whether_it_is_stale(self):
-        text = (REPO / "cmd" / "status").read_text()
+        text = (REPO / "lib" / "wk" / "status.py").read_text()
         for unit in ("wk-proxy.service", "wk-github-inject.service"):
             with self.subTest(unit=unit):
                 self.assertIn(unit, text)

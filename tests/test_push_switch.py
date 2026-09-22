@@ -154,44 +154,29 @@ class TestTheStatusRowIsCredentialsNotThePosition(WkTest):
     """`wk status` reads this machine's own directories; only `wk push status`
     asks the agent and the injector. So the row is named for what it measures
     -- a key on disk is not a thrown switch -- and it names the command that
-    answers the other question.
+    answers the other question."""
 
-    report_health (cmd/status) is lifted and run against a scratch store, with
-    the record helpers lifted from the same file rather than restated: nothing
-    here starts a machine or reads this device's real keys."""
+    FORKS = ("fork", "forkwpe")
 
-    HARNESS = '''
-set -uo pipefail
-. "$WK_ROOT/lib/common.sh"
-. "$WK_ROOT/lib/store.sh"
-. "$WK_ROOT/lib/resources.sh"
-eval "$(sed -n "/^_jesc() {/,/^note_warn()/p" "$WK_ROOT/cmd/status")"
-report_sdk_image() { :; }
-report_tasks() { :; }
-eval "$(sed -n "/^report_health() {/,/^}$/p" "$WK_ROOT/cmd/status")"
-exec 3>&1
-report_health testmachine
-'''
-
-    def _rows(self, keys=(), pat=False, env=None):
+    def _row(self, keys=(), pat=False, in_vm=False):
+        import sys
+        sys.path.insert(0, str(REPO / "lib"))
+        from wk import status
+        from wk.store import Store
         secrets = self.tmp / "store" / "secrets"
         held = self.tmp / "store" / "push-keys"
-        for d in (secrets, held, self.tmp / "store"):
+        for d in (secrets, held):
             d.mkdir(parents=True, exist_ok=True)
         for k in keys:
             (held / f"build_key_{k}").write_text("not-a-key\n")
         if pat:
             (held / "github-pat").write_text("ghp_notatoken\n")
-        e = {"WK_STORE": str(self.tmp / "store"), "WK_HOST_SECRETS": str(secrets)}
-        e.update(env or {})
-        cp = bash(self.HARNESS, env=e)
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        return [json.loads(l) for l in cp.stdout.splitlines() if l.startswith("{")]
+        store = Store({"WK_STORE": str(self.tmp / "store"), "WK_HOST_SECRETS": str(secrets), "HOME": str(self.tmp)})
+        return status.push_record(store, "testmachine", list(self.FORKS), in_vm)
 
-    def _row(self, **kw):
-        rows = [r for r in self._rows(**kw) if r.get("kind") == "switch"]
-        self.assertEqual(1, len(rows), rows)
-        return rows[0]
+    def test_the_forks_are_the_stores_table(self):
+        cp = bash('. lib/common.sh; . lib/store.sh; wk_push_forks | awk \'NF {print $1}\'')
+        self.assertEqual(tuple(cp.stdout.split()), self.FORKS)
 
     def test_the_row_is_named_for_the_credentials_it_read(self):
         row = self._row(keys=("fork", "forkwpe"))
@@ -199,8 +184,6 @@ report_health testmachine
         self.assertIn("'wk push status' says whether they are loaded", row["detail"])
 
     def test_it_never_reports_a_switch_position(self):
-        """`on`/`off` is what `wk push status` answers, from the agent. A row
-        saying either from a file on disk would be a claim nothing measured."""
         for keys in ((), ("fork",), ("fork", "forkwpe")):
             with self.subTest(keys=keys):
                 self.assertNotIn(self._row(keys=keys)["state"], ("on", "off"))
@@ -226,10 +209,7 @@ report_health testmachine
         """The keys are the host's; the VM mounts only the public halves, so a
         row from in there could only ever say `no keys` about a machine that
         holds two."""
-        rows = [r for r in self._rows(keys=("fork", "forkwpe"), env={"WK_IN_VM": "1"})
-                if r.get("kind") == "switch"]
-        self.assertEqual([], rows)
-
+        self.assertIsNone(self._row(keys=("fork", "forkwpe"), in_vm=True))
 
 class TestTheClaudeSessionGate(unittest.TestCase):
     """`wk push on` with a claude session already running in a workspace.

@@ -34,7 +34,6 @@ TOUCHED = [
     "targets/remote.sh",
     "targets/vm.sh",
     "cmd/sync",
-    "cmd/status",
     "cmd/remote",
 ]
 
@@ -441,33 +440,13 @@ class TestGuestStartConverges(unittest.TestCase):
 
 
 class TestStatusToolsRow(unittest.TestCase):
-    """cmd/status's wk-tools row for a machine across ssh: every copy is
+    """`wk status`'s wk-tools row for a machine across ssh: every copy is
     compared by commit -- a checkout's own, or, in the podman VM, this very
-    checkout mounted in. A `-` sha is neither, and is never in sync.
-
-    report_machine is lifted with its one helper and driven against a stubbed
-    `t_wk version`, so no machine is reached and no record writer is faked
-    beyond printing what it was handed."""
-
-    LIFT = subprocess.run(
-        ["sed", "-n", "/^sha_matches()/,/^}/p;/^report_machine()/,/^}/p",
-         str(REPO / "cmd" / "status")],
-        capture_output=True, text=True).stdout
-
-    STUBS = """
-rec_start() { printf 'kind=%s\\n' "$1"; }
-rec_set()   { printf '%s=%s\\n' "$1" "${2:-}"; }
-rec_opt()   { [ -n "${2:-}" ] && rec_set "$1" "$2"; return 0; }
-rec_json()  { printf '%s=%s\\n' "$1" "$2"; }
-rec_emit()  { printf 'emit\\n'; }
-this_machine() { printf fakebox; }
-default_target() { printf container; }
-t_has_wk() { return 0; }
-WK_TARGET_KIND=remote
-_group_machine=fakebox
-"""
+    checkout mounted in. A `-` sha is neither, and is never in sync."""
 
     def setUp(self):
+        import sys
+        sys.path.insert(0, str(REPO / "lib"))
         self.tmp = Path(tempfile.mkdtemp(prefix="wk-test-toolsrow-"))
         self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
         self.src = self.tmp / "src"
@@ -479,60 +458,39 @@ _group_machine=fakebox
         self.short = git(self.src, "rev-parse", "--short", "HEAD").stdout.strip()
         self.full = git(self.src, "rev-parse", "HEAD").stdout.strip()
 
-    def row(self, ver, extra=""):
-        cp = bash(
-            f'. "{REPO}/lib/common.sh"\n'
-            + self.STUBS
-            + 't_wk() { case "$1" in version) printf %s '
-            + shlex.quote(ver) + ' ;; esac; }\n'
-            + self.LIFT
-            + f'WK_ROOT={self.src}\n' + extra
-            + 'report_machine fakebox\n'
-        )
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        out = {}
-        for line in cp.stdout.splitlines():
-            if "=" in line:
-                k, v = line.split("=", 1)
-                out[k] = v
-        return out
+    def row(self, ver, in_vm=False):
+        from wk import status
+        fields = dict(l.split("=", 1) for l in ver.splitlines() if "=" in l)
+        return status.tools_fact(fields, self.short, "fakebox", "fakebox", in_vm=in_vm)
 
     def test_a_checkout_at_this_trees_commit_reads_in_sync(self):
         row = self.row(f"sha={self.full}\ndirty=no\n")
-        self.assertEqual(row["sha"], self.full)
-        self.assertEqual(row["expect"], self.short)
-        self.assertEqual(row["insync"], "true")
+        self.assertEqual((row["sha"], row["expect"], row["insync"]), (self.full, self.short, True))
         self.assertNotIn("fix", row)
 
     def test_a_checkout_at_another_commit_differs_and_names_the_push(self):
         row = self.row("sha=0000000\ndirty=no\n")
-        self.assertEqual(row["sha"], "0000000")
-        self.assertEqual(row["expect"], self.short)
-        self.assertEqual(row["insync"], "false")
+        self.assertEqual((row["sha"], row["expect"], row["insync"]), ("0000000", self.short, False))
         self.assertEqual(row["fix"], "wk sync --tools fakebox")
 
     def test_a_dirty_checkout_over_there_is_reported_as_dirty(self):
         row = self.row(f"sha={self.short}\ndirty=yes\n")
-        self.assertEqual(row["dirty"], "true")
-        self.assertEqual(row["insync"], "true")
+        self.assertEqual((row["dirty"], row["insync"]), (True, True))
 
     def test_a_copy_with_no_commit_is_never_in_sync(self):
-        # A `-` sha is neither a checkout nor the podman VM's mount of this
-        # one: it is always DIFFERS, whatever files happen to be there.
-        row = self.row("sha=-\ndirty=unknown\n", extra="WK_IN_VM=1\n")
-        self.assertEqual(row["insync"], "false")
-        self.assertEqual(row["fix"],
-                         "./setup   (recreates the machine with this checkout mounted at /opt/wk-tools)")
+        row = self.row("sha=-\ndirty=unknown\n", in_vm=True)
+        self.assertEqual(row["insync"], False)
+        self.assertEqual(row["fix"], "./setup   (recreates the machine with this checkout mounted at /opt/wk-tools)")
 
     def test_reporting_reaches_no_machine_and_syncs_nothing(self):
         """Read-only: the row is built from a question (`wk version` over
         there), and no statement in the path can write anything."""
-        code = "\n".join(l for l in self.LIFT.splitlines()
-                         if not l.lstrip().startswith("#"))
+        import inspect
+        from wk import status
+        code = inspect.getsource(status.tools_fact) + inspect.getsource(status.Walk.report_machine)
         for writer in ("tools_push", "t_sync", "rsync", "rev-parse HEAD --"):
             self.assertNotIn(writer, code, f"the status path runs {writer}")
-        self.assertIn("t_wk version", code)
-
+        self.assertIn('wk("version"', code)
 
 if __name__ == "__main__":
     unittest.main()

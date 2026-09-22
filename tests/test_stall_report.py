@@ -100,10 +100,9 @@ _stall_report /dev/null 301
     def test_the_status_report_leaves_the_verdict_to_the_evidence(self):
         """The log's age is not evidence of a stall, so the verdict belongs
         to the report that takes the process reading."""
-        text = (REPO / "cmd" / "status").read_text()
+        text = (REPO / "lib" / "wk" / "status.py").read_text()
         self.assertNotIn("likely stalled or killed", text)
-        self.assertIn('note_warn "no log output for ${_age:-?}s', text)
-        self.assertIn("counted as busy, since nothing", text)
+        self.assertIn('"no log output for %ss -- counted as busy, since nothing', text)
 
 
 if __name__ == "__main__":

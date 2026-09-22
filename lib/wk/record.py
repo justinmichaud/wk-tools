@@ -12,6 +12,12 @@ from wk.clock import Clock
 from wk.store import Store
 
 RUNNING = ("starting", "running", "silent", "unanswered")
+ERROR = re.compile(r"(^FAILED:|^error:|: error:|: fatal error:|ninja: build stopped|No such file or directory)")
+NOT_ERROR = re.compile(r"Performing Test|-- Failed|check for working|(^|[: ])warning:")
+PROGRESS = (re.compile(r"\[[0-9]+/[0-9]+\]"),
+            re.compile(r"Start the iteration ([0-9]+) of ([0-9]+)"),
+            re.compile(r"^(CompileC|CompileSwiftSources|SwiftCompile|SwiftDriver|Ld|Libtool|CodeSign|ScanDependencies"
+                       r"|ProcessInfoPlistFile|GenerateDSYMFile) ([^ ]+)", re.M))
 STEP_EVENTS = {"start": "running", "ok": "done", "already": "done", "failed": "failed",
                "skipped": "skipped", "unneeded": "skipped", "refused": "pending"}
 _STAMP = re.compile(r"^\d{8}T\d{6}Z$")
@@ -31,6 +37,58 @@ def machine_name(env=None):
         return env["WK_ROW_LABEL"]
     cp = subprocess.run(["hostname", "-s"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
     return (cp.stdout.strip() or "here").lower()
+
+
+def normalised(path):
+    """A build log with ninja's carriage-return progress split into lines."""
+    with open(path, errors="replace") as f:
+        return f.read().replace("\r", "\n")
+
+
+def first_error(path):
+    """Up to five `line:text` rows naming the first errors in a log."""
+    out = []
+    try:
+        lines = normalised(path).split("\n")
+    except OSError:
+        return out
+    for n, line in enumerate(lines, 1):
+        if ERROR.search(line) and not NOT_ERROR.search(line):
+            out.append("%d:%s" % (n, line))
+            if len(out) == 5:
+                break
+    return out
+
+
+def progress_line(path):
+    """What the last 64 KiB of a log says it reached: a ninja step, a benchmark iteration, an Xcode phase."""
+    try:
+        with open(path, "rb") as f:
+            f.seek(0, 2)
+            f.seek(max(0, f.tell() - 65536))
+            tail = f.read().decode(errors="replace").replace("\r", "\n")
+    except OSError:
+        return ""
+    m = None
+    for m in PROGRESS[0].finditer(tail):
+        pass
+    if m:
+        return m.group(0)
+    for m in PROGRESS[1].finditer(tail):
+        pass
+    if m:
+        return "iteration %s/%s" % (m.group(1), m.group(2))
+    for m in PROGRESS[2].finditer(tail):
+        pass
+    return "%s %s" % (m.group(1), os.path.basename(m.group(2))) if m else ""
+
+
+def log_age(path, clock):
+    """Whole seconds since the log was written, or None where there is no log."""
+    try:
+        return int(clock.now() - os.path.getmtime(path))
+    except (OSError, TypeError):
+        return None
 
 
 def _put(path, value):

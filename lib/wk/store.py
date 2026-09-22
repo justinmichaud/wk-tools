@@ -2,6 +2,22 @@
 rules lib/store.sh spells, read from the same variables."""
 
 import os
+import re
+import subprocess
+
+
+def lock_holder_pid(path):
+    """The pid in a lock's payload (a symlink target or a payload file), or None."""
+    try:
+        line = os.readlink(path)
+    except OSError:
+        try:
+            with open(os.path.join(path, "payload")) as f:
+                line = f.read()
+        except OSError:
+            return None
+    m = re.search(r"pid=(\d+)", line)
+    return int(m.group(1)) if m else None
 
 
 class Store:
@@ -17,6 +33,14 @@ class Store:
 
     def state_dir(self):
         return os.path.join(self.env.get("XDG_STATE_HOME") or os.path.join(self.home(), ".local", "state"), "wk")
+
+    def lock_dir(self):
+        return self.env.get("WK_LOCK_DIR") or os.path.join(self.state_dir(), "locks")
+
+    def lock_path(self, resource):
+        cp = subprocess.run(["hostname", "-s"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+        host = cp.stdout.strip() or "local"
+        return os.path.join(self.lock_dir(), "%s@%s.lock" % (resource, host))
 
     def default(self):
         """The store a machine uses when none is named."""

@@ -8,9 +8,12 @@ import sys
 LIBS = ("lib/common.sh", "lib/target.sh", "lib/store.sh")
 
 
+def prelude(root):
+    return "".join('. "%s/%s"\n' % (root, lib) for lib in LIBS)
+
+
 def _script(fn, root):
-    src = "".join('. "%s/%s"\n' % (root, lib) for lib in LIBS)
-    return src + fn + ' "$@"\n'
+    return prelude(root) + fn + ' "$@"\n'
 
 
 def ask(root, fn, *args, env=None):
@@ -79,9 +82,10 @@ def machine_answers(root, machine):
     return cp.returncode == 0, cp.stdout
 
 
-def machine_wk(root, machine, *args):
+def machine_wk(root, machine, *args, env=None, quiet=False):
     cp = subprocess.run(["bash", "-c", _script("load_target %s >/dev/null 2>&1; t_wk" % sh_quote(machine), root),
-                         "wk", *args], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+                         "wk", *args], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL if quiet else subprocess.STDOUT,
+                        text=True, env=env or os.environ)
     return cp.returncode, cp.stdout
 
 

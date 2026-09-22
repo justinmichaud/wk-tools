@@ -13,7 +13,6 @@
 
 import glob
 import os
-import re
 import sys
 
 ROOT = os.environ.get("WK_ROOT") or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -21,9 +20,7 @@ sys.path.insert(0, os.path.join(ROOT, "lib"))
 
 from wk import shell, targets  # noqa: E402
 from wk.act import Refused, die, info, log  # noqa: E402
-
-ERROR = re.compile(r"(^FAILED:|^error:|: error:|: fatal error:|ninja: build stopped|No such file or directory)")
-NOT_ERROR = re.compile(r"Performing Test|-- Failed|check for working|(^|[: ])warning:")
+from wk.record import first_error, normalised  # noqa: E402
 
 # The readings travel beside the products (build/mac-pgo.sh's `_pgo_evidence`), read from the build
 # the workspace holds now, on the machine holding it, each verdict re-derived by its own checker.
@@ -48,21 +45,6 @@ done
 collects them (build/mac-pgo.sh beside the products, image/pgo.sh under
 wk-pgo/); every other build has no gates.\n' "$SRC"
 '''
-
-
-def normalised(path):
-    with open(path, errors="replace") as f:
-        return f.read().replace("\r", "\n")
-
-
-def first_error(path):
-    out = []
-    for n, line in enumerate(normalised(path).split("\n"), 1):
-        if ERROR.search(line) and not NOT_ERROR.search(line):
-            out.append("%d:%s" % (n, line))
-            if len(out) == 5:
-                break
-    return out
 
 
 def resolve_log(target, name):

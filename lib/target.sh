@@ -22,8 +22,7 @@ t_sync_tools() { :; }               # push wk-tools in; nothing when it is bind-
 t_sync()       { :; }               # refresh this target's furniture: its tooling copy, and its store
 t_prefetch()   { :; }                # ask this target whatever a report will need
 
-# Three lines, any may be empty: remote name, its url there, ssh config to use.
-t_wiring_args() { printf '\n\n\n'; }
+t_wiring_args() { printf '\n\n\n'; }   # remote name, its url there, ssh config to use; any may be empty
 t_ssh_host()   { echo "wk-$1"; }    # ssh destination, for Zed and the generated alias
 
 t_ssh_prepare() { :; }   # point an editor at this target over ssh; nothing for one already an ssh destination
@@ -787,40 +786,4 @@ load_target() {
     fi
     # shellcheck disable=SC1090
     . "$WK_ROOT/targets/$kind.sh"
-}
-
-ws_image_base() { # <ws> -- CFG_RELEASE from image/configs/<profile>.conf
-    local profile
-    case "$1" in
-        yocto-*)     profile="${1#yocto-}" ;;
-        buildroot-*) profile="${1#buildroot-}" ;;
-        *) return 1 ;;
-    esac
-    awk -F= '/^CFG_RELEASE=/ { print $2; found=1 } END { exit !found }' \
-        "$WK_ROOT/image/configs/$profile.conf" 2>/dev/null
-}
-
-# Run with $PWD inside the checkout, and shipped in by `declare -f`.
-ws_upstream_line() { # `main`, a release like `2.52`, or `?` when unsure
-    _u=$(git rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null) || _u=''
-    _b=''
-    if [ -n "$_u" ]; then
-        _br=${_u#*/}
-        case "$_br" in
-            main) _b=main ;;
-            webkitglib/*) _b=${_br#webkitglib/} ;;
-        esac
-    fi
-    if [ -z "$_b" ]; then
-        _rel=$(git for-each-ref --format='%(refname)' \
-                --contains HEAD 'refs/remotes/*/webkitglib/*' 2>/dev/null \
-                | sed 's#.*/webkitglib/##' | sort -t. -k1,1n -k2,2n | tail -1)
-        if [ -n "$_rel" ]; then
-            _b=$_rel
-        elif git for-each-ref --format='%(refname)' \
-                --contains HEAD 'refs/remotes/*/main' 2>/dev/null | grep -q .; then
-            _b=main
-        fi
-    fi
-    printf '%s' "${_b:-?}"
 }

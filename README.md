@@ -582,7 +582,8 @@ inside a container).
 **Credentials and the tailnet** — `WK_PUSH_AGENT_SOCK`, `WK_PUSH_PAT_FILE`,
 `WK_PUSH_READ_PAT_FILE`, `WK_PUSH_BUGZILLA_KEY_FILE`, `WK_TS_AUTHKEY`,
 `WK_TS_API_SECRET`, `WK_IMAGE_KEY`, `WK_ANY_ROOT`, `WK_TAILSCALE_TIMEOUT`,
-`WK_SOFTNET_BIN`, `WK_PROBE_SECONDS` (how long a build machine's probe may take).
+`WK_SOFTNET_BIN`, `WK_PROBE_SECONDS` (how long a build machine's probe may take),
+`WK_SSH_TIMEOUT` (ssh's connect timeout on every hop, default 10).
 
 **Waiting and reporting** — `WK_READY_TIMEOUT`, `WK_READY_WAIT`,
 `WK_POLL_SECONDS`, `WK_HEARTBEAT_SECONDS`, `WK_STATUS_PORT`,

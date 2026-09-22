@@ -1,13 +1,8 @@
-#!/usr/bin/env python3
-"""status-view.py <text|json|html|web|strip> <records-file> [--port N] [--interval S] [--out FILE]
-
-Input is the stream `wk status` collects, one JSON object per line from several
-processes at once; every view, `--json` included, draws the one merged document.
-Two records are the stream's own: `{"kind":"plan","jobs":[{"job":..,"machine":..},
-..]}` names every job and its machine first, and `{"kind":"flush","job":..}` ends
-one, so a machine's block is drawn when its last job has flushed, not from what
-happened to arrive. `strip -` drops both: a remote's markers would end this walk.
-"""
+"""`wk status` rendering: one merged document from the record stream the
+collector (wk.status) produces, drawn as text, JSON, a static page or a
+served one. Two records are the stream's own: `plan` names every job and
+its machine, `flush` ends one, so a machine's block is drawn when its last
+job has flushed."""
 
 import http.server
 import json
@@ -18,25 +13,71 @@ import threading
 import time
 import webbrowser
 
-MARKERS = ("plan", "flush")   # the stream's own records, not the document's
+MARKERS = ("plan", "flush")
 
 
-def strip_markers(fh, out):
-    for line in fh:
+def default_mode(env, isatty):
+    """The view a bare `wk status` gets: the page at a terminal that has a
+    browser to open, the table everywhere else."""
+    if env.get("WK_STATUS_VIEW"):
+        return env["WK_STATUS_VIEW"]
+    if not isatty or env.get("CI") or env.get("NO_COLOR"):
+        return "text"
+    if os.path.isfile(env.get("WK_MARKER") or os.path.join(env.get("HOME", ""), ".wk-workspace")):
+        return "text"
+    if (env.get("SSH_CONNECTION") or env.get("SSH_TTY")) and not env.get("DISPLAY"):
+        return "text"
+    return "web"
+
+
+def colour_wanted(stdout=None, env=None):
+    stdout = sys.stdout if stdout is None else stdout
+    env = os.environ if env is None else env
+    try:
+        tty = stdout.isatty()
+    except (AttributeError, ValueError):
+        tty = False
+    return bool(tty and not env.get("NO_COLOR"))
+
+
+def dumps(rec):
+    return json.dumps(rec, separators=(",", ":"))
+
+
+def parse_record(line):
+    line = line.strip()
+    if not line or not line.startswith("{"):
+        return None
+    try:
+        return json.loads(line)
+    except json.JSONDecodeError as exc:
+        raise ValueError(line[:120]) from exc
+
+
+def records_from_lines(lines):
+    """Records out of JSON lines; an unreadable line is reported and skipped."""
+    for line in lines:
         try:
             r = parse_record(line)
-        except ValueError:
-            out.write(line)   # left for the renderer, which reports an unreadable record
+        except ValueError as exc:
+            print("wk status: unreadable record: %s" % exc, file=sys.stderr)
             continue
-        if r is not None and r.get("kind") in MARKERS:
-            continue
-        out.write(line)
+        if r is not None:
+            yield r
+
+
+def strip_markers(records):
+    for r in records:
+        if r.get("kind") not in MARKERS:
+            yield r
 
 
 class Merger:
-    # Records -> one document, grouped machine / method / workspace, in arrival
-    # order. `merge` and the streaming renderer both fold over this, and two
-    # reports of one machine merge.
+    """Records -> one document, grouped machine / method / workspace, in arrival order."""
+
+    PER_MACHINE = ("fact", "raw", "disk", "service", "lock", "switch", "capacity", "bench", "task", "sdk")
+    LISTS = {"fact": "facts", "raw": "raw", "disk": "disk", "service": "services", "lock": "locks",
+             "switch": "switches", "capacity": "capacity", "bench": "bench", "task": "tasks", "sdk": "sdk"}
 
     def __init__(self):
         self.doc = {"machines": [], "fleet": [], "bridges": [], "exit": 0}
@@ -60,127 +101,49 @@ class Merger:
         return g
 
     def feed(self, r):
-        # Returns the machine, or None for fleet/bridge/exit and for a marker.
+        """The machine the record belongs to, or None."""
         kind = r.get("kind")
         if kind == "machine":
             m = self.machine(r["name"])
             m["self"] = m["self"] or bool(r.get("self"))
-            # Kept from whichever half knew it: losing these is invisible.
             for k in ("tailnet", "direct", "conf"):
                 if r.get(k) and not m.get(k):
                     m[k] = r[k]
             return m["name"]
-        elif kind == "workspace":
+        if kind == "workspace":
             name = r.get("machine", "?")
-            self.method(self.machine(name), r.get("method", "?"))[
-                "workspaces"
-            ].append(r)
+            self.method(self.machine(name), r.get("method", "?"))["workspaces"].append(r)
             return name
-        elif kind == "fact":
+        if kind in self.PER_MACHINE:
             name = r.get("machine", "?")
-            self.machine(name)["facts"].append(r)
+            self.machine(name)[self.LISTS[kind]].append(r)
             return name
-        elif kind == "raw":
-            name = r.get("machine", "?")
-            self.machine(name)["raw"].append(r)
-            return name
-        elif kind == "disk":
-            name = r.get("machine", "?")
-            self.machine(name)["disk"].append(r)
-            return name
-        elif kind == "service":
-            name = r.get("machine", "?")
-            self.machine(name)["services"].append(r)
-            return name
-        elif kind == "lock":
-            name = r.get("machine", "?")
-            self.machine(name)["locks"].append(r)
-            return name
-        elif kind == "switch":
-            name = r.get("machine", "?")
-            self.machine(name)["switches"].append(r)
-            return name
-        elif kind == "capacity":
-            # Per reporter: on a macOS host the VM and the Mac each answer.
-            name = r.get("machine", "?")
-            m = self.machine(name)
-            if m.get("capacity") is None:
-                m["capacity"] = []
-            m["capacity"].append(r)
-            return name
-        elif kind == "bench":
-            name = r.get("machine", "?")
-            self.machine(name)["bench"].append(r)
-            return name
-        elif kind == "task":
-            name = r.get("machine", "?")
-            self.machine(name)["tasks"].append(r)
-            return name
-        elif kind == "sdk":
-            name = r.get("machine", "?")
-            self.machine(name)["sdk"].append(r)
-            return name
-        elif kind == "fleet":
+        if kind == "fleet":
             self.doc["fleet"].append(r)
-            return None
         elif kind == "bridge":
             self.doc["bridges"].append(r)
-            return None
         elif kind == "exit":
             self.doc["exit"] = max(self.doc["exit"], int(r.get("code", 0)))
-            return None
         return None
 
 
-def parse_record(line):
-    line = line.strip()
-    if not line or not line.startswith("{"):
-        return None
-    try:
-        return json.loads(line)
-    except json.JSONDecodeError as exc:
-        raise ValueError(line[:120]) from exc
-
-
-def merge(lines):
+def merge(records):
     merger = Merger()
-    for line in lines:
-        try:
-            r = parse_record(line)
-        except ValueError as exc:
-            print("wk status: unreadable record: %s" % exc, file=sys.stderr)
-            continue
-        if r is None or r.get("kind") in MARKERS:
-            continue  # a one-shot read has no use for the stream's markers
+    for r in strip_markers(records):
         merger.feed(r)
     return merger.doc
 
 
 def read_doc(path):
     with open(path, encoding="utf-8", errors="replace") as fh:
-        return merge(fh)
+        return merge(records_from_lines(fh))
 
 
 GOOD = ("ok", "present", "running", "host mode", "up", "bench", "open", "complete")
-BUSY = ("creating", "starting", "building", "fixing", "no", "empty", "held",
-        "silent",
-        # A board on its base image is not a bench system.
-        "base", "role")
-BAD = (
-    "unhealthy",
-    "incomplete",   # a task that stopped before every step of its plan ended
-    "died",         # a pid that no longer answers, with no exit recorded
-    "unanswered",   # the workspace holding the pid did not say in time
-    "failed",
-    "oom",
-    "stalled",
-    "broken",
-    "unreachable",
-    "gave-up",
-    "error", "closed",
-)
-IDLE = ("absent", "none", "stopped", "exited", "-", "clean", "finished", "off",
-        "cancelled")
+BUSY = ("creating", "starting", "building", "fixing", "no", "empty", "held", "silent", "base", "role")
+BAD = ("unhealthy", "incomplete", "died", "unanswered", "failed", "oom", "stalled", "broken",
+       "unreachable", "gave-up", "error", "closed")
+IDLE = ("absent", "none", "stopped", "exited", "-", "clean", "finished", "off", "cancelled")
 
 
 def severity(word):
@@ -196,7 +159,7 @@ def severity(word):
     return ""
 
 
-def sub_text(sub):   # one workspace's build state, for a table cell
+def sub_text(sub):
     out = "%s=%s" % (sub.get("kind", "?"), sub.get("state", "?"))
     if sub.get("config"):
         out += " (%s)" % sub["config"]
@@ -204,22 +167,13 @@ def sub_text(sub):   # one workspace's build state, for a table cell
 
 
 RESET = "\033[0m"
-ANSI = {
-    "good": "\033[32m",
-    "busy": "\033[33m",
-    "bad": "\033[31m",
-    "idle": "\033[2m",
-    "": "",
-    "bold": "\033[1m",
-    "dim": "\033[2m",
-    "head": "\033[1;36m",
-}
+ANSI = {"good": "\033[32m", "busy": "\033[33m", "bad": "\033[31m", "idle": "\033[2m", "": "",
+        "bold": "\033[1m", "dim": "\033[2m", "head": "\033[1;36m"}
 
-# `work` exists nowhere else; `base` is the upstream line: main, or 2.52.
 COLUMNS = ("workspace", "state", "branch", "base", "work", "snap", "build")
 
 
-def ws_work(ws):   # what a `wk rm` would take with it
+def ws_work(ws):
     bits = []
     if ws.get("unpushed"):
         bits.append("%s unpushed" % ws["unpushed"])
@@ -233,50 +187,36 @@ def ws_work(ws):   # what a `wk rm` would take with it
 
 
 def ws_work_hue(ws):
-    if ws.get("unpushed") or ws.get("dirty"):
-        return "busy"
-    return "idle"
+    return "busy" if ws.get("unpushed") or ws.get("dirty") else "idle"
 
 
 def ws_branch(ws, cap=40):
-    # Capped: one 78-character WebKit bug branch pushes BUILD off the terminal.
     b = ws.get("branch") or "-"
     if len(b) > cap:
-        b = b[: cap - 1] + "\u2026"
+        b = b[: cap - 1] + "…"
     if ws.get("behind"):
-        b += " \u2193%s" % ws["behind"]
+        b += " ↓%s" % ws["behind"]
     if ws.get("ahead"):
-        b += " \u2191%s" % ws["ahead"]
+        b += " ↑%s" % ws["ahead"]
     return b
 
 
 def ws_snap(ws):
-    # A workspace is pinned to the snapshot it was made on; `wk sync` cannot move it.
     n = ws.get("snap_behind")
     return "-%s" % n if n else ""
 
 
 def ws_cells(ws):
     subs = ws.get("subs") or []
-    return [
-        ws.get("name", "?"),
-        ws.get("state", "?"),
-        ws_branch(ws),
-        ws.get("base") or "?",
-        ws_work(ws),
-        ws_snap(ws),
-        sub_text(subs[0]) if subs else "",
-    ]
+    return [ws.get("name", "?"), ws.get("state", "?"), ws_branch(ws), ws.get("base") or "?",
+            ws_work(ws), ws_snap(ws), sub_text(subs[0]) if subs else ""]
 
 
 def ws_hues(ws):
     subs = ws.get("subs") or []
-    return {
-        1: severity(ws.get("state")),
-        4: ws_work_hue(ws),
-        5: "busy" if ws.get("snap_behind") else "",
-        6: severity(subs[0].get("state")) if subs else "",
-    }
+    return {1: severity(ws.get("state")), 4: ws_work_hue(ws),
+            5: "busy" if ws.get("snap_behind") else "",
+            6: severity(subs[0].get("state")) if subs else ""}
 
 
 def gb(mb):
@@ -292,12 +232,10 @@ def disk_hue(pct):
         pct = int(pct)
     except (TypeError, ValueError):
         return ""
-    # A WebKit build tree is tens of gigabytes, so 90% may not hold the next.
     return "bad" if pct >= 90 else "busy" if pct >= 75 else "good"
 
 
 def load_hue(load, cores):
-    # Against cores: 8 is idle on a 64-core build box and desperate on a Pi.
     try:
         load, cores = float(load), int(cores)
     except (TypeError, ValueError):
@@ -317,15 +255,11 @@ def sdk_verdict(s):
 
 
 def sdk_line(s, colour):
-    return "%s pulled %s; upstream %s" % (
-        s.get("tag") or "?",
-        s.get("pulled") or "?",
-        paint(*sdk_verdict(s), colour),
-    )
+    return "%s pulled %s; upstream %s" % (s.get("tag") or "?", s.get("pulled") or "?",
+                                          paint(*sdk_verdict(s), colour))
 
 
 def where_word(obj):
-    # The record carries "in the podman VM"; a column heading wants the word.
     return (obj.get("where") or "").replace("in the ", "").replace("the ", "")
 
 
@@ -335,23 +269,19 @@ def paint(text, key, colour):
     return "%s%s%s" % (ANSI[key], text, RESET)
 
 
-# Buffered, not formatted: the column width waits on the section's last label.
 class Kv(tuple):
     __slots__ = ()
 
 
 def row(cells, widths, hues, colour):
-    # All but the last: with colour on, trailing spaces precede the reset.
     hues = hues or {}
     last = len(cells) - 1
-    return "    " + "  ".join(
-        paint(c if i == last else c.ljust(widths[i]), hues.get(i, ""), colour)
-        for i, c in enumerate(cells)
-    )
+    return "    " + "  ".join(paint(c if i == last else c.ljust(widths[i]), hues.get(i, ""), colour)
+                             for i, c in enumerate(cells))
 
 
 class Writer:
-    # A heading, label/value lines `align` squares up, reachability, notes.
+    """A heading, label/value lines `align` squares up, reachability, notes."""
 
     def __init__(self, colour):
         self.colour = colour
@@ -359,14 +289,12 @@ class Writer:
 
     def heading(self, name, tag=""):
         self.out.append("")
-        self.out.append(paint(name, "head", self.colour)
-                         + (paint("   " + tag, "dim", self.colour) if tag else ""))
+        self.out.append(paint(name, "head", self.colour) + (paint("   " + tag, "dim", self.colour) if tag else ""))
 
     def kv(self, label, value, indent="  "):
         self.out.append(Kv((indent, label, value)))
 
     def align(self, start):
-        # The widest label but never under 14, so short sections still line up.
         labels = [k[1] for k in self.out[start:] if isinstance(k, Kv)]
         if not labels:
             return
@@ -390,22 +318,17 @@ class Writer:
         for n in items or []:
             hue = "busy" if n.get("level") == "warn" else "dim"
             for i, text in enumerate(n.get("text", "").split("\n")):
-                self.out.append(indent + paint(("! " if i == 0 and hue == "busy" else "  ")
-                                          + text.strip(), hue, self.colour))
+                self.out.append(indent + paint(("! " if i == 0 and hue == "busy" else "  ") + text.strip(), hue, self.colour))
 
 
-# The one renderer for a long-running command, whatever wrote the record: its progress against the plan it declared, what stops it, and where it says so.
 LIVE = ("running", "silent", "starting")
-
-STEP_MARKS = {"done": ("[x]", "good"), "failed": ("[!]", "bad"),
-              "skipped": ("[-]", "dim"), "pending": ("[ ]", "dim")}
+STEP_MARKS = {"done": ("[x]", "good"), "failed": ("[!]", "bad"), "skipped": ("[-]", "dim"), "pending": ("[ ]", "dim")}
 
 
 def step_mark(step_state, task_state):
     if task_state == "ok":
         return STEP_MARKS["done"]
     if step_state == "running":
-        # Where it stopped: a plan of empty boxes hides which step ended it.
         return ("[>]", "busy") if task_state in LIVE else ("[!]", "bad")
     return STEP_MARKS.get(step_state, STEP_MARKS["pending"])
 
@@ -413,10 +336,9 @@ def step_mark(step_state, task_state):
 def render_task(wr, t, colour):
     state = t.get("state", "?")
     head = "%s  %s" % (paint(state, severity(state), colour),
-                       paint("%s  since %s" % (t.get("machine", "?"), t.get("since", "?")),
-                             "dim", colour))
+                       paint("%s  since %s" % (t.get("machine", "?"), t.get("since", "?")), "dim", colour))
     wr.kv("%s %s" % (t.get("task_kind", "task"), t.get("name", "?")), head)
-    if t.get("subject"):   # which slot, which commit, and which of the builds a profile-guided release makes (image_build_subject)
+    if t.get("subject"):
         wr.out.append("      " + paint(t["subject"], "dim", colour))
     plan = t.get("plan") or []
     steps = t.get("steps") or []
@@ -425,30 +347,30 @@ def render_task(wr, t, colour):
         wr.out.append("      " + paint("%s %s" % (mark, line), hue, colour))
     if state == "died":
         rc = t.get("exit")
-        wr.out.append("      " + paint(
-            "died -- %s" % ("exit %s" % rc if rc else "no exit recorded"), "bad", colour))
+        wr.out.append("      " + paint("died -- %s" % ("exit %s" % rc if rc else "no exit recorded"), "bad", colour))
     if t.get("holds"):
         wr.out.append("      " + paint("holds: %s" % t["holds"], "dim", colour))
-    wr.out.append("      " + paint("kill: %s" % t.get("kill", "?"),
-                                   "dim", colour))
-    if t.get("log"):   # a command that writes to the terminal it was started in has no log of its own
+    wr.out.append("      " + paint("kill: %s" % t.get("kill", "?"), "dim", colour))
+    if t.get("log"):
         wr.out.append("      " + paint("log:  %s" % t["log"], "dim", colour))
 
 
-def render_machine_block(m, colour, widths=None):
-    # widths=None is the streaming renderer, aligned within a machine only.
-    w = widths
-    if w is None:
-        w = [len(h) for h in COLUMNS]
+def column_widths(machines):
+    w = [len(h) for h in COLUMNS]
+    for m in machines:
         for g in m["methods"]:
             for ws in g["workspaces"]:
                 for i, c in enumerate(ws_cells(ws)):
                     w[i] = max(w[i], len(c))
+    return w
 
+
+def render_machine_block(m, colour, widths=None):
+    w = widths if widths is not None else column_widths([m])
     wr = Writer(colour)
     out = wr.out
     wr.heading(m["name"], "this machine" if m.get("self") else "")
-    _machine_start = len(out)
+    start = len(out)
     wr.meta(m)
 
     if not any(g["workspaces"] for g in m["methods"]) and not m["raw"]:
@@ -467,8 +389,7 @@ def render_machine_block(m, colour, widths=None):
                 out.append("      " + paint(sub_text(sub), severity(sub.get("state")), colour))
             wr.notes(ws.get("notes"))
 
-    # Apart from its workspaces: every line here breaks a build or costs work.
-    if any(m.get(k) for k in ("disk", "sdk", "services", "switches", "capacity", "locks", "tasks")) or m.get("bench"):
+    if any(m.get(k) for k in ("disk", "sdk", "services", "switches", "capacity", "locks", "tasks", "bench")):
         out.append("")
     for d in m.get("disk") or []:
         tail = ""
@@ -477,9 +398,8 @@ def render_machine_block(m, colour, widths=None):
             if d.get("reclaimable") and d["reclaimable"] != "0":
                 tail += paint(", %s reclaimable (wk gc)" % d["reclaimable"], "busy", colour)
         wr.kv("disk" + (" (%s)" % where_word(d) if where_word(d) else ""),
-              "%s used   %s free of %s%s"
-              % (paint((d.get("used_pct", "?") or "?") + "%", disk_hue(d.get("used_pct")), colour),
-                 gb(d.get("free_mb")), gb(d.get("total_mb")), tail))
+              "%s used   %s free of %s%s" % (paint((d.get("used_pct", "?") or "?") + "%", disk_hue(d.get("used_pct")), colour),
+                                            gb(d.get("free_mb")), gb(d.get("total_mb")), tail))
     for s in m.get("sdk") or []:
         wr.kv("sdk image", sdk_line(s, colour))
     for sv in m.get("services") or []:
@@ -493,29 +413,22 @@ def render_machine_block(m, colour, widths=None):
     for cap in m.get("capacity") or []:
         label = "load" + (" (%s)" % where_word(cap) if where_word(cap) else "")
         if not cap.get("cores"):
-            # Said, rather than the line vanishing: no load is never true.
             if cap.get("note"):
                 wr.kv(label, paint(cap["note"], "bad", colour))
             continue
-        # A remote t_mem_mb is MemAvailable, not a size (targets/remote.sh).
         free = "%s free" % gb(cap.get("free_mb"))
         if cap.get("mem_mb"):
             free += " of %s" % gb(cap.get("mem_mb"))
-        wr.kv(label, "%s of %s cores   %s"
-              % (paint(cap.get("load") or "?", load_hue(cap.get("load"), cap.get("cores")), colour),
-                 cap.get("cores"), free))
+        wr.kv(label, "%s of %s cores   %s" % (paint(cap.get("load") or "?", load_hue(cap.get("load"), cap.get("cores")), colour),
+                                              cap.get("cores"), free))
     for lk in m.get("locks") or []:
-        # A lock whose holder is gone is not a lock: the next taker breaks it.
-        wr.kv("lock", "%s  %s  %s"
-              % (lk.get("resource", "?"),
-                 paint("held" if lk.get("alive") else "stale",
-                       "busy" if lk.get("alive") else "bad", colour),
-                 paint("pid %s  %s" % (lk.get("pid", "?"), lk.get("cmd", "")), "dim", colour)))
+        wr.kv("lock", "%s  %s  %s" % (lk.get("resource", "?"),
+                                      paint("held" if lk.get("alive") else "stale", "busy" if lk.get("alive") else "bad", colour),
+                                      paint("pid %s  %s" % (lk.get("pid", "?"), lk.get("cmd", "")), "dim", colour)))
     for b in m.get("bench") or []:
-        wr.kv("bench", "%s  %s  %s" % (b.get("task", "?"),
-                                        paint(b.get("state", "?"), severity(b.get("state")), colour),
-                                        paint(b.get("summary", ""), "dim", colour)))
-        wr.kv("", "%s" % paint("%s  %s" % (b.get("subject", ""), b.get("path", "")), "dim", colour))
+        wr.kv("bench", "%s  %s  %s" % (b.get("task", "?"), paint(b.get("state", "?"), severity(b.get("state")), colour),
+                                       paint(b.get("summary", ""), "dim", colour)))
+        wr.kv("", paint("%s  %s" % (b.get("subject", ""), b.get("path", "")), "dim", colour))
     for t in m.get("tasks") or []:
         render_task(wr, t, colour)
 
@@ -531,8 +444,7 @@ def render_machine_block(m, colour, widths=None):
         if f.get("type") == "wk-tools":
             what = "wk-tools" + (" (%s)" % f["copy"] if f.get("copy") else "")
             verdict = (paint("in sync", "good", colour) if f.get("insync")
-                       else paint("DIFFERS from the workstation (%s)" % f.get("expect", "?"),
-                                  "bad", colour))
+                       else paint("DIFFERS from the workstation (%s)" % f.get("expect", "?"), "bad", colour))
             ident = (f.get("sha") or "?") + ("+dirty" if f.get("dirty") else "")
             wr.kv(what, "%s  %s" % (paint(ident, "dim", colour), verdict))
             if f.get("fix"):
@@ -540,7 +452,7 @@ def render_machine_block(m, colour, widths=None):
         elif f.get("type") == "key":
             wr.kv("push key", f.get("text", ""))
 
-    wr.align(_machine_start)
+    wr.align(start)
     return out
 
 
@@ -553,28 +465,21 @@ def render_fleet_and_bridges(doc, colour):
         fw = max([len(f.get("machine", "")) for f in doc["fleet"]] + [7])
         rw = max([len(f.get("role", "")) for f in doc["fleet"]] + [4])
         mw = max([len(f.get("mode", "")) for f in doc["fleet"]] + [4])
-        _fleet_start = len(out)
+        start = len(out)
         for f in doc["fleet"]:
-            out.append("  %s  %s  %s  %s"
-                       % (f.get("machine", "").ljust(fw),
-                          paint(f.get("role", "").ljust(rw), "dim", colour),
-                          paint(f.get("mode", "").ljust(mw), severity(f.get("mode")), colour),
-                          f.get("media", "")))
+            out.append("  %s  %s  %s  %s" % (f.get("machine", "").ljust(fw), paint(f.get("role", "").ljust(rw), "dim", colour),
+                                             paint(f.get("mode", "").ljust(mw), severity(f.get("mode")), colour), f.get("media", "")))
             if f.get("armed"):
-                out.append("  %s  %s" % (" " * fw,
-                           paint("** armed for %s -- wk boot %s --status **"
-                                 % (f["armed"], f.get("machine", "")), "busy", colour)))
+                out.append("  %s  %s" % (" " * fw, paint("** armed for %s -- wk boot %s --status **"
+                                                        % (f["armed"], f.get("machine", "")), "busy", colour)))
             wr.meta(f, "  " + " " * fw + "  ")
-        wr.align(_fleet_start)
+        wr.align(start)
 
-        # From each machine's boot driver (b_reprovision): no second copy.
         recipes = [f for f in doc["fleet"] if f.get("reprovision")]
         if recipes:
-            wr.heading("re-provisioning",
-                       "each machine from nothing")
+            wr.heading("re-provisioning", "each machine from nothing")
             for f in recipes:
-                out.append("  " + paint(f.get("machine", ""), "dim", colour)
-                           + "  " + paint(f.get("role", ""), "dim", colour))
+                out.append("  " + paint(f.get("machine", ""), "dim", colour) + "  " + paint(f.get("role", ""), "dim", colour))
                 for line in f["reprovision"].split("\n"):
                     if not line.strip():
                         continue
@@ -586,18 +491,15 @@ def render_fleet_and_bridges(doc, colour):
 
             roles = []
             if any(f.get("role") == "bench-device" for f in doc["fleet"]):
-                roles.append(("a rescue system",
-                              "wk sysimage write <id> --disk <machine>:<device> --rescue"))
-                roles.append(("a bench system",
-                              "wk sysimage write <id> --disk <machine>:<device>"))
+                roles.append(("a rescue system", "wk sysimage write <id> --disk <machine>:<device> --rescue"))
+                roles.append(("a bench system", "wk sysimage write <id> --disk <machine>:<device>"))
             if doc.get("bridges"):
                 roles.append(("a tailnet bridge", "wk bridge provision <name>"))
             if any(f.get("role") == "workstation" for f in doc["fleet"]):
                 roles.append(("a workstation", "./setup"))
             if roles:
-                out.append("  " + paint("by role", "dim", colour)
-                           + "  " + paint("one image serves both board roles; the marker on the "
-                                          "card is the only difference", "dim", colour))
+                out.append("  " + paint("by role", "dim", colour) + "  "
+                           + paint("one image serves both board roles; the marker on the card is the only difference", "dim", colour))
                 lw = max(len(r[0]) for r in roles)
                 for what, cmd in roles:
                     out.append("      " + paint(what.ljust(lw), "dim", colour) + "   " + cmd)
@@ -606,57 +508,42 @@ def render_fleet_and_bridges(doc, colour):
     if doc["bridges"]:
         wr.heading("tailnet bridges", "probed: the segment, the role, and its own health check")
         bw = max(len(b.get("name", "")) for b in doc["bridges"])
-        _bridge_start = len(out)
+        start = len(out)
         for b in doc["bridges"]:
-            out.append("  %s  %-10s %-14s %s"
-                       % (b.get("name", "").ljust(bw), b.get("device", "?"), b.get("segment", "?"),
-                          paint(b.get("state", "?"), severity(b.get("state")), colour)))
+            out.append("  %s  %-10s %-14s %s" % (b.get("name", "").ljust(bw), b.get("device", "?"), b.get("segment", "?"),
+                                                 paint(b.get("state", "?"), severity(b.get("state")), colour)))
             pad = "  " + " " * bw + "  "
             if b.get("health"):
                 wr.kv("health", b["health"], pad)
             if "role_insync" in b:
-                wr.kv("role",
-                      paint("this repository's", "good", colour) if b["role_insync"]
-                      else paint("older than this repository -- wk bridge setup %s" % b.get("name", ""),
-                                 "bad", colour),
-                      pad)
+                wr.kv("role", paint("this repository's", "good", colour) if b["role_insync"]
+                      else paint("older than this repository -- wk bridge setup %s" % b.get("name", ""), "bad", colour), pad)
             wr.meta(b, pad)
             if b.get("note"):
                 out.append(pad + paint(b["note"], "dim", colour))
             wr.notes(b.get("notes"), pad)
-        wr.align(_bridge_start)
+        wr.align(start)
 
     return out
 
 
 def render_text(doc, colour):
-    # What a pipe, `wk selftest` and an agent get. One set of column widths.
     out = []
-
-    w = [len(h) for h in COLUMNS]
-    for m in doc["machines"]:
-        for g in m["methods"]:
-            for ws in g["workspaces"]:
-                for i, c in enumerate(ws_cells(ws)):
-                    w[i] = max(w[i], len(c))
-
+    w = column_widths(doc["machines"])
     for m in doc["machines"]:
         out.extend(render_machine_block(m, colour, w))
     out.extend(render_fleet_and_bridges(doc, colour))
-
     out.append("")
     return "\n".join(out)
 
 
-def render_text_stream(fh, out, colour):
-    # Arrival order: par_join_stream (cmd/status) hands back each job's records
-    # as they exist. Re-imposing an order would buffer a fast machine behind a
-    # slow one, the wait this removes. A planned machine gets a placeholder at
-    # once, never erased -- a stream, not a redrawn terminal.
+def render_text_stream(records, out, colour):
+    """Arrival order: a planned machine gets a placeholder at once and its
+    block when the last job the plan gave it has flushed."""
     merger = Merger()
-    owner = {}       # job -> the machine the plan gave it; a flush names only the job
-    pending = {}     # machine -> its planned jobs that have not flushed
-    drawn = set()    # machines whose block is out
+    owner = {}
+    pending = {}
+    drawn = set()
 
     def draw(machine):
         for m in merger.doc["machines"]:
@@ -666,14 +553,7 @@ def render_text_stream(fh, out, colour):
                     out.write(line + "\n")
         out.flush()
 
-    for line in fh:
-        try:
-            r = parse_record(line)
-        except ValueError as exc:
-            print("wk status: unreadable record: %s" % exc, file=sys.stderr)
-            continue
-        if r is None:
-            continue
+    for r in records:
         kind = r.get("kind")
         if kind == "plan":
             for j in r.get("jobs", []):
@@ -697,18 +577,12 @@ def render_text_stream(fh, out, colour):
 
     for m in merger.doc["machines"]:
         draw(m["name"])
-    tail = render_fleet_and_bridges(merger.doc, colour)
-    for line in tail:
+    for line in render_fleet_and_bridges(merger.doc, colour):
         out.write(line + "\n")
     out.write("\n")
     out.flush()
+    return merger.doc
 
-
-# Self-contained: no CDN, no font host, no framework. A page for looking at a
-# fleet must not depend on the network the fleet is the reason you are worried
-# about. Arranged so what costs time or work is what the eye lands on: the exit
-# code as a verdict, non-zero counts only, disk and load as bars against their
-# ceiling. The state vocabulary is injected (__SEV__ below), never rewritten.
 
 PAGE = """<!doctype html>
 <meta charset="utf-8">
@@ -853,7 +727,7 @@ PAGE = """<!doctype html>
 <footer id="foot">loading…</footer>
 <script>
 const ESC = s => String(s == null ? '' : s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
-// The state vocabulary, from lib/status-view.py -- one list, not a second copy
+// The state vocabulary, from wk.statusview -- one list, not a second copy
 // that drifts from it.
 const SEV = __SEV__;
 function sev(w) {
@@ -885,7 +759,7 @@ function diskHue(p) { const n = parseInt(p,10); return isNaN(n) ? "" : n >= 90 ?
 function loadHue(l, c) { l = parseFloat(l); c = parseInt(c,10);
   return (isNaN(l) || !c) ? "" : l > c ? "bad" : l > c/2 ? "busy" : "good"; }
 const where = o => (o.where || "").replace("in the ","").replace("the ","");
-// Same verdict as lib/status-view.py's sdk_verdict/sdk_line -- one wording,
+// Same verdict as wk.statusview's sdk_verdict/sdk_line -- one wording,
 // used by both the terminal and the page.
 function sdkVerdict(s) {
   if (s.upstream) return s.upstream === s.tag ? chip("current", "good") : chip(`behind (${s.upstream})`, "busy");
@@ -1152,21 +1026,25 @@ else {
 
 
 def page(doc, live):
-    return (
-        PAGE.replace("__LIVE__", "true" if live else "false")
-        .replace("__SEV__", json.dumps({"good": GOOD, "busy": BUSY, "bad": BAD, "idle": IDLE}))
-        .replace("__DOC__", json.dumps(doc) if not live else "null")
-    )
+    return (PAGE.replace("__LIVE__", "true" if live else "false")
+            .replace("__SEV__", json.dumps({"good": GOOD, "busy": BUSY, "bad": BAD, "idle": IDLE}))
+            .replace("__DOC__", json.dumps(doc) if not live else "null"))
+
+
+def write_page(doc, out):
+    target = out or os.path.join(os.environ.get("TMPDIR", "/tmp"), "wk-status.html")
+    with open(target, "w", encoding="utf-8") as fh:
+        fh.write(page(doc, live=False))
+    return target
 
 
 class Live:
-    # Re-run on a timer, not per request: a walk goes over ssh, and a browser's
-    # poll rate onto a phone-linked Pi is not that.
+    """Re-walked on a timer, one walk at a time; `lock` guards the document
+    mid-swap and `busy` the right to walk."""
 
-    def __init__(self, interval):
+    def __init__(self, root, interval):
+        self.root = root
         self.interval = max(5, int(interval))
-        # `lock` guards the document mid-swap, `busy` the right to walk: one
-        # lock for both would hold a poll across a whole walk.
         self.lock = threading.Lock()
         self.busy = threading.Lock()
         self.doc = {"machines": [], "fleet": [], "bridges": [], "exit": 0}
@@ -1175,41 +1053,22 @@ class Live:
 
     def payload(self):
         with self.lock:
-            return json.dumps(
-                {
-                    "doc": self.doc,
-                    "stamp": self.stamp,
-                    "interval": self.interval,
-                    "refreshing": self.refreshing,
-                }
-            ).encode()
+            return json.dumps({"doc": self.doc, "stamp": self.stamp, "interval": self.interval,
+                               "refreshing": self.refreshing}).encode()
 
     def refresh_once(self):
-        # One walk at a time, ever: a walk takes minutes when the tailnet is
-        # down, and two over one phone disagree about which boards are up.
         if not self.busy.acquire(blocking=False):
             return
         try:
             with self.lock:
                 self.refreshing = True
-            wk = os.path.join(
-                os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "wk"
-            )
             doc = None
             try:
-                # --json through the dispatcher a person would type, so the page
-                # cannot differ from the terminal's; WK_STATUS_VIEW keeps the
-                # walk from serving a second page from inside this one.
                 env = dict(os.environ, WK_STATUS_VIEW="json")
-                out = subprocess.run(
-                    [wk, "status", "--json"],
-                    capture_output=True,
-                    text=True,
-                    timeout=600,
-                    env=env,
-                ).stdout
+                out = subprocess.run([os.path.join(self.root, "wk"), "status", "--json"], capture_output=True,
+                                     text=True, timeout=600, env=env).stdout
                 doc = json.loads(out) if out.strip().startswith("{") else None
-            except Exception as exc:  # a refresh that fails must not stop the loop
+            except Exception as exc:
                 print("wk status --web: refresh failed: %s" % exc, file=sys.stderr)
             with self.lock:
                 if doc is not None:
@@ -1223,20 +1082,18 @@ class Live:
         while True:
             started = time.time()
             self.refresh_once()
-            # A gap between walks, not a period; a second of floor, so an
-            # instant answer cannot become a spin.
             time.sleep(max(1.0, self.interval - (time.time() - started)))
 
 
-def serve(doc, port, interval):
-    live = Live(interval)
+def serve(root, doc, port, interval):
+    live = Live(root, interval)
     with live.lock:
         live.doc = doc
         live.stamp = int(time.time())
     body = page(None, live=True).encode()
 
     class Handler(http.server.BaseHTTPRequestHandler):
-        def do_GET(self):  # noqa: N802 -- http.server's spelling
+        def do_GET(self):  # noqa: N802
             if self.path.startswith("/status.json"):
                 data, ctype = live.payload(), "application/json"
             elif self.path in ("/", "/index.html"):
@@ -1252,84 +1109,25 @@ def serve(doc, port, interval):
             self.wfile.write(data)
 
         def log_message(self, *_):
-            pass  # the terminal that started this is not a web server log
+            pass
 
-    # 127.0.0.1, never 0.0.0.0: this page names the keys every machine holds.
     try:
         httpd = http.server.ThreadingHTTPServer(("127.0.0.1", int(port)), Handler)
     except OSError as exc:
-        # The usual cause is the last `wk status --web` still running elsewhere.
-        print(
-            "wk status: cannot serve on 127.0.0.1:%s (%s).\n"
-            "    Another 'wk status --web' is probably still running -- its page is\n"
-            "    already live. Otherwise pick a port: wk status --web --port 0"
-            % (port, exc.strerror or exc),
-            file=sys.stderr,
-        )
+        print("wk status: cannot serve on 127.0.0.1:%s (%s).\n"
+              "    Another 'wk status --web' is probably still running -- its page is\n"
+              "    already live. Otherwise pick a port: wk status --web --port 0" % (port, exc.strerror or exc),
+              file=sys.stderr)
         return 1
     url = "http://127.0.0.1:%d/" % httpd.server_port
     threading.Thread(target=live.loop, daemon=True).start()
-    print("wk status: serving %s (refreshing every %ds, ctrl-c to stop)" % (url, live.interval),
-          file=sys.stderr)
+    print("wk status: serving %s (refreshing every %ds, ctrl-c to stop)" % (url, live.interval), file=sys.stderr)
     try:
         webbrowser.open(url)
     except Exception:
-        pass  # a browser that will not open is not a reason to stop serving
+        pass
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:
         print("", file=sys.stderr)
     return 0
-
-
-def main(argv):
-    if len(argv) < 3:
-        print(__doc__, file=sys.stderr)
-        return 2
-    mode, recs = argv[1], argv[2]
-    port, interval, out = 0, 20, ""
-    rest = argv[3:]
-    while rest:
-        flag = rest.pop(0)
-        value = rest.pop(0) if rest else ""
-        if flag == "--port":
-            port = value or 0
-        elif flag == "--interval":
-            interval = value or 20
-        elif flag == "--out":
-            out = value
-
-    if mode == "strip":
-        strip_markers(sys.stdin, sys.stdout)
-        return 0
-
-    if mode == "text":
-        # Straight off the stream `collect` is still writing: text mode gets a
-        # fifo so reading starts before the last machine answers.
-        colour = sys.stdout.isatty() and not os.environ.get("NO_COLOR")
-        with open(recs, encoding="utf-8", errors="replace", buffering=1) as fh:
-            render_text_stream(fh, sys.stdout, colour)
-        return 0
-
-    doc = read_doc(recs)
-
-    if mode == "json":
-        json.dump(doc, sys.stdout, indent=2, sort_keys=False)
-        sys.stdout.write("\n")
-    elif mode == "html":
-        target = out or os.path.join(
-            os.environ.get("TMPDIR", "/tmp"), "wk-status.html"
-        )
-        with open(target, "w", encoding="utf-8") as fh:
-            fh.write(page(doc, live=False))
-        print(target)
-    elif mode == "web":
-        return serve(doc, port or 0, interval)
-    else:
-        colour = sys.stdout.isatty() and not os.environ.get("NO_COLOR")
-        sys.stdout.write(render_text(doc, colour) + "\n")
-    return 0
-
-
-if __name__ == "__main__":
-    sys.exit(main(sys.argv))

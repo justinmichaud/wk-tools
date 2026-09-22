@@ -1,5 +1,4 @@
-# A job writes to its own fd 3 file: two writers on one byte stream interleave
-# mid-line. `wait` is by pid (bare catches the fleet probes); stdin /dev/null, or ssh takes SIGTTIN.
+# A job writes to its own fd 3 file: two writers on one byte stream interleave mid-line; stdin /dev/null, or ssh takes SIGTTIN.
 _par_dir=""
 _par_names=""
 _par_pids=""
@@ -60,26 +59,5 @@ par_join() {
     set -- $_par_status
     while [ $# -gt 0 ]; do bump "$2"; shift 2; done
     for n in $_par_names; do par_record "$n" >&3; done
-    par_end
-}
-
-par_join_stream() {  # fd 3 in completion order, each job followed by a flush record so lib/status-view.py can draw a machine; polled because bash 3.2 has no `wait -n`
-    local n p rc pending="$_par_names" next
-    while [ -n "$pending" ]; do
-        next=""
-        for n in $pending; do
-            if [ -f "$_par_dir/$n.rc" ]; then
-                rc=$(cat "$_par_dir/$n.rc" 2>/dev/null); rc="${rc:-4}"
-                bump "$rc"
-                par_record "$n" >&3
-                printf '{"kind":"flush","job":"%s"}\n' "$n" >&3
-            else
-                next="$next $n"
-            fi
-        done
-        pending="$next"
-        [ -z "$pending" ] || sleep 0.1
-    done
-    for p in $_par_pids; do wait "$p" 2>/dev/null || true; done
     par_end
 }

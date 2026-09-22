@@ -475,11 +475,14 @@ ensure_dir "$(bench_task_dir probe)/runs" >/dev/null && echo MADE
     def test_one_spelling_of_the_bench_directory(self):
         """cmd/status and cmd/doctor read it without sourcing lib/bench.sh, so
         the path is a function rather than a second `$WK_STORE/bench`."""
-        for rel in ("cmd/status", "cmd/doctor", "lib/bench.sh"):
+        for rel in ("cmd/doctor", "lib/bench.sh"):
             with self.subTest(file=rel):
                 text = (REPO / rel).read_text()
                 self.assertIn("wk_bench_dir", text)
                 self.assertNotIn("$WK_STORE/bench", text)
+        text = (REPO / "lib" / "wk" / "status.py").read_text()
+        self.assertIn("store.bench_dir()", text)
+        self.assertNotIn('record_dir(), "bench"', text)
 
 
 class TestAStageThatCannotFinishLeavesNothing(WkTest):

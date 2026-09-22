@@ -1,7 +1,6 @@
 """lib/par.sh: several jobs at once, each leaving its exit status as a
-marker the moment it ends -- whatever way it ends. `wk status` polls those
-markers (par_join_stream), so a job whose marker never lands is a listing
-that never finishes.
+marker the moment it ends -- whatever way it ends. par_join folds those
+markers, so a job whose marker never lands is a caller that never finishes.
 
 Run: python3 -m unittest tests.test_par -v
 """
@@ -27,7 +26,7 @@ class TestParMarkers(WkTest):
         try:
             cp = bash(PRELUDE + script, env={"OUT": str(out)}, timeout=30)
         except subprocess.TimeoutExpired:
-            self.fail("par_join_stream never finished: a job left no marker")
+            self.fail("par_join never finished: a job left no marker")
         self.assertEqual(cp.returncode, 0, f"script failed: {cp.stdout}{cp.stderr}")
         return cp.stdout, out.read_text()
 
@@ -45,7 +44,7 @@ par_run ok ok; par_run returns returns; par_run exits exits
 par_run dies dies; par_run trips trips
 sleep 0.5
 for n in ok returns exits dies trips; do printf '%s=%s\\n' "$n" "$(cat "$d/$n.rc")"; done
-par_join_stream
+par_join
 echo "worst=$worst"
 [ -d "$d" ] && echo "dir kept" || echo "dir removed"
 '''
@@ -56,9 +55,6 @@ echo "worst=$worst"
         for job in ("ok", "returns", "exits", "dies", "trips"):
             self.assertIn(f'{{"job":"{job}"}}', records)
         self.assertNotIn("unreachable", records)
-        for job in ("ok", "returns", "exits", "dies", "trips"):
-            self.assertIn(f'{{"kind":"flush","job":"{job}"}}', records)
-        self.assertEqual(records.count('"kind":"flush"'), 5)
 
     def test_par_join_reports_the_worst_status_in_start_order(self):
         """the non-streaming join keeps start order and raises the worst status"""

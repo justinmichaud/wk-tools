@@ -18,6 +18,44 @@ READY_MARKER = ".wk-ready"
 FIRSTRUN_MARKER = ".wk-firstrun-complete"   # TODO: drop once no pre-marker workspace is left
 STATES_NOT_THERE = ("absent", "creating", "broken", "unreachable")
 
+# Run with $PWD inside the checkout; sets `_b` to `main`, a release like `2.52`, or nothing.
+UPSTREAM_LINE_BODY = r'''
+_u=$(git rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null) || _u=''
+_b=''
+if [ -n "$_u" ]; then
+    _br=${_u#*/}
+    case "$_br" in
+        main) _b=main ;;
+        webkitglib/*) _b=${_br#webkitglib/} ;;
+    esac
+fi
+if [ -z "$_b" ]; then
+    _rel=$(git for-each-ref --format='%(refname)' --contains HEAD 'refs/remotes/*/webkitglib/*' 2>/dev/null \
+        | sed 's#.*/webkitglib/##' | sort -t. -k1,1n -k2,2n | tail -1)
+    if [ -n "$_rel" ]; then _b=$_rel
+    elif git for-each-ref --format='%(refname)' --contains HEAD 'refs/remotes/*/main' 2>/dev/null | grep -q .; then _b=main
+    fi
+fi
+'''
+UPSTREAM_LINE = UPSTREAM_LINE_BODY + "printf '%s' \"${_b:-?}\"\n"
+
+
+def image_base(root, ws):
+    """CFG_RELEASE of an image workspace's profile, or None."""
+    for prefix in ("yocto-", "buildroot-"):
+        if ws.startswith(prefix):
+            conf = os.path.join(root, "image", "configs", ws[len(prefix):] + ".conf")
+            return read_conf(conf).get("CFG_RELEASE") or None
+    return None
+
+
+def git_base(target, ws):
+    if target.info(ws) in STATES_NOT_THERE:
+        return None
+    r = target.exec(ws, ["sh", "-c", "cd %s 2>/dev/null || exit 0\n%s" % (shell.sh_quote(target.src(ws)), UPSTREAM_LINE)])
+    out = r.out.replace("\r", "").strip().splitlines()
+    return out[-1] if r.ok and out else None
+
 
 def read_conf(path):
     """KEY=value shell assignments, one per line, quotes stripped."""
@@ -106,6 +144,16 @@ class Registry:
 
     def here(self):
         return [t for t in self.all() if t not in self.machines()]
+
+    def walk(self):
+        """The targets a listing covers: WK_TARGET's, this workspace's, the ones here when another wk asked, else all."""
+        if self.env.get("WK_TARGET"):
+            return self.env["WK_TARGET"].split()
+        if self.in_workspace():
+            return [self.default()]
+        if self.env.get("WK_NO_DELEGATE"):
+            return self.here()
+        return self.all()
 
     def on_target(self, name, ws):
         """Whether `ws` is on `name`: its directory, its environment, or a creation still running."""
@@ -207,8 +255,27 @@ class Target:
     def far_side(self):
         return "none"
 
+    def is_here(self):
+        """Whether the machine behind this target is the one running this process."""
+        return True
+
+    def probe(self):
+        """(far side, why it does not answer)."""
+        return self.far_side(), ""
+
     def has_wk(self):
         return False
+
+    def wk(self, *args, env=None, quiet=False):
+        """(status, output) of the far side's own wk."""
+        return shell.machine_wk(self.root, self.name, *args, env=env, quiet=quiet)
+
+    def branch(self, ws):
+        if self.info(ws) in STATES_NOT_THERE:
+            return "-"
+        r = self.exec(ws, ["git", "-C", self.src(ws), "rev-parse", "--abbrev-ref", "HEAD"])
+        out = r.out.replace("\r", "").strip()
+        return out if r.ok and out else "-"
 
     def delegates(self):
         return False
@@ -219,10 +286,10 @@ class Target:
     def stop(self, ws):
         raise NotImplementedError
 
-    def state(self, ws):
+    def state(self, ws, info=None):
         """absent | creating | broken | present | unreachable: the record and
         the environment read together (lib/target.sh's ws_state)."""
-        env = self.info(ws)
+        env = self.info(ws) if info is None else info
         ws_dir = self.store.ws_dir(ws)
         if env in ("creating", "unreachable"):
             return env
@@ -290,6 +357,23 @@ class Container(Target):
             return "absent"
         return st if self.created(ws) else "creating"
 
+    def branch(self, ws):
+        head = os.path.join(self.store.ws_dir(ws), "changes", ".git", "HEAD")
+        if not self.machine.exists(head):
+            base = self.store.ws_base_id(ws)
+            if not base:
+                return "-"
+            head = os.path.join(self.store.base_path(base), ".git", "HEAD")
+        try:
+            ref = self.machine.read(head).strip()
+        except OSError:
+            return "-"
+        if ref.startswith("ref: refs/heads/"):
+            return ref[len("ref: refs/heads/"):]
+        if ref.startswith("ref: "):
+            return ref[len("ref: "):]
+        return "detached %s" % ref[:10]
+
     def exec(self, ws, argv, tty=False, timeout=None):
         cmd = [os.path.join(self.sdk(), "scripts", "host-only", "wkdev-enter"), "--quiet", "--name", self.ctr(ws)]
         if not tty:
@@ -297,8 +381,11 @@ class Container(Target):
         cmd += ["--exec", "--", "/opt/wk-tools/container/proxy/ensure-bridge.sh", *argv]
         return self.machine.run(cmd, timeout=timeout)
 
+    def is_here(self):
+        return bool(self.env.get("WK_IN_VM")) or os.uname().sysname != "Darwin"
+
     def far_side(self):
-        if self.env.get("WK_IN_VM") or os.uname().sysname != "Darwin":
+        if self.is_here():
             return "none"
         r = self.machine.run(["podman", "machine", "inspect", self.env.get("WK_MACHINE", "wk"), "--format", "{{.State}}"])
         return "answering" if r.ok and r.out.strip() == "running" else "stopped"
@@ -422,6 +509,7 @@ class LocalWorkspace(Target):
 
     def __init__(self, name, root, env, machine):
         super().__init__(name, root, env, machine)
+        self.store = Store(dict(env, WK_STORE=env.get("WK_LOCAL_STORE") or Store(env).state_dir()))
         marker = read_conf(env.get("WK_MARKER") or os.path.join(env.get("HOME", os.path.expanduser("~")), ".wk-workspace"))
         self.ws_name = marker.get("name", "")
         self.ws_src = marker.get("src", "")
@@ -460,10 +548,17 @@ class Remote(Target):
 
     def __init__(self, name, root, env, machine):
         super().__init__(name, root, env, machine)
-        self.host = env.get("WK_REMOTE_HOST", "")
+        marker = read_conf(env.get("WK_REMOTE_MARKER") or os.path.join(env.get("HOME", os.path.expanduser("~")), ".wk-remote"))
+        self.host = env.get("WK_REMOTE_HOST") or (name if name != "remote" else "")
         self.peer = bool(env.get("WK_REMOTE_PEER"))
-        self.is_local = bool(env.get("WK_REMOTE_LOCAL"))
-        self.needs_base = self.is_local or False
+        self.is_local = bool(env.get("WK_REMOTE_LOCAL")) or marker.get("target") == name
+        self.needs_base = self.is_local
+        root_there = env.get("WK_REMOTE_ROOT") or (marker.get("root", "") if self.is_local else "")
+        if self.is_local and root_there:
+            store = env.get("WK_REMOTE_STORE") or root_there
+        else:
+            store = env.get("WK_REMOTE_STORE") or os.path.join(Store(env).state_dir(), "remote", name)
+        self.store = Store(dict(env, WK_STORE=store))
 
     def _ask(self, fn, *args):
         return shell.ask(self.root, "load_target %s >/dev/null 2>&1; %s" % (shlex.quote(self.name), fn), *args)
@@ -494,8 +589,17 @@ class Remote(Target):
         script = shell._script("load_target %s >/dev/null 2>&1; t_exec" % shlex.quote(self.name), self.root)
         return self.machine.run(["bash", "-c", script, "wk", ws, *argv], timeout=timeout)
 
+    def is_here(self):
+        return self.is_local
+
     def far_side(self):
         return self._ask("t_far_side") or "unreachable"
+
+    def probe(self):
+        out = self._ask("_probe() { if t_answers; then printf 'side=%s\\n' \"$(t_far_side)\"; "
+                        "else printf 'side=unreachable\\nwhy=%s\\n' \"$WK_FAR_WHY\"; fi; }; _probe") or ""
+        fields = dict(line.partition("=")[::2] for line in out.splitlines() if "=" in line)
+        return fields.get("side") or "unreachable", fields.get("why", "")
 
     def has_wk(self):
         return self.far_side() == "answering"
@@ -504,9 +608,6 @@ class Remote(Target):
         if self.is_local:
             return False
         return self.peer or self.has_wk()
-
-    def wk(self, *args):
-        return shell.machine_wk(self.root, self.name, *args)
 
     def stop(self, ws):
         return shell.ws_stop(self.root, self.name, ws) == 0

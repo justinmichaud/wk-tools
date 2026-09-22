@@ -219,9 +219,8 @@ class TestFleetTailnetLine(unittest.TestCase):
         peers = "rpi4-rescue\t100.1.1.1\tup\n"
         cp = bash(f'''
 set -euo pipefail
-. "{REPO}/lib/common.sh"; . "{REPO}/lib/reach.sh"
+. "{REPO}/lib/common.sh"; . "{REPO}/boot/machines.sh"
 wk_tailscale_peers() {{ printf '%s' "$PEERS"; }}
-eval "$(sed -n '/^fleet_tailnet()/,/^}}/p' "{REPO}/cmd/status")"
 fleet_tailnet rpi4; echo
 fleet_tailnet rpi5
 ''', env={"PEERS": peers, "WK_ROOT": str(REPO)})

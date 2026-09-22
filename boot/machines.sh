@@ -71,6 +71,17 @@ machine_load() {
     [ -n "$NODE_DRIVER" ] && [ -n "$NODE_NOTE" ] || return 1
 }
 
+fleet_tailnet() { # <machine> -- each of its tailnet names with its address, or `not a node`
+    ( machine_load "$1" >/dev/null 2>&1 || exit 0
+      local n a out=""
+      for n in "${NODE_SSH:-$1}" "${NODE_BENCH_SSH:-}"; do
+          [ -n "$n" ] || continue
+          a=$(reach_tailnet "$n")
+          out="${out:+$out; }$n ${a:-not a node}"
+      done
+      printf '%s' "$out" )
+}
+
 machine_by_ssh() {
     local want="$1" m
     machine_load "$want" 2>/dev/null && return 0

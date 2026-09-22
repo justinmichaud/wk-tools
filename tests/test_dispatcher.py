@@ -223,18 +223,12 @@ class TestStatusDefaultView(WkTest):
         # The tty half needs a pty and is verified by hand (same carve-out
         # cmd/selftest's chk_status_default_view documents); this checks the
         # half that matters for scripting: not-a-terminal defaults to text.
-        script = f'''
-set -euo pipefail
-. "{REPO}/lib/common.sh"
-status_default_mode; m="$WK_STATUS_DEFAULT_MODE"
-[ "$m" = text ] || {{ echo "redirected stdout defaulted to '$m', not text"; exit 1; }}
-( WK_STATUS_VIEW=json; status_default_mode; [ "$WK_STATUS_DEFAULT_MODE" = json ] ) \\
-    || {{ echo "WK_STATUS_VIEW did not decide the view"; exit 1; }}
-( CI=1; status_default_mode; [ "$WK_STATUS_DEFAULT_MODE" = text ] ) \\
-    || {{ echo "CI did not fall back to the table"; exit 1; }}
-'''
-        cp = self.bash(script)
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        import sys
+        sys.path.insert(0, str(REPO / "lib"))
+        from wk import statusview
+        self.assertEqual(statusview.default_mode({"HOME": "/nonexistent"}, False), "text")
+        self.assertEqual(statusview.default_mode({"HOME": "/nonexistent", "WK_STATUS_VIEW": "json"}, True), "json")
+        self.assertEqual(statusview.default_mode({"HOME": "/nonexistent", "CI": "1"}, True), "text")
 
 
 if __name__ == "__main__":

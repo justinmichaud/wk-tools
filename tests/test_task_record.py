@@ -9,7 +9,7 @@ A task is a directory under $WK_STORE/task: plan, steps/<n>, pid, machine, log,
 kill, argv, started, and on end exit and finished. Each field is one file, so
 every write is one tmp+rename and a reader never sees half a record. Liveness
 is the process table at read time -- a pid that no longer answers with no exit
-recorded reads `died` -- and the renderer (lib/status-view.py render_task) puts
+recorded reads `died` -- and the renderer (wk.statusview render_task) puts
 the plan under the task as [x] done, [>] running, [-] skipped, [!] stopped
 there and [ ] pending, with the kill command and the log beneath it. A plan is
 a graph, so each step carries its own state and any number read as running.
@@ -26,7 +26,7 @@ import unittest
 
 from tests.support import REPO, WkTest, bash
 
-STATUS_VIEW = REPO / "lib" / "status-view.py"
+from tests.test_status import render as _render_records
 
 PLANS = {
     "build":  ["configure", "compile", "link"],
@@ -50,15 +50,7 @@ HERE = ("test", "pgo", "new", "agent-forward")   # the pid is this machine's
 
 
 def render(records, mode="text"):
-    with tempfile.NamedTemporaryFile("w", suffix=".jsonl", delete=False, dir="/tmp") as fh:
-        for rec in records:
-            fh.write(json.dumps(rec) + "\n")
-        path = fh.name
-    try:
-        return subprocess.run(["python3", str(STATUS_VIEW), mode, path],
-                              capture_output=True, text=True)
-    finally:
-        os.unlink(path)
+    return _render_records(records, mode)
 
 
 def in_order(plan, step):

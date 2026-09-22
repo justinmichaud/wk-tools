@@ -29,7 +29,6 @@ import unittest
 
 from tests.support import REPO, WkTest, bash, rand_suffix, run, stub_path
 
-STATUS_VIEW = REPO / "lib" / "status-view.py"
 
 # The stub `ssh` tests/test_fleet_walk.py uses for a fleet walk with no fleet:
 # it runs the probe locally instead of reaching a machine.
@@ -326,10 +325,10 @@ class TestTheStalledStateIsOnlyAKill(_FakeWalk):
         self.assertEqual(cp.returncode, 3, cp.stdout)
         self.assertIn("killed after no output", self.notes(rec))
 
-    def test_nothing_in_cmd_status_manufactures_a_state(self):
-        text = (REPO / "cmd" / "status").read_text()
-        self.assertNotIn("state=stalled", text)
-        self.assertIn("task_verdict", text)
+    def test_nothing_in_the_collector_manufactures_a_state(self):
+        text = (REPO / "lib" / "wk" / "status.py").read_text()
+        self.assertNotIn('set("state", "stalled")', text)
+        self.assertIn('.verdict("capped")', text)
 
 
 class TestOneExitCodePerRecordedState(_FakeWalk):
@@ -421,21 +420,17 @@ class TestWaitWaitsThroughSilence(_FakeWalk):
 
 class TestTheViewCallsSilenceBusy(unittest.TestCase):
     def test_severity_of_silent_is_busy(self):
-        cp = bash(f'''python3 - <<'PY'
-import importlib.util, sys
-spec = importlib.util.spec_from_file_location("sv", "{STATUS_VIEW}")
-m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
-print(m.severity("silent"), m.severity("stalled"))
-PY''')
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertEqual(cp.stdout.strip(), "busy bad", cp.stdout + cp.stderr)
+        import sys
+        sys.path.insert(0, str(REPO / "lib"))
+        from wk import statusview
+        self.assertEqual((statusview.severity("silent"), statusview.severity("stalled")), ("busy", "bad"))
 
     def test_exit_2_is_explained_the_same_way_in_both_files(self):
         """The page prints the exit code in cmd/status's own words, so the
         two say the same thing about a silent build or one of them is
         wrong."""
         header = (REPO / "cmd" / "status").read_text()
-        view = STATUS_VIEW.read_text()
+        view = (REPO / "lib" / "wk" / "statusview.py").read_text()
         for text in ("a build is running or silent",
                      "a build stalled and was killed by its own watchdog"):
             self.assertIn(text, header, text)

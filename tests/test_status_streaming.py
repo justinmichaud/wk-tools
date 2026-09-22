@@ -1,238 +1,143 @@
-"""Streaming behaviour of `wk status --text`'s renderer (lib/status-view.py)
-and the stream cmd/status collects for it.
+"""Streaming behaviour of `wk status --text`: the renderer (wk.statusview)
+over the stream the collector (wk.status) hands it.
 
 The stream opens with one `plan` record naming every job and the machine
 each one's records belong to; a `flush` ends one job, and a machine's block
 is drawn when the last job the plan gave it has flushed. A run asked for
 `--records` is one job of the wk that asked and carries neither.
 
-Run: python3 -m unittest tests.test_status_streaming -v
+Run: python3 tests/run.py -k tests.test_status_streaming
 """
+import contextlib
+import io
 import json
 import os
-import queue
-import subprocess
 import sys
-import tempfile
-import threading
-import time
 import unittest
 
 from tests.support import REPO, WkTest, rand_suffix, requires_container_target, run, scratch_dir, stub_path
 
-STATUS_VIEW = REPO / "lib" / "status-view.py"
-
-
-def _reap(proc):
-    if proc.poll() is None:
-        proc.kill()
-        proc.wait(timeout=5)
-    if proc.stdout:
-        proc.stdout.close()
-    if proc.stderr:
-        proc.stderr.close()
+sys.path.insert(0, str(REPO / "lib"))
+from wk import statusview  # noqa: E402
 
 
 def _rec(**kw):
-    return json.dumps(kw) + "\n"
+    return kw
 
 
 def _plan(*jobs):
     """<(job, machine)...>: a job with no machine completes nobody's block."""
-    return _rec(kind="plan", jobs=[
-        {"job": j, "machine": m} if m else {"job": j} for j, m in jobs
-    ])
+    return _rec(kind="plan", jobs=[{"job": j, "machine": m} if m else {"job": j} for j, m in jobs])
 
 
 def _machine_lines(name):
     """One job's records: its machine, one workspace, and the flush that ends it."""
-    return [
-        _rec(kind="machine", name=name, self=(name == "alpha")),
-        _rec(kind="workspace", machine=name, method="container", name="ws-" + name,
-             state="present", ws="present"),
-        _rec(kind="flush", job=name),
-    ]
+    return [_rec(kind="machine", name=name, self=(name == "alpha")),
+            _rec(kind="workspace", machine=name, method="container", name="ws-" + name, state="present", ws="present"),
+            _rec(kind="flush", job=name)]
 
 
-def _render(lines):
-    recs = os.path.join(tempfile.mkdtemp(prefix="wk-status-stream-"), "records")
-    with open(recs, "w") as fh:
-        fh.writelines(lines)
-    try:
-        return subprocess.run([sys.executable, str(STATUS_VIEW), "text", recs],
-                              cwd=str(REPO), capture_output=True, text=True,
-                              env=dict(os.environ, NO_COLOR="1"), timeout=30)
-    finally:
-        subprocess.run(["rm", "-rf", os.path.dirname(recs)])
+class _Tap:
+    """The renderer's output, each line stamped with how many records it had consumed when the line appeared."""
 
+    def __init__(self, records):
+        self.records = records
+        self.consumed = 0
+        self.lines = []
 
-class _LineReader:
-    """Drains a subprocess's stdout in a background thread, timestamping each
-    line, so a test can assert when a line showed up relative to what the
-    main thread did."""
+    def feed(self):
+        for r in self.records:
+            self.consumed += 1
+            yield r
 
-    def __init__(self, proc):
-        self.proc = proc
-        self.q = queue.Queue()
-        threading.Thread(target=self._pump, daemon=True).start()
+    def write(self, text):
+        for line in text.rstrip("\n").split("\n"):
+            self.lines.append((self.consumed, line))
 
-    def _pump(self):
-        for line in self.proc.stdout:
-            self.q.put((time.monotonic(), line.rstrip("\n")))
-        self.q.put(None)
+    def flush(self):
+        pass
 
-    def until(self, predicate, timeout=5.0):
-        deadline = time.monotonic() + timeout
-        while True:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                raise AssertionError("timed out waiting for: %r" % predicate)
-            item = self.q.get(timeout=remaining)
-            if item is None:
-                raise AssertionError("stream ended before a matching line arrived")
-            arrived, line = item
+    def when(self, predicate):
+        for consumed, line in self.lines:
             if predicate(line):
-                return arrived, line
+                return consumed
+        raise AssertionError("no line matched:\n" + "\n".join(l for _, l in self.lines))
+
+
+def _render(records):
+    tap = _Tap(records)
+    err = io.StringIO()
+    with contextlib.redirect_stderr(err):
+        statusview.render_text_stream(tap.feed(), tap, False)
+    return tap, err.getvalue()
 
 
 class TestTextStreamsAsRecordsArrive(unittest.TestCase):
-    """Fed over a real fifo, the way cmd/status hands it the stream."""
-
-    def setUp(self):
-        self.tmpdir = tempfile.mkdtemp(prefix="wk-status-stream-")
-        self.addCleanup(lambda: subprocess.run(["rm", "-rf", self.tmpdir]))
-        self.fifo = os.path.join(self.tmpdir, "records")
-        os.mkfifo(self.fifo)
-        self.proc = subprocess.Popen(
-            [sys.executable, str(STATUS_VIEW), "text", self.fifo],
-            cwd=str(REPO), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            text=True, env=dict(os.environ, NO_COLOR="1"),
-        )
-        self.addCleanup(_reap, self.proc)
-        self.reader = _LineReader(self.proc)
-
-    def test_first_machine_prints_before_second_machines_records_are_sent(self):
-        t0 = time.monotonic()
-        # Opening the fifo for writing returns once the renderer has opened it for reading.
-        wfh = open(self.fifo, "w")
-        try:
-            wfh.write(_plan(("alpha", "alpha"), ("beta", "beta")))
-            wfh.writelines(_machine_lines("alpha"))
-            wfh.flush()
-
-            time.sleep(1.0)
-            t_beta_sent = time.monotonic()
-            wfh.writelines(_machine_lines("beta"))
-            wfh.write(_rec(kind="exit", code=0))
-            wfh.flush()
-        finally:
-            wfh.close()
-
-        alpha_at, _ = self.reader.until(lambda l: l.startswith("alpha"))
-        beta_at, _ = self.reader.until(lambda l: l.startswith("beta"))
-        self.assertLess(alpha_at, t_beta_sent,
-                        "alpha's block waited for beta's records -- not streaming")
-        self.assertGreaterEqual(beta_at - t0, 0.9)
-        self.assertEqual(self.proc.wait(timeout=5), 0, self.proc.stderr.read())
+    def test_first_machine_prints_before_second_machines_records_are_consumed(self):
+        records = [_plan(("alpha", "alpha"), ("beta", "beta"))] + _machine_lines("alpha") + _machine_lines("beta") + [_rec(kind="exit", code=0)]
+        tap, err = _render(records)
+        alpha_at = tap.when(lambda l: l.startswith("alpha"))
+        self.assertLessEqual(alpha_at, 4, "alpha's block waited for beta's records -- not streaming")
+        self.assertGreater(tap.when(lambda l: l.startswith("beta")), 4)
+        self.assertEqual(err, "")
 
     def test_a_planned_machine_shows_as_probing_before_it_answers(self):
-        wfh = open(self.fifo, "w")
-        try:
-            wfh.write(_plan(("slowbox", "slowbox")))
-            wfh.flush()
-            probing_at, _ = self.reader.until(lambda l: "probing slowbox" in l)
-            time.sleep(0.3)
-            wfh.writelines(_machine_lines("slowbox"))
-            wfh.write(_rec(kind="exit", code=0))
-            wfh.flush()
-        finally:
-            wfh.close()
-        # The block follows the placeholder rather than erasing it: a scrolling stream, not a redrawn terminal.
-        block_at, _ = self.reader.until(lambda l: l.strip() == "slowbox")
-        self.assertGreater(block_at, probing_at)
-        self.assertEqual(self.proc.wait(timeout=5), 0, self.proc.stderr.read())
+        records = [_plan(("slowbox", "slowbox"))] + _machine_lines("slowbox") + [_rec(kind="exit", code=0)]
+        tap, _ = _render(records)
+        self.assertEqual(tap.when(lambda l: "probing slowbox" in l), 1)
+        self.assertGreater(tap.when(lambda l: l.strip() == "slowbox"), 1)
 
 
 class TestABlockWaitsForEveryPlannedJob(unittest.TestCase):
-    """A macOS host feeds one machine from two jobs, the podman VM's
-    container target and the tart vm target. The block is drawn once, after
-    both, whatever order and however far apart they flush."""
+    """A macOS host feeds one machine from two jobs, the podman VM's container target and the tart vm target."""
 
     def test_the_first_job_flushing_empty_does_not_draw_the_machine(self):
-        cp = _render([
+        tap, err = _render([
             _plan(("container", "host"), ("vm", "host")),
             _rec(kind="machine", name="host", self=True),
             _rec(kind="flush", job="container"),
             _rec(kind="machine", name="host", self=True),
-            _rec(kind="workspace", machine="host", method="macOS guest",
-                 name="ws-v", state="stopped", ws="present"),
+            _rec(kind="workspace", machine="host", method="macOS guest", name="ws-v", state="stopped", ws="present"),
             _rec(kind="flush", job="vm"),
-            _rec(kind="exit", code=0),
-        ])
-        self.assertEqual(cp.returncode, 0, cp.stderr)
-        self.assertEqual(len([l for l in cp.stdout.splitlines() if l.startswith("host ")]), 1, cp.stdout)
-        self.assertIn("ws-v", cp.stdout)
-        self.assertNotIn("no workspaces", cp.stdout)
-        self.assertLess(cp.stdout.index("probing vm"), cp.stdout.index("host "))
+            _rec(kind="exit", code=0)])
+        out = "\n".join(l for _, l in tap.lines)
+        self.assertEqual(err, "")
+        self.assertEqual(len([l for l in out.splitlines() if l.startswith("host ")]), 1, out)
+        self.assertIn("ws-v", out)
+        self.assertNotIn("no workspaces", out)
+        self.assertLess(out.index("probing vm"), out.index("host "))
 
     def test_a_flush_for_a_job_outside_the_plan_is_reported_and_draws_nothing(self):
-        cp = _render([
+        tap, err = _render([
             _plan(("container", "host")),
             _rec(kind="machine", name="host", self=True),
             _rec(kind="flush", job="vm"),
-            _rec(kind="workspace", machine="host", method="container",
-                 name="ws-c", state="present", ws="present"),
+            _rec(kind="workspace", machine="host", method="container", name="ws-c", state="present", ws="present"),
             _rec(kind="flush", job="container"),
-            _rec(kind="exit", code=0),
-        ])
-        self.assertEqual(cp.returncode, 0, cp.stderr)
-        self.assertIn("'vm' ended without being in the plan", cp.stderr)
-        self.assertIn("ws-c", cp.stdout)
-        self.assertNotIn("no workspaces", cp.stdout)
+            _rec(kind="exit", code=0)])
+        out = "\n".join(l for _, l in tap.lines)
+        self.assertIn("'vm' ended without being in the plan", err)
+        self.assertIn("ws-c", out)
+        self.assertNotIn("no workspaces", out)
 
     def test_a_job_with_no_machine_completes_no_block(self):
-        cp = _render([
-            _plan(("alpha", "alpha"), ("devices", None)),
-            _rec(kind="flush", job="devices"),
-            *_machine_lines("alpha"),
-            _rec(kind="exit", code=0),
-        ])
-        self.assertEqual(cp.returncode, 0, cp.stderr)
-        self.assertEqual(len([l for l in cp.stdout.splitlines() if l.startswith("alpha")]), 1, cp.stdout)
-        self.assertIn("ws-alpha", cp.stdout)
+        tap, _ = _render([_plan(("alpha", "alpha"), ("devices", None)), _rec(kind="flush", job="devices"), *_machine_lines("alpha"),
+                          _rec(kind="exit", code=0)])
+        out = "\n".join(l for _, l in tap.lines)
+        self.assertEqual(len([l for l in out.splitlines() if l.startswith("alpha")]), 1, out)
+        self.assertIn("ws-alpha", out)
 
 
 class TestJsonModeUnchangedByStreamMarkers(unittest.TestCase):
-    """--json is one document at the end; the plan and the flushes are
-    invisible to it, exactly as `merge` ignores them for --html and --web."""
-
     def test_json_output_equals_the_merge_of_the_same_stream_without_markers(self):
-        lines = (
-            [_plan(("alpha", "alpha"), ("beta", "beta"))]
-            + _machine_lines("alpha")
-            + _machine_lines("beta")
-            + [_rec(kind="fleet", machine="rpi3", role="bench-device",
-                    mode="bench mode", media="sd"),
-               _rec(kind="exit", code=2)]
-        )
-        tmp = tempfile.mkdtemp(prefix="wk-status-stream-")
-        self.addCleanup(lambda: subprocess.run(["rm", "-rf", tmp]))
-        with_markers = os.path.join(tmp, "with")
-        without = os.path.join(tmp, "without")
-        with open(with_markers, "w") as fh:
-            fh.writelines(lines)
-        with open(without, "w") as fh:
-            fh.writelines(l for l in lines if '"plan"' not in l and '"flush"' not in l)
-
-        outs = []
-        for path in (with_markers, without):
-            cp = subprocess.run([sys.executable, str(STATUS_VIEW), "json", path],
-                                cwd=str(REPO), capture_output=True, text=True, timeout=30)
-            self.assertEqual(cp.returncode, 0, cp.stderr)
-            outs.append(json.loads(cp.stdout))
-        self.assertEqual(outs[0], outs[1])
-        self.assertEqual(outs[0]["exit"], 2)
-        self.assertEqual([m["name"] for m in outs[0]["machines"]], ["alpha", "beta"])
+        records = ([_plan(("alpha", "alpha"), ("beta", "beta"))] + _machine_lines("alpha") + _machine_lines("beta")
+                   + [_rec(kind="fleet", machine="rpi3", role="bench-device", mode="bench mode", media="sd"), _rec(kind="exit", code=2)])
+        with_markers = statusview.merge(records)
+        without = statusview.merge([r for r in records if r["kind"] not in ("plan", "flush")])
+        self.assertEqual(with_markers, without)
+        self.assertEqual(with_markers["exit"], 2)
+        self.assertEqual([m["name"] for m in with_markers["machines"]], ["alpha", "beta"])
+        self.assertEqual(json.loads(json.dumps(with_markers)), with_markers)
 
 
 _ANSWERING_SSH = '''#!/bin/sh
@@ -242,24 +147,13 @@ exec bash -c "$last"
 
 
 class TestCollectorMarkers(WkTest):
-    """The stream cmd/status collects over one faked reachable target (the
-    scaffolding tests/test_fleet_walk.py uses): a rendering run opens with a
-    plan and ends every job with a flush; a run asked for `--records` is one
-    job of the wk that asked and carries neither."""
+    """The stream cmd/status collects over one faked reachable target: a rendering run opens with a plan
+    and ends every job with a flush; a run asked for `--records` carries neither."""
 
     def _status(self, *args):
-        with scratch_dir(prefix="wk-test-machines-") as machdir, \
-             stub_path({"ssh": _ANSWERING_SSH}) as binp:
-            env = {
-                "WK_MACHINES_DIR": str(machdir),
-                "WK_TARGET": "remote",
-                "WK_REMOTE_HOST": "fake-reachable-" + rand_suffix(4),
-                "PATH": f"{binp}:{os.environ.get('PATH', '/usr/bin:/bin')}",
-                # The probe's cap (targets/remote.sh): the stub answers at once, and
-                # `capped` leaves its watchdog sleeping on the walk's stdout for the
-                # whole cap after the walk has exited.
-                "WK_PROBE_SECONDS": "1",
-            }
+        with scratch_dir(prefix="wk-test-machines-") as machdir, stub_path({"ssh": _ANSWERING_SSH}) as binp:
+            env = {"WK_MACHINES_DIR": str(machdir), "WK_TARGET": "remote", "WK_REMOTE_HOST": "fake-reachable-" + rand_suffix(4),
+                   "PATH": f"{binp}:{os.environ.get('PATH', '/usr/bin:/bin')}", "WK_PROBE_SECONDS": "1"}
             return run("status", *args, env=env, timeout=60)
 
     def test_records_carry_no_markers(self):
@@ -277,8 +171,6 @@ class TestCollectorMarkers(WkTest):
         self.assertEqual(len([l for l in cp.stdout.splitlines() if l.startswith("remote")]), 1, cp.stdout)
 
 
-# A machine with a wk of its own whose `--records` answer still carries its
-# own walk's markers, one of them a flush for a job this walk also has.
 _MARKER_LEAKING_SSH = '''#!/bin/sh
 for last; do :; done
 case "$last" in
@@ -294,37 +186,26 @@ exec bash -c "$last"
 
 
 class TestARemotesMarkersStayItsOwn(WkTest):
-    """A remote's plan and flush records end its jobs, not this walk's: its
-    workspace is listed even when its stream flushed the job named after it
-    before the workspace record arrived."""
+    """A remote's plan and flush records end its jobs, not this walk's."""
 
     def test_a_flush_in_a_remotes_records_does_not_draw_its_block_early(self):
-        with scratch_dir(prefix="wk-test-machines-") as machdir, \
-             stub_path({"ssh": _MARKER_LEAKING_SSH}) as binp:
+        with scratch_dir(prefix="wk-test-machines-") as machdir, stub_path({"ssh": _MARKER_LEAKING_SSH}) as binp:
             cp = run("status", "--text", "--no-devices", env={
-                "WK_MACHINES_DIR": str(machdir),
-                "WK_TARGET": "remote",
-                "WK_REMOTE_HOST": "fake-leaky-" + rand_suffix(4),
-                "PATH": f"{binp}:{os.environ.get('PATH', '/usr/bin:/bin')}",
-                "WK_PROBE_SECONDS": "1",
-            }, timeout=60)
+                "WK_MACHINES_DIR": str(machdir), "WK_TARGET": "remote", "WK_REMOTE_HOST": "fake-leaky-" + rand_suffix(4),
+                "PATH": f"{binp}:{os.environ.get('PATH', '/usr/bin:/bin')}", "WK_PROBE_SECONDS": "1"}, timeout=60)
         self.assertEqual(cp.returncode, 0, cp.stdout)
         self.assertEqual(len([l for l in cp.stdout.splitlines() if l.startswith("remote")]), 1, cp.stdout)
         self.assertRegex(cp.stdout, r"(?m)^\s+leaky-ws\s", cp.stdout)
 
 
 class TestEveryWorkspaceIsInTheListing(WkTest):
-    """The container target answers as this machine -- the podman VM on macOS,
-    the host on Linux -- beside every peer that answers for itself: the bare
-    listing names every workspace `wk ls` names."""
-
     @requires_container_target()
     def test_bare_status_lists_every_workspace_ls_lists(self):
         ls = run("ls", "--json", timeout=120)
         self.assertEqual(ls.returncode, 0, ls.stdout)
         names = [w["name"] for w in json.loads(ls.stdout)["workspaces"]]
         st = run("status", "--text", "--no-devices", env={"NO_COLOR": "1"}, timeout=180)
-        self.assertIn(st.returncode, (0, 2, 4), st.stdout)  # 2 is work in progress, 4 an unreachable peer: neither is the listing's fault
+        self.assertIn(st.returncode, (0, 2, 4), st.stdout)
         for n in names:
             self.assertRegex(st.stdout, r"(?m)^\s+%s\s" % n, f"'{n}' missing from a bare 'wk status':\n{st.stdout}")
 
@@ -338,17 +219,10 @@ esac
 
 
 class TestAStoppedPodmanMachineSaysSo(WkTest):
-    """On macOS the container target's far side is the podman machine. Stopped,
-    it is reported on this machine's block with the command that brings it
-    up, never as an empty target."""
-
     @unittest.skipUnless(sys.platform == "darwin", "the container target has a far side only on macOS")
     def test_the_block_names_wk_start(self):
         with stub_path({"podman": _STOPPED_PODMAN}) as binp:
-            cp = run("status", "--records", env={
-                "WK_TARGET": "container",
-                "PATH": f"{binp}:{os.environ.get('PATH', '/usr/bin:/bin')}",
-            }, timeout=60)
+            cp = run("status", "--records", env={"WK_TARGET": "container", "PATH": f"{binp}:{os.environ.get('PATH', '/usr/bin:/bin')}"}, timeout=60)
         self.assertEqual(cp.returncode, 0, cp.stdout)
         raws = [json.loads(l) for l in cp.stdout.splitlines() if l.startswith('{"kind":"raw"')]
         self.assertEqual(len(raws), 1, cp.stdout)

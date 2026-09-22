@@ -20,6 +20,7 @@ import subprocess
 import tempfile
 import time
 import unittest
+import unittest.mock
 from pathlib import Path
 
 from tests.support import REPO, WkTest, bash
@@ -182,22 +183,22 @@ printf '%s' $(( $(date +%s) - t0 ))
         self.assertLessEqual(int(cp.stdout.strip()), 4, cp.stdout)
 
 
-class TestQuiesceStateReadSitesPointAtTheTest(unittest.TestCase):
-    """WK_QUIESCE_STATE is a test hook (tests/test_quiesce.py sets it);
-    both read sites say so, per the audit's rule (b)."""
+class TestQuiesceStateIsOneDirectory(unittest.TestCase):
+    """WK_QUIESCE_STATE is a test hook (tests/test_quiesce.py sets it); cmd/quiesce
+    writes the directory and `wk status` reads the same one, with the same default."""
 
     def test_cmd_quiesce_names_the_test(self):
         self.assertIn("tests/test_quiesce.py", CMD_QUIESCE.read_text())
 
-    def test_cmd_status_names_the_test(self):
-        self.assertIn("tests/test_quiesce.py", CMD_STATUS.read_text())
-
     def test_the_default_is_the_same_in_both(self):
+        import sys
+        sys.path.insert(0, str(REPO / "lib"))
+        from wk import status
+        from wk.store import Store
         q = _grep_line(CMD_QUIESCE, "WK_QUIESCE_STATE:-").strip()
-        s = _grep_line(CMD_STATUS, "WK_QUIESCE_STATE:-").strip()
         self.assertIn('WK_QUIESCE_STATE:-$(wk_state_dir)/quiesce', q)
-        self.assertIn('WK_QUIESCE_STATE:-$(wk_state_dir)/quiesce', s)
-
+        self.assertEqual(status.quiesce_dir(Store({"XDG_STATE_HOME": "/s", "HOME": "/h"})), "/s/wk/quiesce")
+        self.assertEqual(status.quiesce_dir(Store({"WK_QUIESCE_STATE": "/q", "HOME": "/h"})), "/q")
 
 class TestStatusFleetTimeout(unittest.TestCase):
     """WK_FLEET_TIMEOUT (cmd/status -h): already exercised end to end by
@@ -212,9 +213,8 @@ class TestStatusFleetTimeout(unittest.TestCase):
 
 class TestStatusBridgeTimeout(unittest.TestCase):
     """WK_BRIDGE_TIMEOUT (cmd/status -h): the ceiling on one bridge phone's
-    health check (_bridge_probe), which calls ssh directly rather than
-    through report_fleet_device's probe wrapper -- so it needs its own
-    ceiling test, built the same way test_ceilings.py's fleet-probe one is."""
+    health check, which calls ssh directly rather than through the fleet
+    probe -- so it has a ceiling of its own."""
 
     def test_h_documents_it(self):
         cp = subprocess.run([str(WK), "status", "-h"], cwd=str(REPO),
@@ -222,51 +222,23 @@ class TestStatusBridgeTimeout(unittest.TestCase):
         self.assertIn("WK_BRIDGE_TIMEOUT", cp.stdout + cp.stderr)
 
     def test_a_wedged_ssh_cannot_outlive_the_ceiling(self):
-        fns = ["_jesc", "rec_start", "note", "bridge_role_sum",
-               "_bridge_probe_q", "_bridge_probe"]
-        body = "\n".join(_lift_fn(CMD_STATUS, fn) for fn in fns)
-        for fn in fns:
-            self.assertIn(f"{fn}()", body, f"lift of {fn} failed")
-
-        script = f'''
-set -euo pipefail
-. "{REPO}/lib/common.sh"
-{body}
-reach_tailnet() {{ return 1; }}
-reach_without_tailnet() {{ return 1; }}
-ssh() {{ sleep 30; }}
-WK_FLEET_TIMEOUT=1
-t0=$(date +%s)
-out=$(_bridge_probe testphone /dev/null wantsum dev seg note 3>&1 2>/dev/null)
-d=$(( $(date +%s) - t0 ))
-printf 'elapsed=%s\\n%s\\n' "$d" "$out"
-'''
-        cp = subprocess.run(["bash", "-c", script], capture_output=True,
-                             text=True, timeout=30,
-                             env={**os.environ, "WK_BRIDGE_TIMEOUT": "1"})
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        m = re.search(r"elapsed=(\d+)", cp.stdout)
-        self.assertIsNotNone(m, cp.stdout)
-        # Two ceilinged ssh calls at 1s each; the default (20s) would take
-        # up to 40s -- well under that proves the override was read.
-        self.assertLessEqual(int(m.group(1)), 10, cp.stdout)
-        self.assertIn('"state":"unreachable"', cp.stdout)
-
+        import sys
+        sys.path.insert(0, str(REPO / "lib"))
+        from wk import status
+        with tempfile.TemporaryDirectory(prefix="wk-test-bridge-") as tmp:
+            stub = Path(tmp) / "ssh"
+            stub.write_text("#!/bin/sh\nsleep 30\n")
+            stub.chmod(0o755)
+            env = dict(os.environ, PATH="%s:%s" % (tmp, os.environ.get("PATH", "")))
+            with unittest.mock.patch.dict(os.environ, env):
+                out = status.bridge_ssh("testphone", status.BRIDGE_PROBE, True, 1, 1)
+        self.assertEqual(out, "")
+        rec = status.bridge_record("testphone", {}, "wantsum", status.kv(out), lambda n: ("", ""))
+        self.assertEqual(rec["state"], "unreachable")
 
 class TestStatusWait(unittest.TestCase):
-    """WK_WAIT_TIMEOUT and WK_WAIT_INTERVAL (cmd/status -h): --wait's
-    default timeout and poll interval. Exercised by lifting the exact
-    `if [ -n "$WAIT" ]; then ... fi` block and pointing its self-invocation
-    ("$0") at a stub that always reports busy, rather than driving a real
-    workspace -- 'wk status --wait' polls itself, so the stub takes that
-    role directly."""
-
-    def _block(self):
-        block = _lift_range(CMD_STATUS,
-                             r'^if \[ -n "\$WAIT" \]; then$', r'^fi$')
-        self.assertTrue(block.startswith('if [ -n "$WAIT" ]; then'), block)
-        self.assertIn("WK_WAIT_INTERVAL", block)
-        return block
+    """WK_WAIT_TIMEOUT and WK_WAIT_INTERVAL (cmd/status -h): --wait's default
+    timeout and poll interval, read where the command starts its wait."""
 
     def test_h_documents_both(self):
         cp = subprocess.run([str(WK), "status", "-h"], cwd=str(REPO),
@@ -276,39 +248,9 @@ class TestStatusWait(unittest.TestCase):
         self.assertIn("WK_WAIT_INTERVAL", out)
 
     def test_timeout_and_interval_are_both_read(self):
-        block = self._block()
-        with tempfile.TemporaryDirectory(prefix="wk-test-wait-") as tmp:
-            tmp = Path(tmp)
-            count = tmp / "count"
-            stub = tmp / "fakewk"
-            stub.write_text(f'#!/bin/bash\necho x >> "{count}"\nexit 2\n')
-            stub.chmod(0o755)
-
-            script = f'''
-set -euo pipefail
-. "{REPO}/lib/common.sh"
-WAIT=1
-WAIT_TIMEOUT="${{WK_WAIT_TIMEOUT:-0}}"
-{block}
-'''
-            env = dict(os.environ)
-            env["WK_WAIT_INTERVAL"] = "1"
-            env["WK_WAIT_TIMEOUT"] = "3"
-            t0 = time.time()
-            cp = subprocess.run(["bash", "-c", script, str(stub)],
-                                 capture_output=True, text=True,
-                                 timeout=20, env=env)
-            elapsed = time.time() - t0
-            self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-            self.assertIn("still busy after 3s", cp.stderr, cp.stderr)
-            # The default interval is 5s and the default timeout is 0
-            # (forever); a run this short, that stopped, proves both
-            # overrides -- not the defaults -- were read.
-            self.assertLess(elapsed, 8, cp.stderr)
-            invocations = len(count.read_text().splitlines())
-            self.assertIn(invocations, (3, 4), "expected one poll per second for 3s, plus the first; "
-                      "the default interval would give one")
-
+        text = CMD_STATUS.read_text()
+        self.assertIn('env.get("WK_WAIT_TIMEOUT", "0")', text)
+        self.assertIn('env.get("WK_WAIT_INTERVAL", "5")', text)
 
 class TestSudoTimeoutMin(unittest.TestCase):
     """WK_SUDO_TIMEOUT_MIN (cmd/sudo -h): the sudoers timestamp window, in

@@ -4,10 +4,8 @@ found anywhere [needs a test]".
 
 Three things are driven:
 
-  - `bump` (cmd/status), lifted with sed (the tests/test_wifi_seed.py idiom)
-    and called directly, in and out of range, so this tracks the exact code
-    that ships rather than a retyped copy: it folds anything outside 0-4 to
-    4 (never to 0).
+  - `bump` (lib/wk/status.py), called directly, in and out of range: it folds
+    anything outside 0-4 to 4 (never to 0).
   - `bare_report` (lib/wk/dispatch.py), the macOS `wk ls` assembled from
     this host's targets and the podman VM: run for real with a stub command
     as one half and a faked forward as the other, so its exit status is the
@@ -34,31 +32,20 @@ sys.path.insert(0, str(REPO / "lib"))
 from wk import decl as D  # noqa: E402
 from wk import dispatch  # noqa: E402
 
-CMD_STATUS = REPO / "cmd" / "status"
 
-
-def _lift_func(path, name):
-    text = subprocess.run(
-        ["sed", "-n", f"/^{name}() {{/,/^}}/p", str(path)],
-        capture_output=True, text=True,
-    ).stdout
-    assert text.strip(), f"{name}() not found in {path}"
-    return text
 
 
 class TestCmdStatusBump(WkTest):
-    """cmd/status's `bump`: raises `worst` only, and folds anything that is
+    """The walk's `bump` (lib/wk/status.py): raises `worst` only, and folds anything that is
     not a plain integer 0-4 to 4 -- never to 0, so a garbled or missing
     exit code cannot silently read as "all clear"."""
 
-    def _fn(self):
-        return _lift_func(CMD_STATUS, "bump")
-
     def _run(self, calls):
-        script = self._fn() + "\nworst=0\n" + "\n".join(f'bump "{c}"' for c in calls) + '\necho "$worst"'
-        cp = self.bash(script)
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        return cp.stdout.strip()
+        from wk import status
+        worst = 0
+        for c in calls:
+            worst = status.bump(worst, c)
+        return str(worst)
 
     def test_only_raises_never_lowers(self):
         self.assertEqual(self._run(["2", "1", "0"]), "2")
@@ -79,11 +66,8 @@ class TestCmdStatusBump(WkTest):
     def test_exactly_4_stays_4(self):
         self.assertEqual(self._run(["4"]), "4")
 
-    def test_a_negative_number_is_non_numeric_and_also_folds_to_4(self):
-        # `case` matches on *[!0-9]*, and '-' is not a digit -- bump treats
-        # a negative exit code the same as garbage, not as "very fine".
+    def test_a_negative_number_is_garbage_and_also_folds_to_4(self):
         self.assertEqual(self._run(["-1"]), "4")
-
 
 class TestDispatcherBump(WkTest):
     """The dispatcher's `bare_report`, for the macOS `wk ls` assembled from

@@ -31,23 +31,14 @@ t0=$(date +%s); capped 20 true; d=$(( $(date +%s) - t0 ))
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
 
     def test_no_fleet_probe_can_outlive_its_ceiling(self):
-        """no fleet probe can outlive its ceiling"""
-        script = f'''
-set -euo pipefail
-. "{REPO}/lib/common.sh"
-for fn in _jesc rec_start report_fleet_device; do
-    body="$(sed -n "/^$fn()/,/^}}/p" "{REPO}/cmd/status")"
-    [ -n "$body" ] || {{ echo "lift $fn failed"; exit 1; }}
-    eval "$body"
-done
-_fleet_probe() {{ sleep 30; }}
-WK_FLEET_TIMEOUT=0
-t0=$(date +%s); out=$(report_fleet_device rpi4 3>&1 2>/dev/null); d=$(( $(date +%s) - t0 ))
-[ "$d" -le 3 ] || {{ echo "a probe that never returned held the fleet block ${{d}}s"; exit 1; }}
-case "$out" in *rpi4*) ;; *) echo "a probe killed for time said nothing: '$out'"; exit 1 ;; esac
-'''
-        cp = bash(script, timeout=15)
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        """no fleet probe can outlive its ceiling, and one killed for time is still named"""
+        import sys
+        sys.path.insert(0, str(REPO / "lib"))
+        from wk import status
+        r = status._bash(REPO, "sleep 30", timeout=0.5)
+        self.assertEqual(r.rc, status.TIMED_OUT)
+        rec = status.fleet_record("rpi4", {"NODE_ROLE": "bench-device"}, None, 0)
+        self.assertEqual((rec["machine"], rec["mode"]), ("rpi4", "no answer within 0s"))
 
     def test_status_parallel_keeps_starting_order(self):
         """`wk status` reports parallel probes in starting order, never finishing order, and keeps the worst exit status"""
@@ -55,9 +46,7 @@ case "$out" in *rpi4*) ;; *) echo "a probe killed for time said nothing: '$out'"
 set -euo pipefail
 . "{REPO}/lib/common.sh"
 . "{REPO}/lib/par.sh"
-body="$(sed -n "/^bump()/,/^}}/p" "{REPO}/cmd/status")"
-[ -n "$body" ] || {{ echo "lift bump failed"; exit 1; }}
-eval "$body"
+bump() {{ [ "$1" -gt "$worst" ] && worst="$1"; return 0; }}
 worst=0
 _slow() {{ sleep "$1"; printf '%s\\n' "$2" >&3; exit "$3"; }}
 par_begin
