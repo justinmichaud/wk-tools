@@ -346,7 +346,6 @@ def main():
     # Derived on every report, never stored in the reading: one place holds the floors.
     clients = {str(k): v for k, v in (reading.get("webkit_gpu_clients") or {}).items()}
     if args.displays_only:
-        # An install that measures always owes the topology, mode or no mode.
         found = display_faults(reading.get("displays"), expect, topology=True)
     else:
         found = faults(reading, clients, reading.get("accelerator"), args.min_raf, expect)

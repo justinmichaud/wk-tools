@@ -17,11 +17,14 @@ test is the plumbing.
 Run: python3 -m unittest tests.test_pi_agent -v
 """
 import json
+import os
+import shlex
 import shutil
 import subprocess
 import sys
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from tests.support import REPO, WkTest, bash, run
 
@@ -31,8 +34,8 @@ STORE = (REPO / "lib" / "store.sh").read_text()
 FIRSTRUN = (REPO / "container" / "firstrun.sh").read_text()
 RC = REPO / "shell" / "bashrc"
 
-# Read out of lib/credcheck.py rather than duplicated here: pi_litellm_endpoint
-# (cmd/ai) reads the same constant the same way.
+# Read out of lib/credcheck.py rather than duplicated here: cmd/ai reads the
+# same constant.
 LITELLM_ENDPOINT = subprocess.run(
     ["python3", "-c",
      "import sys; sys.path.insert(0, sys.argv[1]); import credcheck; "
@@ -46,8 +49,7 @@ PLACEHOLDER = "placeholder-value-for-this-test"
 # to look at it stores that shape. Still not a token.
 CLAUDE_SHAPED = "sk-ant-oat01-" + PLACEHOLDER
 
-TOUCHED = ("cmd/ai", "cmd/key", "lib/store.sh", "container/firstrun.sh",
-           "shell/bashrc")
+TOUCHED = ("cmd/key", "lib/store.sh", "container/firstrun.sh", "shell/bashrc")
 
 
 def secret_table():
@@ -159,7 +161,7 @@ WK_STORE={store}
             reader = "wk_cred_read" if row[4] == "file" else "wk_agent_secret"
             with self.subTest(name=name):
                 cp = self._sh(
-                    f'printf "%s\\n" {name}-{PLACEHOLDER} | wk_agent_secret_store {name}\n'
+                    f'printf "%s\\n" {name}-{PLACEHOLDER} | wk_cred_store {name}\n'
                     f'printf "[%s]\\n" "$({reader} {name})"', store)
                 self.assertIn(f"[{name}-{PLACEHOLDER}]", cp.stdout,
                               cp.stdout + cp.stderr)
@@ -174,7 +176,7 @@ WK_STORE={store}
             with self.subTest(name=row[0]):
                 cp = self._sh(
                     f'if wk_agent_secret_present {row[0]}; then echo yes; else echo no; fi\n'
-                    f'printf "%s\\n" x | wk_agent_secret_store {row[0]}\n'
+                    f'printf "%s\\n" x | wk_cred_store {row[0]}\n'
                     f'if wk_agent_secret_present {row[0]}; then echo yes; else echo no; fi',
                     store)
                 self.assertEqual(["no", "yes"], cp.stdout.split(), cp.stderr)
@@ -185,7 +187,7 @@ WK_STORE={store}
         store = self._store()
         row = FILE_ROWS[0]
         cp = self._sh(
-            f'printf "one\\ntwo\\n" | wk_agent_secret_store {row[0]}\n'
+            f'printf "one\\ntwo\\n" | wk_cred_store {row[0]}\n'
             f'printf "bytes=[%s]\\n" "$(wk_cred_read {row[0]})"', store)
         self.assertIn("bytes=[one\ntwo]", cp.stdout, cp.stdout + cp.stderr)
 
@@ -208,8 +210,8 @@ WK_STORE={store}
     def test_clearing_withdraws_one_and_leaves_the_others(self):
         store = self._store()
         cp = self._sh(
-            f'printf "%s\\n" a-{PLACEHOLDER} | wk_agent_secret_store claude\n'
-            f'printf "%s\\n" b-{PLACEHOLDER} | wk_agent_secret_store litellm\n'
+            f'printf "%s\\n" a-{PLACEHOLDER} | wk_cred_store claude\n'
+            f'printf "%s\\n" b-{PLACEHOLDER} | wk_cred_store litellm\n'
             'wk_cred_clear litellm\n'
             'printf "claude=[%s] litellm=[%s]\\n" "$(wk_agent_secret claude)" "$(wk_agent_secret litellm)"',
 
@@ -482,10 +484,6 @@ class TestTheShellExportsEveryName(WkTest):
 
 
 class TestPiIsAnAgentThisCommandKnows(unittest.TestCase):
-    def test_it_no_longer_refuses_by_name(self):
-        self.assertIn("claude|pi) shift ;;", AI)
-        self.assertNotIn("the pi agent is not built yet", AI)
-
     def test_an_unknown_agent_still_is_refused(self):
         """cmd/ai directly, not through `wk`: the dispatcher resolves the
         workspace name first (name=required@2), so a test going that way is
@@ -502,28 +500,9 @@ class TestPiIsAnAgentThisCommandKnows(unittest.TestCase):
         for fact in ("@earendil-works/pi-coding-agent",
                      "https://www.npmjs.com/package/@earendil-works/pi-coding-agent",
                      "https://github.com/earendil-works/pi",
-                     "PI_NODE_MIN=22.19.0",
+                     'PI_NODE_MIN = "22.19.0"',
                      "models.json"):
             self.assertIn(fact, AI, fact)
-
-    def test_remote_control_is_claude_code_s_alone(self):
-        self.assertIn('[ -z "$RC" ] || [ "$AGENT" = claude ] || die', AI)
-
-    def test_both_agents_get_the_same_sandbox_treatment(self):
-        """One implementation, not two: the push switch, the commit wall and
-        `wk verify` are above the launch and know nothing about which
-        agent it is."""
-        self.assertIn('exec ${WALL}$(sh_quote "$AGENT_BIN")', AI)
-        self.assertIn('env WK_AGENT="$AGENT"', AI)
-        self.assertEqual(1, AI.count('WALL="$(commit_wall_prefix'))
-        self.assertEqual(1, AI.count('WK_NAME="$NAME" "$WK_ROOT/cmd/verify"'))
-        # cmd/verify reads the name from WK_NAME and refuses a positional as
-        # usage, so the name must never be passed as one (measured live: it
-        # was, and remote control never started in a fresh workspace).
-        self.assertNotIn('cmd/verify" "$NAME"', AI)
-
-    def test_the_install_line_is_the_documented_one(self):
-        self.assertIn("npm install -g --ignore-scripts --prefix", AI)
 
     def test_the_registry_is_reachable_from_a_workspace(self):
         proxy = (REPO / "container" / "proxy" / "wk-proxy.py").read_text()
@@ -535,109 +514,121 @@ class TestPiNodeCompare(unittest.TestCase):
     compare is dotted rather than a major number."""
 
     CASES = {
-        "v24.3.0": True, "v22.19.0": True, "v22.20.1": True, "v23.0.0": True,
+        "v24.3.0": True, "v22.19.0": True, "v22.20.1": True, "v23.0.0": True, "v22.19": True,
         "v22.18.9": False, "v22.11.0": False, "v20.19.0": False,
         "v18.0.0": False, "": False, "vwhat": False,
     }
 
     def test_versions(self):
-        script = "\n".join(
-            f'if pi_node_ok {v!r}; then echo "{v}=yes"; else echo "{v}=no"; fi'
-            for v in self.CASES)
-        cp = bash(f'''
-export WK_CLAUDE_LIB=1
-. "$WK_ROOT/cmd/ai"
-{script}
-''')
-        self.assertEqual(0, cp.returncode, cp.stdout + cp.stderr)
+        from tests.test_ai import AI as ai
         for v, ok in self.CASES.items():
             with self.subTest(version=v or "(nothing)"):
-                self.assertIn(f"{v}={'yes' if ok else 'no'}", cp.stdout)
+                self.assertEqual(ok, ai.pi_node_ok(v))
 
 
-class TestPiEnsure(WkTest):
-    """pi_ensure against a fake workspace: cmd/ai in library mode
-    (WK_CLAUDE_LIB=1, the guard it defines for exactly this) with t_exec
-    replaced, so nothing here reaches a container."""
+class TestPiEnsure(unittest.TestCase):
+    """pi as the agent, against a fake workspace whose probe answers from
+    what this test says is installed: an install is recorded rather than run,
+    and a models.json write is read back from the command that would write it.
+    The sandbox treatment is Claude's own (tests/test_ai.py): nothing is
+    installed before it has run."""
 
-    def _script(self, node="v22.19.0", npm="/usr/bin/npm", body="pi_ensure ws"):
-        store = self.tmp / "store"
-        (store / "secrets").mkdir(parents=True)
-        self.store = store
-        return f'''
-export WK_CLAUDE_LIB=1
-export WK_IN_VM=1
-export WK_STORE={store}
-. "$WK_ROOT/cmd/ai"
+    def setUp(self):
+        from tests.test_ai import AI, SimRegistry, SimTarget, quiet_env
+        from wk.machine import Fake, Result
+        self.AI, self.Result = AI, Result
+        env = quiet_env()
+        self.addCleanup(env.stop)
+        self.fake = Fake()
+        self.fake.answer([os.path.join(AI.ROOT, "wk"), "push"], rc=1)
+        self.fake.answer(["bash", "-c"], rc=1)   # wk_agent_secret_present litellm: none stored
+        self.env = {"WK_NAME": "ws", "WK_TARGET": "container"}
+        self.target = SimTarget(self.fake, self.env)
+        self.reg = SimRegistry(self.env, self.fake, self.target)
+        self.node, self.npm, self.installed = "v22.19.0", "/usr/bin/npm", False
+        self.target.answers["npm install"] = self._install
+        self.target.answers['printf "node=%s'] = self._probe
+        self.handed = []
+        for p in (mock.patch.object(AI.Ai, "checks"),
+                  mock.patch.object(AI, "foreground", side_effect=lambda argv, cwd: self.handed.append(argv) or 0)):
+            p.start()
+            self.addCleanup(p.stop)
 
-CALLS={self.tmp}/calls
-INSTALLED={self.tmp}/installed
-MODELS_WRITTEN={self.tmp}/models-written
+    def _install(self, argv):
+        self.installed = True
+        return self.Result(0, "added 1 package\n")
 
-# The workspace, faked: the probe answers from these variables, an install
-# is recorded rather than run, and a models.json write lands in a file this
-# test can read back rather than in a real workspace. Defined after the
-# source so it wins over lib/target.sh's own, the same way
-# tests/test_claude_rc.py does it.
-t_exec() {{
-    case "$*" in
-        *"npm install"*) printf 'install: %s\\n' "$*" >> "$CALLS"; : > "$INSTALLED"; return 0 ;;
-        *"cat > ~/.pi/agent/models.json"*) cat > "$MODELS_WRITTEN"; return 0 ;;
-    esac
-    printf 'node={node}\\n'
-    printf 'npm={npm}\\n'
-    if [ -e "$INSTALLED" ]; then printf 'pi=%s\\n' "$HOME/.local/bin/pi"; else printf 'pi=\\n'; fi
-    printf 'models=no\\n'
-}}
-{body}
-'''
+    def _probe(self, argv):
+        return self.Result(0, "node=%s\r\nnpm=%s\npi=%s\nmodels=no\n" % (self.node, self.npm, "/home/u/.local/bin/pi" if self.installed else ""))
+
+    def pi(self):
+        import contextlib
+        import io
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            try:
+                status = self.AI.main(["pi"], env=self.env, reg=self.reg)
+            except self.AI.Refused as e:
+                status = e.status
+        return status, err.getvalue()
+
+    def installs(self):
+        return [a for a in self.target.asked if "npm install" in a]
 
     def test_no_npm_is_refused_with_the_remedy(self):
-        cp = bash(self._script(npm=""))
-        self.assertNotEqual(0, cp.returncode)
-        self.assertIn("no node runtime pi can use", cp.stderr)
-        self.assertIn("container/firstrun.sh", cp.stderr)
-        self.assertIn("22.19.0", cp.stderr)
+        self.npm = ""
+        status, err = self.pi()
+        self.assertEqual(1, status, err)
+        self.assertIn("no node runtime pi can use", err)
+        self.assertIn("container/firstrun.sh", err)
+        self.assertIn("22.19.0", err)
 
-    def test_too_old_a_node_is_refused_with_what_it_found(self):
-        cp = bash(self._script(node="v20.11.1"))
-        self.assertNotEqual(0, cp.returncode)
-        self.assertIn("v20.11.1", cp.stderr)
-        self.assertIn("container/firstrun.sh", cp.stderr)
-
-    def test_nothing_is_installed_when_the_check_refuses(self):
-        bash(self._script(node="v18.0.0"))
-        self.assertFalse((self.tmp / "calls").exists())
+    def test_too_old_a_node_is_refused_with_what_it_found_and_nothing_installed(self):
+        self.node = "v20.11.1"
+        status, err = self.pi()
+        self.assertEqual(1, status, err)
+        self.assertIn("v20.11.1", err)
+        self.assertEqual([], self.installs())
+        self.assertEqual([], self.handed)
 
     def test_it_installs_once_and_then_finds_it(self):
-        cp = bash(self._script(body='pi_ensure ws; pi_ensure ws; echo "bin=$PI_BIN"'))
-        self.assertEqual(0, cp.returncode, cp.stdout + cp.stderr)
-        calls = (self.tmp / "calls").read_text().splitlines()
-        self.assertEqual(1, len(calls), calls)
-        self.assertIn("--ignore-scripts", calls[0])
-        self.assertIn("@earendil-works/pi-coding-agent", calls[0])
-        self.assertIn("bin=", cp.stdout)
-        self.assertIn("/.local/bin/pi", cp.stdout)
+        status, err = self.pi()
+        self.assertEqual(0, status, err)
+        self.pi()
+        self.assertEqual(1, len(self.installs()), self.installs())
+        self.assertIn("--ignore-scripts", self.installs()[0])
+        self.assertIn("@earendil-works/pi-coding-agent", self.installs()[0])
+        self.assertTrue(self.handed[-1][-1].endswith(" -- /home/u/.local/bin/pi"), self.handed[-1][-1])
+        self.assertIn("exec bwrap ", self.handed[-1][-1], "pi is walled off like claude")
+        self.assertIn("WK_AGENT=pi", self.handed[-1])
+
+    def test_an_install_that_fails_names_the_command(self):
+        self.target.answers["npm install"] = self.Result(1)
+        status, err = self.pi()
+        self.assertEqual(1, status, err)
+        self.assertIn("npm could not install @earendil-works/pi-coding-agent in 'ws'", err)
 
     def test_it_writes_the_models_file_when_a_key_is_stored(self):
-        script = self._script()
-        (self.store / "secrets" / "litellm-key").write_text(PLACEHOLDER + "\n")
-        cp = bash(script)
-        self.assertEqual(0, cp.returncode, cp.stdout + cp.stderr)
-        written = json.loads((self.tmp / "models-written").read_text())
+        self.fake.answer(["bash", "-c"])
+        scripts = []
+        self.target.answers["> ~/.pi/agent/models.json"] = lambda argv: scripts.append(argv[-1]) or self.Result(0)
+        status, err = self.pi()
+        self.assertEqual(0, status, err)
+        write = scripts[0]
+        words = shlex.split(write)
+        written = json.loads(words[words.index("printf") + 2])
         provider = written["providers"]["litellm"]
         self.assertEqual(LITELLM_ENDPOINT, provider["baseUrl"])
         self.assertEqual("openai-completions", provider["api"])
         self.assertEqual("$LITELLM_API_KEY", provider["apiKey"])
-        self.assertIn("models.json", cp.stderr)
-        self.assertIn("wk enter ws --", cp.stderr)
-        # The key itself is a value in a file, not something to print.
-        self.assertNotIn(PLACEHOLDER, cp.stderr + cp.stdout)
+        self.assertIn("umask 077", write)
+        self.assertIn("wrote ~/.pi/agent/models.json", err)
+        self.assertIn("wk enter ws --", err)
 
     def test_with_no_key_it_says_which_command_stores_one(self):
-        cp = bash(self._script())
-        self.assertEqual(0, cp.returncode, cp.stdout + cp.stderr)
-        self.assertIn("wk key set litellm", cp.stderr)
+        status, err = self.pi()
+        self.assertEqual(0, status, err)
+        self.assertIn("wk key set litellm", err)
 
 
 class TestDoctorReportsEveryName(WkTest):

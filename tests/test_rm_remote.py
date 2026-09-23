@@ -1,5 +1,5 @@
 """`wk rm` against a machine that does not answer, and against a name that
-is not there -- driven through the real remote driver (targets/remote.sh)
+is not there -- driven through the real remote driver (lib/wk/targets.py)
 with a stub `ssh` on PATH and a registry of this test's own, so no test
 reaches the maintainer's fleet.
 
@@ -15,9 +15,11 @@ The properties:
 Run: python3 -m unittest tests.test_rm_remote -v
 """
 import os
+import subprocess
+import sys
 import unittest
 
-from tests.support import WkTest, bash, run, stub_path
+from tests.support import REPO, WkTest, run, stub_path
 
 _HOSTKEY_SSH = """#!/bin/sh
 echo "Host key verification failed." >&2
@@ -78,14 +80,12 @@ class TestAnUnreachableMachineKeepsItsRecord(WkTest):
 
     def test_the_locate_walk_names_the_machine_and_ssh_reason(self):
         with stub_path({"ssh": _HOSTKEY_SSH}) as binp:
-            cp = bash(
-                'set -euo pipefail\n'
-                '. "$WK_ROOT/lib/common.sh"\n'
-                '. "$WK_ROOT/lib/target.sh"\n'
-                'ws_locate no-such-workspace\n',
-                env=self._env(binp), timeout=120,
-            )
+            cp = subprocess.run(
+                [sys.executable, "-c", "import sys; sys.path.insert(0, sys.argv[1] + '/lib')\n"
+                 "from wk import targets\nprint(targets.Registry(sys.argv[1]).locate('no-such-workspace'))", str(REPO)],
+                env=dict(os.environ, **self._env(binp)), capture_output=True, text=True, timeout=120)
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertEqual(cp.stdout.strip(), "[]", cp.stdout + cp.stderr)
         self.assertIn("could not ask fakebox over ssh: Host key verification failed.",
                       cp.stderr, cp.stderr)
 

@@ -68,14 +68,12 @@ class TestDeadHoldersLockIsReclaimed(WkTest):
 set -euo pipefail
 . "{REPO}/lib/common.sh"
 export WK_LOCK_DIR="{lockdir}"
-h=$(hostname -s 2>/dev/null || hostname 2>/dev/null || echo local)
 # A pid above every default pid_max on both platforms: dead by construction
 # (the same convention tests/test_state.py's status-file test uses).
-ln -s "pid=4194304 tok=deadbeef at=2020-01-01T00:00:00Z cmd=stale" \
-    "{lockdir}/demo-resource@$h.lock"
+ln -s "pid=4194304 tok=deadbeef at=2020-01-01T00:00:00Z cmd=stale" "$(_lock_path demo-resource)"
 
 hold_lock demo-resource -w 5
-echo "took it: $(readlink "{lockdir}/demo-resource@$h.lock")"
+echo "took it: $(readlink "$(_lock_path demo-resource)")"
 '''
             cp = bash(script, timeout=15)
             self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)

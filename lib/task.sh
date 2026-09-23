@@ -8,7 +8,6 @@ command -v wk_ws_dir >/dev/null 2>&1 || . "$WK_ROOT/lib/store.sh"
 
 task_root() { printf '%s/task' "$(wk_record_dir)"; }
 
-# A waiter's stamp precedes its driver, and task_wait ignores every record older than it: the last record of a kind and name is a previous run's until the driver writes its own.
 task_stamp() { date -u +%Y%m%dT%H%M%SZ; }
 
 task_id() { # <kind> <name> -- the pid separates two tasks begun in one second
@@ -189,46 +188,6 @@ task_verdict() { # <dir> [pid|capped] -- starting|running|silent|died|unanswered
     if [ "$age" -le "${WK_STALL_SECONDS:-300}" ]; then printf 'running'; else printf 'silent'; fi
 }
 
-task_wait() { # <kind> <name> <log> [timeout] [pid] [floor stamp] -- the verdict it ended on, or crashed/timeout
-    local kind="$1" name="$2" log="$3" timeout="${4:-0}" pid="${5:-}" floor="${6:-}"
-    local st waited=0 tail_pid=""
-
-    _task_wait_interrupted() { [ -z "$tail_pid" ] || kill "$tail_pid" 2>/dev/null || true; }   # registered before the reader starts: a signal between the two leaves a `tail -f` holding this process's stderr after it has exited
-    on_interrupt _task_wait_interrupted
-    if [ -f "$log" ]; then
-        tail -n +1 -f "$log" >&2 & tail_pid=$!
-    fi
-
-    while :; do
-        st=$(_task_wait_verdict "$kind" "$name" "$floor")
-        case "$st" in starting|running|silent) ;; died) st=crashed; break ;; *) break ;; esac
-
-        # The record is the job's own claim and the pid the fact: a driver killed before it wrote one leaves `starting` forever otherwise.
-        if [ -n "$pid" ] && ! kill -0 "$pid" 2>/dev/null; then
-            wk_sleep 1   # one more pass: the child may be mid-write of its final state
-            st=$(_task_wait_verdict "$kind" "$name" "$floor")
-            case "$st" in starting|running|silent|died) st=crashed ;; esac
-            break
-        fi
-
-        if [ "$timeout" -gt 0 ] && [ "$waited" -ge "$timeout" ]; then st=timeout; break; fi
-        wk_sleep 1
-        waited=$((waited + 1))
-    done
-
-    if [ -n "$tail_pid" ]; then
-        wk_sleep 1  # a moment for the child's last lines to reach the log
-        kill "$tail_pid" 2>/dev/null || true
-        wait "$tail_pid" 2>/dev/null || true
-    fi
-    printf '%s' "$st"
-}
-
-_task_wait_verdict() { # <kind> <name> [floor stamp] -- starting until the driver has written a record
-    local d; d=$(task_find "$1" "$2" "${3:-}")
-    if [ -z "$d" ]; then printf 'starting'; else task_verdict "$d"; fi
-}
-
 _task_prune() { # <kind> <name> <dir> -- one per kind and name, keeping live ones
     local d want; want="$(_task_slug "$1")-$(_task_slug "$2")-"
     while IFS= read -r d; do
@@ -241,11 +200,10 @@ $(task_list)
 EOF
 }
 
-task_find() { # <kind> <name> [floor stamp] -- prints the newest dir at or after the floor, or nothing
-    local d last="" want stamp; want="$(_task_slug "$1")-$(_task_slug "$2")-"
+task_find() { # <kind> <name> -- prints the newest dir, or nothing
+    local d last="" want; want="$(_task_slug "$1")-$(_task_slug "$2")-"
     while IFS= read -r d; do
-        stamp=$(_task_stamp_of "${d##*/}" "$want") || continue
-        if [ -n "${3:-}" ] && [[ "$stamp" < "$3" ]]; then continue; fi
+        _task_stamp_of "${d##*/}" "$want" >/dev/null || continue
         last="$d"
     done <<EOF
 $(task_list)

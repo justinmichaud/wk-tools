@@ -38,7 +38,6 @@ class TestPodmanRmByHand(WkTest):
 . "{REPO}/lib/detach.sh"
 load_target container >/dev/null 2>&1
 echo "state:$(ws_state {name})"
-echo "display:$(ws_display_state {name})"
 '''
             env = {"WK_STORE": str(store["path"]), "PATH": f"{binp}:{os.environ['PATH']}"}
             cp = bash(script, env=env)
@@ -46,10 +45,6 @@ echo "display:$(ws_display_state {name})"
             self.assertIn(
                 "state:broken", cp.stdout,
                 f"a hand-removed container should read 'broken' (rule 5): {cp.stdout}",
-            )
-            self.assertIn(
-                "display:broken", cp.stdout,
-                f"'wk ls'/'wk status' (ws_display_state) should say 'broken' too: {cp.stdout}",
             )
 
 
@@ -73,7 +68,6 @@ class TestTartDeleteByHand(WkTest):
 . "{REPO}/lib/detach.sh"
 load_target vm >/dev/null 2>&1
 echo "state:$(ws_state {name})"
-echo "display:$(ws_display_state {name})"
 '''
             env = {"WK_VM_STORE": str(store["path"]), "PATH": f"{binp}:{os.environ['PATH']}"}
             cp = bash(script, env=env)
@@ -81,10 +75,6 @@ echo "display:$(ws_display_state {name})"
             self.assertIn(
                 "state:broken", cp.stdout,
                 f"a hand-deleted guest should read 'broken' (rule 5): {cp.stdout}",
-            )
-            self.assertIn(
-                "display:broken", cp.stdout,
-                f"'wk ls'/'wk status' (ws_display_state) should say 'broken' too: {cp.stdout}",
             )
 
 

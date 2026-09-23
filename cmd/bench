@@ -397,17 +397,17 @@ preflight() {
     # --gpu makes a software renderer fatal rather than a footnote: MotionMark on llvmpipe measures llvmpipe.
     if [ "$class" = cpu ]; then
         check yes "class" "cpu -- no GPU or compositor required"
-        "$WK_ROOT/cmd/verify" "$ws" >/dev/null 2>&1 \
-            || check no "sandbox intact" "wk verify $ws"
+        WK_NAME="$ws" "$WK_ROOT/cmd/doctor" >/dev/null 2>&1 \
+            || check no "sandbox intact" "wk doctor $ws"
     elif [ -n "$SOFTWARE" ]; then
         check yes "sandbox (software rendering)" "not comparable with a GPU run"
-        "$WK_ROOT/cmd/verify" "$ws" >/dev/null 2>&1 \
-            || check no "sandbox intact" "wk verify $ws"
+        WK_NAME="$ws" "$WK_ROOT/cmd/doctor" >/dev/null 2>&1 \
+            || check no "sandbox intact" "wk doctor $ws"
         PREFLIGHT_NOTES="${PREFLIGHT_NOTES}software rendering; "
-    elif "$WK_ROOT/cmd/verify" "$ws" --gpu >/tmp/.wk-bench-verify.$$ 2>&1; then
+    elif WK_NAME="$ws" "$WK_ROOT/cmd/doctor" --gpu >/tmp/.wk-bench-verify.$$ 2>&1; then
         check yes "sandbox and GPU" "$(awk -F'renderer=' '/renderer=/{print substr($2,1,44); exit}' /tmp/.wk-bench-verify.$$)"
     else
-        check no  "sandbox and GPU" "$(grep FAIL /tmp/.wk-bench-verify.$$ | head -2 | tr '\n' ' ')"
+        check no  "sandbox and GPU" "$(grep -- ' -> ' /tmp/.wk-bench-verify.$$ | head -2 | tr '\n' ' ')"
     fi
     # awk rather than grep|head: a reader that exits early trips pipefail inside a command substitution under `set -e`.
     GPU_RENDERER=$(awk -F'renderer=' '/renderer=/{sub(/ *\|.*/,"",$2); print $2; exit}' /tmp/.wk-bench-verify.$$ 2>/dev/null || true)

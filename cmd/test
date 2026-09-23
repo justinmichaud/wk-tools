@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/usr/bin/env python3
 #
 # wk test <workspace> [flags] [paths...] -- run the JSC or layout test suites
 # wk: where=workspace name=required ready=yes group=workspaces takes=* passthrough dryrun
@@ -20,226 +20,286 @@
 #                        web process, "ui" to WebKitTestRunner
 #   --kill               stop the test run in this workspace, wherever it runs
 
-set -euo pipefail
-WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-. "$WK_ROOT/lib/common.sh"
-. "$WK_ROOT/lib/resources.sh"
-. "$WK_ROOT/lib/store.sh"
-. "$WK_ROOT/lib/watchdog.sh"
-. "$WK_ROOT/lib/target.sh"
-. "$WK_ROOT/lib/arch.sh"
-. "$WK_ROOT/build/configs.sh"
-. "$WK_ROOT/lib/task.sh"
+import os
+import re
+import shlex
+import subprocess
+import sys
 
-NAME="${WK_NAME:-}"
-require_name "$NAME"
+ROOT = os.environ.get("WK_ROOT") or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(ROOT, "lib"))
 
-CONFIG="${WK_CONFIG:-}"
-SUITE=jsc
-GPU=""
-LLDB=""
-KILL=""
-while [ $# -gt 0 ]; do
-    case "$1" in
-        --config)  CONFIG="${2:-}"; shift 2 ;;
-        --config=*) CONFIG="${1#*=}"; shift ;;
-        --layout)  SUITE=layout; shift ;;
-        --gpu)     GPU=1; shift ;;
-        --lldb)    LLDB=web
-                   case "${2:-}" in ui|web) LLDB="$2"; shift ;; esac
-                   shift ;;
-        --kill)    KILL=1; shift ;;
-        --)        shift; break ;;
-        *)         break ;;
-    esac
-done
+from wk import buildconf, job, record, shell, targets  # noqa: E402
+from wk.act import Refused, die, dry_run, info, log, warn  # noqa: E402
+from wk.build import records_of, size_for  # noqa: E402
+from wk.clock import Clock  # noqa: E402
 
-# The target first: on macOS a config does not choose its own build system, so config_load needs t_os.
-TARGET="$(ws_target "$NAME")"
-load_target "$TARGET"
+# The suite runner, in the announcing shell's own -lc text.
+PID_MATCH = "*Tools/Scripts/run-*"
+_SUMMARY = re.compile(r"^(Ran |Test suite|[0-9]+ test|All [0-9]+ test)", re.I | re.M)
+_FAILURE = re.compile(r"FAIL|crash|timed out", re.I)
 
-_KILL_CMD="wk test$(in_workspace || printf ' %s' "$NAME") --kill"
 
-if [ -n "$KILL" ]; then   # before a config is resolved: stopping a run needs none
-    _rc=0; job_stop "$NAME" test || _rc=$?
-    [ "$_rc" = 1 ] && die "the test run in '$NAME' outlived a TERM and a KILL.
-    Look at it:  wk enter $NAME  and then  pgrep -af run-"
-    exit 0
-fi
+def parse(argv):
+    o = {"suite": "jsc", "pass": []}
+    i = 0
+    while i < len(argv):
+        a = argv[i]
+        if a == "--config":
+            o["config"] = argv[i + 1] if i + 1 < len(argv) else ""
+            i += 2
+        elif a.startswith("--config="):
+            o["config"] = a[len("--config="):]
+            i += 1
+        elif a == "--layout":
+            o["suite"] = "layout"
+            i += 1
+        elif a == "--gpu":
+            o["gpu"] = True
+            i += 1
+        elif a == "--lldb":
+            lldb = "web"
+            if i + 1 < len(argv) and argv[i + 1] in ("ui", "web"):
+                lldb = argv[i + 1]
+                i += 1
+            o["lldb"] = lldb
+            i += 1
+        elif a == "--kill":
+            o["kill"] = True
+            i += 1
+        elif a == "--":
+            i += 1
+            break
+        else:
+            break
+    o["pass"] += argv[i:]
+    return o
 
-[ -n "$CONFIG" ] || CONFIG=$(default_config "$NAME")
 
-config_load "$CONFIG" "$(t_os)" || die "unknown config '$CONFIG' (wk build --list)"
+def missing_layout_paths(runner, src, paths):
+    """Every `paths` entry (its `?query` stripped) run-webkit-tests would find neither
+    under LayoutTests/ nor under the checkout -- one round trip, so a mistyped path is
+    named before the suite starts rather than silently "0 tests, 0 run"."""
+    if not paths:
+        return []
+    q_src = shlex.quote(src)
+    script = ("for t in " + " ".join(shlex.quote(p) for p in paths) + "; do\n"
+              "  p=${t%%\\?*}\n"
+              '  [ -e ' + q_src + '/LayoutTests/"$p" ] || [ -e ' + q_src + '/"$p" ] || printf "%s\\n" "$t"\n'
+              "done\n")
+    r = runner(["sh", "-c", script])
+    if not r.ok:
+        return []
+    return [l for l in r.out.replace("\r", "").splitlines() if l]
 
-# Asked of the config, not of CFG_PORT: on macOS a jsc-* config is an Apple-port build with no port flag.
-if [ "$SUITE" = layout ] && config_jsc_only; then
-    die "'$CONFIG' builds JavaScriptCore alone, which has no layout tests -- no
-    WebKitTestRunner and no ImageDiff are built by it. Name a full-port config
-    that has been built in '$NAME':
-        wk test $NAME --layout --config gtk-release-asan
-    ('wk status $NAME' says what it was last built with; 'wk build --list' has
-    the configs.)"
-fi
 
-if [ -n "${WK_DRY_RUN:-}" ]; then
-    WS_STATE=$(ws_state "$NAME")
-else
-    WS_STATE=present
-fi
+def size_and_admit(reg, target, name, cfg, clock):
+    """`wk build`'s sizing: one machine's jobs and disk are spoken for the same way whether the job compiles or runs tests."""
+    budget, running, jobs, mbpj, _ = size_for(reg, target, name, cfg, clock)
+    store = reg.env.get("WK_STORE") or reg.env.get("HOME", "")
+    budget.disk_admit("this test run", cfg.disk_gb, budget.free_gb(store), "%s's filesystem" % store)
+    budget.admit("this test run", jobs, running)
+    if not dry_run():
+        budget.record("wk test %s" % name, jobs, jobs * mbpj, "pid:%d" % os.getpid())
+    return jobs
 
-lower=$(echo "$CFG_TYPE" | tr '[:upper:]' '[:lower:]')
-SRC=$(t_src "$NAME")
 
-# The same personality wrapper the build ran under: without it `uname -m` in an armhf container answers aarch64.
-ARCH=$(t_arch "$NAME")
-WRAP=$(arch_wrapper "$ARCH")
-export_target_resources "$NAME"
-POLITE=""
-[ "$WK_TARGET_KIND" = remote ] && POLITE=1
-JOBS=$(build_jobs "$POLITE")
-build_admit "this test run" "$JOBS"
-[ -n "${WK_DRY_RUN:-}" ] || build_record "wk test $NAME" "$JOBS" "$(( JOBS * WK_MB_PER_JOB ))" "pid:$$"
+def build_cmd(suite, src, out_env, render_env, wrap, lower, port, jobs, debug_flags, pass_args):
+    tail = shlex.join(pass_args)
+    if suite == "jsc":
+        head = " ".join(x for x in (out_env, wrap, "nice -n 10 Tools/Scripts/run-javascriptcore-tests") if x)
+        return ("cd %s && %s --%s %s --no-build --no-fail-fast --memory-limited %s"
+                % (src, head, lower, port, tail)).rstrip()
+    head = " ".join(x for x in (out_env, render_env, wrap, "nice -n 10 Tools/Scripts/run-webkit-tests") if x)
+    return ("cd %s && %s --%s %s --no-build --no-retry-failures --child-processes=%d %s %s"
+            % (src, head, lower, port, jobs, debug_flags, tail)).rstrip()
 
-if [ "$CFG_BUILDSYS" = xcode ]; then
-    RENDER_ENV=""
-    RENDER_DESC="the guest's GPU"
-    [ -n "$GPU" ] && warn "--gpu has no meaning for an Apple port; ignoring"
-elif [ -n "$GPU" ]; then
-    RENDER_ENV=""
-    RENDER_DESC=GPU
-    info "using the real GPU (requires /dev/dri in the workspace)"
-    # /dev/dri being there is not the whole story: a BMC or software seat's display path is not the GPU's.
-    session_mode_warn || true
-else
-    RENDER_ENV="LIBGL_ALWAYS_SOFTWARE=1 GALLIUM_DRIVER=llvmpipe WEBKIT_DISABLE_DMABUF_RENDERER=1"
-    RENDER_DESC="software rendering"
-fi
 
-if [ "$SUITE" = layout ] && [ $# -gt 0 ] && [ -z "${WK_DRY_RUN:-}" ]; then
-    _missing=$(t_exec "$NAME" sh -c "$(
-        printf 'for t in %s; do\n' "$(sh_quote "$@")"
-        printf '  p=${t%%%%\\?*}\n'
-        printf '  [ -e %s/LayoutTests/"$p" ] || [ -e %s/"$p" ] || printf "%%s\\n" "$t"\n' \
-               "$(sh_quote "$SRC")" "$(sh_quote "$SRC")"
-        printf 'done\n'
-    )" 2>/dev/null | tr -d '\r') || _missing=""
-    [ -z "$_missing" ] || die "no such test in '$NAME':
-$(printf '%s\n' "$_missing" | sed 's/^/      /')
-    A path run-webkit-tests cannot find is not a failure to it -- it runs
-    nothing and exits 0. Paths are relative to LayoutTests/ (or to the
-    checkout): 'wk enter $NAME', then look under $SRC/LayoutTests."
-    unset _missing
-fi
+def main(argv, reg=None, clock=None, popen=None):
+    name = os.environ.get("WK_NAME", "")
+    opts = parse(argv)
+    clock = clock or Clock()
+    popen = popen or subprocess.Popen
+    reg = reg or targets.Registry(ROOT)
 
-if [ -n "$LLDB" ]; then
-    [ "$SUITE" = layout ] || die "--lldb debugs a layout test; for jsc use 'wk run --lldb'"
-    case "$LLDB" in
-        web) ATTACH=$(config_web_process_name) ;;
-        ui)  ATTACH=$(config_test_runner_name) ;;
-    esac
-    [ -n "$ATTACH" ] || die "'$CONFIG' builds no layout-test binaries to debug -- use a wpe-*, gtk-* or mac-* config"
-    [ $# -gt 0 ] || die "--lldb needs a test to debug, e.g. fast/dom/Comment"
-    JOBS=1  # one driver, so exactly one process of either kind to catch
-fi
+    try:
+        tname = reg.ws_target(name)
+        target = reg.load(tname)
+    except LookupError as e:
+        die(str(e))
+    recs = records_of(target, clock, reg.machine)
 
-# mac-release-asan builds into Release-asan/, and only WEBKIT_OUTPUTDIR tells webkitdirs so.
-OUT_ENV=""
-[ "$CFG_BUILDSYS" = xcode ] && OUT_ENV="WEBKIT_OUTPUTDIR=$(config_build_dir "$SRC")"
+    kill_cmd = "wk test%s --kill" % ("" if reg.in_workspace() else " " + name)
 
-case "$SUITE" in
-jsc)
-    info "JSC tests ($CONFIG, -j$JOBS)"
-    CMD="cd $SRC && $OUT_ENV $WRAP nice -n 10 Tools/Scripts/run-javascriptcore-tests \
-         --$lower $CFG_PORT --no-build --no-fail-fast --memory-limited $(sh_quote "$@")"
-    ;;
-layout)
-    info "layout tests ($CONFIG, $RENDER_DESC, $JOBS processes)"
-    # --no-timeout: the runner's own 30s per-test timeout cannot tell a process stopped at a breakpoint from one that hung.
-    DEBUG_FLAGS=""
-    [ -n "$LLDB" ] && DEBUG_FLAGS="--no-timeout"
-    [ "$LLDB" = web ] && DEBUG_FLAGS="$DEBUG_FLAGS --additional-env-var=$(config_web_process_pause_env)"
-    CMD="cd $SRC && $OUT_ENV $RENDER_ENV $WRAP nice -n 10 Tools/Scripts/run-webkit-tests \
-         --$lower $CFG_PORT --no-build --no-retry-failures \
-         --child-processes=$JOBS $DEBUG_FLAGS $(sh_quote "$@")"
-    ;;
-*) die "unknown suite: $SUITE" ;;
-esac
+    if opts.get("kill"):   # before a config is resolved: stopping a run needs none
+        rc = job.stop(target, recs, name, "test", reg.machine, clock, reg.env)
+        if rc == 1:
+            die("the test run in '%s' outlived a TERM and a KILL.\n"
+                "    Look at it:  wk enter %s  and then  pgrep -af run-" % (name, name))
+        return 0
 
-if [ -n "${WK_DRY_RUN:-}" ]; then
-    log "dry run -- nothing was run."
-    ARCH_LABEL=$(arch_label "$ARCH")
-    log "  workspace: $NAME ($TARGET, $WS_STATE${ARCH_LABEL:+, $ARCH_LABEL})"
-    log "  suite:     $SUITE ($CONFIG)"
-    log "  would run: bash -lc $(sh_quote "$CMD")"
-    [ -n "$LLDB" ] && log "  in front of: lldb $(lldb_pin_opts) -o 'process attach --name $ATTACH --waitfor'"
-    exit 0
-fi
+    config = opts.get("config") or os.environ.get("WK_CONFIG") or reg.default_config(name)
+    try:
+        cfg = buildconf.resolve(config, target.os(), target.kind, target.env)
+    except LookupError:
+        die("unknown config '%s' (wk build --list)" % config)
 
-t_sync_tools "$NAME"
+    # Asked of the config, not of cfg.port: on macOS a jsc-* config is an Apple-port build with no port flag.
+    if opts["suite"] == "layout" and cfg.jsc_only:
+        die("'%s' builds JavaScriptCore alone, which has no layout tests -- no\n"
+            "    WebKitTestRunner and no ImageDiff are built by it. Name a full-port config\n"
+            "    that has been built in '%s':\n"
+            "        wk test %s --layout --config gtk-release-asan\n"
+            "    ('wk status %s' says what it was last built with; 'wk build --list' has\n"
+            "    the configs.)" % (config, name, name, name))
 
-# The watchdog kills a silent job after WK_ABORT_SECONDS, and a process at a breakpoint is silent by definition. The running record carries that deadline, so cmd/status can tell a quiet run from one whose watchdog is gone.
-if [ -n "$LLDB" ]; then
-    info "debugging $* ($CONFIG) in '$NAME', lldb waiting for $ATTACH"
-    log  "  it attaches as that process starts; 'continue' runs the test"
-    log  "  test output: /tmp/wk-test-lldb.log (in the workspace)"
-    t_exec_tty "$NAME" bash -lc "$(lldb_prelude)
-( sleep 2; $CMD >/tmp/wk-test-lldb.log 2>&1 ) & \
-        exec \"\$LLDB\" $(lldb_pin_opts) -o $(sh_quote "process attach --name $ATTACH --waitfor")"
-    exit 0
-fi
+    ws_state = target.state(name) if dry_run() else "present"
 
-WS=$(wk_ws_dir "$NAME")
-LOG="$WS/test.log"
-START_EPOCH=$(date +%s)
+    lower = cfg.type.lower()
+    src = target.src(name)
 
-TASK=$(task_begin test here "$NAME" "$_KILL_CMD" "$LOG" "$SUITE/$CONFIG in $NAME")
-task_step "$TASK" 1
+    # The same personality wrapper the build ran under: without it `uname -m` in an armhf container answers aarch64.
+    arch = target.arch(name)
+    wrap = buildconf.ARCH.get(arch, {}).get("wrapper", "")
+    jobs = size_and_admit(reg, target, name, cfg, clock)
 
-# ^C reaches this driver and `t_exec` carries no signal, so the machine running the tests is told and the record converged.
-_test_cancelled() {
-    [ -z "${_PIDWATCH:-}" ] || kill "$_PIDWATCH" 2>/dev/null || true
-    warn "interrupted -- stopping the test run in '$NAME'"
-    job_kill "$NAME" "$TASK" cancelled || warn "it is still running; stop it with:  $_KILL_CMD"
-}
-on_interrupt _test_cancelled
+    if cfg.buildsys == "xcode":
+        render_env, render_desc = "", "the guest's GPU"
+        if opts.get("gpu"):
+            warn("--gpu has no meaning for an Apple port; ignoring")
+    elif opts.get("gpu"):
+        render_env, render_desc = "", "GPU"
+        info("using the real GPU (requires /dev/dri in the workspace)")
+        # /dev/dri being there is not the whole story: a BMC or software seat's display path is not the GPU's.
+        shell.session_mode_warn(ROOT, env=reg.env)
+    else:
+        render_env = "LIBGL_ALWAYS_SOFTWARE=1 GALLIUM_DRIVER=llvmpipe WEBKIT_DISABLE_DMABUF_RENDERER=1"
+        render_desc = "software rendering"
 
-log "  log: $LOG"
-log "  stop: $_KILL_CMD"
+    if opts["suite"] == "layout" and opts["pass"] and not dry_run():
+        missing = missing_layout_paths(lambda argv: target.exec(name, argv), src, opts["pass"])
+        if missing:
+            die("no such test in '%s':\n%s\n"
+                "    A path run-webkit-tests cannot find is not a failure to it -- it runs\n"
+                "    nothing and exits 0. Paths are relative to LayoutTests/ (or to the\n"
+                "    checkout): 'wk enter %s', then look under %s/LayoutTests."
+                % (name, "\n".join("      " + m for m in missing), name, src))
 
-job_pid_watch "$TASK" "$LOG" test '*Tools/Scripts/run-*' & _PIDWATCH=$!   # the suite in the announcing shell's own -lc text
+    attach = ""
+    if opts.get("lldb"):
+        if opts["suite"] != "layout":
+            die("--lldb debugs a layout test; for jsc use 'wk run --lldb'")
+        attach = cfg.web_process_name() if opts["lldb"] == "web" else cfg.test_runner_name()
+        if not attach:
+            die("'%s' builds no layout-test binaries to debug -- use a wpe-*, gtk-* or mac-* config" % config)
+        if not opts["pass"]:
+            die("--lldb needs a test to debug, e.g. fast/dom/Comment")
+        jobs = 1   # one driver, so exactly one process of either kind to catch
 
-set +e
-run_watched "$LOG" -- t_exec "$NAME" bash -lc "echo \"wk: test pid \$\$\" >&2
-$CMD"
-rc=$?
-set -e
-kill "$_PIDWATCH" 2>/dev/null || true
+    # mac-release-asan builds into Release-asan/, and only WEBKIT_OUTPUTDIR tells webkitdirs so.
+    out_env = "WEBKIT_OUTPUTDIR=%s" % cfg.build_dir(src) if cfg.buildsys == "xcode" else ""
 
-ELAPSED=$(( $(date +%s) - START_EPOCH ))
-MINS=$(( ELAPSED / 60 )); SECS=$(( ELAPSED % 60 ))
+    debug_flags = ""
+    if opts["suite"] == "layout" and opts.get("lldb"):
+        debug_flags = "--no-timeout"
+        if opts["lldb"] == "web":
+            debug_flags += " --additional-env-var=%s" % cfg.web_process_pause_env()
 
-# `|| true` is load-bearing: grep exits 1 on no match, which would abort under `set -e` and leave the status file at "running".
-summary=$(tr '\r' '\n' < "$LOG" | grep -iE '^(Ran |Test suite|[0-9]+ test|All [0-9]+ test)' | tail -4 || true)
+    if opts["suite"] == "jsc":
+        info("JSC tests (%s, -j%d)" % (config, jobs))
+    else:
+        info("layout tests (%s, %s, %d processes)" % (config, render_desc, jobs))
+    cmd = build_cmd(opts["suite"], src, out_env, render_env, wrap, lower, cfg.port, jobs, debug_flags, opts["pass"])
 
-echo >&2
-case $rc in
-0)
-    task_end "$TASK" 0
-    info "TESTS OK  $SUITE/$CONFIG in '$NAME'  (${MINS}m${SECS}s)"
-    [ -n "$summary" ] && printf '%s\n' "$summary" | sed 's/^/  /' >&2
-    ;;
-124)
-    task_end "$TASK" stalled
-    die "TESTS STALLED  $SUITE/$CONFIG in '$NAME' (killed after ${MINS}m${SECS}s with no output)
-    log: $LOG"
-    ;;
-*)
-    task_end "$TASK" "$rc"
-    warn "TESTS FAILED  $SUITE/$CONFIG in '$NAME'  (exit $rc after ${MINS}m${SECS}s)"
-    [ -n "$summary" ] && printf '%s\n' "$summary" | sed 's/^/  /' >&2
-    log "failures:"
-    tr '\r' '\n' < "$LOG" | grep -iE 'FAIL|crash|timed out' | head -10 | sed 's/^/  /' || true
-    log "  full log: $LOG"
-    exit "$rc"
-    ;;
-esac
+    if dry_run():
+        log("dry run -- nothing was run.")
+        arch_label = buildconf.arch_label(arch)
+        log("  workspace: %s (%s, %s%s)" % (name, target.name, ws_state, ", " + arch_label if arch_label else ""))
+        log("  suite:     %s (%s)" % (opts["suite"], config))
+        log("  would run: bash -lc %s" % shlex.quote(cmd))
+        if opts.get("lldb"):
+            log("  in front of: lldb %s -o 'process attach --name %s --waitfor'" % (shell.lldb_pin_opts(ROOT), attach))
+        return 0
+
+    if not shell.sync_tools(ROOT, reg.machine, target.name, name):
+        die("pushing wk-tools into '%s' failed -- the reason is above" % name)
+
+    # The watchdog kills a silent job after WK_ABORT_SECONDS, and a process at a breakpoint is silent by definition. The running record carries that deadline, so cmd/status can tell a quiet run from one whose watchdog is gone.
+    if opts.get("lldb"):
+        info("debugging %s (%s) in '%s', lldb waiting for %s" % (" ".join(opts["pass"]), config, name, attach))
+        log("  it attaches as that process starts; 'continue' runs the test")
+        log("  test output: /tmp/wk-test-lldb.log (in the workspace)")
+        script = ("%s\n( sleep 2; %s >/tmp/wk-test-lldb.log 2>&1 ) &\nexec \"$LLDB\" %s -o %s"
+                  % (shell.lldb_prelude(ROOT), cmd, shell.lldb_pin_opts(ROOT),
+                     shlex.quote("process attach --name %s --waitfor" % attach)))
+        target.exec_tty(name, ["bash", "-lc", script])
+        return 0
+
+    ws_dir = target.store.ws_dir(name)
+    log_path = os.path.join(ws_dir, "test.log")
+    start = clock.now()
+
+    task = recs.begin("test", "here", name, kill_cmd, log_path, ["%s/%s in %s" % (opts["suite"], config, name)])
+    task.step(1)
+
+    watcher = None
+    rc = None
+    with job.Signals():
+        try:
+            log("  log: %s" % log_path)
+            log("  stop: %s" % kill_cmd)
+            watcher = job.PidWatch(target, name, task, log_path, "test", PID_MATCH, int(reg.env.get("WK_JOB_PID_TRIES") or 900))
+            watcher.start()
+            script = "echo \"wk: test pid $$\" >&2\n%s" % cmd
+            run_argv, cwd = target.exec_argv(name, ["bash", "-lc", script])
+            rc = job.watch(run_argv, log_path, reg.machine, clock, reg.env, cwd, popen)
+        except job.Interrupted as e:
+            warn("interrupted -- stopping the test run in '%s'" % name)
+            if not job.kill(target, name, task, "cancelled", reg.machine, clock, reg.env):
+                warn("it is still running; stop it with:  %s" % kill_cmd)
+            raise Refused(job.EXIT_OF.get(e.signum, 130))
+        finally:
+            if watcher is not None:
+                watcher.stop()
+
+    try:
+        text = record.normalised(log_path)
+    except OSError:
+        text = ""
+    summary = _SUMMARY.findall(text) and [l for l in text.split("\n") if _SUMMARY.match(l)][-4:] or []
+    elapsed = int(clock.now() - start)
+    mins, secs = elapsed // 60, elapsed % 60
+
+    sys.stderr.write("\n")
+    if rc != 0 and task.field("stopping"):
+        task.end(rc)
+        warn("TESTS STOPPED  %s/%s in '%s'  (by '%s' after %dm%ds)" % (opts["suite"], config, name, kill_cmd, mins, secs))
+        raise Refused(rc)
+    if rc == 0:
+        task.end(0)
+        info("TESTS OK  %s/%s in '%s'  (%dm%ds)" % (opts["suite"], config, name, mins, secs))
+        for l in summary:
+            log("  " + l)
+        return 0
+    if rc == 124:
+        task.end("stalled")
+        die("TESTS STALLED  %s/%s in '%s' (killed after %dm%ds with no output)\n"
+            "    log: %s" % (opts["suite"], config, name, mins, secs, log_path))
+    task.end(rc)
+    warn("TESTS FAILED  %s/%s in '%s'  (exit %d after %dm%ds)" % (opts["suite"], config, name, rc, mins, secs))
+    for l in summary:
+        log("  " + l)
+    log("failures:")
+    for l in [l for l in text.split("\n") if _FAILURE.search(l)][:10]:
+        log("  " + l)
+    log("  full log: %s" % log_path)
+    raise Refused(rc)
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main(sys.argv[1:]))
+    except Refused as e:
+        sys.exit(e.status)
+    except KeyboardInterrupt:
+        sys.exit(130)

@@ -87,7 +87,7 @@ class _Here(WkTest):
 class TestTheStoreFunctionsReadAndWriteHere(_Here):
     def test_store_read_and_clear_round_trip(self):
         cp = self.sh(
-            f'printf "%s\\n" {PLACEHOLDER} | wk_agent_secret_store claude\n'
+            f'printf "%s\\n" {PLACEHOLDER} | wk_cred_store claude\n'
             'printf "stored=[%s]\\n" "$(wk_agent_secret claude)"\n'
             'wk_cred_clear claude\n'
             'printf "cleared=[%s]\\n" "$(wk_agent_secret claude)"\n')
@@ -249,8 +249,8 @@ class TestNothingButAFileIsReadOrWrittenThroughAgentRw(_Here):
                 f'wk_agent_secret {self.NAME}',
             "wk_agent_secret_present":
                 f'wk_agent_secret_present {self.NAME}',
-            "wk_agent_secret_store":
-                f'printf "%s\\n" replacement | wk_agent_secret_store {self.NAME}',
+            "wk_cred_store":
+                f'printf "%s\\n" replacement | wk_cred_store {self.NAME}',
         }
 
     def test_the_row_really_does_live_in_the_writable_directory(self):
@@ -298,7 +298,7 @@ class TestNothingButAFileIsReadOrWrittenThroughAgentRw(_Here):
         """The refusal is about what a workspace could put there, and the
         ordinary path is untouched: the credential still round-trips."""
         doc = "{-a-: 1}"
-        cp = self.sh(f'printf "%s" "{doc}" | wk_agent_secret_store {self.NAME}\n'
+        cp = self.sh(f'printf "%s" "{doc}" | wk_cred_store {self.NAME}\n'
                      f'if wk_agent_secret_present {self.NAME}; then echo present; fi\n'
                      f'printf "bytes=[%s]\\n" "$(wk_cred_read {self.NAME})"')
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)

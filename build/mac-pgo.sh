@@ -150,8 +150,8 @@ pgo_build() {
     [ "$(uname -s)" = Darwin ] || [ -n "${WK_DRY_RUN:-}" ] \
         || { echo "wk: a PGO build is the Apple port's, and this is not macOS" >&2; return 1; }
     local final="${WEBKIT_OUTPUTDIR:-}" pgo="${WK_PGO_DIR:-}" arch
-    [ -n "$final" ] || { echo "wk: WEBKIT_OUTPUTDIR is unset; build/configs.sh sets it for every Apple config" >&2; return 1; }
-    [ -n "$pgo" ] || { echo "wk: WK_PGO_DIR is unset; build/configs.sh sets it for a PGO config" >&2; return 1; }
+    [ -n "$final" ] || { echo "wk: WEBKIT_OUTPUTDIR is unset; lib/wk/buildconf.py sets it for every Apple config" >&2; return 1; }
+    [ -n "$pgo" ] || { echo "wk: WK_PGO_DIR is unset; lib/wk/buildconf.py sets it for a PGO config" >&2; return 1; }
     arch=$(uname -m)
     local instr="$final$PGO_INSTR_SUFFIX"
 

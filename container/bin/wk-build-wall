@@ -9,7 +9,7 @@ WALL_NAMES="ninja cmake make xcodebuild build-webkit build-jsc run-javascriptcor
 
 GATE_NAMES="git"   # on a workspace's PATH only (shell/path.sh), where the switch and the wall are what a failure means
 
-GIT_WRITE_VERBS="add am apply branch checkout cherry-pick commit fetch gc merge mv notes prune pull push rebase reset restore revert rm stash switch tag"   # what the commit wall (WK_COMMIT_WALL_PATHS, lib/common.sh) can make fail; read only after the command has failed, so a verb whose read-only form works -- `git tag`, `git stash list` -- costs nothing to name
+GIT_WRITE_VERBS="add am apply branch checkout cherry-pick commit fetch gc merge mv notes prune pull push rebase reset restore revert rm stash switch tag"   # what the commit wall (COMMIT_WALL_PATHS, lib/wk/wall.py) can make fail; read only after the command has failed, so a verb whose read-only form works -- `git tag`, `git stash list` -- costs nothing to name
 
 self=${0##*/}
 

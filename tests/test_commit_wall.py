@@ -2,7 +2,8 @@
 can write git history into the checkout the person will push -- the write-side
 twin of `wk push` (only the person commits). `wk ai claude` runs the agent under
 bwrap with the checkout's .git commit-parts read-only (commit_wall_prefix,
-lib/common.sh); a human `wk enter` shell is not wrapped and commits normally.
+lib/wk/wall.py); a human `wk enter` shell is not wrapped and commits normally.
+tests/test_ai.py drives the session that is wrapped and the refusal without bwrap.
 
 The static half checks the wiring (no hardware). The functional half proves
 the recipe against a throwaway repo inside the podman VM's image -- the same
@@ -11,44 +12,39 @@ image a container workspace runs -- and is skipped when that VM is not up.
 Run: python3 -m unittest tests.test_commit_wall -v
 """
 import shlex
-import subprocess
+import sys
 import unittest
-from pathlib import Path
 
-from tests.support import REPO, bash, podman_vm_ssh, requires_podman_vm
+from tests.support import REPO, podman_vm_ssh, requires_podman_vm
 
-COMMON = (REPO / "lib" / "common.sh").read_text()
-CLAUDE = (REPO / "cmd" / "ai").read_text()
+sys.path.insert(0, str(REPO / "lib"))
+from wk import wall  # noqa: E402
+
 PUSH = (REPO / "cmd" / "push").read_text()
-VERIFY = (REPO / "cmd" / "verify").read_text()
+WALL = (REPO / "lib" / "wk" / "wall.py").read_text()
+
+
+def prefix(src):
+    return " ".join(wall.commit_wall_prefix(str(REPO), src))
 
 
 class TestWiring(unittest.TestCase):
-    def test_the_recipe_lives_in_one_place(self):
-        self.assertIn("commit_wall_prefix()", COMMON)
-        self.assertIn("WK_COMMIT_WALL_PATHS=", COMMON)
+    def test_the_paths_live_in_one_place(self):
         for p in ("objects", "refs", "logs", "HEAD", "packed-refs"):
-            self.assertIn(p, COMMON.split("WK_COMMIT_WALL_PATHS=", 1)[1].split("\n", 1)[0])
+            self.assertIn(p, wall.COMMIT_WALL_PATHS)
 
     def test_prefix_binds_every_wall_path_read_only(self):
-        out = bash(f'. "{REPO}/lib/common.sh"; commit_wall_prefix /src/WebKit')
-        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
-        line = out.stdout.strip()
+        line = prefix("/src/WebKit")
         self.assertTrue(line.startswith("bwrap "), line)
         self.assertIn("--dev-bind / /", line)
         for p in ("objects", "refs", "logs", "HEAD", "packed-refs"):
             self.assertIn(f"--ro-bind-try /src/WebKit/.git/{p} /src/WebKit/.git/{p}", line)
         self.assertTrue(line.rstrip().endswith("--"), line)
 
-    def test_claude_refuses_a_container_without_bwrap(self):
-        # the refusal names bwrap and the remedy, and it is gated on the
-        # container target (a vm/remote has no such bind).
-        self.assertIn("command -v bwrap", CLAUDE)
-        self.assertIn("the commit wall needs bwrap", CLAUDE)
-
-    def test_claude_wraps_the_agent_exec_with_the_wall(self):
-        self.assertIn("WALL=\"$(commit_wall_prefix", CLAUDE)
-        self.assertIn("exec ${WALL}$(sh_quote \"$AGENT_BIN\")", CLAUDE)
+    def test_the_probe_measures_the_prefix_a_session_runs_under(self):
+        """One recipe: `wk doctor`'s commit-wall probe builds its wrapper with
+        the same function, so what it proves is what the agent gets."""
+        self.assertIn('commit_wall_prefix(self.root, "$D")', WALL)
 
     def test_push_on_ends_a_running_session_before_it_loads_the_keys(self):
         self.assertIn("push_end_sessions_first $(agent_sessions)",
@@ -57,9 +53,9 @@ class TestWiring(unittest.TestCase):
         self.assertIn("end_agent_sessions", gate)   # the wall goes with the session
         self.assertIn('confirm "', gate)
 
-    def test_verify_measures_the_wall(self):
-        self.assertIn("commit wall", VERIFY)
-        self.assertIn("did NOT block a commit", VERIFY)
+    def test_doctor_measures_the_wall(self):
+        self.assertIn("commit wall", WALL)
+        self.assertIn("did NOT block a commit", WALL)
 
 
 def _vm_image():
@@ -79,7 +75,7 @@ class TestTheWallHolds(unittest.TestCase):
         if not cls.img:
             raise unittest.SkipTest("no wkdev image in the podman VM")
         # the exact prefix production emits, for a repo at /tmp/r
-        cls.prefix = bash(f'. "{REPO}/lib/common.sh"; commit_wall_prefix /tmp/r').stdout.strip()
+        cls.prefix = prefix("/tmp/r")
 
     def _run(self, script):
         img = shlex.quote(self.img)
@@ -123,17 +119,19 @@ if __name__ == "__main__":
 
 
 class TestBuiltinsAreAskedThroughAShell(unittest.TestCase):
-    """t_exec hands argv to an exec, not a shell, so a shell builtin such as
-    `command -v` cannot be the program: measured live, the bare form failed
-    in every container and remote control never started. cmd/ai asks through
-    one helper that wraps it in `sh -c`, and nothing under cmd/ or lib/ uses
-    the bare form (`test` is a real program in every image and is fine)."""
+    """A target's exec hands argv to an exec, not a shell, so a shell builtin
+    such as `command -v` cannot be the program: measured live, the bare form
+    failed in every container and no session started. cmd/ai asks
+    through `sh -c`, and nothing under cmd/ or lib/ uses the bare form (`test`
+    is a real program in every image and is fine)."""
 
-    def test_cmd_ai_asks_for_bwrap_through_one_helper(self):
-        text = (REPO / "cmd" / "ai").read_text()
-        self.assertEqual(1, text.count("wall_available() {"))
-        self.assertEqual(2, text.count('wall_available "$NAME"'))
-        self.assertIn("""t_exec "$1" sh -c 'command -v bwrap""", text)
+    def test_cmd_ai_asks_for_bwrap_through_a_shell(self):
+        from tests.test_ai import AI, SimRegistry, SimTarget
+        from wk.machine import Fake
+        fake = Fake()
+        target = SimTarget(fake, {})
+        AI.Ai(str(REPO), {}, SimRegistry({}, fake, target), target, "claude", "demo").wall_available()
+        self.assertEqual(["sh -c command -v bwrap >/dev/null 2>&1"], target.asked)
 
     def test_no_bare_builtin_reaches_t_exec(self):
         import re

@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/usr/bin/env python3
 #
 # wk zed <workspace> -- open a workspace's checkout in Zed
 # wk: where=workspace name=optional here outside group=workspaces opts --tools,--url,--route
@@ -16,102 +16,181 @@
 #                                     fields it needs to build a route of its
 #                                     own (user, src, proxy)
 
-set -euo pipefail
-WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-. "$WK_ROOT/lib/common.sh"
-. "$WK_ROOT/lib/store.sh"
-. "$WK_ROOT/lib/target.sh"
+import os
+import re
+import shutil
+import sys
 
-TOOLS=""
-NAME="${WK_NAME:-}"
-URL_ONLY=""
-ROUTE=""
-while [ $# -gt 0 ]; do
-    case "$1" in
-        --tools) TOOLS=1; shift ;;
-        --url)   URL_ONLY=1; shift ;;
-        --route) ROUTE=1; shift ;;
-        *) NAME="$1"; shift ;;
-    esac
-done
+ROOT = os.environ.get("WK_ROOT") or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(ROOT, "lib"))
 
-# Zed outlives this command and every terminal it opens inherits its
-# environment, so wk_exec_clean strips the dispatcher's variables.
-emit() {
-    local url="$1"
-    if [ -n "$URL_ONLY" ]; then
-        printf '%s\n' "$url"
-        log "  zed '$url'"
-        exit 0
-    fi
-    wk_exec_clean "$Z" "$url"
-}
+from wk import record, shell, targets  # noqa: E402
+from wk.act import Refused, die, exec_into, log  # noqa: E402
+from wk.workspace import require_name  # noqa: E402
 
-[ -z "$ROUTE" ] || [ -z "$TOOLS" ] \
-    || die "--route describes a workspace; a wk-tools copy is already an ssh destination
-    (wk zed --tools --url $NAME prints it)"
 
-if [ -z "$URL_ONLY" ] && [ -z "$ROUTE" ]; then
-    Z=$(zed_cli) || die "zed is not installed (no 'zed' on PATH, no /Applications/Zed.app)
-    https://zed.dev/download -- 'wk doctor' checks for it, or add --url to print
-    the route instead and open it from a machine that does have Zed"
-fi
+def zed_cli():
+    """A drag-installed Zed.app has no PATH symlink but is installed."""
+    p = shutil.which("zed")
+    if p:
+        return p
+    app = "/Applications/Zed.app/Contents/MacOS/cli"
+    return app if os.access(app, os.X_OK) else None
 
-if [ -n "$TOOLS" ]; then
-    if [ -z "$NAME" ] || [ "$NAME" = here ] || [ "$NAME" = "$(hostname -s 2>/dev/null)" ]; then
-        if [ -n "$URL_ONLY" ]; then
-            printf '%s\n' "$WK_ROOT"
-            log "  already local -- open it directly:  zed $WK_ROOT"
-            exit 0
-        fi
-        wk_exec_clean "$Z" "$WK_ROOT"
-    fi
 
-    if [ "$(target_kind "$NAME" 2>/dev/null)" = remote ]; then
-        load_target "$NAME"
-        # "" -- t_tools and t_ssh_host answer for the machine itself here.
-        host=$(t_ssh_host "" 2>/dev/null) \
-            || die "target '$NAME' is this machine -- 'wk zed --tools' opens this checkout"
-        emit "ssh://$host$(t_tools "")"
-    fi
+def dispatch_vars():
+    """The dispatcher's own per-invocation variables, read from where they are
+    declared (lib/common.sh's WK_DISPATCH_VARS) rather than copied here."""
+    m = re.search(r'WK_DISPATCH_VARS="([^"]+)"', open(os.path.join(ROOT, "lib", "common.sh")).read())
+    if not m:
+        die("lib/common.sh no longer declares WK_DISPATCH_VARS -- exec_clean cannot tell\n"
+            "    which of its own environment to strip before Zed inherits it")
+    return tuple(m.group(1).split())
 
-    case "$(target_kind "$NAME" 2>/dev/null)" in
-    container|vm|local)
-        die "'$NAME' is a kind of target, not a machine. What holds a copy of
-    wk-tools is a machine or a workspace:
-        wk zed --tools            this checkout
-        wk zed --tools moose      a machine's copy
-        wk zed --tools <ws>       /opt/wk-tools as that workspace sees it" ;;
-    esac
 
-    require_name "$NAME"
-    ws_exists "$NAME" || die "no machine or workspace named '$NAME'
-    'wk ls' lists the workspaces, 'wk status' the machines."
-    TARGET="$(ws_target "$NAME")"
-    load_target "$TARGET"
-    t_ssh_prepare "$NAME"
-    host=$(t_ssh_host "$NAME") || die "'$NAME' is not running, so nothing in it can be opened"
-    emit "ssh://$host$(t_tools "$NAME")"
-fi
+def exec_clean(argv):
+    """Zed outlives this command and every terminal it opens inherits its environment,
+    so the dispatcher's own variables are stripped first."""
+    exec_into(argv, env={k: v for k, v in os.environ.items() if k not in dispatch_vars()})
 
-require_name "$NAME"
-TARGET="$(ws_target "$NAME")"
-load_target "$TARGET"
 
-t_ssh_prepare "$NAME"
+def emit(url_only, zed, url):
+    if url_only:
+        print(url)
+        log("  zed '%s'" % url)
+        sys.exit(0)
+    exec_clean([zed, url])
 
-if [ -n "$ROUTE" ]; then
-    USER_IN=$(t_ssh_user "$NAME") \
-        || die "a '$WK_TARGET_KIND' workspace has no ssh account for an editor to log in to"
-    PROXY=$(t_ssh_proxy "$NAME") || PROXY=""
-    printf 'user=%s\nsrc=%s\nproxy=%s\n' "$USER_IN" "$(t_src "$NAME")" "$PROXY"
-    exit 0
-fi
 
-host=$(t_ssh_host "$NAME") || die "'$NAME' is not running, so there is no route to it.
-    A macOS guest needs booting first:  wk vm start $NAME"
+def main(argv):
+    tools = "--tools" in argv
+    url_only = "--url" in argv
+    route = "--route" in argv
+    name = os.environ.get("WK_NAME", "")
+    for a in argv:
+        if a not in ("--tools", "--url", "--route"):
+            name = a
 
-# vm_login_note is the one place the guest's login password is stated.
-[ "$WK_TARGET_KIND" != vm ] || vm_login_note
+    if route and tools:
+        die("--route describes a workspace; a wk-tools copy is already an ssh destination\n"
+            "    (wk zed --tools --url %s prints it)" % name)
 
-emit "ssh://$host$(t_src "$NAME")"
+    zed = None
+    if not url_only and not route:
+        zed = zed_cli()
+        if zed is None:
+            die("zed is not installed (no 'zed' on PATH, no /Applications/Zed.app)\n"
+                "    https://zed.dev/download -- 'wk doctor' checks for it, or add --url to print\n"
+                "    the route instead and open it from a machine that does have Zed")
+
+    reg = targets.Registry(ROOT)
+
+    if tools:
+        hostname = record.host_name(reg.machine)
+        if not name or name == "here" or name.lower() == hostname:
+            if url_only:
+                print(ROOT)
+                log("  already local -- open it directly:  zed %s" % ROOT)
+                return 0
+            exec_clean([zed, ROOT])
+
+        try:
+            kind = reg.kind(name)
+        except LookupError:
+            kind = None
+        if kind == "remote":
+            try:
+                target = reg.load(name)
+            except LookupError as e:
+                die(str(e))
+            host = target.ssh_host("")
+            if not host:
+                die("target '%s' is this machine -- 'wk zed --tools' opens this checkout" % name)
+            emit(url_only, zed, "ssh://%s%s" % (host, target.tools("")))
+
+        if kind in ("container", "vm", "local"):
+            die("'%s' is a kind of target, not a machine. What holds a copy of\n"
+                "    wk-tools is a machine or a workspace:\n"
+                "        wk zed --tools            this checkout\n"
+                "        wk zed --tools moose      a machine's copy\n"
+                "        wk zed --tools <ws>       /opt/wk-tools as that workspace sees it" % name)
+
+        require_name(name)
+        if not ws_exists(reg, name):
+            die("no machine or workspace named '%s'\n"
+                "    'wk ls' lists the workspaces, 'wk status' the machines." % name)
+        try:
+            target = reg.load(reg.ws_target(name))
+        except LookupError as e:
+            die(str(e))
+        target.ssh_prepare(name)
+        host = target.ssh_host(name)
+        if not host:
+            die("'%s' is not running, so nothing in it can be opened" % name)
+        emit(url_only, zed, "ssh://%s%s" % (host, target.tools(name)))
+        return 0
+
+    require_name(name)
+    try:
+        tname = reg.ws_target(name)
+        target = reg.load(tname)
+    except LookupError as e:
+        die(str(e))
+    broken = broken_reason(target, tname, name)
+    if broken:
+        die(broken)
+
+    target.ssh_prepare(name)
+
+    if route:
+        user = target.ssh_user(name)
+        if not user:
+            die("a %s workspace has no ssh account for an editor to log in to" % target.kind)
+        proxy = target.ssh_proxy(name) or ""
+        print("user=%s" % user)
+        print("src=%s" % target.src(name))
+        print("proxy=%s" % proxy)
+        return 0
+
+    host = target.ssh_host(name)
+    if not host:
+        die("'%s' is not running, so there is no route to it.\n"
+            "    A macOS guest needs booting first:  wk vm start %s" % (name, name))
+
+    # vm_login_note is the one place the guest's login password is stated.
+    if target.kind == "vm":
+        shell.vm_login_note(ROOT, env=target.env)
+
+    emit(url_only, zed, "ssh://%s%s" % (host, target.src(name)))
+    return 0
+
+
+def ws_exists(reg, name):
+    if reg.env.get("WK_TARGET"):
+        tname = reg.env["WK_TARGET"]
+        if reg.on_target(tname, name):
+            return True
+        try:
+            target = reg.load(tname)
+        except LookupError:
+            return False
+        return target.info(name) == "unreachable"
+    return bool(reg.locate(name))
+
+
+def broken_reason(target, tname, name):
+    """None, or why `name` is a record without an environment -- naming the repair, not a driver's word."""
+    if target.state(name) != "broken":
+        return None
+    return ("'%s' exists as a record and not as a %s workspace: creation\n"
+            "    finished, and the environment is gone -- something outside wk removed it.\n"
+            "    Repair:  wk rm %s    (then 'wk new %s' if you still want it)" % (name, tname, name, name))
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main(sys.argv[1:]))
+    except Refused as e:
+        sys.exit(e.status)
+    except KeyboardInterrupt:
+        sys.exit(130)

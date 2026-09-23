@@ -33,7 +33,7 @@ import sys
 ROOT = os.environ.get("WK_ROOT") or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "lib"))
 
-from wk import shell, targets  # noqa: E402
+from wk import record, shell, targets  # noqa: E402
 from wk.act import info, log  # noqa: E402
 from wk.machine import Local  # noqa: E402
 from wk.store import Store  # noqa: E402
@@ -151,8 +151,7 @@ def main(argv):
     reg = targets.Registry(ROOT)
     rep = Report()
     macos_host = store.macos_host
-    hostname = here.run(["hostname", "-s"]).out.strip() or here.run(["hostname"]).out.strip()
-    info("wk disk on %s (%s)" % ("macos" if os.uname().sysname == "Darwin" else "linux", hostname))
+    info("wk disk on %s (%s)" % ("macos" if os.uname().sysname == "Darwin" else "linux", record.host_name(here)))
     if reg.in_workspace():
         workspace_report(reg, rep)
         return 0

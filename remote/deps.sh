@@ -5,7 +5,7 @@ wk_remote_deps() {   # <tool> <required|wanted> <what it is for>; a build cannot
 git required the checkout, and the lock that serialises builds
 cmake required configures every CMake port
 ninja required every CMake port builds with it
-clang required the compiler every config here names (build/configs.sh)
+clang required the compiler every config here names (lib/wk/buildconf.py)
 python3 required webkitpy, and every structured-data step wk runs on the far side
 ccache wanted without it every build on this machine starts cold, every time
 zsh wanted the shell wk's rc moves an interactive session to; bash works too
@@ -47,7 +47,7 @@ wk_remote_install_cmd() { # <family> <package>... -- nothing for a family it doe
     esac
 }
 
-wk_remote_build_env_vars() {   # the variables wk's build sets for itself (config_build_env, build/configs.sh)
+wk_remote_build_env_vars() {   # the variables wk's build sets for itself (build_env, lib/wk/buildconf.py)
     printf '%s\n' CC CXX CFLAGS CXXFLAGS LDFLAGS MAKEFLAGS \
         CCACHE_DIR CCACHE_BASEDIR CCACHE_SLOPPINESS \
         NUMBER_OF_PROCESSORS CMAKE_BUILD_PARALLEL_LEVEL WEBKIT_OUTPUTDIR
@@ -110,7 +110,7 @@ DEPS
     printf '%s\n' "$probe" | sed -n 's/^env\.\([A-Z_]*\)=\(.*\)$/\1 \2/p' \
         | while read -r v rest; do
         _f note "$v is set to '$rest' in a login shell there" \
-                "wk's build sets its own $v and ignores that one (build/configs.sh)"
+                "wk's build sets its own $v and ignores that one (lib/wk/buildconf.py)"
     done
 
     # The copies of this machine's agent credentials (cmd/remote writes every row delivered to a `remote`), compared by digest with what is stored here.

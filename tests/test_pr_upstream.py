@@ -22,6 +22,8 @@ which is what puts it in the way of the very URL each question asks for.
 
 Run: python3 -m unittest tests.test_pr_upstream -v
 """
+import importlib.machinery
+import importlib.util
 import subprocess
 import unittest
 
@@ -32,6 +34,19 @@ from tests.support import REPO, bash, func_body, scratch_dir
 PRELUDE = f'set -euo pipefail\n. "{REPO}/lib/common.sh"\n. "{REPO}/lib/store.sh"\n'
 
 GITHUB = "https://github.com/justinmichaud"
+
+
+def _load_cmd_pr():
+    """cmd/pr as a module -- a real file with no extension needs its loader spelled out."""
+    path = str(REPO / "cmd" / "pr")
+    loader = importlib.machinery.SourceFileLoader("wk_cmd_pr", path)
+    spec = importlib.util.spec_from_file_location("wk_cmd_pr", path, loader=loader)
+    m = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m)
+    return m
+
+
+CMD_PR_MODULE = _load_cmd_pr()
 
 
 def git(*args, cwd=None):
@@ -244,13 +259,7 @@ class TestPrOpenTarget(unittest.TestCase):
     def target(self, upstream_remote, branch):
         git("checkout", "-q", "-b", branch, cwd=self.src)
         git("branch", "-q", f"--set-upstream-to={upstream_remote}/main", branch, cwd=self.src)
-        prelude = (PRELUDE
-                   + subprocess.run(["sed", "-n", "/^pr_open_target()/,/^}/p",
-                                     str(REPO / "cmd" / "pr")],
-                                    capture_output=True, text=True).stdout)
-        cp = bash(prelude + f'pr_open_target "{self.src}"')
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        return cp.stdout.strip().split("\t")
+        return list(CMD_PR_MODULE.pr_open_target(self.src))
 
     def test_a_webkit_branch_opens_against_webkit_from_the_webkit_fork(self):
         self.assertEqual(self.target("origin", "eng/x"),
@@ -437,7 +446,7 @@ class TestThePrBranchIsLeftPushable(Wired):
         self.assertEqual(cp.returncode, 1, cp.stdout)
 
     def test_the_remotes_retarget_points_a_branch_the_same_way(self):
-        """`wk remotes --fix` moves a branch that tracks an upstream onto the
+        """`wk sync --fix` moves a branch that tracks an upstream onto the
         fork it can be pushed to (wk_branch_upstream_fix_script), and writes
         the same two keys through the same function, so what a branch's
         upstream is set to has one implementation.

@@ -584,10 +584,9 @@ class TestTheLoadProbeChangesNothing(WkTest):
         self.assertNotIn("ControlPersist", opts,
                          "a multiplexed master would hold a session open in "
                          "the guest after the command that made it ended")
-        for fn in ("t_exec_tty", "t_enter"):
-            body = vm[vm.index(f"{fn}() {{"):]
-            body = body[:body.index("\n}\n")]
-            self.assertIn("exec ssh -t", body, fn)
+        body = vm[vm.index("t_enter() {"):]
+        body = body[:body.index("\n}\n")]
+        self.assertIn("exec ssh -t", body, "t_enter")
 
 
 class TestARehearsalGuestIsNotAlsoAWorkspace(WkTest):

@@ -17,12 +17,19 @@ drive real driver code against a fake of the thing it talks to.
 
 Run: python3 -m unittest tests.test_peer -v
 """
+import contextlib
+import io
 import os
 import re
 import subprocess
+import sys
 import unittest
 
 from tests.support import REPO, repo_files, WkTest, bash, stub_path
+
+sys.path.insert(0, str(REPO / "lib"))
+from wk import targets  # noqa: E402
+from wk.act import Refused  # noqa: E402
 
 # Runs locally what `ssh <opts> <host> <command>` would have run over there.
 # Every option is dropped, then the destination, and what is left is the
@@ -122,6 +129,9 @@ class PeerFixture(WkTest):
         e.update(with_ssh)
         return e
 
+    def registry(self):
+        return targets.Registry(self.root, env=dict(os.environ, **self.env()))
+
     def peer_calls(self):
         if not self.calls.exists():
             return []
@@ -136,41 +146,25 @@ class TestPeerResolution(PeerFixture):
                     cwd=str(self.root))
 
     def test_peer_workspace_resolves(self):
-        """ws_exists/ws_target find a workspace only the peer's own `wk` knows"""
+        """ws_target finds a workspace only the peer's own `wk` knows"""
         with stub_path({"ssh": _FAKE_SSH}) as binp:
             cp = self._bash('''
 set -euo pipefail
 . "$WK_ROOT/lib/common.sh"
 . "$WK_ROOT/lib/target.sh"
-ws_exists peerws   || { echo "ws_exists missed peerws"; exit 1; }
 t=$(ws_target peerws)
 [ "$t" = peerbox ] || { echo "ws_target said '$t'"; exit 1; }
-! ws_exists ghost  || { echo "ws_exists found a ghost"; exit 1; }
 ''', binp)
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
 
     def test_only_a_workstation_keeps_its_own_records(self):
-        """t_owns_records, which is what makes a removal the far side's own: a
-        build box's workspaces are recorded on the workstation that made them,
-        and destroying one is that workstation's own work"""
+        """a workstation's workspaces are its own, so a removal is its own `wk
+        rm`; a build box's are recorded on the workstation that made them"""
         (self.root / "targets" / "hosts" / "buildbox.conf").write_text(
             "WK_TARGET_KIND=remote\nWK_REMOTE_HOST=buildbox\n")
-        with stub_path({"ssh": _FAKE_SSH}) as binp:
-            cp = self._bash('''
-set -euo pipefail
-. "$WK_ROOT/lib/common.sh"
-. "$WK_ROOT/lib/target.sh"
-load_target peerbox
-echo "peer=$(t_owns_records && echo yes || echo no)"
-load_target buildbox
-echo "buildbox=$(t_owns_records && echo yes || echo no)"
-load_target vm
-echo "vm=$(t_owns_records && echo yes || echo no)"
-''', binp)
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertIn("peer=yes", cp.stdout)
-        self.assertIn("buildbox=no", cp.stdout)
-        self.assertIn("vm=no", cp.stdout)
+        reg = self.registry()
+        self.assertTrue(reg.load("peerbox").peer)
+        self.assertFalse(reg.load("buildbox").peer)
 
     def test_peer_info_and_list(self):
         """t_info answers present/absent for a peer, and t_list names what it holds"""
@@ -183,13 +177,11 @@ load_target peerbox
 echo "info=$(t_info peerws)"
 echo "ghost=$(t_info ghost)"
 echo "list=$(t_list | cut -f1 | tr '\\n' ',')"
-echo "delegates=$(t_delegates && echo yes || echo no)"
 ''', binp)
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
         self.assertIn("info=present", cp.stdout)
         self.assertIn("ghost=absent", cp.stdout)
         self.assertIn("list=peerws,", cp.stdout)
-        self.assertIn("delegates=yes", cp.stdout)
 
 
 class TestPeerDelegation(PeerFixture):
@@ -239,18 +231,10 @@ class TestPeerDelegation(PeerFixture):
         """the other half of the lifecycle is still typed over there: this
         driver would make a plain checkout under ~/wk, which is not what a
         workstation's workspaces are"""
-        with stub_path({"ssh": _FAKE_SSH}) as binp:
-            cp = bash('''
-set -euo pipefail
-. "$WK_ROOT/lib/common.sh"
-. "$WK_ROOT/lib/target.sh"
-load_target peerbox
-t_create newws
-''', env=self.env({"PATH": f"{binp}:{os.environ['PATH']}"}), cwd=str(self.root))
-        self.assertNotEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertIn("wk new newws", cp.stderr, cp.stderr)
-        self.assertFalse([c for c in self.peer_calls() if c.startswith("new ")],
-                         self.peer_calls())
+        with self.assertRaises(Refused), contextlib.redirect_stderr(io.StringIO()) as err:
+            self.registry().load("peerbox").create("newws")
+        self.assertIn("ssh peerbox wk new newws", err.getvalue())
+        self.assertFalse(self.peer_calls())
 
     def test_a_here_command_stays_here(self):
         """`wk zed` is declared `here`: it asks the peer for a route and opens it from this machine"""

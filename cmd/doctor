@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 #
-# wk doctor [--all] -- what is provisioned on this machine, and what is still missing
-# wk: where=local name=none readonly group=hosts opts --all,--probe-store
+# wk doctor [<workspace> [--gpu]] [--all] -- what is provisioned on this machine, or whether a workspace's wall holds
+# wk: where=dynamic name=optional readonly group=hosts opts --all,--probe-store,--gpu
 #
 # The reinstall companion: `./setup` is the automated path, but several pieces
 # are deliberately manual (interactive sudo, credentials, hardware). This prints
@@ -10,6 +10,18 @@
 # Read-only by design: it never starts the podman machine, never boots a guest,
 # and never prompts. State it cannot see without starting something is reported
 # as '??' with the command that would reveal it.
+#
+#   wk doctor <workspace>   the sandbox around that workspace, measured from
+#           inside it: egress through the allowlisting proxy, isolation and the
+#           commit wall (a container), no key, token or credential inside that
+#           could publish, reads and writes through the credential injector
+#           against the host's push switch, the agent's login, and the GPU. A
+#           remote target has no sandbox, and is refused.
+#   wk doctor               inside a workspace: the half it answers about itself,
+#           with the push switch measured rather than read (what `wk ai claude`
+#           runs in here before a session)
+#
+#   --gpu   fail if the workspace has no hardware-accelerated GPU (informational otherwise)
 #
 #   --all   also ask every configured machine (targets/hosts/*.conf) what it
 #           has. A peer workstation: whether its own claude.ai login is one
@@ -26,8 +38,10 @@
 #   --probe-store   the store's key=value facts alone, for the host that asks
 #                   the podman VM to run this where the store is
 #
-#   0  everything checkable is provisioned
-#   1  something is missing (the lines say what and how)
+#   0  everything checkable is provisioned; every check of the wall passed
+#   1  something is missing, or a check of the wall failed (the lines say what and how)
+#   3  inside a workspace: something in here could publish (a deploy key, a
+#      GitHub or Bugzilla write the injector did not refuse)
 
 import os
 import sys
@@ -35,11 +49,67 @@ import sys
 ROOT = os.environ.get("WK_ROOT") or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "lib"))
 
-from wk.act import info, log, warn  # noqa: E402
+from wk import wall  # noqa: E402
+from wk.act import Refused, die, info, log, warn  # noqa: E402
 from wk.doctor import Doctor, Report  # noqa: E402
+from wk.machine import Local  # noqa: E402
+from wk.targets import Registry  # noqa: E402
 
 
-def main(argv):
+def where(argv):
+    """The dispatcher's `where=dynamic` question: a workspace's name goes to the machine holding it."""
+    return "workspace" if any(not a.startswith("-") for a in argv) else "local"
+
+
+def only(argv, allowed, why):
+    extra = [a for a in argv if a not in allowed]
+    if extra:
+        die("%s %s" % (extra[0], why))
+
+
+def inside(reg):
+    target = reg.load("local")
+    info("checking workspace '%s' from inside it" % target.ws_name)
+    rep = Report(sys.stderr)
+    publishing = wall.from_inside(ROOT, target, target.ws_name, reg.machine, rep)
+    sys.stderr.write("\n")
+    v = wall.verdict(rep, publishing)
+    if v == "publishing":
+        warn("an agent in here could publish (see above)")
+        return 3
+    if v == "broken":
+        warn("%d check(s) failed -- the sandbox is not intact" % rep.missing)
+        return 1
+    info("sandbox intact, and nothing in here can publish")
+    return 0
+
+
+def workspace(reg, name, argv):
+    target = reg.load(reg.ws_target(name))
+    info("checking workspace '%s' (%s)" % (name, target.name))
+    rep = Report(sys.stderr)
+    wall.from_host(ROOT, target, name, reg.machine, rep, want_gpu="--gpu" in argv)
+    sys.stderr.write("\n")
+    if wall.verdict(rep) == "broken":
+        warn("%d check(s) failed -- the sandbox is not intact" % rep.missing)
+        return 1
+    info("sandbox intact")
+    return 0
+
+
+def main(argv, env=None, reg=None):
+    env = os.environ if env is None else env
+    if argv[:1] == ["--where"]:
+        print(where(argv[1:]))
+        return 0
+    reg = reg or Registry(ROOT, env, Local())
+    if reg.in_workspace():
+        only(argv, (), "is not asked inside a workspace: 'wk doctor' here checks this one")
+        return inside(reg)
+    if env.get("WK_NAME"):
+        only(argv, ("--gpu",), "is this machine's question, not a workspace's: drop the workspace name")
+        return workspace(reg, env["WK_NAME"], argv)
+    only(argv, ("--all", "--probe-store"), "is a workspace's question: wk doctor <workspace> --gpu")
     doc = Doctor(ROOT)
     if "--probe-store" in argv:
         sys.stdout.write(doc.probe_store())
@@ -63,5 +133,7 @@ def main(argv):
 if __name__ == "__main__":
     try:
         sys.exit(main(sys.argv[1:]))
+    except Refused as e:
+        sys.exit(e.status)
     except KeyboardInterrupt:
         sys.exit(130)

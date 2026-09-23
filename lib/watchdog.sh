@@ -145,22 +145,6 @@ job_pid_adopt() { # <ws> <task dir> <pid> <patterns its command line must match 
     return 1
 }
 
-# The job announces its pid down its log (`wk: <label> pid <n>`, build/build-in-target.sh and cmd/test's inner shell), the one channel back from every target kind, and runs in the background because the job holds the shell that started it. `where` goes last, so no reader tests the target's pid against this kernel. WK_JOB_PID_TRIES bounds the wait at one second a try.
-job_pid_watch() { # <task dir> <log> <label> <patterns the pid's command line must match one of>
-    local dir="$1" log="$2" label="$3" want="${4:-}" i=0 pid ws
-    ws=$(task_field "$dir" name)
-    while [ "$i" -lt "${WK_JOB_PID_TRIES:-900}" ]; do
-        pid=$(sed -n "s/^wk: $label pid \([0-9][0-9]*\).*/\1/p" "$log" 2>/dev/null | head -1)
-        if [ -n "$pid" ]; then
-            job_pid_adopt "$ws" "$dir" "$pid" "$want"
-            return $?
-        fi
-        wk_sleep 1
-        i=$((i + 1))
-    done
-    return 1
-}
-
 # Descendants first: ninja's children reparent to init the moment their parent is gone. No pattern kill -- a wkdev container shares the host's PID namespace (wkdev-create passes --pid host), so `pkill -f <build dir>` in one matches another workspace's build of the same config. WK_KILL_WAIT is the seconds a TERM gets before the KILL.
 job_kill() { # <ws> <task dir> <word to end the record with> -- 0 when it is gone
     local ws="$1" dir="$2" word="$3" pid i=0
@@ -196,31 +180,6 @@ job_stop() { # <ws> <kind> -- 0 stopped, 2 nothing was running, 1 it outlived a 
     t_task_put "$ws" "$dir"
     [ "$rc" = 0 ] && info "stopped '$ws's $kind and recorded it as cancelled"
     return "$rc"
-}
-
-# `wk ai claude <ws> --rc --stop`, and `wk stop` / `wk rm` taking its workspace.
-rc_task()  { task_find rc "$1"; }
-
-rc_alive() { # <ws>
-    local dir; dir=$(rc_task "$1")
-    [ -n "$dir" ] || return 1
-    task_alive "$dir"
-}
-
-rc_stop() { # <ws>
-    local name="$1" dir
-    dir=$(rc_task "$name")
-
-    if ! rc_alive "$name"; then
-        info "claude remote-control is not running in '$name'"
-        [ -z "$dir" ] || task_end "$dir" stopped
-        return 0
-    fi
-
-    info "stopping claude remote-control in '$name' (pid $(task_field "$dir" pid))"
-    job_kill "$name" "$dir" stopped \
-        || die "claude remote-control in '$name' outlived a KILL, so it is still
-    running:  wk enter $name"
 }
 
 _job_signal() { # <ws> <task dir> <pid> <signal>

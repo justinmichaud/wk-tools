@@ -1,9 +1,7 @@
 #!/usr/bin/env python3
 """Split a perf profile into per-GC-section hardware-counter breakdowns.
-
-Run as a perf script and not standalone, so perf's own Python API parses perf.data: `TRACE_AUX=/tmp/jsc-trace-aux perf script -i perf.data -s split-perf.py`. perf calls process_event() once per sample with a structured dict (event name, period, CLOCK_MONOTONIC timestamp, comm/tid/pid, resolved symbol, callchain), and every sample belonging to a GC thread of the marker-emitting process and falling inside a "GC <phase>" text-marker span is pooled across all GCs -- split-trace.py's split and stitch, summing PMU event periods instead of counting wall-clock samples. Per phase it reports instructions-per-cycle and cache behaviour, per-function tables showing where memory stalls concentrate, and folded stacks weighted by cache misses for flamegraphs.
-
-Env: TRACE_AUX marker directory (default /tmp/jsc-trace-aux), GC_PREFIX the marker-name prefix identifying a section (default "GC "), PERF_OUTDIR where folded-stack files are written (default $TRACE_AUX), ALL_THREADS to keep every thread's samples rather than the GC threads' only."""
+Run as a perf script, not standalone: `TRACE_AUX=/tmp/jsc-trace-aux perf script -i perf.data -s split-perf.py`; every sample from a GC thread inside a "GC <phase>" marker span (split-trace.py's split/stitch) is pooled across GCs, reporting IPC, cache MPKI, per-function memory-stall tables and folded stacks for flamegraphs.
+Env: TRACE_AUX marker dir (default /tmp/jsc-trace-aux), GC_PREFIX marker prefix (default "GC "), PERF_OUTDIR folded-stack output (default $TRACE_AUX), ALL_THREADS to keep every thread instead of GC threads only."""
 import os
 import re
 import sys
@@ -17,7 +15,7 @@ ALL_THREADS = bool(os.environ.get("ALL_THREADS"))
 # Linux truncates thread names to 15 chars (prctl PR_SET_NAME); match by shared prefix.
 GC_THREAD_NAMES = ("Heap Helper Thread", "JSC Heap Collector Thread")
 
-def load_markers():   # -> {phase name: merged [[start_ns, end_ns], ...]}, set(marker pids), from the JSC text-marker files
+def load_markers():
     spans = defaultdict(list)
     pids = set()
     import glob
@@ -53,10 +51,10 @@ def load_markers():   # -> {phase name: merged [[start_ns, end_ns], ...]}, set(m
 
 SECTIONS = {}
 MARKER_PIDS = set()
-phase_events = defaultdict(lambda: defaultdict(int))   # phase -> event -> summed period
-phase_func = defaultdict(lambda: defaultdict(lambda: defaultdict(int)))   # phase -> symbol -> event -> summed period
+phase_events = defaultdict(lambda: defaultdict(int))
+phase_func = defaultdict(lambda: defaultdict(lambda: defaultdict(int)))
 phase_samples = defaultdict(int)
-folded = defaultdict(lambda: defaultdict(int))   # (phase, metric event) -> stack string -> weight
+folded = defaultdict(lambda: defaultdict(int))
 MISS_EVENTS = ("l1d_cache_refill", "ll_cache_miss_rd")
 
 
@@ -72,7 +70,7 @@ def _is_gc_thread(pid, tid, comm):
     if pid not in MARKER_PIDS:
         return False
     if tid == pid:
-        return True  # main thread
+        return True
     if not comm:
         return False
     return len(comm) >= 8 and any(full.startswith(comm) or comm.startswith(full)
@@ -117,7 +115,7 @@ def process_event(param_dict):
             names = [_frame_name(fr) for fr in cc]
             if not names:
                 names = [sym]
-            stack = ";".join(reversed(names))  # root->leaf for flamegraphs
+            stack = ";".join(reversed(names))
             folded[(phase, ev)][stack] += period
 
 

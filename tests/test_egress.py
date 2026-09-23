@@ -21,6 +21,7 @@ import importlib.util
 import io
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 import unittest.mock
@@ -28,6 +29,10 @@ from pathlib import Path
 
 from tests.support import (assert_guest_start_converges, func_body,
                            REPO, WkTest)
+
+sys.path.insert(0, str(REPO / "lib"))
+from wk import targets as wk_targets  # noqa: E402
+from wk.machine import Fake  # noqa: E402
 
 PROXY = REPO / "container" / "proxy" / "wk-proxy.py"
 INJECT = REPO / "container" / "proxy" / "github-inject.py"
@@ -456,7 +461,7 @@ class TestTheInjectorsRule(unittest.TestCase):
 
     def test_with_no_token_the_placeholder_is_stripped_and_nothing_added(self):
         """GitHub then answers for itself -- 200 for a public endpoint, 401 for
-        one that needs an account -- which is what `wk verify` measures either
+        one that needs an account -- which is what `wk doctor` measures either
         side of the switch. Forwarding the placeholder would only ever be a way
         to smuggle a credential out."""
         out = self.m.rewrite_head(self.head(), self.m.GITHUB, "")
@@ -794,7 +799,7 @@ GIT_WEBKIT_WRITES = (
 )
 
 # Paths a workspace reaches that `git-webkit` never asks for -- `gh`, curl by
-# hand, and the reachability probe `wk verify` measures the injector with.
+# hand, and the reachability probe `wk doctor <ws>` measures the injector with.
 READS_WITH_NO_GIT_WEBKIT_CALLER = ("/user", "/rate_limit",
                                    "/repos/a/b/actions/runs", "/orgs/x", "/")
 
@@ -1291,7 +1296,7 @@ class TestWhatGhNeeds(unittest.TestCase):
     def test_no_published_login_means_no_bugzilla_placeholder(self):
         """A placeholder with no login beside it would have git-webkit
         validate an empty pair; with neither it asks, which is the visible
-        state `wk verify` fails on."""
+        state `wk doctor <ws>` fails on."""
         out, _, _ = run_bridge(True, "BUGS_WEBKIT_ORG_USERNAME",
                                     "BUGS_WEBKIT_ORG_PASSWORD")
         self.assertIn("BUGS_WEBKIT_ORG_USERNAME=[]", out)
@@ -1302,7 +1307,7 @@ class TestWhatGhNeeds(unittest.TestCase):
         self.assertEqual("THE-SYSTEM-STORE\nTHE-INJECTORS-CA\n", text)
 
     def test_a_guest_gets_the_same_two(self):
-        """A guest's injector is the host's, and `wk verify` measures the
+        """A guest's injector is the host's, and `wk doctor <ws>` measures the
         placeholder on both targets, so the file that writes a guest's
         environment carries them too (targets/vm.sh, ~/.wk-egress)."""
         vm = (REPO / "targets" / "vm.sh").read_text()
@@ -1326,17 +1331,26 @@ class TestTheWorkspaceHoldsThePlaceholder(unittest.TestCase):
         an editor takes is the sshd, which the wrapper starts for the same
         reason."""
         text = (REPO / "targets" / "container.sh").read_text()
-        for fn in ("t_exec", "t_enter", "t_spawn", "t_ssh_sshd_cmd"):
+        for fn in ("t_exec", "t_spawn", "t_ssh_sshd_cmd"):
             with self.subTest(fn=fn):
                 self.assertRegex(func_body(text, fn),
                                  r"_wrap_cmd|ensure-bridge\.sh")
+
+    def test_enter_argv_goes_through_the_bridge_too(self):
+        """`wk enter` execs `Container.enter_argv` directly now (targets/container.sh's
+        own t_enter has no caller left): the same property this class checks in bash
+        for the other ways in must hold for the one Python already owns."""
+        c = wk_targets.Container("c", REPO, {"WK_CONTAINER_USER": "dev"}, Fake("here"))
+        argv, _ = c.enter_argv("a")
+        self.assertIn("/opt/wk-tools/container/proxy/ensure-bridge.sh", argv)
 
     def test_the_shell_wk_enter_spawns_is_still_a_login_shell(self):
         """What the wrapper may not cost: wkdev-enter spawns a login shell of
         its own only when it is given no command, and the container's rc is
         what puts the checkout on PATH and starts the shell in it."""
-        self.assertIn("--login", func_body(
-            (REPO / "targets" / "container.sh").read_text(), "t_enter"))
+        c = wk_targets.Container("c", REPO, {"WK_CONTAINER_USER": "dev"}, Fake("here"))
+        argv, _ = c.enter_argv("a")
+        self.assertIn("--login", argv)
 
     def test_a_container_gets_them_from_ensure_bridge(self):
         text = (REPO / "container" / "proxy" / "ensure-bridge.sh").read_text()
@@ -1716,7 +1730,6 @@ if __name__ == "__main__":
 
 
 FIRSTRUN = REPO / "container" / "firstrun.sh"
-CONTAINER = REPO / "targets" / "container.sh"
 
 
 def _shell_function(path, name):
@@ -1728,24 +1741,14 @@ def _shell_function(path, name):
 
 
 def _sandbox_env():
-    """The proxy variables `_sandbox_flags` (targets/container.sh) starts a
-    container with, taken by running it: `_wk_runtime` writes under /run and
-    the GPU flags ask the host, neither of which a test may do."""
-    script = (f'. "{REPO}/lib/common.sh"; . "{REPO}/lib/store.sh"\n'
-              f'. "{REPO}/lib/target.sh"; . "{CONTAINER}"\n'
-              '_wk_runtime() { printf "%s" "$TMPDIR"; }\n'
-              'arch_has_gpu() { return 1; }\n'
-              '_sandbox_flags native\n')
-    cp = subprocess.run(["bash", "-c", script], cwd=str(REPO), capture_output=True,
-                        text=True, timeout=60, env={"PATH": "/usr/bin:/bin", "HOME": os.environ.get("HOME", "/tmp"),
-                             "TMPDIR": tempfile.mkdtemp(prefix="wk-test-rt-")})
-    assert cp.returncode == 0, cp.stdout + cp.stderr
-    out = {}
-    for word in cp.stdout.split():
-        if "=" in word:
-            k, v = word.split("=", 1)
-            out[k] = v
-    return out
+    """The proxy variables the container target starts a container with
+    (`Container.sandbox_flags`), asked of a fake machine: the runtime
+    directory is made under /run, which a test may not do."""
+    sys.path.insert(0, str(REPO / "lib"))
+    from wk import targets
+    from wk.machine import Fake
+    flags = targets.Container("container", str(REPO), {"XDG_RUNTIME_DIR": "/run/user/1"}, Fake("here")).sandbox_flags("armhf")
+    return dict(v.split("=", 1) for k, v in zip(flags[0::2], flags[1::2]) if k == "--env")
 
 
 class TestAptGoesThroughTheProxy(unittest.TestCase):
@@ -1768,7 +1771,7 @@ class TestAptGoesThroughTheProxy(unittest.TestCase):
         self.assertIn('Acquire::https::Proxy "http://127.0.0.1:9";', out)
 
     def test_the_address_is_the_one_the_container_is_started_with(self):
-        """No drift: the drop-in carries whatever `_sandbox_flags` passed in,
+        """No drift: the drop-in carries whatever `sandbox_flags` passed in,
         because it reads that and nothing else."""
         env = _sandbox_env()
         for var in ("http_proxy", "https_proxy"):

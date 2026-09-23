@@ -21,17 +21,31 @@ already has a job holding its checkout.
 
 Run: python3 -m unittest tests.test_build_kill -v
 """
+import importlib.machinery
+import importlib.util
 import os
 import re
 import shlex
 import signal
-import socket
 import subprocess
+import sys
 import time
 import unittest
 from pathlib import Path
 
 from tests.support import REPO, WkTest, bash, fake_workspace, glob_bait, rand_suffix, run
+
+sys.path.insert(0, str(REPO / "lib"))
+from wk import build  # noqa: E402
+
+
+def _load(rel):
+    """A `cmd/*` file, which carries no `.py` suffix for the loader to infer from."""
+    loader = importlib.machinery.SourceFileLoader(rel.replace("/", "_"), str(REPO / rel))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    mod = importlib.util.module_from_spec(spec)
+    loader.exec_module(mod)
+    return mod
 
 PRELUDE = f'''set -uo pipefail
 WK_ROOT="{REPO}"
@@ -117,12 +131,6 @@ def alive(pid):
 # A target whose pid never stops answering, and whose command line is the job's.
 STUB_ALIVE_EXEC = ('t_exec() { shift; case "$*" in "ps -o args="*)'
                    ' printf \'%s\\n\' "' + TARGET_PID_ARGS + '" ;; esac; return 0; }\n')
-
-
-def stub_ps(args):
-    """A t_exec that answers `ps -o args=` with <args>, as the adopt check asks."""
-    return ('t_exec() { shift; case "$*" in "ps -o args="*)'
-            " printf '%%s\\n' '%s' ;; esac; return 0; }\n" % args)
 
 
 def stub_target(execs, answer="dead", args=TARGET_PID_ARGS):
@@ -273,38 +281,6 @@ job_stop selftest-ws {kind}
 class TestThePidComesBackDownTheLog(WkTest):
     """The one channel that reaches the driver from every target kind."""
 
-    def test_job_pid_watch_records_the_announced_pid_and_flips_where(self):
-        store = self.tmp / "store"
-        log = self.tmp / "build.log"
-        log.write_text("cmake -G Ninja\nwk: build pid 8123\n[1/9] cc\n")
-        d = begin(store, log=str(log))
-        cp = bash(PRELUDE + stub_ps(TARGET_PID_ARGS) +
-                  f'job_pid_watch "{d}" "{log}" build "{TARGET_PID_MATCH}"',
-                  env={"WK_STORE": str(store)}, timeout=60)
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertEqual(field(d, "pid"), "8123")
-        self.assertEqual(field(d, "pid_match"), TARGET_PID_MATCH,
-                         "the pattern is recorded with the pid, or nothing can check it later")
-        self.assertEqual(field(d, "where"), "target",
-                         "until the pid is known the record's pid is the driver's own")
-
-    def test_a_pid_whose_command_line_is_not_the_job_is_not_adopted(self):
-        """The log is bind-mounted read-write into the workspace, so the pid
-        down it is the workspace's claim: a container shares the host's PID
-        namespace, and an unchecked pid is a signal at another workspace's
-        build. The record keeps the driver's own pid, so nothing signals it."""
-        store = self.tmp / "store"
-        log = self.tmp / "build.log"
-        log.write_text("wk: build pid 1\n")
-        d = begin(store, log=str(log))
-        cp = bash(PRELUDE + stub_ps("/sbin/init") +
-                  f'job_pid_watch "{d}" "{log}" build "{TARGET_PID_MATCH}" && echo TOOK || echo REFUSED',
-                  env={"WK_STORE": str(store)}, timeout=60)
-        self.assertEqual(cp.stdout.strip().splitlines()[-1], "REFUSED", cp.stdout + cp.stderr)
-        self.assertIn("/sbin/init", cp.stdout + cp.stderr)
-        self.assertNotEqual(field(d, "pid"), "1")
-        self.assertEqual(field(d, "pid_match"), "")
-
     def test_nothing_is_signalled_at_a_pid_that_is_not_the_job(self):
         """The check is at the signal too, not only at adoption: a pid can be
         recycled between the two."""
@@ -348,10 +324,11 @@ class TestThePatternsCoverEveryShapeTheJobTakes(WkTest):
     `Tools/Scripts/build-*` after it."""
 
     def _declared(self, path, label):
-        m = re.search(r"job_pid_watch [^\n]*? %s '([^'\n]*)'" % label,
-                      (REPO / path).read_text())
-        self.assertIsNotNone(m, f"no job_pid_watch for {label} in {path}")
-        return m.group(1)
+        if path == "lib/wk/build.py":
+            return build.PID_MATCH
+        if path == "cmd/test":
+            return _load(path).PID_MATCH
+        self.fail(f"no PID_MATCH source known for {label} in {path}")
 
     def _matches(self, args, want):
         with glob_bait(want) as cwd:
@@ -361,7 +338,7 @@ class TestThePatternsCoverEveryShapeTheJobTakes(WkTest):
         return cp.stdout.strip().splitlines()[-1] == "MATCH"
 
     def test_a_builds_two_shapes_both_match_and_nothing_else_does(self):
-        want = self._declared("cmd/build", "build")
+        want = self._declared("lib/wk/build.py", "build")
         for args in ("env WK_JOBS=8 /opt/wk-tools/build/build-in-target.sh --release",
                      "Tools/Scripts/build-webkit --release --export-compile-commands",
                      "linux32 Tools/Scripts/build-jsc --release"):
@@ -391,10 +368,9 @@ class TestThePatternsCoverEveryShapeTheJobTakes(WkTest):
 
 class TestASecondBuildIsRefusedAtOnceAndNamesTheRemedy(WkTest):
     def _lockfile(self, lockdir, res):
-        host = subprocess.run(["hostname", "-s"], capture_output=True,
-                              text=True).stdout.strip() or socket.gethostname()
-        lockdir.mkdir(parents=True, exist_ok=True)
-        f = lockdir / f"{res}@{host}.lock"
+        cp = bash('. "$WK_ROOT/lib/common.sh"; _lock_path %s' % res, env={"WK_LOCK_DIR": str(lockdir)})
+        self.assertEqual(cp.returncode, 0, cp.stderr)
+        f = Path(cp.stdout.strip())
         os.symlink(f"pid={os.getpid()} tok={rand_suffix()} at=now cmd=test", f)
         return f
 
@@ -421,19 +397,24 @@ class TestASecondBuildIsRefusedAtOnceAndNamesTheRemedy(WkTest):
             self.assertIn("already has a job running in it", cp.stdout)
             self.assertIn("wk sysimage build rpi5-64 --stage image --stop", cp.stdout)
 
-    def test_an_agent_session_in_the_workspace_is_not_a_reason_to_refuse(self):
-        """`rc` (wk ai claude --rc) does not hold the checkout, so a build
-        beside it is fine -- only the kinds that write it are exclusive. The
+    def test_a_job_that_does_not_hold_the_checkout_is_not_a_reason_to_refuse(self):
+        """`test` does not hold the checkout, so a build beside it is fine --
+        only the kinds that write it are exclusive -- and a pid file in the
+        workspace's home naming its record's pid is judged by that record
+        and not again as an unrecorded job. The
         build itself then fails: a fake workspace has no Tools/Scripts, which
         is past the refusal this asks about."""
         with fake_workspace() as ws:
-            begin(store_of(ws), kind="rc", where="target", pid=os.getpid(),
-                  kill="wk ai claude selftest-ws --rc --stop", plan="claude")
+            begin(store_of(ws), kind="test", where="target", pid=os.getpid(),
+                  kill="wk test selftest-ws --kill", plan="jsc")
+            home = store_of(ws) / "ws" / "selftest-ws" / "home"
+            home.mkdir(parents=True)
+            (home / "jsc-tests.pid").write_text("%d\n" % os.getpid())
             cp = ws.run("build", "jsc-release", timeout=180)
             self.assertNotIn("already has a job running", cp.stdout)
 
     def test_the_job_that_started_this_build_is_not_counted_against_it(self):
-        """build/babysit.sh runs `wk build` itself, and exports the record it
+        """The babysitter runs `wk build` itself, and exports the record it
         holds so its own build is not refused as a second job."""
         with fake_workspace() as ws:
             d = begin(store_of(ws), kind="babysit", pid=os.getpid(),
@@ -487,31 +468,13 @@ class TestKillFromTheOutside(WkTest):
                 reap(pid)
 
     def test_the_record_a_running_build_writes_names_the_kill_command(self):
-        text = (REPO / "cmd" / "build").read_text()
-        self.assertIn('_KILL_CMD="wk build$(in_workspace || printf \' %s\' "$NAME") --kill"',
-                      text)
-        self.assertIn('task_begin build here "$NAME" "$_KILL_CMD"', text)
+        """The record's own `kill` is this form (tests/test_wk_build.py holds that a run writes it)."""
+        self.assertEqual(build.kill_cmd(False, "ws"), "wk build ws --kill")
+        self.assertEqual(build.kill_cmd(True, "ws"), "wk build --kill")
 
 
 class TestTheBabysitterIsOneOfTheseJobsToo(unittest.TestCase):
-    """build/babysit.sh writes the same record: its plan is every build it may
-    run, and `wk build <ws> --kill` stops it before the build it drives, or it
-    would start the next one."""
-
-    def test_it_declares_a_record_with_a_real_kill_command(self):
-        text = (REPO / "build" / "babysit.sh").read_text()
-        self.assertIn('task_begin babysit here "$NAME" "wk build $NAME --kill"', text)
-        self.assertNotIn("babysit.status", text)
-        self.assertNotIn("bs_status", text)
-
-    def test_every_way_out_ends_the_record(self):
-        text = (REPO / "build" / "babysit.sh").read_text()
-        for word in ("0", "stalled", "gave-up", "error", "cancelled"):
-            self.assertIn(f'task_end "$TASK" {word}', text, word)
-
-    def test_kill_stops_the_babysitter_before_the_build(self):
-        text = (REPO / "cmd" / "build").read_text()
-        self.assertIn("for _kind in babysit build; do", text)
+    """The babysitter writes the same record (its states are tests/test_wk_build.py's)."""
 
     def test_cmd_status_renders_it_through_the_one_task_renderer(self):
         text = (REPO / "cmd" / "status").read_text()
@@ -558,8 +521,6 @@ t_task_put selftest-ws "{d}"
         that builds reports from, so the default is a no-op."""
         text = (REPO / "lib" / "target.sh").read_text()
         self.assertIn("t_task_put()  { :; }", text)
-        callers = (REPO / "cmd" / "build").read_text()
-        self.assertIn('t_task_put "$NAME" "$TASK"', callers)
 
 
 if __name__ == "__main__":

@@ -89,11 +89,11 @@ only one there is. `wk build --list` shows the configs, and a bare `wk run` or
 `wk test` uses the config this workspace was built with — so a macOS guest does
 not have to be told it is an Apple port every time.
 
-Commands that act on the *host* — `wk new`, `wk rm`, `wk sync`, `wk gc`,
-`wk session`, `wk quiesce`, `wk verify`, `wk ai claude` — refuse in here and say
+Commands that act on the *host* — `wk new`, `wk rm`, `wk gc`,
+`wk session`, `wk quiesce` — refuse in here and say
 so. That is not something to work around: nothing in a workspace can create or
-destroy a workspace, and `wk verify` measures the boundary from the outside as
-well as the inside, so a result from in here would mean nothing.
+destroy a workspace. The boundary is measured from the host by `wk doctor <ws>`;
+`wk doctor` in here answers only the half a workspace can see of itself.
 
 ## Network
 

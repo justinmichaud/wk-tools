@@ -246,7 +246,7 @@ class TestOneAliasBlock(WkTest):
     def test_what_keeps_the_agent_signing_is_the_absent_private_half(self):
         """IdentitiesOnly with a readable private IdentityFile would let ssh
         sign with the file rather than the agent, which is the whole thing this
-        avoids. Nothing puts one at that path in a workspace -- `wk verify`
+        avoids. Nothing puts one at that path in a workspace -- `wk doctor`
         measures that from inside -- so the named path is the public half's
         stem and ssh has only the agent to sign with."""
         out = self._blocks("/secrets build_key_ /run/wk/ssh-agent.sock")

@@ -10,6 +10,7 @@ mutates it -- these are read-only probes only.
 Run: python3 -m unittest tests.test_remote -v
 """
 import os
+import sys
 import unittest
 
 from tests.support import (REAL_REGISTRY, REPO, WkTest, bash, func_body, stub_path,
@@ -20,7 +21,7 @@ class TestUnregisteredWorkspaceResolves(WkTest):
     """a remote workspace with no registry entry here still resolves"""
 
     def test_unregistered_remote_workspace_resolves(self):
-        """ws_exists/ws_target find a remote workspace the registry misses"""
+        """ws_target finds a remote workspace the registry misses"""
         # A registry holding only the fake conf (WK_TARGET_REGISTRY,
         # lib/target.sh), so the walk cannot reach the real fleet.
         registry = self.tmp / "hosts"
@@ -43,10 +44,8 @@ class TestUnregisteredWorkspaceResolves(WkTest):
 set -euo pipefail
 . "$WK_ROOT/lib/common.sh"
 . "$WK_ROOT/lib/target.sh"
-ws_exists tws || { echo "ws_exists missed tws"; exit 1; }
 t=$(ws_target tws)
 [ "$t" = fakebox ] || { echo "ws_target said '$t'"; exit 1; }
-! ws_exists not-a-workspace || { echo "ws_exists found a ghost"; exit 1; }
 ''', env={
             "WK_TARGET_REGISTRY": str(registry),
             "XDG_STATE_HOME": str(self.tmp / "state"),
@@ -240,11 +239,14 @@ _remote_mirror_update "$(_remote_root)" >/dev/null 2>&1
         self.assertIn("mirror_refresh_script", body)
 
     def test_the_workspace_wiring_names_the_same_mirror(self):
-        """t_wiring_args tells a checkout on the box where the local copy is;
-        naming it twice is how the two drift apart."""
-        body = func_body((REPO / "targets" / "remote.sh").read_text(), "t_wiring_args")
-        self.assertIn("t_mirror_dir", body)
-        self.assertNotIn("/mirror'", body)
+        """Remote.wiring_args tells a checkout on the box where the local copy
+        is; naming it twice is how the two drift apart."""
+        import inspect
+        sys.path.insert(0, str(REPO / "lib"))
+        from wk import targets
+        body = inspect.getsource(targets.Remote.wiring_args)
+        self.assertIn("self.mirror_dir()", body)
+        self.assertNotIn("/mirror", body)
 
 
 if __name__ == "__main__":

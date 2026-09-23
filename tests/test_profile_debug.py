@@ -10,6 +10,8 @@ already uses for the other privileged helper.
 Run: python3 -m unittest tests.test_profile_debug -v
 """
 
+import importlib.machinery
+import importlib.util
 import os
 import platform
 import subprocess
@@ -68,11 +70,11 @@ class ProfileHelpTest(unittest.TestCase):
         self.assertNotIn("strongrefs", text, "cmd/profile mentions a 'strongrefs' mode that was never wired in")
 
     def test_mode_list_in_header_matches_the_MODES_variable(self):
-        """the header comment's mode list and the MODES variable never drift apart"""
-        text = PROFILE.read_text()
-        modes_line = next(l for l in text.splitlines() if l.startswith("MODES="))
-        declared = modes_line.split("=", 1)[1].strip('"').split()
-        self.assertEqual(sorted(declared), sorted(KNOWN_MODES))
+        """the header comment's mode list and the MODES tuple never drift apart"""
+        loader = importlib.machinery.SourceFileLoader("cmd_profile", str(PROFILE))
+        mod = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
+        loader.exec_module(mod)
+        self.assertEqual(sorted(mod.MODES), sorted(KNOWN_MODES))
 
 
 class ProfileModeRefusalTest(unittest.TestCase):

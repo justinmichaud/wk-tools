@@ -82,6 +82,7 @@ class Merger:
     def __init__(self):
         self.doc = {"machines": [], "fleet": [], "bridges": [], "exit": 0}
         self.index = {}
+        self.ws_index = {}   # (id(group), workspace name) -> its row; not part of the document itself
 
     def machine(self, name):
         if name not in self.index:
@@ -100,6 +101,20 @@ class Merger:
         m["methods"].append(g)
         return g
 
+    def merge_workspace(self, g, r):
+        """One row per workspace name: a second record naming a different state is not a second row, it
+        is the first view learning the fleet disagrees -- the worst state anywhere still owns the exit
+        code, so a disagreement is never quieter than the state it hides."""
+        key = (id(g), r.get("name", "?"))
+        existing = self.ws_index.get(key)
+        if existing is None:
+            self.ws_index[key] = r
+            g["workspaces"].append(r)
+            return
+        if existing.get("state") != r.get("state") or existing.get("ws") != r.get("ws"):
+            existing["disagree"] = [existing.get("state", "?"), r.get("state", "?")]
+            self.doc["exit"] = max(self.doc["exit"], 4)
+
     def feed(self, r):
         """The machine the record belongs to, or None."""
         kind = r.get("kind")
@@ -112,7 +127,7 @@ class Merger:
             return m["name"]
         if kind == "workspace":
             name = r.get("machine", "?")
-            self.method(self.machine(name), r.get("method", "?"))["workspaces"].append(r)
+            self.merge_workspace(self.method(self.machine(name), r.get("method", "?")), r)
             return name
         if kind in self.PER_MACHINE:
             name = r.get("machine", "?")
@@ -142,7 +157,7 @@ def read_doc(path):
 GOOD = ("ok", "present", "running", "host mode", "up", "bench", "open", "complete")
 BUSY = ("creating", "starting", "building", "fixing", "no", "empty", "held", "silent", "base", "role")
 BAD = ("unhealthy", "incomplete", "died", "unanswered", "failed", "oom", "stalled", "broken",
-       "unreachable", "gave-up", "error", "closed")
+       "unreachable", "gave-up", "error", "closed", "disagree", "desync")
 IDLE = ("absent", "none", "stopped", "exited", "-", "clean", "finished", "off", "cancelled")
 
 
@@ -206,15 +221,22 @@ def ws_snap(ws):
     return "-%s" % n if n else ""
 
 
+def ws_state_cell(ws):
+    d = ws.get("disagree")
+    if d:
+        return "disagree (%s vs %s)" % (d[0], d[1])
+    return ws.get("state", "?")
+
+
 def ws_cells(ws):
     subs = ws.get("subs") or []
-    return [ws.get("name", "?"), ws.get("state", "?"), ws_branch(ws), ws.get("base") or "?",
+    return [ws.get("name", "?"), ws_state_cell(ws), ws_branch(ws), ws.get("base") or "?",
             ws_work(ws), ws_snap(ws), sub_text(subs[0]) if subs else ""]
 
 
 def ws_hues(ws):
     subs = ws.get("subs") or []
-    return {1: severity(ws.get("state")), 4: ws_work_hue(ws),
+    return {1: severity(ws_state_cell(ws)), 4: ws_work_hue(ws),
             5: "busy" if ws.get("snap_behind") else "",
             6: severity(subs[0].get("state")) if subs else ""}
 
@@ -459,23 +481,35 @@ def render_machine_block(m, colour, widths=None):
 def render_fleet_and_bridges(doc, colour):
     wr = Writer(colour)
     out = wr.out
+    # The self machine's row already led the whole document (self_line); the board table is for the
+    # other devices wk owns, not a second look at the one just named.
+    fleet = [f for f in doc["fleet"] if f.get("machine") != self_machine_name(doc)]
 
-    if doc["fleet"]:
+    if fleet:
         wr.heading("fleet", "role, mode, and the media wk owns")
-        fw = max([len(f.get("machine", "")) for f in doc["fleet"]] + [7])
-        rw = max([len(f.get("role", "")) for f in doc["fleet"]] + [4])
-        mw = max([len(f.get("mode", "")) for f in doc["fleet"]] + [4])
+        fw = max([len(f.get("machine", "")) for f in fleet] + [7])
+        rw = max([len(f.get("role", "")) for f in fleet] + [4])
+        mw = max([len(f.get("mode", "")) for f in fleet] + [4])
         start = len(out)
-        for f in doc["fleet"]:
+        for f in fleet:
             out.append("  %s  %s  %s  %s" % (f.get("machine", "").ljust(fw), paint(f.get("role", "").ljust(rw), "dim", colour),
                                              paint(f.get("mode", "").ljust(mw), severity(f.get("mode")), colour), f.get("media", "")))
             if f.get("armed"):
-                out.append("  %s  %s" % (" " * fw, paint("** armed for %s -- wk boot %s --status **"
-                                                        % (f["armed"], f.get("machine", "")), "busy", colour)))
+                detail = "armed for %s" % f["armed"]
+                if f.get("armed_by"):
+                    detail += " by %s" % f["armed_by"]
+                if f.get("armed_at"):
+                    detail += " since %s" % f["armed_at"]
+                hue = "busy"
+                if f.get("armed_desync"):
+                    detail = "desync -- %s, and the record was never cleared" % detail
+                    hue = "bad"
+                out.append("  %s  %s" % (" " * fw, paint("** %s -- wk boot %s --status **"
+                                                        % (detail, f.get("machine", "")), hue, colour)))
             wr.meta(f, "  " + " " * fw + "  ")
         wr.align(start)
 
-        recipes = [f for f in doc["fleet"] if f.get("reprovision")]
+        recipes = [f for f in fleet if f.get("reprovision")]
         if recipes:
             wr.heading("re-provisioning", "each machine from nothing")
             for f in recipes:
@@ -490,12 +524,12 @@ def render_fleet_and_bridges(doc, colour):
                 out.append("")
 
             roles = []
-            if any(f.get("role") == "bench-device" for f in doc["fleet"]):
+            if any(f.get("role") == "bench-device" for f in fleet):
                 roles.append(("a rescue system", "wk sysimage write <id> --disk <machine>:<device> --rescue"))
                 roles.append(("a bench system", "wk sysimage write <id> --disk <machine>:<device>"))
             if doc.get("bridges"):
                 roles.append(("a tailnet bridge", "wk bridge provision <name>"))
-            if any(f.get("role") == "workstation" for f in doc["fleet"]):
+            if any(f.get("role") == "workstation" for f in fleet):
                 roles.append(("a workstation", "./setup"))
             if roles:
                 out.append("  " + paint("by role", "dim", colour) + "  "
@@ -527,8 +561,29 @@ def render_fleet_and_bridges(doc, colour):
     return out
 
 
+def self_machine_name(doc):
+    return next((m["name"] for m in doc["machines"] if m.get("self")), None)
+
+
+def self_line_text(machine, role, mode, colour):
+    return "%s -- %s, %s" % (machine, paint(role, "dim", colour), paint(mode, severity(mode), colour))
+
+
+def self_line(doc, colour):
+    """The self machine's own fleet record (status.self_fleet_record): role and mode, the line every
+    session starts with, ahead of any machine block or probe."""
+    name = self_machine_name(doc)
+    f = next((f for f in doc.get("fleet", []) if f.get("machine") == name), None) if name else None
+    if not f:
+        return None
+    return self_line_text(name, f.get("role", "?"), f.get("mode", "?"), colour)
+
+
 def render_text(doc, colour):
     out = []
+    lead = self_line(doc, colour)
+    if lead:
+        out.append(lead)
     w = column_widths(doc["machines"])
     for m in doc["machines"]:
         out.extend(render_machine_block(m, colour, w))
@@ -544,6 +599,7 @@ def render_text_stream(records, out, colour):
     owner = {}
     pending = {}
     drawn = set()
+    lead_shown = False
 
     def draw(machine):
         for m in merger.doc["machines"]:
@@ -555,6 +611,13 @@ def render_text_stream(records, out, colour):
 
     for r in records:
         kind = r.get("kind")
+        if kind == "fleet" and r.get("self"):
+            merger.feed(r)
+            if not lead_shown:
+                out.write(self_line_text(r.get("machine", "?"), r.get("role", "?"), r.get("mode", "?"), colour) + "\n")
+                out.flush()
+                lead_shown = True
+            continue
         if kind == "plan":
             for j in r.get("jobs", []):
                 owner[j["job"]] = j.get("machine")

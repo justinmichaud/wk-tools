@@ -1,8 +1,6 @@
 #!/usr/bin/env python3
 """Split a samply profile into one profile per section, keyed by JSC text markers.
-
 The instrumented build (JSC_useTextMarkers=1) emits an interval text marker spanning the wall-clock time each named section ran. Markers whose name starts with --prefix (default "GC ") select the sections, and each distinct name gets a profile keeping only the samples whose timestamp falls inside one of that name's spans. The section repeats -- once per GC in the worked example, "GC ParallelMarking" / "GC Sweeping" / "GC Finalizers" from Heap::recordGCPhaseMarker, though any prefix works -- so the per-section profile pools every occurrence and its call tree rests on far more samples than one occurrence provides, trading wall-clock spread for statistical depth. The shared stack/frame/func/string tables, carrying the JIT-symbolicated frames from JSC_useJITDump, are kept verbatim, so the split profiles keep full symbolication.
-
 Usage:  split-trace.py PROFILE.json.gz [-o OUTDIR] [--prefix "GC "] [--summary] [--top N] [--all-threads] [--drop-idle]"""
 
 import argparse
@@ -170,13 +168,11 @@ def leaf_name_line(profile, stack_index):   # leaf function name plus that frame
 
 # Leaf frames that mean the thread was parked rather than doing GC work: the macOS mach/psynch and the Linux futex/poll/nanosleep wait primitives.
 IDLE_LEAVES = {
-    # macOS
     "__psynch_cvwait", "__psynch_cvsignal", "__psynch_mutexwait", "semaphore_wait_trap",
     "semaphore_wait_signal_trap", "semaphore_timedwait_trap", "syscall_thread_switch",
     "__workq_kernreturn", "mach_msg2_trap", "mach_msg_trap", "mach_msg2_internal",
     "__semwait_signal", "thread_switch", "start_wqthread", "_pthread_wqthread",
     "read", "__read_nocancel", "kevent", "kevent_id",
-    # Linux
     "futex", "__futex_abstimed_wait_common", "__futex_abstimed_wait_common64",
     "futex_wait", "futex_abstimed_wait", "do_futex_wait", "__pthread_cond_wait",
     "pthread_cond_wait", "pthread_cond_timedwait", "__pthread_cond_timedwait",

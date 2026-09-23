@@ -78,7 +78,7 @@
 #                                     other; separate from this machine's own
 #                                     login so neither refresh invalidates the
 #                                     other. The second of Claude's two, and
-#                                     what `wk ai claude <ws> --rc` needs
+#                                     what a session's Remote Control needs
 #                       litellm       the API key `wk ai pi` reaches your
 #                                     LiteLLM endpoint with
 #                       tailnet       the fleet's tailnet auth key, seeded onto

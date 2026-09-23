@@ -469,48 +469,6 @@ class TestEveryHandoverStatesTheLogin(WkTest):
         self.assertIn("vm_login_note", enter.split("\nsync)", 1)[0])
 
 
-class TestSyncPushesTheToolingIntoEachRunningGuest(WkTest):
-    """`wk sync` reaches t_sync, this target's furniture, which for a guest is
-    its tooling copy alone: its mirror is the host's, mounted in, and the host
-    refreshes that (cmd/sync). Driven with the push replaced by a recorder."""
-
-    def _sync(self, push_body, state="running"):
-        store = self.tmp / "store"
-        store.mkdir(exist_ok=True)
-        with stub_path({"tart": TART}) as binp:
-            return bash(DRIVER + f'''
-target_workspaces() {{ echo mya; echo myb; }}
-t_info()            {{ echo {state}; }}
-t_sync_tools()      {{ echo "PUSHED: $1"; {push_body}; }}
-_ssh()              {{ echo "ssh should not have run" >&2; exit 1; }}
-t_sync
-''', env={"WK_VM_STORE": str(store),
-          "PATH": f"{binp}:{os.environ['PATH']}"})
-
-    def test_every_running_guest_takes_the_tooling_and_nothing_else_is_sent(self):
-        cp = self._sync(":")
-        out = cp.stdout + cp.stderr
-        self.assertEqual(cp.returncode, 0, out)
-        self.assertEqual([l for l in cp.stdout.splitlines() if l.startswith("PUSHED:")],
-                         ["PUSHED: mya", "PUSHED: myb"])
-        self.assertNotIn("should not have run", out)
-        self.assertIn("mya", out)
-
-    def test_a_guest_that_is_not_running_is_skipped(self):
-        cp = self._sync(":", state="exited")
-        out = cp.stdout + cp.stderr
-        self.assertEqual(cp.returncode, 0, out)
-        self.assertIn("not running -- skipped", out)
-        self.assertNotIn("PUSHED:", out)
-
-    def test_a_push_that_failed_fails_the_sync(self):
-        cp = self._sync("return 1")
-        self.assertNotEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-
-    def test_no_guest_fetches_into_a_mirror_of_its_own(self):
-        self.assertNotIn("mirror_refresh_script", func_body(VM.read_text(), "t_sync"))
-
-
 class TestTheGuestReadsTheHostsMirror(WkTest):
     """The one copy of WebKit's history on a Mac is the host's mirror
     (wk_mirror, lib/store.sh); a guest mounts that directory read-only as a
@@ -561,7 +519,7 @@ t_create demo
 class TestGitWebkitSetupHasAnIdentityToRead(unittest.TestCase):
     """`git-webkit setup --defaults` asks for a user email when none is in
     reach, and its stdin is /dev/null, so the setup dies on EOF and the
-    marker `wk verify` reads is never written. The include that carries the
+    marker `wk doctor` reads is never written. The include that carries the
     identity therefore precedes the setup wherever it runs unattended."""
 
     def _order(self, text, who):

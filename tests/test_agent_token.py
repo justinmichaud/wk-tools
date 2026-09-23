@@ -25,13 +25,21 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path, PurePosixPath
 
+from types import SimpleNamespace
+from unittest import mock
+
 from tests.support import func_body
 from tests.support import assert_guest_start_converges, REPO, WkTest, bash, stub_path
 from tests.test_pi_agent import FILE_ROWS, TABLE, VALUE_ROWS, store_path
+
+sys.path.insert(0, str(REPO / "lib"))
+from wk import targets  # noqa: E402
+from wk.machine import Local, Result  # noqa: E402
 
 RC = REPO / "shell" / "bashrc"
 VAR = "CLAUDE_CODE_OAUTH_TOKEN"
@@ -180,14 +188,14 @@ WK_STORE={store}
     def test_stored_then_read_back(self):
         store = self._store()
         cp = self._sh(
-            f'printf "%s\\n" {PLACEHOLDER} | wk_agent_secret_store claude\n'
+            f'printf "%s\\n" {PLACEHOLDER} | wk_cred_store claude\n'
             'printf "[%s]\\n" "$(wk_agent_secret claude)"',
             store)
         self.assertIn(f"[{PLACEHOLDER}]", cp.stdout, cp.stdout + cp.stderr)
 
     def test_it_is_written_unreadable_to_anyone_else(self):
         store = self._store()
-        self._sh(f'printf "%s\\n" {PLACEHOLDER} | wk_agent_secret_store claude', store)
+        self._sh(f'printf "%s\\n" {PLACEHOLDER} | wk_cred_store claude', store)
         mode = (store / "secrets" / "claude-token").stat().st_mode & 0o777
         self.assertEqual(mode, 0o600, oct(mode))
 
@@ -242,7 +250,7 @@ printf "store=%s path=%s\\n" "$WK_STORE" "$(wk_agent_secret_path claude)"
     def test_clearing_withdraws_it(self):
         store = self._store()
         cp = self._sh(
-            f'printf "%s\\n" {PLACEHOLDER} | wk_agent_secret_store claude\n'
+            f'printf "%s\\n" {PLACEHOLDER} | wk_cred_store claude\n'
             'wk_cred_clear claude\n'
             'printf "[%s]\\n" "$(wk_agent_secret claude)"',
             store)
@@ -282,7 +290,7 @@ class TestOneClaudeCredentialPerTarget(unittest.TestCase):
                 self.assertEqual(["container", "vm"], row[5].split(","))
 
     def test_a_kind_given_the_login_is_given_no_token(self):
-        """The token wins over the login (cmd/verify), so a kind that mounts
+        """The token wins over the login (lib/wk/wall.py), so a kind that mounts
         the login is sent no token."""
         for kind in ("container", "vm"):
             with self.subTest(kind=kind):
@@ -350,8 +358,7 @@ class TestEveryTargetDeliversIt(unittest.TestCase):
         text = (REPO / "lib" / "store.sh").read_text()
         self.assertEqual(1, text.count("_wk_secret_read() {"))
         for fn in ("_wk_secret_read", "wk_cred_store", "wk_cred_present",
-                   "wk_agent_secret_store", "wk_cred_clear",
-                   "wk_push_key"):
+                   "wk_cred_clear", "wk_push_key"):
             with self.subTest(no_hop_in=fn):
                 self.assertNotIn("podman machine ssh", func_body(text, fn))
         self.assertEqual(1, text.count("podman machine ssh"))
@@ -437,6 +444,29 @@ ip)   echo 1.2.3.4 ;;
 *)    exit 1 ;;
 esac
 '''
+
+
+def ask(target, fn, secret):
+    """The target's answer as the shell probes printed it: YES or NO for `present`, the text for `remedy`."""
+    if fn == "present":
+        out = "YES" if target.agent_secret_present("demo", secret) else "NO"
+    else:
+        out = target.agent_secret_remedy("demo", secret)
+    return SimpleNamespace(stdout=out, stderr="")
+
+
+class _Plain(targets.Target):
+    """The base driver's contract, minus the hop: a real exec reaches the target over podman or ssh and runs the
+    probe in a login shell, which is what decides where CLAUDE_SECURESTORAGE_CONFIG_DIR points."""
+
+    def __init__(self, env):
+        super().__init__("plain", str(REPO), env, Local())
+
+    def exec(self, ws, argv, tty=False, timeout=None):
+        guest = self.env["WK_TEST_GUEST"]
+        cp = subprocess.run(argv, capture_output=True, text=True,
+                            env=dict(self.env, HOME=guest, CLAUDE_SECURESTORAGE_CONFIG_DIR=guest + "/.claude"))
+        return Result(cp.returncode, cp.stdout, cp.stderr)
 
 
 class _Delivery(WkTest):
@@ -857,10 +887,10 @@ _write_agent_secrets demo 1.2.3.4
 
 
 class TestWhoIsAskedWhetherAWorkspaceCanAuthenticate(_Delivery):
-    """t_agent_secret_present: the question is put to the machine that will run
-    the agent, not to whoever is asking. One implementation, in lib/target.sh,
-    which every driver inherits: it asks the target through its own login
-    shell, the one authority on where its credential store is."""
+    """Target.agent_secret_present: the question is put to the machine that
+    will run the agent, not to whoever is asking. One implementation, in
+    lib/wk/targets.py, which every driver inherits: it asks the target through
+    its own login shell, the one authority on where its credential store is."""
 
     def _guest(self, login=None, mounted=True):
         """A guest home wired by the real vm/shell-rc.sh, so the probe and the
@@ -880,20 +910,15 @@ class TestWhoIsAskedWhetherAWorkspaceCanAuthenticate(_Delivery):
 
     def _ask(self, store, home, fn, secret):
         with stub_path({"ssh": FAKE_SSH, "tart": FAKE_TART}) as binp:
-            env = self._env(store, home,
-                            {"PATH": f"{binp}:{os.environ['PATH']}",
-                             "WK_VM_STORE": str(self.tmp / "vmstore")})
-            return bash(f'''
-. "$WK_ROOT/lib/common.sh"
-. "$WK_ROOT/lib/store.sh"
-. "$WK_ROOT/lib/target.sh"
-load_target vm >/dev/null 2>&1
-if {fn} demo {secret}; then echo YES; else echo NO; fi
-''', env=env)
+            env = dict(os.environ, **self._env(store, home, {"PATH": f"{binp}:{os.environ['PATH']}",
+                                                             "WK_VM_STORE": str(self.tmp / "vmstore")}))
+            with mock.patch.dict(os.environ, env), \
+                    mock.patch("wk.store.Store.macos_host", new_callable=mock.PropertyMock, return_value=True):
+                return ask(targets.Registry(str(REPO), env=env, machine=Local()).load("vm"), fn, secret)
 
     def test_a_guest_whose_share_holds_the_login_answers_yes(self):
         cp = self._ask(self._store(), self._guest(FAKE_LOGIN),
-                       "t_agent_secret_present", FILE_ROWS[0][0])
+                       "present", FILE_ROWS[0][0])
         self.assertIn("YES", cp.stdout, cp.stdout + cp.stderr)
 
     def test_a_guest_that_has_not_answers_no_however_full_this_store_is(self):
@@ -904,14 +929,14 @@ if {fn} demo {secret}; then echo YES; else echo NO; fi
         for row in FILE_ROWS:
             store_path(store, row).write_text(FAKE_LOGIN)
             store_path(store, row).chmod(0o600)
-        cp = self._ask(store, self._guest(), "t_agent_secret_present",
+        cp = self._ask(store, self._guest(), "present",
                        FILE_ROWS[0][0])
         self.assertIn("NO", cp.stdout, cp.stdout + cp.stderr)
 
     def test_an_empty_credential_file_is_not_a_login(self):
         """What a `claude auth login` that was interrupted leaves behind."""
         cp = self._ask(self._store(), self._guest(""),
-                       "t_agent_secret_present", FILE_ROWS[0][0])
+                       "present", FILE_ROWS[0][0])
         self.assertIn("NO", cp.stdout, cp.stdout + cp.stderr)
 
     def test_a_value_row_is_asked_of_the_guest_too(self):
@@ -923,16 +948,16 @@ if {fn} demo {secret}; then echo YES; else echo NO; fi
         (guest / row[2]).parent.mkdir(parents=True, exist_ok=True)
         (guest / row[2]).write_text(f"{PLACEHOLDER}-{row[0]}\n")
         with_it = self._ask(self._store(), guest,
-                            "t_agent_secret_present", row[0])
+                            "present", row[0])
         self.assertIn("YES", with_it.stdout, with_it.stdout + with_it.stderr)
 
         (guest / row[2]).unlink()
         without = self._ask(self._store(values=[row[0]]), guest,
-                            "t_agent_secret_present", row[0])
+                            "present", row[0])
         self.assertIn("NO", without.stdout, without.stdout + without.stderr)
 
     def test_a_mounted_empty_share_names_this_machines_store(self):
-        cp = self._ask(self._store(), self._guest(), "t_agent_secret_remedy",
+        cp = self._ask(self._store(), self._guest(), "remedy",
                        FILE_ROWS[0][0])
         self.assertIn(f"wk key set {FILE_ROWS[0][0]}", cp.stdout, cp.stdout + cp.stderr)
         self.assertNotIn("claude auth login", cp.stdout, cp.stdout)
@@ -941,34 +966,24 @@ if {fn} demo {secret}; then echo YES; else echo NO; fi
         """A guest booted before the share existed has nowhere to read the
         login from, however full this store is; the share arrives at boot."""
         cp = self._ask(self._store(), self._guest(mounted=False),
-                       "t_agent_secret_remedy", FILE_ROWS[0][0])
+                       "remedy", FILE_ROWS[0][0])
         self.assertIn("not mounted", cp.stdout, cp.stdout + cp.stderr)
         self.assertIn("wk vm start demo", cp.stdout, cp.stdout)
         self.assertNotIn("wk key set", cp.stdout, cp.stdout)
 
     def test_a_value_rows_remedy_is_this_machines_store(self):
         name = VM_ROWS[0][0]
-        cp = self._ask(self._store(), self._guest(), "t_agent_secret_remedy", name)
+        cp = self._ask(self._store(), self._guest(), "remedy", name)
         self.assertIn(f"wk key set {name}", cp.stdout, cp.stdout + cp.stderr)
 
 
 class TestTheDefaultAsksTheTarget(_Delivery):
-    """The default in lib/target.sh, which the container and remote drivers
+    """The default in lib/wk/targets.py, which the container and remote drivers
     inherit: a workspace is asked about its own credential, because this
     machine's store is what it was *given* -- a container made before a key was
     stored, or a shared machine someone cleaned up, disagrees with it. A file
     row is read where its own tool rewrites it (the directory each target's
     shell rc names), a value row where the driver delivered it."""
-
-    # The driver contract, minus the hop: a real t_exec reaches the target over
-    # podman or ssh and runs the probe in a login shell, which is what decides
-    # where CLAUDE_SECURESTORAGE_CONFIG_DIR points.
-    FAKE_DRIVER = '''
-t_exec() {
-    shift
-    HOME="$WK_TEST_GUEST" CLAUDE_SECURESTORAGE_CONFIG_DIR="$WK_TEST_GUEST/.claude" "$@"
-}
-'''
 
     def _target(self):
         h = self.tmp / "target-home"
@@ -976,20 +991,16 @@ t_exec() {
         return h
 
     def _ask(self, store, target, fn, secret):
-        env = self._env(store, target)
-        return bash(f'''
-. "$WK_ROOT/lib/common.sh"
-. "$WK_ROOT/lib/store.sh"
-. "$WK_ROOT/lib/target.sh"
-{self.FAKE_DRIVER}
-if {fn} demo {secret}; then echo YES; else echo NO; fi
-''', env=env)
+        env = dict(os.environ, **self._env(store, target))
+        with mock.patch.dict(os.environ, env):
+            return ask(_Plain(env), fn, secret)
+
 
     def test_a_login_in_the_workspace_is_a_yes(self):
         target = self._target()
         row = FILE_ROWS[0]
         (target / ".claude" / row[1]).write_text(FAKE_LOGIN)
-        cp = self._ask(self._store(), target, "t_agent_secret_present", row[0])
+        cp = self._ask(self._store(), target, "present", row[0])
         self.assertIn("YES", cp.stdout, cp.stdout + cp.stderr)
 
     def test_a_full_store_the_workspace_never_got_is_a_no(self):
@@ -999,14 +1010,14 @@ if {fn} demo {secret}; then echo YES; else echo NO; fi
         for row in FILE_ROWS:
             store_path(store, row).write_text(FAKE_LOGIN)
             store_path(store, row).chmod(0o600)
-        cp = self._ask(store, self._target(), "t_agent_secret_present",
+        cp = self._ask(store, self._target(), "present",
                        FILE_ROWS[0][0])
         self.assertIn("NO", cp.stdout, cp.stdout + cp.stderr)
 
     def test_an_empty_credential_file_is_not_a_login(self):
         target = self._target()
         (target / ".claude" / FILE_ROWS[0][1]).write_text("")
-        cp = self._ask(self._store(), target, "t_agent_secret_present",
+        cp = self._ask(self._store(), target, "present",
                        FILE_ROWS[0][0])
         self.assertIn("NO", cp.stdout, cp.stdout + cp.stderr)
 
@@ -1014,14 +1025,14 @@ if {fn} demo {secret}; then echo YES; else echo NO; fi
         row = VALUE_ROWS[0]
         target = self._target()
         cp = self._ask(self._store(values=[row[0]]), target,
-                       "t_agent_secret_present", row[0])
+                       "present", row[0])
         self.assertIn("NO", cp.stdout, cp.stdout + cp.stderr)
         (target / row[2]).write_text(f"{PLACEHOLDER}-{row[0]}\n")
-        cp = self._ask(self._store(), target, "t_agent_secret_present", row[0])
+        cp = self._ask(self._store(), target, "present", row[0])
         self.assertIn("YES", cp.stdout, cp.stdout + cp.stderr)
 
     def test_the_remedy_names_the_command_that_stores_one(self):
-        cp = self._ask(self._store(), self._target(), "t_agent_secret_remedy",
+        cp = self._ask(self._store(), self._target(), "remedy",
                        FILE_ROWS[0][0])
         self.assertIn(f"wk key set {FILE_ROWS[0][0]}", cp.stdout,
                       cp.stdout + cp.stderr)
@@ -1038,14 +1049,15 @@ class TestAContainerSharesOneWritableFile(unittest.TestCase):
     CONTAINER = (REPO / "targets" / "container.sh").read_text()
     RC = (REPO / "shell" / "bashrc").read_text()
     MACHINE = (REPO / "host" / "macos" / "machine.sh").read_text()
+    CREATE = (REPO / "lib" / "wk" / "targets.py").read_text()
 
     def test_the_container_gets_the_directory_read_write(self):
-        self.assertIn("--volume $WK_STORE/agent-rw:/agent-rw", self.CONTAINER)
+        self.assertIn('"--volume", "%s/agent-rw:/agent-rw" % store', self.CREATE)
         # And the read-only one it sits beside is still read-only, and what it
         # mounts is the view of the store that holds what a container is given
         # (secrets_publish_view, lib/store.sh) rather than the store itself.
-        self.assertIn("--volume $(wk_secrets_view_dir container):/secrets:ro",
-                      self.CONTAINER)
+        self.assertIn('"--volume", "%s:/secrets:ro" % self.store.secrets_view_dir("container")',
+                      self.CREATE)
 
     def test_the_shell_points_the_cli_at_it_rather_than_exporting_anything(self):
         block = self.RC[self.RC.index("# --- 6b. The agents' credentials"):

@@ -15,12 +15,14 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from tests.support import REPO, WkTest, bash, owed
+from tests.support import REPO, WkTest, bash
 from tests.test_wk_targets import LINUX_PROBE, SshFake
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk import status, statusview, targets  # noqa: E402
 from wk.clock import FakeClock  # noqa: E402
+from wk.machine import Fake, Result  # noqa: E402
+from wk.resources import Resources  # noqa: E402
 from wk.record import Records  # noqa: E402
 from wk.store import Store  # noqa: E402
 
@@ -75,6 +77,18 @@ class TestLoadLine(unittest.TestCase):
         out = render(recs, "text").stdout
         self.assertIn("could not measure load/memory on devbox-arm64-2", out)
         self.assertNotIn("of  cores", out)
+
+    def test_this_hosts_capacity_is_measured_by_resources(self):
+        fake = Fake()
+        fake.answer(["nproc"], out="16\n")
+        fake.files["/proc/meminfo"] = "MemTotal: 33554432 kB\nMemAvailable: 20971520 kB\n"
+        rec = status.capacity_here("here", "", Resources(fake, {}, "linux"))
+        self.assertEqual((rec["cores"], rec["mem_mb"], rec["free_mb"]), ("16", "32768", "20480"))
+
+    def test_an_unreadable_host_is_a_note_not_a_number(self):
+        with mock.patch("sys.stderr", io.StringIO()):
+            rec = status.capacity_here("here", "", Resources(Fake(), {}, "linux"))
+        self.assertIn("could not measure", rec["note"])
 
     def test_no_capacity_record_at_all_is_silence_not_a_zero(self):
         out = render([machine_rec("quiet-machine"), {"kind": "exit", "code": 0}], "text").stdout
@@ -149,7 +163,54 @@ class TestFleetDeviceRecord(unittest.TestCase):
         rec = status.fleet_record("x", self.CONF, fields, 4)
         self.assertEqual((rec["mode"], rec["armed"], rec["media"], rec["reprovision"]), ("host mode", "img-1", "usb", "wk boot x"))
         self.assertNotIn("direct", rec)
+        self.assertNotIn("armed_by", rec)
         self.assertIn("** armed for img-1 -- wk boot x --status **", render([rec]).stdout)
+
+    ARMED_FIELDS = dict(role="workstation", probeable="yes", mode="host", bridge="", armed="img-1", media="usb",
+                        reprovision="", tailnet="", direct="", armed_by="tolken", armed_at="2026-01-01T00:00:00Z")
+
+    def test_the_arming_record_carries_who_and_when(self):
+        clock = FakeClock()
+        rec = status.fleet_record("rpi5", self.CONF, dict(self.ARMED_FIELDS, armed_at=clock.iso(), armed_boot="a", boot_id="a"),
+                                  4, clock=clock)
+        self.assertEqual((rec["armed_by"], rec["armed_at"]), ("tolken", clock.iso()))
+        self.assertNotIn("armed_desync", rec)
+
+    def test_a_boot_id_mismatch_is_desync_the_arm_was_consumed_and_never_cleared(self):
+        rec = status.fleet_record("rpi5", self.CONF, dict(self.ARMED_FIELDS, armed_boot="before", boot_id="after"), 4)
+        self.assertTrue(rec["armed_desync"])
+
+    def test_an_arm_older_than_the_threshold_is_desync_even_with_a_matching_boot_id(self):
+        clock = FakeClock()
+        stamp = clock.iso()
+        clock.t += status.ARM_STALE_SECONDS + 1
+        rec = status.fleet_record("rpi5", self.CONF, dict(self.ARMED_FIELDS, armed_at=stamp, armed_boot="a", boot_id="a"),
+                                  4, clock=clock)
+        self.assertTrue(rec["armed_desync"])
+
+    def test_a_fresh_arm_with_a_matching_boot_id_is_not_desync(self):
+        clock = FakeClock()
+        rec = status.fleet_record("rpi5", self.CONF, dict(self.ARMED_FIELDS, armed_at=clock.iso(), armed_boot="a", boot_id="a"),
+                                  4, clock=clock)
+        self.assertNotIn("armed_desync", rec)
+
+    def test_an_unreadable_arm_stamp_is_desync_not_current(self):
+        rec = status.fleet_record("rpi5", self.CONF, dict(self.ARMED_FIELDS, armed_at="garbage", armed_boot="a", boot_id="a"), 4)
+        self.assertTrue(rec["armed_desync"])
+
+    def test_fleet_probe_carries_the_arming_fields_in_order(self):
+        parts = ["workstation", "yes", "host", "", "img-1", "usb", "", "t 1.2.3.4", "", "tolken",
+                 "2026-01-01T00:00:00Z", "boot-a", "boot-b"]
+        with mock.patch.object(status, "_bash", return_value=Result(0, out="\0".join(parts))):
+            fields = status.fleet_probe(REPO, "rpi5", 1)
+        self.assertEqual((fields["armed_by"], fields["armed_at"], fields["armed_boot"], fields["boot_id"]),
+                         ("tolken", "2026-01-01T00:00:00Z", "boot-a", "boot-b"))
+
+    def test_the_renderer_shows_the_transition_and_desyncs_a_stale_arm(self):
+        rec = status.fleet_record("rpi5", self.CONF, dict(self.ARMED_FIELDS, armed_boot="before", boot_id="after"), 4)
+        out = render([rec]).stdout
+        self.assertIn("armed for img-1 by tolken since 2026-01-01T00:00:00Z", out)
+        self.assertIn("desync", out)
 
 
 class TestBridgeRecord(unittest.TestCase):
@@ -181,6 +242,78 @@ class TestBridgeRecord(unittest.TestCase):
         self.assertTrue(want.isdigit(), want)
         again = bash('cd bridge && cat $(ls bin/* | sort) $(ls init.d/* | sort) | cksum | awk \'{print $1}\'').stdout.strip()
         self.assertEqual(want, again)
+
+
+class TestSelfRoleAndMode(unittest.TestCase):
+    """This machine's own role and mode, read locally with no probe of its own."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="wk-test-self-"))
+
+    def tearDown(self):
+        subprocess.run(["rm", "-rf", str(self.tmp)])
+
+    def test_a_machine_with_no_conf_defaults_to_workstation(self):
+        self.assertEqual(status.self_role(str(self.tmp), "here"), "workstation")
+
+    def test_a_declared_role_is_read_from_its_own_boot_conf(self):
+        (self.tmp / "boot" / "machines").mkdir(parents=True)
+        (self.tmp / "boot" / "machines" / "here.conf").write_text("NODE_ROLE=bench-device\n")
+        self.assertEqual(status.self_role(str(self.tmp), "here"), "bench-device")
+
+    def test_no_marker_file_reads_host(self):
+        self.assertEqual(status.self_mode_word({"WK_IMAGE_MARKER": str(self.tmp / "no-marker")}), "host")
+
+    def test_a_marker_with_an_id_reads_bench(self):
+        marker = self.tmp / "wk-image"
+        marker.write_text("id=bench-2026-01\nprofile=p\n")
+        self.assertEqual(status.self_mode_word({"WK_IMAGE_MARKER": str(marker)}), "bench bench-2026-01")
+
+    def test_the_fleet_record_carries_both_as_the_renderer_reads_them(self):
+        rec = status.self_fleet_record(str(self.tmp), {"WK_IMAGE_MARKER": str(self.tmp / "no-marker")}, "here")
+        self.assertEqual((rec["kind"], rec["machine"], rec["role"], rec["mode"], rec["self"]),
+                         ("fleet", "here", "workstation", "host mode", True))
+
+
+class TestWalkLeadsWithSelf(unittest.TestCase):
+    """A bare `wk status` yields its own role and mode first, computed locally and not by re-probing
+    itself as a fleet device."""
+
+    def _walk(self, root, env):
+        w = status.Walk(root, env=env, fleet=False, devices=False)
+        w.targets = lambda: []   # no registry needed: only the leading record and the exit are asked
+        return w
+
+    def test_the_self_record_is_the_first_thing_yielded(self):
+        env = {"WK_IMAGE_MARKER": "/nonexistent/wk-image-marker-for-tests", "WK_ROW_LABEL": "here"}
+        w = self._walk(REPO, env)
+        recs = list(w.records(markers=False))
+        self.assertEqual((recs[0]["kind"], recs[0]["machine"], recs[0]["role"], recs[0]["mode"]),
+                         ("fleet", "here", "workstation", "host mode"))
+        self.assertEqual(recs[-1]["kind"], "exit")
+
+    def test_a_named_workspace_walk_does_not_lead_with_it(self):
+        env = {"WK_ROW_LABEL": "here"}
+        w = status.Walk(REPO, name="ws1", env=env, fleet=False, devices=False)
+        w.reg = types.SimpleNamespace(ws_target=lambda n: "local")
+        w._job = lambda tname, name: (lambda: ([], 0))
+        recs = list(w.records(markers=False))
+        self.assertFalse(any(r.get("kind") == "fleet" for r in recs))
+
+    def test_the_self_machine_is_never_reprobed_as_a_fleet_device(self):
+        tmp = Path(tempfile.mkdtemp(prefix="wk-test-fleetself-"))
+        try:
+            (tmp / "boot" / "machines").mkdir(parents=True)
+            (tmp / "boot" / "machines" / "here.conf").write_text("NODE_DRIVER=x\nNODE_NOTE=this machine\n")
+            (tmp / "boot" / "machines.sh").write_text("")
+            env = {"WK_ROW_LABEL": "here"}
+            w = status.Walk(str(tmp), env=env, fleet=True, devices=True)
+            w.reg = types.SimpleNamespace(in_workspace=lambda: False)
+            with mock.patch.object(status, "fleet_probe") as fp:
+                w.fleet_devices()
+            fp.assert_not_called()
+        finally:
+            subprocess.run(["rm", "-rf", str(tmp)])
 
 
 class TestBump(unittest.TestCase):
@@ -455,6 +588,19 @@ class TestTaskVerdictsBecomeExitCodes(TaskTest):
         self.assertEqual((rec["state"], worst), ("died", 4))
         self.assertIn("died without recording an exit", notes)
 
+    def test_a_live_session_is_reported_and_is_not_busy(self):
+        """An agent forward runs until stopped: counted busy, it would hold `wk status --wait` for ever."""
+        log = self.tmp / "forward.log"
+        log.write_text("forwarding\n")
+        os.utime(log, (self.clock.now() - 4000, self.clock.now() - 4000))
+        self.sh('d=$(task_begin agent-forward target ws1 "wk push off" "%s" forward)\ntask_pid "$d" 4242' % log)
+        self.answers["ws1"] = True
+        recs, worst = self.reported("ws1")
+        self.assertEqual((recs[0]["task_kind"], worst), ("agent-forward", 0))
+        self.assertIn("not busy", recs[0]["notes"][0]["text"])
+        self.answers["ws1"] = False
+        self.assertEqual(self.reported("ws1")[1], 4)
+
     def test_nothing_here_manufactures_a_state(self):
         src = inspect.getsource(status.task_records)
         self.assertIn('.verdict("capped")', src)
@@ -679,24 +825,62 @@ class TestRendersPartial(unittest.TestCase):
         self.assertIn("unreadable record", err.getvalue())
 
 
+class TestFleetIsOne(unittest.TestCase):
+    """Two views of one workspace merge to one row when they agree, and the worst state anywhere -- a
+    disagreement included -- is what the exit code carries, whichever record said it."""
+
+    def _recs(self, state_a, state_b, exit_code=0):
+        return [machine_rec("box"),
+                {"kind": "workspace", "machine": "box", "method": "native", "name": "ws", "state": state_a, "ws": state_a},
+                {"kind": "workspace", "machine": "box", "method": "native", "name": "ws", "state": state_b, "ws": state_b},
+                {"kind": "exit", "code": exit_code}]
+
+    def test_two_views_agreeing_are_one_row(self):
+        out = render(self._recs("present", "present")).stdout
+        self.assertEqual(out.count(" ws "), 1)
+        self.assertNotIn("disagree", out)
+
+    def test_two_views_disagreeing_name_both_states_once(self):
+        out = render(self._recs("present", "absent")).stdout
+        self.assertEqual(out.count(" ws "), 1)
+        self.assertIn("disagree (present vs absent)", out)
+
+    def test_a_disagreement_is_the_worst_state_even_when_every_view_reported_a_clean_exit(self):
+        doc = json.loads(render(self._recs("present", "absent"), "json").stdout)
+        self.assertEqual(doc["exit"], 4)
+
+    def test_agreement_never_invents_a_disagreement_or_raises_the_exit(self):
+        doc = json.loads(render(self._recs("present", "present"), "json").stdout)
+        self.assertEqual(doc["exit"], 0)
+
+
 class TestOwedStatusRules(unittest.TestCase):
-    @owed("every session start leads with the machine's role and mode (docs/PLAN.md, status.leads_with_role_and_mode)")
     def test_leads_with_role_and_mode(self):
         out = render([machine_rec("m", self=True), {"kind": "fleet", "machine": "m", "role": "workstation", "mode": "host mode", "media": ""}]).stdout
         self.assertRegex(out.strip().splitlines()[0], r"workstation.*host mode")
 
-    @owed("an armed machine's row shows the transition, and desync when armed too long (docs/PLAN.md, status.armed_transition)")
     def test_armed_transition(self):
         rec = {"kind": "fleet", "machine": "rpi5", "role": "workstation", "mode": "host mode", "media": "usb", "armed": "img-1",
                "armed_by": "tolken", "armed_at": "2026-01-01T00:00:00Z"}
         out = render([rec]).stdout
         self.assertIn("armed for img-1 by tolken since 2026-01-01T00:00:00Z", out)
 
-    @owed("two workstations reaching one box see one state, and a disagreement names both views (docs/PLAN.md, status.fleet_is_one)")
     def test_fleet_is_one(self):
         recs = [machine_rec("box"), {"kind": "workspace", "machine": "box", "method": "native", "name": "ws", "state": "present", "ws": "present"},
                 {"kind": "workspace", "machine": "box", "method": "native", "name": "ws", "state": "absent", "ws": "absent"}]
         self.assertIn("disagree", render(recs).stdout)
+
+
+class TestTheSelfLineIsSpacedOneWay(unittest.TestCase):
+    def test_the_stream_and_the_batch_lead_the_same_way(self):
+        recs = [{"kind": "fleet", "machine": "here", "self": True, "role": "workstation", "mode": "host"},
+                {"kind": "machine", "name": "here", "self": True}, {"kind": "exit", "code": 0}]
+        merger = statusview.Merger()
+        for r in recs:
+            merger.feed(r)
+        out = io.StringIO()
+        statusview.render_text_stream(iter(recs), out, False)
+        self.assertEqual(out.getvalue().split("\n")[:3], statusview.render_text(merger.doc, False).split("\n")[:3])
 
 
 if __name__ == "__main__":

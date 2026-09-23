@@ -1,5 +1,5 @@
-"""wk-tools' own identity across machines (cmd/version, targets/remote.sh's
-peer branch of t_sync, lib/tools.sh's tools_committed): the commit, plus
+"""wk-tools' own identity across machines (cmd/version, the peer arm of
+lib/wk/targets.py's Remote.sync, lib/tools.sh's tools_committed): the commit, plus
 `+dirty` for a *tracked* modification -- never a hash of file contents.
 
 Two checkouts of one commit that differ only in untracked or ignored files
@@ -10,15 +10,23 @@ by a *tracked* edit reads as `+dirty`.
 
 Run: python3 -m unittest tests.test_tree_identity -v
 """
+import contextlib
+import io
 import os
-import shlex
 import shutil
 import subprocess
+import sys
 import tempfile
+import types
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from tests.support import REPO, bash
+
+sys.path.insert(0, str(REPO / "lib"))
+from wk import targets  # noqa: E402
+from wk.machine import Local  # noqa: E402
 
 CMD_VERSION = REPO / "cmd" / "version"
 
@@ -30,16 +38,6 @@ def git(cwd, *args, check=True):
         env={**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
              "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"},
     )
-
-
-def _lift_func(path, func):
-    return subprocess.run(
-        ["sed", "-n", f"/^{func}()/,/^}}/p", str(path)],
-        capture_output=True, text=True,
-    ).stdout
-
-
-T_SYNC = _lift_func(REPO / "targets" / "remote.sh", "t_sync")
 
 
 def kv(text):
@@ -88,7 +86,7 @@ class TwoClonesCase(unittest.TestCase):
         # do with what this test is measuring.
         for d in (self.a, self.b):
             git(d, "config", "pull.rebase", "false")
-        # t_sync's own `"$WK_ROOT/cmd/version"` call assumes WK_ROOT is a
+        # Remote.sync runs `<root>/cmd/version` on each side, which assumes a
         # full wk-tools checkout, not a bare scratch clone; symlinked in
         # (untracked, invisible to a --untracked-files=no dirty check) so
         # each clone can answer for itself, the same way a real peer's own
@@ -98,26 +96,16 @@ class TwoClonesCase(unittest.TestCase):
             (d / "lib").symlink_to(REPO / "lib")
 
     def _peer_sync(self, mine_root, their_root):
-        """t_sync's peer branch, lifted from targets/remote.sh: `mine` is
-        this process's own `$WK_ROOT/cmd/version` (the real call the
-        function makes); `their` is answered by a stubbed _rsh_q that runs
-        `bash -c` against the other clone -- exactly the shape an ssh
-        wrapper hands a remote command string, no ssh or machine involved."""
-        stubs = f"""
-WK_TARGET=peer
-WK_REMOTE_HOST=peer
-_remote_probe() {{ :; }}
-_remote_peer() {{ return 0; }}
-_peer_why_behind() {{ printf 'stubbed reason'; }}
-t_tools() {{ printf %s {shlex.quote(str(their_root))}; }}
-# WK_ROOT cleared, not inherited from this side's own: a real ssh would
-# never carry it across, and cmd/version's own default (unset WK_ROOT falls
-# back to wherever it was invoked from) is what points this call at the
-# other clone instead of this one.
-_rsh_q() {{ WK_ROOT= bash -c "$1"; }}
-"""
-        return bash(". lib/common.sh\n" + stubs + T_SYNC + "\nt_sync\n",
-                    env={"WK_ROOT": str(mine_root)})
+        """Remote.sync's peer arm with no ssh (WK_REMOTE_LOCAL): `mine` is
+        `cmd/version` against mine_root, `theirs` is the other clone's own
+        `cmd/version` with no WK_ROOT, as a real ssh would carry none."""
+        env = {k: v for k, v in os.environ.items() if k != "WK_ROOT"}
+        t = targets.Remote("peer", str(mine_root), dict(env, WK_REMOTE_PEER="1", WK_REMOTE_LOCAL="1",
+                                                        WK_REMOTE_HOST="peer", WK_REMOTE_TOOLS=str(their_root)), Local())
+        with mock.patch.dict(os.environ, {"WK_ROOT": ""}), contextlib.redirect_stderr(io.StringIO()) as err:
+            os.environ.pop("WK_ROOT")
+            ok = t.sync()
+        return types.SimpleNamespace(returncode=0 if ok else 1, stdout="", stderr=err.getvalue())
 
 
 class TestMachineLocalFilesDoNotDiffer(TwoClonesCase):

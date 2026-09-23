@@ -1,16 +1,16 @@
 """What is provisioned on this machine and what a rebuild still needs: every
-check is a row (state, what, remedy), state ok | miss | unk, and one renderer
-prints the rows and counts the misses."""
+check is a row (state, what, remedy), state ok | miss | unk | note, and one
+renderer prints the rows and counts the misses."""
 
 import os
 import re
 
-from wk import shell, targets
+from wk import record, shell, targets
 from wk.machine import Local
 from wk.status import kv, machine_confs
 from wk.store import Store
 
-OK, MISS, UNK = "ok", "miss", "unk"
+OK, MISS, UNK, NOTE = "ok", "miss", "unk", "note"
 MARK = {OK: "\033[32mok\033[0m", MISS: "\033[31m--\033[0m", UNK: "\033[33m??\033[0m"}
 
 GIT_KEYS = (("name", "user.name"), ("email", "user.email"),
@@ -31,6 +31,10 @@ def unk(what, remedy):
     return (UNK, what, remedy)
 
 
+def note(what):
+    return (NOTE, what, "")
+
+
 def check(what, remedy, good):
     return ok(what) if good else miss(what, remedy)
 
@@ -47,6 +51,8 @@ class Report:
         state, what, remedy = row
         if state == OK:
             self.out.write("  %s    %s\n" % (MARK[OK], what))
+        elif state == NOTE:
+            self.out.write("        %s\n" % what)
         else:
             self.out.write("  %s    %-46s -> %s\n" % (MARK[state], what, remedy))
         self.missing += state == MISS
@@ -271,8 +277,8 @@ class Doctor:
     def have(self, name):
         return self.machine.run(["which", name]).ok
 
-    def hostname(self, *flags):
-        return self.machine.run(["hostname", *flags]).out.strip()
+    def hostname(self):
+        return record.host_name(self.machine)
 
     def read(self, path):
         try:
@@ -428,9 +434,7 @@ class Doctor:
                        "./setup --stage machine, which needs a live tailnet auth key: wk key set tailnet")
 
     def machine_name(self):
-        if self.env.get("WK_IN_VM") and self.env.get("WK_ROW_LABEL"):
-            return self.env["WK_ROW_LABEL"]
-        return self.hostname("-s").lower() or "here"
+        return record.machine_name(self.env, self.machine)
 
     def workspaces_store(self):
         fork_key = self.machine.exists(os.path.join(self.paths()["push_held"], "build_key_fork"))

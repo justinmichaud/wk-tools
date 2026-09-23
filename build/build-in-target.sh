@@ -23,7 +23,7 @@ script=${WK_BUILD_SCRIPT:-Tools/Scripts/build-webkit}
 
 cmakeargs=${WK_BUILD_CMAKE:-}
 
-# CMake caches these at *configure* time, so an architecture is fixed at creation: WK_ARCH plus WK_ARCH_WRAPPER/WK_ARCH_CFLAGS/WK_ARCH_LDFLAGS for a non-native workspace, and WK_BUILDSYS, WK_BUILD_SCRIPT, WK_SRC, WK_BUILD_DIR, WK_DERIVED_DATA and -- for a profile-guided config -- WK_PGO and WK_PGO_DIR the config's own, exported by build/configs.sh.
+# CMake caches these at *configure* time, so an architecture is fixed at creation: WK_ARCH plus WK_ARCH_WRAPPER/WK_ARCH_CFLAGS/WK_ARCH_LDFLAGS for a non-native workspace, and WK_BUILDSYS, WK_BUILD_SCRIPT, WK_SRC, WK_BUILD_DIR, WK_DERIVED_DATA and -- for a profile-guided config -- WK_PGO and WK_PGO_DIR the config's own, set by lib/wk/buildconf.py.
 arch=${WK_ARCH:-native}
 if [ "$arch" != native ]; then
     export CFLAGS="${WK_ARCH_CFLAGS:-} ${CFLAGS:-}"

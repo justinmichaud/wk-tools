@@ -8,6 +8,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import types
 import unittest
 from pathlib import Path
 
@@ -15,6 +16,8 @@ from tests.support import REPO, bash
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk.clock import FakeClock  # noqa: E402
+from wk.machine import Fake  # noqa: E402
+from wk.store import Store  # noqa: E402
 from wk import record  # noqa: E402
 
 
@@ -157,6 +160,43 @@ class TestTheVerdict(RecordTest):
         self.assertFalse((t.path / "exit").exists())
 
 
+class TestAStopAskedFor(RecordTest):
+    def test_the_status_a_stop_caused_reads_as_the_stop(self):
+        t = self.begin()
+        t.set("stopping", "cancelled")
+        t.end(143)
+        self.assertEqual((t.field("exit"), t.verdict()), ("cancelled", "cancelled"))
+
+    def test_a_job_that_finished_first_keeps_its_ok(self):
+        t = self.begin()
+        t.set("stopping", "cancelled")
+        t.end(0)
+        self.assertEqual(t.verdict(), "ok")
+
+
+class TestOneBuilderPerTarget(unittest.TestCase):
+    """`record.of_target`: the target's record store, a workspace pid asked there with a capped `kill -0`."""
+
+    def test_a_workspace_pid_is_alive_dead_or_unanswered_by_kill_0s_status(self):
+        asked = []
+
+        class T:
+            env = {}
+
+            class store:
+                @staticmethod
+                def record_dir():
+                    return "/nowhere"
+
+            @staticmethod
+            def exec(ws, argv, timeout=None):
+                asked.append((ws, tuple(argv), timeout))
+                return types.SimpleNamespace(rc={1: 0, 2: 1}.get(int(argv[-1]), 124))
+        ask = record.of_target(T).ask_target
+        self.assertEqual([ask("ws", 1, 5), ask("ws", 2, 5), ask("ws", 3, 5)], [True, False, None])
+        self.assertEqual(asked[0], ("ws", ("kill", "-0", "1"), 5))
+
+
 class TestFindHoldersAndWait(RecordTest):
     def test_find_returns_the_newest_at_or_after_the_floor(self):
         a = self.begin()
@@ -232,6 +272,136 @@ printf '%%s' "$d"
         self.assertEqual(t.steps(), [(1, "done"), (2, "running")])
         self.assertEqual(t.verdict(), "died")   # the bash subshell that begun it is gone
         self.assertEqual(self.records.holders("device:rpi3"), [])
+
+
+class TestHoldFollowsHolder(RecordTest):
+    def setUp(self):
+        super().setUp()
+        self.machine = Fake()
+        self.records = record.Records(self.tmp / "store", clock=self.clock, machine=self.machine,
+                                      env={"WK_STORE": str(self.tmp / "store")})
+
+    def held(self, pid, name="ws", **kw):
+        self.machine.pids.add(pid)
+        return self.begin(name=name, holds="device:rpi3", pid=pid, **kw)
+
+    def holders(self):
+        return [r[0] for r in self.records.holders("device:rpi3")]
+
+    def test_a_hold_is_released_only_when_the_machine_says_its_holder_is_gone(self):
+        t = self.held(1001)
+        self.assertEqual(self.holders(), [t.id])
+        self.machine.pids.discard(1001)
+        self.assertEqual(self.holders(), [])
+
+    def test_an_ended_holder_holds_nothing(self):
+        t = self.held(1001)
+        t.end(0)
+        self.assertEqual(self.holders(), [])
+
+    def test_an_unreadable_pid_keeps_the_hold(self):
+        t = self.held(1001)
+        (t.path / "pid").write_text("10x1\n")
+        self.assertEqual(self.holders(), [t.id])
+        (t.path / "pid").unlink()
+        (t.path / "pid").mkdir()
+        self.assertEqual(self.holders(), [t.id])
+
+    def test_an_unreadable_claim_keeps_the_hold(self):
+        t = self.held(1001)
+        (t.path / "holds").unlink()
+        (t.path / "holds").mkdir()
+        self.assertEqual(self.holders(), [t.id])
+
+    def test_a_hold_names_the_pid_that_took_it(self):
+        t = self.held(1001)
+        self.assertEqual(t.field("pid"), "1001")
+
+    def test_a_workspace_pid_cannot_hold(self):
+        with self.assertRaises(ValueError):
+            self.begin(where="target", holds="device:rpi3")
+
+    def test_a_target_record_a_bash_driver_wrote_keeps_its_hold_until_it_ends(self):
+        t = self.begin(where="target")
+        t.set("holds", "device:rpi3")
+        t.pid(77)
+        self.assertEqual(self.holders(), [t.id])
+        t.end(0)
+        self.assertEqual(self.holders(), [])
+
+    def test_no_child_inherits_its_parents_hold(self):
+        parent = self.held(1001)
+        self.machine.pids.add(1002)
+        records = record.Records(self.tmp / "store", clock=self.clock, machine=self.machine,
+                                 env={"WK_STORE": str(self.tmp / "store"), "WK_DEVICE_HELD": "device:rpi3"})
+        child = records.begin(kind="boot", where="here", name="rpi3", kill="wk boot --kill",
+                              log=str(self.log), plan=["boot"], pid=1002)
+        self.assertEqual(child.field("holds"), "")
+        self.assertEqual(self.holders(), [parent.id])
+        self.machine.pids.discard(1001)
+        self.assertEqual(self.holders(), [], "the child is alive and still holds nothing")
+
+    def test_wait_asks_the_machine_whether_the_driver_lives(self):
+        self.assertEqual(self.records.wait("build", "nothing", str(self.log), pid=4242), "crashed")
+
+
+class TestOneStorePerTarget(unittest.TestCase):
+    """The vm target's store is WK_VM_STORE or this host's record directory,
+    and never the container's store."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="wk-test-vmstore-")
+        self.addCleanup(lambda: record._rmtree(self.tmp))
+        self.base = {"HOME": self.tmp, "XDG_STATE_HOME": self.tmp + "/state"}
+
+    def envs(self):
+        yield "the default store", dict(self.base)
+        yield "a scratch store", dict(self.base, WK_STORE=self.tmp + "/store")
+        yield "a scratch store beside a vm store", dict(self.base, WK_STORE=self.tmp + "/store",
+                                                       WK_VM_STORE=self.tmp + "/vm")
+        yield "a vm store named as the scratch store", dict(self.base, WK_STORE=self.tmp + "/store",
+                                                           WK_VM_STORE=self.tmp + "/store")
+        yield "in the podman VM", dict(self.base, WK_IN_VM="1", WK_STORE="/var/lib/wk")
+
+    def test_the_vm_store_is_never_the_container_store(self):
+        for label, env in self.envs():
+            with self.subTest(env=label):
+                store = Store(env)
+                vm = store.vm_store()
+                if vm is None:
+                    continue
+                self.assertNotEqual(os.path.realpath(vm), os.path.realpath(store.root()))
+                vm_records = Store(dict(env, WK_STORE=vm)).record_dir()
+                self.assertNotEqual(os.path.realpath(vm_records), os.path.realpath(store.root()))
+
+    @unittest.skipUnless(sys.platform == "darwin", "a guest exists only on a macOS host")
+    def test_a_macos_host_gives_the_vm_its_own_store_or_none(self):
+        want = {"the default store": self.tmp + "/state/wk",
+                "a scratch store": None,
+                "a scratch store beside a vm store": self.tmp + "/vm",
+                "a vm store named as the scratch store": None,
+                "in the podman VM": None}
+        for label, env in self.envs():
+            with self.subTest(env=label):
+                self.assertEqual(Store(env).vm_store(), want[label])
+
+    @unittest.skipIf(sys.platform == "darwin", "a guest exists only on a macOS host")
+    def test_off_macos_there_is_no_vm_store(self):
+        for label, env in self.envs():
+            with self.subTest(env=label):
+                self.assertIsNone(Store(env).vm_store())
+
+
+class TestTheMachineName(unittest.TestCase):
+    def test_the_name_is_hostname_lowered_and_here_where_it_answers_none(self):
+        m = Fake()
+        m.answer(["hostname", "-s"], out="Tolken\n")
+        self.assertEqual(record.host_name(m), "tolken")
+        self.assertEqual(record.machine_name({}, m), "tolken")
+        self.assertEqual(record.machine_name({}, Fake()), "here")
+
+    def test_in_the_vm_the_forwarding_workstation_names_the_row(self):
+        self.assertEqual(record.machine_name({"WK_IN_VM": "1", "WK_ROW_LABEL": "mbp"}, Fake()), "mbp")
 
 
 if __name__ == "__main__":

@@ -429,7 +429,7 @@ class TestEveryCallSiteTakesAReadingIntoAVariable(unittest.TestCase):
         self.assertLessEqual(
             {"host_cores", "host_mem_mb", "host_load", "describe_cores",
              "avail_mem_mb", "envelope_cores", "envelope_mem_mb",
-             "build_jobs", "explain_jobs", "build_admit", "disk_admit"},
+             "build_jobs", "build_admit", "disk_admit"},
             names)
         self.assertNotIn("store_free_gb", names,
                          "store_free_gb answers nothing rather than refusing")
@@ -470,7 +470,7 @@ class TestAReadingRefusalReachesItsCaller(WkTest):
     DEAF = {"nproc": "exit 1", "awk": "exit 1", "sysctl": "exit 1"}
 
     COMPOSITE = ("envelope_cores", "envelope_mem_mb", "avail_mem_mb",
-                 "build_jobs", "explain_jobs", "describe_cores")
+                 "build_jobs", "describe_cores")
 
     def _res(self, script, stubs=None, env=None):
         e = {"XDG_STATE_HOME": str(self.tmp / "state"),
@@ -496,7 +496,7 @@ class TestAReadingRefusalReachesItsCaller(WkTest):
                 self.assertNotIn("syntax error", cp.stderr)
 
     def test_the_readings_still_answer_a_machine_that_does_reply(self):
-        """The same six against the real machine: `|| return $?` must not
+        """The same five against the real machine: `|| return $?` must not
         turn a reading that worked into a refusal."""
         for name in self.COMPOSITE:
             with self.subTest(reading=name):

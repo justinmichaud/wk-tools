@@ -34,7 +34,7 @@ def welch_log_ratio(a, b):
     ma, mb = sum(la)/na, sum(lb)/nb
     va = sum((x-ma)**2 for x in la)/(na-1) if na > 1 else 0.0
     vb = sum((x-mb)**2 for x in lb)/(nb-1) if nb > 1 else 0.0
-    diff = mb - ma  # log(b/a)
+    diff = mb - ma
     se = math.sqrt(va/na + vb/nb) if (va+vb) > 0 else 0.0
     if se > 0:
         df = (va/na + vb/nb)**2 / ((va/na)**2/(na-1) + (vb/nb)**2/(nb-1))
@@ -62,7 +62,7 @@ for name in names:
     if len(a) < 2 or len(b) < 2:
         continue
     ratio, lo, hi = welch_log_ratio(a, b)
-    ruled_out = (1 - lo) * 100  # smallest regression % the CI rules out
+    ruled_out = (1 - lo) * 100
     rows.append((name, ratio, lo, hi, ruled_out))
 
 rows.sort(key=lambda r: r[1])

@@ -54,7 +54,7 @@ if [ -d "$SRC/.git" ]; then             # an old snapshot's remotes are stale
     else
         _mirror=""
         warn "mirror_in_container failed, so where this machine keeps its mirror is not
-         known here and the wiring below reads github.com. 'wk remotes' in the
+         known here and the wiring below reads github.com. 'wk sync' in the
          workspace says what the checkout ended up with; '--fix' re-asserts it."
     fi
     _wiring=$(_store_fn wk_wiring_script "$SRC" "$_mirror") \
@@ -72,7 +72,7 @@ if [ -d "$SRC/.git" ]; then             # an old snapshot's remotes are stale
         log "git-webkit: $_out"
     else
         log "WARNING: 'git-webkit setup' did not finish (above) -- 'wk push on' if the"
-        log "         token is off, then 'wk remotes ${WK_WORKSPACE:-?} --fix' on the host"
+        log "         token is off, then 'wk sync ${WK_WORKSPACE:-?} --fix' on the host"
     fi
 fi
 

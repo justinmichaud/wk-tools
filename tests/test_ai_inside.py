@@ -2,243 +2,105 @@
 
 A session in a workspace starts the same way whether it is driven from the host
 or from in there, so `claude` in a workspace shell is a function that calls this
-command (shell/bashrc) and the command no longer refuses the `local` target.
-What differs is that the host's push switch cannot be thrown from inside, so it
-is measured beside the sandbox probes rather than thrown -- and every one of
-them runs at once, because a person waiting to start a session waits for all of
-it.
+command (shell/bashrc) and the command does not refuse the `local` target.
+What differs is that the host's push switch cannot be thrown from inside, so
+`wk doctor`'s inside half measures it beside the sandbox checks
+(lib/wk/wall.py, tests/test_doctor_wall.py) and says which kind of failure it
+found: the sandbox (a barrier) or a way to publish (a refusal).
 
-checks_here is driven against a scratch $WK_ROOT whose cmd/verify is a stub:
-every path in the tree is the real one except that file, so the assembly under
-test is cmd/ai's and the probes it names are whatever the stub makes them. A
-real container is what the probes themselves need, and tests/support cannot
-conjure one (tests/test_verify_credentials.py drives those).
+The checks are driven here against the healthy workspace
+tests/test_doctor_wall.py answers for, one answer taken away at a time.
 
 Run: python3 -m unittest tests.test_ai_inside -v
 """
-import platform
+import contextlib
+import io
+import os
 import re
-import time
 import unittest
+from unittest import mock
 
 from tests.support import REPO, WkTest, bash
+from tests.test_ai import AI, _Flow
+from tests.test_doctor_wall import _Wall
+from wk import wall
+from wk.act import Refused
 
-AI = (REPO / "cmd" / "ai").read_text()
-VERIFY = (REPO / "cmd" / "verify").read_text()
-
-# cmd/verify's own definition, lifted rather than copied: which probes a
-# sandbox has to answer is one rule, and a copy here could pass while the
-# command it stands in for had changed its mind.
-ISOLATION_APPLIES = re.search(r"^isolation_applies\(\) \{.*\}$",
-                              VERIFY, re.M).group(0)
+AI_TEXT = (REPO / "cmd" / "ai").read_text()
 BASHRC = (REPO / "shell" / "bashrc").read_text()
 
-# Stands in for cmd/verify's library half: the reporting helpers cmd/ai's
-# probes and its own totalling use, lib/par.sh, and one stub per probe
-# checks_here names. Each sleeps, so a serial assembly is visible on the clock,
-# fails as many times as $WK_TEST_FAIL_<name> says, and exits reporting nothing
-# under $WK_TEST_DIE_<name>. The one thing not stubbed is the predicate that
-# says which probes this sandbox has to answer: that is cmd/verify's own, so
-# the gate under test is the real one.
-FAKE_VERIFY = '''#!/usr/bin/env bash
-exec 3>&2
-fails=0
-pass() { printf '  ok    %s\\n' "$*" >&3; }
-fail() { printf '  FAIL  %s\\n' "$*" >&3; fails=$((fails + 1)); }
-note() { printf '        %s\\n' "$*" >&3; }
-inside() { :; }
-. "$WK_ROOT/lib/par.sh"
 
-_stub() {
-    local n="$1" want die
-    eval "want=\\${WK_TEST_FAIL_$1:-0}"
-    eval "die=\\${WK_TEST_DIE_$1:-}"
-    sleep "${WK_TEST_PROBE_SECS:-0}"
-    [ -z "$die" ] || exit 9
-    local i=0
-    while [ "$i" -lt "$want" ]; do fail "$n went wrong"; i=$((i + 1)); done
-    [ "$want" -gt 0 ] || pass "$n is fine"
-    return "$want"
-}
-for _p in push_here github_read github_write bugzilla_read bugzilla_write \\
-          github allowlist off_allowlist isolation no_credentials_inside \\
-          gitwebkit_setup commit_wall; do
-    eval "probe_$_p() { _stub $_p; }"
-done
-__ISOLATION_APPLIES__
-[ "${WK_VERIFY_LIB:-}" != 1 ] || return 0
-echo "the real wk verify would have run" >&2
-'''.replace("__ISOLATION_APPLIES__", ISOLATION_APPLIES)
+class _Inside(_Flow, _Wall):
+    kind = "local"
+
+    def setUp(self):
+        _Wall.setUp(self)
+        self.setUpFlow()
+        self.env.update(WK_NAME="demo", WK_TARGET="local")
+        self.fake.answer(["ssh", "-G", "github-webkit"], out="user me\n")
+
+    def checks(self, force=False):
+        """(refused, stderr) of the checks a session in here runs first."""
+        if force:
+            os.environ["WK_FORCE"] = "1"
+        err = io.StringIO()
+        refused = False
+        with contextlib.redirect_stderr(err):
+            try:
+                AI.Ai(AI.ROOT, self.env, self.reg, self.target, "claude", "demo").checks()
+            except Refused:
+                refused = True
+        os.environ.pop("WK_FORCE", None)
+        return refused, err.getvalue()
 
 
-class _Inside(WkTest):
-    def _root(self):
-        root = self.tmp / "root"
-        root.mkdir(exist_ok=True)
-        for p in REPO.iterdir():
-            if p.name != "cmd" and not (root / p.name).exists():
-                (root / p.name).symlink_to(p)
-        cmd = root / "cmd"
-        cmd.mkdir(exist_ok=True)
-        for p in (REPO / "cmd").iterdir():
-            if p.name != "verify" and not (cmd / p.name).exists():
-                (cmd / p.name).symlink_to(p)
-        v = cmd / "verify"
-        v.write_text(FAKE_VERIFY)
-        v.chmod(0o755)
-        return root
-
-    def _checks(self, env=None, secs="0"):
-        root = self._root()
-        marker = self.tmp / "wk-marker"
-        src = self.tmp / "src"
-        src.mkdir(exist_ok=True)
-        marker.write_text(f"name=demo\nsrc={src}\n")
-        e = {
-            "WK_ROOT": str(root),
-            "WK_MARKER": str(marker),
-            "WK_TARGET": "local",
-            "WK_NAME": "demo",
-            "WK_LOCAL_STORE": str(self.tmp / "state"),
-            "WK_STORE": str(self.tmp / "store"),
-            "WK_HOST_SECRETS": str(self.tmp / "secrets"),
-            "WK_TEST_PROBE_SECS": secs,
-        }
-        e.update(env or {})
-        return bash(f'''
-set -euo pipefail
-export WK_CLAUDE_LIB=1
-. "{root}/cmd/ai"
-NAME=demo
-load_target local
-checks_here
-''', env=e)
-
-
-class TestTheCommandRunsInAWorkspace(unittest.TestCase):
-    def test_the_local_target_is_no_longer_refused(self):
-        self.assertNotIn("already inside workspace", AI)
-
+class TestTheCommandRunsInAWorkspace(_Inside):
     def test_the_local_target_runs_the_in_workspace_checks(self):
-        case = AI[AI.index('case "$WK_TARGET_KIND" in\ncontainer|vm)'):]
-        case = case[:case.index("\nesac\n")]
-        self.assertIn("local)", case)
-        self.assertIn("checks_here", case)
+        refused, err = self.checks()
+        self.assertFalse(refused, err)
+        self.assertIn("checking workspace 'demo' from inside it", err)
+        self.assertIn("the agent holds nothing", err)
+        self.assertIn("sandbox intact", err)
 
     def test_the_commit_wall_covers_a_session_started_from_inside(self):
         """The wall is a property of the container, not of which side the
-        command was typed on, and bwrap is what applies it."""
-        body = AI[AI.index("wall_applies() {"):]
-        body = body[:body.index("\n}\n")]
-        self.assertIn("container)", body)
-        self.assertIn("local)", body)
-
-
-class TestEveryCheckRunsAtOnce(_Inside):
-    def test_the_probes_are_all_started_through_par_run(self):
-        body = AI[AI.index("checks_here() {"):]
-        body = body[:body.index("\n}\n")]
-        named = re.findall(r"par_run \S+\s+(probe_\w+)", body)
-        self.assertEqual(len(named), len(set(named)), named)
-        self.assertIn("probe_push_here", named)
-        for direct in named:
-            self.assertNotRegex(body, rf"^\s*{direct}\s*$")
-
-    def test_the_wall_clock_is_the_slowest_probe_and_not_the_sum(self):
-        started = time.monotonic()
-        cp = self._checks(secs="0.6")
-        elapsed = time.monotonic() - started
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertLess(elapsed, 3.0, f"{elapsed:.1f}s for probes of 0.6s each")
-
-    def test_every_probes_verdict_is_reported(self):
-        cp = self._checks()
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        for name in ("push_here", "github_read", "github_write",
-                     "bugzilla_read", "bugzilla_write", "github"):
-            self.assertIn(f"{name} is fine", cp.stderr)
-        self.assertIn("nothing in here can publish", cp.stderr)
-
-    def test_the_container_only_probes_are_asked_only_of_a_container(self):
-        """probe_isolation measures a network namespace of the workspace's own
-        and the host paths a bind mount could expose. A guest has neither and
-        no /proc/net/dev to read, so asked there it reports a workspace that
-        cannot enumerate its interfaces -- a FAIL for a property nothing ever
-        promised, and one that stopped every session in a guest. This runs
-        against the `local` target, which is no more a container than a guest
-        is."""
-        cp = self._checks()
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertNotIn("isolation", cp.stderr)
-
-    def test_the_commit_wall_is_probed_exactly_where_it_applies(self):
-        """The wall is bwrap's read-only .git, and bwrap is Linux's:
-        `wall_applies` (cmd/ai) says a `local` workspace on macOS has no wall,
-        and checks_here probes what applies rather than the same ten
-        everywhere. This runs against the `local` target, so the platform
-        under the test is this machine's."""
-        cp = self._checks()
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        if platform.system() == "Darwin":
-            self.assertNotIn("commit_wall", cp.stderr,
-                             "a wall that cannot be applied was reported on")
-        else:
-            self.assertIn("commit_wall is fine", cp.stderr)
+        command was typed on, and bwrap -- Linux's -- is what applies it."""
+        with mock.patch.object(self.target, "os", return_value="linux"):
+            self.assertTrue(wall.commit_walled(self.target))
+        with mock.patch.object(self.target, "os", return_value="macos"):
+            self.assertFalse(wall.commit_walled(self.target))
+        self.assertTrue(wall.commit_walled(self.reg.load("container")))
+        self.assertFalse(wall.commit_walled(self.reg.load("remote")))
 
 
 class TestWhatEachKindOfFailureDoes(_Inside):
     def test_a_sandbox_failure_is_a_barrier(self):
         """The same verdict `wk ai claude <ws>` reaches from the host: it
         refuses, and an explicit --force crosses it."""
-        cp = self._checks(env={"WK_TEST_FAIL_no_credentials_inside": "1"})
-        self.assertNotEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertIn("the sandbox around 'demo' is not intact", cp.stderr)
-        self.assertIn("--force", cp.stderr)
-
-        forced = self._checks(env={"WK_TEST_FAIL_no_credentials_inside": "1",
-                                   "WK_FORCE": "1"})
-        self.assertEqual(forced.returncode, 0, forced.stdout + forced.stderr)
+        self.set("rest/version", "000")
+        refused, err = self.checks()
+        self.assertTrue(refused, err)
+        self.assertIn("the sandbox around 'demo' is not intact", err)
+        self.assertIn("--force", err)
+        refused, err = self.checks(force=True)
+        self.assertFalse(refused, err)
 
     def test_a_way_to_publish_is_not_forceable(self):
         """A session that starts with a working push is the failure the whole
-        arrangement exists to prevent, and nothing in here could fix it. All
-        three ways count: a key that signs, a GitHub write, a Bugzilla write."""
-        for env in ({"WK_TEST_FAIL_push_here": "1"},
-                    {"WK_TEST_FAIL_github_write": "1"},
-                    {"WK_TEST_FAIL_bugzilla_write": "1"},
-                    {"WK_TEST_FAIL_push_here": "1", "WK_FORCE": "1"}):
-            with self.subTest(env=env):
-                cp = self._checks(env=env)
-                self.assertNotEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-                self.assertIn("could publish", cp.stderr)
-                self.assertIn("wk push off", cp.stderr)
+        arrangement exists to prevent, and nothing in here could fix it."""
+        self.set("/pulls", "422")
+        for force in (False, True):
+            with self.subTest(force=force):
+                refused, err = self.checks(force=force)
+                self.assertTrue(refused, err)
+                self.assertIn("could publish", err)
+                self.assertIn("wk push off", err)
 
-    def test_a_read_that_is_not_authenticated_is_not_a_way_to_publish(self):
-        """The injector authenticates a read from a standing token in either
-        position of the switch, so what a read answers says nothing about
-        whether this workspace could publish. Refusing a session for one --
-        and telling the person the agent could publish -- sends them after a
-        switch that is already off."""
-        cp = self._checks(env={"WK_TEST_FAIL_github_read": "1",
-                               "WK_TEST_FAIL_bugzilla_read": "1"})
-        self.assertNotEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertNotIn("could publish", cp.stderr)
-        self.assertIn("the sandbox around 'demo' is not intact", cp.stderr)
-
-    def test_a_probe_that_dies_without_reporting_is_named(self):
-        """Unmeasured is not the same as passed: a probe killed by its own
-        `set -e` leaves an exit status and no record, and a count that only
-        added the status would show a number with no FAIL line under it."""
-        cp = self._checks(env={"WK_TEST_DIE_no_credentials_inside": "1"})
-        self.assertNotEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertIn("the 'no-credentials' probe died before it reported anything",
-                      cp.stderr)
-        self.assertIn("the sandbox around 'demo' is not intact", cp.stderr)
-
-    def test_a_publishing_probe_that_dies_is_not_forceable_either(self):
-        cp = self._checks(env={"WK_TEST_DIE_push_here": "1", "WK_FORCE": "1"})
-        self.assertNotEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertIn("could publish", cp.stderr)
+    def test_the_checks_are_doctors_and_not_a_copy(self):
+        for asked in ("wall.from_inside(", "wall.from_host("):
+            self.assertIn(asked, AI_TEXT)
+        self.assertNotIn("api.github.com", AI_TEXT)
+        self.assertNotIn("bugs.webkit.org", AI_TEXT)
 
 
 class TestTypingClaudeInAWorkspaceGoesThroughIt(unittest.TestCase):

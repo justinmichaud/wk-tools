@@ -1,8 +1,6 @@
 #!/usr/bin/env python3
-"""The workspace fleet-request boundary, shaped like the egress proxy: a unix
-socket into the sandbox, the policy out here, a closed verb set, every action
-an argv list handed to execve. Each verb resolves to a `wk` command that
-already refuses on its own evidence -- a narrower door, never a wider one."""
+"""The workspace fleet-request boundary, shaped like the egress proxy: a unix socket into the sandbox, the policy out here, a closed verb set, every action an argv list handed to execve.
+Each verb resolves to a `wk` command that already refuses on its own evidence -- a narrower door, never a wider one."""
 
 import asyncio
 import json
@@ -80,8 +78,7 @@ WK_ROOT={json.dumps(WK_ROOT)}
 machine_declare
 '''
 
-# Two fragments under two ceilings: run together, a wedged tailscaled swallowed
-# the bridge answer too and "no route derived" was reported about a pinned board.
+# Two fragments under two ceilings, so a wedged tailscaled cannot also swallow the mDNS/ssh answer.
 _REACH_TAILNET_SH = f'''
 set -euo pipefail
 WK_ROOT={json.dumps(WK_ROOT)}
@@ -100,7 +97,7 @@ reach_without_tailnet "$1" || true
 
 
 def fleet():
-    out = {}                           # read now, never held between requests
+    out = {}
     declared = _bash(_MACHINES_SH)
     if declared is _TIMED_OUT:
         raise Refused(
@@ -152,8 +149,8 @@ def want_name(kind, value, remedy):
     return value
 
 
-def want_bench_device(args):           # the central refusal, which everything
-    machines = fleet()                 # mutating goes through
+def want_bench_device(args):           # the central refusal every mutating verb goes through
+    machines = fleet()
     name = want_name(
         "machine", args.get("machine"), "ask this broker for 'capabilities' -- it lists the machines it will act on"
     )
@@ -229,8 +226,7 @@ def want_count(args):
 
 
 def state_dir():
-    # `wk_state_dir` in lib/common.sh. Never $WK_STORE: on macOS that names
-    # the podman VM's store, a path this machine cannot even create.
+    # `wk_state_dir` in lib/common.sh. Never $WK_STORE: on macOS that names the podman VM's store, a path this machine cannot even create.
     return os.path.join(
         os.environ.get("XDG_STATE_HOME", os.path.expanduser("~/.local/state")), "wk"
     )
@@ -285,8 +281,7 @@ def in_flight(machine=None):
 
 
 def _clean_env():
-    # Nothing from a request reaches this, and WK_FORCE is stripped rather
-    # than merely unset: this process may have been started from a shell.
+    # Nothing from a request reaches this, and WK_FORCE is stripped rather than merely unset: this process may have been started from a shell.
     keep = ("HOME", "USER", "LOGNAME", "LANG", "TERM", "SSH_AUTH_SOCK",
             "XDG_RUNTIME_DIR", "XDG_STATE_HOME", "WK_STORE", "WK_ROOT", "WK_MACHINE")
     env = {k: v for k, v in os.environ.items() if k in keep}
@@ -311,8 +306,7 @@ def build_arm(args):
 
 
 def build_keep(args):
-    # A bench system reboots itself back to host mode after its manifest's
-    # watchdog interval -- 15 minutes on the rpi4, shorter than a Pi 3 suite.
+    # A bench system reboots itself back to host mode after its manifest's watchdog interval -- 15 minutes on the rpi4, shorter than a Pi 3 suite.
     m = want_bench_device(args)
     argv = [os.path.join(WK_ROOT, "wk"), "boot", m["name"], "--keep"]
     if args.get("dry_run"):
@@ -368,9 +362,7 @@ def build_status(args):
     return m, argv, f"read {m['name']}'s mode"
 
 
-# The store, not a board: the subject a request is keyed and serialised by is
-# this machine itself, so two workspaces asking at once queue behind each other
-# on the one mirror. It is reached by being here, so nothing is probed.
+# The store, not a board: the subject a request is keyed and serialised by is this machine itself, so two workspaces asking at once queue behind each other on the one mirror, reached by being here so nothing is probed.
 def build_sync(args):
     for k in args:
         raise Refused(f"'sync' takes no arguments (got '{str(k)[:40]}')",
@@ -397,8 +389,8 @@ class Broker:
         self.active = 0
 
     async def send(self, w, obj):
-        try:                           # a closed client has not cancelled the
-            w.write((json.dumps(obj) + "\n").encode())   # run it asked for
+        try:                           # a closed client has not cancelled the run it asked for
+            w.write((json.dumps(obj) + "\n").encode())
             await w.drain()
         except (ConnectionResetError, BrokenPipeError, OSError):
             pass
@@ -409,8 +401,7 @@ class Broker:
             k for k, v in sorted(machines.items())
             if v["role"] == "bench-device" and v["os"] in ("any", host_os())
         ]
-        # Each of these can end in a tailscale query and an mDNS lookup, whose
-        # sum froze the whole broker when they ran in a comprehension.
+        # Each of these can end in a tailscale query and an mDNS lookup, so they run concurrently rather than in a comprehension.
         where = await asyncio.gather(*(asyncio.to_thread(reach, n) for n in names))
         benches = {
             n: {
@@ -503,8 +494,7 @@ class Broker:
             verb=verb, machine=m["name"], stage=what,
         )
 
-        # A loop, not a task, so as to drain once more after the process is
-        # reaped: a task dies the instant `wait()` returns, losing the tail.
+        # A loop, not a task, so as to drain once more after the process is reaped: a task dies the instant `wait()` returns, losing the tail.
         waiter = asyncio.ensure_future(proc.wait())
         pos = 0
         deadline = time.time() + RUN_TIMEOUT
@@ -627,9 +617,7 @@ class Broker:
 
 
 async def publish_into_machine(machine, local_sock):
-    # On macOS the containers mount the podman guest's runtime directory, so
-    # the socket is carried in over a remote unix-socket forward the Mac dials
-    # itself. The guest's sshd will not replace an existing one: remove it.
+    # On macOS the containers mount the podman guest's runtime directory, so the socket is carried in over a remote unix-socket forward the Mac dials itself; the guest's sshd will not replace an existing one, so remove it.
     while True:
         try:
             def q(fmt):

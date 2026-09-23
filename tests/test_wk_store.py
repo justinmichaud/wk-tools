@@ -12,6 +12,7 @@ import unittest
 from tests.support import REPO, bash
 
 sys.path.insert(0, str(REPO / "lib"))
+from wk import record  # noqa: E402
 from wk.store import Store  # noqa: E402
 
 PAIRS = (
@@ -67,6 +68,15 @@ class TestAgreesWithBash(unittest.TestCase):
         self.assertIsNone(s.ws_base_id("b"))
         self.assertEqual(s.base_path("main-1"), os.path.join(tmp, "base", "main-1", "WebKit"))
         self.assertEqual(s.secrets_view_dir("container"), os.path.join(s.secrets_dir(), "view", "container"))
+
+    def test_a_lock_path_is_the_one_bash_takes(self):
+        tmp = tempfile.mkdtemp(prefix="wk-test-store-")
+        self.addCleanup(lambda: os.system("rm -rf %s" % tmp))
+        env = {"HOME": tmp, "WK_LOCK_DIR": tmp + "/locks"}
+        cp = bash('. "$WK_ROOT/lib/common.sh"; _lock_path ws-a', env=env)
+        self.assertEqual(cp.returncode, 0, cp.stderr)
+        self.assertEqual(Store(dict(os.environ, **env)).lock_path("ws-a"), cp.stdout.strip())
+        self.assertEqual(cp.stdout.strip(), tmp + "/locks/ws-a@%s.lock" % (record.host_name() or "local"))
 
 
 if __name__ == "__main__":

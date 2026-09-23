@@ -21,12 +21,16 @@ refusal to run, and stops the command right there, before any driver is used.
 
 Run: python3 -m unittest tests.test_agent_push_switch -v
 """
+import contextlib
+import io
 import os
 import unittest
+from unittest import mock
 
 from tests.support import REPO, WkTest, bash, stub_path
-
-AI = (REPO / "cmd" / "ai").read_text()
+from tests.test_ai import AI, WK, SimRegistry, SimTarget
+from wk.act import Refused
+from wk.machine import Fake, Result
 
 # The recording `wk`. `push status` answers "on" by default, and `push off` is
 # made to fail by the caller, which is what turns cmd/ai's refusal into the
@@ -195,89 +199,64 @@ class TestAnUnmeasuredSwitchIsARefusal(_AiRun):
         self.assertNotIn("refusing to run", cp.stdout + cp.stderr)
 
 
-class TestTheSwitchComesBackOnlyForAPerson(WkTest):
-    """restore_push, driven in cmd/ai's library mode: a headless run re-enters
-    this command every few minutes via the babysitter's fix loop, and leaving
-    push on between attempts would be the switch flapping open unattended."""
+class TestTheSwitchComesBackOnlyForAPerson(unittest.TestCase):
+    """restore_push: a headless run re-enters this command every few minutes
+    via the babysitter's fix loop, and leaving push on between attempts would
+    be the switch flapping open unattended."""
 
-    def _restore(self, was_on, target=""):
-        log = self.tmp / "wk.log"
-        log.write_text("")
-        root = self.tmp / "root"
-        root.mkdir(exist_ok=True)
-        for p in REPO.iterdir():
-            if p.name != "wk" and not (root / p.name).exists():
-                (root / p.name).symlink_to(p)
-        wk = root / "wk"
-        wk.write_text("#!/bin/sh\n" + FAKE_WK)
-        wk.chmod(0o755)
-        cp = bash(f'''
-export WK_CLAUDE_LIB=1
-. "{root}/cmd/ai"
-PUSH_WAS_ON={was_on!r}
-PUSH_TARGET={target!r}
-restore_push
-''', env={"WK_ROOT": str(root), "WK_TEST_WK_LOG": str(log),
-                  "XDG_STATE_HOME": str(self.tmp / "state"),
-                  "WK_STORE": str(self.tmp / "store")})
-        self.calls = [l for l in log.read_text().splitlines() if l.strip()]
-        return cp
+    def _restore(self, was_on, terminal):
+        fake = Fake()
+        fake.answer([WK, "push"])
+        env = {}
+        reg = SimRegistry(env, fake, SimTarget(fake, env))
+        ai = AI.Ai(AI.ROOT, env, reg, reg.target, "claude", "demo")
+        ai.push_was_on = was_on
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            ai.restore_push(terminal)
+        return [" ".join(e[1][1:]) for e in fake.effects], err.getvalue()
 
     def test_a_headless_session_leaves_it_off(self):
-        """bash() gives the script no terminal, which is exactly the
-        babysitter's condition."""
-        cp = self._restore("1")
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertEqual([], self.calls, self.calls)
-        self.assertIn("stays off", cp.stdout + cp.stderr)
+        calls, err = self._restore(True, terminal=False)
+        self.assertEqual([], calls)
+        self.assertIn("stays off", err)
+
+    def test_a_person_at_a_terminal_gets_it_back(self):
+        calls, err = self._restore(True, terminal=True)
+        self.assertEqual(["push on"], calls)
+        self.assertIn("git push turned back on", err)
 
     def test_a_switch_this_command_did_not_throw_is_not_touched(self):
-        cp = self._restore("")
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertEqual([], self.calls, self.calls)
+        for terminal in (False, True):
+            self.assertEqual(([], ""), self._restore(False, terminal))
 
 
 class TestOneShapeAndNoTargetNames(unittest.TestCase):
-    """Source-level twin: the switch is thrown by one unconditional call, so a
-    fourth target kind cannot arrive without it. A `case` or an `if` over
-    WK_TARGET_KIND around it is how the guest was missed."""
-
-    def test_the_call_is_unconditional(self):
-        calls = [l for l in AI.splitlines()
-                 if l.strip() == 'push_hold_back "$NAME"']
-        self.assertEqual(1, len(calls), calls)
-        self.assertEqual('push_hold_back "$NAME"', calls[0],
-                         "the call is indented, so it is inside a conditional")
-
-    def test_only_the_store_s_owner_is_named_by_kind(self):
-        """The one thing that differs by target is which machine holds the
-        keys, so the only line that names a kind is the one that says a build
-        box keeps its own. Comments are stripped: the prose explains all four
-        targets, which is the point of it."""
-        code = [l.strip() for l in AI.splitlines()
-                if l.strip() and not l.strip().startswith("#")]
-        naming = [l for l in code if "PUSH_TARGET=" in l and "WK_TARGET_KIND" in l]
-        self.assertEqual(['[ "$WK_TARGET_KIND" != remote ] || PUSH_TARGET="$TARGET"'],
-                         naming, naming)
+    """The switch is thrown by one unconditional step, so a fourth target kind
+    cannot arrive without it, and each target's own gate still runs behind it:
+    `wk doctor <ws>`'s checks, the Softnet checks for a guest, the gh refusal
+    for a build box."""
 
     def test_every_target_s_sandbox_gate_still_runs_after_it(self):
-        """The switch goes first -- `wk verify` measures the keys' absence in
-        a container -- and each target's own gate is still there behind it:
-        `wk verify` for a container, the Softnet checks for a guest, the gh
-        refusal for a build box."""
-        call = AI.index('push_hold_back "$NAME"')
-        for gate in ('WK_NAME="$NAME" "$WK_ROOT/cmd/verify"',
-                     'if [ "$WK_TARGET_KIND" = vm ]; then',
-                     "gh auth logout"):
-            with self.subTest(gate=gate):
-                self.assertLess(call, AI.index(gate), gate)
-
-    def test_the_functions_are_in_the_library_block(self):
-        """`WK_CLAUDE_LIB=1 . cmd/ai` has to define them, or the driven test
-        above is testing a copy."""
-        lib = AI[:AI.index('[ "${WK_CLAUDE_LIB:-}" != 1 ] || return 0')]
-        for fn in ("push_switch()", "push_hold_back()", "restore_push()"):
-            self.assertIn(fn, lib, fn)
+        for kind, gate in (("container", "checks"), ("vm", "guest_egress"), ("remote", "gh")):
+            with self.subTest(kind=kind):
+                order = []
+                fake = Fake()
+                fake.react([WK, "push"], lambda argv, f: order.append("push") or Result(1))
+                env = {"WK_NAME": "demo", "WK_TARGET": kind}
+                target = SimTarget(fake, env, kind=kind)
+                target.answers["command -v claude"] = Result(0, "/c\n")
+                target.answers["gh auth status"] = lambda argv: order.append("gh") or Result(0)
+                reg = SimRegistry(env, fake, target)
+                with mock.patch.dict(os.environ, {"WK_FORCE": "1"}), mock.patch.object(AI, "foreground", return_value=0), \
+                        mock.patch.object(AI.Ai, "checks", side_effect=lambda: order.append("checks")), \
+                        mock.patch.object(AI.Ai, "guest_egress", side_effect=lambda: order.append("guest_egress")), \
+                        contextlib.redirect_stderr(io.StringIO()):
+                    try:
+                        AI.main(["claude"], env=env, reg=reg)
+                    except Refused:
+                        pass
+                self.assertEqual("push", order[0], order)
+                self.assertIn(gate, order)
 
 
 if __name__ == "__main__":

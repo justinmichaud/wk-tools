@@ -1,7 +1,7 @@
-#!/usr/bin/env bash
+#!/usr/bin/env python3
 #
 # wk new <name> -- create a workspace named after the task it is for
-# wk: where=workspace name=required lifecycle post=zed group=workspaces
+# wk: where=workspace name=required lifecycle post=zed group=workspaces dryrun
 # wk: opts --target=,--base=,--arch=,--zed,--no-wait,--kill,--pr=,--sysroot,--_detached
 #
 # Other targets take minutes (a guest clone, a git clone over ssh), so creation is
@@ -9,6 +9,7 @@
 # new` resumes it. This end refuses what should be refused, starts the driver and
 # follows its log; the driver (`--_detached`) does everything that changes
 # anything, under the workspace lock, stepping its task record as it goes.
+# --dry-run runs the driver here instead and prints what it would change.
 #
 #   --target <target>   container, vm, or a machine named in
 #                        targets/hosts/<name>.conf (default: container)
@@ -26,378 +27,62 @@
 #
 #   WK_NEW_TIMEOUT=<s>   how long this end waits for the driver before giving
 #                        up (default 3600); the driver itself is unaffected
+#   WK_READY_TIMEOUT=<s> how long the driver waits for the workspace to finish
+#                        initialising (default 300)
+#   WK_KILL_WAIT=<s>     how long --kill waits after TERM before KILL (default 15)
 #
 # Creation fetches from the mirror beside its snapshot and fast-forwards the
 # checkout onto it. It never fetches over the network and never refreshes the
 # mirror itself: that is `wk sync --tools`.
-#
-# Claude remote control is started in the workspace once it is up, and what
-# that needs -- a claude.ai login this machine stores, one Anthropic accepts,
-# one the organization's policy allows remote control -- is checked before
-# anything is made. A refusal names the remedy; WK_NO_CLAUDE_RC=1 makes the
-# workspace without remote control.
 
-set -euo pipefail
-WK_ROOT="${WK_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
-. "$WK_ROOT/lib/common.sh"
-. "$WK_ROOT/lib/resources.sh"
-. "$WK_ROOT/lib/store.sh"
-. "$WK_ROOT/lib/target.sh"
-. "$WK_ROOT/lib/arch.sh"
-. "$WK_ROOT/lib/detach.sh"
-. "$WK_ROOT/lib/task.sh"
-. "$WK_ROOT/lib/watchdog.sh"
+import os
+import sys
+
+ROOT = os.environ.get("WK_ROOT") or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(ROOT, "lib"))
+
+from wk import record, targets, workspace  # noqa: E402
+from wk.act import Refused, die  # noqa: E402
+from wk.lock import Lock  # noqa: E402
+
+def parse(argv):
+    """The options as the dispatcher hands them on, a declared `--x=` as `--x <value>`; None when not given."""
+    def value(flag):
+        i = argv.index(flag) + 1
+        return argv[i] if i < len(argv) else ""
+    return {"target": value("--target") if "--target" in argv else None,
+            "base": value("--base") if "--base" in argv else None,
+            "arch": value("--arch") if "--arch" in argv else None,
+            "pr": value("--pr") if "--pr" in argv else None,
+            "zed": "--zed" in argv, "no_wait": "--no-wait" in argv, "kill": "--kill" in argv,
+            "sysroot": "--sysroot" in argv, "detached": "--_detached" in argv}
 
 
-new_fetch_from() {
-    case "$1" in
-        yes) printf 'mirror\n' ;;
-        no)  printf 'network\n' ;;
-        *)   printf 'unreachable\n' ;;
-    esac
-}
+def driver(reg, records, name, opts):
+    """The detached half: the front spawned it with the canonical --target, --arch and --base."""
+    try:
+        target = reg.load(opts.get("target") or reg.default())
+    except LookupError as e:
+        die(str(e))
+    recs = record.of_target(target, records.clock, reg.machine)
+    return workspace.new_driver(target, recs, Lock(target.store, reg.machine, recs.clock), recs.clock,
+                                name, opts.get("base") or "", opts.get("arch") or "native")
 
-# A portable `sh` snippet, because the checkout is behind a container exec or an ssh. Never a reset: nothing here may discard a commit.
-new_checkout_script() { # <src>
-    printf 'cd %s || exit 2\n' "$(sh_quote "$1")"
-    cat <<'EOF'
-b=$(git symbolic-ref --quiet --short HEAD 2>/dev/null || echo "")
-if [ -z "$b" ]; then
-    echo "detached=$(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
-    exit 0
-fi
-echo "branch=$b"
-u=$(git rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null || echo "")
-[ -n "$u" ] || exit 0
-echo "upstream=$u"
-behind=$(git rev-list --count "$b..$u" 2>/dev/null || echo 0)
-echo "behind=$behind"
-if [ "$behind" != 0 ]; then
-    if git merge --ff-only --quiet "$u" 2>/dev/null; then
-        echo "moved=$behind"
-    else
-        echo "moved=refused"
-    fi
-fi
-echo "head=$(git rev-parse --short HEAD)"
-EOF
-}
 
-# Never fatal: a fetch that could not happen must not turn a made workspace into a failed command.
-new_freshen() { # <name>
-    local name="$1" probe out b u moved head detached mirror
-    mirror=$(t_mirror_dir "$name")
-    # `|| probe=""`: t_exec dies when there is nothing to run in -- a guest is stopped when it is made -- and under `set -e` with pipefail that status would end this driver with nothing printed.
-    probe=$(t_exec "$name" sh -c \
-                "[ -n $(sh_quote "$mirror") ] && [ -d $(sh_quote "$mirror") ] \
-                 && echo yes || echo no" \
-                2>/dev/null | tr -d '\r' | tail -1) || probe=""
-    case "$(new_fetch_from "$probe")" in
-    mirror)
-        "$WK_ROOT/wk" sync "$name" \
-            || warn "'$name' is there; fetching in it is what failed (above).
-    'wk sync $name' retries; the checkout is at the snapshot it was made from." ;;
-    network)
-        info "no mirror in reach of '$name', so its checkout is as old as what it was made from"
-        log  "  wk sync $name    fetches it over the network" ;;
-    unreachable)
-        info "nothing to run in '$name' yet, so its checkout was not fetched in"
-        log  "  wk sync $name    once it is up"
-        return 0 ;;
-    esac
+def main(argv):
+    opts = parse(argv)
+    name = os.environ.get("WK_NAME", "")
+    reg = targets.Registry(ROOT)
+    records = record.Records(machine=reg.machine)
+    if opts.get("detached"):
+        return driver(reg, records, name, opts)
+    return workspace.new_front(reg, records, name, opts)
 
-    out=$(t_exec "$name" sh -c "$(new_checkout_script "$(t_src "$name")")" \
-              2>/dev/null | tr -d '\r') || out=""
-    detached=$(kv_get detached <<<"$out")
-    if [ -n "$detached" ]; then
-        warn "'$name' is not on a branch (detached at $detached), so 'git status',
-    'git pull' and 'wk pr rebase' in there have no upstream to name:
-        git checkout main    in the workspace"
-        return 0
-    fi
-    b=$(kv_get branch <<<"$out")
-    [ -n "$b" ] || { warn "could not read the checkout in '$name' to say where it is
-    ('wk enter $name', then 'git status' in there)"; return 0; }
-    u=$(kv_get upstream <<<"$out")
-    [ -n "$u" ] || { warn "'$name' is on '$b', which tracks nothing -- 'git pull' and
-    'wk pr' have no upstream to name:  wk remotes $name --fix"; return 0; }
-    head=$(kv_get head <<<"$out"); moved=$(kv_get moved <<<"$out")
-    case "$moved" in
-        refused) warn "'$b' in '$name' and $u have diverged, so the checkout is left where
-    it is:  git rebase $u   in the workspace" ;;
-        "")      info "'$name' is on $b at $head, up to date with $u" ;;
-        *)       info "'$name' is on $b at $head, $moved commit(s) on from its snapshot ($u)" ;;
-    esac
-}
 
-# tests/test_new_fetch.py sources this file for the functions above; `wk` always execs it, so a real run cannot take this arm.
-if (return 0 2>/dev/null); then
-    [ "${1:-}" = functions ] && return 0
-fi
-
-TARGET=$(default_target)
-BASE=""
-
-ARCH=native
-
-ZED=""
-NO_WAIT=""
-KILL=""
-
-# Internal: this process *is* the detached driver, which is this same file, so the two halves cannot drift apart.
-DETACHED=""
-
-PR_SPEC=""
-
-NAME="${WK_NAME:-}"
-require_name "$NAME"
-
-while [ $# -gt 0 ]; do
-    case "$1" in
-        --target) TARGET="${2:-}"; shift 2 ;;
-        --base)   BASE="${2:-}"; shift 2 ;;
-        --arch)   ARCH=$(arch_canon "${2:-}"); shift 2 ;;
-        --zed)    ZED=1; shift ;;
-        --no-wait) NO_WAIT=1; shift ;;
-        --kill)   KILL=1; shift ;;
-        --pr)     PR_SPEC="${2:-}"; [ -n "$PR_SPEC" ] || die "--pr needs a spec: <user>:<branch>, <n>, or wpe:<n>"; shift 2 ;;
-        --_detached) DETACHED=1; shift ;;
-        --sysroot)
-            die "--sysroot is not implemented (docs/Nice to have/HANDOFF-cross-compile.md).
-    It is also not this flag: --arch makes the workspace itself another
-    architecture, executed natively. A sysroot cross build stays in a native
-    workspace and is a property of the build, so it will be 'wk build
-    --sysroot', not 'wk new --sysroot'." ;;
-    esac
-done
-
-load_target "$TARGET"
-
-if [ -n "$KILL" ]; then   # the creation's own record names this command (lib/task.sh)
-    [ -z "$PR_SPEC$ZED$NO_WAIT$BASE" ] || die "'wk new $NAME --kill' stops the creation already running and takes
-    nothing with it -- no --base, --zed, --no-wait or --pr."
-    _rc=0; job_stop "$NAME" new || _rc=$?
-    case "$_rc" in
-        1) die "the process creating '$NAME' outlived a TERM and a KILL. It holds the
-    workspace lock, so nothing else can touch '$NAME' until it is gone:
-        ps -p $(task_field "$(task_find new "$NAME")" pid)" ;;
-        0) log "  what it got as far as is half-made and nothing in one is worth
-  keeping:  wk rm $NAME    (then 'wk new $NAME' to start again)" ;;
-    esac
-    exit 0
-fi
-
-if ! arch_is_native "$ARCH" && [ "$WK_TARGET_KIND" != container ]; then
-    die "--arch $ARCH is a container-only capability (this is target '$TARGET').
-    32-bit ARM needs a host that can execute it: this Neoverse-N1 runs AArch32
-    at EL0, and Apple Silicon does not, which is why it lives on the Linux
-    workstation permanently."
-fi
-
-if [ -n "$PR_SPEC" ]; then
-    [ -z "$NO_WAIT" ] || die "--pr needs the workspace to be ready, and --no-wait returns before it is.
-    Drop --no-wait, or check it out afterwards:  wk pr $NAME $PR_SPEC"
-    pr_parse_spec "$PR_SPEC"
-fi
-
-# Refuse before detaching: t_create's refusal belongs on the terminal, not in a log nobody was told to read yet.
-if [ "$WK_TARGET_KIND" = local ]; then t_create "$NAME"; fi
-
-# Remote control is started in the finished workspace, so what it needs is measured before anything is made: the store's login is what a container or a guest is given.
-if [ -z "$DETACHED" ] && [ -z "${WK_NO_CLAUDE_RC:-}" ]; then
-    case "$WK_TARGET_KIND" in
-    container|vm)
-        rc_login_judge "$(wk_cred_check claude-login --stored)" "in this machine's store" \
-            "WK_NO_CLAUDE_RC=1 wk new $NAME --target $TARGET    makes it without remote control" ;;
-    esac
-fi
-
-t_store_init
-
-LOG=$(ws_create_log "$NAME")
-
-if [ -n "$DETACHED" ]; then
-    stage() { task_step_named "$TASK" "$1"; }
-
-    # A failure has to leave a state behind, or a waiter sits there until its timeout deciding from the process table alone.
-    _driver_exit() {
-        # WK_EXIT_STATUS: published by the atexit trap (lib/common.sh) as this process's exit code before handlers run; ":-0" guards other callers.
-        [ -n "${REFUSED:-}" ] || [ "${WK_EXIT_STATUS:-0}" -eq 0 ] \
-            || task_end "$TASK" "${WK_EXIT_STATUS:-1}"
-        release_locks
-    }
-
-    # A refusal is not a failed creation, and the record says which it was. A flag rather than dropping the shared exit trap, which would drop the lock release too.
-    REFUSED=""
-    refuse() {
-        REFUSED=1
-        task_end "$TASK" refused
-        release_locks
-        die "$@"
-    }
-
-    # The SDK lock and before the store one: the refresh is a network fetch and a `git reset --hard` over the one checkout this machine shares. Then this workspace, so two `wk new <same-name>` cannot both create, and the store, so a create and a `wk sync` do not race a moving snapshot.
-    [ "$WK_TARGET_KIND" != container ] || with_lock sdk -- t_sdk_refresh
-    hold_lock "ws-$NAME"
-    if t_needs_base; then hold_lock store -s; fi
-
-    # Under the lock and before the record: `task_begin` drops the ended record of the last creation, which is what says this workspace was ever finished.
-    STATE=$(ws_state "$NAME")
-    TASK=$(task_begin new here "$NAME" "wk new $NAME --kill" "$LOG" \
-        checking wipe base create init fetch register)
-    wk_atexit _driver_exit
-
-    stage checking
-
-    # Crash-only: converge by remaking. An unfinished workspace holds nothing of value; a finished or environment-less one may still hold real work, so those refuse.
-    case "$STATE" in
-    present)
-        refuse "workspace '$NAME' already exists (target '$TARGET').
-    'wk rm $NAME' first, or pick another name." ;;
-    broken)
-        refuse "'$NAME' is a record without an environment: creation finished, and the
-    $TARGET side of it is gone -- something outside wk removed it. Its layer
-    may still hold work, so this will not wipe it for you:
-        wk rm $NAME     then 'wk new $NAME' to start again" ;;
-    unreachable)
-        refuse "cannot reach the machine behind target '$TARGET', so whether '$NAME' is
-    already there cannot be known -- and creating it blind could clobber a
-    workspace of the same name. Try again when the machine answers." ;;
-    creating)
-        stage wipe
-        warn "'$NAME' exists but was never finished -- destroying it and starting again"
-        log  "  (an interrupted 'wk new' leaves this; nothing in it is worth keeping)"
-        t_destroy "$NAME" || die "could not destroy the half-made workspace '$NAME'"
-        ssh_alias_remove "$NAME"
-        ;;
-    esac
-
-    if t_needs_base; then
-        stage base
-        [ -n "$BASE" ] || BASE=$(current_base) \
-            || die "no base snapshot this machine can build a workspace from:  wk sync
-    publishes one. A snapshot that is not on the branch it was published from
-    is refused here -- every workspace overlaid on it starts detached."
-        _why=$(base_verify "$BASE") || die "$_why"
-    fi
-
-    stage create
-    t_create "$NAME" "$BASE" "$ARCH"
-
-    # Creation is asynchronous on some targets, so waiting for the marker makes "created" mean "usable".
-    stage init
-    t_ready "$NAME" || die "'$NAME' was created but never finished initialising -- the push
-    keys, the Claude CLI, the lldb config and the shell rc are set up at first
-    start, and something above went wrong before the end of it.
-    Nothing here is worth repairing:  wk new $NAME    (destroys it and retries)"
-
-    stage fetch
-    new_freshen "$NAME"
-
-    # The ssh alias, last: it points at something that has to exist first. None for a container -- `wk zed` writes that alias where the editor runs.
-    stage register
-
-    task_end "$TASK" 0
-    info "workspace '$NAME' created"
-    exit 0
-fi
-
-case "$(ws_state "$NAME")" in
-present)
-    die "workspace '$NAME' already exists (target '$TARGET').
-    'wk rm $NAME' first, or pick another name." ;;
-broken)
-    die "'$NAME' is a record without an environment -- something outside wk removed
-    the $TARGET side of it. 'wk status $NAME' says so; 'wk rm $NAME' clears it." ;;
-creating)
-    _d=$(task_find new "$NAME")
-    if [ -n "$_d" ] && task_alive "$_d"; then
-        die "'$NAME' is already being created (pid $(task_field "$_d" pid), at stage
-    '$(task_stage "$_d")'). Follow it:      tail -f $(task_field "$_d" log)
-    Or ask for it and wait:  wk enter $NAME --zed   /   wk build $NAME <config>"
-    fi
-    ;;
-esac
-
-_SINCE=$(task_stamp)   # before the spawn: until the driver writes its record, the newest one of this name is the last run's
-
-_pid=$(detach_run "$LOG" -- \
-    "$WK_ROOT/wk" new "$NAME" --target "$TARGET" --arch "$ARCH" \
-    ${BASE:+--base "$BASE"} --_detached)
-
-if [ -n "$NO_WAIT" ]; then
-    info "creating '$NAME' on $TARGET, detached as pid $_pid -- this end can go away"
-    log  "  follow:  tail -f $LOG"
-    log  "  state:   wk status $NAME"
-    [ -z "$ZED" ] || log  "  open it:  wk enter $NAME --zed   (waits for it to be ready)"
-    exit 0
-fi
-
-_st=$(task_wait new "$NAME" "$LOG" "${WK_NEW_TIMEOUT:-3600}" "$_pid" "$_SINCE")
-case "$_st" in
-ok) ;;
-crashed)
-    die "the process creating '$NAME' is gone without having said how it ended.
-    Whatever it left is half-made, and a re-run destroys it and starts again:
-        wk new $NAME --target $TARGET
-    What it managed to say is in $LOG" ;;
-refused)
-    die "'$NAME' was not created, and nothing was left half-made: the reason is
-    above, in full in $LOG" ;;
-timeout)
-    die "'$NAME' is still being created after ${WK_NEW_TIMEOUT:-3600}s.
-    It is detached, so it is still going: 'wk status $NAME' says where, and
-    $LOG says what it is doing. Nothing here was undone." ;;
-*)
-    die "creating '$NAME' failed (${_st}) -- the reason is above, in full in $LOG.
-    A re-run destroys what is there and starts again:  wk new $NAME --target $TARGET" ;;
-esac
-
-LABEL=$(arch_label "$ARCH")
-info "workspace '$NAME' ready${LABEL:+ ($LABEL)}"
-
-if [ -n "$PR_SPEC" ]; then
-    wk_pr_checkout "$NAME" "$PR_SPEC"
-fi
-
-RC_UP=""
-if [ -z "${WK_NO_CLAUDE_RC:-}" ] && [ "$WK_TARGET_KIND" != remote ] \
-   && [ "$(t_info "$NAME")" = running ]; then
-    if "$WK_ROOT/wk" ai claude "$NAME" --rc; then
-        RC_UP=1
-    else
-        warn "'$NAME' is there; starting claude remote control in it is what failed
-  (above). 'wk ai claude $NAME --rc' retries; WK_NO_CLAUDE_RC=1 stops trying."
-    fi
-fi
-
-if ! arch_is_native "$ARCH"; then
-    log "  $ARCH: native 32-bit, no GPU. 'wk bench' will run CPU-class plans"
-    log "  in here and refuse GPU-class ones."
-fi
-case "$WK_TARGET_KIND" in
-vm)
-    log "  wk vm start $NAME       boot it (its ssh alias and claude remote control start then)"
-    log "  wk zed $NAME            the checkout, in Zed (once it is up)"
-    log "  wk build $NAME mac-release"
-    ;;
-remote)
-    log "  wk build $NAME <config> build (polite: sized from that machine's load)"
-    log "  wk enter $NAME          shell, in the checkout"
-    _host=$(t_ssh_host "$NAME" 2>/dev/null) \
-        && log "  wk zed $NAME            the checkout, in Zed (ssh://$_host$(t_src "$NAME"))"
-    log ""
-    log "  no sandbox on a shared machine, so 'wk ai claude' and 'wk verify' refuse."
-    ;;
-*)
-    log "  wk enter $NAME          shell"
-    log "  wk build $NAME <config> build"
-    log "  wk ai claude $NAME      sandboxed agent${RC_UP:+ (remote control is already up)}"
-    log "  wk zed $NAME            the checkout, in Zed"
-    ;;
-esac
-
-if [ -n "$ZED" ]; then
-    "$WK_ROOT/cmd/zed" "$NAME" \
-        || warn "'$NAME' is there; opening it in Zed is what failed (above) -- 'wk zed $NAME' retries"
-fi
+if __name__ == "__main__":
+    try:
+        sys.exit(main(sys.argv[1:]))
+    except Refused as e:
+        sys.exit(e.status)
+    except KeyboardInterrupt:
+        sys.exit(130)

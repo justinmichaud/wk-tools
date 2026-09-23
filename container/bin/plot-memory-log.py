@@ -19,8 +19,8 @@ def _split_row(line):
     return line.split()
 
 
-def read_log(path):                    # -> (columns without the time column,
-    columns = None                     #     [(time, {column: value})])
+def read_log(path):                    # -> (columns without the time column, [(time, {column: value})])
+    columns = None
     rows = []
     skipped = 0
     with open(path, newline="") as f:
@@ -97,7 +97,7 @@ def render_svg(columns, rows, title):
 
     parts = []
 
-    for i in range(6):                 # gridlines and labels, 5 divisions
+    for i in range(6):
         gy = pad_t + plot_h * i / 5
         val = vmax * (5 - i) / 5
         parts.append(f'<line x1="{pad_l}" y1="{gy:.1f}" x2="{width - pad_r}" y2="{gy:.1f}" '

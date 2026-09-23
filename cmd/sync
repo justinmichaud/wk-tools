@@ -1,7 +1,7 @@
-#!/usr/bin/env bash
+#!/usr/bin/env python3
 #
-# wk sync [<workspace>|--mirror|--target <t>|--all|--tools] -- bring WebKit and the tooling up to date
-# wk: where=dynamic name=optional group=sources needs git opts --all,--target=,--tools,--machine,--mirror broker --mirror
+# wk sync [<workspace>|--mirror|--target <t>|--all|--tools [<t>]] [--fix] -- bring WebKit and the tooling up to date
+# wk: where=dynamic name=optional group=sources needs git dryrun opts --all,--target=,--tools,--machine,--mirror,--fix broker --mirror
 #
 # A fetch, and never a checkout: no branch is switched, merged or rebased, here
 # or in a workspace. Safe to run at any time -- workspaces already made stay
@@ -24,401 +24,95 @@
 #                              wk-tools, its WebKit mirror, and a new snapshot.
 #                              One target's, or all.
 #
+# Each fetch also reads the checkout's wiring back: `origin` is upstream
+# (fetch-only, push URL `no-push://`), each fork pushes over ssh through its
+# host alias, and a fetch reads the machine's mirror. A deviation is named
+# under the workspace, and so is one in the base snapshot every new workspace
+# starts from.
+#
+#   --fix   before each fetch, re-assert the wiring, point the branch at the
+#           fork it pushes to, and finish `git-webkit setup` in a container or
+#           guest. Only git config and the commit hooks change -- never a
+#           commit or a working tree -- and a checkout already right is left
+#           as it is
+#
 #   WK_DEBUG=1          per-stage timing on stderr: 'stage <name>: <n>s'
 #   WK_BRANCH=<branch>  publish the snapshot from this remote-tracking branch
 #                       (origin/safari-7620-branch, wpe/wpe-2.46), not origin/main
+#
+#   0  everything in scope was brought up to date and is wired right
+#   1  something did not take, did not fetch, or is wired wrong (above)
 
-set -euo pipefail
-WK_ROOT="${WK_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
-. "$WK_ROOT/lib/common.sh"
-. "$WK_ROOT/lib/store.sh"
-. "$WK_ROOT/lib/target.sh"
-. "$WK_ROOT/lib/par.sh"
+import os
+import sys
 
-# The dispatcher's `where=dynamic` question. A workspace's name -- or a bare `wk sync` inside one -- goes to the machine holding it; every scope flag is this host's, where the mirror is written and the podman VM and the guests read it.
-if [ "${1:-}" = --where ]; then
-    shift
-    for _a in "$@"; do
-        case "$_a" in
-            --all|--tools|--tools=*|--target|--target=*|--machine|--mirror) echo host; exit 0 ;;
-            -*) ;;
-            *)  echo workspace; exit 0 ;;
-        esac
-    done
-    if in_workspace; then echo workspace; else echo host; fi
-    exit 0
-fi
+ROOT = os.environ.get("WK_ROOT") or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(ROOT, "lib"))
 
-STAGE_T0=0
-stage_begin() { STAGE_T0=$(date +%s); }
-stage_end()   { debug "stage $1: $(( $(date +%s) - STAGE_T0 ))s"; }
+from wk import sync, targets, workspace  # noqa: E402
+from wk.act import Refused, die  # noqa: E402
+from wk.clock import Clock  # noqa: E402
+from wk.lock import Lock  # noqa: E402
 
-snapshot_current() {
-    [ -n "$1" ] && [ "$1" = "$2" ]
-}
+USAGE = "usage: wk sync [<workspace>|--mirror|--target <target>|--all|--tools [<target>]] [--fix]"
 
-# `-B` resets rather than switches: the branch `git clone` leaves keeps the sha it was cloned at, and every later snapshot is hardlinked from that one.
-snapshot_checkout() { # <tree> <branch>
-    local tree="$1" branch="$2" ref upstream local_branch
-    ref=$(git -C "$tree" rev-parse --symbolic-full-name "$branch" 2>/dev/null || true)
-    case "$ref" in
-        refs/remotes/*/*) ;;
-        *)  printf "'%s' is not a branch this mirror carries.
-    A snapshot is published from a remote-tracking branch, spelled
-    <remote>/<branch>:  origin/main (the default), wpe/wpe-2.46.
-    Only %s of origin is in the mirror at all -- WK_MIRROR_BRANCHES=<branch>
-    carries another one in.\n" "$branch" "$(wk_mirror_branches)"
-            return 1 ;;
-    esac
-    upstream=${ref#refs/remotes/}      # origin/main
-    local_branch=${upstream#*/}        # main
-    git -C "$tree" checkout --quiet -B "$local_branch" "$ref" \
-        || { printf "could not check %s out as branch %s\n" "$upstream" "$local_branch"; return 1; }
-    git -C "$tree" branch --quiet --set-upstream-to "$upstream" "$local_branch" \
-        || { printf "branch %s does not track %s\n" "$local_branch" "$upstream"; return 1; }
-}
 
-# Portable `sh`: the checkout is behind a container exec or an ssh. Every remote as git has it configured (wk_fetch_config), so this is the same fetch a person's own `git fetch --all` in there is, with no second refspec list to keep in step with it.
-ws_fetch_script() { # <src> <mirror-dir, or empty for a checkout with no mirror in reach>
-    printf 'cd %s || exit 1\n' "$(sh_quote "$1")"
-    printf 'rc=0\ngit fetch --all --prune --quiet || rc=1\n'
-    if [ -n "${2:-}" ]; then
-        printf 'if [ -n "$(git config --get-all %s 2>/dev/null)" ]; then echo from=mirror; else echo from=github; fi\n' \
-            "$(sh_quote "url.$2.insteadOf")"
-    else
-        printf 'if [ -n "$(git config --get-regexp %s 2>/dev/null)" ]; then echo from=mirror; else echo from=github; fi\n' \
-            "$(sh_quote '^url\..*\.insteadof$')"
-    fi
-    printf 'exit $rc\n'
-}
+def parse(argv, name=""):
+    """(scope, the workspace named, the target named, --fix): ws | here | target | all | tools | mirror."""
+    scope, spelled, target = "", "", ""
 
-# tests/test_sync.py and tests/test_new_fetch.py source this file for its helpers; `wk` always execs it, so a real run cannot take this arm.
-if (return 0 2>/dev/null); then
-    [ "${1:-}" = functions ] && return 0
-fi
+    def set_scope(s, as_typed):
+        nonlocal scope, spelled
+        if scope:
+            die("%s and %s ask for different things -- one at a time.\n    %s" % (spelled, as_typed, USAGE))
+        scope, spelled = s, as_typed
 
-USAGE="usage: wk sync [<workspace>|--mirror|--target <target>|--all|--tools [<target>]]"
-SCOPE=""            # ws | target | all | tools -- what this run brings up to date
-SCOPE_AS=""         # how it was spelled, for a message about two of them
-ONLY="${WK_NAME:-}" # the workspace named, if one was
-TARGET=""           # the target --target or --tools named, if one was
-_v=""               # the value a flag was given, while it is being checked
+    def set_target(t):
+        nonlocal target
+        if target:
+            die("one target at a time (got '%s' and '%s')" % (target, t))
+        target = t
 
-scope_set() { # <scope> <as-typed>
-    [ -z "$SCOPE" ] || die "$SCOPE_AS and $2 ask for different things -- one at a time.
-    $USAGE"
-    SCOPE="$1"; SCOPE_AS="$2"
-}
+    args = list(argv)
+    while args:
+        a = args.pop(0)
+        if a == "--machine":
+            die("'wk sync --machine' is gone: it meant a machine's furniture and\n"
+                "    every workspace on it at once. Say which:\n"
+                "        wk sync --all         every workspace on every target\n"
+                "        wk sync --tools       every machine's wk-tools, mirror and snapshot\n"
+                "        wk sync --tools <t>   just that one's")
+        elif a == "--all" or a == "--mirror":
+            set_scope(a[2:], a)
+        elif a == "--target":
+            set_target(args.pop(0))
+            set_scope("target", a)
+        elif a == "--tools":
+            if args and not args[0].startswith("-"):
+                set_target(args.pop(0))
+            set_scope("tools", a)
+        elif a != "--fix":
+            workspace.require_name(a)
+            name = a
+    if name:
+        set_scope("ws", "'%s'" % name)
+    return scope or "here", name, target, "--fix" in argv
 
-while [ $# -gt 0 ]; do
-    case "$1" in
-        --all)    scope_set all --all; shift ;;
-        --mirror) scope_set mirror --mirror; shift ;;
-        --target|--target=*)
-            _v=""
-            case "$1" in --target=*) _v="${1#*=}" ;; *) _v="${2:-}" ;; esac
-            [ -n "$_v" ] || die "--target names the target whose workspaces to fetch in.
-    'wk status' names them; 'wk sync --all' is every one of them."
-            [ -z "$TARGET" ] || die "one target at a time (got '$TARGET' and '$_v')"
-            TARGET="$_v"
-            case "$1" in --target=*) shift ;; *) shift 2 ;; esac
-            scope_set target --target ;;
-        --tools|--tools=*)
-            case "$1" in
-                *)  shift
-                    case "${1:-}" in ''|-*) ;;
-                        *) [ -z "$TARGET" ] || die "one target at a time (got '$TARGET' and '$1')"
-                           TARGET="$1"; shift ;;
-                    esac ;;
-            esac
-            scope_set tools --tools ;;
-        --machine)  die "'wk sync --machine' is gone: it meant a machine's furniture and
-    every workspace on it at once. Say which:
-        wk sync --all         every workspace on every target
-        wk sync --tools       every machine's wk-tools, mirror and snapshot
-        wk sync --tools <t>   just that one's" ;;
-        *)          ONLY="$1"; require_name "$ONLY"; shift ;;
-    esac
-done
 
-[ -z "$ONLY" ] || scope_set ws "'$ONLY'"
-
-if [ -n "$TARGET" ]; then
-    ( load_target "$TARGET" >/dev/null ) || exit 1
-fi
-
-# Bare is this machine, whole: every target that lives here, since the containers and the macOS guests read the one mirror this host keeps.
-if [ -z "$SCOPE" ] && [ -z "$ONLY" ]; then
-    SCOPE=here
-fi
-
-# walk_targets, not target_all: a machine answering another machine's --tools (WK_NO_DELEGATE) refreshes what it holds and asks nobody, so a sweep cannot bounce between peers.
-scope_targets() {
-    case "$SCOPE" in
-        here)   target_here ;;
-        target) printf '%s\n' "$TARGET" ;;
-        *)      if [ -n "$TARGET" ]; then printf '%s\n' "$TARGET"; else walk_targets; fi ;;
-    esac
-}
-
-scope_touches_here() {
-    local _t
-    for _t in $(scope_targets); do target_is_here "$_t" && return 0; done
-    return 1
-}
-
-sync_furniture() {
-    local _bad=0 _t
-    for _t in $(scope_targets); do
-        (
-            load_target "$_t" >/dev/null || exit 3
-            [ -z "$TARGET" ] || { WK_SYNC_NAMED=1; export WK_SYNC_NAMED; }
-            t_sync
-        ) || _bad=$((_bad + 1))
-    done
-    info "'wk status' compares every copy against this one"
-    if [ "$_bad" -ne 0 ]; then
-        warn "$_bad target(s) did not take the tooling -- see above"
-        return 1
-    fi
-    return 0
-}
-
-# One fetch per par job: each is a round trip to the machine holding the workspace.
-ws_fetch_one() { # <ws>
-    local ws="$1" st rc mirror said
-    load_target "$(ws_target "$ws")" >/dev/null 2>&1 || return 3
-    st=$(ws_state "$ws" 2>/dev/null) || st=absent
-    if [ "$st" != present ]; then
-        printf '  %-24s %s\n' "$ws" "$st -- skipped" >&3
-        return 2
-    fi
-    printf '  %-24s ' "$ws" >&3
-
-    stage_begin
-    mirror=$(t_mirror_dir "$ws")
-    said=$(t_exec "$ws" sh -c "$(ws_fetch_script "$(t_src "$ws")" "$mirror")" 2>/dev/null) \
-        && rc=0 || rc=$?
-    stage_end "workspace fetch $ws"
-    if [ "$rc" = 0 ]; then
-        case "$said" in
-            *from=mirror*) printf 'ok  (%s)\n' "$mirror" >&3 ;;
-            *from=github*) printf 'ok  (over the network: this checkout reads no mirror%s)\n' \
-                                  "${mirror:+, though this machine keeps $mirror -- wk remotes $ws --fix}" >&3 ;;
-            *)             printf 'ok  (it did not say which source it read)\n' >&3 ;;
-        esac
+def main(argv):
+    reg = targets.Registry(ROOT)
+    if argv[:1] == ["--where"]:
+        print(sync.where(reg.in_workspace(), argv[1:]))
         return 0
-    fi
-    echo "FAILED (continuing)" >&3
-    # The fetch is `git fetch --all` as this checkout is wired, so the wiring check is what says which ref it died on -- a mirror missing a branch origin's refspec names, before anything else.
-    t_exec "$ws" sh -c "$(wk_wiring_check_script "$(t_src "$ws")" "$mirror")" 2>/dev/null \
-        | tr -d '\r' | sed -n 's/^problem: /    /p' >&3 || true
-    return 1
-}
+    scope, name, target, fix = parse(argv, os.environ.get("WK_NAME", ""))
+    clock = Clock()
+    return sync.Sync(reg, clock, Lock(reg.store, reg.machine, clock), scope, name, target, fix).run()
 
-sync_workspaces() {
-    local ws bad=0 rc
-    local -a names=()
-    for ws in "$@"; do names+=("$ws"); done
-    [ "${#names[@]}" -gt 0 ] || return 0
 
-    info "fetching in ${#names[@]} workspace(s) -- $(wk_mirror_default_remotes)"
-    wk_atexit par_cleanup
-    par_begin
-    for ws in "${names[@]}"; do par_run "$ws" ws_fetch_one "$ws"; done
-    par_wait
-    for ws in "${names[@]}"; do
-        par_record "$ws" >&2
-        rc=$(par_rc "$ws")
-        case "$rc" in
-            0)   ;;
-            2)   [ "$SCOPE" != ws ] || die "workspace '$ONLY' is not there to fetch in
-    ('wk status $ONLY' says what it is; 'wk ls' lists the ones there are)" ;;
-            *)   bad=$((bad + 1)) ;;
-        esac
-    done
-    par_end
-    [ "$bad" -eq 0 ] || warn "$bad workspace(s) did not fetch -- 'wk remotes <ws> --fix' re-asserts the
-    wiring the fetch reads, and 'wk enter <ws>' then 'git fetch --all' says why"
-    return 0
-}
-
-# One workspace at a time, by name, never a scope word: what a scope means is decided by *that* machine's copy of wk-tools, a different version as often as not.
-sync_target() { # <target>
-    local _t="$1" _ws
-    if ( load_target "$_t" >/dev/null 2>&1; [ -n "${WK_REMOTE_PEER:-}" ] ); then
-        _ws=$( ( load_target "$_t" >/dev/null || exit 3; target_workspaces ) )
-        [ -n "$_ws" ] || { info "no workspaces on $_t"; return 0; }
-        info "$_t holds its own workspaces -- asking it to fetch in each"
-        (
-            load_target "$_t" >/dev/null || exit 3
-            for _w in $_ws; do
-                WK_NO_DELEGATE=1 t_wk sync "$_w" \
-                    || warn "$_t did not fetch in '$_w' -- see above"
-            done
-        )
-        return 0
-    fi
-
-    _ws=$( ( load_target "$_t" >/dev/null || exit 3; target_workspaces ) )
-    [ -n "$_ws" ] || { info "no workspaces on $_t"; return 0; }
-    # WK_TARGET: these names came from this target, so ws_target must not ask every other one where each lives -- an ssh probe per workspace per target.
-    # shellcheck disable=SC2086 -- deliberate word splitting of the name list.
-    ( export WK_TARGET="$_t"; sync_workspaces $_ws )
-}
-
-if [ "$SCOPE" = ws ]; then
-    WS_MIRROR_RC=0
-    if in_workspace; then mirror_refresh_request || WS_MIRROR_RC=1; else store_init; fi
-    sync_workspaces "$ONLY"
-    exit "$WS_MIRROR_RC"
-fi
-
-sync_mirror() {
-    local MIRROR _tag _name _state _b _gap
-    MIRROR=$(wk_mirror)
-    mirror_init
-
-    if [ -d "$MIRROR" ]; then
-        unchanged "mirror exists"
-    else
-        info "creating bare mirror (first run: this clones all of WebKit)"
-    fi
-
-    info "fetching $(wk_mirror_default_remotes) (origin: $(wk_mirror_branches))"
-
-    stage_begin
-    { sh -c "$(mirror_refresh_script "$MIRROR")" 2>/dev/null \
-          || warn "the mirror refresh did not finish"; } \
-        | while read -r _tag _name _state; do
-              [ "$_tag" = mirror-fetch ] || continue
-              case "$_state" in
-                  ok) printf '  %-8s ok\n' "$_name" >&2 ;;
-                  *)  printf '  %-8s FAILED (continuing)\n' "$_name" >&2 ;;
-              esac
-          done
-    stage_end "mirror fetch"
-
-    git -C "$MIRROR" rev-parse --verify --quiet refs/heads/main >/dev/null \
-        || die "main was not fetched into the mirror; nothing can be published from it"
-
-    # The refresh is the one producer of what every workspace's refspecs ask for, so a branch still absent after it is a branch origin does not advertise -- named here rather than in each fetch it goes on to fail.
-    _gap=""
-    for _b in $(wk_mirror_branches); do
-        git -C "$MIRROR" rev-parse --verify --quiet "refs/heads/$_b" >/dev/null \
-            || _gap="$_gap $_b"
-    done
-    [ -z "$_gap" ] || warn "origin advertises no$_gap, so the mirror carries none of it and every
-    workspace wired to ask for it fails its fetch. An image configuration names
-    it (image/configs, CFG_BRANCH); 'wk doctor' reports the mirror the same way."
-}
-
-# `--shared`: the snapshot borrows the mirror's objects, so a machine holds WebKit's history once and every workspace overlaid on the snapshot borrows them too -- which is why `wk gc` never prunes the mirror.
-sync_snapshot() {
-    local MIRROR NEW_ID NEW_DIR NEW_TREE PREV_ID PREV_TREE BRANCH _why
-    local _mirror_main_sha _wiring
-    store_init
-    MIRROR=$(wk_mirror)
-    [ -d "$MIRROR" ] || die "no mirror at $MIRROR to publish a snapshot from -- 'wk sync' on the host makes it"
-    _mirror_main_sha=$(git -C "$MIRROR" rev-parse refs/heads/main)
-
-    BRANCH="${WK_BRANCH:-origin/main}"
-    NEW_ID=$(date -u +%Y%m%dT%H%M%SZ)
-    NEW_DIR="$(wk_base_dir)/$NEW_ID"
-    NEW_TREE="$NEW_DIR/WebKit"
-
-    PREV_ID=$(newest_complete_base 2>/dev/null || true)   # the hardlink source; a snapshot without the branch record still saves the copy
-
-    # Skipped only for the default branch, where the mirror's own head is exactly the ref checked out; a non-default WK_BRANCH has no such mapping. A snapshot base_verify refuses is republished even when its sha is current.
-    if [ "$BRANCH" = "origin/main" ] && [ -n "$PREV_ID" ] && base_verify "$PREV_ID" 2>/dev/null \
-        && snapshot_current "$(base_recorded_sha "$PREV_ID")" "$_mirror_main_sha"; then
-        unchanged "mirror unchanged; base $PREV_ID is already $(printf '%s' "$_mirror_main_sha" | cut -c1-10)"
-        return 0
-    fi
-
-    if [ -n "$PREV_ID" ]; then
-        PREV_TREE=$(base_path "$PREV_ID")
-        info "snapshotting $PREV_ID -> $NEW_ID"
-        ensure_dir "$NEW_DIR"
-        stage_begin
-        cp -al "$PREV_TREE" "$NEW_TREE"
-        stage_end "snapshot publish (cp -al)"
-    else
-        info "no previous snapshot; checking out $BRANCH (this takes a few minutes)"
-        ensure_dir "$NEW_DIR"
-        stage_begin
-        git clone --quiet --shared "$MIRROR" "$NEW_TREE"
-        stage_end "snapshot publish (clone)"
-    fi
-
-    # Wired before the fetch, so the fetch reads the mirror this machine keeps rather than github.com -- and so a workspace overlaid on this tree inherits the wiring even if its own first run never happens.
-    info "wiring snapshot remotes for workspace use"
-    _wiring=$(wk_wiring_script "$NEW_TREE" "$MIRROR")
-    sh -c "$_wiring"
-    git -C "$NEW_TREE" fetch --all --prune --quiet
-
-    _why=$(snapshot_checkout "$NEW_TREE" "$BRANCH") || { rm -rf "$NEW_DIR"; die "$_why"; }
-    info "checked out on branch $(git -C "$NEW_TREE" symbolic-ref --short HEAD) (tracking $BRANCH)"
-    # A stray file in the lower layer appears in every workspace built from this snapshot and cannot be deleted from any of them.
-    git -C "$NEW_TREE" reset --hard --quiet
-    git -C "$NEW_TREE" clean -qfdx
-
-    [ -d "$NEW_TREE/.git" ] || { rm -rf "$NEW_DIR"; die "snapshot $NEW_ID was not published"; }
-
-    # `sha` is the completion marker (lib/store.sh), written last and atomically; `branch` goes first, so a snapshot marked complete has everything beside it.
-    printf '%s\n' "$BRANCH" > "$NEW_DIR/branch"
-    git -C "$NEW_TREE" rev-parse HEAD > "$NEW_DIR/sha.tmp"
-    [ -s "$NEW_DIR/sha.tmp" ] || { rm -rf "$NEW_DIR"; die "snapshot $NEW_ID has no HEAD to record"; }
-    mv "$NEW_DIR/sha.tmp" "$NEW_DIR/sha"
-
-    info "published base $NEW_ID ($(cut -c1-10 < "$NEW_DIR/sha"))"
-}
-
-sync_in_vm() { # <target> -- the VM runs this same tree, so the scope word means the same in there
-    local _t="$1" _word
-    case "$SCOPE" in tools) _word=--tools ;; *) _word=--target ;; esac
-    if ( load_target "$_t" >/dev/null 2>&1; [ "$(t_far_side)" = answering ] ); then
-        info "$_t's snapshot and workspaces are in the podman VM -- syncing in there"
-        ( load_target "$_t" >/dev/null || exit 3; t_wk sync "$_word" "$_t" )
-        return
-    fi
-    warn "the podman machine is stopped, so $_t's snapshot was not published and its
-    workspaces did not fetch:  wk start, then  wk sync $_word $_t"
-    return 1
-}
-
-sync_store_of() { # <target>: its snapshot, then (--tools excepted) a fetch in its workspaces
-    local _t="$1" _rc=0
-    if ( load_target "$_t" >/dev/null 2>&1; t_needs_base && ! store_is_local ); then
-        sync_in_vm "$_t"
-        return
-    fi
-    if ( load_target "$_t" >/dev/null 2>&1; t_needs_base ); then
-        # Exclusive: two of these racing would hardlink from each other's half-published snapshot. It also holds off `wk gc` and `wk new`, and is dropped before the workspace fetches, which need nothing of the store.
-        ( load_target "$_t" >/dev/null || exit 3; with_lock store -- sync_snapshot ) || _rc=1
-    fi
-    [ "$SCOPE" = tools ] || sync_target "$_t"
-    return "$_rc"
-}
-
-if [ "$SCOPE" = mirror ]; then
-    if in_workspace; then mirror_refresh_request; exit $?; fi
-    mirror_is_here || die "the mirror in here is the host's, mounted read-only.
-    Run it on the machine that keeps it."
-    with_lock store -- sync_mirror
-    exit 0
-fi
-
-FURNITURE_RC=0
-sync_furniture || FURNITURE_RC=1
-
-MIRROR_RC=0
-if scope_touches_here && mirror_is_here; then
-    with_lock store -- sync_mirror || MIRROR_RC=1
-fi
-
-STORE_RC=0
-for _t in $(scope_targets); do sync_store_of "$_t" || STORE_RC=1; done
-
-[ "$FURNITURE_RC" -eq 0 ] && [ "$MIRROR_RC" -eq 0 ] && [ "$STORE_RC" -eq 0 ] || exit 1
-exit 0
+if __name__ == "__main__":
+    try:
+        sys.exit(main(sys.argv[1:]))
+    except Refused as e:
+        sys.exit(e.status)
+    except KeyboardInterrupt:
+        sys.exit(130)

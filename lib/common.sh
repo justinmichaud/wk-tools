@@ -64,13 +64,6 @@ wk_ssh_timeout() { printf '%s' "${WK_SSH_TIMEOUT:-10}"; }
 
 WK_DISPATCH_VARS="WK_NAME WK_TARGET WK_TARGET_KIND WK_ROOT WK_FORCE WK_QUIET WK_DRY_RUN WK_DESTRUCTIVE WK_CONFIRMED WK_ROW_LABEL WK_HOST_SELF WK_IN_VM"
 
-wk_exec_clean() { # <command...> -- exec with none of WK_DISPATCH_VARS set
-    local v unset_args=""
-    for v in $WK_DISPATCH_VARS; do unset_args="$unset_args -u $v"; done
-    # shellcheck disable=SC2086 -- one -u per variable, deliberately split.
-    exec env $unset_args "$@"
-}
-
 link_config() { # <src> <dst> -- symlink dst -> src, moving any real dst aside once
     local src="$1" dst="$2"
 
@@ -192,15 +185,19 @@ kv_field() {
 }
 
 
-# macOS keeps the hostname's capitalisation; ssh aliases and confs are lower.
 WK_BENCH_ACCOUNT="${WK_BENCH_USER:-bench}"
+
+# macOS keeps the hostname's capitalisation; ssh aliases, confs and lock paths are lower (lib/wk/record.py's host_name).
+wk_host_name() { { hostname -s 2>/dev/null || true; } | tr '[:upper:]' '[:lower:]'; }
 
 wk_machine_name() {   # in the VM: the workstation that forwarded (vm_wk_cmd), the VM being that machine's container target and not one of its own -- its `localhost` hostname would put a machine nobody can act on in every listing
     if [ -n "${WK_IN_VM:-}" ] && [ -n "${WK_ROW_LABEL:-}" ]; then
         printf '%s\n' "$WK_ROW_LABEL"
         return 0
     fi
-    { hostname -s 2>/dev/null || echo here; } | tr '[:upper:]' '[:lower:]'
+    local h
+    h=$(wk_host_name)
+    printf '%s\n' "${h:-here}"
 }
 
 # A script's title and synopsis for its own usage(), by shape not line number: indented lines are the synopsis, the prose after it is not. A fixed window reprints the wrong thing the first time a comment above it moves.
@@ -210,13 +207,6 @@ usage_block() { # <file>
          /^#  / { seen = 1; sub(/^# ?/, ""); print; next }
          seen   { exit }
                 { sub(/^# ?/, ""); print }' "$1"
-}
-
-zed_cli() { # a drag-installed Zed.app has no PATH symlink but is installed
-    if have zed; then echo zed; return 0; fi
-    local c=/Applications/Zed.app/Contents/MacOS/cli
-    [ -x "$c" ] && { echo "$c"; return 0; }
-    return 1
 }
 
 valid_name() { # names become container names, directories and ssh host aliases
@@ -267,11 +257,6 @@ done
 [ -n "$LLDB" ] || { printf 'error: no lldb here that will start -- `lldb` resolves to %s\n' \
     "$(command -v lldb || echo 'nothing')" >&2; exit 127; }
 EOF
-}
-
-# `~/.lldbinit` sets follow-fork-mode child; `-O` runs after the init file.
-lldb_pin_opts() {
-    printf '%s' "-O 'settings set target.process.follow-fork-mode parent'"
 }
 
 confirm() {
@@ -421,7 +406,7 @@ wk_tailscale_authkey() {
     return 1
 }
 
-# bash keeps only the last `trap ... EXIT`, so handlers register here instead, each one named `<pid>:<function>`. The pid is not decoration: a subshell inherits both the list and the trap, and anything registering a cleanup of its own in there re-arms the trap and would run the *parent's* handlers when the subshell ends -- which deleted cmd/ab's step file halfway through its own graph (measured 2026-09-16, bash 5.2, inside `$(ws_target ...)`). A handler runs in the process that asked for it and in no other.
+# bash keeps only the last `trap ... EXIT`, so handlers register here instead, each one named `<pid>:<function>`. The pid is not decoration: a subshell inherits both the list and the trap, and anything registering a cleanup of its own in there re-arms the trap and would run the *parent's* handlers when the subshell ends -- which deleted cmd/ab's step file halfway through its own graph (measured 2026-09-16, bash 5.2, inside `$(ws_target ...)`). A handler runs in the process that asked for it and in no other, and reads the exit status from WK_EXIT_STATUS.
 _WK_ATEXIT=""
 
 _wk_run_atexit() {
@@ -527,18 +512,6 @@ barrier() { # [--retry] <message...> -- refuse, or warn loudly and continue unde
     return 0
 }
 
-WK_COMMIT_WALL_PATHS="objects refs logs HEAD packed-refs index.lock ORIG_HEAD"
-
-# bwrap's read-only binds resist unmount, remount, shadowing and nested user
-# namespaces, with an empty capability set (tests/test_commit_wall.py).
-commit_wall_prefix() { # <checkout-dir> -- prints the bwrap argv prefix
-    local src="$1" p ro=""
-    for p in $WK_COMMIT_WALL_PATHS; do
-        ro="$ro --ro-bind-try $src/.git/$p $src/.git/$p"
-    done
-    printf 'bwrap --dev-bind / /%s --' "$ro"
-}
-
 # A lock is a symlink whose target names the holder. Not `flock`: its fd is
 # inherited by every child (`conmon` would hold ours for the workspace's life)
 # and macOS ships none. Keyed by hostname: NFS homes.
@@ -592,8 +565,8 @@ _lock_path() {
     local d h
     d=$(wk_lock_dir)
     mkdir -p "$d" 2>/dev/null || true
-    h=$(hostname -s 2>/dev/null || hostname 2>/dev/null || echo local)
-    echo "$d/$1@$h.lock"
+    h=$(wk_host_name)
+    echo "$d/$1@${h:-local}.lock"
 }
 
 _lock_release_all() {
@@ -633,7 +606,7 @@ _lock_break() {
 }
 
 hold_lock() { # <resource> [-w seconds] [-s]
-    local res="$1" timeout=600 f owner opid started announced=""
+    local res="$1" timeout=600 f owner opid started announced="" unreadable=""
     shift
     while [ $# -gt 0 ]; do
         case "$1" in
@@ -652,6 +625,7 @@ hold_lock() { # <resource> [-w seconds] [-s]
     esac
 
     while :; do
+        unreadable=""
         if [ -d "$f" ] && [ ! -L "$f" ]; then
             # Checked before the `ln`: `ln -s x somedir` links *inside* it.
             opid=$(cat "$f/pid" 2>/dev/null | tr -dc '0-9') || true
@@ -660,8 +634,7 @@ hold_lock() { # <resource> [-w seconds] [-s]
             fi
         elif ln -s "$(_lock_payload)" "$f" 2>/dev/null; then
             break
-        else
-            owner=$(readlink "$f" 2>/dev/null || true)
+        elif owner=$(readlink "$f" 2>/dev/null); then
             opid=$(_lock_pid_of "$owner")
 
             if [ -n "$opid" ] && ! kill -0 "$opid" 2>/dev/null; then
@@ -673,13 +646,23 @@ hold_lock() { # <resource> [-w seconds] [-s]
                 warn "clearing a lock file with no holder in it: $f"
                 rm -rf "$f"; continue
             fi
+        else
+            # A transient read failure is not evidence of free: it could hide a live hold, so it is kept, not cleared.
+            opid=""; unreadable=1
         fi
 
         if [ -z "$announced" ]; then
             announced=1
-            info "waiting for the $res lock${opid:+ (held by pid $opid)}"
+            if [ -n "$unreadable" ]; then
+                info "waiting for the $res lock (its holder cannot be read)"
+            else
+                info "waiting for the $res lock${opid:+ (held by pid $opid)}"
+            fi
         fi
         if [ "$(( $(date +%s) - started ))" -ge "$timeout" ]; then
+            if [ -n "$unreadable" ]; then
+                die "could not take the $res lock within ${timeout}s -- its holder cannot be read"
+            fi
             die "could not take the $res lock within ${timeout}s${opid:+ -- pid $opid still holds it}"
         fi
         sleep 1
@@ -690,8 +673,6 @@ hold_lock() { # <resource> [-w seconds] [-s]
     wk_atexit _lock_release_all
     debug "lock: $res"
 }
-
-release_locks() { _lock_release_all; }
 
 lock_holder_pid() { # <lock file> -- read without taking; a dead holder reads as none
     local line

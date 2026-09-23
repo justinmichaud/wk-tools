@@ -1,10 +1,8 @@
 # The host GUI must stay interactive and never be the process the OOM killer picks. Every WK_* here is overridable.
 
-# Held back from a GUI host, and a *count* of cores because Virtualization.framework places threads itself. A swapped desktop is unusable.
+# GUI reserve: held back from a GUI host, and a *count* of cores because Virtualization.framework places threads itself (a swapped desktop is unusable). Headless reserve is far less: the macOS host was already reserved for it when sizing the VM, and reserving again double-counts and starves containers.
 WK_RESERVE_CORES="${WK_RESERVE_CORES:-1}"
 WK_RESERVE_MB="${WK_RESERVE_MB:-12288}"
-
-# A headless machine needs far less: the macOS host reserved for it when sizing the VM, and reserving again double-counts and starves containers.
 WK_HEADLESS_RESERVE_CORES="${WK_HEADLESS_RESERVE_CORES:-0}"
 WK_HEADLESS_RESERVE_MB="${WK_HEADLESS_RESERVE_MB:-2048}"
 
@@ -138,22 +136,9 @@ envelope_mem_mb() {
     echo "$m"
 }
 
-export_target_resources() {  # a remote target's numbers, load average included, replace this machine's; call after `load_target`
-    local name="$1"
-    if [ "$WK_TARGET_KIND" = remote ]; then
-        WK_AVAIL_MB=$(t_mem_mb "$name"); WK_CGROUP_CORES=$(t_cores "$name")
-        WK_LOAD=$(t_load "$name")
-        WK_BUILD_MACHINE="$WK_TARGET"
-        export WK_AVAIL_MB WK_CGROUP_CORES WK_LOAD WK_BUILD_MACHINE
-    else
-        WK_CGROUP_MB=$(t_mem_mb "$name"); WK_CGROUP_CORES=$(t_cores "$name")
-        export WK_CGROUP_MB WK_CGROUP_CORES
-    fi
-}
-
 # A build's memory is spoken for before it is used -- a link step allocates late, so MemAvailable at the start of a second build says nothing about the first -- so each build leaves a record of its budget per build machine and build_jobs sizes the next one against it.
 builds_dir() { echo "$(wk_state_dir)/builds"; }
-build_machine() { printf '%s' "${WK_BUILD_MACHINE:-$(hostname)}"; }
+build_machine() { printf '%s' "${WK_BUILD_MACHINE:-$(wk_host_name)}"; }
 
 build_record() { # <label> <jobs> <budget-mb> <holder>
     ensure_dir "$(builds_dir)"
@@ -261,32 +246,6 @@ build_jobs() {  # from the memory not already spoken for -- running out of RAM d
     [ -n "${WK_MAX_JOBS:-}" ] && [ "$jobs" -gt "$WK_MAX_JOBS" ] && jobs=$WK_MAX_JOBS  # policy, not capacity: last, so it caps the answer and not the inputs
 
     [ "$jobs" -lt 1 ] && jobs=1
-
-    echo "$jobs"
-}
-
-explain_jobs() {
-    local polite="${1:-}" jobs cores by_mem avail reserved load=""
-    jobs=$(build_jobs "$polite") || return $?
-    cores=$(wk_cores) || return $?
-    avail=$(avail_mem_mb) || return $?
-    reserved=$(build_reserved_mb) || return $?
-    [ -z "$polite" ] || load=$(wk_load) || return $?
-    log "resources: ${jobs} jobs (cores=${cores} avail=${avail}MB${reserved:+ minus ${reserved}MB other builds} @ ${WK_MB_PER_JOB}MB/job${polite:+, polite, load=${load}}${WK_MAX_JOBS:+, max $WK_MAX_JOBS})"
-
-    if [ -z "${WK_MAX_JOBS:-}" ] && [ "$jobs" -lt $(( cores / 2 )) ]; then
-        by_mem=$(( avail / WK_MB_PER_JOB ))
-        if [ "$by_mem" -le "$jobs" ]; then
-            warn "parallelism: ${jobs} jobs is under half of ${cores} cores -- the memory
-  envelope only fits $by_mem at ${WK_MB_PER_JOB}MB/job (${avail}MB available)."
-        elif [ -n "$polite" ]; then
-            warn "parallelism: ${jobs} jobs is under half of ${cores} cores -- load average
-  ${load} is treated as that many cores already spoken for on this shared machine."
-        else
-            warn "parallelism: ${jobs} jobs is under half of ${cores} cores -- ${cores} is
-  this target's own ceiling (a reserve held back for the host, or a fixed vCPU/cgroup count)."
-        fi
-    fi
 
     echo "$jobs"
 }

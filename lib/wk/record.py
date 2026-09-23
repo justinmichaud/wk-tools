@@ -4,14 +4,16 @@ writes. Liveness is asked of the process table at read time, never stored."""
 
 import os
 import re
-import subprocess
 import sys
 from pathlib import Path
 
 from wk.clock import Clock
-from wk.store import Store
+from wk.machine import here
+from wk import store
 
 RUNNING = ("starting", "running", "silent", "unanswered")
+# Kinds that run until stopped: alive is their idle state, never busy.
+SESSIONS = ("agent-forward",)
 ERROR = re.compile(r"(^FAILED:|^error:|: error:|: fatal error:|ninja: build stopped|No such file or directory)")
 NOT_ERROR = re.compile(r"Performing Test|-- Failed|check for working|(^|[: ])warning:")
 PROGRESS = (re.compile(r"\[[0-9]+/[0-9]+\]"),
@@ -21,6 +23,7 @@ PROGRESS = (re.compile(r"\[[0-9]+/[0-9]+\]"),
 STEP_EVENTS = {"start": "running", "ok": "done", "already": "done", "failed": "failed",
                "skipped": "skipped", "unneeded": "skipped", "refused": "pending"}
 _STAMP = re.compile(r"^\d{8}T\d{6}Z$")
+UNREADABLE = object()
 
 
 def slug(text):
@@ -28,25 +31,28 @@ def slug(text):
 
 
 def record_dir(env=None):
-    return Store(env).record_dir()
+    return store.Store(env).record_dir()
 
 
-def machine_name(env=None):
+def host_name(machine=None):
+    """`hostname -s` lowercased as ssh aliases, confs and lock paths spell it (bash: wk_host_name), or ""."""
+    return (machine or here()).run(["hostname", "-s"]).out.strip().lower()
+
+
+def machine_name(env=None, machine=None):
+    """A row's machine, in the VM the forwarding workstation; never a lock's, whose pid is the VM's."""
     env = os.environ if env is None else env
     if env.get("WK_IN_VM") and env.get("WK_ROW_LABEL"):
         return env["WK_ROW_LABEL"]
-    cp = subprocess.run(["hostname", "-s"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
-    return (cp.stdout.strip() or "here").lower()
+    return host_name(machine) or "here"
 
 
 def normalised(path):
-    """A build log with ninja's carriage-return progress split into lines."""
     with open(path, errors="replace") as f:
         return f.read().replace("\r", "\n")
 
 
 def first_error(path):
-    """Up to five `line:text` rows naming the first errors in a log."""
     out = []
     try:
         lines = normalised(path).split("\n")
@@ -84,7 +90,6 @@ def progress_line(path):
 
 
 def log_age(path, clock):
-    """Whole seconds since the log was written, or None where there is no log."""
     try:
         return int(clock.now() - os.path.getmtime(path))
     except (OSError, TypeError):
@@ -98,31 +103,31 @@ def _put(path, value):
     os.replace(tmp, path)
 
 
-def _local_alive(pid):
-    try:
-        os.kill(pid, 0)
-        return True
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-
-
 class Task:
     """One record; `ask_target(name, pid, cap)` answers True, False or None
     (no answer within cap seconds) for a pid inside the workspace."""
 
-    def __init__(self, path, clock=None, ask_target=None):
+    def __init__(self, path, clock=None, ask_target=None, machine=None):
         self.path = Path(path)
         self.id = self.path.name
         self.clock = clock or Clock()
         self.ask_target = ask_target
+        self.machine = machine or here()
 
     def field(self, name):
         try:
             return (self.path / name).read_text().replace("\r", "").rstrip("\n")
         except OSError:
             return ""
+
+    def raw(self, name):
+        """A field's text, None where it is absent, UNREADABLE where it is there and cannot be read."""
+        try:
+            return (self.path / name).read_text().replace("\r", "").rstrip("\n")
+        except FileNotFoundError:
+            return None
+        except (OSError, UnicodeDecodeError):
+            return UNREADABLE
 
     def set(self, name, value):
         _put(str(self.path / name), value)
@@ -168,9 +173,11 @@ class Task:
         return [plan[i - 1] for i, state in self.steps() if state == "running"]
 
     def end(self, status):
-        """The first verdict stands."""
+        """The first verdict stands, and a stop asked for (`stopping`) outranks the status it caused."""
         if (self.path / "exit").is_file():
             return
+        if str(status) != "0" and self.field("stopping"):
+            status = self.field("stopping")
         self.set("finished", self.clock.iso())
         self.set("exit", status)
 
@@ -190,7 +197,16 @@ class Task:
             if self.ask_target is None:
                 raise RuntimeError("%s runs inside a workspace and no target is loaded" % self.id)
             return self.ask_target(self.field("name"), int(pid), cap)
-        return _local_alive(int(pid))
+        return self.machine.alive(int(pid))
+
+    def holder_gone(self):
+        """True only where the process that took this record's claim is provably gone."""
+        if (self.path / "exit").is_file() or self.job_exit():
+            return True
+        pid = self.raw("pid")
+        if self.field("where") != "here" or not isinstance(pid, str) or not pid.isdigit():
+            return False
+        return not self.machine.alive(int(pid))
 
     def verdict(self, how="pid", stall_seconds=None, ask_seconds=None):
         if how not in ("pid", "capped"):
@@ -224,15 +240,25 @@ class Task:
         return self.verdict(how) in RUNNING
 
 
+def of_target(target, clock=None, machine=None, env=None):
+    """`target`'s records; a pid in a workspace is asked there, None where the workspace does not answer in time."""
+    def ask(ws, pid, cap):
+        r = target.exec(ws, ["kill", "-0", str(pid)], timeout=cap)
+        return True if r.rc == 0 else False if r.rc == 1 else None
+    return Records(target.store.record_dir(), clock=clock, ask_target=ask, env=target.env if env is None else env,
+                   machine=machine)
+
+
 class Records:
-    def __init__(self, root=None, clock=None, ask_target=None, env=None):
+    def __init__(self, root=None, clock=None, ask_target=None, env=None, machine=None):
         self.env = os.environ if env is None else env
         self.root = Path(root or record_dir(self.env)) / "task"
         self.clock = clock or Clock()
         self.ask_target = ask_target
+        self.machine = machine or here()
 
     def _task(self, path):
-        return Task(path, self.clock, self.ask_target)
+        return Task(path, self.clock, self.ask_target, self.machine)
 
     def list(self):
         if not self.root.is_dir():
@@ -275,13 +301,18 @@ class Records:
             raise ValueError("%s/%s declared no plan" % (kind, name))
         if not kill:
             raise ValueError("%s/%s named no kill command" % (kind, name))
+        if holds and where != "here":
+            raise ValueError("%s/%s: a hold names the pid on this machine that took it, and a workspace's is not one" % (kind, name))
         pid = os.getpid() if pid is None else pid
         path = self.root / ("%s-%s-%s-%d" % (slug(kind), slug(name), self.clock.stamp(), pid))
         self.prune(kind, name, keep=path)
         path.mkdir(parents=True, exist_ok=True)
         t = self._task(path)
+        if where != "target":
+            t.set("pid", pid)
+        # The claim goes on with its holder, before the plan that publishes the record.
         if holds:
-            t.set("holds", holds)   # before the plan, which is what publishes the record
+            t.set("holds", holds)
         tmp = path / ("plan.tmp.%d" % os.getpid())
         tmp.write_text("".join(s + "\n" for s in plan))
         os.replace(tmp, path / "plan")
@@ -290,9 +321,7 @@ class Records:
         t.set("name", name)
         t.set("kill", kill)
         t.set("log", log)
-        t.set("machine", machine_name(self.env))
-        if where != "target":
-            t.set("pid", pid)
+        t.set("machine", machine_name(self.env, self.machine))
         t.set("argv", " ".join(argv if argv is not None else sys.argv))
         t.set("started", self.clock.iso())
         if self.env.get("WK_ABORT_SECONDS"):
@@ -307,11 +336,13 @@ class Records:
         return t
 
     def holders(self, resource):
+        """Every record naming `resource`, or whose claim cannot be read, with its holder not provably gone."""
         out = []
         for t in self.list():
-            if t.field("holds") != resource:
+            holds = t.raw("holds")
+            if holds is None or (holds is not UNREADABLE and holds != resource):
                 continue
-            if t.verdict("capped") not in RUNNING:
+            if t.holder_gone():
                 continue
             out.append((t.id, t.field("machine"), "%s %s" % (t.field("kind"), t.field("name")), t.field("kill")))
         return out
@@ -342,8 +373,9 @@ class Records:
                 break
             if st not in ("starting", "running", "silent"):
                 break
-            if pid is not None and not _local_alive(pid):
-                self.clock.sleep(1)   # the child may be mid-write of its final state
+            if pid is not None and not self.machine.alive(pid):
+                # The child may be mid-write of its final state.
+                self.clock.sleep(1)
                 t = self.find(kind, name, floor)
                 st = "starting" if t is None else t.verdict("pid")
                 if st in ("starting", "running", "silent", "died"):

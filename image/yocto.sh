@@ -91,7 +91,7 @@ yocto_ensure_ws() {  # created rather than demanded: the name is derivable from 
     mirror is behind this checkout:
         wk sync
     If the mirror does have it, the remotes in the workspace are what to look
-    at -- 'wk remotes $ws' reports them and '--fix' re-asserts them."
+    at -- 'wk sync $ws' reports them and '--fix' re-asserts them."
     fi
 }
 

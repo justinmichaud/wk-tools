@@ -78,14 +78,14 @@ class TestHelixConfigParses(unittest.TestCase):
     def test_clangd_names_a_compile_commands_dir(self):
         """clangd needs pointing at a build directory: WebKit's tree carries
         no compile_commands.json at its root, only inside whichever build
-        directory produced one (build/configs.sh's config_build_dir)."""
+        directory produced one (lib/wk/buildconf.py's build_dir)."""
         with open(HELIX_DIR / "languages.toml", "rb") as f:
             doc = tomllib.load(f)
         args = doc["language-server"]["clangd"].get("args", [])
         hits = [a for a in args if a.startswith("--compile-commands-dir=")]
         self.assertEqual(len(hits), 1, f"expected exactly one --compile-commands-dir= arg, got {args}")
         # jsc-release is the config every container workspace starts on
-        # (container/firstrun.sh's workspace marker); build/configs.sh maps
+        # (container/firstrun.sh's workspace marker); lib/wk/buildconf.py maps
         # it to WebKitBuild/JSCOnly/Release.
         self.assertIn("WebKitBuild/JSCOnly/Release", hits[0])
 
@@ -230,7 +230,7 @@ if __name__ == "__main__":
 class TestZedInheritsNoDispatcherVariables(unittest.TestCase):
     """Zed outlives `wk zed` and every terminal it opens inherits its
     environment; a WK_NAME/WK_TARGET left in it makes every later `wk` about
-    that one workspace on that one machine (wk_exec_clean, lib/common.sh)."""
+    that one workspace on that one machine (dispatch_vars, cmd/zed)."""
 
     def test_wk_zed_tools_starts_zed_without_wk_variables(self):
         with stub_path({"zed": 'env > "$ZED_ENV_LOG"\n'}) as binp:

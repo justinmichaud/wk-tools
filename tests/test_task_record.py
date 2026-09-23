@@ -33,7 +33,6 @@ PLANS = {
     "test":   ["jsc/release in ws1"],
     "yocto":  ["layers", "fetch", "image", "toolchain", "webkit", "pgo-mix"],
     "pgo":    ["instrumented build", "collect on rpi5", "measured build"],
-    "rc":     ["claude remote-control in ws1"],
     "new":    ["checking", "wipe", "base", "create", "init", "fetch", "register"],
     "agent-forward": ["start forward", "verify"],
 }
@@ -42,7 +41,6 @@ KILLS = {
     "test":  "kill 1234 on tolken, or ^C where it runs",
     "yocto": "wk sysimage build wpe --stage image --stop",
     "pgo":   "kill 1234 on tolken",
-    "rc":    "wk ai claude ws1 --rc --stop",
     "new":   "wk new ws1 --kill",
     "agent-forward": "wk push off",
 }
@@ -156,27 +154,6 @@ class TestOneRecordPerKind(WkTest):
         self.assertEqual(count.strip(), "2")
         self.assertEqual(kept, "KEPT")
 
-    def test_a_wait_ignores_a_record_older_than_the_floor_it_was_given(self):
-        """The driver reaches task_begin only after a network fetch, so the
-        newest record of that kind and name is a previous run's until then: a
-        waiter given the stamp it took before spawning follows the fresh run,
-        and one without it ends on the stale verdict."""
-        stale = ('d=$(task_begin new here ws1 "k" /nonexistent-log checking create)\n'
-                 'mv "$d" "$(dirname "$d")/new-ws1-20200101T000000Z-1"\n'
-                 'task_end "$(dirname "$d")/new-ws1-20200101T000000Z-1" refused\n')
-        self.assertEqual(
-            self._sh(stale + 'printf "%s\\n" "$(task_wait new ws1 /nonexistent-log 0)"').strip(),
-            "refused")
-        out = self._sh(
-            stale +
-            'floor=$(task_stamp)\n'
-            '( sleep 2\n'
-            '  d2=$(task_begin new here ws1 "k" /nonexistent-log checking create)\n'
-            '  task_end "$d2" 0 ) &\n'
-            'printf "%s\\n" "$(task_wait new ws1 /nonexistent-log 30 "" "$floor")"\n'
-            'wait')
-        self.assertEqual(out.strip(), "ok")
-
     def test_a_record_of_a_longer_name_is_not_this_name_s_record(self):
         out = self._sh(
             'd=$(task_begin new here ws1-extra "k" /nonexistent-log checking)\n'
@@ -217,7 +194,7 @@ class TestOneRecordPerKind(WkTest):
                                             ("return 255", "unanswered"), ("sleep 30", "unanswered"))):
             with self.subTest(answer=answer):
                 out = self._sh(
-                    'd=$(task_begin rc target ws%d "k" /l one)\n'
+                    'd=$(task_begin test target ws%d "k" /l one)\n'
                     'task_pid "$d" 4242\n'
                     'printf "%%s\\n" "$(task_verdict "$d" capped)"' % i,
                     env='WK_TASK_ASK_SECONDS=1\nt_exec() { %s; }' % answer)
@@ -225,14 +202,14 @@ class TestOneRecordPerKind(WkTest):
 
     def test_an_uncapped_reading_waits_for_the_workspace(self):
         out = self._sh(
-            'd=$(task_begin rc target ws1 "k" /l one)\n'
+            'd=$(task_begin test target ws1 "k" /l one)\n'
             'task_pid "$d" 4242\n'
             'printf "%s\\n" "$(task_verdict "$d")"',
             env='t_exec() { sleep 2; return 0; }')
         self.assertEqual(out.strip(), "running")
 
     def test_a_task_with_no_pid_yet_is_starting_not_died(self):
-        out = self._sh('d=$(task_begin rc target ws1 "k" /l one)\n'
+        out = self._sh('d=$(task_begin test target ws1 "k" /l one)\n'
                        'printf "%s\\n" "$(task_verdict "$d")"')
         self.assertEqual(out.strip(), "starting")
 
@@ -250,7 +227,7 @@ class TestOneRecordPerKind(WkTest):
             'd=$(WK_ABORT_SECONDS=1800 task_begin build here ws1 "k" "%s" a b)\n'
             'printf "%%s " "$(WK_STALL_SECONDS=9000 task_verdict "$d")"\n'
             'printf "%%s " "$(task_verdict "$d")"\n'
-            'd=$(task_begin rc here ws2 "k" "%s" session)\n'
+            'd=$(task_begin agent-forward here ws2 "k" "%s" session)\n'
             'printf "%%s\\n" "$(task_verdict "$d")"' % (log, log))
         self.assertEqual(out.split(), ["running", "silent", "running"])
 

@@ -254,7 +254,7 @@ class TestTheRecordedDeadlineTellsSilenceFromADeadWatchdog(_FakeWalk):
 class TestTheRecordCarriesTheDeadlineTheWatchdogIsArmedWith(WkTest):
     """One writer for the deadline: lib/task.sh stamps `abort_after` from
     WK_ABORT_SECONDS, the same variable lib/watchdog.sh aborts on, and
-    cmd/build declares its record through it rather than writing one of its
+    `wk build` declares its record through it rather than writing one of its
     own."""
 
     def _record(self, env=None):
@@ -271,12 +271,6 @@ class TestTheRecordCarriesTheDeadlineTheWatchdogIsArmedWith(WkTest):
         d = self._record({"abort_after": 5400})
         self.assertEqual((__import__("pathlib").Path(d) / "abort_after").read_text().strip(),
                          "5400")
-
-    def test_cmd_build_declares_its_record_through_the_task_lib(self):
-        text = (REPO / "cmd" / "build").read_text()
-        self.assertIn("task_begin build here", text)
-        self.assertNotIn("build.status", text)
-        self.assertNotIn("write_status", text)
 
     def test_the_record_and_the_watchdog_read_one_variable(self):
         self.assertIn('_task_put "$dir/abort_after" "$WK_ABORT_SECONDS"',
@@ -309,11 +303,6 @@ class TestATestRunKeepsTheSameRecordAsABuild(_FakeWalk):
         self.assertEqual(rec["state"], "silent", cp.stdout)
         self.assertIn("counted as busy", self.notes(rec))
         self.assertEqual(cp.returncode, 2, cp.stdout)
-
-    def test_the_record_cmd_test_writes_carries_the_deadline(self):
-        text = (REPO / "cmd" / "test").read_text()
-        self.assertIn("task_begin test here", text)
-        self.assertIn("lib/watchdog.sh", text)
 
 
 class TestTheStalledStateIsOnlyAKill(_FakeWalk):

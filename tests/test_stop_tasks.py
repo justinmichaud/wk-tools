@@ -9,6 +9,8 @@ tasks are read again afterwards, and one still there is the exit status.
 
 Run: python3 -m unittest tests.test_stop_tasks -v
 """
+import importlib.machinery
+import importlib.util
 import os
 import shlex
 import shutil
@@ -16,7 +18,7 @@ import subprocess
 import unittest
 from pathlib import Path
 
-from tests.support import WkTest, bash
+from tests.support import REPO, WkTest, bash
 
 
 def alive(pid):
@@ -70,11 +72,11 @@ class TestStopTasks(WkTest):
 
     def test_each_task_is_ended_by_the_command_its_record_names(self):
         one, flag_one = self.a_live_task("build", "ws1")
-        two, flag_two = self.a_live_task("rc", "ws2")
+        two, flag_two = self.a_live_task("test", "ws2")
         cp = self.run_wk("stop", "--tasks", "--yes", env=self.env)
         self.assertEqual(0, cp.returncode, cp.stdout)
         self.assertIn("build ws1", cp.stdout)
-        self.assertIn("rc ws2", cp.stdout)
+        self.assertIn("test ws2", cp.stdout)
         self.assertTrue(flag_one.exists(), cp.stdout)
         self.assertTrue(flag_two.exists(), cp.stdout)
         self.assertFalse(alive(one), cp.stdout)
@@ -146,3 +148,48 @@ class TestWhichVerdictsAreStillGoing(WkTest):
         got = self.verdicts("ok", "failed", "died", "cancelled", "stopped",
                             "oom", "stalled", "refused")
         self.assertEqual(["no"] * 8, list(got.values()), got)
+
+
+def load_stop():
+    path = str(REPO / "cmd" / "stop")
+    loader = importlib.machinery.SourceFileLoader("wk_cmd_stop", path)
+    spec = importlib.util.spec_from_file_location("wk_cmd_stop", path, loader=loader)
+    m = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m)
+    return m
+
+
+class TestStopWorkspace(unittest.TestCase):
+    """`wk stop <ws>` is the driver's stop and nothing else, on every kind: no session of its own to end first."""
+
+    class Target:
+        def __init__(self, kind):
+            self.kind, self.calls = kind, []
+
+        def info(self, ws):
+            return "running"
+
+        def stop(self, ws):
+            self.calls.append(("stop", ws))
+            return True
+
+        def __getattr__(self, name):
+            raise AssertionError("wk stop <ws> asked the target for %s" % name)
+
+    class Reg:
+        def __init__(self, target):
+            self.target = target
+
+        def ws_target(self, name):
+            return "t"
+
+        def load(self, name):
+            return self.target
+
+    def test_each_kind_is_stopped_by_its_driver_alone(self):
+        stop = load_stop()
+        for kind in ("container", "vm", "remote"):
+            with self.subTest(kind=kind):
+                t = self.Target(kind)
+                self.assertEqual(0, stop.stop_workspace(self.Reg(t), "ws"))
+                self.assertEqual([("stop", "ws")], t.calls)

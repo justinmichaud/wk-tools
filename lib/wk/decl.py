@@ -2,8 +2,7 @@
 cmd/<name> and the `# wk <name> ... -- <summary>` synopsis. Keys: where=,
 name= (with @N for the slot), takes=, ready=yes, group=, lifecycle, readonly,
 destructive, dryrun, opts, passthrough[=tail], broker, outside, forward=no,
-here, bare=merged, post=, values=, needs; `sub`/`flag` lines override per
-subverb or flag."""
+here, bare=merged, post=, values=, needs; `sub`/`flag` lines override per subverb or flag."""
 
 import re
 from pathlib import Path

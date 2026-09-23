@@ -23,13 +23,14 @@ Run: python3 -m unittest tests.test_wk_overrides_cmd1 -v
 """
 import re
 import subprocess
+import sys
 import unittest
 
 from tests.support import REPO, WkTest, bash, fake_workspace, run, scratch_dir
 
 BENCH = REPO / "cmd" / "bench"
 BRIDGE = REPO / "cmd" / "bridge"
-BUILD = REPO / "cmd" / "build"
+BUILD_PY = REPO / "lib" / "wk" / "build.py"
 
 
 def _lift_func(path, name):
@@ -298,18 +299,17 @@ class TestTheWorkspaceLockIsRefusedNotWaitedOut(WkTest):
     """
 
     def test_build_asks_for_the_lock_with_no_wait_at_all(self):
-        text = BUILD.read_text()
-        self.assertIn('hold_lock "ws-$NAME" -w 0', text)
-        self.assertIn('if lock_alive "ws-$NAME"; then', text,
-                      "the refusal is the named one, not hold_lock's own message")
+        text = BUILD_PY.read_text()
+        self.assertIn('lock.hold("ws-" + name, timeout=0)', text)
         self.assertNotIn("WK_BUILD_LOCK_WAIT", text)
 
     def test_the_refusal_names_the_command_that_stops_the_other_build(self):
-        text = BUILD.read_text()
-        refusal = text[text.index('if lock_alive "ws-$NAME"; then'):]
-        refusal = refusal[:refusal.index("hold_lock")]
+        """The named refusal comes before the lock's own wait message could."""
+        text = BUILD_PY.read_text()
+        refusal = text[text.index('holder = lock.holder_pid("ws-" + name)'):]
+        refusal = refusal[:refusal.index("lock.hold(")]
         self.assertIn("already building", refusal)
-        self.assertIn("$_KILL_CMD", refusal)
+        self.assertIn("self.kill", refusal)
 
     def test_a_yocto_stage_still_waits_for_the_stage_ahead_of_it(self):
         yocto = (REPO / "image" / "yocto.sh").read_text()
@@ -319,23 +319,16 @@ class TestTheWorkspaceLockIsRefusedNotWaitedOut(WkTest):
 
 
 class TestBuildBabysitDefaults(WkTest):
-    """--babysit's model/attempts defaults: WK_BABYSIT_MODEL is what bare
-    `--babysit` (no `=model`) uses, WK_BABYSIT_ATTEMPTS how many fixes it
-    tries before giving up."""
+    """--babysit's model/attempts defaults: WK_BABYSIT_MODEL is the model, WK_BABYSIT_ATTEMPTS how
+    many fixes it tries before giving up (tests/test_wk_build.py runs both overridden)."""
 
-    def test_babysit_model_default_and_override(self):
-        expr = _extract_expr(BUILD, r'BABYSIT="\$\{WK_BABYSIT_MODEL:-haiku\}"')
-        default = bash(f'{expr}\necho "$BABYSIT"')
-        override = bash(f'{expr}\necho "$BABYSIT"', env={"WK_BABYSIT_MODEL": "sonnet"})
-        self.assertEqual(default.stdout.strip(), "haiku")
-        self.assertEqual(override.stdout.strip(), "sonnet")
-
-    def test_babysit_attempts_default_and_override(self):
-        expr = _extract_expr(BUILD, r'"\$\{WK_BABYSIT_ATTEMPTS:-5\}"')
-        default = bash(f'echo {expr}')
-        override = bash(f'echo {expr}', env={"WK_BABYSIT_ATTEMPTS": "9"})
-        self.assertEqual(default.stdout.strip(), "5")
-        self.assertEqual(override.stdout.strip(), "9")
+    def test_babysit_model_and_attempts_defaults(self):
+        sys.path.insert(0, str(REPO / "lib"))
+        from wk import build
+        self.assertEqual((build.BABYSIT_MODEL, build.BABYSIT_ATTEMPTS), ("haiku", 5))
+        text = BUILD_PY.read_text()
+        self.assertIn('env.get("WK_BABYSIT_MODEL") or BABYSIT_MODEL', text)
+        self.assertIn('env.get("WK_BABYSIT_ATTEMPTS") or BABYSIT_ATTEMPTS', text)
 
 
 class TestBuildMemInterval(WkTest):
@@ -356,7 +349,7 @@ class TestBuildMemInterval(WkTest):
 class TestRemoteMaxJobsTombstone(WkTest):
     """WK_REMOTE_MAX_JOBS: a name no conf sets any more -- the job count is
     always derived per build from what the target has free
-    (export_target_resources, lib/resources.sh). Set anyway (a leftover
+    (Resources, lib/wk/resources.py). Set anyway (a leftover
     conf line), cmd/build warns and names the fix rather than silently
     reading it -- CLAUDE.md's tombstone shape, a name the tooling still
     refuses, naming its replacement."""

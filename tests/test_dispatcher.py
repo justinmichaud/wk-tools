@@ -178,12 +178,12 @@ class TestWorkspaceRefusals(WkTest):
     host-only command must refuse inside a workspace, and it must name the
     reason rather than fail some other way."""
 
-    def test_wk_verify_refuses_inside_a_workspace(self):
-        """`wk verify` refuses inside a workspace"""
+    def test_wk_doctor_takes_no_workspace_inside_one(self):
+        """`wk doctor <ws>` measures from the host; inside, `wk doctor` checks this one"""
         with fake_workspace() as ws:
-            cp = ws.run("verify", "selftest-ws")
-        self.assertNotEqual(cp.returncode, 0, "wk verify succeeded inside a workspace")
-        self.assertIn("acts on a host", cp.stdout + cp.stderr)
+            cp = ws.run("doctor", "other-ws")
+        self.assertNotEqual(cp.returncode, 0, "wk doctor <ws> was accepted inside a workspace")
+        self.assertIn("no workspace argument in here", cp.stdout + cp.stderr)
 
     def test_host_only_commands_refuse_inside_a_workspace(self):
         """host-only commands refuse inside a workspace"""
@@ -287,7 +287,7 @@ class TestUnknownWorkspaceName(WkTest):
     # exercised through the declaration check below rather than by running.
     COMMANDS = (
         "build", "enter", "gui", "logs", "pr", "profile",
-        "remotes", "run", "status", "sync", "test", "verify", "zed",
+        "run", "status", "sync", "test", "doctor", "zed",
     )
 
     def test_a_name_at_another_slot_is_refused_the_same_way(self):
@@ -665,9 +665,9 @@ class TestHelpNamesEveryWhereOverride(WkTest):
 
 
 class TestNothingBootsTheMachineToRefuse(WkTest):
-    """`wk verify <a name with a typo in it>` used to start the podman machine
-    -- 20GB of VM -- so that the VM's own dispatcher could print the usage line.
-    Every `wk selftest` did it too, which is how a stopped machine kept coming
+    """`wk enter <a name with a typo in it>` must not start the podman machine
+    -- 20GB of VM -- just so its own dispatcher can print the usage line, and
+    neither must `wk selftest`: that is how a stopped machine keeps coming
     back on a workstation.
 
     Starting it is a convenience for a person who typed the command. A script,
@@ -698,7 +698,7 @@ exit 0
 
     @unittest.skipUnless(sys.platform == "darwin", "forwarding into the podman VM is the macOS host's")
     def test_a_forward_into_a_stopped_machine_is_refused_without_a_terminal(self):
-        cp, asked = self._forward("verify", "nosuchws-" + rand_suffix())
+        cp, asked = self._forward("enter", "nosuchws-" + rand_suffix())
         self.assertNotEqual(cp.returncode, 0, cp.stdout)
         self.assertIn("wk start", cp.stdout)
         self.assertNotIn("machine start", asked,

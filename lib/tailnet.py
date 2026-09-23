@@ -1,6 +1,4 @@
-"""tailnet.py retire <name> | check | key-live <id> | key-mint <tag> -- what the
-fleet asks of the tailnet through its API credential; a minted key has the shape
-lib/credcheck.py's `tailnet` rule describes, pre-authorized besides.
+"""tailnet.py retire <name> | check | key-live <id> | key-mint <tag> -- what the fleet asks of the tailnet through its API credential; a minted key has the shape lib/credcheck.py's `tailnet` rule describes, pre-authorized besides.
 Exit: 0 done, 2 no such node / no such key, 3 online, 4 no credential, 5 refused, 6 unreachable."""
 import json
 import os

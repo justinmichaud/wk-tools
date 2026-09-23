@@ -173,7 +173,7 @@ A workspace's checkout is on `main`, tracking `origin/main`, with four
 remotes: `origin` (WebKit/WebKit, fetch only), `wpe` (WPEWebKit, fetch
 only), `fork` and `forkwpe` (yours; the only ones a push reaches). Every
 fetch is a local read of the machine's mirror. `git-webkit setup` has already
-run. `wk remotes <ws>` checks the wiring; `--fix` re-asserts it.
+run. `wk sync <ws>` reads the wiring back as it fetches; `--fix` re-asserts it.
 
 **Files in and out**
 
@@ -236,9 +236,11 @@ wk sync bug-238                         # one workspace's fetch
 wk sync --mirror                        # the mirror alone
 wk sync --tools buildbox4               # that machine's wk-tools, mirror and snapshot
 wk sync --all                           # every machine
+wk sync bug-238 --fix                   # re-assert its remotes and git-webkit setup, then fetch
 ```
 
-A sync fetches and never checks out. Tooling goes to a machine as a git
+A sync fetches and never checks out, and names any checkout, or base
+snapshot, whose remotes are wired wrong. Tooling goes to a machine as a git
 bundle of HEAD; an uncommitted tree here is refused.
 
 **Profile**
@@ -384,7 +386,6 @@ wk bridge status tailnet-bridge-generic
 ```sh
 wk ai claude bug-238                    # verifies the sandbox first; refuses if it fails
 wk ai claude bug-238 -r                 # resume
-wk ai claude bug-238 --rc               # a Remote Control server; --rc --stop ends it
 wk ai pi bug-238                        # the pi agent
 wk ai claude                            # inside a workspace: this one
 ```
@@ -392,8 +393,13 @@ wk ai claude                            # inside a workspace: this one
 An agent cannot push, commit or build directly. Pushing needs a key that is
 not there (`wk push`, below). Committing is walled: the checkout's `.git`
 commit parts are mounted read-only under the agent. Building goes through
-`wk build`: the build tools on `PATH` refuse an agent by name. `wk verify
+`wk build`: the build tools on `PATH` refuse an agent by name. `wk doctor
 <ws>` measures all three from inside.
+
+A Claude session on a terminal starts with Remote Control on, named after the
+workspace, so claude.ai/code and the mobile app can join it. It needs the
+claude.ai login; where only the inference token authenticates the session (a
+build machine), the session starts without it and says so.
 
 **`wk key`: every credential, one fleet**
 
@@ -402,7 +408,7 @@ wk key setup                            # deploy keys, then every credential thi
 wk key check                            # one row per credential, what its issuer says now
 wk key set github-pat                   # one by name; --replace rotates it
 wk key set claude                       # the inference token, for build machines
-wk key set claude-login                 # the account login, which --rc needs
+wk key set claude-login                 # the account login, which Remote Control needs
 wk key deploy --rotate                  # the deploy keys, revoked and reissued fleet-wide
 ```
 
@@ -560,13 +566,13 @@ Every `WK_*` variable is read with a default; each moves one decision.
 `WK_BUILD_MACHINE`, `WK_BUILD_DISK_GB`.
 
 **Where state lives** — `WK_LOCAL_STORE`, `WK_REMOTE_STORE`, `WK_LOCK_DIR`,
-`WK_PREFETCH_DIR`, `WK_MARKER`, `WK_REMOTE_MARKER`, `WK_IMAGE_MARKER`,
+`WK_MARKER`, `WK_REMOTE_MARKER`, `WK_IMAGE_MARKER`,
 `WK_SESSION_MODE_FILE`, `WK_MIRROR_BRANCHES`, `WK_TART_CACHE_GB`, `WK_CMD`.
 On a macOS workstation the store is the podman machine's, so this machine's
 own records go under `~/.local/state/wk`.
 
 **The container target** — `WK_SDK`, `WK_SDK_IMAGE`, `WK_CONTAINER_USER`,
-`WK_TOOLS_SRC`, `WK_MACHINE`, `WK_SANDBOX`, `WK_MIRROR` (the mirror's path
+`WK_TOOLS_SRC`, `WK_MACHINE`, `WK_MIRROR` (the mirror's path
 inside a container).
 
 **The macOS guest** — `WK_VM_IMAGE`, `WK_VM_BASE`, `WK_VM_USER`,

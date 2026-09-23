@@ -139,12 +139,15 @@ class TestWhatItRefuses(RmAllFixture):
         self.assertIn("acts on a host", cp.stdout, cp.stdout)
         self.assertIn("wk rm --all", cp.stdout, cp.stdout)
 
-    def test_a_named_removal_still_has_no_dry_run(self):
-        """only `--all` is on the `act` path, and the dispatcher refuses the
-        flag everywhere else rather than letting it through"""
+    def test_a_named_dry_run_prints_the_removal_and_destroys_nothing(self):
+        self.make("alpha")
         cp = self.rm("alpha", "--dry-run")
-        self.assertEqual(cp.returncode, 2, cp.stdout)
-        self.assertIn("has no dry run yet", cp.stdout, cp.stdout)
+        self.assertEqual(cp.returncode, 0, cp.stdout)
+        self.assertIn("alpha@fakebox", cp.stdout, cp.stdout)
+        self.assertIn("would ", cp.stdout, cp.stdout)
+        self.assertNotIn("workspace 'alpha' destroyed", cp.stdout, cp.stdout)
+        self.assertEqual(self.remaining(), ["alpha"], cp.stdout)
+        self.assertTrue((self.store / "ws" / "alpha").is_dir(), cp.stdout)
 
 
 if __name__ == "__main__":

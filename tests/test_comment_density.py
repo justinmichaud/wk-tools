@@ -35,8 +35,10 @@ import io
 import os
 import re
 import subprocess
+import tempfile
 import tokenize
 import unittest
+from pathlib import Path
 
 from tests.support import REPO
 
@@ -64,9 +66,9 @@ GRANT_STATEMENTS = {
 
 
 def tracked_source_files():
-    out = subprocess.run(["git", "ls-files"], cwd=REPO,
-                         capture_output=True, text=True, check=True).stdout.split()
-    for rel in out:
+    out = subprocess.run(["git", "ls-files", "--cached", "--others", "--exclude-standard"],
+                         cwd=REPO, capture_output=True, text=True, check=True).stdout.split()
+    for rel in sorted(set(out)):
         if rel.startswith(("tests/", "docs/", "claude/skills/synced/")) \
                 or rel in GRANT_STATEMENTS:
             continue
@@ -120,9 +122,7 @@ def python_counts(src):
             text = tok.string.strip()
             if DIRECTIVE.match(text):
                 continue
-            # A trailing comment rides on a code line and is not a prose line.
-            if lines[tok.start[0] - 1].strip().startswith("#"):
-                prose += 1
+            prose += 1
     except (tokenize.TokenError, IndentationError, SyntaxError):
         pass
     try:
@@ -150,20 +150,29 @@ def prints_its_own_usage(rel, src):
     return rel.startswith("cmd/") or 'usage_block "$0"' in src
 
 
+def is_python_source(rel, lines):
+    """A `.py` file is Python; so is an extensionless file (cmd/*) whose
+    shebang names python3 -- the dispatcher runs either as a program, and the
+    Python rules (docstrings count) apply to what actually runs as Python."""
+    if rel.endswith(".py"):
+        return True
+    return bool(lines) and lines[0].startswith("#!") and "python3" in lines[0]
+
+
 def body_ratio(rel, path):
     """(non-blank body lines, prose lines) for one file."""
     src = path.read_text(encoding="utf-8", errors="replace")
     lines = src.splitlines()
     start = 1 if lines and lines[0].startswith("#!") else 0
 
-    if rel.endswith(".py"):
-        return python_counts("\n".join(lines[start:]))
-
     end = start
     if prints_its_own_usage(rel, src):
         while end < len(lines) and (lines[end].lstrip().startswith("#")
                                     or not lines[end].strip()):
             end += 1
+
+    if is_python_source(rel, lines):
+        return python_counts("\n".join(lines[end:]))
     return shell_counts(lines[end:])
 
 
@@ -196,6 +205,27 @@ class TestCommentDensity(unittest.TestCase):
         self.assertLess(ratio, MAX_BODY_PROSE,
                         f"tree body prose is {100 * ratio:.1f}% "
                         f"({prose_total}/{body_total} lines)")
+
+    def test_a_trailing_comment_counts_as_prose(self):
+        nonblank, prose = python_counts("x = 1  # explains why x has to be 1\n")
+        self.assertEqual((nonblank, prose), (1, 1))
+
+    def test_a_cmd_python_files_docstring_counts_and_its_help_block_does_not(self):
+        src = (
+            "#!/usr/bin/env python3\n"
+            "#\n"
+            "# wk thing <workspace> -- do a thing\n"
+            "# wk: where=workspace name=required\n"
+            "\n"
+            "def f():\n"
+            "    \"\"\"Explains what f does.\"\"\"\n"
+            "    return 1\n"
+        )
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "thing"
+            path.write_text(src)
+            nonblank, prose = body_ratio("cmd/thing", path)
+        self.assertEqual((nonblank, prose), (3, 1))
 
     def test_the_exempt_files_are_the_privileged_helpers_and_still_exist(self):
         """An exemption nobody can see is an exemption that grows. Each name

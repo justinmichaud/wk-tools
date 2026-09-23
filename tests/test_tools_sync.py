@@ -33,7 +33,6 @@ TOUCHED = [
     "lib/tools.sh",
     "targets/remote.sh",
     "targets/vm.sh",
-    "cmd/sync",
     "cmd/remote",
 ]
 
@@ -494,18 +493,3 @@ class TestStatusToolsRow(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-
-
-class TestAToolsSweepThatLostATargetFails(unittest.TestCase):
-    """`wk sync --tools` prints "N target(s) did not take the tooling" when a
-    driver's push failed; the command's exit status says the same, whatever
-    the mirror and snapshot half did afterwards (measured live: it exited 0
-    over three refused targets)."""
-
-    def test_the_furniture_verdict_is_the_exit_status(self):
-        text = (REPO / "cmd" / "sync").read_text()
-        self.assertNotIn('sync_furniture || true', text)
-        self.assertIn('sync_furniture || FURNITURE_RC=1', text)
-        # One exit carries every verdict, at the end of the run.
-        self.assertIn(
-            '[ "$FURNITURE_RC" -eq 0 ] && [ "$MIRROR_RC" -eq 0 ] && [ "$STORE_RC" -eq 0 ] || exit 1', text)

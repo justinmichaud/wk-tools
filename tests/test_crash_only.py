@@ -17,6 +17,7 @@ Run: python3 -m unittest tests.test_crash_only -v
 import os
 import re
 import subprocess
+import sys
 import time
 import unittest
 
@@ -30,6 +31,10 @@ from tests.support import (
     run,
     scratch_dir,
 )
+
+sys.path.insert(0, str(REPO / "lib"))
+from wk import record, workspace  # noqa: E402
+from wk.machine import Local  # noqa: E402
 
 
 def _wait_dead(pid, timeout=60):
@@ -234,7 +239,7 @@ gc_rubble
 
 class TestGcReapsDeadCreationRecord(unittest.TestCase):
     """cmd/gc's orphaned-creation-record reaping is a callable seam
-    (gc_creation_records, lib/target.sh, next to ws_target/ws_exists), so
+    (gc_creation_records, lib/target.sh, next to ws_target), so
     this drives it directly against a fake WK_STORE and a stubbed
     target_all/load_target -- the way test_state.py's TestWsStateWords
     drives ws_state -- rather than the real shared store cmd/gc otherwise
@@ -301,71 +306,34 @@ done
 
 class TestRmTakesTheWorkspacesRecordsWithIt(unittest.TestCase):
     """`wk rm` converges on everything a workspace left, its task records
-    (lib/task.sh) included: a record that outlived its workspace would name a
-    kill command for a job whose checkout is gone. A record of a job still
-    running is a refusal instead -- destroying the workspace under it leaves it
-    compiling into nothing. Driven through the three functions cmd/rm defines
-    for it, lifted out of the file the way tests/test_status_base.py lifts
-    report_sdk_image."""
+    included: a record that outlived its workspace would name a kill command
+    for a job whose checkout is gone. A record of a job still running is a
+    refusal instead -- destroying the workspace under it leaves it compiling
+    into nothing. Driven through wk.workspace's helpers over real record
+    directories; rm_one's call sites are tests/test_wk_workspace.py's."""
 
-    PRELUDE = ('set -euo pipefail\n'
-               '. "%s/lib/common.sh"\n' % REPO
-               + '. "%s/lib/task.sh"\n' % REPO)
-
-    def _lift(self):
-        out = []
-        for fn in ("ws_task_records", "ws_task_live_lines", "ws_task_records_remove"):
-            cp = subprocess.run(["sed", "-n", "/^%s()/,/^}/p" % fn,
-                                 str(REPO / "cmd" / "rm")],
-                                capture_output=True, text=True, check=True)
-            self.assertTrue(cp.stdout.strip(), "%s() is not in cmd/rm" % fn)
-            out.append(cp.stdout)
-        return "".join(out)
-
-    def _run(self, store, body):
-        cp = bash(self.PRELUDE + self._lift() + body,
-                  env={"WK_STORE": str(store)})
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        return cp.stdout
+    def _records(self, tmp):
+        return record.Records(tmp, env={"WK_STORE": str(tmp)}, machine=Local())
 
     def test_a_running_job_is_named_with_the_command_that_stops_it(self):
         with scratch_dir(prefix="wk-test-rm-records-") as tmp:
-            out = self._run(tmp, '''
-d=$(task_begin build here ws1 "wk build ws1 --kill" /nolog compile)
-task_pid "$d" $$
-d=$(task_begin rc here ws1 "wk ai claude ws1 --rc --stop" /nolog session)
-task_pid "$d" $$
-d=$(task_begin test here ws1 "wk test ws1 --kill" /nolog jsc)
-task_pid "$d" 4194304
-ws_task_live_lines ws1
-''')
+            recs = self._records(tmp)
+            recs.begin("build", "here", "ws1", "wk build ws1 --kill", "/nolog", ["compile"])
+            recs.begin("test", "here", "ws1", "wk test ws1 --kill", "/nolog", ["jsc"], pid=4194304)
+            out = workspace.live_task_lines(recs, "ws1")
             self.assertIn("wk build ws1 --kill", out)
-            self.assertNotIn("--rc --stop", out,
-                             "rm stops the rc session itself; it is not a refusal")
-            self.assertNotIn("wk test ws1 --kill", out,
-                             "a record whose pid is gone is not a running job")
+            self.assertNotIn("wk test ws1 --kill", out, "a record whose pid is gone is not a running job")
 
     def test_every_record_of_that_workspace_goes_and_no_others(self):
         with scratch_dir(prefix="wk-test-rm-records-") as tmp:
-            out = self._run(tmp, '''
-task_begin build here ws1 "wk build ws1 --kill" /nolog compile >/dev/null
-task_begin rc here ws1 "wk ai claude ws1 --rc --stop" /nolog session >/dev/null
-task_begin build here ws2 "wk build ws2 --kill" /nolog compile >/dev/null
-ws_task_records_remove ws1
-task_list
-''')
-            left = [l for l in out.splitlines() if l.strip()]
-            self.assertEqual(len(left), 1, out)
-            self.assertIn("build-ws2-", left[0])
-
-    def test_rm_refuses_on_a_live_job_and_removes_the_records_when_it_is_done(self):
-        """The two call sites in cmd/rm itself: the refusal before the lock,
-        and the removal on each path that finishes."""
-        text = (REPO / "cmd" / "rm").read_text()
-        refusal = text[text.index('_live=$(ws_task_live_lines "$NAME")'):]
-        self.assertIn("has work running in it", refusal[:400])
-        self.assertEqual(text.count('ws_task_records_remove "$NAME"'), 2,
-                         "a path that finishes a removal leaves the records behind")
+            recs = self._records(tmp)
+            recs.begin("build", "here", "ws1", "wk build ws1 --kill", "/nolog", ["compile"], pid=4194304)
+            recs.begin("test", "here", "ws1", "wk test ws1 --kill", "/nolog", ["jsc"], pid=4194304)
+            recs.begin("build", "here", "ws2", "wk build ws2 --kill", "/nolog", ["compile"], pid=4194304)
+            workspace.remove_task_records(recs, "ws1")
+            left = [t.id for t in recs.list()]
+            self.assertEqual(len(left), 1, left)
+            self.assertTrue(left[0].startswith("build-ws2-"), left)
 
 if __name__ == "__main__":
     unittest.main()

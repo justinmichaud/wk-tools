@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/usr/bin/env python3
 #
 # wk pr [<workspace>] <user>:<branch>|<n>|wpe:<n> -- check out a PR head, from either project
 # wk: where=workspace name=optional takes=1 ready=yes group=sources
@@ -37,165 +37,207 @@
 #   --draft   open it as a draft
 #   --web     open the browser's new-PR form instead of creating it directly
 
-set -euo pipefail
-WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-. "$WK_ROOT/lib/common.sh"
-. "$WK_ROOT/lib/resources.sh"
-. "$WK_ROOT/lib/store.sh"
-. "$WK_ROOT/lib/target.sh"
+import os
+import re
+import subprocess
+import sys
 
-# pr_open_target <src-dir> -- prints "<base-repo>\t<user>:<branch>\t<fork-remote>\t<branch>".
-# No WK_ROOT and no color codes, so it ships via `declare -f` into a workspace.
-pr_open_target() {
-    local src="$1" branch dirty up up_remote up_url up_repo fork url owner base _forks _rn _ru
-    branch=$(git -C "$src" symbolic-ref --quiet --short HEAD 2>/dev/null) || {
-        printf 'error: %s\n' "'wk pr open' needs a branch checked out, not a detached HEAD" >&2
-        return 1
-    }
-    if [ "$branch" = main ]; then
-        printf 'error: %s\n' "'wk pr open' cannot open 'main' as a pull request -- create a branch first" >&2
-        return 1
-    fi
-    dirty=$(git -C "$src" status --porcelain)
-    if [ -n "$dirty" ]; then
-        printf 'error: %s\n' "the tree has uncommitted changes -- commit or stash them: git -C $src status" >&2
-        return 1
-    fi
-    up=$(git -C "$src" rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null) || up=""
-    if [ -z "$up" ]; then
-        printf 'error: %s\n' "'$branch' has no upstream, so 'wk pr open' cannot tell which project it belongs to -- track one first: git branch -u origin/main (WebKit) or wpe/main (WPEWebKit)" >&2
-        return 1
-    fi
-    up_remote="${up%%/*}"
-    up_url=$(git -C "$src" config --get "remote.$up_remote.url" 2>/dev/null) || up_url=""   # `git remote get-url` applies the url.<mirror>.insteadOf rewrite a wired checkout carries, under which every remote answers with the mirror path and both projects read as one repository
-    up_repo=$(printf '%s' "$up_url" | sed -E 's#(\.git)?$##; s#.*/##')
-    _forks=$(wk_push_forks | awk 'NF {printf " %s", $1}')
-    fork=$(wk_push_forks | awk -v r="$up_repo" 'NF && $2 ~ ("/" r "$") { print $1; exit }')
-    if [ -z "$fork" ]; then
-        printf 'error: %s\n' "'$branch' tracks '$up' ($up_url), not a known upstream (origin or wpe) -- 'wk pr open' only knows WebKit and WPEWebKit" >&2
-        return 1
-    fi
-    url=$(git -C "$src" config --get "remote.$fork.url" 2>/dev/null) || {
-        printf 'error: %s\n' "no '$fork' remote here -- 'wk remotes --fix' wires it" >&2
-        return 1
-    }
-    owner=$(printf '%s' "$url" | sed -E 's#\.git$##; s#.*[:/]([^/]+)/[^/]+$#\1#')
-    # The project's upstream, not the remote the branch happens to track: `wk pr` leaves a branch tracking the fork it came from, and a pull request against that is one against yourself.
-    base=""
-    while read -r _rn _ru; do
-        [ -n "$_rn" ] || continue
-        case " $_forks " in *" $_rn "*) continue ;; esac
-        case "$_ru" in */"$up_repo".git) base=$(printf '%s' "$_ru" | sed -E 's#^https://github.com/##; s#\.git$##'); break ;; esac
-    done <<EOF
-$(wk_remotes)
-EOF
-    if [ -z "$base" ]; then
-        printf 'error: %s\n' "no upstream in wk_remotes for the project '$up_repo', so there is nothing to open '$branch' against" >&2
-        return 1
-    fi
-    printf '%s\t%s\t%s\t%s\n' "$base" "$owner:$branch" "$fork" "$branch"
-}
+ROOT = os.environ.get("WK_ROOT") or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(ROOT, "lib"))
 
-# pr_open_gh_args <base-repo> <head> [--draft] [--web] -- 'gh pr create' argv, one token per line.
-pr_open_gh_args() {
-    local base="$1" head="$2" a; shift 2
-    printf '%s\n' --repo "$base" --head "$head" --fill
-    for a in "$@"; do
-        case "$a" in
-            --draft|--web) printf '%s\n' "$a" ;;
-        esac
-    done
-}
+from wk import shell, targets  # noqa: E402
+from wk.act import Refused, die, info, log, warn  # noqa: E402
+from wk.targets import show  # noqa: E402
+from wk.workspace import require_name  # noqa: E402
 
-NAME="${WK_NAME:-}"
-SPEC="${1:-}"
+WK = os.path.join(ROOT, "wk")
 
-# 'rebase' never matches a workspace name, so it survives as $1 and a name after it is $2.
-if [ "$SPEC" = rebase ]; then
-    [ -n "$NAME" ] || NAME="${2:-}"
-    [ -n "$NAME" ] || die "usage: wk pr rebase [<workspace>]; run inside a workspace, or name one; see wk pr -h"
-    shift $#
-    require_name "$NAME"
-    load_target "$(ws_target "$NAME")"
-    SRC=$(t_src "$NAME")
 
-    MIRROR=$(t_mirror_dir "$NAME")
-    info "fetching in '$NAME' from the mirror, then rebasing onto origin/main"
-    if t_exec "$NAME" bash -c "
-        set -e
-        cd $(sh_quote "$SRC")
-        if [ -n $(sh_quote "$MIRROR") ] && [ -d $(sh_quote "$MIRROR") ]; then
-            git fetch --prune --quiet $(sh_quote "$MIRROR") '+refs/heads/*:refs/remotes/origin/*'
-        else
-            git fetch --prune --quiet origin
-        fi
-        git rebase origin/main
-    "; then
-        info "'$NAME' is rebased onto origin/main"
-        log  "  $(t_exec "$NAME" bash -c "cd $(sh_quote "$SRC") && git --no-pager log --oneline -1" 2>/dev/null | tr -d '\r')"
-        exit 0
-    else
-        warn "the rebase stopped -- almost always a conflict, and the sequencer holds where."
-        log  "  in the workspace:  git status; git rebase --continue   (or --abort)"
-        exit 1
-    fi
-fi
+class PrOpenError(Exception):
+    pass
 
-if [ "$SPEC" = open ]; then
-    shift
-    DRAFT="" WEB="" NAME2=""
-    while [ $# -gt 0 ]; do
-        case "$1" in
-            --draft) DRAFT=1; shift ;;
-            --web)   WEB=1; shift ;;
-            *)       NAME2="$1"; shift ;;
-        esac
-    done
-    [ -n "$NAME" ] || NAME="$NAME2"
-    [ -n "$NAME" ] || die "usage: wk pr open <workspace> [--draft] [--web]; see wk pr -h"
-    require_name "$NAME"
-    load_target "$(ws_target "$NAME")"
-    SRC=$(t_src "$NAME")
 
-    # Shipped via declare -f, not sourced remotely: a remote /opt/wk-tools may be stale or different.
-    info "reading '$NAME's branch and remotes"
-    _remote_script="$(declare -f wk_remotes wk_push_forks pr_open_target)
-pr_open_target $(sh_quote "$SRC")"
-    TARGET_LINE=$(t_exec "$NAME" bash -c "$_remote_script") \
-        || die "'$NAME' is not ready to open as a pull request -- see above"
-    BASE=$(printf '%s' "$TARGET_LINE" | cut -f1)
-    HEAD=$(printf '%s' "$TARGET_LINE" | cut -f2)
-    FORK=$(printf '%s' "$TARGET_LINE" | cut -f3)
-    BRANCH=$(printf '%s' "$TARGET_LINE" | cut -f4)
+def _run_local(argv):
+    cp = subprocess.run(argv, capture_output=True, text=True)
+    return cp.returncode, cp.stdout, cp.stderr
 
-    "$WK_ROOT/wk" push status >/dev/null 2>&1 \
-        || die "'wk pr open' pushes '$BRANCH' to '$FORK', and the deploy key is held back.
-    wk push on"
 
-    info "pushing '$BRANCH' to '$FORK'"
-    t_exec "$NAME" git -C "$SRC" push -u "$FORK" "$BRANCH" \
-        || die "the push to '$FORK' failed -- see above.
-    If the deploy key is the problem:  wk push on"
+def _owner_of(url):
+    m = re.search(r"[:/]([^/]+)/[^/]+$", re.sub(r"\.git$", "", url))
+    return m.group(1) if m else ""
 
-    GH_ARGS=()
-    while IFS= read -r _a; do GH_ARGS+=("$_a"); done \
-        < <(pr_open_gh_args "$BASE" "$HEAD" ${DRAFT:+--draft} ${WEB:+--web})
 
-    info "opening a pull request: $BASE <- $HEAD"
-    gh pr create "${GH_ARGS[@]}"
-    exit 0
-fi
+def _repo_of(url):
+    return re.sub(r"(\.git)?$", "", url).rsplit("/", 1)[-1]
 
-[ -n "$SPEC" ] \
-    || die "usage: wk pr [<workspace>] <user>:<branch>|<n>|wpe:<n>, or 'wk pr rebase [<ws>]', or 'wk pr open <ws> [--draft] [--web]' (from the host); see wk pr -h"
-# takes=1 means the ref is never read as a workspace name, so what is missing is the workspace.
-[ -n "$NAME" ] \
-    || die "'wk pr $SPEC' does not say which workspace to check it out into.
-    Name one:        wk pr <workspace> $SPEC   ('wk ls' lists them)
-    or run it in one: wk pr $SPEC"
-shift $#
 
-require_name "$NAME"
-load_target "$(ws_target "$NAME")"
+def pr_open_target(src, run=_run_local, remotes=None, push_forks=None):
+    """(base-repo, "<owner>:<branch>", fork-remote, branch) for the checkout at `src`, or PrOpenError naming what stops it."""
+    def git(*args):
+        rc, out, _ = run(["git", "-C", str(src)] + list(args))
+        return rc, out.strip()
 
-wk_pr_checkout "$NAME" "$SPEC"
+    rc, branch = git("symbolic-ref", "--quiet", "--short", "HEAD")
+    if rc != 0 or not branch:
+        raise PrOpenError("'wk pr open' needs a branch checked out, not a detached HEAD")
+    if branch == "main":
+        raise PrOpenError("'wk pr open' cannot open 'main' as a pull request -- create a branch first")
+    _, dirty = git("status", "--porcelain")
+    if dirty:
+        raise PrOpenError("the tree has uncommitted changes -- commit or stash them: git -C %s status" % src)
+    rc, up = git("rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}")
+    if rc != 0 or not up:
+        raise PrOpenError("'%s' has no upstream, so 'wk pr open' cannot tell which project it belongs to -- "
+                          "track one first: git branch -u origin/main (WebKit) or wpe/main (WPEWebKit)" % branch)
+    up_remote = up.split("/", 1)[0]
+    # Not `git remote get-url`: through the mirror's insteadOf every remote reads as the mirror, and both projects as one.
+    _, up_url = git("config", "--get", "remote.%s.url" % up_remote)
+    up_repo = _repo_of(up_url)
+    if push_forks is None:
+        push_forks = shell.wk_push_forks(ROOT)
+    fork_names = {r for r, _, _ in push_forks}
+    # The project's upstream, not the remote the branch happens to track: `wk pr` leaves a
+    # branch tracking the fork it came from, and a pull request against that is one against yourself.
+    fork = next((r for r, repo, _ in push_forks if _repo_of(repo) == up_repo), None)
+    if not fork:
+        raise PrOpenError("'%s' tracks '%s' (%s), not a known upstream (origin or wpe) -- "
+                          "'wk pr open' only knows WebKit and WPEWebKit" % (branch, up, up_url))
+    rc, url = git("config", "--get", "remote.%s.url" % fork)
+    if rc != 0 or not url:
+        raise PrOpenError("no '%s' remote here -- 'wk sync --fix' wires it" % fork)
+    owner = _owner_of(url)
+    if remotes is None:
+        remotes = shell.wk_remotes(ROOT)
+    base = ""
+    for name, remote_url in remotes:
+        if name in fork_names:
+            continue
+        if remote_url.endswith("/%s.git" % up_repo):
+            base = re.sub(r"^https://github\.com/", "", remote_url)
+            base = re.sub(r"\.git$", "", base)
+            break
+    if not base:
+        raise PrOpenError("no upstream in wk_remotes for the project '%s', so there is nothing to open '%s' against"
+                          % (up_repo, branch))
+    return base, "%s:%s" % (owner, branch), fork, branch
+
+
+def pr_open_gh_args(base, head, *flags):
+    args = ["--repo", base, "--head", head, "--fill"]
+    args += [f for f in flags if f in ("--draft", "--web")]
+    return args
+
+
+def pr_rebase(target, name):
+    src, mirror = target.src(name), target.mirror_dir()
+    info("fetching in '%s' from the mirror, then rebasing onto origin/main" % name)
+    if mirror and target.exec(name, ["test", "-d", mirror]).ok:
+        r = target.exec(name, ["git", "-C", src, "fetch", "--prune", "--quiet", mirror,
+                               "+refs/heads/*:refs/remotes/origin/*"])
+    else:
+        r = target.exec(name, ["git", "-C", src, "fetch", "--prune", "--quiet", "origin"])
+    if r.ok:
+        r = target.exec(name, ["git", "-C", src, "rebase", "origin/main"])
+    if r.ok:
+        info("'%s' is rebased onto origin/main" % name)
+        r = target.exec(name, ["git", "-C", src, "--no-pager", "log", "--oneline", "-1"])
+        log("  %s" % r.out.replace("\r", "").strip())
+        return 0
+    show(r)
+    warn("the rebase stopped -- almost always a conflict, and the sequencer holds where.")
+    log("  in the workspace:  git status; git rebase --continue   (or --abort)")
+    return 1
+
+
+def pr_open(target, name, draft, web):
+    src = target.src(name)
+    info("reading '%s's branch and remotes" % name)
+
+    def _target_run(argv):
+        r = target.exec(name, argv)
+        return r.rc, r.out, r.err
+
+    try:
+        base, head, fork, branch = pr_open_target(src, run=_target_run)
+    except PrOpenError as e:
+        sys.stderr.write("error: %s\n" % e)
+        die("'%s' is not ready to open as a pull request -- see above" % name)
+
+    if subprocess.run([WK, "push", "status"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode != 0:
+        die("'wk pr open' pushes '%s' to '%s', and the deploy key is held back.\n    wk push on" % (branch, fork))
+
+    info("pushing '%s' to '%s'" % (branch, fork))
+    r = target.exec(name, ["git", "-C", src, "push", "-u", fork, branch])
+    show(r)
+    if not r.ok:
+        die("the push to '%s' failed -- see above.\n    If the deploy key is the problem:  wk push on" % fork)
+
+    flags = (["--draft"] if draft else []) + (["--web"] if web else [])
+    info("opening a pull request: %s <- %s" % (base, head))
+    return subprocess.run(["gh", "pr", "create"] + pr_open_gh_args(base, head, *flags)).returncode
+
+
+def _load(reg, name):
+    try:
+        return reg.load(reg.ws_target(name))
+    except LookupError as e:
+        die(str(e))
+
+
+def main(argv):
+    name = os.environ.get("WK_NAME", "")
+    spec = argv[0] if argv else ""
+    reg = targets.Registry(ROOT)
+
+    # 'rebase' never matches a workspace name, so it survives as argv[0] and a name after it is argv[1].
+    if spec == "rebase":
+        if not name:
+            name = argv[1] if len(argv) > 1 else ""
+        if not name:
+            die("usage: wk pr rebase [<workspace>]; run inside a workspace, or name one; see wk pr -h")
+        require_name(name)
+        target = _load(reg, name)
+        return pr_rebase(target, name)
+
+    if spec == "open":
+        rest = argv[1:]
+        draft = "--draft" in rest
+        web = "--web" in rest
+        name2 = ""
+        for a in rest:
+            if a not in ("--draft", "--web"):
+                name2 = a
+        if not name:
+            name = name2
+        if not name:
+            die("usage: wk pr open <workspace> [--draft] [--web]; see wk pr -h")
+        require_name(name)
+        target = _load(reg, name)
+        return pr_open(target, name, draft, web)
+
+    if not spec:
+        die("usage: wk pr [<workspace>] <user>:<branch>|<n>|wpe:<n>, or 'wk pr rebase [<ws>]', or "
+            "'wk pr open <ws> [--draft] [--web]' (from the host); see wk pr -h")
+    # takes=1 means the ref is never read as a workspace name, so what is missing is the workspace.
+    if not name:
+        die("'wk pr %s' does not say which workspace to check it out into.\n"
+            "    Name one:        wk pr <workspace> %s   ('wk ls' lists them)\n"
+            "    or run it in one: wk pr %s" % (spec, spec, spec))
+
+    require_name(name)
+    try:
+        tname = reg.ws_target(name)
+        reg.load(tname)
+    except LookupError as e:
+        die(str(e))
+    shell.pr_checkout(ROOT, reg.machine, tname, name, spec)
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main(sys.argv[1:]))
+    except Refused as e:
+        sys.exit(e.status)
+    except KeyboardInterrupt:
+        sys.exit(130)

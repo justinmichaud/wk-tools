@@ -392,7 +392,7 @@ class TestVerdictIsWhatAnotherWorkstationAsks(_Login):
 
 
 class TestTheRemedyReadsTheStore(_Login):
-    """`wk verify` and `wk ai claude` name the remedy when a workspace has no
+    """`wk doctor <ws>` and `wk ai claude` name the remedy when a workspace has no
     login, and it is derived from what this machine's store holds
     (agent_secret_store_remedy, lib/target.sh): nothing, one no workspace can
     use, or a usable one the workspace was made without."""
@@ -553,7 +553,7 @@ class TestNothingElseLearnedTheShape(unittest.TestCase):
                       'claude auth login', self.KEY)
 
     def test_no_other_file_names_the_keychain_item(self):
-        for f in ("cmd/ai", "cmd/verify", "lib/store.sh", "targets/vm.sh",
+        for f in ("cmd/ai", "lib/wk/wall.py", "lib/store.sh", "targets/vm.sh",
                   "container/firstrun.sh", "shell/bashrc"):
             with self.subTest(script=f):
                 self.assertNotIn("find-generic-password", (REPO / f).read_text())

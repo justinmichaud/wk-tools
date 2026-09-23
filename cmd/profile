@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/usr/bin/env python3
 #
 # wk profile [<workspace>] [flags] [file.js] -- profile a jsc or browser run
 # wk: where=workspace name=required values=--list ready=yes group=workspaces takes=* passthrough dryrun
@@ -27,7 +27,7 @@
 # What this doesn't decide is *what* to profile: the jsc shell with your file,
 # MiniBrowser with your page, or an attach to something already running -- one
 # that also picks the workload is `wk bench`. Artifacts stay in the workspace;
-# `--fetch` copies them out through t_pull, since `t_exec <ws> cat` corrupts a
+# `--fetch` copies them out through pull_dir, since a captured `cat` corrupts a
 # binary.
 #
 #   --mode <m>        which profiler runs (default sampling); native picks
@@ -57,409 +57,459 @@
 #
 # Everything after `--` is passed to what is being profiled.
 
-set -euo pipefail
-WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-. "$WK_ROOT/lib/common.sh"
-. "$WK_ROOT/lib/store.sh"
-. "$WK_ROOT/lib/target.sh"
-. "$WK_ROOT/build/configs.sh"
+import os
+import shlex
+import sys
+import time
 
-MODES="sampling bytecode samply instruments heaptrack massif"
+ROOT = os.environ.get("WK_ROOT") or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(ROOT, "lib"))
 
-NAME="${WK_NAME:-}"
+from wk import buildconf, shell, targets  # noqa: E402
+from wk.act import Refused, die, dry_run, info, log, warn  # noqa: E402
+from wk.machine import Local  # noqa: E402
+from wk.store import Store  # noqa: E402
+from wk.workspace import require_name  # noqa: E402
 
-PRIV=/usr/local/libexec/wk-quiesce-priv
-
-MODE=sampling
-CONFIG="${WK_CONFIG:-}"
-BROWSER=""; URL=""; PROCESS=web; PROCESS_EXPLICIT=""
-ATTACH=""; JITDUMP=""; MARKERS=""; TOP=""
-FETCH=""; FETCH_DIR=""; DRY="${WK_DRY_RUN:-}"; EXTRA_ENV=""
-ARGS=()
-
-while [ $# -gt 0 ]; do
-    case "$1" in
-        --mode)    MODE="${2:-}"; shift 2 ;;
-        --mode=*)  MODE="${1#*=}"; shift ;;
-        --config)  CONFIG="${2:-}"; shift 2 ;;
-        --config=*) CONFIG="${1#*=}"; shift ;;
-        --browser) BROWSER=1; shift
-                   case "${1:-}" in ''|-*) ;; *) URL="$1"; shift ;; esac ;;
-        --process) PROCESS="${2:-}"; PROCESS_EXPLICIT=1; shift 2 ;;
-        --process=*) PROCESS="${1#*=}"; PROCESS_EXPLICIT=1; shift ;;
-        --attach)  ATTACH="${2:-}"; shift 2 ;;
-        --attach=*) ATTACH="${1#*=}"; shift ;;
-        --jit-dump) JITDUMP=1; shift ;;
-        --markers) MARKERS=1; shift ;;
-        --top)     TOP="${2:-}"; shift 2 ;;
-        --top=*)   TOP="${1#*=}"; shift ;;
-        --fetch)   FETCH=1; shift
-                   case "${1:-}" in ''|-*) ;; *) FETCH_DIR="$1"; shift ;; esac ;;
-        --env)     EXTRA_ENV="$EXTRA_ENV
-${2:-}"; shift 2 ;;
-        --env=*)   EXTRA_ENV="$EXTRA_ENV
-${1#*=}"; shift ;;
-        --list)    printf '%s\n' $MODES; exit 0 ;;
-        --)        shift; while [ $# -gt 0 ]; do ARGS+=("$1"); shift; done ;;
-        *)         ARGS+=("$1"); shift ;;
-    esac
-done
-
-case "$PROCESS" in
-    ui|web|network|gpu) ;;
-    *) die "no such process '$PROCESS' -- there are: ui web network gpu" ;;
-esac
-
-require_name "$NAME"
-
-# Every refusal that reads only the arguments comes first: resolving the
-# workspace walks the fleet, and an argument error paid for that walk before
-# saying what was wrong with the command line.
-[ -n "$ATTACH" ] && [ -n "$BROWSER" ] && \
-    die "--attach and --browser are two ways to name the same thing: one starts
-    the browser under the profiler, the other profiles a process that is
-    already running. Pick one."
-
-[ -n "$PROCESS_EXPLICIT" ] && [ -z "$BROWSER" ] && \
-    die "--process only makes sense with --browser: it names which of
-    MiniBrowser's own processes (ui, web, network, gpu) to point the profiler
-    at, and without --browser there is no MiniBrowser to name one of."
-
-[ -n "$CONFIG" ] || CONFIG=$(default_config "$NAME")
-# The target first: on macOS a config does not choose its own build system, so config_load needs t_os.
-TARGET="$(ws_target "$NAME")"
-load_target "$TARGET"
-
-config_load "$CONFIG" "$(t_os)" || die "unknown config '$CONFIG' (wk build --list)"
-
-[ "$MODE" = native ] && { case "$CFG_BUILDSYS" in xcode) MODE=instruments ;; *) MODE=samply ;; esac; }
-case " $MODES " in
-    *" $MODE "*) ;;
-    *) die "no such mode '$MODE' -- there are: $MODES (and 'native')" ;;
-esac
-
-SRC=$(t_src "$NAME")
-VAR=$(config_run_var)
-DIR=$(config_run_dir "$SRC")
-
-# Not /tmp: a profile is worth more than the ten minutes it took to record, and /tmp on a container workspace is the first thing a restart takes away.
-STAMP=$(date -u +%Y%m%dT%H%M%SZ)
-RUN="$STAMP-$MODE"
-OUTDIR="$(t_home "$NAME")/wk-profile/$RUN"
-
-MB_PREFIX=""      # --process ui's recorder belongs in WEBKIT_MINI_BROWSER_PREFIX, not TARGET_CMD
-CMAKE_BROWSER=""  # any CMake --browser run: it builds its own command line below
-if [ -n "$ATTACH" ]; then
-    SUBJECT="attach:$ATTACH"
-    TARGET_CMD=""
-elif [ -n "$BROWSER" ]; then
-    [ -n "$URL" ] || URL="about:blank"
-    BIN=$(config_browser_path "$SRC")
-    case "$CFG_BUILDSYS" in
-    xcode)
-        [ -z "$PROCESS_EXPLICIT" ] || \
-            die "--process is not wired up for the Apple ports: MiniBrowser is profiled
-    directly here, not through a process picker. '--attach
-    $(config_web_process_name)' reaches the web process once it is up."
-        SUBJECT="MiniBrowser $URL"
-        TARGET_CMD="$(sh_quote "$BIN") $(config_browser_url_flag) $(sh_quote "$URL")"
-        [ ${#ARGS[@]} -gt 0 ] && TARGET_CMD="$TARGET_CMD $(sh_quote "${ARGS[@]}")"
-        ;;
-    *)
-        CMAKE_BROWSER=1
-        # MiniBrowser is a grandchild of Tools/Scripts/run-minibrowser here, so a profiler pointed at the launcher would record the launcher.
-        # run-minibrowser splits WEBKIT_MINI_BROWSER_PREFIX in front of the MiniBrowser command it builds (webkitpy/port/{gtk,wpe}.py).
-        case "$MODE" in
-            heaptrack|massif)
-                die "--browser --mode $MODE is not wired up on the CMake ports: $MODE has to
-    be there from the process's first allocation, and its own launch line is a
-    shell fragment ('cd <dir> && $MODE'), not the plain command
-    WEBKIT_MINI_BROWSER_PREFIX needs. Owed --
-    docs/Urgent/HANDOFF-linux-minibrower.md. Use --mode samply against the
-    browser, or profile the jsc shell instead." ;;
-        esac
-        if [ -n "$PROCESS_EXPLICIT" ]; then
-            case "$MODE" in
-                sampling|bytecode)
-                    die "--process is meaningless with --mode $MODE: it sets environment
-    variables the whole browser process tree inherits, not a wrapper pointed at
-    one process. Drop --process, or use --mode samply to pick one." ;;
-            esac
-        fi
-        TYPE_FLAG="--$(printf '%s' "$CFG_TYPE" | tr 'A-Z' 'a-z')"
-        LAUNCH_ENV="WPE_BROWSER=minibrowser"
-        LAUNCH_CMD="Tools/Scripts/run-minibrowser $CFG_PORT $TYPE_FLAG -- $(sh_quote "$URL")"
-        [ ${#ARGS[@]} -gt 0 ] && LAUNCH_CMD="$LAUNCH_CMD $(sh_quote "${ARGS[@]}")"
-        if [ "$MODE" = samply ] && [ "$PROCESS" != ui ]; then
-            # samply cannot be a prefix of a process the UI process spawns later, so it attaches instead: a fixed wait, then the newest process of that name.
-            case "$PROCESS" in
-                web)     PROC_NAME=$(config_web_process_name) ;;
-                network) PROC_NAME=$(config_network_process_name) ;;
-                gpu)     PROC_NAME=$(config_gpu_process_name) ;;
-            esac
-            [ -n "$PROC_NAME" ] || die "no $PROCESS process for '$CONFIG' ($CFG_BUILDSYS:$CFG_PORT)"
-            SUBJECT="MiniBrowser $URL, samply attaching to the newest $PROC_NAME after launch"
-            TARGET_CMD="$LAUNCH_ENV $LAUNCH_CMD >$(sh_quote "$OUTDIR/browser.log") 2>&1 &
-sleep 5
-_pid=\$(pgrep -n -x $(sh_quote "$PROC_NAME") 2>/dev/null) || true
-[ -n \"\$_pid\" ] || { echo \"error: no $PROC_NAME appeared within 5s of launching MiniBrowser -- see $(sh_quote "$OUTDIR/browser.log")\" >&2; exit 1; }
-echo \"attaching samply to $PROC_NAME pid \$_pid\" >&2
-exec samply record --save-only -o $(sh_quote "$OUTDIR/profile.json") -p \"\$_pid\""
-        else
-            SUBJECT="MiniBrowser $URL"
-            if [ "$MODE" = samply ]; then
-                SUBJECT="$SUBJECT (process: ui, samply prefixed via WEBKIT_MINI_BROWSER_PREFIX)"
-                MB_PREFIX=1
-            fi
-            TARGET_CMD="$LAUNCH_ENV $LAUNCH_CMD"
-        fi
-        ;;
-    esac
-else
-    BIN=$(config_jsc_path "$SRC")
-    SUBJECT="jsc${ARGS[0]:+ ${ARGS[0]}}"
-    # jsc takes its options *before* the script: a `--sample` after the file name is silently handed to the script as an argument.
-    TARGET_CMD=""
-fi
-
-# The loader variable is prepended, not replaced: a plain assignment would drop the wkdev image's own libwpe/jhbuild prefix on that path.
-PRELUDE="export $VAR=\"$DIR\${${VAR}:+:\${${VAR}}}\""
-
-# JSC_<option> is spelled the way JSC's OptionsList.h spells it -- a typo'd variable is ignored in silence, and the profile looks like the code changed.
-JSC_ENV=""
-add_env() { JSC_ENV="$JSC_ENV $1"; }
-
-if [ -n "$MARKERS" ]; then
-    add_env "JSC_useTextMarkers=1"
-    add_env "JSC_textMarkersDirectory=$OUTDIR"
-fi
-
-if [ -n "$JITDUMP" ]; then
-    add_env "JSC_useJITDump=1"
-    add_env "JSC_jitDumpDirectory=$OUTDIR"
-    if [ "$CFG_BUILDSYS" != xcode ] && [ -n "$BROWSER" ]; then
-        warn "JSC_useJITDump=1 has been seen to crash the WebKitGTK UI process on startup"
-        log  "  (claude/skills/jsc-marker-trace). If the browser dies at once, that is why."
-    fi
-fi
-
-if [ -n "$EXTRA_ENV" ]; then
-    while IFS= read -r _e; do
-        [ -n "$_e" ] || continue
-        add_env "$_e"
-    done <<EOF
-$EXTRA_ENV
-EOF
-fi
-
-NEEDS=""       # a binary that must exist in the workspace
-JSC_FLAGS=""   # options for the jsc shell itself, which go before the script
-TEE=""         # a file the run's own output is copied into
-WRAP=""        # what goes in front of the command
-PRE=""         # what to run in the workspace first
-POST=""        # what to run in the workspace afterwards
-ARTIFACT=""    # what to point at when it is done
-
-case "$MODE" in
-sampling)
-    [ -n "$ATTACH" ] && die "the sampling profiler is a JSC option, not an attach: it has to be
-    on when the process starts. Use --mode samply (or instruments) to profile
-    something already running."
-    if [ -n "$BROWSER" ]; then
-        add_env "JSC_useSamplingProfiler=1"
-        add_env "JSC_collectExtraSamplingProfilerData=1"
-        add_env "JSC_reportSamplingProfilerData=1"
-        ARTIFACT="the report goes to the browser's stderr at exit"
-    else
-        JSC_FLAGS="--sample"
-        if [ -n "$TOP" ]; then
-            JSC_FLAGS="$JSC_FLAGS --samplingProfilerTopFunctionsCount=$TOP"
-            JSC_FLAGS="$JSC_FLAGS --samplingProfilerTopBytecodesCount=$((TOP * 2))"
-        fi
-        ARTIFACT="$OUTDIR/report.txt"
-        TEE="$ARTIFACT"
-    fi
-    ;;
-bytecode)
-    [ -n "$ATTACH" ] && die "the bytecode profiler is a JSC option and has to be on when the
-    process starts -- there is nothing to attach to."
-    add_env "JSC_useProfiler=true"
-    add_env "JSC_dumpProfilerDataAtExit=true"
-    # JSC writes JSCProfile-<pid>-<n>.json into the working directory, so the file is moved out afterwards -- identified by being newer than a stamp, not newest in the tree.
-    ARTIFACT="$OUTDIR/JSCProfile.json"
-    PRE="touch $(sh_quote "$OUTDIR/.stamp")"
-    POST="p=\$(find $(sh_quote "$SRC") -maxdepth 1 -name 'JSCProfile-*.json' -newer $(sh_quote "$OUTDIR/.stamp") 2>/dev/null | head -1)
-          [ -n \"\$p\" ] || { echo 'no JSCProfile-*.json was written -- did the run reach exit?'; exit 1; }
-          mv \"\$p\" $(sh_quote "$ARTIFACT")
-          printf 'summary\\nquit\\n' | $(sh_quote "$SRC")/Tools/Scripts/display-profiler-output $(sh_quote "$ARTIFACT")"
-    ;;
-samply)
-    NEEDS=samply
-    ARTIFACT="$OUTDIR/profile.json"
-    if [ -n "$ATTACH" ]; then
-        case "$ATTACH" in
-            [0-9]*) WRAP="samply record --save-only -o $(sh_quote "$ARTIFACT") -p $ATTACH" ;;
-            *) die "samply attaches by pid. Find it in the workspace first:
-    wk enter $NAME -- pgrep -f $ATTACH" ;;
-        esac
-    else
-        WRAP="samply record --save-only -o $(sh_quote "$ARTIFACT") --"
-    fi
-    ;;
-instruments)
-    [ "$CFG_BUILDSYS" = xcode ] || die "xctrace profiles Mach-O processes on macOS; '$CONFIG' is a $CFG_BUILDSYS
-    build. Use --mode samply there."
-    NEEDS=xctrace
-    ARTIFACT="$OUTDIR/trace.trace"
-    if [ -n "$ATTACH" ]; then
-        WRAP="xctrace record --template 'Time Profiler' --output $(sh_quote "$ARTIFACT") --attach $(sh_quote "$ATTACH")"
-    else
-        WRAP="xctrace record --template 'Time Profiler' --output $(sh_quote "$ARTIFACT") --launch --"
-    fi
-    ;;
-heaptrack|massif)
-    [ "$CFG_BUILDSYS" = xcode ] && die "$MODE is a Linux tool and this is an Apple-port build.
-    For allocations on macOS use Instruments' Allocations template by hand --
-    'wk profile --mode instruments' records Time Profiler only."
-    [ -n "$ATTACH" ] && die "$MODE has to be there from the first allocation; there is nothing
-    useful to attach to."
-    if [ "$MODE" = heaptrack ]; then
-        NEEDS=heaptrack
-        ARTIFACT="$OUTDIR/heaptrack.*.zst"
-        WRAP="cd $(sh_quote "$OUTDIR") && heaptrack"
-    else
-        NEEDS=valgrind
-        ARTIFACT="$OUTDIR/massif.out"
-        WRAP="valgrind --tool=massif --massif-out-file=$(sh_quote "$ARTIFACT")"
-    fi
-    ;;
-esac
-
-# A CMake --browser run builds its own command line above: prepending WRAP here would wrap Tools/Scripts/run-minibrowser rather than MiniBrowser.
-if [ -n "$CMAKE_BROWSER" ]; then
-    [ -n "$MB_PREFIX" ] && add_env "WEBKIT_MINI_BROWSER_PREFIX=$(sh_quote "$WRAP")"
-    WRAP=""
-fi
+MODES = ("sampling", "bytecode", "samply", "instruments", "heaptrack", "massif")
+PRIV = "/usr/local/libexec/wk-quiesce-priv"
 
 
-BIN_PRESENT=""
-if [ -z "$ATTACH" ] && [ -n "${BIN:-}" ]; then
-    if t_exec "$NAME" test -x "$BIN" 2>/dev/null; then
-        BIN_PRESENT=1
-    elif [ -z "$DRY" ]; then
-        die "nothing to profile: no $(basename "$BIN") at $BIN
-    Build it first:  wk build $NAME $CONFIG"
-    fi
-fi
-
-if [ -n "$NEEDS" ] && [ -z "$DRY" ]; then
-    # `command` is a builtin and t_exec is an exec, not a shell: ask through sh.
-    t_exec "$NAME" sh -c "command -v $(sh_quote "$NEEDS") >/dev/null 2>&1" || die "$NEEDS is not installed in '$NAME'.
-    It is provisioning, not a per-run step -- see the provisioning half of
-    docs/Urgent/HANDOFF-profile.md. Until that lands:
-        wk enter $NAME     and install it there, or
-        wk profile $NAME --mode sampling   which needs no tools at all."
-fi
-
-# samply reads the kernel's perf events, refused by the default paranoia level; the sysctl is not namespaced, so a container cannot set it, which reads from inside as a samply permission problem.
-if [ "$MODE" = samply ] && [ -z "$DRY" ]; then
-    _par=$(t_exec "$NAME" cat /proc/sys/kernel/perf_event_paranoid 2>/dev/null | tr -dc '0-9') || _par=""
-    if [ -n "$_par" ] && [ "$_par" -gt 1 ] && is_linux && [ -x "$PRIV" ]; then
-        info "perf_event_paranoid is $_par on this host -- asking the quiesce helper to unrestrict it"
-        sudo -n "$PRIV" perf-on >/dev/null 2>&1 || true
-        _par=$(t_exec "$NAME" cat /proc/sys/kernel/perf_event_paranoid 2>/dev/null | tr -dc '0-9') || _par=""
-    fi
-    if [ -n "$_par" ] && [ "$_par" -gt 1 ]; then
-        if ! is_linux; then
-            die "perf_event_paranoid is $_par in '$NAME', and samply needs 1 or less.
-    It is a host setting and cannot be written from inside a workspace (the
-    sysctl is not namespaced -- sudo in there fails with 'permission denied on
-    key'). On the machine that runs the workspace:
-        echo 1 | sudo tee /proc/sys/kernel/perf_event_paranoid
-    On a booted benchmark image it is set already."
-        elif [ ! -x "$PRIV" ]; then
-            die "perf_event_paranoid is $_par in '$NAME', and samply needs 1 or less.
-    The privileged helper that can lower it is not installed on this host.
-    Remedy:  ./setup --stage quiesce"
-        else
-            die "perf_event_paranoid is $_par in '$NAME', and samply needs 1 or less.
-    Asking the quiesce helper ('$PRIV perf-on') did not bring it down --
-    passwordless sudo is likely not set up for it.
-    Remedy:  ./setup --stage quiesce"
-        fi
-    fi
-fi
+def is_linux():
+    return os.uname().sysname != "Darwin"
 
 
-if [ -z "$TARGET_CMD" ]; then
-    TARGET_CMD="$(sh_quote "$BIN")${JSC_FLAGS:+ $JSC_FLAGS}"
-    [ ${#ARGS[@]} -gt 0 ] && TARGET_CMD="$TARGET_CMD $(sh_quote "${ARGS[@]}")"
-fi
+def parse(argv):
+    o = {"mode": "sampling", "process": "web", "extra_env": [], "args": []}
+    i = 0
+    while i < len(argv):
+        a = argv[i]
+        if a == "--mode":
+            o["mode"] = argv[i + 1] if i + 1 < len(argv) else ""
+            i += 2
+        elif a.startswith("--mode="):
+            o["mode"] = a[len("--mode="):]
+            i += 1
+        elif a == "--config":
+            o["config"] = argv[i + 1] if i + 1 < len(argv) else ""
+            i += 2
+        elif a.startswith("--config="):
+            o["config"] = a[len("--config="):]
+            i += 1
+        elif a == "--process":
+            o["process"] = argv[i + 1] if i + 1 < len(argv) else ""
+            o["process_explicit"] = True
+            i += 2
+        elif a.startswith("--process="):
+            o["process"] = a[len("--process="):]
+            o["process_explicit"] = True
+            i += 1
+        elif a == "--attach":
+            o["attach"] = argv[i + 1] if i + 1 < len(argv) else ""
+            i += 2
+        elif a.startswith("--attach="):
+            o["attach"] = a[len("--attach="):]
+            i += 1
+        elif a == "--top":
+            o["top"] = argv[i + 1] if i + 1 < len(argv) else ""
+            i += 2
+        elif a.startswith("--top="):
+            o["top"] = a[len("--top="):]
+            i += 1
+        elif a == "--browser":
+            o["browser"] = True
+            i += 1
+            if i < len(argv) and argv[i] and not argv[i].startswith("-"):
+                o["url"] = argv[i]
+                i += 1
+        elif a == "--jit-dump":
+            o["jitdump"] = True
+            i += 1
+        elif a == "--markers":
+            o["markers"] = True
+            i += 1
+        elif a == "--fetch":
+            o["fetch"] = True
+            i += 1
+            if i < len(argv) and argv[i] and not argv[i].startswith("-"):
+                o["fetch_dir"] = argv[i]
+                i += 1
+        elif a == "--env":
+            o["extra_env"].append(argv[i + 1] if i + 1 < len(argv) else "")
+            i += 2
+        elif a.startswith("--env="):
+            o["extra_env"].append(a[len("--env="):])
+            i += 1
+        elif a == "--list":
+            o["list"] = True
+            i += 1
+        elif a == "--":
+            o["args"] += argv[i + 1:]
+            i = len(argv)
+        else:
+            o["args"].append(a)
+            i += 1
+    return o
 
-# pipefail with the tee, or the run's status becomes tee's own and every crash reads as a clean exit.
-[ -n "$TEE" ] && TARGET_CMD="set -o pipefail; $TARGET_CMD 2>&1 | tee $(sh_quote "$TEE")"
 
-CMD="$PRELUDE
-mkdir -p $(sh_quote "$OUTDIR")
-${PRE:+$PRE
-}${JSC_ENV:+export$JSC_ENV
-}${WRAP:+$WRAP }$TARGET_CMD"
-
-if [ -n "$DRY" ]; then
-    info "dry run -- nothing was profiled"
-    log  "  workspace: $NAME ($TARGET), config: $CONFIG, mode: $MODE"
-    log  "  subject:   $SUBJECT${BIN:+ (${BIN_PRESENT:+built: }${BIN_PRESENT:-NOT BUILT: }$BIN)}"
-    log  "  output:    $OUTDIR"
-    log  "  in the workspace:"
-    printf '%s\n' "$CMD" | sed 's/^/    /' >&2
-    [ -n "$POST" ] && { log "  and afterwards:"; printf '%s\n' "$POST" | sed 's/^/    /' >&2; }
-    exit 0
-fi
-
-info "$MODE: $SUBJECT in '$NAME' ($CONFIG)"
-log  "  output: $OUTDIR"
-
-# A tty when the subject is interactive: xctrace and an attached samply both expect ctrl-c, which without a pty kills the ssh instead of the recorder.
-if [ -n "$ATTACH" ] || [ -n "$BROWSER" ]; then
-    t_exec_tty "$NAME" bash -lc "cd $(sh_quote "$SRC") && $CMD"
-else
-    t_exec "$NAME" bash -lc "cd $(sh_quote "$SRC") && $CMD"
-fi
-
-[ -n "$POST" ] && t_exec "$NAME" bash -lc "$POST" || true
+def prelude(var, dir_):
+    # The loader variable is prepended, not replaced: a plain assignment would drop the wkdev image's own libwpe/jhbuild prefix on that path.
+    return 'export %s="%s${%s:+:${%s}}"' % (var, dir_, var, var)
 
 
-info "recorded in '$NAME': $ARTIFACT"
+def browser_target(cfg, url, process, process_explicit, mode, args, outdir):
+    """(subject, target_cmd, mb_prefix) for `--browser`: the Apple ports profile MiniBrowser
+    directly, the CMake ports profile it through `run-minibrowser`, which is not itself the subject."""
+    if cfg.xcode():
+        if process_explicit:
+            die("--process is not wired up for the Apple ports: MiniBrowser is profiled\n"
+                "    directly here, not through a process picker. '--attach\n"
+                "    %s' reaches the web process once it is up." % cfg.web_process_name())
+        subject = "MiniBrowser %s" % url
+        cmd = shlex.quote(cfg.browser_path("$SRC")) + " " + cfg.browser_url_flag() + " " + shlex.quote(url)
+        if args:
+            cmd += " " + shlex.join(args)
+        return subject, cmd, False
 
-if [ -n "$FETCH" ]; then
-    [ -n "$FETCH_DIR" ] || FETCH_DIR="$(wk_state_dir)/profiles/$NAME/$RUN"
-    # The whole run directory in one copy (t_pull_dir): a loop over t_pull only reaches top-level files, silently missing instruments' .trace bundle.
-    if t_pull_dir "$NAME" "$OUTDIR" "$FETCH_DIR" 2>/dev/null; then
-        info "copied to $FETCH_DIR"
-    else
-        warn "could not copy '$OUTDIR' out of '$NAME'"
-    fi
-fi
+    if mode in ("heaptrack", "massif"):
+        die("--browser --mode %s is not wired up on the CMake ports: %s has to\n"
+            "    be there from the process's first allocation, and its own launch line is a\n"
+            "    shell fragment ('cd <dir> && %s'), not the plain command\n"
+            "    WEBKIT_MINI_BROWSER_PREFIX needs. Owed --\n"
+            "    docs/Urgent/HANDOFF-linux-minibrower.md. Use --mode samply against the\n"
+            "    browser, or profile the jsc shell instead." % (mode, mode, mode))
+    if process_explicit and mode in ("sampling", "bytecode"):
+        die("--process is meaningless with --mode %s: it sets environment\n"
+            "    variables the whole browser process tree inherits, not a wrapper pointed at\n"
+            "    one process. Drop --process, or use --mode samply to pick one." % mode)
 
-case "$MODE" in
-samply)
-    log "  view it:  samply load $ARTIFACT          (in the workspace)"
-    log "            or --fetch it here and open it at profiler.firefox.com --"
-    log "            the file is self-contained and the site uploads nothing"
-    ;;
-instruments)
-    log "  view it:  open $ARTIFACT                 (on the machine that has it)"
-    log "            --fetch brings the whole .trace bundle here (t_pull_dir"
-    log "            copies the directory, not just its top-level files)"
-    ;;
-bytecode)
-    log "  the summary is above; for the interactive tool:"
-    log "    wk enter $NAME -- Tools/Scripts/display-profiler-output $ARTIFACT"
-    log "    then: summary | bytecode <hash> | log <hash>"
-    ;;
-sampling)
-    log "  the tier breakdown decides the next step: mostly FTL/DFG/Baseline"
-    log "  means the cost is in generated JS -- 'wk profile $NAME --mode bytecode'."
-    log "  Mostly C/C++ means the engine itself -- '--mode native'."
-    ;;
-esac
+    type_flag = "--%s" % cfg.type.lower()
+    launch_env = "WPE_BROWSER=minibrowser"
+    launch_cmd = "Tools/Scripts/run-minibrowser %s %s -- %s" % (cfg.port, type_flag, shlex.quote(url))
+    if args:
+        launch_cmd += " " + shlex.join(args)
+
+    if mode == "samply" and process != "ui":
+        # samply cannot be a prefix of a process the UI process spawns later, so it attaches instead: a fixed wait, then the newest process of that name.
+        proc_name = {"web": cfg.web_process_name(), "network": cfg.network_process_name(),
+                    "gpu": cfg.gpu_process_name()}.get(process, "")
+        if not proc_name:
+            die("no %s process for the resolved config (%s:%s)" % (process, cfg.buildsys, cfg.port))
+        subject = "MiniBrowser %s, samply attaching to the newest %s after launch" % (url, proc_name)
+        cmd = ("%s %s >%s 2>&1 &\n"
+              "sleep 5\n"
+              '_pid=$(pgrep -n -x %s 2>/dev/null) || true\n'
+              '[ -n "$_pid" ] || { echo "error: no %s appeared within 5s of launching MiniBrowser -- see %s" >&2; exit 1; }\n'
+              'echo "attaching samply to %s pid $_pid" >&2\n'
+              'exec samply record --save-only -o %s -p "$_pid"'
+              % (launch_env, launch_cmd, shlex.quote(os.path.join(outdir, "browser.log")), shlex.quote(proc_name),
+                 proc_name, os.path.join(outdir, "browser.log"), proc_name, shlex.quote(os.path.join(outdir, "profile.json"))))
+        return subject, cmd, False
+
+    subject = "MiniBrowser %s" % url
+    mb_prefix = False
+    if mode == "samply":
+        subject += " (process: ui, samply prefixed via WEBKIT_MINI_BROWSER_PREFIX)"
+        mb_prefix = True
+    return subject, "%s %s" % (launch_env, launch_cmd), mb_prefix
+
+
+def main(argv, reg=None):
+    name = os.environ.get("WK_NAME", "")
+    o = parse(argv)
+
+    if o.get("list"):
+        for m in MODES:
+            log(m)
+        return 0
+
+    if o["process"] not in ("ui", "web", "network", "gpu"):
+        die("no such process '%s' -- there are: ui web network gpu" % o["process"])
+
+    require_name(name)
+
+    # Every refusal that reads only the arguments comes first: resolving the
+    # workspace walks the fleet, and an argument error paid for that walk before
+    # saying what was wrong with the command line.
+    if o.get("attach") and o.get("browser"):
+        die("--attach and --browser are two ways to name the same thing: one starts\n"
+            "    the browser under the profiler, the other profiles a process that is\n"
+            "    already running. Pick one.")
+    if o.get("process_explicit") and not o.get("browser"):
+        die("--process only makes sense with --browser: it names which of\n"
+            "    MiniBrowser's own processes (ui, web, network, gpu) to point the profiler\n"
+            "    at, and without --browser there is no MiniBrowser to name one of.")
+    reg = reg or targets.Registry(ROOT)
+
+    config = o.get("config") or os.environ.get("WK_CONFIG") or reg.default_config(name)
+    try:
+        tname = reg.ws_target(name)
+        target = reg.load(tname)
+    except LookupError as e:
+        die(str(e))
+    try:
+        cfg = buildconf.resolve(config, target.os(), target.kind, target.env)
+    except LookupError:
+        die("unknown config '%s' (wk build --list)" % config)
+
+    mode = o["mode"]
+    if mode == "native":
+        mode = "instruments" if cfg.xcode() else "samply"
+    if mode not in MODES:
+        die("no such mode '%s' -- there are: %s (and 'native')" % (mode, " ".join(MODES)))
+
+    src = target.src(name)
+    var, run_dir = cfg.run_var(), cfg.run_dir(src)
+
+    # Not /tmp: a profile is worth more than the ten minutes it took to record, and /tmp on a container workspace is the first thing a restart takes away.
+    stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+    run = "%s-%s" % (stamp, mode)
+    outdir = os.path.join(target.home(), "wk-profile", run)
+
+    attach, browser, url = o.get("attach", ""), o.get("browser", False), o.get("url", "")
+    args = o["args"]
+    mb_prefix, cmake_browser = False, False
+    bin_path = ""
+    if attach:
+        subject, target_cmd = "attach:%s" % attach, ""
+    elif browser:
+        url = url or "about:blank"
+        bin_path = cfg.browser_path(src)
+        cmake_browser = not cfg.xcode()
+        subject, target_cmd, mb_prefix = browser_target(cfg, url, o["process"], o.get("process_explicit"), mode, args, outdir)
+    else:
+        bin_path = cfg.jsc_path(src)
+        subject = "jsc" + (" " + args[0] if args else "")
+        # jsc takes its options *before* the script: a `--sample` after the file name is silently handed to the script as an argument.
+        target_cmd = ""
+
+    jsc_env = []
+    if o.get("markers"):
+        jsc_env.append("JSC_useTextMarkers=1")
+        jsc_env.append("JSC_textMarkersDirectory=%s" % outdir)
+    if o.get("jitdump"):
+        jsc_env.append("JSC_useJITDump=1")
+        jsc_env.append("JSC_jitDumpDirectory=%s" % outdir)
+        if not cfg.xcode() and browser:
+            warn("JSC_useJITDump=1 has been seen to crash the WebKitGTK UI process on startup")
+            log("  (claude/skills/jsc-marker-trace). If the browser dies at once, that is why.")
+    for e in o["extra_env"]:
+        if e:
+            jsc_env.append(e)
+
+    needs, jsc_flags, tee, wrap, pre, post, artifact = "", "", "", "", "", "", ""
+
+    if mode == "sampling":
+        if attach:
+            die("the sampling profiler is a JSC option, not an attach: it has to be\n"
+                "    on when the process starts. Use --mode samply (or instruments) to profile\n"
+                "    something already running.")
+        if browser:
+            jsc_env.append("JSC_useSamplingProfiler=1")
+            jsc_env.append("JSC_collectExtraSamplingProfilerData=1")
+            jsc_env.append("JSC_reportSamplingProfilerData=1")
+            artifact = "the report goes to the browser's stderr at exit"
+        else:
+            jsc_flags = "--sample"
+            if o.get("top"):
+                top = int(o["top"])
+                jsc_flags += " --samplingProfilerTopFunctionsCount=%d --samplingProfilerTopBytecodesCount=%d" % (top, top * 2)
+            artifact = os.path.join(outdir, "report.txt")
+            tee = artifact
+    elif mode == "bytecode":
+        if attach:
+            die("the bytecode profiler is a JSC option and has to be on when the\n"
+                "    process starts -- there is nothing to attach to.")
+        jsc_env.append("JSC_useProfiler=true")
+        jsc_env.append("JSC_dumpProfilerDataAtExit=true")
+        # JSC writes JSCProfile-<pid>-<n>.json into the working directory, so the file is moved out afterwards -- identified by being newer than a stamp, not newest in the tree.
+        artifact = os.path.join(outdir, "JSCProfile.json")
+        pre = "touch %s" % shlex.quote(os.path.join(outdir, ".stamp"))
+        post = ('p=$(find %s -maxdepth 1 -name \'JSCProfile-*.json\' -newer %s 2>/dev/null | head -1)\n'
+               '[ -n "$p" ] || { echo \'no JSCProfile-*.json was written -- did the run reach exit?\'; exit 1; }\n'
+               'mv "$p" %s\n'
+               'printf \'summary\\nquit\\n\' | %s/Tools/Scripts/display-profiler-output %s'
+               % (shlex.quote(src), shlex.quote(os.path.join(outdir, ".stamp")), shlex.quote(artifact),
+                  shlex.quote(src), shlex.quote(artifact)))
+    elif mode == "samply":
+        needs = "samply"
+        artifact = os.path.join(outdir, "profile.json")
+        if attach:
+            if attach.isdigit():
+                wrap = "samply record --save-only -o %s -p %s" % (shlex.quote(artifact), attach)
+            else:
+                die("samply attaches by pid. Find it in the workspace first:\n"
+                    "    wk enter %s -- pgrep -f %s" % (name, attach))
+        else:
+            wrap = "samply record --save-only -o %s --" % shlex.quote(artifact)
+    elif mode == "instruments":
+        if not cfg.xcode():
+            die("xctrace profiles Mach-O processes on macOS; '%s' is a %s\n"
+                "    build. Use --mode samply there." % (config, cfg.buildsys))
+        needs = "xctrace"
+        artifact = os.path.join(outdir, "trace.trace")
+        if attach:
+            wrap = "xctrace record --template 'Time Profiler' --output %s --attach %s" % (shlex.quote(artifact), shlex.quote(attach))
+        else:
+            wrap = "xctrace record --template 'Time Profiler' --output %s --launch --" % shlex.quote(artifact)
+    else:   # heaptrack, massif
+        if cfg.xcode():
+            die("%s is a Linux tool and this is an Apple-port build.\n"
+                "    For allocations on macOS use Instruments' Allocations template by hand --\n"
+                "    'wk profile --mode instruments' records Time Profiler only." % mode)
+        if attach:
+            die("%s has to be there from the first allocation; there is nothing\n"
+                "    useful to attach to." % mode)
+        if mode == "heaptrack":
+            needs = "heaptrack"
+            artifact = os.path.join(outdir, "heaptrack.*.zst")
+            wrap = "cd %s && heaptrack" % shlex.quote(outdir)
+        else:
+            needs = "valgrind"
+            artifact = os.path.join(outdir, "massif.out")
+            wrap = "valgrind --tool=massif --massif-out-file=%s" % shlex.quote(artifact)
+
+    # A CMake --browser run builds its own command line above: prepending wrap here would wrap Tools/Scripts/run-minibrowser rather than MiniBrowser.
+    if cmake_browser:
+        if mb_prefix:
+            jsc_env.append("WEBKIT_MINI_BROWSER_PREFIX=%s" % shlex.quote(wrap))
+        wrap = ""
+
+    bin_present = False
+    if not attach and bin_path:
+        if target.exec(name, ["test", "-x", bin_path]).ok:
+            bin_present = True
+        elif not dry_run():
+            die("nothing to profile: no %s at %s\n"
+                "    Build it first:  wk build %s %s" % (os.path.basename(bin_path), bin_path, name, config))
+
+    if needs and not dry_run():
+        # `command` is a builtin and exec is not a shell: ask through sh.
+        if not target.exec(name, ["sh", "-c", "command -v %s >/dev/null 2>&1" % shlex.quote(needs)]).ok:
+            die("%s is not installed in '%s'.\n"
+                "    It is provisioning, not a per-run step -- see the provisioning half of\n"
+                "    docs/Urgent/HANDOFF-profile.md. Until that lands:\n"
+                "        wk enter %s     and install it there, or\n"
+                "        wk profile %s --mode sampling   which needs no tools at all." % (needs, name, name, name))
+
+    # samply reads the kernel's perf events, refused by the default paranoia level; the sysctl is not namespaced, so a container cannot set it, which reads from inside as a samply permission problem.
+    if mode == "samply" and not dry_run():
+        _check_perf_paranoid(target, name)
+
+    if not target_cmd:
+        target_cmd = shlex.quote(bin_path) + (" " + jsc_flags if jsc_flags else "")
+        if args:
+            target_cmd += " " + shlex.join(args)
+
+    # pipefail with the tee, or the run's status becomes tee's own and every crash reads as a clean exit.
+    if tee:
+        target_cmd = "set -o pipefail; %s 2>&1 | tee %s" % (target_cmd, shlex.quote(tee))
+
+    cmd = prelude(var, run_dir) + "\nmkdir -p %s\n" % shlex.quote(outdir)
+    if pre:
+        cmd += pre + "\n"
+    if jsc_env:
+        cmd += "export " + " ".join(jsc_env) + "\n"
+    if wrap:
+        cmd += wrap + " "
+    cmd += target_cmd
+
+    if dry_run():
+        info_lines_dry(name, tname, config, subject, bin_path, bin_present, outdir, cmd, post, mode)
+        return 0
+
+    info("%s: %s in '%s' (%s)" % (mode, subject, name, config))
+    log("  output: %s" % outdir)
+
+    # exec_tty inherits this process's own stdio: the sampling report, the bytecode
+    # tier breakdown and a crash's error text all print here instead of being captured
+    # and dropped, and xctrace/an attached samply still get ctrl-c through the pty.
+    r = target.exec_tty(name, ["bash", "-lc", "cd %s && %s" % (src, cmd)])
+    if not r.ok:
+        raise Refused(r.rc)
+
+    if post:
+        target.exec_tty(name, ["bash", "-lc", post])   # its own failure never stops the report below
+
+    info("recorded in '%s': %s" % (name, artifact))
+
+    if o.get("fetch"):
+        fetch_dir = o.get("fetch_dir") or os.path.join(Store(reg.env).state_dir(), "profiles", name, run)
+        # The whole run directory in one copy (pull_dir): a loop over pull only reaches top-level files, silently missing instruments' .trace bundle.
+        try:
+            target.pull_dir(name, outdir, fetch_dir)
+            info("copied to %s" % fetch_dir)
+        except OSError:
+            warn("could not copy '%s' out of '%s'" % (outdir, name))
+
+    closing_lines(mode, artifact, name)
+    return 0
+
+
+def _check_perf_paranoid(target, name):
+    r = target.exec(name, ["cat", "/proc/sys/kernel/perf_event_paranoid"])
+    par = "".join(c for c in r.out if c.isdigit())
+    if par and int(par) > 1 and is_linux() and os.access(PRIV, os.X_OK):
+        info("perf_event_paranoid is %s on this host -- asking the quiesce helper to unrestrict it" % par)
+        Local().act_run(["sudo", "-n", PRIV, "perf-on"])
+        r = target.exec(name, ["cat", "/proc/sys/kernel/perf_event_paranoid"])
+        par = "".join(c for c in r.out if c.isdigit())
+    if par and int(par) > 1:
+        if not is_linux():
+            die("perf_event_paranoid is %s in '%s', and samply needs 1 or less.\n"
+                "    It is a host setting and cannot be written from inside a workspace (the\n"
+                "    sysctl is not namespaced -- sudo in there fails with 'permission denied on\n"
+                "    key'). On the machine that runs the workspace:\n"
+                "        echo 1 | sudo tee /proc/sys/kernel/perf_event_paranoid\n"
+                "    On a booted benchmark image it is set already." % (par, name))
+        if not os.access(PRIV, os.X_OK):
+            die("perf_event_paranoid is %s in '%s', and samply needs 1 or less.\n"
+                "    The privileged helper that can lower it is not installed on this host.\n"
+                "    Remedy:  ./setup --stage quiesce" % (par, name))
+        die("perf_event_paranoid is %s in '%s', and samply needs 1 or less.\n"
+            "    Asking the quiesce helper ('%s perf-on') did not bring it down --\n"
+            "    passwordless sudo is likely not set up for it.\n"
+            "    Remedy:  ./setup --stage quiesce" % (par, name, PRIV))
+
+
+def info_lines_dry(name, tname, config, subject, bin_path, bin_present, outdir, cmd, post, mode):
+    info("dry run -- nothing was profiled")
+    built = ("built: " if bin_present else "NOT BUILT: ") + bin_path if bin_path else ""
+    log("  workspace: %s (%s), config: %s, mode: %s" % (name, tname, config, mode))
+    log("  subject:   %s%s" % (subject, " (%s)" % built if built else ""))
+    log("  output:    %s" % outdir)
+    log("  in the workspace:")
+    for line in cmd.splitlines():
+        log("    " + line)
+    if post:
+        log("  and afterwards:")
+        for line in post.splitlines():
+            log("    " + line)
+
+
+def closing_lines(mode, artifact, name):
+    if mode == "samply":
+        log("  view it:  samply load %s          (in the workspace)" % artifact)
+        log("            or --fetch it here and open it at profiler.firefox.com --")
+        log("            the file is self-contained and the site uploads nothing")
+    elif mode == "instruments":
+        log("  view it:  open %s                 (on the machine that has it)" % artifact)
+        log("            --fetch brings the whole .trace bundle here (pull_dir")
+        log("            copies the directory, not just its top-level files)")
+    elif mode == "bytecode":
+        log("  the summary is above; for the interactive tool:")
+        log("    wk enter %s -- Tools/Scripts/display-profiler-output %s" % (name, artifact))
+        log("    then: summary | bytecode <hash> | log <hash>")
+    elif mode == "sampling":
+        log("  the tier breakdown decides the next step: mostly FTL/DFG/Baseline")
+        log("  means the cost is in generated JS -- 'wk profile %s --mode bytecode'." % name)
+        log("  Mostly C/C++ means the engine itself -- '--mode native'.")
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main(sys.argv[1:]))
+    except Refused as e:
+        sys.exit(e.status)
+    except KeyboardInterrupt:
+        sys.exit(130)

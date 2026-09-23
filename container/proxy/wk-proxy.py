@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
-"""The workspace egress boundary: --network none, the outside reached only through this
-unix socket, by hostname. Rootless podman re-emits container traffic from a random scope, so an interface filter would have nothing to see."""
+"""The workspace egress boundary: --network none, the outside reached only through this unix socket, by hostname; rootless podman re-emits container traffic from a random scope, so an interface filter would have nothing to see."""
 
 import asyncio
 import ipaddress
@@ -18,53 +17,52 @@ DENIED_HOSTS = {
     "uploads.github.com": "GitHub's upload API is refused: nothing in a workspace may publish",
 }
 
-# The hosts whose TLS is not tunnelled: CONNECT goes to the credential injector (github-inject.py). Exact, and first, or the `github.com` and `webkit.org` suffixes tunnel them.
-# SANDBOX AUDIT (docs/PLAN.md): a workspace reaches GitHub's API and Bugzilla but cannot authenticate -- under `wk push off`, which `wk ai claude` sets, the injector holds no write token and no Bugzilla key, so GitHub answers 401 and Bugzilla 410. `wk verify` measures both halves of each.
+# The hosts whose TLS is not tunnelled: CONNECT goes to the credential injector (github-inject.py), exact-match and checked first. SANDBOX AUDIT (docs/PLAN.md): a workspace reaches GitHub's API and Bugzilla but cannot authenticate -- under `wk push off`, which `wk ai claude` sets, the injector refuses a write itself (412) rather than forwarding it uncredentialed.
 INJECTED_HOSTS = {
     "api.github.com": 443,
     "bugs.webkit.org": 443,
 }
 
-INJECT_SOCKET = os.environ.get(   # under the store root, not the mounted runtime dir
+INJECT_SOCKET = os.environ.get(
     "WK_INJECT_SOCK",
     os.path.join(os.environ.get("WK_STORE", "/var/lib/wk"), "github-inject.sock"))
 
-# Port 80 as well as 443 where a client's own URLs are http (apt, poky's mirrors) or a site answers :80 with the redirect a browser follows to :443.
-ALLOWED_HOSTS = {                      # dot-boundary suffix matches
-    "anthropic.com": (80, 443),        # the API, the console, the CLI installer
+# ALLOWED_HOSTS matches by dot-boundary suffix, never plain substring, so 'evilgithub.com' cannot match 'github.com'; port 80 is opened only where a client's own URLs are http (apt, poky's mirrors) or redirect to :443.
+ALLOWED_HOSTS = {
+    "anthropic.com": (80, 443),
     "claude.ai": (80, 443),
     "claude.com": (80, 443),
-    "github.com": (22, 80, 443),       # https clones, ssh pushes to the fork
+    "github.com": (22, 80, 443),
     "githubusercontent.com": (80, 443),
     "githubassets.com": (443,),
-    "pypi.org": (443,),                # build-webkit autoinstalls setuptools
+    "pypi.org": (443,),
     "pythonhosted.org": (443,),
-    "ports.ubuntu.com": (80, 443),     # apt: sources.list on arm
-    "archive.ubuntu.com": (80, 443),   # apt: sources.list on x86_64
-    "security.ubuntu.com": (80, 443),  # read by the same apt-get update
-    "ddebs.ubuntu.com": (80, 443),     # debug symbols for system-library frames
-    "agentclientprotocol.com": (443,), # zed's remote server reads its registry
+    "ports.ubuntu.com": (80, 443),
+    "archive.ubuntu.com": (80, 443),
+    "security.ubuntu.com": (80, 443),
+    "ddebs.ubuntu.com": (80, 443),
+    "agentclientprotocol.com": (443,),
 
-    "webkit.org": (80, 443),           # pages MiniBrowser is driven at
-    "browserbench.org": (80, 443),     # Speedometer, MotionMark, JetStream
+    "webkit.org": (80, 443),
+    "browserbench.org": (80, 443),
     "igalia.com": (80, 443),
     "gnome.org": (80, 443),
 
-    "google.com": (80, 443),           # top-10 by traffic, each with its CDN
-    "gstatic.com": (80, 443),          # google's static assets
+    "google.com": (80, 443),
+    "gstatic.com": (80, 443),
     "googleapis.com": (80, 443),
     "youtube.com": (80, 443),
-    "ytimg.com": (80, 443),            # youtube thumbnails
-    "googlevideo.com": (80, 443),      # youtube media
+    "ytimg.com": (80, 443),
+    "googlevideo.com": (80, 443),
     "facebook.com": (80, 443),
-    "fbcdn.net": (80, 443),            # facebook + instagram assets
+    "fbcdn.net": (80, 443),
     "instagram.com": (80, 443),
     "cdninstagram.com": (80, 443),
     "x.com": (80, 443),
-    "twitter.com": (80, 443),          # still redirects here
-    "twimg.com": (80, 443),            # x/twitter assets
+    "twitter.com": (80, 443),
+    "twimg.com": (80, 443),
     "wikipedia.org": (80, 443),
-    "wikimedia.org": (80, 443),        # wikipedia images and static
+    "wikimedia.org": (80, 443),
     "reddit.com": (80, 443),
     "redditstatic.com": (80, 443),
     "redditmedia.com": (80, 443),
@@ -77,40 +75,36 @@ ALLOWED_HOSTS = {                      # dot-boundary suffix matches
     "whatsapp.com": (80, 443),
     "baidu.com": (80, 443),
 
-    # bitbake fetches the Yocto source mirror first (image/yocto-build.sh); this is the remainder, from --runall=fetch over 1492 tasks.
-    # SANDBOX AUDIT: a real widening -- source-code hosts only, still by hostname, BLOCKED_NETS unchanged, so no name here becomes a route onto the LAN or the tailnet. It does let a workspace fetch distribution tarballs.
-    "yoctoproject.org": (80, 443),     # git. and downloads. -- layers + the mirror
-    "openembedded.org": (80, 443),     # git. (manifest.xml) and sources. (a MIRROR)
-    "googlesource.com": (443,),        # `repo` clones its own git-repo from here
-    "freedesktop.org": (80, 443),      # gitlab. -- polkit, wayland, mesa, libinput
-    "kernel.org": (80, 443),           # mirrors. is one of poky's default PREMIRRORS
-    "videolan.org": (80, 443),         # code. -- dav1d
-    "metacpan.org": (80, 443),         # cpan. -- Archive-Zip
-    "sourceforge.net": (443,),         # hyphen: downloads. 302s to a dl. mirror
+    # SANDBOX AUDIT (bitbake's yocto fetch, image/yocto-build.sh): source-code hosts only, still by hostname, BLOCKED_NETS unchanged -- no name here is a route onto the LAN or the tailnet; it lets a workspace fetch distribution tarballs.
+    "yoctoproject.org": (80, 443),
+    "openembedded.org": (80, 443),
+    "googlesource.com": (443,),
+    "freedesktop.org": (80, 443),
+    "kernel.org": (80, 443),
+    "videolan.org": (80, 443),
+    "metacpan.org": (80, 443),
+    "sourceforge.net": (443,),
 
-    "sources.buildroot.net": (80, 443),  # BR2_PRIMARY_SITE, http by default
-    "gnu.org": (80, 443),              # ftpmirror. -- host tools the mirror lacks
-    "wpewebkit.org": (80, 443),        # libwpe, wpebackend-fdo, cog tarballs
-    "tailscale.com": (443,),           # pkgs. -- meta-wk-tailnet's pinned tarball
+    "sources.buildroot.net": (80, 443),
+    "gnu.org": (80, 443),
+    "wpewebkit.org": (80, 443),
+    "tailscale.com": (443,),
 
-    # SANDBOX AUDIT: the widest widening in *kind*. A package registry serves
-    # whatever a project's manifest names, so this is third-party code chosen by
-    # a file in the checkout. Deliberate: a workspace that cannot install a
-    # package is not a development machine. Each name was measured as a refusal.
-    "registry.npmjs.org": (443,),      # npm, and `npm install -g` for an agent
-    "formulae.brew.sh": (443,),        # Homebrew's formula index
-    "ghcr.io": (443,),                 # Homebrew bottle manifests
-    "crates.io": (443,),               # cargo, and static. for the tarballs
-    "rust-lang.org": (443,),           # static. -- rustup's toolchains
-    "rustup.rs": (443,),               # sh. -- the rustup installer
+    # SANDBOX AUDIT: the widest widening in *kind* -- a package registry serves whatever a project's manifest names, so this is third-party code chosen by a file in the checkout; deliberate, since a workspace that cannot install a package is not a development machine, and each name here was measured as a refusal.
+    "registry.npmjs.org": (443,),
+    "formulae.brew.sh": (443,),
+    "ghcr.io": (443,),
+    "crates.io": (443,),
+    "rust-lang.org": (443,),
+    "rustup.rs": (443,),
 
     # The softwareupdate scan path -- swscan, swcdn, updates.cdn-apple.com, mesu, gdmf -- is deliberately absent: a guest is a clone of a pinned image, no guest can turn the check off (vm/desktop.sh), and an offer that arrives puts a Setup Assistant pane in front of the window a benchmark is measured in.
-    "developer.apple.com": (443,),     # and download. -- Xcode + CLT
-    "valid.apple.com": (80, 443),      # gatekeeper: unchecked, it will not run
+    "developer.apple.com": (443,),
+    "valid.apple.com": (80, 443),
     "ocsp.apple.com": (80, 443),
     "ocsp2.apple.com": (80, 443),
     "crl.apple.com": (80, 443),
-    "pki.goog": (80, 443),             # i. -- Google Trust Services CRL/OCSP
+    "pki.goog": (80, 443),
 }
 
 BLOCKED_NETS = [   # never a destination: this workstation is a tailnet node
@@ -123,8 +117,8 @@ BLOCKED_NETS = [   # never a destination: this workstation is a tailnet node
 
 MAX_CONNECTIONS = 64
 CONNECT_TIMEOUT = 15
-IDLE_TIMEOUT = 900          # a git clone of WebKit is slow, but not this slow
-DENY_LOG_INTERVAL = 60      # seconds between repeats of the same denial
+IDLE_TIMEOUT = 900
+DENY_LOG_INTERVAL = 60
 
 
 def log(msg):
@@ -141,7 +135,6 @@ UPSTREAM_TLS = ssl.create_default_context()
 
 
 def parse_absolute_target(target):
-    """An absolute-form target (proxy form) as (host, port, tls, path). A client that sends `GET https://host/...` rather than `CONNECT host:443` -- axios behind a proxy, which is how the Claude CLI fetches its org policy -- wants the proxy to originate TLS; dropping the scheme sent that request in the clear to :80, a 400 from an https-only API (measured 2026-09-11)."""
     scheme, _, rest = target.partition("://")
     hostport, slash, tail = rest.partition("/")
     path = "/" + tail if slash else "/"
@@ -167,7 +160,7 @@ class Policy:
             mtime = os.stat(path).st_mtime
         except OSError:
             return set()
-        if mtime != self._pi_mtime:    # `wk pi setup` appends without a restart
+        if mtime != self._pi_mtime:
             with open(path) as f:
                 self._pi = {
                     line.strip() for line in f
@@ -222,14 +215,14 @@ class Proxy:
         self.active = 0
         self._denials = {}
 
-    def deny(self, host, port, why):   # rate-limited: a retry loop fills a log,
+    def deny(self, host, port, why):   # rate-limited (repeats collapse) and capped at 512 entries, so a retry loop or an enumeration cannot grow this into unbounded memory
         key = (host, port, why)
         now = time.time()
         last = self._denials.get(key, 0)
         if now - last > DENY_LOG_INTERVAL:
             self._denials[key] = now
             log(f"DENY {host}:{port} -- {why}")
-        if len(self._denials) > 512:   # and enumeration grows one entry a name
+        if len(self._denials) > 512:
             self._denials = {k: v for k, v in self._denials.items()
                              if now - v <= DENY_LOG_INTERVAL}
 
@@ -307,7 +300,7 @@ class Proxy:
                     line = await asyncio.wait_for(creader.readline(), 30)
                     if line in (b"\r\n", b"\n", b""):
                         break
-            else:                      # absolute-form: apt sends http, axios https
+            else:
                 if "://" not in target:
                     cwriter.write(b"HTTP/1.1 400 Bad Request\r\n\r\n")
                     await cwriter.drain()
@@ -343,11 +336,10 @@ class Proxy:
             log(f"allow {host}:{port} ({why})")
 
             if method == "CONNECT":
-                # HTTP/1.0, as Squid answers: Apple's nc -X connect rejects a 1.1 tunnel, and it is how every macOS guest reaches github.com:22.
                 cwriter.write(b"HTTP/1.0 200 Connection established\r\n\r\n")
                 await cwriter.drain()
             else:
-                uwriter.write(headers)  # the rewritten request line
+                uwriter.write(headers)
                 while True:
                     line = await asyncio.wait_for(creader.readline(), 30)
                     uwriter.write(line)

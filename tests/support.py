@@ -523,7 +523,14 @@ def _build_in_the_way():
 
 
 # wk_state_dir (lib/common.sh), spelled for the shell that reads the records.
-_BUILD_RECORDS = r'cat "${XDG_STATE_HOME:-$HOME/.local/state}"/wk/builds/* 2>/dev/null || true'
+# A record whose `pid:` holder is gone is a killed build (lib/resources.sh's
+# _build_holder_alive); any other holder is kept, since it cannot be read from here.
+_BUILD_RECORDS = r'''for f in "${XDG_STATE_HOME:-$HOME/.local/state}"/wk/builds/*; do
+    [ -f "$f" ] || continue
+    h=$(sed -n 's/^holder=//p' "$f")
+    case "$h" in pid:*) kill -0 "${h#pid:}" 2>/dev/null || continue ;; esac
+    cat "$f"
+done; true'''
 
 
 def builds_on_the_books():
@@ -531,7 +538,7 @@ def builds_on_the_books():
     the podman VM on macOS, on this machine on Linux (build_record,
     lib/resources.sh). Read and never pruned -- `builds_running` deletes the
     record of a holder it cannot see, and a reading may not mutate what it
-    reports on."""
+    reports on -- so a dead holder's record is skipped, not removed."""
     if sys.platform == "darwin":
         out = podman_vm_ssh(_BUILD_RECORDS).stdout
     else:

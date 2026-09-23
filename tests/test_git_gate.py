@@ -31,6 +31,9 @@ from pathlib import Path
 
 from tests.support import REPO, WkTest
 
+sys.path.insert(0, str(REPO / "lib"))
+from wk.wall import COMMIT_WALL_PATHS  # noqa: E402
+
 WALL = REPO / "container" / "bin" / "wk-build-wall"
 SHIM = REPO / "container" / "bin" / "ws" / "git"
 PATH_SH = (REPO / "shell" / "path.sh").read_text()
@@ -245,11 +248,8 @@ class TestWhereItSitsOnPath(unittest.TestCase):
     def test_every_verb_it_watches_is_one_the_wall_paths_can_break(self):
         """A verb here that the commit wall cannot touch would be a note on a
         failure with another cause."""
-        wall_paths = re.search(r'^WK_COMMIT_WALL_PATHS="([^"]+)"',
-                               (REPO / "lib" / "common.sh").read_text(), re.M)
-        self.assertTrue(wall_paths)
-        self.assertIn("objects", wall_paths.group(1))
-        self.assertIn("index.lock", wall_paths.group(1))
+        self.assertIn("objects", COMMIT_WALL_PATHS)
+        self.assertIn("index.lock", COMMIT_WALL_PATHS)
         for verb in ("commit", "add", "fetch", "push", "rebase"):
             self.assertIn(verb, _write_verbs())
 

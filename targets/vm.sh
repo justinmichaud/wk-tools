@@ -149,12 +149,6 @@ t_mirror_dir() { mirror_in_guest; }
 
 t_needs_base() { return 1; }
 
-t_store_init() {
-    ensure_dir "$WK_STORE"
-    ensure_dir "$WK_STORE/ws"
-    ensure_dir "$WK_VM_DIR" 0700
-}
-
 t_list() {
     _vm_query list "$WK_VM_BASE"
 }
@@ -173,15 +167,10 @@ t_ssh_host() {
     echo "$WK_VM_USER@$ip"
 }
 
-t_ssh_user() { printf '%s' "$WK_VM_USER"; }
-
 t_agent_sock() { printf '/Users/%s/.wk-ssh-agent.sock' "$WK_VM_USER"; }
 
 WK_VM_AGENT_RW_SHARE=agent-rw   # the claude.ai login the CLI rotates in place, so every holder here reads one set of bytes (wk_agent_rw_dir); the other share is the mirror (WK_VM_MIRROR_SHARE)
 _agent_rw_guest_dir() { guest_share_dir "$WK_VM_AGENT_RW_SHARE"; }
-
-# _boot records WK_VM_UNFILTERED as a file beside the run log, because Softnet is applied at `tart run` and a guest booted without it stays open for its whole life -- the environment this is read in says nothing about it.
-t_egress_filtered() { [ ! -f "$WK_VM_DIR/$1.unfiltered" ]; }
 
 t_os() { echo macos; }
 
@@ -241,7 +230,7 @@ _converge_guest() { # <name> <ip>
     _write_lldbinit "$name" "$ip" || debug "could not write .lldbinit in $name"
     _set_guest_clock "$name" "$ip" || warn "could not set $name's clock; TLS in there will fail as CERT_NOT_YET_VALID"
     _set_guest_egress "$name" "$ip" || warn "could not set $name's egress; nothing in there will reach the outside"
-    _write_checkout "$name" "$ip" || warn "$name's WebKit checkout is not wired and set up (above); 'wk remotes $name --fix' once it is up"
+    _write_checkout "$name" "$ip" || warn "$name's WebKit checkout is not wired and set up (above); 'wk sync $name --fix' once it is up"
     _install_claude_cli "$name" "$ip" || warn "could not install the Claude CLI in $name; 'wk ai claude $name' will not work there"
     _write_claude_config "$name" "$ip" || warn "could not link ~/.claude in $name; an agent in there would have no instructions"
     _write_agent_secrets "$name" "$ip" || warn "could not write the agent credentials into $name; an agent in there will ask you to log in"
@@ -578,16 +567,9 @@ t_stop() {
 t_exec() {
     local name="$1"; shift
     local ip; ip=$(_ip "$name") || die "'$name' is not running (wk vm start $name)"
-    # Two layers of quoting: ssh joins its arguments with spaces, so the command must be one already-quoted string, in a *login* shell for PATH.
+    # ssh joins arguments with spaces: one already-quoted string, in a login shell for PATH.
     local cmd; cmd=$(sh_quote "$@")
     _ssh "$ip" "bash -lc $(sh_quote "$cmd")"
-}
-
-t_pull() {
-    local name="$1" src="$2" dest="$3"
-    local ip; ip=$(_ip "$name") || die "'$name' is not running (wk vm start $name)"
-    # shellcheck disable=SC2046 -- deliberate word splitting of the option list.
-    scp -q $(_ssh_opts) "$WK_VM_USER@$ip:$src" "$dest"
 }
 
 t_pull_dir() {
@@ -598,36 +580,6 @@ t_pull_dir() {
     # shellcheck disable=SC2046 -- deliberate word splitting of the option list.
     rsync -a --chmod=go-w --delete ${_T_PULL_EXCLUDES[@]+"${_T_PULL_EXCLUDES[@]}"} -e "ssh $(_ssh_opts)" \
         "$WK_VM_USER@$ip:$src/" "$dest/"
-}
-
-t_push() {
-    local name="$1" src="$2" dest="$3"
-    local ip; ip=$(_ip "$name") || die "'$name' is not running (wk vm start $name)"
-    # shellcheck disable=SC2046 -- deliberate word splitting of the option list.
-    scp -q $(_ssh_opts) "$src" "$WK_VM_USER@$ip:$dest"
-}
-
-t_push_dir() {
-    local name="$1" src="$2" dest="$3"
-    local ip; ip=$(_ip "$name") || die "'$name' is not running (wk vm start $name)"
-    # shellcheck disable=SC2046 -- deliberate word splitting of the option list.
-    rsync -a --chmod=go-w --delete -e "ssh $(_ssh_opts)" "$src/" "$WK_VM_USER@$ip:$dest/"
-}
-
-t_path_kind() {
-    local name="$1" p="$2"
-    local ip; ip=$(_ip "$name") || die "'$name' is not running (wk vm start $name)"
-    _ssh "$ip" "if [ -d $(sh_quote "$p") ]; then echo dir
-         elif [ -e $(sh_quote "$p") ]; then echo file
-         else echo absent; fi" 2>/dev/null < /dev/null | tr -d '\r'
-}
-
-t_exec_tty() {
-    local name="$1"; shift
-    local ip; ip=$(_ip "$name") || die "'$name' is not running (wk vm start $name)"
-    local cmd; cmd=$(sh_quote "$@")
-    # shellcheck disable=SC2046 -- deliberate word splitting of the option list.
-    exec ssh -t $(_ssh_opts) "$WK_VM_USER@$ip" "bash -lc $(sh_quote "$cmd")"
 }
 
 t_enter() {
@@ -730,19 +682,7 @@ EOF
     debug "agent credentials in $name: $n"
 }
 
-t_agent_secret_remedy() { # <name> <secret>
-    local name="$1" sname="$2"
-    [ "$(wk_agent_secret_kind "$sname")" = file ] || { agent_secret_store_remedy "$sname"; return; }
-    if t_exec "$name" bash -lc 'test -d "$CLAUDE_SECURESTORAGE_CONFIG_DIR"' >/dev/null 2>&1; then
-        agent_secret_store_remedy "$sname"
-    else
-        printf "the %s share is not mounted in '%s': 'wk vm stop %s', then 'wk vm start %s' boots it with the share" \
-            "$WK_VM_AGENT_RW_SHARE" "$name" "$name" "$name"
-    fi
-}
-
-# Softnet allows one address, where wk-proxy listens, so a guest's direct TCP to port 22 is dropped and this proxy is an HTTP CONNECT one; github.com:22 is in its allowlist.
-# macOS's own nc speaks CONNECT with `-X connect`, and there is no other nc in a Cirrus Labs image. Absolute path: ssh runs this through /bin/sh, not the login PATH.
+# Softnet allows one address, where wk-proxy listens, so a guest's direct TCP to port 22 is dropped and this proxy is an HTTP CONNECT one; github.com:22 is in its allowlist. macOS's own nc speaks CONNECT with `-X connect`, and there is no other nc in a Cirrus Labs image. Absolute path: ssh runs this through /bin/sh, not the login PATH.
 _ssh_proxy_command() {
     printf '/usr/bin/nc -X connect -x %s:%s %%h %%p' "$(_proxy_addr)" "$WK_VM_PROXY_PORT"
 }
@@ -976,18 +916,6 @@ t_sync_tools() {
     _write_marker "$name" "$ip"
 }
 
-t_sync() {   # the tooling copy only: a guest's mirror is the host's, refreshed by the host (cmd/sync)
-    local g rc=0
-    for g in $(target_workspaces); do
-        if [ "$(t_info "$g" 2>/dev/null)" != running ]; then
-            printf '  %-24s %s\n' "$g" "not running -- skipped" >&2
-            continue
-        fi
-        if t_sync_tools "$g"; then printf '  %-24s ok\n' "$g" >&2; else rc=1; fi
-    done
-    return "$rc"
-}
-
 t_destroy() {
     local name="$1"
     local v; v=$(_vm "$name")
@@ -1200,7 +1128,6 @@ _base_inputs_hash() {
 print(hashlib.sha256(sys.stdin.buffer.read()).hexdigest()[:16])'
 }
 
-# Prints the reason and succeeds when the base is stale, so a caller reads `if why=$(vm_base_stale); then`.
 vm_base_stale() {
     local rec
     rec=$(marker_field "$(_base_marker)" inputs)

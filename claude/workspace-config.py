@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
-"""workspace-config.py <checkout>: record in ~/.claude.json the answers `wk` has
-already given (onboarding, the remote-control dialog, trust for <checkout>) and
-the account record beside the shared login -- cmd/ai says why each is needed."""
+"""workspace-config.py <checkout>: records in ~/.claude.json the onboarding, remote-control-dialog
+and trust answers `wk` already gave, plus the account record beside the shared login (cmd/ai says why each is needed)."""
 import json
 import os
 import sys

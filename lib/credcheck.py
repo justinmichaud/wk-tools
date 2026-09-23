@@ -598,8 +598,8 @@ def _login_measured(oauth, org):
                     + _rc_line(state)
                     + "\n    fix: an owner of the %s organization turns Remote "
                       "Control on in its Claude Code policy "
-                      "(allow_remote_control); until then WK_NO_CLAUDE_RC=1 "
-                      "makes workspaces without it" % (organization.get("name") or org))
+                      "(allow_remote_control); until then `wk ai claude` "
+                      "sessions run without it" % (organization.get("name") or org))
     return OK, ("%s; remote control unverified: %s." % ("; ".join(facts), why)
                 + _rc_line(state))
 
@@ -909,8 +909,8 @@ RULES = collections.OrderedDict((
         check=_litellm_key)),
     ("claude-login", Rule(
         spent_by="targets/container.sh -- mounted into every container as the "
-                 "one Claude credential it is given, and what `wk ai claude "
-                 "<ws> --rc` refuses to start remote control without",
+                 "one Claude credential it is given, and what a `wk ai claude` "
+                 "session's Remote Control needs",
         needs="run inference and fetch the account profile (user:inference, "
               "user:profile), and still be renewable",
         forbids="be an inference-only setup token, which cannot fetch a profile",

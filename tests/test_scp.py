@@ -9,26 +9,33 @@ Three things are held to here:
       target is a real filesystem, so these compare the bytes rather than a
       transcript of a copy
     each driver moves them the way it already moves bytes -- `podman cp` for
-      a container, scp and rsync for a guest or a build machine -- and never
-      through t_exec, which is a login shell (or wkdev-enter) and not a byte
-      pipe
+      a container, scp and rsync (through the one `Machine` copy) for a guest
+      or a build machine -- and never through `exec`, which is a login shell
+      (or wkdev-enter) and not a byte pipe
 
-Nothing here touches a real container, guest or build machine: `podman`,
-`tart`, `ssh`, `scp` and `rsync` are stubs on PATH that log their argv, and
-the "workspace" is a scratch directory.
+`TestTheBytesArrive`/`TestRefusals`/`TestTheWholeCommandOnAGuest` touch no
+real container, guest or build machine: `podman`, `tart`, `ssh`, `scp` and
+`rsync` are stubs on PATH that log their argv, and the "workspace" is a
+scratch directory. `TestDriverCopy` is one step below that: `targets.py`'s
+drivers over a fake machine, the argv each one builds.
 
 Run: python3 -m unittest tests.test_scp -v
 """
+import json
 import os
-import subprocess
+import shutil
+import sys
+import tempfile
 import unittest
+from pathlib import Path
 
 from tests.support import (
-    REPO, WkTest, bash, fake_workspace, run, stub_path,
+    REPO, WkTest, fake_workspace, run, stub_path,
 )
 
-TOUCHED = ("cmd/scp", "lib/target.sh", "targets/container.sh",
-           "targets/vm.sh", "targets/remote.sh")
+sys.path.insert(0, str(REPO / "lib"))
+from wk import targets  # noqa: E402
+from wk.machine import Fake, Local  # noqa: E402
 
 # `podman`: logs every invocation and answers the two questions the container
 # driver asks -- the container's user (its working directory) and what a path
@@ -61,15 +68,6 @@ def _net_stub(tool, kind="absent"):
         f'case "$*" in *"echo dir"*) echo {kind} ;; esac\n'
         'exit 0\n'
     )
-
-
-class TestScriptsParse(unittest.TestCase):
-    def test_bash_n(self):
-        for f in TOUCHED:
-            with self.subTest(script=f):
-                cp = subprocess.run(["bash", "-n", str(REPO / f)],
-                                    capture_output=True, text=True, timeout=60)
-                self.assertEqual(cp.returncode, 0, cp.stderr)
 
 
 class TestDeclaration(WkTest):
@@ -342,122 +340,175 @@ class TestTheWholeCommandOnAGuest(WkTest):
         self.assertNotIn("no such file", cp.stdout)
 
 
-class TestDriverTransports(WkTest):
-    """What each driver actually runs. The bytes never go through t_exec: a
-    container's exec is wkdev-enter and a guest's is a login shell, and
-    neither is a byte pipe (targets/container.sh's t_pull says what that cost
-    the last time -- 1396 bytes arrived as 1399)."""
+class DriverCopyTest(unittest.TestCase):
+    """A `Registry` over a `Fake` machine: no bash, no real process, the
+    argv each driver's `pull`/`push`/`pull_dir`/`push_dir`/`path_kind` builds."""
 
-    def _lift(self, target, calls, env):
-        script = ('. "$WK_ROOT/lib/common.sh"\n'
-                  '. "$WK_ROOT/lib/store.sh"\n'
-                  '. "$WK_ROOT/lib/target.sh"\n'
-                  f'load_target {target} >/dev/null 2>&1\n' + calls)
-        cp = bash(script, env=env)
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        return cp
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="wk-test-scp-drivers-"))
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.env = {"HOME": str(self.tmp / "home"), "WK_STORE": str(self.tmp / "store"),
+                    "WK_TARGET_REGISTRY": str(self.tmp / "hosts"), "WK_IN_VM": "1",
+                    "PATH": os.environ.get("PATH", "")}
+        (self.tmp / "home").mkdir()
+        (self.tmp / "hosts").mkdir()
+        self.fake = Fake("here")
+        self.reg = targets.Registry(REPO, env=self.env, machine=self.fake)
 
-    def test_a_container_moves_bytes_with_podman_cp(self):
-        log = self.tmp / "podman.log"
-        log.write_text("")
-        with stub_path({"podman": FAKE_PODMAN}) as binp:
-            cp = self._lift("container", '''
-echo "kind=$(t_path_kind demo /src/WebKit/a.txt)"
-t_push demo /tmp/local.txt /src/WebKit/a.txt
-t_pull demo /src/WebKit/a.txt /tmp/out.txt
-t_push_dir demo /tmp/tree /src/WebKit/tree
-t_pull_dir demo /src/WebKit/tree /tmp/tree
-''', env={"PATH": f"{binp}:{os.environ['PATH']}",
-          "WK_TEST_PODMAN_LOG": str(log)})
-        text = log.read_text()
-        self.assertIn("kind=file", cp.stdout)
-        # In, out, and both directions of a tree -- `podman cp` each time.
-        self.assertIn("cp /tmp/local.txt wk-demo:/src/WebKit/a.txt", text)
-        self.assertIn("cp wk-demo:/src/WebKit/a.txt /tmp/out.txt", text)
-        self.assertIn("cp /tmp/tree/. wk-demo:/src/WebKit/tree", text)
-        self.assertIn("cp wk-demo:/src/WebKit/tree/. /tmp/tree", text)
-        # A tree's destination is emptied first, as the container's own user,
-        # so the copy is a copy and the directory is not root's.
-        self.assertIn("exec --user dev wk-demo /bin/sh -c rm -rf "
-                      "'/src/WebKit/tree' && mkdir -p '/src/WebKit/tree'", text)
-        for word in ("tar", "wkdev-enter"):
-            self.assertNotIn(word, text, f"bytes went through {word}")
+    def conf(self, name, text):
+        (self.tmp / "hosts" / (name + ".conf")).write_text(text)
 
-    def test_a_container_reaches_podman_the_way_the_host_does(self):
-        """`_hpodman`, not `_podman`: on a macOS host this runs outside the
-        podman VM, where the default connection is the rootful one."""
-        text = (REPO / "targets" / "container.sh").read_text()
-        for fn in ("t_push()", "t_push_dir()", "t_pull()", "t_pull_dir()",
-                   "t_path_kind()"):
-            body = text.split(fn, 1)[1].split("\n}\n", 1)[0]
-            self.assertNotIn("_podman ", body, f"{fn} bypasses _hpodman")
 
-    def test_a_guest_moves_bytes_with_scp_and_rsync(self):
-        log = self.tmp / "net.log"
-        log.write_text("")
-        with stub_path({"tart": FAKE_TART, "ssh": _net_stub("ssh"),
-                        "scp": _net_stub("scp"), "rsync": _net_stub("rsync")}) as binp:
-            cp = self._lift("vm", '''
-echo "kind=$(t_path_kind demo /Users/admin/WebKit/a.txt)"
-t_push demo /tmp/local.txt /Users/admin/WebKit/a.txt
-t_push_dir demo /tmp/tree /Users/admin/WebKit/tree
-''', env={"PATH": f"{binp}:{os.environ['PATH']}",
-          "WK_TEST_NET_LOG": str(log),
-          "WK_VM_STORE": str(self.tmp / "vmstore")})
-        text = log.read_text()
-        self.assertIn("kind=absent", cp.stdout)
-        self.assertIn("/tmp/local.txt admin@1.2.3.4:/Users/admin/WebKit/a.txt",
-                      text)
-        self.assertTrue(
-            any(l.startswith("scp ") for l in text.splitlines()), text)
-        # --chmod: a tree that crosses machines does not carry the pushing
-        # machine's umask (tests/test_owed_static_audits.py audits every one).
-        self.assertIn("rsync -a --chmod=go-w --delete -e ssh", text)
-        self.assertIn("/tmp/tree/ admin@1.2.3.4:/Users/admin/WebKit/tree/", text)
-        # The question is asked over ssh, and answered with one word.
-        self.assertTrue(
-            any(l.startswith("ssh ") and "echo dir" in l
-                for l in text.splitlines()), text)
+class TestContainerCopy(DriverCopyTest):
+    """`podman cp`: wkdev-enter is a shell wrapper and not a byte pipe, and a
+    shell wrapper corrupts a binary copy piped through it -- 1396 bytes
+    arriving as 1399, measured against `Container.pull` (lib/wk/targets.py)."""
 
-    def test_a_build_machine_moves_bytes_with_scp_and_rsync(self):
-        log = self.tmp / "net.log"
-        log.write_text("")
-        with stub_path({"ssh": _net_stub("ssh"), "scp": _net_stub("scp"),
-                        "rsync": _net_stub("rsync")}) as binp:
-            self._lift("remote", '''
-t_push demo /tmp/local.txt /wk/ws/demo/WebKit/a.txt
-t_push_dir demo /tmp/tree /wk/ws/demo/WebKit/tree
-''', env={"PATH": f"{binp}:{os.environ['PATH']}",
-          "WK_TEST_NET_LOG": str(log),
-          "XDG_STATE_HOME": str(self.tmp / "state"),
-          "WK_REMOTE_HOST": "fakebox", "WK_REMOTE_ROOT": "/wk"})
-        text = log.read_text()
-        self.assertIn("/tmp/local.txt fakebox:/wk/ws/demo/WebKit/a.txt", text)
-        self.assertIn("/tmp/tree/ fakebox:/wk/ws/demo/WebKit/tree/", text)
+    def setUp(self):
+        super().setUp()
+        self.t = self.reg.load("container")
+        self.fake.answer(["podman", "inspect", "wk-demo", "--format", "{{.Config.WorkingDir}}"], out="/home/dev\n")
+        self.fake.answer(["podman", "cp"], out="")
 
-    def test_a_machine_that_is_its_own_host_copies_locally(self):
-        """On the build machine itself there is nothing to connect to
-        (WK_REMOTE_LOCAL in its conf), the same split every other function
-        there makes -- and these are real copies on a real filesystem."""
-        d = self.tmp / "box"
-        (d / "src").mkdir(parents=True)
-        (d / "src" / "a").write_bytes(b"a\n")
-        (d / "one.txt").write_bytes(b"one\n")
-        registry = self.tmp / "hosts"
-        registry.mkdir()
-        (registry / "fakebox.conf").write_text(
-            "WK_TARGET_KIND=remote\n"
-            "WK_REMOTE_LOCAL=1\n"
-            f"WK_REMOTE_ROOT={d}\n"
-        )
-        self._lift("fakebox", f'''
-t_push demo {d}/one.txt {d}/two.txt
-t_push_dir demo {d}/src {d}/dst
-echo "kind=$(t_path_kind demo {d}/one.txt)"
-''', env={"XDG_STATE_HOME": str(self.tmp / "state"),
-          "WK_TARGET_REGISTRY": str(registry)})
-        self.assertEqual((d / "two.txt").read_bytes(), b"one\n")
-        self.assertEqual((d / "dst" / "a").read_bytes(), b"a\n")
+    def test_push_and_pull_are_podman_cp(self):
+        self.t.push("demo", "/tmp/local.txt", "/src/WebKit/a.txt")
+        self.assertEqual(self.fake.effects[-1][1], ("podman", "cp", "/tmp/local.txt", "wk-demo:/src/WebKit/a.txt"))
+        self.t.pull("demo", "/src/WebKit/a.txt", "/tmp/out.txt")
+        self.assertEqual(self.fake.effects[-1][1], ("podman", "cp", "wk-demo:/src/WebKit/a.txt", "/tmp/out.txt"))
+
+    def test_push_dir_clears_the_containers_own_side_first_as_its_own_user(self):
+        self.fake.answer(["podman", "exec", "--user", "dev", "wk-demo", "/bin/sh"], out="")
+        self.t.push_dir("demo", "/tmp/tree", "/src/WebKit/tree")
+        clear, cp = self.fake.effects[-2][1], self.fake.effects[-1][1]
+        self.assertEqual(clear[:5], ("podman", "exec", "--user", "dev", "wk-demo"))
+        self.assertIn("rm -rf '/src/WebKit/tree' && mkdir -p '/src/WebKit/tree'", clear[-1])
+        self.assertEqual(cp, ("podman", "cp", "/tmp/tree/.", "wk-demo:/src/WebKit/tree"))
+
+    def test_pull_dir_clears_the_destination_here_first(self):
+        self.fake.mkdir("/tmp/out")
+        self.fake.write("/tmp/out/stale", "x")
+        self.t.pull_dir("demo", "/src/WebKit/tree", "/tmp/out")
+        self.assertFalse(self.fake.exists("/tmp/out/stale"))
+        self.assertEqual(self.fake.effects[-1][1], ("podman", "cp", "wk-demo:/src/WebKit/tree/.", "/tmp/out"))
+
+    def test_path_kind_asks_inside_the_container_as_its_own_user(self):
+        self.fake.answer(["podman", "exec", "--user", "dev", "wk-demo", "/bin/sh"], out="dir\n")
+        self.assertEqual(self.t.path_kind("demo", "/src/WebKit/tree"), "dir")
+
+    def test_no_copy_goes_through_wkdev_enter(self):
+        self.fake.answer(["podman", "exec", "--user", "dev", "wk-demo", "/bin/sh"], out="file\n")
+        self.t.push("demo", "/tmp/a", "/src/WebKit/a")
+        self.t.pull("demo", "/src/WebKit/a", "/tmp/a")
+        self.t.path_kind("demo", "/src/WebKit/a")
+        for kind, argv in self.fake.effects:
+            self.assertNotIn("wkdev-enter", " ".join(str(a) for a in argv))
+
+
+class TestVmCopy(DriverCopyTest):
+    def setUp(self):
+        super().setUp()
+        del self.env["WK_IN_VM"]
+        self.env["WK_VM_STORE"] = str(self.tmp / "vmstore")
+        bin_dir = self.tmp / "bin"
+        bin_dir.mkdir()
+        (bin_dir / "tart").write_text("#!/bin/sh\nexit 0\n")
+        (bin_dir / "tart").chmod(0o755)
+        self.env["PATH"] = "%s:%s" % (bin_dir, os.environ.get("PATH", ""))
+        from unittest import mock
+        from wk.store import Store
+        p = mock.patch.object(Store, "macos_host", new_callable=mock.PropertyMock, return_value=True)
+        p.start()
+        self.addCleanup(p.stop)
+        self.reg = targets.Registry(REPO, env=self.env, machine=self.fake)
+        self.t = self.reg.load("vm")
+        self.fake.answer([self.t.tart(), "list"], out=json.dumps([{"Name": "wk-demo", "State": "running", "Source": "local"}]))
+        self.fake.answer([self.t.tart(), "ip"], out="1.2.3.4\n")
+
+    def test_push_and_pull_are_scp_with_the_guests_own_key(self):
+        self.fake.answer(["scp"], out="")
+        self.t.push("demo", "/tmp/local.txt", "/Users/admin/WebKit/a.txt")
+        argv = self.fake.effects[-1][1]
+        self.assertEqual(argv[0], "scp")
+        self.assertEqual(argv[-2:], ("/tmp/local.txt", "admin@1.2.3.4:/Users/admin/WebKit/a.txt"))
+        self.assertIn("-i", argv)
+        self.assertIn(self.t.key(), argv)
+        self.t.pull("demo", "/Users/admin/WebKit/a.txt", "/tmp/out.txt")
+        self.assertEqual(self.fake.effects[-1][1][-2:], ("admin@1.2.3.4:/Users/admin/WebKit/a.txt", "/tmp/out.txt"))
+
+    def test_push_dir_and_pull_dir_are_rsync_with_chmod(self):
+        self.fake.answer(["rsync"], out="")
+        self.t.push_dir("demo", "/tmp/tree", "/Users/admin/WebKit/tree")
+        argv = self.fake.effects[-1][1]
+        self.assertEqual(argv[0], "rsync")
+        self.assertIn("--chmod=go-w", argv)
+        self.assertIn("--delete", argv)
+        self.assertEqual(argv[-2:], ("/tmp/tree/", "admin@1.2.3.4:/Users/admin/WebKit/tree/"))
+
+    def test_path_kind_asks_over_ssh(self):
+        self.fake.answer(["ssh"], out="file\n")
+        self.assertEqual(self.t.path_kind("demo", "/Users/admin/WebKit/a.txt"), "file")
+
+    def test_a_guest_that_is_not_running_dies_naming_start(self):
+        from wk.act import Refused
+        with self.assertRaises(Refused):
+            self.t.pull("gone", "/x", "/y")
+
+
+class TestRemoteCopy(DriverCopyTest):
+    """A build machine reached over ssh: scp and rsync, over the same opts `exec` uses."""
+
+    def setUp(self):
+        super().setUp()
+        del self.env["WK_IN_VM"]
+        self.env["XDG_STATE_HOME"] = str(self.tmp / "state")
+        self.conf("box", "WK_REMOTE_HOST=box.example\nWK_REMOTE_ROOT=/home/u/wk\n")
+        self.reg = targets.Registry(REPO, env=self.env, machine=self.fake)
+        self.t = self.reg.load("box")
+
+    def test_push_and_pull_are_scp(self):
+        self.fake.answer(["scp"], out="")
+        self.t.push("demo", "/tmp/local.txt", "/wk/ws/demo/WebKit/a.txt")
+        self.assertEqual(self.fake.effects[-1][1][0], "scp")
+        self.assertEqual(self.fake.effects[-1][1][-2:], ("/tmp/local.txt", "box.example:/wk/ws/demo/WebKit/a.txt"))
+        self.t.pull("demo", "/wk/ws/demo/WebKit/a.txt", "/tmp/out.txt")
+        self.assertEqual(self.fake.effects[-1][1][-2:], ("box.example:/wk/ws/demo/WebKit/a.txt", "/tmp/out.txt"))
+
+    def test_push_dir_and_pull_dir_are_rsync_with_chmod(self):
+        self.fake.answer(["rsync"], out="")
+        self.t.push_dir("demo", "/tmp/tree", "/wk/ws/demo/WebKit/tree")
+        argv = self.fake.effects[-1][1]
+        self.assertEqual(argv[0], "rsync")
+        self.assertIn("--chmod=go-w", argv)
+        self.assertEqual(argv[-2:], ("/tmp/tree/", "box.example:/wk/ws/demo/WebKit/tree/"))
+
+    def test_path_kind_asks_over_ssh(self):
+        self.fake.answer(["ssh"], out="dir\n")
+        self.assertEqual(self.t.path_kind("demo", "/wk/ws/demo/WebKit/tree"), "dir")
+
+
+class TestRemoteLocalCopy(DriverCopyTest):
+    """A build machine that is this one (WK_REMOTE_LOCAL): the same split
+    every other function of this driver makes, and real copies on a real
+    filesystem -- no ssh, no scp, no rsync."""
+
+    def setUp(self):
+        super().setUp()
+        del self.env["WK_IN_VM"]
+        self.env["XDG_STATE_HOME"] = str(self.tmp / "state")
+        self.box = self.tmp / "box"
+        self.conf("fakebox", "WK_TARGET_KIND=remote\nWK_REMOTE_LOCAL=1\nWK_REMOTE_ROOT=%s\n" % self.box)
+        self.reg = targets.Registry(REPO, env=self.env, machine=Local())
+        self.t = self.reg.load("fakebox")
+
+    def test_push_and_push_dir_copy_on_a_real_filesystem(self):
+        (self.box / "src").mkdir(parents=True)
+        (self.box / "src" / "a").write_bytes(b"a\n")
+        (self.box / "one.txt").write_bytes(b"one\n")
+        self.t.push("demo", str(self.box / "one.txt"), str(self.box / "two.txt"))
+        self.assertEqual((self.box / "two.txt").read_bytes(), b"one\n")
+        self.t.push_dir("demo", str(self.box / "src"), str(self.box / "dst"))
+        self.assertEqual((self.box / "dst" / "a").read_bytes(), b"a\n")
+        self.assertEqual(self.t.path_kind("demo", str(self.box / "one.txt")), "file")
 
 
 if __name__ == "__main__":

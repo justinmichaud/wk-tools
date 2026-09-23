@@ -16,19 +16,24 @@ TestPrEndToEnd.test_new_then_pr_against_a_local_fork for why.
 
 'wk pr open' -- the fifth form, which pushes a branch to its fork and opens
 it with `gh pr create` -- is covered further down by TestPrOpenTarget and
-TestPrOpenGhArgs (pr_open_target/pr_open_gh_args, lifted out of cmd/pr the
-same way _lift lifts a function from admin/wk-card-priv in
-tests/test_wifi_seed.py, and run against a real, if local-path, git repo:
-no network and no gh) and by TestPrOpenRefusals (the two refusals that
-happen before either of those ever runs, through the real dispatcher).
+TestPrOpenGhArgs (pr_open_target/pr_open_gh_args, imported straight out of
+the Python cmd/pr -- they are plain module-level functions precisely so a
+test can call them directly, against a temporary repo or a stub gh, without
+running the rest of the file, which needs a real workspace) and by
+TestPrOpenRefusals (the two refusals that happen before either of those ever
+runs, through the real dispatcher).
 
 Run: python3 -m unittest tests.test_pr_workflow -v
 """
+import contextlib
+import importlib.machinery
+import importlib.util
+import io
 import os
-import shlex
 import subprocess
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from tests.support import REPO, WK, bash, fake_workspace, rand_suffix, run, scratch_dir, stub_path
 
@@ -37,32 +42,23 @@ PRELUDE = f'set -euo pipefail\ncd "{REPO}"\n. lib/common.sh\n. lib/store.sh\n'
 CMD_PR = REPO / "cmd" / "pr"
 
 
-def _lift(path, func):
-    """A function's body, sed'd out of a shell file -- see tests/test_wifi_seed.py's
-    _lift, which this mirrors. pr_open_target/pr_open_gh_args are written as
-    plain functions in cmd/pr precisely so they can be lifted and called
-    directly, against a temporary repo or a stub gh, without running the
-    rest of the file (which needs a real workspace)."""
-    text = subprocess.run(
-        ["sed", "-n", f"/^{func}()/,/^}}/p", str(path)],
-        capture_output=True, text=True,
-    ).stdout
-    assert text.strip(), f"{func} not found in {path}"
-    return text
+def _load_cmd_pr():
+    """cmd/pr as a module, the way its own `#!/usr/bin/env python3` runs it --
+    a real file with no extension needs its loader spelled out."""
+    loader = importlib.machinery.SourceFileLoader("wk_cmd_pr", str(CMD_PR))
+    spec = importlib.util.spec_from_file_location("wk_cmd_pr", str(CMD_PR), loader=loader)
+    m = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m)
+    return m
 
 
-# lib/store.sh's real wk_remotes/wk_push_forks, unmodified: pr_open_target
-# never fetches or pushes over them (it only reads remote *names* it is
-# handed and URLs already configured in the test's own local-path repo), so
-# there is nothing here for a fake to stand in for, unlike TestMirrorFetch's
-# wk_remotes override.
-OPEN_PRELUDE = (
-    f'set -euo pipefail\ncd "{REPO}"\n. lib/common.sh\n. lib/store.sh\n'
-    + _lift(CMD_PR, "pr_open_target")
-    + "\n"
-    + _lift(CMD_PR, "pr_open_gh_args")
-    + "\n"
-)
+# lib/store.sh's real wk_remotes/wk_push_forks (shell.wk_remotes/wk_push_forks), unmodified:
+# pr_open_target never fetches or pushes over them (it only reads remote *names* it is handed
+# and URLs already configured in the test's own local-path repo), so there is nothing here for
+# a fake to stand in for, unlike TestMirrorFetch's wk_remotes override.
+CMD_PR_MODULE = _load_cmd_pr()
+
+from wk.machine import Result  # noqa: E402  -- needs CMD_PR_MODULE's sys.path.insert above
 
 
 def _git(*args, cwd, check=True):
@@ -219,29 +215,24 @@ class TestPrOpenTarget(unittest.TestCase):
         return work
 
     def _target(self, src):
-        cp = bash(OPEN_PRELUDE + f'pr_open_target {shlex.quote(str(src))}\n')
-        return cp
+        return CMD_PR_MODULE.pr_open_target(src)
 
     def test_webkit_branch(self):
         """a branch tracking origin/main opens against WebKit/WebKit, head
         <fork's github user>:<branch>, pushed to the 'fork' remote"""
         work = self._tracked_branch("WebKit", "origin", "fork", "eng/my-feature")
-        cp = self._target(work)
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
         self.assertEqual(
-            cp.stdout.strip().split("\t"),
-            ["WebKit/WebKit", "testuser:eng/my-feature", "fork", "eng/my-feature"],
+            self._target(work),
+            ("WebKit/WebKit", "testuser:eng/my-feature", "fork", "eng/my-feature"),
         )
 
     def test_wpe_branch(self):
         """a branch tracking wpe/main opens against WPEWebKit's real owner
         (WebPlatformForEmbedded, not the fork's), pushed to 'forkwpe'"""
         work = self._tracked_branch("WPEWebKit", "wpe", "forkwpe", "eng/wpe-feature")
-        cp = self._target(work)
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
         self.assertEqual(
-            cp.stdout.strip().split("\t"),
-            ["WebPlatformForEmbedded/WPEWebKit", "testuser:eng/wpe-feature", "forkwpe", "eng/wpe-feature"],
+            self._target(work),
+            ("WebPlatformForEmbedded/WPEWebKit", "testuser:eng/wpe-feature", "forkwpe", "eng/wpe-feature"),
         )
 
     def _branch_tracking_its_fork(self, project, fork_remote, branch, user="testuser"):
@@ -263,21 +254,17 @@ class TestPrOpenTarget(unittest.TestCase):
         """Not against the fork itself: `wk pr` leaves the branch tracking
         `fork/<branch>`, and a pull request against that is one against you."""
         work = self._branch_tracking_its_fork("WebKit", "fork", "eng/my-feature")
-        cp = self._target(work)
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
         self.assertEqual(
-            cp.stdout.strip().split("\t"),
-            ["WebKit/WebKit", "testuser:eng/my-feature", "fork", "eng/my-feature"],
+            self._target(work),
+            ("WebKit/WebKit", "testuser:eng/my-feature", "fork", "eng/my-feature"),
         )
 
     def test_a_wpe_branch_tracking_its_fork_opens_against_wpewebkit(self):
         work = self._branch_tracking_its_fork("WPEWebKit", "forkwpe", "eng/wpe-feature")
-        cp = self._target(work)
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
         self.assertEqual(
-            cp.stdout.strip().split("\t"),
-            ["WebPlatformForEmbedded/WPEWebKit", "testuser:eng/wpe-feature",
-             "forkwpe", "eng/wpe-feature"],
+            self._target(work),
+            ("WebPlatformForEmbedded/WPEWebKit", "testuser:eng/wpe-feature",
+             "forkwpe", "eng/wpe-feature"),
         )
 
     def test_refuses_on_main(self):
@@ -285,28 +272,29 @@ class TestPrOpenTarget(unittest.TestCase):
         work = self.tmp / "on-main"
         work.mkdir()
         _git("init", "-q", "-b", "main", cwd=work)
-        cp = self._target(work)
-        self.assertNotEqual(cp.returncode, 0)
-        self.assertIn("cannot open 'main'", cp.stderr)
+        with self.assertRaises(CMD_PR_MODULE.PrOpenError) as ctx:
+            self._target(work)
+        self.assertIn("cannot open 'main'", str(ctx.exception))
 
     def test_refuses_detached_head(self):
         """a detached HEAD has no branch to push, so it is refused by name"""
         work = self.tmp / "detached"
         _make_repo(work, "main")
         _git("checkout", "-q", "--detach", "HEAD", cwd=work)
-        cp = self._target(work)
-        self.assertNotEqual(cp.returncode, 0)
-        self.assertIn("detached HEAD", cp.stderr)
+        with self.assertRaises(CMD_PR_MODULE.PrOpenError) as ctx:
+            self._target(work)
+        self.assertIn("detached HEAD", str(ctx.exception))
 
     def test_refuses_dirty_tree(self):
         """an uncommitted change is named before anything is pushed, the
         same rule the PR-checkout form applies (cmd/pr's own header)"""
         work = self._tracked_branch("WebKit", "origin", "fork", "eng/dirty")
         (work / "untracked.txt").write_text("scratch\n")
-        cp = self._target(work)
-        self.assertNotEqual(cp.returncode, 0)
-        self.assertIn("uncommitted changes", cp.stderr)
-        self.assertIn("git", cp.stderr)
+        with self.assertRaises(CMD_PR_MODULE.PrOpenError) as ctx:
+            self._target(work)
+        msg = str(ctx.exception)
+        self.assertIn("uncommitted changes", msg)
+        self.assertIn("git", msg)
 
     def test_refuses_a_branch_with_no_upstream(self):
         """a fresh local branch with no tracking ref cannot be told apart
@@ -314,23 +302,17 @@ class TestPrOpenTarget(unittest.TestCase):
         work = self.tmp / "no-upstream"
         _make_repo(work, "main")
         _git("checkout", "-q", "-b", "eng/untracked", cwd=work)
-        cp = self._target(work)
-        self.assertNotEqual(cp.returncode, 0)
-        self.assertIn("no upstream", cp.stderr)
+        with self.assertRaises(CMD_PR_MODULE.PrOpenError) as ctx:
+            self._target(work)
+        self.assertIn("no upstream", str(ctx.exception))
 
 
 class TestPrOpenGhArgs(unittest.TestCase):
-    """pr_open_gh_args: the exact argv 'gh pr create' gets, one token per
-    line -- what a stub gh actually receives in TestPrOpenRefusals-style use."""
+    """pr_open_gh_args: the exact argv 'gh pr create' gets -- what a stub gh
+    actually receives in TestPrOpenRefusals-style use."""
 
     def _args(self, base, head, *flags):
-        script = OPEN_PRELUDE + 'pr_open_gh_args {} {} {}\n'.format(
-            shlex.quote(base), shlex.quote(head),
-            " ".join(shlex.quote(f) for f in flags),
-        )
-        cp = bash(script)
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        return cp.stdout.splitlines()
+        return CMD_PR_MODULE.pr_open_gh_args(base, head, *flags)
 
     def test_plain(self):
         """no flags: --repo, --head, --fill, nothing else"""
@@ -351,6 +333,110 @@ class TestPrOpenGhArgs(unittest.TestCase):
             self._args("WebKit/WebKit", "alice:eng/x", "--bogus"),
             ["--repo", "WebKit/WebKit", "--head", "alice:eng/x", "--fill"],
         )
+
+
+class _FakeRebaseTarget:
+    """A duck-typed Target: pr_rebase only ever calls src/mirror_dir/exec on
+    it, so a fake answering those three, from a scripted list of Results, is
+    the whole of what a unit test needs -- no container, guest or ssh driver."""
+
+    def __init__(self, mirror, responses):
+        self._mirror = mirror
+        self._responses = list(responses)
+        self.calls = []
+
+    def src(self, ws):
+        return "/src/WebKit"
+
+    def mirror_dir(self):
+        return self._mirror
+
+    def exec(self, ws, argv, tty=False, timeout=None):
+        self.calls.append(argv)
+        return self._responses.pop(0)
+
+
+class TestPrRebase(unittest.TestCase):
+    """pr_rebase: fetch from the mirror when the target has one and it is
+    there, the network otherwise, then rebase -- one round trip per fact,
+    each through Target.exec, none of it inline bash."""
+
+    def _run(self, mirror, responses):
+        target = _FakeRebaseTarget(mirror, responses)
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            rc = CMD_PR_MODULE.pr_rebase(target, "myws")
+        return rc, target.calls, err.getvalue()
+
+    def test_fetches_from_the_mirror_when_it_is_there(self):
+        rc, calls, _ = self._run("/store/git/WebKit.git", [
+            Result(0),                       # test -d <mirror>
+            Result(0),                       # git fetch <mirror>
+            Result(0),                       # git rebase origin/main
+            Result(0, "abc1234 c\n"),        # git log --oneline -1
+        ])
+        self.assertEqual(rc, 0)
+        self.assertEqual(calls[0], ["test", "-d", "/store/git/WebKit.git"])
+        self.assertIn("/store/git/WebKit.git", calls[1])
+        self.assertIn("+refs/heads/*:refs/remotes/origin/*", calls[1])
+        self.assertEqual(calls[2], ["git", "-C", "/src/WebKit", "rebase", "origin/main"])
+
+    def test_fetches_from_origin_with_no_mirror(self):
+        rc, calls, _ = self._run("", [
+            Result(0),                       # git fetch origin
+            Result(0),                       # git rebase origin/main
+            Result(0, "abc1234 c\n"),        # git log --oneline -1
+        ])
+        self.assertEqual(rc, 0)
+        self.assertEqual(calls[0], ["git", "-C", "/src/WebKit", "fetch", "--prune", "--quiet", "origin"])
+
+    def test_fetches_from_origin_when_the_mirror_is_not_there(self):
+        rc, calls, _ = self._run("/store/git/WebKit.git", [
+            Result(1),                       # test -d <mirror> -- not there
+            Result(0),                       # git fetch origin
+            Result(0),                       # git rebase origin/main
+            Result(0, "abc1234 c\n"),
+        ])
+        self.assertEqual(rc, 0)
+        self.assertEqual(calls[1], ["git", "-C", "/src/WebKit", "fetch", "--prune", "--quiet", "origin"])
+
+    def test_a_failed_fetch_never_rebases(self):
+        rc, calls, err = self._run("", [Result(1, "", "network unreachable\n")])
+        self.assertEqual(rc, 1)
+        self.assertEqual(len(calls), 1, "the rebase must not run over an unfetched checkout")
+        self.assertIn("the rebase stopped", err)
+
+    def test_a_rebase_conflict_is_reported_not_swallowed(self):
+        rc, calls, err = self._run("", [
+            Result(0),                       # fetch ok
+            Result(1, "", "CONFLICT\n"),      # rebase stops
+        ])
+        self.assertEqual(rc, 1)
+        self.assertEqual(len(calls), 2, "nothing past the failed rebase runs")
+        self.assertIn("CONFLICT\n", err)
+        self.assertLess(err.index("CONFLICT"), err.index("the rebase stopped"))
+        self.assertIn("git rebase --continue", err)
+
+
+class TestPrOpenStatus(unittest.TestCase):
+    """'wk pr open' ends with gh's own exit status: a PR gh did not create is not a success."""
+
+    def _open(self, gh_rc):
+        target = _FakeRebaseTarget("", [Result(0)])   # the push
+        ran = []
+
+        def fake_run(argv, **kw):
+            ran.append(argv)
+            return subprocess.CompletedProcess(argv, gh_rc if argv[:3] == ["gh", "pr", "create"] else 0)
+        with mock.patch.object(CMD_PR_MODULE, "pr_open_target", return_value=("WebKit/WebKit", "me:b", "fork", "b")), \
+                mock.patch.object(CMD_PR_MODULE.subprocess, "run", fake_run), contextlib.redirect_stderr(io.StringIO()):
+            rc = CMD_PR_MODULE.pr_open(target, "myws", draft=False, web=False)
+        self.assertEqual(ran[-1][:3], ["gh", "pr", "create"])
+        return rc
+
+    def test_gh_failing_is_the_commands_failure(self):
+        self.assertEqual(self._open(1), 1)
+        self.assertEqual(self._open(0), 0)
 
 
 class TestPrOpenRefusals(unittest.TestCase):

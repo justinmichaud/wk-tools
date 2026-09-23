@@ -177,7 +177,7 @@ EOF
     return 0
 }
 
-end_agent_sessions() { # <ws...> -- 1 when one outlived the KILL. A remote-control server's task record is not written back: task_alive reads the pid, so it converges on the next read whoever ended the process
+end_agent_sessions() { # <ws...> -- 1 when one outlived the KILL
     local ws pids i rc=0
     for ws in "$@"; do
         pids=$(agent_pids "$ws")

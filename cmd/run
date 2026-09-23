@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/usr/bin/env python3
 #
 # wk run <workspace> [options] [-- jsc-args] -- run jsc from a workspace build
 # wk: where=workspace name=required ready=yes group=workspaces opts --config=,--lldb,--until-crash,--max= passthrough
@@ -18,126 +18,152 @@
 #   --max <n>           cap the iterations under --until-crash (default: 200;
 #                       reaching it without a crash exits 0)
 
-set -euo pipefail
-WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-. "$WK_ROOT/lib/common.sh"
-. "$WK_ROOT/lib/store.sh"
-. "$WK_ROOT/lib/target.sh"
-. "$WK_ROOT/build/configs.sh"
+import os
+import sys
 
-NAME="${WK_NAME:-}"
-require_name "$NAME"
+ROOT = os.environ.get("WK_ROOT") or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(ROOT, "lib"))
 
-CONFIG="${WK_CONFIG:-$(default_config "$NAME")}"
-DEBUGGER=""
-UNTIL_CRASH=""
-MAX=200
-while [ $# -gt 0 ]; do
-    case "$1" in
-        --config)      CONFIG="${2:-}"; shift 2 ;;
-        --lldb)        DEBUGGER=lldb; shift ;;
-        --until-crash) UNTIL_CRASH=1; shift ;;
-        --max)
-            MAX="${2:-}"
-            case "$MAX" in
-                *[!0-9]*) die "--max needs a positive integer iteration count (got '${2:-}')
-    example:  wk run $NAME --until-crash --max 50 -- ..." ;;
-            esac
-            shift 2 ;;
-        --)            shift; break ;;
-    esac
-done
+from wk import buildconf, shell, targets  # noqa: E402
+from wk.act import Refused, die, exec_into  # noqa: E402
 
-TARGET="$(ws_target "$NAME")"
-load_target "$TARGET"
-
-config_load "$CONFIG" "$(t_os)" || die "unknown config '$CONFIG'"
-
-SRC=$(t_src "$NAME")
-JSC=$(config_jsc_path "$SRC")
-VAR=$(config_run_var)
-DIR=$(config_run_dir "$SRC")
-
-# Prepended, not replaced: a bare assignment drops the wkdev image's jhbuild prefix.
-PRELUDE="export $VAR=\"$DIR\${${VAR}:+:\${${VAR}}}\""
-
-if [ -n "$UNTIL_CRASH" ]; then
-    HOMEDIR="$(t_home "$NAME")"
-    LOGDIR="$HOMEDIR/until-crash"
-    CORE_DIR="$HOMEDIR/wk-cores"
-
-    if [ -n "$DEBUGGER" ]; then
-        # until-crash-run-file quits lldb only on a 0 status, so a crash leaves its prompt up.
-        RUNFILE="$(t_tools "$NAME")/container/lldb/until-crash-run-file"
-        CMD="$(lldb_prelude)
-$PRELUDE
-LOGDIR=$(sh_quote "$LOGDIR")
-mkdir -p \"\$LOGDIR\"
+LLDB_UNTIL_CRASH = '''{lldb_prelude}
+{prelude}
+LOGDIR={logdir_q}
+mkdir -p "$LOGDIR"
 i=0
-while [ \"\$i\" -lt $MAX ]; do
-    i=\$((i + 1))
-    STFILE=\$(mktemp)
-    WK_UNTIL_CRASH_STATUS=\"\$STFILE\" \"\$LLDB\" $(t_lldb_opts) -s $(sh_quote "$RUNFILE") $(sh_quote "$JSC") -- --validateOptions=1 $(sh_quote "$@")
-    STATUS=\$(cat \"\$STFILE\" 2>/dev/null || true)
-    rm -f \"\$STFILE\"
-    case \"\$STATUS\" in
+while [ "$i" -lt {max} ]; do
+    i=$((i + 1))
+    STFILE=$(mktemp)
+    WK_UNTIL_CRASH_STATUS="$STFILE" "$LLDB" {lldb_opts} -s {runfile_q} {jsc_q} -- --validateOptions=1 {tail_q}
+    STATUS=$(cat "$STFILE" 2>/dev/null || true)
+    rm -f "$STFILE"
+    case "$STATUS" in
         ''|0) continue ;;
     esac
-    echo \"until-crash: iteration \$i exited \$STATUS -- args: $(sh_quote "$@")\" >&2
-    exit \"\$STATUS\"
+    echo "until-crash: iteration $i exited $STATUS -- args: {tail_q}" >&2
+    exit "$STATUS"
 done
-echo \"until-crash: reached the cap of $MAX iterations without a crash\"
-exit 0"
-        t_exec_tty "$NAME" bash -lc "$CMD"
-    else
-        JSC_INVOKE="$(sh_quote "$JSC") --validateOptions=1 $(sh_quote "$@")"
-        CMD="$PRELUDE
+echo "until-crash: reached the cap of {max} iterations without a crash"
+exit 0'''
+
+PLAIN_UNTIL_CRASH = '''{prelude}
 export JSC_validateOptions=1
-LOGDIR=$(sh_quote "$LOGDIR")
-CORE_DIR=$(sh_quote "$CORE_DIR")
-mkdir -p \"\$LOGDIR\"
+LOGDIR={logdir_q}
+CORE_DIR={core_dir_q}
+mkdir -p "$LOGDIR"
 i=0
-while [ \"\$i\" -lt $MAX ]; do
-    i=\$((i + 1))
-    STAMP=\$(date -u +%Y%m%dT%H%M%SZ)-\$i
-    LOG=\"\$LOGDIR/\$STAMP.log\"
-    MARK=\"\$LOGDIR/.mark-\$STAMP\"
-    touch \"\$MARK\"
-    $JSC_INVOKE >\"\$LOG\" 2>&1
-    STATUS=\$?
-    if [ \"\$STATUS\" -eq 0 ]; then
-        rm -f \"\$LOG\" \"\$MARK\"
+while [ "$i" -lt {max} ]; do
+    i=$((i + 1))
+    STAMP=$(date -u +%Y%m%dT%H%M%SZ)-$i
+    LOG="$LOGDIR/$STAMP.log"
+    MARK="$LOGDIR/.mark-$STAMP"
+    touch "$MARK"
+    {jsc_invoke} >"$LOG" 2>&1
+    STATUS=$?
+    if [ "$STATUS" -eq 0 ]; then
+        rm -f "$LOG" "$MARK"
         continue
     fi
-    echo \"until-crash: crashed on iteration \$i (exit \$STATUS)\" >&2
-    echo \"until-crash: args: $(sh_quote "$@")\" >&2
-    echo \"until-crash: log: \$LOG\" >&2
-    CORES=\$(find \"\$CORE_DIR\" -newer \"\$MARK\" -type f 2>/dev/null || true)
-    rm -f \"\$MARK\"
-    if [ -n \"\$CORES\" ]; then
-        echo \"until-crash: core:\" >&2
-        printf '%s\n' \"\$CORES\" | sed 's/^/  /' >&2
+    echo "until-crash: crashed on iteration $i (exit $STATUS)" >&2
+    echo "until-crash: args: {tail_q}" >&2
+    echo "until-crash: log: $LOG" >&2
+    CORES=$(find "$CORE_DIR" -newer "$MARK" -type f 2>/dev/null || true)
+    rm -f "$MARK"
+    if [ -n "$CORES" ]; then
+        echo "until-crash: core:" >&2
+        printf '%s\\n' "$CORES" | sed 's/^/  /' >&2
     fi
-    exit \"\$STATUS\"
+    exit "$STATUS"
 done
-echo \"until-crash: reached the cap of $MAX iterations without a crash\"
-exit 0"
-        t_exec "$NAME" bash -lc "$CMD"
-    fi
-    exit $?
-fi
+echo "until-crash: reached the cap of {max} iterations without a crash"
+exit 0'''
 
-# validateOptions: a typo'd JSC flag otherwise fails silently, and the run measures nothing.
-if [ -n "$DEBUGGER" ]; then
-    CMD="$(lldb_prelude)
-$PRELUDE; exec \"\$LLDB\" $(t_lldb_opts) -s $(sh_quote "$(t_tools "$NAME")/container/lldb/run-file") $(sh_quote "$JSC") -- --validateOptions=1 $(sh_quote "$@")"
-else
-    CMD="$PRELUDE; export JSC_validateOptions=1; exec $(sh_quote "$JSC") --validateOptions=1 $(sh_quote "$@")"
-fi
+DIRECT_LLDB = '{lldb_prelude}\n{prelude}; exec "$LLDB" {lldb_opts} -s {runfile_q} {jsc_q} -- --validateOptions=1 {tail_q}'
 
-# ssh allocates a pty only when asked; lldb without one accepts no input.
-if [ -n "$DEBUGGER" ]; then
-    t_exec_tty "$NAME" bash -lc "$CMD"
-else
-    t_exec "$NAME" bash -lc "$CMD"
-fi
+DIRECT_PLAIN = '{prelude}; export JSC_validateOptions=1; exec {jsc_q} --validateOptions=1 {tail_q}'
+
+
+def parse(argv):
+    """The options as the dispatcher hands them on, a declared `--x=` as `--x <value>`; the tail after `--` verbatim."""
+    if "--" in argv:
+        i = argv.index("--")
+        head, tail = argv[:i], argv[i + 1:]
+    else:
+        head, tail = argv, []
+
+    def after(flag):
+        i = head.index(flag) + 1
+        return head[i] if i < len(head) else ""
+
+    config = after("--config") if "--config" in head else None
+    max_raw = after("--max") if "--max" in head else "200"
+    if not max_raw.isdigit():
+        die("--max needs a positive integer iteration count (got '%s')\n"
+            "    example:  wk run %s --until-crash --max 50 -- ..." % (max_raw, os.environ.get("WK_NAME", "")))
+    return {"config": config, "lldb": "--lldb" in head,
+            "until_crash": "--until-crash" in head, "max": int(max_raw), "tail": tail}
+
+
+def prelude(var, run_dir):
+    """Prepended, not replaced: a bare assignment drops the wkdev image's jhbuild prefix."""
+    return 'export %s="%s${%s:+:${%s}}"' % (var, run_dir, var, var)
+
+
+def main(argv):
+    name = os.environ.get("WK_NAME", "")
+    opts = parse(argv)
+
+    reg = targets.Registry(ROOT)
+    try:
+        target = reg.load(reg.ws_target(name))
+    except LookupError as e:
+        die(str(e))
+
+    config = opts["config"] or os.environ.get("WK_CONFIG") or reg.default_config(name)
+    try:
+        cfg = buildconf.resolve(config, target.os(), target.kind, target.env)
+    except LookupError:
+        die("unknown config '%s'" % config)
+
+    src = target.src(name)
+    jsc = cfg.jsc_path(src)
+    var = cfg.run_var()
+    pre = prelude(var, cfg.run_dir(src))
+    tail_q = shell.sh_quote(*opts["tail"])
+
+    if opts["until_crash"]:
+        home = target.home()
+        if opts["lldb"]:
+            cmd = LLDB_UNTIL_CRASH.format(
+                lldb_prelude=shell.lldb_prelude(ROOT), prelude=pre, logdir_q=shell.sh_quote(home + "/until-crash"),
+                max=opts["max"], lldb_opts=target.lldb_opts(),
+                runfile_q=shell.sh_quote(target.tools(name) + "/container/lldb/until-crash-run-file"),
+                jsc_q=shell.sh_quote(jsc), tail_q=tail_q)
+            argv_, cwd = target.exec_argv(name, ["bash", "-lc", cmd], tty=True)
+        else:
+            cmd = PLAIN_UNTIL_CRASH.format(
+                prelude=pre, logdir_q=shell.sh_quote(home + "/until-crash"), core_dir_q=shell.sh_quote(home + "/wk-cores"),
+                max=opts["max"], jsc_invoke="%s --validateOptions=1 %s" % (shell.sh_quote(jsc), tail_q), tail_q=tail_q)
+            argv_, cwd = target.exec_argv(name, ["bash", "-lc", cmd], tty=False)
+        exec_into(argv_, cwd)
+        return
+
+    if opts["lldb"]:
+        cmd = DIRECT_LLDB.format(
+            lldb_prelude=shell.lldb_prelude(ROOT), prelude=pre, lldb_opts=target.lldb_opts(),
+            runfile_q=shell.sh_quote(target.tools(name) + "/container/lldb/run-file"), jsc_q=shell.sh_quote(jsc), tail_q=tail_q)
+        argv_, cwd = target.exec_argv(name, ["bash", "-lc", cmd], tty=True)
+    else:
+        cmd = DIRECT_PLAIN.format(prelude=pre, jsc_q=shell.sh_quote(jsc), tail_q=tail_q)
+        argv_, cwd = target.exec_argv(name, ["bash", "-lc", cmd], tty=False)
+    exec_into(argv_, cwd)
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main(sys.argv[1:]))
+    except Refused as e:
+        sys.exit(e.status)
+    except KeyboardInterrupt:
+        sys.exit(130)

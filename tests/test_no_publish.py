@@ -1,16 +1,15 @@
 """Nothing an agent runs can publish. The proxy now *allows* api.github.com and
 hands it to the credential injector, so the refusal has moved: the token the
 injector would add is not there while push is off, the deploy keys are in an
-ssh-agent nothing in a workspace can take a key out of, `wk verify` measures
+ssh-agent nothing in a workspace can take a key out of, `wk doctor <ws>` measures
 both from inside, `wk ai claude` holds push back before it verifies (and
-refuses a build box that holds a gh login), and `wk push on` is refused while a
+refuses a build box that holds a gh login: tests/test_ai.py), and `wk push on` is refused while a
 claude process runs in any workspace is ended first. The person at the keyboard
 is the only publisher.
 
 Run: python3 -m unittest tests.test_no_publish -v
 """
 import importlib.util
-import re
 import tempfile
 import unittest
 from pathlib import Path
@@ -18,8 +17,6 @@ from pathlib import Path
 from tests.support import REPO, bash
 
 PROXY = REPO / "container" / "proxy" / "wk-proxy.py"
-VERIFY = (REPO / "cmd" / "verify").read_text()
-CLAUDE = (REPO / "cmd" / "ai").read_text()
 PUSH = (REPO / "cmd" / "push").read_text()
 
 
@@ -66,73 +63,6 @@ class TestProxyRefusesGitHubsApi(unittest.TestCase):
             with self.subTest(host=host, port=port):
                 ok, _ = p.host_allowed(host, port)
                 self.assertTrue(ok, host)
-
-
-class TestVerifyMeasuresThatNothingCanPublish(unittest.TestCase):
-    """What each probe answers is tests/test_verify_credentials.py's subject,
-    driven. What is held here is that the probes exist at all -- reaching the
-    API, reading it, and the switch over writing."""
-
-    def test_every_side_of_the_api_is_measured(self):
-        """Reaching api.github.com is the state and not a fault, and neither is
-        an authenticated read: what is measured is that a write is
-        authenticated only while push is on."""
-        self.assertIn("https://github.com/", VERIFY)
-        self.assertRegex(VERIFY, r"curl [^\n]*https://api\.github\.com/ ")
-        self.assertIn("https://api.github.com/user", VERIFY)
-        self.assertIn("https://api.github.com/repos/$fork/pulls", VERIFY)
-        self.assertIn("401", VERIFY)
-        self.assertIn("422", VERIFY)
-
-    def test_the_old_claim_that_the_api_is_refused_is_gone(self):
-        self.assertNotIn("api.github.com is refused", VERIFY)
-
-    def test_key_material_and_gh_credentials_fail_the_sandbox(self):
-        self.assertIn("PRIVATE KEY", VERIFY)
-        self.assertIn("ssh-add -l", VERIFY)
-        self.assertIn("~/.config/gh/hosts.yml", VERIFY)
-        self.assertIn("GITHUB_TOKEN|GH_ENTERPRISE_TOKEN", VERIFY)
-        self.assertIn("wk-injects-this", VERIFY)
-
-    def test_gh_holding_the_placeholder_is_what_is_measured_now(self):
-        """`gh` reaches GitHub through the injector like everything else, so
-        the check is that its token is the placeholder -- not that it has
-        none, which would be `gh` unable to read a pull request."""
-        self.assertIn("for _var in GITHUB_COM_TOKEN GH_TOKEN", VERIFY)
-        self.assertNotIn("gh auth status", VERIFY)
-
-
-class TestClaudeHoldsPushBackBeforeVerifying(unittest.TestCase):
-    """The switch itself -- that it is thrown for every target, and what it
-    records -- is tests/test_agent_push_switch.py's subject, driven rather than
-    read. What is held here is the *order*: the keys are gone before anything
-    measures the mount or hands over control."""
-
-    def test_push_off_precedes_wk_verify(self):
-        off = CLAUDE.index('push_hold_back "$NAME"')
-        verify = CLAUDE.index('WK_NAME="$NAME" "$WK_ROOT/cmd/verify"')
-        self.assertLess(off, verify, "the keys must be gone before wk verify measures the mount")
-
-    def test_the_switch_is_thrown_on_a_build_box_too(self):
-        """A build box keeps its own keys under its own wk root, so every
-        `wk push` this command makes carries the target when there is one."""
-        self.assertIn('push "$1" ${PUSH_TARGET:+--target "$PUSH_TARGET"}', CLAUDE)
-        self.assertIn('[ "$WK_TARGET_KIND" != remote ] || PUSH_TARGET="$TARGET"', CLAUDE)
-
-    def test_a_gh_login_on_a_build_box_is_a_refusal_not_a_barrier(self):
-        m = re.search(r'\[ "\$WK_TARGET_KIND" = remote \][^\n]*\n[^\n]*gh auth status[^\n]*\n\s*die ', CLAUDE)
-        self.assertIsNotNone(m, "no `die` on a gh login found in the remote path")
-        self.assertIn("gh auth logout", CLAUDE)
-
-    def test_remote_control_never_turns_push_back_on(self):
-        """A background server left running unattended: there is no foreground
-        moment to notice a session ending, so the keys stay held back and
-        `restore_push` is never armed for it."""
-        # Anchored on the branch itself, not on the comment banner above it.
-        rc = CLAUDE[CLAUDE.index('if [ -n "$RC" ]; then'):
-                    CLAUDE.index("wk_atexit restore_push")]
-        self.assertNotIn("push_switch on", rc, "remote-control must leave push off")
-        self.assertIn('PUSH_WAS_ON=""', rc, "remote-control must disarm restore_push")
 
 
 class TestPushOnEndsAnyRunningAgent(unittest.TestCase):

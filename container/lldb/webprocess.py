@@ -1,12 +1,10 @@
-# `wk-follow-page`, aliased by `wk gui --lldb web` with this port's web-process
-# name: PSON swaps a page into a fresh web process silently, so ask them all.
+# `wk-follow-page`, aliased by `wk gui --lldb web`: PSON swaps a page into a fresh web process silently, so ask them all by name.
 
 import os
 
 import lldb
 
-# m_pageMap's count read as memory: WTF::HashTable keeps it before the table
-# (keyCountOffset = -3, HashTable.h:614), and size() in the inferior SIGSEGVs.
+# m_pageMap's count read as memory (keyCountOffset = -3, HashTable.h:614): WTF::HashTable keeps it before the table, and size() in the inferior SIGSEGVs.
 _PAGES = ("(unsigned)(WebKit::WebProcess::singleton().m_pageMap.m_impl.m_table"
           " ? ((unsigned*)WebKit::WebProcess::singleton()"
           ".m_pageMap.m_impl.m_table)[-3] : 0)")
@@ -34,7 +32,7 @@ def _ensure_stopped(process):   # an expression evaluates only in a stopped one
     return process.Stop().Success() and process.GetState() == lldb.eStateStopped
 
 
-def _read_int(process, expr):   # None when it cannot be answered
+def _read_int(process, expr):
     if not _ensure_stopped(process):
         return None
     thread = process.GetSelectedThread()
@@ -70,7 +68,7 @@ def follow_page(debugger, command, result, internal_dict):
     was_async = debugger.GetAsync()
     debugger.SetAsync(False)
     existing = _targets_by_pid(debugger)
-    opened = []           # attached by us, and detached below unless kept
+    opened = []
 
     try:
         candidates = []
@@ -132,7 +130,7 @@ def follow_page(debugger, command, result, internal_dict):
                 process.Detach()
             debugger.DeleteTarget(target)
         debugger.SetSelectedTarget(keep)
-        opened = []           # kept or already detached; nothing left to undo
+        opened = []
 
         print("\nstaying with pid %d -- the page is in it, and it is stopped."
               % pid)

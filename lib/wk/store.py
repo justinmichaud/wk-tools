@@ -1,23 +1,8 @@
-"""Where a machine keeps things: the store and the paths under it, the same
-rules lib/store.sh spells, read from the same variables."""
+"""Where a machine keeps things: the paths lib/store.sh spells, from the same variables."""
 
 import os
-import re
-import subprocess
 
-
-def lock_holder_pid(path):
-    """The pid in a lock's payload (a symlink target or a payload file), or None."""
-    try:
-        line = os.readlink(path)
-    except OSError:
-        try:
-            with open(os.path.join(path, "payload")) as f:
-                line = f.read()
-        except OSError:
-            return None
-    m = re.search(r"pid=(\d+)", line)
-    return int(m.group(1)) if m else None
+from wk import record
 
 
 class Store:
@@ -38,9 +23,7 @@ class Store:
         return self.env.get("WK_LOCK_DIR") or os.path.join(self.state_dir(), "locks")
 
     def lock_path(self, resource):
-        cp = subprocess.run(["hostname", "-s"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
-        host = cp.stdout.strip() or "local"
-        return os.path.join(self.lock_dir(), "%s@%s.lock" % (resource, host))
+        return os.path.join(self.lock_dir(), "%s@%s.lock" % (resource, record.host_name() or "local"))
 
     def default(self):
         """The store a machine uses when none is named."""
@@ -52,6 +35,13 @@ class Store:
 
     def root(self):
         return self.env.get("WK_STORE") or self.default()
+
+    def vm_store(self):
+        """The vm target's store, or None off a macOS host and where it would be the container's."""
+        if not self.macos_host:
+            return None
+        d = self.env.get("WK_VM_STORE") or self.record_dir()
+        return None if os.path.realpath(d) == os.path.realpath(self.root()) else d
 
     def machine_store(self):
         return self.env.get("WK_STORE_DEFAULT") or self.root()

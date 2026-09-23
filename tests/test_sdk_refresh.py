@@ -4,8 +4,8 @@ is fetched and moved onto its remote's current default branch. The image tag
 `get_sdk_version`), so a checkout that never fetches pins every container this
 machine makes to whatever commit `./setup` first cloned.
 
-host/linux/sdk.sh, host/macos/vmtools.sh (over ssh) and targets/container.sh's
-`t_sdk_refresh` (from `wk new`, before `wkdev-create`) all invoke this script
+host/linux/sdk.sh, host/macos/vmtools.sh (over ssh) and lib/wk/targets.py's
+`Container.sdk_refresh` (from `wk new`, before `wkdev-create`) all invoke this script
 rather than each carrying a copy of the fetch.
 
 Driven against real, disposable git repos: a temporary "upstream" and a

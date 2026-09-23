@@ -479,7 +479,7 @@ class TestAPathWithASpaceInIt(_Agent):
         self.assertFalse(pat.exists())
 
     def test_the_resolved_path_is_what_the_store_says_and_carries_no_quotes(self):
-        """It reaches `wk push status` and `wk verify` as user-facing text, so
+        """It reaches `wk push status` and `wk doctor` as user-facing text, so
         a shell word with its own quote characters in it is printed at a
         person -- and the far side's quoting is push_agent_pat_*'s job."""
         store = self.spaced / "store"
@@ -669,7 +669,7 @@ class TestTheSourceHasNoMoveLeft(unittest.TestCase):
     def test_the_container_target_names_the_socket_in_the_mounted_directory(self):
         text = (REPO / "targets" / "container.sh").read_text()
         self.assertIn("t_agent_sock() { echo /run/wk/ssh-agent.sock; }", text)
-        self.assertIn("--volume $rt:/run/wk", text)
+        self.assertIn('"--volume", "%s:/run/wk" % rt', (REPO / "lib" / "wk" / "targets.py").read_text())
 
     def test_a_target_with_no_agent_refuses_rather_than_guessing(self):
         cp = bash('. "$WK_ROOT/lib/target.sh"; t_agent_sock && echo YES || echo NO')

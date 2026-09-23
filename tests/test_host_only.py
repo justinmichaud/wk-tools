@@ -64,10 +64,10 @@ set -euo pipefail
 . "{REPO}/lib/common.sh"; . "{REPO}/lib/resources.sh"
 . "{REPO}/lib/store.sh";  . "{REPO}/lib/target.sh"
 load_target container
-first=$(type t_branch)
+first=$(type t_exec)
 load_target remote
-second=$(type t_branch)
-[ "$first" != "$second" ] || {{ echo "t_branch is the same after loading two drivers"; exit 1; }}
+second=$(type t_exec)
+[ "$first" != "$second" ] || {{ echo "t_exec is the same after loading two drivers"; exit 1; }}
 ''')
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
 

@@ -347,7 +347,7 @@ fi
 '
 }
 
-# The other half of wk_fetch_config, asked of a checkout: one wired before it fetches every branch of every upstream over the network, and `wk remotes --fix` re-asserts it.
+# The other half of wk_fetch_config, asked of a checkout: one wired before it fetches every branch of every upstream over the network, and `wk sync --fix` re-asserts it.
 wk_fetch_check() { # <mirror-dir>
     local mirror="$1" name url _b
     [ -z "$mirror" ] || printf 'ins=" $(git config --get-all %s 2>/dev/null | tr "\\n" " ")"\n' \
@@ -1174,8 +1174,7 @@ claude-login  .credentials.json   .claude/.credentials.json   -                 
 EOF
 }
 
-# The Claude CLI rotates the refresh token in place, so every holder here
-# shares these bytes and one lock.
+# The Claude CLI rotates the refresh token in place, so every holder here shares these bytes and one lock.
 wk_agent_rw_dir() { printf '%s/agent-rw' "$(dirname "$(wk_secrets_dir)")"; }
 
 wk_agent_secret_names() { wk_agent_secrets | awk 'NF { print $1 }'; }
@@ -1183,7 +1182,6 @@ wk_agent_secret_names() { wk_agent_secrets | awk 'NF { print $1 }'; }
 wk_agent_secret_field() { # <name> <column>; empty for a name not in the table
     wk_agent_secrets | awk -v n="$1" -v c="$2" '$1 == n { print $c; exit }'
 }
-wk_agent_secret_known() { [ -n "$(wk_agent_secret_field "$1" 1)" ]; }
 wk_agent_secret_kind() { wk_agent_secret_field "$1" 5; }
 
 wk_agent_secret_delivered() { # <name> <target kind> -- 0 when this row reaches that kind
@@ -1210,10 +1208,6 @@ wk_agent_secret() { # <name> -- its first line; a file row is read whole by wk_c
 
 wk_agent_secret_present() { # <name>
     wk_cred_present "$1"
-}
-
-wk_agent_secret_store() { # <name> -- from stdin: an argument is visible in `ps`
-    wk_cred_store "$1"
 }
 
 wk_cred_path() { # <name> -- where this machine keeps it
@@ -1309,34 +1303,3 @@ wk_cred_fact() { # <verdict line> <key>
     printf '%s\n' "$1" | sed -n "s/^ *$2: //p" | sed -n 1p
 }
 
-# One reading of a claude.ai login's verdict for the two commands that start remote control -- cmd/new before it makes a workspace, cmd/ai before it spawns the server: a refusal with the remedy when the server would stop at once, a warning when the answer needs a network that did not answer.
-rc_login_judge() { # <verdict line> <where the login is> <what runs without remote control>
-    local line="$1" where="$2" without="$3"
-    case "$(wk_cred_verdict "$line")" in
-        absent)
-            die "no claude.ai login $where, and remote control refuses to start without one:
-    $(wk_cred_detail "$line")
-    $without" ;;
-        bad)
-            die "the claude.ai login $where is one no session can use, so remote control would start and stop at once:
-    $(wk_cred_detail "$line")
-    $without" ;;
-        ok|wide)
-            case "$(wk_cred_fact "$line" remote-control)" in
-                allowed) ;;
-                denied)
-                    die "the organization's policy denies remote control to the login $where, so the server would start and stop at once:
-    $(wk_cred_detail "$line" | sed -n '1p; /^ *fix: /p')
-    $without" ;;
-                *)
-                    warn "whether the login $where may run remote control could not be verified:
-    $(wk_cred_detail "$line" | sed -n 1p)
-  it is started anyway, and the start reports how it went" ;;
-            esac ;;
-        *)
-            warn "whether Anthropic still accepts the claude.ai login $where could not be verified:
-    $(wk_cred_detail "$line" | sed -n 1p)
-  remote control is started anyway, and the start reports how it went" ;;
-    esac
-    return 0
-}

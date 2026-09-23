@@ -1,10 +1,7 @@
 #!/usr/bin/env python3
-"""The parts of a PGO collection that belong to no one lane: mixing what came
-back into a profile to build against, and deciding whether that profile is one
-to build against at all. Every profdata operation is WebKit's own -- imported
-from the checkout being built, so the weights and the llvm-profdata calls are
-upstream's. What this file supplies is the list of libraries a profile is
-carried in: three frameworks on the Apple ports, one shared library on GLib."""
+"""The parts of a PGO collection that belong to no one lane: mixing what came back into a profile to build against, and deciding whether that profile is one to build against at all.
+Every profdata operation is WebKit's own -- imported from the checkout being built, so the weights and the llvm-profdata calls are upstream's.
+What this file supplies is the list of libraries a profile is carried in: three frameworks on the Apple ports, one shared library on GLib."""
 import argparse
 import glob
 import importlib.machinery
@@ -70,7 +67,7 @@ def cmd_mix(args):
                  f"  The benchmarks a profile is taken from are the ones upstream weighs: "
                  f"{', '.join(weights)}.")
 
-    module.PROFILED_DYLIBS = [args.lib]   # one shared library on the GLib ports, not three frameworks
+    module.PROFILED_DYLIBS = [args.lib]
     per_plan = {}
     for plan in plans:
         raw = os.path.join(args.dir, plan, "diagnose")

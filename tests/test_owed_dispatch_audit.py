@@ -84,8 +84,12 @@ def decl_value(path, key, default=""):
 def parses_flag(path, flag):
     """Does the file have a `case` arm of its own for <flag>? The arm, not
     the spelling: `--force` inside a printf string is prose, and an arm
-    pattern cannot contain a parenthesis of its own."""
-    for line in path.read_text(errors="replace").splitlines():
+    pattern cannot contain a parenthesis of its own. A python command's is a
+    membership or equality test on the literal."""
+    text = path.read_text(errors="replace")
+    if text.startswith("#!/usr/bin/env python3"):
+        return '"%s" in ' % flag in text or '== "%s"' % flag in text
+    for line in text.splitlines():
         m = re.match(r"^\s*([^()#]*?)\)", line)
         if m and re.search(r"(^|\|)" + re.escape(flag) + r"(=\*)?($|\|)",
                            m.group(1).strip()):

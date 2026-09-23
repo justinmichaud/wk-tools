@@ -65,11 +65,11 @@ ARM = re.compile(r"^\s*((?:--?[A-Za-z_][-A-Za-z0-9_]*(?:=\*)?\|?)+)\)")
 
 def code_opts(path):
     """Every option the command's own code matches on: a bash `case` arm, or
-    a Python string literal."""
+    a Python string literal tested for membership or equality."""
     out = set()
     text = path.read_text()
     if text.startswith("#!/usr/bin/env python3"):
-        return set(re.findall(r'"(-{1,2}[a-z][a-z-]*=?)" in ', text))
+        return set(re.findall(r'"(-{1,2}[a-z_][a-z_-]*=?)" in ', text) + re.findall(r'== "(-{1,2}[a-z_][a-z_-]*)"', text))
     for line in text.splitlines():
         m = ARM.match(line)
         if not m:

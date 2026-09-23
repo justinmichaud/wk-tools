@@ -50,6 +50,29 @@ true
         cp = lock_bash(script, self.tmp / "locks", timeout=30)
         self.assertEqual(cp.stdout.strip(), "", cp.stdout + cp.stderr)
 
+    def test_an_unreadable_holder_is_kept_not_cleared(self):
+        """readlink failing is not evidence the holder is gone -- a transient
+        read failure could hide a live hold, so the lock is kept, never
+        cleared. This is `Lock.hold`'s own rule (lib/wk/lock.py); bash's
+        `hold_lock` must make the same call rather than treating "cannot
+        read" the same as "no holder in it"."""
+        script = f'''
+{HOLDER % "u"}
+p=$!; {TAKEN % "u"}
+mkdir -p "$WK_LOCK_DIR/bin"
+printf '#!/bin/sh\\nexit 1\\n' > "$WK_LOCK_DIR/bin/readlink"
+chmod +x "$WK_LOCK_DIR/bin/readlink"
+PATH="$WK_LOCK_DIR/bin:$PATH" bash -c '. {REPO}/lib/common.sh
+    hold_lock u -w 2' >"$WK_LOCK_DIR/out" 2>&1
+rc=$?
+[ "$rc" != 0 ] || echo "an unreadable holder was not waited out"
+grep -q "cannot be read" "$WK_LOCK_DIR/out" || echo "no unreadable message: $(cat "$WK_LOCK_DIR/out")"
+[ -L "$(_lock_path u)" ] || echo "an unreadable holder's lock was cleared"
+kill $p 2>/dev/null; wait $p 2>/dev/null
+'''
+        cp = lock_bash(script, self.tmp / "locks", timeout=30)
+        self.assertEqual(cp.stdout.strip(), "", cp.stdout + cp.stderr)
+
     def test_exit_handlers_compose(self):
         """a command's own end-of-run work does not disable the lock release"""
         script = f'''

@@ -107,8 +107,8 @@ _verify_mounts && echo VERIFIED
         self.assertIn("reach no workspace", out)
 
     def test_no_agent_rw_mount_at_all_is_refused(self):
-        """A machine created before the writable mount existed: `wk ai claude
-        --rc` in every workspace would ask for a login that is already here."""
+        """A machine created before the writable mount existed: `wk ai claude`
+        in every workspace would ask for a login that is already here."""
         cp = self._run(rw_mount=0)
         out = cp.stdout + cp.stderr
         self.assertNotEqual(cp.returncode, 0, out)

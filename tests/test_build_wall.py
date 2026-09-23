@@ -38,7 +38,7 @@ SETTINGS = REPO / "claude" / "settings.json"
 SETTINGS_ALL = [SETTINGS, REPO / "claude" / "settings-host.json"]
 
 # Files this change touched, for the parse check below.
-EDITED = ("container/bin/wk-build-wall", "cmd/ai", "shell/path.sh", "shell/bashrc")
+EDITED = ("container/bin/wk-build-wall", "shell/path.sh", "shell/bashrc")
 
 
 def wall_names():
@@ -504,29 +504,6 @@ class TestTheAgentIsToldUpFront(unittest.TestCase):
         self.assertIn("refuse", text)
         for remedy in ("wk build", "wk test", "wk bench", "wk run"):
             self.assertIn(remedy, text)
-
-
-class TestCmdAiSetsTheVariable(unittest.TestCase):
-    """cmd/ai is the one thing that knows a session is an agent's, and every
-    way it hands over control has to carry that: a foreground session, a
-    headless one, and the detached remote-control server."""
-
-    def test_all_three_hand_overs_carry_wk_agent(self):
-        text = (REPO / "cmd" / "ai").read_text()
-        self.assertEqual(3, text.count('env WK_AGENT="$AGENT"'), text.count("t_exec"))
-
-    def test_the_checkout_path_is_quoted_into_the_login_shell(self):
-        """The hand-over is a `bash -lc` *string*; an unquoted `cd $(t_src ...)`
-        breaks on a workspace path with a space in it."""
-        text = (REPO / "cmd" / "ai").read_text()
-        self.assertNotIn('cd $(t_src "$NAME")', text)
-        self.assertEqual(2, text.count('cd $(sh_quote "$(t_src "$NAME")")'))
-
-    def test_the_agent_name_is_not_hard_coded(self):
-        """`$AGENT` rather than the word `claude`, so the pi agent is walled by
-        the line that names it and nothing has to be added here."""
-        text = (REPO / "cmd" / "ai").read_text()
-        self.assertNotIn("WK_AGENT=claude", text)
 
 
 class TestScriptsParse(unittest.TestCase):

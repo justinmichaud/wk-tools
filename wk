@@ -1,9 +1,4 @@
 #!/usr/bin/env python3
-"""wk -- WebKit development workspaces. `wk` lists the commands, `wk help`
-prints README.md, `wk <cmd> -h` explains one. Every command is a file under
-cmd/ whose header declares what it acts on; lib/wk/dispatch.py reads that
-and does, once for all of them, what each would otherwise re-decide."""
-
 import os
 import sys
 

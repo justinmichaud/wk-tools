@@ -48,7 +48,7 @@ eleven characters to type every time.
 
 clangd needs a `compile_commands.json`, and this checkout's is written inside
 whichever build directory produced it
-(`build/configs.sh`'s `config_build_dir`), not at the checkout root. Every
+(`lib/wk/buildconf.py`'s `build_dir`), not at the checkout root. Every
 container workspace starts on `config=jsc-release`, which builds to
 `WebKitBuild/JSCOnly/Release` -- so `container/helix/languages.toml` points
 `--compile-commands-dir` there, and that directory has a `compile_commands.json`
@@ -58,5 +58,5 @@ as soon as `wk build <ws> jsc-release` has run once
 Working a different config -- `gtk-release`, `jsc-debug`, an Apple port --
 instead? Build it at least once so its own `compile_commands.json` exists,
 edit the `--compile-commands-dir` line in `~/.config/helix/languages.toml` to
-match (see `config_build_dir` in `build/configs.sh` for the path each config
+match (see `build_dir` in `lib/wk/buildconf.py` for the path each config
 uses), and restart clangd with `:lsp-restart`.

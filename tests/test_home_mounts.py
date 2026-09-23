@@ -1,5 +1,5 @@
 """A workspace user owns their home, mountpoints included
-(_ensure_home_mountpoint, targets/container.sh).
+(`Container._ensure_home_mountpoint`, lib/wk/targets.py).
 
 A container workspace's home is a directory on the machine, mounted in at
 /home/<user>, and the machine's mirror is mounted at the machine's own path so
@@ -11,33 +11,30 @@ is a directory in the workspace's own home.
 podman makes a missing mount destination as container root, so left to podman
 that is a root-owned ~/.local the workspace user cannot write: no ~/.local/bin,
 so `claude install` fails and no session in the workspace can run at all (what
-`wk verify` reports as "no 'claude' on $PATH").
+`wk doctor` reports as "no 'claude' on $PATH").
 
 So `wk new` makes any home mountpoint itself, before podman can, as the user
 whose home it is.
 
-Hermetic: the driver is sourced and the one function called against scratch
-directories. No container, no podman, no network.
+Hermetic: the one method is called against scratch directories. No
+container, no podman, no network.
 
 Run: python3 -m unittest tests.test_home_mounts -v
 """
+import os
+import sys
 import unittest
 
-from tests.support import REPO, WkTest, bash
+from tests.support import REPO, WkTest
+
+sys.path.insert(0, str(REPO / "lib"))
+from wk import targets  # noqa: E402
+from wk.machine import Local  # noqa: E402
 
 
 def _ensure(ws, dest, user="wsuser"):
-    cp = bash(f'''
-set -euo pipefail
-. "$WK_ROOT/lib/common.sh"
-. "$WK_ROOT/lib/resources.sh"
-. "$WK_ROOT/lib/store.sh"
-. "$WK_ROOT/lib/target.sh"
-load_target container >/dev/null 2>&1
-_ensure_home_mountpoint {str(ws)!r} {str(dest)!r}
-''', env={"WK_CONTAINER_USER": user})
-    assert cp.returncode == 0, cp.stdout + cp.stderr
-    return cp
+    c = targets.Container("container", str(REPO), dict(os.environ, WK_CONTAINER_USER=user), Local())
+    c._ensure_home_mountpoint(str(ws), str(dest))
 
 
 class TestTheMountpointsInsideTheHomeAreMadeHere(WkTest):
@@ -82,18 +79,6 @@ class TestTheMountpointsInsideTheHomeAreMadeHere(WkTest):
         matches has a path under it, so the home is not re-derived here."""
         _ensure(self.ws, self.HOME)
         self.assertEqual(sorted(p.name for p in (self.ws / "home").iterdir()), [])
-
-
-class TestWkNewMakesThemRatherThanPodman(unittest.TestCase):
-    def test_the_mirror_mountpoint_goes_through_it(self):
-        """The mount and the mountpoint are one decision: a driver that mounts
-        the mirror at the machine's own path asks for that path in the home."""
-        text = (REPO / "targets" / "container.sh").read_text()
-        self.assertIn('_ensure_home_mountpoint "$ws" "$(dirname "$(wk_mirror)")"', text,
-                      "t_create leaves the mirror's mountpoint to podman")
-        self.assertLess(text.index('_ensure_home_mountpoint "$ws"'),
-                        text.index('--volume $(dirname "$(wk_mirror)")'),
-                        "the mountpoint is made after the container is created")
 
 
 if __name__ == "__main__":

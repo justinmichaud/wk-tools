@@ -9,12 +9,12 @@ language-servers=[{name="solargraph"}]
 
 # clangd, pointed at a real build's compile_commands.json rather than left to
 # search for one: WebKit's source tree carries none at its root, only inside
-# whichever build directory produced it (build/configs.sh's
-# config_build_dir), and build/build-in-target.sh's --export-compile-commands
+# whichever build directory produced it (lib/wk/buildconf.py's
+# build_dir), and build/build-in-target.sh's --export-compile-commands
 # is on by default so that directory always has one once a build has run.
 #
 # Every container workspace starts on config=jsc-release
-# (container/firstrun.sh's workspace marker; build/configs.sh:
+# (container/firstrun.sh's workspace marker; lib/wk/buildconf.py:
 # jsc-release -> WebKitBuild/JSCOnly/Release), so that is the directory named
 # below. Working a different config instead (gtk-release, jsc-debug, ...)?
 # Build it at least once so its compile_commands.json exists, then repoint

@@ -1,6 +1,4 @@
-"""act, confirm and barrier: the rules lib/common.sh holds, from the same
-variables, so a bash and a Python command behave alike under --dry-run,
---yes, --force and a destructive declaration."""
+"""act, confirm and barrier: the rules lib/common.sh holds, from the same variables, so a bash and a Python command behave alike under --dry-run, --yes, --force and a destructive declaration."""
 
 import os
 import shlex
@@ -52,6 +50,17 @@ def debug(msg):
 
 def dry_run():
     return bool(os.environ.get("WK_DRY_RUN"))
+
+
+def exec_into(argv, cwd=None, env=None):
+    """Replaces this process, so the far side's tty and job control are the caller's own."""
+    if cwd is not None:
+        os.chdir(cwd)
+    sys.stdout.flush()
+    sys.stderr.flush()
+    if env is not None:
+        os.execvpe(argv[0], argv, env)
+    os.execvp(argv[0], argv)
 
 
 def confirm(prompt, stdin=None):

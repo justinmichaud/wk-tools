@@ -10,7 +10,7 @@ Measured 2026-09-22 on this workstation.
 
 | | |
 | --- | --- |
-| code | 39k lines of bash, 13k of Python (the dispatcher, the registry and drivers, the record, status and doctor among it); 41 commands, 8 of them Python, 8 over 500 lines and holding 53% of command code |
+| code | 39k lines of bash, 13k of Python (the dispatcher, the registry and drivers, the record, status and doctor among it); 39 commands, 21 of them Python, 8 over 500 lines and holding 53% of command code |
 | tests | 71k lines, 194 modules, 4434 tests in the lint and unit tiers, 40 in the live tier |
 | `wk selftest` (lint then unit) | 13.4 minutes, green; the lint tier alone 27 s |
 | the slowest unit test | 16 s, under a 30 s budget the runner enforces |
@@ -197,22 +197,189 @@ exist.
    `status` (the walk in `lib/wk/status.py`, the renderer in
    `lib/wk/statusview.py`) and `doctor` (`lib/wk/doctor.py`: rows of state,
    what and remedy, one renderer). What still bridges to bash through
-   `lib/wk/shell.py`, each a named helper: every driver's create, destroy
-   and sync; the guest's start and stop (`targets/vm.sh`); a peer
-   workspace's checkout path (`t_src` through `wk zed --route`); the
-   remote-control watchdog stop (`rc_stop`); the boot drivers' probe and
-   the reach probes; the credential verdicts (`wk_cred_check`,
+   `lib/wk/shell.py`, each a named helper: every driver's tooling push
+   (`t_sync_tools`); the guest's
+   start and stop (`targets/vm.sh`); the boot drivers' probe and the reach
+   probes; the credential verdicts (`wk_cred_check`,
    `peer_cred_verdict`), the privileged-helper table, `wk_remote_probe`,
    `wk_remote_findings`, `remote_provision_stale`, `vm_base_findings` and
    the store paths `lib/store.sh` names; in `lib/wk/status.py`,
-   `current_base`, `unreferenced_bases` and this host's envelope from
-   `lib/resources.sh`. The write side of each driver lands with its first
-   Python caller (`new` and `rm`, step 3). Done when `lib/target.sh` and
-   `targets/*.sh` are gone and no bash file parses JSON.
+   `current_base` and `unreferenced_bases` (this host's envelope is
+   `Resources` now). Done when `lib/target.sh` and `targets/*.sh` are gone
+   and no bash file parses JSON.
 3. **Workspaces.** `new`, `rm`, `build`, `run`, `test`, `enter`, `scp`,
    `sync`, `pr`, `remotes`, `verify`, `ai`, `zed`, `gui`, `profile`. Done
    when `lib/store.sh`'s workspace half is gone and each has a kill-point
-   test.
+   test. **Where `new` and `rm` stand** (uncommitted on `python-core`; the
+   full suite has not run over them yet -- run it first, in the background,
+   with nothing editing):
+   - *Landed.* `cmd/new` and `cmd/rm` are Python entry points over the flows
+     in `lib/wk/workspace.py`, with the lock in `lib/wk/lock.py`, the alias in
+     `lib/wk/sshalias.py`, each driver's write side and `mirror_dir` in
+     `lib/wk/targets.py` and the bash they still reach in `lib/wk/shell.py`;
+     `tests/test_wk_workspace.py` holds every refusal, `killpoints[new]`,
+     `killpoints[rm]` and dry-run-equals-wet-run. Of the drivers' bash write
+     side only `targets/vm.sh`'s `t_create`/`t_destroy` remain, for `wk vm`
+     until step 5.
+   - *Owed.* The live check, one pattern per run: `wk selftest --live
+     crash_only`, `wk selftest --live container_workspace`, `wk selftest
+     --live lifecycle`. `t_needs_base` and `t_created` stay in
+     the bash drivers while `ws_state`, asked by the dispatcher's own
+     `wait_ready` and by `cmd/gc`, asks them, and
+     `tests/test_owed_new.py`'s and `tests/test_state.py`'s `ws_state` tests
+     stay with them. `cmd/new`'s `parse` re-parses every option itself
+     (`--target`, `--base`, `--arch`, `--pr`, `--zed`, `--no-wait`, `--kill`,
+     `--sysroot`, `--_detached`), not only `--target`
+     (`tests/test_owed_dispatch_audit.py`).
+   - *`enter`/`scp`/`zed`.* All three are Python entry points over
+     `lib/wk/targets.py`: `enter` runs a command through `Target.exec` or
+     execs into `Target.enter_argv`'s shell; `scp` moves bytes through
+     `pull`/`push`/`pull_dir`/`push_dir`/`path_kind` -- `podman cp` for a
+     container, the one `Machine` copy (`copy_in`/`copy_out`/`copy_tree_in`/
+     `copy_tree_out` on `Local`/`Ssh`/`Fake`) for a guest or a build machine;
+     `zed` reaches a workspace through `ssh_host`/`ssh_prepare`/`ssh_user`/
+     `ssh_proxy`, one hop further for a peer's own `--route`. The bash `t_pull`,
+     `t_push`, `t_push_dir`, `t_path_kind`, `t_ssh_prepare`, `t_ssh_user` and
+     `t_ssh_proxy` are gone with their last caller; `t_pull_dir` stays for
+     `cmd/bench`, and `targets/vm.sh`'s own `t_enter`/`t_ssh_host` for
+     `cmd/vm` (every other driver's copy is gone; `cmd/profile` is Python
+     now and calls `Target.pull_dir` directly).
+     `tests/test_enter.py`, `tests/test_scp.py` and `tests/test_zed.py` hold
+     the refusals; `tests/test_wk_targets.py` holds each driver's argv;
+     `tests/test_wk_machine.py` holds the copy conformance. Owed: the live
+     checks (`enter.shell`, `zed.peer`) against a real container, guest and
+     peer.
+   - *`pr`.* `cmd/pr` is a Python entry point: `rebase` and `open` run over
+     `Target.exec`/`src`/`mirror_dir` (now on the base `Target` and on
+     `LocalWorkspace` too, matching `targets/*.sh`), and `pr_open_target`/
+     `pr_open_gh_args` are module-level functions `tests/test_pr_workflow.py`
+     and `tests/test_pr_upstream.py` import directly rather than lifting bash.
+     Owed: the plain `wk pr <ws> <spec>` checkout still shells out through
+     `shell.pr_checkout`/`pr_spec_check` to `lib/store.sh`'s
+     `wk_pr_checkout`/`pr_parse_spec`, which stay bash with the rest of that
+     file's PR fetch.
+   - *`verify`.* Merged into `wk doctor <workspace>` (and `wk doctor` inside
+     one, the half `wk ai claude` runs there): the checks are
+     `lib/wk/wall.py`, run at once, `tests/test_doctor_wall.py` holds each;
+     `wk verify` is a tombstone. Owed: the live check against a container and
+     a guest.
+   - *`ai`.* `cmd/ai` is a Python entry point: the wall's checks are
+     `lib/wk/wall.py`'s own (`from_host`, `from_inside`, `commit_walled`,
+     `commit_wall_prefix`), and each driver's `exec_argv` is in
+     `lib/wk/targets.py`. `tests/test_ai.py` holds the flow,
+     `ai.verifies_wall` and the session's `--remote-control <ws>`. Owed: the
+     live checks (`ai.walled_session`, `ai.commit_wall`,
+     `ai.remote_control`).
+   - *`sync`.* `cmd/sync` is a Python entry point (its parse and `--where`)
+     over `lib/wk/sync.py`; each driver's furniture is `Target.sync` in
+     `lib/wk/targets.py`, and `wk remotes` is a tombstone for `wk sync
+     [<ws>] --fix`, the wiring read back in every fetch.
+     `tests/test_sync.py` holds `sync.scopes`, the wiring report and fix,
+     `killpoints[sync]`, `dispatch.where[sync]` and dry-run-equals-wet-run.
+     Owed: the live check (`sync.fleet`); the tooling push, the mirror
+     refresh request, `newest_complete_base` and the wiring scripts stay
+     bash behind `lib/wk/shell.py`; `status.py` calls `Target.workspaces`
+     now, and the one remaining inline copy of its union is `cmd/ls`.
+   - *`build`.* `cmd/build` is a Python entry point over `lib/wk/build.py`
+     (front, driver, `--detach`, `--kill`, the babysitter -- `build/babysit.sh`
+     is gone), `lib/wk/job.py` (the watched run, the announced
+     pid, the one job stop) and `lib/wk/buildconf.py` (the configs as data;
+     `build/configs.sh` is its shim for the bash callers, plus the cross
+     configs `image/` reads); each driver's `ccache_dir`, `build_argv`,
+     `build_size` and `task_put` are in `lib/wk/targets.py`, the budget in
+     `lib/wk/resources.py`'s `Budget`. `tests/test_wk_build.py` holds every
+     refusal, `killpoints[build]`, `progress_shape[build]` and
+     dry-run-equals-wet-run; `tests/test_buildconf.py` the configs and the
+     shim. Owed: the live checks (`build.config[<config>]`,
+     `build.babysit_e2e`); `Budget` repeats `lib/resources.sh`'s
+     `build_jobs`/`build_admit`/`builds_running`, `build.busy_reason` repeats
+     `lib/target.sh`'s `ws_busy_reason`, and `job.py` repeats
+     `lib/watchdog.sh`'s `run_watched`/`job_stop` and its `TOOLS`/
+     `build_processes` repeat `lib/detach.sh`'s `_build_ps`, which
+     `lib/watchdog.sh`'s `_stall_report` still uses, until `sysimage`
+     and `image/` call the Python ones (`test` now does). `configs.sh` keeps
+     only the four accessors `cmd/bench` and `bench/mac-ab.sh` still call
+     (`config_build_dir`, `config_jsc_path`, `config_run_var`,
+     `config_run_dir`); `run` and `gui` are ported, so the accessors that
+     read the browser/process/test-runner fields (`config_browser_path`,
+     `config_browser_url_flag`, `config_jsc_only`,
+     `config_web/network/gpu_process_name`, `config_test_runner_name`,
+     `config_web_process_pause_env`, `config_browser_env`) are gone (`test`
+     and `profile` resolve a config through `buildconf.resolve` directly).
+   - *`run`/`gui`.* Both are Python entry points that resolve a config
+     straight through `lib/wk/buildconf.py`'s `Config` (no `config_load`
+     call at all) and exec into `Target.exec_argv`'s result with
+     `os.execvp`, the same replace-this-process pattern as `enter`/`zed` --
+     every branch of both is a tail call into the target, so neither reads
+     a `Result` or an exit status. `Registry.default_config` (from the
+     workspace's own `build` task record, `lib/wk/record.py`) replaces
+     `lib/target.sh`'s `default_config` for both; `Target.lldb_opts`
+     (Container's two `-O` flags) and `shell.py`'s `lldb_prelude`/
+     `lldb_pin_opts`/`session_mode`/`bmc_drm_device` bridge what stays
+     bash. `wk gui` refuses a `kind == "remote"` target (`unit
+     gui.refuses_remote`).
+     `tests/test_run_until_crash.py` passes unmodified against the port;
+     `tests/test_wk_run.py` holds `run.finds_binary[<port>]` and `--lldb`'s
+     tty request on every target, `tests/test_wk_gui.py` holds
+     `gui.refuses_remote`, the jsc-only/no-browser/macOS-container
+     refusals and the fullscreen-flag table. Owed: the live checks
+     (`run.lldb_tty`, `session.modes[moose]`); `Registry.default_config`
+     repeats `lib/target.sh`'s `default_config` until `bench` calls the
+     Python one (`test` and `profile` now do).
+   - *`test`/`profile`.* Both are Python entry points. `cmd/test` runs the
+     JSC and layout suites over `lib/wk/job.py` (`watch`, `PidWatch`,
+     `kill`, `stop`) and `lib/wk/resources.py`'s `Budget`, its record
+     wrapped through `build.records_of` for the same `WK_ABORT_SECONDS`
+     default a build's carries; `cmd/profile` is argv/refusal construction
+     and direct `Target.exec`/`exec_tty` calls with no task record at all.
+     Both resolve a config straight
+     through `lib/wk/buildconf.py`, no `build/configs.sh`. The one new
+     primitive either needed: `Machine.run_tty`/`Target.exec_tty`,
+     blocking with this process's own stdio inherited (a real pty for
+     lldb/samply/xctrace) but returning control here afterward, unlike
+     `exec_argv`'s `os.execvp` replace -- `enter`/`run`/`gui` still use
+     that replace where nothing follows. `Registry.default_config` (`lib/wk/
+     targets.py`) is `run`/`gui`'s and `test`/`profile`'s one caller.
+     `tests/test_wk_test.py` holds `progress_shape[test]` and
+     `killpoints[test]`; `tests/test_wk_profile.py` the host-side
+     `perf_event_paranoid` gate and `--fetch`; `tests/test_layout_paths.py`
+     and `tests/test_profile_debug.py` exercise the ported behaviour
+     directly. `lib/arch.sh`'s `arch_wrapper`/`arch_label` are gone
+     (only `cmd/test` called them; `buildconf.ARCH`/`arch_label` replace
+     both). Owed: the live checks (`test.suite[<target>]`,
+     `profile.modes[<mode>]`); no unit test yet for `--lldb`'s tty request
+     (needs `Machine.run_tty`, landed, but not yet driven from `cmd/test`'s
+     own suite).
+   - *How agents work on it.* Disjoint file sets per agent, named in the
+     brief; no `git checkout`/`restore`/`stash`/`commit`; no full `wk
+     selftest` while anyone edits (`python3 tests/run.py --unit -k <pattern>`
+     for a package's own modules, `--lint` before reporting); no mutating
+     `wk` command; every report checked against `git diff`.
+   - *Python-vs-Python duplicates a review pass found.* Fixed already:
+     `wall.verdict(rep, publishing)` is the one "N check(s) failed" render
+     (`cmd/doctor`, `cmd/ai`) and `wall.push_verdict(rc)` the one push-status
+     decode (`cmd/ai`'s `push_switch` only runs `wk push <verb>` now).
+     Still open, none in this agent's files: `is_linux`/`is_macos` are
+     redefined in `cmd/enter`, `cmd/profile`, `cmd/gui` and `cmd/stop`; the
+     session-socket path and `S_ISSOCK` check is copied in `cmd/enter` and
+     `cmd/gui` rather than shared with `lib/wk/targets.py`; `cmd/profile`'s
+     `prelude()` is a byte-for-byte copy of `cmd/run`'s; `cmd/zed`'s own
+     `ws_exists` copies `lib/target.sh`'s `ws_exists_on` (`dispatch.py`
+     already calls the bash one); `cmd/zed`'s `zed_cli()` and `doctor.py`'s
+     own Zed-installed check disagree; `cmd/zed --tools` resolves its target
+     twice. `lib/wk/sshalias.py`'s `alias_set`/`alias_remove` and
+     `lib/wk/store.py`'s `artifact_dir` copy `lib/target.sh`'s
+     `ssh_alias_set`/`ssh_alias_remove` and `lib/store.sh`'s
+     `wk_artifact_dir` verbatim; the bash pair stays for `cmd/vm` until step
+     5, `wk_artifact_dir` for `lib/bench.sh`/`lib/profiler.sh`.
+     `shell.target_pid_alive` (a bash `t_exec kill -0` round trip) is one of
+     three "is this pid alive in the target" answers, alongside
+     `record.of_target`'s own (used by `status.py` and `workspace.py`); it
+     stays only for `cmd/stop` and `cmd/status` until they ask a
+     `Target.pid_alive` like the rest. `shell.lldb_pin_opts`/`LLDB_PIN_OPTS`
+     is already a plain Python constant, not a bash bridge; the
+     `shell.lldb_pin_opts(root)` wrapper stays only until `cmd/test` and
+     `cmd/gui` read `shell.LLDB_PIN_OPTS` directly.
 4. **Credentials.** `key`, `push`, `sudo`, `backup`, `skills`. Done when
    `lib/store.sh` is gone.
 5. **Fleet and bench.** `sysimage`, `boot`, `pi`, `bench`, `ab`, `quiesce`,
@@ -236,7 +403,7 @@ decides is a row; one still open is listed under "Decisions for the user".
 
 | owed behaviour | lands in step | test |
 | --- | --- | --- |
-| Every mutating command, killed after any effect and re-run, converges on the declared final state (`new`, `rm`, `sync`, `build`, `test`, `bench`, `gc`, `vm base`, `machine setup/rm`, `key`, `skills`, `backup`, `quiesce`, `session`, `ai`, `boot`, `sysimage`, `./setup`) | 1 (helper), then each command's step | `unit killpoints[<cmd>]`, `live killpoints[setup]` |
+| Every mutating command, killed after any effect and re-run, converges on the declared final state (`new`, `rm`, `build`, `test`, `bench`, `gc`, `vm base`, `machine setup/rm`, `key`, `skills`, `backup`, `quiesce`, `session`, `boot`, `sysimage`, `./setup`) | 1 (helper), then each command's step | `unit killpoints[<cmd>]`, `live killpoints[setup]` |
 | `wk gc` reclaims or names every kind of rubble: tagged container images nothing references, an abandoned `.tmp-*` seed, a workspace a killed selftest left, a staged build on the Mac volume, an instrumented slot on a board, a remote store's mirror, ccache and dead workspaces; and `wk disk` names what it can reclaim | 5 | `unit gc.reclaims_or_names[<kind>]` |
 | A machine on another wk-tools sha or a dirty checkout is named with both shas, a delegated answer from it is reported as its own rather than merged, and the remedy is `wk sync --tools` once clean, "commit and push here first" while dirty | 2 | `unit status.version_skew` |
 | `wk profile` records in every mode (sampling prints the tier breakdown, bytecode leaves one JSCProfile json, samply refuses with the host remedy above `perf_event_paranoid` 1, instruments records a `.trace`) and `--fetch` copies the recording out byte for byte | 3 | `live profile.modes[<mode>]` |
@@ -253,16 +420,14 @@ decides is a row; one still open is listed under "Decisions for the user".
 | The live tier runs against the container target on Linux and macOS alike; no test is gated on the podman VM | 1 | `live` runner rule |
 | A hold is released only when its holder is provably gone, an unreadable holder keeps it, and no child process inherits one | 1 | `unit record.hold_follows_holder` |
 | A workspace name is resolved once per invocation and every machine probed at most once | 1 | `unit machine.probed_once_per_invocation` |
-| This machine's name is read by one function (`record.machine_name`); `store.lock_path` reads it there too | 1 | `lint.one_machine_name_reader` |
 | Interrupting a command (Ctrl-C, a lost ssh) stops the process it started on the far machine and releases its holds | 1 | `unit machine.interrupt_stops_remote_process` |
-| The vm target's records live in a store of their own; a scratch store never puts two targets on one directory | 1 | `unit record.one_store_per_target` |
+| A scratch store never puts two targets on one directory, and one machine's task records live in one directory | 1 | `unit record.one_store_per_target` |
 | Every mutating command honours `--dry-run` as the recorder: the plan and the run cannot differ, and a dry run fetches nothing | 1 | `unit dispatch.dry_run_is_the_recorder[<cmd>]` |
 | The dispatcher parses every argument: the build config, the subverb, `--target`, paths | 1 | `unit dispatch.parses_every_argument` |
 | `wk <cmd> -h` previews the command line it would run and lists the values every config-taking flag accepts | 1 | `unit dispatch.help_previews_and_lists_values` |
 | Every destructive effect is named in one question asked before it (a tailnet device delete, a replaced root-owned helper, a removed far destination, a reset SDK checkout, an overwritten credential), the default is No, no terminal declines, `--yes` answers, and a forwarded command carries the answer rather than exempting the receiver | 1 | `unit dispatch.destructive_asks_once[<cmd>]` |
 | `--force` crosses only the barriers it names and records itself; a preflight that cannot be measured reports unknown, never failure | 1 | `unit dispatch.force_names_what_it_crosses` |
 | Every long-running command (build, test, bench, image build, A/B, board run) writes the one progress record (step n of m, since when, the log) that dies with it; `wk status` shows every running one and a board run prints its iterations from it | 1 | `unit record.progress_shape[<cmd>]` |
-| A detached build truncates its log before its record says running, and a run that launched one waits for that build, not the previous report | 1 | `unit record.detach_reads_its_own_build` |
 | Two commands mutating one resource serialise or refuse naming the holder, on every target (two builds, two syncs, two guest starts, two image builds, a base refresh during a build) | 1 | `unit record.one_lock_per_resource[<cmd>]` |
 | An unreadable or older-shape task record renders as unreadable and everything else still lists | 1 | `unit record.tolerates_corrupt_and_old` |
 | Every target driver and every boot driver implements the whole interface (a guest driver starts a stopped guest, reports stopped as stopped and needs no image build) | 1, 5 | `unit machine.conformance[<kind>]` |
@@ -270,7 +435,7 @@ decides is a row; one still open is listed under "Decisions for the user".
 | A probe or a boot driven over non-interactive ssh finds the same tools a login shell does | 1 | `unit machine.remote_path` |
 | The podman machine is not started beside a running macOS guest on a host too small for both | 1 | `unit machine.podman_not_started_beside_guest` |
 | Copying bytes out of a workspace, onto a board or onto a card is the one `Machine` copy | 1 | `unit machine.one_copy_path` |
-| Each command runs where its declaration says, and a forwarded one forwards only the flags that apply there (`sync` scope flags never enter the podman VM; `bench` on the Mac's volume runs on the Mac) | 1 | `unit dispatch.where[<cmd>]` |
+| Each command runs where its declaration says, and a forwarded one forwards only the flags that apply there (`bench` on the Mac's volume runs on the Mac) | 1 | `unit dispatch.where[<cmd>]` |
 | When the record and the machine disagree (a hand `podman rm` or `tart delete`, a deleted `ws/<n>`, an edited `~/.ssh/config.d/wk`, a fetch into a published base) the command reports it, believes the machine, refuses by name and touches only its own lines | 1 | `unit machine.machine_wins[<case>]` |
 | The fleet view is one: the exit code is the worst state found anywhere, a name alive on two machines is a conflict `--target` disambiguates, two workstations reaching one box see one state and a disagreement names both views | 2 | `unit status.fleet_is_one` |
 | An armed machine's status line shows the transition (system, who, when); armed too long or back in host mode with the record uncleared reads desync; a mutating command aimed at it refuses | 2, 5 | `unit status.armed_transition` |
@@ -286,21 +451,18 @@ decides is a row; one still open is listed under "Decisions for the user".
 | A machine is rebuilt from the repo alone: `wk doctor` names every machine-local entry regenerable, re-authable or backed-up before the wipe, and a fresh clone plus `./setup` sees the whole fleet with nothing copied | 2 | `live doctor.reprovision[<machine>]` |
 | `./setup` completes on every host OS and every privileged stage installs its helper | 2 | `live setup.completes[<host>]` |
 | `wk new` refuses without a base snapshot naming `wk sync` and creates nothing, remakes a half-made workspace rather than answering "already exists", and waits for the ready marker | 3 | `unit new.lifecycle` |
-| `wk new` where the organisation denies Remote Control refuses before creating and names the owner; `WK_NO_CLAUDE_RC=1` makes the workspace | 3 | `unit new.remote_control_policy` |
 | A workspace on a peer is created there by hand (refused here, naming the command) and removed from here; `wk rm --all` asks once for the whole fleet and routes each removal | 3 | `live rm.peer[<machine>]` |
 | `wk rm` leaves nothing on any target: no container, guest or checkout, no ws dir, no registry entry, no `Host wk-<name>` alias, no `.unfiltered`; the registry entry outlives the artifacts, never the reverse | 3 | `unit rm.final_state[<target>]` |
-| A build config is data: `--cmakeargs` is refused, an ASan config builds instrumented into its own dir, a profile-guided config declares its disk need for the guest and for the host image it grows | 3 | `unit build.config_is_data` |
-| A build sizes from the whole machine once, reserving the desktop once, on the host and inside a guest | 3 | `unit build.sizes_once` |
-| `wk build --babysit` is a task: one at a time by its record, ends stalled, gave-up or error by name, refuses where it cannot run, and a killed one reads died | 3 | `unit build.babysit_states`, `live build.babysit_e2e` |
+| `wk build --babysit` is a task: one at a time by its record, ends stalled, gave-up or error by name, refuses where it cannot run, and a killed one reads died | 3 | `live build.babysit_e2e` |
 | Every declared build config builds on its target (gtk, wpe, mac-debug, ios-sim, armhf on 2.48), a fresh clone off a warm base builds in under 45 min, and a mac build produces ImageDiff | 3 | `live build.config[<config>]` |
 | `wk test <ws>` runs the JSC suite and `--layout` on every target, against a remote target's own build | 3 | `live test.suite[<target>]` |
 | `wk run` finds its binary on every port (GTK, WPE, an Apple-port guest) with `LD_LIBRARY_PATH` prepended, and `--lldb` gets a pty on every target | 3 | `unit run.finds_binary[<port>]`, `live run.lldb_tty` |
 | `wk enter <ws>` lands in a shell, `wk enter <ws> <cmd>` runs the command, `--zed` against a broken workspace refuses naming the repair | 3 | `unit enter.runs_command`, `live enter.shell` |
-| `wk sync` bare inside a workspace syncs it, `--all` reaches every workspace on every target, `--tools` refreshes every machine's copy and publishes one snapshot, `WK_MIRROR_BRANCHES` carries the extra branches | 3 | `unit sync.scopes`, `live sync.fleet` |
-| Every checkout's wiring is rendered once (`origin` WebKit/WebKit, both forks, the machine's mirror, `core.sshCommand`, the ccache ceiling), nothing already there is overwritten, nothing outside the wk root is edited, and `wk remotes` reports a deviation | 3 | `unit remotes.wiring[<target>]` |
-| The PR workflow runs as one flow: `wk push on\|off`, `wk remotes --fix`, `wk pr`, the `container/bin` helpers, agents building while a person pushes, including from an armhf container | 3 | `live pr.workflow` |
-| `wk ai claude` runs the wall's checks at once, gives the report `wk verify` gives, refuses a stopped proxy, `--force` repeats the warning at exit, the patch verifier can fail, and a tool inside wanting the network is refused and told so | 3 | `unit ai.verifies_wall`, `live ai.walled_session` |
+| `wk sync` bare inside a workspace syncs it, `--all` reaches every workspace on every target, `--tools` refreshes every machine's copy and publishes one snapshot, `WK_MIRROR_BRANCHES` carries the extra branches | 3 | `live sync.fleet` |
+| The PR workflow runs as one flow: `wk push on\|off`, `wk sync --fix`, `wk pr`, the `container/bin` helpers, agents building while a person pushes, including from an armhf container | 3 | `live pr.workflow` |
+| `wk ai claude` against a real container and guest runs the wall's checks, refuses a stopped proxy, and a tool inside wanting the network is refused and told so | 3 | `live ai.walled_session` |
 | In an agent session `git commit` and `git push` name the rule after git's own error, `wk push on` on the host ends the session, and a terminal session turns push back on at exit | 3 | `live ai.commit_wall` |
+| `wk ai claude` on a terminal, against a real container with the claude.ai login, starts a session Remote Control shows under the workspace's name; on a build box holding the inference token it starts without it and says so | 3 | `live ai.remote_control` |
 | `wk zed` reaches a workspace through its `Host wk-<name>` ProxyCommand alias on every target, one hop for a peer's, and `wk new --zed` warns instead of failing when zed cannot launch | 3 | `unit zed.alias_is_proxycommand`, `live zed.peer` |
 | `wk key setup` elects across workstations: the credential its issuer accepts wins from whichever machine runs it, a refused peer is re-logged in, a second run moves nothing, and one `claude login` seeds every workspace | 4 | `live key.election[<peer>]` |
 | `wk key register` registers one key per machine titled with its name, `wk key check` reports per machine, and a peer that did not answer reads differently from one holding no key | 4 | `unit key.register_per_machine` |
@@ -361,6 +523,12 @@ decides is a row; one still open is listed under "Decisions for the user".
 | An image build runs from a Tart guest and the image reaches the host for writing | 5 | `live sysimage.build[vm]` |
 | A task's results live in its workspace, `wk bench ls` names them wherever they are, the task restarts from where it stopped on any machine, and `wk doctor` names the results backed-up | 6 | `unit results.restart_anywhere` |
 | A task's deliverables export as one archive | 6 | `unit results.export_archive` |
+| A long effect (`wkdev-create`, `sdk-refresh`, `tart clone`) streams to the task log as it runs, so the silence watchdog and a followed log see it; `Machine.run` captures and prints only after it ends | 3 | `unit machine.streams_long_effects` |
+| An effect run over ssh counts as an effect on the machine that drives it, so a kill point can land inside a remote flow (`Ssh.act_run` runs through `via.run` today) | 3 | `unit machine.ssh_effects_are_effects` |
+| A hold names the pid that took it: the bash record (`lib/task.sh`) writes the pid after the plan, the Python one before `holds` | 3 | `unit record.hold_names_its_taker` |
+| `Target.state` reads the workspace directory through the machine, not `os.path`, so the real drivers run in a Fake world and `killpoints[new]` runs over them rather than a stand-in | 3 | `unit killpoints[new]` |
+| `hostname` is read in one place: the bash readers in `lib/common.sh` (`wk_host_name`), `lib/target.sh`, `lib/resources.sh`, `cmd/bench`, `cmd/key`, `cmd/sudo`, `cmd/find` and `cmd/sysimage` go with their commands' ports (`cmd/zed` is Python already) | 3, 5 | `lint.one_machine_name_reader` |
+| The `--web` status page renders `armed_by`, `armed_at`, `armed_desync` and `disagree` as the text renderer does | 5 | `unit status.web_mirrors_text` |
 
 ### Decisions for the user
 

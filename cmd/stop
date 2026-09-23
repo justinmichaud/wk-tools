@@ -45,8 +45,7 @@ def here():
 
 
 def running_tasks(records):
-    """(task, 'kind name', kill) for each task still going: the record names
-    the command that stops it, and that command is its kind's own."""
+    """(task, 'kind name', kill) for each task still going -- kill is each kind's own stop command."""
     rows = []
     for t in records.list():
         if t.verdict("capped") in record.RUNNING:
@@ -71,7 +70,7 @@ def stop_tasks_here(records):
         if cp is not None and cp.returncode != 0:
             warn("'%s' exited non-zero" % kill)
     if act.dry_run():
-        return 0   # nothing was stopped, so nothing is read back
+        return 0
     left = running_tasks(records)   # asked again rather than believed
     if left:
         warn("still running on %s:" % machine)
@@ -105,10 +104,6 @@ def stop_workspace(reg, name):
     target = reg.load(reg.ws_target(name))
     if target.info(name) == "absent":
         die("no such workspace: %s" % name)
-    if target.kind == "remote":
-        rc = shell.rc_stop(ROOT, target.name, name)
-        if rc != 0:
-            raise Refused(rc)
     if not target.stop(name):
         raise Refused(1)
     return 0

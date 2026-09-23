@@ -16,6 +16,7 @@ process and not one kind:
 Run: python3 -m unittest tests.test_build_subject -v
 """
 import json
+import os
 import subprocess
 import unittest
 
@@ -189,6 +190,21 @@ class TestSelftestRefusesBesideABuild(WkTest):
         self.assertIn("--force proceeds anyway", cp.stdout)
         self.assertIn("wk selftest\n", cp.stdout)
         self.assertNotIn("tiers:", cp.stdout)
+
+    def test_a_killed_builds_record_is_not_on_the_books(self):
+        """A build killed with -9 leaves its record; a dead `pid:` holder is
+        no build, while a live one and one held in a workspace still count."""
+        from tests.support import _BUILD_RECORDS
+        books = self.tmp / "state" / "wk" / "builds"
+        books.mkdir(parents=True)
+        dead = subprocess.Popen(["true"]); dead.wait()
+        (books / "a").write_text("label=killed\nholder=pid:%d\n" % dead.pid)
+        (books / "b").write_text("label=running\nholder=pid:%d\n" % os.getpid())
+        (books / "c").write_text("label=in-a-workspace\nholder=ws:w:build.pid\n")
+        out = subprocess.run(["bash", "-c", _BUILD_RECORDS], capture_output=True, text=True,
+                             env=dict(os.environ, XDG_STATE_HOME=str(self.tmp / "state"))).stdout
+        labels = [l.split("=", 1)[1] for l in out.splitlines() if l.startswith("label=")]
+        self.assertEqual(sorted(labels), ["in-a-workspace", "running"])
 
     def test_the_tiers_that_need_no_machine_run_beside_a_build(self):
         env = builds_on_the_books_env(self.tmp, "wk-test-fake-build")

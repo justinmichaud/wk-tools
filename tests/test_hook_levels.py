@@ -86,7 +86,7 @@ wk_gitwebkit_setup_script /src/WebKit
         self.assertIn("install-hooks", after)
 
     def test_the_state_it_reports_still_distinguishes_the_two(self):
-        """cmd/remotes' fix_gitwebkit reads the last line to say whether it changed anything"""
+        """`wk sync --fix` reads the last line to say whether it changed anything"""
         script = self._script()
         self.assertIn("state=already", script)
         self.assertIn("state=ok", script)

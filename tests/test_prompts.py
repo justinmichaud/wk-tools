@@ -95,8 +95,6 @@ def _raw_read_sites():
 EXPECTED_SAFE_RAW_READS = {
     ("cmd/bridge", 'read -r _reply || die "aborted -- nothing further was changed"'):
         "pause(): waits for Enter before a manual step with no alternative -- explicitly not confirm() (see the comment above it), since there is nothing to answer no to",
-    ("cmd/remotes", '{ read -r extra_name; read -r extra_url; read -r ssh_config; } <<EOF'):
-        "reads three lines from a heredoc, not a terminal",
     ("admin/wk-card-priv", 'read -r type tran <<EOF'):
         "reads two fields from a heredoc, not a terminal",
     ("image/yocto.sh", "read -r stage_jobs stage_mb <<EOF"):

@@ -334,28 +334,6 @@ echo PASS
         )
         self.assertIn("PASS", cp.stdout, cp.stdout + cp.stderr)
 
-    def test_wk_ready_timeout_bounds_t_ready_polling(self):
-        # t_info is called inside a `$(...)` -- its own subshell -- so a
-        # plain shell variable it increments never reaches the parent; a
-        # file is the one counter that survives the subshell.
-        counter = self.tmp / "t_info_calls"
-        cp = self.bash(
-            '''
-. "$WK_ROOT/lib/common.sh"
-. "$WK_ROOT/lib/target.sh"
-WK_READY_TIMEOUT=2
-t_info() { printf x >> "$COUNTER"; echo creating; }
-t_ready somews && rc=0 || rc=$?
-[ "$rc" = 1 ] || { echo "rc: $rc"; exit 1; }
-calls=$(wc -c < "$COUNTER" | tr -d ' ')
-[ "$calls" = 2 ] || { echo "calls: $calls"; exit 1; }
-echo PASS
-''',
-            env={"COUNTER": str(counter)},
-            timeout=15,
-        )
-        self.assertIn("PASS", cp.stdout, cp.stdout + cp.stderr)
-
     def test_wk_ready_wait_bounds_wait_ready_polling(self):
         cp = self.bash(
             '''

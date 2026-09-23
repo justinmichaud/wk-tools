@@ -15,7 +15,8 @@ import sys
 from pathlib import Path
 
 from wk import decl as D
-from wk import shell
+from wk import record, shell, sshalias
+from wk.machine import Local
 from wk.targets import Registry
 
 ROOT = Path(os.environ.get("WK_ROOT") or Path(__file__).resolve().parents[2])
@@ -27,6 +28,8 @@ TOMBSTONES = {
     "pick": "'wk pick' is removed",
     "skills": "'wk skills' is removed",
     "notify": "'wk notify' is removed: a program calls wk_notify (lib/store.sh)",
+    "verify": "'wk verify' is merged into doctor: wk doctor <workspace>",
+    "remotes": "'wk remotes' is merged into sync: wk sync [<workspace>] --fix",
 }
 GLOBALS = {"--force": "WK_FORCE", "--quiet": "WK_QUIET", "--dry-run": "WK_DRY_RUN",
            "-n": "WK_DRY_RUN", "--yes": "WK_YES", "-y": "WK_YES"}
@@ -545,13 +548,6 @@ def delegate_run(target, cmd, args):
     shell.exec_fn(str(ROOT), 'load_target %s >/dev/null 2>&1; %s' % (shell.sh_quote(machine), fn), cmd, *args)
 
 
-def machine_name():
-    if os.environ.get("WK_IN_VM") and os.environ.get("WK_ROW_LABEL"):
-        return os.environ["WK_ROW_LABEL"]
-    cp = subprocess.run(["hostname", "-s"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
-    return (cp.stdout.strip() or "here").lower()
-
-
 def bare_report(inv, cmd, args):
     """A report with no subject, merged over every target here and the VM."""
     hosts = [t for t in registry().all() if t != "container"]
@@ -578,8 +574,8 @@ def bare_report(inv, cmd, args):
             rc = subprocess.call([str(inv.decl.path), *args], env=env)
         worst = max(worst, rc)
     if machine_running():
-        env = dict(os.environ, WK_ROW_LABEL=machine_name())
-        if cmd in ("ls", "remotes") and hosts:
+        env = dict(os.environ, WK_ROW_LABEL=record.machine_name())
+        if cmd == "ls" and hosts:
             if ls_json:
                 ls_vm = tempfile.NamedTemporaryFile(delete=False)
                 cp = subprocess.run([sys.executable, str(ROOT / "wk"), "--forward", cmd, "--continued", *args],
@@ -740,7 +736,7 @@ def main(argv):
             if rc != 0:
                 raise Exit(rc)
             if name:
-                shell.run(str(ROOT), "ssh_alias_remove", name)
+                sshalias.alias_remove(Local(), os.environ, name)
             raise Exit(0)
         if d.bare == "merged" and not positionals(args):
             bare_report(inv, cmd, args)

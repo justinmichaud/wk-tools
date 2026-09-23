@@ -9,9 +9,6 @@
 #   wk start                 the podman machine, then every container
 #   wk start <workspace>     only that workspace's environment; for a macOS
 #                            guest this is `wk vm start <workspace>`
-#
-# WK_NO_CLAUDE_RC=1 skips restarting claude remote control in the containers
-# that came back up.
 
 import os
 import subprocess
@@ -21,7 +18,7 @@ ROOT = os.environ.get("WK_ROOT") or os.path.dirname(os.path.dirname(os.path.absp
 sys.path.insert(0, os.path.join(ROOT, "lib"))
 
 from wk import act, shell, targets  # noqa: E402
-from wk.act import Refused, die, info, log, warn  # noqa: E402
+from wk.act import Refused, die, info, log  # noqa: E402
 
 MACHINE = os.environ.get("WK_MACHINE", "wk")
 STOPPED = 'podman ps -a --filter "name=^wk-" --filter "status=exited" --filter "status=created" --format "{{.Names}}"'
@@ -59,13 +56,6 @@ def start_everything(reg):
         info("started %d container(s)" % len(stopped))
     else:
         info("no stopped containers")
-    if stopped and not os.environ.get("WK_NO_CLAUDE_RC"):
-        for n in stopped:
-            ws = n[3:] if n.startswith("wk-") else n
-            rc = subprocess.call([os.path.join(ROOT, "wk"), "ai", "claude", ws, "--rc"],
-                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            if rc != 0:
-                warn("claude remote control did not start in '%s' -- 'wk ai claude %s --rc' says why" % (ws, ws))
     if here():
         try:
             vm = reg.load("vm")

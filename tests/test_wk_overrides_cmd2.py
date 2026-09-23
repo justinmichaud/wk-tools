@@ -1,8 +1,8 @@
 """Coverage for the WK_* overrides read (with a default) in this agent's
 files: cmd/new, cmd/pi, cmd/pr, cmd/profile, cmd/push,
-cmd/quiesce, cmd/remote, cmd/remotes, cmd/rm, cmd/run, cmd/selftest,
+cmd/quiesce, cmd/remote, cmd/rm, cmd/run, cmd/selftest,
 cmd/session, cmd/start, cmd/status, cmd/stop, cmd/sudo, cmd/sync,
-cmd/test, cmd/verify, cmd/version, cmd/vm, cmd/zed, the `wk` dispatcher, and
+cmd/test, cmd/version, cmd/vm, cmd/zed, the `wk` dispatcher, and
 `setup` (docs/PLAN.md's "every WK_* override ... documented
 ... and covered by a test, or removed").
 
@@ -17,6 +17,7 @@ Run: python3 -m unittest tests.test_wk_overrides_cmd2 -v
 import os
 import re
 import subprocess
+import sys
 import tempfile
 import time
 import unittest
@@ -25,12 +26,10 @@ from pathlib import Path
 
 from tests.support import REPO, WkTest, bash
 
-CMD_NEW = REPO / "cmd" / "new"
 CMD_PI = REPO / "cmd" / "pi"
 CMD_QUIESCE = REPO / "cmd" / "quiesce"
 CMD_STATUS = REPO / "cmd" / "status"
 CMD_SUDO = REPO / "cmd" / "sudo"
-CMD_SYNC = REPO / "cmd" / "sync"
 WK = REPO / "wk"
 SETUP = REPO / "setup"
 
@@ -78,56 +77,17 @@ class TestDispatcherProtocolDocumented(unittest.TestCase):
         self.assertEqual(missing, [], f"not documented in the dispatcher's header: {missing}")
 
 
-class TestNewExitStatus(unittest.TestCase):
-    """WK_EXIT_STATUS (cmd/new): published by lib/common.sh's atexit trap,
-    not a knob a person sets -- documented at the read site so a reader
-    does not mistake it for one."""
-
-    def test_read_site_names_the_publisher(self):
-        text = CMD_NEW.read_text()
-        self.assertIn("WK_EXIT_STATUS: published by the atexit trap", text)
-
-
 class TestNewTimeout(WkTest):
     """WK_NEW_TIMEOUT (cmd/new -h): how long `wk new` waits for its detached
     driver before giving up on watching it -- the driver itself is
-    unaffected. cmd/new passes it straight to lib/task.sh's task_wait,
-    so this drives that same function the way cmd/new's own read does."""
+    unaffected. The override shortening the wait is
+    tests/test_wk_workspace.py's, on a fake clock."""
 
-    def test_h_documents_it(self):
+    def test_h_documents_it_and_every_other_override_new_reads(self):
         cp = subprocess.run([str(WK), "new", "-h"], cwd=str(REPO),
                              capture_output=True, text=True, timeout=10)
-        self.assertIn("WK_NEW_TIMEOUT", cp.stdout + cp.stderr)
-
-    def test_override_shortens_the_wait(self):
-        line = _grep_line(CMD_NEW, "task_wait.*WK_NEW_TIMEOUT")
-        self.assertIn("task_wait", line)
-
-        script = f'''
-set -euo pipefail
-WK_ROOT="{REPO}"
-. "{REPO}/lib/common.sh"
-. "{REPO}/lib/task.sh"
-export WK_STORE=$(mktemp -d)
-NAME=somews
-LOG=/nonexistent-log
-_pid=$$
-_SINCE=$(task_stamp)   # cmd/new takes one before it spawns the driver; the record below is newer
-task_pid "$(task_begin new here "$NAME" "wk new $NAME --kill" "$LOG" checking create)" "$_pid"
-t0=$(date +%s)
-{line.strip()}
-d=$(( $(date +%s) - t0 ))
-printf 'state=%s elapsed=%s\\n' "$_st" "$d"
-rm -rf "$WK_STORE"
-'''
-        cp = self.bash(script, env={"WK_NEW_TIMEOUT": "2"}, timeout=20)
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertIn("state=timeout", cp.stdout, cp.stdout)
-        m = re.search(r"elapsed=(\d+)", cp.stdout)
-        self.assertIsNotNone(m)
-        # Default is 3600s; anything well under that proves the override
-        # was read, not the default.
-        self.assertLessEqual(int(m.group(1)), 8, cp.stdout)
+        for var in ("WK_NEW_TIMEOUT", "WK_READY_TIMEOUT", "WK_KILL_WAIT"):
+            self.assertIn(var, cp.stdout + cp.stderr)
 
 
 class TestPiTag(unittest.TestCase):
@@ -287,9 +247,8 @@ printf '%s' "$WK_SUDO_TIMEOUT_DESC"
 
 class TestSyncBranch(unittest.TestCase):
     """WK_BRANCH (cmd/sync -h): publishes a snapshot from this branch
-    instead of origin/main. Exercised as a substitution, the same way
-    cmd/sync reads it -- driving a real 'wk sync --tools' would fetch
-    all of WebKit."""
+    instead of origin/main. Exercised on lib/wk/sync.py's reader -- driving
+    a real 'wk sync --tools' would fetch all of WebKit."""
 
     def test_h_documents_it(self):
         cp = subprocess.run([str(WK), "sync", "-h"], cwd=str(REPO),
@@ -297,19 +256,10 @@ class TestSyncBranch(unittest.TestCase):
         self.assertIn("WK_BRANCH", cp.stdout + cp.stderr)
 
     def test_override_changes_the_published_branch(self):
-        stmt = _grep_line(CMD_SYNC, 'BRANCH="\\${WK_BRANCH').strip()
-        self.assertTrue(stmt.startswith("BRANCH="), stmt)
-
-        default = subprocess.run(["bash", "-c", f'{stmt}; printf "%s" "$BRANCH"'],
-                                  capture_output=True, text=True, env={})
-        self.assertEqual(default.stdout, "origin/main")
-
-        overridden = subprocess.run(
-            ["bash", "-c", f'{stmt}; printf "%s" "$BRANCH"'],
-            capture_output=True, text=True,
-            env={"WK_BRANCH": "wpe-2.44"},
-        )
-        self.assertEqual(overridden.stdout, "wpe-2.44")
+        sys.path.insert(0, str(REPO / "lib"))
+        from wk import sync
+        self.assertEqual(sync.publish_branch({}), "origin/main")
+        self.assertEqual(sync.publish_branch({"WK_BRANCH": "wpe-2.44"}), "wpe-2.44")
 
 
 class TestSetupDryRun(unittest.TestCase):

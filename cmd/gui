@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/usr/bin/env python3
 #
 # wk gui <workspace> [<url>] [flags] -- run MiniBrowser in the benchmark seat
 # wk: where=workspace name=required ready=yes forward=no group=workspaces takes=1 passthrough
@@ -17,147 +17,189 @@
 #                          attaches to the web process once it starts
 #   -- <args>              extra arguments passed straight to the browser
 
-set -euo pipefail
-WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-. "$WK_ROOT/lib/common.sh"
-. "$WK_ROOT/lib/store.sh"
-. "$WK_ROOT/lib/target.sh"
-. "$WK_ROOT/build/configs.sh"
+import os
+import stat
+import sys
 
-NAME="${WK_NAME:-}"
-require_name "$NAME"
+ROOT = os.environ.get("WK_ROOT") or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(ROOT, "lib"))
 
-_gui_default_config() {
-    if in_workspace; then default_config "$NAME"
-    elif is_macos;   then echo mac-release
-    else                  echo wpe-release
-    fi
-}
+from wk import buildconf, shell, targets  # noqa: E402
+from wk.act import Refused, die, exec_into, info, log, warn  # noqa: E402
 
-CONFIG="${WK_CONFIG:-$(_gui_default_config)}"
-URL=""
-FULLSCREEN=1
-EXTRA=""
-DEBUG=""
 
-while [ $# -gt 0 ]; do
-    case "$1" in
-        --config)        CONFIG="${2:-}"; shift 2 ;;
-        --wpe)           CONFIG=wpe-release; shift ;;
-        --gtk)           CONFIG=gtk-release; shift ;;
-        --mac)           CONFIG=mac-release; shift ;;
-        --lldb)          DEBUG="${2:-}"
-                         case "$DEBUG" in ui|web) ;; *) die "--lldb takes ui or web, not '$DEBUG'" ;; esac
-                         shift 2 ;;
-        --no-fullscreen) FULLSCREEN=""; shift ;;
-        --)              shift; EXTRA=$(sh_quote "$@"); break ;;
-        *)               URL="$1"; shift ;;
-    esac
-done
+def is_macos():
+    return os.uname().sysname == "Darwin"
 
-TARGET="$(ws_target "$NAME")"
-load_target "$TARGET"
 
-config_load "$CONFIG" "$(t_os)" || die "unknown config '$CONFIG'"
+def parse(argv):
+    config, url, tail, debug = None, "", [], ""
+    fullscreen = True
+    i = 0
+    while i < len(argv):
+        a = argv[i]
+        if a == "--config":
+            config = argv[i + 1] if i + 1 < len(argv) else ""
+            i += 2
+        elif a == "--wpe":
+            config, i = "wpe-release", i + 1
+        elif a == "--gtk":
+            config, i = "gtk-release", i + 1
+        elif a == "--mac":
+            config, i = "mac-release", i + 1
+        elif a == "--lldb":
+            debug = argv[i + 1] if i + 1 < len(argv) else ""
+            if debug not in ("ui", "web"):
+                die("--lldb takes ui or web, not '%s'" % debug)
+            i += 2
+        elif a == "--no-fullscreen":
+            fullscreen, i = False, i + 1
+        elif a == "--":
+            tail = argv[i + 1:]
+            break
+        else:
+            url, i = a, i + 1
+    return {"config": config, "url": url, "fullscreen": fullscreen, "tail": tail, "debug": debug}
 
-config_jsc_only && \
-    die "'$CONFIG' builds JavaScriptCore alone -- there is no browser in it.
-    Use a wpe-*, gtk-* or mac-* config."
 
-case "$CFG_BUILDSYS:$CFG_PORT" in
-    cmake:--wpe) FS_FLAG=--fullscreen ;;
-    cmake:--gtk) FS_FLAG=--full-screen ;;
-    xcode:)      FS_FLAG="" ;;
-    *)           die "'$CONFIG' builds no browser to drive -- use a wpe-*, gtk-* or mac-* config" ;;
-esac
-[ -n "$FULLSCREEN" ] || FS_FLAG=""
+def gui_default_config(reg, name):
+    if reg.in_workspace():
+        return reg.default_config(name)
+    return "mac-release" if is_macos() else "wpe-release"
 
-[ -n "$URL" ] || URL="about:blank"
 
-if is_macos && [ "$WK_TARGET_KIND" = container ]; then
-    die "a container workspace on a macOS host has no display, and cannot get one:
-    the podman machine has no GPU and there is no compositor to draw into.
-    Use a macOS guest instead -- 'wk vm new <name>', then 'wk gui <name>',
-    which runs MiniBrowser on the guest's own desktop with the real GPU."
-fi
+def fullscreen_flag(cfg):
+    if cfg.buildsys == "cmake" and cfg.port == "--wpe":
+        return "--fullscreen"
+    if cfg.buildsys == "cmake" and cfg.port == "--gtk":
+        return "--full-screen"
+    if cfg.buildsys == "xcode" and cfg.port == "":
+        return ""
+    die("'%s' builds no browser to drive -- use a wpe-*, gtk-* or mac-* config" % cfg.name)
 
-SRC=$(t_src "$NAME")
-BROWSER=$(config_browser_path "$SRC")
-t_exec "$NAME" test -x "$BROWSER" 2>/dev/null \
-    || die "no MiniBrowser at $BROWSER -- wk build $NAME $CONFIG"
 
-RUN_ENV=""
-if is_linux; then
-    SOCK="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/wk/display/wayland-0"
-    [ -S "$SOCK" ] || die "no graphical session -- 'wk session on', or 'wk session on --bmc' to watch it over the BMC"
-    session_mode_warn || true
+def session_env(root):
+    """The Linux GPU-session gate and, on a BMC seat, the software-rendering pins."""
+    sock = os.path.join(os.environ.get("XDG_RUNTIME_DIR") or "/run/user/%d" % os.getuid(), "wk", "display", "wayland-0")
+    try:
+        is_socket = stat.S_ISSOCK(os.stat(sock).st_mode)
+    except OSError:
+        is_socket = False
+    if not is_socket:
+        die("no graphical session -- 'wk session on', or 'wk session on --bmc' to watch it over the BMC")
+    shell.session_mode_warn(root, env=os.environ)
+    if shell.session_mode(root, env=os.environ) != "bmc":
+        return ""
+    run_env = ("WEBKIT_DISABLE_DMABUF_RENDERER=1 LIBGL_ALWAYS_SOFTWARE=1 GALLIUM_DRIVER=llvmpipe"
+               " __EGL_VENDOR_LIBRARY_FILENAMES=/usr/share/glvnd/egl_vendor.d/50_mesa.json")
+    dev = shell.bmc_drm_device(root, env=os.environ)
+    if dev:
+        run_env += " WPE_DRM_DEVICE=%s" % dev
+    else:
+        warn("could not identify the ast DRM device -- WPE may still infer the GPU")
+    info("software session: pinning the browser to Mesa, disabling the dmabuf renderer,")
+    log("  and pointing WPE's own DRM device inference at the ast")
+    return run_env
 
-    # A BMC session cannot import an NVIDIA dmabuf: unpinned, the browser goes black silently.
-    if [ "$(session_mode)" = bmc ]; then
-        RUN_ENV="WEBKIT_DISABLE_DMABUF_RENDERER=1 LIBGL_ALWAYS_SOFTWARE=1 GALLIUM_DRIVER=llvmpipe"
-        RUN_ENV="$RUN_ENV __EGL_VENDOR_LIBRARY_FILENAMES=/usr/share/glvnd/egl_vendor.d/50_mesa.json"
-        if _bmc_dev=$(bmc_drm_device); then
-            RUN_ENV="$RUN_ENV WPE_DRM_DEVICE=$_bmc_dev"
-        else
-            warn "could not identify the ast DRM device -- WPE may still infer the GPU"
-        fi
-        unset _bmc_dev
-        info "software session: pinning the browser to Mesa, disabling the dmabuf renderer,"
-        log  "  and pointing WPE's own DRM device inference at the ast"
-    fi
-fi
 
-TYPE_FLAG="--$(printf '%s' "$CFG_TYPE" | tr 'A-Z' 'a-z')"
+def main(argv):
+    name = os.environ.get("WK_NAME", "")
+    opts = parse(argv)
 
-# `open -a` is refused for the Apple bundle (LaunchServices -10825): WebKit stamps an
-# LSMinimumSystemVersion from a table (Configurations/DeploymentTargets.xcconfig) naming
-# macOS 15 and 27, so a 26 host stamps a minimum it does not meet -- TODO: once it does.
-# A CMake port's browser is a grandchild lldb never sees; WEBKIT_MINI_BROWSER_PREFIX inserts it.
-if [ "$CFG_BUILDSYS" = xcode ]; then
-    LAUNCH_ENV=$(config_browser_env "$SRC")
-    LAUNCH_CMD="$(sh_quote "$BROWSER") $(config_browser_url_flag) $(sh_quote "$URL") $EXTRA"
-    UI_PREFIX=""
-else
-    LAUNCH_ENV="WPE_BROWSER=minibrowser $RUN_ENV"
-    LAUNCH_CMD="Tools/Scripts/run-minibrowser $CFG_PORT $TYPE_FLAG -- $FS_FLAG $(sh_quote "$URL") $EXTRA"
-    UI_PREFIX="WEBKIT_MINI_BROWSER_PREFIX=\"\$LLDB $(t_lldb_opts) $(lldb_pin_opts) --\""
-fi
+    reg = targets.Registry(ROOT)
+    try:
+        target = reg.load(reg.ws_target(name))
+    except LookupError as e:
+        die(str(e))
 
-case "$DEBUG" in
-"")
-    info "MiniBrowser ($CONFIG) in '$NAME' -> $URL"
-    log  "  ctrl-c here closes it"
-    t_exec "$NAME" bash -lc "cd $SRC && $LAUNCH_ENV $LAUNCH_CMD"
-    ;;
-ui)
-    info "MiniBrowser ($CONFIG) in '$NAME' under lldb -> $URL"
-    log  "  'run' starts it; breakpoints can go in first"
-    if [ "$CFG_BUILDSYS" = xcode ]; then
-        RUN="cd $SRC && $LAUNCH_ENV exec \"\$LLDB\" $(t_lldb_opts) $(lldb_pin_opts) -- $LAUNCH_CMD"
-    else
-        RUN="cd $SRC && $LAUNCH_ENV $UI_PREFIX exec $LAUNCH_CMD"
-    fi
-    t_exec_tty "$NAME" bash -lc "$(lldb_prelude)
-$RUN"
-    ;;
-web)
-    WEB_PROC=$(config_web_process_name)
-    info "MiniBrowser ($CONFIG) in '$NAME' -> $URL, lldb waiting for $WEB_PROC"
-    log  "  it attaches as the page's process starts; 'continue' lets it run"
-    log  "  a cross-site navigation moves the page to a *new* process and leaves"
-    log  "  lldb in the old one, silently -- breakpoints just stop being reached."
-    log  "  'follow-page' attaches to every $WEB_PROC, asks each which one holds"
-    log  "  the live page, and stays there ('reattach' catches the next one at"
-    log  "  launch instead, for debugging it from the start). Re-set breakpoints."
-    log  "  browser output: /tmp/wk-gui.log (in the workspace)"
-    # lldb must already be waiting, and prewarming is well after load, so the first web process is the page's.
-    t_exec_tty "$NAME" bash -lc "$(lldb_prelude)
-cd $SRC && \
-        ( sleep 2; $LAUNCH_ENV $(config_web_process_pause_env) $LAUNCH_CMD >/tmp/wk-gui.log 2>&1 ) & \
-        exec \"\$LLDB\" $(lldb_pin_opts) \
-            -o $(sh_quote "command script import $(t_tools "$NAME")/container/lldb/webprocess.py") \
-            -o $(sh_quote "command alias follow-page wk-follow-page $WEB_PROC") \
-            -o $(sh_quote "command alias reattach process attach --name $WEB_PROC --waitfor") \
-            -o $(sh_quote "process attach --name $WEB_PROC --waitfor")"
-    ;;
-esac
+    if target.kind == "remote":
+        die("wk gui needs a benchmark seat -- a container, a guest or the workspace itself:\n"
+            "    '%s' is a remote target, an arbitrary machine reached over ssh with no seat\n"
+            "    of its own to draw into. Use a container or vm workspace instead." % name)
+
+    config = opts["config"] or os.environ.get("WK_CONFIG") or gui_default_config(reg, name)
+    try:
+        cfg = buildconf.resolve(config, target.os(), target.kind, target.env)
+    except LookupError:
+        die("unknown config '%s'" % config)
+
+    if cfg.jsc_only:
+        die("'%s' builds JavaScriptCore alone -- there is no browser in it.\n"
+            "    Use a wpe-*, gtk-* or mac-* config." % config)
+
+    fs_flag = fullscreen_flag(cfg) if opts["fullscreen"] else ""
+    url = opts["url"] or "about:blank"
+
+    if is_macos() and target.kind == "container":
+        die("a container workspace on a macOS host has no display, and cannot get one:\n"
+            "    the podman machine has no GPU and there is no compositor to draw into.\n"
+            "    Use a macOS guest instead -- 'wk vm new <name>', then 'wk gui <name>',\n"
+            "    which runs MiniBrowser on the guest's own desktop with the real GPU.")
+
+    src = target.src(name)
+    browser = cfg.browser_path(src)
+    if not target.exec(name, ["test", "-x", browser]).ok:
+        die("no MiniBrowser at %s -- wk build %s %s" % (browser, name, config))
+
+    run_env = "" if is_macos() else session_env(ROOT)
+    extra_q = shell.sh_quote(*opts["tail"])
+    type_flag = "--" + cfg.type.lower()
+
+    if cfg.buildsys == "xcode":
+        launch_env = cfg.browser_env(src)
+        launch_cmd = "%s %s %s %s" % (shell.sh_quote(browser), cfg.browser_url_flag(), shell.sh_quote(url), extra_q)
+        ui_prefix = ""
+    else:
+        launch_env = ("WPE_BROWSER=minibrowser " + run_env).rstrip()
+        launch_cmd = "Tools/Scripts/run-minibrowser %s %s -- %s %s %s" % (cfg.port, type_flag, fs_flag, shell.sh_quote(url), extra_q)
+        ui_prefix = 'WEBKIT_MINI_BROWSER_PREFIX="$LLDB %s %s --"' % (target.lldb_opts(), shell.lldb_pin_opts(ROOT))
+
+    if opts["debug"] == "":
+        info("MiniBrowser (%s) in '%s' -> %s" % (config, name, url))
+        log("  ctrl-c here closes it")
+        cmd = "cd %s && %s %s" % (src, launch_env, launch_cmd)
+        argv_, cwd = target.exec_argv(name, ["bash", "-lc", cmd], tty=False)
+        exec_into(argv_, cwd)
+        return
+
+    if opts["debug"] == "ui":
+        info("MiniBrowser (%s) in '%s' under lldb -> %s" % (config, name, url))
+        log("  'run' starts it; breakpoints can go in first")
+        if cfg.buildsys == "xcode":
+            run = ('cd %s && %s exec "$LLDB" %s %s -- %s'
+                  % (src, launch_env, target.lldb_opts(), shell.lldb_pin_opts(ROOT), launch_cmd))
+        else:
+            run = "cd %s && %s %s exec %s" % (src, launch_env, ui_prefix, launch_cmd)
+        cmd = "%s\n%s" % (shell.lldb_prelude(ROOT), run)
+        argv_, cwd = target.exec_argv(name, ["bash", "-lc", cmd], tty=True)
+        exec_into(argv_, cwd)
+        return
+
+    web_proc = cfg.web_process_name()
+    info("MiniBrowser (%s) in '%s' -> %s, lldb waiting for %s" % (config, name, url, web_proc))
+    log("  it attaches as the page's process starts; 'continue' lets it run")
+    log("  a cross-site navigation moves the page to a *new* process and leaves")
+    log("  lldb in the old one, silently -- breakpoints just stop being reached.")
+    log("  'follow-page' attaches to every %s, asks each which one holds" % web_proc)
+    log("  the live page, and stays there ('reattach' catches the next one at")
+    log("  launch instead, for debugging it from the start). Re-set breakpoints.")
+    log("  browser output: /tmp/wk-gui.log (in the workspace)")
+    run = ("cd %s && ( sleep 2; %s %s %s >/tmp/wk-gui.log 2>&1 ) & "
+          'exec "$LLDB" %s -o %s -o %s -o %s -o %s'
+          % (src, launch_env, cfg.web_process_pause_env(), launch_cmd, shell.lldb_pin_opts(ROOT),
+             shell.sh_quote("command script import %s/container/lldb/webprocess.py" % target.tools(name)),
+             shell.sh_quote("command alias follow-page wk-follow-page %s" % web_proc),
+             shell.sh_quote("command alias reattach process attach --name %s --waitfor" % web_proc),
+             shell.sh_quote("process attach --name %s --waitfor" % web_proc)))
+    cmd = "%s\n%s" % (shell.lldb_prelude(ROOT), run)
+    argv_, cwd = target.exec_argv(name, ["bash", "-lc", cmd], tty=True)
+    exec_into(argv_, cwd)
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main(sys.argv[1:]))
+    except Refused as e:
+        sys.exit(e.status)
+    except KeyboardInterrupt:
+        sys.exit(130)

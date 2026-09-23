@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
-"""Structured-data operations for `wk bench`: the JSON records a run produces, merging
-jsc-shell iteration logs into one result, and warning when two runs are not comparable. Stdlib only, for whatever python3 a macOS host or a bare-metal board has; every input arrives as argv or stdin, never spliced into source text."""
+"""Structured-data operations for `wk bench`: the JSON records a run produces, merging jsc-shell iteration logs into one result, and warning when two runs are not comparable. Stdlib only, for whatever python3 a macOS host or a bare-metal board has; every input arrives as argv or stdin, never spliced into source text."""
 
 import argparse
 import json
@@ -599,9 +598,7 @@ def _subtest_metrics(doc):
         if not isinstance(node, dict):
             return
         entry = metric_vals(node.get("metrics"))
-        # Only the topmost declaration that cannot be resolved is reported: the
-        # levels above a silent subtest are silent for the same one reason, and
-        # each would say so again.
+        # Only the topmost declaration that cannot be resolved is reported: the levels above a silent subtest are silent for the same one reason, and each would say so again.
         for key in ("Score", "Time"):
             declared = _declared_metric(node, key)
             if declared is None or not resolve:
@@ -984,9 +981,7 @@ def _render_html(report, title="wk bench report"):
     )
 
 
-# The warmup round's evidence, and the judgement on it. What counts as a problem
-# within one arm is decided where it is measured (bench/wk_board_driver.py) and
-# recorded in the file; this adds only what needs both arms side by side.
+# The warmup round's evidence, and the judgement on it. What counts as a problem within one arm is decided where it is measured (bench/wk_board_driver.py) and recorded in the file; this adds only what needs both arms side by side.
 def warmup_load(taskdir, device):
     out = {}
     for arm in ("a", "b"):

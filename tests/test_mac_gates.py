@@ -9,6 +9,8 @@ Run: python3 -m unittest tests.test_mac_gates -v
 """
 import importlib.util
 import os
+import sys
+import types
 import unittest
 
 from tests.support import REPO, WkTest, bash, func_body, scratch_dir
@@ -284,11 +286,10 @@ class TestAProfileGuidedBuildDoesNotCacheCompilations(WkTest):
     101 GB of compilation cache beside 45 GB of products, and a full disk."""
 
     def _env(self, config):
-        return bash('. "$WK_ROOT/lib/common.sh"; . "$WK_ROOT/lib/arch.sh"\n'
-                    '. "$WK_ROOT/build/configs.sh"\n'
-                    'WK_TARGET_KIND=vm; config_load %s macos vm >/dev/null 2>&1\n'
-                    'WK_CCACHE_DIR=/ccache config_build_env /src/WebKit 4 10 native >/dev/null 2>&1\n'
-                    'printf "%%s\\n" "${CFG_ENV[@]}"\n' % config)
+        sys.path.insert(0, str(REPO / "lib"))
+        from wk import buildconf
+        c = buildconf.resolve(config, "macos", "vm", {})
+        return types.SimpleNamespace(stdout="\n".join(buildconf.build_env(c, "/src/WebKit", 4, 10, "native", "/ccache", {})), stderr="")
 
     def test_the_pgo_config_turns_it_off(self):
         cp = self._env("mac-release-pgo")

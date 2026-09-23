@@ -309,7 +309,7 @@ class TestTheTokenCanDoTheJob(_Rules):
 
     def test_the_probe_is_a_write_that_creates_nothing(self):
         """An empty body names no head or base branch, so an authorised call is
-        422 -- the same probe `wk verify` runs from inside a workspace."""
+        422 -- the same probe `wk doctor` runs from inside a workspace."""
         self.check("github-pat", FINE)
         posts = [p for p in FakeGitHub.seen if p[0] == "POST"]
         self.assertEqual(["/repos/%s/pulls" % r
@@ -887,7 +887,7 @@ class TestTheClaudeLogin(_Anthropic):
         self.assertIn("remote control DENIED", detail)
         self.assertIn("\n    remote-control: denied", detail)
         self.assertIn("fix: an owner of the Example Org organization", detail)
-        self.assertIn("WK_NO_CLAUDE_RC=1", detail)
+        self.assertIn("until then `wk ai claude` sessions run without it", detail)
 
     def test_a_hipaa_organization_is_denied_the_same_way(self):
         FakeAnthropic.policy = {"restrictions": {}, "compliance_taints": ["hipaa"]}

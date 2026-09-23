@@ -183,14 +183,14 @@ class TestConfFieldSets(unittest.TestCase):
 
     def test_targets_hosts_field_set(self):
         # Every file that READS one of these fields, so the vocabulary comes
-        # from code. build/configs.sh and lib/target.sh are here because they
+        # from code. lib/wk/buildconf.py and lib/target.sh are here because they
         # are the only readers of some of them -- WK_TARGET_LIBCXX among them,
         # which otherwise survives in this set only as prose in remote.sh.
         known = loader_fields(
             (REPO / "targets" / "remote.sh", "WK_"),
             (REPO / "cmd" / "remote", "WK_"),
-            (REPO / "cmd" / "build", "WK_"),
-            (REPO / "build" / "configs.sh", "WK_"),
+            (REPO / "lib" / "wk" / "build.py", "WK_"),
+            (REPO / "lib" / "wk" / "buildconf.py", "WK_"),
             (REPO / "lib" / "target.sh", "WK_"),
         )
         known.add("WK_TARGET_KIND")

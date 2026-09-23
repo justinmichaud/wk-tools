@@ -1,15 +1,11 @@
-# Loading a target driver, and the defaults every driver inherits. Commands
-# under cmd/ call only this contract, never podman, tart or ssh directly.
-# Required: t_create <name> [base], t_exec <name> <cmd..>, t_enter <name>, t_destroy <name>,
-# t_home <name> (the workspace user's home, seen from inside it: never this machine's), t_list
-# ("<name><tab><state>" per line), t_info <name> (absent | creating | unreachable | the driver's word for one that exists).
-# Everything below is a default a driver overrides only where it differs.
+# Loading a target driver, and the defaults every driver inherits. Commands under cmd/ call only this contract, never podman, tart or ssh directly.
+# Required: t_exec <name> <cmd..>, t_home <name> (the workspace user's home, seen from inside it: never this machine's), t_list ("<name><tab><state>" per line), t_info <name> (absent | creating | unreachable | the driver's word for one that exists).
+# t_enter/t_ssh_host are the vm driver's own now; `wk vm` is the only caller left. Everything below is a default a driver overrides only where it differs.
 
 t_src()        { echo "/src/WebKit"; }   # the WebKit checkout inside the target
 t_arch()       { echo native; }      # only the container driver differs; see lib/arch.sh
 t_os()         { echo linux; }       # the platform a build here runs on: linux | macos
 t_tools()      { echo "/opt/wk-tools"; }   # where wk-tools is inside the target
-t_ccache_dir() { echo "/ccache"; }   # inert on the Apple ports (no ccache)
 
 t_mirror_dir() { echo ""; }          # <name>; empty means fetch from the upstreams
 
@@ -19,42 +15,7 @@ guest_share_dir()  { printf '/Volumes/My Shared Files/%s' "$1"; }   # <share nam
 mirror_in_guest()  { printf '%s/WebKit.git' "$(guest_share_dir "$WK_VM_MIRROR_SHARE")"; }
 t_sync_tools() { :; }               # push wk-tools in; nothing when it is bind-mounted
 
-t_sync()       { :; }               # refresh this target's furniture: its tooling copy, and its store
-t_prefetch()   { :; }                # ask this target whatever a report will need
-
-t_wiring_args() { printf '\n\n\n'; }   # remote name, its url there, ssh config to use; any may be empty
-t_ssh_host()   { echo "wk-$1"; }    # ssh destination, for Zed and the generated alias
-
-t_ssh_prepare() { :; }   # point an editor at this target over ssh; nothing for one already an ssh destination
-
-t_ssh_user()   { return 1; }        # the account inside the workspace an editor logs into
-t_ssh_proxy()  { return 1; }        # what to run here to reach an addressless workspace
-
 t_agent_sock() { return 1; }        # the ssh-agent socket crossing in (push_agent_load)
-t_egress_filtered() { return 1; }   # <name>; 0 when everything this workspace reaches goes through wk's allowlisting proxy
-
-# The workspace's own answer, not this machine's store: given and held are different facts. A login shell, because the rc names CLAUDE_SECURESTORAGE_CONFIG_DIR -- where a `file` row's own tool rewrites it.
-t_agent_secret_present() { # <name> <secret>
-    local probe
-    if [ "$(wk_agent_secret_kind "$2")" = file ]; then
-        probe="test -s \"\$CLAUDE_SECURESTORAGE_CONFIG_DIR/$(wk_agent_secret_field "$2" 2)\""
-    else
-        probe="test -s \"\$HOME/$(wk_agent_secret_field "$2" 3)\""
-    fi
-    t_exec "$1" bash -lc "$probe" >/dev/null 2>&1
-}
-t_agent_secret_remedy() { agent_secret_store_remedy "$2"; } # <name> <secret>
-
-# The credential as the workspace holds it, put to its rule where it is spent: the check renews a login whose access token has run out and asks Anthropic what it can do, through the egress a session there uses.
-t_agent_secret_verdict() { # <name> <secret> -> the verdict, every line of it
-    local file
-    if [ "$(wk_agent_secret_kind "$2")" = file ]; then
-        file="\"\$CLAUDE_SECURESTORAGE_CONFIG_DIR/$(wk_agent_secret_field "$2" 2)\""
-    else
-        file="\"\$HOME/$(wk_agent_secret_field "$2" 3)\""
-    fi
-    t_exec "$1" bash -lc "python3 $(sh_quote "$(t_tools "$1")/lib/credcheck.py") check $(sh_quote "$2") --path $file < $file" 2>/dev/null | tr -d '\r'
-}
 
 # What the store holds decides the remedy: nothing, one no workspace can use, or a usable one this workspace was made without.
 agent_secret_store_remedy() { # <secret>
@@ -75,13 +36,6 @@ t_needs_base() { return 0; }        # 0 when `wk new` must resolve a base snapsh
 t_start() { info "'$WK_TARGET' has no notion of starting a single workspace -- nothing to bring up for '$1'"; }
 
 t_stop() { die "the '$WK_TARGET' target has no notion of stopping a single workspace -- '$1' is left running"; }
-t_store_init() { store_init; }      # create the host-side directories this target needs
-
-# `t_exec <ws> cat <file>` into a redirect corrupts binary data both ways.
-t_pull() {
-    local name="$1" src="$2" dest="$3"
-    cp -f "$src" "$dest"
-}
 
 _t_pull_dir_excludes() {
     _T_PULL_EXCLUDES=()
@@ -98,22 +52,6 @@ t_pull_dir() {
     _t_pull_dir_excludes "$@"
     mkdir -p "$dest"
     rsync -a --delete ${_T_PULL_EXCLUDES[@]+"${_T_PULL_EXCLUDES[@]}"} "$src/" "$dest/"
-}
-
-t_push() {
-    local name="$1" src="$2" dest="$3"
-    cp -f "$src" "$dest"
-}
-
-t_push_dir() { # contents replaced, not merged: the destination becomes a copy
-    local name="$1" src="$2" dest="$3"
-    mkdir -p "$dest"
-    rsync -a --delete "$src/" "$dest/"
-}
-
-t_path_kind() { # dir | file | absent, so a copy can refuse before moving bytes
-    local name="$1" p="$2"
-    if [ -d "$p" ]; then echo dir; elif [ -e "$p" ]; then echo file; else echo absent; fi
 }
 
 _ssh_opts_base() { # never interactive, bounded connect; drivers add their own
@@ -136,45 +74,17 @@ t_spawn() { # <name> <log> <pidf> <cmd...> -- detached from this process
         > /dev/null 2>&1 < /dev/null & disown"
 }
 
-t_branch() { # `-` when unknowable without starting something
-    local out
-    case "$(t_info "$1")" in
-        absent|creating|broken|unreachable) echo -; return 0 ;;
-    esac
-    out=$(t_exec "$1" git -C "$(t_src "$1")" rev-parse --abbrev-ref HEAD 2>/dev/null | tr -d '\r') || out=""
-    printf '%s' "${out:--}"
-}
-
 WK_READY_MARKER=".wk-ready"   # written as the last act of creating a workspace
 
 t_created() { return 0; }     # is the marker there? yes for a target that keeps none
 
-t_ready() {
-    local name="$1" i=0 max="${WK_READY_TIMEOUT:-300}"
-    while [ "$i" -lt "$max" ]; do
-        case "$(t_info "$name")" in
-            creating) ;;
-            absent|unreachable) return 1 ;;   # neither improves with waiting
-            *) return 0 ;;
-        esac
-        sleep 1; i=$((i + 1))
-    done
-    return 1
-}
 t_cores()      { envelope_cores; }   # <name>; a vm target is sized from the guest
 t_mem_mb()     { envelope_mem_mb; }  # t_mem_mb <name>
-
-t_exec_tty()   { t_exec "$@"; }     # interactive exec: a full-screen UI needs a pty, ssh doesn't allocate one unasked
-t_lldb_opts()  { :; }               # lldb options a target needs before it can launch anything
-
-t_exec_build() { t_exec "$@"; }   # separate: the build lock must not block `wk run`
 
 t_task_put()  { :; }   # <name> <task dir>; nothing to do where the record already sits in the store the building machine reports from -- a driver whose far side is another machine copies it there
 
 t_has_wk()    { return 1; }         # is there a far side that can answer?
 
-t_delegates() { return 1; }         # must a command about a workspace here run there?
-t_owns_records() { return 1; }      # does the far side keep the record of its own workspaces, so one is made and destroyed by its `wk` and not by this one?
 t_far_side()  { echo none; }        # answering | unreachable | stopped | no-wk | none (not a machine of its own)
 t_answers()   { WK_FAR_WHY=""; return 0; }   # 0 when the machine behind this target answers; else 1, with why in WK_FAR_WHY. By exit status in the caller's shell, so the driver's one probe is memoised for every question after it
 t_wk()        { return 1; }         # t_wk <args...>, its exit status is the answer
@@ -237,11 +147,6 @@ ws_exists_on() { # <target> <name> -- unlike ws_on_target, silence is not absenc
     ws_on_target "$1" "$2" && return 0
     ( load_target "$1" >/dev/null 2>&1
       [ "$(t_info "$2" 2>/dev/null)" = unreachable ] )
-}
-
-ws_exists() { # <name>
-    [ -z "${WK_TARGET:-}" ] || { ws_exists_on "$WK_TARGET" "$1"; return $?; }
-    [ -n "$(ws_locate "$1")" ]
 }
 
 ws_target() { # <name>
@@ -396,7 +301,7 @@ target_all() { # container, vm, this machine's own target, and targets/hosts/*.c
     # timeout per machine it has no route to.
     local me=""
     if ! in_remote_host && [ -z "${WK_IN_VM:-}" ]; then
-        me=$(hostname -s 2>/dev/null | tr '[:upper:]' '[:lower:]')
+        me=$(wk_host_name)
         for d in "$(target_registry_dir)"; do
             [ -d "$d" ] || continue
             for f in "$d"/*.conf; do
@@ -586,14 +491,6 @@ ws_state() {
     echo present
 }
 
-ws_display_state() {   # the driver's own word, or the lifecycle state when not `present`
-    local st; st=$(ws_state "$1")
-    case "$st" in
-        present) t_info "$1" ;;
-        *)       echo "$st" ;;
-    esac
-}
-
 # The creation's log outlives the workspace directory a re-run destroys first.
 ws_create_log()   { echo "$WK_STORE/log/new-$1.log"; }
 
@@ -682,14 +579,15 @@ wait_ready() {
 WS_EXCLUSIVE_KINDS=" build babysit yocto buildroot "   # the jobs that hold a workspace's checkout: two at once corrupt it, where an agent session or a benchmark in the same workspace does not
 
 # A lock says nothing about work detached into the workspace, so such a job
-# writes `$(t_home)/<job>.pid` instead; one with a task record is asked first, since the record names the command that stops it.
+# writes `$(t_home)/<job>.pid` instead; one with a task record is judged by its record's kind alone, since the record names the command that stops it.
 ws_busy_reason() { # <name> [task record to ignore -- the job that started this one]
-    local name="$1" skip="${2:-}" ws p pid job d
+    local name="$1" skip="${2:-}" ws p pid job d recorded=" "
     _ws_task_lib
     while IFS= read -r d; do
         [ -n "$d" ] || continue
         [ "$d" != "$skip" ] || continue
         [ "$(task_field "$d" name)" = "$name" ] || continue
+        [ "$(task_field "$d" where)" != target ] || recorded="$recorded$(task_field "$d" pid) "
         case "$WS_EXCLUSIVE_KINDS" in
             *" $(task_field "$d" kind) "*) ;;
             *) continue ;;
@@ -708,6 +606,7 @@ EOF
         [ -f "$p" ] || continue
         pid=$(tr -dc '0-9' < "$p" 2>/dev/null) || true
         [ -n "$pid" ] || continue
+        case "$recorded" in *" $pid "*) continue ;; esac
         job=$(basename "$p" .pid)
         if t_exec "$name" kill -0 "$pid" >/dev/null 2>&1; then
             printf '%s (pid %s in the workspace)' "$job" "$pid"
@@ -715,24 +614,6 @@ EOF
         fi
     done
     return 1
-}
-
-prefetch_targets() {
-    local t
-    [ $# -gt 0 ] || return 0
-    command -v mktemp >/dev/null 2>&1 || return 0
-    WK_PREFETCH_DIR=$(mktemp -d "${TMPDIR:-/tmp}/wk-probe.XXXXXX" 2>/dev/null) || return 0
-    export WK_PREFETCH_DIR
-    for t in "$@"; do
-        ( load_target "$t" >/dev/null 2>&1 && t_prefetch ) >/dev/null 2>&1 &
-    done
-    wait
-}
-
-prefetch_done() {
-    [ -n "${WK_PREFETCH_DIR:-}" ] || return 0
-    rm -rf "$WK_PREFETCH_DIR"
-    unset WK_PREFETCH_DIR
 }
 
 walk_targets() {

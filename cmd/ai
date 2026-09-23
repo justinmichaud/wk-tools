@@ -1,10 +1,9 @@
-#!/usr/bin/env bash
+#!/usr/bin/env python3
 #
 # wk ai claude|pi <workspace> [agent options] -- run a coding agent inside a workspace
-# wk: where=workspace name=required@2 ready=yes group=workspaces opts --rc,--stop passthrough=tail
+# wk: where=workspace name=required@2 ready=yes group=workspaces passthrough=tail
 #
 # The workspace name comes first; everything after it is the agent's, verbatim.
-# --rc and --stop are wk's own and are taken out of argv here.
 #
 #   wk ai claude bb4 -r          resume, in bb4
 #   wk ai claude bb4 --continue  and so on
@@ -19,553 +18,401 @@
 # there is a shell function that calls it (shell/bashrc). What differs is that
 # the host's push switch cannot be thrown from in here, so it is measured
 # instead -- a key reaching this workspace, or a GitHub or Bugzilla write that
-# is not refused, stops the session and no --force crosses it. The sandbox
-# probes are `wk verify`'s own, minus the half only the host can answer, and
-# every check runs at once.
+# is not refused, stops the session and no --force crosses it. The checks are
+# `wk doctor`'s own, minus the half only the host can answer, and every one
+# runs at once.
 #
-# --rc runs Claude Code Remote Control (claude.ai/code, the mobile app) instead
-# of a foreground session: a persistent server, started detached in the
-# workspace's checkout and left running after this command returns.
-#
-#   wk ai claude <ws> --rc          start it (a no-op, reported, if already up)
-#   wk ai claude <ws> --rc --stop   stop it
-#
-# `wk new`, `wk start` and `wk vm start` start remote control in what they
-# bring up; WK_NO_CLAUDE_RC=1 turns that off. It needs the claude.ai account
-# login rather than a `claude setup-token` token: 'wk key set claude-login',
-# which every container and guest reads. Before the server is spawned the
-# login is put to its rule where the workspace holds it -- renewed, accepted
-# by Anthropic, and allowed remote control by the organization's policy -- and
-# a login that fails any of those refuses here with the remedy. Onboarding,
-# the trust dialog and the remote-control dialog are recorded in the workspace
-# before either kind of session starts (claude/workspace-config.py): each is a
-# prompt that waits for a terminal the agent may not have, measured against
-# Claude Code 2.1.268 -- `claude remote-control` asks "Enable Remote Control?"
-# on stdin and answers no, exit 0, when stdin is /dev/null; and refuses to
-# start at all without the trust dialog accepted or without the account record
-# (oauthAccount.organizationUuid, 2.1.269) `claude auth login` wrote beside the
-# shared credential, which is copied in on every start so a rotated login
-# converges. WK_RC_WAIT=<seconds> is how long --rc waits for the server to
-# report connected (60).
+# A Claude session on a terminal starts with Remote Control on, named after
+# the workspace (`claude --remote-control <ws>`), so claude.ai/code and the
+# mobile app can join it. Remote Control needs the claude.ai account login
+# ('wk key set claude-login', which every container and guest reads); where
+# $CLAUDE_CODE_OAUTH_TOKEN authenticates the session instead -- the `claude
+# setup-token` credential a build box is given -- it starts without Remote
+# Control and says so. Onboarding, the trust dialog and the remote-control
+# dialog are recorded in the workspace first (claude/workspace-config.py),
+# with the account record (oauthAccount.organizationUuid) `claude auth login`
+# wrote beside the shared login: each dialog waits for a terminal the agent
+# may not have, and Remote Control refuses a login whose organization it
+# cannot read (measured against Claude Code 2.1.269).
 #
 # The agents this knows:
 #
 #   claude   Claude Code. Installed by container/firstrun.sh, and authenticated
 #            by whichever one credential the store delivers to this kind of
-#            target (wk_agent_secrets, lib/store.sh). The only one with a
-#            remote-control server (--rc).
+#            target (wk_agent_secrets, lib/store.sh).
 #   pi       the pi coding agent. Installed per workspace from npm on first
 #            use, and pointed at an OpenAI-compatible endpoint by its own
 #            config file; `wk key set litellm` stores the key for it.
 
-set -euo pipefail
-WK_ROOT="${WK_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
-. "$WK_ROOT/lib/common.sh"
-. "$WK_ROOT/lib/store.sh"
-. "$WK_ROOT/lib/target.sh"
-. "$WK_ROOT/lib/detach.sh"
+import json
+import os
+import shlex
+import signal
+import subprocess
+import sys
 
-# Carried into the workspace as WK_AGENT, which the build wall reads.
-AGENT="${1:-}"
+ROOT = os.environ.get("WK_ROOT") or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(ROOT, "lib"))
 
-PUSH_WAS_ON=""
-PUSH_TARGET=""
+from wk import shell, wall  # noqa: E402
+from wk.act import Refused, barrier, debug, die, info, log, warn  # noqa: E402
+from wk.doctor import Report  # noqa: E402
+from wk.machine import Local  # noqa: E402
+from wk.targets import Registry, show  # noqa: E402
+from wk.workspace import require_name  # noqa: E402
 
-push_switch() { # <on|off|status>
-    "$WK_ROOT/wk" push "$1" ${PUSH_TARGET:+--target "$PUSH_TARGET"} >/dev/null 2>&1
-}
-
-# t_exec hands argv to an exec, not a shell, so a builtin needs `sh -c` (measured).
-wall_available() { # <name>
-    t_exec "$1" sh -c 'command -v bwrap >/dev/null 2>&1'
-}
-
-wall_applies() {   # a container, reached from the host or from inside it
-    case "$WK_TARGET_KIND" in
-        container) return 0 ;;
-        local)     [ "$(t_os)" != macos ] ;;
-        *)         return 1 ;;
-    esac
-}
-
-# In a workspace the switch cannot be thrown, so whether a push from in here could sign is measured where it would be spent. What a *write* to GitHub and to Bugzilla answers is the same question `wk verify` asks from the host, and its probes ask it (checks_here); a read is authenticated in either position by design and says nothing about the switch.
-probe_push_here() {
-    local fails=0 alias sock ident
-    alias=$(wk_push_forks | awk 'NF {print $3; exit}')
-    sock=$(ssh -G "$alias" 2>/dev/null | awk '$1 == "identityagent" {print $2; exit}') || sock=""
-    ident=0
-    [ -z "$sock" ] || ident=$(SSH_AUTH_SOCK="$sock" ssh-add -l 2>/dev/null | grep -c .) || ident=0
-    if [ "$ident" = 0 ]; then
-        pass "the agent holds nothing, so a push from in here has no identity to offer"
-    else
-        fail "$ident deploy key(s) reach this workspace through $sock, so an agent in
-        here could push. The switch is the host's:  wk push off"
-    fi
-    return "$fails"
-}
-
-# The probes a workspace answers about itself are cmd/verify's own, lifted without running it: the half it reads from the host is unanswerable in here. Each is a request with its own timeout, so a session starts in the time of the slowest rather than their sum. Sourcing cmd/verify re-reads lib/target.sh, which restores the driver defaults over this target's, so the target is loaded again.
-checks_here() {
-    local publish=0 sandbox=0 rec
-    WK_VERIFY_LIB=1 . "$WK_ROOT/cmd/verify"
-    load_target "$WK_TARGET"
-    PUSH_ON=0   # `wk push status` is the host's and refused in here, and off is the only position an agent may start in: the probes are told so, and a write that is not refused fails below
-    info "checking workspace '$NAME' from inside it"
-
-    wk_atexit par_cleanup
-    par_begin
-    par_run push-keys            probe_push_here
-    par_run github-read          probe_github_read
-    par_run github-write         probe_github_write
-    par_run bugzilla-read        probe_bugzilla_read
-    par_run bugzilla-write       probe_bugzilla_write
-    par_run egress-github        probe_github
-    par_run egress-allowlist     probe_allowlist
-    par_run egress-off-allowlist probe_off_allowlist
-    par_run no-credentials       probe_no_credentials_inside
-    par_run gitwebkit-setup      probe_gitwebkit_setup
-    ! isolation_applies || par_run isolation   probe_isolation
-    ! wall_applies      || par_run commit-wall probe_commit_wall
-    par_wait
-
-    set -- $_par_status
-    while [ $# -gt 0 ]; do
-        rec=$(par_record "$1")
-        if [ -z "$rec" ] && [ "$2" != 0 ]; then
-            fail "the '$1' probe died before it reported anything (exit $2), so what it
-        measures is unmeasured"
-        else
-            [ -z "$rec" ] || printf '%s\n' "$rec" >&2
-        fi
-        case "$1" in
-            push-keys|github-write|bugzilla-write) publish=$((publish + $2)) ;;
-            *)                                     sandbox=$((sandbox + $2)) ;;
-        esac
-        shift 2
-    done
-    par_end
-
-    [ "$publish" -eq 0 ] || die "refusing to run: an agent in '$NAME' could publish (see above).
-    Nothing in here can fix it and --force does not cross it; the switch is the
-    host's:  wk push off"
-    [ "$sandbox" -eq 0 ] || barrier "the sandbox around '$NAME' is not intact (see above), and relaxed
-    permissions are only defensible while it is."
-    info "sandbox intact, and nothing in here can publish"
-}
-
-push_hold_back() { # <name>
-    # In a workspace the measurement stands in for the switch, beside the sandbox probes (checks_here).
-    if in_workspace; then return 0; fi
-    local rc=0
-    push_switch status || rc=$?
-    case "$rc" in
-        1|4) return 0 ;;
-        0)   ;;
-        *)   die "refusing to run: 'wk push status${PUSH_TARGET:+ --target $PUSH_TARGET}' exited $rc rather
-    than measuring the switch, so whether an agent in '$1' could publish is
-    unknown. Run that command and fix what it names." ;;
-    esac
-    PUSH_WAS_ON=1
-    warn "git push is ON -- turning it off while the agent runs in '$1'"
-    push_switch off \
-        || die "refusing to run: could not hold back the push keys ('wk push status${PUSH_TARGET:+ --target $PUSH_TARGET}')"
-}
-
-restore_push() {
-    [ -n "$PUSH_WAS_ON" ] || return 0
-    if [ -t 0 ] && [ -t 1 ]; then
-        push_switch on \
-            && info "git push turned back on" \
-            || warn "could not turn git push back on -- 'wk push on'"
-    else
-        log "git push stays off (headless session; 'wk push on' when you want it back)"
-    fi
-}
-
-claude_workspace_config() { # <name>
-    local out
-    out=$(t_exec "$1" bash -lc "python3 $(sh_quote "$(t_tools "$1")/claude/workspace-config.py") $(sh_quote "$(t_src "$1")")" 2>&1) \
-        || die "could not record Claude's start-up answers in '$1', and every
-    session there would stop at a dialog instead of starting:
-$(printf '%s' "$out" | sed 's/^/    /')"
-    [ -z "$out" ] || debug "$out"
-}
-
-command -v task_begin >/dev/null 2>&1 || . "$WK_ROOT/lib/task.sh"
-command -v job_kill   >/dev/null 2>&1 || . "$WK_ROOT/lib/watchdog.sh"
-
-rc_log()     { printf '%s' "$(t_home "$1")/claude-remote-control.log"; }
-rc_pidfile() { printf '%s' "$(t_home "$1")/claude-remote-control.pid"; }
-
-# The pid comes out of a file in the workspace's own home, and a wkdev container shares the host's PID namespace, so it is the workspace's claim about a pid rather than a fact (lib/watchdog.sh). One pattern covers both shapes the server's command line has: the `-lc` text before the exec, and the CLI itself after it.
-RC_PID_MATCH='*claude*remote-control*'
-
-rc_minutes() {
-    local started; started=$(task_field "$(rc_task "$1")" started)
-    [ -n "$started" ] || { printf '?'; return 0; }
-    printf '%d' $(( ( $(date -u +%s) - $(utc_to_epoch "$started") ) / 60 ))
-}
-
-rc_start() {
-    local name="$1" claude_bin="$2" task log pidf pid started
-
-    if rc_alive "$name"; then
-        info "'$name' claude remote-control already running, $(rc_minutes "$name") minutes, log at $(task_field "$(rc_task "$name")" log)"
-        return 0
-    fi
-
-    # Measured: remote control refuses a `claude setup-token` credential as inference-only.
-    t_agent_secret_present "$name" claude-login \
-        || die "'$name' has no claude.ai login credential -- what 'claude auth login'
-    leaves behind -- and remote control refuses anything less: a
-    'claude setup-token' token ('wk key set claude') is inference-only.
-    $(t_agent_secret_remedy "$name" claude-login)"
-    rc_login_judge "$(t_agent_secret_verdict "$name" claude-login)" "in '$name'" \
-        "A plain session there is unaffected:  wk ai claude $name"
-
-    log=$(rc_log "$name"); pidf=$(rc_pidfile "$name")
-    t_exec "$name" mkdir -p "$(t_home "$name")" >/dev/null 2>&1 || true
-    task=$(task_begin rc target "$name" "wk ai claude $name --rc --stop" "$log" \
-        "claude remote-control in $name")
-    task_step "$task" 1
-
-    t_spawn "$name" "$log" "$pidf" \
-        env WK_AGENT="$AGENT" WK_WORKSPACE="$name" bash -lc \
-        "cd $(sh_quote "$(t_src "$name")") && exec $(sh_quote "$claude_bin") remote-control --spawn=same-dir --name $(sh_quote "$name")" \
-        || die "could not start claude remote-control in '$name'"
-
-    # The server's own word decides (Claude Code 2.1.270): `Connected` down its log when it is up, an exit when it is not -- a policy fetch that fails is retried for about 4s first, so a settle shorter than that reported a dead server running.
-    pid=""; started=$(date +%s)
-    while :; do
-        if [ -z "$pid" ]; then
-            pid=$(t_exec "$name" cat "$pidf" 2>/dev/null | tr -d '\r') || pid=""
-        elif ! t_exec "$name" kill -0 "$pid" >/dev/null 2>&1; then
-            task_end "$task" 1
-            die "claude remote-control exited at once in '$name'. Its log ($log) ends:
-$(t_exec "$name" tail -n 3 "$log" 2>/dev/null | sed 's/^/    /')"
-        elif t_exec "$name" grep -q Connected "$log" 2>/dev/null; then
-            break
-        fi
-        if [ $(( $(date +%s) - started )) -ge "${WK_RC_WAIT:-60}" ]; then
-            [ -n "$pid" ] || die "remote-control did not start in '$name': nothing wrote $pidf in ${WK_RC_WAIT:-60}s.
-    Its log ($log) ends:
-$(t_exec "$name" tail -n 3 "$log" 2>/dev/null | sed 's/^/    /')"
-            job_pid_adopt "$name" "$task" "$pid" "$RC_PID_MATCH" || task_end "$task" 1
-            die "claude remote-control in '$name' (pid $pid) is alive but has not reported connected after ${WK_RC_WAIT:-60}s.
-    It is left running; 'wk ai claude $name --rc --stop' stops it. Its log ($log) ends:
-$(t_exec "$name" tail -n 3 "$log" 2>/dev/null | sed 's/^/    /')"
-        fi
-        sleep 0.1
-    done
-
-    job_pid_adopt "$name" "$task" "$pid" "$RC_PID_MATCH" || {
-        task_end "$task" 1
-        die "nothing here will stop remote control in '$name'; its log is $log"
-    }
-    info "claude remote-control running in '$name' (pid $pid), log at $log"
-}
-
-# From https://www.npmjs.com/package/@earendil-works/pi-coding-agent -> https://github.com/earendil-works/pi (packages/coding-agent).
-# pi has no LiteLLM provider (earendil-works/pi #4561, closed unimplemented), and
-# LiteLLM speaks the OpenAI wire format, so it is a custom provider in ~/.pi/agent/models.json.
-PI_PKG=@earendil-works/pi-coding-agent
-PI_NODE_MIN=22.19.0
-
-pi_node_ok() { # <version, as `node -v` prints it>
-    local have="${1#v}" want="$PI_NODE_MIN" hp wp
-    [ -n "$have" ] || return 1
-    while [ -n "$have" ] || [ -n "$want" ]; do
-        hp="${have%%.*}"; wp="${want%%.*}"
-        [ -n "$hp" ] || hp=0
-        [ -n "$wp" ] || wp=0
-        case "$hp$wp" in *[!0-9]*) return 1 ;; esac
-        if [ "$hp" -gt "$wp" ]; then return 0; fi
-        if [ "$hp" -lt "$wp" ]; then return 1; fi
-        case "$have" in *.*) have="${have#*.}" ;; *) have="" ;; esac
-        case "$want" in *.*) want="${want#*.}" ;; *) want="" ;; esac
-    done
-    return 0
-}
-
-pi_probe() { # <name>
-    t_exec "$1" bash -lc '
-        printf "node=%s\n" "$(node -v 2>/dev/null || true)"
-        printf "npm=%s\n" "$(command -v npm 2>/dev/null || true)"
-        p=""
-        for c in "$HOME/.local/bin/pi" "$(command -v pi 2>/dev/null)"; do
-            [ -n "$c" ] && [ -x "$c" ] || continue
-            "$c" --version >/dev/null 2>&1 && { p="$c"; break; }
-        done
-        printf "pi=%s\n" "$p"
-        [ -f "$HOME/.pi/agent/models.json" ] && printf "models=yes\n" || printf "models=no\n"
-    ' 2>/dev/null | tr -d '\r'
-}
-
-# `die` in a command substitution ends only the subshell, so PI_BIN is a global.
-pi_ensure() { # <name>
-    local name="$1" probe node npm models key
-    PI_BIN=""
-    probe=$(pi_probe "$name") || die "could not reach the checkout in '$name'"
-    node=$(kv_get node <<<"$probe")
-    npm=$(kv_get npm <<<"$probe")
-    PI_BIN=$(kv_get pi <<<"$probe")
-    models=$(kv_get models <<<"$probe")
-
-    if [ -z "$npm" ] || ! pi_node_ok "$node"; then
-        die "'$name' has no node runtime pi can use: node ${node:-absent}, npm ${npm:-absent}.
-    $PI_PKG needs node >= $PI_NODE_MIN and npm to install itself.
-    This repository owns no Containerfile for the workspace image -- it is
-    ghcr.io/igalia/wkdev-sdk, pulled pre-built -- so a runtime it lacks is
-    installed the way the workspace's other tools are: add a pinned node
-    release to container/firstrun.sh beside the samply and helix installs
-    (fetch, checksum, unpack into ~/.local), then 'wk rm $name' and 'wk new'.
-    On a build box or a macOS guest, install node >= $PI_NODE_MIN into your own
-    ~/.local there."
-    fi
-
-    if [ -z "$PI_BIN" ]; then
-        info "installing pi in '$name' (npm, into your own ~/.local)"
-        # npm's global prefix in the image is /usr, which the workspace user cannot write.
-        t_exec "$name" bash -lc \
-            "npm install -g --ignore-scripts --prefix \"\$HOME/.local\" $(sh_quote "$PI_PKG")" \
-            || die "npm could not install $PI_PKG in '$name'. By hand:
-        wk enter $name
-        npm install -g --ignore-scripts --prefix \"\$HOME/.local\" $PI_PKG
-    The workspace's egress allows registry.npmjs.org and nothing else npm
-    reaches for (container/proxy/wk-proxy.py is the list)."
-
-        probe=$(pi_probe "$name") || die "could not reach the checkout in '$name'"
-        PI_BIN=$(kv_get pi <<<"$probe")
-        models=$(kv_get models <<<"$probe")
-        [ -n "$PI_BIN" ] || die "installed, and nothing in '$name' runs as pi. Try it by hand:
-        wk enter $name
-        ~/.local/bin/pi --version"
-    fi
-
-    [ "$models" = no ] || return 0
-    key=$(wk_agent_secret litellm)
-    if [ -n "$key" ]; then
-        local endpoint; endpoint=$(pi_litellm_endpoint) \
-            || die "lib/credcheck.py has no LITELLM_ENDPOINT to read"
-        pi_write_models "$name" "$endpoint" \
-            || die "could not write ~/.pi/agent/models.json in '$name'. By hand:
-        wk enter $name
-        mkdir -p ~/.pi/agent && cat > ~/.pi/agent/models.json"
-        info "wrote ~/.pi/agent/models.json in '$name' (\$LITELLM_API_KEY, $endpoint)"
-        log  "  set the model id this endpoint serves:"
-        log  "    wk enter $name -- \${EDITOR:-vi} ~/.pi/agent/models.json"
-    else
-        log "no LiteLLM key on this machine ('wk key set litellm') and no"
-        log "~/.pi/agent/models.json in '$name', so pi will ask you to /login"
-    fi
-}
-
-pi_litellm_endpoint() {
-    python3 -c 'import sys
-sys.path.insert(0, sys.argv[1])
-import credcheck
-print(credcheck.LITELLM_ENDPOINT)' "$WK_ROOT/lib"
-}
-
-pi_write_models() { # <name> <endpoint>
-    python3 -c '
-import json, sys
-json.dump({"providers": {"litellm": {
-    "baseUrl": sys.argv[1],
-    "api": "openai-completions",
-    "apiKey": "$LITELLM_API_KEY",
-    "models": [{"id": "REPLACE-WITH-A-MODEL-THIS-ENDPOINT-SERVES"}],
-}}}, sys.stdout, indent=2)
-sys.stdout.write("\n")
-' "$2" | t_exec "$1" "mkdir -p ~/.pi/agent && umask 077 && cat > ~/.pi/agent/models.json"
-}
-
-# WK_CLAUDE_LIB=1 sources the functions above without the side effects below.
-[ "${WK_CLAUDE_LIB:-}" != 1 ] || return 0
-
-case "$AGENT" in
-    claude|pi) shift ;;
-    "")     die "usage: wk ai claude|pi <workspace> [agent options]; see wk ai -h" ;;
-    *)      die "unknown agent '$AGENT'. This checkout knows: claude, pi" ;;
-esac
-
-NAME="${WK_NAME:-}"
-require_name "$NAME"
-
-RC=""; RC_STOP=""
-_rc_args=()
-for _a in ${@+"$@"}; do
-    case "$_a" in
-        --rc)   RC=1 ;;
-        --stop) RC_STOP=1 ;;
-        *)      _rc_args+=("$_a") ;;
-    esac
+AGENTS = ("claude", "pi")
+NOT_INTACT = ("the sandbox around '%s' is not intact (see above), and relaxed\n"
+              "    permissions are only defensible while it is.")
+# A shared box's `claude` on PATH can be an npm install under too old a node.
+FIND_CLAUDE = '''for c in "$HOME/.local/bin/claude" "$(command -v claude 2>/dev/null)"; do
+    [ -n "$c" ] && [ -x "$c" ] || continue
+    "$c" --version >/dev/null 2>&1 && { echo "$c"; exit 0; }
 done
-set -- ${_rc_args[@]+"${_rc_args[@]}"}
-[ -z "$RC_STOP" ] || [ -n "$RC" ] || die "--stop only makes sense with --rc: wk ai claude $NAME --rc --stop"
-[ -z "$RC" ] || [ $# -eq 0 ] || die "wk ai claude $NAME --rc takes no other options (got: $*)"
-[ -z "$RC" ] || [ "$AGENT" = claude ] || die "--rc is Claude Code's remote control; $AGENT has no equivalent.
-    A foreground session:  wk ai $AGENT $NAME"
-
-TARGET="$(ws_target "$NAME")"
-load_target "$TARGET"
-
-AGENT_BIN="$AGENT"
-AGENT_MODE=()
-[ "$AGENT" != claude ] || AGENT_MODE=(--dangerously-skip-permissions)
-
-if [ "$WK_TARGET_KIND" = remote ]; then
-    barrier "'$NAME' is on the shared build machine '$TARGET', which has no sandbox at
-    all: no container, no separate uid, no filesystem boundary, and other
-    people's work on the same machine. An agent there is an agent on that
-    machine, with your access."
-
-    if [ "$AGENT" = claude ]; then
-        # A shared box's `claude` on PATH can be an npm install under too old a node.
-        AGENT_BIN=$(t_exec "$NAME" bash -lc '
-            for c in "$HOME/.local/bin/claude" "$(command -v claude 2>/dev/null)"; do
-                [ -n "$c" ] && [ -x "$c" ] || continue
-                "$c" --version >/dev/null 2>&1 && { echo "$c"; exit 0; }
-            done
-            exit 1' 2>/dev/null | tr -d '\r' | tail -1) || AGENT_BIN=""
-
-        if [ -z "$AGENT_BIN" ]; then
-            warn "there is no Claude CLI on $TARGET that runs"
-            # Single-quoted so the far side's shell expands $c and $(node -v).
-            _diag=$(t_exec "$NAME" bash -lc '
-                c=$(command -v claude 2>/dev/null) || true
-                if [ -n "$c" ]; then
-                    echo "  on PATH:  $c"
-                    echo "  node:     $(node -v 2>&1 | head -1)  (Claude Code needs 18 or newer)"
-                    echo "  it fails to start; see for yourself:  ssh '"$TARGET"' claude --version"
-                else
-                    echo "  nothing called claude is on PATH in a login shell there"
-                fi' 2>/dev/null) || true
-            # Captured then printed: `2>/dev/null >&2` would send stdout to that /dev/null.
-            [ -z "$_diag" ] || printf '%s\n' "$_diag" >&2
-
-            info "installing the Claude CLI on $TARGET (your own ~/.local, as you)"
-            t_exec "$NAME" bash -lc 'curl -fsSL https://claude.ai/install.sh | bash' \
-                || die "the installer failed on $TARGET. By hand:
-    ssh $TARGET 'curl -fsSL https://claude.ai/install.sh | bash'"
-
-            AGENT_BIN=$(t_exec "$NAME" bash -lc '
-                for c in "$HOME/.local/bin/claude" "$(command -v claude 2>/dev/null)"; do
-                    [ -n "$c" ] && [ -x "$c" ] || continue
-                    "$c" --version >/dev/null 2>&1 && { echo "$c"; exit 0; }
-                done
-                exit 1' 2>/dev/null | tr -d '\r' | tail -1) || AGENT_BIN=""
-            [ -n "$AGENT_BIN" ] || die "installed, and still nothing on $TARGET runs: try it by hand --
-    ssh $TARGET '~/.local/bin/claude --version'"
-        fi
-        AGENT_MODE=(--permission-mode auto)
-        info "using $AGENT_BIN on $TARGET, in auto mode (this machine is not a sandbox)"
-    fi
-fi
-
-# A build box keeps its own keys under its own wk root, so the switch is thrown there.
-[ "$WK_TARGET_KIND" != remote ] || PUSH_TARGET="$TARGET"
-push_hold_back "$NAME"
-
-if [ "$WK_TARGET_KIND" = remote ] \
-   && t_exec "$NAME" sh -c 'test -e "$HOME/.config/gh/hosts.yml" || { command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1; }' 2>/dev/null; then
-    die "'$TARGET' holds a GitHub credential in the account the agent would run as
-    (~/.config/gh/hosts.yml, or gh is logged in there), and nothing an agent runs
-    may post as you. Remedy, on $TARGET:  gh auth logout"
-fi
-
-case "$WK_TARGET_KIND" in
-container|vm)
-    WK_NAME="$NAME" "$WK_ROOT/cmd/verify" \
-        || barrier "the sandbox around '$NAME' is not intact (see above), and relaxed
-    permissions are only defensible while it is."
-    ;;
-local)
-    checks_here
-    ;;
-remote)
-    info "'wk verify' is not run for '$TARGET': there is no sandbox there to
-  measure (cmd/verify says so and refuses). The barrier above is the whole of
-  the boundary on this target."
-    ;;
-esac
-
-if [ "$WK_TARGET_KIND" = vm ]; then
-    # A macOS guest's egress is filtered on the host by Softnet, unmeasurable from
-    # here, and Softnet applies at `tart run`: a guest booted without it is unfiltered.
-    if [ -f "$WK_VM_DIR/$NAME.unfiltered" ] && [ -z "${WK_VM_UNFILTERED:-}" ]; then
-        barrier "'$NAME' was booted with NO egress filter.
-    Restart it filtered:  wk vm stop $NAME && wk vm start $NAME
-    (WK_VM_UNFILTERED=1 is the same decision, said the older way.)"
-    fi
-    if [ -x "${WK_SOFTNET_BIN:-/usr/local/bin/softnet}" ] && [ -z "${WK_VM_UNFILTERED:-}" ]; then
-        info "'$NAME' is a macOS VM: egress is filtered on the host by Softnet,
-  default-deny except the wk-proxy address. Of the host filesystem it reaches
-  one directory, the claude.ai login every container mounts too, and the
-  guest is disposable."
-    elif [ -n "${WK_VM_UNFILTERED:-}" ]; then
-        warn "WK_VM_UNFILTERED=1: '$NAME' has the open network. Of the host filesystem
-  it still reaches only the login directory, and the guest is still
-  disposable -- but that is the whole of the boundary right now."
-    else
-        barrier "softnet is not installed, so this guest's egress is not filtered.
-    Install it:  ./setup --stage softnet   (needs a terminal)
-    (WK_VM_UNFILTERED=1 is the same decision, said the older way.)"
-    fi
-fi
-
-if [ -n "$RC" ]; then
-    if [ -n "$RC_STOP" ]; then
-        rc_stop "$NAME"
-        exit 0
-    fi
-
-    if [ -n "$PUSH_WAS_ON" ]; then
-        log "  git push stays off ('wk push on' when you want it back)"
-        PUSH_WAS_ON=""
-    fi
-
-    rc_alive "$NAME" || claude_workspace_config "$NAME"
-
-    if wall_applies; then
-        wall_available "$NAME" \
-            || die "the commit wall needs bwrap in the workspace image, and '$NAME' has none
-    (see 'wk ai claude $NAME' without --rc for the remedy)."
-    fi
-    rc_start "$NAME" "$AGENT_BIN"
-    exit 0
-fi
-
-wk_atexit restore_push
-
-WALL=""
-if wall_applies; then
-    wall_available "$NAME" \
-        || die "the commit wall needs bwrap in the workspace image, and '$NAME' has none.
-    Rebuild the workspace from a current base ('wk rm $NAME' then 'wk new'), or
-    install bwrap in the image; nothing an agent runs may write git history
-    while the sandbox cannot stop it."
-    WALL="$(commit_wall_prefix "$(t_src "$NAME")") "
-    info "git commits are walled off for this session (bwrap; 'wk push on' lifts it for the next)"
-fi
-
-# After the sandbox checks: nothing is installed into the workspace before then.
-[ "$AGENT" != pi ] || { pi_ensure "$NAME"; AGENT_BIN="$PI_BIN"; }
-
-if [ "$AGENT" = claude ]; then
-    claude_workspace_config "$NAME"
-    info "starting Claude in '$NAME' (permissions relaxed; the workspace is the boundary)"
+exit 1'''
+CLAUDE_DIAG = '''c=$(command -v claude 2>/dev/null) || true
+if [ -n "$c" ]; then
+    echo "  on PATH:  $c"
+    echo "  node:     $(node -v 2>&1 | head -1)  (Claude Code needs 18 or newer)"
+    echo "  it fails to start; see for yourself:  ssh %s claude --version"
 else
-    info "starting $AGENT in '$NAME' ($AGENT_BIN; the workspace is the boundary)"
-fi
+    echo "  nothing called claude is on PATH in a login shell there"
+fi'''
+TOKEN_SET = 'printf %s "${CLAUDE_CODE_OAUTH_TOKEN:+set}"'
+GH_LOGIN = 'test -e "$HOME/.config/gh/hosts.yml" || { command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1; }'
 
-# The babysitter's fix loop runs this under nohup with -p, where t_exec_tty would demand a tty.
-rc=0
-if [ -t 0 ] && [ -t 1 ]; then
-    t_exec_tty "$NAME" env WK_AGENT="$AGENT" WK_WORKSPACE="$NAME" \
-        bash -lc "cd $(sh_quote "$(t_src "$NAME")") && exec ${WALL}$(sh_quote "$AGENT_BIN") $(sh_quote ${AGENT_MODE[@]+"${AGENT_MODE[@]}"}) $(sh_quote "$@")" || rc=$?
-else
-    t_exec "$NAME" env WK_AGENT="$AGENT" WK_WORKSPACE="$NAME" \
-        bash -lc "cd $(sh_quote "$(t_src "$NAME")") && exec ${WALL}$(sh_quote "$AGENT_BIN") $(sh_quote ${AGENT_MODE[@]+"${AGENT_MODE[@]}"}) $(sh_quote "$@")" || rc=$?
-fi
-exit "$rc"
+# https://www.npmjs.com/package/@earendil-works/pi-coding-agent has no LiteLLM provider
+# (https://github.com/earendil-works/pi#4561, closed unimplemented); LiteLLM speaks the OpenAI
+# wire format, so it is a custom provider in ~/.pi/agent/models.json.
+PI_PKG = "@earendil-works/pi-coding-agent"
+PI_NODE_MIN = "22.19.0"
+PI_PROBE = '''printf "node=%s\\n" "$(node -v 2>/dev/null || true)"
+printf "npm=%s\\n" "$(command -v npm 2>/dev/null || true)"
+p=""
+for c in "$HOME/.local/bin/pi" "$(command -v pi 2>/dev/null)"; do
+    [ -n "$c" ] && [ -x "$c" ] || continue
+    "$c" --version >/dev/null 2>&1 && { p="$c"; break; }
+done
+printf "pi=%s\\n" "$p"
+[ -f "$HOME/.pi/agent/models.json" ] && printf "models=yes\\n" || printf "models=no\\n"'''
+PI_INSTALL = 'npm install -g --ignore-scripts --prefix "$HOME/.local" '   # the image's global prefix is /usr, which the user cannot write
+
+
+def pi_node_ok(version):
+    have = (version[1:] if version.startswith("v") else version).split(".")
+    want = PI_NODE_MIN.split(".")
+    if have == [""]:
+        return False
+    n = max(len(have), len(want))
+    for h, w in zip(have + ["0"] * (n - len(have)), want + ["0"] * (n - len(want))):
+        h, w = h or "0", w or "0"
+        if not (h + w).isdigit():
+            return False
+        if int(h) != int(w):
+            return int(h) > int(w)
+    return True
+
+
+def pi_models(endpoint):
+    return json.dumps({"providers": {"litellm": {
+        "baseUrl": endpoint,
+        "api": "openai-completions",
+        "apiKey": "$LITELLM_API_KEY",
+        "models": [{"id": "REPLACE-WITH-A-MODEL-THIS-ENDPOINT-SERVES"}],
+    }}}, indent=2)
+
+
+def indented(text):
+    return "\n".join("    " + line for line in text.replace("\r", "").splitlines())
+
+
+def foreground(argv, cwd):
+    """The session, on this process's terminal; a Ctrl-C there is the agent's, and this waits for it to end."""
+    p = subprocess.Popen(argv, cwd=cwd)
+    while True:
+        try:
+            return p.wait()
+        except KeyboardInterrupt:
+            continue
+
+
+def on_a_terminal():
+    return sys.stdin.isatty() and sys.stdout.isatty()
+
+
+def _raise(signum, frame):
+    raise SystemExit(128 + signum)
+
+
+class _CatchTermHup:
+    """SIGTERM/SIGHUP have no Python-level default: they end the process before a `finally` restores the push switch."""
+
+    def __enter__(self):
+        self.old = {sig: signal.signal(sig, _raise) for sig in (signal.SIGTERM, signal.SIGHUP)}
+        return self
+
+    def __exit__(self, *exc):
+        for sig, handler in self.old.items():
+            signal.signal(sig, handler)
+        return False
+
+
+class Ai:
+    def __init__(self, root, env, reg, target, agent, name):
+        self.root, self.env, self.reg, self.machine = root, env, reg, reg.machine
+        self.target, self.agent, self.name = target, agent, name
+        self.push_target = None   # a build box keeps its own keys under its own wk root, so the switch is thrown there
+        self.push_was_on = False
+
+    def exec(self, argv):
+        return self.target.exec(self.name, argv)
+
+    def push_switch(self, verb):
+        argv = [os.path.join(self.root, "wk"), "push", verb] + (["--target", self.push_target] if self.push_target else [])
+        return (self.machine.run(argv) if verb == "status" else self.machine.act_run(argv)).rc
+
+    def push_status_line(self):
+        return "wk push status" + (" --target %s" % self.push_target if self.push_target else "")
+
+    def push_hold_back(self):
+        """In a workspace the measurement stands in for the switch, beside the sandbox probes (`checks`)."""
+        if self.reg.in_workspace():
+            return
+        st = self.push_switch("status")
+        push_on = wall.push_verdict(st)
+        if push_on == 0:
+            return
+        if push_on is None:
+            die("refusing to run: '%s' exited %d rather\n    than measuring the switch, so whether an agent in '%s' could "
+                "publish is\n    unknown. Run that command and fix what it names." % (self.push_status_line(), st, self.name))
+        self.push_was_on = True
+        warn("git push is ON -- turning it off while the agent runs in '%s'" % self.name)
+        if self.push_switch("off") != 0:
+            die("refusing to run: could not hold back the push keys ('%s')" % self.push_status_line())
+
+    def restore_push(self, terminal):
+        if not self.push_was_on:
+            return
+        if not terminal:
+            log("git push stays off (headless session; 'wk push on' when you want it back)")
+        elif self.push_switch("on") == 0:
+            info("git push turned back on")
+        else:
+            warn("could not turn git push back on -- 'wk push on'")
+
+    def remote_claude(self):
+        tname = self.target.name
+        found = self.find_claude()
+        if found:
+            return found
+        warn("there is no Claude CLI on %s that runs" % tname)
+        diag = self.exec(["bash", "-lc", CLAUDE_DIAG % tname]).out.replace("\r", "").rstrip("\n")
+        if diag:
+            sys.stderr.write(diag + "\n")
+        info("installing the Claude CLI on %s (your own ~/.local, as you)" % tname)
+        r = self.exec(["bash", "-lc", "curl -fsSL https://claude.ai/install.sh | bash"])
+        show(r)
+        if not r.ok:
+            die("the installer failed on %s. By hand:\n    ssh %s 'curl -fsSL https://claude.ai/install.sh | bash'" % (tname, tname))
+        found = self.find_claude()
+        if not found:
+            die("installed, and still nothing on %s runs: try it by hand --\n    ssh %s '~/.local/bin/claude --version'" % (tname, tname))
+        return found
+
+    def find_claude(self):
+        lines = self.exec(["bash", "-lc", FIND_CLAUDE]).out.replace("\r", "").splitlines()
+        return lines[-1] if lines else ""
+
+    def checks(self):
+        """`wk doctor`'s checks, run at once: from the host for a container or a guest, from inside for this workspace."""
+        kind, name = self.target.kind, self.name
+        if kind == "remote":
+            info("'wk doctor %s' is not run for '%s': there is no sandbox there to\n  measure (it says so and refuses). The "
+                 "barrier above is the whole of the\n  boundary on this target." % (name, self.target.name))
+            return
+        rep = Report(sys.stderr)
+        if kind == "local":
+            info("checking workspace '%s' from inside it" % name)
+            publishing = wall.from_inside(self.root, self.target, name, self.machine, rep)
+        else:
+            info("checking workspace '%s' (%s)" % (name, self.target.name))
+            publishing = wall.from_host(self.root, self.target, name, self.machine, rep)
+        sys.stderr.write("\n")
+        v = wall.verdict(rep, publishing)
+        if v == "publishing":
+            die("refusing to run: an agent in '%s' could publish (see above).\n    Nothing in here can fix it and --force does "
+                "not cross it; the switch is the\n    host's:  wk push off" % name)
+        if v == "broken":
+            warn("%d check(s) failed -- the sandbox is not intact" % rep.missing)
+            barrier(NOT_INTACT % name)
+        else:
+            info("sandbox intact")
+
+    def guest_egress(self):
+        """A macOS guest's egress is filtered on the host by Softnet, unmeasurable from in there, and Softnet applies at
+        `tart run`: a guest booted without it is unfiltered."""
+        name, unfiltered = self.name, self.env.get("WK_VM_UNFILTERED")
+        if not self.target.egress_filtered(name) and not unfiltered:
+            barrier("'%s' was booted with NO egress filter.\n    Restart it filtered:  wk vm stop %s && wk vm start %s\n"
+                    "    (WK_VM_UNFILTERED=1 is the same decision, said the older way.)" % (name, name, name))
+        softnet = self.env.get("WK_SOFTNET_BIN") or "/usr/local/bin/softnet"
+        if not unfiltered and self.machine.run(["test", "-x", softnet]).ok:
+            info("'%s' is a macOS VM: egress is filtered on the host by Softnet,\n  default-deny except the wk-proxy address. Of "
+                 "the host filesystem it reaches\n  one directory, the claude.ai login every container mounts too, and the\n"
+                 "  guest is disposable." % name)
+        elif unfiltered:
+            warn("WK_VM_UNFILTERED=1: '%s' has the open network. Of the host filesystem\n  it still reaches only the login "
+                 "directory, and the guest is still\n  disposable -- but that is the whole of the boundary right now." % name)
+        else:
+            barrier("softnet is not installed, so this guest's egress is not filtered.\n    Install it:  ./setup --stage softnet"
+                    "   (needs a terminal)\n    (WK_VM_UNFILTERED=1 is the same decision, said the older way.)")
+
+    def wall_available(self):
+        """A builtin needs `sh -c`: a target's exec hands argv to an exec, not a shell (measured)."""
+        return self.exec(["sh", "-c", "command -v bwrap >/dev/null 2>&1"]).ok
+
+    def workspace_config(self):
+        """Onboarding, the trust dialog and the remote-control dialog, answered before a session waits on one."""
+        t = self.target
+        r = self.exec(["bash", "-lc", "python3 %s %s" % (shlex.quote(t.tools(self.name) + "/claude/workspace-config.py"),
+                                                          shlex.quote(t.src(self.name)))])
+        out = (r.out + r.err).replace("\r", "").rstrip("\n")
+        if not r.ok:
+            die("could not record Claude's start-up answers in '%s', and every\n    session there would stop at a dialog "
+                "instead of starting:\n%s" % (self.name, indented(out)))
+        if out:
+            debug(out)
+
+    def pi_probe(self):
+        r = self.exec(["bash", "-lc", PI_PROBE])
+        if not r.ok:
+            die("could not reach the checkout in '%s'" % self.name)
+        return dict(line.partition("=")[::2] for line in r.out.replace("\r", "").splitlines() if "=" in line)
+
+    def pi_ensure(self):
+        name, probe = self.name, self.pi_probe()
+        node, npm = probe.get("node", ""), probe.get("npm", "")
+        if not npm or not pi_node_ok(node):
+            die("'%s' has no node runtime pi can use: node %s, npm %s.\n    %s needs node >= %s and npm to install itself.\n"
+                "    This repository owns no Containerfile for the workspace image -- it is\n    ghcr.io/igalia/wkdev-sdk, "
+                "pulled pre-built -- so a runtime it lacks is\n    installed the way the workspace's other tools are: add a "
+                "pinned node\n    release to container/firstrun.sh beside the samply and helix installs\n    (fetch, checksum, "
+                "unpack into ~/.local), then 'wk rm %s' and 'wk new'.\n    On a build box or a macOS guest, install node >= %s "
+                "into your own\n    ~/.local there." % (name, node or "absent", npm or "absent", PI_PKG, PI_NODE_MIN, name, PI_NODE_MIN))
+        if not probe.get("pi"):
+            info("installing pi in '%s' (npm, into your own ~/.local)" % name)
+            r = self.exec(["bash", "-lc", PI_INSTALL + shlex.quote(PI_PKG)])
+            show(r)
+            if not r.ok:
+                die("npm could not install %s in '%s'. By hand:\n        wk enter %s\n        %s%s\n    The workspace's egress "
+                    "allows registry.npmjs.org and nothing else npm\n    reaches for (container/proxy/wk-proxy.py is the list)."
+                    % (PI_PKG, name, name, PI_INSTALL, PI_PKG))
+            probe = self.pi_probe()
+            if not probe.get("pi"):
+                die("installed, and nothing in '%s' runs as pi. Try it by hand:\n        wk enter %s\n        ~/.local/bin/pi --version"
+                    % (name, name))
+        if probe.get("models") == "no":
+            self.pi_models()
+        return probe["pi"]
+
+    def pi_models(self):
+        name = self.name
+        if not shell.agent_secret_stored(self.root, self.machine, "litellm"):
+            log("no LiteLLM key on this machine ('wk key set litellm') and no")
+            log("~/.pi/agent/models.json in '%s', so pi will ask you to /login" % name)
+            return
+        import credcheck
+        endpoint = credcheck.LITELLM_ENDPOINT
+        write = "mkdir -p ~/.pi/agent && umask 077 && printf '%%s\\n' %s > ~/.pi/agent/models.json" % shlex.quote(pi_models(endpoint))
+        if not self.exec(["bash", "-c", write]).ok:
+            die("could not write ~/.pi/agent/models.json in '%s'. By hand:\n        wk enter %s\n"
+                "        mkdir -p ~/.pi/agent && cat > ~/.pi/agent/models.json" % (name, name))
+        info("wrote ~/.pi/agent/models.json in '%s' ($LITELLM_API_KEY, %s)" % (name, endpoint))
+        log("  set the model id this endpoint serves:")
+        log("    wk enter %s -- ${EDITOR:-vi} ~/.pi/agent/models.json" % name)
+
+    def remote_control(self):
+        """A person's Claude session, not the babysitter's `-p`; a set token wins over the login and Remote Control refuses it."""
+        if self.agent != "claude" or not on_a_terminal():
+            return []
+        if self.exec(["bash", "-lc", TOKEN_SET]).out.replace("\r", "").strip() == "set":
+            warn("Remote Control is off for this session: $CLAUDE_CODE_OAUTH_TOKEN authenticates it,\n"
+                 "  an inference-only credential Remote Control refuses; the claude.ai login is what it needs")
+            return []
+        return ["--remote-control", self.name]
+
+    def session(self, agent_bin, mode, args):
+        name, t = self.name, self.target
+        with _CatchTermHup():
+            try:
+                prefix = []
+                if wall.commit_walled(t):
+                    if not self.wall_available():
+                        die("the commit wall needs bwrap in the workspace image, and '%s' has none.\n    Rebuild the workspace from "
+                            "a current base ('wk rm %s' then 'wk new'), or\n    install bwrap in the image; nothing an agent runs "
+                            "may write git history\n    while the sandbox cannot stop it." % (name, name))
+                    prefix = wall.commit_wall_prefix(self.root, t.src(name))
+                    info("git commits are walled off for this session (bwrap; 'wk push on' lifts it for the next)")
+                if self.agent == "pi":
+                    agent_bin = self.pi_ensure()
+                if self.agent == "claude":
+                    self.workspace_config()
+                    info("starting Claude in '%s' (permissions relaxed; the workspace is the boundary)" % name)
+                else:
+                    info("starting %s in '%s' (%s; the workspace is the boundary)" % (self.agent, name, agent_bin))
+                words = prefix + [agent_bin] + mode + self.remote_control() + args
+                line = "cd %s && exec %s" % (shlex.quote(t.src(name)), " ".join(shlex.quote(w) for w in words))
+                # The babysitter's fix loop runs this under nohup with -p, where a terminal of its own would be demanded.
+                argv, cwd = t.exec_argv(name, ["env", "WK_AGENT=" + self.agent, "WK_WORKSPACE=" + name, "bash", "-lc", line],
+                                        on_a_terminal())
+                return foreground(argv, cwd)
+            finally:
+                self.restore_push(on_a_terminal())
+
+    def run(self, args):
+        t, name = self.target, self.name
+        agent_bin = self.agent
+        mode = ["--dangerously-skip-permissions"] if self.agent == "claude" else []
+        if t.kind == "remote":
+            barrier("'%s' is on the shared build machine '%s', which has no sandbox at\n    all: no container, no separate uid, "
+                    "no filesystem boundary, and other\n    people's work on the same machine. An agent there is an agent "
+                    "on that\n    machine, with your access." % (name, t.name))
+            if self.agent == "claude":
+                agent_bin = self.remote_claude()
+                mode = ["--permission-mode", "auto"]
+                info("using %s on %s, in auto mode (this machine is not a sandbox)" % (agent_bin, t.name))
+            self.push_target = t.name
+        self.push_hold_back()
+        if t.kind == "remote" and self.exec(["sh", "-c", GH_LOGIN]).ok:
+            die("'%s' holds a GitHub credential in the account the agent would run as\n    (~/.config/gh/hosts.yml, or gh is "
+                "logged in there), and nothing an agent runs\n    may post as you. Remedy, on %s:  gh auth logout" % (t.name, t.name))
+        self.checks()
+        if t.kind == "vm":
+            self.guest_egress()
+        return self.session(agent_bin, mode, args)
+
+
+def main(argv, env=None, reg=None):
+    env = os.environ if env is None else env
+    agent = argv[0] if argv else ""
+    if not agent:
+        die("usage: wk ai claude|pi <workspace> [agent options]; see wk ai -h")
+    if agent not in AGENTS:
+        die("unknown agent '%s'. This checkout knows: %s" % (agent, ", ".join(AGENTS)))
+    name = env.get("WK_NAME", "")
+    require_name(name)
+    reg = reg or Registry(ROOT, env, Local())
+    try:
+        target = reg.load(reg.ws_target(name))
+    except LookupError as e:
+        die(str(e))
+    return Ai(ROOT, env, reg, target, agent, name).run(argv[1:])
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main(sys.argv[1:]))
+    except Refused as e:
+        sys.exit(e.status)
+    except KeyboardInterrupt:
+        sys.exit(130)

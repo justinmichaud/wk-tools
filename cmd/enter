@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/usr/bin/env python3
 #
 # wk enter <workspace> -- interactive shell in a workspace
 # wk: where=workspace name=required ready=yes group=workspaces opts --zed passthrough=tail
@@ -10,44 +10,78 @@
 #   [--] <cmd>   run one command there and exit, instead of a shell; the `--`
 #                is optional and is not passed on
 
-set -euo pipefail
-WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-. "$WK_ROOT/lib/common.sh"
-. "$WK_ROOT/lib/store.sh"
-. "$WK_ROOT/lib/target.sh"
+import os
+import stat
+import sys
 
-NAME="${WK_NAME:-}"
-require_name "$NAME"
+ROOT = os.environ.get("WK_ROOT") or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(ROOT, "lib"))
 
-ZED=""
-while [ $# -gt 0 ]; do
-    case "$1" in
-        --zed) ZED=1; shift ;;
-        --)    shift; break ;;
-        *)     break ;;
-    esac
-done
+from wk import shell, targets  # noqa: E402
+from wk.act import Refused, die, exec_into, log, warn  # noqa: E402
 
-TARGET="$(ws_target "$NAME")"
-load_target "$TARGET"
 
-if [ -n "$ZED" ]; then
-    exec "$WK_ROOT/cmd/zed" "$NAME"
-fi
+def is_linux():
+    return os.uname().sysname != "Darwin"
 
-[ "$(t_info "$NAME")" != absent ] || die "no such workspace: $NAME"
 
-# t_exec and t_enter are shell functions, so `exec` cannot replace the process.
-if [ $# -gt 0 ]; then
-    t_exec "$NAME" "$@"
-    exit $?
-fi
+def session_display_warning(env):
+    sock = os.path.join(env.get("XDG_RUNTIME_DIR") or "/run/user/%d" % os.getuid(), "wk", "display", "wayland-0")
+    try:
+        is_socket = stat.S_ISSOCK(os.stat(sock).st_mode)
+    except OSError:
+        is_socket = False
+    if not is_socket:
+        warn("no benchmark session running; GPU-accelerated tests fall back to software rendering")
+        log("  start one with:  wk session on")
+    else:
+        shell.session_mode_warn(ROOT, env=env)
 
-if is_linux && [ ! -S "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/wk/display/wayland-0" ]; then
-    warn "no benchmark session running; GPU-accelerated tests fall back to software rendering"
-    log  "  start one with:  wk session on"
-elif is_linux; then
-    session_mode_warn || true
-fi
 
-t_enter "$NAME"
+def parse(argv):
+    """--zed is the flag only as the leading token; one leading `--` past it is dropped, the rest is the command tail verbatim."""
+    zed = bool(argv) and argv[0] == "--zed"
+    cmd = list(argv[1:] if zed else argv)
+    if cmd[:1] == ["--"]:
+        cmd = cmd[1:]
+    return zed, cmd
+
+
+def main(argv):
+    name = os.environ.get("WK_NAME", "")
+    zed, cmd = parse(argv)
+
+    reg = targets.Registry(ROOT)
+    try:
+        tname = reg.ws_target(name)
+        target = reg.load(tname)
+    except LookupError as e:
+        die(str(e))
+
+    if zed:
+        exec_into([os.path.join(ROOT, "cmd", "zed"), name])
+        return
+
+    if target.info(name) == "absent":
+        die("no such workspace: %s" % name)
+
+    if cmd:
+        tty = sys.stdin.isatty() and sys.stdout.isatty()
+        argv, cwd = target.exec_argv(name, cmd, tty=tty)
+        exec_into(argv, cwd)
+        return
+
+    if is_linux():
+        session_display_warning(os.environ)
+
+    argv, cwd = target.enter_argv(name)
+    exec_into(argv, cwd)
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main(sys.argv[1:]))
+    except Refused as e:
+        sys.exit(e.status)
+    except KeyboardInterrupt:
+        sys.exit(130)

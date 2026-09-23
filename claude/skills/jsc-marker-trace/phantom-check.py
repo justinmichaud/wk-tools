@@ -19,7 +19,7 @@ def fname(frame):
 def is_physical(frame):
     return (fdepth[frame] == 0) if isinstance(fdepth, list) else True
 
-def phys_funcs(si):   # leaf->root, one entry per physical frame
+def phys_funcs(si):
     seq = []
     while si is not None:
         fr = sframe[si]
@@ -28,7 +28,7 @@ def phys_funcs(si):   # leaf->root, one entry per physical frame
         si = prefix[si]
     return seq
 
-sample_stacks = Counter()   # only stacks a sample lands on, weighted by that count
+sample_stacks = Counter()
 for t in d["threads"]:
     s = t["samples"]
     for si in s["stack"]:
@@ -46,7 +46,6 @@ for si, w in sample_stacks.items():
         if a[0] == b[0] and a[1] != b[1]:   # same func, distinct address = phantom dup
             dup_pairs[a[0]] += w
             flagged = True
-        # leaf-ward isRope with sweep as its (physical) caller
         if "isRope" in a[0] and "weep" in b[0]:
             isrope_sweep += w
     if flagged:

@@ -18,12 +18,20 @@ asks each of them for t_os. No container, guest, machine or network.
 
 Run: python3 -m unittest tests.test_mirror_path -v
 """
+import contextlib
+import io
 import os
 import shutil
 import subprocess
+import sys
 import unittest
+from unittest import mock
 
 from tests.support import REPO, repo_files, WkTest, bash, fake_workspace, stub_path
+
+sys.path.insert(0, str(REPO / "lib"))
+from wk import act, sync, targets  # noqa: E402
+from wk.clock import Clock  # noqa: E402
 
 DRIVERS = ("container", "vm", "remote", "local")
 
@@ -102,12 +110,10 @@ class TestEveryDriverNamesOne(WkTest):
     def test_a_containers_mirror_is_the_one_its_driver_named_in_the_environment(self):
         """The alternates of a `--shared` snapshot are the machine's own path,
         so the container is handed that path and mounts the mirror there --
-        which only the machine's driver knows (targets/container.sh)."""
+        which only the machine's driver knows (the flags it is created with are
+        tests/test_wk_targets.py's)."""
         self.assertEqual(_ask("container", env={"WK_MIRROR": "/some/store/git/WebKit.git"}),
                          "/some/store/git/WebKit.git")
-        self.assertIn("--env WK_MIRROR=$(wk_mirror)", (REPO / "targets" / "container.sh").read_text())
-        self.assertIn('--volume $(dirname "$(wk_mirror)"):$(dirname "$(wk_mirror)"):ro',
-                      (REPO / "targets" / "container.sh").read_text())
 
     def test_a_guests_mirror_is_the_hosts_on_the_share_the_guest_mounts(self):
         """macOS automounts every tart share under one directory, so the path
@@ -200,7 +206,7 @@ class MirrorFixture(WkTest):
 
 class TestOneMirrorLayoutEverywhere(MirrorFixture):
     """mirror_refresh_script (lib/store.sh) makes every mirror in the fleet --
-    this machine's, a build box's, a guest's -- and cmd/sync's ws_fetch_script
+    this machine's, a build box's, a guest's -- and lib/wk/sync.py's fetch_script
     is what a workspace fetches from one with, so the emitter and the consumer
     are held to one layout here rather than to two descriptions of it."""
 
@@ -265,11 +271,7 @@ class TestOneMirrorLayoutEverywhere(MirrorFixture):
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
         for bare in ("up.git", "fk.git"):
             shutil.rmtree(self.tmp / bare)
-        cp = bash('set -euo pipefail\ncd "$WK_ROOT"\n. cmd/sync functions\n'
-                  + self.remotes
-                  + f'ws_fetch_script {str(ws)!r}\n', env=self.ENV)
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        out = subprocess.run(["sh", "-c", cp.stdout], cwd=str(self.tmp),
+        out = subprocess.run(["sh", "-c", sync.fetch_script(str(ws), "")], cwd=str(self.tmp),
                              capture_output=True, text=True)
         self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
         refs = self._git("for-each-ref", "--format=%(refname)", cwd=ws).stdout.split()
@@ -328,11 +330,9 @@ class TestABranchIsTakenFromTheMirrorFirst(MirrorFixture):
         self.assertEqual(step.strip(), "git fetch -q origin 'main'")
 
     def test_both_callers_use_it(self):
-        for rel in ("cmd/build", "build/babysit.sh"):
-            text = (REPO / rel).read_text()
-            with self.subTest(file=rel):
-                self.assertIn("origin_branch_fetch_step", text)
-                self.assertNotIn("git fetch -q origin $(sh_quote", text)
+        text = (REPO / "lib" / "wk" / "build.py").read_text()
+        self.assertIn("shell.origin_branch_fetch_step(", text)
+        self.assertNotIn("git fetch -q origin", text)
 
 
 class TestWhatTheMirrorCarries(WkTest):
@@ -386,13 +386,11 @@ class TestTheCommandsAskTheDriver(unittest.TestCase):
     only the drivers name a path. One path spelled into several commands is
     fixed in one of them and wrong in the rest."""
 
-    ASKS = ("cmd/sync", "cmd/new", "cmd/build", "build/babysit.sh")
-
     # lib/store.sh takes the mirror directory as an argument from those
     # callers and never resolves one itself, and `wk pr` fetches the one ref
     # from the upstream rather than through any mirror -- so neither has a
     # t_mirror_dir call to make, and both are still held to spelling no path.
-    SPELLS_NO_PATH = ASKS + ("lib/store.sh", "cmd/pr")
+    SPELLS_NO_PATH = ("lib/store.sh", "cmd/pr", "lib/wk/workspace.py", "lib/wk/sync.py", "lib/wk/build.py")
 
     def test_no_command_spells_a_mirror_path_of_its_own(self):
         for rel in self.SPELLS_NO_PATH:
@@ -401,10 +399,12 @@ class TestTheCommandsAskTheDriver(unittest.TestCase):
                                  f"{rel} names a container's mirror itself")
 
     def test_every_command_that_fetches_a_mirror_asks_the_driver_for_it(self):
-        for rel in self.ASKS:
-            with self.subTest(file=rel):
-                self.assertIn("t_mirror_dir", (REPO / rel).read_text(),
-                              f"{rel} fetches without asking the driver")
+        self.assertIn("target.mirror_dir()", (REPO / "lib" / "wk" / "workspace.py").read_text(),
+                      "wk new fetches without asking the driver")
+        self.assertIn("target.mirror_dir()", (REPO / "lib" / "wk" / "sync.py").read_text(),
+                      "wk sync fetches without asking the driver")
+        self.assertIn("self.target.mirror_dir()", (REPO / "lib" / "wk" / "build.py").read_text(),
+                      "wk build fetches without asking the driver")
 
     # t_spawn (targets/container.sh) execs these directly, with no WK_ROOT and
     # no lib/target.sh sourced, so there is no t_mirror_dir for them to ask:
@@ -494,48 +494,53 @@ class TestOneMirrorPerMachine(WkTest):
 
 
 class TestASnapshotBorrowsTheMirrorsObjects(MirrorFixture):
-    """cmd/sync's sync_snapshot against the fixture mirror and a scratch
+    """lib/wk/sync.py's publish against the fixture mirror and a scratch
     store: the snapshot it publishes is a `--shared` clone, so its objects
     are the mirror's (an alternates file, no second copy), it is on main
     tracking origin/main, and its completion marker is the mirror's main."""
 
-    def _publish(self):
+    def _sync(self, mirror=True):
+        """The store's mirror is where the store says (WK_IN_VM: under the store), linked to the fixture's. The
+        real wk_remotes: the wiring rewrites each upstream's URL to the mirror, so the fetch after it reads the
+        mirror and the network (refused at port 1) is never asked."""
         store = self.tmp / "store"
-        lifted = subprocess.run(["sed", "-n", "/^sync_snapshot()/,/^}/p", str(REPO / "cmd" / "sync")],
-                                capture_output=True, text=True).stdout
-        self.assertIn("git clone --quiet --shared", lifted)
-        # The real wk_remotes here: the wiring rewrites each upstream's URL to
-        # the mirror, so the fetch after it reads the mirror and the network
-        # (refused at port 1) is never asked.
-        cp = bash('set -euo pipefail\ncd "$WK_ROOT"\n. cmd/sync functions\n'
-                  + f'wk_mirror() {{ echo {str(self.mirror)!r}; }}\n'
-                  + lifted + "\nsync_snapshot\n",
-                  env={**self.ENV, "WK_STORE": str(store),
-                       "http_proxy": "http://127.0.0.1:1",
-                       "https_proxy": "http://127.0.0.1:1", "GIT_TERMINAL_PROMPT": "0"})
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        if mirror:
+            (store / "git").mkdir(parents=True)
+            os.symlink(str(self.mirror), str(store / "git" / "WebKit.git"))
+        p = mock.patch.dict(os.environ, dict(self.ENV, WK_STORE=str(store), WK_IN_VM="1", GIT_TERMINAL_PROMPT="0",
+                                             http_proxy="http://127.0.0.1:1", https_proxy="http://127.0.0.1:1"))
+        p.start()
+        self.addCleanup(p.stop)
+
+        class Here(targets.Container):
+            def store_init(self):
+                pass
+        reg = targets.Registry(REPO, env=dict(os.environ))
+        target = Here("container", str(REPO), dict(os.environ), reg.machine)
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            try:
+                sync.Sync(reg, Clock(), None, "tools", target="container").sync_snapshot(target)
+            except act.Refused:
+                return store, None, err.getvalue()
         ids = sorted(d.name for d in (store / "base").iterdir())
         self.assertEqual(len(ids), 1, ids)
-        return store / "base" / ids[0]
+        return store, store / "base" / ids[0], err.getvalue()
 
     def test_the_published_tree_shares_the_mirror_and_is_complete(self):
-        d = self._publish()
+        store, d, err = self._sync()
+        self.assertIsNotNone(d, err)
         alternates = d / "WebKit" / ".git" / "objects" / "info" / "alternates"
         self.assertTrue(alternates.exists(), "the snapshot copied the history instead of borrowing it")
-        self.assertEqual(alternates.read_text().strip(), str(self.mirror / "objects"))
+        self.assertEqual(os.path.realpath(alternates.read_text().strip()), os.path.realpath(str(self.mirror / "objects")))
         self.assertEqual((d / "sha").read_text().strip(),
                          self._git("rev-parse", "refs/heads/main", cwd=self.mirror).stdout.strip())
         self.assertEqual((d / "branch").read_text().strip(), "origin/main")
         self.assertEqual(self._git("symbolic-ref", "--short", "HEAD", cwd=d / "WebKit").stdout.strip(), "main")
 
     def test_no_mirror_is_refused_naming_the_host(self):
-        cp = bash('set -uo pipefail\ncd "$WK_ROOT"\n. cmd/sync functions\n'
-                  f'wk_mirror() {{ echo {str(self.tmp / "none.git")!r}; }}\n'
-                  + subprocess.run(["sed", "-n", "/^sync_snapshot()/,/^}/p", str(REPO / "cmd" / "sync")],
-                                   capture_output=True, text=True).stdout
-                  + "\nsync_snapshot\n", env={"WK_STORE": str(self.tmp / "store2")})
-        self.assertNotEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertIn("'wk sync' on the host makes it", cp.stdout + cp.stderr)
+        store, d, err = self._sync(mirror=False)
+        self.assertIsNone(d)
+        self.assertIn("'wk sync' on the host makes it", err)
 
 
 if __name__ == "__main__":

@@ -46,7 +46,6 @@ class TestStartExitsOnItsOwnResult(WkTest):
                 "WK_MACHINES_DIR": str(self.tmp / "machines"),
                 "WK_TARGET": "remote",
                 "WK_REMOTE_HOST": "fake-unreachable-machine",
-                "WK_NO_CLAUDE_RC": "1",
                 # The probe's cap (targets/remote.sh): the stub refuses at once, and
                 # `capped` leaves its watchdog sleeping on the walk's stdout for the
                 # whole cap after the walk has exited.
@@ -139,7 +138,7 @@ class TestExplainStatic(unittest.TestCase):
 class TestContainerLifecycle(WkTest):
     """One real container workspace, exercised end to end:
     wk new -> wk stop <ws> -> wk ls (not running) -> wk start <ws> ->
-    wk ls (running again) -> the state-sharing mount t_create adds ->
+    wk ls (running again) -> the state-sharing mount Container.create adds ->
     wk rm <ws> <bogus-second-name>, cleaning up in tearDown either way."""
 
     def setUp(self):
@@ -204,7 +203,7 @@ class TestContainerLifecycle(WkTest):
             f"'{self.name}' does not show running after 'wk start {self.name}': {line!r}",
         )
 
-        # --- the shared state mount (targets/container.sh, t_create): a
+        # --- the shared state mount (lib/wk/targets.py, Container.create): a
         # `wk build` run from *inside* the workspace (the only way Claude
         # ever builds, CLAUDE.md) writes build.status where the host's own
         # `wk status` can see it, at the same absolute path on both sides. ---
