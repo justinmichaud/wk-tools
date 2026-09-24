@@ -16,6 +16,17 @@
           ]
         }
       ]
+    },
+    {
+      "host": "devbox-arm64-2",
+      "args": [],
+      "projects": [
+        {
+          "paths": [
+            "/home/igalia/jmichaud/OpenSource/./"
+          ]
+        }
+      ]
     }
   ],
   "project_panel": {
