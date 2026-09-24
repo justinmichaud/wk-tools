@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 #
-# The in-workspace half of a buildroot image build, spawned by image/buildroot.sh.
+# The in-workspace half of a buildroot image build, run by lib/wk/sysimage/buildroot.py through
+# `python3 -m wk.sysimage.task stage`, which takes the build wall off PATH and announces this pid.
 # Follows the wiki recipe "Building WPEWebKit for 32-bit Raspberry Pi 3 (Buildroot DRM config)", the only one known to boot.
 
 set -euo pipefail
@@ -9,7 +10,7 @@ export WK_BUILD=1  # the build wall (container/bin/wk-build-wall) passes ninja/c
 
 SRC=/src/WebKit
 TREE_URL=""; TREE_BRANCH=""; TREE_COMMIT=""; DEFCONFIG=""; EXTERNAL=0
-IMAGE=""; JOBS=""; OVERLAY_ARCH=""; OVERLAY_WIFI=0; NAME=""; ROOTFS_SIZE=""
+IMAGE=""; JOBS=""; OVERLAY_ARCH=""; OVERLAY_WIFI=0; NAME=""
 KERNEL_TAR=""; KERNEL_RELEASE=""
 
 while [ $# -gt 0 ]; do
@@ -26,7 +27,6 @@ while [ $# -gt 0 ]; do
         --kernel-release) KERNEL_RELEASE="${2:-}"; shift 2 ;;
         --overlay-arch) OVERLAY_ARCH="${2:-}"; shift 2 ;;
         --overlay-wifi) OVERLAY_WIFI="${2:-0}"; shift 2 ;;
-        --rootfs-size) ROOTFS_SIZE="${2:-}"; shift 2 ;;
         *) echo "buildroot-build.sh: unknown option: $1" >&2; exit 2 ;;
     esac
 done
@@ -119,7 +119,7 @@ KERNEL_STAGE=""  # one Debian package holds kernel, modules, device trees and ov
 if [ -n "$KERNEL_TAR" ]; then
     [ -f "$KERNEL_TAR" ] || fail "the pinned kernel is not at $KERNEL_TAR.
     It is fetched and prepared on the driving machine and handed over through
-    the download cache both sides share (image/buildroot.sh); this build does
+    the download cache both sides share (lib/wk/sysimage/buildroot.py); this build does
     not fetch it itself."
     [ -n "$KERNEL_RELEASE" ] || fail "--kernel-tar needs --kernel-release"
     KERNEL_STAGE="$WORKDIR/wk-kernel"
@@ -186,7 +186,7 @@ fi
         *.img)
             echo "BR2_TARGET_ROOTFS_EXT2=y"
             echo "BR2_TARGET_ROOTFS_EXT2_4=y"
-            echo "BR2_TARGET_ROOTFS_EXT2_SIZE=\"${ROOTFS_SIZE:-1600M}\""
+            echo "BR2_TARGET_ROOTFS_EXT2_SIZE=\"1600M\""
             ;;
     esac
     [ -z "$KERNEL_STAGE" ] || echo "BR2_ROOTFS_POST_IMAGE_SCRIPT=\"$WK_POST_IMAGE $POST_IMAGE_ORIG\""

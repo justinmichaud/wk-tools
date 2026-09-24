@@ -1,0 +1,11 @@
+[Unit]
+Description=Park the arming that booted this system, so the next boot is the rescue
+ConditionPathExists=!/etc/wk/rescue
+DefaultDependencies=no
+After=local-fs.target
+Before=sysinit.target
+[Install]
+WantedBy=sysinit.target
+[Service]
+Type=oneshot
+RemainAfterExit=yes

@@ -88,12 +88,20 @@ def confirm(prompt, stdin=None):
     return False
 
 
+def nothing_to_ask():
+    """A destructive command whose destructive part does not apply this run says so here, and then acts unasked."""
+    os.environ["WK_CONFIRMED"] = "1"
+
+
+def asked():
+    return bool(os.environ.get("WK_CONFIRMED"))
+
+
 def act(argv, **kw):
-    """The CompletedProcess, or None under --dry-run."""
     if dry_run():
         sys.stderr.write("would run: %s\n" % " ".join(shlex.quote(a) for a in argv))
         return None
-    if os.environ.get("WK_DESTRUCTIVE") and not os.environ.get("WK_CONFIRMED"):
+    if os.environ.get("WK_DESTRUCTIVE") and not asked():
         die("BUG: this command is declared destructive and acted before asking:\n    %s"
             % " ".join(shlex.quote(a) for a in argv))
     debug("run: %s" % " ".join(shlex.quote(a) for a in argv))

@@ -94,7 +94,7 @@ class _Wall(unittest.TestCase):
         self.tmp = Path(tempfile.mkdtemp(prefix="wk-test-wall-"))
         self.addCleanup(os.system, "rm -rf %s" % self.tmp)
         self.env = {"HOME": str(self.tmp / "home"), "WK_STORE": str(self.tmp / "store"), "WK_VM_STORE": str(self.tmp / "vmstore"),
-                    "WK_TARGET_REGISTRY": str(self.tmp / "hosts"), "WK_IN_VM": "1", "WK_MARKER": str(self.tmp / "marker"),
+                    "WK_MACHINES_DIR": str(self.tmp / "hosts"), "WK_IN_VM": "1", "WK_MARKER": str(self.tmp / "marker"),
                     "PATH": os.environ.get("PATH", "")}
         (self.tmp / "marker").write_text("name=demo\nsrc=/src/WebKit\n")
         self.fake = Fake()

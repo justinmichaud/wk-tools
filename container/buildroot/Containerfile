@@ -20,7 +20,7 @@
 # workspace scaffolding needs. The recipe only had to name four because its
 # devcontainer base already carried the others; a bare ubuntu:22.04 does not.
 #
-# Built by image/buildroot.sh, tagged localhost/wk-buildroot-host:<ubuntu tag>.
+# Built by lib/wk/sysimage/buildroot.py, tagged localhost/wk-buildroot-host:<ubuntu tag>.
 
 ARG BASE=ubuntu:22.04
 FROM ${BASE}

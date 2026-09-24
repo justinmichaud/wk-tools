@@ -69,7 +69,7 @@ class TestEveryReaderAsksIt(WkTest):
     could do: the dispatcher's gate ran `command -v` while the vm target ran
     the bundle, so `wk vm start` over ssh was refused with tart installed."""
 
-    READERS = ("lib/wk/dispatch.py", "targets/vm.sh", "boot/mac-guest.sh",
+    READERS = ("lib/wk/dispatch.py", "lib/wk/targets.py", "targets/vm.sh",
                "host/macos/tools.sh", "host/macos/softnet.sh")
 
     def test_no_reader_spells_it_for_itself(self):
@@ -77,6 +77,8 @@ class TestEveryReaderAsksIt(WkTest):
             text = (REPO / rel).read_text()
             self.assertNotIn('-x "$HOME/.local/bin/tart"', text, rel)
             self.assertNotIn("command -v tart", text, rel)
+            self.assertNotIn('".local", "bin", "tart"', text, rel)
+            self.assertNotIn('which("tart")', text, rel)
             self.assertIn("tart_bin", text, rel)
 
     def test_the_dispatcher_gate_is_the_locator(self):

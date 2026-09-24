@@ -13,7 +13,7 @@ Covers: the two hooks' answers for every profile this checkout defines; the
 dispatcher's reading of `name=derived` (no positional of its own, nothing
 stripped from argv, no "no such workspace" refusal, the name vocabulary it
 refuses outside); a lane on another machine delegated to that machine with
-its arguments intact; and `wk sysimage ls`'s fleet walk and its columns.
+its arguments intact. `wk sysimage ls`'s fleet walk is tests/test_sysimage_ls.py.
 
 Run: python3 -m unittest tests.test_sysimage_routing -v
 """
@@ -104,8 +104,8 @@ class TestTheDispatcherReadsDerived(unittest.TestCase):
     def _decl(self, impl="cmd/sysimage"):
         return D.Decl(REPO / impl)
 
-    def test_build_and_webkit_derive_their_name_and_nothing_else_does(self):
-        """cmd/sysimage declares name=derived for build and webkit alone"""
+    def test_the_workspace_verbs_derive_their_name_and_nothing_else_does(self):
+        """cmd/sysimage declares name=derived for the verbs that act on one image workspace"""
         d = self._decl()
         got = ["%s=%s" % (s, d.name_for([s])) for s in ("build", "webkit", "ls", "write", "disks", "rm", "flash")]
         self.assertEqual(got, ["build=derived", "webkit=derived", "ls=none", "write=none",
@@ -172,11 +172,11 @@ exit 0
         registry = self.tmp / "hosts"
         registry.mkdir()
         (registry / "fakebox.conf").write_text(
-            "WK_TARGET_KIND=remote\n"
+            "KIND=build\nWK_TARGET_KIND=remote\n"
             "WK_REMOTE_HOST=fakebox\n"
             f"WK_REMOTE_ROOT={self.tmp}/box\n")
         (self.tmp / "here").mkdir()
-        self.env = {"WK_TARGET_REGISTRY": str(registry),
+        self.env = {"WK_MACHINES_DIR": str(registry),
                     "WK_STORE": str(self.tmp / "here"),
                     "WK_TEST_SSH_LOG": str(self.log)}
 
@@ -222,127 +222,6 @@ exit 0
         self.assertIn("this target is 'vm'", out)
 
 
-class TestTheFleetWalk(WkTest):
-    """`wk sysimage ls` is the fleet's answer: this machine's store, then
-    every machine it knows that answers for a store of its own."""
-
-    SSH_STUB = """#!/bin/sh
-printf '%s\\n' "$*" >> "$WK_TEST_SSH_LOG"
-case "$*" in
-  *sysimage*) printf '%-40s %-8s %-10s %-10s %-9s %-8s %s\\n' \\
-      yocto-faraway rpi4 fakebox yocto ready 1.2G 2026-01-01T00:00:00Z
-              printf '    /elsewhere/faraway.wic.xz\\n' ;;
-esac
-exit 0
-"""
-    QUIET = "exit 0\n"
-
-    # A far side whose wk does not know the flag, which is every machine
-    # in the fleet until this tree reaches it.
-    REFUSING_SSH = """#!/bin/sh
-printf '%s\\n' "$*" >> "$WK_TEST_SSH_LOG"
-case "$*" in
-  *sysimage*) echo "warning: unknown option: --continued" >&2; exit 1 ;;
-esac
-exit 0
-"""
-
-    def setUp(self):
-        super().setUp()
-        self.profile = next((p for p, b in _profiles() if b == "yocto"), "")
-        if not self.profile:
-            self.skipTest("this checkout defines no yocto profile")
-        self.board = re.search(
-            r"(?m)^IMG_MACHINE=(\S+)",
-            (REPO / "image" / "configs" / f"{self.profile}.conf").read_text()).group(1)
-        (self.tmp / "store" / "ws" / f"yocto-{self.profile}").mkdir(parents=True)
-        self.log = self.tmp / "ssh.log"
-        self.log.write_text("")
-        self.env = {"WK_STORE": str(self.tmp / "store"),
-                    "WK_TEST_SSH_LOG": str(self.log)}
-
-    def _ls(self, *args, registry=None):
-        with stub_path({"ssh": self.SSH_STUB, "podman": self.QUIET,
-                        "tart": self.QUIET}) as binp:
-            env = dict(self.env, PATH=f"{binp}:{os.environ['PATH']}")
-            if registry:
-                env["WK_TARGET_REGISTRY"] = str(registry)
-            return run("sysimage", "ls", *args, env=env)
-
-    def test_the_columns_name_the_board_and_the_machine_holding_the_lane(self):
-        """BOARD is what the image is for, WHERE the machine holding it"""
-        cp = self._ls()
-        head = [l for l in cp.stdout.splitlines() if l.startswith("WORKSPACE")]
-        self.assertEqual(len(head), 1, cp.stdout)
-        self.assertEqual(head[0].split(),
-                         ["WORKSPACE", "BOARD", "WHERE", "BUILDER", "STATE", "SIZE", "BUILT"])
-        row = [l for l in cp.stdout.splitlines()
-               if l.startswith(f"yocto-{self.profile} ")]
-        self.assertEqual(len(row), 1, cp.stdout)
-        # This machine's own store: the board, and nothing in WHERE.
-        self.assertEqual(row[0].split()[:3], [f"yocto-{self.profile}", self.board, "yocto"])
-
-    def test_a_machine_with_a_wk_of_its_own_answers_for_its_store(self):
-        """a lane on another machine is in the table, named by that machine"""
-        registry = self.tmp / "hosts"
-        registry.mkdir()
-        (registry / "fakebox.conf").write_text(
-            "WK_TARGET_KIND=remote\n"
-            "WK_REMOTE_HOST=fakebox\n"
-            f"WK_REMOTE_ROOT={self.tmp}/box\n")
-        cp = self._ls(registry=registry)
-        self.assertIn("yocto-faraway", cp.stdout)
-        self.assertIn("/elsewhere/faraway.wic.xz", cp.stdout)
-        self.assertIn("2 images", cp.stdout + cp.stderr)
-        # The label is the machine holding it, and the walk does not recurse.
-        sent = self.log.read_text()
-        self.assertIn("WK_ROW_LABEL='fakebox'", sent)
-        self.assertIn("WK_NO_DELEGATE=1", sent)
-        self.assertIn("'sysimage' 'ls' '--continued'", sent)
-
-    def test_continued_is_rows_and_nothing_else(self):
-        """the half another machine's walk asks for is rows alone"""
-        cp = self._ls("--continued")
-        self.assertNotIn("WORKSPACE", cp.stdout)
-        self.assertNotIn("There is no image store", cp.stdout)
-        self.assertIn(f"yocto-{self.profile}", cp.stdout)
-
-    @unittest.skipUnless(sys.platform == "darwin",
-                         "only on macOS does the container target answer for a machine of its own")
-    def test_a_machine_that_is_not_running_is_reported_not_left_out(self):
-        """a store this machine cannot read is named, not silently missing"""
-        cp = self._ls()   # the stubbed podman answers for no running machine
-        self.assertIn("is stopped, so the images in its", cp.stdout)
-
-    def test_a_machine_that_refuses_the_walk_names_the_remedy(self):
-        """A checkout that predates this listing answers with its own
-        refusal, which read as though the whole command had failed. It is one
-        machine's rows missing, and the remedy is that machine's tree."""
-        registry = self.tmp / "hosts"
-        registry.mkdir()
-        (registry / "oldbox.conf").write_text(
-            "WK_TARGET_KIND=remote\n"
-            "WK_REMOTE_HOST=oldbox\n"
-            f"WK_REMOTE_ROOT={self.tmp}/box\n")
-        with stub_path({"ssh": self.REFUSING_SSH, "podman": self.QUIET,
-                        "tart": self.QUIET}) as binp:
-            cp = run("sysimage", "ls",
-                     env=dict(self.env, PATH=f"{binp}:{os.environ['PATH']}",
-                              WK_TARGET_REGISTRY=str(registry)))
-        out = cp.stdout + cp.stderr
-        self.assertEqual(cp.returncode, 0, out)
-        self.assertIn("'oldbox' did not answer the listing", out)
-        self.assertIn("wk sync --tools oldbox", out, "the remedy is not named")
-        self.assertNotIn("unknown option", out, "the far side's own refusal is passed through")
-        self.assertIn(f"yocto-{self.profile}", out, "this machine's rows are still listed")
-
-    def test_the_where_question_is_answered_for_both_halves(self):
-        """the walk runs here; the answer to another's walk is the store"""
-        self.assertEqual(_hook("--where", "ls")[0], "local")
-        self.assertEqual(_hook("--where", "ls", "--continued")[0], "store")
-
-
-
 class TestTheLaneSpec(unittest.TestCase):
     """`<profile>@<machine>`: which machine a lane is on, for one that nothing
     holds yet or that a second machine is to hold beside another's. The machine
@@ -350,7 +229,7 @@ class TestTheLaneSpec(unittest.TestCase):
     (`--wstarget`), and what is built is the profile."""
 
     def _src(self, snippet):
-        return bash(f'. "{REPO}/cmd/sysimage" functions\n{snippet}\n')
+        return bash(f'. "{REPO}/lib/sysimage-arms.sh" functions\n{snippet}\n')
 
     def test_the_machine_half_is_split_off_the_profile(self):
         cp = self._src('image_spec_profile webkit-2.52-yocto-rpi5-64@moose; echo; '
@@ -406,7 +285,7 @@ class TestTheProfileBehindALane(unittest.TestCase):
     a prefix."""
 
     def _profile_of(self, ws):
-        cp = bash(f'. "{REPO}/cmd/sysimage" functions\n'
+        cp = bash(f'. "{REPO}/lib/sysimage-arms.sh" functions\n'
                   f'image_lane_profile {ws} || echo "REFUSED"\n')
         return cp.stdout.strip()
 

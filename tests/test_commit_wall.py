@@ -47,11 +47,11 @@ class TestWiring(unittest.TestCase):
         self.assertIn('commit_wall_prefix(self.root, "$D")', WALL)
 
     def test_push_on_ends_a_running_session_before_it_loads_the_keys(self):
-        self.assertIn("push_end_sessions_first $(agent_sessions)",
-                      PUSH.split("\non)\n", 1)[1])
-        gate = PUSH.split("\npush_end_sessions_first() {", 1)[1].split("\n}\n", 1)[0]
+        on = PUSH.split("\n    def switch_on(self):", 1)[1]
+        self.assertLess(on.index("self.end_sessions_first(self.agent_sessions())"), on.index("agent_load"))
+        gate = PUSH.split("\n    def end_sessions_first(self, sessions):", 1)[1].split("\n    def ", 1)[0]
         self.assertIn("end_agent_sessions", gate)   # the wall goes with the session
-        self.assertIn('confirm "', gate)
+        self.assertIn("act.confirm(", gate)
 
     def test_doctor_measures_the_wall(self):
         self.assertIn("commit wall", WALL)

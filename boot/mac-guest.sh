@@ -1,140 +1,15 @@
-# Boot driver: a macOS guest standing in for a machine in bench mode. Every reading it takes is the vm target's, so a caller that loaded only boot/machines.sh gets it here.
-command -v load_target >/dev/null 2>&1 || . "$WK_ROOT/lib/target.sh"
-
-BOOT_ARMING=guest
-
-BOOT_ORDER_IMAGE=""
-BOOT_ORDER_NORMAL=""
-
-NODE_GUEST="${WK_BENCH_GUEST:-wk-bench}"
-
-BENCH_GUEST_ROOT=/var/wk
-
-# `|| true` / `return 0` throughout: an off guest is a normal state, and cmd/boot runs under set -euo pipefail.
-_guest_ip() {
-    ( load_target vm >/dev/null 2>&1; _ip "$NODE_GUEST" 2>/dev/null ) || return 1
-}
-
-# A guest's address is in no ssh config and changes with every boot, so boot/machines.sh's m_ssh cannot serve here.
-m_ssh() {
-    local ip; ip=$(_guest_ip) || return 1
-    ( load_target vm >/dev/null 2>&1
-      # shellcheck disable=SC2046 -- deliberate word splitting of the options.
-      ssh $(_ssh_opts) "$WK_VM_USER@$ip" "$@" )
-}
-
-b_probe() {
-    local id
-    MODE_CHANNEL=none; MODE=unreachable
-    m_ssh true >/dev/null 2>&1 || return 0
-    MODE_CHANNEL=host
-    id=$(m_ssh 'sed -n "s/^id=//p" /etc/wk-image 2>/dev/null' 2>/dev/null | tr -d '\r')
-    if [ -n "$id" ]; then MODE="bench $id"; else MODE=host; fi
-    return 0
-}
-
-_guest_boot_sec() {
-    m_ssh 'sysctl -n kern.boottime' 2>/dev/null \
-        | sed -n 's/.*{ *sec *= *\([0-9][0-9]*\).*/\1/p' || true
-}
-
-b_booted_at() {
-    local sec; sec=$(_guest_boot_sec)
-    [ -n "$sec" ] || return 0
-    epoch_to_utc "$sec"
-}
-
-b_boot_id() { _guest_boot_sec; }
-
-b_evidence() {
-    local st
-    st=$( load_target vm >/dev/null 2>&1; _vm_state "$(_vm "$NODE_GUEST")" 2>/dev/null || echo unknown )
-    echo "guest=$NODE_GUEST (${st:-unknown})"
-    m_ssh 'echo "marker=$(sed -n "s/^id=//p" /etc/wk-image 2>/dev/null)"' 2>/dev/null | tr -d '\r' || true
-    return 0
-}
-
-b_arm() {
-    local st
-    st=$( load_target vm >/dev/null 2>&1; _vm_state "$(_vm "$NODE_GUEST")" 2>/dev/null )
-    [ "$st" = absent ] && die "there is no guest '$NODE_GUEST'.
-    Make one from the golden base and mark it as a benchmark install:
-        wk vm new $NODE_GUEST && wk vm start $NODE_GUEST
-        then, in it:  sudo tee /etc/wk-image <<<'id=perf-macos-benchvm'"
-    if [ "$st" != running ]; then
-        info "starting guest '$NODE_GUEST'"
-        ( load_target vm >/dev/null 2>&1; t_start "$NODE_GUEST" >/dev/null )
-    fi
-    m_ssh 'test -f /etc/wk-image' 2>/dev/null \
-        || die "'$NODE_GUEST' is running but carries no /etc/wk-image, so it is a
-    workstation guest and not a benchmark install. A run in it would be refused
-    by 'wk bench staged', which is the correct answer -- mark it first."
-}
-
-b_reboot() {
-    ( load_target vm >/dev/null 2>&1; t_stop "$NODE_GUEST" >/dev/null )
-    info "stopped '$NODE_GUEST' -- for a guest, leaving the role is leaving the machine"
-}
-
-b_diag() { m_ssh 'cat /var/log/wk-diag.txt 2>/dev/null || echo "(no diag on the guest)"'; }
-
-b_bench_root() { printf '%s' "$BENCH_GUEST_ROOT"; }
-b_bench_local() { return 1; }
-
-b_bench_home() { m_ssh 'printf "%s" "$HOME"' 2>/dev/null | tr -d '\r'; }
-
-b_bench_put_file() {
-    local src="$1" dest="$2" ip
-    ip=$(_guest_ip) || die "'$NODE_GUEST' is not running"
-    ( load_target vm >/dev/null 2>&1
-      # shellcheck disable=SC2046 -- deliberate word splitting of the options.
-      scp -q $(_ssh_opts) "$src" "$WK_VM_USER@$ip:$dest" )
-}
-
-b_bench_put() {
-    local src="$1" dest="$2" ip
-    ip=$(_guest_ip) || die "'$NODE_GUEST' is not running"
-    m_ssh "sudo mkdir -p $(sh_quote "$dest") && sudo chown -R \$(id -un) $(sh_quote "$BENCH_GUEST_ROOT")" \
-        || die "could not make $dest in '$NODE_GUEST'"
-    ( load_target vm >/dev/null 2>&1
-      # shellcheck disable=SC2046 -- deliberate word splitting of the options and the excludes.
-      rsync -a --chmod=go-w --delete $(bench_put_excludes) -e "ssh $(_ssh_opts)" "$src/" "$WK_VM_USER@$ip:$dest/" )
-}
-
-# tart runs on the macOS host and nowhere else, so the machine that manages this guest is the one this is running on.
-b_manage() { bash -c "$*"; }
-b_manage_name() { printf 'this machine'; }
+# Boot driver mac-guest: lib/wk/boot/mac.py. Here: the verbs a bash caller asks for past boot/machines.sh's, and m_ssh, since a guest's address is in no ssh config and changes with every boot.
+command -v boot_facts >/dev/null 2>&1 || . "$WK_ROOT/boot/machines.sh"
+boot_facts mac-guest || return 1
+_wk_mac() { ( export NODE_NAME ${!NODE_*} MODE MODE_CHANNEL; PYTHONPATH="$WK_ROOT/lib" exec python3 -m wk.boot.mac mac-guest "$@" ); }
+b_bench_root() { _wk_mac bench-root; }
+b_bench_home() { _wk_mac bench-home; }
+b_bench_put() { _wk_mac bench-put "$1" "$2" ${BENCH_PUT_SKIP:?names what a put never carries, and lib/bench.sh sets it}; }
+b_bench_put_file() { _wk_mac bench-put-file "$@"; }
+b_manage() { _wk_mac manage "$@"; }
+b_manage_name() { _wk_mac manage-name; }
 b_manage_tools() { printf '%s' "$WK_ROOT"; }
 b_manage_prepare() { return 0; }
-
-b_restart_ready() { return 0; }
-b_restart_detail() { printf 'unreachable: stopping a guest needs no helper'; }
-
-# The declared mode is the one the guest is built with, read from the target that sets it rather than stored a second time in this machine's conf. A paravirtual panel is not a built-in one, which is what the kind says.
-b_display() {
-    local wh
-    wh=$( load_target vm >/dev/null 2>&1; printf '%s' "$WK_VM_DISPLAY" )
-    [ -n "$wh" ] || return 1
-    printf 'external %s' "$wh"
-}
-
-b_probeable() { is_macos && ( load_target vm >/dev/null 2>&1; tart_bin >/dev/null 2>&1 ); }
-
-b_media() {
-    local st
-    if ! is_macos || ! tart_bin >/dev/null 2>&1; then
-        printf 'a Tart guest, %s (managed on the macOS host)' "$NODE_GUEST"
-        return 0
-    fi
-    st=$( load_target vm >/dev/null 2>&1; _vm_state "$(_vm "$NODE_GUEST")" 2>/dev/null || echo absent )
-    printf 'a Tart guest, %s (%s); no physical media' "$NODE_GUEST" "${st:-unknown}"
-}
-
-b_reprovision() {
-    cat <<REPROV
-wk vm base
-    the golden guest every vm workspace is cloned from
-wk vm new $NODE_NAME
-wk bench stage <ws> --to $NODE_NAME
-REPROV
-}
+b_restart_ready() { _wk_mac restart-ready; }
+b_restart_detail() { _wk_mac restart-detail; }
+m_ssh() { _wk_mac exec "$@"; }

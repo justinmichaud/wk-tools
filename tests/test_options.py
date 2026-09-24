@@ -1,5 +1,5 @@
 """Option consistency across cmd/*: --quiet (dispatcher-level, once), --json
-on `wk ls`/`wk find`, and what stays a command's own once the dispatcher
+on `wk ls`, and what stays a command's own once the dispatcher
 refuses unknown options and extra arguments for all of them.
 
 Run: python3 -m unittest tests.test_options -v
@@ -94,20 +94,19 @@ class TestQuietFlag(WkTest):
         self.assertIn("a log line", cp.stderr)
         self.assertIn("a warning", cp.stderr)
 
-    def test_find_with_quiet_still_exits_zero_with_no_narration(self):
+    def test_a_readonly_command_with_quiet_still_exits_zero_with_no_narration(self):
         """a read-only command run with --quiet: no info lines, still its result"""
-        # Offline and deterministic: --segment/--no-ssh/--timeout need no
-        # network path (a documentation-only range) and no ssh.
-        cp = run("find", "--segment", "203.0.113.0/31", "--timeout", "2",
-                  "--no-ssh", "--quiet")
+        empty = self.tmp / "machines"
+        empty.mkdir()
+        cp = run("machine", "ls", "--quiet", env={"WK_MACHINES_DIR": str(empty)})
         self.assertEqual(cp.returncode, 0, cp.stdout)
         self.assertNotIn("==>", cp.stdout)
 
 
 class TestSudoQuietGoesThroughEnv(WkTest):
     def test_sudo_no_longer_parses_a_local_quiet_flag(self):
-        """cmd/sudo reads WK_QUIET, not its own --quiet case arm"""
-        text = (REPO / "cmd" / "sudo").read_text()
+        """`wk key sudo` (lib/wk/sudo.py) reads WK_QUIET, not its own --quiet case arm"""
+        text = (REPO / "lib" / "wk" / "sudo.py").read_text()
         self.assertNotIn("--quiet)  QUIET=1", text)
         self.assertIn("WK_QUIET", text)
 
@@ -160,24 +159,6 @@ class TestLsJson(WkTest):
         names = sorted(w["name"] for w in doc["workspaces"])
         self.assertEqual(names, ["a", "b", "c"])
 
-
-class TestFindJson(WkTest):
-    def test_find_json_is_one_valid_document(self):
-        """`wk find --json` against an offline, empty sweep is valid JSON"""
-        cp = run_wk_split("find", "--segment", "203.0.113.0/31", "--timeout", "2",
-                           "--no-ssh", "--json")
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        doc = json.loads(cp.stdout)
-        for key in ("want", "want_mac", "seen", "swept", "blind", "vantages", "hits"):
-            self.assertIn(key, doc)
-        self.assertEqual(doc["seen"], 0)
-        self.assertEqual(doc["swept"], 1)
-        self.assertEqual(doc["hits"], [])
-
-    def test_find_json_nothing_else_on_stdout(self):
-        cp = run_wk_split("find", "--segment", "203.0.113.0/31", "--timeout", "2",
-                           "--no-ssh", "--json")
-        self.assertEqual(len(cp.stdout.strip().splitlines()), 1, cp.stdout)
 
 class TestWhatStaysTheCommandsOwn(WkTest):
     """Refusing an unknown option or an extra argument is the dispatcher's

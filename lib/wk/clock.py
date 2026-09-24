@@ -19,6 +19,14 @@ class Clock:
     def iso(self):
         return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(self.now()))
 
+    def wait_until(self, done, timeout, interval):
+        start = self.monotonic()
+        while not done():
+            if self.monotonic() - start >= timeout:
+                return False
+            self.sleep(interval)
+        return True
+
 
 class FakeClock(Clock):
     def __init__(self, start=1_700_000_000.0):

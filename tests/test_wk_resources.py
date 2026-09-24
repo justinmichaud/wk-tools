@@ -113,12 +113,12 @@ class TestEnvelope(ResourcesTest):
     def test_the_bash_and_the_python_agree_on_this_machine(self):
         env = {k: v for k, v in os.environ.items() if not k.startswith("WK_")}
         env.update(self.env, XDG_STATE_HOME=str(self.tmp / "state"))
-        cp = subprocess.run(["bash", "-c", '. lib/common.sh; . lib/resources.sh; envelope_cores; envelope_mem_mb; host_cores; host_mem_mb; avail_mem_mb'],
+        cp = subprocess.run(["bash", "-c", '. lib/common.sh; . lib/resources.sh; envelope_cores; envelope_mem_mb; host_cores; host_mem_mb'],
                             cwd=str(REPO), env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         self.assertEqual(cp.returncode, 0, cp.stderr)
         r = resources.Resources(Local(), env, "macos")
         self.assertEqual([int(x) for x in cp.stdout.split()],
-                         [r.envelope_cores(), r.envelope_mem_mb(), r.host_cores(), r.host_mem_mb(), r.avail_mem_mb()])
+                         [r.envelope_cores(), r.envelope_mem_mb(), r.host_cores(), r.host_mem_mb()])
 
 
 class TestBudget(ResourcesTest):

@@ -1,26 +1,34 @@
 """WiFi credential seeding: rpi3/rpi4/rpi5 have no cable at the bench, so
 their rescue and bench images bring up WiFi from a credential `wk sysimage
-write` seeds onto the card -- the same shape as the tailnet auth key
-(disk_seed_tailnet, boot/disk.sh), one seed further. There is no hand-made
-credential file: the credential is this machine's own WiFi connection,
-extracted at write time by the privileged card helper (which already runs as
-root on the machine holding the reader) from that machine's netplan --
-ordinary `sudo -n` is not passwordless there, only the helper is. See
-boot/disk.sh (disk_seed_wifi, _image_wants_wifi), admin/wk-card-priv
-(v_wifi_host, v_wifi_from_host, v_wifi_joins, _netplan_wifi,
-check_wifi_value, _wifi_edit, the embedded netplan
-parser, standalone and testable) and cmd/sysimage (_wifi_creds_preflight).
+write` seeds onto the card -- the same shape as the tailnet auth key, one seed
+further. There is no hand-made credential file: the credential is this
+machine's own WiFi connection, extracted at write time by the privileged card
+helper (which already runs as root on the machine holding the reader) from that
+machine's netplan -- ordinary `sudo -n` is not passwordless there, only the
+helper is. See lib/wk/sysimage/write.py (wants_wifi, wifi_preflight,
+seed_wifi, the tailnet preflights) and admin/wk-card-priv (v_wifi_host,
+v_wifi_from_host, v_wifi_joins, _netplan_wifi, check_wifi_value, _wifi_edit,
+the embedded netplan parser, standalone and testable).
 
 Run: python3 -m unittest tests.test_wifi_seed -v
 """
+import contextlib
+import io
 import os
 import re
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
-from tests.support import REPO, WkTest, bash, requires_machine, run, run_here
+from tests.support import FLEET_ENV, REPO, WkTest, bash, requires_machine, run, run_here
+
+sys.path.insert(0, str(REPO / "lib"))
+from wk import act, fleet, images, shell  # noqa: E402
+from wk.machine import Local, Result  # noqa: E402
+from wk.sysimage import write  # noqa: E402
 
 
 CARD_PRIV = REPO / "admin" / "wk-card-priv"
@@ -293,87 +301,93 @@ check_wifi_value "the SSID" "$1"
                 self.assertIn("REFUSED", cp.stdout + cp.stderr)
 
 
+class Channel:
+    """The disk machine's card helper at the Channel, answering one verb."""
+
+    def __init__(self, **answers):
+        self.answers, self.calls, self.channel, self.bash_driver = answers, [], "host", False
+
+    def call(self, fn, *args, input=None, mutates=False):
+        self.calls.append((fn,) + args)
+        return Result(*self.answers.get(args[0], (0, "")))
+
+
+def writer(**answers):
+    w = write.Write(REPO, FLEET_ENV, Local(), None)
+    w.conf, w.ch = {"NODE_NAME": "stub-disk-machine", "NODE_SSH": "stub-disk-machine"}, Channel(**answers)
+    return w
+
+
+def refusal(fn, *args):
+    """The refusal's words, or None when `fn` passed."""
+    with contextlib.redirect_stderr(io.StringIO()) as err:
+        try:
+            fn(*args)
+        except act.Refused:
+            return err.getvalue()
+    return None
+
+
 class TestImageWantsWifi(WkTest):
     def test_only_rpi3_rpi4_rpi5_want_wifi(self):
-        """WiFi is derived from IMG_MACHINE, for exactly the fleet's Pi boards"""
-        script = f'''
-. "{REPO}/lib/common.sh"; . "{REPO}/boot/machines.sh"; . "{REPO}/boot/disk.sh"
-for m in rpi3 rpi4 rpi5 mbp benchvm bogus ""; do
-    if _image_wants_wifi "$m"; then echo "$m=yes"; else echo "$m=no"; fi
-done
-'''
-        cp = bash(script)
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        want = {"rpi3": "yes", "rpi4": "yes", "rpi5": "yes",
-                "mbp": "no", "benchvm": "no", "bogus": "no", "": "no"}
-        got = dict(line.split("=", 1) for line in cp.stdout.splitlines() if "=" in line)
-        self.assertEqual(got, want)
+        """WiFi is derived from the machine a card is for, for exactly the fleet's Pi boards"""
+        f = fleet.Fleet(REPO, FLEET_ENV)
+        got = {m: write.wants_wifi(f, m) for m in ("rpi3", "rpi4", "rpi5", "mbp", "benchvm", "bogus", "")}
+        self.assertEqual(got, {"rpi3": True, "rpi4": True, "rpi5": True,
+                               "mbp": False, "benchvm": False, "bogus": False, "": False})
 
-    def test_every_image_config_names_rpi3_rpi4_or_rpi5(self):
-        """every image/configs/*.conf is for a board _image_wants_wifi knows about"""
+    def test_the_bash_callers_ask_the_same_rule(self):
+        """image/yocto.sh asks boot/disk.sh's _image_wants_wifi, one line over the Python."""
+        cp = bash(f'. "{REPO}/lib/common.sh"; . "{REPO}/boot/disk.sh"; _image_wants_wifi rpi3 && echo Y; '
+                  '_image_wants_wifi mbp || echo N', env=FLEET_ENV)
+        self.assertEqual(cp.stdout.split(), ["Y", "N"], cp.stderr)
+
+    def test_a_machine_wk_writes_no_card_for_does_not(self):
+        """A Mac reaches the bench over WiFi and has no card to seed, so the question does not arise for it."""
+        with tempfile.TemporaryDirectory() as d:
+            for name, body in (("wifimach", "NODE_NET=wifi\nNODE_DEVICE=/dev/sda\n"),
+                               ("ethmach", "NODE_NET=ethernet\nNODE_DEVICE=/dev/sda\n"),
+                               ("nocard", "NODE_NET=wifi\n")):
+                Path(d, name + ".conf").write_text("KIND=board\nNODE_DRIVER=pi-sd\nNODE_NOTE=x\n" + body)
+            f = fleet.Fleet(REPO, dict(FLEET_ENV, WK_MACHINES_DIR=d))
+            self.assertEqual([write.wants_wifi(f, m) for m in ("wifimach", "ethmach", "nocard")], [True, False, False])
+
+    def test_every_board_image_names_rpi3_rpi4_or_rpi5(self):
+        """every yocto or buildroot profile is for a board _image_wants_wifi knows about"""
         # static: the reason no IMG_NET field was added -- the fact is already
-        # fully implied by IMG_MACHINE, since every profile targets one of the
-        # three boards this defect is about.
+        # implied by IMG_MACHINE. A pmos or fetch profile is a phone's, seeded
+        # by its own PMO_WIFI_BANDS and held to a declared bridge in test_profiles.
         bad = []
-        for f in sorted((REPO / "image" / "configs").glob("*.conf")):
-            m = re.search(r"(?m)^IMG_MACHINE=(\S+)", f.read_text(errors="replace"))
-            mach = m.group(1) if m else ""
-            if mach not in ("rpi3", "rpi4", "rpi5"):
-                bad.append(f"{f.name}: IMG_MACHINE={mach or '(none)'}")
+        for n in images.names():
+            p = images.load(n)
+            if p["IMG_BUILDER"] in images.WS_BUILDERS and p["IMG_MACHINE"] not in ("rpi3", "rpi4", "rpi5"):
+                bad.append(f"{n}: IMG_MACHINE={p['IMG_MACHINE'] or '(none)'}")
         self.assertEqual(bad, [], f"confs naming a board wifi-seeding does not know: {bad}")
 
 
-class TestWifiPreflight(WkTest):
-    def _preflight(self, machine, card_priv_output, card_priv_rc=0):
-        """Runs the real _wifi_creds_preflight with card_priv stubbed --
-        exactly the shape it is invoked in, m_ssh included, but without a
-        real machine or ssh session: the preflight asks $DISK_MACHINE
-        (already loaded by cmd_write_from at this point), never a local
-        file, so what it needs stubbed is card_priv's answer."""
-        script = f'''
-. "{REPO}/lib/common.sh"; . "{REPO}/boot/machines.sh"; . "{REPO}/boot/disk.sh"
-{_lift(REPO / "cmd" / "sysimage", "_wifi_creds_preflight")}
-DISK_MACHINE="stub-disk-machine"
-card_priv() {{ printf '%s\\n' {card_priv_output!r}; exit {card_priv_rc}; }}
-_wifi_creds_preflight {machine!r}
-'''
-        return bash(script)
+class TestWifiPreflight(unittest.TestCase):
+    """The preflight asks the disk machine's own card helper, never a local file; there is no --force past it."""
 
     def test_refuses_a_wifi_board_when_the_disk_machine_is_not_on_wifi(self):
-        """refuses a WiFi board when the disk machine's own wifi-host says no, and names the remedy"""
-        cp = self._preflight("rpi3", "wifi-host: no")
-        self.assertNotEqual(cp.returncode, 0, "wifi-host: no, but did not refuse")
-        out = cp.stdout + cp.stderr
-        self.assertIn("no uplink", out)
-        self.assertIn("stub-disk-machine", out, "the refusal does not name the disk machine")
+        err = refusal(writer(**{"wifi-host": (0, "wifi-host: no")}).wifi_preflight, "rpi3")
+        self.assertIn("no uplink", err)
+        self.assertIn("stub-disk-machine", err, "the refusal does not name the disk machine")
 
     def test_refuses_when_card_priv_itself_fails(self):
-        """an ssh/helper failure asking wifi-host refuses too -- no answer is not a yes"""
-        cp = self._preflight("rpi5", "wk-card-priv: connection refused", card_priv_rc=1)
-        self.assertNotEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        """no answer is not a yes"""
+        self.assertIsNotNone(refusal(writer(**{"wifi-host": (1, "connection refused")}).wifi_preflight, "rpi5"))
 
     def test_force_does_not_cross_the_wifi_barrier(self):
-        """--force does not appear anywhere in the wifi preflight -- there is no override"""
-        # static: unlike _tailnet_key_preflight (a `barrier`, crossable by
-        # --force), _wifi_creds_preflight is an unconditional `die` -- a
-        # board with no cable and no WiFi credential has no uplink at all,
-        # which CLAUDE.md's barrier rule does not license forcing past.
-        text = (REPO / "cmd" / "sysimage").read_text(errors="replace")
-        m = re.search(r"(?ms)^_wifi_creds_preflight\(\).*?^\}", text)
-        self.assertIsNotNone(m, "_wifi_creds_preflight not found in cmd/sysimage")
-        body = m.group(0)
-        self.assertNotIn("barrier", body, "the wifi preflight is crossable, like a barrier")
-        self.assertIn("die ", body)
+        with mock.patch.dict(os.environ, {"WK_FORCE": "1"}):
+            self.assertIsNotNone(refusal(writer(**{"wifi-host": (0, "wifi-host: no")}).wifi_preflight, "rpi3"))
 
     def test_passes_for_a_wired_board_regardless_of_the_disk_machine(self):
-        """a board with a cable needs no WiFi credential at all"""
-        cp = self._preflight("mbp", "wifi-host: no")
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        w = writer(**{"wifi-host": (0, "wifi-host: no")})
+        self.assertIsNone(refusal(w.wifi_preflight, "mbp"))
+        self.assertEqual(w.ch.calls, [])
 
     def test_passes_for_a_wifi_board_when_the_disk_machine_is_on_wifi(self):
-        """passes once the disk machine's own wifi-host says yes"""
-        cp = self._preflight("rpi4", "wifi-host: yes ssid=TestNet")
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertIsNone(refusal(writer(**{"wifi-host": (0, "wifi-host: yes ssid=TestNet")}).wifi_preflight, "rpi4"))
 
 
 class TestSysimageWriteDryRun(WkTest):
@@ -384,7 +398,7 @@ class TestSysimageWriteDryRun(WkTest):
         # is needed) against a profile this checkout defines, rather than a
         # lifted function -- the dry run path itself is what has to print the
         # right thing before the real write ever asks. Needs rpi3 itself
-        # reachable over ssh (cmd_write_from checks the disk before printing
+        # reachable over ssh (the write checks the disk before printing
         # the dry run), which this checkout's development machine is not --
         # self-skips rather than asserting against a machine nobody has here.
         with tempfile.TemporaryDirectory() as store, tempfile.NamedTemporaryFile(suffix=".img") as img:
@@ -414,34 +428,21 @@ class TestSysimageWriteDryRun(WkTest):
 
 
 # --------------------------------------------------------------------------- #
-# tailnet name collision (cmd/sysimage: _tailnet_name_collides /
-# _tailnet_name_preflight) -- a stale or renamed node blocking a card the
-# same way a missing tailnet key or WiFi credential does, before anything is
-# erased. lib/reach.sh's wk_tailscale_peers is the one parser of `tailscale
-# status --json`; these tests feed it a synthetic document through a stubbed
-# `tailscale` binary rather than adding a second parser here.
+# The tailnet name a card joins under, checked against this machine's view
+# before anything is erased. lib/reach.sh's wk_tailscale_peers is the one
+# parser of `tailscale status --json`; these tests feed it a synthetic document
+# through a stubbed `tailscale` binary rather than adding a second parser.
 # --------------------------------------------------------------------------- #
 
-def _fake_tailscale(tmp, peers_json):
-    """A `tailscale` stand-in that prints a fixed `status --json` document,
-    so wk_tailscale_peers (the real, unmodified parser) runs against
-    synthetic data with no live tailnet."""
-    stub = tmp / "tailscale"
-    stub.write_text(f"#!/bin/sh\ncat <<'EOF'\n{peers_json}\nEOF\n")
-    stub.chmod(0o755)
-    return stub
-
-
-def _run_tailnet_preflight(name, tmp, peers_json=None, no_cli=False):
-    ts_stub = "" if no_cli else str(_fake_tailscale(tmp, peers_json or "{}"))
-    script = f'''
-. "{REPO}/lib/common.sh"; . "{REPO}/boot/machines.sh"
-{_lift(REPO / "cmd" / "sysimage", "_tailnet_name_collides")}
-{_lift(REPO / "cmd" / "sysimage", "_tailnet_name_preflight")}
-wk_tailscale_cli() {{ {"return 1" if no_cli else f"printf '%s' {ts_stub!r}"}; }}
-_tailnet_name_preflight {name!r}
-'''
-    return bash(script)
+def _name_preflight(name, tmp, peers_json="{}", role="bench", machine="rpi3", env=None):
+    stub = tmp / "bin"
+    stub.mkdir(exist_ok=True)
+    (stub / "tailscale").write_text(f"#!/bin/sh\ncat <<'EOF'\n{peers_json}\nEOF\n")
+    (stub / "tailscale").chmod(0o755)
+    w = writer()
+    over = {"PATH": f"{stub}:{os.environ['PATH']}", "WK_TS_API_SECRET": str(tmp / "none")}
+    with mock.patch.dict(os.environ, dict(over, **(env or {}))):
+        return refusal(w.name_preflight, name, role, machine)
 
 
 class TestTailnetNameCollision(WkTest):
@@ -453,137 +454,101 @@ class TestTailnetNameCollision(WkTest):
 
     def test_exact_match_refuses_with_remedy(self):
         """an existing exact name match refuses, online or offline, and names the remedy"""
-        cp = _run_tailnet_preflight("rpi4", self.tmp, self.PEERS)
-        self.assertNotEqual(cp.returncode, 0, cp.stdout)
-        out = cp.stdout + cp.stderr
-        self.assertIn("already on the tailnet", out)
-        self.assertIn("rpi4-1", out, "does not name the rename tailscale would perform")
-        self.assertIn("admin console", out)
-        self.assertIn("--force", out, "does not say --force cannot cross this")
+        err = _name_preflight("rpi4", self.tmp, self.PEERS)
+        self.assertIn("already on the tailnet", err)
+        self.assertIn("rpi4-1", err, "does not name the rename tailscale would perform")
+        self.assertIn("admin console", err)
+        self.assertIn("--force", err, "does not say --force cannot cross this")
 
     def test_suffixed_match_refuses(self):
         """a '<name>-N' peer -- the trace of an earlier rename -- refuses too"""
-        cp = _run_tailnet_preflight("rpi3", self.tmp, self.PEERS)
-        self.assertNotEqual(cp.returncode, 0, cp.stdout)
-        self.assertIn("rpi3-1", cp.stdout + cp.stderr)
+        self.assertIn("rpi3-1", _name_preflight("rpi3", self.tmp, self.PEERS))
 
     def test_no_match_passes(self):
-        """a name nothing on the tailnet has taken passes"""
-        cp = _run_tailnet_preflight("rpi5", self.tmp, self.PEERS)
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertIsNone(_name_preflight("rpi5", self.tmp, self.PEERS))
 
     def test_case_insensitive_match_refuses(self):
         """RPI4 on the tailnet still blocks a write for 'rpi4'"""
-        peers = self.PEERS.replace('"rpi4.tail0', '"RPI4.tail0')
-        cp = _run_tailnet_preflight("rpi4", self.tmp, peers)
-        self.assertNotEqual(cp.returncode, 0, cp.stdout)
+        self.assertIsNotNone(_name_preflight("rpi4", self.tmp, self.PEERS.replace('"rpi4.tail0', '"RPI4.tail0')))
 
     def test_a_peer_is_keyed_by_its_magicdns_label_not_its_os_hostname(self):
         """A macOS peer keeps its hostname's capitalisation ('Tolken') and two
         phones both answer 'localhost', so keying on HostName loses the Mac and
         collapses the phones onto one name. Measured on this tailnet."""
-        peers = self.PEERS.replace(
-            '"b":{"HostName":"rpi4","DNSName":"rpi4.tail0.ts.net."',
-            '"b":{"HostName":"Tolken","DNSName":"rpi4.tail0.ts.net."')
-        cp = _run_tailnet_preflight("rpi4", self.tmp, peers)
-        self.assertNotEqual(cp.returncode, 0, cp.stdout)
-        self.assertIn("already on the tailnet", cp.stdout + cp.stderr)
+        peers = self.PEERS.replace('"b":{"HostName":"rpi4","DNSName":"rpi4.tail0.ts.net."',
+                                   '"b":{"HostName":"Tolken","DNSName":"rpi4.tail0.ts.net."')
+        self.assertIn("already on the tailnet", _name_preflight("rpi4", self.tmp, peers))
 
     def test_a_peer_with_no_magicdns_name_is_no_name_at_all(self):
-        """MagicDNS off means there is no name to dial, so the peer yields no
-        row and the board is found by enumeration instead of by a guess."""
-        peers = self.PEERS.replace('"DNSName":"rpi4.tail0.ts.net.",', "")
-        cp = _run_tailnet_preflight("rpi4", self.tmp, peers)
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        """MagicDNS off means there is no name to dial, so the peer yields no row."""
+        self.assertIsNone(_name_preflight("rpi4", self.tmp, self.PEERS.replace('"DNSName":"rpi4.tail0.ts.net.",', "")))
 
     def test_empty_or_invalid_json_refuses_the_check_cannot_be_skipped(self):
-        """empty/invalid tailscale output refuses -- the check cannot be skipped"""
         for label, doc in [("empty", ""), ("garbage", "not json at all")]:
             with self.subTest(doc=label):
-                cp = _run_tailnet_preflight("rpi3", self.tmp, doc)
-                self.assertNotEqual(cp.returncode, 0, f"{label}: {cp.stdout}")
-                self.assertIn("cannot be skipped", cp.stdout + cp.stderr)
-
-    def test_no_tailscale_cli_refuses(self):
-        """no tailscale CLI on this machine refuses -- the same reason"""
-        cp = _run_tailnet_preflight("rpi3", self.tmp, no_cli=True)
-        self.assertNotEqual(cp.returncode, 0, cp.stdout)
-        self.assertIn("cannot be skipped", cp.stdout + cp.stderr)
+                self.assertIn("cannot be skipped", _name_preflight("rpi3", self.tmp, doc))
 
     def test_empty_name_is_a_no_op(self):
         """no name to seed (no --profile, unresolved machine) is not this check's problem"""
-        cp = _run_tailnet_preflight("", self.tmp, self.PEERS)
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertIsNone(_name_preflight("", self.tmp, self.PEERS))
 
-    def test_name_collision_preflight_is_wired_into_the_write_path(self):
-        """the one write path (cmd_write_from) runs the collision check before erasing"""
-        # static
-        text = (REPO / "cmd" / "sysimage").read_text(errors="replace")
-        body = {}
-        for fn in ("cmd_write_from", "cmd_write"):
-            m = re.search(rf"(?ms)^{fn}\(\).*?(?=^\w[\w_]*\(\) \{{|\Z)", text)
-            self.assertIsNotNone(m, f"{fn} not found")
-            body[fn] = m.group(0)
-        self.assertIn("_tailnet_name_preflight", body["cmd_write_from"],
-                      "cmd_write_from does not run the name-collision check")
-        self.assertIn("cmd_write_from", body["cmd_write"],
-                      "cmd_write does not delegate to cmd_write_from -- a second write path")
+    def test_a_rescue_replacing_itself_is_a_barrier_that_force_crosses(self):
+        peers = self.PEERS.replace("rpi4.tail0", "stub-disk-machine.tail0")
+        args = ("stub-disk-machine", self.tmp, peers, "rescue", "stub-disk-machine")
+        self.assertIn("running rescue", _name_preflight(*args))
+        self.assertIsNone(_name_preflight(*args, env={"WK_FORCE": "1"}))
 
+    def test_the_exception_is_exactly_one_case_and_force_is_recorded(self):
+        """this board, its own rescue name, a rescue write; nothing else crosses, whatever --force says"""
+        peers = self.PEERS.replace("rpi4.tail0", "stub-disk-machine.tail0")
+        w = writer()
+        with mock.patch.dict(os.environ, {"PATH": f"{self.tmp}/bin:{os.environ['PATH']}", "WK_FORCE": "1",
+                                          "WK_TS_API_SECRET": str(self.tmp / "none")}), \
+                contextlib.redirect_stderr(io.StringIO()) as err:
+            _name_preflight("stub-disk-machine", self.tmp, peers)
+            w.name_preflight("stub-disk-machine", "rescue", "stub-disk-machine")
+        self.assertIn("FORCED past a barrier", err.getvalue())
+        for role, machine in (("bench", "stub-disk-machine"), ("rescue", "rpi3")):
+            with self.subTest(role=role, machine=machine):
+                self.assertIn("no --force", _name_preflight("stub-disk-machine", self.tmp, peers, role, machine,
+                                                            env={"WK_FORCE": "1"}))
 
-# --------------------------------------------------------------------------- #
-# _tailnet_key_preflight (cmd/sysimage) -- the hard counterpart of
-# _wifi_creds_preflight: an unresolved machine name or a missing tailnet auth
-# key refuses the write outright, with no --force, before anything is erased
-# (disk_seed_tailnet, boot/disk.sh, assumes both are already guaranteed and no
-# longer barriers on them itself).
-# --------------------------------------------------------------------------- #
-
-def _tailnet_key_preflight(machine, authkey_path, force=False):
-    script = f'''
-. "{REPO}/lib/common.sh"; . "{REPO}/boot/machines.sh"
-{_lift(REPO / "cmd" / "sysimage", "_tailnet_name_for")}
-{_lift(REPO / "cmd" / "sysimage", "_tailnet_key_preflight")}
-_tailnet_key_preflight {machine!r}
-'''
-    env = {"WK_TS_AUTHKEY": authkey_path}
-    if force:
-        env["WK_FORCE"] = "1"
-    return bash(script, env=env)
+    def test_a_stored_token_retires_the_stale_node(self):
+        retired = []
+        with mock.patch.object(shell, "tailnet_api_present", lambda root, m: True), \
+                mock.patch.object(shell, "tailnet_retire", lambda root, m, n: retired.append(n) or Result(0, "retired\n")):
+            self.assertIsNone(_name_preflight("rpi4", self.tmp, self.PEERS))
+        self.assertEqual(retired, ["rpi4"])
 
 
 class TestTailnetKeyPreflight(WkTest):
-    def test_refuses_with_no_machine_name_and_names_the_remedy(self):
-        """an unresolved machine name refuses, and names --machine as the remedy"""
+    """The hard counterpart of the WiFi preflight: an unresolved machine name or a missing tailnet auth key refuses
+    the write outright, with no --force, before anything is erased."""
+
+    def _preflight(self, machine, key, force=False):
+        env = {"WK_TS_AUTHKEY": str(key), "WK_TS_API_SECRET": str(self.tmp / "no-api-key")}
+        if force:
+            env["WK_FORCE"] = "1"
+        with mock.patch.dict(os.environ, env):
+            return refusal(writer().key_preflight, machine, "bench")
+
+    def key(self):
         key = self.tmp / "authkey"
         key.write_text("tskey-auth-abc123-secret\n")
-        cp = _tailnet_key_preflight("", str(key))
-        self.assertNotEqual(cp.returncode, 0, "wrote nothing, but did not refuse")
-        self.assertIn("--machine", cp.stdout + cp.stderr)
+        return key
+
+    def test_refuses_with_no_machine_name_and_names_the_remedy(self):
+        self.assertIn("--machine", self._preflight("", self.key()))
 
     def test_refuses_with_no_key_and_names_the_remedy(self):
-        """no tailnet auth key on this machine refuses, and names 'wk key set tailnet'"""
-        cp = _tailnet_key_preflight("rpi3", str(self.tmp / "no-such-key"))
-        self.assertNotEqual(cp.returncode, 0, "wrote nothing, but did not refuse")
-        self.assertIn("wk key set tailnet", cp.stdout + cp.stderr)
+        self.assertIn("wk key set tailnet", self._preflight("rpi3", self.tmp / "no-such-key"))
 
-    def test_wk_force_does_not_cross_the_missing_machine_name_refusal(self):
-        """WK_FORCE=1 changes nothing -- there is no --force past this"""
-        key = self.tmp / "authkey2"
-        key.write_text("tskey-auth-abc123-secret\n")
-        cp = _tailnet_key_preflight("", str(key), force=True)
-        self.assertNotEqual(cp.returncode, 0, "WK_FORCE=1 let an unresolved machine name through")
-
-    def test_wk_force_does_not_cross_the_missing_key_refusal(self):
-        """WK_FORCE=1 changes nothing -- there is no --force past this"""
-        cp = _tailnet_key_preflight("rpi3", str(self.tmp / "still-no-key"), force=True)
-        self.assertNotEqual(cp.returncode, 0, "WK_FORCE=1 let a missing tailnet key through")
+    def test_wk_force_does_not_cross_either_refusal(self):
+        self.assertIsNotNone(self._preflight("", self.key(), force=True))
+        self.assertIsNotNone(self._preflight("rpi3", self.tmp / "still-no-key", force=True))
 
     def test_passes_with_a_resolved_machine_and_a_present_key(self):
-        """a real machine name and a present key pass, with nothing left to refuse"""
-        key = self.tmp / "authkey3"
-        key.write_text("tskey-auth-abc123-secret\n")
-        cp = _tailnet_key_preflight("rpi3", str(key))
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertIsNone(self._preflight("rpi3", self.key()))
 
 
 # --------------------------------------------------------------------------- #

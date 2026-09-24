@@ -200,7 +200,7 @@ bench_node_name() {
     n=$( . "$WK_ROOT/boot/machines.sh" >/dev/null 2>&1
          machine_load "$MACHINE" >/dev/null 2>&1
          printf '%s' "${NODE_BENCH_SSH:-}" )
-    [ -n "$n" ] || die "boot/machines/$MACHINE.conf declares no NODE_BENCH_SSH,
+    [ -n "$n" ] || die "machines/$MACHINE.conf declares no NODE_BENCH_SSH,
     so there is no name for the benchmark install to join the tailnet under.
     Every phase of this lane reaches it by that name; a node that joins under
     another one is a machine nothing here can find."

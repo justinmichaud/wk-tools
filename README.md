@@ -140,7 +140,7 @@ cd ~/Development/wk-tools
 ./setup                        # idempotent; a second run prints no changes
 ./setup --dry-run              # what it would change
 ./setup --stage quiesce        # one sudo prompt: the privileged helpers
-wk sudo setup                  # closes sudo's timestamp and NOPASSWD
+wk key sudo setup              # closes sudo's timestamp and NOPASSWD
 gh auth login                  # wk key setup uses this once, for the deploy keys
 claude setup-token             # the token wk key setup asks for
 wk key setup                   # every credential, one at a time; Enter skips one
@@ -206,11 +206,14 @@ with anything in front of it. `wk vm check <name>` asks again.
 **A build machine**
 
 ```sh
-wk remote setup buildbox4               # probes it, writes targets/hosts/buildbox4.conf,
+wk machine setup buildbox4 --kind build # probes it, writes machines/buildbox4.conf,
                                         # installs WebKit's build dependencies
 wk new big-build --target buildbox4
 wk build big-build jsc-release          # sized from the machine's live load
-wk remote rm buildbox4
+wk machine rm buildbox4
+wk machine ls                           # every machine in machines/, and its tailnet names
+wk machine probe rpi4                   # how it is reached; a board that does not answer is swept for
+wk machine probe                        # every device on every segment a sweep can see
 ```
 
 A build machine is someone else's: no credential rests on it, `wk ai` there
@@ -255,8 +258,8 @@ wk profile bug-238 --mode bytecode --fetch       # per-bytecode tier report, cop
 
 ```sh
 wk quiesce on && wk session on
-wk bench bug-238 speedometer3
-wk bench bug-238 jetstream3 --cores 0-3          # pinned; recorded and compared
+wk bench run bug-238 speedometer3
+wk bench run bug-238 jetstream3 --cores 0-3      # pinned; recorded and compared
 wk bench ls                                      # every task on every machine, where it is
 wk bench compare <run-a> <run-b>
 wk bench report <task> --html
@@ -351,7 +354,7 @@ an unthrottled frame rate; then the profile is read back and judged
 The display mode is declared (`NODE_DISPLAY`), held, and checked before the
 restart and in every leg. Brightness is driven to minimum. What is on the
 screen is asked of the window server, and anything wk did not put there
-refuses the leg. `bench/mac-quiet-desktop.sh` is the one table of what a
+refuses the leg. `bench/quiet/macos.tsv` is the one table of what a
 quiet Mac is; `wk quiesce status` reads it back off the machine.
 
 **Quiesce and session, before any measurement**
@@ -366,11 +369,20 @@ wk quiesce off && wk session off
 **Add a bench machine**
 
 ```sh
-$EDITOR boot/machines/<name>.conf       # NODE_SSH, NODE_BENCH_SSH, NODE_DRIVER, NODE_DEVICE,
-                                        # NODE_ROOT, NODE_PROFILE, NODE_NET, NODE_DTB, NODE_ROLE
-git add boot/machines/<name>.conf && git commit
+$EDITOR machines/<name>.conf            # KIND=board (or mac, guest), NODE_SSH, NODE_BENCH_SSH,
+                                        # NODE_DRIVER, NODE_DEVICE, NODE_ROOT, NODE_PROFILE,
+                                        # NODE_NET, NODE_DTB, NODE_ROLE
+git add machines/<name>.conf && git commit
 wk boot --list
 ```
+
+Every machine is one `machines/<name>.conf`, named as the CLI names it, with a
+`KIND`: `build` or `peer` (a target), `board`, `mac` or `guest` (a bench
+machine), or `bridge`. Values are literals. A bench role that is also a peer
+names the peer (`mbp.conf` sets `NODE_SSH=tolken`). A target whose `hostname -s`
+is not its name says what it is (`WK_REMOTE_HOSTNAME`): that is how its far
+end knows which machine it is, however many share its home. A conf in
+`~/.config/wk/machines/` sets keys over the shared one's, for this device only.
 
 **Provision a bridge phone**
 
@@ -459,7 +471,7 @@ cd ~/Development/wk-tools && ./setup && wk sync
 ```
 
 Every machine the repo knows is in it. Nothing else is machine-specific but
-what `wk backup` captures and the credentials, which are never in git. On
+what `wk key backup` captures and the credentials, which are never in git. On
 macOS, `podman machine rm wk && ./setup` discards the container store
 (workspaces, snapshots) and nothing of the host's.
 
@@ -510,7 +522,7 @@ measured in it is comparable with hardware.
 From a bare board to an automated A/B. The boards differ only in the
 `--disk` spelling (`wk help hardware`).
 
-1. **Declare it.** `boot/machines/<name>.conf`; commit.
+1. **Declare it.** `machines/<name>.conf`; commit.
 2. **Build both images.** The rescue (`webkit-2.52-yocto-<board>`) and the
    system under test, each in its own workspace, hours each:
    ```sh

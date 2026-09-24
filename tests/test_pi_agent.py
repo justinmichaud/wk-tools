@@ -27,6 +27,7 @@ from pathlib import Path
 from unittest import mock
 
 from tests.support import REPO, WkTest, bash, run
+from tests.test_wk_key import KeyTest
 
 AI = (REPO / "cmd" / "ai").read_text()
 KEY = (REPO / "cmd" / "key").read_text()
@@ -49,7 +50,7 @@ PLACEHOLDER = "placeholder-value-for-this-test"
 # to look at it stores that shape. Still not a token.
 CLAUDE_SHAPED = "sk-ant-oat01-" + PLACEHOLDER
 
-TOUCHED = ("cmd/key", "lib/store.sh", "container/firstrun.sh", "shell/bashrc")
+TOUCHED = ("lib/store.sh", "container/firstrun.sh", "shell/bashrc")
 
 
 def secret_table():
@@ -334,9 +335,7 @@ class TestWkKeySet(WkTest):
     def test_the_value_is_never_an_argument(self):
         """An argument is in `ps` for everyone on the machine. The one writer
         takes it on stdin, and nothing hands it on as a parameter."""
-        self.assertIn('printf \'%s\\n\' "$_val" | wk_cred_store "$_name"', KEY)
-        self.assertNotIn("--token", KEY)
-        self.assertNotIn('wk_cred_store "$_name" "$_val"', KEY)
+        self.assertNotIn("--token", (REPO / "lib" / "wk" / "key.py").read_text())
         # The writer is lib/secretfile.py, which takes the value on stdin and
         # is handed only the path (it refuses a path that is not a plain file
         # of this user's; see the file).
@@ -678,6 +677,13 @@ class TestDoctorReportsEveryName(WkTest):
                 self.assertIn(f"wk key set {name}", line[0][1] + line[0][2])
                 self.assertEqual(doctor.OK if name == first[0] else doctor.UNK, line[0][0], line[0])
         self.assertNotIn(PLACEHOLDER, "".join(w + r for _, w, r in rows))
+
+
+class TestAKeyTypedAtThePromptTravelsOnStdin(KeyTest):
+    def test_the_litellm_key_is_never_an_argument(self):
+        argvs, inputs = self.stored_on_stdin("litellm", "sk-notarealvirtualkey", typed=True)
+        self.assertFalse([a for a in argvs if "sk-notarealvirtualkey" in a], argvs)
+        self.assertIn("sk-notarealvirtualkey\n", inputs)
 
 
 if __name__ == "__main__":

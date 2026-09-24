@@ -26,10 +26,10 @@ echo "Host key verification failed." >&2
 exit 255
 """
 
-_MACHINE_CONF = "WK_TARGET_KIND=remote\nWK_REMOTE_HOST={host}\n"
+_MACHINE_CONF = "KIND=build\nWK_TARGET_KIND=remote\nWK_REMOTE_HOST={host}\n"
 
 _LOCAL_CONF = (
-    "WK_TARGET_KIND=remote\n"
+    "KIND=build\nWK_TARGET_KIND=remote\n"
     "WK_REMOTE_LOCAL=1\n"
     "WK_REMOTE_ROOT={root}\n"
     "WK_REMOTE_STORE={store}\n"
@@ -49,7 +49,7 @@ class TestAnUnreachableMachineKeepsItsRecord(WkTest):
 
     def _env(self, binp, **extra):
         env = {
-            "WK_TARGET_REGISTRY": str(self.registry),
+            "WK_MACHINES_DIR": str(self.registry),
             "XDG_STATE_HOME": str(self.state),
             "PATH": f"{binp}:{os.environ.get('PATH', '/usr/bin:/bin')}",
         }
@@ -102,7 +102,7 @@ class TestAnAbsentNameIsRefusedBeforeThePrompt(WkTest):
         (self.registry / "fakelocal.conf").write_text(
             _LOCAL_CONF.format(root=self.root, store=self.store))
         self.env = {
-            "WK_TARGET_REGISTRY": str(self.registry),
+            "WK_MACHINES_DIR": str(self.registry),
             "XDG_STATE_HOME": str(self.tmp / "state"),
             "WK_TARGET": "fakelocal",
         }

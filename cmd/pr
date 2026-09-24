@@ -45,8 +45,9 @@ import sys
 ROOT = os.environ.get("WK_ROOT") or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "lib"))
 
-from wk import shell, targets  # noqa: E402
+from wk import decl, git, pr, shell, targets  # noqa: E402
 from wk.act import Refused, die, info, log, warn  # noqa: E402
+from wk.machine import Local  # noqa: E402
 from wk.targets import show  # noqa: E402
 from wk.workspace import require_name  # noqa: E402
 
@@ -67,47 +68,43 @@ def _owner_of(url):
     return m.group(1) if m else ""
 
 
-def _repo_of(url):
-    return re.sub(r"(\.git)?$", "", url).rsplit("/", 1)[-1]
-
-
 def pr_open_target(src, run=_run_local, remotes=None, push_forks=None):
     """(base-repo, "<owner>:<branch>", fork-remote, branch) for the checkout at `src`, or PrOpenError naming what stops it."""
-    def git(*args):
+    def ask(*args):
         rc, out, _ = run(["git", "-C", str(src)] + list(args))
         return rc, out.strip()
 
-    rc, branch = git("symbolic-ref", "--quiet", "--short", "HEAD")
+    rc, branch = ask("symbolic-ref", "--quiet", "--short", "HEAD")
     if rc != 0 or not branch:
         raise PrOpenError("'wk pr open' needs a branch checked out, not a detached HEAD")
     if branch == "main":
         raise PrOpenError("'wk pr open' cannot open 'main' as a pull request -- create a branch first")
-    _, dirty = git("status", "--porcelain")
+    _, dirty = ask("status", "--porcelain")
     if dirty:
         raise PrOpenError("the tree has uncommitted changes -- commit or stash them: git -C %s status" % src)
-    rc, up = git("rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}")
+    rc, up = ask("rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}")
     if rc != 0 or not up:
         raise PrOpenError("'%s' has no upstream, so 'wk pr open' cannot tell which project it belongs to -- "
                           "track one first: git branch -u origin/main (WebKit) or wpe/main (WPEWebKit)" % branch)
     up_remote = up.split("/", 1)[0]
     # Not `git remote get-url`: through the mirror's insteadOf every remote reads as the mirror, and both projects as one.
-    _, up_url = git("config", "--get", "remote.%s.url" % up_remote)
-    up_repo = _repo_of(up_url)
+    _, up_url = ask("config", "--get", "remote.%s.url" % up_remote)
+    up_repo = git.repo_of(up_url)
     if push_forks is None:
-        push_forks = shell.wk_push_forks(ROOT)
+        push_forks = shell.push_forks(ROOT, Local())
     fork_names = {r for r, _, _ in push_forks}
     # The project's upstream, not the remote the branch happens to track: `wk pr` leaves a
     # branch tracking the fork it came from, and a pull request against that is one against yourself.
-    fork = next((r for r, repo, _ in push_forks if _repo_of(repo) == up_repo), None)
+    fork = next((r for r, repo, _ in push_forks if git.repo_of(repo) == up_repo), None)
     if not fork:
         raise PrOpenError("'%s' tracks '%s' (%s), not a known upstream (origin or wpe) -- "
                           "'wk pr open' only knows WebKit and WPEWebKit" % (branch, up, up_url))
-    rc, url = git("config", "--get", "remote.%s.url" % fork)
+    rc, url = ask("config", "--get", "remote.%s.url" % fork)
     if rc != 0 or not url:
         raise PrOpenError("no '%s' remote here -- 'wk sync --fix' wires it" % fork)
     owner = _owner_of(url)
     if remotes is None:
-        remotes = shell.wk_remotes(ROOT)
+        remotes = git.REMOTES
     base = ""
     for name, remote_url in remotes:
         if name in fork_names:
@@ -117,7 +114,7 @@ def pr_open_target(src, run=_run_local, remotes=None, push_forks=None):
             base = re.sub(r"\.git$", "", base)
             break
     if not base:
-        raise PrOpenError("no upstream in wk_remotes for the project '%s', so there is nothing to open '%s' against"
+        raise PrOpenError("no upstream among the wired remotes for the project '%s', so there is nothing to open '%s' against"
                           % (up_repo, branch))
     return base, "%s:%s" % (owner, branch), fork, branch
 
@@ -186,13 +183,15 @@ def _load(reg, name):
 
 def main(argv):
     name = os.environ.get("WK_NAME", "")
-    spec = argv[0] if argv else ""
+    args = decl.Args(decl.Decl(__file__), argv)
+    spec = args.positionals[0] if args.positionals else ""
     reg = targets.Registry(ROOT)
 
-    # 'rebase' never matches a workspace name, so it survives as argv[0] and a name after it is argv[1].
+    # 'rebase' never matches a workspace name, so it survives as the first positional and a name after it is the next one.
     if spec == "rebase":
+        rest = args.positionals[1:]
         if not name:
-            name = argv[1] if len(argv) > 1 else ""
+            name = rest[0] if rest else ""
         if not name:
             die("usage: wk pr rebase [<workspace>]; run inside a workspace, or name one; see wk pr -h")
         require_name(name)
@@ -200,13 +199,9 @@ def main(argv):
         return pr_rebase(target, name)
 
     if spec == "open":
-        rest = argv[1:]
-        draft = "--draft" in rest
-        web = "--web" in rest
-        name2 = ""
-        for a in rest:
-            if a not in ("--draft", "--web"):
-                name2 = a
+        draft, web = args.flag("--draft"), args.flag("--web")
+        rest = args.positionals[1:]
+        name2 = rest[-1] if rest else ""
         if not name:
             name = name2
         if not name:
@@ -225,12 +220,7 @@ def main(argv):
             "    or run it in one: wk pr %s" % (spec, spec, spec))
 
     require_name(name)
-    try:
-        tname = reg.ws_target(name)
-        reg.load(tname)
-    except LookupError as e:
-        die(str(e))
-    shell.pr_checkout(ROOT, reg.machine, tname, name, spec)
+    pr.checkout(_load(reg, name), reg.machine, name, spec)
     return 0
 
 

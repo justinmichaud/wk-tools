@@ -18,13 +18,13 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import secretfile
 import wkdata
-from wk import record, shell, statusview, targets
+from wk import fleet, reach, record, shell, statusview, targets
 from wk.clock import Clock
 from wk.lock import holder_pid
 from wk.machine import TIMED_OUT, Local
 from wk.act import Refused
 from wk.resources import Resources
-from wk.store import Store
+from wk.store import Bases, Store
 
 ANSI = re.compile(r"\x1b\[[0-9;]*m")
 ENDED_AS_ASKED = ("ok", "cancelled", "stopped", "refused")
@@ -73,7 +73,7 @@ else
 fi
 media=$(b_media 2>/dev/null || printf 'unknown')
 if [ -z "${NODE_PROFILE:-}" ]; then
-    reprov="missing NODE_PROFILE in boot/machines/$1.conf -- nothing to compose a recipe from"
+    reprov="missing NODE_PROFILE in machines/$1.conf -- nothing to compose a recipe from"
 else
     reprov=$(b_reprovision 2>/dev/null || true)
 fi
@@ -181,7 +181,7 @@ def far_side_reason(target, side, why):
     if side == "stopped":
         return "the podman machine '%s' is stopped -- 'wk start' brings it up" % target.env.get("WK_MACHINE", "wk")
     if side == "no-wk":
-        return "no wk-tools there yet -- 'wk remote setup %s'" % target.name
+        return "no wk-tools there yet -- 'wk machine setup %s'" % target.name
     return "not a machine of its own"
 
 
@@ -573,7 +573,7 @@ def fleet_record(name, conf, fields, cap, reach=None, clock=None):
     if fields is None or "error" in fields:
         r.set("role", conf.get("NODE_ROLE") or "workstation")
         r.set("mode", "no answer within %ss" % cap if fields is None else "probe failed: %s" % fields["error"])
-        r.set("conf", "boot/machines/%s.conf" % name)
+        r.set("conf", "machines/%s.conf" % name)
         tailnet, direct = reach(name) if reach else ("", "")
         r.opt("tailnet", tailnet)
         r.opt("direct", direct)
@@ -589,7 +589,7 @@ def fleet_record(name, conf, fields, cap, reach=None, clock=None):
         r.opt("armed_at", fields.get("armed_at"))
         if armed_desync(fields, clock or Clock()):
             r.raw("armed_desync", True)
-    r.set("conf", "boot/machines/%s.conf" % name)
+    r.set("conf", "machines/%s.conf" % name)
     r.opt("tailnet", fields["tailnet"])
     r.opt("direct", fields["direct"])
     r.opt("reprovision", fields["reprovision"])
@@ -597,14 +597,16 @@ def fleet_record(name, conf, fields, cap, reach=None, clock=None):
 
 
 def self_role(root, machine):
-    """This machine's own declared role, read the way boot/machines/*.conf holds every other machine's;
-    workstation is FLEET_PROBE's own default (`${NODE_ROLE:-workstation}`), not one invented here."""
-    conf = targets.read_conf(os.path.join(root, "boot", "machines", machine + ".conf"))
+    """This machine's own declared role; workstation is FLEET_PROBE's own default (`${NODE_ROLE:-workstation}`)."""
+    try:
+        conf = fleet.Fleet(root).load(machine) or {}
+    except fleet.ConfError:
+        conf = {}
     return conf.get("NODE_ROLE") or "workstation"
 
 
 def self_mode_word(env):
-    """host/bench, from the marker every booted bench image writes (lib/common.sh's in_bench_mode); its
+    """host/bench, from the marker every booted bench image writes (lib/common.sh's wk_image_id); its
     absence is the host install, the same default lib/common.sh assumes."""
     fields = kv_file(env.get("WK_IMAGE_MARKER") or "/etc/wk-image")
     return "bench %s" % fields["id"] if fields.get("id") else "host"
@@ -620,15 +622,11 @@ def self_fleet_record(root, env, machine):
 
 
 def machine_confs(root, env):
-    """(name, conf) for every board conf with a driver and a note, as boot/machines.sh's machine_list lists them."""
-    d = env.get("WK_MACHINES_DIR") or os.path.join(root, "boot", "machines")
+    """(name, conf) for every bench machine with a driver and a note, as boot/machines.sh's machine_list lists them."""
+    f = fleet.Fleet(root, env)
     out = []
-    try:
-        names = sorted(f[:-5] for f in os.listdir(d) if f.endswith(".conf"))
-    except OSError:
-        return out
-    for n in names:
-        conf = targets.read_conf(os.path.join(d, n + ".conf"))
+    for n in f.names(fleet.BENCH_KINDS):
+        conf = f.load(n)
         if conf.get("NODE_DRIVER") and conf.get("NODE_NOTE"):
             out.append((n, conf))
     return out
@@ -659,7 +657,7 @@ def bridge_ssh(name, script, as_root, connect_timeout, cap):
 def bridge_record(name, conf, want, fields, reach):
     r = Rec("bridge", name=name, device=conf.get("BR_DEVICE") or "?", segment=conf.get("BR_SEGMENT") or "?")
     r.opt("note", conf.get("BR_NOTE"))
-    r.set("conf", "bridge/hosts/%s.conf" % name)
+    r.set("conf", "machines/%s.conf" % name)
     tailnet, direct = reach(name)
     r.opt("tailnet", tailnet)
     r.opt("direct", direct)
@@ -727,6 +725,7 @@ class Walk:
         self.worst = 0
         self._git = None
         self._loaded = {}
+        self._reach = reach.Reach(self.reg.machine, self.env, self.reg.fleet)
 
     # -- the walk
 
@@ -871,16 +870,10 @@ class Walk:
         return r.done()
 
     def reach(self, m):
-        out = _bash(self.root, '. "$WK_ROOT/lib/reach.sh"; . "$WK_ROOT/boot/machines.sh"; '
-                    'printf "tailnet=%s\\ndirect=%s\\n" "$(reach_tailnet "$1")" "$(reach_without_tailnet "$1")"', m).out
-        f = kv(out)
-        return f.get("tailnet", ""), f.get("direct", "")
+        return self._reach.tailnet(m), self._reach.without_tailnet(m)
 
     def reach_fleet(self, m):
-        out = _bash(self.root, '. "$WK_ROOT/lib/reach.sh"; . "$WK_ROOT/boot/machines.sh"; '
-                    'printf "tailnet=%s\\ndirect=%s\\n" "$(fleet_tailnet "$1")" "$(reach_without_tailnet "$1")"', m).out
-        f = kv(out)
-        return f.get("tailnet", ""), f.get("direct", "")
+        return self._reach.fleet_line(m), self._reach.without_tailnet(m)
 
     def delegate(self, target, gm, args):
         """A machine of its own answers in its own records, stripped of the markers that end its jobs."""
@@ -900,8 +893,7 @@ class Walk:
     def current_base(self, target):
         with self.lock:
             if target.name not in self.bases:
-                r = _bash(self.root, "load_target %s >/dev/null 2>&1; current_base" % shell.sh_quote(target.name))
-                self.bases[target.name] = r.out.strip() if r.ok else ""
+                self.bases[target.name] = Bases(target.store, Local()).current()
             return self.bases[target.name]
 
     def remake_hint(self, target, ws):
@@ -1030,8 +1022,7 @@ class Walk:
         store = target.store
         alive = Local().alive
         out = []
-        r = _bash(self.root, "load_target %s >/dev/null 2>&1; unreferenced_bases | grep -c ." % shell.sh_quote(target.name))
-        out.append(disk_record(store, m, self.in_vm, int(r.out.strip() or 0) if r.out.strip().isdigit() else 0))
+        out.append(disk_record(store, m, self.in_vm, len(Bases(store, Local()).unreferenced())))
         if target.kind == "container":
             local = kv(_bash(self.root, "load_target container >/dev/null 2>&1; t_sdk_local").out)
             if local.get("image"):
@@ -1069,11 +1060,8 @@ class Walk:
         return [r for r in recs if r], 0
 
     def bridges(self):
-        d = os.path.join(self.root, "bridge", "hosts")
-        try:
-            names = sorted(f[:-5] for f in os.listdir(d) if f.endswith(".conf"))
-        except OSError:
-            return [], 0
+        f = fleet.Fleet(self.root, self.env)
+        names = f.names(("bridge",))
         want = bridge_role_sum(self.root)
         connect = self.env.get("WK_FLEET_TIMEOUT", "4")
         cap = float(self.env.get("WK_BRIDGE_TIMEOUT", "20"))
@@ -1082,7 +1070,7 @@ class Walk:
             out = bridge_ssh(name, BRIDGE_PROBE, True, connect, cap)
             if not out.startswith("reachable="):
                 out = bridge_ssh(name, BRIDGE_PROBE, False, connect, cap)
-            return bridge_record(name, targets.read_conf(os.path.join(d, name + ".conf")), want, kv(out), self.reach)
+            return bridge_record(name, f.load(name), want, kv(out), self.reach)
 
         with ThreadPoolExecutor(max_workers=max(1, len(names))) as pool:
             return list(pool.map(one, names)), 0

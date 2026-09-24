@@ -28,7 +28,7 @@ case "$COMMIT" in
     *[!0-9a-f]*) fail "--commit takes a full sha, got '$COMMIT'" ;;
 esac
 [ "${#COMMIT}" -eq 40 ] || fail "--commit takes a full 40-character sha, got '$COMMIT'"
-# t_spawn execs this with no WK_ROOT and no lib/target.sh, so there is no t_mirror_dir to ask: the container driver names the mirror in the environment (mirror_in_container, lib/target.sh).
+# Run in the workspace with no WK_ROOT and no lib/target.sh, so there is no t_mirror_dir to ask: the container driver names the mirror in the environment (mirror_in_container, lib/target.sh).
 MIRROR="${WK_MIRROR:?WK_MIRROR names the mirror this container mounts, set by targets/container.sh}"
 
 WORKDIR="$SRC/WebKitBuild/buildroot/$NAME"

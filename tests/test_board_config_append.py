@@ -16,43 +16,30 @@ the watchdog that hands it back is itself in the userspace never reached
 Run: python3 -m unittest tests.test_board_config_append -v
 """
 import re
-import subprocess
+import sys
+import tempfile
 import unittest
 from pathlib import Path
 
 from tests.support import REPO
+
+sys.path.insert(0, str(REPO / "lib"))
+from wk import images  # noqa: E402
+from wk.sysimage import write  # noqa: E402
 
 BOARDS = REPO / "image" / "boards"
 CONFIGS = sorted((REPO / "image" / "configs").glob("*.conf"))
 
 
 def resolved_append(profile):
-    """The two files `config_append_text` concatenates, in its order."""
-    cp = subprocess.run(["bash", "-c", f'''
-set -euo pipefail
-. "{REPO}/lib/common.sh"
-. "{REPO}/image/profiles.sh"
-image_profile_load {profile} >/dev/null 2>&1
-b="$WK_ROOT/image/boards/${{IMG_MACHINE:-}}/config.txt.append"
-f="${{IMG_SPEC_DIR:-}}/config.txt.append"
-if [ -f "$b" ]; then cat "$b"; fi
-if [ -f "$f" ]; then cat "$f"; fi
-'''], capture_output=True, text=True)
-    return cp.stdout
-
-
+    """What the write appends to the card's config.txt for that configuration."""
+    return write.config_add(REPO, images.load(profile))
 
 
 def resolved_cmdline(profile):
-    """What cmdline_append_text hands the card for that configuration."""
-    script = (
-        'set -euo pipefail\n'
-        '. "%s/lib/common.sh"\n. "%s/image/profiles.sh"\n. "%s/lib/image.sh"\n'
-        'eval "$(sed -n \'/^cmdline_append_text()/,/^}/p\' "%s/cmd/sysimage")"\n'
-        'image_profile_load %s >/dev/null 2>&1\n'
-        'cmdline_append_text\n'
-    ) % (REPO, REPO, REPO, REPO, profile)
-    return subprocess.run(["bash", "-c", script], capture_output=True, text=True).stdout
+    """What the write appends to the card's kernel command line for that configuration."""
+    return write.cmdline_add(REPO, images.load(profile))
+
 
 def machine_of(conf):
     m = re.search(r"^IMG_MACHINE=(\S+)", conf.read_text(), re.M)
@@ -88,11 +75,16 @@ class TestTheSplitIsKept(unittest.TestCase):
     def test_the_board_is_appended_before_the_profile(self):
         """Later wins in config.txt, so a profile can override a board default
         -- not the other way round."""
-        body = (REPO / "cmd" / "sysimage").read_text()
-        fn = body[body.index("config_append_text()"):]
-        fn = fn[:fn.index("\n}\n")]
-        self.assertLess(fn.index('image/boards/'), fn.index("IMG_SPEC_DIR"),
-                        "the profile's append comes first, so a board fact could be lost")
+        with tempfile.TemporaryDirectory() as d:
+            board, spec = Path(d, "image", "boards", "b"), Path(d, "spec")
+            board.mkdir(parents=True)
+            spec.mkdir()
+            for where, text in ((board, "board"), (spec, "profile")):
+                (where / "config.txt.append").write_text(text + "=1\n")
+                (where / "cmdline.txt.append").write_text("# a comment\n" + text + "=1\n\n")
+            p = {"IMG_MACHINE": "b", "IMG_SPEC_DIR": str(spec)}
+            self.assertEqual(write.config_add(d, p), "board=1\nprofile=1\n")
+            self.assertEqual(write.cmdline_add(d, p), "board=1 profile=1")
 
     def test_a_measurement_choice_stays_with_the_profile(self):
         """rpi4's clock pinning is not a board fact: another profile on the
@@ -100,18 +92,6 @@ class TestTheSplitIsKept(unittest.TestCase):
         rpi4 = resolved_append("webkit-2.52-yocto-rpi4-64")
         self.assertIn("force_turbo=1", rpi4)
         self.assertNotIn("force_turbo", (BOARDS / "rpi5" / "config.txt.append").read_text())
-
-    def test_the_kernel_command_line_has_the_same_two_sources(self):
-        """cmdline.txt.append is the config.txt.append of the kernel: a board
-        fact first, then the profile's. Held per profile, a board with no
-        console had no way to report a boot that stopped, and each one cost a
-        trip to the power supply (rpi5, 2026-09-04)."""
-        body = (REPO / "cmd" / "sysimage").read_text()
-        fn = body[body.index("cmdline_append_text()"):]
-        fn = fn[:fn.index("\n}\n")]
-        self.assertIn("image/boards/", fn, "the kernel command line has no board-level half")
-        self.assertLess(fn.index("image/boards/"), fn.index("IMG_SPEC_DIR"),
-                        "the profile's arguments come first, so a board fact could be lost")
 
     def test_the_rpi5_makes_a_stopped_boot_report_itself(self):
         """The pair, not either alone: without a bounded wait a missing root
@@ -137,7 +117,7 @@ class TestTheSplitIsKept(unittest.TestCase):
             if not d.is_dir():
                 continue
             with self.subTest(board=d.name):
-                self.assertTrue((REPO / "boot" / "machines" / f"{d.name}.conf").exists(),
+                self.assertTrue((REPO / "machines" / f"{d.name}.conf").exists(),
                                 f"image/boards/{d.name} names no fleet machine")
 
 

@@ -348,7 +348,7 @@ class DriverCopyTest(unittest.TestCase):
         self.tmp = Path(tempfile.mkdtemp(prefix="wk-test-scp-drivers-"))
         self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
         self.env = {"HOME": str(self.tmp / "home"), "WK_STORE": str(self.tmp / "store"),
-                    "WK_TARGET_REGISTRY": str(self.tmp / "hosts"), "WK_IN_VM": "1",
+                    "WK_MACHINES_DIR": str(self.tmp / "hosts"), "WK_IN_VM": "1",
                     "PATH": os.environ.get("PATH", "")}
         (self.tmp / "home").mkdir()
         (self.tmp / "hosts").mkdir()
@@ -356,7 +356,8 @@ class DriverCopyTest(unittest.TestCase):
         self.reg = targets.Registry(REPO, env=self.env, machine=self.fake)
 
     def conf(self, name, text):
-        (self.tmp / "hosts" / (name + ".conf")).write_text(text)
+        kind = "" if "KIND=build" in text else "KIND=%s\n" % ("peer" if "WK_REMOTE_PEER=1" in text else "build")
+        (self.tmp / "hosts" / (name + ".conf")).write_text(kind + text)
 
 
 class TestContainerCopy(DriverCopyTest):
@@ -496,7 +497,7 @@ class TestRemoteLocalCopy(DriverCopyTest):
         del self.env["WK_IN_VM"]
         self.env["XDG_STATE_HOME"] = str(self.tmp / "state")
         self.box = self.tmp / "box"
-        self.conf("fakebox", "WK_TARGET_KIND=remote\nWK_REMOTE_LOCAL=1\nWK_REMOTE_ROOT=%s\n" % self.box)
+        self.conf("fakebox", "KIND=build\nWK_TARGET_KIND=remote\nWK_REMOTE_LOCAL=1\nWK_REMOTE_ROOT=%s\n" % self.box)
         self.reg = targets.Registry(REPO, env=self.env, machine=Local())
         self.t = self.reg.load("fakebox")
 

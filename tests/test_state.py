@@ -1,5 +1,5 @@
 """cmd/selftest's `state` section: read-only is read-only, one walk behind
-both `wk ls`/`wk status`, `ws_state`'s five words, status-files-are-claims,
+both `wk ls`/`wk status`, `Target.state`'s five words and `wait_ready`, status-files-are-claims,
 the wk-tools completion marker naming, one status entry per machine, and `wk
 zed` refusing inside a workspace. Each docstring is the
 phrase the check implements 
@@ -9,14 +9,26 @@ bash; they exercise no runtime behaviour.
 
 Run: python3 -m unittest tests.test_state -v
 """
+import contextlib
+import io
 import json
+import os
 import re
 import shutil
 import subprocess
+import sys
+import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from tests.support import REPO, WK, WkTest, bash, requires_container_target, run
+
+sys.path.insert(0, str(REPO / "lib"))
+from wk import targets  # noqa: E402
+from wk.act import Refused  # noqa: E402
+from wk.clock import FakeClock  # noqa: E402
+from wk.machine import Fake  # noqa: E402
 
 
 def _have_podman():
@@ -200,79 +212,171 @@ class TestZedRefusesInsideAWorkspace(WkTest):
         self.assertIn("wk zed selftest-ws", cp.stdout, cp.stdout)
 
 
-class TestWsStateWords(WkTest):
+class Scripted(targets.Target):
+    """A target whose environment says `word` and whose creation marker is `marker`, over a Fake host."""
+
+    def __init__(self, store, fake, word="absent", marker=False, needs_base=False):
+        super().__init__("stub", str(REPO), {"WK_STORE": store, "HOME": store}, fake)
+        self.word, self.marker, self.needs_base = word, marker, needs_base
+
+    def info(self, ws):
+        return self.word
+
+    def created(self, ws):
+        return self.marker
+
+
+class StateTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="wk-test-state-"))
+        self.addCleanup(shutil.rmtree, str(self.tmp), True)
+        self.store = str(self.tmp / "store")
+        self.fake = Fake("here")
+        self.clock = FakeClock()
+        env = mock.patch.dict(os.environ, {}, clear=False)
+        env.start()
+        self.addCleanup(env.stop)
+        for v in ("WK_FORCE", "WK_DRY_RUN", "WK_READY_WAIT", "WK_QUIET"):
+            os.environ.pop(v, None)
+
+    def target(self, **kw):
+        return Scripted(self.store, self.fake, **kw)
+
+    def ws_dir(self, t, ws):
+        self.fake.dirs.add(t.store.ws_dir(ws))
+
+    def creation(self, t, ws, alive):
+        """A `wk new` record for `ws`: its driver alive, or ended 0."""
+        rec = t.records().begin("new", "here", ws, "wk new %s --kill" % ws, "/nolog", ["checking", "create"], pid=4242)
+        rec.step_named("create")
+        if alive:
+            self.fake.pids.add(4242)
+        else:
+            rec.end(0)
+        return rec
+
+    def waited(self, t, ws="ws", timeout=None):
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            try:
+                t.wait_ready(ws, self.clock, timeout)
+                rc = 0
+            except Refused as e:
+                rc = e.status
+        return rc, err.getvalue()
+
+
+class TestWsStateWords(StateTest):
     def test_ws_state_words(self):
-        """five words, each from the evidence that decides it"""
-        script = f'''
-set -euo pipefail
-. "{REPO}/lib/common.sh"
-. "{REPO}/lib/store.sh"
-. "{REPO}/lib/target.sh"
-WK_STORE="{self.tmp}/store"; export WK_STORE
-mkdir -p "$WK_STORE/ws"
-wk_ws_dir() {{ echo "$WK_STORE/ws/$1"; }}
-t_needs_base() {{ return 1; }}
+        """five words, each from the evidence that decides it -- the directory read through the machine"""
+        t = self.target()
+        self.assertEqual(t.state("ws"), "absent")                    # nothing anywhere
+        self.ws_dir(t, "ws")
+        t.word, t.marker = "running", True
+        self.assertEqual(t.state("ws"), "present")                   # the environment is up and creation finished
+        t.word = "creating"
+        self.assertEqual(t.state("ws"), "creating")                  # the driver says so itself
+        t.word = "unreachable"
+        self.assertEqual(t.state("ws"), "unreachable")               # the machine did not answer
+        t.word, t.marker = "absent", False
+        self.assertEqual(t.state("ws"), "creating")                  # a directory, no environment, no marker
+        t.marker = True
+        self.assertEqual(t.state("ws"), "broken")                    # the same once creation had finished
 
-_env=absent; _marker=""
-t_info()    {{ echo "$_env"; }}
-t_created() {{ [ -n "$_marker" ]; }}
+    def test_a_finished_creation_record_is_the_marker_where_the_target_keeps_none(self):
+        t = self.target()
+        self.ws_dir(t, "ws")
+        self.creation(t, "ws", alive=False)
+        self.assertEqual(t.state("ws"), "broken")
 
-# nothing anywhere
-echo "1:$(ws_state nothing)"
-# the environment is up and creation finished
-mkdir -p "$WK_STORE/ws/done"; _env=running; _marker=1
-echo "2:$(ws_state done)"
-# the driver says so itself: still being made
-_env=creating
-echo "3:$(ws_state done)"
-# the machine did not answer
-_env=unreachable
-echo "4:$(ws_state done)"
-# a workspace directory with no environment behind it, and no marker
-_env=absent; _marker=""
-echo "5:$(ws_state done)"
-# the same, but creation had finished: something outside wk removed it
-_marker=1
-echo "6:$(ws_state done)"
-'''
-        cp = bash(script)
-        self.assertEqual(cp.returncode, 0, f"ws_state failed: {cp.stdout + cp.stderr}")
-        want = "1:absent\n2:present\n3:creating\n4:unreachable\n5:creating\n6:broken"
-        self.assertEqual(cp.stdout.strip(), want, f"got:\n{cp.stdout}\nwant:\n{want}")
+    def test_a_directory_that_is_not_on_the_fake_machine_is_absent_whatever_the_real_disk_holds(self):
+        t = self.target()
+        os.makedirs(t.store.ws_dir("ws"))
+        self.assertEqual(t.state("ws"), "absent")
 
 
-class TestReadyMeansTheCreationIsFinished(WkTest):
+class TestReadyMeansTheCreationIsFinished(StateTest):
     def test_a_workspace_whose_creation_is_still_running_is_not_ready(self):
-        """`wk new` writes the ready marker at its `init` stage and then holds
-        the workspace lock through the stages after it, so `present` alone
-        would hand a build a lock it cannot take: every `ready=yes` command
-        waits for the creation driver itself to be gone."""
-        script = f'''
-set -euo pipefail
-. "{REPO}/lib/common.sh"
-. "{REPO}/lib/store.sh"
-. "{REPO}/lib/target.sh"
-. "{REPO}/lib/task.sh"
-WK_STORE="{self.tmp}/store"; export WK_STORE
-mkdir -p "$WK_STORE/ws/ws1"
-t_info() {{ echo running; }}
-t_created() {{ return 0; }}
-t_needs_base() {{ return 1; }}
+        """`wk new` writes the ready marker at its `init` stage and then holds the workspace lock through the
+        stages after it, so `present` alone would hand a build a lock it cannot take: every `ready=yes`
+        command waits for the creation driver itself to be gone."""
+        t = self.target(word="running", marker=True)
+        self.ws_dir(t, "ws")
+        rec = self.creation(t, "ws", alive=True)
+        t.env["WK_READY_WAIT"] = "4"
+        rc, err = self.waited(t)
+        self.assertEqual(rc, 1, err)
+        self.assertIn("waiting for 'ws' to finish being created (at: create)", err)
+        self.assertIn("was still creating after 4s", err)
+        self.assertEqual(self.clock.slept, [2, 2])
+        rec.end(0)
+        self.fake.pids.clear()
+        self.assertEqual(self.waited(t), (0, ""))
 
-d=$(task_begin new here ws1 "wk new ws1 --kill" /nonexistent-log checking create)
-out=$(WK_READY_WAIT=1 wait_ready ws1 2>&1) && rc=0 || rc=$?
-printf 'rc=%s\n%s\n' "$rc" "$out"
+    def test_the_wait_ends_when_the_creation_does(self):
+        t = self.target(word="running", marker=True)
+        self.ws_dir(t, "ws")
+        rec = self.creation(t, "ws", alive=True)
+        real = self.clock.sleep
 
-task_end "$d" 0
-out=$(wait_ready ws1 2>&1) && rc=0 || rc=$?
-printf 'rc2=%s\n%s\n' "$rc" "$out"
-'''
-        cp = bash(script)
-        self.assertIn("finish being created", cp.stdout, cp.stdout + cp.stderr)
-        self.assertIn("was still creating after 1s", cp.stdout, cp.stdout + cp.stderr)
-        self.assertNotIn("rc=0", cp.stdout, "it treated a live creation as ready")
-        self.assertIn("rc2=0", cp.stdout,
-                      "once the driver has ended, the same workspace is ready")
+        def sleep(n):
+            real(n)
+            if len(self.clock.slept) == 3:
+                rec.end(0)
+        self.clock.sleep = sleep
+        rc, err = self.waited(t)
+        self.assertEqual(rc, 0, err)
+        self.assertIn("'ws' is ready", err)
+        self.assertEqual(len(self.clock.slept), 3)
+
+    def test_absent_broken_and_unreachable_do_not_improve_with_waiting(self):
+        for word, marker, dir_, says in (("absent", False, False, "no such workspace: ws"),
+                                         ("absent", True, True, "wk rm ws"),
+                                         ("unreachable", False, False, "did not answer")):
+            with self.subTest(word=word, marker=marker):
+                t = self.target(word=word, marker=marker)
+                if dir_:
+                    self.ws_dir(t, "ws")
+                rc, err = self.waited(t)
+                self.assertEqual(rc, 1)
+                self.assertIn(says, err)
+                self.assertEqual(self.clock.slept, [])
+
+    def test_a_creation_nothing_is_running_is_a_barrier_naming_the_remake(self):
+        t = self.target(word="creating")
+        self.ws_dir(t, "ws")
+        rc, err = self.waited(t)
+        self.assertEqual(rc, 1)
+        self.assertIn("never finished creating", err)
+        self.assertIn("wk new ws --target stub", err)
+        self.assertEqual(self.clock.slept, [])
+        os.environ["WK_FORCE"] = "1"
+        self.assertEqual(self.waited(t)[0], 0)
+
+    def test_a_dead_creation_is_refused_at_once_by_the_real_container_driver(self):
+        """`unit machine.dead_creation_refused_at_once`: the container is up, its directory is gone and nothing is
+        creating it. Every ready command is refused at once naming `wk rm`, and nothing reaches `wkdev-enter`."""
+        self.fake.answer(["podman", "inspect"], out="running\n")
+        t = targets.Container("container", str(REPO), {"WK_STORE": self.store, "HOME": self.store, "WK_IN_VM": "1"}, self.fake)
+        self.assertEqual(t.state("ws"), "broken")
+        rc, err = self.waited(t)
+        self.assertEqual(rc, 1)
+        self.assertIn("Repair:  wk rm ws", err)
+        self.assertEqual(self.clock.slept, [])
+        self.assertEqual([e for e in self.fake.effects if e[0] == "run" and "wkdev-enter" in " ".join(e[1])], [])
+
+    def test_the_bash_shims_ask_the_python(self):
+        """cmd/gc and lib/bench-arms.sh reach `ws_state` and `wait_ready` through lib/target.sh."""
+        cp = bash('''
+. "$WK_ROOT/lib/common.sh"
+. "$WK_ROOT/lib/store.sh"
+. "$WK_ROOT/lib/target.sh"
+load_target container >/dev/null 2>&1
+echo "state=$(ws_state nosuchws)"
+wait_ready nosuchws 2>&1 || echo "rc=$?"
+''', env={"WK_STORE": self.store, "WK_IN_VM": "1"})
+        self.assertIn("state=absent", cp.stdout, cp.stdout + cp.stderr)
+        self.assertIn("no such workspace: nosuchws", cp.stdout)
+        self.assertIn("rc=1", cp.stdout)
 
 
 class TestARecordIsAClaimAndThePidIsTheFact(WkTest):

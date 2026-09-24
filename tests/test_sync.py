@@ -28,7 +28,7 @@ from tests.killpoints import converges
 from tests.support import REPO, fake_workspace, run
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import act, shell, sync, targets  # noqa: E402
+from wk import act, git, pr, sync, targets  # noqa: E402
 from wk.act import Refused  # noqa: E402
 from wk.clock import FakeClock  # noqa: E402
 from wk.decl import Decl  # noqa: E402
@@ -48,19 +48,26 @@ def _load_cmd():
 
 
 cmd = _load_cmd()
-REAL_MIRROR_BRANCHES = shell.mirror_branches
-REAL_WIRING_CHECK = shell.wiring_check_script
+REAL_MIRROR_BRANCHES = git.mirror_branches
+FORKS = "fork justinmichaud/WebKit github-webkit\nforkwpe justinmichaud/WPEWebKit github-wpe\n"
 
-# The bash script generators, stood in for by a line naming what each would render: rendering is
-# lib/store.sh's and tests/test_new_fetch.py runs it for real, while what is asked for is this file's.
+
+def fake_retarget(target, ws, src, forks, branches):
+    target.machine.steps.append("UPSTREAMFIX %s" % ws)
+    r = target.machine.fixes.get((ws, "UPSTREAMFIX"))
+    return [l for l in r.out.replace("\r", "").splitlines() if l.strip()] if r else []
+
+
+# The script generators, stood in for by a line naming what each would render: rendering is lib/wk/git.py's,
+# tests/test_cli_refspecs.py and tests/test_new_fetch.py run it for real, and what is asked for is this file's.
 GENERATORS = {
-    "wiring_script": lambda root, src, mirror, n="", u="", c="", env=None: "WIRING %s %s %s %s %s" % (src, mirror, n, u, c),
-    "wiring_check_script": lambda root, src, mirror, skip="", env=None: "CHECK %s %s %s" % (src, mirror, skip),
-    "branch_upstream_fix_script": lambda root, src, env=None: "UPSTREAMFIX %s" % src,
-    "gitwebkit_setup_script": lambda root, src, env=None: "GITWEBKIT %s" % src,
-    "mirror_refresh_script": lambda root, mirror, env=None: "REFRESH %s" % mirror,
-    "wk_remotes": lambda root, env=None: [("origin", "u1"), ("wpe", "u2"), ("fork", "u3"), ("forkwpe", "u4")],
-    "mirror_branches": lambda root, env=None: ["main"],
+    (git, "wiring_script"): lambda src, mirror, forks, branches, n="", u="", c="": "WIRING %s %s %s %s %s" % (src, mirror, n, u, c),
+    (git, "wiring_check_script"): lambda src, mirror, forks, branches, skip="": "CHECK %s %s %s" % (src, mirror, skip),
+    (git, "gitwebkit_setup_script"): lambda src, forks: "GITWEBKIT %s" % src,
+    (git, "mirror_refresh_script"): lambda mirror, branches: "REFRESH %s" % mirror,
+    (git, "REMOTES"): (("origin", "u1"), ("wpe", "u2"), ("fork", "u3"), ("forkwpe", "u4")),
+    (git, "mirror_branches"): lambda env=None: ["main"],
+    (pr, "retarget"): fake_retarget,
 }
 
 
@@ -147,7 +154,7 @@ class World(Fake):
         self.workspaces, self.states, self.mirrors, self.far, self.wk_rc = {}, {}, {}, {}, {}
         self.fetched, self.fixes = {}, {}
         self.steps, self.refuse_tools = [], set()
-        self.local_store, self.verified, self.current = True, set(), ""
+        self.local_store, self.verified = True, set()
         self.heads = ["main"]
         self.reg = FakeRegistry(REPO, self.env, self, kinds or {"container": "container"})
         self.store = self.reg.store
@@ -174,7 +181,7 @@ class World(Fake):
 
     def publish(self, bid, sha=MAIN_SHA):
         d = os.path.join(self.base_dir(), bid)
-        self.dirs.update({d, os.path.join(d, "WebKit"), os.path.join(d, "WebKit", ".git")})
+        self.dirs.update({self.base_dir(), d, os.path.join(d, "WebKit"), os.path.join(d, "WebKit", ".git")})
         self.files[os.path.join(d, "branch")] = "origin/main\n"
         self.files[os.path.join(d, "sha")] = sha + "\n"
 
@@ -185,17 +192,10 @@ class World(Fake):
 
     def _bash(self, argv, f):
         script = argv[2]
-        if "newest_complete_base" in script:
-            done = f.complete()
-            return Result(0, done[0] + "\n") if done else Result(1)
-        if "base_verify" in script:
-            return Result(0) if argv[-1] in f.verified else Result(1, "snapshot %s is not on branch main\n" % argv[-1])
-        if "current_base" in script:
-            return Result(0, f.current + "\n") if f.current else Result(1)
+        if "wk_push_forks" in script:
+            return Result(0, FORKS)
         if "store_is_local" in script:
             return Result(0 if f.local_store else 1)
-        if "t_sync_tools" in script:
-            return Result(0, "", "pushed into %s\n" % argv[-1])
         return Result(127, "", "no bash answer for: %s" % script[-60:])
 
     def _sh(self, argv, f):
@@ -222,7 +222,12 @@ class World(Fake):
         return r(argv) if callable(r) else r
 
     def _git(self, argv, f):
+        """A snapshot is on its branch, tracking it, once `verified` names it."""
         tree, args = argv[2], argv[3:]
+        if tree.startswith(f.base_dir() + "/") and args[:2] == ["symbolic-ref", "--quiet"]:
+            return Result(0, "refs/heads/main\n") if tree[len(f.base_dir()) + 1:].split("/")[0] in f.verified else Result(1)
+        if args[:3] == ["rev-parse", "--abbrev-ref", "--symbolic-full-name"]:
+            return Result(0, "origin/main\n")
         if args[:2] == ["rev-parse", "refs/heads/main"]:
             return Result(0, MAIN_SHA + "\n")
         if args[:3] == ["rev-parse", "--verify", "--quiet"]:
@@ -281,8 +286,8 @@ class SyncTest(unittest.TestCase):
         for v in ("WK_DRY_RUN", "WK_YES", "WK_QUIET", "WK_DESTRUCTIVE", "WK_CONFIRMED", "WK_CMD", "WK_DEBUG",
                   "WK_BRANCH", "WK_IN_VM", "WK_TARGET", "WK_NAME", "WK_NO_DELEGATE"):
             os.environ.pop(v, None)
-        for name, fn in GENERATORS.items():
-            p = mock.patch.object(shell, name, fn)
+        for (module, name), fn in GENERATORS.items():
+            p = mock.patch.object(module, name, fn)
             p.start()
             self.addCleanup(p.stop)
         p = mock.patch.object(targets.record, "host_name", return_value="here")
@@ -498,7 +503,7 @@ class TestWhatEachScopeRuns(SyncTest):
     def test_inside_a_workspace_the_mirror_is_a_request(self):
         Path(self.w.env["WK_MARKER"]).write_text("name=ws\n")
         for rc_asked, want in ((0, 0), (1, 1)):
-            with mock.patch.object(shell, "mirror_refresh_request", return_value=rc_asked) as ask:
+            with mock.patch.object(sync.Sync, "mirror_refresh_request", return_value=rc_asked) as ask:
                 rc, steps, _ = self.steps("mirror")
             with self.subTest(rc=rc_asked):
                 self.assertEqual((rc, steps, ask.called), (want, [], True))
@@ -515,6 +520,38 @@ class TestWhatEachScopeRuns(SyncTest):
         s = Steps(self.w.reg, self.w.clock, lock, "target", "", "container")
         self.stderr(s.run)
         self.assertEqual(held, ["store", "store"])
+
+
+class TestTheRefreshAskedOfTheBroker(SyncTest):
+    """In a workspace the mirror is mounted read-only, so the refresh is one request to the broker, which runs
+    `wk sync --mirror` outside; with no broker listening it says how to open the door and what ran instead."""
+
+    def ask(self, sock=True, rc=0):
+        self.w.answer(["test", "-S"], rc=0 if sock else 1)
+        self.w.answer(["env"], rc=rc, out="refreshed\n")
+        return self.stderr(self.w.sync("mirror").mirror_refresh_request)
+
+    def client_runs(self):
+        return [e[1] for e in self.w.effects if e[0] == "run" and e[1][0] == "env"]
+
+    def test_no_broker_is_named_with_the_stage_that_makes_one_and_asks_nothing(self):
+        rc, err = self.ask(sock=False)
+        self.assertEqual(rc, 1)
+        self.assertIn("no request broker at /run/wk/broker.sock", err)
+        self.assertIn("./setup --stage broker", err)
+        self.assertEqual(self.client_runs(), [])
+
+    def test_the_request_is_the_client_asking_for_sync_and_its_status_is_the_answer(self):
+        client = str(REPO / "container" / "broker" / "wk-broker-client.py")
+        self.w.files[client] = ""
+        self.w.env["WK_BROKER_SOCKET"] = "/run/x.sock"
+        self.assertEqual(self.ask(), (0, "refreshed\n"))
+        self.assertEqual(self.client_runs(), [("env", "WK_BROKER_SOCKET=/run/x.sock", "python3", client, "sync")])
+        self.assertEqual(self.ask(rc=3)[0], 1)
+
+    def test_a_tree_without_the_client_is_refused_naming_the_tools_sync(self):
+        self.w.answer(["test", "-S"])
+        self.assertIn("wk sync --tools container", self.refused(self.w.sync("mirror").mirror_refresh_request))
 
 
 class TestWhereEachTargetsWorkspacesAreFetched(SyncTest):
@@ -600,10 +637,10 @@ class TestTheMirror(SyncTest):
         self.assertIn("the mirror refresh did not finish", self.mirror())
 
     def test_wk_mirror_branches_carries_the_extra_branches(self):
-        """The branch list is lib/store.sh's wk_mirror_branches, which reads WK_MIRROR_BRANCHES; a branch it
+        """The branch list is lib/wk/git.py's mirror_branches, which reads WK_MIRROR_BRANCHES; a branch it
         names that the refresh did not bring is named once, here, rather than in every workspace's fetch."""
         self.w.reg.env["WK_MIRROR_BRANCHES"] = "main webkitglib/2.52"
-        with mock.patch.object(shell, "mirror_branches", REAL_MIRROR_BRANCHES):
+        with mock.patch.object(git, "mirror_branches", REAL_MIRROR_BRANCHES):
             err = self.mirror(heads=("main",))
             self.assertIn("(origin: main webkitglib/2.52)", err)
             self.assertIn("advertises no webkitglib/2.52", err)
@@ -734,8 +771,9 @@ class TestTheBaseWiring(SyncTest):
 
     def setUp(self):
         super().setUp()
-        self.w.current = "20200101T000000Z"
-        self.w.publish(self.w.current)
+        self.current = "20200101T000000Z"
+        self.w.publish(self.current)
+        self.w.verified.add(self.current)
 
     def wiring(self, fix=False):
         s = self.w.sync("target", target="container", fix=fix)
@@ -757,20 +795,14 @@ class TestTheBaseWiring(SyncTest):
         rc, err = self.wiring(fix=True)
         self.assertEqual(rc, 0)
         self.assertIn("re-wired the base snapshot", err)
-        self.assertIn(("sh", "-c", "WIRING %s %s   " % (self.w.store.base_path(self.w.current), self.w.mirror)),
+        self.assertIn(("sh", "-c", "WIRING %s %s   " % (self.w.store.base_path(self.current), self.w.mirror)),
                       [e[1] for e in self.w.effects if e[0] == "run"])
         self.w.wire_result = Result(1)
         self.assertEqual(self.wiring(fix=True)[0], 1)
 
     def test_no_snapshot_is_nothing_to_read(self):
-        self.w.current = ""
+        self.w.verified.clear()
         self.assertEqual(self.wiring(), (0, ""))
-
-    def test_a_check_script_bash_could_not_render_is_a_refusal_not_an_empty_check_that_passes(self):
-        with mock.patch.object(shell, "wiring_check_script", REAL_WIRING_CHECK), mock.patch.object(shell, "ask", return_value=None):
-            err = self.refused(lambda: self.w.sync("target", target="container").base_wiring(self.w.reg.load("container")))
-        self.assertIn("the bash function wk_wiring_check_script failed (its error is above)", err)
-        self.assertNotIn(("sh", "-c", ""), [e[1] for e in self.w.effects if e[0] == "run"])
 
 
 class TestTheFetch(SyncTest):
@@ -930,24 +962,27 @@ class TestEachDriversFurniture(SyncTest):
         self.assertEqual(argv[argv.index("--") + 1:], ("/opt/wk-tools/container/proxy/ensure-bridge.sh", "sh", "-c", "GITWEBKIT /src/WebKit"))
 
     def test_a_guest_gets_its_copy_pushed_and_one_not_running_is_skipped(self):
+        """Each running guest is handed to `Vm.sync_tools` (the push itself is tests/test_tools_sync.py's)."""
         class Guests(targets.Vm):
+            pushed, result = [], True
+
             def list(self):
                 return [("mya", "running"), ("myb", "stopped")]
 
             def info(self, ws):
                 return "running" if ws == "mya" else "stopped"
+
+            def sync_tools(self, ws):
+                self.pushed.append(ws)
+                return self.result
         t = Guests("vm", str(REPO), dict(self.w.env), self.w)
         ok, err = self.stderr(lambda: t.sync())
         self.assertTrue(ok)
         self.assertIn("mya" + " " * 22 + "ok", err)
         self.assertIn("myb" + " " * 22 + "not running -- skipped", err)
-        pushed = [e[1] for e in self.w.effects if e[0] == "run" and e[1][:1] == ("bash",)]
-        self.assertEqual(len(pushed), 1)
-        self.assertIn("load_target 'vm'", pushed[0][2])
-        self.assertIn("t_sync_tools", pushed[0][2])
-        self.assertEqual(pushed[0][-1], "mya")
-        self.assertEqual([e for e in self.w.effects if e[1][:1] != ("bash",)], [], "a guest's mirror is the host's")
-        self.w.react(["bash", "-c"], lambda a, f: Result(1))
+        self.assertEqual(t.pushed, ["mya"])
+        self.assertEqual(self.w.effects, [], "a guest's mirror is the host's")
+        t.result = False
         self.assertFalse(self.stderr(lambda: t.sync())[0])
 
 
@@ -1016,7 +1051,6 @@ class TestRemoteFurniture(SyncTest):
 
     def test_a_build_box_is_pushed_head_and_its_mirror_refreshed(self):
         self.answer_versions("")
-        self.w.answer(["bash", "-c"], err="pushed\n")
         self.w.answer(["git", "-C", str(REPO), "rev-parse", "HEAD"], out="f00d\n")
         ok, err = self.stderr(lambda: self.remote().sync())
         self.assertTrue(ok, err)
@@ -1025,8 +1059,8 @@ class TestRemoteFurniture(SyncTest):
 
     def test_a_build_box_cloning_from_its_admins_reference_keeps_no_mirror(self):
         self.answer_versions("")
-        self.w.answer(["bash", "-c"], rc=1)
-        ok, err = self.stderr(lambda: self.remote(reference="/srv/WebKit").sync())
+        with mock.patch.object(targets.Remote, "sync_tools", return_value=False):
+            ok, err = self.stderr(lambda: self.remote(reference="/srv/WebKit").sync())
         self.assertFalse(ok)
         self.assertIn("clone from /srv/WebKit", err)
         self.assertNotIn("mirror on box", err)

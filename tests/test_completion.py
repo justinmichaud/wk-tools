@@ -1,16 +1,26 @@
 """`wk --declarations` and `wk completion` -- the machine-readable command
-dump and the shell completion scripts built on it. Each docstring is the
-phrase of the behaviour it checks.
+dump, and the shell completion script the dispatcher builtin generates from
+the declarations (lib/wk/completion.py). Each docstring is the phrase of the
+behaviour it checks.
 
 Run: python3 -m unittest tests.test_completion -v
 """
 import os
+import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
+from unittest import mock
 
 from tests.support import REPO, WK, WkTest, run, where_values
+
+sys.path.insert(0, str(REPO / "lib"))
+from wk import completion as C          # noqa: E402
+from wk import decl as D                 # noqa: E402
+from wk.dispatch import TOMBSTONES       # noqa: E402
+from wk.machine import Local             # noqa: E402
 
 VALID_WHERE = where_values()
 
@@ -49,11 +59,56 @@ class TestDeclarations(WkTest):
         extra = seen.keys() - on_disk
         self.assertEqual(extra, set(), f"in --declarations but not on disk: {extra}")
 
-    def test_declarations_includes_completion_itself(self):
-        """`wk --declarations` includes completion itself"""
+    def test_declarations_omits_the_completion_builtin(self):
+        """`wk --declarations` dumps `cmd/` files; completion has none, so it is absent"""
         cp = run("--declarations")
         names = [l.split("\t")[0] for l in cp.stdout.splitlines() if l.strip()]
-        self.assertIn("completion", names)
+        self.assertNotIn("completion", names)
+
+
+class TestCompletionGenerator(unittest.TestCase):
+    """The generator itself (lib/wk/completion.py), read directly -- no shell,
+    no subprocess, no `-h` text."""
+
+    def test_every_declared_command_and_its_opts_appear(self):
+        """every non-tombstoned command, and every flag it declares anywhere, is in the generated script"""
+        script = C.generate(REPO, "bash", TOMBSTONES)
+        for d in D.all_commands(REPO):
+            if d.name in TOMBSTONES:
+                continue
+            self.assertIn(d.name, script, f"{d.name} missing from the generated script")
+            for opt in C.flags_for(d):
+                self.assertIn(opt, script, f"{d.name}'s {opt} missing from the generated script")
+
+    def test_a_tombstoned_command_does_not_complete(self):
+        """a tombstoned command is never offered as a completion"""
+        script = C.generate(REPO, "bash", TOMBSTONES)
+        m = re.search(r"_wk_commands='([^']*)'", script)
+        self.assertIsNotNone(m, script)
+        offered = m.group(1).split()
+        for name in TOMBSTONES:
+            self.assertNotIn(name, offered, f"tombstoned command '{name}' still completes")
+
+    def test_completion_itself_completes_though_it_has_no_cmd_file(self):
+        """`completion` is a builtin with no `cmd/` file, and still offered"""
+        self.assertIn("completion", C.commands(REPO, TOMBSTONES))
+
+    def test_a_values_list_answered_by_a_store_is_not_asked_at_tab(self):
+        """bench's values= list runs on its store, so completion never asks it; build's runs here"""
+        cmds = {d.name: d for d in D.all_commands(REPO)}
+        self.assertEqual(C.values_cmd(cmds["bench"]), "")
+        self.assertEqual(C.values_cmd(cmds["build"]), "--list")
+
+    def test_workspace_listing_never_touches_a_machine(self):
+        """`local_workspaces` reads local state only: a probe of a machine (podman,
+        ssh) runs through `Local.run`/`run_tty`, and neither is ever called"""
+        tmp = tempfile.mkdtemp(prefix="wk-completion-test-")
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        os.makedirs(os.path.join(tmp, "ws", "demo-ws"))
+        env = dict(os.environ, WK_STORE=tmp)
+        with mock.patch.object(Local, "run", side_effect=AssertionError("probed a machine")), \
+             mock.patch.object(Local, "run_tty", side_effect=AssertionError("probed a machine")):
+            self.assertEqual(C.local_workspaces(REPO, env=env), ["demo-ws"])
 
 
 class TestCompletionScripts(WkTest):
@@ -167,12 +222,41 @@ printf '%s\\n' "${{COMPREPLY[@]}}"
         tmp = tempfile.mkdtemp(prefix="wk-completion-test-")
         self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
         # No registry: a workspace's own store is what completion reads
-        # (cmd/completion, list_workspaces_local) -- container is the one
+        # (lib/wk/completion.py, local_workspaces) -- container is the one
         # built-in kind whose store is plain $WK_STORE.
         os.makedirs(os.path.join(tmp, "ws", "demo-ws"))
 
         reply = self._complete([str(WK), "build", ""], 2, env={"WK_STORE": tmp})
         self.assertIn("demo-ws", reply)
+
+    def test_config_flag_completes_build_configs(self):
+        """`--config <TAB>` offers build configs, on a command that only shares the word"""
+        reply = self._complete([str(WK), "test", "somews", "--config", ""], 4)
+        self.assertIn("jsc-release", reply)
+        self.assertIn("mac-release", reply)
+
+    def test_the_word_after_a_value_taking_flag_is_not_the_workspace(self):
+        """`wk build --branch x <TAB>` still completes the workspace slot"""
+        tmp = tempfile.mkdtemp(prefix="wk-completion-test-")
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        os.makedirs(os.path.join(tmp, "ws", "demo-ws"))
+        reply = self._complete([str(WK), "build", "--branch", "x", ""], 4, env={"WK_STORE": tmp})
+        self.assertIn("demo-ws", reply)
+
+    def test_the_argument_after_the_workspace_offers_the_declared_values(self):
+        """`wk build ws <TAB>` offers the configs `wk build --list` prints"""
+        reply = self._complete([str(WK), "build", "somews", ""], 3)
+        self.assertIn("jsc-release", reply)
+        self.assertNotIn("available", reply)
+
+    def test_a_subverb_completes(self):
+        """`wk key <TAB>` offers key's declared subverbs"""
+        reply = self._complete([str(WK), "key", ""], 2)
+        self.assertIn("sudo", reply)
+
+    def test_completion_offers_its_shells(self):
+        """`wk completion <TAB>` offers bash and zsh"""
+        self.assertEqual(self._complete([str(WK), "completion", ""], 2), ["bash", "zsh"])
 
 
 if __name__ == "__main__":

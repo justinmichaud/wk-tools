@@ -1,6 +1,5 @@
-"""Shape and consistency checks for the four conf registries: image/configs,
-boot/machines, targets/hosts, bridge/hosts (docs/defects, "Conf files need to
-be more consistent").
+"""Shape and consistency checks for the two conf registries: image/configs
+and machines/ (docs/defects, "Conf files need to be more consistent").
 
 Every check here reads the registries and their loaders as they stand on
 disk -- nothing is hardcoded that a loader already states, so a field this
@@ -11,30 +10,25 @@ Run:  python3 -m unittest tests.test_confs -v
 """
 
 import re
+import sys
 import unittest
-from pathlib import Path
 
-from tests.support import REAL_REGISTRY, REPO, run
+from tests.support import FLEET_ENV, REAL_MACHINES, REPO, run
 
-# --- the four registries ------------------------------------------------------
+sys.path.insert(0, str(REPO / "lib"))
+from wk import fleet  # noqa: E402
 
 REGISTRIES = {
     "image/configs": REPO / "image" / "configs",
-    "boot/machines": REPO / "boot" / "machines",
-    "targets/hosts": REPO / "targets" / "hosts",
-    "bridge/hosts": REPO / "bridge" / "hosts",
+    "machines": REAL_MACHINES,
 }
-
-# Directories a case arm naming a machine must not hide in (docs/defects item
-# 2/5: "no CODE file ... contains a case arm naming a machine from the
-# registries"). Conf files themselves are data, not code, and are excluded by
-# suffix below regardless of which of these dirs they live in.
-CODE_DIRS = ["cmd", "lib", "targets", "boot", "bench", "image", "bridge"]
 
 ASSIGN_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)=")
 
 
-def conf_files(registry):
+def conf_files(registry, kinds=fleet.KINDS):
+    if registry == "machines":
+        return [REAL_MACHINES / (n + ".conf") for n in fleet.Fleet(REPO, FLEET_ENV).names(kinds)]
     return sorted(REGISTRIES[registry].glob("*.conf"))
 
 
@@ -67,7 +61,7 @@ def loader_fields(*paths_and_prefixes):
 
 
 class TestConfShape(unittest.TestCase):
-    """Every conf in the four registries: only KEY=value and '#' lines (a
+    """Every conf in the two registries: only KEY=value and '#' lines (a
     value may continue across lines inside one quoted string), no bare prose,
     and a header line naming the file."""
 
@@ -130,7 +124,7 @@ class TestEveryImageListsADescription(unittest.TestCase):
                 self.assertTrue(m.group(2).strip(), f"{path.name}: empty description")
 
     def test_the_listing_reads_the_description_from_that_line(self):
-        """The one reader, exercised rather than retyped: image_config_list
+        """The one reader, exercised rather than retyped: wk.images.listing
         must print a non-empty description under every image it names."""
         cp = run("sysimage", "--list")
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
@@ -153,31 +147,31 @@ class TestConfFieldSets(unittest.TestCase):
 
     def test_boot_machines_field_set(self):
         known = loader_fields((REPO / "boot" / "machines.sh", "NODE_"))
-        files = conf_files("boot/machines")
-        self.assertTrue(files, "no boot/machines/*.conf found")
-        sets = {p.name: assigned_fields(p) for p in files}
+        files = conf_files("machines", fleet.BENCH_KINDS)
+        self.assertTrue(files, "no bench machine in machines/")
+        sets = {p.name: assigned_fields(p) - {"KIND"} for p in files}
         for name, fields in sets.items():
             self.assertTrue(fields <= known, f"{name} sets unknown field(s): {fields - known}")
         first_name, first_fields = next(iter(sets.items()))
         for name, fields in sets.items():
             self.assertEqual(
                 fields, first_fields,
-                f"boot/machines/{name} field set differs from {first_name}: "
+                f"machines/{name} field set differs from {first_name}: "
                 f"{fields ^ first_fields}",
             )
 
     def test_bridge_hosts_field_set(self):
         known = loader_fields((REPO / "cmd" / "bridge", "BR_"))
-        files = conf_files("bridge/hosts")
-        self.assertTrue(files, "no bridge/hosts/*.conf found")
-        sets = {p.name: assigned_fields(p) for p in files}
+        files = conf_files("machines", ("bridge",))
+        self.assertTrue(files, "no bridge in machines/")
+        sets = {p.name: assigned_fields(p) - {"KIND"} for p in files}
         for name, fields in sets.items():
             self.assertTrue(fields <= known, f"{name} sets unknown field(s): {fields - known}")
         first_name, first_fields = next(iter(sets.items()))
         for name, fields in sets.items():
             self.assertEqual(
                 fields, first_fields,
-                f"bridge/hosts/{name} field set differs from {first_name}: "
+                f"machines/{name} field set differs from {first_name}: "
                 f"{fields ^ first_fields}",
             )
 
@@ -188,40 +182,38 @@ class TestConfFieldSets(unittest.TestCase):
         # which otherwise survives in this set only as prose in remote.sh.
         known = loader_fields(
             (REPO / "targets" / "remote.sh", "WK_"),
-            (REPO / "cmd" / "remote", "WK_"),
+            (REPO / "lib" / "wk" / "machine_cmd.py", "WK_"),
+            (REPO / "lib" / "wk" / "targets.py", "WK_"),
             (REPO / "lib" / "wk" / "build.py", "WK_"),
             (REPO / "lib" / "wk" / "buildconf.py", "WK_"),
             (REPO / "lib" / "target.sh", "WK_"),
+            (REPO / "lib" / "wk" / "fleet.py", "WK_"),
         )
         known.add("WK_TARGET_KIND")
-        files = conf_files("targets/hosts")
-        self.assertTrue(files, "no targets/hosts/*.conf found")
-        sets = {p.name: assigned_fields(p) for p in files}
+        files = conf_files("machines", fleet.TARGET_KINDS)
+        self.assertTrue(files, "no build machine or peer in machines/")
+        sets = {p.name: assigned_fields(p) - {"KIND"} for p in files}
         for name, fields in sets.items():
             self.assertTrue(fields <= known, f"{name} sets unknown field(s): {fields - known}")
         first_name, first_fields = next(iter(sets.items()))
         for name, fields in sets.items():
             self.assertEqual(
                 fields, first_fields,
-                f"targets/hosts/{name} field set differs from {first_name}: "
+                f"machines/{name} field set differs from {first_name}: "
                 f"{fields ^ first_fields}",
             )
 
     def test_image_configs_field_set_per_builder(self):
         # Different builders (yocto/buildroot/pmos/fetch) read different
-        # field subsets by design (image/profiles.sh's own reset list groups
+        # field subsets by design (lib/wk/images.py's FIELDS groups
         # them the same way) -- the documented optional subset is "same
         # builder, same fields".
-        known = loader_fields((REPO / "image" / "profiles.sh", "CFG_"),
-                               (REPO / "image" / "profiles.sh", "IMG_"),
-                               (REPO / "image" / "profiles.sh", "YOC_"),
-                               (REPO / "image" / "profiles.sh", "BR_"),
-                               (REPO / "image" / "profiles.sh", "FET_"),
-                               (REPO / "image" / "profiles.sh", "PMO_"))
+        known = loader_fields(*((REPO / "lib" / "wk" / "images.py", p)
+                                for p in ("CFG_", "IMG_", "YOC_", "BR_", "FET_", "PMO_")))
         files = conf_files("image/configs")
         self.assertTrue(files, "no image/configs/*.conf found")
         # CFG_NEEDS is the one documented optional field within a builder
-        # group: image_config_list (image/profiles.sh) treats its mere
+        # group: wk.images.listing (lib/wk/images.py) treats its mere
         # presence as "not buildable yet", so it is set only on the configs
         # that need something the others in the same group already have.
         # BR_KERNEL_*: a profile whose board will not boot the kernel its
@@ -263,7 +255,7 @@ class TestConfFieldSets(unittest.TestCase):
 class TestBootListsEveryMachine(unittest.TestCase):
     def test_wk_boot_list_covers_every_conf(self):
         cp = run("boot", "--list")
-        names = {p.stem for p in conf_files("boot/machines")}
+        names = {p.stem for p in conf_files("machines", fleet.BENCH_KINDS)}
         for name in names:
             with self.subTest(machine=name):
                 self.assertRegex(
@@ -273,12 +265,8 @@ class TestBootListsEveryMachine(unittest.TestCase):
 
 
 def registry_machine_names():
-    """Every machine name in the three name-keyed registries -- what a case
-    arm or a default value is not allowed to hardcode."""
-    names = set()
-    for registry in ("boot/machines", "targets/hosts", "bridge/hosts"):
-        names |= {p.stem for p in conf_files(registry)}
-    return names
+    """Every machine name in machines/ -- what a default value is not allowed to hardcode."""
+    return {p.stem for p in conf_files("machines")}
 
 
 def code_lines(dirs):
@@ -301,37 +289,14 @@ def code_lines(dirs):
                 yield path, i, line
 
 
-class TestNoHardcodedMachineCaseArms(unittest.TestCase):
-    """CLAUDE.md: 'New devices arrive as config, never code -- a case
-    statement naming a machine is the shape being replaced.' A line escapes
-    either check in this class only by being marked '# static' on the same
-    line."""
-
-    def test_no_case_arm_names_a_registry_machine(self):
-        names = registry_machine_names()
-        arm_re = re.compile(r"^\s*((?:[A-Za-z0-9_.-]+\|)*[A-Za-z0-9_.-]+)\)")
-        violations = []
-        for path, i, line in code_lines(CODE_DIRS):
-            if "# static" in line:
-                continue
-            m = arm_re.match(line)
-            if not m:
-                continue
-            arms = m.group(1).split("|")
-            hit = names & set(arms)
-            if hit:
-                violations.append(f"{path.relative_to(REPO)}:{i}: {line.strip()!r} names {hit}")
-        self.assertEqual(
-            violations, [],
-            "case arm(s) naming a registry machine by hand (add '# static' to "
-            "keep one deliberately, or move the fact onto the machine's conf "
-            "as a field):\n" + "\n".join(violations),
-        )
+class TestNoHardcodedMachineDefaults(unittest.TestCase):
+    """CLAUDE.md: 'New devices arrive as config, never code' (the case-arm
+    half is lint.one_machine_dir, tests/test_machines_dir.py). A line escapes
+    only by being marked '# static' on the same line."""
 
     def test_no_default_value_names_a_registry_machine(self):
         # A '${VAR:-name}' fallback picks a machine exactly as silently as a
-        # case arm does -- lib/image.sh's image_dtb_for and cmd/bench's
-        # staged_root used to default to rpi5 / mbp this way. Scoped to
+        # case arm does. Scoped to
         # lib/cmd/image/bench: the four directories where code reaches for a
         # fleet machine by name (targets/ and bridge/ have their own
         # registries and are covered by the case-arm check above instead).
@@ -355,13 +320,13 @@ class TestNoHardcodedMachineCaseArms(unittest.TestCase):
 
 class TestPiConfsSetDtb(unittest.TestCase):
     """A Pi's firmware halts, not panics, if it cannot find its device tree
-    (image_check_boot_files, lib/image.sh) -- so image_dtb_for refuses to
-    guess one, and every Pi conf has to set NODE_DTB for real."""
+    (the card helper's boot-check) -- so the write refuses to guess one, and
+    every Pi conf has to set NODE_DTB for real."""
 
     PI_NAMES = {"rpi3", "rpi4", "rpi5"}
 
     def test_every_pi_conf_sets_mach_dtb(self):
-        for path in conf_files("boot/machines"):
+        for path in conf_files("machines", fleet.BENCH_KINDS):
             if path.stem not in self.PI_NAMES:
                 continue
             with self.subTest(machine=path.stem):
@@ -375,12 +340,12 @@ class TestPiConfsSetDtb(unittest.TestCase):
 
 
 class TestMachinesSetNet(unittest.TestCase):
-    """_image_wants_wifi (boot/disk.sh) keys on NODE_NET rather than a case
-    arm naming machines, so every boot/machines conf has to set it to one of
+    """wants_wifi (lib/wk/sysimage/write.py) keys on NODE_NET rather than a case
+    arm naming machines, so every bench machine's conf has to set it to one of
     the two words that function checks against."""
 
     def test_every_machine_conf_sets_mach_net(self):
-        for path in conf_files("boot/machines"):
+        for path in conf_files("machines", fleet.BENCH_KINDS):
             with self.subTest(machine=path.stem):
                 value = None
                 for line in path.read_text().splitlines():
@@ -402,7 +367,7 @@ class TestUnknownTargetRefusal(unittest.TestCase):
     instructions for provisioning the machine the typo invented."""
 
     def known(self):
-        return sorted(f.stem for f in REAL_REGISTRY.glob("*.conf"))
+        return fleet.Fleet(REPO, FLEET_ENV).names(fleet.TARGET_KINDS)
 
     def test_the_refusal_names_the_machines_that_do_have_a_conf(self):
         """`--target <typo>` lists the registry rather than only offering to
@@ -411,10 +376,10 @@ class TestUnknownTargetRefusal(unittest.TestCase):
         self.assertTrue(names, "no machine confs to check against")
         typo = names[0][::-1]
         # The real registry: what the refusal has to name is the machines
-        # this repo ships, and the suite is otherwise pointed at an empty one
-        # (tests.support.NO_REGISTRY).
+        # this repo ships, and the suite is otherwise pointed at one with no
+        # target (tests.support.BLIND_FLEET).
         cp = run("push", "status", "--target", typo,
-                 env={"WK_TARGET_REGISTRY": str(REAL_REGISTRY)})
+                 env={"WK_MACHINES_DIR": str(REAL_MACHINES)})
         self.assertNotEqual(cp.returncode, 0, cp.stdout)
         self.assertIn(f"unknown target '{typo}'", cp.stdout)
         for n in names:
@@ -423,47 +388,5 @@ class TestUnknownTargetRefusal(unittest.TestCase):
     def test_the_refusal_still_says_how_to_add_a_new_machine(self):
         """the name may genuinely be a machine that has no conf yet"""
         cp = run("push", "status", "--target", "a-machine-with-no-conf")
-        self.assertIn("wk remote setup a-machine-with-no-conf", cp.stdout)
+        self.assertIn("wk machine setup a-machine-with-no-conf", cp.stdout)
         self.assertIn("WK_REMOTE_HOST", cp.stdout)
-
-
-
-class TestTheWatchdogIsOneValue(unittest.TestCase):
-    """A borrowed board hands itself back on its own: every system reboots out
-    of bench mode after IMG_WATCHDOG seconds unless claimed, which is what stops
-    one staying borrowed until somebody notices.
-
-    All 21 profiles carried `IMG_WATCHDOG=900` and the same four lines of
-    reasoning above it -- one number that could then be changed in no single
-    place. It lives in image/profiles.sh now, and a profile names it only to
-    differ."""
-
-    CONFIGS = sorted((REPO / "image" / "configs").glob("*.conf"))
-    PROFILES = REPO / "image" / "profiles.sh"
-
-    def test_the_default_is_five_minutes(self):
-        m = re.search(r"^\s*IMG_WATCHDOG=(\d+)\s*$", self.PROFILES.read_text(), re.M)
-        self.assertIsNotNone(m, "image/profiles.sh sets no IMG_WATCHDOG default")
-        self.assertEqual(300, int(m.group(1)))
-
-    def test_no_profile_restates_the_default(self):
-        """Restating it is how 21 copies happened. A profile may still override,
-        but not with the value it would have got anyway."""
-        for conf in self.CONFIGS:
-            m = re.search(r"^IMG_WATCHDOG=(\d+)", conf.read_text(), re.M)
-            if m:
-                with self.subTest(profile=conf.stem):
-                    self.assertNotEqual(300, int(m.group(1)),
-                                        f"{conf.name} restates the default")
-
-    def test_the_reset_still_clears_every_img_field(self):
-        """profiles.sh resets each field before sourcing a conf, so a second
-        load cannot inherit the first profile's answers. The watchdog now
-        resets to a value rather than to empty, and must still be in that
-        block."""
-        text = self.PROFILES.read_text()
-        block = text[text.index("IMG_BUILDER=\"\""):]
-        block = block[:block.index("YOC_BRANCH=")]
-        for field in ("IMG_MACHINE", "IMG_ARCH", "IMG_HOSTNAME", "IMG_WATCHDOG"):
-            with self.subTest(field=field):
-                self.assertIn(field + "=", block, f"{field} is not reset per load")

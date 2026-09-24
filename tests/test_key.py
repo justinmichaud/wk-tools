@@ -9,15 +9,21 @@ has to be running.
 Run: python3 -m unittest tests.test_key -v
 """
 
+import inspect
 import json
 import os
 import subprocess
+import sys
 import unittest
 
-from tests.support import REPO, WkTest, bash, func_body, stub_path
+from tests.support import REPO, WkTest, bash, stub_path
 from tests.test_credcheck import FINE, login
 
+sys.path.insert(0, str(REPO / "lib"))
+from wk import key  # noqa: E402
+
 KEY = REPO / "cmd" / "key"
+KEY_PY = REPO / "lib" / "wk" / "key.py"
 
 # A `podman` that fails loudly if anything calls it: what this file is mostly
 # about is that nothing does.
@@ -54,7 +60,7 @@ class _KeyRun(WkTest):
         for var in ("WK_NAME", "WK_TARGET", "WK_TARGET_KIND", "WK_MARKER",
                     "WK_STORE", "WK_IN_VM"):
             env.pop(var, None)
-        env["WK_TARGET_REGISTRY"] = str(self.tmp / "no-registry")
+        env["WK_MACHINES_DIR"] = str(self.tmp / "no-registry")
         (self.tmp / "no-registry").mkdir(exist_ok=True)
         return env
 
@@ -142,7 +148,7 @@ class TestTheKeysAreReadFromHere(_KeyRun):
 
     def test_nothing_here_reaches_the_podman_machine(self):
         """the hop is gone, not merely unused"""
-        text = KEY.read_text()
+        text = KEY.read_text() + KEY_PY.read_text()
         for gone in ("podman machine ssh", "IN_VM_SSH", "in_vm "):
             with self.subTest(gone=gone):
                 self.assertNotIn(gone, text)
@@ -151,12 +157,10 @@ class TestTheKeysAreReadFromHere(_KeyRun):
 class TestEnsureIsOneImplementation(WkTest):
     def test_deploy_ensures_through_this_same_file(self):
         """`wk key deploy` walks the machines and asks each to make its
-        missing keys; for this one that is this file's own `ensure` arm, not a
-        second copy of ssh-keygen"""
-        text = KEY.read_text()
-        self.assertIn('ensure_keys() { "$0" ensure', text)
-        self.assertIn("ssh-keygen -t ed25519", text)
-        self.assertEqual(1, text.count("ssh-keygen -t ed25519"))
+        missing keys; for this one that is `ensure` itself, not a second copy
+        of ssh-keygen"""
+        self.assertIn("self.ensure()", inspect.getsource(key.Key.converge_forks))
+        self.assertEqual(1, KEY_PY.read_text().count('"-t", "ed25519"'))
 
 
 # `gh` marking when it starts and when it ends, so a test can see whether two
@@ -276,7 +280,7 @@ class TestCheckAsksAboutEveryCredential(_KeyRun):
         """A private half is always in the directory nothing mounts, so its
         path says nothing about `wk push`; a guard on that path would make
         every key report the switch instead of GitHub's answer."""
-        self.assertNotIn("push is off", KEY.read_text())
+        self.assertNotIn("push is off", KEY_PY.read_text())
 
 
 # A `gh` that refuses every call: `setup` and `deploy` must not reach GitHub
@@ -333,11 +337,7 @@ class TestSetupDoesWhateverIsMissing(_KeyRun):
         table still gets its turn and the report still comes out."""
         cp, _secrets = self.setup_run()
         self.assertIn("Re-run interactively", cp.stderr)
-        last = subprocess.run(["bash", "-c",
-                               '. "%s/lib/common.sh"; . "%s/lib/store.sh"; '
-                               'wk_cred_settable | tail -1' % (REPO, REPO)],
-                              capture_output=True, text=True).stdout.strip()
-        self.assertIn(last, cp.stdout)
+        self.assertIn(key.Key(REPO).settable()[-1], cp.stdout)
 
     def test_it_makes_the_push_keys_on_the_way(self):
         cp, secrets = self.setup_run()
@@ -462,7 +462,7 @@ class TestTheTopicIsMintedNotAsked(_KeyRun):
     def test_replacing_it_mints_a_different_one(self):
         _cp, secrets = self.key("set", "ntfy")
         first = self.topic_path(secrets).read_text().strip()
-        cp, _ = self.key("set", "ntfy", "--replace")
+        cp, _ = self.key("set", "ntfy", "--replace", env={"WK_YES": "1"})
         self.assertEqual(0, cp.returncode, cp.stdout + cp.stderr)
         second = self.topic_path(secrets).read_text().strip()
         self.assertNotEqual(first, second)
@@ -730,9 +730,6 @@ class TestABareKeyChangesNothing(_KeyRun):
     another machine or to GitHub -- the fan-out to peer workstations, the
     revocation `--rotate` starts with -- asks first, defaulting to No."""
 
-    def test_the_default_verb_is_check(self):
-        self.assertIn('ACTION="${1:-check}"', KEY.read_text())
-
     def test_it_prints_the_report_and_nothing_else(self):
         bare, _ = self.key()
         check, _ = self.key("check")
@@ -742,27 +739,27 @@ class TestABareKeyChangesNothing(_KeyRun):
             self.assertNotIn(word, bare.stdout + bare.stderr)
 
     def arm(self, verb):
-        return KEY.read_text().split("\n%s)\n" % verb, 1)[1].split("\n    ;;", 1)[0]
+        return inspect.getsource(getattr(key.Key, verb))
 
     def test_nothing_is_elected_taken_or_written_before_the_question(self):
         """Every arm that can overwrite another workstation, or revoke a key on
         GitHub, asks first: the election, the fan-out and rotate_keys all sit
-        inside converge_forks and the credential walk, after fleet_confirm.
+        inside converge_forks and the credential walk, after the question.
         The declined run itself is driven against a peer in
-        tests/test_key_shared.py."""
-        self.assertIn("rotate_keys", func_body(KEY.read_text(), "converge_forks"))
+        tests/test_key_shared.py and tests/test_wk_key.py."""
+        self.assertIn("rotate_keys", inspect.getsource(key.Key.converge_forks))
         for verb in ("setup", "deploy"):
             with self.subTest(verb=verb):
                 arm = self.arm(verb)
-                self.assertLess(arm.index("fleet_confirm "), arm.index("converge_forks"), arm)
+                self.assertLess(arm.index("self.confirm("), arm.index("self.converge_forks()"), arm)
 
     def test_a_declined_question_is_not_reported_as_done(self):
         """`deploy` has nothing left to do, so it says so and stops; `setup`
         still has this machine's own credentials to set up, so it drops the
         fleet and goes on."""
-        self.assertIn('die "not done', self.arm("deploy"))
+        self.assertIn('die("not done', self.arm("deploy"))
         setup = self.arm("setup")
-        self.assertIn('|| FLEET=""', setup, setup)
+        self.assertIn("self.fleet_on = False", setup, setup)
         self.assertIn("was left exactly as it is", setup)
 
 

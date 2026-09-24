@@ -539,12 +539,12 @@ SHAPE=$(lane_shape)
 if [ -z "$HOST" ]; then
     machine_load "$MACHINE" >/dev/null 2>&1 || die "no such machine: $MACHINE (wk boot --list)"
     HOST="${NODE_SSH:-}"
-    [ -n "$HOST" ] || die "$MACHINE (boot/machines/$MACHINE.conf) sets no NODE_SSH"
+    [ -n "$HOST" ] || die "$MACHINE (machines/$MACHINE.conf) sets no NODE_SSH"
 fi
 if [ "$SHAPE" = volume ] && [ -z "$BENCH_HOST" ]; then
     machine_load "$MACHINE" >/dev/null 2>&1
     BENCH_HOST="${NODE_BENCH_SSH:-}"
-    [ -n "$BENCH_HOST" ] || die "$MACHINE (boot/machines/$MACHINE.conf) sets no NODE_BENCH_SSH -- needed to reach its bench-mode install"
+    [ -n "$BENCH_HOST" ] || die "$MACHINE (machines/$MACHINE.conf) sets no NODE_BENCH_SSH -- needed to reach its bench-mode install"
 fi
 
 if [ "$SHAPE" = volume ] && NODE_SSH="$HOST" m_here; then

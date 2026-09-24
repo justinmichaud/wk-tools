@@ -29,7 +29,7 @@ from tests.support import REPO, bash, scratch_dir, temp_store
 # own case statement or while-loop -- belong here.
 CLOSED_SETS = {
     "push": {"action": ["on", "off", "status"]},
-    "remote": {"verb": ["setup", "rm"]},
+    "machine": {"verb": ["setup", "rm", "ls", "probe"]},
     "ab": {"--builder": ["buildroot", "yocto"], "--bits": ["32", "64"]},
     "completion": {"shell": ["bash", "zsh"]},
     "bridge": {"subverb": ["ls", "provision", "setup", "tailnet", "status", "rm"]},

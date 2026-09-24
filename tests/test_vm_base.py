@@ -15,10 +15,12 @@ helpers -- no VM, no guest, no ssh.
 
 Run: python3 -m unittest tests.test_vm_base -v
 """
+import inspect
 import os
 import platform
 import shutil
 import subprocess
+import sys
 import unittest
 
 from tests.support import (REPO, WkTest, assert_guest_start_converges, bash,
@@ -445,24 +447,26 @@ class TestTheGuestKeepsTheImagesPassword(WkTest):
 
 class TestEveryHandoverStatesTheLogin(WkTest):
     """`wk start <guest>` said nothing about the login before this: it goes
-    through t_start, which did not state it, while `wk vm start` stated it in
-    the command instead. One exit in t_start is what makes both say it."""
+    through a start that did not state it, while `wk vm start` stated it in
+    the command instead. One exit in lib/wk/guest.py's start is what makes both say it."""
 
-    def test_t_start_states_the_login_on_its_one_exit(self):
-        body = func_body((REPO / "targets" / "vm.sh").read_text(), "t_start")
+    def test_a_start_states_the_login_on_its_one_exit(self):
+        sys.path.insert(0, str(REPO / "lib"))
+        from wk import guest
+        body = inspect.getsource(guest.start)
         self.assertEqual(1, body.count("vm_login_note"), body)
-        # A second `echo "$ip"` would be a return path that skips the note.
-        self.assertEqual(1, body.count('echo "$ip"'), body)
+        # A second return would be a path that skips the note.
+        self.assertEqual(1, body.count("return "), body)
 
     def test_the_note_is_not_restated_by_the_command_that_starts_a_guest(self):
-        """cmd/vm's start arm calls t_start, so a call of its own prints it
+        """cmd/vm's start arm calls that start, so a call of its own prints it
         twice."""
         src = (REPO / "cmd" / "vm").read_text()
         arm = src.split("\nstart)", 1)[1].split("\nstop)", 1)[0]
         self.assertNotIn("vm_login_note", arm, arm)
 
     def test_the_attach_paths_state_it_themselves(self):
-        """`wk zed` and `wk vm enter` never call t_start -- they attach to a
+        """`wk zed` and `wk vm enter` never start a guest -- they attach to a
         guest that is already up -- so each states it directly."""
         self.assertIn("vm_login_note", (REPO / "cmd" / "zed").read_text())
         enter = (REPO / "cmd" / "vm").read_text().split("\nenter)", 1)[1]
@@ -483,8 +487,9 @@ class TestTheGuestReadsTheHostsMirror(WkTest):
         self.assertNotIn("WK_VM_MIRROR=", VM.read_text(), "targets/vm.sh still hands provisioning a mirror path")
 
     def test_the_guest_is_booted_with_the_mirror_share_read_only(self):
-        boot = func_body(VM.read_text(), "_boot")
-        self.assertIn('--dir="$WK_VM_MIRROR_SHARE:$(dirname "$(wk_mirror)"):ro"', boot)
+        sys.path.insert(0, str(REPO / "lib"))
+        from wk import guest
+        self.assertIn('"--dir=%s:%s:ro" % (vm.mirror_share, os.path.dirname(vm.store.mirror()))', inspect.getsource(guest.boot))
 
     def test_a_guest_is_not_made_on_a_machine_with_no_mirror(self):
         """The refusal is at creation, before a base is built or cloned: a

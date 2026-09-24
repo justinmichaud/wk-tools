@@ -17,6 +17,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from tests.support import REPO, WkTest, run
 
@@ -47,7 +48,7 @@ class DriverTest(unittest.TestCase):
         self.tmp = Path(tempfile.mkdtemp(prefix="wk-test-zed-"))
         self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
         self.env = {"HOME": str(self.tmp / "home"), "WK_STORE": str(self.tmp / "store"),
-                    "WK_TARGET_REGISTRY": str(self.tmp / "hosts"), "WK_IN_VM": "1",
+                    "WK_MACHINES_DIR": str(self.tmp / "hosts"), "WK_IN_VM": "1",
                     "WK_ZED_PUBKEY": "ssh-ed25519 AAAAstub test",
                     "PATH": os.environ.get("PATH", "")}
         (self.tmp / "home").mkdir()
@@ -56,7 +57,8 @@ class DriverTest(unittest.TestCase):
         self.reg = targets.Registry(REPO, env=self.env, machine=self.fake)
 
     def conf(self, name, text):
-        (self.tmp / "hosts" / (name + ".conf")).write_text(text)
+        kind = "KIND=%s\n" % ("peer" if "WK_REMOTE_PEER=1" in text else "build")
+        (self.tmp / "hosts" / (name + ".conf")).write_text(kind + text)
 
 
 class TestContainerAlias(DriverTest):
@@ -102,6 +104,34 @@ class TestContainerAlias(DriverTest):
         self.t.ssh_prepare("demo")
         installed = [e for e in self.fake.effects if e[0] == "run" and any("ensure-bridge.sh" in a for a in e[1])]
         self.assertTrue(installed)
+
+
+class TestToolsTargetResolvedOnce(TestContainerAlias):
+    """`wk zed --tools <ws>` used to resolve `<ws>`'s target once to ask
+    whether it exists (`reg.locate`, a fleet-wide probe) and again to pick it
+    (`reg.ws_target`, the same probe) -- one `Registry.locate` call now
+    answers both."""
+
+    def setUp(self):
+        super().setUp()
+        self.fake.dirs.add(self.reg.load("container").store.ws_dir("demo"))
+        self.fake.answer(["podman", "exec", "wk-demo", "/opt/wk-tools/container/proxy/ensure-bridge.sh"], out="")
+
+    def test_locate_is_called_once(self):
+        calls = {"n": 0}
+        real_locate = targets.Registry.locate
+
+        def counting_locate(reg_self, ws):
+            calls["n"] += 1
+            return real_locate(reg_self, ws)
+
+        with mock.patch.object(targets.Registry, "locate", counting_locate), \
+                mock.patch.object(ZED.targets, "Registry", return_value=self.reg), \
+                mock.patch.object(ZED.targets, "zed_cli", return_value="/usr/bin/zed"), \
+                mock.patch.object(ZED, "emit") as emit:
+            ZED.main(["--tools", "demo"])
+        self.assertEqual(calls["n"], 1)
+        emit.assert_called_once_with(False, "/usr/bin/zed", "ssh://wk-demo/opt/wk-tools")
 
 
 class SshFake(Fake):
@@ -178,7 +208,7 @@ class TestBrokenRefusesNamingTheRepair(unittest.TestCase):
         self.tmp = Path(tempfile.mkdtemp(prefix="wk-test-zed-broken-"))
         self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
         self.env = {"HOME": str(self.tmp / "home"), "WK_STORE": str(self.tmp / "store"),
-                    "WK_TARGET_REGISTRY": str(self.tmp / "hosts"), "WK_IN_VM": "1",
+                    "WK_MACHINES_DIR": str(self.tmp / "hosts"), "WK_IN_VM": "1",
                     "PATH": os.environ.get("PATH", "")}
         (self.tmp / "home").mkdir()
         (self.tmp / "hosts").mkdir()
@@ -226,6 +256,28 @@ class TestZedRoute(WkTest):
         cp = run("zed", "demo", "--route", "--tools")
         self.assertNotEqual(cp.returncode, 0)
         self.assertIn("--route describes a workspace", cp.stdout)
+
+
+class TestZedCli(unittest.TestCase):
+    """`targets.zed_cli`: the one answer `cmd/zed` (which binary to exec into)
+    and `wk doctor` (whether one exists at all) both read."""
+
+    def test_a_zed_on_path_wins(self):
+        fake = Fake()
+        fake.answer(["which", "zed"], out="/usr/local/bin/zed\n")
+        self.assertEqual(targets.zed_cli(fake), "/usr/local/bin/zed")
+
+    def test_a_drag_installed_bundle_with_no_path_symlink_is_found(self):
+        fake = Fake()
+        fake.answer(["which", "zed"], rc=1)
+        fake.answer(["test", "-x", "/Applications/Zed.app/Contents/MacOS/cli"], rc=0)
+        self.assertEqual(targets.zed_cli(fake), "/Applications/Zed.app/Contents/MacOS/cli")
+
+    def test_neither_is_not_installed(self):
+        fake = Fake()
+        fake.answer(["which", "zed"], rc=1)
+        fake.answer(["test", "-x", "/Applications/Zed.app/Contents/MacOS/cli"], rc=1)
+        self.assertIsNone(targets.zed_cli(fake))
 
 
 class TestDeclaration(WkTest):

@@ -114,7 +114,7 @@ class TestTheResolvedTargetIsHandedOn(WkTest):
                 env={
                     "PATH": f"{binp}:{os.environ.get('PATH', '/usr/bin:/bin')}",
                     "HOME": str(self.tmp / "home"),
-                    "WK_TARGET_REGISTRY": str(self.registry),
+                    "WK_MACHINES_DIR": str(self.registry),
                     "XDG_STATE_HOME": str(self.tmp / "state"),
                     "WK_TEST_WITNESS": str(self.witness),
                     "WK_TEST_SSH_WITNESS": str(self.witness),

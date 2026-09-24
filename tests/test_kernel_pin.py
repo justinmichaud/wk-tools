@@ -142,7 +142,7 @@ class TestWiring(unittest.TestCase):
         self.assertIn("BR_KERNEL_RELEASE=", conf)
 
     def test_the_driver_refuses_a_half_declared_pin(self):
-        text = (REPO / "image" / "buildroot.sh").read_text()
+        text = (REPO / "lib" / "wk" / "sysimage" / "buildroot.py").read_text()
         self.assertIn("BR_KERNEL_DEB_SHA256", text)
         self.assertIn("is not pinned", text)
 
@@ -150,7 +150,7 @@ class TestWiring(unittest.TestCase):
         """the build image has dpkg-deb and xz but no kmod; preparing in the
         build would mean adding a tool to a container to run a command the
         driving machine already has."""
-        self.assertIn("kernel-pin.sh", (REPO / "image" / "buildroot.sh").read_text())
+        self.assertIn("kernel-pin.sh", (REPO / "lib" / "wk" / "sysimage" / "buildroot.py").read_text())
         build = (REPO / "image" / "buildroot-build.sh").read_text()
         self.assertNotIn("depmod", build, "the build image has no depmod")
 

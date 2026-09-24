@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
-# Denies the hosts macOS software update scans, in /etc/hosts, on a bench install only.
-# mesu and gdmf still answer OTA/DDM check-ins with automatic checking off, so the whole scan path is denied: catalogs, both CDNs, xp.apple.com.
+# Denies the hosts macOS software update scans, in /etc/hosts, on a bench install only. The list is quiet/macos-hosts.txt beside this file.
 
-WK_BENCH_HOSTS_LIST="swscan.apple.com swdist.apple.com swcdn.apple.com swdownload.apple.com mesu.apple.com gdmf.apple.com updates.cdn-apple.com updates-http.cdn-apple.com xp.apple.com"
+WK_BENCH_HOSTS_LIST=$(grep -v '^#' "$(dirname "${BASH_SOURCE[0]:-.}")/quiet/macos-hosts.txt" 2>/dev/null || true)
 
 WK_BENCH_HOSTS_BEGIN="# wk-bench: software update denial -- begin"
 WK_BENCH_HOSTS_END="# wk-bench: software update denial -- end"
@@ -11,6 +10,7 @@ _wk_bench_hosts_say() { printf '%s\n' "$*" >&2; }
 
 wk_bench_hosts_lines() {
     local h
+    [ -n "$WK_BENCH_HOSTS_LIST" ] || { _wk_bench_hosts_say "  hosts: no quiet/macos-hosts.txt beside mac-quiet-hosts.sh, so no list to deny"; return 1; }
     for h in $WK_BENCH_HOSTS_LIST; do
         printf '0.0.0.0 %s\n' "$h"
     done
@@ -18,7 +18,7 @@ wk_bench_hosts_lines() {
 
 wk_bench_hosts_block() {
     printf '%s\n' "$WK_BENCH_HOSTS_BEGIN"
-    wk_bench_hosts_lines
+    wk_bench_hosts_lines || return 1
     printf '%s\n' "$WK_BENCH_HOSTS_END"
 }
 
@@ -31,7 +31,7 @@ wk_bench_hosts_present() {
         $0 == e { on=0 }
         on { print }
     ' "$hosts" 2>/dev/null)
-    want=$(wk_bench_hosts_lines)
+    want=$(wk_bench_hosts_lines) || return 1
     [ "$got" = "$want" ]
 }
 
@@ -67,7 +67,7 @@ _wk_bench_hosts_write() {   # <hosts> [with-block]
             !skip { print }
         ' "$hosts" > "$tmp"
     fi
-    if [ -n "$want_block" ]; then wk_bench_hosts_block >> "$tmp"; fi
+    if [ -n "$want_block" ]; then wk_bench_hosts_block >> "$tmp" || { rm -f "$tmp"; return 1; }; fi
 
     if ! cat "$tmp" > "$hosts" 2>/dev/null; then
         rm -f "$tmp"

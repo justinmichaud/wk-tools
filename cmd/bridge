@@ -11,7 +11,7 @@
 # A bridge is a phone with two legs: WiFi to the house, USB-C Ethernet to a
 # segment with no other way onto the tailnet -- a BMC's management port, or a
 # test board on a cable. Spec: bridge/provision.sh, bridge/bin and
-# bridge/hosts/<name>.conf; the phone holds a copy, never the original. It
+# machines/<name>.conf; the phone holds a copy, never the original. It
 # runs postmarketOS; getting pmOS onto the device is a hands-on,
 # once-per-phone job (wk help).
 #
@@ -55,40 +55,23 @@ WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 . "$WK_ROOT/boot/disk.sh"
 . "$WK_ROOT/bridge/devices.sh"
 
-bridge_registry_dir() { echo "$WK_ROOT/bridge/hosts"; }
-bridge_conf_dir()     { echo "${XDG_CONFIG_HOME:-$HOME/.config}/wk/bridges"; }
-
-bridge_conf() {
-    local c
-    for c in "$(bridge_conf_dir)/$1.conf" "$(bridge_registry_dir)/$1.conf"; do
-        [ -f "$c" ] && { printf '%s' "$c"; return 0; }
-    done
-    return 1
-}
-
-bridge_names() {
-    local f
-    for f in "$(bridge_registry_dir)"/*.conf "$(bridge_conf_dir)"/*.conf; do
-        [ -f "$f" ] || continue
-        basename "$f" .conf
-    done | sort -u
-}
+bridge_names() { wk_fleet list --kind bridge; }
 
 load_bridge() {
-    local name="$1" conf
-    conf=$(bridge_conf "$name") || die "no such bridge '$name'.
+    local name="$1" conf out
+    conf=$(wk_fleet path "$name")
+    out=$(wk_fleet load "$name" --kind bridge) || die "no such bridge '$name'.
     Declared bridges:$(bridge_names | sed 's/^/ /' | tr -d '\n')
-    A bridge is a conf file: $(bridge_registry_dir)/<name>.conf
-    (shared, in this repository) or $(bridge_conf_dir)/<name>.conf (this
-    device only). See 'wk help'."
+    A bridge is a conf with KIND=bridge: machines/<name>.conf (shared, in this
+    repository) or ~/.config/wk/machines/<name>.conf (this device only, its
+    keys over the shared one's). See 'wk help'."
 
     BR_NAME="$name"
     BR_DEVICE=""; BR_SSH=""; BR_HOSTNAME=""; BR_TAG=""; BR_SEGMENT=""
     BR_ROUTER=""; BR_IF=""; BR_POOL=""; BR_LEASES=""; BR_EGRESS=""
     BR_CAMERA=""; BR_REACHED_BY=""; BR_NOTE=""; BR_LAN_MAC=""; BR_CARD=""
     BR_USER=""; BR_BATTERY=""; BR_BATTERY_LIMIT=""
-    # shellcheck disable=SC1090
-    . "$conf"
+    eval "$out"
     BR_CONF="$conf"
 
     [ -n "$BR_DEVICE" ]   || die "$conf sets no BR_DEVICE (pinephone | librem5)"
@@ -285,7 +268,6 @@ bridge_bootstrap_root() {
               "doas sh -c 'install -d -o root -g root -m 700 /root/.ssh && install -o root -g root -m 600 $target /root/.ssh/authorized_keys'" \
               >/dev/null 2>&1 || true
 
-    # With a pty, ssh's exit status is about the pty, so the test is whether root now answers.
     host="${BR_SSH#*@}"
     if _reaches "root@$host"; then
         BR_SSH="root@$host"
@@ -380,7 +362,7 @@ cmd_ls() {
               "$BR_NAME" "$BR_DEVICE" "$BR_SEGMENT" "$state" "${BR_NOTE:-}" ) \
             || warn "$name: its conf does not load -- 'wk bridge status $name' says why"
     done
-    [ -n "$any" ] || log "(no bridges declared -- bridge/hosts/*.conf)"
+    [ -n "$any" ] || log "(no bridges declared -- machines/*.conf with KIND=bridge)"
     log ""
     log "  bare         answers ssh, nothing of this role on it yet"
     log "  provisioned  'wk bridge setup' has run against it"

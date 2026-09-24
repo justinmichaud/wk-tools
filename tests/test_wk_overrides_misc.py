@@ -112,9 +112,6 @@ class TestExprOverrideMechanism(WkTest):
         self.assertEqual(overridden, override, f"{var} in {path} does not override")
         self.assertNotEqual(default, override, f"{var} in {path} defaults to the override value by coincidence")
 
-    def test_wk_buildroot_base(self):
-        self._assert_overridable(IMAGE / "buildroot.sh", "WK_BUILDROOT_BASE")
-
     def test_wk_yocto_base(self):
         self._assert_overridable(IMAGE / "yocto.sh", "WK_YOCTO_BASE")
 
@@ -218,7 +215,7 @@ class TestMacLaneOverrides(WkTest):
         conf_dir = self.tmp / "machines"
         conf_dir.mkdir()
         (conf_dir / "faketest.conf").write_text(
-            f'NODE_SSH={FAKE_SSH}\nNODE_DRIVER=mac-volume\nNODE_NOTE="wk-selftest fake machine"\n'
+            f'KIND=mac\nNODE_SSH={FAKE_SSH}\nNODE_DRIVER=mac-volume\nNODE_NOTE="wk-selftest fake machine"\n'
         )
         env = {"WK_MACHINES_DIR": str(conf_dir), "WK_MAC_MACHINE": "faketest"}
 

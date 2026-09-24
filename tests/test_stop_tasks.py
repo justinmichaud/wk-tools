@@ -15,10 +15,14 @@ import os
 import shlex
 import shutil
 import subprocess
+import sys
 import unittest
 from pathlib import Path
 
 from tests.support import REPO, WkTest, bash
+
+sys.path.insert(0, str(REPO / "lib"))
+from wk import record  # noqa: E402
 
 
 def alive(pid):
@@ -127,17 +131,12 @@ class TestStopTasks(WkTest):
         self.assertIn("--keep-vm", cp.stdout)
 
 
-class TestWhichVerdictsAreStillGoing(WkTest):
-    """task_running() is the one place that decides it, so `wk stop --tasks`
+class TestWhichVerdictsAreStillGoing(unittest.TestCase):
+    """lib/wk/record.py's RUNNING is the one place that decides it, so `wk stop --tasks`
     and anything else that acts on a task agree on what is over."""
 
     def verdicts(self, *words):
-        script = ['. "$WK_ROOT/lib/task.sh"']
-        for w in words:
-            script.append('task_running %s && echo "%s yes" || echo "%s no"' % (w, w, w))
-        cp = bash("\n".join(script))
-        self.assertEqual(0, cp.returncode, cp.stdout + cp.stderr)
-        return dict(line.split() for line in cp.stdout.split("\n") if line)
+        return {w: "yes" if w in record.RUNNING else "no" for w in words}
 
     def test_a_task_with_no_exit_recorded_is_still_going(self):
         got = self.verdicts("starting", "running", "silent", "unanswered")

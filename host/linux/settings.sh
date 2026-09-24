@@ -5,7 +5,7 @@ _dconf="$WK_ROOT/host/linux/config.dconf"
 if ! have dconf; then
     warn "dconf not installed; skipping desktop settings"
 elif [ ! -f "$_dconf" ]; then
-    warn "no config.dconf; run 'wk backup' on a configured machine first"
+    warn "no config.dconf; run 'wk key backup' on a configured machine first"
 elif [ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ]; then
     warn "no session bus; run ./setup from inside a graphical session to apply GNOME settings"
 else

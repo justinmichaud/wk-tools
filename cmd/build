@@ -44,43 +44,20 @@ import sys
 ROOT = os.environ.get("WK_ROOT") or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "lib"))
 
-from wk import build, targets  # noqa: E402
+from wk import build, decl, targets  # noqa: E402
 from wk.act import Refused  # noqa: E402
 
 
 def parse(argv):
-    """The options as the dispatcher hands them on, a declared `--x=` as `--x <value>`."""
-    o = {"cmake": [], "env": [], "pass": []}
-    i = 0
-    while i < len(argv):
-        a = argv[i]
-        v = argv[i + 1] if i + 1 < len(argv) else ""
-        i += 1
-        if a == "--":
-            o["pass"] += argv[i:]
-            break
-        if a == "--list":
-            o["list"] = True
-        elif a == "--kill":
-            o["kill"] = True
-        elif a == "--detach":
-            o["detach"] = True
-        elif a == "--no-defaults":
-            o["no_defaults"] = True
-        elif a == "--babysit":
-            o["babysit"] = True
-        elif a == "--_babysit":
-            o["babysit_driver"] = True
-        elif a == "--branch" or a == "--mem-budget" or a == "--mem-floor" or a == "--cmakeargs" or a == "--sysroot":
-            o[a[2:].replace("-", "_")] = v
-            i += 1
-        elif a == "--cmake" or a == "--env":
-            o[a[2:]].append(v)
-            i += 1
-        elif "config" not in o:
-            o["config"] = a
-        else:
-            o["pass"].append(a)
+    a = decl.Args(decl.Decl(__file__), argv)
+    o = {"list": a.flag("--list"), "kill": a.flag("--kill"), "detach": a.flag("--detach"),
+         "no_defaults": a.flag("--no-defaults"), "babysit": a.flag("--babysit"),
+         "babysit_driver": a.flag("--_babysit"), "branch": a.value("--branch"),
+         "mem_budget": a.value("--mem-budget"), "mem_floor": a.value("--mem-floor"),
+         "cmakeargs": a.value("--cmakeargs"), "sysroot": a.value("--sysroot"),
+         "cmake": a.values("--cmake"), "env": a.values("--env"), "pass": a.positionals[1:] + a.tail}
+    if a.positionals:
+        o["config"] = a.positionals[0]
     return o
 
 

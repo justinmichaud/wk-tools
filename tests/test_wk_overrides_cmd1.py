@@ -9,39 +9,20 @@ lifts _netplan_wifi). Nothing here touches real hardware, a podman VM, or a
 workspace; WK_LOCK_DIR/WK_BENCH_ROOT/WK_IMAGE_MARKER point every test at a
 scratch directory.
 
-Two things these tests pin down at the source level:
-
-  - cmd/bench raises WK_STALL_SECONDS/WK_ABORT_SECONDS to 900/5400 *before*
-    sourcing lib/watchdog.sh (whose own `:-300`/`:-1800` defaults must find
-    these already set, not lock in first).
-  - bench_padded_path uses two separate `local` statements for `dir` and
-    `link`, because a single `local a=.. b=..` expands every RHS before
-    assigning any of them, so `link="$dir/Y"` would read $dir's old value in
-    every bash tested (3.2 and 5.2).
-
 Run: python3 -m unittest tests.test_wk_overrides_cmd1 -v
 """
 import re
-import subprocess
 import sys
 import unittest
 
 from tests.support import REPO, WkTest, bash, fake_workspace, run, scratch_dir
+from tests.test_bench_pipeline import BenchTest, World
 
-BENCH = REPO / "cmd" / "bench"
+from wk.act import Refused  # noqa: E402
+
+BENCH = REPO / "lib" / "bench-arms.sh"
 BRIDGE = REPO / "cmd" / "bridge"
 BUILD_PY = REPO / "lib" / "wk" / "build.py"
-
-
-def _lift_func(path, name):
-    """A function's body, sed'd out of a shell file (tests/test_wifi_seed.py's
-    _lift) so the test calls the exact code that ships, not a hand copy."""
-    text = subprocess.run(
-        ["sed", "-n", f"/^{name}() {{/,/^}}/p", str(path)],
-        capture_output=True, text=True,
-    ).stdout
-    assert text.strip(), f"{name}() not found in {path}"
-    return text
 
 
 def _lift_range(path, start_needle, end_needle, end_exact=False):
@@ -70,183 +51,33 @@ def _extract_expr(path, needle_re):
     return m.group(0)
 
 
-class TestBenchWatchdogOrdering(WkTest):
-    """cmd/bench raises the build watchdog's defaults for a benchmark's
-    longer legitimate silence; the raise has to land before lib/watchdog.sh
-    is sourced, not after, or its own :-300/:-1800 defaults win."""
+class TestBenchRunKnobs(BenchTest):
+    """`wk bench run`'s own reads (lib/wk/bench/pipeline.py): WK_BENCH_MAX_LOAD is the 1-minute load
+    average, rounded, above which preflight calls the machine busy (default 4); WK_BENCH_ASLR=off runs
+    the benchmark under setarch -R, and unset runs it as it is."""
 
-    def _snippet(self):
-        return _lift_range(
-            BENCH,
-            'WK_STALL_SECONDS="${WK_STALL_SECONDS:-900}"',
-            '. "$WK_ROOT/lib/watchdog.sh"',
-        )
-
-    def test_defaults_are_the_bench_values_not_the_build_watchdogs(self):
-        """WK_STALL_SECONDS=900, WK_ABORT_SECONDS=5400 by default in cmd/bench"""
-        script = f'. "{REPO}/lib/common.sh"\n{self._snippet()}\necho "$WK_STALL_SECONDS $WK_ABORT_SECONDS"'
-        cp = bash(script)
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertEqual(cp.stdout.strip(), "900 5400", cp.stdout + cp.stderr)
-
-    def test_an_explicit_override_still_wins(self):
-        """WK_STALL_SECONDS/WK_ABORT_SECONDS set in the environment survive the source"""
-        script = f'. "{REPO}/lib/common.sh"\n{self._snippet()}\necho "$WK_STALL_SECONDS $WK_ABORT_SECONDS"'
-        cp = bash(script, env={"WK_STALL_SECONDS": "12", "WK_ABORT_SECONDS": "34"})
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertEqual(cp.stdout.strip(), "12 34", cp.stdout + cp.stderr)
-
-
-class TestBenchVarianceKnobs(WkTest):
-    """WK_BENCH_ASLR, WK_BENCH_ENV_PAD, WK_BENCH_PATH_PAD and
-    WK_BENCH_SHARED_CACHE: documented in cmd/bench's -h header (bench/*.sh
-    and cmd/pi read the same names, owned by whoever owns those files)."""
-
-    def test_aslr_off_prefixes_setarch(self):
-        fn = _lift_func(BENCH, "bench_aslr_wrap")
-        cp = bash(f"{fn}\nWK_BENCH_ASLR=off bench_aslr_wrap")
-        self.assertIn("setarch", cp.stdout, cp.stdout + cp.stderr)
-
-    def test_aslr_default_is_empty(self):
-        fn = _lift_func(BENCH, "bench_aslr_wrap")
-        cp = bash(f"{fn}\nbench_aslr_wrap; echo END")
-        self.assertEqual(cp.stdout.strip(), "END", cp.stdout + cp.stderr)
-
-    def test_env_pad_exports_a_dummy_of_the_requested_size(self):
-        fn = _lift_func(BENCH, "bench_env_pad_prelude")
-        cp = bash(f'{fn}\nWK_BENCH_ENV_PAD=200 bench_env_pad_prelude')
-        self.assertIn("head -c 200", cp.stdout, cp.stdout + cp.stderr)
-
-    def test_env_pad_default_is_nothing(self):
-        fn = _lift_func(BENCH, "bench_env_pad_prelude")
-        cp = bash(f"{fn}\nbench_env_pad_prelude; echo END")
-        self.assertEqual(cp.stdout.strip(), "END", cp.stdout + cp.stderr)
-
-    def test_path_pad_creates_a_symlink_under_the_padded_directory(self):
-        """regression test for the `local dir=X link=$dir/Y` bug: link must
-        land under $dir, not at the filesystem root"""
-        fn = _lift_func(BENCH, "bench_padded_path")
-        cp = bash(f'{fn}\nbench_padded_path "" /tmp/wk-test-pad-target; printf "\\n"',
-                   env={"WK_BENCH_PATH_PAD": "5"})
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        link = cp.stdout.strip()
-        self.assertTrue(
-            link.startswith("/tmp/wk-bench-pad-"),
-            f"padded link should live under /tmp/wk-bench-pad-*, got {link!r}",
-        )
-        self.assertTrue(link.endswith("/wk-test-pad-target"), link)
-
-    def test_path_pad_default_leaves_the_target_unchanged(self):
-        fn = _lift_func(BENCH, "bench_padded_path")
-        cp = bash(f'{fn}\nbench_padded_path "" /tmp/wk-test-pad-target; printf "\\n"')
-        self.assertEqual(cp.stdout.strip(), "/tmp/wk-test-pad-target", cp.stdout + cp.stderr)
-
-    def test_shared_cache_avoid_sets_dyld_shared_region(self):
-        expr = _extract_expr(
-            BENCH, r'\[ "\$\{WK_BENCH_SHARED_CACHE:-\}" = avoid \].*$',
-        )
-        cp = bash(f'shared_cache_env=""\n{expr}\necho "$shared_cache_env"',
-                   env={"WK_BENCH_SHARED_CACHE": "avoid"})
-        self.assertIn("DYLD_SHARED_REGION=avoid", cp.stdout, cp.stdout + cp.stderr)
-
-    def test_shared_cache_default_leaves_it_unset(self):
-        expr = _extract_expr(
-            BENCH, r'\[ "\$\{WK_BENCH_SHARED_CACHE:-\}" = avoid \].*$',
-        )
-        cp = bash(f'shared_cache_env=""\n{expr}\necho "[$shared_cache_env]"')
-        self.assertEqual(cp.stdout.strip(), "[]", cp.stdout + cp.stderr)
-
-
-class TestBenchRootAndMachine(WkTest):
-    """staged_root: WK_BENCH_ROOT is the escape hatch host mode uses to
-    reach bench mode's code path without rebooting into it (tested already
-    by tests/test_host_only.py's test_bench_role_required_or_it_does_not_run);
-    WK_BENCH_MACHINE is the only way host mode can tell which fleet Mac it
-    is running on -- there is no default, by design."""
-
-    def _fn(self):
-        return _lift_func(BENCH, "staged_root")
-
-    def test_bench_root_wins_over_everything_else(self):
-        with scratch_dir(prefix="wk-test-bench-root-") as d:
-            explicit = d / "explicit"
-            cp = bash(
-                f'. "{REPO}/lib/common.sh"\n{self._fn()}\nstaged_root; printf "\\n"',
-                env={"WK_BENCH_ROOT": str(explicit), "WK_IMAGE_MARKER": str(d / "no-marker")},
-            )
-            self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-            self.assertEqual(cp.stdout.strip(), str(explicit))
-
-    def test_bench_machine_unset_refuses_with_its_own_reason(self):
-        with scratch_dir(prefix="wk-test-bench-machine-") as d:
-            cp = bash(
-                f'. "{REPO}/lib/common.sh"\n{self._fn()}\nrc=0; staged_root || rc=$?; echo "rc=$rc"',
-                env={"WK_IMAGE_MARKER": str(d / "no-marker"), "WK_DEBUG": "1"},
-            )
-            self.assertIn("rc=1", cp.stdout, cp.stdout + cp.stderr)
-            self.assertIn("WK_BENCH_MACHINE is not set", cp.stderr, cp.stdout + cp.stderr)
-
-    def test_bench_machine_set_takes_a_different_path(self):
-        """with WK_BENCH_MACHINE set, staged_root gets past the "not set"
-        early return -- it still fails (no such fleet machine here), but not
-        for the same reason, which is the observable effect of the override"""
-        with scratch_dir(prefix="wk-test-bench-machine-") as d:
-            cp = bash(
-                f'. "{REPO}/lib/common.sh"\n{self._fn()}\nrc=0; staged_root || rc=$?; echo "rc=$rc"',
-                env={
-                    "WK_IMAGE_MARKER": str(d / "no-marker"),
-                    "WK_DEBUG": "1",
-                    "WK_BENCH_MACHINE": "wk-test-nonexistent-machine",
-                },
-            )
-            self.assertIn("rc=1", cp.stdout, cp.stdout + cp.stderr)
-            self.assertNotIn("WK_BENCH_MACHINE is not set", cp.stderr, cp.stdout + cp.stderr)
-
-
-class TestBenchPython(WkTest):
-    """staged_python: WK_BENCH_PYTHON overrides the search for a python3
-    with `objc` importable, and a bad override falls back rather than
-    breaking the run."""
-
-    def _fn(self):
-        return _lift_func(BENCH, "staged_python")
-
-    def test_override_is_tried_first_and_used_if_it_works(self):
-        with scratch_dir(prefix="wk-test-bench-python-") as d:
-            fake = d / "fake-python3"
-            fake.write_text("#!/bin/sh\nexit 0\n")
-            fake.chmod(0o755)
-            cp = bash(f'{self._fn()}\nstaged_python; printf "\\n"',
-                       env={"WK_BENCH_PYTHON": str(fake)})
-            self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-            self.assertEqual(cp.stdout.strip(), str(fake))
-
-    def test_a_broken_override_falls_back_instead_of_failing(self):
-        with scratch_dir(prefix="wk-test-bench-python-") as d:
-            cp = bash(f'{self._fn()}\nstaged_python; printf "\\n"',
-                       env={"WK_BENCH_PYTHON": str(d / "does-not-exist")})
-            self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-            self.assertNotEqual(cp.stdout.strip(), str(d / "does-not-exist"))
-
-
-class TestBenchMaxLoad(WkTest):
-    """preflight's idle check: WK_BENCH_MAX_LOAD is the 1-minute load
-    average above which the machine is called busy (default 4)."""
-
-    def _expr(self):
-        return _extract_expr(BENCH, r'\[ "\$\(printf .*WK_BENCH_MAX_LOAD:-4\}" \]')
+    def _load(self, load, env=None):
+        self.w = World(self.tmp)
+        self.w.files["/proc/loadavg"] = "%s 1.00 1.00 1/100 1\n" % load
+        try:
+            self.run_(extra=env)
+        except Refused:
+            return "busy"
+        return "idle"
 
     def test_default_threshold_is_4(self):
-        expr = self._expr()
-        busy = bash(f'load=5\n{expr} && echo busy || echo idle')
-        idle = bash(f'load=4\n{expr} && echo busy || echo idle')
-        self.assertEqual(busy.stdout.strip(), "busy", busy.stdout + busy.stderr)
-        self.assertEqual(idle.stdout.strip(), "idle", idle.stdout + idle.stderr)
+        self.assertEqual((self._load("5.00"), self._load("4.00")), ("busy", "idle"))
 
     def test_override_raises_the_threshold(self):
-        expr = self._expr()
-        cp = bash(f'load=5\n{expr} && echo busy || echo idle', env={"WK_BENCH_MAX_LOAD": "10"})
-        self.assertEqual(cp.stdout.strip(), "idle", cp.stdout + cp.stderr)
+        self.assertEqual(self._load("5.00", {"WK_BENCH_MAX_LOAD": "10"}), "idle")
+
+    def test_aslr_off_prefixes_setarch(self):
+        self.run_(extra={"WK_BENCH_ASLR": "off"})
+        self.assertIn("setarch $(uname -m) -R -- ", self.w.watched[0][-1])
+
+    def test_aslr_default_is_empty(self):
+        self.run_()
+        self.assertNotIn("setarch", self.w.watched[0][-1])
 
 
 class TestBridgeAuthkey(WkTest):

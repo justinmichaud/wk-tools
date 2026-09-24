@@ -5,6 +5,8 @@ bench_payload_files() {   # <source, repo-relative> <dest under the root> <mode>
 bench/mac-bench-firstboot.sh usr/local/libexec/wk-bench-firstboot.sh 0755
 bench/mac-quiet-hosts.sh     usr/local/libexec/wk-bench-quiet-hosts.sh 0644
 bench/mac-quiet-desktop.sh   usr/local/libexec/wk-bench-quiet-desktop.sh 0644
+bench/quiet/macos.tsv        usr/local/libexec/quiet/macos.tsv 0644
+bench/quiet/macos-hosts.txt  usr/local/libexec/quiet/macos-hosts.txt 0644
 bench/mac-pyobjc.sh          usr/local/libexec/wk-bench-pyobjc.sh 0644
 ROWS
 }
@@ -12,7 +14,7 @@ ROWS
 stage_payload() {   # <root> [privilege prefix...]
     local root="$1"; shift
     local src dest mode
-    run "$@" install -d -m 0755 "$root/usr/local/libexec" "$root/usr/local/share/wk-bench"
+    run "$@" install -d -m 0755 "$root/usr/local/libexec" "$root/usr/local/libexec/quiet" "$root/usr/local/share/wk-bench"
     while read -r src dest mode; do
         [ -n "$src" ] || continue
         run "$@" install -m "$mode" "$WK_ROOT/$src" "$root/$dest"

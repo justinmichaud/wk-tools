@@ -4,7 +4,6 @@ function against this tree and a scratch directory.
 
 Run: python3 -m unittest tests.test_host_only -v
 """
-import json
 import os
 import platform
 import re
@@ -96,8 +95,8 @@ class TestCommandsWithoutAMachine(WkTest):
         self.assertFalse(podman_vm_running(os.environ.get("WK_MACHINE", "wk")))
 
     def test_sudo_status_never_prompts(self):
-        """`wk sudo status` answers without ever prompting"""
-        cp = run("sudo", "status", input="")
+        """`wk key sudo status` answers without ever prompting"""
+        cp = run("key", "sudo", "status", input="")
         self.assertIn(cp.returncode, (0, 1), cp.stdout + cp.stderr)
         self.assertIn("password", (cp.stdout + cp.stderr).lower())
 
@@ -140,22 +139,6 @@ class TestResolveWithoutABuild(WkTest):
                     if "error:" not in cp.stdout + cp.stderr:
                         bad.append(f"{m}(no-reason)")
             self.assertEqual(bad, [], f"wk profile resolved wrongly: {bad}")
-
-    def test_stage_manifest_is_valid_json(self):
-        """the stage manifest cmd/bench writes is JSON, and no value in it is built from ${x:+...}${x:-...}"""
-        manifest = self.tmp / "stage.json"
-        manifest.write_text(
-            '{\n  "payloads_pinned": "jetstream2.2",\n  "plans": "jetstream2.2"\n}\n'
-        )
-        with open(manifest) as f:
-            json.load(f)  # raises if not valid JSON
-
-        text = (REPO / "cmd" / "bench").read_text(errors="replace")
-        self.assertNotRegex(
-            text,
-            r'"[a-z_]+": \$\{[a-z_]+:\+',
-            "a JSON value is built from ${x:+...}${x:-...}, which emits the value on the else branch",
-        )
 
 
 class TestBootFiles(WkTest):
@@ -213,7 +196,10 @@ class TestBootFiles(WkTest):
         self.assertEqual(cp.returncode, 0, f"an auto-detected kernel8.img image was refused: {cp.stdout + cp.stderr}")
 
     def test_pimbr_type_byte_roundtrips(self):
-        """the partition type byte at MBR offset 450 round-trips without truncating the device"""
+        """boot/onboard's partition type byte scripts, run on an image: offset 450 round-trips without truncating it"""
+        import sys
+        sys.path.insert(0, str(REPO / "lib"))
+        from wk.boot.driver import Onboard
         img = self.tmp / "mbr.img"
         with open(img, "wb") as f:
             f.write(b"\x00" * (1024 * 2048))
@@ -222,31 +208,16 @@ class TestBootFiles(WkTest):
             f.write(bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 8, 0, 0, 0, 8, 0, 0]))
             f.seek(510)
             f.write(bytes([0x55, 0xAA]))
-            f.seek(450)
-            f.write(bytes([0x0C]))
 
-        cp = bash(f'NODE_DEVICE=/dev/null; . "{REPO}/boot/pi-mbr.sh"; echo "$PIMBR_TYPE_OFFSET"')
-        offset = cp.stdout.strip()
-        self.assertEqual(offset, "450", f"offset is {offset}, not 450")
+        def sh(name, **p):
+            cp = subprocess.run(["sh", "-c", Onboard(REPO, name, WK_DEV=str(img), **p).text()], capture_output=True, text=True)
+            self.assertEqual(cp.returncode, 0, cp.stderr)
+            return cp.stdout.split()
 
-        def read_byte(pos):
-            with open(img, "rb") as f:
-                f.seek(pos)
-                return f.read(1)
-
-        self.assertEqual(read_byte(450), b"\x0c")
-
-        with open(img, "r+b") as f:
-            f.seek(450)
-            f.write(bytes([0x83]))
-        self.assertEqual(read_byte(450), b"\x83")
+        for octal, byte in (("014", "0c"), ("203", "83"), ("014", "0c")):
+            sh("pimbr-set-type.sh", WK_OCT=octal)
+            self.assertEqual(sh("pimbr-type.sh"), [byte])
         self.assertEqual(img.stat().st_size, 2097152, "the write truncated the device")
-
-        with open(img, "r+b") as f:
-            f.seek(450)
-            f.write(bytes([0x0C]))
-        self.assertEqual(read_byte(450), b"\x0c")
-
         if _have("sfdisk"):
             cp = subprocess.run(["sfdisk", "-l", str(img)], capture_output=True, text=True)
             self.assertIn("FAT32", cp.stdout, "sfdisk no longer reads the round-tripped table as FAT32")
@@ -353,7 +324,7 @@ set -euo pipefail
 . "{REPO}/boot/machines.sh"
 bad=""
 machine_load rpi4 || {{ echo "no rpi4 machine conf"; exit 1; }}
-# rpi4: the bench system on the USB drive, the rescue on the SD card (boot/machines/rpi4.conf)
+# rpi4: the bench system on the USB drive, the rescue on the SD card (machines/rpi4.conf)
 for pair in "/dev/sda2 bench" "/dev/mmcblk0p2 base" " unknown"; do
     set -- $pair
     got=$(b_system_kind "${{2:+$1}}")
@@ -407,8 +378,8 @@ class TestHandsOnArmingAndBench(WkTest):
         self.assertIn("host mode", cp2.stdout + cp2.stderr)
 
         cp3 = run("bench", "staged", "--plan", "jetstream2.2", "--dry-run", env={"WK_BENCH_ROOT": str(self.tmp / "bench")})
-        self.assertEqual(cp3.returncode, 0, f"--dry-run refused as well: {cp3.stdout + cp3.stderr}")
-        self.assertIn("--plan jetstream2.2 --browser minibrowser --platform osx", cp3.stdout)
+        self.assertEqual(cp3.returncode, 1, "a dry run in host mode is a leg that would be refused")
+        self.assertIn("--browser minibrowser --platform osx --plan jetstream2.2", cp3.stdout + cp3.stderr)
 
     def test_boot_status_survives_an_absent_machine(self):
         """`wk boot <machine> --status` reports something for every machine, an absent one included"""

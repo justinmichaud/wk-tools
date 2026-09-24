@@ -1,60 +1,49 @@
-"""`wk new` over a workspace with no `base-id` remakes it, owed
-(docs/PLAN.md): "catches: 'already exists' answered about a
-half-made thing". The decision lives in `ws_state` (lib/target.sh): a
-target that needs a base snapshot (`t_needs_base`) but whose workspace
-directory has no `base-id` file reports `creating`, not `present` -- so
-`wk new` resumes/remakes it instead of refusing "already exists". Driven
-directly against the decision function with `t_info`/`t_needs_base`/
-`wk_ws_dir` stubbed: no podman, no VM, no real driver. The creation driver's
-order -- the SDK refreshed under its lock, before the store lock and the
-create -- is tests/test_wk_workspace.py's, read off a fake machine.
+"""`wk new` over a workspace with no `base-id` remakes it, owed (docs/PLAN.md): "catches: 'already exists'
+answered about a half-made thing". The decision lives in `Target.state` (lib/wk/targets.py): a target that needs a
+base snapshot but whose workspace directory has no `base-id` file reports `creating`, not `present` -- so `wk new`
+resumes/remakes it instead of refusing "already exists". Driven against the decision with the environment's word
+scripted, over a Fake machine. The creation driver's order -- the SDK refreshed under its lock, before the store lock
+and the create -- is tests/test_wk_workspace.py's, read off a fake machine.
 
 Run: python3 -m unittest tests.test_owed_new -v
 """
+import os
+import sys
 import unittest
 
-from tests.support import (WkTest, rand_suffix, requires_container_target,
-                          run, scratch_dir)
+from tests.support import REPO, rand_suffix, requires_container_target, run
+
+sys.path.insert(0, str(REPO / "lib"))
+from wk import targets  # noqa: E402
+from wk.machine import Fake  # noqa: E402
 
 
-class TestWorkspaceWithNoBaseIdIsStillCreating(WkTest):
-    def _state(self, env_present, needs_base, has_base_id):
-        with scratch_dir() as ws:
-            if has_base_id:
-                (ws / "base-id").write_text("some-snapshot-id\n")
-            cp = self.bash(f'''
-. "$WK_ROOT/lib/common.sh"
-. "$WK_ROOT/lib/target.sh"
-t_info() {{ echo {"present" if env_present else "absent"}; }}
-t_needs_base() {{ return {0 if needs_base else 1}; }}
-wk_ws_dir() {{ echo "{ws}"; }}
-ws_state somews
-''')
-        return cp
+class Up(targets.Target):
+    def info(self, ws):
+        return "running"
+
+
+class TestWorkspaceWithNoBaseIdIsStillCreating(unittest.TestCase):
+    def _state(self, needs_base, has_base_id):
+        fake = Fake()
+        t = Up("stub", str(REPO), {"WK_STORE": "/store", "HOME": "/home/u"}, fake)
+        t.needs_base = needs_base
+        fake.mkdir(t.store.ws_dir("somews"))
+        if has_base_id:
+            fake.write(os.path.join(t.store.ws_dir("somews"), "base-id"), "some-snapshot-id\n")
+        return t.state("somews")
 
     def test_a_workspace_needing_a_base_with_none_recorded_is_creating(self):
-        """The environment exists (a container/vm was made) but the base-id
-        pin was never written -- an interrupted `wk new`, not a finished
-        one. 'already exists' would be wrong here: `wk new` has to resume
-        it, not refuse it."""
-        cp = self._state(env_present=True, needs_base=True, has_base_id=False)
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertEqual(cp.stdout.strip(), "creating", cp.stdout + cp.stderr)
+        """The environment exists but the base-id pin was never written -- an interrupted `wk new`, not a
+        finished one: `wk new` has to resume it, not refuse it."""
+        self.assertEqual(self._state(needs_base=True, has_base_id=False), "creating")
 
     def test_the_same_workspace_once_base_id_is_recorded_is_present(self):
-        """Contrast: once base-id exists, the same environment reports
-        present -- so 'creating' above is not ws_state being broken outright."""
-        cp = self._state(env_present=True, needs_base=True, has_base_id=True)
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertEqual(cp.stdout.strip(), "present", cp.stdout + cp.stderr)
+        self.assertEqual(self._state(needs_base=True, has_base_id=True), "present")
 
     def test_a_target_with_no_base_at_all_never_needs_the_file(self):
-        """A target that does not use base snapshots (t_needs_base false --
-        e.g. a remote target, whose base is a repository, not a pinned
-        snapshot) is present without one."""
-        cp = self._state(env_present=True, needs_base=False, has_base_id=False)
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertEqual(cp.stdout.strip(), "present", cp.stdout + cp.stderr)
+        """A remote target's base is a repository, not a pinned snapshot: present without one."""
+        self.assertEqual(self._state(needs_base=False, has_base_id=False), "present")
 
 
 class TestNewKillStopsTheCreation(unittest.TestCase):

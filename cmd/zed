@@ -18,24 +18,15 @@
 
 import os
 import re
-import shutil
 import sys
 
 ROOT = os.environ.get("WK_ROOT") or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "lib"))
 
-from wk import record, shell, targets  # noqa: E402
+from wk import decl, record, shell, targets  # noqa: E402
 from wk.act import Refused, die, exec_into, log  # noqa: E402
+from wk.machine import Local  # noqa: E402
 from wk.workspace import require_name  # noqa: E402
-
-
-def zed_cli():
-    """A drag-installed Zed.app has no PATH symlink but is installed."""
-    p = shutil.which("zed")
-    if p:
-        return p
-    app = "/Applications/Zed.app/Contents/MacOS/cli"
-    return app if os.access(app, os.X_OK) else None
 
 
 def dispatch_vars():
@@ -63,13 +54,13 @@ def emit(url_only, zed, url):
 
 
 def main(argv):
-    tools = "--tools" in argv
-    url_only = "--url" in argv
-    route = "--route" in argv
+    args = decl.Args(decl.Decl(__file__), argv)
+    tools = args.flag("--tools")
+    url_only = args.flag("--url")
+    route = args.flag("--route")
     name = os.environ.get("WK_NAME", "")
-    for a in argv:
-        if a not in ("--tools", "--url", "--route"):
-            name = a
+    if args.positionals:
+        name = args.positionals[-1]
 
     if route and tools:
         die("--route describes a workspace; a wk-tools copy is already an ssh destination\n"
@@ -77,7 +68,7 @@ def main(argv):
 
     zed = None
     if not url_only and not route:
-        zed = zed_cli()
+        zed = targets.zed_cli(Local())
         if zed is None:
             die("zed is not installed (no 'zed' on PATH, no /Applications/Zed.app)\n"
                 "    https://zed.dev/download -- 'wk doctor' checks for it, or add --url to print\n"
@@ -116,13 +107,14 @@ def main(argv):
                 "        wk zed --tools <ws>       /opt/wk-tools as that workspace sees it" % name)
 
         require_name(name)
-        if not ws_exists(reg, name):
-            die("no machine or workspace named '%s'\n"
-                "    'wk ls' lists the workspaces, 'wk status' the machines." % name)
         try:
-            target = reg.load(reg.ws_target(name))
+            tname = reg.ws_target(name)
+            target = reg.load(tname)
         except LookupError as e:
             die(str(e))
+        if not reg.on_target(tname, name) and target.info(name) != "unreachable":
+            die("no machine or workspace named '%s'\n"
+                "    'wk ls' lists the workspaces, 'wk status' the machines." % name)
         target.ssh_prepare(name)
         host = target.ssh_host(name)
         if not host:
@@ -163,19 +155,6 @@ def main(argv):
 
     emit(url_only, zed, "ssh://%s%s" % (host, target.src(name)))
     return 0
-
-
-def ws_exists(reg, name):
-    if reg.env.get("WK_TARGET"):
-        tname = reg.env["WK_TARGET"]
-        if reg.on_target(tname, name):
-            return True
-        try:
-            target = reg.load(tname)
-        except LookupError:
-            return False
-        return target.info(name) == "unreachable"
-    return bool(reg.locate(name))
 
 
 def broken_reason(target, tname, name):

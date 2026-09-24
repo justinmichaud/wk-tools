@@ -11,11 +11,13 @@ command under a pty rather than a stub of the prompt.
 
 Run: python3 -m unittest tests.test_key_github_pat -v
 """
+import inspect
 import os
 import pty
 import re
 import select
 import subprocess
+import sys
 import termios
 import threading
 import time
@@ -24,6 +26,9 @@ from http.server import HTTPServer
 
 from tests.support import REPO, WkTest, clean_env, stub_path
 from tests.test_credcheck import CLASSIC, FINE, POLICY, FakeGitHub
+
+sys.path.insert(0, str(REPO / "lib"))
+from wk import key  # noqa: E402
 
 KEY = REPO / "cmd" / "key"
 
@@ -73,7 +78,7 @@ class _PatRun(WkTest):
         reg.mkdir(exist_ok=True)
         return clean_env({"WK_HOST_SECRETS": str(self.secrets),
                           "WK_STORE": str(self.store),
-                          "WK_TARGET_REGISTRY": str(reg),
+                          "WK_MACHINES_DIR": str(reg),
                           "PATH": f"{binp}:/usr/bin:/bin:/usr/sbin:/sbin",
                           **self.extra_env})
 
@@ -84,7 +89,7 @@ class _PatRun(WkTest):
                                   env=self._env(binp), capture_output=True,
                                   text=True, timeout=120)
 
-    def key_tty(self, *args, paste=""):
+    def key_tty(self, *args, paste="", answer="y"):
         """The same command with a real terminal on stdin, and <paste> typed
         at the prompt -- the only way through `read -rs`, which is what keeps
         the value out of argv and out of the shell's history."""
@@ -94,7 +99,7 @@ class _PatRun(WkTest):
                                  env=self._env(binp), stdin=slave,
                                  stdout=slave, stderr=slave, close_fds=True)
             os.close(slave)
-            out, sent = b"", False
+            out, sent, answered = b"", False, False
             while True:
                 r, _, _ = select.select([master], [], [], 30)
                 if not r:
@@ -106,6 +111,9 @@ class _PatRun(WkTest):
                 if not chunk:
                     break
                 out += chunk
+                if not answered and b"[y/N]" in out:
+                    os.write(master, (answer + "\n").encode())
+                    answered = True
                 if not sent and b"paste it" in out:
                     _wait_for_echo_off(master)
                     os.write(master, (paste + "\n").encode())
@@ -173,10 +181,10 @@ class TestStoringOne(_PatRun):
     def test_the_value_is_never_an_argument(self):
         """An argument is in `ps` for everyone on the machine, so the value
         goes down a pipe into the one writer (lib/secretfile.py, through
-        wk_cred_store) -- never handed to a command."""
-        text = (REPO / "cmd" / "key").read_text()
-        self.assertIn(r'''printf '%s\n' "$_val" | wk_cred_store "$_name"''', text)
-        self.assertNotIn('wk_cred_store "$_name" "$_val"', text)
+        Key.store) -- never handed to a command."""
+        text = inspect.getsource(key.Key.store)
+        self.assertIn("input=value", text)
+        self.assertNotIn("value]", text)
 
 
 class TestReplacingOne(_PatRun):
@@ -204,6 +212,18 @@ class TestReplacingOne(_PatRun):
         self.assertEqual(rc, 0, out)
         self.assertIn("revoke it too if it is still live", out)
         self.assertEqual(TOKEN, self.pat().read_text().strip())
+
+    def test_replace_asks_first_and_a_no_keeps_the_old_one(self):
+        rc, out = self.key_tty("set", "github-pat", "--replace", paste=TOKEN, answer="n")
+        self.assertNotEqual(rc, 0, out)
+        self.assertIn("remove the stored github-pat and replace it? [y/N]", out)
+        self.assertEqual("ghp_theoldone", self.pat().read_text().strip())
+
+    def test_replace_without_a_terminal_declines(self):
+        cp = self.key("set", "github-pat", "--replace")
+        self.assertNotEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertIn("declining (no terminal", cp.stderr)
+        self.assertEqual("ghp_theoldone", self.pat().read_text().strip())
 
     def test_replace_with_an_empty_answer_leaves_none(self):
         """The old one is gone the moment --replace is given: that is the
@@ -442,8 +462,7 @@ class TestTheMachineTakesTheTokenOnEveryStart(unittest.TestCase):
     guests' (targets/vm.sh)."""
 
     def test_both_start_paths_converge_through_the_one_function(self):
-        for path in ("cmd/start", "targets/container.sh"):
-            with self.subTest(path=path):
-                self.assertIn("push_agent_pat_converge_machine", (REPO / path).read_text())
+        self.assertIn("Secrets(ROOT).pat_converge_machine()", (REPO / "cmd" / "start").read_text())
+        self.assertIn("push_agent_pat_converge_machine", (REPO / "targets" / "container.sh").read_text())
         body = (REPO / "lib" / "store.sh").read_text()
         self.assertEqual(1, body.count("push_agent_pat_converge_machine() {"))

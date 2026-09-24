@@ -61,6 +61,7 @@ boot_order_first "{order}" "{nibble}"
 
 
 _FAKE_NODE_CONF = '''NODE_SSH={ssh}
+KIND=board
 NODE_DRIVER=pi-mbr
 NODE_DEVICE={device}
 NODE_ROOT=/dev/sda2

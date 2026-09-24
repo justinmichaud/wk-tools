@@ -202,7 +202,7 @@ if [ -n "$PURGE" ]; then
     _uses_snapshots || die "target '$TARGET' has no mirror or snapshots to purge: its base is
     $([ "$WK_TARGET_KIND" = vm ] \
         && echo "the golden guest image -- erase that with 'wk vm base --rm'" \
-        || echo "that machine's own repository -- 'wk remote rm $TARGET' offers to remove
+        || echo "that machine's own repository -- 'wk machine rm $TARGET' offers to remove
     the remote root, and 'wk sync --tools $TARGET' refreshes it in place")"
 
     ws=$(list_workspaces | tr '\n' ' '); ws="${ws% }"

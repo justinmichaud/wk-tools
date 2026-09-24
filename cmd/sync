@@ -49,7 +49,7 @@ import sys
 ROOT = os.environ.get("WK_ROOT") or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "lib"))
 
-from wk import sync, targets, workspace  # noqa: E402
+from wk import decl, sync, targets, workspace  # noqa: E402
 from wk.act import Refused, die  # noqa: E402
 from wk.clock import Clock  # noqa: E402
 from wk.lock import Lock  # noqa: E402
@@ -59,6 +59,14 @@ USAGE = "usage: wk sync [<workspace>|--mirror|--target <target>|--all|--tools [<
 
 def parse(argv, name=""):
     """(scope, the workspace named, the target named, --fix): ws | here | target | all | tools | mirror."""
+    args = decl.Args(decl.Decl(__file__), argv)
+    if args.flag("--machine"):
+        die("'wk sync --machine' is gone: it meant a machine's furniture and\n"
+            "    every workspace on it at once. Say which:\n"
+            "        wk sync --all         every workspace on every target\n"
+            "        wk sync --tools       every machine's wk-tools, mirror and snapshot\n"
+            "        wk sync --tools <t>   just that one's")
+
     scope, spelled, target = "", "", ""
 
     def set_scope(s, as_typed):
@@ -67,36 +75,32 @@ def parse(argv, name=""):
             die("%s and %s ask for different things -- one at a time.\n    %s" % (spelled, as_typed, USAGE))
         scope, spelled = s, as_typed
 
-    def set_target(t):
-        nonlocal target
-        if target:
-            die("one target at a time (got '%s' and '%s')" % (target, t))
-        target = t
+    values = args.values("--target")
+    if len(values) > 1:
+        die("one target at a time (got '%s' and '%s')" % (values[0], values[1]))
+    if values:
+        target = values[0]
+    tools = args.flag("--tools")
 
-    args = list(argv)
-    while args:
-        a = args.pop(0)
-        if a == "--machine":
-            die("'wk sync --machine' is gone: it meant a machine's furniture and\n"
-                "    every workspace on it at once. Say which:\n"
-                "        wk sync --all         every workspace on every target\n"
-                "        wk sync --tools       every machine's wk-tools, mirror and snapshot\n"
-                "        wk sync --tools <t>   just that one's")
-        elif a == "--all" or a == "--mirror":
-            set_scope(a[2:], a)
-        elif a == "--target":
-            set_target(args.pop(0))
-            set_scope("target", a)
-        elif a == "--tools":
-            if args and not args[0].startswith("-"):
-                set_target(args.pop(0))
-            set_scope("tools", a)
-        elif a != "--fix":
-            workspace.require_name(a)
-            name = a
+    # --tools [<target>]: the sole positional, if there is one, is its optional value.
+    positionals = list(args.positionals)
+    if tools and positionals:
+        target = positionals.pop(0)
+
+    scope_named = {"--all": "all" if args.flag("--all") else None,
+                  "--mirror": "mirror" if args.flag("--mirror") else None,
+                  "--target": "target" if values else None, "--tools": "tools" if tools else None}
+    for opt in args.order:   # two scopes are refused in the order they were typed
+        named = scope_named.get(opt)
+        if named is not None:
+            set_scope(named, opt)
+
+    if positionals:
+        workspace.require_name(positionals[0])
+        name = positionals[0]
     if name:
         set_scope("ws", "'%s'" % name)
-    return scope or "here", name, target, "--fix" in argv
+    return scope or "here", name, target, args.flag("--fix")
 
 
 def main(argv):

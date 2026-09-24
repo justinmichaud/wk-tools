@@ -23,7 +23,7 @@
 #
 #   --gpu   fail if the workspace has no hardware-accelerated GPU (informational otherwise)
 #
-#   --all   also ask every configured machine (targets/hosts/*.conf) what it
+#   --all   also ask every configured machine (machines/*.conf) what it
 #           has. A peer workstation: whether its own claude.ai login is one
 #           Anthropic accepts and may run remote control. A build machine: the
 #           tools a build needs there, the identity a commit made there would
@@ -49,11 +49,13 @@ import sys
 ROOT = os.environ.get("WK_ROOT") or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "lib"))
 
-from wk import wall  # noqa: E402
+from wk import decl, wall  # noqa: E402
 from wk.act import Refused, die, info, log, warn  # noqa: E402
 from wk.doctor import Doctor, Report  # noqa: E402
 from wk.machine import Local  # noqa: E402
 from wk.targets import Registry  # noqa: E402
+
+ALLOWED = ("--all", "--probe-store", "--gpu")
 
 
 def where(argv):
@@ -61,8 +63,8 @@ def where(argv):
     return "workspace" if any(not a.startswith("-") for a in argv) else "local"
 
 
-def only(argv, allowed, why):
-    extra = [a for a in argv if a not in allowed]
+def only(args, allowed, why):
+    extra = [f for f in ALLOWED if args.flag(f) and f not in allowed]
     if extra:
         die("%s %s" % (extra[0], why))
 
@@ -85,10 +87,11 @@ def inside(reg):
 
 
 def workspace(reg, name, argv):
+    args = decl.Args(decl.Decl(__file__), argv)
     target = reg.load(reg.ws_target(name))
     info("checking workspace '%s' (%s)" % (name, target.name))
     rep = Report(sys.stderr)
-    wall.from_host(ROOT, target, name, reg.machine, rep, want_gpu="--gpu" in argv)
+    wall.from_host(ROOT, target, name, reg.machine, rep, want_gpu=args.flag("--gpu"))
     sys.stderr.write("\n")
     if wall.verdict(rep) == "broken":
         warn("%d check(s) failed -- the sandbox is not intact" % rep.missing)
@@ -102,21 +105,22 @@ def main(argv, env=None, reg=None):
     if argv[:1] == ["--where"]:
         print(where(argv[1:]))
         return 0
+    args = decl.Args(decl.Decl(__file__), argv)
     reg = reg or Registry(ROOT, env, Local())
     if reg.in_workspace():
-        only(argv, (), "is not asked inside a workspace: 'wk doctor' here checks this one")
+        only(args, (), "is not asked inside a workspace: 'wk doctor' here checks this one")
         return inside(reg)
     if env.get("WK_NAME"):
-        only(argv, ("--gpu",), "is this machine's question, not a workspace's: drop the workspace name")
+        only(args, ("--gpu",), "is this machine's question, not a workspace's: drop the workspace name")
         return workspace(reg, env["WK_NAME"], argv)
-    only(argv, ("--all", "--probe-store"), "is a workspace's question: wk doctor <workspace> --gpu")
+    only(args, ("--all", "--probe-store"), "is a workspace's question: wk doctor <workspace> --gpu")
     doc = Doctor(ROOT)
-    if "--probe-store" in argv:
+    if args.flag("--probe-store"):
         sys.stdout.write(doc.probe_store())
         return 0
     info("wk doctor on %s (%s)" % ("macos" if doc.macos else "linux", doc.hostname()))
     rep = Report(sys.stderr)
-    for title, rows in doc.sections("--all" in argv):
+    for title, rows in doc.sections(args.flag("--all")):
         rep.section(title)
         rep.rows(rows)
     sys.stderr.write("\n")

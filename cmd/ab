@@ -180,7 +180,7 @@ ab_parse_build_on() {
     first, so it takes one name or two (got '$BUILD_ON')."
         case " $(target_known | tr '\n' ' ') $(wk_machine_name) " in
             *" $m "*) ;;
-            *) die "--build-on names a machine this checkout knows (targets/hosts/<name>.conf)
+            *) die "--build-on names a machine this checkout knows (machines/<name>.conf)
     or this one, and '$m' is neither.$(_target_known_line)" ;;
         esac
         ARM_ON[$i]="$m"; i=$((i + 1))

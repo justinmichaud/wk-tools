@@ -1,0 +1,9 @@
+[Unit]
+Description=Refuse to carry swap, so a benchmark cannot page
+After=local-fs.target
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/sbin/swapoff -a
+[Install]
+WantedBy=multi-user.target

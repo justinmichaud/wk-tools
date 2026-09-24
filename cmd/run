@@ -24,8 +24,9 @@ import sys
 ROOT = os.environ.get("WK_ROOT") or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "lib"))
 
-from wk import buildconf, shell, targets  # noqa: E402
+from wk import buildconf, decl, shell, targets  # noqa: E402
 from wk.act import Refused, die, exec_into  # noqa: E402
+from wk.ldpath import prelude  # noqa: E402
 
 LLDB_UNTIL_CRASH = '''{lldb_prelude}
 {prelude}
@@ -86,28 +87,13 @@ DIRECT_PLAIN = '{prelude}; export JSC_validateOptions=1; exec {jsc_q} --validate
 
 def parse(argv):
     """The options as the dispatcher hands them on, a declared `--x=` as `--x <value>`; the tail after `--` verbatim."""
-    if "--" in argv:
-        i = argv.index("--")
-        head, tail = argv[:i], argv[i + 1:]
-    else:
-        head, tail = argv, []
-
-    def after(flag):
-        i = head.index(flag) + 1
-        return head[i] if i < len(head) else ""
-
-    config = after("--config") if "--config" in head else None
-    max_raw = after("--max") if "--max" in head else "200"
+    args = decl.Args(decl.Decl(__file__), argv)
+    max_raw = args.value("--max") or "200"
     if not max_raw.isdigit():
         die("--max needs a positive integer iteration count (got '%s')\n"
             "    example:  wk run %s --until-crash --max 50 -- ..." % (max_raw, os.environ.get("WK_NAME", "")))
-    return {"config": config, "lldb": "--lldb" in head,
-            "until_crash": "--until-crash" in head, "max": int(max_raw), "tail": tail}
-
-
-def prelude(var, run_dir):
-    """Prepended, not replaced: a bare assignment drops the wkdev image's jhbuild prefix."""
-    return 'export %s="%s${%s:+:${%s}}"' % (var, run_dir, var, var)
+    return {"config": args.value("--config"), "lldb": args.flag("--lldb"),
+            "until_crash": args.flag("--until-crash"), "max": int(max_raw), "tail": args.tail}
 
 
 def main(argv):

@@ -1,6 +1,6 @@
 """lib/par.sh: several jobs at once, each leaving its exit status as a
-marker the moment it ends -- whatever way it ends. par_join folds those
-markers, so a job whose marker never lands is a caller that never finishes.
+marker the moment it ends -- whatever way it ends. par_wait collects those
+statuses in start order, so a job whose marker never lands is a caller that never finishes.
 
 Run: python3 -m unittest tests.test_par -v
 """
@@ -14,8 +14,6 @@ PRELUDE = f'''
 set -euo pipefail
 . "{REPO}/lib/common.sh"
 . "{REPO}/lib/par.sh"
-worst=0
-bump() {{ [ "$1" -gt "$worst" ] && worst="$1" || true; }}
 exec 3>"$OUT"
 '''
 
@@ -26,9 +24,9 @@ class TestParMarkers(WkTest):
         try:
             cp = bash(PRELUDE + script, env={"OUT": str(out)}, timeout=30)
         except subprocess.TimeoutExpired:
-            self.fail("par_join never finished: a job left no marker")
+            self.fail("par_wait never finished: a job left no marker")
         self.assertEqual(cp.returncode, 0, f"script failed: {cp.stdout}{cp.stderr}")
-        return cp.stdout, out.read_text()
+        return cp.stdout
 
     def test_every_way_a_job_can_end_leaves_its_status(self):
         """return N, exit N, die, a `set -e` trip and success all land a marker"""
@@ -42,61 +40,32 @@ par_begin
 d="$_par_dir"
 par_run ok ok; par_run returns returns; par_run exits exits
 par_run dies dies; par_run trips trips
-sleep 0.5
-for n in ok returns exits dies trips; do printf '%s=%s\\n' "$n" "$(cat "$d/$n.rc")"; done
-par_join
-echo "worst=$worst"
+par_wait
+for n in ok returns exits dies trips; do printf '%s=%s %s\\n' "$n" "$(cat "$d/$n.rc")" "$(par_record "$n")"; done
+echo "status=$_par_status"
+par_end
 [ -d "$d" ] && echo "dir kept" || echo "dir removed"
 '''
-        stdout, records = self._run(script)
-        self.assertIn("ok=0\nreturns=3\nexits=2\ndies=1\ntrips=1\n", stdout)
-        self.assertIn("worst=3", stdout)
+        stdout = self._run(script)
+        for job, rc in (("ok", 0), ("returns", 3), ("exits", 2), ("dies", 1), ("trips", 1)):
+            self.assertIn('%s=%d {"job":"%s"}' % (job, rc, job), stdout)
+        self.assertIn("status= ok 0 returns 3 exits 2 dies 1 trips 1", stdout)
         self.assertIn("dir removed", stdout)
-        for job in ("ok", "returns", "exits", "dies", "trips"):
-            self.assertIn(f'{{"job":"{job}"}}', records)
-        self.assertNotIn("unreachable", records)
+        self.assertNotIn("unreachable", stdout)
 
-    def test_par_join_reports_the_worst_status_in_start_order(self):
-        """the non-streaming join keeps start order and raises the worst status"""
+    def test_the_statuses_come_back_in_start_order(self):
+        """a slow first job is still first, whatever finished first"""
         script = '''
 a() { sleep 0.3; echo A >&3; return 2; }
 b() { echo B >&3; return 0; }
-par_begin; par_run a a; par_run b b; par_join
-echo "worst=$worst"
-'''
-        stdout, records = self._run(script)
-        self.assertIn("worst=2", stdout)
-        self.assertEqual(records, "A\nB\n")
-
-
-class TestParRc(WkTest):
-    """`par_rc` is how a caller that replays the records itself -- `wk key
-    check`'s table, `wk sync`'s workspace list -- asks what one row's job
-    made of it, in an order of its own rather than the order they finished."""
-
-    def _run(self, script):
-        out = self.tmp / "records"
-        cp = bash(PRELUDE + script, env={"OUT": str(out)}, timeout=30)
-        self.assertEqual(cp.returncode, 0, f"script failed: {cp.stdout}{cp.stderr}")
-        return cp.stdout
-
-    def test_each_jobs_status_is_readable_by_name(self):
-        script = '''
-slow_ok()  { sleep 0.3; echo SLOW >&3; return 0; }
-quick_bad(){ echo QUICK >&3; return 2; }
-par_begin; par_run slow slow_ok; par_run quick quick_bad; par_wait
-for n in quick slow; do printf '%s=%s:%s\\n' "$n" "$(par_rc "$n")" "$(par_record "$n")"; done
+par_begin; par_run a a; par_run b b; par_wait
+echo "status=$_par_status"; par_record a; par_record b
 par_end
 '''
         stdout = self._run(script)
-        self.assertIn("quick=2:QUICK", stdout)
-        self.assertIn("slow=0:SLOW", stdout)
+        self.assertIn("status= a 2 b 0", stdout)
+        self.assertIn("A\nB\n", stdout)
 
-    def test_a_name_no_job_ran_under_is_refused(self):
-        script = '''
-par_begin; par_run only true; par_wait
-rc=0; par_rc absent || rc=$?
-echo "refused=$rc"
-par_end
-'''
-        self.assertIn("refused=1", self._run(script))
+
+if __name__ == "__main__":
+    unittest.main()

@@ -542,7 +542,7 @@ phase_plant() {
     declared=$(b_display) || die "$MACHINE declares no display, so nothing here knows what the
     measured install must read.
 
-    Add its own mode to boot/machines/$MACHINE.conf, in points, kind first:
+    Add its own mode to machines/$MACHINE.conf, in points, kind first:
         NODE_DISPLAY=\"builtin 1470x956\"
     ('python3 lib/wkmac.py displays' on that install prints both.)"
 

@@ -18,48 +18,33 @@
 #   -- <args>              extra arguments passed straight to the browser
 
 import os
-import stat
 import sys
 
 ROOT = os.environ.get("WK_ROOT") or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "lib"))
 
-from wk import buildconf, shell, targets  # noqa: E402
+from wk import buildconf, decl, shell, targets  # noqa: E402
 from wk.act import Refused, die, exec_into, info, log, warn  # noqa: E402
-
-
-def is_macos():
-    return os.uname().sysname == "Darwin"
+from wk.machine import is_macos  # noqa: E402
 
 
 def parse(argv):
-    config, url, tail, debug = None, "", [], ""
-    fullscreen = True
-    i = 0
-    while i < len(argv):
-        a = argv[i]
-        if a == "--config":
-            config = argv[i + 1] if i + 1 < len(argv) else ""
-            i += 2
-        elif a == "--wpe":
-            config, i = "wpe-release", i + 1
-        elif a == "--gtk":
-            config, i = "gtk-release", i + 1
-        elif a == "--mac":
-            config, i = "mac-release", i + 1
-        elif a == "--lldb":
-            debug = argv[i + 1] if i + 1 < len(argv) else ""
-            if debug not in ("ui", "web"):
-                die("--lldb takes ui or web, not '%s'" % debug)
-            i += 2
-        elif a == "--no-fullscreen":
-            fullscreen, i = False, i + 1
-        elif a == "--":
-            tail = argv[i + 1:]
-            break
-        else:
-            url, i = a, i + 1
-    return {"config": config, "url": url, "fullscreen": fullscreen, "tail": tail, "debug": debug}
+    args = decl.Args(decl.Decl(__file__), argv)
+    # Whichever of --config/--wpe/--gtk/--mac is typed last wins, the same as
+    # any repeated option -- so the config each names is read back in the order seen.
+    config_named = {"--config": args.value("--config"), "--wpe": "wpe-release" if args.flag("--wpe") else None,
+                    "--gtk": "gtk-release" if args.flag("--gtk") else None, "--mac": "mac-release" if args.flag("--mac") else None}
+    config = None
+    for opt in args.order:
+        named = config_named.get(opt)
+        if named is not None:
+            config = named
+    debug = args.value("--lldb") or ""
+    if debug and debug not in ("ui", "web"):
+        die("--lldb takes ui or web, not '%s'" % debug)
+    fullscreen = not args.flag("--no-fullscreen")
+    url = args.positionals[0] if args.positionals else ""
+    return {"config": config, "url": url, "fullscreen": fullscreen, "tail": args.tail, "debug": debug}
 
 
 def gui_default_config(reg, name):
@@ -69,23 +54,18 @@ def gui_default_config(reg, name):
 
 
 def fullscreen_flag(cfg):
-    if cfg.buildsys == "cmake" and cfg.port == "--wpe":
+    if cfg.buildsys == "cmake" and cfg.port in ("--wpe",):
         return "--fullscreen"
-    if cfg.buildsys == "cmake" and cfg.port == "--gtk":
+    if cfg.buildsys == "cmake" and cfg.port in ("--gtk",):
         return "--full-screen"
-    if cfg.buildsys == "xcode" and cfg.port == "":
+    if cfg.buildsys == "xcode" and not cfg.port:
         return ""
     die("'%s' builds no browser to drive -- use a wpe-*, gtk-* or mac-* config" % cfg.name)
 
 
 def session_env(root):
     """The Linux GPU-session gate and, on a BMC seat, the software-rendering pins."""
-    sock = os.path.join(os.environ.get("XDG_RUNTIME_DIR") or "/run/user/%d" % os.getuid(), "wk", "display", "wayland-0")
-    try:
-        is_socket = stat.S_ISSOCK(os.stat(sock).st_mode)
-    except OSError:
-        is_socket = False
-    if not is_socket:
+    if not targets.session_socket_present(os.environ):
         die("no graphical session -- 'wk session on', or 'wk session on --bmc' to watch it over the BMC")
     shell.session_mode_warn(root, env=os.environ)
     if shell.session_mode(root, env=os.environ) != "bmc":
@@ -152,7 +132,7 @@ def main(argv):
     else:
         launch_env = ("WPE_BROWSER=minibrowser " + run_env).rstrip()
         launch_cmd = "Tools/Scripts/run-minibrowser %s %s -- %s %s %s" % (cfg.port, type_flag, fs_flag, shell.sh_quote(url), extra_q)
-        ui_prefix = 'WEBKIT_MINI_BROWSER_PREFIX="$LLDB %s %s --"' % (target.lldb_opts(), shell.lldb_pin_opts(ROOT))
+        ui_prefix = 'WEBKIT_MINI_BROWSER_PREFIX="$LLDB %s %s --"' % (target.lldb_opts(), shell.LLDB_PIN_OPTS)
 
     if opts["debug"] == "":
         info("MiniBrowser (%s) in '%s' -> %s" % (config, name, url))
@@ -167,7 +147,7 @@ def main(argv):
         log("  'run' starts it; breakpoints can go in first")
         if cfg.buildsys == "xcode":
             run = ('cd %s && %s exec "$LLDB" %s %s -- %s'
-                  % (src, launch_env, target.lldb_opts(), shell.lldb_pin_opts(ROOT), launch_cmd))
+                  % (src, launch_env, target.lldb_opts(), shell.LLDB_PIN_OPTS, launch_cmd))
         else:
             run = "cd %s && %s %s exec %s" % (src, launch_env, ui_prefix, launch_cmd)
         cmd = "%s\n%s" % (shell.lldb_prelude(ROOT), run)
@@ -186,7 +166,7 @@ def main(argv):
     log("  browser output: /tmp/wk-gui.log (in the workspace)")
     run = ("cd %s && ( sleep 2; %s %s %s >/tmp/wk-gui.log 2>&1 ) & "
           'exec "$LLDB" %s -o %s -o %s -o %s -o %s'
-          % (src, launch_env, cfg.web_process_pause_env(), launch_cmd, shell.lldb_pin_opts(ROOT),
+          % (src, launch_env, cfg.web_process_pause_env(), launch_cmd, shell.LLDB_PIN_OPTS,
              shell.sh_quote("command script import %s/container/lldb/webprocess.py" % target.tools(name)),
              shell.sh_quote("command alias follow-page wk-follow-page %s" % web_proc),
              shell.sh_quote("command alias reattach process attach --name %s --waitfor" % web_proc),

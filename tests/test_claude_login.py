@@ -35,6 +35,7 @@ from http.server import HTTPServer
 from tests.support import REPO, WK, WkTest, _clean_env, run, stub_path
 from tests.test_credcheck import FakeAnthropic
 from tests.test_pi_agent import FILE_ROWS, store_path
+from tests.test_wk_key import KeyTest
 
 # Not a credential, and deliberately nothing like one. The shape is the CLI's
 # own: its stored object is claudeAiOauth: {accessToken, refreshToken,
@@ -230,9 +231,10 @@ class TestItLogsInWhereTheContainersRead(_Login):
         """A copy would be a second holder of one refresh token; the login is
         made rather than captured, so no Keychain item and no ~/.claude file
         is anywhere in this command."""
-        key = (REPO / "cmd" / "key").read_text()
+        key = (REPO / "lib" / "wk" / "key.py").read_text()
         self.assertNotIn("find-generic-password", key)
-        self.assertNotIn(".credentials.json", key)
+        self.assertNotIn(".claude/.credentials.json", key)
+        self.assertNotIn("HOME", key)
 
     def test_the_credential_is_never_an_argument(self):
         self.leaves(login())
@@ -493,7 +495,7 @@ class TestAdoptTakesALoginMadeForThisWorkstation(_Login):
 
 class TestReplace(_Login):
     def test_replacing_nothing_is_refused_and_names_the_remedy(self):
-        cp = self.key("set", "claude-login", "--replace")
+        cp = self.key("set", "claude-login", "--replace", "--yes")
         self.assertNotEqual(0, cp.returncode, cp.stdout)
         self.assertIn("wk key set claude-login", cp.stdout)
 
@@ -504,7 +506,7 @@ class TestReplace(_Login):
         self.leaves(login())
         self.key("set", "claude-login")
         self.answer.write_text("")
-        cp = self.key("set", "claude-login", "--replace")
+        cp = self.key("set", "claude-login", "--replace", "--yes")
         self.assertNotEqual(0, cp.returncode, cp.stdout)
         self.assertFalse(self.stored().exists())
 
@@ -516,16 +518,25 @@ class TestReplace(_Login):
         self.assertTrue(self.recorded().exists())
         self.assertTrue((self.agent_rw / "backups").is_dir())
         self.answer.write_text("")
-        self.key("set", "claude-login", "--replace")
+        self.key("set", "claude-login", "--replace", "--yes")
         self.assertFalse(self.recorded().exists())
         self.assertFalse((self.agent_rw / ".claude.json.lock").exists())
         self.assertFalse((self.agent_rw / "backups").exists())
+
+    def test_without_yes_or_a_terminal_the_replace_is_declined(self):
+        """Replacing removes the login every workspace holds, so it asks first; nobody to ask is a No."""
+        self.leaves(login())
+        self.key("set", "claude-login")
+        cp = self.key("set", "claude-login", "--replace", terminal=False)
+        self.assertNotEqual(0, cp.returncode, cp.stdout)
+        self.assertIn("declining", cp.stdout + cp.stderr)
+        self.assertEqual(login(), self.stored().read_text())
 
     def test_it_rotates_to_the_new_one(self):
         self.leaves(login())
         self.key("set", "claude-login")
         self.leaves(login(accessToken=SECRET + "-second"))
-        cp = self.key("set", "claude-login", "--replace")
+        cp = self.key("set", "claude-login", "--replace", "--yes")
         self.assertEqual(0, cp.returncode, cp.stdout)
         self.assertIn("-second", self.stored().read_text())
         self.assertNotIn("-second", cp.stdout, cp.stdout)
@@ -534,7 +545,7 @@ class TestReplace(_Login):
 class TestNothingElseLearnedTheShape(unittest.TestCase):
     """One place decides what a usable login is, and one place makes one."""
 
-    KEY = (REPO / "cmd" / "key").read_text()
+    KEY = (REPO / "lib" / "wk" / "key.py").read_text()
 
     def test_the_check_is_in_one_function(self):
         """What a usable login is, is one row of lib/credcheck.py -- the same
@@ -543,14 +554,14 @@ class TestNothingElseLearnedTheShape(unittest.TestCase):
         rules = (REPO / "lib" / "credcheck.py").read_text()
         self.assertEqual(1, rules.count("def _claude_login("))
         self.assertNotIn("claudeAiOauth", self.KEY)
-        self.assertEqual(1, self.KEY.count("_claude_login_run() {"))
+        self.assertEqual(1, self.KEY.count("def login_run("))
+        self.assertEqual(1, self.KEY.count('"claude", "auth", "login"'))
 
     def test_the_login_is_made_where_the_containers_read_it(self):
         """The variable and the directory are one expression, so no second
         idea of where a container's login lives can drift in."""
-        self.assertIn('_dir="${2:-$(wk_agent_rw_dir)}"', self.KEY)
-        self.assertIn('CLAUDE_CONFIG_DIR="$_dir" CLAUDE_SECURESTORAGE_CONFIG_DIR="$_dir" '
-                      'claude auth login', self.KEY)
+        self.assertIn("d = d or self.sec.store.agent_rw_dir()", self.KEY)
+        self.assertIn('"CLAUDE_CONFIG_DIR=" + d, "CLAUDE_SECURESTORAGE_CONFIG_DIR=" + d, "claude"', self.KEY)
 
     def test_no_other_file_names_the_keychain_item(self):
         for f in ("cmd/ai", "lib/wk/wall.py", "lib/store.sh", "targets/vm.sh",
@@ -558,9 +569,14 @@ class TestNothingElseLearnedTheShape(unittest.TestCase):
             with self.subTest(script=f):
                 self.assertNotIn("find-generic-password", (REPO / f).read_text())
 
-    def test_a_value_row_is_written_on_stdin(self):
+
+
+class TestAValueRowIsWrittenOnStdin(KeyTest):
+    def test_a_pasted_value_row_is_never_an_argument(self):
         """An argument is in `ps` for everyone on the machine."""
-        self.assertIn('printf \'%s\\n\' "$_val" | wk_cred_store "$_name"', self.KEY)
+        argvs, inputs = self.stored_on_stdin("litellm", "sk-pastedvirtualkey")
+        self.assertFalse([a for a in argvs if "sk-pastedvirtualkey" in a], argvs)
+        self.assertIn("sk-pastedvirtualkey\n", inputs)
 
 
 if __name__ == "__main__":

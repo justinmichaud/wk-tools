@@ -4,12 +4,14 @@ writes. Liveness is asked of the process table at read time, never stored."""
 
 import os
 import re
+import signal
+import subprocess
 import sys
 from pathlib import Path
 
+from wk import act, store
 from wk.clock import Clock
-from wk.machine import here
-from wk import store
+from wk.machine import TIMED_OUT, Result, here
 
 RUNNING = ("starting", "running", "silent", "unanswered")
 # Kinds that run until stopped: alive is their idle state, never busy.
@@ -220,7 +222,7 @@ class Task:
             return "starting"
         cap = None
         if how == "capped" and self.field("where") == "target":
-            cap = float(ask_seconds if ask_seconds is not None else os.environ.get("WK_TASK_ASK_SECONDS", 5))
+            cap = float(ask_seconds if ask_seconds is not None else os.environ.get("WK_TASK_ASK_SECONDS") or 5)
         alive = self.alive(cap)
         if alive is None:
             return "unanswered"
@@ -233,18 +235,22 @@ class Task:
             return "running"
         if not self.field("abort_after"):
             return "running"
-        stall = float(stall_seconds if stall_seconds is not None else os.environ.get("WK_STALL_SECONDS", 300))
+        stall = float(stall_seconds if stall_seconds is not None else os.environ.get("WK_STALL_SECONDS") or 300)
         return "running" if age <= stall else "silent"
 
     def running(self, how="capped"):
         return self.verdict(how) in RUNNING
 
 
+def _answer(r):
+    """`kill -0`'s status as an answer: alive, gone, or None where the workspace did not say."""
+    return True if r.rc == 0 else False if r.rc == 1 else None
+
+
 def of_target(target, clock=None, machine=None, env=None):
     """`target`'s records; a pid in a workspace is asked there, None where the workspace does not answer in time."""
     def ask(ws, pid, cap):
-        r = target.exec(ws, ["kill", "-0", str(pid)], timeout=cap)
-        return True if r.rc == 0 else False if r.rc == 1 else None
+        return _answer(target.exec(ws, ["kill", "-0", str(pid)], timeout=cap))
     return Records(target.store.record_dir(), clock=clock, ask_target=ask, env=target.env if env is None else env,
                    machine=machine)
 
@@ -390,6 +396,189 @@ class Records:
         return st
 
 
+class CallerShell:
+    """A bash caller's own `t_exec`, re-entered from the shell state its shim dumped (lib/detach.sh's _caller_shell)."""
+
+    def __init__(self, state):
+        self.state = state
+
+    def call(self, fn, args, timeout=None, quiet=False):
+        argv = ["bash", "-c", '. "$0" 2>/dev/null; %s "$@"' % fn, self.state] + [str(a) for a in args]
+        p = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                             stderr=subprocess.DEVNULL if quiet else None, text=True, start_new_session=True)
+        try:
+            out, _ = p.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            os.killpg(p.pid, signal.SIGKILL)
+            p.communicate()
+            return Result(TIMED_OUT)
+        return Result(p.returncode, out)
+
+    def exec(self, ws, argv, timeout=None):
+        return self.call("t_exec", [ws] + list(argv), timeout, quiet=True)
+
+    def act_exec(self, ws, argv):
+        if act.dry_run():
+            sys.stderr.write("would run in %s: %s\n" % (ws, " ".join(argv)))
+            return Result(0)
+        return self.exec(ws, argv)
+
+    def task_put(self, ws, task):
+        self.call("t_task_put", [ws, str(task.path)])
+
+    def ask(self, ws, pid, cap):
+        return _answer(self.exec(ws, ["kill", "-0", str(pid)], timeout=cap))
+
+
+def caller_shell(env):
+    state = env.get("WK_CALLER_SHELL")
+    return CallerShell(state) if state else None
+
+
+def fleet_holders(resource, records, stores):
+    """This store's live holders of `resource`, then every other store's; one that could not be asked is a row
+    of its own (`unknown`), since an unread machine is not a free board."""
+    rows = list(records.holders(resource))
+    for name, ask in stores:
+        got, why = ask(resource)
+        if got is None:
+            rows.append(("?", name, "unknown", why.replace("\t", " ")))
+        else:
+            rows += [tuple(l.split("\t")) for l in got.replace("\r", "").splitlines() if l]
+    return rows
+
+
+def fleet_stores(root, env, machine):
+    """(name, ask) for the podman machine's store where this one is not it, and for each peer through its own wk."""
+    from wk import shell, status
+    from wk.targets import Registry
+    reg = Registry(root, env, machine)
+
+    def holds(target, resource, why):
+        rc, out = target.wk("status", "--holds", resource, quiet=True)
+        return (out, "") if rc == 0 else (None, why)
+
+    def peer(name):
+        def ask(resource):
+            t = reg.load(name)
+            side, why = t.probe()
+            if side != "answering":
+                return None, status.far_side_reason(t, side, why)
+            return holds(t, resource, "it answers, but its wk does not read --holds: wk sync --tools %s" % name)
+        return ask
+
+    stores = []
+    if not shell.store_is_local(root, machine):
+        stores.append(("%s's podman machine" % machine_name(env, machine),
+                       lambda r: holds(reg.load("container"), r, "it did not answer: wk start, or wk sync --tools")))
+    return stores + [(p, peer(p)) for p in shell.peer_workstations(root, env=env)]
+
+
+def hold(records, fleet, machine, kind, name, kill, log, plan, pid, env):
+    """A hold on the holder's own record, or None under --dry-run or a driver's own claim (WK_DEVICE_HELD)."""
+    res = "device:%s" % machine
+    if env.get("WK_DEVICE_HELD") == res:
+        return None
+    rows = fleet(res)
+    quiet = "".join("\n    %s -- %s" % (who, why) for _, who, what, why in rows if what == "unknown")
+    held = "".join("\n    %s on %s -- stop it there:  %s" % (what, who, stop) for _, who, what, stop in rows if what != "unknown")
+    if quiet:
+        act.warn("a machine that could be driving %s could not be asked:%s" % (machine, quiet))
+    if held:
+        act.barrier("%s is a fleet resource and another live task holds it:%s\n"
+                    "    Two drivers on one board make both results junk." % (machine, held))
+    if act.dry_run():
+        return None
+    return records.begin(kind, "here", name, kill, log, plan, holds=res, pid=pid)
+
+
+def _begin_args(args):
+    """[--holds R] [--pid P] [--argv A] and the positionals, the shape lib/task.sh's task_begin takes."""
+    kw = {}
+    while args and args[0] in ("--holds", "--pid", "--argv"):
+        kw[args[0][2:]] = args[1]
+        args = args[2:]
+    if "pid" in kw:
+        kw["pid"] = int(kw["pid"])
+    if "argv" in kw:
+        kw["argv"] = [kw["argv"]]
+    return kw, args
+
+
+def _out(text):
+    if text:
+        sys.stdout.write(str(text))
+
+
+def main(argv, env=None):
+    """The record for a bash caller (lib/task.sh): `python3 -m wk.record <verb> ...`."""
+    env = os.environ if env is None else env
+    shell_ = caller_shell(env)
+    records = Records(env=env, ask_target=shell_.ask if shell_ else None)
+    verb, a = argv[0], argv[1:]
+    task = (lambda: records._task(a[0])) if a else None
+    try:
+        if verb == "stamp":
+            _out(records.clock.stamp())
+        elif verb == "field":
+            v = task().field(a[1])
+            _out(v + "\n" if v else "")
+        elif verb == "begin":
+            kw, pos = _begin_args(a)
+            _out(records.begin(*pos[:5], plan=pos[5:], **kw).path)
+        elif verb == "pid":
+            task().pid(a[1], a[2] if len(a) > 2 else None)
+        elif verb == "set":
+            task().set(a[1], a[2])
+        elif verb == "step-state":
+            task().step_state(a[1], a[2])
+        elif verb == "step-event":
+            task().step_event(a[1], a[2])
+        elif verb == "step":
+            task().step(int(a[1]))
+        elif verb == "step-named":
+            task().step_named(a[1])
+        elif verb == "step-now":
+            _out(task().step_now())
+        elif verb == "stage":
+            _out("".join(s + "\n" for s in task().stage()))
+        elif verb == "end":
+            if not a or not os.path.isdir(a[0]):
+                act.die("task_end: '%s' is no task record -- the caller holds none to end (an unset YOCTO_TASK/PGO_TASK "
+                        "reads like this)" % (a[0] if a else ""))
+            task().end(a[1])
+        elif verb == "alive":
+            return 0 if task().alive(None) else 1
+        elif verb == "verdict":
+            _out(task().verdict(a[1] if len(a) > 1 else "pid"))
+        elif verb == "find":
+            t = records.find(a[0], a[1])
+            _out(t.path if t else "")
+        elif verb == "list":
+            _out("".join("%s\n" % t.path for t in records.list()))
+        elif verb == "first-error":
+            _out("".join(l + "\n" for l in first_error(a[0])))
+        elif verb == "log-age":
+            age = log_age(a[0], records.clock) if os.path.isfile(a[0]) else None
+            if age is None:
+                return 1
+            sys.stdout.write("%d" % age)
+        elif verb == "hold":
+            kw, pos = _begin_args(a)
+            root = env.get("WK_ROOT") or str(Path(__file__).resolve().parents[2])
+            t = hold(records, lambda r: fleet_holders(r, records, fleet_stores(root, env, records.machine)),
+                     pos[0], pos[1], pos[2], pos[3], pos[4], pos[5:], kw.get("pid"), env)
+            _out(t.path if t else "")
+        else:
+            act.die("wk.record: no verb '%s'" % verb, 2)
+    except (ValueError, RuntimeError) as e:
+        act.err("%s: %s" % (verb, e))
+        return 1
+    except act.Refused as e:
+        return e.status
+    return 0
+
+
 def _rmtree(path):
     path = Path(path)
     if not path.exists():
@@ -401,3 +590,6 @@ def _rmtree(path):
             p.unlink()
     path.rmdir()
 
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

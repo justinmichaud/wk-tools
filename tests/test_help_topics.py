@@ -27,7 +27,7 @@ class TestHelpTopics(unittest.TestCase):
 
     def test_the_lifecycle_names_every_step_from_bare_board_to_ab(self):
         out = run("help", "lifecycle").stdout
-        for step in ("boot/machines/<name>.conf", "wk sysimage build", "wk sysimage disks",
+        for step in ("machines/<name>.conf", "wk sysimage build", "wk sysimage disks",
                      "wk sysimage write", "--rescue", "@second", "wk pi boot-order",
                      "wk boot", "--keep", "wk sysimage webkit", "wk pi deploy",
                      "wk pi bench", "--ab", "wk bench report", "wk ab",
@@ -68,14 +68,14 @@ if __name__ == "__main__":
 
 
 class TestHardwareSection(unittest.TestCase):
-    """`wk help hardware` is derived from boot/machines/*.conf and the drivers
+    """`wk help hardware` is derived from machines/*.conf and the drivers
     they name, so it names every device and every driver -- a conf added
     without a paragraph there fails here."""
 
     def test_names_every_fleet_device_and_its_driver(self):
         out = run("help", "hardware").stdout
         self.assertTrue(out.startswith("## Hardware"), out[:200])
-        confs = sorted((REPO / "boot" / "machines").glob("*.conf"))
+        confs = [c for c in sorted((REPO / "machines").glob("*.conf")) if "\nNODE_DRIVER=" in c.read_text()]
         self.assertTrue(confs)
         for conf in confs:
             name = conf.stem

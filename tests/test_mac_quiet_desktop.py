@@ -1,12 +1,12 @@
-"""bench/mac-quiet-desktop.sh -- what a macOS machine that exists to be measured
-is, and the one place it is written down.
+"""bench/mac-quiet-desktop.sh and its table, bench/quiet/macos.tsv -- what a
+macOS machine that exists to be measured is, and the one place it is written down.
 
 A guest and a bench install are the same kind of machine for this purpose: a
 window that gets looked at, nobody at the keyboard, and a number coming out at
 the end. A widget that animates, a notification banner, a Setup Assistant pane,
 a Spotlight scan and a clock the machine took down itself each cost the
 measurement, and each used to be turned off in one of those two places and not
-the other. So the settings are four tables, the appliers read the tables, the
+the other. So the settings are one table of several kinds, the appliers read it, the
 probe reads the machine, and the findings judge one against the other -- and
 this file measures the tables and every caller.
 
@@ -25,11 +25,11 @@ import unittest
 from tests.support import REPO, WkTest, bash, func_body, stub_path
 
 QUIET = REPO / "bench" / "mac-quiet-desktop.sh"
+TABLE = REPO / "bench" / "quiet" / "macos.tsv"
 DESKTOP = REPO / "vm" / "desktop.sh"
 FIRSTBOOT = REPO / "bench" / "mac-bench-firstboot.sh"
 VOLUME = REPO / "bench" / "mac-bench-volume.sh"
 VM_DRIVER = REPO / "targets" / "vm.sh"
-QUIESCE = REPO / "cmd" / "quiesce"
 
 # Every call lands in one log, so a test reads what was asked for in order.
 STUB = '#!/bin/sh\nprintf \'%s %s\\n\' "$(basename "$0")" "$*" >> "$WK_TEST_CALLS"\nexit 0\n'
@@ -39,16 +39,14 @@ ID_USER = '#!/bin/sh\n[ "$1" = -u ] && { echo 501; exit 0; }\necho tester\n'
 # A machine where every daemon in the table is running.
 PGREP_ALL = '#!/bin/sh\necho 4242\nexit 0\n'
 
-# How many whitespace-separated fields each table's rows carry before the
-# free-text tail. Read by the splitter so a row's prose never becomes a field.
+# The fields each kind of row carries after its kind, the last one free text.
 FIELDS = {"rows": 6, "agents": 4, "daemons": 3, "power": 4, "expected": 3}
+KIND = {"rows": "setting", "agents": "agent", "daemons": "daemon", "power": "power", "expected": "expected"}
 
 
 def _rows(name):
-    src = QUIET.read_text()
-    body = src[src.index(f"wk_quiet_desktop_{name}() {{"):]
-    body = body[body.index("<<'ROWS'") + 8:body.index("\nROWS\n")]
-    return [l.split(None, FIELDS[name] - 1) for l in body.strip().splitlines()]
+    return [line.split("\t")[1:] for line in TABLE.read_text().splitlines()
+            if line.split("\t")[0] == KIND[name]]
 
 
 def _probe_only_keys():
@@ -454,16 +452,6 @@ class TestPausingTheDaemons(WkTest):
         self.assertIn("kill -STOP 7\n", calls)
         self.assertEqual(1, calls.count("kill "), calls)
 
-    def test_quiesce_keeps_no_list_of_its_own(self):
-        """A second list is a daemon that gets paused and never resumed, or the
-        other way round."""
-        text = QUIESCE.read_text()
-        self.assertIn("wk_quiet_daemons_pause", text)
-        self.assertIn("wk_quiet_daemons_resume", text)
-        for row in _rows("daemons"):
-            with self.subTest(daemon=row[1]):
-                self.assertNotIn(row[1], text)
-
 
 class TestTheProbe(WkTest):
     def _probe(self):
@@ -811,6 +799,7 @@ class TestBothKindsOfMeasuredMacGetIt(unittest.TestCase):
         for caller in (VM_DRIVER, REPO / "vm" / "provision-base.sh"):
             with self.subTest(caller=caller.name):
                 self.assertIn("mac-quiet-desktop.sh", caller.read_text())
+                self.assertIn("wk_quiet_desktop_script", caller.read_text(), "sent without its table")
 
     def test_the_sudo_shell_carries_what_the_system_half_calls(self):
         """`declare -f` copies one function, and wk_quiet_desktop_system reads
@@ -826,7 +815,7 @@ class TestBothKindsOfMeasuredMacGetIt(unittest.TestCase):
         self.assertIn("wk_quiet_desktop_probe", (REPO / "vm" / "desktop-probe.sh").read_text())
         driver = VM_DRIVER.read_text()
         body = driver[driver.index("vm_desktop_probe() {"):]
-        self.assertIn("mac-quiet-desktop.sh", body[:body.index("\n}\n")])
+        self.assertIn("wk_quiet_desktop_script", body[:body.index("\n}\n")])
 
     def test_the_guest_report_judges_it_through_the_shared_findings(self):
         """`wk vm check` and a bench-mode preflight read the same table the same
@@ -836,7 +825,7 @@ class TestBothKindsOfMeasuredMacGetIt(unittest.TestCase):
         body = body[:body.index("\n}\n")]
         self.assertIn("wk_quiet_desktop_findings", body)
         self.assertIn("wk_quiet_cpu_findings", body)
-        self.assertIn("wk_quiet_desktop_findings", (REPO / "lib" / "quiet.sh").read_text())
+        self.assertIn("wk_quiet_desktop_findings", (REPO / "lib" / "wk" / "quiet.py").read_text())
 
     def test_a_bench_install_gets_the_file_and_runs_it(self):
         # The payload table, wherever it is read from: one file now, so both the
@@ -863,7 +852,7 @@ class TestBothKindsOfMeasuredMacGetIt(unittest.TestCase):
         """A second spelling anywhere is a setting that can drift out of the
         table and be true of one kind of measured Mac and not the other."""
         for f in (DESKTOP, FIRSTBOOT, VOLUME, REPO / "vm" / "desktop-probe.sh",
-                  REPO / "cmd" / "bench"):
+                  REPO / "cmd" / "bench", REPO / "lib" / "bench-arms.sh"):
             text = f.read_text()
             with self.subTest(file=f.name):
                 for _name, domain, key, _t, _v, _why in _rows("rows"):
@@ -873,6 +862,35 @@ class TestBothKindsOfMeasuredMacGetIt(unittest.TestCase):
                 for _name, key, _value, _shown in _rows("power"):
                     self.assertNotIn(f"pmset -a {key}", text,
                                      f"{f.name} sets {key} itself")
+
+
+class TestTheTableTravelsWithTheFile(WkTest):
+    """The table is a data file beside the script, and the script is streamed into a guest with no copy
+    of wk-tools on disk: whatever runs it has to be sent both, or be told it was not."""
+
+    PROBE = "set -u\nwk_quiet_desktop_power | head -1\nwk_quiet_desktop_stopped | wc -l\n"
+
+    def test_the_script_it_sends_carries_the_table(self):
+        script = bash('. %r\nwk_quiet_desktop_script\n' % str(QUIET)).stdout
+        cp = bash(script + self.PROBE, cwd=str(self.tmp))
+        self.assertEqual(0, cp.returncode, cp.stdout + cp.stderr)
+        lines = cp.stdout.split()
+        self.assertEqual("power_displaysleep", lines[0], cp.stdout)
+        self.assertEqual(len(_rows("agents")) + len(_rows("daemons")), int(lines[-1]))
+
+    def test_a_copy_sent_without_it_refuses_loudly_and_sources_cleanly(self):
+        cp = bash("set -e\n" + QUIET.read_text() + "\necho SOURCED\nwk_quiet_desktop_power || echo rc=$?\n",
+                  cwd=str(self.tmp))
+        self.assertIn("SOURCED", cp.stdout, cp.stderr)
+        self.assertIn("rc=1", cp.stdout, cp.stderr)
+        self.assertIn("no quiet table here", cp.stderr)
+
+    def test_every_row_is_one_of_the_kinds_a_reader_asks_for(self):
+        kinds = set(KIND.values()) | {"unsettable", "unstoppable"}
+        for line in TABLE.read_text().splitlines():
+            if line and not line.startswith("#"):
+                with self.subTest(row=line):
+                    self.assertIn(line.split("\t")[0], kinds)
 
 
 if __name__ == "__main__":

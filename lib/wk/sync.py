@@ -6,12 +6,14 @@ import os
 import sys
 from concurrent.futures import ThreadPoolExecutor
 
-from wk import act, shell
+from wk import act, git, pr, shell
 from wk.act import Refused, debug, die, info, log, warn
+from wk.store import Bases
 
 SCOPE_FLAGS = ("--all", "--tools", "--target", "--machine", "--mirror")
 FETCH_JOBS = 16
 FIX_AGAIN = "'wk sync <ws> --fix' re-asserts the wiring"
+BROKER_SOCKET = "/run/wk/broker.sock"
 
 
 def where(in_workspace, args):
@@ -41,10 +43,10 @@ def fetch_script(src, mirror):
     return out + "exit $rc\n"
 
 
-def fetch_and_check_script(root, src, mirror, env=None):
+def fetch_and_check_script(src, mirror, forks, branches):
     """The fetch, then the wiring check in a subshell: `fetch=` and `check=` carry each one's status."""
     fetch = fetch_script(src, mirror).replace("exit $rc\n", "echo fetch=$rc\n")
-    return "%s(\n%s\n)\necho check=$?\n" % (fetch, shell.wiring_check_script(root, src, mirror, env=env))
+    return "%s(\n%s\n)\necho check=$?\n" % (fetch, git.wiring_check_script(src, mirror, forks, branches))
 
 
 @contextlib.contextmanager
@@ -59,6 +61,13 @@ class Sync:
         self.reg, self.clock, self.lock = reg, clock, lock
         self.here, self.root, self.env = reg.machine, reg.root, reg.env
         self.scope, self.only, self.target, self.fix = scope, only, target, fix
+        self.branches = git.mirror_branches(self.env)
+        self._forks = None
+
+    def forks(self):
+        if self._forks is None:
+            self._forks = shell.push_forks(self.root, self.here)
+        return self._forks
 
     # -- the scope
 
@@ -76,6 +85,23 @@ class Sync:
     def mirror_is_here(self):
         return not self.env.get("WK_IN_VM")
 
+    # The mirror is mounted read-only in a workspace, so the refresh is asked of the broker, which runs `wk sync --mirror`.
+    def mirror_refresh_request(self):
+        sock = self.env.get("WK_BROKER_SOCKET") or BROKER_SOCKET
+        if not self.here.run(["test", "-S", sock]).ok:
+            warn("no request broker at %s, so this machine's mirror was not\n"
+                 "    refreshed -- only this workspace's own fetch ran, against whatever the\n"
+                 "    mirror already had. Somebody with the workstation opens the door with:\n"
+                 "        ./setup --stage broker     ('wk doctor' says whether it is reachable)\n"
+                 "    The refresh itself, out there:  wk sync --mirror" % sock)
+            return 1
+        client = os.path.join(str(self.root), "container", "broker", "wk-broker-client.py")
+        if not self.here.exists(client):
+            die("this workspace's copy of wk-tools has no broker client\n    (%s). Refresh it:  wk sync --tools container   on the workstation." % client)
+        r = self.here.act_run(["env", "WK_BROKER_SOCKET=" + sock, "python3", client, "sync"])
+        sys.stderr.write(r.out + r.err)
+        return 0 if r.ok else 1
+
     def load(self, name):
         try:
             return self.reg.load(name)
@@ -87,7 +113,7 @@ class Sync:
     def run(self):
         if self.scope == "mirror":
             if self.reg.in_workspace():
-                return 1 if shell.mirror_refresh_request(self.root, self.env) else 0
+                return self.mirror_refresh_request()
             if not self.mirror_is_here():
                 die("the mirror in here is the host's, mounted read-only.\n    Run it on the machine that keeps it.")
             with self.lock.held("store"):
@@ -112,7 +138,7 @@ class Sync:
         except LookupError as e:
             die(str(e))
         if self.reg.in_workspace():
-            rc = 1 if shell.mirror_refresh_request(self.root, self.env) else 0
+            rc = self.mirror_refresh_request()
         else:
             target.store_init()
         return rc | self.fetch_workspaces(target, [self.only])
@@ -191,10 +217,10 @@ class Sync:
             debug("ok: mirror exists")
         else:
             info("creating bare mirror (first run: this clones all of WebKit)")
-        branches = shell.mirror_branches(self.root, self.env)
-        info("fetching %s (origin: %s)" % (" ".join(r[0] for r in shell.wk_remotes(self.root, self.env)), " ".join(branches)))
+        branches = self.branches
+        info("fetching %s (origin: %s)" % (" ".join(r[0] for r in git.REMOTES), " ".join(branches)))
         with stage(self.clock, "mirror fetch"):
-            r = self.here.act_run(["sh", "-c", shell.mirror_refresh_script(self.root, mirror, env=self.env)])
+            r = self.here.act_run(["sh", "-c", git.mirror_refresh_script(mirror, branches)])
         if not r.ok:
             warn("the mirror refresh did not finish")
         for line in r.out.splitlines():
@@ -228,7 +254,7 @@ class Sync:
                     "    A snapshot is published from a remote-tracking branch, spelled\n"
                     "    <remote>/<branch>:  origin/main (the default), wpe/wpe-2.46.\n"
                     "    Only %s of origin is in the mirror at all -- WK_MIRROR_BRANCHES=<branch>\n"
-                    "    carries another one in." % (branch, " ".join(shell.mirror_branches(self.root, self.env))))
+                    "    carries another one in." % (branch, " ".join(self.branches)))
         upstream = "/".join(parts[2:])
         local = "/".join(parts[3:])
         if not self.here.act_run(["git", "-C", tree, "checkout", "--quiet", "-B", local, ref]).ok:
@@ -249,8 +275,9 @@ class Sync:
         new_id = self.clock.stamp()
         new_dir = os.path.join(store.base_dir(), new_id)
         new_tree = os.path.join(new_dir, "WebKit")
-        prev = shell.newest_complete_base(self.root, here, target.name)
-        if branch == "origin/main" and prev and not shell.base_verify(self.root, here, target.name, prev):
+        bases = Bases(store, here)
+        prev = bases.newest_complete()
+        if branch == "origin/main" and prev and not bases.verify(prev):
             try:
                 recorded = here.read(store.base_sha_file(prev)).strip()
             except OSError:
@@ -277,7 +304,7 @@ class Sync:
             fail("could not make snapshot %s: %s" % (new_id, r.err.strip()))
         # Wired before the fetch, so the fetch reads this machine's mirror and a workspace overlaid on the tree inherits the wiring.
         info("wiring snapshot remotes for workspace use")
-        if not here.act_run(["sh", "-c", shell.wiring_script(self.root, new_tree, mirror, env=self.env)]).ok:
+        if not here.act_run(["sh", "-c", git.wiring_script(new_tree, mirror, self.forks(), self.branches)]).ok:
             fail("could not wire snapshot %s" % new_id)
         if not here.act_run(["git", "-C", new_tree, "fetch", "--all", "--prune", "--quiet"]).ok:
             fail("snapshot %s could not fetch from %s" % (new_id, mirror))
@@ -299,12 +326,12 @@ class Sync:
 
     def base_wiring(self, target):
         """The current snapshot is where every future workspace gets its remotes from."""
-        base = shell.current_base(self.root, self.here, target.name)
+        base = Bases(target.store, self.here).current()
         tree = target.store.base_path(base) if base else ""
         if not tree or not self.here.isdir(os.path.join(tree, ".git")):
             return 0
         mirror = target.store.mirror()
-        r = self.here.run(["sh", "-c", shell.wiring_check_script(self.root, tree, mirror, "skip-env", env=self.env)])
+        r = self.here.run(["sh", "-c", git.wiring_check_script(tree, mirror, self.forks(), self.branches, "skip-env")])
         if r.ok:
             return 0
         warn("the base snapshot %s is wired wrong, and every new workspace starts from it:\n%s"
@@ -312,7 +339,7 @@ class Sync:
         if not self.fix:
             log("  re-assert it:  wk sync --target %s --fix" % target.name)
             return 1
-        if not self.here.act_run(["sh", "-c", shell.wiring_script(self.root, tree, mirror, env=self.env)]).ok:
+        if not self.here.act_run(["sh", "-c", git.wiring_script(tree, mirror, self.forks(), self.branches)]).ok:
             warn("could not re-wire the base snapshot %s" % base)
             return 1
         info("re-wired the base snapshot %s" % base)
@@ -321,7 +348,7 @@ class Sync:
     # -- the workspaces
 
     def fetch_workspaces(self, target, names):
-        info("fetching in %d workspace(s) -- %s" % (len(names), " ".join(r[0] for r in shell.wk_remotes(self.root, self.env))))
+        info("fetching in %d workspace(s) -- %s" % (len(names), " ".join(r[0] for r in git.REMOTES)))
         with ThreadPoolExecutor(max_workers=min(len(names), FETCH_JOBS)) as pool:
             results = list(pool.map(lambda ws: self.fetch_one(target, ws), names))
         failed = wired = 0
@@ -350,7 +377,7 @@ class Sync:
         notes = []
         fixed = self.fix_one(target, ws, src, mirror, notes) if self.fix else True
         with stage(self.clock, "workspace fetch %s" % ws):
-            r = target.act_exec(ws, ["sh", "-c", fetch_and_check_script(self.root, src, mirror, self.env)])
+            r = target.act_exec(ws, ["sh", "-c", fetch_and_check_script(src, mirror, self.forks(), self.branches)])
         lines = r.out.replace("\r", "").splitlines()
         said = dict(l.split("=", 1) for l in lines if l.startswith(("from=", "fetch=", "check=")))
         problems = ["    - %s" % l[len("problem: "):] for l in lines if l.startswith("problem: ")]
@@ -372,16 +399,15 @@ class Sync:
     def fix_one(self, target, ws, src, mirror, notes):
         """`git-webkit setup` runs only where the injector puts the credential it reads: a container or a guest."""
         n, u, c = target.wiring_args()
-        r = target.act_exec(ws, ["sh", "-c", shell.wiring_script(self.root, src, mirror, n, u, c, env=self.env)])
+        r = target.act_exec(ws, ["sh", "-c", git.wiring_script(src, mirror, self.forks(), self.branches, n, u, c)])
         if not r.ok:
             notes.append("    could not re-wire '%s'" % ws)
             return False
         notes.append("    re-wired")
-        r = target.act_exec(ws, ["sh", "-c", shell.branch_upstream_fix_script(self.root, src, env=self.env)])
-        notes.extend("    " + l for l in r.out.replace("\r", "").splitlines() if l.strip())
+        notes.extend("    " + l for l in pr.retarget(target, ws, src, self.forks(), self.branches))
         if target.kind not in ("container", "vm"):
             return True
-        r = target.act_exec(ws, ["sh", "-c", shell.gitwebkit_setup_script(self.root, src, env=self.env)])
+        r = target.act_exec(ws, ["sh", "-c", git.gitwebkit_setup_script(src, self.forks())])
         said = (r.out.replace("\r", "").strip().splitlines() or [""])[-1]
         if not r.ok:
             notes.extend("    " + l for l in r.err.replace("\r", "").splitlines() if l.strip())

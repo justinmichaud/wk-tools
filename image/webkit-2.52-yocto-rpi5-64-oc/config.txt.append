@@ -1,0 +1,19 @@
+# --- wk sysimage: webkit-2.52-yocto-rpi5-64-oc ------------------------------
+# Appended by `wk sysimage write --profile webkit-2.52-yocto-rpi5-64-oc` to the
+# card's own config.txt, after image/boards/rpi5/config.txt.append. The
+# overclock is a property of this measurement, so it lives in this profile and
+# nowhere else: the board file is every image's, and the EEPROM (BOOT_ORDER,
+# SDRAM_BANKLOW) is firmware state the workstation boots from too.
+#
+# The numbers are the ones host/linux/rpi5 measured stable on this board:
+# 2.8 GHz holds under stress-ng and real use (2.9 hard-locks, 3.0 SIGILLs),
+# +50 mV puts VDD_CORE at its cap, and v3d at 1200 MHz. arm_freq_min pins the
+# floor so DVFS does not ramp inside a run; force_turbo is left off, as
+# rpi5-stress.sh advises for this board.
+
+[pi5]
+arm_freq=2800
+arm_freq_min=2800
+over_voltage_delta=50000
+v3d_freq=1200
+[all]

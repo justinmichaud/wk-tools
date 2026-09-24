@@ -11,18 +11,24 @@ compares. A record of what produced an artifact, never a verdict about it: no
 code here believes the record over the comparison.
 
 Hermetic. The base half runs the real driver functions against a scratch
-WK_VM_STORE and a stub `tart`; the build-machine half runs the real driver
-functions against a stub `ssh` that executes the command locally, over a scratch
-HOME holding the marker a provisioned machine would have.
+WK_VM_STORE and a stub `tart`; the build-machine half runs lib/wk/machine_cmd.py
+against a fake machine holding the marker a provisioned one would have.
 
 Run: python3 -m unittest tests.test_provision_stale -v
 """
 import os
 import platform
+import shutil
+import sys
+import tempfile
 import unittest
+from pathlib import Path
 
-from tests.support import (REPO, repo_files, WkTest, bash, rand_suffix, run, scratch_dir,
-                           stub_path)
+from tests.support import REPO, repo_files, WkTest, bash, rand_suffix, run, stub_path
+
+sys.path.insert(0, str(REPO / "lib"))
+from wk import machine_cmd, targets  # noqa: E402
+from wk.machine import Fake  # noqa: E402
 
 # A base that exists and is stopped, and every other verb succeeding: what
 # `tart` answers about a machine whose golden base has been built.
@@ -39,12 +45,6 @@ case "$1" in
   list) echo '[]' ;;
   *)    exit 0 ;;
 esac
-'''
-
-# Stand in for a live build machine: run the ssh'd command locally.
-ANSWERING_SSH = '''#!/bin/sh
-for last; do :; done
-exec bash -c "$last"
 '''
 
 
@@ -252,57 +252,57 @@ _base_mark_ready
         self.assertIn("matches its provisioning inputs", cp.stdout, cp.stdout)
 
 
-class TestTheBuildMachineRecord(WkTest):
-    """The same shape one layer out: `wk remote setup` records the hash of what
+class TestTheBuildMachineRecord(unittest.TestCase):
+    """The same shape one layer out: `wk machine setup` records the hash of what
     provisions a machine in that machine's own marker, and `wk doctor --all`
-    recomputes it. Driven over a stub ssh against a scratch HOME."""
+    recomputes it (lib/wk/machine_cmd.py's stale), against a fake machine."""
 
     def _stale(self, marker_text=None):
-        with scratch_dir(prefix="wk-test-remote-home-") as home, \
-             stub_path({"ssh": ANSWERING_SSH}) as binp:
-            if marker_text is not None:
-                (home / ".wk-remote").write_text(marker_text)
-            cp = bash('''
-. "$WK_ROOT/lib/common.sh"
-. "$WK_ROOT/lib/resources.sh"
-. "$WK_ROOT/lib/store.sh"
-. "$WK_ROOT/lib/target.sh"
-load_target remote >/dev/null 2>&1
-echo "hash=$(remote_provision_inputs_hash)"
-if why=$(remote_provision_stale); then echo "stale=$why"; else echo "fresh"; fi
-''', env={
-                # target= names another machine, so this run is a workstation
-                # driving one over ssh rather than the machine itself.
-                "HOME": str(home),
-                "WK_TARGET": "remote",
-                "WK_REMOTE_HOST": "fake-build-machine",
-                "WK_REMOTE_ROOT": str(home / "wk"),
-                "PATH": f"{binp}:{os.environ['PATH']}",
-            })
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        return cp.stdout
-
-    def _hash(self, out):
-        return out.split("hash=", 1)[1].splitlines()[0]
+        far = Fake("box")
+        if marker_text is None:
+            far.answer(["sh", "-c"], rc=0, out="")
+        else:
+            far.answer(["sh", "-c"], out=marker_text)
+        t = targets.Remote("box", str(REPO), {"HOME": "/tmp/wk-test-unused", "XDG_STATE_HOME": "/tmp/wk-test-unused/state"}, far)
+        t.machine = far
+        return machine_cmd.stale(t, REPO)
 
     def test_a_machine_provisioned_from_these_inputs_reads_fresh(self):
-        out = self._stale("target=otherbox\nroot=/home/x/wk\ninputs=PLACEHOLDER\n")
-        h = self._hash(out)
-        out = self._stale(f"target=otherbox\nroot=/home/x/wk\ninputs={h}\n")
-        self.assertIn("fresh", out, out)
+        self.assertIsNone(self._stale("target=otherbox\nroot=/home/x/wk\ninputs=%s\n" % machine_cmd.inputs_hash(REPO)))
 
     def test_a_machine_provisioned_before_the_record_says_so(self):
-        out = self._stale("target=otherbox\nroot=/home/x/wk\n")
-        self.assertIn("stale=provisioned before this record existed", out, out)
+        self.assertEqual(self._stale("target=otherbox\nroot=/home/x/wk\n"), "provisioned before this record existed")
 
     def test_a_changed_provisioning_script_makes_it_stale(self):
-        out = self._stale("target=otherbox\nroot=/home/x/wk\ninputs=0000000000000000\n")
-        self.assertIn("stale=", out, out)
-        self.assertIn("remote/provision.sh", out, out)
+        self.assertIn("remote/provision.sh", self._stale("target=otherbox\nroot=/home/x/wk\ninputs=0000000000000000\n"))
 
     def test_a_machine_with_no_marker_is_not_provisioned_at_all(self):
-        out = self._stale(None)
-        self.assertIn("nothing has provisioned it", out, out)
+        self.assertIn("nothing has provisioned it", self._stale(None))
+
+    def _copy(self, edit=None):
+        root = Path(tempfile.mkdtemp(prefix="wk-test-inputs-"))
+        self.addCleanup(shutil.rmtree, root, True)
+        (root / "remote").mkdir()
+        for f in ("provision.sh", "probe.sh", "deps.sh"):
+            text = (REPO / "remote" / f).read_text()
+            (root / "remote" / f).write_text(edit(f, text) if edit else text)
+        return machine_cmd.inputs_hash(root)
+
+    def test_a_comment_or_a_layout_change_leaves_the_hash_alone(self):
+        """Every provisioned box would otherwise read stale over prose nothing on it runs."""
+        def edit(f, text):
+            if f != "deps.sh":
+                return text
+            text = text.replace("wk_remote_deps() {   #", "\n\n# a new note\nwk_remote_deps() {  # reworded:")
+            text = text.replace("    local w\n", "        local w\n\n")
+            return "# a new header\n" + text + "\nwk_remote_driving_side_only() { true; }\n"
+        self.assertEqual(self._copy(edit), machine_cmd.inputs_hash(REPO))
+
+    def test_what_the_box_runs_is_in_it(self):
+        for f, old, new in (("deps.sh", "ccache wanted", "ccache required"), ("probe.sh", "arch=%s", "machine=%s"),
+                            ("provision.sh", "ensure_dir \"$ROOT/ws\"", "ensure_dir \"$ROOT/w\"")):
+            with self.subTest(f=f):
+                self.assertNotEqual(self._copy(lambda g, t: t.replace(old, new) if g == f else t), machine_cmd.inputs_hash(REPO))
 
 
 class TestTheWriteSideRecordsIt(unittest.TestCase):
@@ -316,38 +316,33 @@ class TestTheWriteSideRecordsIt(unittest.TestCase):
         self.assertIn("inputs=${WK_REMOTE_INPUTS:-}", text)
 
     def test_setup_computes_it_here_and_hands_it_over(self):
-        text = (REPO / "cmd" / "remote").read_text()
-        self.assertIn("WK_REMOTE_INPUTS=$(sh_quote \"$(remote_provision_inputs_hash)\")",
-                      text)
+        text = (REPO / "lib" / "wk" / "machine_cmd.py").read_text()
+        self.assertIn('"WK_REMOTE_INPUTS=" + inputs_hash(self.root)', text)
 
     def test_the_hash_is_computed_in_exactly_one_place_per_artifact(self):
         """One implementation per behaviour: the base's hash lives in the vm
-        driver, the machine's in the remote driver, and nothing else in the
+        driver, the machine's in lib/wk/machine_cmd.py, and nothing else in the
         tree recomputes either."""
-        for func, owner in (("_base_inputs_hash", REPO / "targets" / "vm.sh"),
-                            ("remote_provision_inputs_hash",
-                             REPO / "targets" / "remote.sh")):
-            defs = [f for f in repo_files()
-                    if f.suffix not in (".py",)
-                    and f"{func}() {{" in f.read_text(errors="replace")]
-            self.assertEqual(defs, [owner], f"{func}: {defs}")
+        defs = [f for f in repo_files() if f.suffix not in (".py",)
+                and "_base_inputs_hash() {" in f.read_text(errors="replace")]
+        self.assertEqual(defs, [REPO / "targets" / "vm.sh"])
+        defs = [f for f in sorted((REPO / "lib").rglob("*.py")) if "def inputs_hash(" in f.read_text(errors="replace")]
+        self.assertEqual(defs, [REPO / "lib" / "wk" / "machine_cmd.py"])
 
     def test_doctor_reports_the_machine_through_that_one_function(self):
         """One row per machine, from remote_provision_stale's answer alone: a
-        reason is a miss naming `wk remote setup`, none is the ok row."""
-        from tests.test_doctor import MISS, OK, fake_doctor, stub_shell
+        reason is a miss naming the setup, none is the ok row."""
+        from tests.test_doctor import MISS, OK, build_doctor
         asked = []
 
-        def stale(root, target, env=None):
-            asked.append(target)
-            return "provisioned before this record existed" if target == "old" else None
-        sh = stub_shell(remote_probe=lambda root, t, env=None: "family=debian\n", remote_provision_stale=stale)
-        doc = fake_doctor(False, sh=sh)
-        self.assertEqual([(MISS, "provisioning on old predates its inputs: provisioned before this record existed", "wk remote setup old")],
+        def stale(target, root):
+            asked.append(target.name)
+            return "provisioned before this record existed" if target.name == "old" else None
+        doc = build_doctor(probe=lambda t, root: "family=debian\n", stale=stale)
+        self.assertEqual([(MISS, "provisioning on old predates its inputs: provisioned before this record existed", "wk machine setup old")],
                          list(doc.build_machine("old")))
         self.assertEqual([(OK, "provisioned from this tree's remote/provision.sh + remote/deps.sh", "")], list(doc.build_machine("fresh")))
         self.assertEqual(["old", "fresh"], asked)
-
 
 if __name__ == "__main__":
     unittest.main()

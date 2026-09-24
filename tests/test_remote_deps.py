@@ -1,10 +1,10 @@
 """What a shared build machine needs, and the one root command that installs it
-(remote/deps.sh, remote/probe.sh).
+(remote/deps.sh's table, remote/probe.sh, lib/wk/machine_cmd.py's Deps).
 
 wk installs nothing on a build box -- provisioning never takes root
 (remote/provision.sh) -- so the whole of the help it can give is naming the
 exact command to run there or to hand to that machine's administrators. Three
-places ask: `wk remote setup`, provisioning itself, and `wk doctor --all`. One
+places ask: `wk machine setup`, provisioning itself, and `wk doctor --all`. One
 list answers all three, and these tests pin the list, the package names, the
 per-distro command, and what the findings say about a machine.
 
@@ -14,11 +14,16 @@ what it says about *this* fleet is a fact about the fleet, not about the code.
 Run: python3 -m unittest tests.test_remote_deps -v
 """
 import hashlib
+import os
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 
 from tests.support import REPO, WkTest, bash
+
+sys.path.insert(0, str(REPO / "lib"))
+from wk import machine_cmd  # noqa: E402
 
 DEPS = REPO / "remote" / "deps.sh"
 PROBE = REPO / "remote" / "probe.sh"
@@ -91,45 +96,29 @@ def store_with(**values):
 
 
 def findings(probe, env=None):
-    # The probe arrives as a heredoc, not as a quoted argument: it is many
-    # lines, and a repr()'d one would reach the shell with literal backslash-n.
-    cp = bash(f'''
-set -euo pipefail
-WK_ROOT={str(REPO)!r}
-. "$WK_ROOT/lib/common.sh"
-. "$WK_ROOT/lib/store.sh"
-. "$WK_ROOT/remote/deps.sh"
-probe=$(cat <<'PROBE_EOF'
-{probe}
-PROBE_EOF
-)
-wk_remote_findings "$probe"
-''', env=env if env is not None else store_with(**{"claude-token": TOKEN, "litellm-key": LITELLM}))
-    assert cp.returncode == 0, cp.stdout + cp.stderr
-    out = []
-    for line in cp.stdout.splitlines():
-        parts = line.split("\t")
-        if len(parts) == 3:
-            out.append(tuple(parts))
-    return out
+    env = env if env is not None else store_with(**{"claude-token": TOKEN, "litellm-key": LITELLM})
+    return machine_cmd.Deps(REPO, env=dict(os.environ, **env)).findings(probe)
 
 
 class TestTheList(WkTest):
     def test_every_dep_is_tool_need_and_a_reason(self):
-        cp = self.bash(f'. "{DEPS}"\nwk_remote_deps\n')
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        rows = [l.split(None, 2) for l in cp.stdout.strip().splitlines()]
+        rows = machine_cmd.deps(REPO)
         self.assertTrue(rows)
         for row in rows:
             self.assertEqual(len(row), 3, row)
             self.assertIn(row[1], ("required", "wanted"), row)
         names = [r[0] for r in rows]
         self.assertEqual(len(names), len(set(names)), f"a tool listed twice: {names}")
-        # The four a CMake build cannot start without, and the two that only
+        # The ones a CMake build cannot start without, and the two that only
         # make it slower or less pleasant.
         need = {r[0] for r in rows if r[1] == "required"}
         self.assertEqual(need, {"git", "cmake", "ninja", "clang", "python3"})
         self.assertEqual({r[0] for r in rows if r[1] == "wanted"}, {"ccache", "zsh"})
+
+    def test_the_machine_reads_the_same_table(self):
+        """remote/probe.sh, on the machine, asks deps.sh's own function for the list the Python parses."""
+        cp = self.bash(f'. "{DEPS}"\nwk_remote_deps\n')
+        self.assertEqual([tuple(l.split(None, 2)) for l in cp.stdout.strip().splitlines()], machine_cmd.deps(REPO))
 
     def test_a_derivative_resolves_to_its_parent_family(self):
         """ID first, then ID_LIKE -- so Mint, Raspberry Pi OS and Rocky resolve
@@ -151,27 +140,19 @@ class TestTheList(WkTest):
                 self.assertEqual(cp.stdout.strip(), want)
 
     def test_the_package_name_is_the_tool_unless_it_differs(self):
-        cp = self.bash(f'. "{DEPS}"\n'
-                       'printf "%s %s %s\\n" "$(wk_remote_package ninja debian)" '
-                       '"$(wk_remote_package ccache debian)" "$(wk_remote_package ninja fedora)"\n')
-        self.assertEqual(cp.stdout.split(), ["ninja-build", "ccache", "ninja-build"])
+        self.assertEqual([machine_cmd.package("ninja", "debian"), machine_cmd.package("ccache", "debian"),
+                          machine_cmd.package("ninja", "fedora")], ["ninja-build", "ccache", "ninja-build"])
 
     def test_one_command_installs_the_whole_set(self):
-        cp = self.bash(f'. "{DEPS}"\n'
-                       'wk_remote_install_cmd debian ccache zsh; echo\n'
-                       'wk_remote_install_cmd fedora ccache; echo\n'
-                       'wk_remote_install_cmd arch ccache; echo\n'
-                       'wk_remote_install_cmd unknown ccache || echo REFUSED\n')
-        lines = cp.stdout.strip().splitlines()
-        self.assertEqual(lines[0], "sudo apt-get update && sudo apt-get install -y ccache zsh")
-        self.assertEqual(lines[1], "sudo dnf install -y ccache")
-        self.assertEqual(lines[2], "sudo pacman -S --needed ccache")
-        self.assertEqual(lines[3], "REFUSED",
-                         "an unknown package manager got a command invented for it")
+        self.assertEqual(machine_cmd.install_cmd("debian", ["ccache", "zsh"]),
+                         "sudo apt-get update && sudo apt-get install -y ccache zsh")
+        self.assertEqual(machine_cmd.install_cmd("fedora", ["ccache"]), "sudo dnf install -y ccache")
+        self.assertEqual(machine_cmd.install_cmd("arch", ["ccache"]), "sudo pacman -S --needed ccache")
+        self.assertIsNone(machine_cmd.install_cmd("unknown", ["ccache"]),
+                          "an unknown package manager got a command invented for it")
 
     def test_nothing_to_install_is_not_a_command(self):
-        cp = self.bash(f'. "{DEPS}"\nwk_remote_install_cmd debian || echo REFUSED\n')
-        self.assertIn("REFUSED", cp.stdout)
+        self.assertIsNone(machine_cmd.install_cmd("debian", []))
 
 
 class TestTheFindings(WkTest):
@@ -192,13 +173,13 @@ class TestTheFindings(WkTest):
         state, what, remedy = self._cred(FULL, "claude", store_with(**{"claude-token": "sk-ant-oat01-rotated", "litellm-key": LITELLM}))
         self.assertEqual("wanted", state)
         self.assertIn("rotated since", what)
-        self.assertIn("wk remote setup", remedy)
+        self.assertIn("wk machine setup", remedy)
 
     def test_a_machine_without_the_copy_is_wanted(self):
         state, what, remedy = self._cred(FULL.replace("cred..wk-agent-token=", "cred..wk-other="), "claude")
         self.assertEqual("wanted", state)
         self.assertIn("not on the machine", what)
-        self.assertIn("wk remote setup", remedy)
+        self.assertIn("wk machine setup", remedy)
 
     def test_a_copy_of_a_credential_no_longer_stored_here_is_wanted_gone(self):
         state, what, _r = self._cred(FULL, "claude", store_with(**{"litellm-key": LITELLM}))
@@ -281,8 +262,7 @@ class TestTheProbeItself(WkTest):
             self.assertIn(want, keys, cp.stdout)
         # One line per declared tool, present or not, so a reader never has to
         # know the list to notice one missing.
-        tools = self.bash(f'. "{DEPS}"\nwk_remote_deps | awk "{{print \\$1}}"\n').stdout.split()
-        for t in tools:
+        for t in (row[0] for row in machine_cmd.deps(REPO)):
             self.assertIn(f"tool.{t}", keys, f"the probe said nothing about {t}")
 
     def test_it_sources_nothing(self):

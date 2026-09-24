@@ -129,8 +129,8 @@ class TestTheProbeIsBounded(unittest.TestCase):
         tmp = Path(tempfile.mkdtemp(prefix="wk-test-probe-"))
         self.addCleanup(os.system, "rm -rf %s" % tmp)
         (tmp / "hosts").mkdir()
-        (tmp / "hosts" / "hangs.conf").write_text("WK_REMOTE_HOST=hangs.example\n")
-        env = {"HOME": str(tmp), "XDG_STATE_HOME": str(tmp / "state"), "WK_TARGET_REGISTRY": str(tmp / "hosts"),
+        (tmp / "hosts" / "hangs.conf").write_text("KIND=build\nWK_REMOTE_HOST=hangs.example\n")
+        env = {"HOME": str(tmp), "XDG_STATE_HOME": str(tmp / "state"), "WK_MACHINES_DIR": str(tmp / "hosts"),
                "WK_PROBE_SECONDS": seconds, "PATH": os.environ.get("PATH", "")}
         return targets.Registry(REPO, env=env, machine=fake).load("hangs")
 

@@ -184,6 +184,7 @@ kv_field() {
     kv_get "$k" < "$f"
 }
 
+wk_fleet() { PYTHONPATH="$WK_ROOT/lib" WK_ROOT="$WK_ROOT" python3 -m wk.fleet "$@"; }   # machines/<name>.conf, read by lib/wk/fleet.py alone
 
 WK_BENCH_ACCOUNT="${WK_BENCH_USER:-bench}"
 
@@ -290,26 +291,6 @@ act() { # <cmd...>
     $(printf ' %q' "$@")"
     debug "run:$(printf ' %q' "$@")"
     "$@"
-}
-
-prompt_secret_value() {  # $1 = what to ask for, $2 = the page that mints one, $3 = what is left to choose there
-    local what="$1" url="${2:-}" how="${3:-}" val=""
-
-    if [ ! -t 0 ]; then
-        warn "wk needs $what, and there is no terminal to ask on. Re-run interactively."
-        return 1
-    fi
-
-    printf '\n' >&2
-    info "wk needs $what."
-    [ -n "$url" ] && log "  $url"
-    [ -n "$how" ] && log "  $how"
-    printf '  paste it (input hidden, empty to skip): ' >&2
-    read -rs val || return 1
-    printf '\n' >&2
-
-    [ -n "$val" ] || return 1
-    printf '%s' "$val"
 }
 
 wk_tailscale_authkey_path() { printf '%s' "${WK_TS_AUTHKEY:-$HOME/.config/wk/tailscale-authkey}"; }
@@ -742,8 +723,6 @@ tart_bin() {   # tart is a signed .app reached through a symlink no non-interact
 WK_IMAGE_MARKER="${WK_IMAGE_MARKER:-/etc/wk-image}"
 
 wk_image_id() { kv_field "$WK_IMAGE_MARKER" id 2>/dev/null || true; }   # the bench system's own id, or empty in host mode
-wk_image_profile() { kv_field "$WK_IMAGE_MARKER" profile 2>/dev/null || true; }
-in_bench_mode() { [ -f "$WK_IMAGE_MARKER" ]; }
 
 # The compositor's start modes are indistinguishable at the Wayland socket, and only one of them makes a meaningful number.
 WK_SESSION_MODE_FILE="${WK_SESSION_MODE_FILE:-/run/wk-session-mode}"

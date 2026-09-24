@@ -264,7 +264,7 @@ class Stage(WkTest):
             self.assertIn("tag=tag:wk\n", conf)
 
     def test_the_node_it_names_is_the_machine_confs_and_not_a_second_copy(self):
-        mbp = (REPO / "boot" / "machines" / "mbp.conf").read_text()
+        mbp = (REPO / "machines" / "mbp.conf").read_text()
         self.assertIn('NODE_BENCH_SSH="tolken-bench"', mbp)
         self.assertNotIn("tolken-bench", SCRIPT.read_text(),
                          "the node name is hardcoded; mbp.conf declares it")

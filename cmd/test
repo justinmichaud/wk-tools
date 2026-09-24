@@ -29,7 +29,7 @@ import sys
 ROOT = os.environ.get("WK_ROOT") or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "lib"))
 
-from wk import buildconf, job, record, shell, targets  # noqa: E402
+from wk import buildconf, decl, job, record, shell, targets  # noqa: E402
 from wk.act import Refused, die, dry_run, info, log, warn  # noqa: E402
 from wk.build import records_of, size_for  # noqa: E402
 from wk.clock import Clock  # noqa: E402
@@ -41,38 +41,21 @@ _FAILURE = re.compile(r"FAIL|crash|timed out", re.I)
 
 
 def parse(argv):
-    o = {"suite": "jsc", "pass": []}
-    i = 0
-    while i < len(argv):
-        a = argv[i]
-        if a == "--config":
-            o["config"] = argv[i + 1] if i + 1 < len(argv) else ""
-            i += 2
-        elif a.startswith("--config="):
-            o["config"] = a[len("--config="):]
-            i += 1
-        elif a == "--layout":
-            o["suite"] = "layout"
-            i += 1
-        elif a == "--gpu":
-            o["gpu"] = True
-            i += 1
-        elif a == "--lldb":
-            lldb = "web"
-            if i + 1 < len(argv) and argv[i + 1] in ("ui", "web"):
-                lldb = argv[i + 1]
-                i += 1
-            o["lldb"] = lldb
-            i += 1
-        elif a == "--kill":
-            o["kill"] = True
-            i += 1
-        elif a == "--":
-            i += 1
-            break
-        else:
-            break
-    o["pass"] += argv[i:]
+    args = decl.Args(decl.Decl(__file__), argv)
+    o = {"suite": "layout" if args.flag("--layout") else "jsc"}
+    if args.value("--config") is not None:
+        o["config"] = args.value("--config")
+    if args.flag("--gpu"):
+        o["gpu"] = True
+    if args.flag("--kill"):
+        o["kill"] = True
+    paths = list(args.positionals)
+    if args.flag("--lldb"):
+        lldb = "web"
+        if paths and paths[0] in ("ui", "web"):
+            lldb = paths.pop(0)
+        o["lldb"] = lldb
+    o["pass"] = paths + args.tail
     return o
 
 
@@ -131,7 +114,7 @@ def main(argv, reg=None, clock=None, popen=None):
 
     kill_cmd = "wk test%s --kill" % ("" if reg.in_workspace() else " " + name)
 
-    if opts.get("kill"):   # before a config is resolved: stopping a run needs none
+    if opts.get("kill"):
         rc = job.stop(target, recs, name, "test", reg.machine, clock, reg.env)
         if rc == 1:
             die("the test run in '%s' outlived a TERM and a KILL.\n"
@@ -218,10 +201,10 @@ def main(argv, reg=None, clock=None, popen=None):
         log("  suite:     %s (%s)" % (opts["suite"], config))
         log("  would run: bash -lc %s" % shlex.quote(cmd))
         if opts.get("lldb"):
-            log("  in front of: lldb %s -o 'process attach --name %s --waitfor'" % (shell.lldb_pin_opts(ROOT), attach))
+            log("  in front of: lldb %s -o 'process attach --name %s --waitfor'" % (shell.LLDB_PIN_OPTS, attach))
         return 0
 
-    if not shell.sync_tools(ROOT, reg.machine, target.name, name):
+    if not target.sync_tools(name):
         die("pushing wk-tools into '%s' failed -- the reason is above" % name)
 
     # The watchdog kills a silent job after WK_ABORT_SECONDS, and a process at a breakpoint is silent by definition. The running record carries that deadline, so cmd/status can tell a quiet run from one whose watchdog is gone.
@@ -230,7 +213,7 @@ def main(argv, reg=None, clock=None, popen=None):
         log("  it attaches as that process starts; 'continue' runs the test")
         log("  test output: /tmp/wk-test-lldb.log (in the workspace)")
         script = ("%s\n( sleep 2; %s >/tmp/wk-test-lldb.log 2>&1 ) &\nexec \"$LLDB\" %s -o %s"
-                  % (shell.lldb_prelude(ROOT), cmd, shell.lldb_pin_opts(ROOT),
+                  % (shell.lldb_prelude(ROOT), cmd, shell.LLDB_PIN_OPTS,
                      shlex.quote("process attach --name %s --waitfor" % attach)))
         target.exec_tty(name, ["bash", "-lc", script])
         return 0

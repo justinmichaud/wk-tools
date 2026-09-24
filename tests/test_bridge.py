@@ -9,7 +9,7 @@ import subprocess
 import unittest
 from pathlib import Path
 
-from tests.support import REPO, WK, WkTest, bash, run, stub_path
+from tests.support import REPO, WK, WkTest, bash, real_confs, run, stub_path
 
 
 NO_ROUTE = 'echo "ssh: connect to host $* port 22: No route to host" >&2; exit 255\n'
@@ -22,7 +22,7 @@ class TestBridge(WkTest):
             cp = run("bridge", "ls", env={"PATH": f"{binp}:{os.environ['PATH']}"})
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
         out = cp.stdout
-        for f in sorted((REPO / "bridge" / "hosts").glob("*.conf")):
+        for f in real_confs("bridge"):
             name = f.stem
             self.assertRegex(out, rf"(?m)^{re.escape(name)} ", f"{name} is declared but not listed")
         self.assertRegex(out, r"unreachable|bare|provisioned", "no state column in the listing")
@@ -55,7 +55,7 @@ echo "$probe" | grep -q 'StrictHostKeyChecking=accept-new' \\
     def test_bridge_confs_resolve(self):
         """loads and names a device"""
         bad = []
-        for f in sorted((REPO / "bridge" / "hosts").glob("*.conf")):
+        for f in real_confs("bridge"):
             name = f.stem
             cp = run("bridge", "setup", name, "--dry-run")
             if cp.returncode != 0:
@@ -65,7 +65,7 @@ echo "$probe" | grep -q 'StrictHostKeyChecking=accept-new' \\
     def test_bridge_provision_resolves(self):
         """`wk bridge provision --dry-run` resolves the profile, the card and the service image for every declared bridge, or refuses because no service image exists"""
         bad = []
-        for f in sorted((REPO / "bridge" / "hosts").glob("*.conf")):
+        for f in real_confs("bridge"):
             name = f.stem
             cp = run("bridge", "provision", name, "--dry-run")
             out = cp.stdout + cp.stderr
@@ -151,7 +151,7 @@ echo "$probe" | grep -q 'StrictHostKeyChecking=accept-new' \\
                 continue
             device = dev_m.group(1)
             bridge = br_m.group(1) if br_m else ""
-            conf = REPO / "bridge" / "hosts" / f"{bridge}.conf"
+            conf = REPO / "machines" / f"{bridge}.conf"
             if not conf.exists():
                 bad.append(f"{prof}: names bridge '{bridge}', which has no conf")
                 continue

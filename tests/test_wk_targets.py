@@ -21,7 +21,7 @@ from unittest import mock
 from tests.support import REPO
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import record, shell, targets  # noqa: E402
+from wk import record, secrets, shell, targets  # noqa: E402
 from wk.act import Refused  # noqa: E402
 from wk.clock import FakeClock  # noqa: E402
 from wk.machine import TIMED_OUT, Fake, Result  # noqa: E402
@@ -39,7 +39,7 @@ class TargetsTest(unittest.TestCase):
         self.registry_dir = self.tmp / "hosts"
         self.registry_dir.mkdir()
         self.env = {"HOME": str(self.tmp / "home"), "WK_STORE": str(self.tmp / "store"),
-                    "WK_TARGET_REGISTRY": str(self.registry_dir), "WK_IN_VM": "1", "PATH": os.environ.get("PATH", "")}
+                    "WK_MACHINES_DIR": str(self.registry_dir), "WK_IN_VM": "1", "PATH": os.environ.get("PATH", "")}
         (self.tmp / "home").mkdir()
         self.fake = Fake("here")
         self.reg = targets.Registry(REPO, env=self.env, machine=self.fake)
@@ -48,7 +48,9 @@ class TargetsTest(unittest.TestCase):
         os.system("rm -rf %s" % self.tmp)
 
     def conf(self, name, text):
-        (self.registry_dir / (name + ".conf")).write_text(text)
+        kind = "" if "KIND=" in text.replace("WK_TARGET_KIND=", "") else \
+            "KIND=%s\n" % ("peer" if "WK_REMOTE_PEER=1" in text else "build")
+        (self.registry_dir / (name + ".conf")).write_text(kind + text)
 
     def stderr_of(self, fn):
         with contextlib.redirect_stderr(io.StringIO()) as err:
@@ -67,13 +69,49 @@ class TargetsTest(unittest.TestCase):
         self.addCleanup(p.stop)
 
 
+class TestSessionSocket(unittest.TestCase):
+    """The one path and presence check `cmd/enter` and `cmd/gui` share for the
+    benchmark session's Wayland socket."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="wk-test-session-socket-"))
+        self.addCleanup(lambda: os.system("rm -rf %s" % self.tmp))
+        self.env = {"XDG_RUNTIME_DIR": str(self.tmp)}
+
+    def sock_path(self):
+        return Path(targets.session_socket_path(self.env))
+
+    def test_the_path_is_under_the_runtime_dir(self):
+        self.assertEqual(self.sock_path(), self.tmp / "wk" / "display" / "wayland-0")
+
+    def test_absent_is_not_present(self):
+        self.assertFalse(targets.session_socket_present(self.env))
+
+    def test_a_real_socket_is_present(self):
+        import socket
+        self.sock_path().parent.mkdir(parents=True)
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.addCleanup(s.close)
+        s.bind(str(self.sock_path()))
+        self.assertTrue(targets.session_socket_present(self.env))
+
+    def test_a_plain_file_of_the_same_name_is_not_present(self):
+        self.sock_path().parent.mkdir(parents=True)
+        self.sock_path().write_text("")
+        self.assertFalse(targets.session_socket_present(self.env))
+
+    def test_no_xdg_runtime_dir_falls_back_to_run_user_uid(self):
+        self.assertEqual(targets.session_socket_path({}),
+                         os.path.join("/run/user/%d" % os.getuid(), "wk", "display", "wayland-0"))
+
+
 class TestRegistry(TargetsTest):
     def host_registry(self):
         env = {k: v for k, v in self.env.items() if k != "WK_IN_VM"}
         return targets.Registry(REPO, env=env, machine=self.fake)
 
     def test_the_builtins_and_every_conf_are_targets(self):
-        self.conf("box1", "WK_TARGET_KIND=remote\nWK_REMOTE_HOST=box1\n")
+        self.conf("box1", "KIND=build\nWK_TARGET_KIND=remote\nWK_REMOTE_HOST=box1\n")
         self.conf("peer", "# a peer\nWK_REMOTE_PEER=1\n")
         reg = self.host_registry()
         self.assertEqual(reg.all(), ["container", "box1", "peer"])
@@ -96,6 +134,8 @@ class TestRegistry(TargetsTest):
         env = {k: v for k, v in self.env.items() if k != "WK_IN_VM"}
         env["WK_REMOTE_MARKER"] = str(self.tmp / "wk-remote")
         (self.tmp / "wk-remote").write_text("target=box2\nroot=/home/u/wk\n")
+        self.conf("box2", "WK_REMOTE_HOSTNAME=box2-host\n")
+        self.fake.answer(["hostname", "-s"], out="box2-host\n")
         self.assertEqual(targets.Registry(REPO, env=env, machine=self.fake).all(), ["container", "box2"])
 
     def test_a_conf_is_parsed_as_shell_assignments(self):
@@ -116,6 +156,8 @@ class TestRegistry(TargetsTest):
         rm = self.tmp / "remote-marker"
         rm.write_text("target=buildbox\nroot=/home/u/wk\n")
         self.env["WK_REMOTE_MARKER"] = str(rm)
+        self.conf("buildbox", "WK_REMOTE_HOST=buildbox\n")
+        self.fake.answer(["hostname", "-s"], out="buildbox\n")
         self.assertEqual(self.reg.default(), "buildbox")
         self.assertIn("buildbox", self.reg.all())
 
@@ -150,18 +192,24 @@ class TestContainer(TargetsTest):
         self.assertEqual(self.t.info("c"), "absent")
 
     def test_state_reads_the_record_and_the_environment_together(self):
-        ws = Path(self.env["WK_STORE"]) / "ws"
+        ws = os.path.join(self.env["WK_STORE"], "ws")
         self.assertEqual(self.t.state("c"), "absent")
-        (ws / "c").mkdir(parents=True)
+        self.fake.mkdir(os.path.join(ws, "c"))
         self.assertEqual(self.t.state("c"), "creating")           # a directory, no marker, no container
-        self.fake.write(str(ws / "c" / "home" / targets.READY_MARKER), "")
+        self.fake.write(os.path.join(ws, "c", "home", targets.READY_MARKER), "")
         self.assertEqual(self.t.state("c"), "broken")             # created, and the container is gone
-        self.fake.write(str(ws / "a" / "home" / targets.READY_MARKER), "")
-        (ws / "a").mkdir(parents=True, exist_ok=True)
+        self.assertEqual(self.t.state("a"), "broken")             # a container with no directory, nothing creating it
+        self.fake.write(os.path.join(ws, "a", "home", targets.READY_MARKER), "")
         self.assertEqual(self.t.state("a"), "creating")           # no base-id yet
-        (ws / "a" / "base-id").write_text("main-1\n")
+        self.fake.write(os.path.join(ws, "a", "base-id"), "main-1\n")
         self.assertEqual(self.t.state("a"), "present")
         self.assertEqual(self.t.display_state("a"), "running")
+
+    def test_a_workspace_exists_by_its_directory_its_environment_or_a_creation(self):
+        self.assertFalse(self.reg.exists_on(self.t, "c"))
+        self.assertTrue(self.reg.exists_on(self.t, "a"))          # podman knows it, whatever the store holds
+        self.fake.mkdir(os.path.join(self.env["WK_STORE"], "ws", "c"))
+        self.assertTrue(self.reg.exists_on(self.t, "c"))
 
     def test_exec_goes_through_the_sdk_and_the_bridge_without_a_tty(self):
         """wkdev-enter refuses to run without WKDEV_SDK in its environment, so the argv carries it."""
@@ -323,6 +371,10 @@ class RemoteTest(TargetsTest):
 
 
 class TestRemote(RemoteTest):
+    def test_a_machine_that_did_not_answer_is_no_absence(self):
+        self.fake.answer_remote("uname -s", rc=255, err="ssh: connect to host box.example port 22: Operation timed out")
+        self.assertTrue(self.reg.exists_on(self.reg.load("box"), "ws"))
+
     def test_the_probe_is_one_round_trip_and_memoised(self):
         self.assertEqual(self.t.probe(), ("answering", ""))
         self.assertEqual((self.t.home(), self.t.os(), self.t.cores(), self.t.load(), self.t.mem_mb()), ("/home/u", "linux", 8, 0, 20000))
@@ -660,9 +712,9 @@ class TestContainerWrite(TargetsTest):
 
     def test_store_init_makes_the_tree_once_and_publishes_the_secrets(self):
         root = self.t.store.root()
-        with mock.patch.object(shell, "secrets_publish", return_value=0) as sp:
+        with mock.patch.object(secrets.Secrets, "store_publish") as sp:
             self.t.store_init()
-            self.assertEqual(sp.call_args[0], (self.t.root, self.env))
+            sp.assert_called_once_with()
         for d in ("git", "base", "ws", "cache/ccache", "cache/yocto/downloads", "cache/buildroot/ccache", "cache/bench", "bench", "skills"):
             self.assertIn(os.path.join(root, d), self.fake.dirs)
         conf = os.path.join(root, "cache", "ccache", "ccache.conf")
@@ -670,10 +722,10 @@ class TestContainerWrite(TargetsTest):
         chmods = [e[1] for e in self.fake.effects if e[0] == "run" and e[1][0] == "chmod"]
         self.assertEqual(chmods, [("chmod", "0700", self.t.store.secrets_dir()), ("chmod", "0700", self.t.store.agent_rw_dir())])
         self.fake.effects = []
-        with mock.patch.object(shell, "secrets_publish", return_value=0):
+        with mock.patch.object(secrets.Secrets, "store_publish"):
             self.t.store_init()
         self.assertNotIn(("write", conf), self.fake.effects)
-        with mock.patch.object(shell, "secrets_publish", return_value=1):
+        with mock.patch.object(secrets.Secrets, "store_publish", side_effect=Refused(1)):
             with self.assertRaises(Refused):
                 self.t.store_init()
 

@@ -1,6 +1,5 @@
-"""The buildroot builder: image/buildroot.sh (host half, drives a container
-workspace) and image/buildroot-build.sh (runs inside it), the same
-host/worker split image/yocto.sh and image/yocto-build.sh use. See
+"""The buildroot builder: lib/wk/sysimage/buildroot.py (the driving half, over a
+container workspace) and image/buildroot-build.sh (runs inside it). See
 docs/PLAN.md for what this exists to close out.
 
 Four things are checked by the classes down to TestDerivedDefconfigs,
@@ -11,7 +10,7 @@ matching the four real defects found while writing this lane:
              would resolve to nothing once handed to a process running
              inside the container (BR2_DL_DIR/BR2_CCACHE_DIR arrive as
              environment variables the container already sets, the same
-             way DL_DIR/SSTATE_DIR do for the Yocto lane; buildroot.sh only
+             way DL_DIR/SSTATE_DIR do for the Yocto lane; buildroot.py only
              ever *displays* the host-side path these are mounted from).
 
   freshness  the image stage's completion line has to be evidence, not an
@@ -47,16 +46,8 @@ matching the four real defects found while writing this lane:
              appends the upstream fix (buildroot 2021.02 -> 2021.08, applied
              to host-python) makes.
 
-BuildrootBusyTest and BuildrootRefuseBusyRefusesASecondBuild cover two more
-handoff items, on the driving side (image/buildroot.sh): does `kill -9`
-mid-`wk sysimage build` converge on re-run, and does a second `wk sysimage
-build` of the same profile refuse rather than race the first's cleanup?
-Buildroot has no status file of its own -- busy-ness is decided entirely by
-`ws_busy_reason` (lib/target.sh), which checks every `*.pid` file under the
-workspace's home directory with `kill -0` run inside the workspace. Driven
-directly here, with `t_exec` stubbed to run on this host, against a pid
-file naming a pid that no longer exists (the exact shape a killed driver
-leaves) and, separately, against a genuinely live one.
+The driving half's task -- its record, refusals, --detach, --stop and kill
+points -- is tests/test_sysimage_task.py's.
 
 Run: python3 -m unittest tests.test_buildroot -v
 """
@@ -65,11 +56,10 @@ import subprocess
 import tempfile
 import time
 import unittest
-from pathlib import Path
 
-from tests.support import REPO, WkTest, run, run_here, scratch_dir
+from tests.support import REPO, WkTest, run_here, scratch_dir
 
-BUILDROOT_SH = REPO / "image" / "buildroot.sh"
+BUILDROOT_PY = REPO / "lib" / "wk" / "sysimage" / "buildroot.py"
 BUILDROOT_BUILD = REPO / "image" / "buildroot-build.sh"
 EXTERNAL_DIR = REPO / "image" / "buildroot" / "external"
 EXTERNAL_MK = EXTERNAL_DIR / "external.mk"
@@ -113,8 +103,8 @@ def _run_lifted(body, *args):
 # --------------------------------------------------------------------------- #
 
 class TestSyntax(unittest.TestCase):
-    def test_both_halves_parse(self):
-        for f in (BUILDROOT_SH, BUILDROOT_BUILD):
+    def test_both_in_workspace_scripts_parse(self):
+        for f in (BUILDROOT_BUILD, REPO / "image" / "buildroot-webkit.sh"):
             cp = subprocess.run(["bash", "-n", str(f)], capture_output=True, text=True)
             self.assertEqual(cp.returncode, 0, f"{f}: {cp.stderr}")
 
@@ -162,12 +152,12 @@ class TestDryRun(WkTest):
             self.assertIn("no defconfig for rpi5", cp.stdout)
 
     def test_wifi_overlay_flag_is_wired_and_accepted(self):
-        """buildroot.sh passes --overlay-wifi 1 to buildroot-build.sh
+        """buildroot.py passes --overlay-wifi 1 to buildroot-build.sh
         whenever the board has no cable (_image_wants_wifi); the flag has to
         be one buildroot-build.sh's own arg parser actually recognises, or
         every wifi board's real build dies in the first second on 'unknown
         option: --overlay-wifi' before it clones anything."""
-        self.assertIn("--overlay-wifi", BUILDROOT_SH.read_text())
+        self.assertIn("--overlay-wifi", BUILDROOT_PY.read_text())
         text = BUILDROOT_BUILD.read_text()
         self.assertIn("--overlay-wifi", text)
         self.assertIn("OVERLAY_WIFI", text)
@@ -400,12 +390,6 @@ class TestDerivedDefconfigs(unittest.TestCase):
                     )
 
 
-# --------------------------------------------------------------------------- #
-# kill -9 convergence, and a second build at once -- image/buildroot.sh's
-# own busy check (ws_busy_reason, lib/target.sh), not the freshness check
-# above (that guards a single build's own completion; this guards two
-# builds of the same workspace overlapping).
-# --------------------------------------------------------------------------- #
     def test_every_derived_defconfig_can_be_reached(self):
         """The four things a fleet bench system needs and the fork's cog
         defconfigs have none of. An image without them builds, boots, and is
@@ -456,133 +440,19 @@ class TestDerivedDefconfigs(unittest.TestCase):
 
 
 
-class BuildrootBusyTest(WkTest):
-    PRELUDE = f'''
-. "{REPO}/lib/common.sh"
-. "{REPO}/lib/store.sh"
-. "{REPO}/lib/target.sh"
-. "{REPO}/image/buildroot.sh"
-t_exec() {{ shift; "$@"; }}
-IMG_PROFILE=demo-profile
-'''
-
-    def setUp(self):
-        super().setUp()
-        self.store = self.tmp / "store"
-        self.ws = "buildrootws"
-        self.home = self.store / "ws" / self.ws / "home"
-        self.home.mkdir(parents=True)
-
-    def _write_pidfile(self, stage, pid):
-        (self.home / f"buildroot-{stage}.pid").write_text(f"{pid}\n")
-
-    def _run(self, script):
-        env = dict(os.environ)
-        env["WK_STORE"] = str(self.store)
-        env["WK_ROOT"] = str(REPO)
-        for var in ("WK_NAME", "WK_TARGET", "WK_TARGET_KIND"):
-            env.pop(var, None)
-        return subprocess.run(
-            ["bash", "-c", self.PRELUDE + script],
-            cwd=str(REPO), env=env, capture_output=True, text=True, timeout=30,
-        )
-
-    def test_a_dead_pid_after_kill_9_is_not_read_as_busy(self):
-        """the exact scenario: a killed build leaves a pid file naming a
-        pid that no longer exists -- ws_busy_reason must not read that as
-        a build still running, or a re-run would refuse forever"""
-        self._write_pidfile("image", DEAD_PID)
-        cp = self._run(f'ws_busy_reason {self.ws} >/dev/null && echo BUSY || echo IDLE')
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertEqual(cp.stdout.strip(), "IDLE", cp.stdout + cp.stderr)
-
-    def test_buildroot_refuse_busy_lets_a_re_run_through(self):
-        """the actual guard buildroot_build calls before starting: a dead
-        pid must not refuse the re-run"""
-        self._write_pidfile("image", DEAD_PID)
-        cp = self._run(f'buildroot_refuse_busy {self.ws} && echo OK')
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertEqual(cp.stdout.strip(), "OK", cp.stdout + cp.stderr)
-
-    def test_a_genuinely_live_pid_is_still_read_as_busy(self):
-        """positive control"""
-        proc = subprocess.Popen(["sleep", "60"])
-        try:
-            self._write_pidfile("image", proc.pid)
-            cp = self._run(f'ws_busy_reason {self.ws} >/dev/null && echo BUSY || echo IDLE')
-            self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-            self.assertEqual(cp.stdout.strip(), "BUSY", cp.stdout + cp.stderr)
-        finally:
-            proc.kill()
-            proc.wait()
-
-    def test_dry_run_after_a_kill_9_does_not_claim_a_build_is_running(self):
-        """`wk sysimage build <buildroot profile> --dry-run` against a
-        workspace a killed build left behind prints its plan, not a claim
-        that a build is already running"""
-        self._write_pidfile("image", DEAD_PID)
-        env = dict(os.environ)
-        env["WK_STORE"] = str(self.store)
-        env["WK_TARGET"] = "container"
-        for var in ("WK_NAME", "WK_TARGET_KIND"):
-            env.pop(var, None)
-        env["WK_IN_VM"] = "1"   # this machine holds the store: no forward into the podman VM
-        cp = subprocess.run(
-            [str(REPO / "wk"), "sysimage", "build", "wpewebkit-2.46-buildroot-rpi3-32",
-             "--workspace", self.ws, "--dry-run"],
-            cwd=str(REPO), env=env, capture_output=True, text=True, timeout=60,
-        )
-        out = cp.stdout + cp.stderr
-        self.assertEqual(cp.returncode, 0, out)
-        self.assertIn("dry run", out, out)
-        self.assertNotIn("already running", out, out)
-        self.assertNotIn("still running", out, out)
-
-
-class BuildrootRefuseBusyRefusesASecondBuild(WkTest):
-    """Two `wk sysimage build` of the same buildroot profile at once:
-    `buildroot_refuse_busy` is the one guard -- no lock, unlike yocto's
-    `hold_lock` -- and the design it implements is a refusal, not a wait
-    (README 'Build interventions': the checkout and the tree's output are
-    both single-writer per workspace)."""
-
-    PRELUDE = f'''
-. "{REPO}/lib/common.sh"
-. "{REPO}/lib/store.sh"
-. "{REPO}/lib/target.sh"
-. "{REPO}/image/buildroot.sh"
-t_exec() {{ shift; "$@"; }}
-IMG_PROFILE=demo-profile
-'''
-
-    def setUp(self):
-        super().setUp()
-        self.store = self.tmp / "store"
-        self.ws = "buildrootws"
-        self.home = self.store / "ws" / self.ws / "home"
-        self.home.mkdir(parents=True)
-
-    def test_refuses_and_names_the_live_job_and_its_log(self):
-        proc = subprocess.Popen(["sleep", "60"])
-        try:
-            (self.home / "buildroot-image.pid").write_text(f"{proc.pid}\n")
-            env = dict(os.environ)
-            env["WK_STORE"] = str(self.store)
-            env["WK_ROOT"] = str(REPO)
-            cp = subprocess.run(
-                ["bash", "-c", self.PRELUDE + f'buildroot_refuse_busy {self.ws}'],
-                cwd=str(REPO), env=env, capture_output=True, text=True, timeout=30,
-            )
-            out = cp.stdout + cp.stderr
-            self.assertNotEqual(cp.returncode, 0, out)
-            self.assertIn("still running", out, out)
-            self.assertIn("buildroot-image", out, out)
-            self.assertIn(str(self.home / "buildroot-image.log"), out, out)
-            self.assertIn("--stop", out, out)
-        finally:
-            proc.kill()
-            proc.wait()
-
+class TestADryRunAfterAKill(WkTest):
+    def test_a_pid_file_a_killed_build_left_does_not_claim_a_build_is_running(self):
+        """`wk sysimage build <buildroot profile> --dry-run` against a workspace a
+        killed build left behind prints its plan, not a claim that one is running."""
+        store = self.tmp / "store"
+        home = store / "ws" / "buildrootws" / "home"
+        home.mkdir(parents=True)
+        (home / "buildroot-image.pid").write_text(f"{DEAD_PID}\n")
+        cp = run_here("sysimage", "build", "wpewebkit-2.46-buildroot-rpi3-32", "--workspace", "buildrootws", "--dry-run",
+                      env={"WK_STORE": str(store), "WK_TARGET": "container"}, timeout=60)
+        self.assertEqual(cp.returncode, 0, cp.stdout)
+        self.assertIn("dry run", cp.stdout)
+        self.assertNotIn("still running", cp.stdout)
 
 
 if __name__ == "__main__":

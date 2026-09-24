@@ -12,9 +12,9 @@ asked about, which is enough to exercise the real ssh shell-out and the
 unreachable-by-name reporting faithfully and fast.
 
 A bare `wk status` also walks this host's bench-device fleet
-(`report_fleet_devices`, cmd/status): WK_MACHINES_DIR (boot/machines.sh,
-read only by `machines_dir`) points that walk at a directory of faked
-`boot/machines/*.conf`-shaped confs instead of the real fleet, and the same
+(`report_fleet_devices`, cmd/status): WK_MACHINES_DIR (read by
+lib/wk/fleet.py alone) points that walk at a directory of faked
+`machines/*.conf`-shaped confs instead of the real fleet, and the same
 stub `ssh` answers every board's probe too -- `m_ssh`/`i_ssh`
 (boot/machines.sh) shell out to `ssh` by name, the same as targets/remote.sh
 does. Driving the real fleet for real from a test hung past two minutes in
@@ -96,6 +96,7 @@ class TestFleetWalkNamedFormRendersAFakedMachine(WkTest):
 
 
 _FAKE_NODE_CONF = '''NODE_SSH={ssh}
+KIND=board
 NODE_DRIVER=rpi5-usb
 NODE_DEVICE=/dev/sda
 NODE_ROOT=/dev/nvme0n1p2
@@ -114,12 +115,12 @@ NODE_NOTE="{note}"
 
 class TestFleetWalkBareFormMultiMachine(WkTest):
     def test_bare_status_renders_every_faked_machines_block(self):
-        # WK_MACHINES_DIR (boot/machines.sh) fakes the fleet without
-        # touching boot/machines/*.conf; WK_TARGET=remote (with the stub ssh
+        # WK_MACHINES_DIR (lib/wk/fleet.py) fakes the fleet without
+        # touching machines/*.conf; WK_TARGET=remote (with the stub ssh
         # every boot driver's m_ssh/i_ssh also shells out through, since it
         # calls `ssh` by name) keeps the *workspace target* walk to one
         # fast, fake target instead of every real machine in
-        # targets/hosts/*.conf -- the thing that hung past 120s before.
+        # machines/*.conf -- the thing that hung past 120s before.
         with scratch_dir(prefix="wk-test-machines-") as machdir, \
              stub_path({"ssh": _ANSWERING_SSH}) as binp:
             # Short: machine_list's listing (boot/machines.sh) is a fixed

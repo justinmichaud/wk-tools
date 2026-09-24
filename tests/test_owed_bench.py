@@ -25,7 +25,7 @@ def _is_macos():
 
 @unittest.skipUnless(_is_macos(), "wk bench mac and a plain sysimage write are macOS-only paths")
 class TestBenchMacDryRunOnAFreshLane(WkTest):
-    """benchvm (boot/machines/benchvm.conf, driver mac-guest) has no
+    """benchvm (machines/benchvm.conf, driver mac-guest) has no
     NODE_SSH of its own -- its bench mode is reached through a host, so
     --host stands in for one here. `ssh` is stubbed to refuse everything
     (an always-unreachable host), which fails preflight; --dry-run must
@@ -88,12 +88,11 @@ esac
         img = self.tmp / "fake.img"
         img.write_text("not a real image, just bytes\n")
         with stub_path({"ssh": self._SSH, "tailscale": TAILSCALE_KNOWS_NOTHING}) as binp, \
-                scratch_dir() as store, scratch_dir() as reg:
+                scratch_dir() as store:
             cp = run(
                 "sysimage", "write", "--from", str(img),
                 "--disk", f"rpi5:/dev/sd{rand_suffix(2)}", "--dry-run",
-                env={"PATH": f"{binp}:{os.environ['PATH']}",
-                     "WK_STORE": str(store), "WK_TARGET_REGISTRY": str(reg)},
+                env={"PATH": f"{binp}:{os.environ['PATH']}", "WK_STORE": str(store)},
             )
         out = cp.stdout
         self.assertEqual(cp.returncode, 0, out)

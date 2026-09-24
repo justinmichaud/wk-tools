@@ -30,7 +30,9 @@ from unittest import mock
 from tests.support import REPO, repo_files, WkTest, bash, fake_workspace, stub_path
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import act, sync, targets  # noqa: E402
+from wk import act, git, images, pr, sync, targets  # noqa: E402
+from wk.machine import Fake  # noqa: E402
+from wk.store import Store  # noqa: E402
 from wk.clock import Clock  # noqa: E402
 
 DRIVERS = ("container", "vm", "remote", "local")
@@ -69,7 +71,7 @@ class TestEveryDriverNamesOne(WkTest):
         self.registry.mkdir()
         self.root = self.tmp / "remote-root"
         (self.registry / "fakebox.conf").write_text(
-            "WK_TARGET_KIND=remote\n"
+            "KIND=build\nWK_TARGET_KIND=remote\n"
             "WK_REMOTE_LOCAL=1\n"
             f"WK_REMOTE_ROOT={self.root}\n"
             f"WK_REMOTE_STORE={self.tmp / 'remote-store'}\n"
@@ -77,7 +79,7 @@ class TestEveryDriverNamesOne(WkTest):
 
     def _mirror(self, target):
         if target == "remote":
-            return _ask("fakebox", env={"WK_TARGET_REGISTRY": str(self.registry),
+            return _ask("fakebox", env={"WK_MACHINES_DIR": str(self.registry),
                                         "XDG_STATE_HOME": str(self.tmp / "state")})
         if target == "local":
             with fake_workspace() as ws:
@@ -120,8 +122,8 @@ class TestEveryDriverNamesOne(WkTest):
         is the share's name and nothing the guest holds."""
         mirror = self._mirror("vm")
         self.assertEqual(mirror, "/Volumes/My Shared Files/mirror/WebKit.git")
-        self.assertIn('--dir="$WK_VM_MIRROR_SHARE:$(dirname "$(wk_mirror)"):ro"',
-                      (REPO / "targets" / "vm.sh").read_text(),
+        self.assertIn('"--dir=%s:%s:ro" % (vm.mirror_share, os.path.dirname(vm.store.mirror()))',
+                      (REPO / "lib" / "wk" / "guest.py").read_text(),
                       "the guest is not booted with the mirror share")
 
 
@@ -151,12 +153,12 @@ class TestAWorkspaceAnswersForTheKindItIs(WkTest):
 
 
 class MirrorFixture(WkTest):
-    """A mirror made by the real mirror_refresh_script out of two local
-    repositories standing in for the upstreams -- git takes a path as a URL,
-    so nothing here reaches the network.
+    """A mirror made by the real mirror_refresh_script (lib/wk/git.py) out of
+    two local repositories standing in for the upstreams -- git takes a path
+    as a URL, so nothing here reaches the network.
 
-    The stand-in origin carries `main` alone, so WK_MIRROR_BRANCHES pins the
-    list to it: what wk_mirror_branches derives from this checkout's image
+    The stand-in origin carries `main` alone, so the branch list is pinned to
+    it: what mirror_branches derives from this checkout's image
     configurations is TestWhatTheMirrorCarries's question, not the layout's."""
 
     ENV = {"WK_MIRROR_BRANCHES": "main"}
@@ -191,21 +193,24 @@ class MirrorFixture(WkTest):
         self._git("symbolic-ref", "HEAD", "refs/heads/side",
                   cwd=self.tmp / "fk.git")
 
-        # wk_remotes is the one list of upstreams; overridden here so nothing
-        # reaches github.com, and the rest of the snippet is the real one.
-        self.remotes = (f'wk_remotes() {{ printf "origin {self.tmp}/up.git\\n'
-                        f'fork {self.tmp}/fk.git\\n"; }}\n')
+        # git.REMOTES is the one list of upstreams; stood in for here so nothing
+        # reaches github.com, and the rest of the script is the real one.
+        self.remotes = (("origin", str(self.tmp / "up.git")), ("fork", str(self.tmp / "fk.git")))
         self.mirror = self.tmp / "m.git"
-        cp = bash('set -euo pipefail\n. "$WK_ROOT/lib/common.sh"\n'
-                  '. "$WK_ROOT/lib/store.sh"\n' + self.remotes
-                  + f'sh -c "$(mirror_refresh_script {str(self.mirror)!r})"\n',
-                  env=self.ENV)
+        cp = subprocess.run(["sh", "-c", git.mirror_refresh_script(str(self.mirror), ["main"], self.remotes)],
+                            capture_output=True, text=True)
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
         self.refresh_out = cp.stdout
 
+    def wire_fetches(self, ws):
+        """fetch_config's steps, rendered and run in the checkout."""
+        script = git.render(str(ws), git.fetch_config(str(self.mirror), ["main"], self.remotes))
+        cp = subprocess.run(["sh", "-c", script], capture_output=True, text=True)
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+
 
 class TestOneMirrorLayoutEverywhere(MirrorFixture):
-    """mirror_refresh_script (lib/store.sh) makes every mirror in the fleet --
+    """mirror_refresh_script (lib/wk/git.py) makes every mirror in the fleet --
     this machine's, a build box's, a guest's -- and lib/wk/sync.py's fetch_script
     is what a workspace fetches from one with, so the emitter and the consumer
     are held to one layout here rather than to two descriptions of it."""
@@ -242,19 +247,14 @@ class TestOneMirrorLayoutEverywhere(MirrorFixture):
         ws = self.tmp / "ws-graph"
         self._git("clone", "-q", "--shared", "--branch", "main",
                   str(self.mirror), "ws-graph", cwd=self.tmp)
-        cp = bash('set -euo pipefail\n. "$WK_ROOT/lib/common.sh"\n'
-                  '. "$WK_ROOT/lib/store.sh"\n' + self.remotes
-                  + f'cd {str(ws)!r}\n'
-                  + f'sh -c "$(wk_fetch_config {str(self.mirror)!r})"\n',
-                  env=self.ENV)
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.wire_fetches(ws)
         for key in ("fetch.writeCommitGraph", "gc.writeCommitGraph"):
             with self.subTest(key=key):
                 self.assertEqual(self._git("config", key, cwd=ws).stdout.strip(), "false")
 
     def test_a_workspace_fetch_against_it_takes_the_mirror_arm(self):
         """The pair under test: a checkout made the way a guest's and a build
-        box's are (`--shared` off the mirror) and wired by wk_fetch_config
+        box's are (`--shared` off the mirror) and wired by fetch_config
         fetches every upstream the mirror carries in one local fetch. The
         upstreams are deleted first, so a fetch that reaches one fails."""
         ws = self.tmp / "ws"
@@ -263,12 +263,7 @@ class TestOneMirrorLayoutEverywhere(MirrorFixture):
         for remote, bare in (("origin", "up.git"), ("fork", "fk.git")):
             self._git("remote", "remove", remote, cwd=ws, check=False)
             self._git("remote", "add", remote, str(self.tmp / bare), cwd=ws)
-        cp = bash('set -euo pipefail\n. "$WK_ROOT/lib/common.sh"\n'
-                  '. "$WK_ROOT/lib/store.sh"\n' + self.remotes
-                  + f'cd {str(ws)!r}\n'
-                  + f'sh -c "$(wk_fetch_config {str(self.mirror)!r})"\n',
-                  env=self.ENV)
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.wire_fetches(ws)
         for bare in ("up.git", "fk.git"):
             shutil.rmtree(self.tmp / bare)
         out = subprocess.run(["sh", "-c", sync.fetch_script(str(ws), "")], cwd=str(self.tmp),
@@ -281,22 +276,17 @@ class TestOneMirrorLayoutEverywhere(MirrorFixture):
 
 class TestABranchIsTakenFromTheMirrorFirst(MirrorFixture):
     """`wk build <ws> <branch>` and the babysitter fetch one branch before
-    they build. origin_branch_fetch_step (lib/store.sh) is that fetch: the
+    they build. origin_branch_fetch_step (lib/wk/git.py) is that fetch: the
     mirror when it carries the branch, origin when it does not -- WebKit has
-    ~920 branches and a mirror carries the handful wk_mirror_branches names,
+    ~920 branches and a mirror carries the handful mirror_branches names,
     so both arms are real."""
 
     def _step(self, branch, mirror):
-        cp = bash('set -euo pipefail\n. "$WK_ROOT/lib/common.sh"\n'
-                  '. "$WK_ROOT/lib/store.sh"\n'
-                  f'origin_branch_fetch_step {branch!r} {str(mirror)!r}\n',
-                  env=self.ENV)
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        return cp.stdout
+        return git.origin_branch_fetch_step(branch, str(mirror) if mirror else "")
 
     def _checkout(self):
         """A workspace checkout whose origin is a real (local-path) upstream,
-        as a workspace's is after wk_wiring_script."""
+        as a workspace's is after the wiring."""
         ws = self.tmp / "co"
         self._git("clone", "-q", "--shared", "--branch", "main",
                   str(self.mirror), "co", cwd=self.tmp)
@@ -336,7 +326,7 @@ class TestABranchIsTakenFromTheMirrorFirst(MirrorFixture):
 
 
 class TestWhatTheMirrorCarries(WkTest):
-    """wk_mirror_branches (lib/store.sh) is what origin is narrowed to, and
+    """mirror_branches (lib/wk/git.py) is what origin is narrowed to, and
     the narrowing is the point: WebKit/WebKit advertises 924 heads. A lane
     reads its release branch from the mirror and from nowhere else
     (image/yocto.sh), so the list is main plus the branch of every image
@@ -344,16 +334,10 @@ class TestWhatTheMirrorCarries(WkTest):
     configurations, never a second list to keep in step with them."""
 
     def _branches(self, env=None):
-        cp = bash('set -euo pipefail\n. "$WK_ROOT/lib/common.sh"\n'
-                  '. "$WK_ROOT/lib/store.sh"\nwk_mirror_branches\n', env=env)
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        return cp.stdout.split()
+        return git.mirror_branches(dict(env or {}, WK_ROOT=str(REPO)))
 
     def _configured(self):
-        cp = bash('set -euo pipefail\n. "$WK_ROOT/lib/common.sh"\n'
-                  '. "$WK_ROOT/image/profiles.sh"\nimage_origin_branches\n')
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        return cp.stdout.split()
+        return images.origin_branches({"WK_ROOT": str(REPO)})
 
     def test_main_is_always_carried(self):
         self.assertIn("main", self._branches())
@@ -372,7 +356,7 @@ class TestWhatTheMirrorCarries(WkTest):
 
     def test_another_upstreams_branch_is_not_one_of_them(self):
         """Only origin is narrowed; every other upstream is mirrored whole
-        (wk_fetch_refspecs), so a wpe-* branch has nothing to be added to."""
+        (fetch_refspecs), so a wpe-* branch has nothing to be added to."""
         for branch in self._branches():
             self.assertFalse(branch.startswith("wpe-"), branch)
 
@@ -380,17 +364,24 @@ class TestWhatTheMirrorCarries(WkTest):
         self.assertEqual(self._branches(env={"WK_MIRROR_BRANCHES": "main only/this"}),
                          ["main", "only/this"])
 
+    def test_the_bash_name_is_the_same_list(self):
+        cp = bash('. "$WK_ROOT/lib/common.sh"; . "$WK_ROOT/lib/store.sh"; wk_mirror_branches',
+                  env={"WK_MIRROR_BRANCHES": ""})
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertEqual(cp.stdout.split(), self._branches())
+
 
 class TestTheCommandsAskTheDriver(unittest.TestCase):
     """Every command that fetches a workspace's mirror reads t_mirror_dir;
     only the drivers name a path. One path spelled into several commands is
     fixed in one of them and wrong in the rest."""
 
-    # lib/store.sh takes the mirror directory as an argument from those
+    # lib/wk/git.py takes the mirror directory as an argument from those
     # callers and never resolves one itself, and `wk pr` fetches the one ref
     # from the upstream rather than through any mirror -- so neither has a
     # t_mirror_dir call to make, and both are still held to spelling no path.
-    SPELLS_NO_PATH = ("lib/store.sh", "cmd/pr", "lib/wk/workspace.py", "lib/wk/sync.py", "lib/wk/build.py")
+    SPELLS_NO_PATH = ("lib/store.sh", "lib/wk/git.py", "lib/wk/pr.py", "cmd/pr", "lib/wk/workspace.py",
+                      "lib/wk/sync.py", "lib/wk/build.py")
 
     def test_no_command_spells_a_mirror_path_of_its_own(self):
         for rel in self.SPELLS_NO_PATH:
@@ -483,14 +474,14 @@ class TestOneMirrorPerMachine(WkTest):
 
     def test_nothing_fetches_into_the_mirror_from_the_podman_vm(self):
         """A pull request head is fetched into the mirror (`wk ab`), and the
-        mount in the VM is read-only: refused with the machine that can."""
-        cp = bash('set -uo pipefail\n. "$WK_ROOT/lib/common.sh"\n. "$WK_ROOT/lib/store.sh"\n'
-                  'with_lock() { echo "LOCKED: $*"; }\n'
-                  '_mirror_fetch_into https://example/x.git refs/heads/b refs/remotes/pr/b\n',
-                  env={"WK_STORE": "/var/lib/wk", "WK_IN_VM": "1"})
-        self.assertNotEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertIn("the host", cp.stdout + cp.stderr)
-        self.assertNotIn("LOCKED:", cp.stdout)
+        mount in the VM is read-only: refused with the machine that can, before
+        any lock or fetch."""
+        here = Fake("here")
+        with contextlib.redirect_stderr(io.StringIO()) as err, self.assertRaises(act.Refused):
+            pr.mirror_fetch(here, Store({"WK_STORE": "/var/lib/wk", "WK_IN_VM": "1"}), None,
+                            "https://example/x.git", "refs/heads/b", "refs/remotes/pr/b")
+        self.assertIn("the host", err.getvalue())
+        self.assertEqual(here.effects, [])
 
 
 class TestASnapshotBorrowsTheMirrorsObjects(MirrorFixture):
@@ -501,7 +492,7 @@ class TestASnapshotBorrowsTheMirrorsObjects(MirrorFixture):
 
     def _sync(self, mirror=True):
         """The store's mirror is where the store says (WK_IN_VM: under the store), linked to the fixture's. The
-        real wk_remotes: the wiring rewrites each upstream's URL to the mirror, so the fetch after it reads the
+        real git.REMOTES: the wiring rewrites each upstream's URL to the mirror, so the fetch after it reads the
         mirror and the network (refused at port 1) is never asked."""
         store = self.tmp / "store"
         if mirror:

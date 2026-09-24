@@ -172,7 +172,7 @@ class TestPiSlotRefusals(WkTest):
                          "not-a-real-machine", "--slot", "base", timeout=60)
         self.assertEqual(cp.returncode, 1, cp.stdout)
         self.assertIn("names machine 'nosuchbox'", cp.stdout)
-        self.assertIn("wk remote setup nosuchbox", cp.stdout)
+        self.assertIn("wk machine setup nosuchbox", cp.stdout)
 
     def test_ab_of_one_slot_twice_is_refused(self):
         cp = self.run_wk("pi", "bench", "not-a-real-machine", "speedometer3", "--ab", "base,base", timeout=15)
@@ -416,7 +416,7 @@ class TestPiHelper(WkTest):
 
 class TestPiSetupWorkstationRefusal(WkTest):
     """`wk pi setup` refuses a known workstation before touching a board, the
-    same gate `wk pi helper` has (TestPiHelper above): boot/machines/rpi5.conf
+    same gate `wk pi helper` has (TestPiHelper above): machines/rpi5.conf
     pins NODE_ROLE=workstation, and machine_by_ssh needs no network to see
     it, so this runs the real dispatcher against the real conf."""
 

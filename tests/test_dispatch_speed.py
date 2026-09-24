@@ -14,7 +14,7 @@ Three properties, each measured rather than asserted about the source:
 Plus the dispatcher's side of the same cost: `resolve_target` is called once
 per invocation, not once per question that needs its answer.
 
-Every fake machine here is a conf in a WK_TARGET_REGISTRY of this test's own
+Every fake machine here is a conf in a WK_MACHINES_DIR of this test's own
 (lib/target.sh) with a stub `ssh` on PATH, so the real driver code shells out
 for real and no test reaches the maintainer's fleet.
 
@@ -44,10 +44,10 @@ for last; do :; done
 exec bash -c "$last"
 '''
 
-_MACHINE_CONF = "WK_TARGET_KIND=remote\nWK_REMOTE_HOST={host}\n"
+_MACHINE_CONF = "KIND=build\nWK_TARGET_KIND=remote\nWK_REMOTE_HOST={host}\n"
 
 _LOCAL_CONF = (
-    "WK_TARGET_KIND=remote\n"
+    "KIND=build\nWK_TARGET_KIND=remote\n"
     "WK_REMOTE_LOCAL=1\n"
     "WK_REMOTE_ROOT={root}\n"
     "WK_REMOTE_STORE={store}\n"
@@ -69,7 +69,7 @@ class TestTheFleetIsAskedAtOnce(WkTest):
             '. "$WK_ROOT/lib/target.sh"\n'
             f'ws_locate {name}\n',
             env={
-                "WK_TARGET_REGISTRY": str(registry),
+                "WK_MACHINES_DIR": str(registry),
                 "XDG_STATE_HOME": str(self.tmp / "state"),
                 "PATH": f"{binp}:{os.environ.get('PATH', '/usr/bin:/bin')}",
             },
@@ -120,7 +120,7 @@ class TestALocalNameNeverReachesTheFleet(WkTest):
                 '. "$WK_ROOT/lib/target.sh"\n'
                 'ws_target here-ws\n',
                 env={
-                    "WK_TARGET_REGISTRY": str(registry),
+                    "WK_MACHINES_DIR": str(registry),
                     "XDG_STATE_HOME": str(self.tmp / "state"),
                     "WK_TEST_SSH_WITNESS": str(witness),
                     "PATH": f"{binp}:{os.environ.get('PATH', '/usr/bin:/bin')}",
@@ -151,7 +151,7 @@ class TestAMachineThatDidNotAnswerIsNamed(WkTest):
                 '. "$WK_ROOT/lib/target.sh"\n'
                 'ws_target no-such-workspace\n',
                 env={
-                    "WK_TARGET_REGISTRY": str(registry),
+                    "WK_MACHINES_DIR": str(registry),
                     "XDG_STATE_HOME": str(self.tmp / "state"),
                     "PATH": f"{binp}:{os.environ.get('PATH', '/usr/bin:/bin')}",
                 },
@@ -181,7 +181,7 @@ class TestTheListingWalksTheSameWay(WkTest):
         (registry / "fakebox.conf").write_text(
             _LOCAL_CONF.format(root=root, store=store))
         cp = run("ls", env={
-            "WK_TARGET_REGISTRY": str(registry),
+            "WK_MACHINES_DIR": str(registry),
             "XDG_STATE_HOME": str(self.tmp / "state"),
             "WK_TARGET": "fakebox",
         }, timeout=120)

@@ -4,8 +4,7 @@ Reads the command's declaration (decl.py), refuses what it does not declare,
 resolves the workspace name and the machine holding it, and runs the command
 there: here, forwarded into the podman VM on a macOS host, or handed to the
 machine's own wk. The targets are asked through one Registry (wk.targets);
-the workspace-existence, readiness and forwarding questions still go through
-shell.py into the bash library.
+the forwarding questions still go through shell.py into the bash library.
 """
 
 import os
@@ -14,9 +13,10 @@ import subprocess
 import sys
 from pathlib import Path
 
+from wk import completion as C
 from wk import decl as D
-from wk import record, shell, sshalias
-from wk.machine import Local
+from wk import act, clock, record, shell, sshalias
+from wk.machine import Local, is_macos
 from wk.targets import Registry
 
 ROOT = Path(os.environ.get("WK_ROOT") or Path(__file__).resolve().parents[2])
@@ -30,6 +30,9 @@ TOMBSTONES = {
     "notify": "'wk notify' is removed: a program calls wk_notify (lib/store.sh)",
     "verify": "'wk verify' is merged into doctor: wk doctor <workspace>",
     "remotes": "'wk remotes' is merged into sync: wk sync [<workspace>] --fix",
+    "sudo": "'wk sudo' is now 'wk key sudo'",
+    "backup": "'wk backup' is now 'wk key backup'",
+    "remote": "'wk remote' is now 'wk machine setup|rm <name>'", "find": "'wk find' is now 'wk machine probe [<name>]'",
 }
 GLOBALS = {"--force": "WK_FORCE", "--quiet": "WK_QUIET", "--dry-run": "WK_DRY_RUN",
            "-n": "WK_DRY_RUN", "--yes": "WK_YES", "-y": "WK_YES"}
@@ -70,10 +73,6 @@ def warn(msg):
 def die(msg, status=1):
     sys.stderr.write("%serror:%s %s\n" % (_colour("\033[31m"), _colour("\033[0m"), msg))
     raise Exit(status)
-
-
-def is_macos():
-    return os.uname().sysname == "Darwin"
 
 
 # -- markers: the file that says this machine is a workspace, or a build machine
@@ -365,13 +364,14 @@ def usage():
   An option a command does not name in its -h, or an argument past what it
   takes, is refused with its usage line.
   wk <command> --all       every one of what the command acts on -- every
-                           machine ('wk push'/'wk sudo'), every workspace on
+                           machine ('wk push'/'wk key sudo'), every workspace on
                            every target ('wk sync', 'wk rm'), every line of
                            the log ('wk logs'); a command's own -h says what
                            its --all covers
   WK_DEBUG=1               verbose output
 """)
     err.write("\n  wk help                  README.md: architecture, setup, every workflow by example\n")
+    err.write("  wk completion bash|zsh   shell completion for wk; shell/bashrc evals it already\n")
     raise Exit(2)
 
 
@@ -380,6 +380,31 @@ def dump_declarations():
         print("\t".join([d.name, d.where, d.name_decl, d.group, d.synopsis_line(), d.takes,
                          d.opts or "-", d.destructive or "-", d.dryrun or "no",
                          d.passthrough or "-", d.readonly or "-"]))
+    raise Exit(0)
+
+
+def completion_cmd(args):
+    """A builtin: it reads every command's declaration, so it has no `cmd/` file of its own."""
+    sub = args[0] if args else None
+    if sub in ("-h", "--help", "--explain"):
+        sys.stdout.write(
+            "wk completion bash|zsh -- print a shell completion script for wk\n\n"
+            "  changes things: no -- prints a script for your shell's rc to eval\n"
+            "  runs on: this machine, never forwarded\n\n"
+            "what it does:\n"
+            "  shell/bashrc evals it for both shells when wk is on PATH. Commands,\n"
+            "  subverbs and flags come from each command's declaration. Workspace names\n"
+            "  are read from this machine's own stores at each TAB press, never by\n"
+            "  asking a machine; a command's values= list is asked of the command when\n"
+            "  that list is answered on this machine.\n")
+        raise Exit(0)
+    if sub == "--list-workspaces" and len(args) == 1:
+        for name in C.local_workspaces(ROOT):
+            print(name)
+        raise Exit(0)
+    if sub not in C.SHELLS or len(args) != 1:
+        die("usage: wk completion bash|zsh -- print a shell completion script for wk; see wk completion -h", 2)
+    sys.stdout.write(C.generate(ROOT, sub, TOMBSTONES))
     raise Exit(0)
 
 
@@ -542,7 +567,7 @@ def delegate_run(target, cmd, args):
             "    Nothing here can reach into it: the workspace is that machine's own." % (cmd, machine, machine))
     if far != "answering":
         die("'%s' acts on a workspace on %s, which has no wk-tools of its own to\n"
-            "    run it:  wk remote setup %s" % (cmd, machine, machine))
+            "    run it:  wk machine setup %s" % (cmd, machine, machine))
     os.environ["WK_ROW_LABEL"] = machine
     fn = "t_wk_tty" if (_tty(0) and _tty(1)) else "t_wk"
     shell.exec_fn(str(ROOT), 'load_target %s >/dev/null 2>&1; %s' % (shell.sh_quote(machine), fn), cmd, *args)
@@ -615,6 +640,8 @@ def main(argv):
             % ((" " + args[0]) if args else ""))
     if cmd == "--declarations":
         dump_declarations()
+    if cmd == "completion":
+        completion_cmd(args)
     if cmd == "--forward":
         # this process's own forward, in a child that goes on afterwards (bare_report)
         d = D.Decl(ROOT / "cmd" / args[0])
@@ -699,7 +726,7 @@ def main(argv):
         inv.check_needs()
 
     if where == "store" and not os.environ.get("WK_IN_VM"):
-        if shell.run(str(ROOT), "store_is_local", env=_quiet_env()) != 0:
+        if not registry().store.is_local():
             forward_to_vm(inv, cmd, args)
 
     if where != "workspace":
@@ -758,29 +785,35 @@ def main(argv):
             name = cwd_workspace()
     if name:
         os.environ["WK_NAME"] = name
-        if not d.lifecycle and base != "derived" and not in_workspace():
-            if shell.run(str(ROOT), "ws_exists_on", resolved, name, env=_quiet_env()) != 0:
-                inv.usage_die("no such workspace: %s -- 'wk ls' lists them" % name)
+        asks = not d.lifecycle and base != "derived" and not in_workspace()
         if not d.lifecycle:
             os.environ["WK_TARGET"] = resolved
-        if d.ready:
-            rc = shell.run(str(ROOT), "load_target %s >/dev/null 2>&1; wait_ready" % shell.sh_quote(resolved), name)
-            if rc != 0:
-                raise Exit(rc)
+        if asks or d.ready:
+            ask_target(inv, resolved, name, asks, d.ready)
     os.execv(str(impl), [str(impl), *argv_split(d.opts_for(args), args)])
+
+
+def ask_target(inv, resolved, name, exists, ready):
+    """Whether `name` is on `resolved` (a machine that did not answer is no absence), then its readiness, from one load."""
+    try:
+        target = registry().load(resolved)
+        if exists and not registry().exists_on(target, name):
+            inv.usage_die("no such workspace: %s -- 'wk ls' lists them" % name)
+        if ready:
+            target.wait_ready(name, clock.Clock())
+    except LookupError as e:
+        die(str(e))
+    except act.Refused as e:
+        raise Exit(e.status)
 
 
 def resolve_target(inv, name_decl, slot, takes, derived):
     if os.environ.get("WK_TARGET"):
         return os.environ["WK_TARGET"]
     args = inv.args
-    prev = None
-    for a in args:
-        if prev == "--target":
-            return a
-        if a.startswith("--target=") and len(a) > len("--target="):
-            return a.split("=", 1)[1]
-        prev = a
+    named = D.Args(inv.decl, argv_split(inv.decl.opts_for(args), args)).value("--target")
+    if named:
+        return named
     name = ""
     if name_decl.split("@")[0] == "derived":
         t = inv.named_target()

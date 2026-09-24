@@ -15,6 +15,7 @@ measures against a real `ssh-agent`:
 
 Run: python3 -m unittest tests.test_push_agent -v
 """
+import contextlib
 import json
 import os
 import shutil
@@ -24,7 +25,14 @@ import sys
 import unittest
 from pathlib import Path
 
-from tests.support import REPO, WkTest, bash, requires_podman_vm
+from tests.support import REPO, THIS_HOST, WkTest, bash, requires_podman_vm
+from tests.test_wk_key import GOOD, KeyTest
+from tests.test_wk_secrets import SOCK
+
+sys.path.insert(0, str(REPO / "lib"))
+from wk.act import Refused  # noqa: E402
+from wk.machine import Local  # noqa: E402
+from wk.secrets import Secrets  # noqa: E402
 
 FORKS = ("fork", "forkwpe")
 
@@ -117,6 +125,59 @@ class _Agent(WkTest):
     def exec_log(self):
         return self.log.read_text()
 
+    def py_secrets(self):
+        """lib/wk/secrets.py over this host, every command line it runs kept in self.machine.argvs."""
+        self.machine = _Recording()
+        return Secrets(REPO, self.env(), self.machine)
+
+
+class _Recording(Local):
+    def __init__(self):
+        self.argvs = []
+
+    def run(self, argv, input=None, timeout=None):
+        self.argvs.append(argv)
+        return super().run(argv, input=input, timeout=timeout)
+
+
+class TestThePythonSwitchAgainstARealAgent(_Agent):
+    """lib/wk/secrets.py, what cmd/push runs, against the same real agent: the key reaches it on stdin."""
+
+    def test_the_key_bytes_go_in_on_stdin_and_are_never_an_argument(self):
+        s = self.py_secrets()
+        self.assertEqual([(f, "loaded") for f in FORKS], s.agent_load(str(self.sock)))
+        self.assertEqual(len(FORKS), len(s.agent_list(str(self.sock))))
+        secret_line = [ln for ln in (self.held / "build_key_fork").read_text().splitlines() if "PRIVATE KEY" not in ln][0]
+        for argv in self.machine.argvs:
+            self.assertNotIn(secret_line, " ".join(argv))
+        self.assertNotIn("PRIVATE KEY", self.ssh_add("-L").stdout)
+
+    def test_an_empty_agent_answers_lists_nothing_and_no_agent_does_not_answer(self):
+        s = self.py_secrets()
+        self.assertTrue(s.agent_answers(str(self.sock)))
+        self.assertEqual([], s.agent_list(str(self.sock)))
+        self.assertFalse(s.agent_answers(str(self.tmp / "not-a-socket")))
+
+    def test_clear_empties_it(self):
+        s = self.py_secrets()
+        s.agent_load(str(self.sock))
+        s.agent_clear(str(self.sock))
+        self.assertIn("no identities", self.ssh_add("-l").stdout)
+
+    def test_the_token_round_trips_through_a_path_with_a_space_at_mode_600(self):
+        (self.held / "github-pat").write_text("ghp-not-a-real-token\nsecond\n")
+        (self.tmp / "a dir").mkdir()
+        pat = self.tmp / "a dir" / "push-github-pat"
+        s = self.py_secrets()
+        self.assertTrue(s.cred_write(str(pat), "github-pat"))
+        self.assertEqual("ghp-not-a-real-token\n", pat.read_text())
+        self.assertEqual(0o600, pat.stat().st_mode & 0o777)
+        self.assertEqual([pat.name], [p.name for p in pat.parent.iterdir()])
+        self.assertTrue(s.cred_present(str(pat)))
+        self.assertNotIn("ghp-not-a-real-token", repr(self.machine.argvs))
+        s.cred_clear(str(pat))
+        self.assertFalse(pat.exists())
+
 
 class TestLoading(_Agent):
     def test_the_key_bytes_go_in_on_stdin_and_are_never_an_argument(self):
@@ -194,7 +255,7 @@ class TestARotatedCredentialReachesTheInjectorWhilePushIsOn(_Agent):
     it runs, so rotating a credential while the switch is on used to leave the
     machine spending the revoked one -- `git-webkit pr` answered 401 Bad
     credentials until someone flipped the switch, and nothing said so.
-    `cred_deliver` (cmd/key) converges it on every store, rotate and withdraw.
+    `Key.deliver` (lib/wk/key.py) converges it on every store, rotate and withdraw.
 
     The switch's position is the agent's own contents, which is what `wk push
     status` reports it from: keys loaded is on, empty is off."""
@@ -249,16 +310,6 @@ class TestARotatedCredentialReachesTheInjectorWhilePushIsOn(_Agent):
         self.converge("github-pat", pat)
         self.assertNotIn("ghp-the-new-one", self.exec_log())
 
-    def test_wk_key_converges_through_this_one_function(self):
-        """Every path that stores, rotates or withdraws one goes through
-        cred_deliver, so the fan-out onto another workstation (`wk key set
-        --paste`) converges that machine too."""
-        body = (REPO / "cmd" / "key").read_text()
-        self.assertIn("push_agent_switch_cred_converge push_agent_exec", body)
-        self.assertEqual(1, body.count("cred_deliver() {"))
-        self.assertEqual(
-            1, (REPO / "lib" / "store.sh").read_text()
-            .count("push_agent_switch_cred_converge() {"))
 
 
 class TestTheApiToken(_Agent):
@@ -315,11 +366,6 @@ class TestTheBugzillaKey(_Agent):
         self.assertEqual(0, cp.returncode, cp.stdout + cp.stderr)
         self.assertIn("wk key set bugzilla-api-key", cp.stdout)
         self.assertFalse((self.tmp / "bz-key").exists())
-
-    def test_off_reads_the_file_back_rather_than_trusting_the_clear(self):
-        src = (REPO / "cmd" / "push").read_text()
-        body = src[src.index("\noff)\n"):src.index("\nstatus)\n")]
-        self.assertIn('push_agent_cred_present push_agent_exec "$MACHINE_BZ"', body)
 
     def test_status_names_it_in_every_position(self):
         cp = self.run_wk("push", "status", env=self.env())
@@ -470,9 +516,7 @@ class TestAPathWithASpaceInIt(_Agent):
         self.assertEqual([pat.name], [p.name for p in self.spaced.iterdir()],
                          "the unquoted path made more than one file")
 
-        cp = self.sh(f'if push_agent_cred_present _fake_exec "{pat}"; '
-                     f'then echo present; else echo absent; fi')
-        self.assertIn("present", cp.stdout, cp.stdout + cp.stderr)
+        self.assertTrue(self.py_secrets().cred_present(str(pat)))
 
         cp = self.sh(f'push_agent_cred_clear _fake_exec "{pat}"')
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
@@ -547,14 +591,6 @@ class TestTheSwitchEndToEnd(_Agent):
         self.assertIn("no ssh-agent answers", cp.stdout)
         self.assertIn("wk-ssh-agent.service", cp.stdout)
 
-    def test_off_reports_the_agents_own_answer_not_the_clears_exit_status(self):
-        """A `ssh-add -D` that returned 0 against an agent that ignored it
-        would otherwise report a switch that is not thrown."""
-        src = (REPO / "cmd" / "push").read_text()
-        body = src[src.index("\noff)\n"):src.index("\nstatus)\n")]
-        self.assertIn("push_agent_list", body)
-        self.assertLess(body.index("push_agent_clear"), body.index("push_agent_list"))
-
 
 class TestAMachineWithNoAgentSaysSoRatherThanHeldBack(_Agent):
     """A build box is a plain checkout with no container around it, so it names
@@ -577,12 +613,12 @@ class TestAMachineWithNoAgentSaysSoRatherThanHeldBack(_Agent):
         registry = self.tmp / "registry"
         registry.mkdir(exist_ok=True)
         (registry / f"{self.MACHINE}.conf").write_text(
-            "WK_TARGET_KIND=remote\n"
+            f"KIND=build\nWK_TARGET_KIND=remote\nWK_REMOTE_HOSTNAME={THIS_HOST}\n"
             "WK_REMOTE_HOST=nonexistent.invalid\n"
             f"WK_REMOTE_ROOT={self.tmp}\n")
         marker = self.tmp / "wk-remote"
         marker.write_text(f"target={self.MACHINE}\nroot={self.tmp}\n")
-        return super().env({"WK_TARGET_REGISTRY": str(registry),
+        return super().env({"WK_MACHINES_DIR": str(registry),
                             "WK_REMOTE_MARKER": str(marker),
                             **(extra or {})})
 
@@ -1029,7 +1065,7 @@ class TestAskingAnotherMachine(WkTest):
         # WK_REMOTE_PEER is what a machine reached by delegation is: no
         # ~/.wk-remote marker of its own is required over there.
         (reg / "peerbox.conf").write_text(
-            f"WK_REMOTE_HOST=fake-peerbox\nWK_REMOTE_PEER=1\n"
+            f"KIND=peer\nWK_REMOTE_HOST=fake-peerbox\nWK_REMOTE_PEER=1\n"
             f"WK_REMOTE_ROOT={root}\n")
         self.log = self.tmp / "peer.log"
         self.log.write_text("")
@@ -1040,7 +1076,7 @@ class TestAskingAnotherMachine(WkTest):
         p.chmod(0o755)
         return {
             "PATH": f"{binp}:{os.environ['PATH']}",
-            "WK_TARGET_REGISTRY": str(reg),
+            "WK_MACHINES_DIR": str(reg),
             "WK_STORE": str(self.tmp / "store"),
             "WK_HOST_SECRETS": str(self.tmp / "secrets"),
             "WK_TEST_PEER_LOG": str(self.log),
@@ -1082,20 +1118,19 @@ class TestAMachineWithNoSwitchSaysSoWithACodeOfItsOwn(WkTest):
 
     def _as_build_machine(self):
         """What the dispatcher and lib/target.sh read on a shared build box:
-        the ~/.wk-remote marker naming the machine, that machine's conf in the
-        registry, and a store of its own holding a private half. Its commands
+        the ~/.wk-remote marker, that machine's conf naming this host, and a store of its own holding a private half. Its commands
         run here (WK_REMOTE_LOCAL), so nothing ssh's anywhere."""
         marker = self.tmp / "wk-remote"
         marker.write_text("target=buildbox4\n")
         reg = self.tmp / "registry"
         reg.mkdir(exist_ok=True)
-        (reg / "buildbox4.conf").write_text("WK_REMOTE_HOST=buildbox4\n")
+        (reg / "buildbox4.conf").write_text(f"KIND=build\nWK_REMOTE_HOST=buildbox4\nWK_REMOTE_HOSTNAME={THIS_HOST}\n")
         store = self.tmp / "store"
         (store / "push-keys").mkdir(parents=True, exist_ok=True)
         (store / "secrets").mkdir(parents=True, exist_ok=True)
         (store / "push-keys" / "build_key_fork").write_text("not-a-key\n")
         return {"WK_REMOTE_MARKER": str(marker), "WK_STORE": str(store),
-                "WK_TARGET_REGISTRY": str(reg),
+                "WK_MACHINES_DIR": str(reg),
                 "WK_HOST_SECRETS": str(store / "secrets"),
                 "WK_REMOTE_LOCAL": "1"}
 
@@ -1114,36 +1149,45 @@ class TestAMachineWithNoSwitchSaysSoWithACodeOfItsOwn(WkTest):
         self.assertIn("cannot be switched off", cp.stdout)
 
 
-class TestTheReadTokenReachesEveryInjectorThisMachineRuns(_Agent):
-    """A macOS workstation runs two injectors -- one in the podman machine for
-    the containers, one here for the guests -- and a token delivered to one of
-    them is a 401 from the other. push_agent_pat_deliver (lib/store.sh) is the
-    one call every convergence point makes, so neither half can be forgotten."""
+class TestEveryStoreRotateAndWithdrawReachesTheInjector(KeyTest):
+    """`wk key set` hands the stored token to every injector this machine runs, and, while the switch is on, to the
+    one that writes: storing, rotating and withdrawing it all converge both copies."""
 
-    def test_the_key_command_delivers_through_it(self):
-        text = (REPO / "cmd" / "key").read_text()
-        self.assertIn("push_agent_pat_deliver", text)
-        self.assertNotIn('push_agent_cred_sync push_agent_exec', text,
-                         "cmd/key converges one injector by hand again")
+    def setUp(self):
+        super().setUp()
+        self.w = self.world()
+        self.w.agents[SOCK] = {"KEY:fork"}
+        self.sec = self.w.sec()
 
-    def test_it_writes_the_machine_half_from_the_token_this_device_holds(self):
-        (self.held / "github-pat").write_text("ghp-not-a-real-token\n")
-        cp = self.sh("push_agent_pat_deliver")
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertEqual("ghp-not-a-real-token\n",
-                         (self.tmp / "read-pat").read_text())
+    def set(self, **kw):
+        with open(os.devnull, "w") as null, contextlib.redirect_stderr(null):
+            try:
+                return self.key(self.w).set("github-pat", **kw)
+            except Refused as e:
+                return e.status
 
-    def test_a_withdrawn_token_is_removed_by_the_same_call(self):
-        (self.tmp / "read-pat").write_text("ghp-the-old-one\n")
-        cp = self.sh("push_agent_pat_deliver")
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertFalse((self.tmp / "read-pat").exists())
+    def copies(self):
+        return self.w.files.get(self.sec.machine_read_pat()), self.w.files.get(self.sec.machine_pat())
 
-    def test_the_guests_half_is_the_vm_drivers_one_writer(self):
-        """The guest injector's copy is written by vm_push_pat_converge and by
-        nothing else, so every guest start and every key rotation converge the
-        same file the same way."""
-        vm = (REPO / "targets" / "vm.sh").read_text()
-        self.assertEqual(1, vm.count("push_agent_cred_sync"),
-                         "targets/vm.sh writes the guests' read token twice")
-        self.assertIn("vm_push_pat_converge", vm)
+    def test_a_stored_token_reaches_the_reader_and_the_writer(self):
+        self.assertEqual(0, self.set(paste=True, value=GOOD))
+        self.assertEqual((GOOD + "\n", GOOD + "\n"), self.copies())
+
+    def test_a_rotated_one_replaces_both(self):
+        self.set(paste=True, value="good-old")
+        os.environ["WK_YES"] = "1"
+        k = self.key(self.w, typed=GOOD, tty=True)
+        with open(os.devnull, "w") as null, contextlib.redirect_stderr(null):
+            self.assertEqual(0, k.set("github-pat", replace=True))
+        self.assertEqual((GOOD + "\n", GOOD + "\n"), self.copies())
+
+    def test_a_withdrawn_one_leaves_neither(self):
+        self.set(paste=True, value=GOOD)
+        os.environ["WK_YES"] = "1"
+        self.assertNotEqual(0, self.set(replace=True))
+        self.assertEqual((None, None), self.copies())
+
+    def test_with_the_switch_off_the_writer_gets_nothing(self):
+        self.w.agents[SOCK] = set()
+        self.set(paste=True, value=GOOD)
+        self.assertEqual((GOOD + "\n", None), self.copies())

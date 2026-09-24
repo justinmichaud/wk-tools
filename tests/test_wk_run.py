@@ -135,6 +135,15 @@ class TestLldbGetsAPty(unittest.TestCase):
         self.assertFalse(kw["tty"])
 
 
+class TestLdpathIsShared(unittest.TestCase):
+    """`cmd/run` and `cmd/profile` import the same `wk.ldpath.prelude`
+    rather than each defining their own copy."""
+
+    def test_run_imports_the_one_prelude(self):
+        from wk import ldpath
+        self.assertIs(RUN.prelude, ldpath.prelude)
+
+
 class TestMaxValidation(unittest.TestCase):
     def test_a_non_numeric_max_is_refused_before_anything_runs(self):
         with mock.patch.dict(os.environ, {"WK_NAME": "ws"}):

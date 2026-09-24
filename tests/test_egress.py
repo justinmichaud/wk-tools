@@ -1309,8 +1309,8 @@ class TestWhatGhNeeds(unittest.TestCase):
     def test_a_guest_gets_the_same_two(self):
         """A guest's injector is the host's, and `wk doctor <ws>` measures the
         placeholder on both targets, so the file that writes a guest's
-        environment carries them too (targets/vm.sh, ~/.wk-egress)."""
-        vm = (REPO / "targets" / "vm.sh").read_text()
+        environment carries them too (lib/wk/guest.py, ~/.wk-egress)."""
+        vm = (REPO / "lib" / "wk" / "guest.py").read_text()
         self.assertIn("export GH_TOKEN=wk-injects-this", vm)
         self.assertIn("export SSL_CERT_FILE=", vm)
         self.assertIn("export PYTHON_KEYRING_BACKEND=keyring.backends.null.Keyring", vm)
@@ -1462,7 +1462,7 @@ class TestTheWorkspaceHoldsThePlaceholder(unittest.TestCase):
         self.assertIn("cat /etc/ssl/certs/ca-certificates.crt", text)
 
     def test_a_guest_gets_them_with_its_egress(self):
-        text = (REPO / "targets" / "vm.sh").read_text()
+        text = (REPO / "lib" / "wk" / "guest.py").read_text()
         self.assertIn("GITHUB_COM_TOKEN=wk-injects-this", text)
         for var in ("REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE", "GIT_SSL_CAINFO"):
             with self.subTest(var=var):
@@ -1472,14 +1472,14 @@ class TestTheWorkspaceHoldsThePlaceholder(unittest.TestCase):
         """The placeholder is the only thing that may be written down: the
         token itself is in wk_push_held_dir on one machine."""
         for f in (REPO / "container" / "proxy" / "ensure-bridge.sh",
-                  REPO / "targets" / "vm.sh",
+                  REPO / "lib" / "wk" / "guest.py",
                   REPO / "container" / "proxy" / "github-inject.py"):
             with self.subTest(f=f.name):
                 self.assertNotIn("ghp_", f.read_text())
 
 
 EGRESS = (
-    "# wk: written by targets/vm.sh on every start\n"
+    "# wk: written by lib/wk/guest.py on every start\n"
     "export http_proxy=http://192.168.2.1:3128\n"
     "export https_proxy=http://192.168.2.1:3128\n"
     "export HTTP_PROXY=http://192.168.2.1:3128\n"
@@ -1718,10 +1718,10 @@ class TestNothingBakesTheAddressIn(unittest.TestCase):
         self.assertNotIn("WK_VM_PROXY_ADDR", text)
 
     def test_the_start_path_writes_the_egress_file(self):
-        """One `_converge_guest`, called from both t_start arms: a guest that
-        was already running gets its egress written exactly like one this
+        """One `Guest.converge`, reached from both of a start's arms: a guest
+        that was already running gets its egress written exactly like one this
         start booted."""
-        self.assertIn(".wk-egress", (REPO / "targets" / "vm.sh").read_text())
+        self.assertIn(".wk-egress", (REPO / "lib" / "wk" / "guest.py").read_text())
         assert_guest_start_converges(self, '_set_guest_egress "$name" "$ip"')
 
 

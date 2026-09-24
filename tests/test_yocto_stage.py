@@ -33,11 +33,15 @@ Run: python3 -m unittest tests.test_yocto_stage -v
 """
 import os
 import subprocess
+import sys
 import time
 import unittest
 from pathlib import Path
 
 from tests.support import REPO, WkTest, bash, func_body, scratch_dir
+
+sys.path.insert(0, str(REPO / "lib"))
+from wk import job, record  # noqa: E402
 
 YOCTO_BUILD = REPO / "image" / "yocto-build.sh"
 DEAD_PID = "99999999"  # a pid essentially guaranteed not to exist
@@ -418,7 +422,7 @@ printf 'exit=%s\n' "$(task_field "$d" exit)"
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
         self.assertIn("exit=stopped", cp.stdout, cp.stdout + cp.stderr)
         sent = execs.read_text()
-        self.assertIn("_watched_descendants 4242", sent, sent)
+        self.assertIn("sh -c %s wk 4242" % job.TREE, sent, sent)
         self.assertIn("kill -TERM", sent, sent)
         self.assertNotIn("pkill", sent, sent)
 
@@ -435,12 +439,11 @@ printf 'exit=%s\n' "$(task_field "$d" exit)"
         them done reads as an image that was built when none was: `[x] image`
         against a lane `wk sysimage ls` says has no image in it."""
         self._record("webkit", DEAD_PID)
-        cp = self._run(
-            'd=$(task_find yocto %s); task_steps "$d"' % self.ws)
+        cp = self._run('task_find yocto %s' % self.ws)
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        states = dict(l.split("\t") for l in cp.stdout.splitlines() if "\t" in l)
-        self.assertEqual(states["5"], "running", cp.stdout)   # webkit
-        for n in ("1", "2", "3", "4", "6"):
+        states = dict(record.Task(cp.stdout.strip()).steps())
+        self.assertEqual(states[5], "running", states)   # webkit
+        for n in (1, 2, 3, 4, 6):
             self.assertEqual(states[n], "pending",
                              "stage %s is claimed done by a run that never did it" % n)
 

@@ -216,7 +216,7 @@ class TestTheProfileReachesTheMachineThatRunsIt(WkTest):
     benchmark install, which never had the build tree."""
 
     def test_the_stage_no_longer_drops_them(self):
-        text = (REPO / "cmd" / "bench").read_text()
+        text = (REPO / "lib" / "bench-arms.sh").read_text()
         self.assertNotIn("--exclude '*.dSYM'", text)
 
     def test_only_the_perf_build_makes_any(self):

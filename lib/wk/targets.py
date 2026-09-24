@@ -1,6 +1,6 @@
 """The targets: where a workspace lives and how it is driven. A `Registry`
 names them (container, vm on a macOS host, this machine inside a workspace,
-and every `targets/hosts/<name>.conf`); each driver answers the same
+and every build machine and peer in `machines/`); each driver answers the same
 contract over a `Machine`."""
 
 import json
@@ -8,9 +8,10 @@ import os
 import pwd
 import re
 import shlex
+import stat
 import sys
 
-from wk import act, record, shell, sshalias
+from wk import act, fleet, guest, record, secrets, shell, sshalias, tools
 from wk.machine import TIMED_OUT, Local, Result, Ssh
 from wk.resources import Resources, workspace_marker_path
 from wk.store import Store
@@ -92,6 +93,26 @@ def read_conf(path):
     return out
 
 
+def session_socket_path(env):
+    return os.path.join(env.get("XDG_RUNTIME_DIR") or "/run/user/%d" % os.getuid(), "wk", "display", "wayland-0")
+
+
+def session_socket_present(env):
+    try:
+        return stat.S_ISSOCK(os.stat(session_socket_path(env)).st_mode)
+    except OSError:
+        return False
+
+
+def zed_cli(machine):
+    """The `zed` cli to exec into: on PATH, or the binary a drag-installed Zed.app carries with no PATH symlink."""
+    r = machine.run(["which", "zed"])
+    if r.ok and r.out.strip():
+        return r.out.strip()
+    app = "/Applications/Zed.app/Contents/MacOS/cli"
+    return app if machine.run(["test", "-x", app]).ok else None
+
+
 def zed_key_path(env):
     return os.path.join(Store(env).state_dir(), "ssh", "zed_ed25519")
 
@@ -123,26 +144,29 @@ class Registry:
         self.env = os.environ if env is None else env
         self.machine = machine or Local()
         self.store = Store(self.env)
-
-    def registry_dir(self):
-        return self.env.get("WK_TARGET_REGISTRY") or os.path.join(self.root, "targets", "hosts")
+        self.fleet = fleet.Fleet(self.root, self.env)
 
     def conf_path(self, name):
-        return os.path.join(self.registry_dir(), name + ".conf")
+        return self.fleet.path(name)
 
     def known(self):
+        return self.fleet.names(fleet.TARGET_KINDS)
+
+    def _conf(self, name):
         try:
-            return sorted(f[:-5] for f in os.listdir(self.registry_dir()) if f.endswith(".conf"))
-        except OSError:
-            return []
+            conf = self.fleet.load(name)
+        except fleet.ConfError as e:
+            raise LookupError(str(e))
+        return conf if conf and conf["KIND"] in fleet.TARGET_KINDS else None
 
     def kind(self, name):
         if name in BUILTIN:
             return name
-        conf = read_conf(self.conf_path(name))
-        if not os.path.isfile(self.conf_path(name)):
+        try:
+            conf = self._conf(name)
+        except LookupError:
             return None
-        return conf.get("WK_TARGET_KIND") or "remote"
+        return None if conf is None else conf.get("WK_TARGET_KIND") or "remote"
 
     def marker_path(self):
         return workspace_marker_path(self.env)
@@ -159,10 +183,15 @@ class Registry:
     def remote_marker_field(self, key):
         return read_conf(self.remote_marker_path()).get(key, "")
 
+    def self_target(self):
+        if not self.in_remote_host():
+            return ""
+        return self.fleet.named_by_host(record.host_name(self.machine))
+
     def default(self):
         if self.in_workspace():
             return "local"
-        return self.remote_marker_field("target") or "container"
+        return self.self_target() or "container"
 
     def vm_listed(self):
         return self.store.vm_store() is not None
@@ -171,7 +200,7 @@ class Registry:
         out = ["container"]
         if self.vm_listed():
             out.append("vm")
-        t = self.remote_marker_field("target")
+        t = self.self_target()
         if t:
             out.append(t)
         # Skipped on the far end of a target: a delegated listing would pay an ssh timeout per machine it has no route to.
@@ -208,13 +237,11 @@ class Registry:
         return self._holds(t, ws)
 
     def _holds(self, t, ws):
-        if os.path.isdir(t.store.ws_dir(ws)):
+        if t.store_machine.isdir(t.store.ws_dir(ws)):
             return True
         if t.info(ws) not in ("absent", "unreachable", ""):
             return True
-        from wk.record import Records
-        rec = Records(t.store.record_dir(), env=t.env).find("new", ws)
-        return bool(rec and rec.alive(None))
+        return t.creating_now(ws)
 
     def _asked(self, name, ws):
         """A machine's answer for `ws`, its one probe paid here; one that does not answer is named, since what is there is not in the answer."""
@@ -222,7 +249,7 @@ class Registry:
             t = self.load(name)
         except LookupError:
             return False
-        if os.path.isdir(t.store.ws_dir(ws)):
+        if t.store_machine.isdir(t.store.ws_dir(ws)):
             return True
         ok, why = t.answers()
         if not ok:
@@ -240,6 +267,21 @@ class Registry:
             answers = list(pool.map(lambda m: (m, self._asked(m, ws)), self.machines()))
         return [m for m, hit in answers if hit]
 
+    def exists_on(self, t, ws):
+        """Whether `ws` is on the loaded target `t`, where a machine that did not answer is not an absence."""
+        return self._holds(t, ws) or t.info(ws) == "unreachable"
+
+    def local_workspaces(self):
+        seen = []
+        for kind in ["container"] + (["vm"] if self.vm_listed() else []):
+            try:
+                store = self.load(kind).store
+            except (LookupError, act.Refused):
+                continue
+            if store.is_local():
+                seen += [n for n in store.workspaces() if n not in seen]
+        return seen
+
     def ws_target(self, ws):
         """The one target holding `ws`; the default when none does."""
         if self.env.get("WK_TARGET"):
@@ -255,14 +297,15 @@ class Registry:
     def load(self, name):
         kind = self.kind(name)
         if kind is None:
+            self._conf(name)   # a conf that does not parse says why
             names = " ".join(self.known())
             raise LookupError(
                 "unknown target '%s'.\n    The built-in ones are container, vm, remote and local.%s\n\n"
                 "    Anything else is a machine, and needs a conf -- in the registry, so every\n"
-                "    device gets it:\n\n        %s\n            WK_REMOTE_HOST=%s      # an ssh destination that already works\n"
-                "            WK_REMOTE_ROOT=/home/you/wk\n\n    'wk remote setup %s' writes it for you."
+                "    device gets it:\n\n        %s\n            KIND=build\n            WK_REMOTE_HOST=%s      # an ssh destination that already works\n"
+                "            WK_REMOTE_ROOT=/home/you/wk\n\n    'wk machine setup %s' writes it for you."
                 % (name, ("\n    The machines here: " + names) if names else "", self.conf_path(name), name, name))
-        conf = read_conf(self.conf_path(name)) if name not in BUILTIN else {}
+        conf = {} if name in BUILTIN else {k: v for k, v in self._conf(name).items() if k != "KIND"}
         env = dict(self.env)
         env.update(conf)
         if kind == "container":
@@ -300,6 +343,7 @@ class Target:
 
     kind = "target"
     needs_base = True
+    dir_first = False   # the workspace directory is made before the environment, so an environment without one is no creation
 
     def __init__(self, name, root, env, machine):
         self.name = name
@@ -311,6 +355,21 @@ class Target:
     @property
     def store(self):
         return self._store
+
+    @property
+    def store_machine(self):
+        return self.machine
+
+    def records(self, clock=None):
+        return record.of_target(self, clock, self.store_machine)
+
+    def creating_now(self, ws):
+        t = self.records().find("new", ws)
+        return bool(t and t.alive(None))
+
+    def creation_finished(self, ws):
+        t = self.records().find("new", ws)
+        return bool(t and t.field("exit") == "0")
 
     def src(self, ws):
         return "/src/WebKit"
@@ -403,19 +462,85 @@ class Target:
         raise NotImplementedError
 
     def state(self, ws, info=None):
-        """absent | creating | broken | present | unreachable: the record and
-        the environment read together (lib/target.sh's ws_state)."""
+        """absent | creating | broken | present | unreachable: the record and the environment read together.
+        Broken is one half gone -- the environment after creation finished, or the directory under a live environment."""
         env = self.info(ws) if info is None else info
-        ws_dir = self.store.ws_dir(ws)
-        if env in ("creating", "unreachable"):
+        ws_dir, m = self.store.ws_dir(ws), self.store_machine
+        if env == "unreachable":
             return env
         if env == "absent":
-            if not os.path.isdir(ws_dir):
+            if not m.isdir(ws_dir):
                 return "absent"
-            return "broken" if self.created(ws) else "creating"
-        if self.needs_base and not os.path.isfile(os.path.join(ws_dir, "base-id")):
+            return "broken" if self.created(ws) or self.creation_finished(ws) else "creating"
+        if self.dir_first and not m.isdir(ws_dir) and not self.creating_now(ws):
+            return "broken"
+        if env == "creating":
+            return env
+        if self.needs_base and not m.exists(os.path.join(ws_dir, "base-id")):
             return "creating"
         return "present"
+
+    def remake_hint(self, ws):
+        reg = Registry(self.root, self.env, self.machine)
+        if reg.in_remote_host():
+            return "from the workstation:  wk new %s --target %s" % (ws, reg.self_target())
+        return "wk new %s --target %s" % (ws, self.name)
+
+    def wait_ready(self, ws, clock, timeout=None):
+        """Returns once `ws` is present, or dies naming why it never will be; a creation still running is waited for."""
+        timeout = int(timeout or self.env.get("WK_READY_WAIT") or 1800)
+        seen = {"said": False}
+
+        def ready():
+            st = self.state(ws)
+            now = self.creating_now(ws) if st in ("present", "creating") else False
+            if st == "present" and now:   # the marker is down at `init`, and the driver holds the lock through the stages after it
+                st = "creating"
+            seen["st"] = st
+            if st == "present":
+                return True
+            if st == "absent":
+                act.die("no such workspace: %s" % ws)
+            if st == "broken":
+                act.die(self._broken_words(ws))
+            if st == "unreachable":
+                act.die("'%s' lives on a machine that did not answer (%ss).\n"
+                        "    Nothing is wrong with the workspace as far as this end can tell -- it\n"
+                        "    cannot be reached to ask. Try again, or check the route:\n"
+                        "        ssh -o BatchMode=yes %s true"
+                        % (ws, self.env.get("WK_SSH_TIMEOUT") or 10, getattr(self, "host", "") or "the machine"))
+            if not now:
+                act.barrier("'%s' was never finished creating, and nothing is creating it now\n"
+                            "    (the process that was is gone, with whatever connection started it).\n"
+                            "    Usually there is nothing in one worth keeping, so remake it:\n        %s\n"
+                            "    --force uses it as it is, which is right when you can see that the\n"
+                            "    checkout is complete and only the marker is missing." % (ws, self.remake_hint(ws)))
+                return True
+            if not seen["said"]:
+                seen["said"] = True
+                stage = " ".join(self.records().find("new", ws).stage())
+                act.info("waiting for '%s' to finish being created%s" % (ws, " (at: %s)" % stage if stage else ""))
+                act.log("  follow it:  tail -f %s" % self.create_log(ws))
+                act.log("  this end can be killed; creation is detached and continues")
+            return False
+
+        if not clock.wait_until(ready, timeout, 2):
+            act.die("'%s' was still %s after %ds.\n    Creation is detached, so it may still be going: 'wk status %s' says\n"
+                    "    whether the driver is alive, and %s says what it is doing." % (ws, seen["st"], timeout, ws, self.create_log(ws)))
+        if seen["said"]:
+            act.info("'%s' is ready" % ws)
+
+    def _broken_words(self, ws):
+        if not self.store_machine.isdir(self.store.ws_dir(ws)):
+            return ("'%s' is an environment with no workspace directory: nothing is creating it, and\n"
+                    "    what it would run in is gone -- something outside wk removed it.\n"
+                    "    Repair:  wk rm %s    (then 'wk new %s' if you still want it)" % (ws, ws, ws))
+        return ("'%s' exists as a record and not as a %s workspace: creation\n"
+                "    finished, and the environment is gone -- something outside wk removed it.\n"
+                "    Repair:  wk rm %s    (then 'wk new %s' if you still want it)" % (ws, self.name, ws, ws))
+
+    def sync_tools(self, ws):
+        return True
 
     def display_state(self, ws):
         st = self.state(ws)
@@ -476,8 +601,8 @@ class Target:
     def pull(self, ws, src, dest):
         self.machine.copy_out(src, dest)
 
-    def pull_dir(self, ws, src, dest):
-        self.machine.copy_tree_out(src, dest)
+    def pull_dir(self, ws, src, dest, exclude=()):
+        self.machine.copy_tree_out(src, dest, exclude)
 
     def push(self, ws, src, dest):
         self.machine.copy_in(src, dest)
@@ -546,6 +671,7 @@ def arch_image(root, arch):
 
 class Container(Target):
     kind = "container"
+    dir_first = True
 
     def _podman(self):
         if os.uname().sysname == "Darwin" and not self.env.get("WK_IN_VM"):
@@ -710,9 +836,7 @@ class Container(Target):
             self.machine.write(conf, shell.ccache_conf(self.root, self.env))
         for d in (self.store.secrets_dir(), self.store.agent_rw_dir()):
             self.ensure_dir_mode(d, "0700")
-        rc = shell.secrets_publish(self.root, self.env)
-        if rc:
-            raise act.Refused(rc)
+        secrets.Secrets(self.root, self.env, self.machine).store_publish()
 
     def sdk_refresh(self):
         r = self.machine.act_run(["bash", os.path.join(self.root, "container", "sdk-refresh.sh"), self.sdk()])
@@ -854,7 +978,10 @@ class Container(Target):
         if not r.ok:
             raise OSError(r.err.strip() or "podman cp failed")
 
-    def pull_dir(self, ws, src, dest):
+    def pull_dir(self, ws, src, dest, exclude=()):
+        if exclude:
+            act.die("the container driver cannot exclude paths (%s): copy the whole tree, or make the selection "
+                    "inside the workspace first" % " ".join(exclude))
         self.machine.remove(dest)
         self.machine.mkdir(dest)
         r = self.machine.act_run(self._podman() + ["cp", "%s:%s/." % (self.ctr(ws), src), dest])
@@ -933,6 +1060,7 @@ class Vm(Target):
     kind = "vm"
     needs_base = False
     agent_rw_share = "agent-rw"
+    mirror_share = "mirror"
 
     def __init__(self, name, root, env, machine):
         super().__init__(name, root, env, machine)
@@ -994,13 +1122,8 @@ class Vm(Target):
         return self.env.get("WK_VM_BASE") or "wk-base"
 
     def tart(self):
-        """tart is a signed .app reached through a symlink; the three places it is looked for."""
-        for c in (shell_which("tart"),
-                  os.path.join(self.env.get("HOME", ""), ".local", "bin", "tart"),
-                  os.path.join(self.env.get("HOME", ""), ".local", "share", "tart", "tart.app", "Contents", "MacOS", "tart")):
-            if c and os.access(c, os.X_OK):
-                return os.path.realpath(c)
-        return None
+        """lib/common.sh's tart_bin, the one locator every reader of "is tart here" asks."""
+        return shell.ask(self.root, "tart_bin", env=dict(self.env), quiet=True) or None
 
     def vm(self, ws):
         return "wk-" + ws
@@ -1056,13 +1179,14 @@ class Vm(Target):
         return ["-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null", "-o", "LogLevel=ERROR",
                 "-o", "ServerAliveInterval=60", "-o", "ServerAliveCountMax=10", "-i", self.key()]
 
-    def _guest_ssh(self, ws):
-        """An `Ssh` onto the guest's own address, its opts identical to `exec`'s -- None while it is not running."""
-        ip = self.ip(ws)
-        if not ip:
-            return None
+    def guest_at(self, ip):
+        """An `Ssh` onto a guest's address, its opts identical to `exec`'s."""
         return Ssh("%s@%s" % (self.user(), ip), opts=self._guest_ssh_opts(),
-                  timeout=int(self.env.get("WK_SSH_TIMEOUT") or 10), via=self.machine)
+                   timeout=int(self.env.get("WK_SSH_TIMEOUT") or 10), via=self.machine)
+
+    def _guest_ssh(self, ws):
+        ip = self.ip(ws)
+        return self.guest_at(ip) if ip else None
 
     def _guest_ssh_or_die(self, ws):
         m = self._guest_ssh(ws)
@@ -1092,8 +1216,8 @@ class Vm(Target):
     def push(self, ws, src, dest):
         self._guest_ssh_or_die(ws).copy_in(src, dest)
 
-    def pull_dir(self, ws, src, dest):
-        self._guest_ssh_or_die(ws).copy_tree_out(src, dest)
+    def pull_dir(self, ws, src, dest, exclude=()):
+        self._guest_ssh_or_die(ws).copy_tree_out(src, dest, exclude)
 
     def push_dir(self, ws, src, dest):
         self._guest_ssh_or_die(ws).copy_tree_in(src, dest)
@@ -1110,21 +1234,41 @@ class Vm(Target):
         return self.user()
 
     def stop(self, ws):
-        return shell.guest_stop(self.root, ws) == 0
+        return guest.stop(self, ws)
 
     def sync(self, named=False):
         ok = True
         for g, _ in self.list():
             if self.info(g) != "running":
                 sys.stderr.write("  %-24s not running -- skipped\n" % g)
-            elif shell.sync_tools(self.root, self.machine, self.name, g):
+            elif self.sync_tools(g):
                 sys.stderr.write("  %-24s ok\n" % g)
             else:
                 ok = False
         return ok
 
+    def sync_tools(self, ws):
+        """A git bundle rather than a mount: a guest's shares are the agent-rw directory and the mirror. The marker
+        is rewritten with it, since the tooling pushed is what reads it."""
+        guest = self._guest_ssh_or_die(ws)
+        return tools.push(self.root, self.machine, guest, self.tools(ws), self.env) and self.write_marker(ws, guest)
+
+    def write_marker(self, ws, guest):
+        """A bench image (/etc/wk-image) is no workspace, so it keeps none."""
+        path = self.home() + "/.wk-workspace"
+        try:
+            if guest.run(["test", "-f", "/etc/wk-image"]).ok:
+                guest.remove(path)
+            else:
+                guest.write(path, "# wk: this machine IS a workspace. Written by lib/wk/targets.py.\nname=%s\nsrc=%s\n"
+                            % (ws, self.src(ws)))
+        except OSError as e:
+            act.warn("could not settle %s's workspace marker: %s" % (ws, e))
+            return False
+        return True
+
     def start(self, ws):
-        return shell.guest_start(self.root, ws) == 0
+        return bool(guest.start(self, ws))
 
     def tart_or_die(self):
         bin = self.tart()
@@ -1503,8 +1647,8 @@ class Remote(Target):
     def push(self, ws, src, dest):
         self.machine.copy_in(src, dest)
 
-    def pull_dir(self, ws, src, dest):
-        self.machine.copy_tree_out(src, dest)
+    def pull_dir(self, ws, src, dest, exclude=()):
+        self.machine.copy_tree_out(src, dest, exclude)
 
     def push_dir(self, ws, src, dest):
         self.machine.copy_tree_in(src, dest)
@@ -1548,6 +1692,21 @@ class Remote(Target):
             act.die("%s said nothing an editor can use about '%s'" % (self.host, ws))
         self._routes[ws] = (kv["user"], kv["src"], kv.get("proxy", ""))
         return self._routes[ws]
+
+    @property
+    def store_machine(self):
+        return self.here
+
+    def sync_tools(self, ws):
+        if self.peer:
+            act.debug("not pushing wk-tools to %s: it is a workstation with its own checkout" % self.label())
+            return True
+        dest = self.tools(ws)
+        if self.is_local:
+            if self.root != dest:
+                act.warn("running %s/wk, but this target's tooling is %s" % (self.root, dest))
+            return True
+        return tools.push(self.root, self.here, self._far(), dest, self.env)
 
     def is_here(self):
         return self.is_local
@@ -1661,7 +1820,7 @@ class Remote(Target):
             rc, out = self.wk("sync", "--tools", env=dict(self.env, WK_NO_DELEGATE="1"))
             sys.stderr.write(out)
             return rc == 0
-        ok = shell.sync_tools(self.root, self.here, self.name, "")
+        ok = self.sync_tools("")
         if ok:
             sys.stderr.write("  %-24s pushed %s\n" % (self.name, self.here.run(["git", "-C", self.root, "rev-parse", "HEAD"]).out.strip()))
         if self.reference():
@@ -1828,9 +1987,32 @@ def _int(s):
         return 0
 
 
-def shell_which(name):
-    for d in os.environ.get("PATH", "").split(os.pathsep):
-        p = os.path.join(d, name)
-        if os.path.isfile(p) and os.access(p, os.X_OK):
-            return p
-    return None
+def main(argv, env=None):
+    from wk.clock import Clock
+    env = os.environ if env is None else env
+    arity = {"state": (2,), "ready": (2, 3), "creating-now": (2,), "needs-base": (1,), "sync-tools": (2,)}
+    if not argv or len(argv) - 1 not in arity.get(argv[0], ()):
+        act.die("usage: python3 -m wk.targets state|creating-now|sync-tools <target> <ws> | ready <target> <ws> [seconds]"
+                " | needs-base <target>")
+    root = env.get("WK_ROOT") or os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    try:
+        t = Registry(root, env).load(argv[1])
+        ws = argv[2] if len(argv) > 2 else ""
+        if argv[0] == "state":
+            print(t.state(ws))
+            return 0
+        if argv[0] == "ready":
+            t.wait_ready(ws, Clock(), argv[3] if len(argv) > 3 else None)
+            return 0
+        ok = {"creating-now": lambda: t.creating_now(ws), "needs-base": lambda: t.needs_base,
+              "sync-tools": lambda: t.sync_tools(ws)}[argv[0]]()
+        return 0 if ok else 1
+    except LookupError as e:
+        act.die(str(e))
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main(sys.argv[1:]))
+    except act.Refused as e:
+        sys.exit(e.status)

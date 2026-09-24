@@ -37,7 +37,7 @@ class TestQuietSiblings(unittest.TestCase):
             f'NODE_SSH="{name}-rescue"\n'
             + (f'NODE_BENCH_SSH="{name}-bench"\n' if bench else "")
             + f'NODE_NET={net}\nNODE_BRIDGE="{bridge}"\n'
-            'NODE_DRIVER=pi-sd\nNODE_DEVICE=/dev/mmcblk0\nNODE_ROOT=/dev/mmcblk0p2\n'
+            'KIND=board\nNODE_DRIVER=pi-sd\nNODE_DEVICE=/dev/mmcblk0\nNODE_ROOT=/dev/mmcblk0p2\n'
             # machine_load requires a note; without one the conf is refused
             # and the walk silently finds no siblings at all.
             f'NODE_NOTE="{name}, a test fixture"\n'

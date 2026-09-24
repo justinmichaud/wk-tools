@@ -36,7 +36,7 @@ from pathlib import Path
 from tests.support import REPO, WkTest, bash, fake_workspace, glob_bait, rand_suffix, run
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import build  # noqa: E402
+from wk import build, job  # noqa: E402
 
 
 def _load(rel):
@@ -204,7 +204,7 @@ class TestJobKillReachesTheMachineThatRuns(WkTest):
                   env={"WK_STORE": str(store)}, timeout=60)
         self.assertEqual(cp.stdout.strip().splitlines()[-1], "GONE", cp.stdout + cp.stderr)
         execs = (self.tmp / "execs").read_text()
-        self.assertIn("_watched_descendants 4242", execs,
+        self.assertIn("sh -c %s wk 4242" % job.TREE, execs,
                       "the far side gets the same descendants-first walk")
         self.assertIn("kill -TERM", execs)
         self.assertNotIn("pkill", execs,

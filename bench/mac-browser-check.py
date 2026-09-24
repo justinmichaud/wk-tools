@@ -307,7 +307,7 @@ def main():
     parser.add_argument("--expect-display", metavar="SPEC",
                         help="the display this reading must be taken on, as "
                              "'<kind> <w>x<h>', kind being builtin or external "
-                             "(boot/machines/<node>.conf's NODE_DISPLAY, or whatever "
+                             "(machines/<node>.conf's NODE_DISPLAY, or whatever "
                              "the machine's driver derives it from). "
                              "Display identity is what makes two runs "
                              "comparable; without it the display is recorded and "

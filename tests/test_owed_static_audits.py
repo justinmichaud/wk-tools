@@ -31,17 +31,9 @@ FUNC_RE = re.compile(r'^([A-Za-z_][A-Za-z0-9_]*)\(\)\s*\{\s*(#.*)?$')
 DELIBERATE_PREDICATES = {
     ("lib/common.sh", "gh_authenticated"),
     ("lib/common.sh", "lock_alive"),
-    ("lib/resources.sh", "is_headless"),
-    ("lib/target.sh", "ws_creating_now"),
-    ("lib/target.sh", "ws_creation_finished"),
     ("lib/store.sh", "store_is_local"),
-    ("cmd/key", "row_agrees"),
-    ("image/pgo.sh", "image_pgo_slot_is"),
-    ("cmd/push", "_in_vm_driver"),
-    ("cmd/sysimage", "_ws_building"),
     ("admin/wk-card-priv", "_slot_present"),
     ("bench/mac-bench-volume.sh", "volume_is_system"),
-    ("boot/disk.sh", "_image_wants_wifi"),
     ("container/proxy/ensure-bridge.sh", "bridge_alive"),
     ("image/yocto-build.sh", "bb"),
 }

@@ -33,10 +33,11 @@ import sys
 ROOT = os.environ.get("WK_ROOT") or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "lib"))
 
-from wk import record, shell, targets  # noqa: E402
+from wk import decl, record, shell, targets  # noqa: E402
 from wk.act import info, log  # noqa: E402
 from wk.machine import Local  # noqa: E402
 from wk.store import Store  # noqa: E402
+from wk.sysimage import task  # noqa: E402
 
 MACHINE = os.environ.get("WK_MACHINE", "wk")
 HOME = os.environ.get("HOME", os.path.expanduser("~"))
@@ -144,8 +145,9 @@ def workspace_report(reg, rep):
 
 
 def main(argv):
+    args = decl.Args(decl.Decl(__file__), argv)
     store = Store()
-    if "--probe-store" in argv:
+    if args.flag("--probe-store"):
         sys.stdout.write(probe_store(store))
         return 0
     reg = targets.Registry(ROOT)
@@ -202,7 +204,7 @@ def main(argv):
     rep.section("this host")
     if os.path.isdir(store.state_dir()):
         rep.row(kb(store.state_dir()), "host-side state", "logs, keys, remote build status")
-        cache = shell.ask(ROOT, '. "$WK_ROOT/lib/image.sh"; image_cache_dir') or ""
+        cache = task.cache_dir(os.environ)
         if cache.startswith(store.state_dir() + "/") and os.path.isdir(cache):
             k = kb(cache)
             if k > 0:

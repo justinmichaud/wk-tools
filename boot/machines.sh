@@ -2,16 +2,11 @@ command -v reach_tailnet >/dev/null 2>&1 || . "$WK_ROOT/lib/reach.sh"
 command -v disk_part >/dev/null 2>&1 || . "$WK_ROOT/boot/disk.sh"
 command -v tools_push >/dev/null 2>&1 || . "$WK_ROOT/lib/tools.sh"
 
-# vcgencmd is on every Pi image; rpi4 lacks rpi-eeprom-config, tried second.
-EEPROM_CONFIG_CMD='vcgencmd bootloader_config 2>/dev/null || sudo rpi-eeprom-config 2>/dev/null || true'
-
-machines_dir() { echo "${WK_MACHINES_DIR:-$WK_ROOT/boot/machines}"; }
+machine_names() { wk_fleet list --kind board --kind mac --kind guest; }
 
 machine_list() {
-    local f n
-    for f in "$(machines_dir)"/*.conf; do
-        [ -f "$f" ] || continue
-        n=$(basename "$f" .conf)
+    local n
+    for n in $(machine_names); do
         machine_load "$n" 2>/dev/null || continue
         printf '%-8s%s\n' "$n" "$NODE_NOTE"
     done
@@ -20,12 +15,10 @@ machine_list() {
 machine_quiet_siblings() { # <this machine> <net> <bridge>; a subshell, machine_load overwriting NODE_* as it walks
     local me="$1" net="$2" bridge="$3"
     (
-        local peers quiet=0 total=0 f n name up
+        local peers quiet=0 total=0 n name up
         peers=$(wk_tailscale_peers 2>/dev/null) || peers=""
         [ -n "$peers" ] || { printf '0 0'; exit 0; }
-        for f in "$(machines_dir)"/*.conf; do
-            [ -f "$f" ] || continue
-            n=$(basename "$f" .conf)
+        for n in $(machine_names); do
             [ "$n" != "$me" ] || continue
             machine_load "$n" 2>/dev/null || continue
             [ "${NODE_NET:-}" = "$net" ] || continue
@@ -45,10 +38,8 @@ machine_quiet_siblings() { # <this machine> <net> <bridge>; a subshell, machine_
 }
 
 machine_declare() {
-    local f n
-    for f in "$(machines_dir)"/*.conf; do
-        [ -f "$f" ] || continue
-        n=$(basename "$f" .conf)
+    local n
+    for n in $(machine_names); do
         machine_load "$n" 2>/dev/null || continue
         printf '%s\t%s\t%s\t%s\t%s\n' \
             "$n" "${NODE_ROLE:-workstation}" "${NODE_OS:-any}" "${NODE_PROFILE:-}" "$NODE_NOTE"
@@ -56,9 +47,8 @@ machine_declare() {
 }
 
 machine_load() {
-    local f
-    f="$(machines_dir)/$1.conf"
-    [ -f "$f" ] || return 1
+    local out
+    out=$(wk_fleet load "$1" --kind board --kind mac --kind guest) || return 1
     NODE_NAME="$1"
     NODE_SSH=""; NODE_DRIVER=""; NODE_DEVICE=""; NODE_ROOT=""; NODE_PROFILE=""
     NODE_NOTE=""; NODE_MAC=""; NODE_VOLUME=""; NODE_DTB=""
@@ -66,8 +56,7 @@ machine_load() {
     NODE_BRIDGE=""  # declared, not discovered: readable when unreachable
     NODE_ROLE=workstation
     NODE_OS=any  # or an OS name for a machine that answers only for itself
-    # shellcheck disable=SC1090
-    . "$f"
+    eval "$out"
     [ -n "$NODE_DRIVER" ] && [ -n "$NODE_NOTE" ] || return 1
 }
 
@@ -207,7 +196,7 @@ mac_ssh() {
     ssh -o BatchMode=yes -o ConnectTimeout="$(wk_ssh_timeout)" "$dest" "$@"
 }
 
-# One declared path, not a search: the same spelling targets/hosts/*.conf gives WK_REMOTE_TOOLS. A machine carrying two clones otherwise has whichever a search reaches first driving the lane.
+# One declared path, not a search: the same spelling a peer's machines/<name>.conf gives WK_REMOTE_TOOLS. A machine carrying two clones otherwise has whichever a search reaches first driving the lane.
 MACHINE_TOOLS=Development/wk-tools
 machine_tools_dir() { printf '%s' "$MACHINE_TOOLS"; }
 
@@ -245,129 +234,48 @@ machine_prepare() { # <ssh destination>
     return 0
 }
 
-# No probe can derive the intent half: once armed, the firmware register and the running system look unchanged.
-NODE_RECORD=/var/lib/wk/boot/armed
-
-record_write() {
-    [ "${MODE_CHANNEL:-host}" = host ] || { debug "$NODE_NAME answered as its bench system; the arming is on its medium and no record is written"; return 0; }
-    m_ssh "mkdir -p $(dirname $NODE_RECORD) && cat > $NODE_RECORD <<EOF
-image=$1
-profile=$2
-device=$3
-order=$4
-armed_by=$(hostname)
-armed_at=\$(date -u +%Y-%m-%dT%H:%M:%SZ)
-armed_boot_id=$(b_boot_id)
-EOF"
+# The driver interface is lib/wk/boot; every b_* here and in boot/pi-*.sh is its shim over this shell's NODE_* and MODE.
+_wk_boot() { # <driver> <verb> [args]
+    ( export NODE_NAME ${!NODE_*} MODE MODE_CHANNEL ARM_SYS_PART
+      PYTHONPATH="$WK_ROOT/lib" exec python3 -m wk.boot "$@" )
 }
 
-record_read() {
-    [ "${MODE_CHANNEL:-host}" = host ] || return 0
-    m_ssh "cat $NODE_RECORD 2>/dev/null" || true
-}
-record_clear() {
-    [ "${MODE_CHANNEL:-host}" = host ] || { debug "$NODE_NAME answered as its bench system; its arming record is on the host install and stays"; return 0; }
-    m_ssh "rm -f $NODE_RECORD"
+boot_facts() { # <driver> -- BOOT_ARMING and the other facts a bash caller reads after load_driver
+    local f
+    f=$(_wk_boot "$1" facts) || { echo "boot driver $1: python3 -m wk.boot $1 facts failed" >&2; return 1; }
+    eval "$f"
 }
 
-# Between `wk boot` and the reboot it asked for, the filesystem answering ssh is not the one about to run.
-machine_armed_barrier() { # <what this command would do>
-    local what="$1" rec img armed_boot now_boot
-    b_probe >/dev/null 2>&1 || true
-    # A barrier may not skip in silence, and `MODE=unreachable` (or an unset MODE, from a probe that died) is not "the board is not in host mode": a deploy routed to a podman machine reaches a board in bench mode and not one in host mode, since the tailnet grants tag:wk -> tag:wk and a host-mode board is tag:workstation (measured 2026-09-16), so exactly there the check was being skipped.
-    case "${MODE:-}" in
-        host) ;;
-        ""|unreachable)
-            barrier "could not tell what $NODE_NAME is running, so whether it is armed for a
-    one-shot boot is unknown -- and if it is, the filesystem answering ssh is
-    not the one about to run:
-    $what
-    Ask from a machine that can reach it:  wk boot $NODE_NAME --status
-    A board in bench mode answers a workspace; one in host mode answers only a
-    workstation."
-            return 0 ;;
-        *) return 0 ;;   # its bench system answered, and an arming record lives on the host install
-    esac
-    rec=$(record_read 2>/dev/null || true)
-    img=$(kv_get image <<<"$rec")
-    [ -n "$img" ] || return 0
-    armed_boot=$(kv_get armed_boot_id <<<"$rec")
-    now_boot=$(b_boot_id 2>/dev/null || true)
-    if [ -n "$armed_boot" ] && [ -n "$now_boot" ] && [ "$armed_boot" != "$now_boot" ]; then
-        return 0    # spent: the machine has rebooted since it was armed
-    fi
-    barrier "$NODE_NAME is armed for system '$img' and has not rebooted yet.
-    $what
-    Disarm it first:   wk boot $NODE_NAME --disarm
-    Or see the state:  wk boot $NODE_NAME --status"
+boot_bridge() { # [--driver] <function> [args] -- one transport call of this library, for lib/wk/boot's BashChannel
+    if [ "$1" = --driver ]; then shift; load_driver "$NODE_DRIVER"; fi
+    "$@"
 }
 
-# Every `case` pattern below opens with `(`: bash 3.2, the bash macOS ships, cannot parse a `case` inside a `$( … )` without both-sided parens, and fails at *load* time.
-_b_probe_sh=$(cat <<'EOS'
-cat /etc/wk-image 2>/dev/null
-rd=$(findmnt -no SOURCE / 2>/dev/null || true)
-[ -n "$rd" ] || rd=$(awk '$2 == "/" { print $1; exit }' /proc/mounts 2>/dev/null)
-case "$rd" in
-  (/dev/root|"") rd=$(sed -n 's/.*[ ]root=\([^ ]*\).*/\1/p' /proc/cmdline 2>/dev/null | head -1) ;;
-esac
-case "$rd" in
-  (PARTUUID=*) rd=$(readlink -f "/dev/disk/by-partuuid/${rd#PARTUUID=}" 2>/dev/null || echo "$rd") ;;
-  (UUID=*)     rd=$(readlink -f "/dev/disk/by-uuid/${rd#UUID=}" 2>/dev/null || echo "$rd") ;;
-esac
-printf 'rootdev=%s\n' "$rd"
-EOS
-)
-
-# NODE_ROOT is tested first: on a one-medium board (rpi3) both patterns match.
-b_system_kind() { # <root device>
-    local rd="${1:-}"
-    [ -n "$rd" ] || { printf 'unknown'; return 0; }
-    case "$rd" in "${NODE_ROOT:-@none@}"*) printf 'base'; return 0 ;; esac
-    case "$rd" in "${NODE_DEVICE:-@none@}"*) printf 'bench'; return 0 ;; esac
-    printf 'unknown'
-}
+_b_probe_sh=$(cat "$WK_ROOT/boot/onboard/probe.sh")
 
 b_probe() {
-    local out id role rootdev kind
-    if m_ssh true >/dev/null 2>&1; then
-        MODE_CHANNEL=host
-        out=$(m_ssh "$_b_probe_sh" 2>/dev/null || true)
-    elif out=$(i_ssh "$_b_probe_sh" 2>/dev/null) && printf '%s' "$out" | grep -q '^id='; then
-        MODE_CHANNEL=bench
-    else
-        MODE_CHANNEL=none; MODE=unreachable; return 0
-    fi
-
-    id=$(     kv_get id      <<<"$out")
-    role=$(   kv_get role    <<<"$out")
-    rootdev=$(kv_get rootdev <<<"$out")
-
-    if [ -z "$id" ]; then MODE="host"; return 0; fi
-
-    kind=$(b_system_kind "$rootdev")
-    case "$kind" in
-        base)  MODE="base $id" ;;
-        bench) MODE="bench $id" ;;
-        *)     case "$role" in
-                   rescue) MODE="base $id" ;;
-                   *)      MODE="bench $id" ;;
-               esac ;;
-    esac
-    return 0
+    local _o
+    _o=$(_wk_boot "${NODE_DRIVER:-}" probe) || _o="MODE=unreachable MODE_CHANNEL=none"
+    eval "$_o"
 }
-
-b_probeable() { :; }
-
-# The display the measured install must be held at, as `<kind> <w>x<h>` in points, kind being what CGDisplayIsBuiltin answers of it. Declared per machine here; a driver whose target has no conf of its own overrides this and reads it from whatever sets it.
-b_display() {
-    [ -n "${NODE_DISPLAY:-}" ] || return 1
-    printf '%s' "$NODE_DISPLAY"
-}
-
-b_media() {
-    [ -n "${NODE_DEVICE:-}" ] || { printf 'no wk-managed media declared'; return 0; }
-    printf 'media %s (this driver says nothing more about it)' "$NODE_DEVICE"
-}
+b_probeable() { _wk_boot "${NODE_DRIVER:-}" probeable; }
+b_system_kind() { _wk_boot "${NODE_DRIVER:-}" system-kind "${1:-}"; }
+b_display() { _wk_boot "${NODE_DRIVER:-}" display; }
+b_media() { _wk_boot "${NODE_DRIVER:-}" media; }
+b_booted_at() { _wk_boot "${NODE_DRIVER:-}" booted-at; }
+b_boot_id() { _wk_boot "${NODE_DRIVER:-}" boot-id; }
+b_watchdog_present() { _wk_boot "${NODE_DRIVER:-}" watchdog-present; }
+b_systems() { _wk_boot "${NODE_DRIVER:-}" systems; }
+machine_select_system() { _wk_boot "${NODE_DRIVER:-}" select "${1:-}" || exit $?; }
+b_diag() { _wk_boot "${NODE_DRIVER:-}" diag || exit $?; }
+b_arm() { _wk_boot "${NODE_DRIVER:-}" arm "$@" || exit $?; B_ARMED=1; }
+b_reboot() { _wk_boot "${NODE_DRIVER:-}" reboot ${B_ARMED:+--armed} || exit $?; }
+b_evidence() { _wk_boot "${NODE_DRIVER:-}" evidence; }
+b_reprovision() { _wk_boot "${NODE_DRIVER:-}" reprovision; }
+record_write() { _wk_boot "${NODE_DRIVER:-}" record-write "$@"; }
+record_read() { _wk_boot "${NODE_DRIVER:-}" record-read; }
+record_clear() { _wk_boot "${NODE_DRIVER:-}" record-clear; }
+machine_armed_barrier() { b_probe; _wk_boot "${NODE_DRIVER:-}" barrier "$1" || exit $?; }   # the probe sets this shell's channel for what follows
 
 r_ssh() {
     case "${MODE_CHANNEL:-none}" in
@@ -377,111 +285,3 @@ r_ssh() {
     esac
 }
 
-# /proc/stat's btime is epoch seconds; `uptime -s` prints *local* time and re-reading it as UTC misreports silently.
-b_booted_at() {
-    local btime
-    btime=$(r_ssh 'sed -n "s/^btime //p" /proc/stat' 2>/dev/null | tr -dc '0-9') || true
-    [ -n "$btime" ] || return 0
-    epoch_to_utc "$btime"
-}
-
-b_boot_id() { r_ssh 'cat /proc/sys/kernel/random/boot_id' 2>/dev/null || true; }
-
-b_boot_part() { disk_part "$NODE_DEVICE" 1; }
-
-B_SYSTEM_PARTS="1"
-
-b_system_part() { disk_part "$NODE_DEVICE" "$1"; }
-
-b_watchdog_present() {   # does the system that is running carry the self-return watchdog? A driver fact cannot answer it: cmd/sysimage stages wk-self-return with every fleet write, whether or not that driver has a self-disarm of its own -- rpi5-usb has none, its arming being one-shot in firmware, and its cards carry the watchdog all the same. Both spellings, because a BusyBox init takes /etc/init.d/S??* and nothing else.
-    r_sudo 'test -f /etc/systemd/system/wk-self-return.timer || test -f /etc/init.d/S99wk-self-return' >/dev/null 2>&1
-}
-
-b_part_absent() {   # <partition device> -- is it simply not there?
-    local dev="$1" out
-    if [ "${NODE_ROLE:-}" = bench-device ]; then
-        out=$(r_ssh "test -e $(sh_quote "$dev") && echo yes || echo no" 2>/dev/null) || return 1
-    else
-        out=$(m_ssh "test -e $(sh_quote "$dev") && echo yes || echo no" 2>/dev/null) || return 1
-    fi
-    [ "$(printf '%s' "$out" | tr -d '\r ')" = no ]
-}
-
-b_systems() {
-    local p part id
-    for p in $B_SYSTEM_PARTS; do
-        part=$(b_system_part "$p")
-        id=$(b_device_image "$part") || return 1
-        [ -n "$id" ] && printf '%s %s\n' "$part" "$id"
-    done
-    return 0
-}
-
-machine_select_system() { # <requested id, or empty for the sole system>
-    local want="$1" systems count
-    systems=$(b_systems) \
-        || die "could not read $NODE_DEVICE on $NODE_NAME to see what it holds"
-    count=$(printf '%s' "$systems" | grep -c . || true)
-    if [ "$count" -eq 0 ]; then
-        die "$NODE_DEVICE on $NODE_NAME holds no wk system yet.
-    Write one first:  wk sysimage write --from <path> --disk $NODE_NAME:$NODE_DEVICE
-    ('wk sysimage ls' lists what a workspace here has built)"
-    fi
-    if [ -z "$want" ]; then
-        [ "$count" -eq 1 ] || die "$NODE_DEVICE on $NODE_NAME holds $count systems:
-$(printf '%s\n' "$systems" | awk '{ printf "        %s  (on %s)\n", $2, $1 }')
-    Name the one to boot:  wk boot $NODE_NAME --system <id>"
-        printf '%s\n' "$systems"
-        return 0
-    fi
-    local line
-    line=$(printf '%s\n' "$systems" | awk -v id="$want" '$2 == id { print; exit }')
-    [ -n "$line" ] || die "$NODE_DEVICE on $NODE_NAME holds:
-$(printf '%s\n' "$systems" | awk '{ printf "        %s  (on %s)\n", $2, $1 }')
-    not '$want'. Write it first:  wk sysimage write --from <path> --disk $NODE_NAME:$NODE_DEVICE
-    (a medium already holding a system takes a second one at ...:$NODE_DEVICE@second)"
-    printf '%s\n' "$line"
-}
-
-# The image writes its dump to its own boot partition 75 s in, readable even if the image was never reachable. Every system is read: after a failed boot of the second, the first one's dump is the stale one.
-b_diag() {
-    local systems line part id
-    systems=$(b_systems) || die "cannot read $NODE_DEVICE on $NODE_NAME"
-    [ -n "$systems" ] || { echo "($NODE_DEVICE holds no wk system, so there is no dump to read)"; return 0; }
-    local dump
-    while read -r part id; do
-        [ -n "$part" ] || continue
-        printf '== %s (%s) ==\n' "$id" "$part"
-        if ! dump=$(b_medium_read "$part" wk-diag.txt); then
-            echo "(cannot read $part)"
-        elif [ -z "$dump" ]; then
-            echo "(no wk-diag.txt -- the image did not get that far)"
-        else
-            printf '%s\n' "$dump"
-        fi
-    done <<EOF
-$systems
-EOF
-}
-
-b_reboot_tryboot() {
-    r_ssh "command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd ]" >/dev/null 2>&1 \
-        || die "$NODE_NAME answered on a system with no systemd, which cannot pass the
-    tryboot flag to the reboot it rides on (only 'systemctl reboot' with
-    /run/systemd/reboot-param does). Arm from a system that can:
-        wk boot $NODE_NAME --back"
-    boot_priv reboot-tryboot >/dev/null
-}
-
-b_reboot() {
-    # Detached and delayed (boot_priv): the reboot kills the ssh session, which would otherwise exit nonzero and read as a failure under `set -e`.
-    boot_priv reboot >/dev/null
-}
-
-# Read off the FAT boot partition rather than by hashing the device: a booted image writes to its own boot partition, so the bytes stop matching.
-b_device_image() { # [boot partition; default: b_boot_part]
-    local part out
-    part=${1:-$(b_boot_part)}
-    out=$(b_medium_read "$part" wk-image.id) || return 1
-    printf '%s' "$out" | tr -d '\r\n '
-}

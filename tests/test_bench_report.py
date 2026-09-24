@@ -1,24 +1,20 @@
-"""`wk bench report` / `wkdata.py report`: the unified score+time+variance
-report (lib/wkdata.py `_subtest_metrics`, `_welch_p`, `cmd_report`).
+"""`wk bench report` / `compare`: the unified score+time+variance report
+(lib/wk/bench/report.py `subtest_metrics`, `welch_p`, `two_runs`).
 
 Unit tests build two synthetic run directories -- a result.json and an
-env.json in each -- and drive `lib/wkdata.py report` exactly as documented: as
-a subprocess, naming the directories, the same way `wk bench report` invokes
-it. The text and html outputs are checked to agree. No workspace, no podman VM.
-
-The integration test is podman-gated (see requires_podman_vm in
-tests/support.py) and self-skips when there is no already-built jsc-release
-in any local container workspace: building one from scratch is tens of
-minutes, which this suite does not do (see CLAUDE.md, "Never build, test, or
-benchmark WebKit here" -- driving an *existing* workspace's `wk bench` is the
-sanctioned way, building one is not this test's job).
+env.json in each -- and call the report on them in-process, the way `wk bench
+report` does. The text and html outputs are checked to agree. No workspace,
+no podman VM. `live bench.compare` is the integration class at the end.
 
 Run: python3 -m unittest tests.test_bench_report -v
 """
+import contextlib
+import io
 import json
 import re
 import statistics
 import subprocess
+import sys
 import unittest
 
 from tests.support import REPO, WkTest, bench_ls_runs, requires_podman_vm, run, scratch_dir
@@ -26,6 +22,9 @@ from tests.test_ab_precision import (
     JETSTREAM3_CHILDREN, JETSTREAM3_HEADLINE, MOTIONMARK_CHILDREN, MOTIONMARK_HEADLINE,
     SPEEDOMETER3_HEADLINE, aggregate_doc, fields, speedometer_doc,
 )
+
+sys.path.insert(0, str(REPO / "lib"))
+from wk.bench import record, report  # noqa: E402
 
 WKDATA = REPO / "lib" / "wkdata.py"
 
@@ -35,14 +34,36 @@ ROW = re.compile(r"^(?P<name>\S.*?) +(?P<metric>Score|Time) +"
                  r"(?P<a>-?[0-9.]+)\+-[0-9.]+ +(?P<b>-?[0-9.]+)\+-[0-9.]+ ")
 
 
+class Ran:
+    def __init__(self, returncode, stdout, stderr):
+        self.returncode, self.stdout, self.stderr = returncode, stdout, stderr
+
+
+def in_process(fn, *args, **kw):
+    """`fn`'s stdout, stderr and exit status, as the command would have had them."""
+    out, err, rc = io.StringIO(), io.StringIO(), 0
+    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+        try:
+            fn(*args, **kw)
+        except SystemExit as e:
+            rc = 1 if isinstance(e.code, str) else (e.code or 0)
+            if isinstance(e.code, str):
+                err.write(e.code + "\n")
+    return Ran(rc, out.getvalue(), err.getvalue())
+
+
+def rep(a, b, html=""):
+    """`wk bench report <a> <b>`: text, or only the html file when one is named."""
+    return in_process(report.two_runs, report.split_paths(str(a)), report.split_paths(str(b)), html=html)
+
+
+def precision(a, b):
+    return in_process(report.precision, str(a), str(b), 0.3)
+
+
 def wkdata(*args, timeout=30):
-    return subprocess.run(
-        ["python3", str(WKDATA), *args],
-        cwd=str(REPO),
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-    )
+    return subprocess.run(["python3", str(WKDATA), *args], cwd=str(REPO),
+                          capture_output=True, text=True, timeout=timeout)
 
 
 def report_means(stdout):
@@ -55,10 +76,14 @@ def report_means(stdout):
     return out
 
 
-def env_record(path, *fields):
+def cli_env_record(path, *fields):
+    """`wkdata env-record`, the writer the bash run arms and cmd/pi call."""
     cp = wkdata("env-record", str(path), *fields)
     assert cp.returncode == 0, cp.stdout + cp.stderr
-    return cp
+
+
+def env_record(path, *fields):
+    record.write_env(str(path), [f for f in fields if f != "--update"], update="--update" in fields)
 
 
 class TestReportWalkerAndStats(WkTest):
@@ -66,7 +91,7 @@ class TestReportWalkerAndStats(WkTest):
 
     def _write_pair(self, tmp, a_doc, b_doc, a_extra=(), b_extra=()):
         """Two run directories. A run is named by the directory a benchmark
-        wrote; result.json and env.json are derived from it inside wkdata.py."""
+        wrote; result.json and env.json are derived from it inside the report."""
         a_dir, b_dir = tmp / "a", tmp / "b"
         a_dir.mkdir()
         b_dir.mkdir()
@@ -121,7 +146,7 @@ class TestReportWalkerAndStats(WkTest):
             }
             a, b = self._write_pair(tmp, a_doc, b_doc)
             html_out = tmp / "report.html"
-            cp = wkdata("report", str(a), str(b), "--html", str(html_out))
+            cp = rep(a, b, html=str(html_out))
             self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
             self.assertIn(f"wrote {html_out}", cp.stdout)
 
@@ -139,7 +164,7 @@ class TestReportWalkerAndStats(WkTest):
 
             # Text mode reports the same numbers -- cross-check the
             # gaussian-blur Score means against a hand computation.
-            cp_text = wkdata("report", str(a), str(b), "--text")
+            cp_text = rep(a, b)
             self.assertEqual(cp_text.returncode, 0, cp_text.stdout + cp_text.stderr)
             a_mean = statistics.mean([95.0, 97.0, 96.0, 94.0, 98.0, 96.5])
             b_mean = statistics.mean([104.0, 106.0, 105.0, 103.0, 107.0, 105.5])
@@ -163,7 +188,7 @@ class TestReportWalkerAndStats(WkTest):
                 "metrics": {"Time": {"Total": {"current": [95.0, 97.0, 96.0, 94.0]}}}
             }}}}
             a, b = self._write_pair(tmp, a_doc, b_doc)
-            cp = wkdata("report", str(a), str(b), "--text")
+            cp = rep(a, b)
             self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
             self.assertIn("TodoMVC-JS", cp.stdout)
             self.assertIn("Time", cp.stdout)
@@ -189,7 +214,7 @@ class TestReportWalkerAndStats(WkTest):
                         }}}}}}}
         with scratch_dir() as tmp:
             a, b = self._write_pair(tmp, doc(11.0), doc(10.5))
-            cp = wkdata("report", str(a), str(b), "--text")
+            cp = rep(a, b)
             self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
             means = report_means(cp.stdout)
             self.assertEqual(
@@ -226,23 +251,21 @@ class TestReportWalkerAndStats(WkTest):
                 a_extra=("configuration.aslr=off", "configuration.env_pad_bytes=4096"),
                 b_extra=("configuration.aslr=off", "configuration.env_pad_bytes=4096"),
             )
-            cp = wkdata("report", str(a), str(b), "--text")
+            cp = rep(a, b)
             self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
             self.assertIn("aslr=off", cp.stdout)
             self.assertIn("env_pad_bytes=4096", cp.stdout)
             self.assertIn("exceeds A sd by >20%", cp.stdout, "B is far noisier than A and should be flagged")
 
     def test_axis_check_warnings_appear_in_the_report(self):
-        """A mismatched axis (different runner) is the same warning
-        `wkdata.py axis-check` prints on its own -- _axis_check_lines is one
-        implementation, read by both."""
+        """A mismatched axis (different runner) is warned about before any statistic."""
         with scratch_dir() as tmp:
             doc = {"JetStream3.0": {"tests": {"t": {"metrics": {"Score": {"current": [1.0, 2.0]}}}}}}
             a, b = self._write_pair(
                 tmp, doc, doc,
                 a_extra=("runner=jsc",), b_extra=("runner=browser",),
             )
-            cp = wkdata("report", str(a), str(b), "--text")
+            cp = rep(a, b)
             self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
             self.assertIn("different runners", cp.stdout)
 
@@ -250,7 +273,7 @@ class TestReportWalkerAndStats(WkTest):
         with scratch_dir() as tmp:
             a, b = self._write_pair(tmp, self._one_subtest(), self._one_subtest())
             (a / "result.json").unlink()
-            cp = wkdata("report", str(a), str(b), "--text")
+            cp = rep(a, b)
             self.assertNotEqual(cp.returncode, 0, cp.stdout + cp.stderr)
             out = cp.stdout + cp.stderr
             self.assertIn("no result.json in this directory", out)
@@ -258,7 +281,7 @@ class TestReportWalkerAndStats(WkTest):
             self.assertIn("side A", out)
 
     def test_naming_no_run_directory_at_all_is_refused(self):
-        cp = wkdata("report", "", "", "--text")
+        cp = rep("", "")
         self.assertNotEqual(cp.returncode, 0, cp.stdout + cp.stderr)
         self.assertIn("no run directories given", cp.stdout + cp.stderr)
 
@@ -269,7 +292,7 @@ class TestReportWalkerAndStats(WkTest):
             a, b = self._write_pair(tmp, self._one_subtest(), self._one_subtest())
             gone = tmp / "a-gone"
             gone.mkdir()
-            cp = wkdata("report", "%s,%s" % (a, gone), str(b), "--text")
+            cp = rep("%s,%s" % (a, gone), b)
             self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
             self.assertIn("warning: side A", cp.stderr)
             self.assertIn("no result.json in this directory", cp.stderr)
@@ -281,7 +304,7 @@ class TestReportWalkerAndStats(WkTest):
             a, b = self._write_pair(tmp, self._one_subtest(), self._one_subtest())
             (a / "env.json").unlink()
             (b / "env.json").unlink()
-            cp = wkdata("report", str(a), str(b), "--text")
+            cp = rep(a, b)
             self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
             self.assertIn("t", cp.stdout)
             self.assertIn("no warnings", cp.stdout)
@@ -292,7 +315,7 @@ class TestReportWalkerAndStats(WkTest):
         older env.json and one written today read the same way."""
         with scratch_dir() as tmp:
             f = tmp / "env.json"
-            env_record(f, "plan=jetstream3")
+            cli_env_record(f, "plan=jetstream3")
             doc = json.loads(f.read_text())
             self.assertEqual(
                 doc["configuration"],
@@ -304,8 +327,8 @@ class TestReportWalkerAndStats(WkTest):
         without a second write discarding the axes recorded before it."""
         with scratch_dir() as tmp:
             f = tmp / "env.json"
-            env_record(f, "plan=jetstream3", "config=jsc-release")
-            env_record(f, "--update", "wall_time_s=42")
+            cli_env_record(f, "plan=jetstream3", "config=jsc-release")
+            cli_env_record(f, "--update", "wall_time_s=42")
             doc = json.loads(f.read_text())
             self.assertEqual(doc["plan"], "jetstream3")
             self.assertEqual(doc["config"], "jsc-release")
@@ -321,8 +344,8 @@ class TestReportWalkerAndStats(WkTest):
                          ("wall_time_s=42", "--update")):
                 f = tmp / "env.json"
                 f.unlink(missing_ok=True)
-                env_record(f, "plan=jetstream3")
-                env_record(f, *args)
+                cli_env_record(f, "plan=jetstream3")
+                cli_env_record(f, *args)
                 doc = json.loads(f.read_text())
                 self.assertEqual(doc["wall_time_s"], "42", args)
                 self.assertEqual(doc["plan"], "jetstream3", args)
@@ -358,14 +381,14 @@ class TestTheHeadlineRow(WkTest):
 
     def _headline_row(self, tmp, doc, suite):
         a, b = self._pair(tmp, doc)
-        cp = wkdata("report", str(a), str(b), "--text")
+        cp = rep(a, b)
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
         means = report_means(cp.stdout)
         self.assertIn((suite, "Score"), means,
                       f"no headline row for {suite}:\n{cp.stdout}")
-        precision = wkdata("ab-precision", "--a", str(a), "--b", str(b))
-        self.assertEqual(precision.returncode, 0, precision.stdout + precision.stderr)
-        return means[(suite, "Score")][0], float(fields(precision.stdout)["mean_a"])
+        precision_run = precision(a, b)
+        self.assertEqual(precision_run.returncode, 0, precision_run.stdout + precision_run.stderr)
+        return means[(suite, "Score")][0], float(fields(precision_run.stdout)["mean_a"])
 
     def test_jetstream3_reports_the_geometric_mean_of_its_seventy_seven_children(self):
         with scratch_dir() as tmp:
@@ -395,7 +418,7 @@ class TestTheHeadlineRow(WkTest):
         with scratch_dir() as tmp:
             doc = aggregate_doc("JetStream3.0", "Geometric", {"x": [1.0], "y": [4.0]})
             a, b = self._pair(tmp, doc)
-            cp = wkdata("report", str(a), str(b), "--text")
+            cp = rep(a, b)
             self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
             means = report_means(cp.stdout)
             self.assertEqual(means[("JetStream3.0", "Score")][0], 2.0)
@@ -417,7 +440,7 @@ class TestTheHeadlineRow(WkTest):
                         "Average": {"metrics": {"Time": {"current": [4.0]}}},
                     }}}}}
             a, b = self._pair(tmp, doc)
-            cp = wkdata("report", str(a), str(b), "--text")
+            cp = rep(a, b)
             self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
             means = report_means(cp.stdout)
             self.assertEqual(4.0, means[("JetStream3.0/gaussian-blur", "Time")][0],
@@ -435,7 +458,7 @@ class TestTheHeadlineRow(WkTest):
                     "metrics": {"Score": ["Geometric"]},
                     "tests": {"First": {"metrics": {"Score": {}}}}}}}}
             a, b = self._pair(tmp, doc)
-            cp = wkdata("report", str(a), str(b), "--text")
+            cp = rep(a, b)
             self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
             said = [l for l in cp.stdout.splitlines() if "report no Score" in l]
             self.assertTrue(said, cp.stdout)
@@ -451,7 +474,7 @@ class TestTheHeadlineRow(WkTest):
             doc = aggregate_doc("JetStream3.0", "Geometric", {"x": [1.0], "y": [4.0]})
             doc["JetStream3.0"]["tests"]["y"] = {"metrics": {"Time": {"current": [9.0]}}}
             a, b = self._pair(tmp, doc)
-            cp = wkdata("report", str(a), str(b), "--text")
+            cp = rep(a, b)
             self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
             means = report_means(cp.stdout)
             self.assertNotIn(("JetStream3.0", "Score"), means,
@@ -460,23 +483,63 @@ class TestTheHeadlineRow(WkTest):
             self.assertIn("1 of 2 first-level tests report no Score", cp.stdout)
             self.assertIn("(y)", cp.stdout)
             self.assertIn("side A", cp.stdout)
-            precision = wkdata("ab-precision", "--a", str(a), "--b", str(b))
-            self.assertNotEqual(precision.returncode, 0,
+            precision_run = precision(a, b)
+            self.assertNotEqual(precision_run.returncode, 0,
                                 "the stopping rule refuses what the report warns about")
 
     def test_an_aggregator_the_report_cannot_take_is_named_rather_than_dropped(self):
         with scratch_dir() as tmp:
             doc = aggregate_doc("JetStream3.0", "Harmonic", {"x": [1.0], "y": [4.0]})
             a, b = self._pair(tmp, doc)
-            cp = wkdata("report", str(a), str(b), "--text")
+            cp = rep(a, b)
             self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
             self.assertIn("Harmonic", cp.stdout)
             self.assertNotIn(("JetStream3.0", "Score"), report_means(cp.stdout))
 
 
+class TestSpreadWithinAndBetweenRuns(WkTest):
+    """`unit bench.report_and_cost`, the report half: a report names the
+    iteration spread inside a run apart from the spread between runs -- the
+    first is what --count averages down, the second only more rounds do."""
+
+    def _side(self, tmp, name, runs):
+        dirs = []
+        for i, vals in enumerate(runs):
+            d = tmp / ("%s%d" % (name, i))
+            d.mkdir()
+            (d / "result.json").write_text(json.dumps(
+                {"Speedometer-3": {"metrics": {"Score": {"current": vals}}}}))
+            dirs.append(str(d))
+        return ",".join(dirs)
+
+    def test_each_side_carries_both_spreads_for_the_suite_row(self):
+        with scratch_dir() as tmp:
+            a = self._side(tmp, "a", [[100.0, 101.0], [110.0, 111.0]])
+            b = self._side(tmp, "b", [[100.0, 101.0], [100.0, 101.0]])
+            cp = rep(a, b)
+            self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+            line = [l for l in cp.stdout.splitlines() if l.strip().startswith("Speedometer-3 Score:")]
+            self.assertEqual(len(line), 1, cp.stdout)
+            self.assertIn("A within-run sd=0.7071, run-to-run sd=7.0711 over 2 run(s)", line[0])
+            self.assertIn("B within-run sd=0.7071, run-to-run sd=0.0000 over 2 run(s)", line[0])
+
+    def test_one_run_has_no_run_to_run_spread_and_says_so(self):
+        with scratch_dir() as tmp:
+            a = self._side(tmp, "a", [[100.0, 101.0]])
+            cp = rep(a, a)
+            self.assertIn("run-to-run sd=- over 1 run(s)", cp.stdout)
+
+    def test_the_html_carries_the_same_lines(self):
+        with scratch_dir() as tmp:
+            a = self._side(tmp, "a", [[100.0, 101.0], [110.0, 111.0]])
+            out = tmp / "r.html"
+            self.assertEqual(rep(a, a, html=str(out)).returncode, 0)
+            self.assertIn("run-to-run sd=7.0711", out.read_text())
+
+
 @requires_podman_vm()
 class TestBenchReportIntegration(WkTest):
-    """`wk bench report` end to end, against whatever local container
+    """`live bench.compare`: `wk bench report` end to end, against whatever local container
     workspace already has a jsc-release build -- building one here would be
     tens of minutes (CLAUDE.md forbids driving a build from this suite
     anyway), so this reuses one rather than creating and building a fresh
@@ -495,9 +558,7 @@ class TestBenchReportIntegration(WkTest):
         if cp.returncode != 0:
             return None, f"'wk ls' failed: {cp.stdout}"
 
-        # Only target == "container" exactly: that is the local podman-VM
-        # backend `wk bench` supports (load_bench_target in cmd/bench
-        # refuses anything else by name). A "moose:container" workspace is
+        # Only target == "container" exactly: the local podman-VM backend. A "moose:container" workspace is
         # someone's real remote checkout, tens of GB, driven over the
         # tailnet -- not something this test probes or touches.
         candidates = []
@@ -513,7 +574,7 @@ class TestBenchReportIntegration(WkTest):
         for name in candidates:
             try:
                 probe = run(
-                    "bench", name, "sunspider1.0.2", "--config", "jsc-release", "--count", "1", timeout=120
+                    "bench", "run", name, "sunspider1.0.2", "--config", "jsc-release", "--count", "1", timeout=120
                 )
             except subprocess.TimeoutExpired:
                 continue
@@ -529,9 +590,9 @@ class TestBenchReportIntegration(WkTest):
             self.skipTest(reason)
 
         t0 = time.time()
-        run_a = run("bench", ws, "sunspider1.0.2", "--config", "jsc-release", "--count", "2", timeout=300)
+        run_a = run("bench", "run", ws, "sunspider1.0.2", "--config", "jsc-release", "--count", "2", timeout=300)
         self.assertEqual(run_a.returncode, 0, f"first run failed: {run_a.stdout}")
-        run_b = run("bench", ws, "sunspider1.0.2", "--config", "jsc-release", "--count", "2", timeout=300)
+        run_b = run("bench", "run", ws, "sunspider1.0.2", "--config", "jsc-release", "--count", "2", timeout=300)
         self.assertEqual(run_b.returncode, 0, f"second run failed: {run_b.stdout}")
         bench_s = time.time() - t0
 

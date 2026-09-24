@@ -3,25 +3,29 @@ picked from: `target_kind` (lib/target.sh: container|vm|remote|local are
 built in, anything else needs a conf and falls through to `remote` when the
 conf names no kind), `_remote_is_local`
 (targets/remote.sh: is this process running on the remote machine itself),
-and `image_root_class` (lib/image.sh: what kind of device a kernel cmdline's
+and `root_class` (lib/wk/sysimage/write.py: what kind of device a kernel cmdline's
 `root=` names). Each is driven directly, sourced with no target loaded and no
 network -- these are the pure decisions the rest of the driver machinery
 calls through.
 
 Owed (docs/PLAN.md): "the target-kind dispatch
 (container|vm|remote|local), _remote_is_local,
-image_root_class".
+image_root_class" -- the last now write.py's root_class.
 
 Run: python3 -m unittest tests.test_owed_dispatch -v
 """
+import sys
 import unittest
 
 from tests.support import REPO, WkTest, bash, scratch_dir
 
+sys.path.insert(0, str(REPO / "lib"))
+from wk.sysimage import write  # noqa: E402
+
 
 class TestTargetKind(WkTest):
     def _kind(self, name, registry=None):
-        env = {"WK_TARGET_REGISTRY": str(registry)} if registry else None
+        env = {"WK_MACHINES_DIR": str(registry)} if registry else None
         return bash(
             f'''
 . "$WK_ROOT/lib/common.sh"
@@ -46,14 +50,14 @@ target_kind {name}
 
     def test_a_conf_that_names_a_kind_is_believed(self):
         with scratch_dir() as reg:
-            (reg / "buildbox1.conf").write_text('WK_TARGET_KIND="remote"\n')
+            (reg / "buildbox1.conf").write_text('KIND=build\nWK_TARGET_KIND="remote"\n')
             cp = self._kind("buildbox1", registry=reg)
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
         self.assertEqual(cp.stdout.strip(), "remote")
 
     def test_a_conf_that_names_no_kind_falls_through_to_remote(self):
         with scratch_dir() as reg:
-            (reg / "plainbox.conf").write_text('WK_REMOTE_HOST="plainbox"\n')
+            (reg / "plainbox.conf").write_text('KIND=build\nWK_REMOTE_HOST="plainbox"\n')
             cp = self._kind("plainbox", registry=reg)
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
         self.assertEqual(cp.stdout.strip(), "remote")
@@ -83,14 +87,7 @@ _remote_is_local && echo YES || echo NO
         self.assertEqual(cp.stdout.strip(), "NO", cp.stdout + cp.stderr)
 
 
-class TestImageRootClass(WkTest):
-    def _class(self, spec):
-        return bash(f'''
-. "$WK_ROOT/lib/common.sh"
-. "$WK_ROOT/lib/image.sh"
-image_root_class {spec!r}
-''')
-
+class TestImageRootClass(unittest.TestCase):
     def test_every_class_this_function_can_return(self):
         cases = {
             "": "unknown",
@@ -106,9 +103,7 @@ image_root_class {spec!r}
         }
         for spec, want in cases.items():
             with self.subTest(spec=spec):
-                cp = self._class(spec)
-                self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-                self.assertEqual(cp.stdout.strip(), want, f"{spec!r}: {cp.stdout + cp.stderr}")
+                self.assertEqual(write.root_class(spec), want)
 
 
 if __name__ == "__main__":

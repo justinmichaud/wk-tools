@@ -10,7 +10,7 @@
     exist yet
 
 Driven as `bash -s <cmd/gc`, the same way the container half invokes it, with
-WK_STORE/XDG_STATE_HOME/WK_TARGET_REGISTRY pointed at scratch and WK_MACHINE
+WK_STORE/XDG_STATE_HOME/WK_MACHINES_DIR pointed at scratch and WK_MACHINE
 named so nothing exists under it: this fleet-blind, so `cmd/gc`'s own
 podman-VM branch never finds a running machine to forward into (the tests/
 support.py rule -- no test here reaches a real podman machine or the fleet).
@@ -18,9 +18,14 @@ support.py rule -- no test here reaches a real podman machine or the fleet).
 Run: python3 -m unittest tests.test_owed_gc -v
 """
 import pathlib
+import sys
 import unittest
 
-from tests.support import REPO, WkTest, bash, rand_suffix, scratch_dir
+from tests.support import REPO, WkTest, rand_suffix, scratch_dir
+
+sys.path.insert(0, str(REPO / "lib"))
+from wk.machine import Local  # noqa: E402
+from wk.store import Bases, Store  # noqa: E402
 
 GC = REPO / "cmd" / "gc"
 
@@ -48,7 +53,7 @@ class TestGcHonoursAPresetWkRoot(WkTest):
                     "WK_STORE": str(store),
                     "WK_VM_STORE": str(store),
                     "XDG_STATE_HOME": str(state),
-                    "WK_TARGET_REGISTRY": str(reg),
+                    "WK_MACHINES_DIR": str(reg),
                     "WK_MACHINE": f"wk-test-no-such-machine-{rand_suffix()}",
                     "PATH": f"{binp}:/usr/bin:/bin",
                     "GC": str(GC),
@@ -108,13 +113,11 @@ class TestGcSourcesTheTreeOptionally(WkTest):
 
 class TestWhatGcKeepsWhenNothingVerifies(WkTest):
     """`wk gc` removes every snapshot no workspace is overlaid on except the
-    newest finished one. That one is the newest `base_complete`, not
-    `current_base`: current_base also requires the branch record base_verify
-    reads, and on a machine whose snapshots were published before that record
-    nothing answers -- which would make every snapshot unreferenced and leave
-    the machine with none to make a workspace from."""
-
-    STORE = ('. "$WK_ROOT/lib/common.sh"\n. "$WK_ROOT/lib/store.sh"\n')
+    newest finished one (lib/wk/store.py's Bases). That one is the newest
+    complete snapshot, not the current one: `current` also requires the branch
+    record `verify` reads, and on a machine whose snapshots were published
+    before that record nothing answers -- which would make every snapshot
+    unreferenced and leave the machine with none to make a workspace from."""
 
     def _bases(self, ids, complete=(), branch=()):
         store = self.tmp / "store"
@@ -129,10 +132,7 @@ class TestWhatGcKeepsWhenNothingVerifies(WkTest):
         return store
 
     def _unreferenced(self, store):
-        cp = bash(self.STORE + "unreferenced_bases\n",
-                  env={"WK_STORE": str(store), "WK_STORE_DEFAULT": str(store)})
-        self.assertEqual(0, cp.returncode, cp.stdout + cp.stderr)
-        return cp.stdout.split()
+        return Bases(Store({"WK_STORE": str(store)}), Local()).unreferenced()
 
     def test_the_newest_finished_snapshot_is_kept_though_none_verifies(self):
         store = self._bases(["20260101", "20260202"],
@@ -145,6 +145,14 @@ class TestWhatGcKeepsWhenNothingVerifies(WkTest):
         store = self._bases(["20260101", "20260202"], complete=["20260101"])
         self.assertEqual(["20260202"], self._unreferenced(store))
 
+
+    def test_a_workspace_pins_its_snapshot_and_an_unknown_pin_keeps_them_all(self):
+        store = self._bases(["20260101", "20260202", "20260303"], complete=["20260101", "20260202", "20260303"])
+        (store / "ws" / "a").mkdir()
+        (store / "ws" / "a" / "base-id").write_text("20260101\n")
+        self.assertEqual(["20260202"], self._unreferenced(store))
+        (store / "ws" / "b").mkdir()
+        self.assertEqual([], self._unreferenced(store), "a workspace with no pin could be on any of them")
 
 if __name__ == "__main__":
     unittest.main()

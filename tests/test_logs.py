@@ -2,7 +2,7 @@
 built has build.log; an image workspace mid-stage (or one whose last image
 build never reached `wk build`) has none, only the stage log its builder
 wrote under home/ -- yocto_log in image/yocto.sh (home/yocto-<stage>.log)
-or buildroot_log in image/buildroot.sh (home/buildroot-<stage>.log). This
+or a buildroot stage in lib/wk/sysimage/task.py (home/buildroot-<stage>.log). This
 drives cmd/logs directly with WK_NAME/WK_TARGET/WK_VM_STORE set, the way a
 dispatcher-resolved `wk logs <ws>` would leave it for a `vm`-kind
 workspace, but without going through `./wk`: a maintainer's interactive

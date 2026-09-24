@@ -28,7 +28,7 @@ import subprocess
 import unittest
 from pathlib import Path
 
-from tests.support import REPO, WkTest
+from tests.support import REPO, WkTest, owed
 
 BIN = REPO / "container" / "bin"
 WALL = BIN / "wk-build-wall"
@@ -247,6 +247,46 @@ class TestBitbakeGetsTheRealTools(WkTest):
                 text = (ws / name).read_text()
                 self.assertIn("# wk-build-wall:", "\n".join(text.splitlines()[:5]))
                 self.assertRegex(text, r'(?m)^\. ".*/wk-build-wall"$')
+
+
+class TestNoBuilderRecordsTheWall(unittest.TestCase):
+    """`lint.build_wall`: no builder or configure cache records a tool from
+    container/bin. A configure step keeps the path it found a tool at
+    (buildroot's host-cmake check, a CMakeCache's CMAKE_MAKE_PROGRAM), and a
+    later run of that path by anyone but wk's own build is refused, so every
+    builder runs with the wall off PATH rather than only past it on WK_BUILD."""
+
+    wk_tier = "lint"
+    TASK = REPO / "lib" / "wk" / "sysimage" / "task.py"
+
+    def _fn(self, path, name):
+        m = re.search(r"(?ms)^    def %s\(.*?(?=^    def |\Z)" % name, path.read_text())
+        self.assertIsNotNone(m, f"{name} is not in {path}")
+        return m.group(0)
+
+    def test_an_image_stage_runs_under_the_wrapper(self):
+        self.assertIn("in_workspace(self.target.tools", self._fn(self.TASK, "run"))
+        driver = (REPO / "lib" / "wk" / "sysimage" / "buildroot.py").read_text()
+        self.assertEqual(driver.count("st.run("), 2, "the image and the slot stage both run as a task.Stage")
+        self.assertNotIn("exec_argv(", driver, "a buildroot stage reaches the workspace around the wrapper")
+
+    def test_the_wrapper_takes_off_every_wall_and_nothing_else(self):
+        """Both trees -- a person's clone and the one `wk` pushed -- and the git
+        gate in container/bin/ws, which is the wall under another name."""
+        import sys
+        sys.path.insert(0, str(REPO / "lib"))
+        from wk.sysimage import task
+        self.assertEqual(task.off_wall("/home/me/wk-tools/container/bin:/usr/local/bin:/opt/wk-tools/container/bin:"
+                                       "/opt/wk-tools/container/bin/ws:/usr/bin:/bin:/opt/container/binaries"),
+                         "/usr/local/bin:/usr/bin:/bin:/opt/container/binaries")
+
+    def test_the_yocto_build_strips_it_itself(self):
+        self.assertRegex((REPO / "image" / "yocto-build.sh").read_text(), r"(?m)^PATH=\$\(_strip_wall_from_path\)$")
+
+    @owed("build/build-in-target.sh runs cmake with the wall ahead of the real tools on PATH, past it only on "
+          "WK_BUILD; `wk build`'s far argv (lib/wk/build.py) goes through task.in_workspace once that file's owner ports it")
+    def test_wk_build_runs_under_the_wrapper(self):
+        self.assertIn("task.in_workspace(", (REPO / "lib" / "wk" / "build.py").read_text())
 
 
 class TestOneFileUnderEveryName(WallTest):

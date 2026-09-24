@@ -83,20 +83,17 @@ def lldb_prelude(root):
 LLDB_PIN_OPTS = "-O 'settings set target.process.follow-fork-mode parent'"
 
 
-def lldb_pin_opts(root):
-    return LLDB_PIN_OPTS
-
-
 def vm_login_note(root, env=None):
     run(root, '. "$WK_ROOT/targets/vm.sh"; vm_login_note', env=env)
 
 
-def guest_stop(root, name):
-    return run(root, '. "$WK_ROOT/targets/vm.sh"; t_stop', name)
+def guest_admit(root, name, env=None):
+    return run(root, _vm('_admit() { _check_guest_limit && _check_memory_budget "$1" "$(t_mem_mb "$1")" '
+                         '&& _check_host_disk; }; _admit'), name, env=env)
 
 
-def guest_start(root, name):
-    return run(root, '. "$WK_ROOT/targets/vm.sh"; t_start', name)
+def guest_step(root, fn, name, ip, env=None):
+    return run(root, _vm(fn), name, ip, env=env) == 0
 
 
 def in_machine(root, command, env=None, quiet=False):
@@ -107,16 +104,7 @@ def gh_authenticated(root, env=None):
     return run(root, "gh_authenticated", env=env, quiet=True) == 0
 
 
-def mirror_branches(root, env=None):
-    return need(root, "wk_mirror_branches", env=env).split()
 
-
-def wk_remotes(root, env=None):
-    return [tuple(line.split()) for line in need(root, "wk_remotes", env=env).splitlines() if line.split()]
-
-
-def wk_push_forks(root, env=None):
-    return [tuple(line.split()) for line in need(root, "wk_push_forks", env=env).splitlines() if line.split()]
 
 
 def local_state_paths(root, env=None):
@@ -155,19 +143,6 @@ def priv_answers(root, path, env=None):
     return run(root, "wk_priv_answers", path, env=env, quiet=True) == 0
 
 
-def remote_probe(root, target, env=None):
-    return ask(root, '. "$WK_ROOT/remote/deps.sh"; load_target %s >/dev/null 2>&1; wk_remote_probe' % sh_quote(target), env=env, quiet=True) or ""
-
-
-def remote_findings(root, probe, env=None):
-    return ask(root, '. "$WK_ROOT/remote/deps.sh"; wk_remote_findings', probe, env=env) or ""
-
-
-def remote_provision_stale(root, target, env=None):
-    """Why the machine's provisioning predates this tree, or None when it does not."""
-    return ask(root, "load_target %s >/dev/null 2>&1; remote_provision_stale" % sh_quote(target), env=env, quiet=True)
-
-
 def vm_base_findings(root, env=None):
     return ask(root, "load_target vm >/dev/null 2>&1; vm_base_findings", env=env, quiet=True) or ""
 
@@ -185,12 +160,21 @@ def ccache_conf(root, env=None):
     return need(root, "ccache_conf_render", env=env) + "\n"
 
 
+# lib/wk/targets.py's, build.py's and doctor.py's names for lib/wk/git.py, imported here since git.py imports this module.
+def mirror_branches(root, env=None):
+    from wk import git
+    return git.mirror_branches(env)
+
+
 def mirror_refresh_script(root, mirror_dir, env=None):
-    return need(root, "mirror_refresh_script", mirror_dir, env=env)
+    from wk import git
+    return git.mirror_refresh_script(mirror_dir, git.mirror_branches(env))
 
 
 def wiring_script(root, src, mirror_dir, extra_name="", extra_url="", ssh_config="", env=None):
-    return need(root, "wk_wiring_script", src, mirror_dir, extra_name, extra_url, ssh_config, env=env)
+    from wk import git
+    forks = [tuple(line.split()) for line in need(root, "wk_push_forks", env=env).splitlines() if line.split()]
+    return git.wiring_script(src, mirror_dir, forks, git.mirror_branches(env), extra_name, extra_url, ssh_config)
 
 
 def _would(what):
@@ -201,11 +185,8 @@ def _would(what):
     return False
 
 
-def secrets_publish(root, env=None):
-    if _would("secrets_publish"):
-        return 0
-    return run(root, '_sp() { if wk_secrets_owned_here; then secrets_publish || warn "could not publish $(wk_secrets_dir)/ssh_config and github-user,'
-                     '\n    so a workspace here gets no fork alias and no GITHUB_COM_TOKEN"; else secrets_require_published; fi; }; _sp', env=env)
+def _vm(fn):
+    return '_vm() { load_target vm >/dev/null 2>&1 || return 1; %s "$@"; }; _vm' % fn
 
 
 def vm_ensure_base(root, env=None):
@@ -239,24 +220,8 @@ def arch_canon(root, machine, arch):
     return r.out.strip()
 
 
-def pr_spec_check(root, machine, spec):
-    r = machine.run(argv(root, "pr_parse_spec", spec))
-    sys.stderr.write(r.err)
-    _refuse_unless(r)
 
 
-def current_base(root, machine, target):
-    r = machine.run(argv(root, _on(target, "current_base")))
-    return r.out.strip() if r.ok else ""
-
-
-def base_verify(root, machine, target, base):
-    r = machine.run(argv(root, _on(target, "base_verify"), base))
-    return "" if r.ok else r.out.strip()
-
-
-def pr_checkout(root, machine, target, name, spec):
-    _refuse_unless(_said(machine.act_run(argv(root, _on(target, "wk_pr_checkout"), name, spec))))
 
 
 def _rows(r):
@@ -284,39 +249,35 @@ def arch_has_gpu(root, machine, arch):
     return machine.run(argv(root, '. "$WK_ROOT/lib/arch.sh"; arch_has_gpu', arch)).ok
 
 
-def wiring_check_script(root, src, mirror_dir, skip_env="", env=None):
-    return need(root, "wk_wiring_check_script", src, mirror_dir, skip_env, env=env)
 
 
-def branch_upstream_fix_script(root, src, env=None):
-    return need(root, "wk_branch_upstream_fix_script", src, env=env)
-
-
-def gitwebkit_setup_script(root, src, env=None):
-    return need(root, "wk_gitwebkit_setup_script", src, env=env)
-
-
-def mirror_refresh_request(root, env=None):
-    if _would("mirror_refresh_request"):
-        return 0
-    return run(root, "mirror_refresh_request", env=env)
 
 
 def store_is_local(root, machine):
     return machine.run(argv(root, "store_is_local")).ok
 
 
-def newest_complete_base(root, machine, target):
-    r = machine.run(argv(root, _on(target, "newest_complete_base")))
+def tailnet_key_present(root, machine):
+    return machine.run(argv(root, "wk_tailscale_authkey_present")).ok
+
+
+def tailnet_api_present(root, machine):
+    return machine.run(argv(root, "wk_tailscale_api_present")).ok
+
+
+def tailnet_authkey(root, machine):
+    """The auth key file, minted first when this machine holds the API credential; "" when there is none."""
+    r = machine.act_run(argv(root, "wk_tailscale_authkey"))
+    sys.stderr.write(r.err)
     return r.out.strip() if r.ok else ""
 
 
-def sync_tools(root, machine, target, ws):
-    return _said(machine.act_run(argv(root, _on(target, "t_sync_tools"), ws))).ok
+def tailnet_retire(root, machine, name):
+    return machine.act_run(argv(root, "wk_tailnet_retire", name))
+
 
 
 def target_size(root, machine, target, ws):
-    """(cores, mem_mb) a guest is configured with (targets/vm.sh)."""
     r = machine.run(argv(root, _on(target, 'printf "%s %s\\n" "$(t_cores "$1")" "$(t_mem_mb "$1")"'), ws))
     _refuse_unless(r)
     cores, mem = (r.out.split() + ["", ""])[:2]
@@ -326,7 +287,17 @@ def target_size(root, machine, target, ws):
 
 
 def origin_branch_fetch_step(root, machine, branch, mirror):
-    """The shell text that fetches one branch, from the mirror when it has it (lib/store.sh)."""
-    r = machine.run(argv(root, "origin_branch_fetch_step", branch, mirror))
-    _refuse_unless(r)
-    return r.out
+    from wk import git
+    return git.origin_branch_fetch_step(branch, mirror)
+
+
+def bench_arms(root, *args):
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os.execvp("bash", ["bash", os.path.join(str(root), "lib", "bench-arms.sh"), *args])
+
+
+def sysimage_arms(root, *args):
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os.execvp("bash", ["bash", os.path.join(str(root), "lib", "sysimage-arms.sh"), *args])

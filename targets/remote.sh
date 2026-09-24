@@ -1,5 +1,5 @@
 # Target driver: a shared, multi-user build machine -- other people's, so no containers: a workspace is a plain checkout under your own home directory. WK_REMOTE_PEER marks a workstation instead, which owns its own workspaces and is asked, not driven.
-# targets/hosts/<name>.conf holds whatever differs: WK_REMOTE_HOST (ssh destination, default the target name), WK_REMOTE_ROOT (~/wk there), WK_REMOTE_REFERENCE (a shared checkout to clone from), WK_REMOTE_LOCAL, WK_REMOTE_PEER, WK_REMOTE_TOOLS, WK_TARGET_CMAKE, WK_TARGET_LIBCXX, WK_TARGET_WPE.
+# machines/<name>.conf (KIND=build or peer) holds whatever differs: WK_REMOTE_HOST (ssh destination, default the target name), WK_REMOTE_ROOT (~/wk there), WK_REMOTE_REFERENCE (a shared checkout to clone from), WK_REMOTE_LOCAL, WK_REMOTE_PEER, WK_REMOTE_TOOLS, WK_TARGET_CMAKE, WK_TARGET_LIBCXX, WK_TARGET_WPE.
 if [ -z "${WK_REMOTE_HOST:-}" ] && [ "${WK_TARGET:-remote}" != remote ]; then
     WK_REMOTE_HOST="$WK_TARGET"
 fi
@@ -7,9 +7,9 @@ WK_REMOTE_HOST="${WK_REMOTE_HOST:-}"
 
 WK_REMOTE_ROOT="${WK_REMOTE_ROOT:-}"
 
-# ~/.wk-remote naming this target means this process runs *on* the machine: no ssh step.
+# This host being the target means this process runs *on* the machine: no ssh step.
 if [ -z "${WK_REMOTE_LOCAL:-}" ] && in_remote_host \
-   && [ "$(wk_remote_field target)" = "${WK_TARGET:-remote}" ]; then
+   && [ "$(wk_fleet self 2>/dev/null)" = "${WK_TARGET:-remote}" ]; then
     WK_REMOTE_LOCAL=1
     [ -n "$WK_REMOTE_ROOT" ] || WK_REMOTE_ROOT="$(wk_remote_field root)"
 fi
@@ -200,20 +200,6 @@ _remote_reference() {
     printf '%s' "$WK_REMOTE_REFERENCE"
 }
 
-_remote_mirror_update() {
-    local root="$1"
-    info "updating the WebKit mirror on $WK_REMOTE_HOST (first run clones it)"
-    command -v mirror_refresh_script >/dev/null 2>&1 || . "$WK_ROOT/lib/store.sh"
-    _rsh_q "set -e
-        mkdir -p $(sh_quote "$root/ws") $(sh_quote "$root/cache/ccache")
-        $(mirror_refresh_script "$(t_mirror_dir)")" \
-        | while read -r _tag _name _state; do
-              [ "$_tag" = mirror-fetch ] || continue
-              printf '  %-8s %s\n' "$_name" "$_state" >&2
-          done \
-        || die "could not update the WebKit mirror on $WK_REMOTE_HOST"
-}
-
 _remote_root() { _remote_probe; printf '%s' "$WK_REMOTE_ROOT"; }
 
 _remote_ws()   { echo "$(_remote_root)/ws/$1"; }
@@ -278,8 +264,6 @@ t_tools() {
     esac
 }
 
-t_needs_base() { return 1; }
-
 t_list() {
     _remote_peer && { _peer_list; return 0; }
     { _rsh_q "ls -1 $(sh_quote "$(_remote_root)/ws") 2>/dev/null" 2>/dev/null || true; } \
@@ -308,23 +292,9 @@ t_info() {
     printf '%s\n' "${out:-unreachable}"
 }
 
-t_created() { [ "$(t_info "$1")" = present ]; }
-
 t_exec() {
     local name="$1"; shift
     _rsh "cd $(sh_quote "$(t_src "$name")") && $(sh_quote "$@")"
-}
-
-t_pull_dir() {
-    local name="$1" src="$2" dest="$3"; shift 3
-    _t_pull_dir_excludes "$@"
-    mkdir -p "$dest"
-    if _remote_is_local; then
-        rsync -a --delete ${_T_PULL_EXCLUDES[@]+"${_T_PULL_EXCLUDES[@]}"} "$src/" "$dest/"; return
-    fi
-    # shellcheck disable=SC2046 -- deliberate word splitting of the option list.
-    rsync -a --chmod=go-w --delete ${_T_PULL_EXCLUDES[@]+"${_T_PULL_EXCLUDES[@]}"} -e "ssh $(_ssh_opts)" \
-        "$WK_REMOTE_HOST:$src/" "$dest/"
 }
 
 t_task_put() { # <name> <task dir> -- `wk status` asks the machine that runs the build (t_has_wk delegates), so every write is copied there, with `log` and `machine` that machine's own or it loses the liveness check and names the wrong host
@@ -352,31 +322,6 @@ t_has_wk() {
     _rsh_q "test -f \$HOME/.wk-remote && test -x $(sh_quote "$(t_tools '')/wk")" 2>/dev/null
 }
 
-# Recomputed here from the same inputs `wk remote setup` hashed into ~/.wk-remote, so the two ends cannot hash differently.
-remote_provision_inputs_hash() {
-    cat "$WK_ROOT/remote/provision.sh" "$WK_ROOT/remote/deps.sh" \
-        | python3 -c 'import hashlib,sys
-print(hashlib.sha256(sys.stdin.buffer.read()).hexdigest()[:16])'
-}
-
-# Prints the reason and succeeds when stale: `if why=$(remote_provision_stale); then`
-remote_provision_stale() {
-    local marker rec
-    marker=$(_rsh_q "cat \"\$HOME/.wk-remote\" 2>/dev/null" 2>/dev/null) || true
-    if [ -z "$marker" ]; then
-        echo "no ~/.wk-remote there, so nothing has provisioned it"
-        return 0
-    fi
-    rec=$(printf '%s\n' "$marker" | kv_get inputs)
-    if [ -z "$rec" ]; then
-        echo "provisioned before this record existed"
-        return 0
-    fi
-    [ "$rec" = "$(remote_provision_inputs_hash)" ] && return 1
-    echo "remote/provision.sh or remote/deps.sh has changed since it ran"
-    return 0
-}
-
 t_far_side() {
     if _remote_is_local; then echo none
     elif ! _remote_probe_try; then echo unreachable
@@ -399,7 +344,7 @@ t_wk() {
     _rsh "$(_remote_wk_cmd "$@")"
 }
 
-# With a pty: `wk sudo setup` prompts, and sudo refuses to read a password without one.
+# With a pty: `wk key sudo setup` prompts, and sudo refuses to read a password without one.
 t_wk_tty() {
     if _remote_is_local; then
         t_wk "$@"
@@ -407,26 +352,6 @@ t_wk_tty() {
     fi
     # shellcheck disable=SC2046 -- deliberate word splitting of the option list.
     ssh -t $(_ssh_opts) "$WK_REMOTE_HOST" "$(_remote_wk_cmd "$@")"
-}
-
-command -v tools_push >/dev/null 2>&1 || . "$WK_ROOT/lib/tools.sh"
-
-# A git bundle of this tree's HEAD, so the machine holds a commit `wk status` can compare.
-t_sync_tools() {
-    local name="$1" dest
-    dest=$(t_tools "$name")
-
-    if _remote_peer; then
-        debug "not pushing wk-tools to $WK_REMOTE_HOST: it is a workstation with its own checkout"
-        return 0
-    fi
-
-    if _remote_is_local; then
-        [ "$WK_ROOT" = "$dest" ] || warn "running $WK_ROOT/wk, but this target's tooling is $dest"
-        return 0
-    fi
-
-    tools_push "$dest" _rsh
 }
 
 t_cores()  { _remote_probe; echo "${_WK_REMOTE_CORES:-1}"; }

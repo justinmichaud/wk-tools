@@ -1,0 +1,6 @@
+[Unit]
+Description=Hand the machine back to host mode unless claimed
+ConditionPathExists=!/etc/wk/rescue
+[Service]
+Type=oneshot
+ExecStart=/bin/sh -c '[ -f /run/wk-keep-running ] || systemctl reboot'

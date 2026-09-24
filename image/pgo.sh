@@ -15,10 +15,8 @@ PGO_TASK=""
 _pgo_task_end() { [ -z "$PGO_TASK" ] || task_end "$PGO_TASK" "${WK_EXIT_STATUS:-0}"; PGO_TASK=""; return 0; }
 
 image_pgo_machine() {   # <profile> -- the board that carries this image, read off the fleet rather than given as a flag: a collection has to run on the hardware the profile is measured on
-    local f n
-    for f in "$(machines_dir)"/*.conf; do
-        [ -f "$f" ] || continue
-        n=$(basename "$f" .conf)
+    local n
+    for n in $(machine_names); do
         ( machine_load "$n" >/dev/null 2>&1 && [ "${NODE_PROFILE:-}" = "$1" ] ) || continue
         printf '%s' "$n"; return 0
     done
@@ -31,27 +29,11 @@ image_pgo_mode() {   # <machine> -- what it is running now, recomputed
       printf '%s' "${MODE:-unreachable}" )
 }
 
-image_pgo_slot_is() {   # <lane workspace> <slot> <sha> <cross config> -- is that slot already what this phase would build? The config is half the question: a slot built before this profile was profile-guided holds the right commit and the wrong code
-    local sj; sj="$(image_slot_dir "$1" "$2")/slot.json"
-    [ -f "$sj" ] || return 1
-    [ "$(wkslot get "$sj" commit)" = "$3" ] && [ "$(wkslot get "$sj" build_config)" = "$4" ]
-}
-
-image_slot_holds() {   # <lane workspace> <slot> <sha> -- is that slot the one this commit would produce in that lane? On a profile-guided release the build config is half the question, so the A/B and the cycle ask one predicate
-    ( image_profile_load "$(image_lane_profile "$1")" >/dev/null 2>&1 || exit 1
-      if image_pgo_wanted; then
-          image_pgo_slot_is "$1" "$2" "$3" wpe-cross-pgo-use
-      else
-          local sj="$(image_slot_dir "$1" "$2")/slot.json"
-          [ -f "$sj" ] && [ "$(wkslot get "$sj" commit)" = "$3" ]
-      fi )
-}
-
 _pgo_require_board() {   # <profile> -- prints the machine, or refuses with the way out
     local profile="$1" machine mode
     machine=$(image_pgo_machine "$profile") || die "no fleet board carries $profile, so there is
     nowhere to collect a profile. A board declares the image it is for as
-    NODE_PROFILE in boot/machines/<name>.conf; that declaration is what this
+    NODE_PROFILE in machines/<name>.conf; that declaration is what this
     reads. Every number from a $CFG_RELEASE board is a profile-guided build's,
     so there is no plain build of this profile to fall back to."
     mode=$(image_pgo_mode "$machine")

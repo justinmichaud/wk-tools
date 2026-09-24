@@ -206,10 +206,10 @@ class Decl:
         return any(in_list(a.split("=")[0], spec) for a in args)
 
     def is_destructive(self, args):
-        return self._in_argv_list(self.destructive, args)
+        return self._in_argv_list(self._answer("destructive", self.destructive, args), args)
 
     def honours_dryrun(self, args):
-        return self._in_argv_list(self.dryrun, args)
+        return self._in_argv_list(self._answer("dryrun", self.dryrun, args), args)
 
     def synopsis_line(self):
         return self.synopsis.split(" -- ")[0]
@@ -237,6 +237,41 @@ class Decl:
                 continue
             break
         return "\n".join(out)
+
+
+class Args:
+    """The one reader of a command's options: argv as the dispatcher hands it on (`--x <value>`), by its declaration."""
+
+    def __init__(self, decl, argv):
+        opts = decl.opts_for(argv)
+        self._values, self._flags = {}, set()
+        self.positionals, self.tail, self.order = [], [], []
+        i = 0
+        while i < len(argv):
+            a = argv[i]
+            i += 1
+            if a == "--":
+                self.tail = argv[i:]
+                break
+            if in_list(a + "=", opts):
+                self._values.setdefault(a, []).append(argv[i])
+                self.order.append(a)
+                i += 1
+            elif in_list(a, opts):
+                self._flags.add(a)
+                self.order.append(a)
+            else:
+                self.positionals.append(a)
+
+    def flag(self, opt):
+        return opt in self._flags
+
+    def value(self, opt):
+        given = self._values.get(opt)
+        return given[-1] if given else None
+
+    def values(self, opt):
+        return list(self._values.get(opt, ()))
 
 
 def name_slot(decl_name):

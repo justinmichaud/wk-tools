@@ -3,34 +3,24 @@ board's, by role: a bench system joins as NODE_BENCH_SSH (`<board>-bench`), a
 rescue as NODE_SSH -- `<board>-rescue` on a bench device, the workstation's
 own name on a workstation (rpi5), whose own install is never written. Two
 names because each written system is its own tailnet node, and a second
-join under a name already on the tailnet comes up renamed -- boot/machines.sh,
-cmd/sysimage (_tailnet_name_for).
+join under a name already on the tailnet comes up renamed --
+lib/wk/sysimage/write.py (tailnet_name).
 
 Run: python3 -m unittest tests.test_tailnet_name -v
 """
-import re
-import subprocess
+import sys
 import unittest
 
-from tests.support import REPO, WkTest, bash
+from tests.support import FLEET_ENV, REPO, WkTest, bash
 
-MACHINES = REPO / "boot" / "machines"
-
-
-def _lift(path, func):
-    return subprocess.run(["sed", "-n", f"/^{func}()/,/^}}/p", str(path)],
-                          capture_output=True, text=True).stdout
+sys.path.insert(0, str(REPO / "lib"))
+from wk import fleet  # noqa: E402
+from wk.sysimage import write  # noqa: E402
 
 
 class TestBenchName(WkTest):
     def _name_for(self, machine, role="bench"):
-        cp = bash(f'''
-. "{REPO}/lib/common.sh"; . "{REPO}/boot/machines.sh"
-{_lift(REPO / "cmd" / "sysimage", "_tailnet_name_for")}
-_tailnet_name_for {machine!r} {role!r}
-''')
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        return cp.stdout.strip()
+        return write.tailnet_name(fleet.Fleet(REPO, FLEET_ENV), machine, role)
 
     def test_every_pi_bench_system_joins_as_board_bench(self):
         """rpi3, rpi4 and rpi5 bench systems join as <board>-bench"""

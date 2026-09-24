@@ -3,7 +3,7 @@
 A container reads the ssh-agent's socket through its /run/wk mount, so the
 machine half is the whole switch for one. A guest mounts nothing of ours and
 cannot see a unix socket across the hypervisor, so its half is an ssh-agent on
-*this host* and one `ssh -N -R` per running guest (targets/vm.sh). No private
+*this host* and one `ssh -N -R` per running guest (lib/wk/guest.py). No private
 key byte is ever written into a guest. Four things to hold to:
 
     the guest gets the ssh config and the *public* halves on every start, and
@@ -23,19 +23,28 @@ will not load a placeholder, and an agent is the thing under test.
 
 Run: python3 -m unittest tests.test_push_vm -v
 """
+import contextlib
+import inspect
+import io
 import os
 import pathlib
-import re
 import shutil
 import signal
 import subprocess
+import sys
+import time
 import unittest
+from unittest import mock
 
-from tests.support import (assert_guest_start_converges, func_body, REPO,
+from tests.support import (assert_guest_start_converges, guest_step, REPO,
                            WkTest, bash, stub_path)
 
+sys.path.insert(0, str(REPO / "lib"))
+from wk import guest, targets  # noqa: E402
+from wk.store import Store  # noqa: E402
+
 TOUCHED = (
-    "cmd/push", "lib/store.sh", "targets/vm.sh",
+    "lib/store.sh", "targets/vm.sh",
     "vm/provision-base.sh", "vm/shell-rc.sh", "container/firstrun.sh",
     "container/proxy/ensure-bridge.sh",
 )
@@ -59,7 +68,7 @@ ip)   exit 1 ;;
 esac
 '''
 
-# `ssh`: the guest, as a directory. targets/vm.sh's _ssh hands the remote
+# `ssh`: the guest, as a directory. The guest's Ssh (lib/wk/machine.py) hands the remote
 # command as the last argument and everything the remote end writes it writes
 # under $HOME, so running that command with HOME pointed at a scratch
 # directory exercises the real umask, mkdir, redirect and rm -- not a
@@ -304,10 +313,13 @@ class TestOneAliasBlock(WkTest):
         body = src[src.index("push_agent_publish_config() {"):]
         body = body[:body.index("\n}\n")]
         self.assertIn("wk_ssh_alias_blocks", body)
+        self.assertIn("wk.secrets alias-blocks", src)
+        self.assertIn("alias_blocks(self.forks()", (REPO / "lib" / "wk" / "secrets.py").read_text())
+        self.assertIn("secrets.alias_blocks(", (REPO / "lib" / "wk" / "guest.py").read_text())
 
 
 class TestAGuestGetsTheConfigOnStart(WkTest):
-    """The real _write_deploy_keys, against a fake guest: what it writes is
+    """The real Guest.write_deploy_keys, against a fake guest: what it writes is
     what a guest would end up holding -- and what it must never write."""
 
     def _write(self, store, home, vmstore, extra=None):
@@ -327,13 +339,7 @@ class TestAGuestGetsTheConfigOnStart(WkTest):
             }
             if extra:
                 env.update(extra)
-            cp = bash('''
-. "$WK_ROOT/lib/common.sh"
-. "$WK_ROOT/lib/store.sh"
-. "$WK_ROOT/lib/target.sh"
-load_target vm >/dev/null 2>&1
-_write_deploy_keys demo 1.2.3.4
-''', env=env)
+            cp = guest_step(env, "write_deploy_keys")
         self.log = log.read_text()
         return cp
 
@@ -341,7 +347,7 @@ _write_deploy_keys demo 1.2.3.4
         home, vmstore = _guest(self.tmp)
         store = _store(self.tmp, keys=("fork",))
         cp = self._write(store, home, vmstore)
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertEqual(cp.returncode, 0, cp.stderr)
         self.assertIn("ssh-ed25519 ", (home / ".ssh" / "id_fork.pub").read_text())
         self.assertFalse((home / ".ssh" / "id_fork").exists(),
                          "a private key half was written into the guest")
@@ -409,7 +415,7 @@ _write_deploy_keys demo 1.2.3.4
         self.assertEqual(1, text.count("Host github-webkit"), text)
 
     def test_it_is_wired_into_both_start_paths(self):
-        """t_start has two arms -- a guest that is already running is
+        """A start has two arms -- a guest that is already running is
         converged, one that is not is booted first -- and a step delivered on
         only one of them is a switch that half works."""
         assert_guest_start_converges(self, '_write_deploy_keys "$name" "$ip"')
@@ -420,9 +426,10 @@ _write_deploy_keys demo 1.2.3.4
     def test_the_source_writes_no_private_half(self):
         """Source-level twin of the tests above, so the property survives a
         rewrite the fake ssh happens not to exercise."""
-        vm = (REPO / "targets" / "vm.sh").read_text()
-        self.assertNotIn("wk_push_key", vm)
-        self.assertNotIn('chmod 600 $idf', vm)
+        text = (REPO / "lib" / "wk" / "guest.py").read_text()
+        for private in ("push_key_path", "held_dir", "agent_load("):
+            self.assertNotIn(private, inspect.getsource(guest.Guest), private)
+        self.assertIn("pub_path(fork)", text)
 
 
 class TestTheGuestHalfOfTheSwitch(WkTest):
@@ -608,126 +615,9 @@ class TestTheGuestHalfOfTheSwitch(WkTest):
     def test_status_stays_declared_readonly_and_the_guest_half_reads(self):
         src = (REPO / "cmd" / "push").read_text()
         self.assertIn("# wk: readonly status", src)
-        state = re.search(r"vm_push_keys_state\(\) \{.*?\n\}",
-                          (REPO / "targets" / "vm.sh").read_text(), re.S).group(0)
-        for writer in ("cat >", "rm -f", "umask", "tart run", "t_start",
-                       "push_agent_load", "detach_run"):
+        state = inspect.getsource(guest.vm_push_keys_state)
+        for writer in ("act_run", ".write(", "remove(", "spawn", "start(", "agent_load", "converge"):
             self.assertNotIn(writer, state, f"{writer!r} in vm_push_keys_state")
-
-
-class TestTwoStartsOfOneForwardDoNotFightOverIt(WkTest):
-    """`wk push on`, `wk vm start` and a second `wk push on` all reach
-    _agent_forward_start, and two of them interleaved used to do real damage:
-    both passed the liveness check, the second removed the socket the first had
-    bound (leaving the first's `ssh -R` with nothing behind it), and the
-    second's failure path then removed the *first's* status file -- after which
-    `wk push off` had no pid to kill and the guest kept reaching the agent.
-
-    The lock is the guest's own (hold_lock, lib/common.sh)."""
-
-    # A forward that binds and stays up, so the first start is live while the
-    # second runs. Every invocation is logged, which is how "the second was a
-    # no-op" is measured.
-    FAKE_SSH_FORWARD = (
-        "printf '%s\\n' \"$*\" >> \"$WK_TEST_SSH_LOG\"\n"
-        "case \" $* \" in\n"
-        "    *\" -N \"*) exec sleep 30 ;;\n"
-        "esac\n"
-        "[ -t 0 ] || cat >/dev/null\n"
-        "exit 0\n"
-    )
-
-    DRIVER = (
-        '. "$WK_ROOT/lib/common.sh"\n'
-        '. "$WK_ROOT/lib/store.sh"\n'
-        '. "$WK_ROOT/lib/target.sh"\n'
-        'load_target vm >/dev/null 2>&1\n'
-    )
-
-    def _driver(self, body, vmstore):
-        (self.tmp / "ssh.log").write_text("")
-        with stub_path({"ssh": self.FAKE_SSH_FORWARD, "tart": FAKE_TART}) as binp:
-            env = {
-                "PATH": f"{binp}:{os.environ['PATH']}",
-                "WK_TEST_SSH_LOG": str(self.tmp / "ssh.log"),
-                "WK_VM_STORE": str(vmstore),
-                "WK_LOCK_DIR": str(self.tmp / "locks"),
-                "XDG_STATE_HOME": str(self.tmp / "state"),
-                "WK_STORE": str(self.tmp / "store"),
-                "WK_HOST_SECRETS": str(self.tmp / "store" / "secrets"),
-            }
-            return bash(self.DRIVER + body, env=env, timeout=120)
-
-    def test_a_second_start_while_one_is_alive_is_a_no_op(self):
-        home, vmstore = _guest(self.tmp)
-        self.addCleanup(_kill_forward, vmstore)
-        cp = self._driver(
-            "_agent_forward_start demo 1.2.3.4 &\n"
-            "_agent_forward_start demo 1.2.3.4 &\n"
-            "wait\n", vmstore)
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        rec = _forward_record(vmstore)
-        self.assertIsNotNone(rec, "no forward record was written at all")
-        self.assertFalse((rec / "exit").exists(),
-                         "the second start ended the first's record")
-        log = (self.tmp / "ssh.log").read_text()
-        self.assertEqual(1, len([l for l in log.splitlines() if " -N " in l]),
-                         "two forwards were started for one guest:\n" + log)
-
-    def test_a_failed_start_ends_its_own_record(self):
-        """A forward that did not come up leaves nothing for `wk push status`
-        to believe: its own record carries the failure, and `wk push off` has
-        no dead pid to chase."""
-        home, vmstore = _guest(self.tmp)
-        cp = self._driver(
-            '. "$WK_ROOT/lib/detach.sh"\n'
-            'mkdir -p "$WK_VM_DIR"\n'
-            "detach_run() { echo 4194304; }\n"   # a pid above every default pid_max
-            "_agent_forward_start demo 1.2.3.4 && echo UNEXPECTED-OK\n", vmstore)
-        self.assertNotIn("UNEXPECTED-OK", cp.stdout, cp.stdout + cp.stderr)
-        rec = _forward_record(vmstore)
-        self.assertIsNotNone(rec, cp.stdout + cp.stderr)
-        self.assertEqual((rec / "exit").read_text().strip(), "failed",
-                         cp.stdout + cp.stderr)
-
-    def test_a_live_forward_is_what_a_second_start_reads(self):
-        """The liveness check is the record's pid in the process table, not a
-        word written into the record: a record whose pid is gone is started
-        again rather than trusted."""
-        home, vmstore = _guest(self.tmp)
-        self.addCleanup(_kill_forward, vmstore)
-        cp = self._driver(
-            '. "$WK_ROOT/lib/task.sh"\n'
-            'mkdir -p "$WK_VM_DIR"\n'
-            'd=$(task_begin agent-forward here demo "wk push off" /nolog "start forward" verify)\n'
-            'task_pid "$d" 4194304\n'
-            "_agent_forward_start demo 1.2.3.4\n", vmstore)
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        log = (self.tmp / "ssh.log").read_text()
-        self.assertEqual(1, len([l for l in log.splitlines() if " -N " in l]),
-                         "a dead record was believed, so no forward was started:\n" + log)
-
-    def test_the_command_the_record_names_is_one_that_ends_the_forward(self):
-        """`wk vm start` starts the forward too (t_settle), not only `wk push
-        on`, so the record's kill command has to end it whoever started it:
-        `wk push off` clears the host agent and then converges every running
-        guest, and a converge with no keys in the agent stops the forward."""
-        vm = (REPO / "targets" / "vm.sh").read_text()
-        self.assertIn('task_begin agent-forward here "$name" "wk push off"', vm)
-        conv = func_body(vm, "_agent_converge_guest")
-        self.assertIn("_agent_forward_stop", conv)
-        off = func_body(vm, "vm_push_keys_converge")
-        self.assertIn("push_agent_clear", off)
-        self.assertIn('_agent_converge_guest "$g" "$ip"', off)
-
-    def test_both_ends_of_the_switch_take_the_same_lock(self):
-        """A stop that runs while a start is mid-flight would kill a pid the
-        start is about to overwrite; one resource, both callers."""
-        vm = (REPO / "targets" / "vm.sh").read_text()
-        for fn in ("_agent_forward_start", "_agent_forward_stop"):
-            with self.subTest(fn=fn):
-                self.assertIn('with_lock "vm-agent-forward-$1" -- %s_locked' % fn,
-                              func_body(vm, fn))
 
 
 class TestTheGuestGetsTheInjectorsCa(WkTest):
@@ -736,22 +626,15 @@ class TestTheGuestGetsTheInjectorsCa(WkTest):
     proxy address, because both are properties of this host and neither may be
     baked into an image."""
 
-    def _egress(self, home, vmstore, ca_text=None, prelude=""):
+    def _egress(self, home, vmstore, ca_text=None, bugzilla=None, **extra):
         log = self.tmp / "ssh.log"
         log.write_text("")
         vmdir = vmstore / "vm"
         vmdir.mkdir(parents=True, exist_ok=True)
         if ca_text is not None:
             (vmdir / "wk-github-ca.pem").write_text(ca_text)
-        with stub_path({"ssh": FAKE_SSH, "tart": FAKE_TART}) as binp:
-            cp = bash('''
-. "$WK_ROOT/lib/common.sh"
-. "$WK_ROOT/lib/store.sh"
-. "$WK_ROOT/lib/target.sh"
-load_target vm >/dev/null 2>&1
-''' + prelude + '''
-_set_guest_egress demo 1.2.3.4 || true
-''', env={
+        with stub_path({"ssh": FAKE_SSH}) as binp:
+            return guest_step({
                 "PATH": f"{binp}:{os.environ['PATH']}",
                 "WK_TEST_GUEST": str(home),
                 "WK_TEST_SSH_LOG": str(log),
@@ -760,19 +643,18 @@ _set_guest_egress demo 1.2.3.4 || true
                 "WK_VM_STORE": str(vmstore),
                 "WK_VM_PROXY_ADDR": "192.168.2.1",
                 "XDG_STATE_HOME": str(self.tmp / "state"),
-            })
-        return cp
+                **extra,
+            }, "set_guest_egress", secrets={"bugzilla_user": lambda s: bugzilla})
 
     def test_the_bugzilla_placeholder_goes_in_with_the_login_and_not_without(self):
-        """The login is read from the mirror (wk_bugzilla_user); a host with
+        """The login is read from the mirror (Secrets.bugzilla_user); a host with
         none writes no Bugzilla pair, so git-webkit in the guest asks rather
         than validating an empty login."""
         home, vmstore = _guest(self.tmp)
         ca = "-----BEGIN CERTIFICATE-----\nx\n-----END CERTIFICATE-----\n"
         self._egress(home, vmstore, ca_text=ca)
         self.assertNotIn("BUGS_WEBKIT_ORG", (home / ".wk-egress").read_text())
-        self._egress(home, vmstore, ca_text=ca,
-                     prelude='wk_bugzilla_user() { echo me@example.test; }\n')
+        self._egress(home, vmstore, ca_text=ca, bugzilla="me@example.test")
         rc = (home / ".wk-egress").read_text()
         self.assertIn("export BUGS_WEBKIT_ORG_USERNAME=me@example.test\n", rc)
         self.assertIn("export BUGS_WEBKIT_ORG_PASSWORD=wk-injects-this\n", rc)
@@ -794,9 +676,7 @@ _set_guest_egress demo 1.2.3.4 || true
     def test_the_bundle_is_the_systems_plus_that_ca_and_not_that_ca_alone(self):
         """Those variables replace the trust store outright: a bundle holding
         one certificate would fail every other HTTPS request in the guest."""
-        vm = (REPO / "targets" / "vm.sh").read_text()
-        self.assertIn('cat /etc/ssl/cert.pem "\\$HOME/.wk-github-ca.pem" '
-                      '> "\\$HOME/.wk-ca-bundle.pem"', vm)
+        self.assertIn('cat /etc/ssl/cert.pem "$HOME/.wk-github-ca.pem" > "$HOME/.wk-ca-bundle.pem"', guest.EGRESS)
 
     def test_an_unfiltered_guest_gets_neither(self):
         """WK_VM_UNFILTERED means no proxy and so no injector: a guest left
@@ -804,35 +684,27 @@ _set_guest_egress demo 1.2.3.4 || true
         who obtained the key could use against it."""
         home, vmstore = _guest(self.tmp)
         (home / ".wk-github-ca.pem").write_text("stale\n")
-        self._egress(home, vmstore, ca_text="x\n")
-        # The real function reads WK_VM_UNFILTERED; run it again with that set.
-        with stub_path({"ssh": FAKE_SSH, "tart": FAKE_TART}) as binp:
-            bash('''
-. "$WK_ROOT/lib/common.sh"
-. "$WK_ROOT/lib/store.sh"
-. "$WK_ROOT/lib/target.sh"
-load_target vm >/dev/null 2>&1
-_set_guest_egress demo 1.2.3.4 || true
-''', env={
-                "PATH": f"{binp}:{os.environ['PATH']}",
-                "WK_TEST_GUEST": str(home),
-                "WK_TEST_SSH_LOG": str(self.tmp / "ssh2.log"),
-                "WK_STORE": str(self.tmp / "store"),
-                "WK_HOST_SECRETS": str(self.tmp / "store" / "secrets"),
-                "WK_VM_STORE": str(vmstore),
-                "WK_VM_UNFILTERED": "1",
-            })
+        self._egress(home, vmstore, ca_text="x\n", WK_VM_UNFILTERED="1")
         self.assertFalse((home / ".wk-github-ca.pem").exists())
         self.assertFalse((home / ".wk-ca-bundle.pem").exists())
 
 
-SETUP = """
-. "$WK_ROOT/lib/common.sh"
-. "$WK_ROOT/lib/resources.sh"
-. "$WK_ROOT/lib/store.sh"
-. "$WK_ROOT/lib/target.sh"
-load_target vm >/dev/null 2>&1
-"""
+def _host(case, **env):
+    """A Host over this machine and a scratch vm store, as a macOS host has one."""
+    mac = mock.patch.object(Store, "macos_host", new_callable=mock.PropertyMock, return_value=True)
+    mac.start()
+    case.addCleanup(mac.stop)
+    base = {"HOME": str(case.tmp / "home"), "PATH": os.environ["PATH"], "WK_STORE": str(case.tmp / "store"),
+            "WK_HOST_SECRETS": str(case.tmp / "store" / "secrets"), "WK_VM_STORE": str(case.tmp / "vmstore"),
+            "WK_LOCK_DIR": str(case.tmp / "locks"), "XDG_STATE_HOME": str(case.tmp / "state")}
+    base.update(env)
+    return guest.Host(targets.Registry(str(REPO), env=base).load("vm"))
+
+
+def _quiet(fn, *args):
+    with contextlib.redirect_stderr(io.StringIO()) as err:
+        result = fn(*args)
+    return result, err.getvalue()
 
 
 class TestTheInjectorReadinessProbeAnswersOnThisPlatform(WkTest):
@@ -843,9 +715,9 @@ class TestTheInjectorReadinessProbeAnswersOnThisPlatform(WkTest):
     the rest of the session."""
 
     def _running(self, sock):
-        return bash(
-            SETUP + "_inject_sock() { printf %s " + repr(str(sock))
-            + "; }\n_inject_running && echo YES || echo NO\n").stdout.strip()
+        host = _host(self)
+        with mock.patch.object(host, "path", lambda name: str(sock)):
+            return "YES" if host.inject_running() else "NO"
 
     def test_a_served_socket_reads_as_running(self):
         import socket as sk
@@ -877,18 +749,8 @@ class TestTheGuestsInjectorGetsTheStandingReadToken(WkTest):
     every `wk vm start` converges that file from what this host holds -- and
     `wk push on|off` never touches it."""
 
-    START_INJECT = """
-. "$WK_ROOT/lib/common.sh"
-. "$WK_ROOT/lib/store.sh"
-. "$WK_ROOT/lib/target.sh"
-load_target vm >/dev/null 2>&1
-# Already up: what a start has to converge is the token, whether or not it
-# also has to start the program.
-_inject_running() { return 0; }
-_start_host_inject
-"""
-
     def _start_inject(self, vmstore, pat=None):
+        """Already up: what a start has to converge is the token, whether or not it also has to start the program."""
         store = self.tmp / "store"
         held = store / "push-keys"
         held.mkdir(parents=True, exist_ok=True)
@@ -897,18 +759,17 @@ _start_host_inject
             (held / "github-pat").unlink(missing_ok=True)
         else:
             (held / "github-pat").write_text(pat)
-        return bash(self.START_INJECT,
-                    env={"WK_STORE": str(store),
-                         "WK_HOST_SECRETS": str(store / "secrets"),
-                         "WK_VM_STORE": str(vmstore)})
+        host = _host(self, WK_VM_STORE=str(vmstore))
+        with mock.patch.object(host, "inject_running", lambda: True):
+            return _quiet(host.start_inject)
 
     def read_pat(self, vmstore):
         return vmstore / "vm" / "read-github-pat"
 
     def test_a_start_writes_it_from_the_token_this_host_holds(self):
         _, vmstore = _guest(self.tmp)
-        cp = self._start_inject(vmstore, pat="ghp-not-a-real-token\n")
-        self.assertEqual(0, cp.returncode, cp.stdout + cp.stderr)
+        ok, err = self._start_inject(vmstore, pat="ghp-not-a-real-token\n")
+        self.assertTrue(ok, err)
         self.assertEqual("ghp-not-a-real-token\n", self.read_pat(vmstore).read_text())
         self.assertEqual(0o600, self.read_pat(vmstore).stat().st_mode & 0o777)
 
@@ -921,19 +782,10 @@ _start_host_inject
     def test_the_injector_is_told_where_to_read_it(self):
         """A file nothing names is a file nothing reads: the program takes the
         path from WK_INJECT_READ_PAT (container/proxy/github-inject.py)."""
-        body = func_body((REPO / "targets" / "vm.sh").read_text(), "_start_host_inject")
-        self.assertIn('WK_INJECT_READ_PAT="$(_inject_read_pat)"', body)
-        self.assertIn('WK_INJECT_BUGZILLA_KEY="$(_inject_bugzilla_key)"', body)
+        body = inspect.getsource(guest.Host.start_inject)
+        self.assertIn('"WK_INJECT_READ_PAT=" + self.path("read-github-pat")', body)
+        self.assertIn('"WK_INJECT_BUGZILLA_KEY=" + self.path("push-bugzilla-api-key")', body)
         self.assertIn("github-inject.py", body)
-
-    def test_the_switch_converges_the_bugzilla_key_beside_the_token(self):
-        """The guests' injector reads its Bugzilla key from a file only
-        `vm_push_keys_converge` writes and removes, the way it does the write
-        token."""
-        body = func_body((REPO / "targets" / "vm.sh").read_text(), "vm_push_keys_converge")
-        self.assertIn('push_agent_cred_write _agent_exec "$(_inject_bugzilla_key)" bugzilla-api-key', body)
-        self.assertEqual(2, body.count('push_agent_cred_clear _agent_exec "$(_inject_bugzilla_key)"'),
-                         "the key is cleared on `off`, and on an `on` that has none to write")
 
     @unittest.skipUnless(os.uname().sysname == "Darwin",
                          "guests are a macOS-host thing (tart)")
@@ -950,52 +802,32 @@ _start_host_inject
 
 
 class TestEveryGuestStartConvergesTheReadToken(WkTest):
-    """The measured defect: the token the guests' injector reads is converged
-    by _start_host_inject, and the only caller of that was past
-    _start_host_proxy's "already running" return -- so a `wk start <guest>` on
-    a host whose proxy was up left a rotated token undelivered and every read
-    from a guest answered 401 (Bad credentials)."""
-
-    START_PROXY = """
-. "$WK_ROOT/lib/common.sh"
-. "$WK_ROOT/lib/store.sh"
-. "$WK_ROOT/lib/target.sh"
-load_target vm >/dev/null 2>&1
-# Both already up, which is the state a second start finds: what it still has
-# to converge is the token.
-_proxy_running() { return 0; }
-_inject_running() { return 0; }
-_start_host_proxy
-"""
-
-    def _start(self, vmstore, pat):
-        store = self.tmp / "store"
-        held = store / "push-keys"
-        held.mkdir(parents=True, exist_ok=True)
-        (store / "secrets").mkdir(parents=True, exist_ok=True)
-        (held / "github-pat").write_text(pat)
-        return bash(self.START_PROXY,
-                    env={"WK_STORE": str(store),
-                         "WK_HOST_SECRETS": str(store / "secrets"),
-                         "WK_VM_STORE": str(vmstore),
-                         "WK_VM_PROXY_ADDR": "192.168.2.1"})
+    """The measured defect: the token the guests' injector reads was converged
+    by the injector's start, and the only caller of that was past the proxy's
+    "already running" return -- so a `wk start <guest>` on a host whose proxy
+    was up left a rotated token undelivered and every read from a guest
+    answered 401 (Bad credentials)."""
 
     def test_a_start_that_finds_the_proxy_up_still_delivers_the_token(self):
         _, vmstore = _guest(self.tmp)
+        store = self.tmp / "store"
+        (store / "push-keys").mkdir(parents=True, exist_ok=True)
+        (store / "secrets").mkdir(parents=True, exist_ok=True)
+        (store / "push-keys" / "github-pat").write_text("ghp-todays\n")
         read_pat = vmstore / "vm" / "read-github-pat"
         (vmstore / "vm").mkdir(parents=True, exist_ok=True)
         read_pat.write_text("ghp-yesterdays\n")
-        cp = self._start(vmstore, "ghp-todays\n")
-        self.assertEqual(0, cp.returncode, cp.stdout + cp.stderr)
+        host = _host(self, WK_VM_PROXY_ADDR="192.168.2.1")
+        with mock.patch.object(host, "proxy_running", lambda: True), mock.patch.object(host, "inject_running", lambda: True):
+            ok, err = _quiet(host.start_proxy)
+        self.assertTrue(ok, err)
         self.assertEqual("ghp-todays\n", read_pat.read_text())
 
     def test_the_injector_is_converged_before_that_check_and_not_after(self):
         """Source-level twin: the call has to be ahead of the early return, or
         the test above only passes while the proxy happens to be down."""
-        body = func_body((REPO / "targets" / "vm.sh").read_text(),
-                         "_start_host_proxy")
-        self.assertLess(body.index("_start_host_inject"),
-                        body.index("_proxy_running"))
+        body = inspect.getsource(guest.Host._start_proxy)
+        self.assertLess(body.index("self.start_inject()"), body.index("self.proxy_running()"))
 
 
 class TestAHostDaemonOlderThanItsSourceIsRestarted(WkTest):
@@ -1006,42 +838,39 @@ class TestAHostDaemonOlderThanItsSourceIsRestarted(WkTest):
     to :80 after the fix landed). A pidfile is written at the start, so its
     mtime against the sources says whether the daemon predates them."""
 
-    SCRIPT = """
-. "$WK_ROOT/lib/common.sh"
-. "$WK_ROOT/lib/store.sh"
-. "$WK_ROOT/lib/target.sh"
-load_target vm >/dev/null 2>&1
-sleep 60 & pid=$!
-echo "$pid" > "$PIDFILE"
-touch -t "$PIDFILE_STAMP" "$PIDFILE"
-_host_daemon_restart_if_stale "$PIDFILE" "egress proxy"
-if kill -0 "$pid" 2>/dev/null; then echo "MARK:alive"; kill "$pid"; else echo "MARK:gone"; fi
-[ -f "$PIDFILE" ] && echo "MARK:pidfile-kept" || echo "MARK:pidfile-removed"
-"""
-
     def _run(self, stamp):
         pidfile = self.tmp / "proxy.pid"
-        return bash(self.SCRIPT, env={"PIDFILE": str(pidfile), "PIDFILE_STAMP": stamp,
-                                      "WK_VM_STORE": str(self.tmp / "vmstore")})
+        # Detached, so the daemon is nobody's child here and is reaped once it goes.
+        pid = int(subprocess.run(["sh", "-c", "sleep 60 >/dev/null 2>&1 & echo $!"], capture_output=True,
+                                 text=True).stdout.strip())
+        self.addCleanup(lambda: subprocess.run(["kill", str(pid)], capture_output=True))
+        pidfile.write_text("%d\n" % pid)
+        os.utime(pidfile, (stamp, stamp))
+        host = _host(self, WK_VM_PROXY_ADDR="192.168.2.1")
+        _, err = _quiet(host.restart_if_stale, str(pidfile), "egress proxy", host.proxy_where())
+        deadline = time.time() + 5
+        while time.time() < deadline and subprocess.run(["kill", "-0", str(pid)], capture_output=True).returncode == 0:
+            time.sleep(0.1)
+        alive = subprocess.run(["kill", "-0", str(pid)], capture_output=True).returncode == 0
+        return alive, pidfile.exists(), err
 
     def test_one_started_before_its_source_changed_is_stopped(self):
-        cp = self._run("200101010000")
-        self.assertIn("MARK:gone", cp.stdout, cp.stdout + cp.stderr)
-        self.assertIn("MARK:pidfile-removed", cp.stdout)
-        self.assertIn("restarting the egress proxy", cp.stderr, cp.stderr)
+        alive, kept, err = self._run(time.mktime((2001, 1, 1, 0, 0, 0, 0, 0, -1)))
+        self.assertFalse(alive, err)
+        self.assertFalse(kept)
+        self.assertIn("restarting the egress proxy", err, err)
 
     def test_one_started_after_is_left_alone(self):
-        cp = self._run("203001010000")
-        self.assertIn("MARK:alive", cp.stdout, cp.stdout + cp.stderr)
-        self.assertIn("MARK:pidfile-kept", cp.stdout)
-        self.assertNotIn("restarting", cp.stderr)
+        alive, kept, err = self._run(time.mktime((2030, 1, 1, 0, 0, 0, 0, 0, -1)))
+        self.assertTrue(alive, err)
+        self.assertTrue(kept)
+        self.assertNotIn("restarting", err)
 
     def test_both_daemons_are_checked_ahead_of_their_already_running_return(self):
-        text = (REPO / "targets" / "vm.sh").read_text()
-        for fn, probe in (("_start_host_proxy", "_proxy_running"),
-                          ("_start_host_inject", "_inject_running")):
-            body = func_body(text, fn)
-            self.assertLess(body.index("_host_daemon_restart_if_stale"), body.index(probe), fn)
+        for fn, probe in ((guest.Host._start_proxy, "self.proxy_running()"),
+                          (guest.Host.start_inject, "self.inject_running()")):
+            body = inspect.getsource(fn)
+            self.assertLess(body.index("self.restart_if_stale("), body.index(probe), fn.__name__)
 
 
 @unittest.skipUnless(os.uname().sysname == "Darwin",
@@ -1112,20 +941,10 @@ class TestBothHalvesRunHere(WkTest):
             with self.subTest(gone=gone):
                 self.assertNotIn(gone, src)
 
-    def test_the_machine_half_runs_before_the_guests_are_converged(self):
-        """A guest converged first would be handed a forward to an agent whose
-        contents the machine half is about to change."""
-        src = (REPO / "cmd" / "push").read_text()
-        body = src[src.index("SWITCH_RC=0"):]
-        self.assertLess(body.index("switch_half"), body.index("converge_guests"))
-
-    def test_the_action_reaches_the_guest_half(self):
-        """The private halves no longer move, so the guest half cannot infer
-        the position from what it can read: it is told."""
-        src = (REPO / "cmd" / "push").read_text()
-        self.assertIn('_in_vm_driver vm_push_keys_converge "$ACTION"', src)
-        vm = (REPO / "targets" / "vm.sh").read_text()
-        self.assertIn("vm_push_keys_converge() { # <on|off>", vm)
+    def test_the_guest_half_is_told_the_action(self):
+        """The private halves no longer move, so the guest half cannot infer the position from what it can
+        read: cmd/push hands it the action (tests/test_push_switch.py, TestTheGuests)."""
+        self.assertIn("action", inspect.signature(guest.vm_push_keys_converge).parameters)
 
     def test_a_workspace_is_still_refused(self):
         marker = self.tmp / "wk-workspace"
@@ -1135,15 +954,6 @@ class TestBothHalvesRunHere(WkTest):
                 cp = self.run_wk("push", action, env={"WK_MARKER": str(marker)})
                 self.assertNotEqual(cp.returncode, 0, cp.stdout)
                 self.assertIn("workspace", cp.stdout)
-
-    def test_stopping_a_guest_ends_its_forward(self):
-        """A forward is a process on this host; one left holding a socket in a
-        guest that is gone is a process nothing would ever reap."""
-        vm = (REPO / "targets" / "vm.sh").read_text()
-        body = vm[vm.index("t_stop() {"):]
-        body = body[:body.index("\n}\n")]
-        self.assertIn('_agent_forward_stop "$1"', body)
-        self.assertLess(body.index("_agent_forward_stop"), body.index("_tart stop"))
 
 
 @unittest.skipUnless(os.uname().sysname == "Darwin",

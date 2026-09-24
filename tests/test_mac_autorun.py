@@ -170,52 +170,6 @@ class TestATimedOutReadingIsUnknownAndNotAFault(WkTest):
         self.assertEqual(["wrong"], [f[0] for f in found], found)
 
 
-class TestEveryPausedDaemonIsReadThroughTheBound(WkTest):
-    """`macos_noise` runs in every leg's preflight (cmd/bench) and inside
-    `wk quiesce on` (cmd/quiesce) -- both after `wk_quiet_daemons_pause` -- so
-    a reading of a daemon it holds stopped hangs the leg exactly the way the
-    Spotlight one did."""
-
-    def _noise(self, timing_out):
-        answers = ('*tmutil*|*AutomaticCheckEnabled*) printf "%s" "$_WK_QD_TIMEOUT" ;;'
-                   if timing_out else
-                   '*tmutil*) printf "No destinations configured\n" ;;'
-                   '*AutomaticCheckEnabled*) printf 0 ;;')
-        cp = sh(f'set -euo pipefail\n. {str(NOISE)!r}\n'
-                f'_wk_qd_read() {{ case "$*" in {answers} *) printf "" ;; esac; }}\n'
-                f'macos_noise || true\n'
-                f'printf "FAULTS=%s\\n" "$MACOS_NOISE_FAULTS"\n')
-        return cp.stdout + cp.stderr
-
-    def test_both_readings_go_through_the_one_bounded_reader(self):
-        text = NOISE.read_text()
-        self.assertIn('_wk_qd_read -e "$_WK_QD_READ_SECS" tmutil destinationinfo', text)
-        self.assertIn('_wk_qd_read "$_WK_QD_READ_SECS" sudo -n defaults read', text)
-        self.assertNotIn("tmutil destinationinfo 2>&1", text)
-
-    def test_a_machine_that_answers_is_judged_as_before(self):
-        out = self._noise(timing_out=False)
-        self.assertIn("no destination configured", out, out)
-        self.assertIn("automatic checking off", out, out)
-        self.assertIn("FAULTS=0", out, out)
-
-    def test_a_reading_that_times_out_is_unknown_and_names_the_daemon(self):
-        out = self._noise(timing_out=True)
-        self.assertIn("backupd did not answer inside its bound", out, out)
-        self.assertIn("softwareupdated did not answer inside its bound", out, out)
-        for line in out.splitlines():
-            if "did not answer inside its bound" in line:
-                self.assertIn("unknown", line, line)
-
-    def test_a_reading_that_times_out_refuses_no_leg(self):
-        """An intermittent XPC deadlock must not turn into a refused
-        measurement: the deadlock is the fault, not the machine."""
-        out = self._noise(timing_out=True)
-        self.assertIn("FAULTS=0", out, out)
-        self.assertNotIn("timemachine: a destination is configured", out, out)
-        self.assertNotIn("updates:    automatic checking is on", out, out)
-
-
 class TestTheMachineEndsUpOff(WkTest):
     """The bench volume is the firmware default, so a reboot lands back on it
     and starts the agent again. Every way this script can end ends with the

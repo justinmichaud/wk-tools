@@ -96,12 +96,15 @@ def git(cwd, *args):
              "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"})
 
 
-# The far side: `bash -c` on the one command string, with stdin (the bundle)
-# flowing through, which is the shape tools_push hands its caller's wrapper.
+# The far side: `bash -c` on the one command string, and a copy (the bundle) landing at the path after the colon.
 FAR_SSH = """#!/bin/sh
 for a in "$@"; do last="$a"; done
 printf '%%s\\n' "$last" >> %s
 exec bash -c "$last"
+"""
+FAR_SCP = """#!/bin/sh
+for a in "$@"; do src="$last"; last="$a"; done
+cp "$src" "${last#*:}"
 """
 
 
@@ -133,7 +136,7 @@ class PreparingPushesACommitAndStopsAtTheSudo(WkTest):
             (src / "wk").write_text("#!/bin/sh\necho uncommitted\n")
         self.far = home / "Development" / "wk-tools"
         log = self.tmp / "ssh.argv"
-        with stub_path({"ssh": FAR_SSH % log}) as path:
+        with stub_path({"ssh": FAR_SSH % log, "scp": FAR_SCP}) as path:
             cp = subprocess.run(
                 ["bash", "-c", LIB + f"WK_ROOT={src}\nNODE_NAME=mbp\n"
                  'machine_prepare tolken || echo "rc=$?"'],

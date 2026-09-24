@@ -158,8 +158,9 @@ class TestRetire(unittest.TestCase):
 
 class TestWiring(unittest.TestCase):
     def test_the_write_retires_rather_than_naming_the_console(self):
-        text = (REPO / "cmd" / "sysimage").read_text()
-        self.assertIn("wk_tailnet_retire", text)
+        self.assertIn("wk_tailnet_retire", (REPO / "lib" / "wk" / "shell.py").read_text())
+        text = (REPO / "lib" / "wk" / "sysimage" / "write.py").read_text()
+        self.assertIn("shell.tailnet_retire(", text)
         self.assertIn("wk key set tailnet-api", text,
                       "the refusal without a token must name the remedy that ends the hand step")
 

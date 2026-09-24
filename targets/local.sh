@@ -40,8 +40,6 @@ t_stop() { die "a workspace cannot stop itself -- run 'wk stop $_local_name' on 
 
 t_start() { die "a workspace cannot start itself -- run 'wk start $_local_name' on the host"; }
 
-t_needs_base() { return 1; }
-
 command -v host_cores >/dev/null 2>&1 || . "$WK_ROOT/lib/resources.sh"
 
 t_cores() {

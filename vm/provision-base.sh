@@ -45,9 +45,9 @@ WK_VM_DISPLAY="${WK_VM_DISPLAY:-1280x800}"
 WK_VM_DISPLAY_W="${WK_VM_DISPLAY%x*}"
 WK_VM_DISPLAY_H="${WK_VM_DISPLAY#*x}"
 
-cat "$WK_TOOLS_DIR/bench/mac-quiet-desktop.sh" "$WK_TOOLS_DIR/bench/mac-pyobjc.sh" \
-    "$WK_TOOLS_DIR/vm/desktop.sh" \
-    | WK_VM_PASSWORD="$WK_VM_PASSWORD" bash -s
+{ ( . "$WK_TOOLS_DIR/bench/mac-quiet-desktop.sh"; wk_quiet_desktop_script )
+  cat "$WK_TOOLS_DIR/bench/mac-pyobjc.sh" "$WK_TOOLS_DIR/vm/desktop.sh"
+} | WK_VM_PASSWORD="$WK_VM_PASSWORD" bash -s
 
 sudo -n tee /Library/LaunchDaemons/org.wk.nosleep.plist >/dev/null <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>

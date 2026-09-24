@@ -10,14 +10,16 @@ is the only publisher.
 Run: python3 -m unittest tests.test_no_publish -v
 """
 import importlib.util
+import os
+import subprocess
 import tempfile
 import unittest
-from pathlib import Path
 
-from tests.support import REPO, bash
+from tests.support import REPO
+from tests.test_push_switch import PUSH, Fleet, PushTest
+from tests.test_wk_secrets import SOCK
 
 PROXY = REPO / "container" / "proxy" / "wk-proxy.py"
-PUSH = (REPO / "cmd" / "push").read_text()
 
 
 def _policy():
@@ -65,59 +67,49 @@ class TestProxyRefusesGitHubsApi(unittest.TestCase):
                 self.assertTrue(ok, host)
 
 
-class TestPushOnEndsAnyRunningAgent(unittest.TestCase):
-    def _sessions(self, t_list_out, running):
-        # agent_pids runs the scan with `t_exec "$ws" sh -c '...'` and reads
-        # its stdout; the stub prints a pid for the named workspace, standing
-        # in for "a claude exe is running in that container".
-        return bash(f'''
-. "{REPO}/lib/common.sh"
-t_list() {{ printf '%b' "{t_list_out}"; }}
-t_exec() {{ case "$1" in {running}) echo 4242 ;; esac; }}
-{_lift("AGENT_PID_SCAN=")}
-{_lift("agent_pids")}
-{_lift("agent_sessions")}
-agent_sessions
-''')
+class TestPushOnEndsAnyRunningAgent(PushTest):
+    """cmd/push's session gate, driven over the fake machine tests/test_push_switch.py builds."""
+
+    def setUp(self):
+        super().setUp()
+        self.w.seed()
+        self.box.claude = {"a": [], "b": ["4242"]}
+
+    def sessions(self):
+        return PUSH.Push(Fleet(self.w, self.boxes), self.w.sec(), self.clock).agent_sessions()
 
     def test_names_the_workspaces_with_a_claude_process(self):
-        cp = self._sessions("a\\tUp 2 hours\\nb\\tUp 1 hour\\n", "b")
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertEqual(cp.stdout.split(), ["b"])
+        self.assertEqual(["b"], self.sessions())
 
     def test_no_session_is_silence(self):
-        cp = self._sessions("a\\tUp 2 hours\\n", "none")
-        self.assertEqual(cp.stdout.strip(), "")
+        self.box.claude = {"a": []}
+        self.assertEqual([], self.sessions())
+
+    def test_the_scan_is_plain_sh(self):
+        cp = subprocess.run(["sh", "-n", "-c", PUSH.AGENT_PID_SCAN], capture_output=True, text=True)
+        self.assertEqual(0, cp.returncode, cp.stderr)
 
     def test_on_ends_them_before_loading_the_agent(self):
-        """`on)` asks the gate about every session it found, and does it
-        before the keys reach the agent; the gate is where the ending is."""
-        on = PUSH[PUSH.index("\non)\n"):PUSH.index("\noff)\n")]
-        self.assertLess(on.index("push_end_sessions_first $(agent_sessions)"),
-                        on.index("push_agent_load"))
-        self.assertIn("end_agent_sessions", _lift("push_end_sessions_first()"))
+        os.environ["WK_YES"] = "1"
+        self.push("on")
+        acts = [e[1] for e in self.w.acts() if e[0] == "act"]
+        self.assertLess(acts.index(("exec", "b", "sh", "-c", "kill 4242 2>/dev/null; exit 0")),
+                        next(i for i, a in enumerate(acts) if "ssh-add -" in a[-1]))
 
     def test_ending_them_is_asked_first(self):
-        """Killing a session is destructive, so it goes through the one
-        yes/no helper and the command declares itself to the dispatcher."""
-        gate = _lift("push_end_sessions_first()")
-        self.assertLess(gate.index('confirm "'), gate.index("end_agent_sessions"))
-        self.assertIn("# wk: destructive on", PUSH)
+        """Killing a session is destructive, so it is asked through the one yes/no helper and the command
+        declares itself to the dispatcher."""
+        os.environ["WK_DESTRUCTIVE"] = "1"
+        rc, _, err = self.push("on")
+        self.assertIn("end the claude session(s) in b? -- declining", err)
+        self.assertEqual(["4242"], self.box.claude["b"])
+        self.assertIn("# wk: destructive on", (REPO / "cmd" / "push").read_text())
 
     def test_a_declined_prompt_leaves_the_keys_out(self):
-        self.assertIn('die "push stays off', _lift("push_end_sessions_first()"))
-
-
-def _lift(name):
-    """One shell definition out of cmd/push, by name: a `name()` function up to
-    its closing brace, or a `NAME=` assignment up to the line closing its
-    single-quoted value."""
-    import subprocess
-    rng = f"/^{name}/,/^}}/p" if name.endswith("()") or "=" not in name else f"/^{name}/,/^done'$/p"
-    text = subprocess.run(["sed", "-n", rng, str(REPO / "cmd" / "push")],
-                          capture_output=True, text=True).stdout
-    assert text.strip(), name
-    return text
+        rc, _, err = self.push("on")
+        self.assertEqual(1, rc)
+        self.assertIn("push stays off", err)
+        self.assertEqual(set(), self.w.agents[SOCK])
 
 
 if __name__ == "__main__":

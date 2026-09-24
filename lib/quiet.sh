@@ -6,62 +6,7 @@ command -v warn >/dev/null 2>&1 || . "$(dirname "${BASH_SOURCE[0]}")/common.sh" 
 # shellcheck disable=SC1090
 . "$(dirname "${BASH_SOURCE[0]}")/../bench/mac-raiser.sh"
 
-# Only the clock is judged on a workstation: the rest is what a benchmark install is and a workstation never will be, and a red line nothing there can clear teaches a reader to skip the list.
-macos_noise() {
-    local bad=0 probe v
-    probe=$(wk_quiet_desktop_probe)
-
-    render_findings <<FINDINGS || bad=$((bad + $?))
-$(wk_quiet_cpu_findings "$probe")
-FINDINGS
-
-    if in_bench_mode; then
-        render_findings <<FINDINGS || bad=$((bad + $?))
-$(wk_quiet_desktop_findings "$probe" "wk bench mac-volume --provision")
-$(wk_quiet_daemons_findings "$probe" "wk quiesce on")
-FINDINGS
-    fi
-
-    v=$(_wk_qd_read -e "$_WK_QD_READ_SECS" tmutil destinationinfo | head -1)   # -e: "No destinations configured" is what it says on stderr
-    case "$v" in
-        "$_WK_QD_TIMEOUT") warn "  timemachine: backupd did not answer inside its bound (this preflight holds it stopped), so whether a backup can start mid-run is unknown" ;;
-        *"No destinations"*) log "  timemachine: no destination configured" ;;
-        *) warn "  timemachine: a destination is configured; a backup can start mid-run"; bad=$((bad + 1)) ;;
-    esac
-
-    v=$(_wk_qd_read "$_WK_QD_READ_SECS" sudo -n defaults read /Library/Preferences/com.apple.SoftwareUpdate AutomaticCheckEnabled)   # not `softwareupdate --schedule`, which says "on" with AutomaticCheckEnabled 0 in the same plist
-    case "$v" in
-        "$_WK_QD_TIMEOUT") warn "  updates:    softwareupdated did not answer inside its bound (this preflight holds it stopped), so whether automatic checking is on is unknown" ;;
-        0)  log  "  updates:    automatic checking off" ;;
-        1)  warn "  updates:    automatic checking is on"; bad=$((bad + 1)) ;;
-        *)  log  "  updates:    AutomaticCheckEnabled unset, where softwareupdated leaves it -- a scan is stopped by the endpoint denial and the paused scanner, not by this key" ;;
-    esac
-
-    if in_bench_mode; then
-        local _qh
-        _qh="$(dirname "${BASH_SOURCE[0]}")/../bench/mac-quiet-hosts.sh"
-        if [ -r "$_qh" ]; then
-            # shellcheck disable=SC1090
-            . "$_qh"
-            if wk_bench_hosts_present /etc/hosts; then
-                log "  hosts:      update endpoints denied"
-            else
-                warn "  hosts:      NOT denied -- wk bench mac-volume --provision"; bad=$((bad + 1))
-            fi
-        fi
-    fi
-
-    MACOS_NOISE_FAULTS="$bad"
-    return $bad
-}
-
-auth_panel() {  # a modal panel is invisible to screen_blocker; SecurityAgent runs only while one is up
-    pgrep -x SecurityAgent >/dev/null 2>&1 && printf 'SecurityAgent'
-    return 0
-}
-
-# Every reading a preflight takes is an instant and a run is an hour, so anything that starts after it was read is invisible: a consent dialog sat over a whole PGO collection that way (2026-09-06), and macOS restarts a paused agent on demand, so the banner-drawing pair -- NotificationCenter and usernoted -- can come back inside a leg that began with both held stopped. Samples every WK_SCREEN_WATCH_SECONDS while the measured thing runs.
-# One `ps` for all forty-odd of them, not a `pgrep` each: this samples beside the thing being measured, and forty forks every ten seconds is a load of its own.
+# Every reading a preflight takes is an instant and a run is an hour, so anything that starts after it was read is invisible: a consent dialog sat over a whole PGO collection that way (2026-09-06), and macOS restarts a paused agent on demand, so the banner-drawing pair -- NotificationCenter and usernoted -- can come back inside a leg that began with both held stopped. Samples every WK_SCREEN_WATCH_SECONDS while the measured thing runs, with one `ps` for all forty-odd rather than a `pgrep` each: forty forks every ten seconds beside the thing being measured is a load of its own.
 _watch_restarted() {   # the must-not-run processes that are running again, comma-separated
     is_macos || return 0
     local listing want

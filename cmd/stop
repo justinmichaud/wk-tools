@@ -30,14 +30,11 @@ import sys
 ROOT = os.environ.get("WK_ROOT") or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "lib"))
 
-from wk import act, record, shell, status, targets  # noqa: E402
+from wk import act, decl, record, shell, status, targets  # noqa: E402
 from wk.act import Refused, confirm, die, info, log, warn  # noqa: E402
+from wk.machine import is_macos  # noqa: E402
 
 MACHINE = os.environ.get("WK_MACHINE", "wk")
-
-
-def is_macos():
-    return os.uname().sysname == "Darwin"
 
 
 def here():
@@ -138,9 +135,10 @@ def stop_everything(reg, keep_vm):
 
 
 def main(argv):
-    keep_vm = "--keep-vm" in argv
-    tasks = "--tasks" in argv
-    everywhere = "--all" in argv
+    args = decl.Args(decl.Decl(__file__), argv)
+    keep_vm = args.flag("--keep-vm")
+    tasks = args.flag("--tasks")
+    everywhere = args.flag("--all")
     name = os.environ.get("WK_NAME", "")
     reg = targets.Registry(ROOT)
     try:

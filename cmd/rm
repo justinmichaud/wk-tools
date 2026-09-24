@@ -24,16 +24,17 @@ import sys
 ROOT = os.environ.get("WK_ROOT") or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "lib"))
 
-from wk import record, targets, workspace  # noqa: E402
+from wk import decl, record, targets, workspace  # noqa: E402
 from wk.act import Refused, die  # noqa: E402
 
 
 def main(argv):
-    names = [a for a in argv if a != "--all"]
+    args = decl.Args(decl.Decl(__file__), argv)
+    names = args.positionals
     reg = targets.Registry(ROOT)
     records = record.Records(machine=reg.machine)
     try:
-        if "--all" in argv:
+        if args.flag("--all"):
             if names:
                 die("'--all' is every workspace there is, and '%s' is one of them:\n    one or the other." % names[0])
             return workspace.rm_all(reg, records)

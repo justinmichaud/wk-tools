@@ -72,7 +72,7 @@ class _Shared(WkTest):
         env.update({"WK_HOST_SECRETS": str(self.secrets), "WK_STORE": str(store),
                     "WK_NTFY_API": "http://127.0.0.1:1", "WK_YES": "1",
                     "WK_GITHUB_API": "http://127.0.0.1:1",
-                    "WK_TARGET_REGISTRY": str(self.tmp / "reg")})
+                    "WK_MACHINES_DIR": str(self.tmp / "reg")})
         (self.tmp / "reg").mkdir(exist_ok=True)
         return env
 
@@ -101,7 +101,7 @@ class _Shared(WkTest):
             wk.write_text(PEER_WK)
             wk.chmod(0o755)
             (reg / f"{name}.conf").write_text(
-                f"WK_REMOTE_HOST=fake-{name}\nWK_REMOTE_ROOT={root}\n"
+                f"KIND={'peer' if peer else 'build'}\nWK_REMOTE_HOST=fake-{name}\nWK_REMOTE_ROOT={root}\n"
                 + ("WK_REMOTE_PEER=1\n" if peer else ""))
         return {"WK_TEST_PEER_LOG": str(log)}
 

@@ -63,13 +63,28 @@ def declared_opts(path):
 ARM = re.compile(r"^\s*((?:--?[A-Za-z_][-A-Za-z0-9_]*(?:=\*)?\|?)+)\)")
 
 
+# A Python command reads an option through wk.decl.Args: `args.flag("--x")`, `.value(...)`, `.values(...)`.
+ARGS_READ = re.compile(r'\.(?:flag|value|values)\("(-{1,2}[a-z_][a-z_-]*)"\)')
+
+
+def literal_opts(text):
+    """Options a Python command matches in argv by hand: a literal tested for membership or equality."""
+    return set(re.findall(r'"(-{1,2}[a-z_][a-z_-]*=?)" in ', text) + re.findall(r'== "(-{1,2}[a-z_][a-z_-]*)"', text))
+
+
+def arms_file(path):
+    """lib/<cmd>-arms.sh: the bash a Python command hands its not yet ported verbs to, verbatim."""
+    return REPO / "lib" / (path.name + "-arms.sh")
+
+
 def code_opts(path):
-    """Every option the command's own code matches on: a bash `case` arm, or
-    a Python string literal tested for membership or equality."""
+    """Every option the command's own code reads: a bash `case` arm, or in
+    Python a read through wk.decl.Args or a literal matched by hand."""
     out = set()
     text = path.read_text()
     if text.startswith("#!/usr/bin/env python3"):
-        return set(re.findall(r'"(-{1,2}[a-z_][a-z_-]*=?)" in ', text) + re.findall(r'== "(-{1,2}[a-z_][a-z_-]*)"', text))
+        arms = arms_file(path)
+        return literal_opts(text) | set(ARGS_READ.findall(text)) | (code_opts(arms) if arms.is_file() else set())
     for line in text.splitlines():
         m = ARM.match(line)
         if not m:
@@ -265,7 +280,9 @@ class TestPromptsAndDestructiveDeclarationsAgree(unittest.TestCase):
 
     def test_every_prompting_helper_is_reached_from_a_destructive_command(self):
         destructive = self._destructive_cmds()
-        texts = {c: (REPO / "cmd" / c).read_text() for c in destructive}
+        texts = {c: (REPO / "cmd" / c).read_text()
+                 + (arms_file(REPO / "cmd" / c).read_text() if arms_file(REPO / "cmd" / c).is_file() else "")
+                 for c in destructive}
         offenders = []
         for d in self.HELPER_DIRS:
             for p in sorted((REPO / d).glob("*.sh")):

@@ -698,9 +698,11 @@ class TestTheCycleSaysWhatItIsDoing(WkTest):
         fn = (REPO / "lib" / "wk" / "status.py").read_text()
         self.assertIn('.verdict("capped")', fn)
         self.assertIn('"died"', fn)
-        lib = func_body((REPO / "lib" / "task.sh").read_text(), "task_verdict")
-        self.assertIn("task_alive", lib)
-        self.assertIn("died", lib)
+        self.assertIn("_task_py verdict", (REPO / "lib" / "task.sh").read_text())
+        lib = (REPO / "lib" / "wk" / "record.py").read_text()
+        verdict = lib[lib.index("    def verdict("):lib.index("    def running(")]
+        self.assertIn("self.alive(", verdict)
+        self.assertIn('"died"', verdict)
 
     def test_a_workspace_walk_asks_for_it_once_per_store(self):
         text = (REPO / "lib" / "wk" / "status.py").read_text()

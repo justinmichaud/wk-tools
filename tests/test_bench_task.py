@@ -1,13 +1,12 @@
 """Benchmark *tasks*: the unit `wk ab`, `wk pi bench` and `wk bench` produce
-and `wk bench ls`, `wk bench report` and `wk status` speak in (lib/bench.sh
-"tasks", lib/wkdata.py task_state).
+and `wk bench ls`, `wk bench report` and `wk status` speak in
+(lib/wk/bench/record.py; `wk bench`'s verbs in lib/wk/bench/cli.py).
 
-Unit tests build a synthetic task -- task.json plus runs whose env.json
-carries the round and arm `wk pi bench --ab` records -- and drive
-`lib/wkdata.py` exactly as cmd/bench, cmd/pi and cmd/status do: as a
-subprocess. No board, no workspace. The bash half (the task's lock deciding
-"running", `wk bench report <task>` through cmd/bench, the refusals) is
-exercised through ./wk against a scratch store.
+A synthetic task -- task.json plus runs whose env.json carries the round and
+arm `wk pi bench --ab` records -- read in-process against a scratch store and
+a fake registry: no board, no workspace, no machine asked. The fleet walk is
+driven through fake targets; two tests go through ./wk to hold the
+declaration (`ls` runs here, reads this store and starts nothing).
 
 Run: python3 -m unittest tests.test_bench_task -v
 """
@@ -16,28 +15,32 @@ import subprocess
 import sys
 import unittest
 
-from tests.support import REPO, WkTest, bash, func_body, run, scratch_dir, temp_store
+from tests.support import REPO, WkTest, bash, clean_env, run, scratch_dir, temp_store
+from tests.test_bench_report import in_process
 
-WKDATA = REPO / "lib" / "wkdata.py"
+sys.path.insert(0, str(REPO / "lib"))
+from wk.act import Refused  # noqa: E402
+from wk.bench import cli, record, report  # noqa: E402
+from wk.clock import FakeClock  # noqa: E402
+from wk.lock import Lock  # noqa: E402
+from wk import record as task_record  # noqa: E402
+from wk.machine import Local  # noqa: E402
+from wk.store import Store  # noqa: E402
+
 TASK = "20260830T120000Z-wpe-pr1725"
-
-
-def wkdata(*args, timeout=30):
-    return subprocess.run(["python3", str(WKDATA), *args], cwd=str(REPO),
-                          capture_output=True, text=True, timeout=timeout)
 
 
 def make_task(bench_dir, rounds=3, slots=("base", "pr1725"), name=TASK):
     d = bench_dir / name
-    cp = wkdata("task-write", str(d), f"task={name}", "requested=2026-08-30T12:00:00Z",
-                "subject.kind=pull", "subject.spec=wpe:1725",
-                "subject.head=afa2ed9e70103469f02732323fa7b874378d6a5d",
-                "subject.base=04abe09851b03b7ce6c8b9c208659c23a5ab7138",
-                "devices=rpi3=wpewebkit-2.38-buildroot-rpi3-32", "plans=speedometer2.1",
-                f"rounds={rounds}", "slots=" + ",".join(slots), "count=1", "timeout=1200",
-                "--command", "wk pi deploy wpewebkit-2.38-buildroot-rpi3-32 rpi3 --slot base",
-                "--command", f"wk pi bench rpi3 speedometer2.1 --ab base,pr1725 --rounds {rounds} --task {name}")
-    assert cp.returncode == 0, cp.stdout + cp.stderr
+    record.task_write(str(d), [
+        f"task={name}", "requested=2026-08-30T12:00:00Z",
+        "subject.kind=pull", "subject.spec=wpe:1725",
+        "subject.head=afa2ed9e70103469f02732323fa7b874378d6a5d",
+        "subject.base=04abe09851b03b7ce6c8b9c208659c23a5ab7138",
+        "devices=rpi3=wpewebkit-2.38-buildroot-rpi3-32", "plans=speedometer2.1",
+        f"rounds={rounds}", "slots=" + ",".join(slots), "count=1", "timeout=1200"],
+        ["wk pi deploy wpewebkit-2.38-buildroot-rpi3-32 rpi3 --slot base",
+         f"wk pi bench rpi3 speedometer2.1 --ab base,pr1725 --rounds {rounds} --task {name}"])
     return d
 
 
@@ -45,14 +48,13 @@ def add_run(task_dir, slot, rnd, arm, outcome, vals=(100.0, 102.0, 99.0)):
     """outcome: ok (result.json), failed (ended, no result), running (neither)."""
     d = task_dir / "runs" / f"20260830T12{rnd:02d}{'00' if arm == 'a' else '30'}Z-speedometer2.1-rpi3-{slot}"
     d.mkdir(parents=True)
-    fields = ["plan=speedometer2.1", "config=wpewebkit-2.38-buildroot-rpi3-32", "machine=rpi3",
-              f"build_slot={slot}", "webkit_sha=abcdef1234567890", "runner=browser", "arch=armv7l",
-              "bench_host=image", f"task={task_dir.name}", f"ab.round={rnd}", f"ab.arm={arm}",
-              "ab.slot_a=base", "ab.slot_b=pr1725"]
-    cp = wkdata("env-record", str(d / "env.json"), *fields)
-    assert cp.returncode == 0, cp.stdout + cp.stderr
+    record.write_env(str(d / "env.json"), [
+        "plan=speedometer2.1", "config=wpewebkit-2.38-buildroot-rpi3-32", "machine=rpi3",
+        f"build_slot={slot}", "webkit_sha=abcdef1234567890", "runner=browser", "arch=armv7l",
+        "bench_host=image", f"task={task_dir.name}", f"ab.round={rnd}", f"ab.arm={arm}",
+        "ab.slot_a=base", "ab.slot_b=pr1725"])
     if outcome != "running":
-        wkdata("env-record", str(d / "env.json"), "--update", "wall_time_s=400")
+        record.write_env(str(d / "env.json"), ["wall_time_s=400"], update=True)
     if outcome == "ok":
         (d / "result.json").write_text(json.dumps({"Speedometer-2": {"tests": {"Elm-TodoMVC": {
             "metrics": {"Time": {"Total": {"current": list(vals)}}}}}}}))
@@ -61,8 +63,47 @@ def add_run(task_dir, slot, rnd, arm, outcome, vals=(100.0, 102.0, 99.0)):
     return d
 
 
-def kv(text):
-    return dict(line.split("=", 1) for line in text.splitlines() if "=" in line)
+def status(d, running=False):
+    return dict(l.split("=", 1) for l in record.status_lines(record.task_state(str(d), running)))
+
+
+class FakeTarget:
+    def __init__(self, name, kind="remote", is_local=False, side="answering", rc=0, out=""):
+        self.name, self.kind, self.is_local = name, kind, is_local
+        self.side, self.rc, self.out = side, rc, out
+        self.asked = []
+
+    def probe(self):
+        return self.side, ""
+
+    def wk(self, *args, env=None, quiet=False):
+        self.asked.append((args, dict(env or {}), quiet))
+        return self.rc, self.out
+
+
+class FakeRegistry:
+    """What cli.Bench and record.Listing ask of targets.Registry: a store, the walk, and each target."""
+
+    def __init__(self, store_dir, targets=(), env=None):
+        self.env = dict(env or {}, WK_STORE=str(store_dir), WK_LOCK_DIR=str(store_dir / "locks"))
+        self.store = Store(self.env)
+        self.machine = Local()
+        self.targets = {t.name: t for t in targets}
+
+    def walk(self):
+        return list(self.targets)
+
+    def load(self, name):
+        if name not in self.targets:
+            raise LookupError("unknown target '%s'" % name)
+        return self.targets[name]
+
+    def ws_target(self, ws):
+        return {"cws": "container"}.get(ws, "vm")
+
+
+def bench(store_dir, targets=(), env=None):
+    return cli.Bench(REPO, FakeRegistry(store_dir, targets, dict(env or {}, WK_ROW_LABEL="here")), FakeClock())
 
 
 class TestTaskState(WkTest):
@@ -71,8 +112,7 @@ class TestTaskState(WkTest):
 
     def test_a_fresh_task_is_incomplete_with_nothing_run(self):
         with scratch_dir() as tmp:
-            d = make_task(tmp)
-            st = kv(wkdata("task-status", str(d)).stdout)
+            st = status(make_task(tmp))
             self.assertEqual(st["state"], "incomplete")
             self.assertEqual(st["planned"], "6")
             self.assertEqual(st["ended"], "0")
@@ -84,12 +124,12 @@ class TestTaskState(WkTest):
             d = make_task(tmp)
             add_run(d, "base", 1, "a", "ok")
             add_run(d, "pr1725", 1, "b", "running")
-            st = kv(wkdata("task-status", str(d), "--running").stdout)
+            st = status(d, running=True)
             self.assertEqual(st["state"], "running")
             self.assertIn("now speedometer2.1 rpi3 pr1725", st["summary"])
             self.assertIn("iteration 1/1", st["summary"])
             # The same files with no lock: a driver that died mid-run.
-            st = kv(wkdata("task-status", str(d)).stdout)
+            st = status(d)
             self.assertEqual(st["state"], "incomplete")
             self.assertIn("died with their driver", st["summary"])
 
@@ -98,7 +138,7 @@ class TestTaskState(WkTest):
             d = make_task(tmp, rounds=2)
             add_run(d, "base", 1, "a", "ok"); add_run(d, "pr1725", 1, "b", "ok")
             add_run(d, "base", 2, "a", "failed"); add_run(d, "pr1725", 2, "b", "ok")
-            st = kv(wkdata("task-status", str(d)).stdout)
+            st = status(d)
             self.assertEqual(st["state"], "complete")
             self.assertEqual(st["ended"], "4")
             self.assertEqual(st["failed"], "1")
@@ -106,21 +146,89 @@ class TestTaskState(WkTest):
 
     def test_task_write_refuses_a_task_missing_its_shape(self):
         with scratch_dir() as tmp:
-            cp = wkdata("task-write", str(tmp / "t"), "task=t", "requested=now", "plans=p", "slots=a")
-            self.assertNotEqual(cp.returncode, 0)
-            self.assertIn("devices is required", cp.stdout + cp.stderr)
+            with self.assertRaises(SystemExit) as e:
+                record.task_write(str(tmp / "t"), ["task=t", "requested=now", "plans=p", "slots=a"], [])
+            self.assertIn("devices is required", str(e.exception.code))
 
     def test_a_directory_without_task_json_is_not_a_task(self):
         with scratch_dir() as tmp:
             (tmp / "junk").mkdir()
-            cp = wkdata("task-status", str(tmp / "junk"))
-            self.assertNotEqual(cp.returncode, 0)
-            self.assertIn("no task.json", cp.stdout + cp.stderr)
+            with self.assertRaises(SystemExit) as e:
+                record.task_state(str(tmp / "junk"), False)
+            self.assertIn("no task.json", str(e.exception.code))
+
+    def test_the_cli_bash_callers_use_answers_the_same(self):
+        """`wkdata task-write` / `task-status`: what bench_task_new and the Mac lane call."""
+        with scratch_dir() as tmp:
+            d = tmp / "t"
+            wk = [sys.executable, str(REPO / "lib" / "wkdata.py")]
+            cp = subprocess.run(wk + ["task-write", str(d), "task=t", "requested=now", "devices=rpi3=p",
+                                      "plans=p", "rounds=1", "slots=a,b", "--command", "wk x"],
+                                capture_output=True, text=True, timeout=30)
+            self.assertEqual(cp.returncode, 0, cp.stderr)
+            cp = subprocess.run(wk + ["task-status", str(d)], capture_output=True, text=True, timeout=30)
+            self.assertIn("planned=2", cp.stdout, cp.stderr)
+            self.assertIn("subject=a vs b", cp.stdout)
+
+
+class TestOneRecord(WkTest):
+    """`unit bench.one_record[container]`: a workspace run's env.json, written
+    by the one writer with its provenance, is all `wk bench ls` and the report
+    read -- nothing else in the run directory is consulted."""
+
+    FIELDS = ["plan=jetstream3", "workspace=w", "config=jsc-release", "class=cpu", "runner=jsc",
+              "arch=native", "bench_host=container", "webkit_sha=0123456789abcdef", "count=4",
+              "host.kernel=6.8.0", "host.kernel_arch=x86_64", "host.cores=16",
+              "host.root_device=nvme0n1 (nvme, ssd, trim)", "cores.set=0-3", "configuration.aslr=off"]
+
+    def _run(self, task_dir, name, extra=(), score=(10.0, 11.0, 12.0, 13.0)):
+        d = task_dir / "runs" / name
+        d.mkdir(parents=True)
+        record.write_env(str(d / "env.json"), self.FIELDS + list(extra), bool_fields=["cores.pinned=0-3"])
+        record.write_env(str(d / "env.json"), ["wall_time_s=12"], update=True)
+        (d / "result.json").write_text(json.dumps({"JetStream3.0": {"tests": {"t": {"metrics": {
+            "Score": {"current": list(score)}}}}}}))
+        return d
+
+    def _task(self, tmp):
+        d = tmp / "20260901T000000Z-w"
+        record.task_write(str(d), ["task=20260901T000000Z-w", "requested=now", "subject.kind=workspace",
+                                   "subject.spec=w", "devices=container=jsc-release", "plans=jetstream3",
+                                   "rounds=1", "slots=w", "count=4"], ["wk bench w jetstream3"])
+        return d
+
+    def test_the_record_carries_its_provenance_and_the_default_axes(self):
+        with scratch_dir() as tmp:
+            env = json.loads((self._run(self._task(tmp), "r1") / "env.json").read_text())
+            self.assertEqual(env["host"]["root_device"], "nvme0n1 (nvme, ssd, trim)")
+            self.assertEqual(env["cores"], {"set": "0-3", "pinned": True})
+            self.assertEqual(env["wall_time_s"], "12")
+            self.assertEqual(env["configuration"]["aslr"], "off")
+            self.assertEqual(env["configuration"]["path_len"], 0, "an axis nobody set reads as uncontrolled")
+
+    def test_ls_reads_the_run_from_its_record_alone(self):
+        with scratch_dir() as tmp:
+            d = self._run(self._task(tmp), "r1")
+            (d / "run-1.log").write_text("Score: 999\n")
+            rows = record.ls_rows(str(tmp), where="tolken")
+            self.assertIn("w jsc-release · jetstream3  [tolken]", rows[0])
+            self.assertIn("complete  1/1 runs ended, 1 ok, 0 failed", rows[1])
+            self.assertTrue(rows[3].endswith("jetstream3 jsc-release jsc 0123456789 ok"), rows[3])
+
+    def test_compare_and_report_warn_from_the_records(self):
+        with scratch_dir() as tmp:
+            t = self._task(tmp)
+            a = self._run(t, "ra")
+            b = self._run(t, "rb", extra=["host.root_device=mmcblk0 (sd, rotational, no-trim)", "cores.set=4-7"])
+            cp = in_process(report.two_runs, [str(a)], [str(b)])
+            self.assertIn("different root storage", cp.stdout)
+            self.assertIn("different core pins (0-3 vs 4-7)", cp.stdout)
+            self.assertIn("aslr=off", cp.stdout)
 
 
 class TestTaskReport(WkTest):
-    """`wkdata.py task-report`: partial data reported as partial, paired
-    rounds only, one html per device x plan, named for the task."""
+    """The task report: partial data reported as partial, paired rounds only,
+    one html per device x plan, named for the task."""
 
     def test_partial_task_reports_usable_rounds_and_names_the_missing(self):
         with scratch_dir() as tmp:
@@ -131,7 +239,7 @@ class TestTaskReport(WkTest):
             add_run(d, "pr1725", 2, "b", "ok")
             add_run(d, "base", 3, "a", "ok", (100.5, 100.0, 99.5))
             add_run(d, "pr1725", 3, "b", "running")
-            cp = wkdata("task-report", str(d), "--running", "--html", "--text")
+            cp = in_process(report.task_report, str(d), True, html=True, text=True)
             self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
             out = cp.stdout
             self.assertIn("state     running", out)
@@ -154,7 +262,7 @@ class TestTaskReport(WkTest):
         with scratch_dir() as tmp:
             d = make_task(tmp)
             add_run(d, "base", 1, "a", "ok")
-            cp = wkdata("task-report", str(d), "--text")
+            cp = in_process(report.task_report, str(d), False, text=True)
             self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
             self.assertIn("no round has both arms yet", cp.stdout)
             self.assertIn("state     incomplete", cp.stdout)
@@ -162,114 +270,243 @@ class TestTaskReport(WkTest):
     def test_a_single_slot_task_is_not_an_ab(self):
         with scratch_dir() as tmp:
             d = make_task(tmp, rounds=1, slots=("base",), name="20260830T120000Z-rpi3-base")
-            cp = wkdata("task-report", str(d), "--text")
+            cp = in_process(report.task_report, str(d), False, text=True)
             self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
             self.assertIn("not an A/B", cp.stdout)
 
 
 class TestLs(WkTest):
-    """`wkdata.py ls`: every task, its state and each run's directory."""
+    """One store's rows: every task, its state and each run's directory."""
 
     def test_lists_tasks_with_run_paths_and_states(self):
         with scratch_dir() as tmp:
             d = make_task(tmp)
             a = add_run(d, "base", 1, "a", "ok")
             b = add_run(d, "pr1725", 1, "b", "failed")
-            cp = wkdata("ls", str(tmp), "--running", TASK)
-            self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-            lines = cp.stdout.splitlines()
+            lines = record.ls_rows(str(tmp), running={TASK})
             self.assertTrue(lines[0].startswith(TASK + "  A/B wpe:1725"), lines[0])
             self.assertIn("running", lines[1])
             self.assertIn(str(d), lines[2])
-            self.assertTrue(any(str(a) in l and l.rstrip().endswith("ok") for l in lines), cp.stdout)
-            self.assertTrue(any(str(b) in l and l.rstrip().endswith("failed") for l in lines), cp.stdout)
+            self.assertTrue(any(str(a) in l and l.rstrip().endswith("ok") for l in lines), lines)
+            self.assertTrue(any(str(b) in l and l.rstrip().endswith("failed") for l in lines), lines)
 
-    def test_an_empty_store_prints_nothing(self):
-        """One store's rows, so several can be concatenated into one listing:
-        the "no tasks anywhere" line belongs to the command that merged them
-        (cmd/bench), which is the only one that knows there were none."""
+    def test_an_empty_store_has_no_rows(self):
+        """The "no tasks anywhere" line belongs to the listing that merged the stores."""
         with scratch_dir() as tmp:
-            cp = wkdata("ls", str(tmp))
-            self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-            self.assertEqual(cp.stdout.strip(), "")
+            self.assertEqual(record.ls_rows(str(tmp)), [])
+            self.assertEqual(record.ls_rows(str(tmp / "absent")), [])
 
     def test_the_machine_holding_the_store_is_printed_against_each_task(self):
         with scratch_dir() as tmp:
             make_task(tmp)
-            cp = wkdata("ls", str(tmp), "--where", "moose")
-            self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-            self.assertIn("[moose]", cp.stdout.splitlines()[0])
+            self.assertIn("[moose]", record.ls_rows(str(tmp), where="moose")[0])
+            self.assertNotIn("[", record.ls_rows(str(tmp))[0])
 
-    def test_without_one_no_machine_is_claimed(self):
+
+class TestTheFleetListing(WkTest):
+    """`wk bench ls` walks the fleet: this store's rows first, then each target
+    whose machine answers for a store of its own, in walk order, asked through
+    its own wk with the label it is to print and no walk of its own."""
+
+    def listing(self, tmp, targets, warned):
+        return record.Listing(FakeRegistry(tmp, targets), str(tmp), lambda r: str(tmp / r),
+                              lambda path: False, "here", warned.append)
+
+    def test_each_answering_machine_adds_its_own_rows_after_this_stores(self):
         with scratch_dir() as tmp:
             make_task(tmp)
-            cp = wkdata("ls", str(tmp))
-            self.assertNotIn("[", cp.stdout.splitlines()[0])
+            moose = FakeTarget("moose", out="T-moose  x  [moose]\r\n    complete\n")
+            vm = FakeTarget("vm", kind="vm", out="T-vm  y  [here]\n")
+            rows = self.listing(tmp, [moose, vm], []).rows()
+            self.assertTrue(rows[0].startswith(TASK))
+            self.assertEqual(rows[-3:], ["T-moose  x  [moose]", "    complete", "T-vm  y  [here]"])
+            args, env, quiet = moose.asked[0]
+            self.assertEqual(args, ("bench", "ls", "--continued"))
+            self.assertEqual((env["WK_ROW_LABEL"], env["WK_NO_DELEGATE"]), ("moose", "1"))
+            self.assertEqual(vm.asked[0][1]["WK_ROW_LABEL"], "here", "a machine behind this one is labelled as this one")
+
+    def test_a_stopped_machine_is_named_with_its_remedy(self):
+        with scratch_dir() as tmp:
+            warned = []
+            self.assertEqual(self.listing(tmp, [FakeTarget("vm", kind="vm", side="stopped")], warned).rows(), [])
+            self.assertIn("'wk start' brings it up", warned[0])
+
+    def test_one_that_does_not_answer_the_listing_is_named(self):
+        with scratch_dir() as tmp:
+            warned = []
+            self.listing(tmp, [FakeTarget("moose", rc=2)], warned).rows()
+            self.assertIn("wk sync --tools moose", warned[0])
+
+    def test_one_with_no_store_of_its_own_is_not_asked(self):
+        with scratch_dir() as tmp:
+            quiet = [FakeTarget("c", kind="container", side="none"), FakeTarget("far", side="unreachable")]
+            warned = []
+            self.assertEqual(self.listing(tmp, quiet, warned).rows(), [])
+            self.assertEqual(warned, [])
+            self.assertEqual([t.asked for t in quiet], [[], []])
+
+
+class TestTheVerbs(WkTest):
+    """`wk bench ls` and `report <task>` / `report <run-a> <run-b>` over a
+    scratch store: the lock decides running, and the refusals name their remedy."""
+
+    def store(self, s):
+        bench_dir = s["path"] / "bench"
+        bench_dir.mkdir()
+        d = make_task(bench_dir)
+        add_run(d, "base", 1, "a", "ok", (100.0, 101.0, 99.0))
+        add_run(d, "pr1725", 1, "b", "ok", (95.0, 96.0, 94.0))
+        return d
+
+    def test_ls_lists_the_store_and_says_where_each_task_is(self):
+        with temp_store() as s:
+            self.store(s)
+            cp = in_process(bench(s["path"]).ls, False)
+            self.assertIn(TASK, cp.stdout)
+            self.assertIn("[here]", cp.stdout.splitlines()[0])
+            self.assertIn("incomplete", cp.stdout, "no lock is held, so the task is not running")
+            self.assertIn("each task is on the machine that took it", cp.stderr)
+
+    def test_a_continued_listing_is_rows_alone(self):
+        with temp_store() as s:
+            self.store(s)
+            cp = in_process(bench(s["path"]).ls, True)
+            self.assertIn(TASK, cp.stdout)
+            self.assertEqual(cp.stderr, "")
+
+    def test_an_empty_fleet_says_so(self):
+        with temp_store() as s:
+            cp = in_process(bench(s["path"]).ls, False)
+            self.assertEqual(cp.stdout, "")
+            self.assertIn("(no tasks on any machine this one knows)", cp.stderr)
+
+    def test_report_reads_the_task_and_writes_its_html_into_it(self):
+        with temp_store() as s:
+            d = self.store(s)
+            cp = in_process(bench(s["path"]).report, [TASK], True, False)
+            self.assertIn("rounds: 1 usable of 1 attempted (3 planned)", cp.stdout)
+            self.assertTrue((d / "report-rpi3-speedometer2.1.html").exists())
+
+    def test_a_held_lock_makes_the_task_running(self):
+        with temp_store() as s:
+            self.store(s)
+            b = bench(s["path"])
+            lock = Lock(b.reg.store, Local(), FakeClock())
+            with lock.held("bench-task-" + TASK):
+                self.assertIn("state     running", in_process(b.report, [TASK], "", True).stdout)
+                self.assertIn("    running", in_process(b.ls, True).stdout)
+
+    def test_two_run_directories_need_no_task(self):
+        with temp_store() as s:
+            d = self.store(s)
+            runs = sorted(str(p) for p in (d / "runs").iterdir())
+            cp = in_process(bench(s["path"]).report, runs, "", False)
+            self.assertIn("Elm-TodoMVC", cp.stdout)
+            rel = sorted("%s/runs/%s" % (TASK, p.name) for p in (d / "runs").iterdir())
+            self.assertIn("Elm-TodoMVC", in_process(bench(s["path"]).compare, rel, "").stdout,
+                          "a run is also named relative to the store")
+
+    def test_a_run_of_one_iteration_is_warned_about(self):
+        with temp_store() as s:
+            d = self.store(s)
+            runs = sorted((d / "runs").iterdir())
+            for r in runs:
+                record.write_env(str(r / "env.json"), ["count=1"], update=True)
+            cp = in_process(bench(s["path"]).report, [str(r) for r in runs], "", False)
+            self.assertIn("has count=1: no p-value can be computed", cp.stderr)
+
+    def test_the_refusals_name_their_remedy(self):
+        with temp_store() as s:
+            self.store(s)
+            b = bench(s["path"])
+            for args, said in ((([TASK], "out.html", False), "--html takes no file here"),
+                               ((["nosuch-task"], "", False), "stays on the machine that took it"),
+                               ((["/nowhere", "/nowhere"], "", False), "no such run in -a: /nowhere"),
+                               ((["a", "b"], True, False), "writes where it is told: --html out.html"),
+                               (([], "", False), "usage: wk bench report")):
+                with self.subTest(args=args):
+                    err = refusal(b.report, *args)
+                    self.assertIn(said, err)
+            self.assertIn("usage: wk bench compare", refusal(b.compare, ["one"], ""))
+            self.assertIn("usage: wk bench precision", refusal(b.precision, ["one"], "0.3"))
+            self.assertIn("is not a percentage", refusal(b.precision, ["a", "b"], "lots"))
+
+    def test_an_unknown_task_names_the_fleet_rows_that_do(self):
+        with temp_store() as s:
+            (s["path"] / "bench").mkdir()
+            other = FakeTarget("moose", out="T-elsewhere  x  [moose]\n")
+            self.assertIn("    T-elsewhere  x  [moose]", refusal(bench(s["path"], [other]).report, ["T-elsewhere"], "", False))
+
+
+def refusal(fn, *args):
+    """What a verb that refuses says on stderr; it must refuse."""
+    import contextlib
+    import io
+    err = io.StringIO()
+    with contextlib.redirect_stderr(err), contextlib.redirect_stdout(io.StringIO()):
+        try:
+            fn(*args)
+        except Refused:
+            return err.getvalue()
+    raise AssertionError("%s did not refuse" % fn.__name__)
+
+
+class TestWhere(WkTest):
+    """Where each Python verb runs: seed where its workspace's store is, ls
+    where it was typed and --continued in this machine's store."""
+
+    def test_each_verb_answers_where_it_runs(self):
+        with scratch_dir() as tmp:
+            reg = FakeRegistry(tmp)
+            self.assertEqual(cli.where(reg, ["ls"]), "local")
+            self.assertEqual(cli.where(reg, ["ls", "--continued"]), "store")
+            self.assertEqual(cli.where(reg, ["seed", "cws", "jetstream3"]), "workspace")
+            self.assertEqual(cli.where(reg, ["seed", "guest", "jetstream3"]), "host")
+            self.assertEqual(cli.where(reg, ["report", "t"]), "host")
+
+    def test_a_workspace_no_target_answers_for_is_asked_for_here(self):
+        with scratch_dir() as tmp:
+            reg = FakeRegistry(tmp)
+
+            def nowhere(ws):
+                raise LookupError(ws)
+            reg.ws_target = nowhere
+            self.assertEqual(cli.where(reg, ["seed", "gone", "p"]), "host")
 
 
 class TestThroughWk(WkTest):
-    """The bash half against a scratch store: `wk bench ls` and `wk bench
-    report <task>` read the task the way `wk ab` writes it, the lock decides
-    running, and the refusals name their remedy."""
+    """Through ./wk: the dispatcher reaches the Python verbs, with the options
+    it normalised, and the unported arms still reach bash."""
 
     def test_bench_ls_and_report_read_a_task_in_the_store(self):
         with temp_store() as store:
-            bench = store["path"] / "bench"
-            bench.mkdir()
-            d = make_task(bench)
+            bench_dir = store["path"] / "bench"
+            bench_dir.mkdir()
+            d = make_task(bench_dir)
             add_run(d, "base", 1, "a", "ok", (100.0, 101.0, 99.0))
             add_run(d, "pr1725", 1, "b", "ok", (95.0, 96.0, 94.0))
-            env = {"WK_STORE": store["WK_STORE"], "WK_LOCK_DIR": str(store["path"] / "locks")}
+            env = {"WK_STORE": store["WK_STORE"], "WK_LOCK_DIR": str(store["path"] / "locks"), "WK_TARGET": "local"}
             ls = run("bench", "ls", env=env, timeout=60)
             self.assertEqual(ls.returncode, 0, ls.stdout)
             self.assertIn(TASK, ls.stdout)
-            self.assertIn("incomplete", ls.stdout, "no lock is held, so the task is not running")
-            rep = run("bench", "report", TASK, "--html", env=env, timeout=60)
+            self.assertNotIn("starting podman machine", ls.stdout)
+            rep = run("bench", "report", TASK, "--text", env=env, timeout=60)
             self.assertEqual(rep.returncode, 0, rep.stdout)
             self.assertIn("rounds: 1 usable of 1 attempted (3 planned)", rep.stdout)
-            self.assertTrue((d / "report-rpi3-speedometer2.1.html").exists())
-            # Two run directories, the form every other lane uses, still work
-            # -- and a run directory is what `wk bench ls` prints.
             runs = sorted(str(p) for p in (d / "runs").iterdir())
-            two = run("bench", "report", runs[0], runs[1], env=env, timeout=60)
+            html = store["path"] / "two.html"
+            two = run("bench", "report", runs[0], runs[1], "--html", str(html), env=env, timeout=60)
             self.assertEqual(two.returncode, 0, two.stdout)
-            self.assertIn("Elm-TodoMVC", two.stdout)
+            self.assertTrue(html.exists(), two.stdout)
 
-    def test_a_held_lock_makes_the_task_running(self):
-        with temp_store() as store:
-            bench = store["path"] / "bench"
-            bench.mkdir()
-            d = make_task(bench)
-            add_run(d, "base", 1, "a", "ok")
-            lock_dir = store["path"] / "locks"
-            # hold_lock in a process that stays alive while `wk bench ls` looks.
-            cp = bash(f'''
-                . lib/common.sh
-                WK_LOCK_DIR={lock_dir}
-                hold_lock bench-task-{TASK}
-                WK_STORE={store["WK_STORE"]} WK_LOCK_DIR={lock_dir} ./wk bench ls
-                WK_STORE={store["WK_STORE"]} WK_LOCK_DIR={lock_dir} ./wk bench report {TASK} --text
-            ''', timeout=60)
-            self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-            self.assertIn("running", cp.stdout)
-            self.assertIn("state     running", cp.stdout)
-
-    def test_report_refuses_an_unknown_task_and_names_the_remedy(self):
-        with temp_store() as store:
-            (store["path"] / "bench").mkdir()
-            cp = run("bench", "report", "nosuch-task", env={"WK_STORE": store["WK_STORE"]}, timeout=60)
-            self.assertNotEqual(cp.returncode, 0)
-            self.assertIn("no such task", cp.stdout)
-            self.assertIn("wk bench ls", cp.stdout)
-
-    def test_task_html_takes_no_file(self):
-        with temp_store() as store:
-            bench = store["path"] / "bench"
-            bench.mkdir()
-            make_task(bench)
-            cp = run("bench", "report", TASK, "--html", "out.html", env={"WK_STORE": store["WK_STORE"]}, timeout=60)
-            self.assertNotEqual(cp.returncode, 0)
-            self.assertIn("--html takes no file here", cp.stdout)
+    def test_an_unported_arm_still_runs_in_bash(self):
+        with scratch_dir() as tmp:
+            cp = run("bench", "staged", "--ls", env={"WK_BENCH_ROOT": str(tmp)}, timeout=60)
+            if sys.platform == "darwin":
+                self.assertEqual(cp.returncode, 0, cp.stdout)
+                self.assertIn("nothing staged on", cp.stdout)
+            else:
+                self.assertIn("is macOS bench mode", cp.stdout)
 
     def test_pi_bench_refuses_an_unknown_task_before_any_board(self):
         with temp_store() as store:
@@ -299,40 +536,19 @@ class TestThroughWk(WkTest):
         self.assertIn("nothing to detach", cp.stdout)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class TestReadingTasksStartsNothing(WkTest):
-    """`wk bench ls` was declared `where=workspace`, so on a macOS host it was
-    handed to the podman VM -- which meant reading a store with no tasks in it,
-    and, because it was not declared read-only, **booting a 20GB VM to do it**.
-    Running the test suite started the machine that way.
-
-    It walks the fleet now, so it meets the VM again as one machine among
-    several; what must not come back is the boot."""
+    """`wk bench ls` walks the fleet from where it is typed and reads a store
+    without starting the machine that holds it."""
 
     def _decl(self, key):
         text = (REPO / "cmd" / "bench").read_text()
         return [l for l in text.splitlines() if l.startswith("# wk:") and key in l]
 
-    def _where(self, *args):
-        cp = subprocess.run([str(REPO / "cmd" / "bench"), "--where", *args],
-                            capture_output=True, text=True, timeout=120,
-                            env={"WK_ROOT": str(REPO), "HOME": "/tmp",
-                                 "PATH": "/usr/bin:/bin:/usr/sbin:/sbin"})
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        return cp.stdout.strip()
-
-    def test_a_walk_runs_where_it_was_typed(self):
-        """It reads this machine's store and then asks every other machine,
-        so it is this machine's command and not one store's."""
-        self.assertEqual(self._where("ls"), "local")
-
-    def test_answering_another_machines_walk_reads_this_machines_store(self):
-        """--continued is the half a walk asked for, so it is the store's --
-        the podman VM's on a macOS workstation, like any other read of it."""
-        self.assertEqual(self._where("ls", "--continued"), "store")
+    def test_cmd_bench_answers_where_itself(self):
+        cp = subprocess.run([str(REPO / "cmd" / "bench"), "--where", "ls", "--continued"],
+                            capture_output=True, text=True, timeout=60,
+                            env={"WK_ROOT": str(REPO), "HOME": "/tmp", "PATH": "/usr/bin:/bin:/usr/sbin:/sbin"})
+        self.assertEqual((cp.returncode, cp.stdout.strip()), (0, "store"), cp.stderr)
 
     def test_report_and_compare_still_read_one_store(self):
         host = [l for l in self._decl("where=host") if l.startswith("# wk: sub ")]
@@ -343,45 +559,10 @@ class TestReadingTasksStartsNothing(WkTest):
 
     def test_ls_is_declared_read_only(self):
         """The dispatcher starts the podman machine for anything that forwards
-        and is not read-only (`wk`, the forward path). Reading a list of tasks
-        is not a reason to boot a VM."""
+        and is not read-only. Reading a list of tasks is not a reason to boot a VM."""
         ro = self._decl("readonly")
         self.assertTrue(ro, "cmd/bench no longer declares anything read-only")
         self.assertIn("ls", ro[0].split()[-1].split(","), ro[0])
-
-    def test_it_reads_the_store_it_is_pointed_at(self):
-        """With the declaration wrong this needed WK_IN_VM=1 to stay on this
-        host. Nothing sets it now, so this fails if the forward comes back."""
-        with temp_store() as store:
-            bench = store["path"] / "bench"
-            bench.mkdir()
-            make_task(bench)
-            cp = run("bench", "ls", env={"WK_STORE": store["WK_STORE"]}, timeout=300)
-            self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-            self.assertIn(TASK, cp.stdout)
-            self.assertNotIn("starting podman machine", cp.stdout + cp.stderr)
-
-    def test_the_listing_names_the_machine_each_task_is_on(self):
-        """A measurement is recorded once, on the machine that took it; the
-        listing is merged on every read rather than copied between machines,
-        so a reader is told which machine to go to."""
-        with temp_store() as store:
-            bench = store["path"] / "bench"
-            bench.mkdir()
-            make_task(bench)
-            cp = run("bench", "ls", env={"WK_STORE": store["WK_STORE"]}, timeout=300)
-            self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-            row = [l for l in cp.stdout.splitlines() if l.startswith(TASK)]
-            self.assertTrue(row, cp.stdout)
-            self.assertRegex(row[0], r"\[[^\]]+\]$")
-
-    def test_a_task_no_machine_has_is_refused_with_where_to_look(self):
-        with temp_store() as store:
-            (store["path"] / "bench").mkdir()
-            cp = run("bench", "report", "nosuchtask",
-                     env={"WK_STORE": store["WK_STORE"]}, timeout=300)
-            self.assertNotEqual(cp.returncode, 0, cp.stdout)
-            self.assertIn("stays on the machine that took it", cp.stdout)
 
 
 class TestArtifactsLandWhereTheMachineCanReadThem(WkTest):
@@ -408,18 +589,18 @@ class TestArtifactsLandWhereTheMachineCanReadThem(WkTest):
 . "{REPO}/lib/common.sh"
 . "{REPO}/lib/store.sh"
 . "{REPO}/lib/bench.sh"
-. "{REPO}/lib/task.sh"
 . "{REPO}/lib/profiler.sh"
 echo "RECORD=$(wk_record_dir)"
 echo "ARTIFACT=$(wk_artifact_dir)"
 echo "BENCH=$BENCH_DIR"
-echo "TASK=$(task_root)"
 echo "SEED=$SEED_DIR"
 echo "RUNNER=$RUNNER_DIR"
 echo "SAMPLY=$(samply_store_dir aarch64-apple-darwin)"
 ''', env=env)
         assert cp.returncode == 0, cp.stdout + cp.stderr
-        return dict(l.split("=", 1) for l in cp.stdout.strip().splitlines())
+        out = dict(l.split("=", 1) for l in cp.stdout.strip().splitlines())
+        out["TASK"] = str(task_record.Records(env=clean_env(env)).root)   # what lib/task.sh writes through
+        return out
 
     def test_a_writable_store_keeps_them(self):
         with scratch_dir() as tmp:
@@ -483,86 +664,3 @@ ensure_dir "$(bench_task_dir probe)/runs" >/dev/null && echo MADE
                 text = (REPO / rel).read_text()
                 self.assertIn("store.bench_dir()", text)
                 self.assertNotIn('record_dir(), "bench"', text)
-
-
-class TestAStageThatCannotFinishLeavesNothing(WkTest):
-    """A stage delivers gigabytes and writes its manifest last, so a failure in
-    between leaves a directory that nothing can run and nothing reclaims.
-    Measured 2026-09-06: a payload path that did not exist on the staging
-    machine left 5.6 GB with no stage.json on the benchmark volume."""
-
-    def test_a_payload_that_is_not_there_is_refused_before_anything_is_copied(self):
-        body = func_body((REPO / "cmd" / "bench").read_text(), "cmd_stage")
-        refusal = body.index("no such payload directory")
-        self.assertLess(refusal, body.index("the build product"),
-                        "the payloads are checked before the products are pulled")
-        self.assertIn("Nothing has been staged", body)
-
-    def test_the_refusal_is_made_once_and_not_in_the_copy_loop(self):
-        body = func_body((REPO / "cmd" / "bench").read_text(), "cmd_stage")
-        self.assertEqual(body.count("no such payload directory"), 1)
-
-    def test_a_half_made_stage_goes_with_the_command_that_failed(self):
-        text = (REPO / "cmd" / "bench").read_text()
-        self.assertIn("wk_atexit stage_drop_half", func_body(text, "cmd_stage"))
-        drop = func_body(text, "stage_drop_half")
-        self.assertIn("stage.json", drop, "what makes it usable is what it checks for")
-        self.assertIn("rm -rf", drop)
-
-    def _drop(self, make):
-        return bash('. "$WK_ROOT/lib/common.sh"\n'
-                    + func_body((REPO / "cmd" / "bench").read_text(), "stage_drop_half")
-                    .join(["stage_drop_half() {", "}\n"])
-                    + 'd=$(mktemp -d); _WK_STAGE_HALF="$d"\n'
-                    + make +
-                    'stage_drop_half 2>/dev/null\n'
-                    '[ -d "$d" ] && echo KEPT || echo GONE\n'
-                    'rm -rf "$d"\n')
-
-    def test_the_cleanup_keeps_a_stage_that_finished(self):
-        cp = self._drop('echo "{}" > "$d/stage.json"\n')
-        self.assertIn("KEPT", cp.stdout, cp.stdout + cp.stderr)
-
-    def test_the_cleanup_removes_one_that_did_not(self):
-        cp = self._drop('mkdir -p "$d/WebKitBuild"\n')
-        self.assertIn("GONE", cp.stdout, cp.stdout + cp.stderr)
-
-
-class TestAStageWorksOnACleanTree(WkTest):
-    """It recorded which wk-tools staged the build with a trailing `&&`, whose
-    status became the assignment's. On a clean checkout that test is false, so
-    `wk bench stage` ended at exit 1 having printed nothing -- on every properly
-    deployed machine, and succeeding only where the tree happened to be dirty.
-    Measured 2026-09-06: two stages onto the benchmark volume left gigabytes of
-    products and no manifest."""
-
-    def _record(self, dirty):
-        """The real block, lifted, with cmd/version's answer stubbed."""
-        body = func_body((REPO / "cmd" / "bench").read_text(), "cmd_stage")
-        block = 'if [ -n "$tools_ver" ]; then' \
-                + body.split('if [ -n "$tools_ver" ]; then')[1].split("\n    fi")[0] \
-                + "\n    fi\n"
-        return bash('set -euo pipefail\n'
-                    'kv_get() { sed -n "s/^$1=//p"; }\n'
-                    f'tools_ver="sha=abc\ndirty={dirty}"\n'
-                    'wk_tools=unknown\n'
-                    + block
-                    + 'echo "wk_tools=$wk_tools"\n')
-
-    def test_a_clean_tree_records_its_sha_and_carries_on(self):
-        cp = self._record("no")
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertIn("wk_tools=abc", cp.stdout)
-
-    def test_a_dirty_tree_says_so(self):
-        cp = self._record("yes")
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertIn("wk_tools=abc+dirty", cp.stdout)
-
-    def test_the_record_is_not_built_by_a_trailing_and(self):
-        """The shape that caused it: a `&&` list whose status becomes the
-        assignment's, under `set -e`."""
-        body = func_body((REPO / "cmd" / "bench").read_text(), "cmd_stage")
-        for line in body.splitlines():
-            if "wk_tools=" in line and "kv_get" in line:
-                self.assertNotIn("&&", line, line)

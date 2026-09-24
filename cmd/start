@@ -17,7 +17,7 @@ import sys
 ROOT = os.environ.get("WK_ROOT") or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "lib"))
 
-from wk import act, shell, targets  # noqa: E402
+from wk import act, secrets, shell, targets  # noqa: E402
 from wk.act import Refused, die, info, log  # noqa: E402
 
 MACHINE = os.environ.get("WK_MACHINE", "wk")
@@ -47,7 +47,7 @@ def start_everything(reg):
             act.act(["podman", "machine", "start", MACHINE], stdout=subprocess.DEVNULL)
         else:
             act.debug("ok: machine already running")
-    shell.run(ROOT, "push_agent_pat_converge_machine")
+    secrets.Secrets(ROOT).pat_converge_machine()
     stopped = (shell.in_machine(ROOT, STOPPED) or "").split()
     if stopped:
         for n in stopped:

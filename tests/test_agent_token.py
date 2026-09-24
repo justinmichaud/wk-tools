@@ -14,13 +14,16 @@ Three targets, three deliveries, one path in the workspace:
     container   a symlink onto the read-only /secrets mount -- live, so a
                 rotation reaches every container without rebuilding one
     macOS guest a copy written by the host on every start
-    build box   a copy written by `wk remote setup`
+    build box   a copy written by `wk machine setup`
 
 Nothing here uses a real token: the value is a placeholder string, and what is
 under test is the plumbing, never the credential.
 
 Run: python3 -m unittest tests.test_agent_token -v
 """
+import contextlib
+import inspect
+import io
 import os
 import re
 import shutil
@@ -34,11 +37,11 @@ from types import SimpleNamespace
 from unittest import mock
 
 from tests.support import func_body
-from tests.support import assert_guest_start_converges, REPO, WkTest, bash, stub_path
+from tests.support import assert_guest_start_converges, guest_step, REPO, WkTest, bash, stub_path
 from tests.test_pi_agent import FILE_ROWS, TABLE, VALUE_ROWS, store_path
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import targets  # noqa: E402
+from wk import guest, targets  # noqa: E402
 from wk.machine import Local, Result  # noqa: E402
 
 RC = REPO / "shell" / "bashrc"
@@ -61,7 +64,7 @@ REMOTE_ROWS = delivered_to("remote", VALUE_ROWS)
 PLACEHOLDER = "placeholder-value-for-this-test"
 
 EDITED = (
-    "cmd/key", "cmd/remote", "lib/store.sh", "lib/common.sh",
+    "lib/store.sh", "lib/common.sh",
     "shell/bashrc", "container/firstrun.sh", "targets/vm.sh",
     "vm/shell-rc.sh", "vm/provision-base.sh",
 )
@@ -347,7 +350,7 @@ class TestEveryTargetDeliversIt(unittest.TestCase):
         of them is half a delivery. Both arms call one `_converge_guest`,
         which writes the credentials once."""
         assert_guest_start_converges(self, '_write_agent_secrets "$name" "$ip"')
-        self.assertIn("umask 077", (REPO / "targets" / "vm.sh").read_text())
+        self.assertIn("umask 077", inspect.getsource(guest.Guest.write_agent_secrets))
 
     def test_one_reader_serves_every_secret_here(self):
         """A deploy key and an agent credential are the same read -- a file in
@@ -374,32 +377,31 @@ class TestEveryTargetDeliversIt(unittest.TestCase):
     def test_every_writer_loops_the_one_table(self):
         """A name added to wk_agent_secrets reaches all three targets with
         nothing else to change, so none of them may name a row of its own."""
-        for f in ("container/firstrun.sh", "targets/vm.sh", "cmd/remote"):
+        for f in ("container/firstrun.sh", "lib/wk/guest.py"):
             text = (REPO / f).read_text()
             with self.subTest(script=f):
-                self.assertIn("wk_agent_secrets", text)
+                self.assertRegex(text, r"(wk_|\.)agent_secrets\b")
                 self.assertNotIn(".wk-agent-token", text)
 
     def test_the_token_is_never_an_argument(self):
         """An argument is in `ps` for everyone on the machine. Every writer
         takes it on stdin instead."""
-        for f in ("cmd/key", "cmd/remote", "lib/store.sh", "targets/vm.sh"):
+        for f in ("lib/wk/key.py", "lib/wk/machine_cmd.py", "lib/store.sh", "lib/wk/guest.py"):
             text = (REPO / f).read_text()
             with self.subTest(script=f):
                 self.assertNotIn("--token", text)
                 self.assertNotIn("echo $_tok", text)
                 self.assertNotIn("echo \"$_agent_tok\"", text)
         # The guest's copy is streamed, never quoted into the command.
-        self.assertIn('| _ssh "$ip" "umask 077 && cat > \\$HOME/$(sh_quote "$shome")"',
-                      (REPO / "targets" / "vm.sh").read_text())
+        self.assertIn('''["sh", "-c", 'umask 077 && cat > "$HOME/$1"', "sh", home_path], input=value + "\\n"''',
+                      inspect.getsource(guest.Guest.write_agent_secrets))
 
     def test_a_build_box_streams_it_rather_than_asking_for_stdin_back(self):
-        """`_rsh_q` is `ssh -n` -- stdin from /dev/null -- so a value piped
-        into it lands as an empty file while the command reports success.
-        The credential goes through `_rsh`, which is the one wrapper with a
-        stdin. Driven by TestABuildBoxGetsThem below; this is the shape."""
-        text = (REPO / "cmd" / "remote").read_text()
-        self.assertIn('| _rsh "umask 077 && cat > \\$HOME/$(sh_quote "$_shome")"', text)
+        """`ssh -n` gives the far side /dev/null, so a value piped into it lands
+        as an empty file while the command reports success. The credential is
+        the run's `input`. Driven by TestABuildBoxGetsThemAtSetup below; this is the shape."""
+        text = (REPO / "lib" / "wk" / "machine_cmd.py").read_text()
+        self.assertIn('act_run(["sh", "-c", "umask 077 && cat > %s" % dest], input=value + "\\n")', text)
 
     def test_the_old_credentials_file_is_gone(self):
         """It was Linux-only and needed a `claude login` from inside a
@@ -511,7 +513,7 @@ class _Delivery(WkTest):
 
 
 class TestAGuestGetsThemOnStart(_Delivery):
-    """targets/vm.sh's _write_agent_secrets, the real function: a guest mounts
+    """lib/wk/guest.py's write_agent_secrets, the real step: a guest mounts
     nothing of ours, so it holds a copy of every *value* row, written by the
     host on every start and taken away again the moment the store has none.
     The file row is the class below."""
@@ -521,13 +523,7 @@ class TestAGuestGetsThemOnStart(_Delivery):
             env = self._env(store, home,
                             {"PATH": f"{binp}:{os.environ['PATH']}",
                              "WK_VM_STORE": str(self.tmp / "vmstore")})
-            return bash('''
-. "$WK_ROOT/lib/common.sh"
-. "$WK_ROOT/lib/store.sh"
-. "$WK_ROOT/lib/target.sh"
-load_target vm >/dev/null 2>&1
-_write_agent_secrets demo 1.2.3.4
-''', env=env)
+            return guest_step(env, "write_agent_secrets")
 
     def test_every_value_row_in_the_store_lands_in_the_guest(self):
         home = self._home()
@@ -576,37 +572,22 @@ _write_agent_secrets demo 1.2.3.4
 
 
 class TestABuildBoxGetsThemAtSetup(_Delivery):
-    """cmd/remote's credential block, lifted and run against a fake machine.
+    """`wk machine setup`'s credential step (lib/wk/machine_cmd.py), run against a fake ssh.
 
-    The measured defect this holds shut: the block used `_rsh_q`, which is
-    `ssh -n` -- stdin from /dev/null -- so the file landed EMPTY and the
-    command still reported that it had written the token."""
-
-    BLOCK = None
-
-    @classmethod
-    def setUpClass(cls):
-        text = (REPO / "cmd" / "remote").read_text()
-        start = text.index("while read -r _sname _ _shome _ _skind _sdelivery; do")
-        end = text.index("unset _sname _shome _sval")
-        cls.BLOCK = text[start:end]
+    The measured defect this holds shut: a value handed to `ssh -n` -- stdin
+    from /dev/null -- landed as an EMPTY file while the command still reported
+    that it had written the token."""
 
     def _setup(self, store, home):
+        from wk import machine_cmd
         with stub_path({"ssh": FAKE_SSH}) as binp:
-            env = self._env(store, home,
-                            {"PATH": f"{binp}:{os.environ['PATH']}",
-                             "WK_REMOTE_HOST": "fakebox"})
-            return bash(f'''
-. "$WK_ROOT/lib/common.sh"
-. "$WK_ROOT/lib/store.sh"
-. "$WK_ROOT/lib/target.sh"
-# Through load_target, not by sourcing the driver: it is what records this
-# machine's own store in $WK_STORE_DEFAULT before the driver points $WK_STORE
-# at the remote root, and the credentials are in the former.
-load_target remote >/dev/null 2>&1
-r_host=fakebox
-{self.BLOCK}
-''', env=env)
+            env = self._env(store, home, {"PATH": f"{binp}:{os.environ['PATH']}"})
+            err = io.StringIO()
+            with mock.patch.dict(os.environ, env), contextlib.redirect_stderr(err):
+                # The credentials are in this machine's store (WK_STORE_DEFAULT), not the target's remote root.
+                t = targets.Remote("fakebox", str(REPO), dict(os.environ), Local())
+                machine_cmd.Machines(REPO, env=dict(os.environ)).credentials(t, "fakebox")
+        return SimpleNamespace(returncode=0, stdout="", stderr=err.getvalue())
 
     def test_the_credential_arrives_with_its_bytes(self):
         home = self._home()
@@ -696,7 +677,8 @@ class TestAGuestMountsTheShare(_Delivery):
 
     def test_the_guest_boots_with_the_share_and_the_base_without(self):
         vm = (REPO / "targets" / "vm.sh").read_text()
-        self.assertIn('--dir="$WK_VM_AGENT_RW_SHARE:$(wk_agent_rw_dir)"', func_body(vm, "_boot"))
+        self.assertIn('"--dir=%s:%s" % (vm.agent_rw_share, agent_rw)', inspect.getsource(guest.boot))
+        self.assertIn("agent_rw_dir()", inspect.getsource(guest.boot))
         self.assertNotIn("--dir", func_body(vm, "_start_base"))
 
     def test_the_rc_is_told_where_the_share_is_by_the_driver(self):
@@ -734,13 +716,7 @@ class TestAGuestMountsTheShare(_Delivery):
             env = self._env(store, home,
                             {"PATH": f"{binp}:{os.environ['PATH']}",
                              "WK_VM_STORE": str(self.tmp / "vmstore")})
-            return bash('''
-. "$WK_ROOT/lib/common.sh"
-. "$WK_ROOT/lib/store.sh"
-. "$WK_ROOT/lib/target.sh"
-load_target vm >/dev/null 2>&1
-_write_agent_secrets demo 1.2.3.4
-''', env=env)
+            return guest_step(env, "write_agent_secrets")
 
     def _wired_home(self, mounted):
         home = self._home()
@@ -766,7 +742,7 @@ _write_agent_secrets demo 1.2.3.4
 
 
 class TestAGuestIsNeverGivenACopyOfTheFileRow(_Delivery):
-    """targets/vm.sh's _write_agent_secrets, the real function: a credential
+    """lib/wk/guest.py's write_agent_secrets, the real step: a credential
     its own tool rewrites in place is never copied into a guest, whatever this
     machine's store holds. A copy would be a second holder whose first refresh
     invalidates the bytes every other holder shares; the guest reads the
@@ -785,13 +761,7 @@ class TestAGuestIsNeverGivenACopyOfTheFileRow(_Delivery):
             env = self._env(store, home,
                             {"PATH": f"{binp}:{os.environ['PATH']}",
                              "WK_VM_STORE": str(self.tmp / "vmstore")})
-            return bash('''
-. "$WK_ROOT/lib/common.sh"
-. "$WK_ROOT/lib/store.sh"
-. "$WK_ROOT/lib/target.sh"
-load_target vm >/dev/null 2>&1
-_write_agent_secrets demo 1.2.3.4
-''', env=env)
+            return guest_step(env, "write_agent_secrets")
 
     def test_a_store_that_holds_one_still_delivers_nothing(self):
         home = self._home()
@@ -834,7 +804,7 @@ _write_agent_secrets demo 1.2.3.4
     def test_the_rule_is_the_delivery_column_and_not_a_name(self):
         """So a credential added to wk_agent_secrets reaches the targets its
         row names, and no others, without an edit in any driver."""
-        vm = (REPO / "targets" / "vm.sh").read_text()
+        vm = (REPO / "lib" / "wk" / "guest.py").read_text()
         for row in FILE_ROWS:
             with self.subTest(name=row[0]):
                 self.assertNotIn(row[0], vm, row[0])

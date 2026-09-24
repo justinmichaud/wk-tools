@@ -14,10 +14,15 @@ re-add is a decision, not a drift.
 Run: python3 -m unittest tests.test_wk_overrides_lib -v
 """
 import os
+import sys
 import unittest
 from pathlib import Path
 
 from tests.support import REPO, WkTest, fake_workspace, stub_path
+
+sys.path.insert(0, str(REPO / "lib"))
+from wk import resources  # noqa: E402
+from wk.machine import Fake  # noqa: E402
 
 
 def _src(*parts):
@@ -38,29 +43,30 @@ class TestRemovedOverridesStayRemoved(unittest.TestCase):
         self.assertNotIn("WK_SWEEP_TIMEOUT", _src("lib", "reach.sh"))
 
     def test_fleet_conf_ssh_names_not_overridable(self):
-        """boot/machines/*.conf: a fleet device is renamed by editing the
+        """machines/*.conf: a fleet device is renamed by editing the
         conf, not by an environment variable nothing sets."""
-        self.assertNotIn("WK_RPI3_SSH", _src("boot", "machines", "rpi3.conf"))
-        self.assertNotIn("WK_RPI4_SSH", _src("boot", "machines", "rpi4.conf"))
-        mbp = _src("boot", "machines", "mbp.conf")
+        self.assertNotIn("WK_RPI3_SSH", _src("machines", "rpi3.conf"))
+        self.assertNotIn("WK_RPI4_SSH", _src("machines", "rpi4.conf"))
+        mbp = _src("machines", "mbp.conf")
         self.assertNotIn("WK_MAC_SSH", mbp)
         self.assertNotIn("WK_MAC_BENCH_SSH", mbp)
-        # WK_BENCH_VOLUME survives: tests/test_host_only.py drives it.
-        self.assertIn("WK_BENCH_VOLUME", mbp)
+        # WK_BENCH_VOLUME survives, in code: tests/test_host_only.py drives it.
+        self.assertNotIn("WK_BENCH_VOLUME", mbp)
+        self.assertIn("WK_BENCH_VOLUME", _src("lib", "wk", "fleet.py"))
 
 
 class TestSharedTimingDefaultsAgree(unittest.TestCase):
-    """CLAUDE.md: 'same name read in several files: one default.' lib/detach.sh
-    and lib/watchdog.sh both read WK_HEARTBEAT_SECONDS and WK_STALL_SECONDS,
-    and must agree on the default."""
+    """CLAUDE.md: 'same name read in several files: one default.' The watched run and the far-side poll read
+    WK_STALL_SECONDS and WK_HEARTBEAT_SECONDS in lib/wk/job.py alone, and no bash file restates them."""
 
-    def test_stall_and_heartbeat_seconds_share_one_default(self):
-        detach = _src("lib", "detach.sh")
-        watchdog = _src("lib", "watchdog.sh")
-        self.assertIn("WK_STALL_SECONDS:-300", detach)
-        self.assertIn("WK_STALL_SECONDS:-300", watchdog)
-        self.assertIn("WK_HEARTBEAT_SECONDS:-300", detach)
-        self.assertIn("WK_HEARTBEAT_SECONDS:-300", watchdog)
+    def test_stall_and_heartbeat_seconds_have_one_default(self):
+        for rel in ("detach.sh", "watchdog.sh"):
+            text = _src("lib", rel)
+            self.assertNotIn("WK_STALL_SECONDS:-", text, rel)
+            self.assertNotIn("WK_HEARTBEAT_SECONDS:-", text, rel)
+        job = _src("lib", "wk", "job.py")
+        self.assertEqual(2, job.count('"WK_STALL_SECONDS", 300'))
+        self.assertEqual(2, job.count('"WK_HEARTBEAT_SECONDS", 300'))
 
 
 class TestSshTimeoutReadInOnePlace(unittest.TestCase):
@@ -104,8 +110,6 @@ echo PASS
 . "$WK_ROOT/lib/common.sh"
 printf 'id=bench-2026-01\\nprofile=webkit-2.52\\n' > "$WK_IMAGE_MARKER"
 [ "$(wk_image_id)" = "bench-2026-01" ] || { echo "id: $(wk_image_id)"; exit 1; }
-[ "$(wk_image_profile)" = "webkit-2.52" ] || { echo "profile: $(wk_image_profile)"; exit 1; }
-in_bench_mode || { echo "in_bench_mode should be true"; exit 1; }
 echo PASS
 ''',
             env={"WK_IMAGE_MARKER": str(marker)},
@@ -224,51 +228,23 @@ echo PASS
         self.assertIn("PASS", cp.stdout, cp.stdout + cp.stderr)
 
     def test_wk_cgroup_mb_clamps_available_memory(self):
-        cp = self.bash('''
-. "$WK_ROOT/lib/common.sh"
-. "$WK_ROOT/lib/resources.sh"
-unset WK_AVAIL_MB
-WK_CGROUP_MB=1
-[ "$(avail_mem_mb)" = 1 ] || { echo "got $(avail_mem_mb)"; exit 1; }
-echo PASS
-''')
-        self.assertIn("PASS", cp.stdout, cp.stdout + cp.stderr)
+        fake = Fake()
+        fake.files["/proc/meminfo"] = "MemAvailable:   20480000 kB\n"
+        self.assertEqual(1, resources.Resources(fake, {"WK_CGROUP_MB": "1"}, "linux").avail_mem_mb())
 
     def test_wk_reserve_cores_and_mb_shrink_the_envelope(self):
-        cp = self.bash('''
-. "$WK_ROOT/lib/common.sh"
-. "$WK_ROOT/lib/resources.sh"
-WK_RESERVE_CORES=3
-hc=$(host_cores)
-want=$(( hc - 3 )); [ "$want" -lt 1 ] && want=1
-got=$(envelope_cores)
-[ "$got" = "$want" ] || { echo "cores: got $got want $want"; exit 1; }
-
-WK_RESERVE_MB=4096
-hm=$(host_mem_mb)
-want=$(( hm - 4096 )); [ "$want" -lt 2048 ] && want=$(( hm / 2 ))
-got=$(envelope_mem_mb)
-[ "$got" = "$want" ] || { echo "mb: got $got want $want"; exit 1; }
-echo PASS
-''')
-        self.assertIn("PASS", cp.stdout, cp.stdout + cp.stderr)
+        fake = Fake()
+        fake.answer(["nproc"], out="16\n")
+        fake.files["/proc/meminfo"] = "MemTotal:       32768000 kB\n"
+        r = resources.Resources(fake, {"WK_RESERVE_CORES": "3", "WK_RESERVE_MB": "4096", "HOME": "/h"}, "linux")
+        self.assertEqual((13, 32000 - 4096), (r.envelope_cores(), r.envelope_mem_mb()))
 
     def test_wk_headless_reserve_cores_and_mb_apply_when_headless(self):
-        cp = self.bash(
-            '''
-. "$WK_ROOT/lib/common.sh"
-. "$WK_ROOT/lib/resources.sh"
-mkdir -p "$WK_STORE"
-touch "$WK_STORE/.headless"
-WK_HEADLESS_RESERVE_CORES=0
-WK_HEADLESS_RESERVE_MB=111
-[ "$(reserve_cores)" = 0 ] || { echo "cores: $(reserve_cores)"; exit 1; }
-[ "$(reserve_mb)" = 111 ] || { echo "mb: $(reserve_mb)"; exit 1; }
-echo PASS
-''',
-            env={"WK_STORE": str(self.tmp / "store")},
-        )
-        self.assertIn("PASS", cp.stdout, cp.stdout + cp.stderr)
+        fake = Fake()
+        fake.files["/s/.headless"] = ""
+        r = resources.Resources(fake, {"WK_STORE": "/s", "WK_HEADLESS_RESERVE_CORES": "0",
+                                       "WK_HEADLESS_RESERVE_MB": "111"}, "linux")
+        self.assertEqual((0, 111), (r.reserve_cores(), r.reserve_mb()))
 
 
 class TestStoreLib(WkTest):
@@ -331,25 +307,6 @@ in_remote_host || { echo "should be true once the marker exists"; exit 1; }
 echo PASS
 ''',
             env={"WK_REMOTE_MARKER": str(self.tmp / "remote-marker")},
-        )
-        self.assertIn("PASS", cp.stdout, cp.stdout + cp.stderr)
-
-    def test_wk_ready_wait_bounds_wait_ready_polling(self):
-        cp = self.bash(
-            '''
-. "$WK_ROOT/lib/common.sh"
-. "$WK_ROOT/lib/target.sh"
-WK_READY_WAIT=1
-ws_state() { echo creating; }
-ws_creating_now() { return 0; }
-ws_create_task() { echo /nonexistent-wk-test-task; }
-task_stage() { echo create; }
-out=$(wait_ready somews 2>&1) && rc=0 || rc=$?
-[ "$rc" != 0 ] || { echo "expected nonzero rc, got 0: $out"; exit 1; }
-printf '%s' "$out" | grep -q "after 1s" || { echo "no WK_READY_WAIT in the message: $out"; exit 1; }
-echo PASS
-''',
-            timeout=15,
         )
         self.assertIn("PASS", cp.stdout, cp.stdout + cp.stderr)
 
@@ -420,7 +377,8 @@ class TestTargetsVm(WkTest):
     """One process, one big script: every top-level WK_VM_*/WK_HOST_* default
     in targets/vm.sh is a plain `${VAR:-default}` assignment or a pure
     function, so sourcing the file (no tart, no VM, no network) is enough to
-    prove every override reaches the variable it names."""
+    prove every override reaches the variable it names. lib/wk/guest.py's own
+    are tests/test_guest.py's."""
 
     def test_vm_driver_overrides(self):
         store = self.tmp / "vmstore"
@@ -431,8 +389,6 @@ WK_VM_IMAGE=custom-image:1
 WK_VM_BASE=custom-base
 WK_VM_MAX=5
 WK_VM_USER=customuser
-WK_VM_SUBNET=10.0.0
-WK_VM_PROXY_PORT=9999
 WK_VM_DISK_GB=111
 WK_VM_DISPLAY=800x600
 WK_HOST_FREE_WARN_GB=50
@@ -444,8 +400,6 @@ chk "$WK_VM_IMAGE" custom-image:1 WK_VM_IMAGE
 chk "$WK_VM_BASE" custom-base WK_VM_BASE
 chk "$WK_VM_MAX" 5 WK_VM_MAX
 chk "$WK_VM_USER" customuser WK_VM_USER
-chk "$WK_VM_SUBNET" 10.0.0 WK_VM_SUBNET
-chk "$WK_VM_PROXY_PORT" 9999 WK_VM_PROXY_PORT
 chk "$WK_VM_DISK_GB" 111 WK_VM_DISK_GB
 chk "$WK_VM_DISPLAY" 800x600 WK_VM_DISPLAY
 chk "$WK_HOST_FREE_WARN_GB" 50 WK_HOST_FREE_WARN_GB
@@ -456,10 +410,6 @@ WK_VM_CPUS=7;      chk "$(_vm_cpus)" 7 WK_VM_CPUS
 WK_VM_MEM_MB=2222; chk "$(_vm_mem_mb)" 2222 WK_VM_MEM_MB
 WK_VM_BASE_CPUS=3;      chk "$(_base_cpus)" 3 WK_VM_BASE_CPUS
 WK_VM_BASE_MEM_MB=4444; chk "$(_base_mem_mb)" 4444 WK_VM_BASE_MEM_MB
-WK_VM_PROXY_ADDR=203.0.113.9; chk "$(_proxy_addr)" 203.0.113.9 WK_VM_PROXY_ADDR
-
-WK_VM_UNFILTERED=1 _softnet_flags >/dev/null 2>&1
-[ $? = 0 ] || { echo "FAIL WK_VM_UNFILTERED: nonzero exit"; exit 1; }
 
 # A refusal is `die`, which is a bare `exit` -- run each one in a subshell
 # so that exit ends the subshell, not this whole test script.

@@ -1,11 +1,12 @@
 """Build performance fixes: JSC-only configs ask ccache for explicitly
-(lib/wk/buildconf.py), and cmd/sudo requires visudo outright rather than
-falling back to a second lookup path. A workspace's WebKitBuild being a
+(lib/wk/buildconf.py), and lib/wk/sudo.py requires visudo outright rather
+than falling back to a second lookup path. A workspace's WebKitBuild being a
 bind-mounted plain directory is tests/test_wk_targets.py's.
 
 Run: python3 -m unittest tests.test_build_perf -v
 """
-import re
+import contextlib
+import io
 import sys
 import unittest
 
@@ -13,6 +14,9 @@ from tests.support import REPO, WkTest, fake_workspace
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk import buildconf  # noqa: E402
+from wk.act import Refused  # noqa: E402
+from wk.machine import Fake  # noqa: E402
+from wk.sudo import Sudo  # noqa: E402
 
 
 # --------------------------------------------------------------------------- #
@@ -63,24 +67,29 @@ class TestJscConfigsUseCcache(WkTest):
 
 
 # --------------------------------------------------------------------------- #
-# Item 4: cmd/sudo requires visudo outright -- no second, hardcoded lookup
-# path tried only when `have visudo` fails.
+# Item 4: lib/wk/sudo.py requires visudo outright -- no second, hardcoded
+# lookup path tried only when the first one fails.
 # --------------------------------------------------------------------------- #
 
-class TestSudoRequiresVisudo(WkTest):
-    def test_no_have_visudo_fallback(self):
-        """static: cmd/sudo no longer branches on `have visudo` with a second lookup"""
-        text = (REPO / "cmd" / "sudo").read_text()
-        self.assertNotIn("have visudo", text)
+class TestSudoRequiresVisudo(unittest.TestCase):
+    """lib/wk/sudo.py's Sudo._visudo_resolve requires visudo outright -- one
+    `which visudo` through the Machine, no second, hardcoded lookup path
+    tried only when that fails."""
 
-    def test_visudo_resolve_refuses_outright_when_absent(self):
-        """visudo_resolve dies naming visudo/sudo when it is not on PATH"""
-        text = (REPO / "cmd" / "sudo").read_text()
-        m = re.search(r"(?ms)^visudo_resolve\(\).*?^\}", text)
-        self.assertIsNotNone(m, "visudo_resolve not found in cmd/sudo")
-        body = m.group(0)
-        self.assertNotIn("/usr/sbin/visudo", body, "a second, hardcoded lookup path is still there")
-        self.assertIn("visudo", body)
+    def test_no_hardcoded_fallback_path(self):
+        text = (REPO / "lib" / "wk" / "sudo.py").read_text()
+        self.assertNotIn("/usr/sbin/visudo", text, "a second, hardcoded lookup path is still there")
+
+    def test_absent_visudo_refuses_outright_naming_the_remedy(self):
+        """checked before anything else in setup(): no verdict probe, no
+        write, runs before the refusal."""
+        f = Fake("here")
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf), self.assertRaises(Refused):
+            Sudo(f, {}).setup()
+        self.assertIn("visudo", buf.getvalue())
+        self.assertIn("sudo", buf.getvalue())
+        self.assertEqual(f.effects, [("run", ("which", "visudo"))])
 
 
 if __name__ == "__main__":

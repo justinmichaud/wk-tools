@@ -252,11 +252,11 @@ class TestBashReadsWhatPythonWrote(RecordTest):
         cp = bash('''
 . "$WK_ROOT/lib/common.sh"; . "$WK_ROOT/lib/store.sh"; . "$WK_ROOT/lib/task.sh"
 d="%s"
-printf '%%s|%%s|%%s\\n' "$(task_field "$d" kind)" "$(task_steps "$d" | tr '\\t\\n' ':,')" "$(task_verdict "$d")"
+printf '%%s|%%s\\n' "$(task_field "$d" kind)" "$(task_verdict "$d")"
 task_end "$d" 0
 ''' % t.path, env={"WK_STORE": str(self.tmp / "store"), "XDG_STATE_HOME": str(self.tmp / "state")})
         self.assertEqual(cp.returncode, 0, cp.stderr)
-        self.assertEqual(cp.stdout.strip(), "build|1:done,2:running,|running")
+        self.assertEqual(cp.stdout.strip(), "build|running")
         self.assertEqual(t.verdict(), "ok")
 
     def test_python_reads_what_the_bash_library_wrote(self):
@@ -275,6 +275,9 @@ printf '%%s' "$d"
 
 
 class TestHoldFollowsHolder(RecordTest):
+    """`unit record.hold_follows_holder`: a hold is released only when its holder is provably gone, an unreadable
+    holder keeps it, and no child process inherits one."""
+
     def setUp(self):
         super().setUp()
         self.machine = Fake()
@@ -314,8 +317,15 @@ class TestHoldFollowsHolder(RecordTest):
         self.assertEqual(self.holders(), [t.id])
 
     def test_a_hold_names_the_pid_that_took_it(self):
+        """`unit record.hold_names_its_taker`: one path, whichever language takes the hold, and the pid on the
+        record before the claim is the taker's -- for a bash caller its own shell, not the Python it ran."""
         t = self.held(1001)
         self.assertEqual(t.field("pid"), "1001")
+        cp = bash('''. "$WK_ROOT/lib/common.sh"; . "$WK_ROOT/lib/task.sh"
+d=$(task_begin --holds device:rpi3 bench here rpi3 "k" /l one)
+printf '%s %s' "$$" "$(task_field "$d" pid)"''', env={"WK_STORE": str(self.tmp / "store")})
+        shell, pid = cp.stdout.split()
+        self.assertEqual(shell, pid, cp.stderr)
 
     def test_a_workspace_pid_cannot_hold(self):
         with self.assertRaises(ValueError):

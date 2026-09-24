@@ -1,5 +1,5 @@
 """The host side of the macOS A/B lane: `bench/mac-ab.sh`'s refusals and the
-boot driver (`boot/mac-volume.sh`) that reports the Mac from another machine.
+boot driver (`lib/wk/boot/mac.py`) that reports the Mac from another machine.
 
 Neither needs a Mac to be exercised. Every decision here is a shell function
 whose one input is what the Mac answered, so each test lifts the function and
@@ -15,10 +15,11 @@ import unittest
 
 from tests.support import (REPO, WkTest, bash, func_body, requires_machine,
                            scratch_dir, temp_store)
+from tests.test_mac_volume import mac_board
+from wk.machine import Result
 
 MACAB = REPO / "bench" / "mac-ab.sh"
-DRIVER = REPO / "boot" / "mac-volume.sh"
-MBP = REPO / "boot" / "machines" / "mbp.conf"
+MBP = REPO / "machines" / "mbp.conf"
 
 # Measured on tolken 2026-09-08: the firmware's boot-volume already names the
 # bench volume group, which is what makes the restart need no human.
@@ -225,7 +226,7 @@ phase_go
 
 
 class TestThePinnedDisplayIsConfig(WkTest):
-    """The expectation is one line of `boot/machines/<machine>.conf`, and a
+    """The expectation is one line of `machines/<machine>.conf`, and a
     plant without it would let two runs at different resolutions compare."""
 
     def test_mbp_declares_the_bench_installs_measured_mode(self):
@@ -242,7 +243,7 @@ class TestThePinnedDisplayIsConfig(WkTest):
         with scratch_dir() as tmp:
             (tmp / "fakemac.conf").write_text(
                 'NODE_SSH="wk-test-no-such-host.invalid"\n'
-                "NODE_DRIVER=mac-volume\n"
+                "KIND=mac\nNODE_DRIVER=mac-volume\n"
                 "NODE_ROLE=workstation\n"
                 "NODE_OS=any\n"
                 'NODE_VOLUME="WK Bench"\n'
@@ -459,83 +460,13 @@ NODE_BENCH_SSH=fakemac-bench
         cp = self._driver('if b_probeable; then echo YES; else echo NO; fi')
         self.assertEqual(cp.stdout.strip(), "YES", cp.stdout + cp.stderr)
 
-    def test_ssh_answering_with_no_marker_is_host_mode(self):
-        cp = self._driver('m_ssh() { printf "READY\\n"; }\n'
-                          'b_probe; printf "%s|%s" "$MODE" "$MODE_CHANNEL"')
-        self.assertEqual(cp.stdout, "host|host", cp.stdout + cp.stderr)
-
-    def test_a_marker_on_the_answering_install_is_bench_mode(self):
-        cp = self._driver('m_ssh() { printf "perf-macos-tolken-2026-08\\nREADY\\n"; }\n'
-                          'b_probe; printf "%s" "$MODE"')
-        self.assertEqual(cp.stdout, "bench perf-macos-tolken-2026-08",
-                         cp.stdout + cp.stderr)
-
-    def test_no_answer_is_unreachable_and_not_unknown(self):
-        cp = self._driver('m_ssh() { return 255; }\n'
-                          'b_probe; printf "%s|%s" "$MODE" "$MODE_CHANNEL"')
-        self.assertEqual(cp.stdout, "unreachable|none", cp.stdout + cp.stderr)
-
-    def _silent_media(self, store):
-        return self._driver('m_ssh() { return 255; }\nb_media',
-                            env={"WK_STORE": store})
-
-    def test_a_bench_answer_reports_the_medium_as_that_installs_own_root(self):
-        cp = self._driver('MODE_CHANNEL=bench\nNODE_BENCH_SSH=fakemac-bench\nb_media')
-        self.assertIn("fakemac-bench is running from it", cp.stdout)
-        self.assertIn("under no /Volumes path", cp.stdout)
-
-    def test_silence_on_both_nodes_names_both_of_them(self):
-        """Silence was two states one reading could not separate, while that
-        install joined nothing. It answers as its own node now, so silence is
-        neither install and says so."""
-        with temp_store() as store:
-            cp = self._silent_media(store["WK_STORE"])
-            self.assertIn("neither fakemac nor fakemac-bench answers", cp.stdout)
-            self.assertNotIn("measuring", cp.stdout)
-
-    def test_the_newest_planted_task_is_the_one_reported(self):
-        with temp_store() as store:
-            for stamp in ("20260901T000000Z", "20260908T010203Z"):
-                d = store["path"] / "bench" / (stamp + "-mbp-mac-ab")
-                d.mkdir(parents=True)
-                (d / "job.json").write_text("{}")
-            cp = self._driver('m_ssh() { return 255; }\nb_evidence',
-                              env={"WK_STORE": store["WK_STORE"]})
-            self.assertIn("20260908T010203Z", cp.stdout)
-            self.assertNotIn("20260901T000000Z", cp.stdout)
-
-    def test_evidence_off_the_mac_says_what_it_cannot_see(self):
-        with temp_store() as store:
-            cp = self._driver('m_ssh() { return 255; }\nb_evidence',
-                              env={"WK_STORE": store["WK_STORE"]})
-            self.assertIn("booted_volume=unknown", cp.stdout)
-            self.assertIn("firmware_default=unknown", cp.stdout)
-            self.assertIn("bench_display=builtin 1470x956", cp.stdout)
-            self.assertIn("planted_job=none", cp.stdout)
-
-    def test_evidence_over_ssh_reads_the_same_facts_as_it_does_locally(self):
-        stub = ("m_ssh() { return 0; }\n"
-                "mv_wkmac() {\n"
-                "    case \"$1\" in\n"
-                "        volume-name)  printf 'Macintosh HD' ;;\n"
-                "        boot-volume)  printf 'a:b:" + BENCH_GROUP + "' ;;\n"
-                "        volume-group) case \"$2\" in\n"
-                "                          /) printf '" + HOST_GROUP + "' ;;\n"
-                "                          *) printf '" + BENCH_GROUP + "' ;;\n"
-                "                      esac ;;\n"
-                "    esac\n"
-                "}\nb_evidence\n")
-        cp = self._driver(stub)
-        self.assertIn("booted_volume=Macintosh HD", cp.stdout)
-        self.assertIn("attached at /Volumes/WK Bench", cp.stdout)
-        self.assertIn("a plain reboot is expected to enter bench mode", cp.stdout)
-
     def test_nothing_about_the_mac_is_stored_between_reads(self):
         """Every fact above is recomputed; the only file the driver keeps is
         the record of a person's arming."""
-        text = DRIVER.read_text()
+        text = (REPO / "lib" / "wk" / "boot" / "mac.py").read_text()
         self.assertNotIn("cache", text.lower())
-        self.assertEqual(text.count("NODE_RECORD="), 1)
+        self.assertEqual(1, text.count('lead=("mac-record.sh",)'))
+
 
 
 class TestTheMeasuredInstallIsReachedOnItsOwnNode(WkTest):
@@ -555,42 +486,6 @@ NODE_VOLUME="WK Bench"
 . "$WK_ROOT/boot/mac-volume.sh"
 """
 
-    MARKED = 'i_ssh() { printf "perf-macos-tolken-2026-08\\n"; }\n'
-    SILENT_HOST = "m_ssh() { return 255; }\n"
-
-    def _probe(self, script, env=None):
-        return bash(self.PRE + script
-                    + 'b_probe; printf "%s|%s" "$MODE" "$MODE_CHANNEL"', env=env)
-
-    def test_the_bench_node_answering_with_a_marker_is_bench_mode(self):
-        cp = self._probe(self.SILENT_HOST + self.MARKED)
-        self.assertEqual("bench perf-macos-tolken-2026-08|bench",
-                         cp.stdout, cp.stdout + cp.stderr)
-
-    def test_a_node_answering_without_the_marker_is_not_this_mac(self):
-        """The marker is the whole of the identification: a node that answers
-        on that name and carries none is some other computer, and reporting it
-        as the benchmark install is how a lane reads the wrong machine."""
-        cp = self._probe(self.SILENT_HOST + 'i_ssh() { printf ""; }\n')
-        self.assertEqual("unreachable|none", cp.stdout, cp.stdout + cp.stderr)
-
-    def test_neither_node_answering_is_unreachable(self):
-        cp = self._probe(self.SILENT_HOST + "i_ssh() { return 255; }\n")
-        self.assertEqual("unreachable|none", cp.stdout, cp.stdout + cp.stderr)
-
-    def test_host_mode_is_asked_first_and_settles_it(self):
-        """Both installs share one address under --host, and then the one that
-        answers is the one carrying the marker."""
-        cp = self._probe('m_ssh() { printf "READY\\n"; }\n'
-                         'i_ssh() { echo SECOND-CHANNEL >&2; return 255; }\n')
-        self.assertEqual("host|host", cp.stdout, cp.stdout + cp.stderr)
-        self.assertNotIn("SECOND-CHANNEL", cp.stderr)
-
-    def test_a_machine_that_declares_no_bench_node_is_not_reached_for(self):
-        cp = self._probe("NODE_BENCH_SSH=\n" + self.SILENT_HOST
-                         + 'i_ssh() { echo SECOND-CHANNEL >&2; return 255; }\n')
-        self.assertEqual("unreachable|none", cp.stdout, cp.stdout + cp.stderr)
-        self.assertNotIn("SECOND-CHANNEL", cp.stderr)
 
     def _ssh_line(self, script="", env=None):
         """i_ssh (boot/machines.sh) with `ssh` stubbed: the command line the
@@ -619,27 +514,6 @@ NODE_VOLUME="WK Bench"
         self.assertIn("somewhere-else", line)
         self.assertNotIn("fakemac-bench", line)
 
-    def test_a_reboot_from_the_bench_side_is_refused_with_the_reason(self):
-        """`wk boot mbp --back` reaches this once bench mode is reachable. The
-        helper is on the host install and nowhere else, so the refusal must
-        name that rather than report a helper that is missing."""
-        cp = bash(self.PRE + 'MODE_CHANNEL=bench\n'
-                  'mv_priv() { echo USED-THE-HELPER; }\nb_reboot\n')
-        self.assertNotEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertIn("carries no boot helper", cp.stderr)
-        self.assertNotIn("USED-THE-HELPER", cp.stdout)
-
-    def test_nothing_is_staged_onto_a_running_measurement(self):
-        """The staging root read on the bench channel names the install that is
-        measuring, so a delivery there would replace the lane under the job."""
-        for fn in ("b_bench_put_file /dev/null /var/wk/x", "b_bench_put /tmp /var/wk"):
-            with self.subTest(fn=fn):
-                cp = bash(self.PRE + 'MODE_CHANNEL=bench\n'
-                          'm_ssh() { echo WROTE; }\n' + fn + "\n")
-                self.assertNotEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-                self.assertIn("running measurement", cp.stderr)
-                self.assertNotIn("WROTE", cp.stdout)
-
     def test_the_staging_root_and_the_home_answer_on_that_channel(self):
         cp = bash(self.PRE + 'MODE_CHANNEL=bench\n'
                   'printf "%s %s" "$(b_bench_root)" "$(b_bench_home)"')
@@ -665,12 +539,22 @@ NODE_VOLUME="WK Bench"
                 self.assertNotIn("host-mode verb", body)
 
 
+def driver_root(channel):
+    """The staging root lib/wk/boot/mac.py resolves for mbp on `channel`, off a FakeMac."""
+    fake, d = mac_board("mac-volume")
+    if channel == "bench":
+        fake.enter_bench()
+    d.probe()
+    return d.bench_root()
+
+
 class TestCollectReadsARunFromBenchMode(WkTest):
     """`--collect` with the Mac still in bench mode. The whole of phase_collect
-    runs against a stand-in for that install: the staging root is resolved by
-    the real `b_bench_root`, and the stub rewrites the prefix it answers onto a
-    directory here -- so both channels read one tree through one code path and
-    the only difference is the prefix, which is the claim."""
+    runs against a stand-in for that install: the staging root is what the
+    driver (lib/wk/boot/mac.py) resolves on that channel of a FakeMac, and the
+    stub rewrites that prefix onto a directory here -- so both channels read
+    one tree through one code path and the only difference is the prefix,
+    which is the claim."""
 
     #  <scratch>/WK Bench - Data/private/var/wk  is the volume as host mode
     #  reaches it, and  /var/wk  is the same bytes as the install itself does.
@@ -700,21 +584,18 @@ NODE_NAME=mbp
 NODE_SSH=fakemac
 NODE_BENCH_SSH=fakemac-bench
 NODE_VOLUME="WK Bench"
-. "$WK_ROOT/boot/mac-volume.sh"
 MACHINE=mbp
 VOLUME="WK Bench"
 MODE_CHANNEL=%s
 MODE="bench perf-macos-tolken-2026-08"
 BROOT=""
-mac_volume_present() { [ "$MODE_CHANNEL" = host ]; }
-mac_volume_data_path() { printf '%%s' %s; }
+ROOT=%s
+VOL=%s
+b_bench_root() { printf '%%s' "$ROOT"; }
 # ssh joins its arguments into one remote command line, and this is that shell.
-# The rewrite is the bench channel's alone: in host mode the path the driver
-# builds is already this directory, and rewriting it would nest it in itself.
 r_ssh() {
     local c="$*"
-    if [ "$MODE_CHANNEL" = bench ]; then c="${c//\\/var\\/wk/%s}"; fi
-    bash -c "$c"
+    bash -c "${c//"$ROOT"/"$VOL"}"
 }
 bench_root() {%s}
 mac() {%s}
@@ -723,7 +604,7 @@ bwk() {%s}
 collect_runs_into_task() {%s}
 phase_collect() {%s}
 phase_collect
-""" % (channel, shlex.quote(str(data)), vol,
+""" % (channel, shlex.quote(driver_root(channel)), shlex.quote(str(vol)),
        macab_func("bench_root"), macab_func("mac"), macab_func("bwk"),
        macab_func("collect_runs_into_task"), macab_func("phase_collect"))
             cp = bash(script, env={"WK_STORE": store["WK_STORE"]})
@@ -738,15 +619,6 @@ phase_collect
         cp, recorded, out = self._collect("bench", self.TSV)
         self.assertEqual(cp.returncode, 0, out)
         self.assertEqual(recorded, ["r1", "r2"], out)
-
-    def test_the_staging_root_it_reaches_for_is_that_installs_own(self):
-        """Not a /Volumes path: in bench mode the volume is `/` and is mounted
-        nowhere, which is what made this unreadable until the machine returned."""
-        cp = bash('. "$WK_ROOT/lib/common.sh"\n. "$WK_ROOT/boot/machines.sh"\n'
-                  'NODE_VOLUME="WK Bench"\n. "$WK_ROOT/boot/mac-volume.sh"\n'
-                  'MODE_CHANNEL=bench\nmac_volume_present() { return 1; }\n'
-                  'b_bench_root')
-        self.assertEqual("/var/wk", cp.stdout, cp.stdout + cp.stderr)
 
     def test_the_same_collect_off_the_volume_in_host_mode_records_the_same_legs(self):
         """One implementation, two channels."""
@@ -995,14 +867,14 @@ class TestTheRestartIsTheOneImplementation(WkTest):
         """b_reboot answers from the Mac and from another machine, so the lane
         and `wk boot` restart it the same way. `mv_priv` is the one spelling of
         asking the helper, and it goes through `m_ssh`, the one reader."""
-        text = (REPO / "boot" / "mac-volume.sh").read_text()
-        body = func_body(text, "b_reboot")
-        self.assertIn("mv_priv", body)
-        self.assertNotIn("sudo -n", body)
-        self.assertIn('mv_priv() { m_ssh "sudo -n', text)
-        # Every ask goes through it: the path is read where mv_priv builds the
-        # command and in the one is-it-installed test, and nowhere else.
-        self.assertEqual(2, text.count("$BOOT_HELPER"), text.count("$BOOT_HELPER"))
+        fake, d = mac_board("mac-volume")
+        d.probe()
+        d.reboot()
+        asks = [(fn, p.get("WK_VERB")) for fn, name, p in fake.asked if name == "mac-priv.sh"]
+        self.assertEqual(asks, [("m_ssh", "reboot")])
+        self.assertTrue(fake.on_rescue() and fake.boots == 2, "the helper's reboot did not happen")
+        onboard = [f.name for f in (REPO / "boot" / "onboard").iterdir() if "sudo -n" in f.read_text()]
+        self.assertEqual(sorted(onboard), ["mac-own.sh", "mac-priv.sh"], "the helper is asked from one file")
 
     def test_preflight_refuses_a_mac_it_cannot_restart(self):
         for ready, want in ((0, "ok"), (1, "FAIL")):
@@ -1069,25 +941,19 @@ class TestTheTwoMachinesAreNamedApart(WkTest):
     def test_each_driver_answers_both_halves(self):
         for rel, hooks in (
                 ("boot/mac-volume.sh", ("b_manage", "b_manage_name", "b_manage_tools",
-                                        "b_manage_prepare", "b_bench_home", "b_bench_local",
+                                        "b_manage_prepare", "b_bench_home",
                                         "b_bench_put", "b_bench_put_file",
                                         "b_restart_ready", "b_restart_detail")),
                 ("boot/mac-guest.sh", ("b_manage", "b_manage_name", "b_manage_tools",
-                                       "b_manage_prepare", "b_bench_home", "b_bench_local",
+                                       "b_manage_prepare", "b_bench_home",
                                        "b_bench_put", "b_bench_put_file",
                                        "b_restart_ready", "b_restart_detail", "b_display"))):
-            text = (REPO / rel).read_text()
+            # the driver's shim, or boot/machines.sh's, which asks the same class
+            text = (REPO / rel).read_text() + (REPO / "boot" / "machines.sh").read_text()
             for hook in hooks:
                 with self.subTest(driver=rel, hook=hook):
                     self.assertIn(f"\n{hook}() {{", "\n" + text)
 
-    def test_a_guests_manager_is_the_machine_this_runs_on(self):
-        """tart runs on the macOS host and nowhere else, so a guest is managed
-        from here rather than over an ssh hop."""
-        self.assertIn('b_manage() { bash -c "$*"; }',
-                      (REPO / "boot" / "mac-guest.sh").read_text())
-        self.assertIn('b_manage() { m_ssh "$@"; }',
-                      (REPO / "boot" / "mac-volume.sh").read_text())
 
 
 class TestStagingIsTheDriversAndVerifiedHere(WkTest):
@@ -1110,11 +976,6 @@ class TestStagingIsTheDriversAndVerifiedHere(WkTest):
         self.assertIn("wc -c <", func_body(MACAB.read_text(), "put_file"))
         self.assertIn("treehash.py", func_body(MACAB.read_text(), "put_tree"))
 
-    def test_the_volume_is_local_only_where_the_manager_is_standing_on_it(self):
-        """`wk bench stage --to mbp` runs on that Mac, where the volume is a
-        mount and nothing is sent; the lane runs from elsewhere, where it is."""
-        self.assertIn("b_bench_local() { m_here; }",
-                      (REPO / "boot" / "mac-volume.sh").read_text())
 
 
 class TestTheMeasuredHomeIsTheDrivers(WkTest):
@@ -1126,40 +987,6 @@ class TestTheMeasuredHomeIsTheDrivers(WkTest):
         self.assertIn("b_bench_home", body)
         self.assertNotIn("Users/bench", body)
 
-    def _in_bench(self, path, channel="host", data=True):
-        driver = (REPO / "boot" / "mac-volume.sh").read_text()
-        return bash('. "$WK_ROOT/lib/common.sh"\n'
-                    'NODE_VOLUME="WK Bench"\n'
-                    'MODE_CHANNEL=%s\n'
-                    'mac_volume_present() { return 0; }\n'
-                    'mac_volume_data_path() { printf "%s"; }\n'
-                    'mv_in_bench() {%s}\n'
-                    'b_bench_root() {%s}\n'
-                    'b_bench_home() {%s}\n%s\n'
-                    % (channel,
-                       "/Volumes/WK Bench - Data" if data else "/Volumes/WK Bench",
-                       func_body(driver, "mv_in_bench"),
-                       func_body(driver, "b_bench_root"),
-                       func_body(driver, "b_bench_home"), path))
-
-    def test_the_volume_driver_maps_both_paths_onto_the_data_volume(self):
-        """/var firmlinks out to `private/var` there; /Users is at the root."""
-        self.assertEqual("/Volumes/WK Bench - Data/private/var/wk",
-                         self._in_bench("b_bench_root").stdout)
-        self.assertEqual("/Volumes/WK Bench - Data/Users/bench",
-                         self._in_bench("b_bench_home").stdout)
-
-    def test_a_volume_with_no_separate_data_mount_keeps_the_plain_paths(self):
-        self.assertEqual("/Volumes/WK Bench/var/wk",
-                         self._in_bench("b_bench_root", data=False).stdout)
-        self.assertEqual("/Volumes/WK Bench/Users/bench",
-                         self._in_bench("b_bench_home", data=False).stdout)
-
-    def test_on_the_bench_channel_the_volume_is_the_root(self):
-        """That install *is* the volume, so it is under no /Volumes path at
-        all -- which is what made a finished run unreadable until it returned."""
-        self.assertEqual("/var/wk", self._in_bench("b_bench_root", channel="bench").stdout)
-        self.assertEqual("/Users/bench", self._in_bench("b_bench_home", channel="bench").stdout)
 
 
 class TestAFailedNotifyCostsNothing(WkTest):
@@ -1256,7 +1083,8 @@ class TestThePlantedTreeIsVerifiedWhole(WkTest):
         body = func_body(text, "put_tree")
         self.assertEqual(1, body.count("$BENCH_PUT_SKIP"),
                          "the far side's list is the driver's own, from the same variable")
-        self.assertIn("bench_put_excludes", (REPO / "boot" / "mac-volume.sh").read_text())
+        for driver in ("mac-volume", "mac-guest"):
+            self.assertIn('${BENCH_PUT_SKIP:?', (REPO / "boot" / ("%s.sh" % driver)).read_text())
 
     def test_the_local_arguments_are_an_array_and_not_a_split_string(self):
         """`sh_quote .git` is `'.git'` with the quotes in it: word-split without
@@ -1287,11 +1115,10 @@ class TestOneReaderOfTheBootTime(WkTest):
     def test_the_one_reader_answers_seconds_and_not_microseconds(self):
         """The brace is what makes it the seconds: bracketed, the pattern cannot
         slide onto `usec`."""
-        body = func_body(DRIVER.read_text(), "_mac_boottime")
-        script = ("r_ssh() { printf '%s\\n' " + repr(self.SYSCTL).replace("'", '"')
-                  + "; }\n_mac_boottime() {" + body + "}\n_mac_boottime\n")
-        cp = bash(script)
-        self.assertEqual("1788835009", cp.stdout.strip(), cp.stdout + cp.stderr)
+        fake, d = mac_board("mac-volume")
+        d.probe()
+        fake.script = lambda name, p, input: Result(0, self.SYSCTL + "\n")
+        self.assertEqual("1788835009", d.boot_id())
 
     def test_the_pattern_the_driver_retired_answered_the_microseconds(self):
         """The discriminating half: without this the test above passes against

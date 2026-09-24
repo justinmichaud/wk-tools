@@ -115,10 +115,10 @@ class TestReprovisionLine(unittest.TestCase):
 
     def test_a_device_missing_mach_profile_renders_the_missing_field_not_a_guess(self):
         recs = [{"kind": "fleet", "machine": "newdevice", "role": "bench-device", "mode": "unreachable", "media": "unknown",
-                 "reprovision": "missing NODE_PROFILE in boot/machines/newdevice.conf -- nothing to compose a recipe from"},
+                 "reprovision": "missing NODE_PROFILE in machines/newdevice.conf -- nothing to compose a recipe from"},
                 {"kind": "exit", "code": 0}]
         out = render(recs, "text").stdout
-        self.assertIn("missing NODE_PROFILE in boot/machines/newdevice.conf", out)
+        self.assertIn("missing NODE_PROFILE in machines/newdevice.conf", out)
         self.assertNotIn("wk sysimage build newdevice", out)
 
     def test_the_by_role_sample_command_differs_per_role(self):
@@ -142,7 +142,7 @@ class TestFleetDeviceRecord(unittest.TestCase):
         rec = status.fleet_record("rpi4", self.CONF, None, 0, reach=lambda m: ("rpi4 not a node", ""))
         self.assertEqual((rec["machine"], rec["role"], rec["mode"]), ("rpi4", "bench-device", "no answer within 0s"))
         self.assertEqual(rec["tailnet"], "rpi4 not a node")
-        self.assertEqual(rec["conf"], "boot/machines/rpi4.conf")
+        self.assertEqual(rec["conf"], "machines/rpi4.conf")
 
     def test_a_bash_snippet_cannot_outlive_the_ceiling(self):
         self.assertEqual(status._bash(REPO, "sleep 30", timeout=0.2).rc, status.TIMED_OUT)
@@ -256,9 +256,9 @@ class TestSelfRoleAndMode(unittest.TestCase):
     def test_a_machine_with_no_conf_defaults_to_workstation(self):
         self.assertEqual(status.self_role(str(self.tmp), "here"), "workstation")
 
-    def test_a_declared_role_is_read_from_its_own_boot_conf(self):
-        (self.tmp / "boot" / "machines").mkdir(parents=True)
-        (self.tmp / "boot" / "machines" / "here.conf").write_text("NODE_ROLE=bench-device\n")
+    def test_a_declared_role_is_read_from_its_own_conf(self):
+        (self.tmp / "machines").mkdir(parents=True)
+        (self.tmp / "machines" / "here.conf").write_text("KIND=board\nNODE_ROLE=bench-device\n")
         self.assertEqual(status.self_role(str(self.tmp), "here"), "bench-device")
 
     def test_no_marker_file_reads_host(self):
@@ -711,9 +711,9 @@ class TestTheWalkProbesAMachineOnce(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp(prefix="wk-test-walk-"))
         (self.tmp / "hosts").mkdir()
-        (self.tmp / "hosts" / "box.conf").write_text("WK_REMOTE_HOST=box.example\nWK_REMOTE_ROOT=/home/u/wk\n")
+        (self.tmp / "hosts" / "box.conf").write_text("KIND=build\nWK_REMOTE_HOST=box.example\nWK_REMOTE_ROOT=/home/u/wk\n")
         self.env = {"HOME": str(self.tmp), "XDG_STATE_HOME": str(self.tmp / "state"), "WK_STORE": str(self.tmp / "store"),
-                    "WK_TARGET_REGISTRY": str(self.tmp / "hosts"), "WK_TARGET": "box", "WK_IN_VM": "1",
+                    "WK_MACHINES_DIR": str(self.tmp / "hosts"), "WK_TARGET": "box", "WK_IN_VM": "1",
                     "PATH": os.environ.get("PATH", "")}
         self.fake = SshFake()
         self.fake.answer_remote("uname -s", out=LINUX_PROBE)

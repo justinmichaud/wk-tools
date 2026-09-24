@@ -12,11 +12,16 @@ succeed, and the witness must never appear.
 
 Run: python3 -m unittest tests.test_store_secrets -v
 """
+import inspect
 import os
 import subprocess
+import sys
 import unittest
 
 from tests.support import REPO, WkTest, bash, stub_path
+
+sys.path.insert(0, str(REPO / "lib"))
+from wk import guest  # noqa: E402
 
 # Not a token, and deliberately nothing like one.
 PLACEHOLDER = "placeholder-value-for-this-test"
@@ -123,7 +128,7 @@ class TestTheStoreFunctionsReadAndWriteHere(_Here):
         held.mkdir(parents=True)
         (held / "github-pat").write_text(f"{PLACEHOLDER}-pat\n")
         cp = self.sh('printf "path=%s\\nvalue=[%s]\\n" '
-                     '"$(wk_github_pat_path)" "$(wk_github_pat)"')
+                     '"$(wk_github_pat_path)" "$(wk_cred_read github-pat)"')
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
         self.assertIn(f"path={held}/github-pat", cp.stdout)
         self.assertIn(f"value=[{PLACEHOLDER}-pat]", cp.stdout)
@@ -314,17 +319,17 @@ class TestNothingButAFileIsReadOrWrittenThroughAgentRw(_Here):
         self.assertIn("bytes=[]", cp.stdout)
 
     def test_a_refused_path_stops_a_guests_start_rather_than_arriving_empty(self):
-        """targets/vm.sh copies a value row into a guest, so a path its reader
+        """lib/wk/guest.py copies a value row into a guest, so a path its reader
         refuses must stop the start rather than land in there as an empty file.
         A file row is never copied into a guest at all -- a copy is a second
         holder of a credential its tool rotates -- so the document is not read
         out of the store on that path either."""
-        vm = (REPO / "targets" / "vm.sh").read_text()
-        body = vm[vm.index("_write_agent_secrets() {"):]
-        body = body[:body.index("\n}\n")]
-        self.assertIn("wk_agent_secret_present", body)
-        self.assertIn('[ "$here" -lt 2 ] || return 1', body)
-        self.assertNotIn("wk_cred_read", body)
+        body = inspect.getsource(guest.Guest.write_agent_secrets)
+        self.assertIn("self.secrets.cred_stored(name)", body)
+        self.assertIn("if here is None:\n                return False", body)
+        file_row = body[body.index('if kind == "file":'):body.index("here = ")]
+        self.assertIn("continue", file_row)
+        self.assertNotIn("cred_read", file_row)
 
 
 class TestNoForwardingIsLeftInTheSource(unittest.TestCase):

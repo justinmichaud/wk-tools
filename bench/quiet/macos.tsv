@@ -1,0 +1,86 @@
+# What a macOS machine that exists to be measured is: a guest and a bench install alike.
+# Tab-separated; the first field is the table. bench/mac-quiet-desktop.sh applies, probes and judges it.
+#   setting      name domain key type value why -- a `defaults` key; `@` before the domain is a key per
+#                hardware UUID (`defaults -currentHost`), which `tart clone` remints for every guest
+#   agent        name launchd-label process why
+#   daemon       name process why
+#   expected     name process why -- judged the other way round: it must be running
+#   power        name pmset-key value the-name-pmset-g-prints-it-back-as
+#   unsettable   setting-name -- a row no script can set on this macOS
+#   unstoppable  process -- SIP refuses SIGSTOP for it even as root
+setting	widgets_desktop	com.apple.WindowManager	StandardHideWidgets	bool	true	desktop widgets are hidden
+setting	widgets_stage	com.apple.WindowManager	StageManagerHideWidgets	bool	true	Stage Manager's widgets are hidden
+setting	reduce_motion	com.apple.universalaccess	reduceMotion	bool	true	window animations are off
+setting	reduce_transparency	com.apple.universalaccess	reduceTransparency	bool	true	the compositor is not blurring behind windows
+setting	appnap	NSGlobalDomain	NSAppSleepDisabled	bool	true	App Nap cannot throttle a backgrounded browser
+setting	window_anim	NSGlobalDomain	NSAutomaticWindowAnimationsEnabled	bool	false	windows open and close without an animation
+setting	askforpassword	com.apple.screensaver	askForPassword	int	0	the screen does not lock
+setting	askforpassworddelay	com.apple.screensaver	askForPasswordDelay	int	0	the screen does not lock after a delay either
+setting	idletime	@com.apple.screensaver	idleTime	int	0	the screen saver is disarmed
+setting	desktop_icons	com.apple.finder	CreateDesktop	bool	false	nothing is drawn on the desktop
+setting	dock_launchanim	com.apple.dock	launchanim	bool	false	the Dock does not animate a launch
+setting	dock_recents	com.apple.dock	show-recents	bool	false	the Dock does not rearrange itself
+setting	crash_dialog	com.apple.CrashReporter	DialogType	string	none	a crash writes a log instead of a dialog
+setting	quarantine	com.apple.LaunchServices	LSQuarantine	bool	false	no "downloaded from the internet" dialog can appear
+setting	timemachine_offer	com.apple.TimeMachine	DoNotOfferNewDisksForBackup	bool	true	no disk prompts to become a backup
+setting	personalised_ads	com.apple.AdLib	allowApplePersonalizedAdvertising	bool	false	no advertising identifier is refreshed
+# Setup Assistant's MiniBuddy is not here: it is submitted by runningboardd on behalf of loginwindow and has no launchd label to disable (measured on a Tahoe 26.4 clone, 2026-09-05).
+agent	widgets_agent	com.apple.chronod	chronod	redraws desktop and Notification Centre widgets on a timer of its own
+agent	notifications	com.apple.notificationcenterui	NotificationCenter	draws a banner over whatever is being measured
+agent	notification_daemon	com.apple.usernoted	usernoted	queues and delivers every alert an application posts
+agent	spotlight_menu	com.apple.Spotlight	Spotlight	opens a search panel over the window
+agent	siri	com.apple.assistantd	assistantd	listens and answers on its own
+agent	siri_knowledge	com.apple.siriknowledged	siriknowledged	builds Siri's index in the background
+agent	siri_inference	com.apple.siriinferenced	siriinferenced	runs on-device inference in the background
+agent	suggestions	com.apple.suggestd	suggestd	mines documents and mail for suggestions
+agent	spotlight_suggestions	com.apple.parsecd	parsecd	fetches Spotlight suggestions from Apple
+agent	knowledge	com.apple.knowledge-agent	knowledge-agent	records what the account does, on a timer
+agent	proactive	com.apple.proactived	proactived	predicts and pre-fetches on a timer
+agent	photo_analysis	com.apple.photoanalysisd	photoanalysisd	analyses the photo library whenever the machine looks idle
+agent	media_analysis	com.apple.mediaanalysisd	mediaanalysisd	analyses media whenever the machine looks idle
+agent	icloud_drive	com.apple.bird	bird	syncs iCloud Drive over the run
+agent	icloud_photos	com.apple.cloudphotod	cloudphotod	syncs the photo library over the run
+agent	music_library	com.apple.AMPLibraryAgent	AMPLibraryAgent	scans and updates the music library
+agent	screentime	com.apple.ScreenTimeAgent	ScreenTimeAgent	records usage and can draw a limit dialog
+agent	usage_tracking	com.apple.UsageTrackingAgent	UsageTrackingAgent	records application usage on a timer
+agent	experiments	com.apple.triald	triald	fetches and applies Apple's experiment configurations
+agent	sharing	com.apple.sharingd	sharingd	advertises and scans for AirDrop and Handoff peers
+agent	tips	com.apple.tipsd	tipsd	posts a Tips notification over the window
+# Not mds and not sysmond: `mdutil` and `pgrep` ask those two over XPC and never return while they are held stopped -- measured in the rehearsal guest, 2026-09-05, where each deadlocked the command that would have undone it. `mdutil -i off` is what makes mds idle instead.
+daemon	spotlight_content	corespotlightd	indexes application content on a timer of its own
+daemon	softwareupdate	softwareupdated	scans for updates, whatever the hosts denial lets through
+daemon	softwareupdate_helper	suhelperd	stages an update a scan has found
+daemon	malware_scan	XProtect	scans the whole disk on Apple's own schedule
+daemon	malware_service	XprotectService	does that scanning
+daemon	malware_daemon	xprotectd	schedules that scan
+daemon	timemachine	backupd	copies the disk the run is using
+daemon	timemachine_helper	backupd-helper	does that copying
+daemon	analytics_daemon	analyticsd	records and uploads usage analytics
+daemon	analytics_helper	osanalyticshelper	collects a report whenever anything crashes
+daemon	diagnostics	diagnosticservicesd	submits diagnostics on a timer
+daemon	crash_reporter	ReportCrash	writes a crash log and can draw a dialog over the run
+daemon	hang_sampler	spindump	samples every process when one stops responding
+daemon	power_records	powerdatad	records power counters on a timer
+daemon	process_stats	systemstats	samples every process's counters on a timer
+daemon	icloud	cloudd	fetches and pushes iCloud records mid-run
+daemon	icloud_defaults	syncdefaultsd	syncs preferences to iCloud on a timer
+daemon	downloads	nsurlsessiond	runs every background download in the machine
+daemon	findmy	searchpartyd	beacons for and scans for nearby devices
+daemon	experiments_system	triald_system	fetches Apple's experiment configurations
+expected	tailnet	tailscaled	is the bench install's only way to be reached while it measures, and pausing it would drop the tailnet mid-leg and leave a live utun with nothing draining it; it costs 1.78% of one core and 71 MB RSS, measured over 3.7 days on moose, the fleet's busiest node
+power	power_displaysleep	displaysleep	0	displaysleep
+power	power_disksleep	disksleep	0	disksleep
+power	power_sleep	sleep	0	sleep
+power	power_disablesleep	disablesleep	1	SleepDisabled
+power	power_lowpowermode	lowpowermode	0	lowpowermode
+power	power_highpowermode	highpowermode	1	highpowermode
+# com.apple.universalaccess is TCC-protected, so a `defaults write` for it is dropped however it is sent -- measured 2026-09-07, written at a first boot as root and again in the account's own session, still reading '?'.
+unsettable	reduce_motion
+unsettable	reduce_transparency
+# `kill -STOP` answers `Operation not permitted` for these; XProtect measured refusing on the bench install, macOS 26.6.2, 2026-09-09.
+unstoppable	ScreenTimeAgent
+unstoppable	UsageTrackingAgent
+unstoppable	suhelperd
+unstoppable	XProtect
+unstoppable	XprotectService
+unstoppable	xprotectd

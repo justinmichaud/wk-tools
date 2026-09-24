@@ -114,11 +114,11 @@ rewritten file resumes a running process mid-word. Check `wk status` first.
   outright changes nothing about how the rest of the fleet works.
 - **New machine-local state goes into `wk doctor`'s machine-local section, or it
   is a bug.** Each entry is `regenerable`, `re-authable` or `backed-up`.
-- **New devices arrive as config, never code** — `boot/machines/<name>.conf`,
-  `targets/hosts/<name>.conf`, `bridge/hosts/<name>.conf`, all in one shape.
+- **New devices arrive as config, never code** — `machines/<name>.conf`, one
+  shape for every kind, its `KIND` naming which.
   A `case` statement naming a machine is a bug.
 - Hand-applied settings vanish on a rebuild. Anything missed belongs in
-  `./setup` or `wk backup`, not in a person's memory.
+  `./setup` or `wk key backup`, not in a person's memory.
 - **Cleanup is never manual.** Anything worth deleting by hand — rubble a
   killed command left, a stale tree, a workspace nothing is making — is
   something `wk gc` reclaims or names, and clearing one by hand is a report

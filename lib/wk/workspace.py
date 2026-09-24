@@ -19,6 +19,8 @@ import sys
 from wk import act, job, record, shell, sshalias
 from wk.act import Refused, die, info, log, warn
 from wk.machine import Killed
+from wk.pr import checkout as pr_checkout, parse_spec
+from wk.store import Bases
 from wk.targets import show
 
 PLAN = ("checking", "wipe", "base", "create", "init", "fetch", "register")
@@ -119,7 +121,7 @@ def new_front(reg, records, name, opts):
         if opts.get("no_wait"):
             die("--pr needs the workspace to be ready, and --no-wait returns before it is.\n"
                 "    Drop --no-wait, or check it out afterwards:  wk pr %s %s" % (name, pr))
-        shell.pr_spec_check(root, here, pr)
+        parse_spec(pr)
     if target.kind == "local":
         target.create(name)
     target.store_init()
@@ -169,7 +171,7 @@ def new_front(reg, records, name, opts):
             "    A re-run destroys what is there and starts again:  wk new %s --target %s" % (name, st, log_path, name, tname))
     info("workspace '%s' ready%s" % (name, "" if arch == "native" else " (%s)" % arch))
     if pr:
-        shell.pr_checkout(root, here, tname, name, pr)
+        pr_checkout(target, here, name, pr)
     new_hints(target, name, arch)
     if opts.get("zed"):
         r = here.act_run([os.path.join(str(root), "cmd", "zed"), name])
@@ -253,7 +255,7 @@ def _end(task, status):
 
 
 def _create(target, records, task, clock, name, base, arch, state):
-    here, tname, root = records.machine, target.name, target.root
+    here, tname = records.machine, target.name
 
     def stage(step):
         if task is not None:
@@ -287,12 +289,17 @@ def _create(target, records, task, clock, name, base, arch, state):
         sshalias.alias_remove(here, target.env, name)
     if target.needs_base:
         stage("base")
-        base = base or shell.current_base(root, here, tname)
+        mirror = target.store.mirror()
+        if not here.isdir(mirror):
+            die("no WebKit mirror at %s, and every snapshot borrows its objects:\n"
+                "    wk sync    makes it, then publishes a snapshot to build a workspace from." % mirror)
+        bases = Bases(target.store, here)
+        base = base or bases.current()
         if not base:
             die("no base snapshot this machine can build a workspace from:  wk sync\n"
                 "    publishes one. A snapshot that is not on the branch it was published from\n"
                 "    is refused here -- every workspace overlaid on it starts detached.")
-        why = shell.base_verify(root, here, tname, base)
+        why = bases.verify(base)
         if why:
             die(why)
     stage("create")

@@ -22,7 +22,7 @@ from tests.support import NO_REGISTRY, REPO, WkTest, clean_env, stub_path
 from tests.test_credcheck import FakeAnthropic, FakeLiteLLM, RECORD, login
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import doctor, shell  # noqa: E402
+from wk import doctor, fleet, shell  # noqa: E402
 from wk.machine import Fake, Local, Result  # noqa: E402
 from wk.store import Store  # noqa: E402
 
@@ -54,20 +54,34 @@ def stub_shell(**over):
                 peer_cred_verdict=lambda root, peer, name, env=None: "",
                 priv_helpers=lambda root, env=None: [],
                 priv_answers=lambda root, path, env=None: False,
-                remote_probe=lambda root, target, env=None: "",
-                remote_findings=lambda root, probe, env=None: "",
-                remote_provision_stale=lambda root, target, env=None: None,
                 vm_base_findings=lambda root, env=None: "",
                 in_machine=lambda root, command, env=None, quiet=False: None)
     base.update(over)
     return types.SimpleNamespace(**base)
 
 
-def fake_doctor(macos, sh=None, env=None, machine=None):
+def stub_mc(**over):
+    """lib/wk/machine_cmd.py's build-machine questions, answered with nothing unless the test says otherwise."""
+    base = dict(probe=lambda target, root: "", findings=lambda root, probe, env=None, here=None: [],
+                stale=lambda target, root: None)
+    base.update(over)
+    return types.SimpleNamespace(**base)
+
+
+def fake_doctor(macos, sh=None, env=None, machine=None, mc=None):
     e = {"HOME": "/h", "WK_STORE": "/store", "XDG_STATE_HOME": "/h/.local/state", "PATH": os.environ["PATH"],
-         "WK_TARGET_REGISTRY": NO_REGISTRY, "WK_MACHINES_DIR": NO_REGISTRY}
+         "WK_MACHINES_DIR": NO_REGISTRY}
     e.update(env or {})
-    return doctor.Doctor(str(REPO), env=e, machine=machine or Fake(), macos=macos, sh=sh or stub_shell())
+    return doctor.Doctor(str(REPO), env=e, machine=machine or Fake(), macos=macos, sh=sh or stub_shell(), mc=mc or stub_mc())
+
+
+def build_doctor(**over):
+    """A Doctor whose registry names `farbox`, `box` and `old` as build machines."""
+    d = tempfile.mkdtemp(prefix="wk-test-doctor-machines-")
+    for n in ("farbox", "box", "old", "fresh"):
+        with open(os.path.join(d, n + ".conf"), "w") as f:
+            f.write("KIND=build\nWK_TARGET_KIND=remote\n")
+    return fake_doctor(False, env={"WK_MACHINES_DIR": d, "XDG_STATE_HOME": os.path.join(d, "state")}, mc=stub_mc(**over))
 
 
 def text_of(rows):
@@ -90,6 +104,35 @@ class TestTheRenderer(unittest.TestCase):
         rep = doctor.Report(io.StringIO())
         rep.rows([doctor.ok("fine"), doctor.unk("unseen", "why")])
         self.assertEqual(0, rep.exit_status())
+
+
+class TestHostToolsZed(unittest.TestCase):
+    """`wk doctor`'s zed row and `cmd/zed`'s own "is zed installed" check
+    read the one answer, `targets.zed_cli` -- they used to disagree (doctor
+    took the app bundle's presence, `cmd/zed` the cli's)."""
+
+    def _zed_row(self, fake):
+        d = fake_doctor(True, machine=fake)
+        return next(r for r in d.host_tools() if r[1] == "zed")
+
+    def test_zed_on_path_is_ok(self):
+        fake = Fake()
+        fake.answer(["which", "zed"], out="/usr/local/bin/zed\n")
+        self.assertEqual(self._zed_row(fake)[0], OK)
+
+    def test_a_drag_installed_bundle_with_no_path_symlink_is_ok(self):
+        fake = Fake()
+        fake.answer(["which", "zed"], rc=1)
+        fake.answer(["test", "-x", "/Applications/Zed.app/Contents/MacOS/cli"], rc=0)
+        self.assertEqual(self._zed_row(fake)[0], OK)
+
+    def test_the_bundle_directory_alone_with_no_executable_cli_is_missing(self):
+        """The bundle folder existing is not enough: the same binary `cmd/zed` execs has to answer."""
+        fake = Fake()
+        fake.dirs.add("/Applications/Zed.app")
+        fake.answer(["which", "zed"], rc=1)
+        fake.answer(["test", "-x", "/Applications/Zed.app/Contents/MacOS/cli"], rc=1)
+        self.assertEqual(self._zed_row(fake)[0], MISS)
 
 
 class TestGitConfigFindings(unittest.TestCase):
@@ -454,8 +497,8 @@ class TestTheOtherWorkstationsLogins(unittest.TestCase):
 
 class TestTheFleetIsWalkedOnlyWhenAsked(unittest.TestCase):
     def _run(self, macos, everything):
-        sh = stub_shell(peer_workstations=boom, peer_cred_verdict=boom, remote_probe=boom, remote_findings=boom, remote_provision_stale=boom)
-        return [(title, list(rows)) for title, rows in fake_doctor(macos, sh=sh).sections(everything)]
+        sh = stub_shell(peer_workstations=boom, peer_cred_verdict=boom)
+        return [(title, list(rows)) for title, rows in fake_doctor(macos, sh=sh, mc=stub_mc(probe=boom, findings=boom, stale=boom)).sections(everything)]
 
     def test_without_all_no_machine_is_asked(self):
         for macos in (True, False):
@@ -472,23 +515,21 @@ class TestTheFleetIsWalkedOnlyWhenAsked(unittest.TestCase):
 
 class TestAMachineThatDoesNotAnswer(unittest.TestCase):
     def test_a_build_machine_is_unknown_never_missing(self):
-        rows = list(fake_doctor(False).build_machine("farbox"))
+        rows = list(build_doctor().build_machine("farbox"))
         self.assertEqual([(UNK, "farbox did not answer", "ssh farbox true  -- then re-run; nothing was changed")], rows)
 
     def test_a_build_machine_that_answers_gets_the_drivers_findings_and_its_provisioning_age(self):
-        sh = stub_shell(remote_probe=lambda root, t, env=None: "family=debian\n",
-                        remote_findings=lambda root, probe, env=None: "ok\tgit (/usr/bin/git)\t\nrequired\tninja\tapt install ninja\nnote\tcores: 4\t\n",
-                        remote_provision_stale=lambda root, t, env=None: "remote/provision.sh or remote/deps.sh has changed since it ran")
-        rows = list(fake_doctor(False, sh=sh).build_machine("box"))
+        rows = list(build_doctor(probe=lambda t, root: "family=debian\n",
+                                 findings=lambda root, probe, env=None, here=None: [("ok", "git (/usr/bin/git)", ""), ("required", "ninja", "apt install ninja"), ("note", "cores: 4", "")],
+                                 stale=lambda t, root: "remote/provision.sh or remote/deps.sh has changed since it ran").build_machine("box"))
         self.assertEqual([(OK, "git (/usr/bin/git)", ""), (MISS, "ninja", "apt install ninja"), (UNK, "cores: 4", ""),
                           (MISS, "provisioning on box predates its inputs: remote/provision.sh or remote/deps.sh has changed since it ran",
-                           "wk remote setup box")], rows)
+                           "wk machine setup box")], rows)
 
     def test_a_missing_remedy_names_the_setup_command(self):
-        sh = stub_shell(remote_probe=lambda root, t, env=None: "family=debian\n",
-                        remote_findings=lambda root, probe, env=None: "wanted\tccache\t\n")
-        rows = list(fake_doctor(False, sh=sh).build_machine("box"))
-        self.assertEqual((MISS, "ccache", "see 'wk remote setup box'"), rows[0])
+        rows = list(build_doctor(probe=lambda t, root: "family=debian\n",
+                                 findings=lambda root, probe, env=None, here=None: [("wanted", "ccache", "")]).build_machine("box"))
+        self.assertEqual((MISS, "ccache", "see 'wk machine setup box'"), rows[0])
         self.assertEqual((OK, "provisioned from this tree's remote/provision.sh + remote/deps.sh", ""), rows[1])
 
     def test_a_bridge_phone_that_does_not_answer_is_unknown(self):
@@ -504,11 +545,11 @@ class TestRootAccess(unittest.TestCase):
     def test_sudo_is_asked_quietly_through_the_environment(self):
         """The dispatcher strips --quiet into WK_QUIET for every other caller; a direct call sets it the same way."""
         fake = Fake()
-        sudo = str(REPO / "cmd" / "sudo")
-        fake.answer(["env", "WK_QUIET=1", sudo, "status"], 1, "a password is required, but sudo keeps a timestamp\n")
+        key = str(REPO / "cmd" / "key")
+        fake.answer(["env", "WK_QUIET=1", key, "sudo", "status"], 1, "a password is required, but sudo keeps a timestamp\n")
         rows = list(fake_doctor(True, machine=fake).root_access())
-        self.assertEqual([(MISS, "sudo: a password is required, but sudo keeps a timestamp", "wk sudo setup")], rows)
-        self.assertEqual([("run", ("env", "WK_QUIET=1", sudo, "status"))], fake.effects)
+        self.assertEqual([(MISS, "sudo: a password is required, but sudo keeps a timestamp", "wk key sudo setup")], rows)
+        self.assertEqual([("run", ("env", "WK_QUIET=1", key, "sudo", "status"))], fake.effects)
 
 
 class TestPrivilegedHelpers(unittest.TestCase):
@@ -594,6 +635,27 @@ class ACachedCredentialIsNotAGrant(WkTest):
     def test_no_listing_at_all_is_reported_as_no_grant(self):
         """Unknown must not read as working -- the safe direction is to refuse."""
         self.assertFalse(self._answers(""))
+
+
+
+class TestTheMachineOverlay(unittest.TestCase):
+    """~/.config/wk/machines/ is machine-local; the directory it replaced is named with the move."""
+
+    def rows(self, fake):
+        return list(fake_doctor(False, machine=fake).machine_local())
+
+    def test_the_overlay_is_a_backed_up_row_and_no_leftover_is_reported(self):
+        rows = self.rows(Fake())
+        self.assertTrue(any(r[1].startswith("~/.config/wk/machines (absent)") and r[2].startswith("backed-up") for r in rows), rows)
+        self.assertEqual([], [r for r in rows if "bridges" in r[1]])
+
+    def test_a_leftover_bridges_dir_is_missing_with_the_mv(self):
+        fake = Fake()
+        old = fleet.Fleet(REPO, {"HOME": "/h"}).old_local_dir()
+        fake.dirs.add(old)
+        row = next(r for r in self.rows(fake) if old in r[1])
+        self.assertEqual(MISS, row[0])
+        self.assertIn("mv '%s'/*.conf '/h/.config/wk/machines'/" % old, row[2])
 
 
 if __name__ == "__main__":

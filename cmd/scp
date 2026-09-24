@@ -18,7 +18,7 @@ import sys
 ROOT = os.environ.get("WK_ROOT") or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "lib"))
 
-from wk import targets  # noqa: E402
+from wk import decl, targets  # noqa: E402
 from wk.act import Refused, barrier, die, info, log, warn  # noqa: E402
 
 
@@ -57,8 +57,9 @@ def kind_or_die(kind, what, name):
 
 def main(argv):
     name = os.environ.get("WK_NAME", "")
-    recurse = "-r" in argv
-    operands = [a for a in argv if a != "-r"]
+    args = decl.Args(decl.Decl(__file__), argv)
+    recurse = args.flag("-r")
+    operands = args.positionals
     if len(operands) != 2:
         usage("needs exactly two paths, a source and a destination")
     src, dst = operands

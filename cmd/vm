@@ -101,7 +101,7 @@ FINDINGS
     ;;
 start)
     NAME="${1:-}"; require_name "$NAME"
-    ip=$(t_start "$NAME")
+    ip=$(_guest_py start "$NAME")
     _write_alias "$NAME" "$ip"
     info "$NAME is up at $ip"
     log  "  wk build $NAME mac-release"
@@ -109,7 +109,7 @@ start)
     ;;
 stop)
     NAME="${1:-}"; require_name "$NAME"
-    t_stop "$NAME"
+    _guest_py stop "$NAME"
     ;;
 ip)
     NAME="${1:-}"; require_name "$NAME"

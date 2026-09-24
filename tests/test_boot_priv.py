@@ -31,10 +31,9 @@ import shutil
 import subprocess
 import unittest
 
-from tests.support import REPO, WkTest, bash, func_body, stub_path
+from tests.support import REPO, WkTest, bash, stub_path
 
 HELPER = REPO / "admin" / "wk-boot-priv"
-DRIVER = REPO / "boot" / "mac-volume.sh"
 INSTALL = REPO / "admin" / "install.sh"
 
 # The helper minus the privilege: its own shell options, and `deny` and `fail`
@@ -240,13 +239,6 @@ class TestStatusReportsWhatThisMachineCanDo(unittest.TestCase):
                 text = re.search(r"(?ms)^%s\(\) \{.*?^\}" % fn, body).group(0)
                 self.assertIn(got["detach"] + " ", text)
 
-    def test_the_mac_driver_requires_that_line_and_not_merely_an_answer(self):
-        line = [l for l in (REPO / "boot" / "mac-volume.sh").read_text().splitlines()
-                if l.startswith("mv_reboot_ready()")]
-        self.assertEqual(1, len(line), line)
-        self.assertIn("detach=", line[0])
-        self.assertNotIn("status >/dev/null 2>&1; }", line[0])
-
     def test_it_still_opens_with_ok(self):
         """`mv_reboot_ready` reads the exit status, and `wk doctor` the first
         line: a status that stopped saying ok would read as a broken helper."""
@@ -379,134 +371,68 @@ class TestTheBlessGateIsTheVolumeAndNotAnArgument(WkTest):
         self.assertIn("blessed the running install", out)
 
 
-_PRE = """. "$WK_ROOT/lib/common.sh"
-. "$WK_ROOT/lib/store.sh"
-. "$WK_ROOT/boot/machines.sh"
-NODE_NAME=mbp
-NODE_SSH=fakemac
-NODE_VOLUME="WK Bench"
-. "$WK_ROOT/boot/mac-volume.sh"
-mac_firmware_default() {
-    head -1 "$FW"
-    tail -n +2 "$FW" > "$FW.rest" && mv "$FW.rest" "$FW"
-}
-m_ssh() {
-    printf '%s\\n' "$1" >> "$LOG"
-    case "$1" in
-        *"test -d"*|*"test -x"*) return 0 ;;
-        *boot-host*)
-            printf '%s\\n' "$HOST_SAID"
-            return "$HOST_RC" ;;
-        *boot-volume*)
-            printf '%s\\n' "$VOL_SAID"
-            return "$VOL_RC" ;;
-    esac
-}
-"""
 
-
-class TestTheDrivingEndProvesTheReturnBeforeItArms(WkTest):
-    """--setBoot is sticky and Apple Silicon has no one-shot form, so `b_arm`
-    blesses the running install first and refuses on what that answered."""
-
-    # What `wk boot mbp --status` reads back, one line per call, in the order
-    # a working arming produces them.
-    HOST = "GRP (the host install -- a plain reboot stays in host mode)"
-    BENCH = "GRP ('WK Bench' -- a plain reboot is expected to enter bench mode)"
-
-    def _arm(self, host_rc=0, host_said="wk-boot-priv: bless said: nothing",
-             vol_rc=0, vol_said="wk-boot-priv: blessed /Volumes/WK Bench",
-             firmware=None):
-        log = self.tmp / "m_ssh.log"
-        log.write_text("")
-        fw = self.tmp / "firmware"
-        fw.write_text("\n".join(firmware if firmware is not None
-                                else [self.HOST, self.BENCH]) + "\n")
-        script = ('LOG=%s\nFW=%s\n'
-                  'HOST_RC=%d\nHOST_SAID=%s\nVOL_RC=%d\nVOL_SAID=%s\n'
-                  % (_q(str(log)), _q(str(fw)),
-                     host_rc, _q(host_said), vol_rc, _q(vol_said))
-                  + _PRE + "b_arm\n")
-        cp = bash(script)
-        return cp, log.read_text()
-
-    def test_it_arms_and_asserts_the_firmware_afterwards(self):
-        cp, asked = self._arm()
-        out = cp.stdout + cp.stderr
-        self.assertEqual(0, cp.returncode, out)
-        self.assertIn("the firmware will boot 'WK Bench' next", out)
-        self.assertLess(asked.index("boot-host"), asked.index("boot-volume"),
-                        asked)
-
-    def test_a_mac_that_cannot_boot_itself_again_is_never_sent_away(self):
-        cp, asked = self._arm(
-            host_rc=1,
-            host_said="wk-boot-priv: bless said: Error -60005: cannot sign")
-        out = cp.stdout + cp.stderr
-        self.assertEqual(1, cp.returncode, out)
-        self.assertIn("Error -60005: cannot sign", out)
-        self.assertNotIn("boot-volume", asked)
-
-    def test_a_firmware_that_will_not_take_the_volume_is_reported_verbatim(self):
-        cp, _ = self._arm(vol_rc=1,
-                          vol_said="wk-boot-priv: bless exited 1, so the "
-                                   "firmware was not told")
-        out = cp.stdout + cp.stderr
-        self.assertEqual(1, cp.returncode, out)
-        self.assertIn("nothing was changed", out)
-        self.assertIn("bless exited 1", out)
-
-    def test_a_return_the_firmware_does_not_confirm_arms_nothing(self):
-        """bless exiting 0 is bless's word; what the firmware names is the
-        evidence, and an unproven return is a one-way trip."""
-        cp, asked = self._arm(firmware=[self.BENCH, self.BENCH])
-        out = cp.stdout + cp.stderr
-        self.assertEqual(1, cp.returncode, out)
-        self.assertIn("a return this cannot see", out)
-        self.assertNotIn("boot-volume", asked)
-
-    def test_an_arming_the_firmware_does_not_confirm_is_reported(self):
-        cp, _ = self._arm(firmware=[self.HOST, self.HOST])
-        out = cp.stdout + cp.stderr
-        self.assertEqual(1, cp.returncode, out)
-        self.assertIn("the firmware still names", out)
+class TestTheDrivingEndProvesTheReturnBeforeItArms(unittest.TestCase):
+    """--setBoot is sticky and Apple Silicon has no one-shot form, so the Mac
+    driver blesses the running install first and refuses on what that answered;
+    tests/test_mac_volume.py's TestArm drives it against a FakeMac."""
 
     def test_the_refusal_asserts_nothing_about_a_credential(self):
         """What bless needs is the platform's answer, and the run has it."""
-        body = func_body(DRIVER.read_text(), "b_arm")
+        import inspect
+        import sys
+        sys.path.insert(0, str(REPO / "lib"))
+        from wk.boot.mac import MacVolume
+        body = inspect.getsource(MacVolume.arm)
         self.assertNotIn("owner-password", body)
         self.assertNotIn("volume owner", body)
-
-    def test_the_helper_is_asked_for_through_m_ssh_and_never_a_local_sudo(self):
-        """`sudo -n` rides inside the command m_ssh runs, so every verb answers
-        on that Mac and from any machine that can reach it."""
-        text = DRIVER.read_text()
-        self.assertNotIn('sudo -n "$BOOT_HELPER"', text)
-        for line in text.splitlines():
-            if "sudo -n" in line:
-                self.assertIn("m_ssh", line, line)
-        self.assertIn("m_ssh", func_body(text, "b_arm"))
-        _, asked = self._arm()
-        self.assertRegex(asked, r"(?m)^sudo -n \S*wk-boot-priv'? boot-host 2>&1$")
 
 
 class TestTheDrivingEndAsksForTheOperationNotThePrivilege(unittest.TestCase):
     """One spelling for both roles: a bench-device is already root, a
     workstation goes through the helper, and no driver decides which."""
 
+    @staticmethod
+    def _rpi5(require_ok=True):
+        import sys
+        sys.path.insert(0, str(REPO / "lib"))
+        from wk.boot.fake import FakeBoard
+        from wk.boot.pi import Rpi5Usb
+        from wk.machine import Result
+        conf = {"NODE_NAME": "rpi5", "NODE_DRIVER": "rpi5-usb", "NODE_DEVICE": "/dev/sda",
+                "NODE_ROOT": "/dev/nvme0n1p2", "NODE_ROLE": "workstation"}
+        fake = FakeBoard(conf)
+        fake.write_system("/dev/sda1", "sys-a")
+        calls, answer = [], fake.call
+
+        def call(fn, *args, **kw):
+            calls.append(fn if fn != "boot_priv" else "boot_priv " + args[0])
+            return Result(1) if fn == "boot_priv_require" and not require_ok else answer(fn, *args, **kw)
+        fake.call = call
+        fake.channel = "host"
+        return Rpi5Usb(REPO, conf, fake), calls
+
     def test_the_rpi5_driver_never_sudoes_the_firmware_itself(self):
-        body = (REPO / "boot" / "rpi5-usb.sh").read_text()
-        self.assertNotIn("r_sudo \"vcmailbox", body)
-        self.assertIn("boot_priv order", body)
-        self.assertIn("boot_priv reboot", body)
+        d, calls = self._rpi5()
+        d.arm("/dev/sda1", d.order_image)
+        d.reboot(armed=True)
+        self.assertIn("boot_priv order", calls)
+        self.assertIn("boot_priv reboot", calls)
+        self.assertNotIn("r_sudo", calls, "the driver took a privilege the helper holds")
 
     def test_it_checks_the_helper_before_the_firmware_call(self):
         """Otherwise a missing helper is reported as a firmware that would not
         answer, which sends the reader to the wrong place."""
-        body = (REPO / "boot" / "rpi5-usb.sh").read_text()
-        arm = body[body.index("b_arm()"):]
-        arm = arm[:arm.index("\n}\n")]
-        self.assertLess(arm.index("boot_priv_require"), arm.index("boot_priv order"))
+        d, calls = self._rpi5()
+        d.arm("/dev/sda1", d.order_image)
+        self.assertLess(calls.index("boot_priv_require"), calls.index("boot_priv order"))
+        import contextlib
+        import io
+        from wk import act
+        d, calls = self._rpi5(require_ok=False)
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertRaises(act.Refused, d.arm, "/dev/sda1", d.order_image)
+        self.assertNotIn("boot_priv order", calls)
 
     def test_the_refusal_names_the_remedy(self):
         body = (REPO / "boot" / "machines.sh").read_text()

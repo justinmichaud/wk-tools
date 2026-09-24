@@ -390,7 +390,7 @@ class TestEveryLegIsJudgedOnTheDeclaredDisplay(WkTest):
     legs, and MotionMark's score is the area it draws. So the expectation the
     job carries reaches every leg, not just the check at the top of the boot."""
 
-    BENCH = REPO / "cmd" / "bench"
+    BENCH = REPO / "lib" / "wk" / "bench" / "mac.py"
 
     def test_the_leg_passes_the_jobs_display_to_the_runner(self):
         body = func_body(AUTORUN.read_text(), "leg")
@@ -398,9 +398,9 @@ class TestEveryLegIsJudgedOnTheDeclaredDisplay(WkTest):
 
     def test_the_runner_takes_it_and_judges_it(self):
         text = self.BENCH.read_text()
-        self.assertIn('--expect-display) EXPECT_DISPLAY="${2:-}"', text)
+        self.assertIn('["--expect-display", expect]', text)
         self.assertIn("--displays-only", text)
-        self.assertIn('check no "the display"', text)
+        self.assertIn('named("the display", display_row(', text)
 
     def test_the_rule_is_not_reimplemented_in_the_runner(self):
         """One implementation: the runner asks bench/mac-browser-check.py, the
@@ -413,7 +413,7 @@ class TestEveryLegIsJudgedOnTheDeclaredDisplay(WkTest):
     def test_the_result_records_what_it_was_judged_against(self):
         """A stored run says which display it was compared on, so re-reading it
         reaches the same verdict with no argument."""
-        self.assertIn('display_declared="$EXPECT_DISPLAY"', self.BENCH.read_text())
+        self.assertIn('"display_declared=" + (self.o.get("expect_display") or "")', self.BENCH.read_text())
 
     def test_the_declared_mode_reaches_the_job_from_the_machine(self):
         """Through the driver, so the one machine whose mode is not in a conf

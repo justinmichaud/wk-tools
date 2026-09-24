@@ -4,6 +4,10 @@ starting-order report.
 
 Run: python3 -m unittest tests.test_ceilings -v
 """
+import os
+import subprocess
+import sys
+import time
 import unittest
 
 from tests.support import REPO, WkTest, bash
@@ -46,41 +50,31 @@ t0=$(date +%s); capped 20 true; d=$(( $(date +%s) - t0 ))
 set -euo pipefail
 . "{REPO}/lib/common.sh"
 . "{REPO}/lib/par.sh"
-bump() {{ [ "$1" -gt "$worst" ] && worst="$1"; return 0; }}
-worst=0
 _slow() {{ sleep "$1"; printf '%s\\n' "$2" >&3; exit "$3"; }}
 par_begin
 par_run a _slow 3 a 2
 par_run b _slow 2 b 4
 par_run c _slow 1 c 0
-par_join 3> "{{TMP}}/par-out"
-out=$(cat "{{TMP}}/par-out")
+par_wait
+out=$(for n in a b c; do par_record "$n"; done)
 [ "$out" = "$(printf 'a\\nb\\nc')" ] || {{ echo "records came back in finishing order: $(printf '%s' "$out" | tr '\\n' ' ')"; exit 1; }}
-[ "$worst" = 4 ] || {{ echo "worst exit status did not come back: worst=$worst"; exit 1; }}
+[ "$_par_status" = " a 2 b 4 c 0" ] || {{ echo "the statuses did not come back: $_par_status"; exit 1; }}
+par_end
 '''.replace("{TMP}", str(self.tmp))
         cp = bash(script, timeout=20)
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
 
     def test_tailscale_reach_cannot_hang(self):
-        """a tailscale CLI that never answers holds the fleet walk for its ceiling and no longer"""
+        """a tailscale CLI that never answers holds the fleet walk for its ceiling and no longer (lib/wk/reach.py)"""
         stub = self.tmp / "tailscale"
         stub.write_text("#!/bin/sh\nsleep 30\n")
         stub.chmod(0o755)
-        script = f'''
-set -euo pipefail
-. "{REPO}/lib/common.sh"
-body="$(sed -n '/^wk_tailscale_peers()/,/^}}/p' "{REPO}/lib/reach.sh")"
-[ -n "$body" ] || {{ echo "lift failed"; exit 1; }}
-eval "$body"
-_WK_TS_PEERS=""; _WK_TS_READ=""
-wk_tailscale_cli() {{ printf '%s' "{stub}"; }}
-t0=$(date +%s)
-WK_TAILSCALE_TIMEOUT=1 wk_tailscale_peers >/dev/null 2>&1 || true
-d=$(( $(date +%s) - t0 ))
-[ "$d" -le 8 ] || {{ echo "a tailscale CLI that never answers held the walk ${{d}}s"; exit 1; }}
-'''
-        cp = bash(script, timeout=20)
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        t0 = time.monotonic()
+        cp = subprocess.run([sys.executable, "-c", "from wk import reach; print(reach.Reach(env={'WK_TAILSCALE_TIMEOUT': '1'}).peers())"],
+                            env=dict(os.environ, PATH="%s:%s" % (self.tmp, os.environ["PATH"]), PYTHONPATH=str(REPO / "lib")),
+                            capture_output=True, text=True, timeout=20)
+        self.assertEqual(cp.stdout.strip(), "[]", cp.stderr)
+        self.assertLessEqual(time.monotonic() - t0, 8, "a tailscale CLI that never answers held the walk")
 
 
 if __name__ == "__main__":

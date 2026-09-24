@@ -1,6 +1,5 @@
-# Loading a target driver, and the defaults every driver inherits. Commands under cmd/ call only this contract, never podman, tart or ssh directly.
+# Loading a target driver, and the defaults every driver inherits. Commands under cmd/ call only this contract, never podman, tart or ssh directly; everything below the required set is a default a driver overrides where it differs.
 # Required: t_exec <name> <cmd..>, t_home <name> (the workspace user's home, seen from inside it: never this machine's), t_list ("<name><tab><state>" per line), t_info <name> (absent | creating | unreachable | the driver's word for one that exists).
-# t_enter/t_ssh_host are the vm driver's own now; `wk vm` is the only caller left. Everything below is a default a driver overrides only where it differs.
 
 t_src()        { echo "/src/WebKit"; }   # the WebKit checkout inside the target
 t_arch()       { echo native; }      # only the container driver differs; see lib/arch.sh
@@ -13,7 +12,12 @@ mirror_in_container() { printf '%s' "${WK_MIRROR:-$(wk_mirror)}"; }   # the mach
 WK_VM_MIRROR_SHARE=mirror
 guest_share_dir()  { printf '/Volumes/My Shared Files/%s' "$1"; }   # <share name>: where macOS automounts a tart share
 mirror_in_guest()  { printf '%s/WebKit.git' "$(guest_share_dir "$WK_VM_MIRROR_SHARE")"; }
-t_sync_tools() { :; }               # push wk-tools in; nothing when it is bind-mounted
+_ws_py() { PYTHONPATH="$WK_ROOT/lib" WK_ROOT="$WK_ROOT" python3 -m wk.targets "$@"; }   # Target's answers (lib/wk/targets.py) for a loaded target
+t_sync_tools()    { _ws_py sync-tools "$WK_TARGET" "$1"; }     # push wk-tools in; nothing when it is bind-mounted
+t_needs_base()    { _ws_py needs-base "$WK_TARGET"; }          # 0 when `wk new` must resolve a base snapshot first
+ws_state()        { _ws_py state "$WK_TARGET" "$1"; }
+ws_creating_now() { _ws_py creating-now "$WK_TARGET" "$1"; }
+wait_ready()      { _ws_py ready "$WK_TARGET" "$@"; }          # <name> [seconds]; foreground: killing it stops only the waiting
 
 t_agent_sock() { return 1; }        # the ssh-agent socket crossing in (push_agent_load)
 
@@ -31,28 +35,9 @@ agent_secret_store_remedy() { # <secret>
     fi
 }
 
-t_needs_base() { return 0; }        # 0 when `wk new` must resolve a base snapshot first
-
 t_start() { info "'$WK_TARGET' has no notion of starting a single workspace -- nothing to bring up for '$1'"; }
 
 t_stop() { die "the '$WK_TARGET' target has no notion of stopping a single workspace -- '$1' is left running"; }
-
-_t_pull_dir_excludes() {
-    _T_PULL_EXCLUDES=()
-    while [ $# -gt 0 ]; do
-        case "$1" in
-            --exclude) _T_PULL_EXCLUDES+=("--exclude" "${2:-}"); shift 2 ;;
-            *) die "t_pull_dir: unknown option $1" ;;
-        esac
-    done
-}
-
-t_pull_dir() {
-    local name="$1" src="$2" dest="$3"; shift 3
-    _t_pull_dir_excludes "$@"
-    mkdir -p "$dest"
-    rsync -a --delete ${_T_PULL_EXCLUDES[@]+"${_T_PULL_EXCLUDES[@]}"} "$src/" "$dest/"
-}
 
 _ssh_opts_base() { # never interactive, bounded connect; drivers add their own
     printf '%s' "-o BatchMode=yes -o ConnectTimeout=${1:-10}"
@@ -75,8 +60,6 @@ t_spawn() { # <name> <log> <pidf> <cmd...> -- detached from this process
 }
 
 WK_READY_MARKER=".wk-ready"   # written as the last act of creating a workspace
-
-t_created() { return 0; }     # is the marker there? yes for a target that keeps none
 
 t_cores()      { envelope_cores; }   # <name>; a vm target is sized from the guest
 t_mem_mb()     { envelope_mem_mb; }  # t_mem_mb <name>
@@ -143,12 +126,6 @@ ws_locate() { # <name> -- every target that answers for it, one per line
     return 0
 }
 
-ws_exists_on() { # <target> <name> -- unlike ws_on_target, silence is not absence
-    ws_on_target "$1" "$2" && return 0
-    ( load_target "$1" >/dev/null 2>&1
-      [ "$(t_info "$2" 2>/dev/null)" = unreachable ] )
-}
-
 ws_target() { # <name>
     local name="$1"
     if [ -n "${WK_TARGET:-}" ]; then printf '%s' "$WK_TARGET"; return 0; fi
@@ -199,10 +176,9 @@ wk_remote_field()    { marker_field "$(wk_remote_marker)" "$1"; }
 
 wk_self() { wk_marker_field name; }   # the workspace this machine *is*, or empty on a host
 
-default_target() { # `container` on a host, `local` inside one: nothing else is there
+default_target() { # `container` on a host, `local` inside one, on a target's far end the target this host is
     if in_workspace; then echo local; return 0; fi
-    local t; t=$(wk_remote_field target)
-    if [ -n "$t" ]; then echo "$t"; return 0; fi
+    if in_remote_host; then wk_fleet self; return; fi
     echo container
 }
 
@@ -288,30 +264,24 @@ zed_key_pub() { # WK_ZED_PUBKEY when preparing a workspace for the machine that 
     cat "$k.pub"
 }
 
-target_all() { # container, vm, this machine's own target, and targets/hosts/*.conf
-    local d f t seen=" container vm "
+target_all() { # container, vm, this machine's own target, and every build machine and peer in machines/
+    local t seen=" container vm "
     echo container
     command -v wk_record_dir >/dev/null 2>&1 || . "$WK_ROOT/lib/store.sh"
     if is_macos && { [ -n "${WK_VM_STORE:-}" ] || [ "$(wk_record_dir)" != "$WK_STORE" ]; }; then echo vm; fi   # tart is Apple's, so a guest exists only on a macOS host, and only where its store (targets/vm.sh) is not the container's: elsewhere -- a Linux workstation, the podman VM, a macOS host pointed at a local store -- wk_record_dir resolves to the container store, and every container workspace would answer a second time as a vm guest
 
-    t=$(wk_remote_field target)
-    if [ -n "$t" ]; then seen="$seen$t "; echo "$t"; fi
+    if in_remote_host; then t=$(wk_fleet self) || return 1; seen="$seen$t "; echo "$t"; fi
 
     # Skipped on the far end of a target: a delegated `wk ls` would pay an ssh
     # timeout per machine it has no route to.
     local me=""
     if ! in_remote_host && [ -z "${WK_IN_VM:-}" ]; then
         me=$(wk_host_name)
-        for d in "$(target_registry_dir)"; do
-            [ -d "$d" ] || continue
-            for f in "$d"/*.conf; do
-                [ -f "$f" ] || continue
-                t=$(basename "$f" .conf)
-                case "$seen" in *" $t "*) continue ;; esac
-                [ -n "$me" ] && [ "$(printf '%s' "$t" | tr '[:upper:]' '[:lower:]')" = "$me" ] && continue
-                seen="$seen$t "
-                echo "$t"
-            done
+        for t in $(target_known); do
+            case "$seen" in *" $t "*) continue ;; esac
+            [ -n "$me" ] && [ "$(printf '%s' "$t" | tr '[:upper:]' '[:lower:]')" = "$me" ] && continue
+            seen="$seen$t "
+            echo "$t"
         done
     fi
 }
@@ -351,11 +321,6 @@ _peer_workstation() {
     ( load_target "$1"; [ -n "${WK_REMOTE_PEER:-}" ] && t_has_wk ) 2>/dev/null && echo "$1"
     return 0
 }
-build_boxes() { for_each_machine _build_box; return 0; }
-_build_box() {
-    ( load_target "$1"; [ -z "${WK_REMOTE_PEER:-}" ] && t_has_wk ) 2>/dev/null && echo "$1"
-    return 0
-}
 
 peer_cred_verdict() { # <peer> <name> -> that machine's verdict for it, every line
     local line
@@ -371,7 +336,7 @@ far_side_reason() { # <target> <far side> -- why it is not answering, for a pers
     case "$2" in
         unreachable) echo "unreachable over ssh${WK_FAR_WHY:+: $WK_FAR_WHY}" ;;
         stopped)     echo "the podman machine '${WK_MACHINE:-wk}' is stopped -- 'wk start' brings it up" ;;
-        no-wk)       echo "no wk-tools there yet -- 'wk remote setup $1'" ;;
+        no-wk)       echo "no wk-tools there yet -- 'wk machine setup $1'" ;;
         *)           echo "not a machine of its own" ;;
     esac
 }
@@ -409,18 +374,9 @@ _in_machine() {
     fi
 }
 
-target_registry_dir() { echo "${WK_TARGET_REGISTRY:-$WK_ROOT/targets/hosts}"; }
-target_registry_conf(){ echo "$(target_registry_dir)/$1.conf"; }
+target_registry_conf() { wk_fleet path "$1"; }
 
-target_known() {
-    local d f
-    d=$(target_registry_dir)
-    [ -d "$d" ] || return 0
-    for f in "$d"/*.conf; do
-        [ -f "$f" ] || continue
-        basename "$f" .conf
-    done
-}
+target_known() { wk_fleet list --kind build --kind peer; }
 
 _target_known_line() { # so a typo is answered by the names that do exist
     local names
@@ -433,12 +389,10 @@ target_kind() { # a non-built-in needs a conf; one naming no kind is `remote`
     case "$1" in
         container|vm|remote|local) echo "$1"; return 0 ;;
     esac
-    local c k=""
-    c=$(target_registry_conf "$1")
-    [ -f "$c" ] || return 1
-    k=$(awk -F= '/^[[:space:]]*WK_TARGET_KIND[[:space:]]*=/ {
-            gsub(/[ \t"'"'"']/, "", $2); print $2; exit }' "$c")
-    echo "${k:-remote}"
+    local out WK_TARGET_KIND=""
+    out=$(wk_fleet load "$1" --kind build --kind peer) || return 1
+    eval "$out"
+    echo "${WK_TARGET_KIND:-remote}"
 }
 
 # A second load in one process would inherit the first machine's host, root and
@@ -465,156 +419,10 @@ _target_reset_vars() {
           _WK_PEER_ROUTE_NAME _WK_PEER_ROUTE_USER _WK_PEER_ROUTE_SRC _WK_PEER_ROUTE_PROXY
 }
 
-# absent: nothing of it exists. creating: something does, and creation never
-# finished. present: both. broken: creation finished and the environment is
-# gone (rule 5). unreachable: its machine did not answer.
-ws_state() {
-    local name="$1" env ws
-    env=$(t_info "$name" 2>/dev/null || echo absent)
-    ws=$(wk_ws_dir "$name")
-
-    case "$env" in
-        creating|unreachable) echo "$env"; return 0 ;;
-    esac
-
-    if [ "$env" = absent ]; then
-        [ -d "$ws" ] || { echo absent; return 0; }
-        if t_created "$name" 2>/dev/null || ws_creation_finished "$name"; then
-            echo broken
-        else
-            echo creating
-        fi
-        return 0
-    fi
-
-    if t_needs_base && [ ! -f "$ws/base-id" ]; then echo creating; return 0; fi
-    echo present
-}
-
 # The creation's log outlives the workspace directory a re-run destroys first.
 ws_create_log()   { echo "$WK_STORE/log/new-$1.log"; }
 
-ws_create_task() { # <name> -- the creation record, or nothing
-    _ws_task_lib
-    task_find new "$1"
-}
-
-ws_creating_now() { # <name> -- a creation driver is running for it right now
-    local d; _ws_task_lib; d=$(ws_create_task "$1")
-    [ -n "$d" ] && task_alive "$d"
-}
-
-ws_creation_finished() { # <name> -- a creation ran to the end, whatever is there now
-    local d; _ws_task_lib; d=$(ws_create_task "$1")
-    [ -n "$d" ] && [ "$(task_field "$d" exit)" = 0 ]
-}
-
-# In the caller's shell, not a command substitution's: a reader needs task_alive as well as the dir.
 _ws_task_lib() { command -v task_find >/dev/null 2>&1 || . "$WK_ROOT/lib/task.sh"; }
-
-ws_remake_hint() { # `wk new` is a workstation command; a build box refuses it
-    if in_remote_host; then
-        printf 'from the workstation:  wk new %s --target %s' "$1" "$(wk_remote_field target)"
-    else
-        printf 'wk new %s%s' "$1" "${WK_TARGET:+ --target $WK_TARGET}"
-    fi
-}
-
-# Foreground by design: killing this waiter stops only the waiting.
-wait_ready() {
-    local name="$1" timeout="${2:-${WK_READY_WAIT:-1800}}"
-    local st waited=0 said="" stage
-
-    while :; do
-        st=$(ws_state "$name")
-        if [ "$st" = present ] && ws_creating_now "$name"; then st=creating; fi   # the marker goes down at the `init` stage and the driver holds the workspace lock through the stages after it, so `present` mid-creation is not ready: a build asked for now would refuse on that lock
-        case "$st" in
-        present)
-            [ -z "$said" ] || info "'$name' is ready"
-            return 0
-            ;;
-        absent)
-            die "no such workspace: $name"
-            ;;
-        broken)
-            die "'$name' exists as a record and not as a $WK_TARGET workspace: creation
-    finished, and the environment is gone -- something outside wk removed it.
-    Repair:  wk rm $name    (then 'wk new $name' if you still want it)"
-            ;;
-        unreachable)
-            die "'$name' lives on a machine that did not answer ($(wk_ssh_timeout)s).
-    Nothing is wrong with the workspace as far as this end can tell -- it
-    cannot be reached to ask. Try again, or check the route:
-        ssh -o BatchMode=yes ${WK_REMOTE_HOST:-the machine} true"
-            ;;
-        creating)
-            if ! ws_creating_now "$name"; then
-                barrier "'$name' was never finished creating, and nothing is creating it now
-    (the process that was is gone, with whatever connection started it).
-    Usually there is nothing in one worth keeping, so remake it:
-        $(ws_remake_hint "$name")
-    --force uses it as it is, which is right when you can see that the
-    checkout is complete and only the marker is missing."
-                return 0
-            fi
-            if [ -z "$said" ]; then
-                said=1
-                stage=$(task_stage "$(ws_create_task "$name")")
-                info "waiting for '$name' to finish being created${stage:+ (at: $stage)}"
-                log  "  follow it:  tail -f $(ws_create_log "$name")"
-                log  "  this end can be killed; creation is detached and continues"
-            fi
-            ;;
-        esac
-
-        if [ "$waited" -ge "$timeout" ]; then
-            die "'$name' was still $st after ${timeout}s.
-    Creation is detached, so it may still be going: 'wk status $name' says
-    whether the driver is alive, and $(ws_create_log "$name") says what it is doing."
-        fi
-        sleep 2; waited=$((waited + 2))
-    done
-}
-
-WS_EXCLUSIVE_KINDS=" build babysit yocto buildroot "   # the jobs that hold a workspace's checkout: two at once corrupt it, where an agent session or a benchmark in the same workspace does not
-
-# A lock says nothing about work detached into the workspace, so such a job
-# writes `$(t_home)/<job>.pid` instead; one with a task record is judged by its record's kind alone, since the record names the command that stops it.
-ws_busy_reason() { # <name> [task record to ignore -- the job that started this one]
-    local name="$1" skip="${2:-}" ws p pid job d recorded=" "
-    _ws_task_lib
-    while IFS= read -r d; do
-        [ -n "$d" ] || continue
-        [ "$d" != "$skip" ] || continue
-        [ "$(task_field "$d" name)" = "$name" ] || continue
-        [ "$(task_field "$d" where)" != target ] || recorded="$recorded$(task_field "$d" pid) "
-        case "$WS_EXCLUSIVE_KINDS" in
-            *" $(task_field "$d" kind) "*) ;;
-            *) continue ;;
-        esac
-        task_alive "$d" || continue
-        printf '%s (pid %s, %s)  stop it: %s' "$(task_field "$d" kind)" \
-            "$(task_field "$d" pid)" "$(task_field "$d" machine)" \
-            "$(task_field "$d" kill)"
-        return 0
-    done <<EOF
-$(task_list)
-EOF
-    ws=$(wk_ws_dir "$name")
-    [ -d "$ws/home" ] || return 1
-    for p in "$ws"/home/*.pid; do
-        [ -f "$p" ] || continue
-        pid=$(tr -dc '0-9' < "$p" 2>/dev/null) || true
-        [ -n "$pid" ] || continue
-        case "$recorded" in *" $pid "*) continue ;; esac
-        job=$(basename "$p" .pid)
-        if t_exec "$name" kill -0 "$pid" >/dev/null 2>&1; then
-            printf '%s (pid %s in the workspace)' "$job" "$pid"
-            return 0
-        fi
-    done
-    return 1
-}
 
 walk_targets() {
     if [ -n "${WK_TARGET:-}" ]; then printf '%s\n' $WK_TARGET; return 0; fi
@@ -633,7 +441,7 @@ target_workspaces() { # both sides: what the store created, what the driver has
 }
 
 load_target() {
-    local t="${1:-container}" kind conf
+    local t="${1:-container}" kind
 
     : "${WK_STORE_DEFAULT:=${WK_STORE:-/var/lib/wk}}"
     WK_STORE="$WK_STORE_DEFAULT"
@@ -645,10 +453,11 @@ load_target() {
     device gets it:
 
         $(target_registry_conf "$t")
+            KIND=build
             WK_REMOTE_HOST=$t      # an ssh destination that already works
             WK_REMOTE_ROOT=/home/you/wk
 
-    'wk remote setup $t' writes it for you."
+    'wk machine setup $t --kind build' writes it for you."
 
     WK_TARGET="$t"
     WK_TARGET_KIND="$kind"
@@ -660,11 +469,7 @@ load_target() {
     # shellcheck disable=SC1090
     . "$WK_ROOT/lib/target.sh"
 
-    conf=$(target_registry_conf "$t")
-    if [ -f "$conf" ]; then
-        # shellcheck disable=SC1090
-        . "$conf"
-    fi
+    [ "$kind" = "$t" ] || eval "$(wk_fleet load "$t")"
     # shellcheck disable=SC1090
     . "$WK_ROOT/targets/$kind.sh"
 }

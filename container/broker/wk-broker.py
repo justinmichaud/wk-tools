@@ -102,7 +102,7 @@ def fleet():
     if declared is _TIMED_OUT:
         raise Refused(
             "the fleet's own declarations could not be read in time "
-            "(boot/machines/*.conf, through boot/machines.sh)",
+            "(machines/*.conf, through boot/machines.sh)",
             "something is wrong on the workstation, not with the request -- "
             "run 'wk boot --list' there",
         )
@@ -159,7 +159,7 @@ def want_bench_device(args):           # the central refusal every mutating verb
         known = ", ".join(sorted(machines)) or "(none declared)"
         raise Refused(
             f"unknown machine '{name}' -- this fleet declares: {known}",
-            "a machine is a file: boot/machines/<name>.conf",
+            "a machine is a file: machines/<name>.conf",
         )
     if m["role"] != "bench-device":
         benches = ", ".join(
@@ -175,7 +175,7 @@ def want_bench_device(args):           # the central refusal every mutating verb
     if m["os"] not in ("any", host_os()):
         raise Refused(
             f"'{name}' is driven from a {m['os']} host only (NODE_OS in "
-            f"boot/machines/{name}.conf), and this broker runs on {host_os()}",
+            f"machines/{name}.conf), and this broker runs on {host_os()}",
             f"run the request against the broker on the {m['os']} workstation",
         )
     return m

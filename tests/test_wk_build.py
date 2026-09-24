@@ -64,6 +64,9 @@ class BuildTarget(targets.Target):
     def build_size(self, ws):
         return self.machine.size
 
+    def sync_tools(self, ws):
+        return self.machine.act_run(["sync-tools", ws]).ok
+
     def mirror_dir(self):
         return "/mirror"
 
@@ -127,6 +130,7 @@ class World(Fake):
         self.answer(["exec", "ws", "bash", "-c"])
         self.react(["exec", "ws", "env"], lambda a, f: Result(0, FAR_LINE) if "WK_DRY_RUN=1" in a else Result(1))
         self.react(["bash", "-c"], self._bash)
+        self.answer(["sync-tools"])
         self.reg = Reg(self)
         self.ws_dir = os.path.join(self.env["WK_STORE"], "ws", "ws")
         os.makedirs(self.ws_dir)
@@ -139,8 +143,6 @@ class World(Fake):
     def _bash(self, argv, f):
         if "origin_branch_fetch_step" in argv[2]:
             return Result(0, "git fetch -q origin 'topic'")
-        if "t_sync_tools" in argv[2]:
-            return Result(0, "tools pushed\n")
         return Result(127, "", "no bash answer")
 
     def popen(self, argv, stdin=None, stdout=None, stderr=None, cwd=None):

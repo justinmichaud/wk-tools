@@ -1,67 +1,35 @@
-# Sourced, never run, and sourcing nothing itself, so it can be streamed into a guest with no copy of wk-tools on disk yet.
+# Sourced, never run, and sourcing nothing itself. Its tables are quiet/macos.tsv beside it, read once here; a shell with no copy of wk-tools on disk is sent both by wk_quiet_desktop_script.
 
-wk_quiet_desktop_rows() {   # `@` is a key per hardware UUID (`defaults -currentHost`), which `tart clone` remints for every guest
-    cat <<'ROWS'
-widgets_desktop com.apple.WindowManager StandardHideWidgets bool true desktop widgets are hidden
-widgets_stage com.apple.WindowManager StageManagerHideWidgets bool true Stage Manager's widgets are hidden
-reduce_motion com.apple.universalaccess reduceMotion bool true window animations are off
-reduce_transparency com.apple.universalaccess reduceTransparency bool true the compositor is not blurring behind windows
-appnap NSGlobalDomain NSAppSleepDisabled bool true App Nap cannot throttle a backgrounded browser
-window_anim NSGlobalDomain NSAutomaticWindowAnimationsEnabled bool false windows open and close without an animation
-askforpassword com.apple.screensaver askForPassword int 0 the screen does not lock
-askforpassworddelay com.apple.screensaver askForPasswordDelay int 0 the screen does not lock after a delay either
-idletime @com.apple.screensaver idleTime int 0 the screen saver is disarmed
-desktop_icons com.apple.finder CreateDesktop bool false nothing is drawn on the desktop
-dock_launchanim com.apple.dock launchanim bool false the Dock does not animate a launch
-dock_recents com.apple.dock show-recents bool false the Dock does not rearrange itself
-crash_dialog com.apple.CrashReporter DialogType string none a crash writes a log instead of a dialog
-quarantine com.apple.LaunchServices LSQuarantine bool false no "downloaded from the internet" dialog can appear
-timemachine_offer com.apple.TimeMachine DoNotOfferNewDisksForBackup bool true no disk prompts to become a backup
-personalised_ads com.apple.AdLib allowApplePersonalizedAdvertising bool false no advertising identifier is refreshed
-ROWS
+WK_QUIET_TSV="${WK_QUIET_TSV:-$(cat "$(dirname "${BASH_SOURCE[0]:-.}")/quiet/macos.tsv" 2>/dev/null || true)}"
+
+_wk_qd_table() { # <table> -- its rows, the fields space-separated and the last one free text
+    [ -n "$WK_QUIET_TSV" ] || {
+        echo "wk: no quiet table here: neither quiet/macos.tsv beside mac-quiet-desktop.sh nor WK_QUIET_TSV (wk_quiet_desktop_script sends both)" >&2
+        return 1
+    }
+    printf '%s\n' "$WK_QUIET_TSV" | awk -F'\t' -v t="$1" '$1 == t { s = $2; for (i = 3; i <= NF; i++) s = s " " $i; print s }'
 }
 
-# Setup Assistant's MiniBuddy is not here: it is submitted by runningboardd on behalf of loginwindow and has no launchd label to disable (measured on a Tahoe 26.4 clone, 2026-09-05).
-wk_quiet_desktop_agents() {
-    cat <<'ROWS'
-widgets_agent com.apple.chronod chronod redraws desktop and Notification Centre widgets on a timer of its own
-notifications com.apple.notificationcenterui NotificationCenter draws a banner over whatever is being measured
-notification_daemon com.apple.usernoted usernoted queues and delivers every alert an application posts
-spotlight_menu com.apple.Spotlight Spotlight opens a search panel over the window
-siri com.apple.assistantd assistantd listens and answers on its own
-siri_knowledge com.apple.siriknowledged siriknowledged builds Siri's index in the background
-siri_inference com.apple.siriinferenced siriinferenced runs on-device inference in the background
-suggestions com.apple.suggestd suggestd mines documents and mail for suggestions
-spotlight_suggestions com.apple.parsecd parsecd fetches Spotlight suggestions from Apple
-knowledge com.apple.knowledge-agent knowledge-agent records what the account does, on a timer
-proactive com.apple.proactived proactived predicts and pre-fetches on a timer
-photo_analysis com.apple.photoanalysisd photoanalysisd analyses the photo library whenever the machine looks idle
-media_analysis com.apple.mediaanalysisd mediaanalysisd analyses media whenever the machine looks idle
-icloud_drive com.apple.bird bird syncs iCloud Drive over the run
-icloud_photos com.apple.cloudphotod cloudphotod syncs the photo library over the run
-music_library com.apple.AMPLibraryAgent AMPLibraryAgent scans and updates the music library
-screentime com.apple.ScreenTimeAgent ScreenTimeAgent records usage and can draw a limit dialog
-usage_tracking com.apple.UsageTrackingAgent UsageTrackingAgent records application usage on a timer
-experiments com.apple.triald triald fetches and applies Apple's experiment configurations
-sharing com.apple.sharingd sharingd advertises and scans for AirDrop and Handoff peers
-tips com.apple.tipsd tipsd posts a Tips notification over the window
-ROWS
+wk_quiet_desktop_script() { # this file with its table inlined, for `bash -s` on a machine that has neither
+    printf 'WK_QUIET_TSV=%q\n' "$WK_QUIET_TSV"
+    cat "${BASH_SOURCE[0]}"
 }
 
-# One list of processes that must not run during a measurement, whichever half of the machine starts them, held by signal and judged by process state. Measured 2026-09-07: `launchctl disable` then `bootout` left 17 of the 21 agents running within the second, because macOS starts them on demand; and `kill -STOP` answers EPERM for a platform binary however it is sent, so the five the kernel refuses are named above, skipped, and reported for what they can still do rather than failing every leg for ever.
-# Rows no script can set on this macOS: com.apple.universalaccess is TCC-protected, so a `defaults write` for it is dropped however it is sent -- measured 2026-09-07, written at a first boot as root and again in the account's own session, still reading '?'. Demanding them refuses every leg for ever, so what they cost is said instead.
-wk_quiet_desktop_unsettable() {
-    printf '%s\n' reduce_motion reduce_transparency
-}
+wk_quiet_desktop_rows()        { _wk_qd_table setting; }
+wk_quiet_desktop_agents()      { _wk_qd_table agent; }
+wk_quiet_desktop_daemons()     { _wk_qd_table daemon; }
+# Judged the other way round: expected running, and never a member of wk_quiet_desktop_stopped, whose every row is held stopped by signal.
+wk_quiet_desktop_expected()    { _wk_qd_table expected; }
+# One key per `pmset -a` call: which keys a Mac has depends on the model (highpowermode raises the fans, so a fanless Mac has none) and pmset applies nothing at all from a command line naming one it does not know.
+wk_quiet_desktop_power()       { _wk_qd_table power; }
+# Demanding one refuses every leg for ever, so what it costs is said instead.
+wk_quiet_desktop_unsettable()  { _wk_qd_table unsettable; }
+wk_quiet_desktop_unstoppable() { _wk_qd_table unstoppable; }
 
 _wk_qd_unsettable() { wk_quiet_desktop_unsettable | grep -qxF "$1"; }
-
-wk_quiet_desktop_unstoppable() {   # SIP refuses SIGSTOP for these even as root -- `kill -STOP` answers `Operation not permitted`. XProtect is here because it was measured refusing (bench install, macOS 26.6.2, 2026-09-09), and because the two processes that do and schedule its scanning were already here: refusing every leg on the one that launches them was the odd case out
-    printf '%s\n' ScreenTimeAgent UsageTrackingAgent suhelperd XProtect XprotectService xprotectd
-}
-
 _wk_qd_unstoppable() { wk_quiet_desktop_unstoppable | grep -qxF "$1"; }
 
+# One list of processes that must not run during a measurement, whichever half of the machine starts them, held by signal and judged by process state. Measured 2026-09-07: `launchctl disable` then `bootout` left 17 of the 21 agents running within the second, because macOS starts them on demand; and `kill -STOP` answers EPERM for a platform binary however it is sent, so the ones the kernel refuses are named, skipped, and reported for what they can still do rather than failing every leg for ever.
 wk_quiet_desktop_stopped() {
     while read -r name plist proc why; do
         [ -n "$plist" ] || continue
@@ -70,51 +38,6 @@ wk_quiet_desktop_stopped() {
 $(wk_quiet_desktop_agents)
 ROWS
     wk_quiet_desktop_daemons
-}
-
-# Not mds and not sysmond: `mdutil` and `pgrep` ask those two over XPC and never return while they are held stopped -- measured in the rehearsal guest, 2026-09-05, where each deadlocked the command that would have undone it. `mdutil -i off` is what makes mds idle instead.
-wk_quiet_desktop_daemons() {
-    cat <<'ROWS'
-spotlight_content corespotlightd indexes application content on a timer of its own
-softwareupdate softwareupdated scans for updates, whatever the hosts denial lets through
-softwareupdate_helper suhelperd stages an update a scan has found
-malware_scan XProtect scans the whole disk on Apple's own schedule
-malware_service XprotectService does that scanning
-malware_daemon xprotectd schedules that scan
-timemachine backupd copies the disk the run is using
-timemachine_helper backupd-helper does that copying
-analytics_daemon analyticsd records and uploads usage analytics
-analytics_helper osanalyticshelper collects a report whenever anything crashes
-diagnostics diagnosticservicesd submits diagnostics on a timer
-crash_reporter ReportCrash writes a crash log and can draw a dialog over the run
-hang_sampler spindump samples every process when one stops responding
-power_records powerdatad records power counters on a timer
-process_stats systemstats samples every process's counters on a timer
-icloud cloudd fetches and pushes iCloud records mid-run
-icloud_defaults syncdefaultsd syncs preferences to iCloud on a timer
-downloads nsurlsessiond runs every background download in the machine
-findmy searchpartyd beacons for and scans for nearby devices
-experiments_system triald_system fetches Apple's experiment configurations
-ROWS
-}
-
-# Judged the other way round: expected running, and never a member of wk_quiet_desktop_stopped, whose every row is held stopped by signal.
-wk_quiet_desktop_expected() {
-    cat <<'ROWS'
-tailnet tailscaled is the bench install's only way to be reached while it measures, and pausing it would drop the tailnet mid-leg and leave a live utun with nothing draining it; it costs 1.78% of one core and 71 MB RSS, measured over 3.7 days on moose, the fleet's busiest node
-ROWS
-}
-
-# One key per `pmset -a` call: which keys a Mac has depends on the model (highpowermode raises the fans, so a fanless Mac has none) and pmset applies nothing at all from a command line naming one it does not know.
-wk_quiet_desktop_power() {
-    cat <<'ROWS'
-power_displaysleep displaysleep 0 displaysleep
-power_disksleep disksleep 0 disksleep
-power_sleep sleep 0 sleep
-power_disablesleep disablesleep 1 SleepDisabled
-power_lowpowermode lowpowermode 0 lowpowermode
-power_highpowermode highpowermode 1 highpowermode
-ROWS
 }
 
 _wk_qd_uid() { id -u "${1:-$(id -un)}" 2>/dev/null; }

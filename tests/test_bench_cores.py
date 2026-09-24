@@ -1,130 +1,91 @@
-"""`wk bench --cores`: the cpu-list validator and taskset prefix builder
-(lib/wkdata.py `cores-valid` / `cores-wrap`, cmd/bench's bench_cores_valid /
-bench_cores_wrap), the target/os refusal decision (cmd/bench's
-bench_cores_refusal), and the axis-mismatch warning `wk bench compare` gains
-for a fourth axis (lib/wkdata.py `_axis_check_lines`).
+"""`wk bench run --cores`: the cpu-list syntax, the pin a run is exec'd through and records
+(lib/wk/bench/pipeline.py), which systems refuse one (lib/wk/bench/systems.py), and the warning
+`wk bench compare` gives two runs pinned differently.
 
-Unit tests only -- no workspace, no podman VM, no hardware. `cores-valid` and
-`cores-wrap` are driven as a subprocess exactly the way `wk bench` itself
-calls them (cmd/bench's `wkdata()` wrapper), the same pattern
-tests/test_bench_report.py uses for the rest of lib/wkdata.py. The axis
-check is exercised the same way test_bench_report.py's own axis-mismatch
-test is: two synthetic env.json fixtures through `wkdata.py report --text`.
-bench_cores_refusal is a pure function of (target, os), so it is lifted
-verbatim out of cmd/bench and called directly -- the same `sed -n
-'/^fn()/,/^}/p'` idiom tests/test_ceilings.py uses to lift cmd/status's `bump`.
+Rows landed here: `unit bench.pins_cores`, `live bench.pins_cores[container]`.
 
-Run: python3 -m unittest tests.test_bench_cores -v
+Run: python3 tests/run.py -k test_bench_cores
 """
 import json
-import subprocess
 import unittest
 
-from tests.support import REPO, WkTest, bash, scratch_dir
+from tests.support import WkTest, bench_ls_runs, podman_vm_ssh, requires_podman_vm, run, scratch_dir
+from tests.test_bench_pipeline import BenchTest, World
+from tests.test_bench_report import rep
 
-WKDATA = REPO / "lib" / "wkdata.py"
-
-
-def wkdata(*args, timeout=30):
-    return subprocess.run(
-        ["python3", str(WKDATA), *args],
-        cwd=str(REPO),
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-    )
+from wk.bench import pipeline, record, systems
 
 
 def env_record(path, *fields):
-    cp = wkdata("env-record", str(path), *fields)
-    assert cp.returncode == 0, cp.stdout + cp.stderr
-    return cp
+    record.write_env(str(path), list(fields))
 
 
 class TestCoresValid(unittest.TestCase):
-    """wkdata.py cores-valid: the syntax `--cores` accepts, checked before a
-    preflight is ever spent on it. A cpu the machine does not have is left
-    to taskset itself -- not this parser's job."""
-
-    def _valid(self, spec):
-        return wkdata("cores-valid", spec).returncode == 0
+    """The syntax `--cores` accepts, checked before a preflight is spent on it; a cpu the machine does
+    not have is taskset's to refuse."""
 
     def test_accepts_every_documented_shape(self):
         for spec in ("0-3", "2,3", "0-1,4", "7"):
             with self.subTest(spec=spec):
-                self.assertTrue(self._valid(spec), f"{spec!r} should be valid")
+                self.assertTrue(pipeline.cores_valid(spec))
 
     def test_refuses_garbage(self):
-        for spec in ("a", "1-", "-1", "1,,2"):
+        for spec in ("", "a", "1-", "-1", "1,,2"):
             with self.subTest(spec=spec):
-                self.assertFalse(self._valid(spec), f"{spec!r} should be refused")
+                self.assertFalse(pipeline.cores_valid(spec))
 
 
-class TestCoresWrap(unittest.TestCase):
-    """wkdata.py cores-wrap: the literal `taskset -c <set> ` prefix
-    cmd_run and run_jsc interpolate onto the command line they build for
-    t_exec (cmd/bench's bench_cores_wrap is a one-line call through to
-    this -- there is no --dry-run on `wk bench <ws> <plan>` to inspect the
-    built command line directly, so this is the helper that builds it)."""
+class TestAPinnedRun(BenchTest):
+    """`bench.pins_cores`: the run is exec'd through the pin it records."""
 
-    def test_prefix_contains_taskset_dash_c_and_the_set(self):
-        cp = wkdata("cores-wrap", "0-3")
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertIn("taskset -c 0-3", cp.stdout)
+    def test_a_container_run_is_exec_d_under_taskset_and_records_it(self):
+        rc, err = self.run_(None, "run", "jetstream3", "--config", "jsc-release", "--cores", "0-3")
+        self.assertEqual(rc, 0, err)
+        self.assertIn("exec taskset -c 0-3 ", self.w.watched[0][-1])
+        self.assertEqual(self.env_json()["cores"], {"set": "0-3", "pinned": True})
 
-    def test_refuses_an_invalid_set_rather_than_printing_garbage(self):
-        cp = wkdata("cores-wrap", "not-a-set")
-        self.assertNotEqual(cp.returncode, 0)
+    def test_an_unpinned_run_records_that_it_was_not(self):
+        self.run_()
+        self.assertNotIn("taskset", self.w.watched[0][-1])
+        self.assertEqual(self.env_json()["cores"], {"set": "", "pinned": False})
+
+    def test_a_guest_records_its_vcpu_count_and_refuses_a_pin(self):
+        w = World(self.tmp, "vm")
+        self.assertIn("no pin exists on macOS; the guest's vCPU count is not a pin",
+                      self.said("run", "jetstream3", "--config", "jsc-release", "--cores", "0-1", w=w))
+        self.run_(w, "run", "jetstream3", "--config", "jsc-release")
+        self.assertEqual(self.env_json(w)["host"]["cores"], "4")
+
+    def test_an_invalid_set_is_refused_before_anything_runs(self):
+        self.assertIn("is not a valid Linux cpu list", self.said("run", "jetstream3", "--cores", "a-b"))
+        self.assertEqual(self.w.effects, [])
+
+    def test_only_the_container_pins(self):
+        self.assertEqual(systems.ContainerSystem.cores_refusal(None), "")
+        self.assertIn("no pin exists on macOS", systems.GuestSystem.cores_refusal(None))
 
 
-class TestCoresRefusal(unittest.TestCase):
-    """bench_cores_refusal <target> <os>, lifted straight out of cmd/bench:
-    refuses a `vm` target regardless of os (a macOS guest by construction),
-    and a `local` target running on macOS; allows container, remote, and
-    local-on-linux, where taskset actually pins something."""
+@requires_podman_vm()
+class TestAPinnedRunLive(WkTest):
+    """`live bench.pins_cores[container]`: a real run in a container workspace that already has a
+    jsc-release build records the pin it ran under."""
 
-    def _refusal(self, target, os):
-        script = f'''
-set -euo pipefail
-. "{REPO}/lib/common.sh"
-body="$(sed -n '/^bench_cores_refusal()/,/^}}/p' "{REPO}/cmd/bench")"
-[ -n "$body" ] || {{ echo "lift bench_cores_refusal failed"; exit 1; }}
-eval "$body"
-bench_cores_refusal {target!r} {os!r}
-'''
-        cp = bash(script)
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        return cp.stdout
-
-    def test_vm_target_refuses_on_macos(self):
-        out = self._refusal("vm", "macos")
-        self.assertIn("no pin exists on macOS", out)
-
-    def test_vm_target_refuses_on_linux_too(self):
-        """a vm target is a macOS guest by construction, whatever os the
-        driving machine reports"""
-        out = self._refusal("vm", "linux")
-        self.assertIn("no pin exists on macOS", out)
-
-    def test_local_target_on_macos_refuses(self):
-        out = self._refusal("local", "macos")
-        self.assertIn("no pin exists on macOS", out)
-
-    def test_local_target_on_linux_allows(self):
-        out = self._refusal("local", "linux")
-        self.assertEqual(out, "")
-
-    def test_container_target_allows(self):
-        out = self._refusal("container", "linux")
-        self.assertEqual(out, "")
-
-    def test_remote_target_allows(self):
-        out = self._refusal("remote", "linux")
-        self.assertEqual(out, "")
+    def test_the_record_carries_the_pin(self):
+        cp = run("ls", timeout=45)
+        names = [l.split()[0] for l in cp.stdout.splitlines() if len(l.split()) > 1 and l.split()[1] == "container"]
+        for ws in names:
+            b = run("bench", "run", ws, "sunspider1.0.2", "--config", "jsc-release", "--count", "1", "--cores", "0", timeout=300)
+            if b.returncode == 0:
+                break
+        else:
+            self.skipTest("no container workspace with a jsc-release build to bench in")
+        rid = bench_ls_runs(run("bench", "ls", timeout=60).stdout)[-1].split("/bench/", 1)[1]
+        env = json.loads(podman_vm_ssh("cat /var/lib/wk/bench/%s/env.json" % rid).stdout)
+        self.assertEqual(env["cores"], {"set": "0", "pinned": True})
 
 
 class TestCoresAxisWarning(WkTest):
-    """`wk bench compare` (wkdata.py report's axis check) warns when two
+    """`wk bench compare` (lib/wk/bench/report.py's axis check) warns when two
     runs' `cores.set` differ, the same way it already warns on a runner or
     session-mode mismatch -- and stays quiet when they agree."""
 
@@ -145,7 +106,7 @@ class TestCoresAxisWarning(WkTest):
     def test_different_core_sets_warn(self):
         with scratch_dir() as tmp:
             a, b = self._pair(tmp, "0-3", "4-7")
-            cp = wkdata("report", str(a), str(b), "--text")
+            cp = rep(a, b)
             self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
             self.assertIn("different core pins", cp.stdout)
             self.assertIn("0-3", cp.stdout)
@@ -154,14 +115,14 @@ class TestCoresAxisWarning(WkTest):
     def test_equal_core_sets_do_not_warn(self):
         with scratch_dir() as tmp:
             a, b = self._pair(tmp, "0-3", "0-3")
-            cp = wkdata("report", str(a), str(b), "--text")
+            cp = rep(a, b)
             self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
             self.assertNotIn("different core pins", cp.stdout)
 
     def test_unpinned_vs_pinned_warns(self):
         with scratch_dir() as tmp:
             a, b = self._pair(tmp, None, "0-3")
-            cp = wkdata("report", str(a), str(b), "--text")
+            cp = rep(a, b)
             self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
             self.assertIn("different core pins", cp.stdout)
             self.assertIn("unpinned", cp.stdout)
@@ -169,7 +130,7 @@ class TestCoresAxisWarning(WkTest):
     def test_both_unpinned_does_not_warn(self):
         with scratch_dir() as tmp:
             a, b = self._pair(tmp, None, None)
-            cp = wkdata("report", str(a), str(b), "--text")
+            cp = rep(a, b)
             self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
             self.assertNotIn("different core pins", cp.stdout)
 

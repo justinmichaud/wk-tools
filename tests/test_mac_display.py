@@ -1,4 +1,4 @@
-"""The display readings a Mac benchmark is judged against: `lib/wkmac.py
+"""The display readings a Mac benchmark is judged against: `lib/wk/mac.py
 displays` / `brightness`, and the faults bench/mac-browser-check.py raises when
 the screen it is measuring on is not the declared one.
 
@@ -32,7 +32,7 @@ def load(path, name):
     return module
 
 
-WKMAC = load(REPO / "lib" / "wkmac.py", "wkmac")
+WKMAC = load(REPO / "lib" / "wk" / "mac.py", "wkmac")
 BROWSER = load(REPO / "bench" / "mac-browser-check.py", "mac_browser_check")
 
 # tolken's built-in panel, as CGGetOnlineDisplayList reports it on the bench
@@ -154,7 +154,7 @@ class WkmacHandles(WkTest):
 
 class WkmacDisplayMode(WkmacHandles):
     """The mode the bench install is measured at is held, not hoped for. It is
-    declared in boot/machines/<node>.conf, and macOS offers no runtime way to
+    declared in machines/<node>.conf, and macOS offers no runtime way to
     reach a scaled mode on an Apple Silicon panel -- CGDisplayCopyAllDisplayModes
     lists the 1:1 modes alone, with or without the duplicates option (measured
     2026-09-08 on Mac16,12) -- so the WindowServer configuration is rewritten
@@ -297,14 +297,14 @@ class WkmacDisplays(WkmacHandles):
     @unittest.skipIf(platform.system() == "Darwin",
                      "this machine is a Mac: CoreGraphics loads here")
     def test_the_subcommand_exits_1_printing_nothing_off_a_mac(self):
-        cp = subprocess.run([sys.executable, str(REPO / "lib" / "wkmac.py"), "displays"],
+        cp = subprocess.run([sys.executable, str(REPO / "lib" / "wk" / "mac.py"), "displays"],
                             capture_output=True, text=True)
         self.assertEqual(1, cp.returncode)
         self.assertEqual("", cp.stdout)
 
     @unittest.skipUnless(platform.system() == "Darwin", "needs a Mac")
     def test_a_real_window_server_answers_with_that_shape(self):
-        cp = subprocess.run([sys.executable, str(REPO / "lib" / "wkmac.py"), "displays"],
+        cp = subprocess.run([sys.executable, str(REPO / "lib" / "wk" / "mac.py"), "displays"],
                             capture_output=True, text=True)
         self.assertEqual(0, cp.returncode, cp.stderr)
         answer = json.loads(cp.stdout)
@@ -366,7 +366,7 @@ class WkmacBrightness(WkmacHandles):
         self.assertEqual("", out)
 
     def test_a_value_outside_0_to_1_is_a_usage_error(self):
-        cp = subprocess.run([sys.executable, str(REPO / "lib" / "wkmac.py"),
+        cp = subprocess.run([sys.executable, str(REPO / "lib" / "wk" / "mac.py"),
                              "brightness", "--set", "2.0"],
                             capture_output=True, text=True)
         self.assertEqual(2, cp.returncode)
@@ -524,7 +524,9 @@ class TheScreenTheReadingWasTakenOn(WkTest):
         self.assertIn("is not the external panel", cp.stderr)
 
     def test_the_display_list_is_read_through_the_wkmac_subcommand(self):
+        """lib/wkmac.py is the old path, a link to lib/wk/mac.py for its bash and bench callers."""
         self.assertEqual(str(REPO / "lib" / "wkmac.py"), BROWSER.WKMAC)
+        self.assertEqual((REPO / "lib" / "wkmac.py").resolve(), REPO / "lib" / "wk" / "mac.py")
 
     @unittest.skipIf(platform.system() == "Darwin",
                      "this machine is a Mac: CoreGraphics loads here")

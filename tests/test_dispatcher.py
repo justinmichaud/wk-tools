@@ -14,7 +14,7 @@ import unittest
 from unittest import mock
 
 from tests.support import (
-    REAL_REGISTRY, REPO, WkTest, fake_workspace, rand_suffix, run, stub_path,
+    REAL_MACHINES, REPO, WkTest, fake_workspace, rand_suffix, run, stub_path,
     where_values,
 )
 
@@ -130,10 +130,10 @@ class TestHelpAndDeclarations(WkTest):
         # that path is what this checks (the suite is otherwise pointed at an
         # empty one -- tests.support.NO_REGISTRY).
         cp = run("ls", env={"WK_TARGET": "nosuchtarget-selftest",
-                            "WK_TARGET_REGISTRY": str(REAL_REGISTRY)})
+                            "WK_MACHINES_DIR": str(REAL_MACHINES)})
         self.assertNotEqual(cp.returncode, 0, "an unknown target was accepted")
         self.assertIn(
-            "targets/hosts/nosuchtarget-selftest.conf", cp.stdout + cp.stderr
+            "machines/nosuchtarget-selftest.conf", cp.stdout + cp.stderr
         )
 
 
@@ -144,10 +144,10 @@ class TestDelegationReadsTheRegistry(WkTest):
     def setUp(self):
         super().setUp()
         (self.tmp / "hosts").mkdir()
-        (self.tmp / "hosts" / "peer.conf").write_text("WK_REMOTE_PEER=1\nWK_REMOTE_TOOLS=/opt/wk-tools\n")
-        (self.tmp / "hosts" / "me.conf").write_text("WK_REMOTE_LOCAL=1\nWK_REMOTE_ROOT=%s\n" % (self.tmp / "rr"))
+        (self.tmp / "hosts" / "peer.conf").write_text("KIND=peer\nWK_REMOTE_PEER=1\nWK_REMOTE_TOOLS=/opt/wk-tools\n")
+        (self.tmp / "hosts" / "me.conf").write_text("KIND=build\nWK_REMOTE_LOCAL=1\nWK_REMOTE_ROOT=%s\n" % (self.tmp / "rr"))
         env = {"HOME": str(self.tmp), "XDG_STATE_HOME": str(self.tmp / "state"), "WK_STORE": str(self.tmp / "store"),
-               "WK_TARGET_REGISTRY": str(self.tmp / "hosts"), "WK_IN_VM": "1", "PATH": os.environ.get("PATH", "")}
+               "WK_MACHINES_DIR": str(self.tmp / "hosts"), "WK_IN_VM": "1", "PATH": os.environ.get("PATH", "")}
         self.fake = Fake("host")
         self.reg = targets.Registry(REPO, env=env, machine=self.fake)
 

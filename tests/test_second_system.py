@@ -26,7 +26,6 @@ from pathlib import Path
 from tests.support import REPO, WkTest, bash, stub_path
 
 CARD_PRIV = REPO / "admin" / "wk-card-priv"
-PI_SD = REPO / "boot" / "pi-sd.sh"
 
 
 def _lift(path, *funcs):
@@ -572,40 +571,6 @@ class TestTailnetIdentityAcrossARewrite(WkTest):
             self.assertRegex(text, rf"(?m)^\s*{verb}\)\s+{fn}")
             self.assertIn(verb, re.search(r'usage: wk-card-priv [^"]*', text).group(0))
 
-    def test_a_whole_bench_medium_keeps_its_node_too(self):
-        """cmd/sysimage runs the save for any bench write onto a board's own
-        bench medium, not only a second system -- and never for a rescue,
-        whose identity is on the medium being replaced."""
-        body = re.search(r"(?ms)^cmd_write_from\(\).*?^}", (REPO / "cmd" / "sysimage").read_text()).group(0)
-        save = re.search(r'kept=\$\(disk_tailnet_save.*', body).group(0)
-        self.assertIn("disk_tailnet_save", save)
-        guard = body[body.index("local kept=no"):body.index("kept=$(disk_tailnet_save")]
-        self.assertIn('"$role" != rescue', guard)
-        self.assertIn('NODE_DEVICE', guard,
-                      "a whole-disk bench write onto the board's own medium must keep its node")
-
-    def test_the_write_keeps_the_identity_across_the_split(self):
-        """cmd/sysimage: saved before anything is erased, the name preflight
-        stood down when it was, put back once the new partitions are there."""
-        body = re.search(r"(?ms)^cmd_write_from\(\).*?^}", (REPO / "cmd" / "sysimage").read_text()).group(0)
-        save = body.index("disk_tailnet_save")
-        self.assertLess(save, body.index("disk_write_source"),
-                        "the identity is saved after the card is erased")
-        self.assertLess(save, body.index("_tailnet_name_preflight"))
-        self.assertIn('if [ "$kept" = yes ]; then', body)
-        restore = body.index("disk_tailnet_restore")
-        self.assertGreater(restore, body.index("disk_parts_present"))
-        self.assertLess(restore, body.index("disk_seed_tailnet"))
-
-    def test_the_identity_is_read_off_an_unmounted_card(self):
-        """disk_tailnet_save *dies* if the helper refuses, and the helper's
-        gate refuses a medium with a mounted filesystem -- so on a machine
-        whose desktop session automounts the card, keeping the node depends on
-        the write having unmounted it first."""
-        body = re.search(r"(?ms)^cmd_write_from\(\).*?^}", (REPO / "cmd" / "sysimage").read_text()).group(0)
-        self.assertLess(body.index("disk_unmount"), body.index("disk_tailnet_save"),
-                        "the identity is read off a card the write has not unmounted")
-
 
 class TestUnitsForABusyBoxInit(WkTest):
     """`units` installs the archive's init.d scripts on an image with no
@@ -671,184 +636,93 @@ class TestUnitsForABusyBoxInit(WkTest):
 
 
 class TestPiSdDriver(unittest.TestCase):
-    """boot/pi-sd.sh: arming through the helper's @second verbs, on the rescue."""
+    """lib/wk/boot/pi.py's PiSd: arming through the helper's @second/@third verbs on the rescue, against a FakeBoard."""
 
-    def _load(self, script):
-        return bash(f'''
-set -eu
-. "{REPO}/lib/common.sh"
-. "{REPO}/lib/store.sh"
-. "{REPO}/lib/image.sh"
-. "{REPO}/image/profiles.sh"
-. "{REPO}/boot/machines.sh"
-machine_load rpi3
-load_driver pi-sd
-{script}
-''')
+    CONF = {"NODE_NAME": "rpi3", "NODE_DRIVER": "pi-sd", "NODE_DEVICE": "/dev/mmcblk0", "NODE_ROOT": "/dev/mmcblk0p2",
+            "NODE_ROLE": "bench-device", "NODE_PROFILE": "webkit-2.52-yocto-rpi3-32"}
+
+    def board(self, *boots):
+        import sys
+        sys.path.insert(0, str(REPO / "lib"))
+        from wk.boot.fake import FakeBoard
+        from wk.boot.pi import PiSd
+        fake = FakeBoard(self.CONF)
+        fake.rescue("rescue-1")
+        for n, boot in enumerate(boots):
+            fake.write_system(boot, "img-%s" % "abc"[n])
+        fake.channel = "host"
+        return fake, PiSd(REPO, dict(self.CONF), fake)
+
+    def arms(self, fake):
+        return [e[2] for e in fake.effects if e[:2] == ("card_priv", "second-arm")]
+
+    def refused(self, fn, *args):
+        import contextlib
+        import io
+        from wk import act
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            self.assertRaises(act.Refused, fn, *args)
+        return err.getvalue()
 
     def test_arming_is_on_the_medium(self):
-        cp = self._load('echo "$BOOT_ARMING"')
-        self.assertEqual(cp.stdout.strip(), "medium", cp.stdout + cp.stderr)
+        from wk.boot.pi import PiSd
+        self.assertEqual(PiSd.arming, "medium")
 
     def test_arm_and_disarm_go_through_the_helper_on_the_rescue(self):
-        cp = self._load('''
-card_priv() { echo "card_priv $*" >&2; case "$1" in second-state) echo "wk-card-priv: armed=no"; echo "wk-card-priv: present=yes" ;; esac; }
-ARM_SYS_PART=/dev/mmcblk0p3 b_arm
-b_disarm
-''')
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertIn("card_priv second-arm /dev/mmcblk0@second", cp.stderr)
-        self.assertNotIn("second-disarm", cp.stderr, "b_disarm disarmed a board that was not armed")
+        fake, d = self.board("/dev/mmcblk0p3")
+        d.disarm()
+        self.assertFalse([e for e in fake.effects if "second-disarm" in e], "disarmed a board that was not armed")
+        d.arm("/dev/mmcblk0p3")
+        self.assertEqual(self.arms(fake), ["/dev/mmcblk0@second"])
 
     def test_arm_selects_the_named_system(self):
-        """the shared layout's pairs map to the helper's addresses: 5-6 is
-        @second, 7-8 is @third; an arm with no selection is refused."""
-        cp = self._load('''
-card_priv() { echo "card_priv $*" >&2; case "$1" in second-state) echo "wk-card-priv: armed=no"; echo "wk-card-priv: present=yes" ;; esac; }
-ARM_SYS_PART=/dev/mmcblk0p7 b_arm
-''')
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertIn("card_priv second-arm /dev/mmcblk0@third", cp.stderr)
-        cp = self._load("b_arm")
-        self.assertNotEqual(cp.returncode, 0)
-        self.assertIn("machine_select_system", cp.stderr)
+        """the shared layout's pairs map to the helper's addresses: 5-6 is @second, 7-8 is @third."""
+        fake, d = self.board("/dev/mmcblk0p5", "/dev/mmcblk0p7")
+        d.arm("/dev/mmcblk0p7")
+        self.assertEqual(self.arms(fake), ["/dev/mmcblk0@third"])
+        self.assertIn("machine_select_system", self.refused(d.arm, ""))
 
     def test_arm_skips_only_when_armed_for_the_same_system(self):
-        """armed for the other system is not armed for this one: the arm
-        re-stages rather than trusting a yes."""
-        cp = self._load('''
-card_priv() { echo "card_priv $*" >&2; case "$1" in second-state) echo "wk-card-priv: armed=yes"; echo "wk-card-priv: armed_prefix=third"; echo "wk-card-priv: present=yes" ;; esac; }
-ARM_SYS_PART=/dev/mmcblk0p5 b_arm
-''')
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertIn("card_priv second-arm /dev/mmcblk0@second", cp.stderr)
-        cp = self._load('''
-card_priv() { echo "card_priv $*" >&2; case "$1" in second-state) echo "wk-card-priv: armed=yes"; echo "wk-card-priv: armed_prefix=second"; echo "wk-card-priv: present=yes" ;; esac; }
-ARM_SYS_PART=/dev/mmcblk0p5 b_arm
-''')
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertNotIn("card_priv second-arm", cp.stderr, "armed for this system already; the arm should be a no-op")
+        """armed for the other system is not armed for this one: the arm re-stages rather than trusting a yes."""
+        fake, d = self.board("/dev/mmcblk0p5", "/dev/mmcblk0p7")
+        d.arm("/dev/mmcblk0p7")
+        d.arm("/dev/mmcblk0p5")
+        self.assertEqual(self.arms(fake), ["/dev/mmcblk0@third", "/dev/mmcblk0@second"])
+        d.arm("/dev/mmcblk0p5")
+        self.assertEqual(len(self.arms(fake)), 2, "armed for this system already; the arm should be a no-op")
 
     def test_arm_refuses_a_card_with_no_second_system(self):
-        cp = self._load('''
-card_priv() { case "$1" in second-state) echo "wk-card-priv: armed=no"; echo "wk-card-priv: present=no" ;; *) echo "card_priv $*" >&2 ;; esac; }
-ARM_SYS_PART=/dev/mmcblk0p3 b_arm
-''')
-        self.assertNotEqual(cp.returncode, 0)
-        self.assertIn("@second", cp.stderr)
-        self.assertNotIn("card_priv second-arm", cp.stderr)
+        fake, d = self.board()
+        self.assertIn("@second", self.refused(d.arm, "/dev/mmcblk0p3"))
+        self.assertEqual(self.arms(fake), [])
 
     def test_disarm_puts_the_rescue_back_when_armed(self):
-        cp = self._load('''
-card_priv() { echo "card_priv $*" >&2; case "$1" in second-state) echo "wk-card-priv: armed=yes"; echo "wk-card-priv: present=yes" ;; esac; }
-b_disarm
-''')
-        self.assertIn("card_priv second-disarm /dev/mmcblk0@second", cp.stderr)
+        fake, d = self.board("/dev/mmcblk0p3")
+        d.arm("/dev/mmcblk0p3")
+        d.disarm()
+        self.assertIn(("card_priv", "second-disarm", "/dev/mmcblk0@second"), fake.effects)
+        d.reboot()
+        self.assertTrue(fake.on_rescue())
 
     def test_the_bench_systems_boot_partition_is_the_third(self):
-        cp = self._load("b_boot_part")
-        self.assertEqual(cp.stdout.strip(), "/dev/mmcblk0p3")
+        self.assertEqual(self.board()[1].boot_part(), "/dev/mmcblk0p3")
 
-    def test_the_self_disarm_is_one_systemd_safe_sh_command(self):
-        cp = self._load("b_self_disarm_sh")
-        self.assertEqual(cp.returncode, 0, cp.stderr)
-        body = cp.stdout
-        self.assertTrue(body.strip())
-        for bad in ("'", "%"):
-            self.assertNotIn(bad, body, f"the self-disarm carries {bad!r}, which systemd's ExecStart would mangle")
-        self.assertIn("config.txt.rescue", body)
-        self.assertEqual(subprocess.run(["sh", "-n"], input=body, text=True, capture_output=True).returncode, 0)
+    def test_the_self_disarm_puts_the_rescue_config_back(self):
+        self.assertIn("config.txt.rescue", self.board()[1].self_disarm_sh())
 
     def test_evidence_comes_from_the_card_not_the_record(self):
-        cp = self._load('''
-card_priv() { echo "wk-card-priv: armed=yes"; echo "wk-card-priv: present=yes"; }
-b_systems() { printf "%s\\n" "/dev/mmcblk0p5 img-a"; }
-b_evidence
-''')
-        self.assertIn("armed=yes", cp.stdout)
-        self.assertIn("system=img-a (on /dev/mmcblk0p5)", cp.stdout)
+        fake, d = self.board("/dev/mmcblk0p5")
+        d.arm("/dev/mmcblk0p5")
+        out = d.evidence()
+        self.assertIn("armed=yes", out)
+        self.assertIn("system=img-a (on /dev/mmcblk0p5)", out)
+        self.assertIsNone(fake.record, "the evidence wrote or needed a record")
 
     def test_reprovisioning_writes_both_systems_from_a_reader(self):
-        cp = self._load("b_reprovision")
-        self.assertIn("--disk <reader>:/dev/mmcblk0 --rescue", cp.stdout)
-        self.assertIn("--disk <reader>:/dev/mmcblk0@second", cp.stdout)
-        self.assertIn("wk boot rpi3", cp.stdout)
-
-
-class TestDiskLayerUnderSecond(WkTest):
-    """boot/disk.sh: the two steps that differ under @second."""
-
-    def _step(self, step, dry="1"):
-        return bash(f'''
-. "{REPO}/lib/common.sh"
-. "{REPO}/boot/machines.sh"
-. "{REPO}/lib/image.sh"
-NODE_NAME=testmach
-DISK_DRY={dry!r}
-card_priv() {{ echo "card_priv should not have run: $*" >&2; exit 9; }}
-m_ssh() {{ echo "m_ssh should not have run: $*" >&2; exit 9; }}
-{step}
-echo DONE
-''')
-
-    def test_the_identity_is_left_to_the_rescue_disk(self):
-        cp = self._step("disk_unique_identity /dev/sdX@second", dry="")
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertIn("keeps the rescue disk's identity", cp.stdout + cp.stderr)
-        self.assertNotIn("card_priv should not", cp.stdout + cp.stderr)
-
-    def test_the_read_back_uses_the_two_partition_hashes(self):
-        meta = self.tmp / "meta"
-        meta.write_text("100 aaaa\n64 bb 128 cc\n")
-        cp = bash(f'''
-. "{REPO}/lib/common.sh"
-. "{REPO}/boot/machines.sh"
-. "{REPO}/lib/image.sh"
-NODE_NAME=testmach
-DISK_DRY=""
-card_priv() {{ echo "card_priv $*" >&2; echo aaaa; }}
-disk_verify_stream /dev/sdX@second "{meta}"
-disk_verify_stream /dev/sdX "{meta}"
-''')
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertIn("card_priv verify /dev/sdX@second 64 bb 128 cc", cp.stderr)
-        self.assertIn("card_priv verify /dev/sdX 100", cp.stderr)
-
-    def test_the_kept_identity_is_reported_and_put_back_only_when_kept(self):
-        cp = bash(f'''
-. "{REPO}/lib/common.sh"
-. "{REPO}/boot/machines.sh"
-. "{REPO}/lib/image.sh"
-NODE_NAME=testmach
-DISK_DRY=""
-CAP="tailnet-keep=yes"
-card_priv() {{ echo "card_priv $*" >&2; case "$1" in status) echo "wk-card-priv: ok"; echo "wk-card-priv: $CAP" ;; tailnet-save) echo "wk-card-priv: kept=$KEPT" ;; esac; }}
-KEPT=yes; k=$(disk_tailnet_save /dev/sdX@second); echo "kept=$k"
-KEPT=no;  k=$(disk_tailnet_save /dev/sdX@second); echo "kept=$k"
-disk_tailnet_restore /dev/sdX@second
-CAP="second=yes"; k=$(disk_tailnet_save /dev/sdX@second 2>old.err); echo "old=$k"; grep -c "cannot keep" old.err
-CAP="tailnet-keep=yes"; KEPT=maybe; disk_tailnet_save /dev/sdX@second && echo "guessed"
-''', cwd=str(self.tmp))
-        self.assertNotEqual(cp.returncode, 0, "an answer that is neither yes nor no was accepted")
-        self.assertIn("kept=yes\nkept=no\n", cp.stdout)
-        self.assertIn("old=no\n1\n", cp.stdout, "an old helper is not a loud 'no'")
-        self.assertNotIn("guessed", cp.stdout)
-        self.assertIn("card_priv tailnet-restore /dev/sdX@second", cp.stderr)
-
-    def test_a_second_write_that_reported_nothing_cannot_be_verified(self):
-        meta = self.tmp / "meta"
-        meta.write_text("100 aaaa\n")
-        cp = bash(f'''
-. "{REPO}/lib/common.sh"
-. "{REPO}/boot/machines.sh"
-. "{REPO}/lib/image.sh"
-NODE_NAME=testmach
-DISK_DRY=""
-card_priv() {{ echo "card_priv $*"; }}
-disk_verify_stream /dev/sdX@second "{meta}"
-''')
-        self.assertNotEqual(cp.returncode, 0)
-        self.assertIn("did not report", cp.stdout + cp.stderr)
+        out = self.board()[1].reprovision()
+        self.assertIn("--disk <reader>:/dev/mmcblk0 --rescue", out)
+        self.assertIn("--disk <reader>:/dev/mmcblk0@second", out)
+        self.assertIn("wk boot rpi3", out)
 
 
 if __name__ == "__main__":

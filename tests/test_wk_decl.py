@@ -77,6 +77,15 @@ class TestDeclarations(unittest.TestCase):
         self.assertEqual(d.takes_for(["ls"]), "0")
         self.assertEqual(d.name_for(["--list=x"]), "none")
 
+    def test_a_subverb_overrides_destructive_and_dryrun(self):
+        d = declare(self.tmp, "probe",
+                    "# wk: where=host destructive setup,--purge dryrun setup",
+                    "# wk: sub inner destructive= dryrun=--list")
+        self.assertTrue(d.is_destructive(["setup"]))
+        self.assertFalse(d.is_destructive(["inner", "setup"]))
+        self.assertTrue(d.honours_dryrun(["inner", "--list"]))
+        self.assertFalse(d.honours_dryrun(["inner", "setup"]))
+
     def test_only_the_first_fifteen_lines_declare(self):
         d = declare(self.tmp, "probe", *(["#"] * 14 + ["# wk: where=host"]))
         self.assertEqual(d.where, "workspace")

@@ -25,11 +25,11 @@ Governor and swap-off are already baked into every system by `cmd/sysimage`.
   **Never write the overclock to the EEPROM**: `SDRAM_BANKLOW` and `BOOT_ORDER`
   are firmware state shared by both modes, so it would overclock the workstation
   too.
-- **`wk backup` does not reach this tree.** `./setup` on this board now runs
+- **`wk key backup` does not reach this tree.** `./setup` on this board now runs
   `rpi5-setup.sh` itself (host/linux/machine.sh detects the board from
   `/proc/device-tree/model`), so a rebuild reapplies fan, wifi powersave, the
   BSSID pin, fstab, the NM/regdom drop-ins and the NUMA kernel; only what
-  `wk backup` would still need to restore first (the NUMA kernel build, the
+  `wk key backup` would still need to restore first (the NUMA kernel build, the
   ssh key shipped beside the script) is manual. docs/PLAN.md
   tracks the remaining gap.
 - **Re-flashing this board from nothing** still needs another provisioned

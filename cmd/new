@@ -12,7 +12,7 @@
 # --dry-run runs the driver here instead and prints what it would change.
 #
 #   --target <target>   container, vm, or a machine named in
-#                        targets/hosts/<name>.conf (default: container)
+#                        machines/<name>.conf (default: container)
 #   --base <id>          which base snapshot to build from -- an id 'wk sync'
 #                        published, under $WK_STORE/base (default: current)
 #   --arch <arch>        native|armhf -- the architecture the workspace
@@ -41,21 +41,16 @@ import sys
 ROOT = os.environ.get("WK_ROOT") or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "lib"))
 
-from wk import record, targets, workspace  # noqa: E402
+from wk import decl, record, targets, workspace  # noqa: E402
 from wk.act import Refused, die  # noqa: E402
 from wk.lock import Lock  # noqa: E402
 
+
 def parse(argv):
-    """The options as the dispatcher hands them on, a declared `--x=` as `--x <value>`; None when not given."""
-    def value(flag):
-        i = argv.index(flag) + 1
-        return argv[i] if i < len(argv) else ""
-    return {"target": value("--target") if "--target" in argv else None,
-            "base": value("--base") if "--base" in argv else None,
-            "arch": value("--arch") if "--arch" in argv else None,
-            "pr": value("--pr") if "--pr" in argv else None,
-            "zed": "--zed" in argv, "no_wait": "--no-wait" in argv, "kill": "--kill" in argv,
-            "sysroot": "--sysroot" in argv, "detached": "--_detached" in argv}
+    a = decl.Args(decl.Decl(__file__), argv)
+    return {"target": a.value("--target"), "base": a.value("--base"), "arch": a.value("--arch"),
+            "pr": a.value("--pr"), "zed": a.flag("--zed"), "no_wait": a.flag("--no-wait"),
+            "kill": a.flag("--kill"), "sysroot": a.flag("--sysroot"), "detached": a.flag("--_detached")}
 
 
 def driver(reg, records, name, opts):

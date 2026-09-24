@@ -26,7 +26,7 @@ from concurrent.futures import ThreadPoolExecutor
 ROOT = os.environ.get("WK_ROOT") or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "lib"))
 
-from wk import shell, targets  # noqa: E402
+from wk import decl, shell, targets  # noqa: E402
 from wk.act import Refused, die, log  # noqa: E402
 from wk.machine import Local  # noqa: E402
 
@@ -90,10 +90,11 @@ def footer(reg, names):
 
 
 def main(argv):
-    continued = "--continued" in argv
-    more_follows = "--more-follows" in argv
-    empty_so_far = "--empty-so-far" in argv
-    as_json = "--json" in argv
+    args = decl.Args(decl.Decl(__file__), argv)
+    continued = args.flag("--continued")
+    more_follows = args.flag("--more-follows")
+    empty_so_far = args.flag("--empty-so-far")
+    as_json = args.flag("--json")
     label = os.environ.get("WK_ROW_LABEL", "")
     reg = targets.Registry(ROOT)
     if not continued and not as_json:

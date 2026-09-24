@@ -5,7 +5,7 @@ renderer prints the rows and counts the misses."""
 import os
 import re
 
-from wk import record, shell, targets
+from wk import fleet, machine_cmd, record, shell, targets
 from wk.machine import Local
 from wk.status import kv, machine_confs
 from wk.store import Store
@@ -261,11 +261,12 @@ def mac_battery_line(out):
 class Doctor:
     """This machine's checks; `sh` answers what the bash library still holds (lib/wk/shell.py)."""
 
-    def __init__(self, root, env=None, machine=None, macos=None, sh=shell):
+    def __init__(self, root, env=None, machine=None, macos=None, sh=shell, mc=machine_cmd):
         self.root = root
         self.env = os.environ if env is None else env
         self.machine = machine or Local()
         self.sh = sh
+        self.mc = mc
         self.store = Store(self.env)
         self.macos = (os.uname().sysname == "Darwin") if macos is None else macos
         self.macos_host = self.macos and not self.env.get("WK_IN_VM")
@@ -331,25 +332,25 @@ class Doctor:
         if self.macos:
             yield check("Xcode command line tools", "xcode-select --install", self.machine.run(["xcode-select", "-p"]).ok)
             yield check("podman", "install the official pkg from podman.io", self.have("podman"))
-            yield check("zed", "https://zed.dev/download", self.have("zed") or self.machine.isdir("/Applications/Zed.app"))
+            yield check("zed", "https://zed.dev/download", targets.zed_cli(self.machine) is not None)
             yield check("tailscale", "https://tailscale.com/download/macos",
                         self.have("tailscale") or self.machine.isdir("/Applications/Tailscale.app"))
         else:
             for tool, what in (("podman", "podman"), ("zsh", "zsh"), ("cage", "cage (benchmark kiosk)"), ("wlr-randr", "wlr-randr (session off)")):
                 yield check(what, "./setup --stage tools", self.have(tool))
         if self.have("nmap"):
-            yield ok("nmap (wk find)")
+            yield ok("nmap (wk machine probe)")
         else:
-            yield unk("nmap absent -- only 'wk find' needs it", "nmap.org, the .dmg" if self.macos else "./setup  (host/linux/apt.txt)")
+            yield unk("nmap absent -- only 'wk machine probe' needs it", "nmap.org, the .dmg" if self.macos else "./setup  (host/linux/apt.txt)")
         yield check("jq (claude hook)", "./setup --stage tools", self.have("jq"))
         yield check("gh", "install gh, then: gh auth login", self.have("gh"))
         if self.have("gh"):
             yield check("gh authenticated", "gh auth login   (then: wk key deploy)", self.sh.gh_authenticated(self.root, env=self.env))
 
     def root_access(self):
-        r = self.machine.run(["env", "WK_QUIET=1", os.path.join(self.root, "cmd", "sudo"), "status"])
+        r = self.machine.run(["env", "WK_QUIET=1", os.path.join(self.root, "cmd", "key"), "sudo", "status"])
         out = (r.out + r.err).strip()
-        yield ok("sudo: " + out) if r.ok else miss("sudo: " + out, "wk sudo setup")
+        yield ok("sudo: " + out) if r.ok else miss("sudo: " + out, "wk key sudo setup")
 
     def config(self):
         def linked(path, target):
@@ -407,6 +408,13 @@ class Doctor:
                                "request records (argv, log, status) the fleet-request broker writes; the next request makes new ones")
         yield self.local_state(os.path.join(self.home, ".ssh", "config.d", "local"), "backed-up",
                                "hand-written ssh entries (host/dotfiles.sh moves them here and owns the rest)")
+        machines = fleet.Fleet(self.root, self.env)
+        yield self.local_state(machines.local_dir(), "backed-up",
+                               "hand-written machine confs for this device only, their keys over machines/<name>.conf's")
+        if self.machine.isdir(machines.old_local_dir()):
+            yield miss("%s -- no longer read: machine-local confs live in %s" % (machines.old_local_dir(), machines.local_dir()),
+                       "mkdir -p %s && mv %s/*.conf %s/ && rmdir %s" % tuple(shell.sh_quote(d) for d in (
+                           machines.local_dir(), machines.old_local_dir(), machines.local_dir(), machines.old_local_dir())))
         yield self.local_state(os.path.join(store.state_dir(), "ssh", "zed_ed25519"), "regenerable",
                                "wk zed makes a new one and re-authorises it in the workspace")
         if self.macos:
@@ -489,14 +497,16 @@ class Doctor:
         yield from vm_guest_git_findings(vm, self.want())
 
     def build_machine(self, t):
-        probe = self.sh.remote_probe(self.root, t, env=self.env)
+        target = self.reg.load(t)
+        probe = self.mc.probe(target, self.root)
         if not probe:
             yield unk("%s did not answer" % t, "ssh %s true  -- then re-run; nothing was changed" % t)
             return
-        yield from findings(self.sh.remote_findings(self.root, probe, env=self.env), "see 'wk remote setup %s'" % t)
-        why = self.sh.remote_provision_stale(self.root, t, env=self.env)
+        rows = self.mc.findings(self.root, probe, self.env, self.machine)
+        yield from findings(machine_cmd.findings_text(rows), "see 'wk machine setup %s'" % t)
+        why = self.mc.stale(target, self.root)
         if why:
-            yield miss("provisioning on %s predates its inputs: %s" % (t, why), "wk remote setup %s" % t)
+            yield miss("provisioning on %s predates its inputs: %s" % (t, why), "wk machine setup %s" % t)
         else:
             yield ok("provisioned from this tree's remote/provision.sh + remote/deps.sh")
 

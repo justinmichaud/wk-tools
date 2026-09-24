@@ -1,4 +1,4 @@
-# Deploys the Claude configuration into ~/.claude on a host -- this workstation, or a remote build machine reached by `wk remote setup` (WK_CLAUDE_REMOTE=1); a workspace gets its own from container/firstrun.sh and vm/provision-base.sh. A host gets the -host variants: the workspace settings allow Bash(*) and the workspace CLAUDE.md says "you are inside a sandbox", true only where the workspace is the blast radius. ~/.claude also holds live state, so only the config entries are linked, and by symlink, so editing the repo takes effect in the next session.
+# Deploys the Claude configuration into ~/.claude on a host -- this workstation, or a remote build machine reached by `wk machine setup` (WK_CLAUDE_REMOTE=1); a workspace gets its own from container/firstrun.sh and vm/provision-base.sh. A host gets the -host variants: the workspace settings allow Bash(*) and the workspace CLAUDE.md says "you are inside a sandbox", true only where the workspace is the blast radius. ~/.claude also holds live state, so only the config entries are linked, and by symlink, so editing the repo takes effect in the next session.
 
 _claude_dir="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
 

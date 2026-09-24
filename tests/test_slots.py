@@ -1,4 +1,4 @@
-"""WebKit slots: the manifest (lib/wkslot.py), the running-binary check the
+"""WebKit slots: the manifest (lib/wk/slot.py, run by bash as lib/wkslot.py), the running-binary check the
 wk-board run-benchmark driver makes (bench/wk_board_driver.py), the
 in-workspace slot builder's refusals (image/buildroot-webkit.sh), and the
 `wk sysimage webkit` / `wk ab` refusals that need no workspace or board.

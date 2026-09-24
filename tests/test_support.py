@@ -1,6 +1,6 @@
 """tests/support.py's own environment scrub: every test that shells out
-through run()/bash() gets a WK_TARGET_REGISTRY and a WK_HOST_SECRETS that
-point at scratch directories, never at the real fleet registry or the real
+through run()/bash() gets a WK_MACHINES_DIR holding no build machine or peer
+and a WK_HOST_SECRETS in a scratch directory, never the real fleet or the real
 ~/.config/wk/secrets -- a test that forgot to pass its own would otherwise
 read or write machine state silently.
 
@@ -12,12 +12,23 @@ import stat
 import subprocess
 import unittest
 
-from tests.support import NO_REGISTRY, NO_SECRETS, _clean_env
+from tests.support import BLIND_FLEET, NO_CONFIG, NO_SECRETS, _clean_env
 
 
 class TestCleanEnvScrubsMachineState(unittest.TestCase):
-    def test_wk_target_registry_defaults_to_the_empty_fake_registry(self):
-        self.assertEqual(_clean_env()["WK_TARGET_REGISTRY"], NO_REGISTRY)
+    def test_the_default_fleet_holds_no_target(self):
+        self.assertEqual(_clean_env()["WK_MACHINES_DIR"], BLIND_FLEET)
+        kinds = {l for p in os.listdir(BLIND_FLEET)
+                 for l in open(os.path.join(BLIND_FLEET, p)).read().splitlines() if l.startswith("KIND=")}
+        self.assertTrue(kinds)
+        self.assertFalse(kinds & {"KIND=build", "KIND=peer"})
+
+    def test_no_test_sees_this_machines_config_home(self):
+        self.assertEqual(_clean_env()["XDG_CONFIG_HOME"], NO_CONFIG)
+        self.assertNotIn("wk", os.listdir(NO_CONFIG))
+
+    def test_no_test_is_the_far_end_of_a_target(self):
+        self.assertFalse(os.path.exists(_clean_env()["WK_REMOTE_MARKER"]))
 
     def test_wk_host_secrets_defaults_to_a_scratch_dir(self):
         env = _clean_env()

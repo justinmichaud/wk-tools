@@ -4,7 +4,7 @@ import os
 import shlex
 import sys
 
-from wk import act
+from wk import act, fleet
 
 LIST_TEXT = """\
 jsc-debug          JSCOnly, Debug, assertions on
@@ -197,10 +197,9 @@ def libcxx(env):
         return False
     if v == "1":
         return True
-    registry = env.get("WK_TARGET_REGISTRY") or os.path.join(env.get("WK_ROOT", ""), "targets", "hosts")
     act.die("WK_TARGET_LIBCXX='%s' in %s\n    is neither 1 nor 0. It says whether that machine has libc++:\n"
             "    1 to build with -stdlib=libc++, 0 (or unset) to leave it out."
-            % (v, os.path.join(registry, (env.get("WK_TARGET") or "<target>") + ".conf")))
+            % (v, fleet.Fleet(env.get("WK_ROOT", ""), env).path(env.get("WK_TARGET") or "<target>")))
 
 
 def target_var(env, stem, cfg):

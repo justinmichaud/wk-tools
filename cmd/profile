@@ -65,9 +65,10 @@ import time
 ROOT = os.environ.get("WK_ROOT") or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "lib"))
 
-from wk import buildconf, shell, targets  # noqa: E402
+from wk import buildconf, decl, shell, targets  # noqa: E402
 from wk.act import Refused, die, dry_run, info, log, warn  # noqa: E402
-from wk.machine import Local  # noqa: E402
+from wk.ldpath import prelude  # noqa: E402
+from wk.machine import Local, is_linux  # noqa: E402
 from wk.store import Store  # noqa: E402
 from wk.workspace import require_name  # noqa: E402
 
@@ -75,86 +76,40 @@ MODES = ("sampling", "bytecode", "samply", "instruments", "heaptrack", "massif")
 PRIV = "/usr/local/libexec/wk-quiesce-priv"
 
 
-def is_linux():
-    return os.uname().sysname != "Darwin"
-
-
 def parse(argv):
-    o = {"mode": "sampling", "process": "web", "extra_env": [], "args": []}
-    i = 0
-    while i < len(argv):
-        a = argv[i]
-        if a == "--mode":
-            o["mode"] = argv[i + 1] if i + 1 < len(argv) else ""
-            i += 2
-        elif a.startswith("--mode="):
-            o["mode"] = a[len("--mode="):]
-            i += 1
-        elif a == "--config":
-            o["config"] = argv[i + 1] if i + 1 < len(argv) else ""
-            i += 2
-        elif a.startswith("--config="):
-            o["config"] = a[len("--config="):]
-            i += 1
-        elif a == "--process":
-            o["process"] = argv[i + 1] if i + 1 < len(argv) else ""
-            o["process_explicit"] = True
-            i += 2
-        elif a.startswith("--process="):
-            o["process"] = a[len("--process="):]
-            o["process_explicit"] = True
-            i += 1
-        elif a == "--attach":
-            o["attach"] = argv[i + 1] if i + 1 < len(argv) else ""
-            i += 2
-        elif a.startswith("--attach="):
-            o["attach"] = a[len("--attach="):]
-            i += 1
-        elif a == "--top":
-            o["top"] = argv[i + 1] if i + 1 < len(argv) else ""
-            i += 2
-        elif a.startswith("--top="):
-            o["top"] = a[len("--top="):]
-            i += 1
-        elif a == "--browser":
+    args = decl.Args(decl.Decl(__file__), argv)
+    o = {"mode": args.value("--mode") or "sampling", "process": "web", "extra_env": args.values("--env")}
+    if args.value("--config") is not None:
+        o["config"] = args.value("--config")
+    if args.value("--process") is not None:
+        o["process"] = args.value("--process")
+        o["process_explicit"] = True
+    if args.value("--attach") is not None:
+        o["attach"] = args.value("--attach")
+    if args.value("--top") is not None:
+        o["top"] = args.value("--top")
+    if args.flag("--jit-dump"):
+        o["jitdump"] = True
+    if args.flag("--markers"):
+        o["markers"] = True
+    if args.flag("--list"):
+        o["list"] = True
+
+    loose = list(args.positionals)
+    given = {"--browser": args.flag("--browser"), "--fetch": args.flag("--fetch")}
+    for opt in args.order:
+        if not given.get(opt):
+            continue
+        if opt in ("--browser",) and "browser" not in o:
             o["browser"] = True
-            i += 1
-            if i < len(argv) and argv[i] and not argv[i].startswith("-"):
-                o["url"] = argv[i]
-                i += 1
-        elif a == "--jit-dump":
-            o["jitdump"] = True
-            i += 1
-        elif a == "--markers":
-            o["markers"] = True
-            i += 1
-        elif a == "--fetch":
+            if loose:
+                o["url"] = loose.pop(0)
+        elif opt in ("--fetch",) and "fetch" not in o:
             o["fetch"] = True
-            i += 1
-            if i < len(argv) and argv[i] and not argv[i].startswith("-"):
-                o["fetch_dir"] = argv[i]
-                i += 1
-        elif a == "--env":
-            o["extra_env"].append(argv[i + 1] if i + 1 < len(argv) else "")
-            i += 2
-        elif a.startswith("--env="):
-            o["extra_env"].append(a[len("--env="):])
-            i += 1
-        elif a == "--list":
-            o["list"] = True
-            i += 1
-        elif a == "--":
-            o["args"] += argv[i + 1:]
-            i = len(argv)
-        else:
-            o["args"].append(a)
-            i += 1
+            if loose:
+                o["fetch_dir"] = loose.pop(0)
+    o["args"] = loose + args.tail
     return o
-
-
-def prelude(var, dir_):
-    # The loader variable is prepended, not replaced: a plain assignment would drop the wkdev image's own libwpe/jhbuild prefix on that path.
-    return 'export %s="%s${%s:+:${%s}}"' % (var, dir_, var, var)
 
 
 def browser_target(cfg, url, process, process_explicit, mode, args, outdir):
@@ -352,7 +307,7 @@ def main(argv, reg=None):
             wrap = "xctrace record --template 'Time Profiler' --output %s --attach %s" % (shlex.quote(artifact), shlex.quote(attach))
         else:
             wrap = "xctrace record --template 'Time Profiler' --output %s --launch --" % shlex.quote(artifact)
-    else:   # heaptrack, massif
+    else:
         if cfg.xcode():
             die("%s is a Linux tool and this is an Apple-port build.\n"
                 "    For allocations on macOS use Instruments' Allocations template by hand --\n"

@@ -9,17 +9,25 @@ calls into lib/resources.sh cover the logic without it.
 
 Run: python3 -m unittest tests.test_build -v
 """
+import contextlib
+import io
 import os
 import platform
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 
-from tests.support import (REAL_REGISTRY, REPO, WkTest, bash, fake_workspace,
+from tests.support import (FLEET_ENV, REAL_MACHINES, REPO, WkTest, bash, fake_workspace,
                            podman_vm_ssh, requires_podman_vm, run, stub_path)
+
+sys.path.insert(0, str(REPO / "lib"))
+from wk import fleet, resources  # noqa: E402
+from wk.act import Refused  # noqa: E402
+from wk.machine import Fake  # noqa: E402
 
 
 class TestHelpAndList(WkTest):
@@ -79,7 +87,7 @@ class TestDryRunRunningLine(WkTest):
 
 class TestTargetBuildArgsDefaults(unittest.TestCase):
     """Item 2: a target's conf can set WK_BUILD_ARGS, the same mechanism
-    WK_TARGET_CMAKE already uses (targets/hosts/<name>.conf, load_target).
+    WK_TARGET_CMAKE already uses (machines/<name>.conf, load_target).
     Exercised at the two points that actually implement it, rather than
     through a full `wk new --target <remote>` (which needs a real machine):
     load_target's conf read here, buildconf.build_env's use of it in
@@ -89,13 +97,13 @@ class TestTargetBuildArgsDefaults(unittest.TestCase):
     def test_load_target_reads_WK_BUILD_ARGS_from_conf(self):
         """load_target sources a target's WK_BUILD_ARGS the same way as WK_TARGET_CMAKE"""
         name = "wk-test-build-args-probe"
-        # A registry of this one machine (WK_TARGET_REGISTRY, lib/target.sh):
+        # A registry of this one machine (WK_MACHINES_DIR, lib/target.sh):
         # the conf load_target reads is the behaviour under test, and the real
-        # targets/hosts is left alone.
+        # machines/ is left alone.
         registry = Path(tempfile.mkdtemp(prefix="wk-test-registry-"))
         self.addCleanup(shutil.rmtree, registry, True)
         (registry / f"{name}.conf").write_text(
-            'WK_TARGET_KIND=remote\n'
+            'KIND=build\nWK_TARGET_KIND=remote\n'
             'WK_REMOTE_HOST=nonexistent.invalid\n'
             'WK_BUILD_ARGS="--no-fatal-warnings --extra-flag"\n'
         )
@@ -107,7 +115,7 @@ set -euo pipefail
 . "{REPO}/lib/target.sh"
 load_target "{name}"
 echo "WK_BUILD_ARGS=[$WK_BUILD_ARGS]"
-''', env={"WK_TARGET_REGISTRY": str(registry)})
+''', env={"WK_MACHINES_DIR": str(registry)})
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
         self.assertIn("WK_BUILD_ARGS=[--no-fatal-warnings --extra-flag]", cp.stdout)
 
@@ -150,7 +158,7 @@ if __name__ == "__main__":
 
 
 # The one round trip _remote_probe_cmd (targets/remote.sh) makes, answered as
-# the Linux build machine every conf in targets/hosts describes.
+# the Linux build machine every conf in machines/ describes.
 FAKE_SSH_PROBE = r'''#!/bin/sh
 cat <<'EOF'
 /home/builder
@@ -168,7 +176,7 @@ EOF
 
 class TestARealHostConfReachesTheBuildFlags(WkTest):
     """The two machine-decided defaults, read the way a build reads them: a
-    conf in targets/hosts, loaded by load_target, then config_load. The
+    conf in machines/, loaded by load_target, then config_load. The
     per-config tests above set the variables directly; this is the path that
     proves a conf's field actually arrives -- buildbox4 is the machine whose
     fields differ from every other's.
@@ -193,7 +201,7 @@ echo "CMAKE=$CFG_CMAKE"
 '''
         with stub_path({"ssh": FAKE_SSH_PROBE}) as binp:
             cp = bash(script, env={
-                "WK_TARGET_REGISTRY": str(REAL_REGISTRY),
+                "WK_MACHINES_DIR": str(REAL_MACHINES),
                 "XDG_STATE_HOME": str(self.tmp / "state"),
                 "PATH": f"{binp}:{os.environ['PATH']}",
             })
@@ -218,75 +226,64 @@ echo "CMAKE=$CFG_CMAKE"
     def test_every_host_conf_carries_a_value_the_loader_accepts(self):
         """A conf with a typo in the field would only be found by building on
         that machine."""
-        for conf in sorted(REAL_REGISTRY.glob("*.conf")):
-            with self.subTest(machine=conf.stem):
-                self._cmake(conf.stem)
+        for name in fleet.Fleet(REPO, FLEET_ENV).names(fleet.TARGET_KINDS):
+            with self.subTest(machine=name):
+                self._cmake(name)
 
 
-# `sysctl -n <name>`: every reading lib/resources.sh takes on a Mac.
+# `sysctl -n <name>`: every reading lib/wk/resources.py takes on a Mac.
 FAKE_SYSCTL = r"""#!/bin/sh
 case "$2" in
 hw.ncpu)                  echo 12 ;;
 hw.memsize)               echo 17179869184 ;;
 vm.loadavg)               echo '{ 3.41 2.20 1.90 }' ;;
-hw.perflevel0.logicalcpu) echo 8 ;;
-hw.perflevel1.logicalcpu) echo 4 ;;
 *) exit 1 ;;
 esac
 """
-
-# An Intel Mac: one kind of core, so there are no perflevel readings at all.
-FAKE_SYSCTL_ONE_CORE_KIND = FAKE_SYSCTL.replace("hw.perflevel0.logicalcpu) echo 8 ;;", "")
-# A Mac that answered the first half of the pair and not the second.
-FAKE_SYSCTL_HALF_A_PAIR = FAKE_SYSCTL.replace("hw.perflevel1.logicalcpu) echo 4 ;;", "")
+SYSCTL = {"hw.ncpu": "12\n", "hw.memsize": "17179869184\n", "vm.loadavg": "{ 3.41 2.20 1.90 }\n"}
 
 
 class TestAReadingTheMachineWillNotGive(WkTest):
-    """lib/resources.sh reads this machine's cores, memory and load average,
+    """lib/wk/resources.py reads this machine's cores, memory and load average,
     and every job count, envelope and admission is sized from one of them. A
     reading that does not come back refuses and names what could not be read:
-    fed into arithmetic instead, an empty one is a bash syntax error several
-    frames away from the sysctl or /proc file that was missing.
+    fed into arithmetic instead, an empty one is an error several frames away
+    from the sysctl or /proc file that was missing.
 
-    Which spelling reads the machine is $(wk_os)'s answer, so the macOS arms
-    are driven here by defining wk_os -- not is_macos, which
-    tests/test_machine_mounts.py defines to drive a macOS *stage* on Linux and
-    which must not change what a reading of this machine says.
+    Which spelling reads the machine is $(wk_os)'s answer in the bash shim, so
+    the macOS arm is driven through it here by defining wk_os -- not is_macos,
+    which tests/test_machine_mounts.py defines to drive a macOS *stage* on Linux.
+    The refusals are read against a fake machine on either platform."""
 
-    A refusal reaches its caller as a failed assignment: a die inside a command
-    substitution kills only that subshell, so every caller reads a reading into
-    a variable and these cases do the same."""
+    def res(self, os_name, sysctl=None, files=None, env=None, nproc=None):
+        m = Fake()
+        for k, v in (sysctl or {}).items():
+            m.answer(["sysctl", "-n", k], out=v)
+        if nproc is not None:
+            m.answer(["nproc"], out=nproc)
+        m.files.update(files or {})
+        return resources.Resources(m, env or {"HOME": "/h"}, os_name)
 
-    MACOS = 'wk_os() { echo macos; }\n'
-    LINUX = 'wk_os() { echo linux; }\n'   # drives the Linux arm on a Mac; nproc/awk are stubbed, so no /proc is read
-    # A fixed path this machine may or may not have; the cases below say which.
-    NO_CGROUP = '_cgroup_mem_max() { echo "$WK_TEST_CGROUP"; }\n'
+    def refusal(self, fn):
+        with self.assertRaises(Refused), contextlib.redirect_stderr(io.StringIO()) as err:
+            fn()
+        self.assertNotIn("Traceback", err.getvalue())
+        return err.getvalue()
 
-    def _res(self, script, prelude="", stubs=None, env=None):
-        e = {"XDG_STATE_HOME": str(self.tmp / "state"),
-             "WK_STORE": str(self.tmp / "store"),
-             "WK_TEST_CGROUP": str(self.tmp / "no-such-cgroup")}
-        if env:
-            e.update(env)
-        body = (f'set -euo pipefail\n. "{REPO}/lib/common.sh"\n'
-                f'. "{REPO}/lib/resources.sh"\n' + prelude + script)
-        if not stubs:
-            return bash(body, env=e)
-        with stub_path(stubs) as binp:
-            e["PATH"] = f"{binp}:{os.environ['PATH']}"
-            return bash(body, env=e)
-
-    def test_each_reading_comes_from_the_kernel_this_process_runs_on(self):
-        """The macOS arms, driven on Linux by wk_os: 16 GiB is 16384 MB, and a
+    def test_each_reading_comes_from_the_kernel_the_shim_names(self):
+        """The macOS arms, driven through wk_os: 16 GiB is 16384 MB, and a
         load average of 3.41 is three cores already spoken for."""
-        cp = self._res('printf "%s %s %s\n" "$(host_cores)" "$(host_mem_mb)" "$(host_load)"',
-                       prelude=self.MACOS, stubs={"sysctl": FAKE_SYSCTL})
+        with stub_path({"sysctl": FAKE_SYSCTL}) as binp:
+            cp = bash(f'set -euo pipefail\n. "{REPO}/lib/common.sh"\n. "{REPO}/lib/resources.sh"\n'
+                      'wk_os() { echo macos; }\nprintf "%s %s %s\\n" "$(host_cores)" "$(host_mem_mb)" "$(host_load)"',
+                      env={"PATH": f"{binp}:{os.environ['PATH']}"})
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
         self.assertEqual("12 16384 3", cp.stdout.strip())
 
     @unittest.skipUnless(platform.system() == "Linux", "reads this machine's real nproc and /proc")
     def test_the_linux_arms_answer_from_proc_and_nproc(self):
-        cp = self._res('printf "%s %s %s\n" "$(host_cores)" "$(host_mem_mb)" "$(host_load)"')
+        cp = bash(f'. "{REPO}/lib/common.sh"\n. "{REPO}/lib/resources.sh"\n'
+                  'printf "%s %s %s\\n" "$(host_cores)" "$(host_mem_mb)" "$(host_load)"')
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
         cores, mem, load = cp.stdout.split()
         self.assertEqual(cores, subprocess.run(["nproc"], capture_output=True,
@@ -295,106 +292,41 @@ class TestAReadingTheMachineWillNotGive(WkTest):
         self.assertRegex(load, r"^[0-9]+$")
 
     def test_a_core_count_that_did_not_come_back_refuses_and_names_it(self):
-        for arm, prelude, stubs in (
-                ("nproc", self.LINUX, {"nproc": "exit 1"}),
-                ("sysctl hw.ncpu", self.MACOS, {"sysctl": "exit 1"})):
-            with self.subTest(arm=arm):
-                cp = self._res('v=$(host_cores); echo "SURVIVED $v"', prelude=prelude, stubs=stubs)
-                self.assertNotEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-                self.assertNotIn("SURVIVED", cp.stdout)
-                self.assertIn(f"the core count ({arm})", cp.stderr)
+        self.assertIn("the core count (nproc)", self.refusal(self.res("linux").host_cores))
+        self.assertIn("the core count (sysctl hw.ncpu)", self.refusal(self.res("macos").host_cores))
 
     def test_a_memory_reading_that_did_not_come_back_refuses_and_names_it(self):
-        """Never a bash arithmetic error: the byte count is divided down, so an
-        empty one is `/ 1024 / 1024 : syntax error` and nothing about memory."""
-        for what, prelude, stubs in (
-                ("total memory (/proc/meminfo MemTotal)", self.LINUX, {"awk": "exit 1"}),
-                ("total memory (sysctl hw.memsize)", self.MACOS, {"sysctl": "exit 1"})):
-            with self.subTest(what=what):
-                cp = self._res('v=$(host_mem_mb); echo "SURVIVED $v"', prelude=prelude, stubs=stubs)
-                self.assertNotEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-                self.assertNotIn("SURVIVED", cp.stdout)
-                self.assertIn(what, cp.stderr)
-                self.assertNotIn("syntax error", cp.stderr)
-
-    def test_a_load_average_that_did_not_come_back_refuses_and_names_it(self):
-        for what, prelude, stubs in (
-                ("the load average (/proc/loadavg)", self.LINUX, {"awk": "exit 1"}),
-                ("the load average (sysctl vm.loadavg)", self.MACOS, {"sysctl": "exit 1"})):
-            with self.subTest(what=what):
-                cp = self._res('v=$(host_load); echo "SURVIVED $v"', prelude=prelude, stubs=stubs)
-                self.assertNotEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-                self.assertNotIn("SURVIVED", cp.stdout)
-                self.assertIn(what, cp.stderr)
+        self.assertIn("total memory (/proc/meminfo MemTotal)", self.refusal(self.res("linux").host_mem_mb))
+        self.assertIn("total memory (sysctl hw.memsize)", self.refusal(self.res("macos").host_mem_mb))
 
     def test_a_polite_build_reads_this_machines_load_when_no_caller_measured_one(self):
         """WK_LOAD is a remote target's, measured by whoever could reach it;
         without one the machine is asked rather than assumed idle."""
-        cp = self._res('build_jobs polite', prelude=self.MACOS + self.NO_CGROUP,
-                       stubs={"sysctl": FAKE_SYSCTL},
-                       env={"WK_CGROUP_CORES": "12", "WK_AVAIL_MB": "100000",
-                            "WK_MB_PER_JOB": "1000"})
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        env = {"WK_CGROUP_CORES": "12", "WK_AVAIL_MB": "100000", "WK_MB_PER_JOB": "1000"}
+        r = self.res("macos", SYSCTL, env=env)
         # 12 cores, load 3.41 -> 3 spoken for, and never more than half a box.
-        self.assertEqual("6", cp.stdout.strip())
+        self.assertEqual(6, resources.build_jobs(r, resources.Budget(r.machine, env), [], polite=True))
 
     def test_free_memory_on_a_mac_is_the_total_less_the_reserve(self):
-        cp = self._res('avail_mem_mb', prelude=self.MACOS + self.NO_CGROUP,
-                       stubs={"sysctl": FAKE_SYSCTL}, env={"WK_RESERVE_MB": "4096"})
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertEqual("12288", cp.stdout.strip())
+        self.assertEqual(12288, self.res("macos", SYSCTL, env={"WK_RESERVE_MB": "4096"}).avail_mem_mb())
 
     def test_free_memory_that_did_not_come_back_refuses_and_names_it(self):
-        cp = self._res('v=$(avail_mem_mb); echo "SURVIVED $v"', prelude=self.LINUX + self.NO_CGROUP,
-                       stubs={"awk": "exit 1"})
-        self.assertNotEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertNotIn("SURVIVED", cp.stdout)
-        self.assertIn("free memory (/proc/meminfo MemAvailable)", cp.stderr)
+        self.assertIn("free memory (/proc/meminfo MemAvailable)", self.refusal(self.res("linux").avail_mem_mb))
 
     def test_a_cgroup_limit_clamps_free_memory_and_max_is_no_limit(self):
         """Inside a container MemAvailable reports the whole machine's free
         memory, which sizes a job count the cgroup kills."""
-        cg = self.tmp / "memory.max"
-        cg.write_text("1073741824\n")
-        cp = self._res('avail_mem_mb', prelude=self.NO_CGROUP,
-                       env={"WK_TEST_CGROUP": str(cg)})
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertEqual("1024", cp.stdout.strip())
-
+        meminfo = {"/proc/meminfo": "MemAvailable:   20480000 kB\n"}
+        r = self.res("linux", files=dict(meminfo, **{resources.CGROUP_MEM_MAX: "1073741824\n"}))
+        self.assertEqual(1024, r.avail_mem_mb())
         # `max` is no limit at all, and not a number to divide down: what the
         # caller measured of the target's own cgroup stands.
-        cg.write_text("max\n")
-        cp = self._res('avail_mem_mb', prelude=self.NO_CGROUP,
-                       env={"WK_TEST_CGROUP": str(cg), "WK_CGROUP_MB": "2048"})
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertEqual("2048", cp.stdout.strip())
+        r = self.res("linux", files=dict(meminfo, **{resources.CGROUP_MEM_MAX: "max\n"}), env={"WK_CGROUP_MB": "2048"})
+        self.assertEqual(2048, r.avail_mem_mb())
 
     def test_a_cgroup_limit_it_could_not_read_refuses_rather_than_ignoring_it(self):
-        cg = self.tmp / "memory.max"
-        cg.write_text("")
-        cp = self._res('v=$(avail_mem_mb); echo "SURVIVED $v"', prelude=self.NO_CGROUP,
-                       env={"WK_TEST_CGROUP": str(cg)})
-        self.assertNotEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertNotIn("SURVIVED", cp.stdout)
-        self.assertIn("the cgroup memory limit", cp.stderr)
-
-    def test_both_core_kinds_are_named_for_a_person_or_neither_is(self):
-        """`wk setup`'s first line. Apple silicon has two kinds of core and an
-        Intel Mac one; half of the pair is a report with a hole in it."""
-        cp = self._res('describe_cores', prelude=self.MACOS, stubs={"sysctl": FAKE_SYSCTL})
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertEqual("8 P + 4 E", cp.stdout)
-
-        cp = self._res('describe_cores', prelude=self.MACOS,
-                       stubs={"sysctl": FAKE_SYSCTL_ONE_CORE_KIND})
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertEqual("12 cores", cp.stdout)
-
-        cp = self._res('v=$(describe_cores); echo "SURVIVED $v"', prelude=self.MACOS,
-                       stubs={"sysctl": FAKE_SYSCTL_HALF_A_PAIR})
-        self.assertNotEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertNotIn("SURVIVED", cp.stdout)
-        self.assertIn("the efficiency core count", cp.stderr)
+        r = self.res("linux", files={"/proc/meminfo": "MemAvailable:   20480000 kB\n", resources.CGROUP_MEM_MAX: ""})
+        self.assertIn("the cgroup memory limit", self.refusal(r.avail_mem_mb))
 
 
 class TestSdkImageCarriesLibbacktrace(unittest.TestCase):

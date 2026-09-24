@@ -24,10 +24,15 @@ Run: python3 -m unittest tests.test_build_liveness -v
 import json
 import os
 import re
+import sys
 import time
 import unittest
 
 from tests.support import REPO, WkTest, bash, rand_suffix, run, stub_path
+
+sys.path.insert(0, str(REPO / "lib"))
+from wk import job, record  # noqa: E402
+from wk.machine import Fake  # noqa: E402
 
 
 # The stub `ssh` tests/test_fleet_walk.py uses for a fleet walk with no fleet:
@@ -40,15 +45,7 @@ exec bash -c "$last"
 # A pid above every default pid_max on both platforms: dead by construction.
 DEAD_PID = 4194304
 
-STUB_PS = '''ps() {
-cat <<'PSOUT'
- 99.5 cc1plus
- 98.0 cc1plus
- 97.0 ld
-  0.1 bash
-PSOUT
-}
-'''
+PS_OUT = " 99.5 cc1plus\n 98.0 cc1plus\n 97.0 ld\n  0.1 bash\n"
 
 
 def write_task(store, kind="build", name="ws1", pid=None, log=None,
@@ -85,8 +82,7 @@ class TestTheVerdictReadsThePidAndTheLogAndNotTheProcessTable(WkTest):
     """`task_verdict` (lib/task.sh): a record with no outcome is running while
     its pid answers and its log moved within WK_STALL_SECONDS, silent when the
     log went quiet, died when the pid is gone. A machine mid-link is the case
-    that made someone want the process count in here, so it is stubbed present
-    in every one of these and changes no answer."""
+    that made someone want the process count in here; the verdict reads none."""
 
     def _verdict(self, pid=None, log_age=0, end=None, stall=""):
         store = self.tmp / "store"
@@ -97,15 +93,15 @@ class TestTheVerdictReadsThePidAndTheLogAndNotTheProcessTable(WkTest):
         cp = bash(f'''
 . "{REPO}/lib/common.sh"
 . "{REPO}/lib/task.sh"
-{STUB_PS}
 {stall}task_verdict "{d}"
 ''', env={"WK_STORE": str(store)})
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
         return cp.stdout.strip()
 
     def test_the_reading_is_available_and_says_three(self):
-        cp = bash(f'. "{REPO}/lib/detach.sh"\n{STUB_PS}\nbuild_processes')
-        self.assertEqual(cp.stdout.strip(), "3", cp.stdout + cp.stderr)
+        m = Fake()
+        m.answer(["ps", "-A", "-o", "pcpu=,comm="], out=PS_OUT)
+        self.assertEqual(3, len(job.build_processes(m)))
 
     def test_a_fresh_log_is_running(self):
         self.assertEqual(self._verdict(), "running")
@@ -273,10 +269,11 @@ class TestTheRecordCarriesTheDeadlineTheWatchdogIsArmedWith(WkTest):
                          "5400")
 
     def test_the_record_and_the_watchdog_read_one_variable(self):
-        self.assertIn('_task_put "$dir/abort_after" "$WK_ABORT_SECONDS"',
-                      (REPO / "lib" / "task.sh").read_text())
-        self.assertIn('[ "$idle" -ge "$WK_ABORT_SECONDS" ]',
-                      (REPO / "lib" / "watchdog.sh").read_text())
+        records = record.Records(self.tmp / "s", env={"WK_ABORT_SECONDS": "77"})
+        t = records.begin("build", "here", "ws", "k", "/l", ["one"])
+        self.assertEqual("77", t.field("abort_after"))
+        self.assertIn('_seconds(env, "WK_ABORT_SECONDS", ABORT_SECONDS)',
+                      (REPO / "lib" / "wk" / "job.py").read_text())
 
 
 class TestATestRunKeepsTheSameRecordAsABuild(_FakeWalk):
@@ -447,7 +444,6 @@ class TestAJobsOwnExitStatusOutlivesItsDriver(WkTest):
         cp = bash(f'''
 . "{REPO}/lib/common.sh"
 . "{REPO}/lib/task.sh"
-{STUB_PS}
 task_set "{d}" exit_file "{exitf}"
 task_verdict "{d}"
 ''', env={"WK_STORE": str(store)})

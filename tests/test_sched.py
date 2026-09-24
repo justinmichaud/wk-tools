@@ -455,7 +455,8 @@ args = [re.sub(r"^https://github\\.com/[^/]+/([A-Za-z]+)(\\.git)?$",
 os.execv(real, ["git"] + args)
 '''
 
-MACHINE_CONF = '''NODE_SSH=fakeboard-%(name)s
+MACHINE_CONF = '''KIND=board
+NODE_SSH=fakeboard-%(name)s
 NODE_DRIVER=no-such-driver
 NODE_DEVICE=/dev/null
 NODE_PROFILE=%(profile)s
@@ -537,11 +538,9 @@ def ab_env(boards, registry=(), pull=None):
                            ("wpe", "WPEWebKit"), ("forkwpe", "WPEWebKit")):
             g("-C", str(mirror), "fetch", "-q", str(github / ("%s.git" % repo)),
               "+refs/heads/*:refs/remotes/%s/*" % name)
-        hosts = tmp / "hosts"
-        hosts.mkdir()
         for name in registry:
-            (hosts / ("%s.conf" % name)).write_text(
-                "WK_TARGET_KIND=remote\nWK_REMOTE_LOCAL=1\n"
+            (machines / ("%s.conf" % name)).write_text(
+                "KIND=build\nWK_TARGET_KIND=remote\nWK_REMOTE_LOCAL=1\n"
                 f"WK_REMOTE_ROOT={tmp / name}\nWK_REMOTE_STORE={tmp / name / 'store'}\n")
         stubs = {"git": GIT_STUB}
         if pull:
@@ -553,7 +552,6 @@ def ab_env(boards, registry=(), pull=None):
                 "env": {"XDG_STATE_HOME": str(state), "WK_STORE": str(store),
                         "WK_TEST_PR_BASE": (pull or {}).get("base", ""),
                         "WK_MACHINES_DIR": str(machines),
-                        "WK_TARGET_REGISTRY": str(hosts),
                         "WK_TEST_REAL_GIT": git, "WK_TEST_FAKE_GITHUB": str(github),
                         "PATH": "%s:%s" % (binp, os.environ["PATH"])},
             }

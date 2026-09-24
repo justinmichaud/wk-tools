@@ -1,6 +1,6 @@
 """Every edit an image needs is made on the card, by the machine holding the
 reader. `wk sysimage write --from` streams the image's own bytes onto the disk
-(disk_write_source, boot/disk.sh) and then asks admin/wk-card-priv to retarget
+(lib/wk/sysimage/write.py) and then asks admin/wk-card-priv to retarget
 the root, append the profile's cmdline and firmware settings, install the
 fleet units, name the system on the boot partition and check that the firmware
 can still reach a kernel -- so the driving machine needs no mtools, debugfs or
@@ -14,19 +14,23 @@ machine is not root and holds no card. The gate, the dispatcher and what is
 
 Run: python3 -m unittest tests.test_card_edits -v
 """
-import hashlib
+import contextlib
+import io
 import os
 import re
-import shutil
 import subprocess
+import sys
 import unittest
-from pathlib import Path
+from unittest import mock
 
 from tests.support import REPO, TAILSCALE_KNOWS_NOTHING, WkTest, bash, stub_path
 
+sys.path.insert(0, str(REPO / "lib"))
+from wk.machine import Fake  # noqa: E402
+from wk.sysimage import write  # noqa: E402
+
 CARD_PRIV = REPO / "admin" / "wk-card-priv"
-DISK_SH = REPO / "boot" / "disk.sh"
-SYSIMAGE = REPO / "cmd" / "sysimage"
+WRITE = REPO / "lib" / "wk" / "sysimage" / "write.py"
 
 # Every verb this move added, and the driving function that calls it.
 NEW_VERBS = {
@@ -609,6 +613,7 @@ class TestNothingIsEditedOnTheDrivingMachine(unittest.TestCase):
         "_card_root_spec", "_root_line", "disk_write_dd", "disk_verify_dd",
     )
     TOOLS = ("mtype", "mcopy", "mtools", "debugfs", "sfdisk", "e2fsck", "resize2fs")
+    PATHS = (WRITE, REPO / "lib" / "image.sh", REPO / "boot" / "disk.sh")
 
     def _code(self, path):
         """The file with its comment lines dropped: a tool named in prose is
@@ -619,7 +624,7 @@ class TestNothingIsEditedOnTheDrivingMachine(unittest.TestCase):
 
     def test_no_filesystem_tooling_runs_on_the_driving_machine(self):
         bad = []
-        for path in (SYSIMAGE, REPO / "lib" / "image.sh", DISK_SH):
+        for path in self.PATHS:
             code = self._code(path)
             for tool in self.TOOLS:
                 for m in re.finditer(rf"(?m)^.*\b{tool}\b.*$", code):
@@ -628,226 +633,49 @@ class TestNothingIsEditedOnTheDrivingMachine(unittest.TestCase):
 
     def test_no_retired_local_edit_survives(self):
         bad = []
-        for path in (SYSIMAGE, REPO / "lib" / "image.sh", DISK_SH):
+        for path in self.PATHS:
             code = self._code(path)
             for name in self.RETIRED:
                 if re.search(rf"\b{re.escape(name)}\b", code):
                     bad.append(f"{path.relative_to(REPO)}: {name}")
         self.assertEqual(bad, [], "retired local edit still referenced:\n" + "\n".join(bad))
 
-    def test_the_write_streams_the_source_straight_onto_the_card(self):
-        code = self._code(SYSIMAGE)
-        self.assertIn('disk_write_source "$DISK_DEV" "$reader"', code,
-                      "the write no longer streams its source onto the card")
-        self.assertNotIn("WRITE_TMP", code, "the local scratch copy is back")
+    def test_the_reader_hands_over_the_builders_own_bytes(self):
+        """The decompressor runs on the card machine; this end only reads."""
+        w = write.Write(REPO, {}, Fake(), None)
+        w.machine.files["/x.wic.xz"] = "x"
+        self.assertEqual(w.reader("/x.wic.xz"), ["cat", "/x.wic.xz"])
 
 
-class TestFarSideStreamMeter(WkTest):
-    """The stream is metered on the card machine, after the decompressor and
-    ahead of the privileged writer (disk_stream_meter_py, boot/disk.sh): the
-    read-back verify has no local copy to compare against, and this end never
-    sees the decompressed bytes at all. Its report goes to fd 3, which the
-    far-side pipeline points at the ssh session's stdout."""
+class TestDryRunIsTheSameSteps(unittest.TestCase):
+    """A dry run runs the write's own steps with every card call suppressed,
+    so what it reports cannot drift from what a write does."""
 
-    def _meter(self, payload):
-        out = self.tmp / "out"
-        report = self.tmp / "report"
-        cp = bash(
-            f'. "{REPO}/lib/common.sh"\n. "{REPO}/boot/disk.sh"\n'
-            f'printf %s {payload!r} | python3 -c "$(disk_stream_meter_py)" '
-            f'3>{report} > {out}\n')
-        return cp, report, out
+    DEV = "/dev/sdX"
+    STEPS = (("unmount", DEV), ("tailnet_save", DEV), ("stream", DEV, ["cat", "/x"], "cat"), ("verify", DEV, {}),
+             ("parts_present", DEV), ("retarget", DEV), ("unique_identity", DEV),
+             ("fleet_install", DEV, "id=x", "ssh-ed25519 AAAA"), ("put_units", DEV, {}),
+             ("check_boot_files", DEV, "rpi5", "some.dtb"), ("check_root", DEV, "rpi5"), ("seed_role", DEV, "bench"),
+             ("install_helper", DEV), ("install_autoboot", DEV), ("seed_tailnet", DEV, "name"), ("seed_wifi", DEV, "rpi3"),
+             ("eject", DEV))
 
-    def test_the_bytes_pass_through_unchanged_and_are_counted_and_hashed(self):
-        payload = "the image's own bytes"
-        cp, report, out = self._meter(payload)
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertEqual(out.read_text(), payload)
-        fields = dict(
-            line.split("=", 1) for line in report.read_text().splitlines())
-        self.assertEqual(int(fields["stream_bytes"]), len(payload))
-        self.assertEqual(fields["stream_sha"],
-                         hashlib.sha256(payload.encode()).hexdigest())
+    class Refuse:
+        channel, bash_driver = "host", False
 
-
-class TestTheCardMachineDecompresses(WkTest):
-    """`--from` hands the source's own bytes to the card machine, which
-    decompresses, meters and writes them in one pipeline: the image crosses
-    the network once, in the shape it was built in."""
-
-    # A card machine that answers for real: `m_ssh` runs the command it is
-    # given, `sudo` drops its -n, and the helper swallows the image and
-    # reports as the real one does.
-    _PRIV = '''#!/bin/sh
-cat >/dev/null
-echo "wk-card-priv: written"
-'''
-    _SUDO = '''#!/bin/sh
-[ "$1" = -n ] && shift
-exec "$@"
-'''
-
-    def _write(self, payload, filter_="cat", reader=None):
-        src = self.tmp / "image"
-        src.write_bytes(payload)
-        meta = self.tmp / "meta"
-        with stub_path({"sudo": self._SUDO, "wk-card-priv": self._PRIV}) as binp:
-            cp = bash(f'''
-. "{REPO}/lib/common.sh"
-. "{REPO}/boot/disk.sh"
-NODE_NAME=testmach
-DISK_DRY=""
-CARD_PRIV={binp}/wk-card-priv
-m_ssh() {{ bash -c "$*"; }}
-disk_write_source /dev/sdX {reader or f"cat {src}"!r} {filter_!r} {meta}
-''', env={"PATH": f"{binp}:{os.environ['PATH']}"})
-        return cp, meta
-
-    def test_the_meta_file_carries_what_the_far_side_metered(self):
-        payload = b"a disk image, near enough\n" * 100
-        cp, meta = self._write(payload)
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertEqual(
-            meta.read_text().splitlines()[0],
-            f"{len(payload)} {hashlib.sha256(payload).hexdigest()}",
-            cp.stdout + cp.stderr)
-        self.assertIn("wk-card-priv: written", cp.stderr,
-                      "the helper's own report is no longer shown")
-
-    def test_a_compressed_source_is_decompressed_on_the_card_machine(self):
-        payload = b"the bytes the card gets\n" * 50
-        xz = shutil.which("xz")
-        if not xz:
-            self.skipTest("no xz on this machine to make a compressed source with")
-        src = self.tmp / "image.xz"
-        src.write_bytes(subprocess.run([xz, "-c"], input=payload,
-                                       capture_output=True).stdout)
-        cp, meta = self._write(b"", filter_="xz -dc", reader=f"cat {src}")
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        # What was metered is the decompressed image, not the .xz that crossed.
-        self.assertEqual(
-            meta.read_text().splitlines()[0],
-            f"{len(payload)} {hashlib.sha256(payload).hexdigest()}",
-            cp.stdout + cp.stderr)
-        self.assertIn("decompressed there with xz -dc", cp.stderr)
-
-    def test_a_decompressor_the_card_machine_lacks_is_refused_by_name(self):
-        cp = bash(f'''
-. "{REPO}/lib/common.sh"
-. "{REPO}/boot/disk.sh"
-NODE_NAME=testmach
-DISK_DRY=""
-m_ssh() {{ case "$*" in *"command -v"*) return 1 ;; esac; echo "wrote it anyway"; }}
-disk_write_source /dev/sdX "cat /dev/null" "xz -dc" {self.tmp}/meta
-''')
-        self.assertNotEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertNotIn("wrote it anyway", cp.stdout,
-                         "the write went ahead without the decompressor")
-        self.assertIn("testmach has no xz", cp.stderr)
-        self.assertIn("install xz on testmach", cp.stderr)
-
-    def test_nothing_on_this_machine_decompresses_the_source(self):
-        reader = _lift(SYSIMAGE, "_from_reader")
-        for tool in ("xz -dc", "zstd -dc", "gzip -dc"):
-            self.assertNotIn(tool, reader,
-                             f"_from_reader still decompresses with {tool} here")
-        self.assertIn('disk_write_source "$DISK_DEV" "$reader" "$filter"',
-                      SYSIMAGE.read_text(),
-                      "the decompressor is no longer handed to the card machine")
-
-
-class TestEjectWithoutUdisks(WkTest):
-    """udisksctl is what powers a written card off; a machine without it is
-    said so, not silently skipped -- the write is complete either way."""
-
-    def test_a_machine_without_udisksctl_is_named_along_with_the_package(self):
-        cp = bash(f'''
-. "{REPO}/lib/common.sh"
-. "{REPO}/boot/disk.sh"
-NODE_NAME=testmach
-DISK_DRY=""
-m_ssh() {{ case "$*" in *udisksctl*) return 1 ;; esac; }}
-disk_eject /dev/sdX
-echo "RC=$?"
-''')
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertIn("RC=0", cp.stdout, "a missing udisksctl failed the write")
-        self.assertIn("testmach has no udisksctl", cp.stderr)
-        self.assertIn("safe to pull", cp.stderr)
-        self.assertIn("udisks2", cp.stderr, "the package to install is not named")
-
-
-class TestListingAWorkspaceMidRebuild(WkTest):
-    """A yocto image stage removes the last image as it rebuilds, so an image
-    workspace with no image is normal for hours. It keeps its row in `wk
-    sysimage ls` (image_workspace_scan's `-` path), which says what is
-    missing and how to get one."""
-
-    def test_a_workspace_with_no_image_still_has_a_row(self):
-        store = self.tmp / "store"
-        ws = "yocto-webkit-2.52-yocto-rpi3-32"
-        (store / "ws" / ws / "build").mkdir(parents=True)
-        cp = self.run_wk("sysimage", "ls", env={"WK_STORE": str(store)})
-        out = cp.stdout
-        self.assertEqual(cp.returncode, 0, out)
-        self.assertIn(ws, out, out)
-        self.assertIn("no image here yet", out, out)
-        self.assertIn("'wk sysimage build webkit-2.52-yocto-rpi3-32' builds one", out, out)
-        self.assertNotIn("has built an image", out, out)
-
-
-class TestDryRunIsTheSameSteps(WkTest):
-    """A dry run runs the write's own steps with every mutation suppressed
-    (disk_would), so what it reports cannot drift from what a write does."""
-
-    def _step(self, step, dry):
-        return bash(f'''
-. "{REPO}/lib/common.sh"
-. "{REPO}/boot/machines.sh"
-. "{REPO}/lib/image.sh"
-. "{REPO}/boot/disk.sh"
-NODE_NAME=testmach
-DISK_DRY={dry!r}
-card_priv() {{ echo "card_priv should not have run: $*" >&2; exit 9; }}
-m_ssh() {{ echo "m_ssh should not have run: $*" >&2; exit 9; }}
-{step}
-echo DONE
-''')
+        def call(self, *a, **kw):
+            raise AssertionError("the card was asked under --dry-run: %r" % (a,))
 
     def test_every_card_step_is_suppressed_and_reports_itself(self):
-        steps = [
-            'disk_unmount /dev/sdX',
-            'disk_write_source /dev/sdX "cat /dev/null" cat /dev/null',
-            'disk_verify_stream /dev/sdX /dev/null',
-            'disk_parts_present /dev/sdX',
-            'disk_root_spec /dev/sdX',
-            'disk_retarget_root /dev/sdX',
-            'disk_cmdline_append /dev/sdX quiet',
-            'disk_config_append /dev/sdX "# --- wk sysimage: p ---"',
-            'disk_boot_id /dev/sdX an-id',
-            'disk_install_units /dev/sdX /nonexistent',
-            'disk_check_boot_files /dev/sdX testmach some.dtb',
-            'disk_check_root /dev/sdX testmach',
-            'disk_unique_identity /dev/sdX',
-            'disk_install_fleet /dev/sdX "id=x" "ssh-ed25519 AAAA"',
-            'disk_seed_role /dev/sdX bench',
-            'disk_seed_tailnet /dev/sdX name',
-            'disk_seed_wifi /dev/sdX rpi3',
-            'disk_grow /dev/sdX',
-            'disk_eject /dev/sdX',
-        ]
-        for step in steps:
-            with self.subTest(step=step):
-                cp = self._step(step, "1")
-                out = cp.stdout + cp.stderr
-                self.assertEqual(cp.returncode, 0, out)
-                self.assertIn("DONE", out, out)
-                self.assertRegex(out, r"(?m)^\s*would ", out)
-
-    def test_without_the_dry_flag_a_step_really_asks_the_card(self):
-        cp = self._step("disk_grow /dev/sdX", "")
-        self.assertNotEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertIn("card_priv should not have run", cp.stdout + cp.stderr)
+        with mock.patch.dict(os.environ, {"WK_DRY_RUN": "1"}):
+            for name, *args in self.STEPS:
+                with self.subTest(step=name):
+                    w = write.Write(REPO, {}, Fake(), None)
+                    w.conf, w.ch = {"NODE_NAME": "testmach"}, self.Refuse()
+                    with contextlib.redirect_stderr(io.StringIO()) as err:
+                        getattr(w, name)(*args)
+                    self.assertRegex(err.getvalue(), r"(?m)^\s*would ")
+                    self.assertEqual(len(w.plan), 1)
+                    self.assertEqual(w.machine.effects, [])
 
 
 class TestWriteDryRunIsTheWholeSequence(WkTest):
@@ -856,7 +684,7 @@ class TestWriteDryRunIsTheWholeSequence(WkTest):
     them -- so an edit that moves, loses or reorders a step shows up here
     without a card in a reader."""
 
-    _SSH = '''#!/bin/sh
+    _SSH = """#!/bin/sh
 # a fleet machine that answers, whose card helper allows the disk
 case "$*" in
   *card-priv*status*) exit 0 ;;
@@ -864,7 +692,7 @@ case "$*" in
   *card-priv*wifi-host*) echo "wk-card-priv: wifi-host: yes ssid=TestNet"; exit 0 ;;
   *) exit 0 ;;
 esac
-'''
+"""
 
     def test_the_steps_are_reported_in_the_order_the_card_meets_them(self):
         key = self.tmp / "id.pub"
@@ -881,11 +709,11 @@ esac
         out = cp.stdout
         self.assertEqual(cp.returncode, 0, out)
         want = [
-            # Before the bytes: retiring a node this card's name is held by
-            # is a state change made outside this machine, and a dry run that
-            # left it out printed no sign of it at all.
-            "would read this machine's tailnet view",
+            "would ask: write",
             "would unmount",
+            # Retiring a node this card's name is held by is a state change
+            # made outside this machine, so a dry run names it.
+            "would read this machine's tailnet view",
             "would stream the image onto /dev/sdX",
             "would read /dev/sdX back",
             "would check that /dev/sdX came out of this with a partition table",
@@ -909,80 +737,41 @@ esac
             self.assertGreater(here, at, f"{step!r} is reported out of order:\n{out}")
             at = here
         self.assertIn("dry run -- nothing was written.", out, out)
-        # Nothing on this machine opened the image: it was never read at all.
         self.assertNotIn("reading ", out, out)
 
 
-class TestTheWriteStaysAddressedToTheReader(WkTest):
+class TestTheUnitsAreTheImageMachinesAndTheWriteIsTheReaders(unittest.TestCase):
     """A card is written by the machine holding the reader, for whatever board
-    the image is for -- rarely the same machine. Composing the units needs the
-    *image* machine's driver (its self-disarm), so that lookup happens in a
-    subshell: NODE_* is what every card edit is addressed to, and loading
-    another machine into this shell sends the rest of the write to the wrong
-    board."""
+    the image is for -- rarely the same machine. The units carry the image
+    machine's own self-disarm (lib/wk/boot); every card call is addressed to
+    the reader (tests/test_sysimage_write.py)."""
 
-    _LIFTED = _lift(SYSIMAGE, "_self_disarm_for", "stage_unit", "stage_sysctl", "stage_init", "stage_units")
+    def setUp(self):
+        self.w = write.Write(REPO, {"HOME": "/nonexistent", "XDG_CONFIG_HOME": "/nonexistent"}, Fake(), None)
 
-    def _sh(self, body, machine="rpi5"):
-        return self.bash(f"""
-set -eu
-. "$WK_ROOT/lib/common.sh"
-. "$WK_ROOT/boot/machines.sh"
-{self._LIFTED}
-IMG_PROFILE=test-profile IMG_WATCHDOG=600
-machine_load {machine}
-{body}
-""")
-
-    def test_staging_the_units_leaves_the_reader_machine_loaded(self):
-        seed = self.tmp / "seed"
-        for d in ("systemd", "sysctl.d", "init.d"):
-            (seed / d).mkdir(parents=True)
-        cp = self._sh(f"""
-IMG_MACHINE=rpi3     # the image is for another board, whose ssh name differs
-stage_units {seed} "$(_self_disarm_for "$IMG_MACHINE")" >/dev/null 2>&1
-printf 'name=%s ssh=%s role=%s driver=%s\n' \
-    "$NODE_NAME" "$NODE_SSH" "$NODE_ROLE" "$NODE_DRIVER"
-""")
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertEqual(
-            cp.stdout.strip(),
-            "name=rpi5 ssh=rpi5 role=workstation driver=rpi5-usb",
-            "staging the units re-aimed the write at the image's machine:\n"
-            + cp.stdout + cp.stderr,
-        )
+    def staged(self, watchdog="600", disarm=""):
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            return write.stage_units(REPO, watchdog, disarm, "test-profile"), err.getvalue()
 
     def test_a_medium_armed_board_gets_its_drivers_self_disarm(self):
-        # Both boards park their own arming, each the thing its driver armed:
-        # rpi3 puts the rescue's config.txt back (pi-sd), rpi4 removes the
-        # tryboot staging from the SD (pi-tryboot) -- that board does not
-        # consume the flag, so the staging is spent by the boot that used it or
-        # the board never leaves its bench system.
-        cp = self._sh('_self_disarm_for rpi4')
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertIn("tryboot.txt", cp.stdout, cp.stdout + cp.stderr)
-        self.assertNotIn("'", cp.stdout, "a quote here would split systemd's ExecStart")
-        cp = self._sh('_self_disarm_for rpi3')
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertIn("config.txt.rescue", cp.stdout, cp.stdout + cp.stderr)
-        self.assertNotIn("'", cp.stdout, "a quote here would split systemd's ExecStart")
+        # rpi3 puts the rescue's config.txt back (pi-sd); rpi4 removes the
+        # tryboot staging from the SD (pi-tryboot), which that board does not
+        # consume by itself.
+        for machine, want in (("rpi4", "tryboot.txt"), ("rpi3", "config.txt.rescue")):
+            with self.subTest(machine=machine):
+                line = self.w.self_disarm(machine)
+                self.assertIn(want, line)
+                self.assertNotIn("'", line, "a quote here would split systemd's ExecStart")
 
     def test_an_unknown_board_has_nothing_to_park(self):
         for machine in ("nosuchmachine", ""):
-            with self.subTest(machine=machine):
-                cp = self._sh(f'_self_disarm_for {machine or '""'}')
-                self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-                self.assertEqual(cp.stdout, "", cp.stdout + cp.stderr)
+            self.assertEqual(self.w.self_disarm(machine), "")
 
     def test_the_self_disarm_unit_is_skipped_when_there_is_nothing_to_park(self):
-        seed = self.tmp / "seed2"
-        for d in ("systemd", "sysctl.d", "init.d"):
-            (seed / d).mkdir(parents=True)
-        cp = self._sh(f'stage_units {seed} "" >/dev/null 2>&1; ls {seed}/systemd {seed}/init.d')
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertNotIn("wk-self-disarm", cp.stdout, cp.stdout)
-        self.assertIn("wk-self-return.service", cp.stdout, cp.stdout)
-        self.assertIn("S99wk-self-return", cp.stdout, cp.stdout)
+        units, _ = self.staged()
+        self.assertNotIn("systemd/wk-self-disarm.service", units)
+        self.assertIn("systemd/wk-self-return.service", units)
+        self.assertIn("init.d/S99wk-self-return", units)
 
     def test_the_watchdog_is_a_timer_that_blocks_no_target(self):
         """A Type=oneshot that sleeps is not active until it returns, so it
@@ -991,25 +780,17 @@ printf 'name=%s ssh=%s role=%s driver=%s\n' \
         (2026-09-01): 15 minutes of every boot with multi-user.target inactive
         and the start job under TimeoutStartSec=infinity. The wait belongs to a
         timer."""
-        seed = self.tmp / "seed-timer"
-        for d in ("systemd", "sysctl.d", "init.d"):
-            (seed / d).mkdir(parents=True)
-        cp = self._sh(f'stage_units {seed} "" >/dev/null 2>&1; ls {seed}/systemd')
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertIn("wk-self-return.timer", cp.stdout, cp.stdout)
-
-        timer = (seed / "systemd" / "wk-self-return.timer").read_text()
-        self.assertIn("OnBootSec=", timer)
+        units, _ = self.staged()
+        timer = units["systemd/wk-self-return.timer"]
+        self.assertTrue(timer.endswith("[Timer]\nAccuracySec=1s\nOnBootSec=600\n"), timer)
         self.assertIn("WantedBy=timers.target", timer)
         self.assertIn("/etc/wk/rescue", timer, "the timer is not gated on the rescue marker")
-
-        svc = (seed / "systemd" / "wk-self-return.service").read_text()
+        svc = units["systemd/wk-self-return.service"]
         self.assertNotIn("sleep", svc, "the service still waits inside its own ExecStart")
         self.assertNotIn("TimeoutStartSec", svc, "a service that returns at once needs no start timeout")
         self.assertNotIn("[Install]", svc,
                          "the timer's service is also wanted by a target, so it runs at "
                          "boot and reboots the board immediately")
-        self.assertNotIn("multi-user.target", svc)
         self.assertIn("wk-keep-running", svc)
         self.assertIn("/etc/wk/rescue", svc, "the service is not gated on the rescue marker")
 
@@ -1017,125 +798,37 @@ printf 'name=%s ssh=%s role=%s driver=%s\n' \
         """a timer with no OnBootSec fires at once and reboots the board, so a
         profile that names no watchdog gets no timer at all -- and is warned
         about, not silently left without one."""
-        seed = self.tmp / "seed-nowd"
-        for d in ("systemd", "sysctl.d", "init.d"):
-            (seed / d).mkdir(parents=True)
-        cp = self._sh(f'IMG_WATCHDOG=""; stage_units {seed} "" 2>&1; ls {seed}/systemd {seed}/init.d')
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertNotIn("wk-self-return", cp.stdout, cp.stdout)
-        self.assertIn("will not hand its machine back", cp.stdout)
+        units, err = self.staged(watchdog="")
+        self.assertFalse([u for u in units if "wk-self-return" in u], units)
+        self.assertIn("will not hand its machine back", err)
+
+    def test_the_self_disarm_lands_in_the_units_last_section(self):
+        units, _ = self.staged(disarm='a=$(x); echo "$a"')
+        unit = units["systemd/wk-self-disarm.service"]
+        self.assertTrue(unit.endswith("[Service]\nType=oneshot\nRemainAfterExit=yes\n"
+                                      "ExecStart=/bin/sh -c 'a=$$(x); echo \"$$a\"'\n"), unit)
 
     def test_a_busybox_image_gets_the_same_two_jobs_as_init_scripts(self):
-        seed = self.tmp / "seed3"
-        for d in ("systemd", "sysctl.d", "init.d"):
-            (seed / d).mkdir(parents=True)
-        cp = self._sh(f'stage_units {seed} "$(_self_disarm_for rpi3)" >/dev/null 2>&1; ls {seed}/init.d')
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertEqual(cp.stdout.split(), ["S11wk-self-disarm", "S99wk-self-return"])
-        disarm = (seed / "init.d" / "S11wk-self-disarm").read_text()
-        self.assertTrue(disarm.startswith("#!/bin/sh\n"))
-        self.assertIn("/etc/wk/rescue", disarm, "the script is not gated on the rescue marker")
-        self.assertIn("config.txt.rescue", disarm)
-        ret = (seed / "init.d" / "S99wk-self-return").read_text()
-        self.assertIn("sleep 600", ret)
-        self.assertIn("wk-keep-running", ret)
+        units, _ = self.staged(disarm=self.w.self_disarm("rpi3"))
+        self.assertEqual(sorted(u for u in units if u.startswith("init.d/")),
+                         ["init.d/S11wk-self-disarm", "init.d/S99wk-self-return"])
+        disarm, ret = units["init.d/S11wk-self-disarm"], units["init.d/S99wk-self-return"]
         for script in (disarm, ret):
+            self.assertTrue(script.startswith("#!/bin/sh\n"))
+            self.assertIn("/etc/wk/rescue", script, "the script is not gated on the rescue marker")
             self.assertEqual(subprocess.run(["sh", "-n"], input=script, text=True, capture_output=True).returncode, 0)
+        self.assertIn("config.txt.rescue", disarm)
+        self.assertIn("WK_WATCHDOG=600\n", ret)
+        self.assertIn('sleep "$WK_WATCHDOG"', ret)
+        self.assertIn("wk-keep-running", ret)
 
+    def test_the_watchdog_scripts_run_their_sleep_in_the_background(self):
+        """Last in rcS so the browser is up when the clock starts, and backgrounded so init does not wait it out."""
+        units, _ = self.staged(watchdog="2")
+        cp = subprocess.run(["sh", "-c", units["init.d/S99wk-self-return"].replace("/etc/wk/rescue", "/nonexistent")
+                             .replace("reboot", "true"), "S99", "start"], capture_output=True, timeout=1)
+        self.assertEqual(cp.returncode, 0)
 
-if __name__ == "__main__":
-    unittest.main()
-
-
-class TestBootCheckThatCannotBeAsked(WkTest):
-    """A writer whose helper has no checker beside it cannot answer the
-    boot-file question. That is the same state as a card written for another
-    machine -- not checked -- and is reported as such, not as missing files
-    (a rescue's helper is its image's, so the remedy there is a rebuild)."""
-
-    def _check(self, helper_out, rc):
-        return bash(f'''
-. "{REPO}/lib/common.sh"
-. "{REPO}/boot/machines.sh"
-. "{REPO}/lib/image.sh"
-NODE_NAME=rescue
-DISK_DRY=""
-card_priv() {{ printf '%s\\n' {helper_out!r}; return {rc}; }}
-disk_check_boot_files /dev/sdX@second rpi3 some.dtb && echo CONTINUED
-''')
-
-    def test_no_checker_is_not_checked_and_says_so(self):
-        cp = self._check("wk-card-priv: REFUSED: there is no boot-file checker at /usr/local/libexec/wk-check-boot-files.py on this machine.", 3)
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertIn("CONTINUED", cp.stdout)
-        self.assertIn("NOT checked", cp.stderr)
-
-    def test_missing_files_still_refuse(self):
-        cp = self._check("wk-card-priv: this card's boot partition is missing files a some.dtb board's firmware asks for", 1)
-        self.assertNotEqual(cp.returncode, 0)
-        self.assertNotIn("CONTINUED", cp.stdout)
-        self.assertIn("missing files", cp.stderr)
-
-
-class TestListingSaysWhichImagesAreInProgress(WkTest):
-    """`wk sysimage ls` carries the state in a column: an image being built
-    right now is the one most likely being looked for, and `-` in the size
-    column is not an answer. `building` is the workspace's own live answer
-    (_ws_building), never a record."""
-
-    def test_a_running_build_is_stated_on_the_row(self):
-        cp = bash(f'''
-. "{REPO}/cmd/sysimage" functions
-image_workspace_scan() {{ printf 'yocto\\tyocto-p\\t-\\t0\\t-\\n'; }}
-_ws_building() {{ return 0; }}
-_fleet_images() {{ :; }}
-cmd_ls
-''')
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        row = [l for l in cp.stdout.splitlines() if l.startswith("yocto-p")]
-        self.assertTrue(row, cp.stdout)
-        self.assertIn("building", row[0], row[0])
-        self.assertIn("STATE", cp.stdout, "the listing has no state column")
-        self.assertIn("wk logs yocto-p", cp.stdout, cp.stdout)
-
-    def test_an_image_present_while_a_build_runs_says_both(self):
-        cp = bash(f'''
-. "{REPO}/cmd/sysimage" functions
-image_workspace_scan() {{ printf 'yocto\\tyocto-p\\t/img/a.wic.xz\\t1024\\t2026-08-30\\n'; }}
-_ws_building() {{ return 0; }}
-_fleet_images() {{ :; }}
-cmd_ls
-''')
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        row = [l for l in cp.stdout.splitlines() if l.startswith("yocto-p")]
-        self.assertIn("building", row[0], row[0])
-        self.assertIn("previous image", cp.stdout, cp.stdout)
-
-    def test_a_finished_image_is_ready_and_an_empty_workspace_is_none(self):
-        for path, want in (("/img/a.wic.xz", "ready"), ("-", "none")):
-            cp = bash(f'''
-. "{REPO}/cmd/sysimage" functions
-image_workspace_scan() {{ printf 'yocto\\tyocto-p\\t{path}\\t1024\\t2026-08-30\\n'; }}
-_ws_building() {{ return 1; }}
-_fleet_images() {{ :; }}
-cmd_ls
-''')
-            with self.subTest(path=path):
-                self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-                row = [l for l in cp.stdout.splitlines() if l.startswith("yocto-p")]
-                self.assertIn(want, row[0], row[0])
-
-    def test_nothing_to_list_prints_no_header(self):
-        cp = bash(f'''
-. "{REPO}/cmd/sysimage" functions
-image_workspace_scan() {{ :; }}
-_fleet_images() {{ :; }}
-cmd_ls
-''')
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertNotIn("STATE", cp.stdout, "a header over an empty table")
-        self.assertIn("no workspace on any machine this one knows has built an image",
-                      cp.stdout + cp.stderr)
 
 class TestBootRead(CardEditTest):
     """`boot-read` is how a **workstation** reads its medium at all. The machine
@@ -1279,21 +972,5 @@ class TestRescueHelper(CardEditTest):
         self.assertFalse((self.root / "usr").exists(), "nothing is written on a refusal")
 
 
-class TestRescueHelperIsWiredIntoARescueWrite(unittest.TestCase):
-    def test_every_system_a_write_makes_takes_it(self):
-        """cmd/sysimage installs it unconditionally: a rescue writes bench media
-        with it, a bench system arms its sibling with it."""
-        text = SYSIMAGE.read_text()
-        self.assertIn("disk_install_helper \"$DISK_DEV\"", text)
-        self.assertNotIn('[ "$role" != rescue ] || disk_install', text,
-                         "the helper is installed on every system a write makes")
-        self.assertIn("disk_install_helper()", DISK_SH.read_text())
-
-    def test_an_older_helper_on_the_reader_is_told_apart_from_a_refusal(self):
-        """a reader whose checkout predates the verb gets the one-line remedy,
-        not 'could not'."""
-        text = DISK_SH.read_text()
-        block = text[text.index("disk_install_helper()"):]
-        block = block[:block.index("\n}\n")]
-        self.assertIn("usage: wk-card-priv", block)
-        self.assertIn("--stage quiesce", block)
+if __name__ == "__main__":
+    unittest.main()

@@ -1,7 +1,7 @@
-#!/usr/bin/env bash
+#!/usr/bin/env python3
 #
 # wk push on|off|status -- whether a workspace can push to git at all
-# wk: where=local name=none group=sources takes=1 opts --target=,--all
+# wk: where=local name=none group=sources takes=1 opts --target=,--all dryrun on,off
 # wk: readonly status
 # wk: destructive on
 #
@@ -27,7 +27,7 @@
 # holds (`ssh-add -l`) and the machine whether the credential files are there. A machine
 # runs an agent per kind of workspace -- one in the podman machine the containers
 # mount its socket from, and on macOS one here for the guests, which cannot see a
-# unix socket across the hypervisor and reach it through a forward (targets/vm.sh).
+# unix socket across the hypervisor and reach it through a forward (lib/wk/guest.py).
 # `on` and `off` switch every one of them or name the one they could not reach,
 # and `status` says ON while any of them holds a key. All of it runs here
 # (where=local). `wk ai claude` turns it off before handing over control.
@@ -46,411 +46,362 @@
 #   4  there are no deploy keys on this machine at all
 #   5  this machine has no switch: its keys are live wherever they sit
 
-set -euo pipefail
-WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-. "$WK_ROOT/lib/common.sh"
-. "$WK_ROOT/lib/store.sh"
-. "$WK_ROOT/lib/target.sh"
+import os
+import sys
 
-# Refused inside a workspace, not on a build machine: the switch acts where the credentials are. Before load_target, or `default_target` (`local` in a workspace) would exit before the refusal printed.
-in_workspace && die "'wk push' throws the credential switch, and this is workspace '$(wk_self)'.
-    The keys and the token are on the host and a workspace cannot reach either --
-    which is what makes the switch a switch. Run it on the host."
+ROOT = os.environ.get("WK_ROOT") or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(ROOT, "lib"))
 
-load_target "$(default_target)" 2>/dev/null || true
+from wk import act, decl, guest, record, secrets, status, targets  # noqa: E402
+from wk.act import Refused, die, info, log, warn  # noqa: E402
+from wk.clock import Clock  # noqa: E402
 
-ACTION=status
-TARGET=""
-while [ $# -gt 0 ]; do
-    case "$1" in
-        on|off|status) ACTION="$1"; shift ;;
-        --target) TARGET="${2:-}"; shift 2 ;;
-        --target=*) TARGET="${1#*=}"; shift ;;
-        --all) TARGET=--all; shift ;;
-        *) die "usage: wk push on|off|status; see wk push -h" ;;
-    esac
-done
+USAGE = "usage: wk push on|off|status; see wk push -h"
+UNASKED, NO_KEYS, NO_SWITCH = 3, 4, 5
 
-if [ -n "$TARGET" ]; then
-    _row() { sed "s/^/$(printf '%-22s' "$1")/"; }
-
-    UNASKED=""
-
-    _one() {
-        local t="$1" rc=0 out
-        load_target "$t"
-        # A machine that cannot be asked may be holding keys, so it is 3 and not 1: a caller reading "could not ask" as "off" is how an agent gets a working push.
-        machine_answers "$t" || { UNASKED="$UNASKED $t"; return 3; }
-        out=$(t_wk push "$ACTION" 2>&1) || rc=$?
-        printf '%s\n' "$out" | _row "$t"
-        return "$rc"
-    }
-
-    _here() {   # stdin closed like every other row's: a question asked here would go into $out and the person would see a hung command
-        local rc=0 out
-        out=$("$WK_ROOT/wk" push "$ACTION" 2>&1 </dev/null) || rc=$?
-        printf '%s\n' "$out" | _row "$(wk_machine_name)"
-        return "$rc"
-    }
-
-    _unasked_verdict() { # <exit code so far>
-        if [ -n "$UNASKED" ]; then
-            warn "not asked:$UNASKED -- the keys there are wherever they were, which
-    is not 'off'. 'wk push $ACTION --target <machine>' once each one answers."
-            exit 3
-        fi
-        exit "$1"
-    }
-
-    if [ "$TARGET" = --all ]; then
-        rc=0; _here || rc=$?
-        fan=0; for_each_machine _one || fan=$?
-        [ "$fan" -gt "$rc" ] && rc="$fan"
-        _unasked_verdict "$rc"
-    fi
-    rc=0; _one "$TARGET" || rc=$?
-    _unasked_verdict "$rc"
-fi
-
-# Nothing moves between the two: HELD holds every private half and the API token and is mounted nowhere; LIVE is the mounted one, with the public halves.
-HELD="$(wk_push_held_dir)"
-LIVE="$(wk_secrets_dir)"
-
-# push_agent_* expands these on the machine holding the workspaces, because /run/user/501 is not on a Mac.
-WS_SOCK=$(t_agent_sock 2>/dev/null) || WS_SOCK=""
-MACHINE_SOCK="$(push_agent_machine_sock)"
-MACHINE_PAT="$(push_agent_machine_pat)"
-MACHINE_BZ="$(push_agent_machine_bugzilla_key)"
-
-forks() { wk_push_forks | awk 'NF {print $1}'; }
-
-AGENT_KEYS="$(push_agent_list push_agent_exec "$MACHINE_SOCK")"
-
-# Matched by the public half's own fingerprint: `ssh-add -l` prints a fingerprint and a comment, never a name this switch chose.
-agent_holds() { # <fork>
-    local fp
-    [ -f "$LIVE/build_key_$1.pub" ] || return 1
-    fp=$(ssh-keygen -lf "$LIVE/build_key_$1.pub" 2>/dev/null | awk '{print $2}')
-    [ -n "$fp" ] || return 1
-    printf '%s\n' "$AGENT_KEYS" | awk '{print $2}' | grep -qxF "$fp"
-}
-
-# `live` is a key on a machine with no agent socket: remote/provision.sh points `core.sshCommand` at it directly.
-where() {
-    local r="$1"
-    agent_holds "$r" && { echo loaded; return 0; }
-    if [ -f "$HELD/build_key_$r" ]; then
-        [ -n "$WS_SOCK" ] && echo held || echo live
-        return 0
-    fi
-    echo absent
-}
-
-exposed_private_keys() {
-    local f
-    [ -d "$LIVE" ] || return 0
-    for f in "$LIVE"/build_key*; do
-        [ -f "$f" ] || continue
-        case "$f" in *.pub) continue ;; esac
-        printf '%s\n' "$(basename "$f")"
-    done
-    return 0
-}
-
-# Asked of the machine, not of a record: the process is called `claude`, `node` or a version string, but its exe path resolves under the Claude install.
-AGENT_PID_SCAN='for e in /proc/[0-9]*/exe; do
+# The process is called `claude`, `node` or a version string, but its exe path resolves under the Claude install.
+AGENT_PID_SCAN = '''for e in /proc/[0-9]*/exe; do
     case "$(readlink "$e" 2>/dev/null)" in
-        */claude/versions/*|*/.local/bin/claude) p=${e#/proc/}; printf "%s\n" "${p%/exe}" ;;
+        */claude/versions/*|*/.local/bin/claude) p=${e#/proc/}; printf "%s\\n" "${p%/exe}" ;;
     esac
-done'
+done'''
 
-agent_pids() { t_exec "$1" sh -c "$AGENT_PID_SCAN" 2>/dev/null | tr -d '\r'; }
 
-agent_sessions() {
-    local ws
-    while IFS=$(printf '\t') read -r ws _; do
-        [ -n "$ws" ] || continue
-        [ -z "$(agent_pids "$ws")" ] || printf '%s\n' "$ws"
-    done <<EOF
-$(t_list 2>/dev/null)
-EOF
-    return 0
-}
+def parse(argv):
+    args = decl.Args(decl.Decl(__file__), argv)
+    action = "status"
+    if args.positionals:
+        if len(args.positionals) > 1 or args.positionals[0] not in ("on", "off", "status"):
+            die(USAGE)
+        action = args.positionals[0]
+    target_named = {"--all": "--all" if args.flag("--all") else None, "--target": args.value("--target")}
+    target = ""
+    for opt in args.order:
+        named = target_named.get(opt)
+        if named is not None:
+            target = named
+    return action, target
 
-end_agent_sessions() { # <ws...> -- 1 when one outlived the KILL
-    local ws pids i rc=0
-    for ws in "$@"; do
-        pids=$(agent_pids "$ws")
-        [ -n "$pids" ] || continue
-        info "ending the claude session(s) in '$ws' (pid $(printf '%s' "$pids" | tr '\n' ' '))"
-        act t_exec "$ws" sh -c "kill $pids 2>/dev/null; exit 0" >/dev/null 2>&1 || true
-        i=0
-        while [ "$i" -lt "${WK_KILL_WAIT:-15}" ] && [ -n "$(agent_pids "$ws")" ]; do
-            wk_sleep 1; i=$((i + 1))
-        done
-        pids=$(agent_pids "$ws")
-        [ -n "$pids" ] || continue
-        warn "pid $(printf '%s' "$pids" | tr '\n' ' ')did not stop on TERM after ${i}s -- killing"
-        act t_exec "$ws" sh -c "kill -KILL $pids 2>/dev/null; exit 0" >/dev/null 2>&1 || true
-        i=0
-        while [ "$i" -lt 5 ] && [ -n "$(agent_pids "$ws")" ]; do wk_sleep 1; i=$((i + 1)); done
-        [ -z "$(agent_pids "$ws")" ] || rc=1
-    done
-    return "$rc"
-}
 
-# The gate in front of `on`: --force leaves the sessions running and hands them the push, through a barrier that says so again when the command ends.
-push_end_sessions_first() { # <ws...>
-    [ $# -gt 0 ] || return 0
-    if [ -n "${WK_FORCE:-}" ]; then
-        barrier "a claude session is running in $* -- loading the deploy keys hands it a
-    working push for as long as it runs, and its commit wall stays until it exits."
+def changed(msg):
+    info(("dry run: " if act.dry_run() else "") + msg)
+
+
+class FanOut:
+    """Another machine's switch, asked of its own wk: the credentials never travel."""
+
+    def __init__(self, reg, action, out):
+        self.reg, self.action, self.out = reg, action, out
+        self.unasked = []
+
+    def row(self, name, text):
+        for line in text.rstrip("\n").split("\n"):
+            self.out.write("%-22s%s\n" % (name, line))
+
+    def one(self, name):
+        try:
+            t = self.reg.load(name)
+        except LookupError as e:
+            die(str(e))
+        side, why = t.probe()
+        if side != "answering":
+            # One that cannot be asked may be holding keys, so it is 3 and never 1, which `wk ai` reads as off.
+            self.out.write("%-22s %s\n" % (name, status.far_side_reason(t, side, why)))
+            self.unasked.append(name)
+            return UNASKED
+        rc, text = t.wk("push", self.action)
+        self.row(name, text)
+        return rc
+
+    def here(self):
+        r = self.reg.machine.run(["sh", "-c", '"$0" push "$1" 2>&1', os.path.join(ROOT, "wk"), self.action], input="")
+        self.row(record.machine_name(self.reg.env, self.reg.machine), r.out)
+        return r.rc
+
+    def run(self, target):
+        if target in ("--all",):
+            rc = self.here()
+            for m in self.reg.machines():
+                rc = max(rc, self.one(m))
+        else:
+            rc = self.one(target)
+        if self.unasked:
+            warn("not asked: %s -- the keys there are wherever they were, which\n    is not 'off'. 'wk push %s --target <machine>' "
+                 "once each one answers." % (" ".join(self.unasked), self.action))
+            return UNASKED
+        return rc
+
+
+class Push:
+    def __init__(self, reg, sec, clock, out=None):
+        self.reg, self.sec, self.clock = reg, sec, clock
+        self.out = out or sys.stdout
+        self.target_name = reg.default()
+        try:
+            self.target = reg.load(self.target_name)
+        except LookupError:
+            self.target = None
+        self.ws_sock = self.target.agent_sock() if self.target else None
+        self.sock, self.pat, self.bz = sec.machine_sock(), sec.machine_pat(), sec.machine_bugzilla_key()
+        self.guest_live = False
+
+    def say(self, what, text):
+        self.out.write("%-10s %s\n" % (what, text))
+
+    def run(self, action):
+        rc = getattr(self, "switch_" + action)()
+        if action != "status":
+            rc = max(rc, self.converge_guests(action))
+        return rc
+
+    # -- the claude sessions `on` would hand a push
+
+    def agent_pids(self, ws):
+        return self.target.exec(ws, ["sh", "-c", AGENT_PID_SCAN]).out.replace("\r", "").split()
+
+    def agent_sessions(self):
+        return [ws for ws, _ in self.target.list() if ws and self.agent_pids(ws)]
+
+    def wait_gone(self, ws, limit):
+        waited = 0
+        while waited < limit and self.agent_pids(ws):
+            self.clock.sleep(1)
+            waited += 1
+        return waited
+
+    def end_agent_sessions(self, sessions):
+        """False when one outlived the KILL."""
+        ok = True
+        for ws in sessions:
+            pids = self.agent_pids(ws)
+            if not pids:
+                continue
+            info("ending the claude session(s) in '%s' (pid %s)" % (ws, " ".join(pids)))
+            self.target.act_exec(ws, ["sh", "-c", "kill %s 2>/dev/null; exit 0" % " ".join(pids)])
+            if act.dry_run():
+                continue
+            waited = self.wait_gone(ws, int(self.reg.env.get("WK_KILL_WAIT") or 15))
+            pids = self.agent_pids(ws)
+            if not pids:
+                continue
+            warn("pid %s did not stop on TERM after %ds -- killing" % (" ".join(pids), waited))
+            self.target.act_exec(ws, ["sh", "-c", "kill -KILL %s 2>/dev/null; exit 0" % " ".join(pids)])
+            self.wait_gone(ws, 5)
+            ok = ok and not self.agent_pids(ws)
+        return ok
+
+    def end_sessions_first(self, sessions):
+        if sessions and os.environ.get("WK_FORCE"):
+            act.barrier("a claude session is running in %s -- loading the deploy keys hands it a\n    working push for as long "
+                        "as it runs, and its commit wall stays until it exits." % " ".join(sessions))
+        elif sessions:
+            warn("a claude session is running in %s -- loading the keys\n    would hand it a working push, and its commit wall "
+                 "stays until it exits, so\n    it is ended first. Whatever it has not written down cannot be undone." % " ".join(sessions))
+            if not act.confirm("end the claude session(s) in %s?" % " ".join(sessions)):
+                die("push stays off -- nothing was loaded and no session was touched")
+            if not self.end_agent_sessions(sessions):
+                die("a claude session outlived a KILL, so the keys stay out of the agent.\n    Find it:  wk enter <workspace>")
+            return
+        # Ending a session is `on`'s one destructive effect, and past this gate none is left to end.
+        act.nothing_to_ask()
+
+    def require_agent_target(self):
+        if self.ws_sock:
+            return
+        warn("'%s' workspaces name no ssh-agent socket (t_agent_sock), so the\n    deploy keys have nowhere to live outside one and "
+             "there is no switch here.\n    Giving this target one -- wk-ssh-agent.service, the way host/linux/sdk.sh\n    installs it "
+             "-- is owed (docs/PLAN.md). Until then, push\n    from the workstation that holds the keys." % self.target_name)
+        raise Refused(NO_SWITCH)
+
+    # -- the switch
+
+    def switch_on(self):
+        sec = self.sec
+        self.require_agent_target()
+        self.end_sessions_first(self.agent_sessions())
+        if not sec.agent_answers(self.sock):
+            warn("no ssh-agent answers at %s on the machine that runs the\n    workspaces, so there is nothing to load the deploy "
+                 "keys into" % self.sock)
+            log("  ./setup installs and starts wk-ssh-agent.service there")
+            return 1
+        # Before the keys, since `wk key deploy` may have minted public halves since the store was made.
+        sec.publish()
+        rows = [state for _, state in sec.agent_load(self.sock)]
+        if rows.count("FAILED"):
+            warn("%d deploy key(s) would not load into the agent, so push is not fully on" % rows.count("FAILED"))
+            log("  the agent is at %s; 'wk push on' again once it answers" % self.sock)
+            return 1
+        if not rows.count("loaded"):
+            warn("no deploy key here to load -- 'wk key deploy' makes them")
+            return NO_KEYS
+        changed("push is ON -- %d deploy key(s) in the agent outside every workspace" % rows.count("loaded"))
+        if rows.count("no-key"):
+            log("  %d fork(s) have no key here ('wk key deploy')" % rows.count("no-key"))
+        log("  every workspace can push to the forks now, including any agent in one.")
+        log("  'wk push off' when you are done; 'wk ai claude' turns it off by itself.")
+        if sec.cred_write(self.pat, "github-pat"):
+            changed("the GitHub API token is where the injector reads it (%s)" % sec.github_user())
+            log("  'git-webkit pr' in a workspace posts as that account; the token stays here")
+        else:
+            sec.cred_clear(self.pat)
+            warn("there is no GitHub API token here, so 'git-webkit pr' in a workspace gets 401")
+            log("  'wk key set github-pat' stores one (repo scope; it never enters a workspace)")
+        if sec.cred_write(self.bz, "bugzilla-api-key"):
+            changed("the Bugzilla API key is where the injector reads it (%s)" % (sec.bugzilla_user() or "no login in the mirror"))
+            log("  'git-webkit pr' in a workspace files and updates the bug as that login; the key stays here")
+        else:
+            sec.cred_clear(self.bz)
+            warn("there is no Bugzilla API key here, so 'git-webkit pr' in a workspace cannot file or update a bug")
+            log("  'wk key set bugzilla-api-key' stores one (it never enters a workspace)")
+        log("  a push also needs this machine's key registered:  wk key check")
         return 0
-    fi
-    warn "a claude session is running in $* -- loading the keys
-    would hand it a working push, and its commit wall stays until it exits, so
-    it is ended first. Whatever it has not written down cannot be undone."
-    confirm "end the claude session(s) in $*?" \
-        || die "push stays off -- nothing was loaded and no session was touched"
-    end_agent_sessions "$@" \
-        || die "a claude session outlived a KILL, so the keys stay out of the agent.
-    Find it:  wk enter <workspace>"
-}
 
-require_agent_target() {
-    [ -n "$WS_SOCK" ] && return 0
-    warn "'$WK_TARGET' workspaces name no ssh-agent socket (t_agent_sock), so the
-    deploy keys have nowhere to live outside one and there is no switch here.
-    Giving this target one -- wk-ssh-agent.service, the way host/linux/sdk.sh
-    installs it -- is owed (docs/PLAN.md). Until then, push
-    from the workstation that holds the keys."
-    exit 5
-}
-
-switch_half() {
-    case "$ACTION" in
-on)
-    require_agent_target
-    push_end_sessions_first $(agent_sessions)
-
-    if ! push_agent_ensure push_agent_exec "$MACHINE_SOCK"; then
-        warn "no ssh-agent answers at $MACHINE_SOCK on the machine that runs the
-    workspaces, so there is nothing to load the deploy keys into"
-        log  "  ./setup installs and starts wk-ssh-agent.service there"
-        return 1
-    fi
-
-    # Before the keys: a workspace whose ssh config names no fork host cannot use an agent that holds one. Republished here because `wk key deploy` may have minted new public halves since the store was made.
-    secrets_publish \
-        || die "could not write $LIVE/ssh_config, which every workspace includes"
-
-    rows=$(push_agent_load push_agent_exec "$MACHINE_SOCK")
-    loaded=$(printf '%s\n' "$rows" | awk '$2 == "loaded"'  | grep -c . || true)
-    failed=$(printf '%s\n' "$rows" | awk '$2 == "FAILED"'  | grep -c . || true)
-    nokey=$( printf '%s\n' "$rows" | awk '$2 == "no-key"'  | grep -c . || true)
-
-    if [ "$failed" -gt 0 ]; then
-        warn "$failed deploy key(s) would not load into the agent, so push is not fully on"
-        log  "  the agent is at $MACHINE_SOCK; 'wk push on' again once it answers"
-        return 1
-    fi
-    if [ "$loaded" -eq 0 ]; then
-        warn "no deploy key here to load -- 'wk key deploy' makes them"
-        return 4
-    fi
-    changed "push is ON -- $loaded deploy key(s) in the agent outside every workspace"
-    [ "$nokey" -eq 0 ] || log "  $nokey fork(s) have no key here ('wk key deploy')"
-    log "  every workspace can push to the forks now, including any agent in one."
-    log "  'wk push off' when you are done; 'wk ai claude' turns it off by itself."
-
-    if push_agent_cred_write push_agent_exec "$MACHINE_PAT" github-pat; then
-        changed "the GitHub API token is where the injector reads it ($(wk_github_user))"
-        log  "  'git-webkit pr' in a workspace posts as that account; the token stays here"
-    else
-        push_agent_cred_clear push_agent_exec "$MACHINE_PAT" || true
-        warn "there is no GitHub API token here, so 'git-webkit pr' in a workspace gets 401"
-        log  "  'wk key set github-pat' stores one (repo scope; it never enters a workspace)"
-    fi
-    if push_agent_cred_write push_agent_exec "$MACHINE_BZ" bugzilla-api-key; then
-        changed "the Bugzilla API key is where the injector reads it ($(wk_bugzilla_user 2>/dev/null || echo 'no login in the mirror'))"
-        log  "  'git-webkit pr' in a workspace files and updates the bug as that login; the key stays here"
-    else
-        push_agent_cred_clear push_agent_exec "$MACHINE_BZ" || true
-        warn "there is no Bugzilla API key here, so 'git-webkit pr' in a workspace cannot file or update a bug"
-        log  "  'wk key set bugzilla-api-key' stores one (it never enters a workspace)"
-    fi
-
-    log "  a push also needs this machine's key registered:  wk key check"
-    ;;
-
-off)
-    require_agent_target
-    push_agent_clear    push_agent_exec "$MACHINE_SOCK" || true
-    push_agent_cred_clear push_agent_exec "$MACHINE_PAT" || true
-    push_agent_cred_clear push_agent_exec "$MACHINE_BZ" || true
-    # Rewritten on `off` too: it names public halves and a socket, not a credential, and an unresolvable `github-webkit` fails with a hostname error.
-    secrets_publish \
-        || warn "could not rewrite $LIVE/ssh_config; a push from a workspace will fail
-    on the host alias rather than on the missing identity"
-
-    # Evidence, not the exit status of the clear: an agent that ignored `ssh-add -D` is an agent a workspace can still push with.
-    left=$(push_agent_list push_agent_exec "$MACHINE_SOCK")
-    if [ -n "$left" ]; then
-        warn "the agent at $MACHINE_SOCK still holds $(printf '%s\n' "$left" | grep -c .) identity/identities"
-        log  "  push is NOT off; 'wk push off' again, or restart wk-ssh-agent.service there"
-        return 1
-    fi
-    if push_agent_cred_present push_agent_exec "$MACHINE_PAT"; then
-        warn "the GitHub API token is still at $MACHINE_PAT on that machine"
-        log  "  push is NOT off; 'wk push off' again"
-        return 1
-    fi
-    if push_agent_cred_present push_agent_exec "$MACHINE_BZ"; then
-        warn "the Bugzilla API key is still at $MACHINE_BZ on that machine"
-        log  "  push is NOT off; 'wk push off' again"
-        return 1
-    fi
-    changed "push is OFF -- the agent is empty and the injector has no token and no Bugzilla key"
-    log "  workspaces keep their remotes and can fetch; a push and an API call are"
-    log "  both refused at the door. The keys never left $HELD."
-    ;;
-
-status)
-    loaded=0; held=0; live=0; absent=0
-    for r in $(forks); do
-        case "$(where "$r")" in
-            loaded) loaded=$((loaded + 1)); printf '%-10s %s\n' "$r" "push allowed (in the agent)" ;;
-            held)   held=$((held + 1));     printf '%-10s %s\n' "$r" "held back ($HELD)" ;;
-            live)   live=$((live + 1));     printf '%-10s %s\n' "$r" "always live ($HELD) -- no switch on this machine" ;;
-            absent) absent=$((absent + 1)); printf '%-10s %s\n' "$r" "no key ('wk key deploy')" ;;
-        esac
-    done
-
-    pat_live=0
-    if push_agent_cred_present push_agent_exec "$MACHINE_PAT"; then
-        pat_live=1
-        printf '%-10s %s\n' "api" "'git-webkit pr' allowed (token at $MACHINE_PAT)"
-    elif [ -n "$(wk_github_pat)" ]; then
-        printf '%-10s %s\n' "api" "held back ($(wk_github_pat_path))"
-    else
-        printf '%-10s %s\n' "api" "no token ('wk key set github-pat')"
-    fi
-    if push_agent_cred_present push_agent_exec "$MACHINE_BZ"; then
-        pat_live=1
-        printf '%-10s %s\n' "bugzilla" "'git-webkit pr' can file the bug (key at $MACHINE_BZ)"
-    elif [ -n "$(wk_bugzilla_key)" ]; then
-        printf '%-10s %s\n' "bugzilla" "held back ($(wk_bugzilla_key_path))"
-    else
-        printf '%-10s %s\n' "bugzilla" "no key ('wk key set bugzilla-api-key')"
-    fi
-
-    exposed=$(exposed_private_keys)
-    if [ -n "$exposed" ]; then
-        warn "private key(s) in the mounted secrets directory, readable by every workspace:
-    $(printf '%s' "$exposed" | tr '\n' ' ')"
-        log  "  move them to $HELD, which nothing mounts anywhere"
-    fi
-
-    if [ -z "$WS_SOCK" ]; then
-        warn "'$WK_TARGET' workspaces name no ssh-agent socket, so there is no switch
-    on this machine: a checkout here is a plain one with no container around it
-    and its core.sshCommand names the private half directly
-    (remote/provision.sh). The key above is live whatever the switch says
-    anywhere else, and 'wk push on|off' here refuses rather than pretending.
-    Installing wk-ssh-agent.service here is owed (docs/PLAN.md)."
-    elif [ "$held" -gt 0 ] || [ "$loaded" -gt 0 ]; then
-        push_agent_ensure push_agent_exec "$MACHINE_SOCK" \
-            || log "  no ssh-agent answers at $MACHINE_SOCK ('./setup' installs it there)"
-    fi
-
-    guest_agent_row
-    guest_rows
-
-    if [ "$live" -gt 0 ]; then
-        info "push is ON here and cannot be switched off -- $live key(s) are live"
+    def switch_off(self):
+        sec = self.sec
+        self.require_agent_target()
+        sec.agent_clear(self.sock)
+        sec.cred_clear(self.pat)
+        sec.cred_clear(self.bz)
+        # It names public halves and a socket, not a credential, and an unresolvable `github-webkit` fails with a hostname error.
+        sec.publish()
+        if act.dry_run():
+            changed("push is OFF -- nothing was cleared, so nothing is read back")
+            return 0
+        # Evidence, not the exit status of the clear: an agent that ignored `ssh-add -D` is one a workspace can still push with.
+        left = sec.agent_list(self.sock)
+        if left:
+            warn("the agent at %s still holds %d identity/identities" % (self.sock, len(left)))
+            log("  push is NOT off; 'wk push off' again, or restart wk-ssh-agent.service there")
+            return 1
+        for path, what in ((self.pat, "GitHub API token"), (self.bz, "Bugzilla API key")):
+            if sec.cred_present(path):
+                warn("the %s is still at %s on that machine" % (what, path))
+                log("  push is NOT off; 'wk push off' again")
+                return 1
+        changed("push is OFF -- the agent is empty and the injector has no token and no Bugzilla key")
+        log("  workspaces keep their remotes and can fetch; a push and an API call are")
+        log("  both refused at the door. The keys never left %s." % sec.held_dir())
         return 0
-    fi
-    if [ "$loaded" -gt 0 ] || [ "$GUEST_LIVE" -eq 1 ]; then
-        info "push is ON"
-        return 0
-    fi
-    # A key is not the only credential a publish needs: the injector's write token and Bugzilla key are ones an agent could spend on a comment or a bug.
-    if [ "$pat_live" -eq 1 ]; then
-        info "push is ON -- no deploy key is loaded, but the injector has a write credential"
-        return 0
-    fi
-    if [ "$held" -gt 0 ]; then
-        info "push is OFF -- 'wk push on' to allow it"
+
+    def where(self, fork, in_agent):
+        """loaded | held | live | absent; `live` is a key on a machine with no agent socket (remote/provision.sh)."""
+        pub = self.sec.pub_path(fork)
+        if self.sec.machine.exists(pub):
+            fp = self.sec.machine.run(["ssh-keygen", "-lf", pub], input="").out.split()
+            if len(fp) > 1 and fp[1] in in_agent:
+                return "loaded"
+        if self.sec.machine.exists(self.sec.push_key_path(fork)):
+            return "held" if self.ws_sock else "live"
+        return "absent"
+
+    def exposed_private_keys(self):
+        d = self.sec.secrets_dir()
+        m = self.sec.machine
+        names = m.listdir(d) if m.isdir(d) else []
+        return [f for f in names if f.startswith("build_key") and not f.endswith(".pub") and not m.isdir(os.path.join(d, f))]
+
+    def switch_status(self):
+        sec = self.sec
+        held_dir = sec.held_dir()
+        in_agent = {line.split()[1] for line in sec.agent_list(self.sock) if len(line.split()) > 1}
+        words = {"loaded": "push allowed (in the agent)", "held": "held back (%s)" % held_dir,
+                 "live": "always live (%s) -- no switch on this machine" % held_dir, "absent": "no key ('wk key deploy')"}
+        count = {w: 0 for w in words}
+        for fork in [f[0] for f in sec.forks()]:
+            w = self.where(fork, in_agent)
+            count[w] += 1
+            self.say(fork, words[w])
+
+        cred_live = False
+        for what, path, name, allowed, held_path in (
+                ("api", self.pat, "github-pat", "'git-webkit pr' allowed (token at %s)", sec.github_pat_path()),
+                ("bugzilla", self.bz, "bugzilla-api-key", "'git-webkit pr' can file the bug (key at %s)", sec.bugzilla_key_path())):
+            if sec.cred_present(path):
+                cred_live = True
+                self.say(what, allowed % path)
+            elif secrets.first_line(sec.cred_read(name)):
+                self.say(what, "held back (%s)" % held_path)
+            else:
+                self.say(what, "no %s ('wk key set %s')" % ("token" if name == "github-pat" else "key", name))
+
+        exposed = self.exposed_private_keys()
+        if exposed:
+            warn("private key(s) in the mounted secrets directory, readable by every workspace:\n    %s" % " ".join(exposed))
+            log("  move them to %s, which nothing mounts anywhere" % held_dir)
+
+        if not self.ws_sock:
+            warn("'%s' workspaces name no ssh-agent socket, so there is no switch\n    on this machine: a checkout here is a plain one "
+                 "with no container around it\n    and its core.sshCommand names the private half directly\n    (remote/provision.sh). "
+                 "The key above is live whatever the switch says\n    anywhere else, and 'wk push on|off' here refuses rather than "
+                 "pretending.\n    Installing wk-ssh-agent.service here is owed (docs/PLAN.md)." % self.target_name)
+        elif (count["held"] or count["loaded"]) and not sec.agent_answers(self.sock):
+            log("  no ssh-agent answers at %s ('./setup' installs it there)" % self.sock)
+
+        self.guest_agent_row()
+        self.guest_rows()
+
+        if count["live"]:
+            info("push is ON here and cannot be switched off -- %d key(s) are live" % count["live"])
+            return 0
+        if count["loaded"] or self.guest_live:
+            info("push is ON")
+            return 0
+        # The injector's write token and Bugzilla key are credentials an agent could spend on a comment or a bug.
+        if cred_live:
+            info("push is ON -- no deploy key is loaded, but the injector has a write credential")
+            return 0
+        if count["held"]:
+            info("push is OFF -- 'wk push on' to allow it")
+            return 1
+        warn("there are no deploy keys here at all -- 'wk key deploy' makes them")
+        return NO_KEYS
+
+    # -- a macOS host's guests: an ssh-agent here and an `ssh -N -R` per guest (lib/wk/guest.py)
+
+    def converge_guests(self, action):
+        if not self.sec.macos or guest.vm_push_keys_converge(ROOT, self.sec.machine, action):
+            return 0
+        warn("the guest(s) named above were not converged and may still reach the agent;\n    'wk push %s' again once each one "
+             "answers" % action)
         return 1
-    fi
-    warn "there are no deploy keys here at all -- 'wk key deploy' makes them"
-    return 4
-    ;;
 
-*)
-    die "usage: wk push on|off|status; see wk push -h"
-    ;;
-    esac
-}
+    def guest_agent_row(self):
+        """A key in the guests' agent is a push from every guest holding a forward, whether or not one is up now."""
+        n = guest.vm_push_agent_keys(ROOT, self.sec.machine) if self.sec.macos else None
+        if n is None:
+            return
+        self.guest_live = self.guest_live or n > 0
+        self.say("guests", "%d key(s) in the agent this host runs for them" % n if n else "the agent this host runs for them holds nothing")
 
-# A container reads the agent's socket through its /run/wk mount; a macOS guest cannot, so its half is an ssh-agent here and an `ssh -N -R` per guest (targets/vm.sh), driven in a subshell that re-points $WK_STORE.
-_in_vm_driver() { # <function to call in the vm driver> [args...]
-    is_macos || return 0
-    local fn="$1"; shift
-    ( load_target vm >/dev/null 2>&1 && "$fn" "$@" )
-}
+    def guest_rows(self):
+        for g, state, forks in guest.vm_push_keys_state(ROOT, self.sec.machine) if self.sec.macos else []:
+            if state != "running":
+                self.out.write("guest %-10s %s\n" % (g, "%s -- not read; 'wk vm start %s' converges it" % (state, g)))
+            elif forks:
+                self.guest_live = True
+                self.out.write("guest %-10s %s\n" % (g, forks))
+            else:
+                self.out.write("guest %-10s %s\n" % (g, "no agent socket -- a push from in there is refused"))
 
-GUEST_RC=0
-GUEST_LIVE=0
 
-converge_guests() {
-    _in_vm_driver vm_push_keys_converge "$ACTION" && return 0
-    GUEST_RC=1
-    warn "the guest(s) named above were not converged and may still reach the agent;
-    'wk push $ACTION' again once each one answers"
-}
+def main(argv, env=None, reg=None, clock=None, out=None):
+    env = os.environ if env is None else env
+    reg = reg or targets.Registry(ROOT, env)
+    # Refused before the target loads: in a workspace the default is `local`, which names no switch.
+    if reg.in_workspace():
+        die("'wk push' throws the credential switch, and this is workspace '%s'.\n    The keys and the token are on the host and "
+            "a workspace cannot reach either --\n    which is what makes the switch a switch. Run it on the host."
+            % targets.read_conf(reg.marker_path()).get("name", ""))
+    action, target = parse(argv)
+    if target:
+        return FanOut(reg, action, out or sys.stdout).run(target)
+    return Push(reg, secrets.Secrets(ROOT, env, reg.machine), clock or Clock(), out).run(action)
 
-# The guests' own agent, asked of the agent: a key in it is a push allowed from every guest holding a forward, so it decides the headline whether or not a guest is up to make one right now.
-guest_agent_row() {
-    local n
-    n=$(_in_vm_driver vm_push_agent_keys) || return 0
-    [ -n "$n" ] || return 0
-    if [ "$n" -gt 0 ]; then
-        GUEST_LIVE=1
-        printf '%-10s %s\n' "guests" "$n key(s) in the agent this host runs for them"
-    else
-        printf '%-10s %s\n' "guests" "the agent this host runs for them holds nothing"
-    fi
-}
 
-# A stopped guest is not started to find out: `wk vm start` converges it before anything in it can run.
-guest_rows() {
-    local rows g state forks
-    rows=$(_in_vm_driver vm_push_keys_state) || return 0
-    [ -n "$rows" ] || return 0
-    while IFS="$(printf '\t')" read -r g state forks; do
-        [ -n "$g" ] || continue
-        if [ "$state" != running ]; then
-            printf 'guest %-10s %s\n' "$g" "$state -- not read; 'wk vm start $g' converges it"
-        elif [ -n "$forks" ]; then
-            GUEST_LIVE=1
-            printf 'guest %-10s %s\n' "$g" "$forks"
-        else
-            printf 'guest %-10s %s\n' "$g" "no agent socket -- a push from in there is refused"
-        fi
-    done <<EOF
-$rows
-EOF
-}
-
-SWITCH_RC=0
-switch_half || SWITCH_RC=$?
-
-case "$ACTION" in
-    on|off) converge_guests ;;
-esac
-
-if [ "$GUEST_RC" -gt "$SWITCH_RC" ]; then
-    exit "$GUEST_RC"
-fi
-exit "$SWITCH_RC"
+if __name__ == "__main__":
+    try:
+        sys.exit(main(sys.argv[1:]))
+    except Refused as e:
+        sys.exit(e.status)
+    except KeyboardInterrupt:
+        sys.exit(130)

@@ -123,6 +123,18 @@ class CopyConformance:
         self.assertEqual((out / "a").read_bytes(), b"a\n")
         self.assertEqual((out / "sub" / "c").read_bytes(), b"c\n")
 
+    def test_a_tree_copied_out_leaves_what_it_excludes_at_any_depth(self):
+        src = Path(self.real_tmp) / "excl"
+        (src / "Release" / "DerivedSources").mkdir(parents=True)
+        (src / "Release" / "keep").write_bytes(b"k\n")
+        (src / "Release" / "libWTF.a").write_bytes(b"a\n")
+        (src / "Release" / "DerivedSources" / "x.h").write_bytes(b"x\n")
+        dest = self.path("excl")
+        self.m.copy_tree_in(str(src), dest)
+        out = Path(self.real_tmp) / "excl-out"
+        self.m.copy_tree_out(dest, str(out), exclude=("DerivedSources", "*.a"))
+        self.assertEqual(sorted(str(p.relative_to(out)) for p in out.rglob("*") if p.is_file()), ["Release/keep"])
+
     def test_dry_run_copies_nothing(self):
         os.environ["WK_DRY_RUN"] = "1"
         real_src = os.path.join(self.real_tmp, "x.dat")
@@ -416,6 +428,13 @@ class TestSsh(MachineTest):
             self.assertIn("-i key", argv[argv.index("-e") + 1])
         self.assertEqual(seen[0][-2:], ["/local/tree/", "box.example:/remote/tree/"])
         self.assertEqual(seen[1][-2:], ["box.example:/remote/tree/", "/local/tree/"])
+
+    def test_copy_tree_out_hands_rsync_each_exclusion(self):
+        m = machine.Ssh("box.example", timeout=3)
+        seen = []
+        with mock.patch.object(machine.Local, "run", lambda self_, argv, input=None, timeout=None: seen.append(argv) or machine.Result(0)):
+            m.copy_tree_out("/remote/tree", "/local/tree", exclude=("*.a", "DerivedSources"))
+        self.assertIn(["--exclude", "*.a", "--exclude", "DerivedSources"], [seen[0][i:i + 4] for i in range(len(seen[0]))])
 
     def test_a_copy_that_fails_raises(self):
         m = machine.Ssh("box.example", timeout=3)

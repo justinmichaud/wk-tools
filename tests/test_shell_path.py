@@ -6,9 +6,13 @@ Run: python3 -m unittest tests.test_shell_path -v
 import os
 import shutil
 import subprocess
+import sys
 import unittest
 
-from tests.support import REPO, WkTest
+from tests.support import FLEET_ENV, REPO, WkTest
+
+sys.path.insert(0, str(REPO / "lib"))
+from wk import fleet  # noqa: E402
 
 
 def path_from(rc, home):
@@ -43,15 +47,13 @@ class TestBinDir(WkTest):
         tests/test_peer.py builds exactly such a root, and resolving `wk`
         through it would silently ask about this machine's real machines."""
         root = self.tmp / "overlay"
-        (root / "targets" / "hosts").mkdir(parents=True)
+        (root / "machines").mkdir(parents=True)
         for entry in REPO.iterdir():
-            if entry.name in ("targets", ".git", "__pycache__"):
+            if entry.name in ("machines", ".git", "__pycache__"):
                 continue
             (root / entry.name).symlink_to(entry)
-        for sh in (REPO / "targets").glob("*.sh"):
-            (root / "targets" / sh.name).symlink_to(sh)
-        (root / "targets" / "hosts" / "overlaybox.conf").write_text(
-            "WK_TARGET_KIND=remote\nWK_REMOTE_HOST=overlaybox\nWK_REMOTE_ROOT=/tmp/x\n")
+        (root / "machines" / "overlaybox.conf").write_text(
+            "KIND=build\nWK_TARGET_KIND=remote\nWK_REMOTE_HOST=overlaybox\nWK_REMOTE_ROOT=/tmp/x\n")
 
         env = {"HOME": str(self.tmp), "PATH": "/usr/bin:/bin"}
         # Known only to the overlay: resolved there, unknown in the real tree.
@@ -60,7 +62,7 @@ class TestBinDir(WkTest):
                             stderr=subprocess.STDOUT, text=True, timeout=60)
         self.assertNotIn("unknown target", cp.stdout)
         # And the real machines are not in this root's registry at all.
-        real = sorted(f.stem for f in (REPO / "targets" / "hosts").glob("*.conf"))
+        real = fleet.Fleet(REPO, FLEET_ENV).names(fleet.TARGET_KINDS)
         cp = subprocess.run([str(root / "wk"), "push", "status", "--target", "nosuchbox"],
                             cwd="/", env=env, stdout=subprocess.PIPE,
                             stderr=subprocess.STDOUT, text=True, timeout=60)

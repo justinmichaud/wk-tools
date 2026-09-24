@@ -20,25 +20,6 @@ vm_login_note() {
     log "                       piling up in it"
 }
 
-# Softnet runs its own network, not vmnet's usual 192.168.64.1, so the host address the guest can reach is discovered from the live interface.
-WK_VM_SUBNET="${WK_VM_SUBNET:-192.168.2}"
-WK_VM_PROXY_PORT="${WK_VM_PROXY_PORT:-3128}"
-
-_proxy_addr() {
-    [ -n "${WK_VM_PROXY_ADDR:-}" ] && { echo "$WK_VM_PROXY_ADDR"; return 0; }
-    local a
-    a=$(ifconfig 2>/dev/null | awk -v net="$WK_VM_SUBNET." '
-        $1 == "inet" && index($2, net) == 1 { print $2; exit }')
-    echo "${a:-${WK_VM_SUBNET}.1}"
-}
-WK_SOFTNET_BIN="${WK_SOFTNET_BIN:-/usr/local/bin/softnet}"
-
-# tart resolves softnet through PATH, and a non-interactive ssh has only /usr/bin:/bin:/usr/sbin:/sbin.
-case ":$PATH:" in
-    *":$(dirname "$WK_SOFTNET_BIN"):"*) ;;
-    *) PATH="$(dirname "$WK_SOFTNET_BIN"):$PATH"; export PATH ;;
-esac
-
 command -v envelope_mem_mb >/dev/null 2>&1 || . "$WK_ROOT/lib/resources.sh"
 command -v wk_record_dir  >/dev/null 2>&1 || . "$WK_ROOT/lib/store.sh"
 WK_VM_BASE_CPUS="${WK_VM_BASE_CPUS:-}"
@@ -48,9 +29,6 @@ _base_mem_mb() { [ -n "$WK_VM_BASE_MEM_MB" ] && echo "$WK_VM_BASE_MEM_MB" || env
 
 # The prepared image's stock 140 GB does not fit even one build. A ceiling, not an allocation: the disk is sparse and the clones are copy-on-write.
 WK_VM_DISK_GB="${WK_VM_DISK_GB:-320}"
-
-# Not zero: the reading is taken over ssh, so a round trip is in every compare.
-WK_VM_CLOCK_SKEW="${WK_VM_CLOCK_SKEW:-30}"
 
 # WK_VM_LOGIN_SETTLE: seconds a base's login is watched before its screen is called clear. Measured: Setup Assistant is up 4s after boot, and ssh answers before that.
 WK_VM_LOGIN_SETTLE="${WK_VM_LOGIN_SETTLE:-45}"
@@ -147,8 +125,6 @@ t_tools() { echo "/Users/$WK_VM_USER/wk-tools"; }
 
 t_mirror_dir() { mirror_in_guest; }
 
-t_needs_base() { return 1; }
-
 t_list() {
     _vm_query list "$WK_VM_BASE"
 }
@@ -166,8 +142,6 @@ t_ssh_host() {
     local ip; ip=$(_ip "$1") || return 1
     echo "$WK_VM_USER@$ip"
 }
-
-t_agent_sock() { printf '/Users/%s/.wk-ssh-agent.sock' "$WK_VM_USER"; }
 
 WK_VM_AGENT_RW_SHARE=agent-rw   # the claude.ai login the CLI rotates in place, so every holder here reads one set of bytes (wk_agent_rw_dir); the other share is the mirror (WK_VM_MIRROR_SHARE)
 _agent_rw_guest_dir() { guest_share_dir "$WK_VM_AGENT_RW_SHARE"; }
@@ -222,52 +196,11 @@ $(_running_vms | sed 's/^/      /')"
     : > "$(wk_ws_dir "$name")/$WK_READY_MARKER"
 }
 
-_converge_guest() { # <name> <ip>
-    local name="$1" ip="$2"
-    _push_tools "$name" "$ip" || warn "wk-tools in $name is not this tree's commit; 'wk sync --tools' puts it there once it is committed"
-    _write_marker "$name" "$ip" || debug "could not settle $name's workspace marker"
-    _write_shell_rc "$name" "$ip" || warn "could not wire $name's shell; 'wk' will not be on PATH in there"
-    _write_lldbinit "$name" "$ip" || debug "could not write .lldbinit in $name"
-    _set_guest_clock "$name" "$ip" || warn "could not set $name's clock; TLS in there will fail as CERT_NOT_YET_VALID"
-    _set_guest_egress "$name" "$ip" || warn "could not set $name's egress; nothing in there will reach the outside"
-    _write_checkout "$name" "$ip" || warn "$name's WebKit checkout is not wired and set up (above); 'wk sync $name --fix' once it is up"
-    _install_claude_cli "$name" "$ip" || warn "could not install the Claude CLI in $name; 'wk ai claude $name' will not work there"
-    _write_claude_config "$name" "$ip" || warn "could not link ~/.claude in $name; an agent in there would have no instructions"
-    _write_agent_secrets "$name" "$ip" || warn "could not write the agent credentials into $name; an agent in there will ask you to log in"
-    _write_deploy_keys "$name" "$ip" || warn "could not write $name's ssh config and public key halves; a push from in there is refused ('wk push status')"
-    _agent_converge_guest "$name" "$ip" || warn "could not converge $name's ssh-agent forward; 'wk push status' says what it can reach"
-    _settle_desktop "$name" "$ip" || warn "could not settle $name's desktop; 'wk vm check $name' says what is in front of the window"
-    _report_desktop "$name"
-}
-
-t_start() {
-    local name="$1" ip
-    local v; v=$(_vm "$name")
-
-    [ "$(_vm_state "$v")" != absent ] || die "no such workspace: $name"
-    if [ "$(_vm_state "$v")" = running ]; then
-        ip=$(_ip "$name")
-        _start_host_proxy || true
-        _converge_guest "$name" "$ip"
-    else
-        _check_guest_limit
-        local mem; mem=$(t_mem_mb "$name")
-        _check_memory_budget "$name" "$mem"
-        _check_host_disk
-
-        ip=$(_boot "$v" 180)
-        _converge_guest "$name" "$ip"
-    fi
-
-    vm_login_note
-    echo "$ip"
-}
-
 _settle_desktop() { # <name> <ip>
     {
         printf 'WK_VM_PASSWORD=%s\n' "$(sh_quote "$WK_VM_PASSWORD")"
-        cat "$WK_ROOT/bench/mac-quiet-desktop.sh" "$WK_ROOT/bench/mac-pyobjc.sh" \
-            "$WK_ROOT/vm/desktop.sh"
+        wk_quiet_desktop_script
+        cat "$WK_ROOT/bench/mac-pyobjc.sh" "$WK_ROOT/vm/desktop.sh"
     } | _ssh "$2" "bash -s" >/dev/null
 }
 
@@ -297,255 +230,6 @@ $(printf '%s' "$blocked" | sed 's/^/      /')
     WK_VM_FORCE=1 hands the guest over anyway."
 }
 
-# --net-softnet-block=0.0.0.0/0 is default-deny, and longest-prefix-match makes the single --net-softnet-allow "nothing except the proxy".
-_softnet_flags() {
-    if [ -n "${WK_VM_UNFILTERED:-}" ]; then
-        warn "WK_VM_UNFILTERED=1 -- this guest gets the open network, with no egress filter"
-        return 0
-    fi
-    # Fail closed: Softnet applies at `tart run` and cannot be added later, so a guest booted without it has the open network for its whole life.
-    [ -x "$WK_SOFTNET_BIN" ] || die "softnet is not installed, so this guest's egress would not be filtered.
-    Install it:  ./setup --stage softnet   (needs a terminal for sudo)
-    Or set WK_VM_UNFILTERED=1 to boot with the open network anyway."
-    printf '%s\n' --net-softnet \
-        "--net-softnet-block=0.0.0.0/0" \
-        "--net-softnet-allow=$(_proxy_addr)/32"
-}
-
-_proxy_pidfile() { echo "$WK_VM_DIR/proxy.pid"; }
-
-# A daemon keeps the code it was started with, and its pidfile's mtime is when that was: one older than any source under container/proxy is stopped so the start below runs the current one.
-_host_daemon_restart_if_stale() { # <pidfile> <what it is>
-    local pf="$1" pid f stale="" i=0
-    pid=$(cat "$pf" 2>/dev/null) || return 0
-    [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null || return 0
-    for f in "$WK_ROOT"/container/proxy/*.py; do [ "$f" -nt "$pf" ] && stale=1; done
-    [ -n "$stale" ] || return 0
-    info "restarting the $2: container/proxy changed since it started"
-    kill "$pid" 2>/dev/null || true
-    while [ "$i" -lt 20 ] && kill -0 "$pid" 2>/dev/null; do sleep 0.25; i=$((i + 1)); done
-    kill -0 "$pid" 2>/dev/null && kill -9 "$pid" 2>/dev/null
-    rm -f "$pf"
-}
-
-_proxy_running() {
-    local pf; pf=$(_proxy_pidfile)
-    [ -f "$pf" ] && kill -0 "$(cat "$pf" 2>/dev/null)" 2>/dev/null && return 0
-    lsof -nP -iTCP@"$(_proxy_addr)":"$WK_VM_PROXY_PORT" -sTCP:LISTEN >/dev/null 2>&1 || return 1
-    debug "a proxy is listening on $(_proxy_addr):$WK_VM_PROXY_PORT that this pidfile does not name"
-}
-
-_start_host_proxy() {
-    [ -n "${WK_VM_UNFILTERED:-}" ] && return 0
-
-    # The injector first: the proxy hands it api.github.com's CONNECT, and one started after the proxy answers those with 502 until it is up. Ahead of the liveness check too, not only ahead of starting the proxy -- the injector's standing read token is converged in there from what this host holds, and a start that found the proxy already up would leave a rotated token undelivered and every read from a guest answering 401.
-    _start_host_inject || true
-
-    _host_daemon_restart_if_stale "$(_proxy_pidfile)" "egress proxy"
-    _proxy_running && { debug "host proxy already running"; return 0; }
-
-    ensure_dir "$WK_VM_DIR"
-    local log="$WK_VM_DIR/proxy.log" addr i=0
-
-    addr=$(_proxy_addr)
-    while [ "$i" -lt 30 ]; do
-        ifconfig 2>/dev/null | grep -q "inet $addr " && break
-        sleep 0.5; i=$((i + 1))
-    done
-    if ! ifconfig 2>/dev/null | grep -q "inet $addr "; then
-        warn "the guest bridge never got address $addr; not starting the proxy"
-        return 1
-    fi
-
-    WK_PROXY_UNIX=0 \
-    WK_PROXY_TCP="$addr:$WK_VM_PROXY_PORT" \
-    WK_STORE="$WK_STORE" \
-    WK_INJECT_SOCK="$(_inject_sock)" \
-    nohup /usr/bin/python3 "$WK_ROOT/container/proxy/wk-proxy.py" >"$log" 2>&1 &
-    echo $! > "$(_proxy_pidfile)"
-    disown 2>/dev/null || true
-
-    i=0
-    while [ "$i" -lt 20 ]; do
-        _proxy_running || break
-        grep -q "listening on $addr" "$log" 2>/dev/null && {
-            info "egress proxy on $addr:$WK_VM_PROXY_PORT"
-            return 0
-        }
-        sleep 0.5; i=$((i + 1))
-    done
-
-    warn "the host egress proxy did not start; the guest will have no egress at all
-  (Softnet denies everything except the proxy address). See $log"
-    return 1
-}
-
-# container/proxy/github-inject.py, the same program the podman machine runs for containers: it terminates TLS for api.github.com and bugs.webkit.org and adds the credential, so a guest opens a PR and files its bug without holding either.
-_inject_sock()  { echo "$WK_VM_DIR/github-inject.sock"; }
-_inject_dir()   { echo "$WK_VM_DIR/github-inject"; }
-_inject_ca()    { echo "$WK_VM_DIR/wk-github-ca.pem"; }
-_inject_pat()   { echo "$WK_VM_DIR/push-github-pat"; }
-_inject_read_pat() { echo "$WK_VM_DIR/read-github-pat"; }
-_inject_bugzilla_key() { echo "$WK_VM_DIR/push-bugzilla-api-key"; }
-
-# macOS `nc -z -U` answers 1 for a socket that is being served, so the connect is made in python: a false negative here restarts a live injector and reports the guest has none.
-_inject_running() {
-    [ -S "$(_inject_sock)" ] || return 1
-    /usr/bin/python3 -c 'import socket, sys
-s = socket.socket(socket.AF_UNIX); s.settimeout(2)
-try:
-    s.connect(sys.argv[1])
-except OSError:
-    sys.exit(1)
-s.close()' "$(_inject_sock)" 2>/dev/null
-}
-
-# The standing read token reaches the injector that serves the guests through this one call: every guest start makes it (_start_host_inject below) and so does every `wk key set github-pat` (push_agent_pat_deliver, lib/store.sh), so a token stored, rotated or withdrawn on this host is the one a guest reads.
-vm_push_pat_converge() {
-    ensure_dir "$WK_VM_DIR"
-    push_agent_cred_sync _agent_exec "$(_inject_read_pat)" github-pat && return 0
-    warn "could not converge $(_inject_read_pat); a read from a guest answers 401"
-    return 1
-}
-
-_start_host_inject() {
-    ensure_dir "$WK_VM_DIR"
-    vm_push_pat_converge || true
-    _host_daemon_restart_if_stale "$WK_VM_DIR/github-inject.pid" "GitHub API injector"
-    _inject_running && return 0
-    local log="$WK_VM_DIR/github-inject.log" i=0
-    WK_INJECT_SOCK="$(_inject_sock)" \
-    WK_INJECT_DIR="$(_inject_dir)" \
-    WK_INJECT_CA_OUT="$(_inject_ca)" \
-    WK_INJECT_PAT="$(_inject_pat)" \
-    WK_INJECT_READ_PAT="$(_inject_read_pat)" \
-    WK_INJECT_BUGZILLA_KEY="$(_inject_bugzilla_key)" \
-    nohup /usr/bin/python3 "$WK_ROOT/container/proxy/github-inject.py" >"$log" 2>&1 &
-    echo $! > "$WK_VM_DIR/github-inject.pid"
-    disown 2>/dev/null || true
-    while [ "$i" -lt 40 ]; do
-        _inject_running && { info "GitHub API injector on $(_inject_sock)"; return 0; }
-        sleep 0.25; i=$((i + 1))
-    done
-    warn "the GitHub API injector did not start, so 'git-webkit pr' in a guest
-  will fail; see $log"
-    return 1
-}
-
-# A guest cannot see a unix socket across the hypervisor, so the ssh-agent holding the private halves runs *here* and an `ssh -N -R` carries its socket in.
-_agent_sock()    { echo "$WK_VM_DIR/ssh-agent.sock"; }
-_agent_pidfile() { echo "$WK_VM_DIR/ssh-agent.pid"; }
-
-_agent_exec() { sh -c "$1"; }
-
-_start_host_agent() {
-    push_agent_ensure _agent_exec "$(_agent_sock)" && return 0
-    ensure_dir "$WK_VM_DIR"
-    # ssh-agent refuses to bind a path that exists.
-    rm -f "$(_agent_sock)"
-    nohup /usr/bin/ssh-agent -D -a "$(_agent_sock)" \
-        >"$WK_VM_DIR/ssh-agent.log" 2>&1 &
-    echo $! > "$(_agent_pidfile)"
-    disown 2>/dev/null || true
-
-    local i=0
-    while [ "$i" -lt 20 ]; do
-        push_agent_ensure _agent_exec "$(_agent_sock)" && return 0
-        sleep 0.2; i=$((i + 1))
-    done
-    warn "the guests' ssh-agent did not start, so no guest can push;
-  see $WK_VM_DIR/ssh-agent.log"
-    return 1
-}
-
-_agent_forward_start() { # <name> <ip>
-    with_lock "vm-agent-forward-$1" -- _agent_forward_start_locked "$@"
-}
-
-# The tunnel is the task: its record (lib/task.sh) stays open for as long as it carries the guest's push, and `wk push off` is what ends it.
-_agent_forward_start_locked() { # <name> <ip>
-    local name="$1" ip="$2" d log pid
-    command -v detach_run >/dev/null 2>&1 || . "$WK_ROOT/lib/detach.sh"
-    command -v task_begin >/dev/null 2>&1 || . "$WK_ROOT/lib/task.sh"
-    d=$(task_find agent-forward "$name")
-    [ -n "$d" ] && task_alive "$d" && return 0
-    log="$WK_VM_DIR/$name.agent-forward.log"
-    _ssh "$ip" "rm -f $(sh_quote "$(t_agent_sock)")" </dev/null || return 1
-    d=$(task_begin agent-forward here "$name" "wk push off" "$log" "start forward" verify)
-    task_step_named "$d" "start forward"
-    # shellcheck disable=SC2046 -- deliberate word splitting of the option list.
-    pid=$(detach_run "$log" -- \
-        ssh $(_ssh_opts) -N -R "$(t_agent_sock):$(_agent_sock)" "$WK_VM_USER@$ip")
-    task_pid "$d" "$pid"
-    task_step_named "$d" verify
-    sleep 0.5
-    task_alive "$d" && return 0
-    task_end "$d" failed
-    return 1
-}
-
-_agent_forward_stop() { # <name>
-    with_lock "vm-agent-forward-$1" -- _agent_forward_stop_locked "$1"
-}
-
-_agent_forward_stop_locked() { # <name>
-    local d pid
-    command -v task_find >/dev/null 2>&1 || . "$WK_ROOT/lib/task.sh"
-    d=$(task_find agent-forward "$1")
-    [ -n "$d" ] || return 0
-    pid=$(task_field "$d" pid)
-    [ -z "$pid" ] || kill "$pid" 2>/dev/null || true
-    task_end "$d" stopped
-}
-
-_agent_converge_guest() { # <name> <ip>
-    local name="$1" ip="$2"
-    if push_agent_list _agent_exec "$(_agent_sock)" | grep -q .; then
-        _agent_forward_start "$name" "$ip" || return 1
-    else
-        _agent_forward_stop "$name"
-        _ssh "$ip" "rm -f $(sh_quote "$(t_agent_sock)")" </dev/null || return 1
-    fi
-}
-
-_boot() {
-    local v="$1" wait="${2:-180}" ip runlog
-
-    ensure_dir "$WK_VM_DIR"
-    runlog="$WK_VM_DIR/${v#wk-}.run.log"
-
-    if [ "$(_vm_state "$v")" != running ]; then
-        # Computed *before* the tart command line: inline, a die in _softnet_flags would kill only the subshell and tart would run anyway.
-        local sflags
-        sflags=$(_softnet_flags)
-
-        if [ -z "$sflags" ]; then
-            : > "$WK_VM_DIR/${v#wk-}.unfiltered"
-        else
-            rm -f "$WK_VM_DIR/${v#wk-}.unfiltered"
-        fi
-
-        ensure_dir "$(wk_agent_rw_dir)" 0700
-        # nohup, not a bare `&`, or the VM dies with the terminal. Windowed: a macOS guest is the one workspace kind with a real GPU, and it is the .app's own binary that runs -- outside the bundle tart loses com.apple.security.virtualization and fullScreenPrimary.
-        # shellcheck disable=SC2086 -- deliberate word splitting of the flags.
-        nohup "$(tart_bin)" run $sflags --dir="$WK_VM_AGENT_RW_SHARE:$(wk_agent_rw_dir)" \
-            --dir="$WK_VM_MIRROR_SHARE:$(dirname "$(wk_mirror)"):ro" "$v" >"$runlog" 2>&1 &
-        disown 2>/dev/null || true
-        info "booting $v (log: $runlog)"
-    fi
-
-    # Default dhcp resolver works behind Softnet; the arp resolver does not.
-    ip=$(_tart ip "$v" --wait "$wait" 2>/dev/null | grep .) \
-        || die "$v did not come up within ${wait}s. Its run log says:
-$(_runlog_tail "$runlog")"
-
-    _start_host_proxy || true
-
-    _wait_ssh "$ip" || die "$v is up at $ip but ssh never answered. Its run log says:
-$(_runlog_tail "$runlog")"
-    echo "$ip"
-}
-
 # The only place a `tart run` states why it died -- "The number of VMs exceeds the system limit" is printed here and nowhere a person looks.
 _runlog_tail() { # <path>
     if [ -s "$1" ]; then
@@ -556,14 +240,6 @@ _runlog_tail() { # <path>
     fi
 }
 
-t_stop() {
-    local v; v=$(_vm "$1")
-    _agent_forward_stop "$1"
-    [ "$(_vm_state "$v")" = running ] || { info "$1 is not running"; return 0; }
-    _tart stop "$v"
-    info "stopped $1"
-}
-
 t_exec() {
     local name="$1"; shift
     local ip; ip=$(_ip "$name") || die "'$name' is not running (wk vm start $name)"
@@ -572,33 +248,10 @@ t_exec() {
     _ssh "$ip" "bash -lc $(sh_quote "$cmd")"
 }
 
-t_pull_dir() {
-    local name="$1" src="$2" dest="$3"; shift 3
-    _t_pull_dir_excludes "$@"
-    local ip; ip=$(_ip "$name") || die "'$name' is not running (wk vm start $name)"
-    mkdir -p "$dest"
-    # shellcheck disable=SC2046 -- deliberate word splitting of the option list.
-    rsync -a --chmod=go-w --delete ${_T_PULL_EXCLUDES[@]+"${_T_PULL_EXCLUDES[@]}"} -e "ssh $(_ssh_opts)" \
-        "$WK_VM_USER@$ip:$src/" "$dest/"
-}
-
 t_enter() {
     local name="$1"
     local ip; ip=$(_ip "$name") || die "'$name' is not running (wk vm start $name)"
     exec ssh -t $(_ssh_opts) "$WK_VM_USER@$ip" "cd $(t_src "$name") 2>/dev/null; exec \$SHELL -l"
-}
-
-# The marker that tells the guest's own wk that it *is* a workspace, and which one. Never written into the golden base, and never into a guest carrying /etc/wk-image: that one is a benchmark install standing in for a machine, and one claiming to be a workspace too is refused by `wk quiesce` and `wk bench staged` -- the two commands a rehearsal exists to run.
-_write_marker() {
-    local name="$1" ip="$2"
-    if _ssh "$ip" 'test -f /etc/wk-image' 2>/dev/null; then
-        _ssh "$ip" 'rm -f $HOME/.wk-workspace'
-        return
-    fi
-    _ssh "$ip" "printf '%s\n' \
-        '# wk: this machine IS a workspace. Written by targets/vm.sh.' \
-        $(sh_quote "name=$name") $(sh_quote "src=$(t_src "$name")") \
-        > \$HOME/.wk-workspace"
 }
 
 _write_claude_config() {
@@ -652,242 +305,6 @@ _install_claude_cli() { # <name> <ip>
     case "$out" in claude=installed) info "Claude CLI installed in $name" ;; esac
 }
 
-# One row per named secret (wk_agent_secrets, lib/store.sh), rewritten every start so a rotation converges: a guest holding a withdrawn credential, or one the delivery column does not send here -- the claude.ai login, whose own tool rewrites it in place -- is the state this must not leave behind. A guest authenticates into a store this host never writes (CLAUDE_SECURESTORAGE_CONFIG_DIR, vm/shell-rc.sh).
-_write_agent_secrets() { # <name> <ip>
-    local name="$1" ip="$2" sname sfile shome svar skind sdelivery val here n=0
-    while read -r sname sfile shome svar skind sdelivery; do
-        [ -n "$sname" ] || continue
-        if [ "$skind" = file ]; then   # read where the host's directory is mounted; a copy under ~ would be a second holder
-            _ssh "$ip" "rm -f \$HOME/$(sh_quote "$shome") && bash -lc 'test -d \"\$CLAUDE_SECURESTORAGE_CONFIG_DIR\"'" </dev/null \
-                || warn "the $WK_VM_AGENT_RW_SHARE share is not mounted in $name, so it has no claude.ai login:
-    'wk vm stop $name', then 'wk vm start $name' boots it with the share"
-            continue
-        fi
-        here=1
-        case ",$sdelivery," in *,vm,*)
-            here=0; wk_agent_secret_present "$sname" || here=$?
-            [ "$here" -lt 2 ] || return 1 ;;
-        esac
-        if [ "$here" -ne 0 ]; then
-            _ssh "$ip" "rm -f \$HOME/$(sh_quote "$shome")" </dev/null || return 1
-            continue
-        fi
-        val=$(wk_agent_secret "$sname")
-        printf '%s\n' "$val" \
-            | _ssh "$ip" "umask 077 && cat > \$HOME/$(sh_quote "$shome")" || return 1
-        n=$((n + 1))
-    done <<EOF
-$(wk_agent_secrets)
-EOF
-    debug "agent credentials in $name: $n"
-}
-
-# Softnet allows one address, where wk-proxy listens, so a guest's direct TCP to port 22 is dropped and this proxy is an HTTP CONNECT one; github.com:22 is in its allowlist. macOS's own nc speaks CONNECT with `-X connect`, and there is no other nc in a Cirrus Labs image. Absolute path: ssh runs this through /bin/sh, not the login PATH.
-_ssh_proxy_command() {
-    printf '/usr/bin/nc -X connect -x %s:%s %%h %%p' "$(_proxy_addr)" "$WK_VM_PROXY_PORT"
-}
-
-_write_deploy_keys() { # <name> <ip>
-    local name="$1" ip="$2" remote repo alias pub idf n=0 total=0
-
-    _ssh "$ip" "umask 077 && mkdir -p \$HOME/.ssh && cat > \$HOME/.ssh/config" <<EOF || return 1
-# wk: written by targets/vm.sh on every start. Whether the agent these name
-# holds a key at all is 'wk push'.
-$(wk_ssh_alias_blocks "/Users/$WK_VM_USER/.ssh" id_ "$(t_agent_sock)" "$(_ssh_proxy_command)")
-EOF
-
-    while read -r remote repo alias; do
-        [ -n "$remote" ] || continue
-        total=$((total + 1))
-        pub=$(_wk_secret_read "$(wk_secrets_dir)/build_key_$remote.pub")
-        idf="\$HOME/.ssh/id_$(sh_quote "$remote").pub"
-        if [ -n "$pub" ]; then
-            printf '%s\n' "$pub" | _ssh "$ip" "cat > $idf" || return 1
-            n=$((n + 1))
-        else
-            _ssh "$ip" "rm -f $idf" </dev/null || return 1
-        fi
-    done <<EOF
-$(wk_push_forks)
-EOF
-    debug "public deploy halves in $name: $n of $total"
-}
-
-vm_push_keys_converge() { # <on|off>
-    local action="$1" g ip rc=0
-    if [ "$action" = on ]; then
-        _start_host_agent || return 1
-        push_agent_load _agent_exec "$(_agent_sock)" >/dev/null || rc=1
-        push_agent_cred_write _agent_exec "$(_inject_pat)" github-pat \
-            || push_agent_cred_clear _agent_exec "$(_inject_pat)"
-        push_agent_cred_write _agent_exec "$(_inject_bugzilla_key)" bugzilla-api-key \
-            || push_agent_cred_clear _agent_exec "$(_inject_bugzilla_key)"
-    else
-        push_agent_clear _agent_exec "$(_agent_sock)" || true
-        push_agent_cred_clear _agent_exec "$(_inject_pat)" || true
-        push_agent_cred_clear _agent_exec "$(_inject_bugzilla_key)" || true
-        local left; left=$(vm_push_agent_keys)
-        if [ "$left" != 0 ]; then
-            printf '  %-24s %s\n' "the guests' agent" \
-                "still holds $left identity/identities at $(_agent_sock)" >&2
-            rc=1
-        fi
-    fi
-
-    for g in $(target_workspaces); do
-        [ "$(t_info "$g" 2>/dev/null)" = running ] || continue
-        if ! ip=$(_ip "$g"); then
-            printf '  %-24s running, no address yet -- not converged\n' "$g" >&2
-            rc=1; continue
-        fi
-        if ! _write_deploy_keys "$g" "$ip" >/dev/null; then
-            printf '  %-24s FAILED -- its ssh config was not rewritten\n' "$g" >&2
-            rc=1; continue
-        fi
-        if _agent_converge_guest "$g" "$ip"; then
-            if [ "$action" = on ]; then
-                printf '  %-24s %s\n' "$g" "reaches the agent on this host" >&2
-            else
-                printf '  %-24s %s\n' "$g" "no agent socket -- a push in there is refused" >&2
-            fi
-        else
-            printf '  %-24s FAILED -- it may still reach the agent\n' "$g" >&2
-            rc=1
-        fi
-    done
-    return "$rc"
-}
-
-vm_push_agent_keys() {
-    push_agent_list _agent_exec "$(_agent_sock)" | grep -c . || true
-}
-
-vm_push_keys_state() {
-    local g ip state n
-    n=$(vm_push_agent_keys)
-    for g in $(target_workspaces); do
-        state=$(t_info "$g" 2>/dev/null) || state=unknown
-        if [ "$state" != running ] || ! ip=$(_ip "$g"); then
-            printf '%s\t%s\t\n' "$g" "${state:-unknown}"
-            continue
-        fi
-        if [ "$n" -gt 0 ] \
-            && _ssh "$ip" "test -S $(sh_quote "$(t_agent_sock)")" </dev/null 2>/dev/null; then
-            printf '%s\trunning\t%s\n' "$g" "$n key(s) through the agent on this host"
-        else
-            printf '%s\trunning\t\n' "$g"
-        fi
-    done
-}
-
-# The proxy address is the host's own on the guest bridge and can change, so no image may bake it in. A guest needs both halves:
-#   WebKit's network process does not read http_proxy/https_proxy (MiniBrowser gives a blank window where curl goes through), so the *system* proxy is set too; ~/.wk-egress carries http_proxy/https_proxy into all four rc files, where a profile would reach only login shells.
-_set_guest_egress() {
-    local name="$1" ip="$2" addr="" ca=""
-    [ -n "${WK_VM_UNFILTERED:-}" ] || addr=$(_proxy_addr)
-    [ -z "$addr" ] || ca=$(cat "$(_inject_ca)" 2>/dev/null) || ca=""
-    debug "guest egress in $name: ${addr:-off}"
-
-    _ssh "$ip" "bash -s" <<EOF
-set -u
-addr='$addr'
-port='$WK_VM_PROXY_PORT'
-ghuser=$(sh_quote "$(wk_github_user)")
-bzuser=$(sh_quote "$(wk_bugzilla_user 2>/dev/null || true)")
-cat > /tmp/.wk-github-ca.new <<'WKCA'
-$ca
-WKCA
-
-# The shell half first, so a guest whose network service cannot be identified
-# below still gets a working proxy in its shells.
-if [ -z "\$addr" ]; then
-    rm -f "\$HOME/.wk-egress"
-else
-    cat > "\$HOME/.wk-egress" <<WKEGRESS
-# wk: written by targets/vm.sh on every start; sourced by every shell
-# (vm/shell-rc.sh). Softnet denies everything but this address.
-export http_proxy=http://\$addr:\$port
-export https_proxy=http://\$addr:\$port
-export HTTP_PROXY=http://\$addr:\$port
-export HTTPS_PROXY=http://\$addr:\$port
-export no_proxy=localhost,127.0.0.1,::1
-export NO_PROXY=localhost,127.0.0.1,::1
-export PYTHON_KEYRING_BACKEND=keyring.backends.null.Keyring
-WKEGRESS
-fi
-
-# The injector's CA, and the placeholder credential 'git-webkit pr' reads
-# (webkitcorepy). The bundle is the system's *plus* that CA, never that CA
-# alone: these variables replace the trust store outright.
-if grep -q 'BEGIN CERTIFICATE' /tmp/.wk-github-ca.new 2>/dev/null; then
-    mv /tmp/.wk-github-ca.new "\$HOME/.wk-github-ca.pem"
-    cat /etc/ssl/cert.pem "\$HOME/.wk-github-ca.pem" > "\$HOME/.wk-ca-bundle.pem"
-    cat >> "\$HOME/.wk-egress" <<WKCAENV
-export REQUESTS_CA_BUNDLE=\$HOME/.wk-ca-bundle.pem
-export CURL_CA_BUNDLE=\$HOME/.wk-ca-bundle.pem
-export GIT_SSL_CAINFO=\$HOME/.wk-ca-bundle.pem
-export GITHUB_COM_USERNAME=\$ghuser
-export GITHUB_COM_TOKEN=wk-injects-this
-export SSL_CERT_FILE=\$HOME/.wk-ca-bundle.pem
-export GH_TOKEN=wk-injects-this
-WKCAENV
-    [ -z "\$bzuser" ] || cat >> "\$HOME/.wk-egress" <<WKBZENV
-export BUGS_WEBKIT_ORG_USERNAME=\$bzuser
-export BUGS_WEBKIT_ORG_PASSWORD=wk-injects-this
-WKBZENV
-else
-    rm -f /tmp/.wk-github-ca.new "\$HOME/.wk-github-ca.pem" "\$HOME/.wk-ca-bundle.pem"
-fi
-
-# The service to configure is the one carrying the default route: the Cirrus
-# Labs image ships several, and which is real is a property of the guest.
-dev=\$(route -n get default 2>/dev/null | awk '/interface:/{print \$2}')
-[ -n "\$dev" ] || { echo "no default route in the guest" >&2; exit 1; }
-svc=\$(networksetup -listnetworkserviceorder | awk -v d="\$dev" '
-    /^\([0-9]+\)/ { name = substr(\$0, index(\$0, ") ") + 2) }
-    index(\$0, "Device: " d ")") { print name; exit }')
-[ -n "\$svc" ] || { echo "no network service owns \$dev" >&2; exit 1; }
-
-read_state() {
-    networksetup -getsecurewebproxy "\$svc" | awk '
-        /^Enabled:/ { e = \$2 } /^Server:/ { s = \$2 } /^Port:/ { p = \$2 }
-        END { print e ":" s ":" p }'
-}
-
-if [ -z "\$addr" ]; then
-    [ "\$(read_state)" = "No::0" ] && exit 0
-    sudo -n networksetup -setwebproxystate "\$svc" off &&
-    sudo -n networksetup -setsecurewebproxystate "\$svc" off
-    exit
-fi
-
-# Idempotent by measurement rather than by a marker file: three networksetup
-# writes on every boot would be slow and would log three times over.
-[ "\$(read_state)" = "Yes:\$addr:\$port" ] && exit 0
-sudo -n networksetup -setwebproxy "\$svc" "\$addr" "\$port" &&
-sudo -n networksetup -setsecurewebproxy "\$svc" "\$addr" "\$port" &&
-sudo -n networksetup -setproxybypassdomains "\$svc" localhost 127.0.0.1
-EOF
-}
-
-# `tart clone` hands a clone the golden base's clock and nothing inside can correct it: Softnet allows one address, and NTP is UDP, which an HTTP CONNECT proxy cannot carry.
-# From inside that looks like every TLS handshake failing as CERT_NOT_YET_VALID, not like a clock. Idempotent by measurement: a guest within WK_VM_CLOCK_SKEW costs no sudo.
-_set_guest_clock() { # <name> <ip>
-    local name="$1" ip="$2" skew
-    skew=$(_ssh "$ip" "env WK_NOW_EPOCH=$(date -u +%s) WK_NOW_SET=$(date -u +%m%d%H%M%Y.%S) \
-                           WK_SKEW=$(sh_quote "$WK_VM_CLOCK_SKEW") bash -s" <<'EOF'
-set -u
-skew=$(( WK_NOW_EPOCH - $(date -u +%s) ))
-[ "$skew" -ge 0 ] || skew=$(( - skew ))
-[ "$skew" -gt "$WK_SKEW" ] || exit 0
-sudo -n date -u "$WK_NOW_SET" >/dev/null || exit 1
-echo "$skew"
-EOF
-    ) || return 1
-    [ -n "$skew" ] || return 0
-    info "$name's clock was ${skew}s out; set from this host"
-}
-
 _write_lldbinit() {
     local name="$1" ip="$2"
     {
@@ -901,19 +318,16 @@ _write_shell_rc() { # <name> <ip>
     _ssh "$2" "bash -s $(sh_quote "$(t_tools "$1")") $(sh_quote "$(_agent_rw_guest_dir)")" < "$WK_ROOT/vm/shell-rc.sh"
 }
 
-command -v tools_push >/dev/null 2>&1 || . "$WK_ROOT/lib/tools.sh"
+command -v _tools_py >/dev/null 2>&1 || . "$WK_ROOT/lib/tools.sh"
 
-# A git bundle of this tree's HEAD (tools_push, lib/tools.sh) rather than a mount: a guest's shares are the agent-rw directory and the mirror (_boot), and an uncommitted tree here is refused.
-_push_tools() {
-    local name="$1" ip="$2"
-    tools_push "$(t_tools "$name")" _ssh "$ip"
-}
+# Start, stop and the clock are lib/wk/guest.py; this driver's own store is WK_VM_STORE there.
+_guest_py() { WK_VM_STORE="$WK_STORE" WK_STORE="$(wk_machine_store)" PYTHONPATH="$WK_ROOT/lib" WK_ROOT="$WK_ROOT" python3 -m wk.guest "$@"; }
+_set_guest_clock() { _guest_py clock "$@"; }   # <name> <ip>
 
-t_sync_tools() {
-    local name="$1"
-    local ip; ip=$(_ip "$name") || die "'$name' is not running (wk vm start $name)"
-    _push_tools "$name" "$ip" || return 1
-    _write_marker "$name" "$ip"
+# A git bundle of this tree's HEAD (lib/wk/tools.py) rather than a mount: a guest's shares are the agent-rw directory and the mirror (lib/wk/guest.py's boot).
+_guest_tools_push() { # <name> <ip>
+    # shellcheck disable=SC2046 -- deliberate word splitting of the option list.
+    _tools_py push "$(t_tools "$1")" "$WK_VM_USER@$2" $(_ssh_opts)
 }
 
 t_destroy() {
@@ -1234,7 +648,7 @@ _provision_base() {
         changed "generated the macOS VM ssh key"
     fi
 
-    # A first boot has Setup Assistant work to get through, hence the longer wait than t_start uses.
+    # A first boot has Setup Assistant work to get through, hence the longer wait than a guest start uses.
     local runlog="$WK_VM_DIR/base.run.log"
     local ip; ip=$(_start_base)
 
@@ -1265,7 +679,7 @@ $(_runlog_tail "$runlog")"
     image rather than patching the guest:  ssh into it and run  sudo -n true"
 
     info "provisioning the base VM (Xcode licence, disk, desktop)"
-    _push_tools "$WK_VM_BASE" "$ip" \
+    _guest_tools_push "$WK_VM_BASE" "$ip" \
         || die "the base cannot be provisioned without wk-tools in it (see above)"
     vm_login_note
     # Detached and polled, not a foreground `ssh <long command>`: provisioning is minutes, and a dropped connection (measured 2026-09-04: "Read from remote host: Connection reset by peer") takes a foreground run with it.
@@ -1341,7 +755,7 @@ _wait_login_settled() { # <ip>
 
 _check_base_screen() { # <ip>
     local reading uninvited
-    reading=$( { cat "$WK_ROOT/bench/mac-quiet-desktop.sh" "$WK_ROOT/bench/mac-window-probe.sh"
+    reading=$( { wk_quiet_desktop_script; cat "$WK_ROOT/bench/mac-window-probe.sh"
                  echo wk_window_probe
                } | _ssh "$1" 'bash -s' 2>/dev/null | sed -n 's/^windows=//p') || reading=""
     [ -n "$reading" ] && [ "$reading" != '?' ] \
@@ -1476,8 +890,9 @@ vm_desktop_findings() { # <probe output>
 vm_desktop_probe() { # <name>
     local ip; ip=$(_ip "$1") || return 1
     [ -n "$ip" ] || return 1
-    cat "$WK_ROOT/bench/mac-quiet-desktop.sh" "$WK_ROOT/bench/mac-window-probe.sh" \
-        "$WK_ROOT/bench/mac-pyobjc.sh" "$WK_ROOT/vm/desktop-probe.sh" | _ssh "$ip" 'bash -s'
+    { wk_quiet_desktop_script
+      cat "$WK_ROOT/bench/mac-window-probe.sh" "$WK_ROOT/bench/mac-pyobjc.sh" "$WK_ROOT/vm/desktop-probe.sh"
+    } | _ssh "$ip" 'bash -s'
 }
 
 

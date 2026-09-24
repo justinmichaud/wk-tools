@@ -1,0 +1,11 @@
+# The hosts macOS software update scans, denied in /etc/hosts on a bench install (bench/mac-quiet-hosts.sh).
+# mesu and gdmf still answer OTA/DDM check-ins with automatic checking off, so the whole scan path is denied: catalogs, both CDNs, xp.apple.com.
+swscan.apple.com
+swdist.apple.com
+swcdn.apple.com
+swdownload.apple.com
+mesu.apple.com
+gdmf.apple.com
+updates.cdn-apple.com
+updates-http.cdn-apple.com
+xp.apple.com

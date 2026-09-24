@@ -67,7 +67,7 @@ CORES_DESC=$(describe_cores)
 MEM_MB=$(host_mem_mb)
 info "wk-tools setup on $OS ($CORES_DESC, $MEM_MB MB)"
 
-_sudo_keepalive_pid=""   # `wk sudo`'s 30-second window closes in the gaps between setup's privileged steps
+_sudo_keepalive_pid=""   # `wk key sudo`'s 30-second window closes in the gaps between setup's privileged steps
 _sudo_keepalive_stop() {
     [ -n "$_sudo_keepalive_pid" ] || return 0
     kill "$_sudo_keepalive_pid" 2>/dev/null || true

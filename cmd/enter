@@ -11,27 +11,18 @@
 #                is optional and is not passed on
 
 import os
-import stat
 import sys
 
 ROOT = os.environ.get("WK_ROOT") or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "lib"))
 
-from wk import shell, targets  # noqa: E402
+from wk import decl, shell, targets  # noqa: E402
 from wk.act import Refused, die, exec_into, log, warn  # noqa: E402
-
-
-def is_linux():
-    return os.uname().sysname != "Darwin"
+from wk.machine import is_linux  # noqa: E402
 
 
 def session_display_warning(env):
-    sock = os.path.join(env.get("XDG_RUNTIME_DIR") or "/run/user/%d" % os.getuid(), "wk", "display", "wayland-0")
-    try:
-        is_socket = stat.S_ISSOCK(os.stat(sock).st_mode)
-    except OSError:
-        is_socket = False
-    if not is_socket:
+    if not targets.session_socket_present(env):
         warn("no benchmark session running; GPU-accelerated tests fall back to software rendering")
         log("  start one with:  wk session on")
     else:
@@ -40,7 +31,7 @@ def session_display_warning(env):
 
 def parse(argv):
     """--zed is the flag only as the leading token; one leading `--` past it is dropped, the rest is the command tail verbatim."""
-    zed = bool(argv) and argv[0] == "--zed"
+    zed = decl.Args(decl.Decl(__file__), argv[:1]).flag("--zed")
     cmd = list(argv[1:] if zed else argv)
     if cmd[:1] == ["--"]:
         cmd = cmd[1:]

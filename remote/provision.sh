@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Runs on a shared build machine, over ssh from `wk remote setup`. Nothing here needs root -- these are other people's machines -- so everything lives under $HOME and prerequisites are checked, never installed. Non-interactive, cleanup being a decision for `wk remote setup`, which has a terminal.
+# Runs on a shared build machine, over ssh from `wk machine setup`. Nothing here needs root -- these are other people's machines -- so everything lives under $HOME and prerequisites are checked, never installed. Non-interactive, cleanup being a decision for `wk machine setup`, which has a terminal.
 
 set -euo pipefail
 
@@ -28,7 +28,7 @@ ensure_dir "$ROOT"
 ensure_dir "$ROOT/ws"
 ensure_dir "$ROOT/cache/ccache"
 
-# inputs= is the hash of this file and remote/deps.sh, computed on the driving side (remote_provision_inputs_hash, targets/remote.sh) so the two ends cannot hash differently; `wk doctor --all` recomputes it and compares.
+# inputs= is the hash of what this file, remote/probe.sh and remote/deps.sh run (comments and layout aside), computed on the driving side (inputs_hash, lib/wk/machine_cmd.py) so the two ends cannot hash differently; `wk doctor --all` recomputes it and compares.
 write_file "$HOME/.wk-remote" 0644 <<EOF
 # wk: this machine hosts wk remote workspaces. Written by remote/provision.sh.
 #

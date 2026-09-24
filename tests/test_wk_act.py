@@ -1,6 +1,6 @@
 """lib/wk/act.py in process: --dry-run prints and runs nothing, a destructive
-command cannot act before confirm was answered, --yes and no terminal answer
-the question, and --force is the only way past a barrier.
+command cannot act before confirm was answered or nothing_to_ask said there is
+no question this run, --yes and no terminal answer the question, and --force is the only way past a barrier.
 
 Run: python3 tests/run.py -k tests.test_wk_act
 """
@@ -65,6 +65,39 @@ class TestAct(ActTest):
         os.environ["WK_CONFIRMED"] = "1"
         cp, _ = self.stderr(lambda: act.act(["true"]))
         self.assertEqual(cp.returncode, 0)
+
+    def test_acting_without_confirm_or_nothing_to_ask_is_a_bug(self):
+        os.environ["WK_DESTRUCTIVE"] = "1"
+        marker = self.tmp / "ran"
+        with self.assertRaises(act.Refused):
+            self.stderr(lambda: act.act(["touch", str(marker)]))
+        self.assertFalse(marker.exists())
+
+    def test_nothing_to_ask_acts_without_prompting(self):
+        """The destructive part does not apply this run: no question, and what follows acts."""
+        os.environ["WK_DESTRUCTIVE"] = "1"
+        marker = self.tmp / "ran"
+        _, err = self.stderr(act.nothing_to_ask)
+        self.assertEqual(err, "")
+        self.assertTrue(act.asked())
+        cp, _ = self.stderr(lambda: act.act(["touch", str(marker)]))
+        self.assertEqual(cp.returncode, 0)
+        self.assertTrue(marker.exists())
+
+    def test_an_answered_confirm_lets_a_destructive_command_act(self):
+        os.environ["WK_DESTRUCTIVE"] = "1"
+        os.environ["WK_YES"] = "1"
+        ok, _ = self.stderr(lambda: act.confirm("remove it?"))
+        self.assertTrue(ok and act.asked())
+        cp, _ = self.stderr(lambda: act.act(["true"]))
+        self.assertEqual(cp.returncode, 0)
+
+    def test_a_declined_confirm_still_cannot_act(self):
+        os.environ["WK_DESTRUCTIVE"] = "1"
+        ok, _ = self.stderr(lambda: act.confirm("remove it?", stdin=io.StringIO("y\n")))
+        self.assertFalse(ok or act.asked())
+        with self.assertRaises(act.Refused):
+            self.stderr(lambda: act.act(["true"]))
 
 
 class TestConfirm(ActTest):

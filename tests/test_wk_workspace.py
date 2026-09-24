@@ -43,19 +43,14 @@ def _bash_defaults():
             return Result(0, "armhf\n")
         return Result(1, "", "error: unknown architecture '%s' (one of: native armhf)\n" % a)
 
-    def pr(argv):
-        spec = argv[-1]
-        if ":" in spec or spec.isdigit():
-            return Result(0)
-        return Result(1, "", "error: '%s' is not a PR spec: <user>:<branch>, a pull request number, or wpe:<number>\n" % spec)
-    return {"arch_canon": arch, "pr_parse_spec": pr,
-            "current_base": Result(0, "main-1\n"), "base_verify": Result(0), "wk_pr_checkout": Result(0, "checked out\n")}
+    return {"arch_canon": arch}
 
 
 class World(Fake):
     """This host with one container target: podman answers from `containers`, wkdev-create stands in for
-    firstrun by writing the ready marker, the bridged bash functions answer from `bash`, and a record
-    removed through this machine goes from the record directory too."""
+    firstrun by writing the ready marker, the bridged bash functions answer from `bash`, a record
+    removed through this machine goes from the record directory too, and the store holds a mirror and
+    one snapshot on its branch, `main-1`, that git answers for."""
 
     def __init__(self, tmp, kinds=None, stores=None):
         super().__init__("here")
@@ -81,12 +76,35 @@ class World(Fake):
         self.react(["find"], self._find)
         self.react(["bash", "-c"], self._bash)
         self.react(["exec"], self._exec)
+        self.react(["git", "-C"], self._git)
+        self.checkouts = []
         self.records = record.Records(self.tmp / "store", clock=self.clock, env=self.env, machine=self,
                                       ask_target=lambda n, pid, cap: pid in self.pids)
         self.reg = FakeRegistry(REPO, self.env, self, kinds or {"fakebox": "container"}, stores or {})
         self.target = self.reg.load("fakebox")
         self.lock = Lock(self.target.store, self, self.clock)
+        self.publish("main-1")
+        self.dirs.add(self.target.store.mirror())
         self.effects = []
+
+    def publish(self, bid, on_branch=True):
+        store = self.target.store
+        d = os.path.join(store.base_dir(), bid)
+        self.dirs.update({store.base_dir(), d, store.base_path(bid), os.path.join(store.base_path(bid), ".git")})
+        self.files[os.path.join(d, "branch")] = "origin/main\n"
+        self.files[store.base_sha_file(bid)] = "a" * 40 + "\n"
+        if not on_branch:
+            self.detached = getattr(self, "detached", set()) | {bid}
+
+    def _git(self, argv, f):
+        bid = os.path.basename(os.path.dirname(argv[2]))
+        if argv[3:] == ["rev-parse", "HEAD"]:
+            return Result(0, "a" * 40 + "\n")
+        if argv[3:5] == ["symbolic-ref", "--quiet"]:
+            return Result(1) if bid in getattr(f, "detached", ()) else Result(0, "refs/heads/main\n")
+        if argv[3:5] == ["rev-parse", "--abbrev-ref"]:
+            return Result(0, "origin/main\n")
+        return Result(127, "", "no git answer")
 
     @property
     def fake(self):
@@ -171,9 +189,9 @@ class World(Fake):
 
     def state(self):
         """What a flow leaves. A lock file is not in it: one a killed holder left is taken by the next
-        taker, and a re-run that cannot take it fails rather than converging."""
+        taker, and a re-run that cannot take it fails rather than converging. Nor is the snapshot, which neither flow writes."""
         store = str(self.tmp / "store")
-        return (sorted(self.containers), sorted(self.rel(p) for p in self.files if p.startswith(store)),
+        return (sorted(self.containers), sorted(self.rel(p) for p in self.files if p.startswith(store) and not p.startswith(store + "/base/")),
                 sorted(self.rel(d) for d in self.dirs if d.startswith(store + "/ws")),
                 [(t.field("kind"), t.field("exit")) for t in self.records.list()],
                 self.files.get(workspace.sshalias.alias_path(self.env), ""))
@@ -205,19 +223,6 @@ class FakeTarget(targets.Target):
         if not r.ok:
             return "absent"
         return r.out.strip() if self.created(ws) else "creating"
-
-    def state(self, ws, info=None):
-        env = self.info(ws) if info is None else info
-        ws_dir = self.store.ws_dir(ws)
-        if env in ("creating", "unreachable"):
-            return env
-        if env == "absent":
-            if not self.machine.isdir(ws_dir):
-                return "absent"
-            return "broken" if self.created(ws) else "creating"
-        if self.needs_base and not self.machine.exists(os.path.join(ws_dir, "base-id")):
-            return "creating"
-        return "present"
 
     def exec(self, ws, argv, tty=False, timeout=None):
         return self.machine.run(["exec", ws] + list(argv))
@@ -275,6 +280,34 @@ class FakeRegistry(targets.Registry):
         if name in self.stores:
             env["WK_STORE"] = self.stores[name]
         return FakeTarget(name, self.root, env, self.machine, self.kinds[name])
+
+
+class RealRegistry(FakeRegistry):
+    def load(self, name):
+        return targets.Container(name, self.root, dict(self.env), self.machine)
+
+
+class ContainerWorld(World):
+    """The World with the real container driver in FakeTarget's place: the SDK's scripts answer behind its `env`
+    prefix, `wkdev-enter` as the World's `exec` does."""
+
+    def __init__(self, tmp):
+        super().__init__(tmp)
+        self.reg = RealRegistry(REPO, self.env, self, {"fakebox": "container"}, {})
+        self.target = self.reg.load("fakebox")
+        self.lock = Lock(self.target.store, self, self.clock)
+        self.react(["env"], self._sdk)
+        self.answer(["bash", os.path.join(str(REPO), "container", "sdk-refresh.sh")])
+        self.answer(["install", "-m"])
+        self.answer(["nproc"], out="8\n")
+        self.files["/proc/meminfo"] = "MemTotal:       33554432 kB\n"
+        self.bash["arch_has_gpu"] = Result(1)
+        self.effects = []
+
+    def _sdk(self, argv, f):
+        if any(a.endswith("wkdev-create") for a in argv):
+            return self._wkdev_create(argv, f)
+        return self._exec(["exec", argv[argv.index("--name") + 1][3:]] + list(argv[argv.index("--") + 2:]), f)
 
 
 class WorkspaceTest(unittest.TestCase):
@@ -350,7 +383,7 @@ class TestNewFrontRefusals(WorkspaceTest):
     def test_pr_needs_a_spec_and_a_valid_one(self):
         self.assertIn("--pr needs a spec: <user>:<branch>, <n>, or wpe:<n>", self.refused(lambda: self.front(pr="")))
         self.assertIn("'nope' is not a PR spec", self.refused(lambda: self.front(pr="nope")))
-        self.assertEqual(len(self.bash_runs(fn="pr_parse_spec")), 1)
+        self.assertEqual(self.runs(head=WK), [])
 
     def test_pr_and_no_wait_exclude_each_other(self):
         err = self.refused(lambda: self.front(pr="u:b", no_wait=True))
@@ -512,16 +545,15 @@ class TestNewFrontTail(WorkspaceTest):
         self.assertIn("workspace 'ws' ready (armhf)", err)
         self.assertIn("armhf: native 32-bit, no GPU.", err)
 
-    def test_a_pr_is_checked_out_through_the_bridge_once_ready_and_its_failure_is_the_commands(self):
-        rc, _ = self.stderr(lambda: self.front(pr="u:b"))
-        self.assertEqual(rc, 0)
-        checkout = self.bash_runs(fn="wk_pr_checkout")
-        self.assertEqual(len(checkout), 1)
-        self.assertEqual(checkout[0][-2:], ("ws", "u:b"))
-        self.assertIn("load_target 'fakebox'", checkout[0][2])
+    def test_a_pr_is_checked_out_once_ready_and_its_failure_is_the_commands(self):
+        calls = []
+        with mock.patch.object(workspace, "pr_checkout", lambda t, here, name, spec: calls.append((t.name, name, spec))):
+            rc, err = self.stderr(lambda: self.front(pr="u:b"))
+        self.assertEqual((rc, calls), (0, [("fakebox", "ws", "u:b")]))
+        self.assertLess(err.index("workspace 'ws' ready"), len(err))
         w = self.make_world()
-        w.bash["wk_pr_checkout"] = Result(3, "", "no branch\n")
-        self.assertIn("no branch", self.refused(lambda: self.front(w, pr="u:b"), 3))
+        with mock.patch.object(workspace, "pr_checkout", lambda *a: act.die("no branch 'b'", 3)):
+            self.assertIn("no branch", self.refused(lambda: self.front(w, pr="u:b"), 3))
 
     def test_zed_opens_the_checkout_and_its_failure_only_warns(self):
         self.stderr(lambda: self.front(zed=True))
@@ -675,8 +707,18 @@ class TestNewDriver(WorkspaceTest):
         self.assertEqual(workspace.creation_state(w.target, w.records, "ws"), "present")
         self.assertIn("already exists", self.refused(lambda: self.driver(w)))
 
+    def test_no_mirror_refuses_naming_wk_sync_and_creates_nothing(self):
+        """`unit new.refuses_without_mirror`: every snapshot is a `--shared` clone borrowing the mirror's objects."""
+        self.w.dirs.discard(self.w.target.store.mirror())
+        err = self.refused(lambda: self.driver())
+        self.assertIn("no WebKit mirror at %s" % self.w.target.store.mirror(), err)
+        self.assertIn("wk sync    makes it", err)
+        self.assertEqual([a for a in self.runs() if a[0] == "wkdev-create"], [])
+        (t,) = self.w.records.list()
+        self.assertEqual((t.verdict(), t.stage()), ("failed", ["base"]))
+
     def test_no_base_snapshot_refuses_naming_wk_sync_and_creates_nothing(self):
-        self.w.bash["current_base"] = Result(1)
+        self.w.publish("main-1", on_branch=False)
         err = self.refused(lambda: self.driver())
         self.assertIn("no base snapshot this machine can build a workspace from:  wk sync\n    publishes one.", err)
         self.assertEqual([a for a in self.runs() if a[0] == "wkdev-create"], [])
@@ -686,14 +728,13 @@ class TestNewDriver(WorkspaceTest):
         self.assertEqual(self.w.lock_files(), [])
 
     def test_a_given_base_is_verified_and_its_refusal_is_the_reason(self):
-        self.w.bash["base_verify"] = Result(1, "snapshot main-9 does not exist\n")
         err = self.refused(lambda: self.driver(base="main-9"))
         self.assertIn("snapshot main-9 does not exist", err)
-        self.assertEqual(self.bash_runs(fn="current_base"), [])
-        self.assertEqual(self.bash_runs(fn="base_verify")[0][-1], "main-9")
+        self.w.publish("main-9", on_branch=False)
+        self.assertIn("snapshot main-9 is not on branch main tracking origin/main", self.refused(lambda: self.driver(base="main-9")))
         w = self.make_world(kinds={"fakebox": "vm"})
         self.stderr(lambda: self.driver(w))
-        self.assertEqual(self.bash_runs(w, fn="base_verify") + self.bash_runs(w, fn="current_base"), [])
+        self.assertEqual(self.runs(w, head="git"), [])
 
     def test_a_workspace_that_never_initialises_is_refused_after_wk_ready_timeout(self):
         def no_firstrun(argv, f):
@@ -1067,6 +1108,18 @@ class TestKillPoints(WorkspaceTest):
             with contextlib.redirect_stderr(io.StringIO()):
                 self.driver(w)
         converges(self, self.make_world, run_once, World.state)
+
+    def test_new_over_the_real_container_driver_killed_after_any_effect_and_rerun_converges(self):
+        """`unit killpoints[new]` over the real drivers: `Target.state` reads the workspace directory through the
+        machine, so the container driver itself runs in the Fake world."""
+        def run_once(w):
+            w.lock = Lock(w.target.store, w, w.clock)
+            with contextlib.redirect_stderr(io.StringIO()):
+                self.driver(w)
+        converges(self, lambda: ContainerWorld(self.tmp), run_once, World.state, max_effects=80)
+        w = ContainerWorld(self.tmp)
+        run_once(w)
+        self.assertEqual(w.target.state("ws"), "present")
 
     def rm_world(self, cls=World):
         w = cls(self.tmp)

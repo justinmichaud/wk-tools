@@ -1,16 +1,22 @@
-"""What a silent build says for itself (lib/detach.sh's process readings,
-lib/watchdog.sh's `_stall_report`).
+"""What a silent build says for itself (lib/wk/job.py's `build_processes` and `stall_report`).
 
 A full-LTO link writes nothing to the log for many minutes while one `ld`
 holds a core, so silence alone cannot be reported as a stall: the process
-table is the evidence, and it is read here through a stubbed `ps` so both
+table is the evidence, read here from a fake machine's `ps` so both
 platforms' spellings are exercised on either.
 
-Run: python3 -m unittest tests.test_stall_report -v
+Run: python3 tests/run.py -k tests.test_stall_report
 """
+import contextlib
+import io
+import sys
 import unittest
 
-from tests.support import REPO, WkTest, bash
+from tests.support import REPO
+
+sys.path.insert(0, str(REPO / "lib"))
+from wk import job  # noqa: E402
+from wk.machine import Fake, here  # noqa: E402
 
 # Darwin's `comm` is the executable's full path; Linux's is the bare name.
 DARWIN_PS = """\
@@ -31,60 +37,41 @@ IDLE_PS = """\
 """
 
 
-def _stub_ps(out):
-    """`ps` as a shell function: what the readings see is the only thing that
-    differs between a Mac mid-link and an idle Linux box."""
-    return "ps() {\ncat <<'PSOUT'\n" + out + "PSOUT\n}\n"
+def _machine(ps_out):
+    m = Fake()
+    m.answer(["ps", "-A", "-o", "pcpu=,comm="], out=ps_out)
+    return m
 
 
-def _with_ps(out, call):
-    return bash(f'''
-. "{REPO}/lib/detach.sh"
-{_stub_ps(out)}
-{call}
-''')
-
-
-class TestTheProcessReadings(WkTest):
+class TestTheProcessReadings(unittest.TestCase):
     def test_a_linker_named_by_its_full_path_is_counted(self):
         """Darwin answers `comm` with the executable's path, so a pattern
         anchored at `^` counts zero of Xcode's linkers."""
-        cp = _with_ps(DARWIN_PS, "build_processes")
-        self.assertEqual(cp.stdout.strip(), "1", cp.stdout + cp.stderr)
-
-    def test_the_busiest_one_is_named_with_its_reading(self):
-        cp = _with_ps(DARWIN_PS, "busiest_process")
-        self.assertEqual(cp.stdout.strip(), "ld at 99.5% CPU", cp.stdout + cp.stderr)
+        self.assertEqual(job.build_processes(_machine(DARWIN_PS)), [(99.5, "ld")])
 
     def test_every_compiler_counts_not_only_the_first(self):
-        cp = _with_ps(LINUX_PS, "build_processes")
-        self.assertEqual(cp.stdout.strip(), "3", cp.stdout + cp.stderr)
+        self.assertEqual(len(job.build_processes(_machine(LINUX_PS))), 3)
+
+    def test_the_busiest_comes_first(self):
+        self.assertEqual(job.build_processes(_machine(LINUX_PS))[0], (12.0, "cc1plus"))
 
     def test_a_machine_building_nothing_counts_nothing(self):
-        cp = _with_ps(IDLE_PS, "build_processes")
-        self.assertEqual(cp.stdout.strip(), "0", cp.stdout + cp.stderr)
-        cp = _with_ps(IDLE_PS, "busiest_process")
-        self.assertEqual(cp.stdout.strip(), "", cp.stdout + cp.stderr)
+        self.assertEqual(job.build_processes(_machine(IDLE_PS)), [])
 
-    def test_the_reading_never_names_its_own_pipeline(self):
+    def test_the_reading_never_names_its_own_reader(self):
         """`pcpu` is an average over a process's whole life, so a just-forked
         `ps` reads at hundreds of percent and wins every sort."""
-        cp = bash(f'. "{REPO}/lib/detach.sh"\nbusiest_process')
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        for tool in ("ps ", "sort ", "awk ", "head ", "sed ", "grep "):
-            self.assertNotIn(tool, cp.stdout, f"the reader named itself: {cp.stdout}")
+        names = [n for _, n in job.build_processes(here())]
+        for tool in ("ps", "python3", "sh"):
+            self.assertNotIn(tool, names)
 
 
-class TestWhatTheReportClaims(WkTest):
+class TestWhatTheReportClaims(unittest.TestCase):
     def _report(self, ps_out):
-        cp = bash(f'''
-. "{REPO}/lib/common.sh"
-. "{REPO}/lib/watchdog.sh"
-{_stub_ps(ps_out)}
-_stall_report /dev/null 301
-''')
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        return cp.stdout + cp.stderr
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            job.stall_report(_machine(ps_out), "/dev/null", 301)
+        return err.getvalue()
 
     def test_a_working_linker_is_not_reported_as_a_stall(self):
         out = self._report(DARWIN_PS)

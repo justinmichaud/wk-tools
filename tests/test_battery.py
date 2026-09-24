@@ -235,7 +235,7 @@ class TestSyntax(unittest.TestCase):
 class TestNoCaseNamesAPhone(unittest.TestCase):
     """CLAUDE.md: 'a case statement naming a machine is a bug'. The battery
     feature is one behaviour for both phones -- the sysfs node is
-    autodetected (or pinned per-host in bridge/hosts/<name>.conf), never
+    autodetected (or pinned per-host in machines/<name>.conf), never
     picked by branching on which phone this is."""
 
     def _device_names(self):

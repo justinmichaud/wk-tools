@@ -8,10 +8,14 @@ Run: python3 -m unittest tests.test_static_rules -v
 TIER = "lint"
 import re
 import subprocess
+import sys
 import unittest
 from pathlib import Path
 
 from tests.support import REPO, WK, WkTest, bash, func_body, shell_files
+
+sys.path.insert(0, str(REPO / "lib"))
+from wk import images  # noqa: E402
 
 # `ssh -G` evaluates a config and connects to nothing, so the system binary is
 # asked directly, past the runner's shim.
@@ -129,14 +133,14 @@ class TestExitTrapOwnership(WkTest):
 
 class TestMachineRegistry(WkTest):
     def test_machine_registry_every_machine_is_a_conf(self):
-        """every machine is a conf under boot/machines"""
+        """every bench machine in machines/ stands alone"""
         script = f'''
 set -euo pipefail
 . "{REPO}/lib/common.sh"; . "{REPO}/lib/image.sh"; . "{REPO}/image/profiles.sh"; . "{REPO}/boot/machines.sh"
 bad=""
-for f in "{REPO}"/boot/machines/*.conf; do
-    [ -f "$f" ] || {{ echo "no machine confs at all"; exit 1; }}
-    n=$(basename "$f" .conf)
+names=$(machine_names)
+[ -n "$names" ] || {{ echo "no bench machines at all"; exit 1; }}
+for n in $names; do
     ( machine_load "$n" || exit 1
       [ -n "$NODE_DRIVER" ] || {{ echo "  $n: no NODE_DRIVER"; exit 1; }}
       [ -f "{REPO}/boot/$NODE_DRIVER.sh" ] || {{ echo "  $n: driver missing"; exit 1; }}
@@ -152,8 +156,7 @@ for f in "{REPO}"/boot/machines/*.conf; do
 done
 [ -z "$bad" ] || {{ echo "machine confs that do not stand alone:$bad"; exit 1; }}
 listed=$(machine_list | awk '{{print $1}}' | sort)
-dir_names=$(ls "{REPO}"/boot/machines/*.conf 2>/dev/null | xargs -n1 basename 2>/dev/null | sed 's/\\.conf$//' | sort)
-[ "$listed" = "$dir_names" ] || {{ echo "machine_list and boot/machines/ disagree"; exit 1; }}
+[ "$listed" = "$(printf '%s\\n' $names | sort)" ] || {{ echo "machine_list and machines/ disagree"; exit 1; }}
 '''
         cp = bash(script)
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
@@ -254,12 +257,11 @@ done
         req_m = re.search(r'(?m)^REQUIRED="(.*)"$', provision)
         self.assertIsNotNone(req_m, "could not read the package lists out of bridge/provision.sh")
         required = req_m.group(1).split()
-        profiles = (REPO / "image" / "profiles.sh").read_text(errors="replace")
-        pkg_m = re.search(r'(?m)^ *PMO_PACKAGES="([^"]*)".*', profiles)
-        self.assertIsNotNone(pkg_m, "could not read PMO_PACKAGES out of image/profiles.sh")
-        profile_pkgs = set(pkg_m.group(1).replace(",", " ").split())
-        missing = [p for p in required if p not in profile_pkgs]
-        self.assertEqual(missing, [], f"bridge/provision.sh needs these and the image does not carry them: {missing}")
+        bridges = [p for p in map(images.load, images.names()) if p["IMG_BUILDER"] == "pmos"]
+        self.assertTrue(bridges, "no pmos profile in image/configs")
+        for p in bridges:
+            missing = [r for r in required if r not in p["PMO_PACKAGES"].split(",")]
+            self.assertEqual(missing, [], f"bridge/provision.sh needs these and {p['IMG_PROFILE']} does not carry them: {missing}")
 
 
 class TestTailnetHygiene(WkTest):
@@ -356,12 +358,13 @@ class TestTailnetHygiene(WkTest):
             capture_output=True, text=True,
         )
         hits = cp.stdout.strip()
-        sysimage = (REPO / "cmd" / "sysimage").read_text(errors="replace")
+        sysimage = (REPO / "lib" / "sysimage-arms.sh").read_text(errors="replace")
         m = re.search(r"(?ms)^cmd_build\(\).*?^\}", sysimage)
         if m and "wk_tailscale_authkey" in m.group(0):
-            hits += f"\n{REPO}/cmd/sysimage (cmd_build)"
+            hits += f"\n{REPO}/lib/sysimage-arms.sh (cmd_build)"
         self.assertEqual(hits.strip(), "", f"the image build path resolves an auth key: {hits}")
-        self.assertIn("disk_seed_tailnet", sysimage, "nothing seeds the tailnet identity onto a written card")
+        write = (REPO / "lib" / "wk" / "sysimage" / "write.py").read_text()
+        self.assertIn("self.seed_tailnet(dev, tailnet)", write, "nothing seeds the tailnet identity onto a written card")
 
 
 class TestDdebsProvisioning(WkTest):
@@ -382,14 +385,13 @@ class TestBuildLocations(WkTest):
     def test_gc_searches_every_build_location(self):
         """every builder's output has somewhere"""
         # static
-        profiles = (REPO / "image" / "profiles.sh").read_text(errors="replace")
-        builders = set(re.findall(r"(?m)^[ \t]*IMG_BUILDER=([a-z]*)", profiles))
+        builders = {images.load(n)["IMG_BUILDER"] for n in images.names()}
         image_lib = (REPO / "lib" / "image.sh").read_text(errors="replace")
         m = re.search(r"(?ms)^image_build_locations\(\).*?^\}", image_lib)
         self.assertIsNotNone(m, "image_build_locations not found in lib/image.sh")
         declared = set()
         for line in m.group(0).splitlines():
-            dm = re.match(r"\s*#\s*builder:\s*(.*)", line)
+            dm = re.search(r"#\s*builder:\s*(.*)", line)
             if dm:
                 for tok in dm.group(1).split(","):
                     tok = tok.strip().split()[0] if tok.strip() else ""
@@ -421,11 +423,11 @@ class TestBuildLocations(WkTest):
         """every disk verb the write path calls is defined"""
         # static
         defs = set()
-        for f in ("boot/disk.sh", "boot/machines.sh", "lib/common.sh", "cmd/sysimage"):
+        for f in ("boot/disk.sh", "boot/machines.sh", "lib/common.sh", "lib/sysimage-arms.sh"):
             cp = subprocess.run(["grep", "-hoE", r"^[a-z_]+\(\)", str(REPO / f)], capture_output=True, text=True)
             defs |= {l.rstrip("()") for l in cp.stdout.splitlines()}
         used = set()
-        for f in ("cmd/sysimage", "boot/disk.sh"):
+        for f in ("lib/sysimage-arms.sh", "boot/disk.sh"):
             text = re.sub(r"#.*", "", (REPO / f).read_text(errors="replace"))
             used |= set(re.findall(r"(?:^|[;&|(}\s])(disk_[a-z_]+|card_priv[a-z_]*)(?=[\s]|$)", text, re.M))
         bad = [f"{n} is called and defined nowhere" for n in used if n not in defs]

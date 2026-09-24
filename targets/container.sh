@@ -63,14 +63,6 @@ t_home() { echo "/home/$WKDEV_CONTAINER_USER"; }
 
 t_mirror_dir() { mirror_in_container; }
 
-t_pull_dir() {
-    local name="$1" src="$2" dest="$3"; shift 3
-    [ $# -eq 0 ] || die "t_pull_dir: the container driver cannot exclude paths ($*).
-    Copy the whole tree, or make the selection inside the workspace first."
-    rm -rf "$dest"; mkdir -p "$dest"
-    _hpodman cp "$(_ctr "$name"):$src/." "$dest"
-}
-
 # podman's own detached exec: a job left behind by `podman exec` (the nohup and disown of lib/target.sh) dies with it.
 t_spawn() {
     local name="$1" log="$2" pidf="$3"; shift 3

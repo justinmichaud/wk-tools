@@ -193,5 +193,14 @@ class TestOutputReachesTheTerminal(ProfileTest):
         self.assertTrue([e for e in self.w.effects if e[0] == "run_tty" and e[1][:2] == ("exec-tty", "ws")], self.w.effects)
 
 
+class TestLdpathIsShared(unittest.TestCase):
+    """`cmd/profile` and `cmd/run` import the same `wk.ldpath.prelude`
+    rather than each defining their own copy."""
+
+    def test_profile_imports_the_one_prelude(self):
+        from wk import ldpath
+        self.assertIs(CMD.prelude, ldpath.prelude)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1,15 +1,16 @@
-#!/usr/bin/env bash
+#!/usr/bin/env python3
 #
 # wk quiesce on|off|status -- quiet the machine for benchmarking
 #
-# wk: where=host name=none group=hosts needs quiesce-helper takes=1
+# wk: where=host name=none group=hosts needs quiesce-helper takes=1 dryrun on,off
+# wk: readonly status
 # wk: sub status needs=
 #
 # Privileged actions go through the sudoers-allowlisted helper (wk-quiesce-priv);
 # everything else stays here.
 #
 #   on      quiet the machine for the length of a run and no longer: stop
-#           every process in bench/mac-quiet-desktop.sh's table -- the agents a
+#           every process in bench/quiet/macos.tsv's table -- the agents a
 #           login session starts and the background daemons alike -- disable
 #           App Nap, keep MiniBrowser frontmost and the display awake (macOS).
 #           In bench mode it also writes this account's desktop settings, which
@@ -23,110 +24,45 @@
 #   What a measured Mac is permanently is written at provisioning time
 #   (`wk bench mac-volume --provision`); `status` reports both.
 
-set -euo pipefail
-WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-. "$WK_ROOT/lib/common.sh"
-. "$WK_ROOT/lib/quiet.sh"
+import os
+import signal
+import sys
 
-PRIV=/usr/local/libexec/wk-quiesce-priv
-QUIET_DESKTOP="$WK_ROOT/bench/mac-quiet-desktop.sh"
+ROOT = os.environ.get("WK_ROOT") or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(ROOT, "lib"))
 
-ACTION="${1:-status}"
+from wk import decl, quiet  # noqa: E402
+from wk.act import Refused, die  # noqa: E402
+from wk.clock import Clock  # noqa: E402
+from wk.machine import Local  # noqa: E402
 
-# One per machine: on macOS $TMPDIR is per-user *and per-session*, so `on` at the keyboard and `off` over ssh would strand state in two directories.
-# WK_QUIESCE_STATE is a test hook (tests/test_quiesce.py sets it); cmd/status reads the same one.
-STATE="${WK_QUIESCE_STATE:-$(wk_state_dir)/quiesce}"
-STALE_STATE="${TMPDIR:-/tmp}/wk-quiesce"
+USAGE = "usage: wk quiesce on|off|status -- quiet the machine for benchmarking.; see wk quiesce -h"
 
-run_priv() {
-    [ -x "$PRIV" ] || die "$PRIV is not installed, so the privileged half of quiesce
-    cannot run.
-    Remedy:  ./setup --stage quiesce"
-    sudo -n "$PRIV" "$1" && return 0   # two failures share this status: a sudo that wanted a password, and a helper that ran and did not finish. Reporting the first for both sent an operator to `./setup --stage quiesce` for a helper killed mid-verb
 
-    sudo -n true 2>/dev/null && die "$PRIV exited nonzero running '$1'. Passwordless sudo is
-    in force, so this is the helper and not the grant -- its own output above says what
-    it was doing."
-    die "passwordless sudo is not set up for $PRIV.
-    Remedy:  ./setup --stage quiesce"
-}
+def parse(argv):
+    args = decl.Args(decl.Decl(__file__), argv)
+    action = args.positionals[0] if args.positionals else "status"
+    if len(args.positionals) > 1 or action not in ("on", "off", "status"):
+        die(USAGE)
+    return action
 
-_quiesce_on_interrupted() {
-    warn "interrupted -- undoing what 'quiesce on' already did"
-    "$0" off || true
-}
 
-case "$ACTION" in
-on)
-    on_interrupt _quiesce_on_interrupted
-    run_priv on
-    mkdir -p "$STATE"
+def interrupted(signum, frame):
+    raise KeyboardInterrupt
 
-    if is_macos; then
-        # SIGSTOP, so root, and undone by `wk quiesce off` or a reboot. SIP withholds even that for a platform binary, which is why the table names the ones it refuses.
-        if sudo -n bash -c ". $(sh_quote "$QUIET_DESKTOP"); wk_quiet_daemons_pause"; then
-            touch "$STATE/daemons_paused"
-            info "background daemons paused"
-        else
-            warn "could not pause the background daemons: this needs passwordless root,
-    which a benchmark install has and a workstation does not. 'wk quiesce status'
-    names every one still running."
-        fi
 
-        # The user half, written again where it can take: at a first boot this account has no session, and a `defaults write` for a protected domain does not survive that session starting (measured 2026-09-07 -- reduce_motion and reduce_transparency read '?' on a fully provisioned install). Bench mode only: a workstation's own accessibility settings are not this command's to rewrite.
-        if in_bench_mode; then
-            wk_quiet_desktop_user \
-                || warn "some of this account's desktop settings did not take (above)"
-        fi
+def main(argv):
+    action = parse(argv)
+    for sig in (signal.SIGTERM, signal.SIGHUP):
+        signal.signal(sig, interrupted)
+    q = quiet.Quiesce(ROOT, Local(), Clock(), os.environ)
+    return getattr(q, action)()
 
-        mac_raiser_on "$STATE"
 
-        info "measured, now that both halves have run:"
-        macos_noise || warn "the machine is noisier than a benchmark install should be (above)"
-    fi
-
-    wk_sleep "${WK_SETTLE_SECONDS:-30}"
-    info "quiesced; settle time elapsed"
-    ;;
-
-off)
-    if is_macos && [ -d "$STATE" ]; then
-        mac_raiser_off "$STATE"
-        if [ -f "$STATE/daemons_paused" ]; then
-            sudo -n bash -c ". $(sh_quote "$QUIET_DESKTOP"); wk_quiet_daemons_resume" \
-                || warn "could not resume the background daemons; a reboot does it"
-            rm -f "$STATE/daemons_paused"
-            info "background daemons resumed"
-        fi
-    fi
-    run_priv off
-    ;;
-
-status)
-    _claim=$(run_priv status 2>&1) || true
-    if [ -n "$_claim" ]; then
-        log "  the privileged half's own account:"
-        printf '%s\n' "$_claim" | sed 's/^/    /' >&2
-    fi
-    log "  measured here, now:"
-    [ -f "$STATE/caffeinate.pid" ] && kill -0 "$(cat "$STATE/caffeinate.pid")" 2>/dev/null \
-        && log "  caffeinate: running" || log "  caffeinate: no"
-    [ -f "$STATE/daemons_paused" ] \
-        && log "  daemons:    'quiesce on' paused them; each one's state is measured below" \
-        || log "  daemons:    not paused"
-    [ -d "$STALE_STATE" ] && log "  stale: $STALE_STATE (an older wk-tools' state; not read -- rm -rf it)"
-    if is_macos; then
-        [ -f "$STATE/raiser.pid" ] && kill -0 "$(cat "$STATE/raiser.pid")" 2>/dev/null \
-            && log "  raiser:     running (MiniBrowser kept frontmost)" \
-            || log "  raiser:     no"
-        [ "$(defaults read org.webkit.MiniBrowser NSAppSleepDisabled 2>/dev/null)" = 1 ] \
-            && log "  app nap:    disabled for MiniBrowser" \
-            || log "  app nap:    default (rAF can be throttled when backgrounded)"
-    fi
-    is_macos && { macos_noise || true; }
-    ;;
-
-*)
-    die "usage: wk quiesce on|off|status -- quiet the machine for benchmarking.; see wk quiesce -h"
-    ;;
-esac
+if __name__ == "__main__":
+    try:
+        sys.exit(main(sys.argv[1:]))
+    except Refused as e:
+        sys.exit(e.status)
+    except KeyboardInterrupt:
+        sys.exit(130)

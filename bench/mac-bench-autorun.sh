@@ -324,7 +324,7 @@ dim_display
 refuse_unpinned_display() {   # unpinned is two runs at different resolutions compared as if they matched, with nothing downstream to say so
     [ -z "$DISPLAY_EXPECT" ] || return 0
     say "the job names no display, so what a round would be measured at is unknown."
-    say "  From host mode: set NODE_DISPLAY in boot/machines/mbp.conf, then plant again."
+    say "  From host mode: set NODE_DISPLAY in machines/mbp.conf, then plant again."
     state_set phase done
     state_set outcome "no-display-expectation"
     remove_agent
@@ -349,7 +349,7 @@ converge_display_mode() {
         say "  Nothing is measured at a mode that is not the declared one: MotionMark's"
         say "  score is the area it draws. From host mode, set the mode on this install"
         say "  by hand and re-plant, or declare the mode it does come up at:"
-        say "    NODE_DISPLAY=\"${DISPLAY_EXPECT%% *} ${running:-<what it reads>}\"  in boot/machines/mbp.conf"
+        say "    NODE_DISPLAY=\"${DISPLAY_EXPECT%% *} ${running:-<what it reads>}\"  in machines/mbp.conf"
         state_set phase done
         state_set outcome "display-mode-unsettable"
         remove_agent

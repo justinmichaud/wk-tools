@@ -62,6 +62,9 @@ class TestTarget(targets.Target):
     def build_size(self, ws):
         return self.machine.size
 
+    def sync_tools(self, ws):
+        return self.machine.act_run(["sync-tools", ws]).ok
+
 
 class Reg(targets.Registry):
     def __init__(self, world):
@@ -110,6 +113,7 @@ class World(Fake):
         self.answer(["df", "-Pk"], out=DF_ROOMY)
         self.answer(["exec", "ws", "sh", "-c"], out="")   # every layout path is present unless a test says otherwise
         self.react(["bash", "-c"], self._bash)
+        self.answer(["sync-tools"])
         self.react(["exec", "ws", "kill", "-0"], lambda a, f: Result(0 if int(a[-1]) in f.pids else 1))
         self.reg = Reg(self)
         self.ws_dir = os.path.join(self.env["WK_STORE"], "ws", "ws")
@@ -120,8 +124,6 @@ class World(Fake):
         return self
 
     def _bash(self, argv, f):
-        if "t_sync_tools" in argv[2]:
-            return Result(0, "tools pushed\n")
         return Result(127, "", "no bash answer")
 
     def popen(self, argv, stdin=None, stdout=None, stderr=None, cwd=None):
@@ -272,7 +274,7 @@ class TestTheRecordARunWrites(TestTest):
         self.assertEqual(self.w.recs().list()[0].field("exit"), "cancelled")
 
     def test_wk_tools_that_did_not_reach_the_workspace_is_refused_before_the_suite(self):
-        self.w.react(["bash", "-c"], lambda a, f: Result(1, "", "rsync: connection refused") if "t_sync_tools" in a[2] else Result(127))
+        self.w.answer(["sync-tools"], rc=1, err="rsync: connection refused")
         err = self.refused(status=1)
         self.assertIn("pushing wk-tools into 'ws' failed -- the reason is above", err)
         self.assertEqual([e for e in self.w.effects if e[0] == "watch"], [])

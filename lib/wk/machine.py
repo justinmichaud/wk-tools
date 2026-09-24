@@ -2,6 +2,7 @@
 on this host, a host over ssh, or an in-memory fake; a mutating call prints
 under --dry-run and refuses before a destructive command has asked."""
 
+import fnmatch
 import os
 import shlex
 import shutil
@@ -11,6 +12,14 @@ import sys
 import time
 
 from wk import act
+
+
+def is_macos():
+    return os.uname().sysname == "Darwin"
+
+
+def is_linux():
+    return not is_macos()
 
 
 class Result:
@@ -65,7 +74,7 @@ class Machine:
         if act.dry_run():
             sys.stderr.write("would run%s: %s\n" % (self._where(), " ".join(shlex.quote(a) for a in argv)))
             return Result(0)
-        if os.environ.get("WK_DESTRUCTIVE") and not os.environ.get("WK_CONFIRMED"):
+        if os.environ.get("WK_DESTRUCTIVE") and not act.asked():
             act.die("BUG: this command is declared destructive and acted before asking:\n    %s"
                     % " ".join(shlex.quote(a) for a in argv))
         return self.run(argv, **kw)
@@ -95,7 +104,8 @@ class Machine:
     def copy_tree_in(self, src, dest):
         raise NotImplementedError
 
-    def copy_tree_out(self, src, dest):
+    def copy_tree_out(self, src, dest, exclude=()):
+        """`exclude` holds rsync patterns: one without a slash names a file or directory at any depth."""
         raise NotImplementedError
 
     # -- lock effects: a resource lock is process coordination, not workspace
@@ -246,15 +256,16 @@ class Local(Machine):
     copy_out = copy_in
 
     def copy_tree_in(self, src, dest):
+        self.copy_tree_out(src, dest)
+
+    def copy_tree_out(self, src, dest, exclude=()):
         if act.dry_run():
             sys.stderr.write("would copy: %s -> %s/\n" % (src, dest))
             return
-        cp = subprocess.run(["rsync", "-a", "--delete", src.rstrip("/") + "/", dest.rstrip("/") + "/"],
+        cp = subprocess.run(["rsync", "-a", "--delete", *excludes(exclude), src.rstrip("/") + "/", dest.rstrip("/") + "/"],
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         if cp.returncode != 0:
             raise OSError(cp.stderr.decode(errors="replace").strip() or "rsync failed")
-
-    copy_tree_out = copy_tree_in
 
 
 class Ssh(Machine):
@@ -384,14 +395,18 @@ class Ssh(Machine):
         if not r.ok:
             raise OSError(r.err.strip() or "copy to %s failed" % self.dest)
 
-    def copy_tree_out(self, src, dest):
+    def copy_tree_out(self, src, dest, exclude=()):
         if act.dry_run():
             sys.stderr.write("would copy on %s: %s -> %s/\n" % (self.dest, src, dest))
             return
-        r = self.via.run(["rsync", "-a", "--chmod=go-w", "--delete", "-e", "ssh " + " ".join(shlex.quote(o) for o in self.opts),
+        r = self.via.run(["rsync", "-a", "--chmod=go-w", "--delete", *excludes(exclude), "-e", "ssh " + " ".join(shlex.quote(o) for o in self.opts),
                           self._dest(src.rstrip("/") + "/"), dest.rstrip("/") + "/"])
         if not r.ok:
             raise OSError(r.err.strip() or "copy from %s failed" % self.dest)
+
+
+def excludes(patterns):
+    return [w for x in patterns for w in ("--exclude", x)]
 
 
 class Killed(Exception):
@@ -590,8 +605,8 @@ class Fake(Machine):
                 with open(os.path.join(root, fn), "rb") as f:
                     self.files[os.path.join(base, fn)] = f.read()
 
-    def copy_tree_out(self, src, dest):
-        self.effect(("copy_tree_out", src, dest))
+    def copy_tree_out(self, src, dest, exclude=()):
+        self.effect(("copy_tree_out", src, dest) + tuple(exclude))
         if act.dry_run():
             return
         if src not in self.dirs:
@@ -604,6 +619,8 @@ class Fake(Machine):
             if not p.startswith(prefix):
                 continue
             rel = p[len(prefix):]
+            if any(fnmatch.fnmatchcase(part, x) for part in rel.split("/") for x in exclude):
+                continue
             out = os.path.join(dest, rel)
             os.makedirs(os.path.dirname(out), exist_ok=True)
             with open(out, "wb") as f:

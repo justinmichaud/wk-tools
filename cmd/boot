@@ -87,10 +87,10 @@ if ! b_probeable; then
     _hostos=linux; is_macos && _hostos=macos
     if [ "$NODE_OS" != any ] && [ "$NODE_OS" != "$_hostos" ]; then
         die "$MACHINE is driven from a $NODE_OS host only (os=$NODE_OS in
-    boot/machines/$MACHINE.conf) and this is a $_hostos host -- run this over there."
+    machines/$MACHINE.conf) and this is a $_hostos host -- run this over there."
     fi
     die "the '$NODE_DRIVER' driver cannot reach $MACHINE from here, so nothing about it
-    can be read (b_probeable). This host is the one boot/machines/$MACHINE.conf
+    can be read (b_probeable). This host is the one machines/$MACHINE.conf
     names (os=$NODE_OS), so what is missing is on this host rather than the machine:
     'wk doctor' names it -- a machine driven as a local guest needs tart and the
     guest itself."
@@ -261,7 +261,7 @@ cmd_arm() {
 
     case "$MODE" in
         unreachable)
-            # Arming a guest *is* starting it (b_arm calls t_start), so "unreachable" is the normal state to arm from.
+            # Arming a guest *is* starting it (lib/wk/boot/mac.py starts it through the vm target), so "unreachable" is the normal state to arm from.
             [ "${BOOT_ARMING:-}" = guest ] || die "$MACHINE is not reachable over ssh in host mode.
     Arming is an ssh command, so there is nothing to arm from here." ;;
         bench*)
@@ -380,7 +380,7 @@ EOF
 }
 
 cmd_prepare() {
-    [ -n "${NODE_SSH:-}" ] || die "$MACHINE (boot/machines/$MACHINE.conf) sets no NODE_SSH,
+    [ -n "${NODE_SSH:-}" ] || die "$MACHINE (machines/$MACHINE.conf) sets no NODE_SSH,
     so there is nowhere to put anything. A machine wk reaches only by its own medium
     has nothing to prepare."
     if [ -n "$DRY" ]; then

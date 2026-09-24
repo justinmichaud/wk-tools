@@ -1,0 +1,9 @@
+[Unit]
+Description=Dump boot and network state where it can be read offline
+After=network.target cloud-init.service
+[Service]
+Type=oneshot
+TimeoutStartSec=600
+ExecStart=/bin/sh -c 'wk_bootfs() { for d in /boot/firmware /boot; do   [ -d "$d" ] && findmnt -no TARGET "$d" >/dev/null 2>&1 && { echo "$d"; return; }; done; echo /boot; };   sleep 90; { date -Is; cat /etc/wk-image 2>/dev/null;   echo; findmnt -no SOURCE,TARGET /; findmnt -no SOURCE,TARGET "$(wk_bootfs)";   echo; rfkill list 2>&1; iw reg get 2>&1; ip -br addr; ip route;   echo; networkctl status --no-pager 2>&1 | head -40;   echo; cloud-init status --long 2>&1;   echo; journalctl -b -u systemd-networkd -u wpa_supplicant -u cloud-init     -u cloud-init-local --no-pager 2>&1 | tail -120; }   > "$(wk_bootfs)/wk-diag.txt" 2>&1; sync'
+[Install]
+WantedBy=multi-user.target

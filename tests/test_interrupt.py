@@ -11,11 +11,16 @@ Run: python3 -m unittest tests.test_interrupt -v
 import os
 import signal
 import subprocess
+import sys
 import tempfile
 import time
 import unittest
 
 from tests.support import REPO
+
+sys.path.insert(0, str(REPO / "lib"))
+from wk import job  # noqa: E402
+from wk.machine import Fake  # noqa: E402
 
 PRELUDE = f'set -euo pipefail\ncd "{REPO}"\n. lib/common.sh\n'
 
@@ -191,7 +196,7 @@ class TestKillingAJobKillsWhatItStarted(unittest.TestCase):
     """run_watched killed only the job's own pid, so a child outlived it: a
     run-benchmark http server was still holding a port eleven days after its
     driver died (measured 2026-09-10). The stall path and the interrupt path
-    both go through watched_kill now."""
+    both walk the descendants through lib/wk/job.py's kill_tree."""
 
     def test_a_grandchild_does_not_outlive_the_job(self):
         cp = subprocess.run(["bash", "-c", KILL_TREE_SCRIPT % {"repo": REPO}],
@@ -199,20 +204,15 @@ class TestKillingAJobKillsWhatItStarted(unittest.TestCase):
         self.assertIn("child reaped", cp.stdout, cp.stdout + cp.stderr)
         self.assertIn("job reaped", cp.stdout, cp.stdout + cp.stderr)
 
-    def test_both_kill_paths_use_it(self):
-        text = (REPO / "lib" / "watchdog.sh").read_text()
-        # run_watched's own body: the interrupt hook and the stall path, two
-        # signals each. `job_kill` below it has its own site (_job_signal),
-        # which reaches the descendants inside the target instead.
-        body = text[text.index("run_watched() {"):text.index("job_kill() {")]
-        self.assertEqual(body.count("watched_kill"), 4, "a kill site still kills only the job")
-        self.assertNotIn('kill -TERM "$pid"', body)
-        self.assertNotIn('kill -KILL "$pid"', body)
+    def test_it_never_signals_the_process_asking(self):
+        """The one walk (lib/wk/job.py, which watched_kill and the stall path both call) skips its own pid."""
+        m = Fake()
+        me = os.getpid()
+        m.answer(["sh", "-c", job.TREE, "wk", "10"], out="%d\n11\n10\n" % me)
+        m.pids.update({me, 10, 11})
+        job.kill_tree(m, 10, signal.SIGTERM)
+        self.assertEqual([11, 10], [e[1] for e in m.effects if e[0] == "kill"])
 
-    def test_it_never_signals_the_shell_running_it(self):
-        body = (REPO / "lib" / "watchdog.sh").read_text()
-        fn = body[body.index("watched_kill() {"):body.index("run_watched() {")]
-        self.assertIn('[ "$p" = "$$" ] && continue', fn)
 
 if __name__ == "__main__":
     unittest.main()

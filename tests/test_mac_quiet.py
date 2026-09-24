@@ -1,6 +1,6 @@
 """Tests for bench/mac-quiet-hosts.sh -- the /etc/hosts software-update
 denial block shared by mac-bench-volume.sh's do_provision and
-mac-bench-firstboot.sh.
+mac-bench-firstboot.sh, its list read from bench/quiet/macos-hosts.txt.
 
 Hardware-free: every test drives the shared shell functions against a
 temp file passed as the hosts path, never the real /etc/hosts, and never
@@ -163,6 +163,21 @@ class ApplyHostsBlockTest(unittest.TestCase):
         cp = apply_block(self.hosts, dry="1")
         self.assertEqual(cp.returncode, 0, cp.stderr)
         self.assertEqual(self.hosts.read_text(), original)
+
+    def test_the_list_is_the_data_file_and_no_list_is_no_block(self):
+        """A copy of the script with no list beside it must not write, or accept, an empty block."""
+        listed = [l for l in (REPO / "bench" / "quiet" / "macos-hosts.txt").read_text().splitlines()
+                  if l and not l.startswith("#")]
+        self.assertEqual(EXPECTED_HOSTS, listed)
+        lone = self.tmp / "mac-quiet-hosts.sh"
+        lone.write_text(QUIET_HOSTS.read_text())
+        self.hosts.write_text(f"{BEGIN}\n{END}\n")
+        cp = subprocess.run(["bash", "-c", f". {shlex.quote(str(lone))}; wk_bench_hosts_present {self.hosts} || echo absent; "
+                             f"wk_bench_hosts_apply {self.hosts} || echo refused"], capture_output=True, text=True)
+        self.assertIn("absent", cp.stdout, cp.stderr)
+        self.assertIn("refused", cp.stdout, cp.stderr)
+        self.assertIn("no quiet/macos-hosts.txt", cp.stderr)
+        self.assertEqual(f"{BEGIN}\n{END}\n", self.hosts.read_text())
 
     def test_read_back_check_fails_when_write_does_not_land(self):
         original = "127.0.0.1 localhost\n"
@@ -351,7 +366,7 @@ class TestWhatIsStoppedIsWhatIsJudged(unittest.TestCase):
     demand -- so every leg was refused and no A/B could run at all. One list,
     stopped by signal and judged by process state, is what is left."""
 
-    QUIESCE = REPO / "cmd" / "quiesce"
+    QUIESCE = REPO / "lib" / "wk" / "quiet.py"
     TABLE = REPO / "bench" / "mac-quiet-desktop.sh"
 
     def test_one_list_is_signalled_and_one_list_is_judged(self):
@@ -373,26 +388,15 @@ class TestWhatIsStoppedIsWhatIsJudged(unittest.TestCase):
         for proc in ("softwareupdated", "backupd", "ReportCrash"):
             self.assertIn(proc, listed, "a daemon is missing from the list")
 
-    def test_the_user_half_is_applied_where_it_can_take(self):
-        """A first boot writes it for an account with no session, and a
-        protected domain does not survive that session starting. Quiesce runs
-        in the session -- and only in bench mode, since a workstation's
-        accessibility settings are not this command's to rewrite."""
-        text = self.QUIESCE.read_text()
-        body = text[text.index("if is_macos; then"):text.index("mac_raiser_on")]
-        self.assertIn("wk_quiet_desktop_user", body)
-        self.assertIn("if in_bench_mode; then", body)
-
     def test_a_leg_stops_them_again_before_it_judges_them(self):
         """`wk quiesce on` runs once per boot; the gate runs per leg. macOS
         restarts a stopped daemon on demand in between -- spindump was absent
         at the quiesce and running at all 16 legs after it -- so the leg that
         is about to measure stops them again first. A dry run must not."""
-        text = (REPO / "cmd" / "bench").read_text()
-        body = text[text.index("the machine itself -- every setting read back") - 700:
-                    text.index("the machine itself -- every setting read back")]
+        text = (REPO / "lib" / "wk" / "bench" / "mac.py").read_text()
+        body = text[text.index("def checks(self, leg):"):text.index('named("quiet machine"')]
         self.assertIn("wk_quiet_daemons_pause", body)
-        self.assertIn('if in_bench_mode && [ -z "$dry" ]; then', body)
+        self.assertIn("if self.install.bench():", body)
 
     def test_the_findings_renderer_still_changes_nothing(self):
         """`wk quiesce status` renders the same findings, and a reporting
@@ -421,22 +425,32 @@ class TestASweepCanNameABenchInstall(unittest.TestCase):
     only the invoking account lists it as an unnamed address and says nothing
     about what it is (measured 2026-09-07: identified by hand instead)."""
 
-    FIND = REPO / "cmd" / "find"
-
     def test_the_sweep_tries_the_bench_account(self):
-        text = self.FIND.read_text()
-        self.assertIn('for who in "$(id -un)" "$WK_BENCH_ACCOUNT"', text)
+        """lib/wk/reach.py's Survey.identify, driven: this account first, then the bench install's."""
+        from wk import reach
+        from wk.machine import Fake, Result
+        via = Fake("here")
+        via.answer(["id", "-un"], out="me\n")
+        via.answer(["ssh"], rc=255)
+        reach.Survey(reach.Reach(via, {}, peers=[])).identify("10.0.0.9", "")
+        dests = [e[1][-2] for e in via.effects if e[1][0] == "ssh"]
+        self.assertEqual(dests, ["me@10.0.0.9", "bench@10.0.0.9"])
 
     def test_it_says_which_account_answered(self):
-        text = self.FIND.read_text()
-        self.assertIn("account=%s", text)
-        self.assertIn('${acct:+ (as $acct)}', text)
+        from wk import reach
+        from wk.machine import Fake, Result
+        via = Fake("here")
+        via.answer(["id", "-un"], out="me\n")
+        via.answer(["ssh"], rc=255)
+        via.react(["ssh"], lambda a, f: Result(0, "host=benchbox\n") if "bench@10.0.0.9" in a else Result(255))
+        self.assertEqual(reach.Survey(reach.Reach(via, {}, peers=[])).identify("10.0.0.9", "")["account"], "bench")
 
     def test_one_spelling_of_that_account(self):
-        """cmd/find and the first-boot script cannot disagree about it."""
+        """the sweep (lib/wk/reach.py) and the first-boot script cannot disagree about it."""
         common = (REPO / "lib" / "common.sh").read_text()
         self.assertIn('WK_BENCH_ACCOUNT="${WK_BENCH_USER:-bench}"', common)
         self.assertIn('BENCH_USER="${WK_BENCH_USER:-bench}"', FIRSTBOOT.read_text())
+        self.assertIn('self.r.env.get("WK_BENCH_USER") or "bench"', (REPO / "lib" / "wk" / "reach.py").read_text())
 
 
 class TestBothLegPathsWatchTheScreen(unittest.TestCase):
@@ -446,20 +460,22 @@ class TestBothLegPathsWatchTheScreen(unittest.TestCase):
     catches that -- and a staged leg, which is the one every A/B runs, did not
     have it while the workspace leg did."""
 
-    BENCH = REPO / "cmd" / "bench"
+    PIPELINE = REPO / "lib" / "wk" / "bench" / "pipeline.py"
 
     def test_every_run_is_bracketed_by_the_watch(self):
-        text = self.BENCH.read_text()
-        starts = text.count("screen_watch_start")
-        stops = text.count("screen_watch_stop")
-        runs = text.count('run_watched "$out/run.log" --')
-        self.assertEqual(runs, starts, "a run-benchmark call is not watched")
-        self.assertEqual(starts, stops, "a watch is started and never read")
+        """The staged leg is the pipeline's browser run (lib/wk/bench/mac.py), not a second one."""
+        text = (REPO / "lib" / "wk" / "bench" / "mac.py").read_text()
+        self.assertIn("class StagedRun(pipeline.Run):", text)
+        self.assertNotIn("def run_browser", text)
+        self.assertNotIn("screen_watch", text)
 
     def test_what_drew_fails_the_leg_unless_forced(self):
-        text = self.BENCH.read_text()
-        self.assertEqual(2, text.count("the machine did not stay quiet under this run"))
-        self.assertEqual(2, text.count('--force: keeping the number anyway; it is one to distrust'))
+        """Once, for every leg: `wk bench run` and the staged leg are one pipeline."""
+        for f in (self.PIPELINE,):
+            text = f.read_text()
+            with self.subTest(file=f.name):
+                self.assertEqual(1, text.count("the machine did not stay quiet under this run"))
+                self.assertEqual(1, text.count('--force: keeping the number anyway; it is one to distrust'))
 
 
 class TestTheWatchSeesAPausedAgentComeBack(unittest.TestCase):

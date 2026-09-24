@@ -81,7 +81,7 @@ _LISTING = ('{"workspaces": [{"name": "peerws", "target": "container", '
 
 
 class PeerFixture(WkTest):
-    """A WK_ROOT whose registry (WK_TARGET_REGISTRY, lib/target.sh) holds one
+    """A WK_ROOT whose registry (WK_MACHINES_DIR, lib/target.sh) holds one
     peer and nothing else, so the walk cannot reach the real fleet, plus a
     $HOME of its own: `wk zed` writes an ssh alias, and no test may write
     into the person's real ~/.ssh."""
@@ -89,13 +89,11 @@ class PeerFixture(WkTest):
     def setUp(self):
         super().setUp()
         self.root = self.tmp / "wk-root"
-        (self.root / "targets" / "hosts").mkdir(parents=True)
+        (self.root / "machines").mkdir(parents=True)
         for entry in REPO.iterdir():
-            if entry.name in ("targets", ".git", "__pycache__"):
+            if entry.name in ("machines", ".git", "__pycache__"):
                 continue
             (self.root / entry.name).symlink_to(entry)
-        for sh in (REPO / "targets").glob("*.sh"):
-            (self.root / "targets" / sh.name).symlink_to(sh)
 
         self.tools = self.tmp / "peer-tools"
         self.tools.mkdir()
@@ -106,8 +104,8 @@ class PeerFixture(WkTest):
                                            removed=self.removed))
         peer_wk.chmod(0o755)
 
-        (self.root / "targets" / "hosts" / "peerbox.conf").write_text(
-            "WK_TARGET_KIND=remote\n"
+        (self.root / "machines" / "peerbox.conf").write_text(
+            "KIND=peer\nWK_TARGET_KIND=remote\n"
             "WK_REMOTE_PEER=1\n"
             "WK_REMOTE_HOST=peerbox\n"
             f"WK_REMOTE_ROOT={self.tmp / 'remote-root'}\n"
@@ -121,7 +119,7 @@ class PeerFixture(WkTest):
         with_ssh = dict(extra or {})
         e = {
             "WK_ROOT": str(self.root),
-            "WK_TARGET_REGISTRY": str(self.root / "targets" / "hosts"),
+            "WK_MACHINES_DIR": str(self.root / "machines"),
             "HOME": str(self.home),
             "XDG_STATE_HOME": str(self.tmp / "state"),
             "WK_SSH_TIMEOUT": "5",
@@ -160,8 +158,8 @@ t=$(ws_target peerws)
     def test_only_a_workstation_keeps_its_own_records(self):
         """a workstation's workspaces are its own, so a removal is its own `wk
         rm`; a build box's are recorded on the workstation that made them"""
-        (self.root / "targets" / "hosts" / "buildbox.conf").write_text(
-            "WK_TARGET_KIND=remote\nWK_REMOTE_HOST=buildbox\n")
+        (self.root / "machines" / "buildbox.conf").write_text(
+            "KIND=build\nWK_TARGET_KIND=remote\nWK_REMOTE_HOST=buildbox\n")
         reg = self.registry()
         self.assertTrue(reg.load("peerbox").peer)
         self.assertFalse(reg.load("buildbox").peer)

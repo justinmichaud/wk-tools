@@ -5,21 +5,31 @@ by looking an id up in a catalogue.
 
 Covers: none of the store's functions survive anywhere in the tree, as a
 definition or a call, under cmd/, lib/, boot/, bench/, image/, container/ or
-host/; the phrase "image store" survives only as cmd/sysimage's own
-tombstones and in this test; `wk sysimage rm` is a tombstone naming `wk rm`;
-`wk boot`'s default system is read off the device rather than looked up, and
-a named --system is checked against it; `image_lane_profile`/`_profile_from_path`
-(cmd/sysimage) derive a profile from both a yocto and a buildroot workspace
-path; image_workspace_scan (lib/image.sh) finds what each builder leaves in
-a workspace laid out the way targets/container.sh mounts one.
+host/; the phrase "image store" survives only where `wk sysimage` says there
+is none, and in this test; `wk sysimage rm` is a tombstone naming `wk rm`; `wk boot`'s default system is read off the device
+rather than looked up, and a named --system is checked against it;
+a profile is derived from both a yocto and a buildroot workspace path; each
+builder's outputs (lib/wk/sysimage/ls.py) are what it leaves in a workspace
+laid out the way targets/container.sh mounts one.
 
 Run: python3 -m unittest tests.test_image_store_gone -v
 """
+import contextlib
+import io
 import re
 import subprocess
+import sys
 import unittest
 
 from tests.support import REPO, WkTest, bash, rand_suffix, run, scratch_dir, shell_files, stub_path
+
+sys.path.insert(0, str(REPO / "lib"))
+from wk import images  # noqa: E402
+from wk.machine import Local  # noqa: E402
+from wk.sysimage import write  # noqa: E402
+from wk.store import Store  # noqa: E402
+from wk import act  # noqa: E402
+from wk.sysimage import cli, ls  # noqa: E402
 
 # The functions the image store used to be built from (lib/image.sh) --
 # every one of them either has no reason to exist without a catalogue to
@@ -117,22 +127,20 @@ class TestNoRetiredFunctionCalled(unittest.TestCase):
 
 
 class TestImageStorePhraseIsTombstoneOnly(unittest.TestCase):
-    """"image store" as a phrase survives only where it names the thing that
-    is gone: cmd/sysimage's header comment and its two tombstone messages
-    (the 'ls' empty-listing note and the 'rm' refusal), plus this test, which
-    is the one place allowed to write the retired name in order to look for
-    it. A hit anywhere else is a regression: this test is meant to fail
-    loudly the next time the phrase leaks somewhere new."""
+    """"image store" as a phrase survives only where `wk sysimage` says there
+    is none -- its help header, the `ls` footnote and the `rm` tombstone -- plus this test, which is
+    the one place allowed to write the retired name in order to look for it."""
 
     _ALLOWED_SUBSTRINGS = (
-        "There is no image store (`wk help`)",  # cmd/sysimage:13, the header
-        "There is no image store: the workspace is the name",  # cmd_ls
-        "there is no image store to remove from",  # cmd_rm
+        "There is no image store (`wk help`)",  # cmd/sysimage's header
+        "There is no image store: the workspace is the name",  # the ls footnote
+        "there is no image store to remove from",  # the rm tombstone
     )
 
     def test_phrase_is_tombstone_only(self):
         bad = []
-        for f in shell_files():
+        files = shell_files() + [REPO / "cmd" / "sysimage"] + sorted((REPO / "lib" / "wk" / "sysimage").glob("*.py"))
+        for f in files:
             try:
                 lines = f.read_text(errors="replace").splitlines()
             except OSError:
@@ -148,12 +156,13 @@ class TestImageStorePhraseIsTombstoneOnly(unittest.TestCase):
         )
 
 
-class TestSysimageRmIsATombstone(WkTest):
+class TestSysimageRmIsATombstone(unittest.TestCase):
     def test_rm_names_wk_rm_instead(self):
-        cp = run("sysimage", "rm", "some-workspace", env={"WK_ROOT": str(REPO)})
-        self.assertNotEqual(cp.returncode, 0, cp.stdout)
-        self.assertIn("wk rm", cp.stdout, cp.stdout)
-        self.assertIn("does not exist", cp.stdout, cp.stdout)
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err), self.assertRaises(act.Refused):
+            cli.Sysimage.rm()
+        self.assertIn("does not exist", err.getvalue())
+        self.assertIn("wk rm <workspace>", err.getvalue())
 
 
 # A stub ssh that never executes the remote script it is handed -- for
@@ -183,6 +192,7 @@ esac
 '''
 
 _FAKE_NODE_CONF = '''NODE_SSH={ssh}
+KIND=board
 NODE_DRIVER=rpi5-usb
 NODE_DEVICE=/dev/sda
 NODE_ROOT=/dev/nvme0n1p2
@@ -237,80 +247,38 @@ class TestBootArmDefaultsToDeviceImage(WkTest):
 
 
 class TestProfileFromWorkspacePath(unittest.TestCase):
-    """image_lane_profile (lib/image.sh) derives a profile from a lane's name
-    for both builders that leave images inside one (image_workspace_scan), by
-    matching the configurations this checkout defines; _profile_from_path
-    (cmd/sysimage) is the same derivation from a full path and calls through
-    it -- lifted beside the library, sed's the idiom tests/test_bridge.py uses
-    for 'bump' (cmd/status)."""
+    """A profile is derived from a lane's name for both builders that leave images inside one, by matching the
+    configurations this checkout defines (lib/wk/images.py), and the write derives it the same way from a full path."""
 
-    def _lift(self):
-        body = subprocess.run(
-            ["sed", "-n", "/^_profile_from_path()/,/^}/p", str(REPO / "cmd" / "sysimage")],
-            capture_output=True, text=True,
-        ).stdout
-        self.assertTrue(body.strip(), "could not lift _profile_from_path from cmd/sysimage")
-        return ('. "$WK_ROOT/lib/common.sh"\n. "$WK_ROOT/lib/store.sh"\n'
-                '. "$WK_ROOT/lib/target.sh"\n. "$WK_ROOT/lib/image.sh"\n' + body)
+    def test_a_lane_names_its_profile(self):
+        self.assertEqual(images.ws_profile("yocto-webkit-2.52-yocto-rpi5-64"), "webkit-2.52-yocto-rpi5-64")
+        self.assertEqual(images.ws_profile("buildroot-webkit-2.52-buildroot-rpi5-64"), "webkit-2.52-buildroot-rpi5-64")
+        self.assertIsNone(images.ws_profile("jsc-release"))
 
-    def setUp(self):
-        self.prelude = self._lift()
-
-    def _run(self, *args):
-        script = self.prelude + "\n" + " ".join(args)
-        return bash(script)
-
-    def test_yocto_workspace_name(self):
-        cp = self._run("image_lane_profile", "yocto-webkit-2.52-yocto-rpi5-64")
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertEqual(cp.stdout.strip(), "webkit-2.52-yocto-rpi5-64")
-
-    def test_buildroot_workspace_name(self):
-        cp = self._run("image_lane_profile", "buildroot-webkit-2.52-buildroot-rpi5-64")
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertEqual(cp.stdout.strip(), "webkit-2.52-buildroot-rpi5-64")
-
-    def test_unrelated_workspace_name_is_not_a_profile(self):
-        cp = self._run("image_lane_profile", "jsc-release")
-        self.assertNotEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-
-    def test_profile_from_a_full_yocto_path(self):
-        cp = self._run(
-            "_profile_from_path",
-            "/var/lib/wk/ws/yocto-webkit-2.52-yocto-rpi5-64/build/"
-            "CrossToolChains/rpi5/build/image/webkit-2.52-yocto-rpi5-64.wic.xz",
-        )
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertEqual(cp.stdout.strip(), "webkit-2.52-yocto-rpi5-64")
-
-    def test_profile_from_a_full_buildroot_path(self):
-        cp = self._run(
-            "_profile_from_path",
-            "/var/lib/wk/ws/buildroot-webkit-2.52-buildroot-rpi5-64/build/"
-            "buildroot/rpi5/output/images/sdcard.img",
-        )
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertEqual(cp.stdout.strip(), "webkit-2.52-buildroot-rpi5-64")
+    def test_a_full_path_names_its_profile(self):
+        w = write.Write(REPO, {"WK_ROOT": str(REPO)}, Local(), None)
+        for path, want in (
+                ("/var/lib/wk/ws/yocto-webkit-2.52-yocto-rpi5-64/build/CrossToolChains/rpi5/build/image/"
+                 "webkit-2.52-yocto-rpi5-64.wic.xz", "webkit-2.52-yocto-rpi5-64"),
+                ("/var/lib/wk/ws/buildroot-webkit-2.52-buildroot-rpi5-64/build/buildroot/rpi5/output/images/sdcard.img",
+                 "webkit-2.52-buildroot-rpi5-64")):
+            with self.subTest(path=path), contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(w.profile("", path)[0], want)
 
 
 class TestScanFindsWhatTheBuildersLeave(unittest.TestCase):
     """Both builders write under /src/WebKit/WebKitBuild, which targets/
-    container.sh bind-mounts from ws/<name>/build, so that is where
-    image_workspace_scan (lib/image.sh) looks. A glob naming any other
-    parent matches nothing and `wk sysimage ls` reports no image over one
-    built minutes earlier."""
+    container.sh bind-mounts from ws/<name>/build, so that is where each
+    builder's outputs are. A pattern naming any other parent matches nothing
+    and `wk sysimage ls` reports no image over one built minutes earlier."""
 
     def _scan(self, store):
-        return bash(
-            '. "$WK_ROOT/lib/common.sh"; . "$WK_ROOT/lib/image.sh"; image_workspace_scan',
-            env={"WK_STORE": str(store)},
-        )
+        return ls.scan(Local(), Store({"WK_STORE": str(store)}))
 
-    def _row(self, cp):
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        lines = [l for l in cp.stdout.splitlines() if l.strip()]
-        self.assertEqual(len(lines), 1, cp.stdout)
-        return lines[0].split("\t")
+    def _one(self, store):
+        found = self._scan(store)
+        self.assertEqual(len(found), 1, found)
+        return found[0]
 
     def test_finds_a_buildroot_image(self):
         with scratch_dir() as d:
@@ -320,12 +288,7 @@ class TestScanFindsWhatTheBuildersLeave(unittest.TestCase):
                    / "sdcard.img")
             img.parent.mkdir(parents=True)
             img.write_bytes(b"x" * 4096)
-
-            builder, name, path, size, _mtime = self._row(self._scan(d))
-            self.assertEqual(builder, "buildroot")
-            self.assertEqual(name, ws)
-            self.assertEqual(path, str(img))
-            self.assertEqual(size, "4096")
+            self.assertEqual(self._one(d), ls.Image("buildroot", ws, str(img)))
 
     def test_finds_a_yocto_image(self):
         with scratch_dir() as d:
@@ -335,48 +298,27 @@ class TestScanFindsWhatTheBuildersLeave(unittest.TestCase):
                    / "webkit-dev-ci-tools.wic.xz")
             img.parent.mkdir(parents=True)
             img.write_bytes(b"x" * 4096)
-
-            builder, name, path, _size, _mtime = self._row(self._scan(d))
-            self.assertEqual(builder, "yocto")
-            self.assertEqual(name, ws)
-            self.assertEqual(path, str(img))
+            self.assertEqual(self._one(d), ls.Image("yocto", ws, str(img)))
 
     def test_a_workspace_that_built_nothing_is_not_a_row(self):
         with scratch_dir() as d:
             (d / "ws" / "jsc-release" / "build").mkdir(parents=True)
-            cp = self._scan(d)
-            self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-            self.assertEqual(cp.stdout.strip(), "")
+            self.assertEqual(self._scan(d), [])
 
-    def test_a_yocto_workspace_mid_rebuild_gets_a_placeholder_row(self):
-        # clear_stale_image_copies (image/yocto-build.sh) deletes build/image
-        # before a rebuild and repopulates it at the end; for the hours in
-        # between the wic glob matches nothing.
+    def test_an_image_workspace_with_no_image_gets_a_placeholder(self):
+        """A yocto rebuild deletes build/image (clear_stale_image_copies,
+        image/yocto-build.sh) and repopulates it at the end, so for hours the
+        workspace holds nothing -- empty, or with the image directory made
+        fresh and not yet written."""
         with scratch_dir() as d:
-            ws = "yocto-webkit-2.52-yocto-rpi3-32"
-            (d / "ws" / ws / "build").mkdir(parents=True)
-            builder, name, path, size, mtime = self._row(self._scan(d))
-            self.assertEqual((builder, name, path, size, mtime),
-                              ("yocto", ws, "-", "0", "-"))
-
-    def test_a_buildroot_workspace_with_no_image_gets_a_placeholder_row(self):
-        with scratch_dir() as d:
-            ws = "buildroot-wpewebkit-2.38-buildroot-rpi4-32"
-            (d / "ws" / ws / "build").mkdir(parents=True)
-            builder, name, path, size, mtime = self._row(self._scan(d))
-            self.assertEqual((builder, name, path, size, mtime),
-                              ("buildroot", ws, "-", "0", "-"))
-
-    def test_a_yocto_workspace_with_an_empty_image_dir_gets_a_placeholder_row(self):
-        # The window clear_stale_image_copies opens: build/image exists
-        # (mkdir'd fresh) but bitbake hasn't written the wic into it yet.
-        with scratch_dir() as d:
-            ws = "yocto-webkit-2.52-yocto-rpi4-64"
-            (d / "ws" / ws / "build" / "CrossToolChains" / "rpi4-64bits-mesa"
-             / "build" / "image").mkdir(parents=True)
-            builder, name, path, size, mtime = self._row(self._scan(d))
-            self.assertEqual((builder, name, path, size, mtime),
-                              ("yocto", ws, "-", "0", "-"))
+            for ws, sub in (("yocto-webkit-2.52-yocto-rpi3-32", "build"),
+                            ("yocto-webkit-2.52-yocto-rpi4-64", "build/CrossToolChains/rpi4-64bits-mesa/build/image"),
+                            ("buildroot-wpewebkit-2.38-buildroot-rpi4-32", "build")):
+                (d / "ws" / ws / sub).mkdir(parents=True)
+            self.assertEqual(self._scan(d), [
+                ls.Image("buildroot", "buildroot-wpewebkit-2.38-buildroot-rpi4-32", None),
+                ls.Image("yocto", "yocto-webkit-2.52-yocto-rpi3-32", None),
+                ls.Image("yocto", "yocto-webkit-2.52-yocto-rpi4-64", None)])
 
 
 if __name__ == "__main__":

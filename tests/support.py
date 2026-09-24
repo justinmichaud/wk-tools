@@ -24,15 +24,38 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 WK = REPO / "wk"
 
-# The suite is fleet-blind: every run()/bash() below points WK_TARGET_REGISTRY
-# (lib/target.sh) at this empty directory, so target_all knows only container
-# and vm and no test ever ssh's to one of the maintainer's real machines or
-# finds a workspace that happens to live there. A test that wants a fleet
-# passes its own directory -- fake machine confs of its own, or REAL_REGISTRY
+# The suite is fleet-blind: every run()/bash() below points WK_MACHINES_DIR
+# (lib/wk/fleet.py) at BLIND_FLEET, this repo's machines less every build
+# machine and peer, so target_all knows only container and vm and no test ever
+# ssh's to one of the maintainer's real targets or finds a workspace that
+# happens to live there. A test that wants a fleet passes its own directory --
+# fake machine confs of its own, NO_REGISTRY for none at all, or REAL_MACHINES
 # when it is deliberately auditing the machines this repo ships.
+REAL_MACHINES = REPO / "machines"
 NO_REGISTRY = tempfile.mkdtemp(prefix="wk-test-no-registry-")
-REAL_REGISTRY = REPO / "targets" / "hosts"
+BLIND_FLEET = tempfile.mkdtemp(prefix="wk-test-blind-fleet-")
+for _conf in REAL_MACHINES.glob("*.conf"):
+    if not re.search(r"^KIND=(build|peer)$", _conf.read_text(), re.M):
+        os.symlink(_conf, os.path.join(BLIND_FLEET, _conf.name))
 atexit.register(shutil.rmtree, NO_REGISTRY, True)
+atexit.register(shutil.rmtree, BLIND_FLEET, True)
+# This machine's config home less its `wk`, so no test sees the ~/.config/wk/machines/ overlay
+# (lib/wk/fleet.py); the rest stays, since git and podman read their own config there.
+NO_CONFIG = tempfile.mkdtemp(prefix="wk-test-no-config-")
+_REAL_CONFIG = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config")
+for _entry in (_REAL_CONFIG.iterdir() if _REAL_CONFIG.is_dir() else ()):
+    if _entry.name != "wk":
+        os.symlink(_entry, os.path.join(NO_CONFIG, _entry.name))
+atexit.register(shutil.rmtree, NO_CONFIG, True)
+FLEET_ENV = {"XDG_CONFIG_HOME": NO_CONFIG}
+# The name a fake target conf gives this host (WK_REMOTE_HOSTNAME) to be its far end.
+THIS_HOST = subprocess.run(["hostname", "-s"], stdout=subprocess.PIPE, universal_newlines=True).stdout.strip().lower()
+
+
+def real_confs(*kinds):
+    """This repo's machines/<name>.conf of those KINDs."""
+    return sorted(p for p in REAL_MACHINES.glob("*.conf")
+                  if re.search(r"^KIND=(%s)$" % "|".join(kinds), p.read_text(), re.M))
 
 # Same reasoning, for wk_secrets_dir (lib/store.sh): on a macOS host it reads
 # WK_HOST_SECRETS rather than $WK_STORE, so without a default of its own a
@@ -123,11 +146,11 @@ def _clean_env(extra=None, wk_root=False):
     """A predictable environment: this machine's own, minus the dispatcher's
     per-invocation variables (DISPATCH_VARS above) and anything else that
     would make the command under test think it is already a workspace or
-    already pointed at a scratch store, and with an empty machine registry
-    (NO_REGISTRY above) so nothing reaches the real fleet and a scratch
+    already pointed at a scratch store, and with a fleet of no build machine
+    or peer (BLIND_FLEET above) so nothing reaches a real target, and a scratch
     secrets directory (NO_SECRETS above) so nothing reads or writes the real
     ~/.config/wk/secrets, plus whatever the caller adds -- including a
-    WK_TARGET_REGISTRY or WK_HOST_SECRETS of its own.
+    WK_MACHINES_DIR or WK_HOST_SECRETS of its own.
 
     wk_root=True also sets WK_ROOT: every sourced lib in this tree that
     needs it (image/profiles.sh, boot/machines.sh, ...) gets it for free
@@ -141,7 +164,9 @@ def _clean_env(extra=None, wk_root=False):
     env.pop("WK_MARKER", None)
     env.pop("WK_STORE", None)
     env["XDG_STATE_HOME"] = NO_STATE
-    env["WK_TARGET_REGISTRY"] = NO_REGISTRY
+    env["WK_MACHINES_DIR"] = BLIND_FLEET
+    env["XDG_CONFIG_HOME"] = NO_CONFIG
+    env["WK_REMOTE_MARKER"] = os.path.join(NO_STATE, "no-wk-remote")   # a real ~/.wk-remote makes this host a target's far end
     env["WK_HOST_SECRETS"] = NO_SECRETS
     env["WK_GITHUB_API"] = NO_GITHUB
     env["WK_TAILNET_API"] = NO_GITHUB
@@ -298,18 +323,43 @@ def shell_files():
 
 
 def assert_guest_start_converges(case, step):
-    """`targets/vm.sh` converges a guest through one function, `_converge_guest`,
-    called from both t_start arms -- the guest that was already running and the
-    one this start booted. A step delivered on only one arm is half a delivery,
-    so the property is now "the step is in that function once, and both arms
-    call it" rather than "the call appears twice in the file"."""
-    vm = (REPO / "targets" / "vm.sh").read_text()
-    body = func_body(vm, "_converge_guest")
-    case.assertEqual(1, body.count(step),
-                     f"_converge_guest does not run {step!r} exactly once")
-    arms = func_body(vm, "t_start")
-    case.assertEqual(2, arms.count('_converge_guest "$name" "$ip"'),
-                     "t_start no longer calls _converge_guest from both arms")
+    """A guest start converges it through one `Guest.converge` over `lib/wk/guest.py`'s STEPS, from both arms --
+    the guest that was already running and the one this start booted. `step` names it as targets/vm.sh did
+    (`_set_guest_egress "$name" "$ip"`): the step is in STEPS once, and `start` converges once, after both arms."""
+    import inspect
+    sys.path.insert(0, str(REPO / "lib"))
+    from wk import guest
+    name = step.split()[0].lstrip("_")
+    case.assertEqual(1, [s[0] for s in guest.STEPS].count(name), f"a guest start does not run {name!r} exactly once")
+    body = inspect.getsource(guest.start)
+    case.assertEqual(1, body.count(".converge()"), "a guest start no longer converges once, after both arms")
+    case.assertIn('if state == "running":', body)
+
+
+def guest_step(env, step, ws="demo", ip="1.2.3.4", secrets=None):
+    """One of lib/wk/guest.py's converge steps run on this host, as a macOS host drives a guest: `env` over the
+    clean environment is the whole of os.environ, so stubs first on its PATH stand in for ssh. `secrets` patches
+    Secrets methods (`{"bugzilla_user": fn}`). A CompletedProcess's returncode and stderr."""
+    import io
+    import types
+    from unittest import mock
+    sys.path.insert(0, str(REPO / "lib"))
+    from wk import act, guest, targets
+    from wk.secrets import Secrets
+    from wk.store import Store
+    err = io.StringIO()
+    with contextlib.ExitStack() as stack:
+        stack.enter_context(mock.patch.dict(os.environ, _clean_env(env, wk_root=True), clear=True))
+        stack.enter_context(mock.patch.object(Store, "macos_host", new_callable=mock.PropertyMock, return_value=True))
+        for name, fn in (secrets or {}).items():
+            stack.enter_context(mock.patch.object(Secrets, name, fn))
+        stack.enter_context(contextlib.redirect_stderr(err))
+        vm = targets.Registry(str(REPO), env=dict(os.environ)).load("vm")
+        try:
+            rc = 0 if getattr(guest.Guest(guest.Host(vm), ws, ip), step)() else 1
+        except act.Refused as e:
+            rc = e.status
+    return types.SimpleNamespace(returncode=rc, stdout="", stderr=err.getvalue())
 
 
 def func_body(text, name):

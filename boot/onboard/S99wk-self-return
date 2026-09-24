@@ -1,0 +1,3 @@
+case "$1" in start) ;; *) exit 0 ;; esac
+[ -f /etc/wk/rescue ] && exit 0
+( sleep "$WK_WATCHDOG"; [ -f /run/wk-keep-running ] || reboot ) </dev/null >/dev/null 2>&1 &

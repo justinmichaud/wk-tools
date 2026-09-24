@@ -6,6 +6,8 @@ import atexit
 import contextlib
 import os
 import re
+import subprocess
+import sys
 
 from wk import act
 
@@ -157,3 +159,33 @@ class Lock:
         if path in self.holding and self._target(path) == self.payload:
             self.machine.remove_now(path)
         self.holding = [p for p in self.holding if p != path]
+
+
+def main(argv, env=None):
+    """`python3 -m wk.lock run <resource> [-w seconds] [--] cmd...`: the command under the lock, and its status.
+    Not exec'd, so the lock drops when the command ends; a symlink lock leaves no descriptor for it to inherit."""
+    from wk.clock import Clock
+    from wk.machine import here
+    from wk.store import Store
+    env = os.environ if env is None else env
+    if len(argv) < 2 or argv[0] != "run":
+        act.die("usage: lockrun.sh <resource> [-w seconds] -- cmd...", 2)
+    res, rest, timeout = argv[1], argv[2:], 600
+    if rest[:1] == ["-w"]:
+        timeout, rest = int(rest[1]), rest[2:]
+    if rest[:1] == ["--"]:
+        rest = rest[1:]
+    if not rest:
+        act.die("lockrun.sh: nothing to run")
+    lock = Lock(Store(env), here(), Clock())
+    with lock.held(res, timeout):
+        sys.stdout.flush()
+        rc = subprocess.call(rest)
+    return rc if rc >= 0 else 128 - rc
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main(sys.argv[1:]))
+    except act.Refused as e:
+        sys.exit(e.status)

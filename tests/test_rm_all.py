@@ -29,7 +29,7 @@ import unittest
 from tests.support import WkTest, fake_workspace, run
 
 _LOCAL_CONF = (
-    "WK_TARGET_KIND=remote\n"
+    "KIND=build\nWK_TARGET_KIND=remote\n"
     "WK_REMOTE_LOCAL=1\n"
     "WK_REMOTE_ROOT={root}\n"
     "WK_REMOTE_STORE={store}\n"
@@ -48,7 +48,7 @@ class RmAllFixture(WkTest):
         (self.registry / "fakebox.conf").write_text(
             _LOCAL_CONF.format(root=self.root, store=self.store))
         self.env = {
-            "WK_TARGET_REGISTRY": str(self.registry),
+            "WK_MACHINES_DIR": str(self.registry),
             "XDG_STATE_HOME": str(self.tmp / "state"),
             "WK_TARGET": "fakebox",
         }

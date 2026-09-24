@@ -13,21 +13,19 @@ who decides each:
                   WK_FORCE and `main` *consumes* the flag, so a command's own
                   arm for it could never fire
   --quiet         the same, WK_QUIET
-  --target        the dispatcher reads it (resolve_target) and leaves it in
-                  argv. For a `where=workspace` command that is the same fact
-                  the dispatcher already resolved into WK_TARGET; for a host
-                  or store command (`wk push --target`, `wk sudo --target`)
-                  it names a *machine*, which is a different argument that
-                  happens to share a spelling
+  --target        the declaration's: resolve_target and a `where=workspace`
+                  command both read it through wk.decl.Args, never argv by
+                  hand. On a host or store command (`wk push --target`, `wk
+                  sudo --target`) it names a *machine*, a different argument
+                  that shares a spelling
   --config        nobody's: WK_CONFIG is only what a forwarded command
                   inherits (`wk`'s environment protocol), and every command
                   that takes a build config parses the flag itself
   subverb         nobody's: the dispatcher reads `${1:-}` to apply a `sub`
                   override and leaves it in argv, so each command re-reads it
 
-The three tests below hold what is already true; the three
-`owed` marks name what is not, file by file, and are the audit's
-answer to the defects line.
+The tests below hold what is already true; the `owed` marks name what is
+not, file by file, and are the audit's answer to the defects line.
 
 Run: python3 -m unittest tests.test_owed_dispatch_audit -v
 """
@@ -41,6 +39,7 @@ from tests.support import REPO, owed, run
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk import dispatch  # noqa: E402
+from tests.test_cli_shape import arms_file, declared_opts, literal_opts  # noqa: E402
 
 
 def commands():
@@ -81,14 +80,19 @@ def decl_value(path, key, default=""):
     return default
 
 
+def is_python(path):
+    return path.read_text(errors="replace").startswith("#!/usr/bin/env python3")
+
+
 def parses_flag(path, flag):
     """Does the file have a `case` arm of its own for <flag>? The arm, not
     the spelling: `--force` inside a printf string is prose, and an arm
     pattern cannot contain a parenthesis of its own. A python command's is a
-    membership or equality test on the literal."""
+    literal matched in argv by hand; a read through wk.decl.Args is not one."""
     text = path.read_text(errors="replace")
-    if text.startswith("#!/usr/bin/env python3"):
-        return '"%s" in ' % flag in text or '== "%s"' % flag in text
+    if is_python(path):
+        arms = arms_file(path)
+        return flag in literal_opts(text) or (arms.is_file() and parses_flag(arms, flag))
     for line in text.splitlines():
         m = re.match(r"^\s*([^()#]*?)\)", line)
         if m and re.search(r"(^|\|)" + re.escape(flag) + r"(=\*)?($|\|)",
@@ -150,25 +154,17 @@ def offenders(label):
 # the list a change to this file rather than a silent drift.
 EXPECTED = {
     "ai":         ["subverb"],
-    "bench":      ["config", "subverb"],
+    "bench":      ["subverb"],
     "bridge":     ["subverb"],
     "build":      ["config"],
-    "completion": ["subverb"],
-    "gui":        ["config"],
     "key":        ["subverb"],
-    "new":        ["--target"],
+    "machine":    ["subverb"],
     "pi":         ["subverb"],
     "pr":         ["subverb"],
-    "profile":    ["config"],
-    "push":       ["subverb", "--target"],
+    "push":       ["subverb"],
     "quiesce":    ["subverb"],
-    "remote":     ["subverb"],
-    "run":        ["config"],
     "session":    ["subverb"],
-    "sudo":       ["subverb", "--target"],
-    "sync":       ["--target"],
-    "sysimage":   ["config", "subverb"],
-    "test":       ["config"],
+    "sysimage":   ["subverb"],
     "vm":         ["subverb"],
 }
 
@@ -210,8 +206,8 @@ class TestTheAuditList(unittest.TestCase):
 
 
 class TestWhatIsStillParsedCommandByCommand(unittest.TestCase):
-    """Three arguments the dispatcher hands nobody. Each `owed` mark
-    names the files, and is the audit's entry for docs/defects."""
+    """What the dispatcher still hands nobody. Each `owed` mark names the
+    files, and is the audit's entry for docs/defects."""
 
     @owed("the build config is parsed by seven commands, declared to the dispatcher by none")
     def test_the_build_config_is_not_the_dispatchers(self):
@@ -227,18 +223,27 @@ class TestWhatIsStillParsedCommandByCommand(unittest.TestCase):
     def test_the_subverb_is_not_the_dispatchers(self):
         """defect: the dispatcher reads ${1:-} to apply a `sub` override and
         leaves it in argv, so cmd/ai, cmd/bench, cmd/boot, cmd/bridge,
-        cmd/completion, cmd/key, cmd/pi, cmd/pr, cmd/push, cmd/quiesce,
-        cmd/remote, cmd/session, cmd/sudo, cmd/sysimage and
+        cmd/key, cmd/machine, cmd/pi, cmd/pr, cmd/push, cmd/quiesce,
+        cmd/session, cmd/sysimage and
         cmd/vm each re-read it and each write their own refusal for an
         unknown one"""
         self.assertEqual(offenders("subverb"), [])
 
-    @owed("cmd/new and cmd/sync re-parse --target after the dispatcher resolved it")
+
+class TestPythonCommandsReadTheirOptionsThroughArgs(unittest.TestCase):
+    def test_every_python_command_reads_its_options_through_args(self):
+        """a python command reads a declared option through wk.decl.Args,
+        never as a literal matched in argv, so none re-decides what the
+        dispatcher already checked"""
+        by_hand = [c.name for c in commands()
+                   if is_python(c) and literal_opts(c.read_text()) & declared_opts(c)]
+        self.assertEqual(by_hand, [])
+
+
+class TestTheWorkspaceTarget(unittest.TestCase):
     def test_the_workspace_target_is_not_re_parsed(self):
-        """defect: cmd/new and cmd/sync parse `--target` for the same fact
-        the dispatcher resolved (resolve_target reads the flag and hands the
-        answer on in WK_TARGET) -- `wk push --target` and `wk sudo --target`
-        are not this: on a host or store command the flag names a machine"""
+        """a `where=workspace` command reads `--target` through wk.decl.Args,
+        the reader resolve_target uses"""
         ws = [c.name for c in commands()
               if "--target" in audit(c) and decl_value(c, "where") == "workspace"]
         self.assertEqual(ws, [])

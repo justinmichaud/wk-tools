@@ -101,6 +101,33 @@ def _exited(pid):
         return False
 
 
+def detached(here, recs, clock, kind, name, argv, path, what):
+    """`argv` detached, its log echoed here until the child's own `kind` record exists; its pid."""
+    since = clock.stamp()
+    pid = job.detach(here, argv, path)
+    offset = [0]
+
+    def pump():
+        try:
+            with open(path, "rb") as f:
+                f.seek(offset[0])
+                data = f.read()
+        except OSError:
+            return
+        offset[0] += len(data)
+        sys.stderr.write(data.decode(errors="replace"))
+
+    while True:
+        pump()
+        t = recs.find(kind, name, floor=since)
+        if t is not None and t.id.endswith("-%d" % pid):
+            return pid
+        if _exited(pid) or not here.alive(pid):
+            pump()
+            die("the detached %s of '%s' ended before it started -- what it said is\n    above, in full in %s" % (what, name, path))
+        clock.sleep(1)
+
+
 def size_for(reg, target, name, cfg, clock):
     """(budget, the jobs already running, jobs, MB a job, nice), from the whole machine once: a remote target's
     own numbers, else this machine's free memory under the target's envelope."""
@@ -196,42 +223,13 @@ class Build:
         return [os.path.join(self.root, "wk"), "build"] + ([] if self.in_ws else [self.name]) + forward(self.argv, drop, drop_valued, add)
 
     def detach(self):
-        """Handed to the machine that runs it; this end returns once the child's own record exists."""
-        path = os.path.join(self.ws_dir, "detached.log")
-        self.here.mkdir(self.ws_dir)
-        self.here.write(path, "")
-        since = self.clock.stamp()
-        pid = self.here.spawn(self.child_argv(("--detach",)), path)
-        if self.wait_own_record(pid, since, path) is None:
-            die("the detached build of '%s' ended before it started -- what it said is\n    above, in full in %s" % (self.name, path))
+        pid = detached(self.here, self.recs, self.clock, "build", self.name, self.child_argv(("--detach",)),
+                       os.path.join(self.ws_dir, "detached.log"), "build")
         info("building %s in '%s', detached as pid %d -- this end can go away" % (self.cfg.name, self.name, pid))
         log("  follow:  wk logs %s -f" % self.name)
         log("  state:   wk status %s" % self.name)
         log("  stop it: %s" % self.kill)
         return 0
-
-    def wait_own_record(self, pid, since, path):
-        offset = [0]
-
-        def pump():
-            try:
-                with open(path, "rb") as f:
-                    f.seek(offset[0])
-                    data = f.read()
-            except OSError:
-                return
-            offset[0] += len(data)
-            sys.stderr.write(data.decode(errors="replace"))
-
-        while True:
-            pump()
-            t = self.recs.find("build", self.name, floor=since)
-            if t is not None and t.id.endswith("-%d" % pid):
-                return t
-            if _exited(pid) or not self.here.alive(pid):
-                pump()
-                return None
-            self.clock.sleep(1)
 
     # -- the babysitter
 
@@ -256,9 +254,7 @@ class Build:
             log("dry run -- nothing was built, no babysitter started.")
             log("  would run detached: %s" % " ".join(shlex.quote(a) for a in argv))
             return 0
-        self.here.mkdir(self.ws_dir)
-        self.here.write(blog, "")
-        pid = self.here.spawn(argv, blog)
+        pid = job.detach(self.here, argv, blog)
         branch = self.opts.get("branch")
         info("babysitter started for %s in '%s' (pid %d, model %s%s)" % (self.cfg.name, name, pid, model, ", branch " + branch if branch else ""))
         log("  it survives this terminal; up to %d fixes, then it closes itself" % attempts)
@@ -489,7 +485,7 @@ class Build:
                     if not self.checkout(o["branch"]):
                         die("could not check out '%s' in '%s'" % (o["branch"], name))
                 advance()
-                if not shell.sync_tools(self.root, here, t.name, name):
+                if not t.sync_tools(name):
                     die("pushing wk-tools into '%s' failed -- the reason is above" % name)
                 advance()
                 info("building %s%s in '%s' with -j%d (nice %d)" % (cfg.name, " (%s)" % label if label else "", name, jobs, nice))

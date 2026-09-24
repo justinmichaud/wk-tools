@@ -1,7 +1,7 @@
 """Coverage for the WK_* overrides read (with a default) in this agent's
 files: cmd/new, cmd/pi, cmd/pr, cmd/profile, cmd/push,
 cmd/quiesce, cmd/remote, cmd/rm, cmd/run, cmd/selftest,
-cmd/session, cmd/start, cmd/status, cmd/stop, cmd/sudo, cmd/sync,
+cmd/session, cmd/start, cmd/status, cmd/stop, cmd/key sudo, cmd/sync,
 cmd/test, cmd/version, cmd/vm, cmd/zed, the `wk` dispatcher, and
 `setup` (docs/PLAN.md's "every WK_* override ... documented
 ... and covered by a test, or removed").
@@ -27,9 +27,7 @@ from pathlib import Path
 from tests.support import REPO, WkTest, bash
 
 CMD_PI = REPO / "cmd" / "pi"
-CMD_QUIESCE = REPO / "cmd" / "quiesce"
 CMD_STATUS = REPO / "cmd" / "status"
-CMD_SUDO = REPO / "cmd" / "sudo"
 WK = REPO / "wk"
 SETUP = REPO / "setup"
 
@@ -117,48 +115,14 @@ class TestPiTag(unittest.TestCase):
 
 class TestQuiesceSettleSeconds(WkTest):
     """WK_SETTLE_SECONDS (cmd/quiesce -h, already documented): the settle
-    time 'quiesce on' sleeps before returning -- exercised through
-    lib/common.sh's wk_sleep with the exact expression cmd/quiesce reads,
-    never through a real 'quiesce on' (that mutates the host)."""
+    time 'quiesce on' sleeps before returning; tests/test_quiesce.py holds the
+    sleep to it against a fake clock."""
 
     def test_h_documents_it(self):
         cp = subprocess.run([str(WK), "quiesce", "-h"], cwd=str(REPO),
                              capture_output=True, text=True, timeout=10)
         self.assertIn("WK_SETTLE_SECONDS", cp.stdout + cp.stderr)
 
-    def test_override_shortens_the_settle(self):
-        line = _grep_line(CMD_QUIESCE, "WK_SETTLE_SECONDS:-30").strip()
-        self.assertTrue(line.startswith("wk_sleep"), line)
-
-        script = f'''
-set -euo pipefail
-. "{REPO}/lib/common.sh"
-t0=$(date +%s)
-{line}
-printf '%s' $(( $(date +%s) - t0 ))
-'''
-        cp = self.bash(script, env={"WK_SETTLE_SECONDS": "1"}, timeout=10)
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        # Default is 30s; well under that proves the override was read.
-        self.assertLessEqual(int(cp.stdout.strip()), 4, cp.stdout)
-
-
-class TestQuiesceStateIsOneDirectory(unittest.TestCase):
-    """WK_QUIESCE_STATE is a test hook (tests/test_quiesce.py sets it); cmd/quiesce
-    writes the directory and `wk status` reads the same one, with the same default."""
-
-    def test_cmd_quiesce_names_the_test(self):
-        self.assertIn("tests/test_quiesce.py", CMD_QUIESCE.read_text())
-
-    def test_the_default_is_the_same_in_both(self):
-        import sys
-        sys.path.insert(0, str(REPO / "lib"))
-        from wk import status
-        from wk.store import Store
-        q = _grep_line(CMD_QUIESCE, "WK_QUIESCE_STATE:-").strip()
-        self.assertIn('WK_QUIESCE_STATE:-$(wk_state_dir)/quiesce', q)
-        self.assertEqual(status.quiesce_dir(Store({"XDG_STATE_HOME": "/s", "HOME": "/h"})), "/s/wk/quiesce")
-        self.assertEqual(status.quiesce_dir(Store({"WK_QUIESCE_STATE": "/q", "HOME": "/h"})), "/q")
 
 class TestStatusFleetTimeout(unittest.TestCase):
     """WK_FLEET_TIMEOUT (cmd/status -h): already exercised end to end by
@@ -213,36 +177,22 @@ class TestStatusWait(unittest.TestCase):
         self.assertIn('env.get("WK_WAIT_INTERVAL", "5")', text)
 
 class TestSudoTimeoutMin(unittest.TestCase):
-    """WK_SUDO_TIMEOUT_MIN (cmd/sudo -h): the sudoers timestamp window, in
-    minutes. WK_SUDO_TIMEOUT_DESC (the seconds spelling of the same value,
-    printed in every verdict line) is derived from it so the two cannot
-    disagree -- this is the regression the derivation guards against."""
+    """WK_SUDO_TIMEOUT_MIN (wk key -h): the sudoers timestamp window, in
+    minutes. Sudo.timeout_desc (lib/wk/sudo.py -- the seconds spelling of the
+    same value, printed in every verdict line) is derived from it in the
+    constructor, so the two cannot disagree."""
 
     def test_h_documents_it_by_its_real_name(self):
-        cp = subprocess.run([str(WK), "sudo", "-h"], cwd=str(REPO),
+        cp = subprocess.run([str(WK), "key", "-h"], cwd=str(REPO),
                              capture_output=True, text=True, timeout=10)
         out = cp.stdout + cp.stderr
         self.assertIn("WK_SUDO_TIMEOUT_MIN", out)
 
     def test_description_tracks_an_override(self):
-        text = CMD_SUDO.read_text()
-        m = re.search(
-            r'^WK_SUDO_TIMEOUT_MIN=.*\n^WK_SUDO_TIMEOUT_DESC=(.*)$',
-            text, re.M,
-        )
-        self.assertIsNotNone(m, "could not find the WK_SUDO_TIMEOUT_DESC assignment")
-        script = f'''
-set -euo pipefail
-WK_SUDO_TIMEOUT_MIN="${{WK_SUDO_TIMEOUT_MIN:-0.5}}"
-WK_SUDO_TIMEOUT_DESC={m.group(1)}
-printf '%s' "$WK_SUDO_TIMEOUT_DESC"
-'''
-        default = subprocess.run(["bash", "-c", script], capture_output=True, text=True, env={})
-        self.assertEqual(default.stdout, "30 seconds", default.stdout + default.stderr)
-
-        overridden = subprocess.run(["bash", "-c", script], capture_output=True,
-                                     text=True, env={"WK_SUDO_TIMEOUT_MIN": "2"})
-        self.assertEqual(overridden.stdout, "120 seconds", overridden.stdout + overridden.stderr)
+        sys.path.insert(0, str(REPO / "lib"))
+        from wk.sudo import Sudo
+        self.assertEqual(Sudo(None, {}).timeout_desc, "30 seconds")
+        self.assertEqual(Sudo(None, {"WK_SUDO_TIMEOUT_MIN": "2"}).timeout_desc, "120 seconds")
 
 
 class TestSyncBranch(unittest.TestCase):

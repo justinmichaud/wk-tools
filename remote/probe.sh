@@ -41,7 +41,7 @@ else
     printf 'marker=no\n'
 fi
 
-# The credential copies `wk remote setup` writes into the home, by digest, so the machine that stores them tells a stale copy from its own without a value crossing back.
+# The credential copies `wk machine setup` writes into the home, by digest, so the machine that stores them tells a stale copy from its own without a value crossing back.
 for _f in "$HOME"/.wk-*; do
     [ -f "$_f" ] || continue
     case "$_f" in */.wk-remote) continue ;; esac

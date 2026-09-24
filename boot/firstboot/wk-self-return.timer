@@ -1,0 +1,7 @@
+[Unit]
+Description=Hand the machine back to host mode unless claimed
+ConditionPathExists=!/etc/wk/rescue
+[Install]
+WantedBy=timers.target
+[Timer]
+AccuracySec=1s

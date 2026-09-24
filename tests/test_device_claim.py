@@ -2,64 +2,43 @@
 
 A benchmark board is a fleet resource: exactly one thing may drive it at a
 time, and the two workstations are peers with their own `wk`. The claim is a
-task record that declares what it holds (`task_begin --holds device:rpi5`,
-lib/task.sh), so there is no second store to keep in step: a holder is live by
-construction, and liveness is asked of the process table at read time.
+hold on the holder's own task record (`holds: device:<machine>`,
+lib/wk/record.py), so there is no second store to keep in step: a holder is
+live by construction, and liveness is asked of the process table at read time.
 
-`task_holders` is this machine's half of the answer, `wk status --holds` is
-that same read as a read-only CLI surface, and `fleet_holders` asks every peer
-workstation through its own wk. `device_hold` is the barrier the commands that
-touch a board take first (`wk pi bench`, `wk pi deploy`, `wk boot`): it names
-the machine, the task and the command that stops it, and `--force` crosses it
-and records that it did.
+`Records.holders` is this machine's half of the answer, `wk status --holds` is
+that same read as a read-only CLI surface, and `record.fleet_holders` asks the
+podman machine's store and every peer workstation through its own wk.
+`record.hold` is the barrier the commands that touch a board take first (`wk
+pi bench`, `wk pi deploy`, `wk boot`, through lib/task.sh's device_hold): it
+names the machine, the task and the command that stops it, and `--force`
+crosses it and records that it did.
 
-No board, no ssh, no hardware: the fleet is stubbed and every record is
-written into a scratch $WK_STORE by lib/task.sh itself.
+No board, no ssh, no hardware: the fleet is fakes, and the bash half writes
+into a scratch $WK_STORE.
 
-Run: python3 -m unittest tests.test_device_claim -v
+Run: python3 tests/run.py -k tests.test_device_claim
 """
+import contextlib
+import io
 import os
 import shlex
 import subprocess
+import sys
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from tests.support import REPO, WkTest, bash, clean_env
 
-TAB = "\t"
+sys.path.insert(0, str(REPO / "lib"))
+from wk import act, record  # noqa: E402
+from wk.clock import FakeClock  # noqa: E402
+from wk.machine import Fake  # noqa: E402
+
 PRELUDE = '. "%s/lib/common.sh"\n. "%s/lib/task.sh"\n' % (REPO, REPO)
-
-# This machine's store is its own, so the podman machine is not a second store
-# to ask: that arm is TestThePodmanMachineIsAskedToo's.
-OWN_STORE = 'store_is_local() { return 0; }\n'
-
-# What fleet_holders needs of lib/target.sh, with no machine behind it: one
-# peer, reachable, answering about its own store through its own wk.
-PEER = OWN_STORE + '''
-peer_workstations() { echo moose; }
-load_target() { :; }
-machine_answers() { return 0; }
-t_wk() { printf '%s\\n' "$PEER_ROWS"; }
-'''
-
-# The same, with nothing to ask: this machine is the whole fleet.
-NO_PEERS = OWN_STORE + 'peer_workstations() { :; }\n'
-
-DEAF_PEER = OWN_STORE + '''
-peer_workstations() { echo moose; }
-load_target() { :; }
-machine_answers() { printf '%s  unreachable over ssh\\n' "$1"; return 1; }
-t_wk() { echo "the peer was asked anyway"; }
-'''
-
-# A peer that answers, with a wk too old to know the flag.
-OLD_PEER = OWN_STORE + '''
-peer_workstations() { echo moose; }
-load_target() { :; }
-machine_answers() { return 0; }
-t_wk() { return 1; }
-'''
+ROW = ("bench-rpi5-x-20260915T000000Z-9", "moose", "bench rpi5/speedometer3", "kill 4242")
 
 
 def alive(pid):
@@ -71,10 +50,14 @@ def alive(pid):
 
 
 class ClaimTest(WkTest):
+    """A scratch store that is this machine's own, and a registry of no other machine."""
+
     def setUp(self):
         super().setUp()
         self.store = self.tmp / "store"
-        self.env = {"WK_STORE": str(self.store)}
+        self.store.mkdir()
+        (self.tmp / "no-machines").mkdir()
+        self.env = {"WK_STORE": str(self.store), "WK_MACHINES_DIR": str(self.tmp / "no-machines")}
 
     def sh(self, body, env=None, check=True):
         cp = bash(PRELUDE + body, env=dict(self.env, **(env or {})))
@@ -91,9 +74,8 @@ class ClaimTest(WkTest):
         self.addCleanup(lambda: alive(pid) and os.kill(pid, 9))
         return pid
 
-    def holder(self, machine="rpi5", kind="bench", name="rpi5/speedometer3",
-               pid=None, ended=None):
-        """A live task record holding <machine>, written by lib/task.sh."""
+    def holder(self, machine="rpi5", kind="bench", name="rpi5/speedometer3", pid=None, ended=None):
+        """A live task record holding <machine>, written through lib/task.sh."""
         if pid is None:
             pid = self.spawn()
         body = ['d=$(task_begin --holds device:%s %s here %s "kill %d" "" "one step")'
@@ -103,6 +85,9 @@ class ClaimTest(WkTest):
             body.append('task_end "$d" %s' % ended)
         body.append('printf "%s" "$d"')
         return Path(self.sh("\n".join(body)).stdout.strip()), pid
+
+    def rows(self, resource="device:rpi5"):
+        return record.Records(env={"WK_STORE": str(self.store)}).holders(resource)
 
     def tasks(self):
         d = self.store / "task"
@@ -118,19 +103,18 @@ class TestTheRecordDeclaresWhatItHolds(ClaimTest):
         d = Path(self.sh('task_begin build here ws1 "wk build ws1 --kill" /l compile').stdout.strip())
         self.assertFalse((d / "holds").exists())
 
-    def test_the_claim_is_written_before_the_plan_that_publishes_the_record(self):
-        """task_list only counts a directory with a plan in it, so a claim
-        written after the plan would be a board held by nobody for as long as
-        the two writes are apart."""
-        text = (REPO / "lib" / "task.sh").read_text()
-        self.assertLess(text.index('_task_put "$dir/holds"'),
-                        text.index('mv "$dir/plan.tmp.$$" "$dir/plan"'))
+    def test_a_hold_taken_from_bash_names_the_shell_that_took_it(self):
+        """The one path: lib/task.sh's task_begin is lib/wk/record.py's begin,
+        and the pid it records is the caller's, not the Python it ran."""
+        out = self.sh('d=$(task_begin --holds device:rpi5 bench here x "k" "" one)\n'
+                      'printf "%s %s" "$$" "$(task_field "$d" pid)"').stdout.split()
+        self.assertEqual(out[0], out[1])
 
     def test_a_live_holder_is_one_row_naming_the_machine_and_its_kill(self):
         _, pid = self.holder()
-        rows = self.sh('task_holders device:rpi5').stdout.splitlines()
+        rows = self.rows()
         self.assertEqual(1, len(rows), rows)
-        task_id, machine, what, kill = rows[0].split(TAB)
+        task_id, machine, what, kill = rows[0]
         self.assertTrue(task_id.startswith("bench-rpi5-speedometer3-"), task_id)
         self.assertEqual("bench rpi5/speedometer3", what)
         self.assertEqual("kill %d" % pid, kill)
@@ -138,11 +122,11 @@ class TestTheRecordDeclaresWhatItHolds(ClaimTest):
 
     def test_another_resource_is_not_this_one(self):
         self.holder(machine="rpi4")
-        self.assertEqual("", self.sh('task_holders device:rpi5').stdout)
+        self.assertEqual([], self.rows())
 
     def test_a_task_that_ended_holds_nothing(self):
         self.holder(ended=0)
-        self.assertEqual("", self.sh('task_holders device:rpi5').stdout)
+        self.assertEqual([], self.rows())
 
     def test_a_holder_whose_pid_is_gone_holds_nothing(self):
         """The claim cannot outlive its holder: liveness is the process table
@@ -153,123 +137,189 @@ class TestTheRecordDeclaresWhatItHolds(ClaimTest):
             if not alive(pid):
                 break
             time.sleep(0.1)
-        self.assertEqual("", self.sh('task_holders device:rpi5').stdout)
+        self.assertEqual([], self.rows())
 
     def test_the_record_is_released_when_its_command_ends(self):
         d, _ = self.holder()
         self.sh('WK_DEVICE_TASK=%s device_release' % shlex.quote(str(d)))
         self.assertTrue((d / "exit").exists())
-        self.assertEqual("", self.sh('task_holders device:rpi5').stdout)
+        self.assertEqual([], self.rows())
 
 
-class TestTheFleetIsAsked(ClaimTest):
-    ROW = "bench-rpi5-x-20260915T000000Z-9\tmoose\tbench rpi5/speedometer3\tkill 4242"
+class Target:
+    """A machine that answers a probe with `side` and its own wk with (rc, out)."""
 
-    def test_a_peer_is_asked_through_its_own_wk(self):
-        cp = self.sh(PEER + 'fleet_holders device:rpi5',
-                     env={"PEER_ROWS": self.ROW})
-        self.assertEqual([self.ROW], cp.stdout.splitlines())
+    def __init__(self, name, side="answering", why="", rc=0, out=""):
+        self.name, self.env = name, {}
+        self.side, self.why, self.rc, self.out = side, why, rc, out
+        self.asked = []
+
+    def probe(self):
+        return self.side, self.why
+
+    def wk(self, *args, env=None, quiet=False):
+        self.asked.append(args)
+        return self.rc, self.out
+
+
+class TestTheFleetIsAsked(unittest.TestCase):
+    def setUp(self):
+        self.records = mock.Mock()
+        self.records.holders.return_value = []
+
+    def test_a_peer_is_asked_and_its_rows_are_the_answer(self):
+        rows = record.fleet_holders("device:rpi5", self.records, [("moose", lambda r: ("\t".join(ROW) + "\r\n", ""))])
+        self.assertEqual([ROW], rows)
 
     def test_this_machine_and_the_peers_are_both_the_answer(self):
-        self.holder()
-        cp = self.sh(PEER + 'fleet_holders device:rpi5', env={"PEER_ROWS": self.ROW})
-        rows = cp.stdout.splitlines()
-        self.assertEqual(2, len(rows), rows)
-        self.assertEqual(self.ROW, rows[1])
+        here = ("id", "tolken", "bench rpi5/jetstream3", "kill 1")
+        self.records.holders.return_value = [here]
+        rows = record.fleet_holders("device:rpi5", self.records, [("moose", lambda r: ("\t".join(ROW), ""))])
+        self.assertEqual([here, ROW], rows)
 
-    def test_a_peer_that_cannot_be_reached_is_a_row_of_its_own(self):
+    def test_a_store_that_could_not_be_asked_is_a_row_of_its_own(self):
         """Never silence: an unread machine is not a free board."""
-        cp = self.sh(DEAF_PEER + 'fleet_holders device:rpi5')
-        rows = cp.stdout.splitlines()
-        self.assertEqual(1, len(rows), rows)
-        _, who, what, why = rows[0].split(TAB)
-        self.assertEqual(("moose", "unknown"), (who, what))
-        self.assertIn("unreachable over ssh", why)
+        rows = record.fleet_holders("device:rpi5", self.records, [("moose", lambda r: (None, "unreachable\tover ssh"))])
+        self.assertEqual([("?", "moose", "unknown", "unreachable over ssh")], rows)
 
-    def test_a_peer_whose_wk_does_not_read_the_flag_is_the_same_row(self):
-        cp = self.sh(OLD_PEER + 'fleet_holders device:rpi5')
-        rows = cp.stdout.splitlines()
-        self.assertEqual(1, len(rows), rows)
-        _, who, what, why = rows[0].split(TAB)
-        self.assertEqual(("moose", "unknown"), (who, what))
+    def stores(self, local, targets, peers=("moose",)):
+        with mock.patch("wk.shell.store_is_local", return_value=local), \
+                mock.patch("wk.shell.peer_workstations", return_value=list(peers)), \
+                mock.patch("wk.targets.Registry") as reg:
+            reg.return_value.load.side_effect = lambda name: targets[name]
+            return [(name, ask("device:rpi5")) for name, ask in record.fleet_stores(str(REPO), {}, Fake())]
+
+    def test_a_peer_is_asked_through_its_own_wk(self):
+        moose = Target("moose", out="\t".join(ROW))
+        self.assertEqual([("moose", ("\t".join(ROW), ""))], self.stores(True, {"moose": moose}))
+        self.assertEqual([("status", "--holds", "device:rpi5")], moose.asked)
+
+    def test_a_peer_that_cannot_be_reached_is_not_asked_and_says_why(self):
+        moose = Target("moose", side="unreachable", why="timed out")
+        [(_, (rows, why))] = self.stores(True, {"moose": moose})
+        self.assertIsNone(rows)
+        self.assertIn("unreachable over ssh", why)
+        self.assertEqual([], moose.asked)
+
+    def test_a_peer_whose_wk_does_not_read_the_flag_names_the_sync(self):
+        [(_, (rows, why))] = self.stores(True, {"moose": Target("moose", rc=1)})
+        self.assertIsNone(rows)
         self.assertIn("wk sync --tools moose", why)
 
-    def test_the_read_needs_the_library_that_knows_the_peers(self):
-        cp = bash(PRELUDE + 'fleet_holders device:rpi5', env=self.env)
-        self.assertNotEqual(0, cp.returncode)
-        self.assertIn("lib/target.sh", cp.stdout + cp.stderr)
+    def test_a_store_of_this_machines_own_is_not_asked_twice(self):
+        """On Linux the container target's store is the directory this machine
+        has already walked, and a board would read as held by itself."""
+        self.assertEqual([], self.stores(True, {}, peers=()))
+
+    def test_a_store_elsewhere_is_asked_as_well(self):
+        vm = Target("container", out="\t".join(ROW))
+        [(name, (rows, _))] = self.stores(False, {"container": vm}, peers=())
+        self.assertIn("podman machine", name)
+        self.assertEqual("\t".join(ROW), rows)
+
+    def test_a_podman_machine_that_did_not_answer_says_so(self):
+        [(name, (rows, why))] = self.stores(False, {"container": Target("container", rc=1)}, peers=())
+        self.assertIn("podman machine", name)
+        self.assertIsNone(rows)
+        self.assertIn("wk start", why)
 
 
-class TestTheBarrier(ClaimTest):
-    HOLD = 'device_hold rpi5 bench rpi5/jetstream3 "kill $$" "" "jetstream3 on rpi5"'
+class TestTheBarrier(unittest.TestCase):
+    def setUp(self):
+        self.store = Path(__import__("tempfile").mkdtemp(prefix="wk-test-claim-"))
+        self.addCleanup(record._rmtree, self.store)
+        self.machine = Fake()
+        self.records = record.Records(self.store, clock=FakeClock(), machine=self.machine,
+                                      env={"WK_STORE": str(self.store)})
+        self.fleet_asked = []
 
-    def test_a_free_board_is_taken_and_the_claim_is_the_record(self):
-        cp = self.sh(NO_PEERS + self.HOLD + '\nprintf "%s|%s" "$WK_DEVICE_TASK" "$WK_DEVICE_HELD"')
-        task, held = cp.stdout.split("|")
-        self.assertEqual("device:rpi5", held)
-        self.assertEqual("device:rpi5", (Path(task) / "holds").read_text().strip())
-        self.assertTrue(task.startswith(str(self.store)), task)
+    def hold(self, rows=(), env=None, **os_env):
+        def fleet(resource):
+            self.fleet_asked.append(resource)
+            return list(rows)
+        err = io.StringIO()
+        with mock.patch.dict(os.environ, os_env), contextlib.redirect_stderr(err):
+            try:
+                t = record.hold(self.records, fleet, "rpi5", "bench", "rpi5/jetstream3", "kill 1", "",
+                                ["jetstream3 on rpi5"], 4321, env or {})
+            except act.Refused as e:
+                return e, err.getvalue()
+        return t, err.getvalue()
+
+    def tasks(self):
+        return [t.id for t in self.records.list()]
+
+    def test_a_free_board_is_taken_and_the_claim_is_the_holders_own_record(self):
+        t, _ = self.hold()
+        self.assertEqual(("device:rpi5", "4321"), (t.field("holds"), t.field("pid")))
+        self.assertEqual(["device:rpi5"], self.fleet_asked)
 
     def test_a_held_board_refuses_naming_the_machine_the_task_and_the_remedy(self):
-        _, pid = self.holder()
-        cp = self.sh(NO_PEERS + self.HOLD, check=False)
-        out = cp.stdout + cp.stderr
-        self.assertNotEqual(0, cp.returncode, out)
-        self.assertIn("rpi5", out)
-        self.assertIn("bench rpi5/speedometer3", out)
-        self.assertIn("kill %d" % pid, out)
-        self.assertIn("--force", out)
-        self.assertEqual(1, len(self.tasks()), "a refused claim wrote a record anyway")
-
-    def test_a_peer_holding_it_refuses_here(self):
-        cp = self.sh(PEER + self.HOLD, check=False,
-                     env={"PEER_ROWS": TestTheFleetIsAsked.ROW})
-        out = cp.stdout + cp.stderr
-        self.assertNotEqual(0, cp.returncode, out)
-        self.assertIn("moose", out)
-        self.assertIn("kill 4242", out)
-        self.assertEqual([], self.tasks())
+        e, out = self.hold(rows=[ROW])
+        self.assertIsInstance(e, act.Refused)
+        for want in ("rpi5", "bench rpi5/speedometer3", "moose", "kill 4242", "--force"):
+            self.assertIn(want, out)
+        self.assertEqual([], self.tasks(), "a refused claim wrote a record anyway")
 
     def test_force_crosses_it_records_the_forcing_and_takes_the_claim(self):
-        self.holder()
-        cp = self.sh(NO_PEERS + self.HOLD + '\nprintf "%s" "$WK_DEVICE_TASK"',
-                     env={"WK_FORCE": "1"})
-        out = cp.stdout + cp.stderr
+        with mock.patch.object(act, "_forced", []):
+            t, out = self.hold(rows=[ROW], WK_FORCE="1")
         self.assertIn("FORCED past a barrier", out)
-        self.assertEqual(2, len(self.tasks()), out)
+        self.assertEqual([t.id], self.tasks())
 
-    def test_a_peer_that_could_not_be_asked_is_reported_and_does_not_refuse(self):
+    def test_a_machine_that_could_not_be_asked_is_reported_and_does_not_refuse(self):
         """A workstation that is off is the normal state, so this is a warning
         and not a refusal -- but it is never silent."""
-        cp = self.sh(DEAF_PEER + self.HOLD)
-        self.assertIn("moose", cp.stderr)
-        self.assertIn("could not be asked", cp.stderr)
-        self.assertEqual(1, len(self.tasks()))
+        t, out = self.hold(rows=[("?", "moose", "unknown", "unreachable over ssh")])
+        self.assertIn("moose -- unreachable over ssh", out)
+        self.assertIn("could not be asked", out)
+        self.assertEqual([t.id], self.tasks())
 
     def test_one_drivers_own_claim_passes_down_to_what_it_runs(self):
         """`wk pi bench --ab-systems` runs `wk boot` for each leg: a claim
         that refused its own holder would deadlock the board's own driver."""
-        self.holder()
-        cp = self.sh(NO_PEERS + self.HOLD + '\nprintf "%s" "${WK_DEVICE_TASK:-none}"',
-                     env={"WK_DEVICE_HELD": "device:rpi5"})
-        self.assertEqual("none", cp.stdout)
-        self.assertEqual(1, len(self.tasks()), "the inherited claim wrote a second record")
+        t, _ = self.hold(rows=[ROW], env={"WK_DEVICE_HELD": "device:rpi5"})
+        self.assertIsNone(t)
+        self.assertEqual([], self.fleet_asked)
+        self.assertEqual([], self.tasks())
 
     def test_an_inherited_claim_on_another_board_still_refuses(self):
-        self.holder()
-        cp = self.sh(NO_PEERS + self.HOLD, check=False, env={"WK_DEVICE_HELD": "device:rpi4"})
-        self.assertNotEqual(0, cp.returncode, cp.stdout + cp.stderr)
+        e, _ = self.hold(rows=[ROW], env={"WK_DEVICE_HELD": "device:rpi4"})
+        self.assertIsInstance(e, act.Refused)
 
     def test_a_dry_run_reads_the_claim_and_takes_none(self):
-        cp = self.sh(NO_PEERS + self.HOLD + '\nprintf "%s" "${WK_DEVICE_TASK:-none}"',
-                     env={"WK_DRY_RUN": "1"})
-        self.assertEqual("none", cp.stdout)
+        t, _ = self.hold(WK_DRY_RUN="1")
+        self.assertIsNone(t)
+        self.assertEqual(["device:rpi5"], self.fleet_asked)
         self.assertEqual([], self.tasks())
 
     def test_a_dry_run_still_refuses_a_held_board(self):
-        self.holder()
-        cp = self.sh(NO_PEERS + self.HOLD, check=False, env={"WK_DRY_RUN": "1"})
-        self.assertNotEqual(0, cp.returncode, cp.stdout + cp.stderr)
+        e, _ = self.hold(rows=[ROW], WK_DRY_RUN="1")
+        self.assertIsInstance(e, act.Refused)
+
+
+class TestTheShimTakesIt(ClaimTest):
+    """lib/task.sh's device_hold over the Python: the claim, exported to what
+    the driver runs, released when the command ends."""
+
+    HOLD = 'device_hold rpi5 bench rpi5/jetstream3 "kill $$" "" "jetstream3 on rpi5"'
+
+    def test_a_free_board_is_taken_and_exported(self):
+        cp = self.sh(self.HOLD + '\nprintf "%s|%s|%s" "$WK_DEVICE_TASK" "$WK_DEVICE_HELD" "$$"')
+        task, held, shell = cp.stdout.split("|")
+        self.assertEqual("device:rpi5", held)
+        self.assertEqual("device:rpi5", (Path(task) / "holds").read_text().strip())
+        self.assertEqual(shell, (Path(task) / "pid").read_text().strip())
+        self.assertTrue((Path(task) / "exit").exists(), "the claim outlived the command that took it")
+
+    def test_a_held_board_ends_the_caller(self):
+        _, pid = self.holder()
+        cp = self.sh(self.HOLD + '\necho SURVIVED', check=False)
+        out = cp.stdout + cp.stderr
+        self.assertNotEqual(0, cp.returncode, out)
+        self.assertNotIn("SURVIVED", out)
+        self.assertIn("kill %d" % pid, out)
+        self.assertEqual(1, len(self.tasks()))
 
 
 class TestStatusHolds(ClaimTest):
@@ -300,66 +350,14 @@ class TestStatusHolds(ClaimTest):
         self.assertTrue(any("readonly" in l for l in decl), decl)
 
 
-MACHINE_CONF = '''NODE_SSH=fakeboard
+MACHINE_CONF = '''KIND=board
+NODE_SSH=fakeboard
 NODE_DRIVER=no-such-driver
 NODE_DEVICE=/dev/null
 NODE_PROFILE=webkit-2.52-yocto-rpi5-64
 NODE_ROLE=bench-device
 NODE_NOTE="a board that is not there, for a refusal that needs no hardware"
 '''
-
-
-class TestThePodmanMachineIsAskedToo(WkTest):
-    """A deploy is routed to the machine holding the lane, and on a macOS
-    workstation that is the podman machine -- so a claim can be taken in a
-    store this side does not read. It is asked exactly when the store is not
-    this machine's: on Linux the container target's store is the directory
-    task_holders has already walked, and a board would read as held by
-    itself."""
-
-    ASK = PRELUDE + '''
-peer_workstations() { :; }
-wk_machine_name() { echo tolken; }
-load_target() { :; }
-t_wk() { printf '%s\\n' "$VM_ROWS"; }
-'''
-
-    def _rows(self, local, vm_rows="", store_is_local=True):
-        return bash(self.ASK
-                    + ("store_is_local() { return %d; }\n" % (0 if store_is_local else 1))
-                    + ("task_holders() { %s; }\n" % (("printf '%s\\n' " + repr(local))
-                                                     if local else ":"))
-                    + "fleet_holders device:rpi5\n",
-                    env={"VM_ROWS": vm_rows})
-
-    ROW = "id\ttolken\tbench rpi5/speedometer3\twk pi bench rpi5 --kill"
-
-    def test_a_store_of_this_machines_own_is_asked_once(self):
-        cp = self._rows(self.ROW, vm_rows=self.ROW)
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertEqual(cp.stdout.strip().count("bench rpi5/speedometer3"), 1,
-                         "a board read as held by itself")
-
-    def test_a_store_elsewhere_is_asked_as_well(self):
-        cp = self._rows("", vm_rows=self.ROW, store_is_local=False)
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertIn("bench rpi5/speedometer3", cp.stdout,
-                      "a claim taken in the podman machine was invisible")
-
-    def test_a_machine_that_did_not_answer_is_a_row_of_its_own(self):
-        """Never silence: an unread store is not a free board."""
-        cp = bash(PRELUDE + '''
-peer_workstations() { :; }
-wk_machine_name() { echo tolken; }
-load_target() { :; }
-store_is_local() { return 1; }
-task_holders() { :; }
-t_wk() { return 1; }
-fleet_holders device:rpi5
-''')
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertIn("unknown", cp.stdout)
-        self.assertIn("podman machine", cp.stdout)
 
 
 class TestTheCommandsTakeIt(ClaimTest):

@@ -1,20 +1,30 @@
-"""Build accounting (lib/resources.sh): every build wk starts leaves a
-budget record while it runs, the next build is sized against what is left,
-and a machine spoken for refuses rather than oversubscribes. Records are
-lock-shaped -- a dead holder's record is pruned on the next read.
+"""Build accounting (lib/wk/resources.py, and lib/resources.sh its shim):
+every build wk starts leaves a budget record while it runs, the next build is
+sized against what is left, and a machine spoken for refuses rather than
+oversubscribes. Records are lock-shaped -- a dead holder's record is pruned
+on the next read.
 
 Also the rule that makes a refused reading reach the person who ran the
 command, in two halves that only work together (TestAReadingRefusalReaches
 ItsCaller and TestEveryCallSiteTakesAReadingIntoAVariable below).
 
-Run: python3 -m unittest tests.test_resources -v
+Run: python3 tests/run.py -k tests.test_resources
 """
+import contextlib
+import io
 import os
 import re
 import subprocess
+import sys
 import unittest
+from unittest import mock
 
 from tests.support import REPO, WkTest, bash, shell_files, stub_path
+
+sys.path.insert(0, str(REPO / "lib"))
+from wk import resources  # noqa: E402
+from wk.act import Refused  # noqa: E402
+from wk.machine import Fake, Local  # noqa: E402
 
 YOCTO = REPO / "image" / "yocto.sh"
 
@@ -38,39 +48,41 @@ MB_PER_JOB = int(re.search(r"^YOCTO_WEBKIT_MB_PER_JOB=(\d+)",
                            YOCTO.read_text(), re.M).group(1))
 
 
+def df_answering(free_gb):
+    """`df -Pk` as both dfs print it, with <free_gb> available; "" is a df that says nothing."""
+    if free_gb == "":
+        return "exit 1"
+    return "echo 'Filesystem 1024-blocks Used Available Capacity Mounted on'\n" \
+           "echo '/dev/x 999999999 1 %d 1%% /'\n" % (int(free_gb) * 1048576)
+
+
 class TestBuildRecords(WkTest):
-    def _bash(self, script):
+    """Through the bash shim, against this machine's process table: a record's holder is a real pid."""
+
+    def _bash(self, script, free_gb=999):
         env = {"XDG_STATE_HOME": str(self.tmp / "state"), "WK_AVAIL_MB": "100000",
                "WK_CGROUP_CORES": "64", "WK_MB_PER_JOB": "1000", "WK_BUILD_MACHINE": "testbox"}
-        return bash(f'set -euo pipefail\n. "{REPO}/lib/common.sh"\n. "{REPO}/lib/resources.sh"\n' + script, env=env, timeout=60)
+        with stub_path({"df": df_answering(free_gb)}) as binp:
+            env["PATH"] = f"{binp}:{os.environ['PATH']}"
+            return bash(f'set -euo pipefail\n. "{REPO}/lib/common.sh"\n. "{REPO}/lib/resources.sh"\n' + script,
+                        env=env, timeout=60)
 
     def test_a_live_record_is_subtracted_and_a_dead_one_pruned(self):
         cp = self._bash('''
 sleep 300 & live=$!
 build_record "live build" 20 40000 "pid:$live"
 build_record "dead build" 30 50000 "pid:99999999"
-echo "reserved=$(build_reserved_mb) jobs=$(build_reserved_jobs)"
-echo "records=$(ls "$(builds_dir)" | wc -l | tr -d ' ')"   # BSD wc pads its count
 echo "next=$(build_jobs)"
+cat "$XDG_STATE_HOME"/wk/builds/*
+echo "records=$(ls "$XDG_STATE_HOME/wk/builds" | wc -l | tr -d ' ')"   # BSD wc pads its count
 kill $live
 ''')
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertIn("reserved=40000 jobs=20", cp.stdout)
+        self.assertIn("label=live build", cp.stdout)
+        self.assertNotIn("dead build", cp.stdout)
         self.assertIn("records=1", cp.stdout, "the dead holder's record is pruned on read")
         # (100000 - 40000) / 1000 = 60 by memory, 64 - 20 = 44 by cores
         self.assertIn("next=44", cp.stdout)
-
-    def test_a_machine_already_building_refuses_without_force(self):
-        cp = self._bash('''
-sleep 300 & live=$!
-trap 'kill $live' EXIT
-build_record "big build" 60 98000 "pid:$live"
-jobs=$(build_jobs); echo "jobs=$jobs"
-( build_admit "a second build" "$jobs" ) && echo admitted || echo refused
-''')
-        self.assertIn("jobs=2", cp.stdout)
-        self.assertIn("--force proceeds anyway", cp.stdout + cp.stderr)
-        self.assertNotIn("admitted", cp.stdout)
 
     def test_a_second_build_is_refused_however_much_room_is_left(self):
         """One machine builds one thing at a time. A build that would still
@@ -81,42 +93,26 @@ sleep 300 & live=$!
 trap 'kill $live' EXIT
 build_record "one small build" 1 1000 "pid:$live"
 jobs=$(build_jobs); echo "jobs=$jobs"
-( build_admit "a second build" "$jobs" ) && echo admitted || echo refused
+( build_admit "a second build" "$jobs" ) && st=0 || st=$?
+echo "status=$st"
 ''')
-        self.assertNotIn("admitted", cp.stdout, cp.stdout + cp.stderr)
         self.assertIn("one thing at a time", cp.stdout + cp.stderr)
         self.assertIn("one small build", cp.stdout + cp.stderr,
                       "the refusal does not name what is already building")
+        self.assertIn("--force proceeds anyway", cp.stdout + cp.stderr)
+        # The refusal a scheduled step comes back to: another build ending is
+        # what changes the answer, so lib/sched.py puts the step back in the queue.
+        self.assertIn(f"status={RETRY_EXIT}", cp.stdout)
 
     def test_nothing_building_is_admitted(self):
         cp = self._bash('( build_admit "the only build" 8 ) && echo admitted || echo refused')
         self.assertIn("admitted", cp.stdout, cp.stdout + cp.stderr)
 
-    def test_a_machine_already_building_is_not_now_rather_than_no(self):
-        """The refusal a scheduled step comes back to: another build ending is
-        what changes the answer, so it exits WK_RETRY_EXIT and lib/sched.py
-        puts the step back in the queue instead of cascading it as a failure."""
-        cp = self._bash('''
-store_free_gb() { echo 999; }   # the disk is asked first, and this rule is about memory
-sleep 300 & live=$!
-trap 'kill $live' EXIT
-build_record "big build" 60 98000 "pid:$live"
-( build_admit "a second build" "$(build_jobs)" ) && st=0 || st=$?
-echo "status=$st"
-''')
-        self.assertIn(f"status={RETRY_EXIT}", cp.stdout,
-                      "a capacity refusal did not exit the scheduler's retry status")
-
     def test_a_disk_refusal_is_no_rather_than_not_now(self):
         """A step ending does not give the filesystem its blocks back, so this
         one is a plain refusal and the scheduler does not come back to it."""
-        cp = self._bash('''
-store_free_gb() { echo 1; }
-( disk_admit "a build" 60 ) && st=0 || st=$?
-echo "status=$st"
-''')
-        self.assertIn("status=1", cp.stdout,
-                      "a disk refusal asked the scheduler to retry it")
+        cp = self._bash('( disk_admit "a build" 60 ) && st=0 || st=$?\necho "status=$st"', free_gb=1)
+        self.assertIn("status=1", cp.stdout, "a disk refusal asked the scheduler to retry it")
 
     def test_the_two_languages_agree_on_the_retry_status(self):
         """One protocol number, written in bash and in python: a test rather
@@ -130,66 +126,113 @@ echo "status=$st"
         cp = self._bash('''
 sleep 300 & live=$!
 WK_BUILD_MACHINE=elsewhere build_record "remote build" 60 98000 "pid:$live"
-echo "reserved=$(build_reserved_mb)"
+echo "next=$(build_jobs)"
 kill $live
 ''')
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertIn("reserved=0", cp.stdout)
+        self.assertIn("next=64", cp.stdout, "another machine's build was spoken for here")
+
+
+class TestTheDefaultsAreThePythons(WkTest):
+    """The variables a bash caller reads (`$WK_RESERVE_MB`, `$WK_BUILD_DISK_GB`)
+    are lib/wk/resources.py's figures, and one a caller set stands."""
+
+    def test_the_bash_variables_are_the_python_constants(self):
+        cp = bash(f'. "{REPO}/lib/common.sh"\nWK_RESERVE_MB=7\n. "{REPO}/lib/resources.sh"\n'
+                  'echo "$WK_RESERVE_MB $WK_RESERVE_CORES $WK_MB_PER_JOB $WK_BUILD_DISK_GB"')
+        self.assertEqual(cp.returncode, 0, cp.stderr)
+        from wk.buildconf import DISK_GB
+        self.assertEqual(cp.stdout.split(), ["7", str(resources.RESERVE_CORES), str(resources.MB_PER_JOB), str(DISK_GB)])
+
+
+class TestTheReadingsTheBashHadAlone(unittest.TestCase):
+    """host_load, describe_cores and the composite job count, against a fake machine."""
+
+    def res(self, os_name, env=None, answers=(), files=None):
+        m = Fake()
+        for argv, out in answers:
+            m.answer(argv, out=out)
+        m.files.update(files or {})
+        return resources.Resources(m, env or {}, os_name)
+
+    def refusal(self, fn):
+        with self.assertRaises(Refused), contextlib.redirect_stderr(io.StringIO()) as err:
+            fn()
+        return err.getvalue()
+
+    def test_a_load_average_is_whole_cores_from_either_kernel(self):
+        mac = self.res("macos", answers=[(["sysctl", "-n", "vm.loadavg"], "{ 3.41 2.20 1.90 }\n")])
+        linux = self.res("linux", files={"/proc/loadavg": "5.93 4.00 3.00 2/900 12345\n"})
+        self.assertEqual((mac.host_load(), linux.host_load()), (3, 5))
+
+    def test_a_load_average_that_did_not_come_back_refuses_and_names_it(self):
+        self.assertIn("the load average (sysctl vm.loadavg)", self.refusal(self.res("macos").host_load))
+        self.assertIn("the load average (/proc/loadavg)", self.refusal(self.res("linux").host_load))
+
+    def test_both_core_kinds_are_named_for_a_person_or_neither_is(self):
+        """Apple silicon has two kinds of core and an Intel Mac one; half of the pair is a report with a hole in it."""
+        both = [(["sysctl", "-n", "hw.perflevel0.logicalcpu"], "8\n"), (["sysctl", "-n", "hw.perflevel1.logicalcpu"], "4\n")]
+        self.assertEqual(self.res("macos", answers=both).describe_cores(), "8 P + 4 E")
+        self.assertEqual(self.res("macos", answers=[(["sysctl", "-n", "hw.ncpu"], "12\n")]).describe_cores(), "12 cores")
+        self.assertIn("the efficiency core count", self.refusal(self.res("macos", answers=both[:1]).describe_cores))
+
+    def test_the_job_count_is_the_memory_and_cores_not_spoken_for(self):
+        env = {"WK_CGROUP_CORES": "64", "WK_AVAIL_MB": "100000", "WK_MB_PER_JOB": "1000"}
+        res = self.res("linux", env)
+        budget = resources.Budget(res.machine, env)
+        self.assertEqual(resources.build_jobs(res, budget, [("live build", 20, 40000)]), 44)
+
+    def test_a_polite_count_reads_this_machines_load_when_no_caller_measured_one(self):
+        """WK_LOAD is a remote target's, measured by whoever could reach it;
+        without one the machine is asked rather than assumed idle."""
+        env = {"WK_CGROUP_CORES": "12", "WK_AVAIL_MB": "100000", "WK_MB_PER_JOB": "1000"}
+        res = self.res("macos", env, answers=[(["sysctl", "-n", "vm.loadavg"], "{ 3.41 2.20 1.90 }\n")])
+        # 12 cores, load 3 spoken for, and never more than half a box.
+        self.assertEqual(resources.build_jobs(res, resources.Budget(res.machine, env), [], polite=True), 6)
+        # A measured load stands, and with memory busy it is not read as a killed build's stale average.
+        res = self.res("macos", dict(env, WK_LOAD="9", WK_AVAIL_MB="8000"))
+        self.assertEqual(resources.build_jobs(res, resources.Budget(res.machine, env), [], polite=True), 3)
 
 
 class TestStoreFreeGb(WkTest):
-    """store_free_gb (lib/resources.sh), run for real on the machine the
-    test is on. Every other disk test stubs it, which is how a GNU-only
-    `df -B1G --output=avail` survived: BSD df exits 64 on those options, and
-    under `set -euo pipefail` that status came out of the assignment in
-    disk_admit and ended `wk build` with no message at all -- every macOS
-    build, container and guest alike."""
+    """The store's free space, read for real on the machine the test is on.
+    Every other disk test stubs df, which is how a GNU-only `df -B1G
+    --output=avail` survived: BSD df exits 64 on those options, and that ended
+    `wk build` with no message at all -- every macOS build, container and
+    guest alike."""
 
-    def _bash(self, script, store=None):
-        env = {"XDG_STATE_HOME": str(self.tmp / "state")}
-        if store is not None:
-            env["WK_STORE"] = str(store)
-        return bash(f'set -euo pipefail\n. "{REPO}/lib/common.sh"\n'
-                    f'. "{REPO}/lib/resources.sh"\n' + script, env=env, timeout=60)
-
-    def test_it_answers_a_number_and_does_not_end_its_caller(self):
-        cp = self._bash('free=$(store_free_gb); echo "free=[$free]"; echo alive',
-                        store=self.tmp)
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertIn("alive", cp.stdout, "the caller did not survive store_free_gb")
-        free = cp.stdout.split("free=[")[1].split("]")[0]
-        self.assertRegex(free, r"^[0-9]+$", f"not a plain integer: {free!r}")
+    def test_it_answers_the_one_spelling_both_dfs_have(self):
+        free = resources.Budget(Local(), {}).free_gb(str(self.tmp))
         avail_k = int(subprocess.run(["df", "-Pk", str(self.tmp)], capture_output=True,
                                      text=True, check=True).stdout.splitlines()[1].split()[3])
-        self.assertEqual(int(free), -(-avail_k // 1048576))
+        self.assertEqual(free, -(-avail_k // 1048576))
 
     def test_a_store_path_df_cannot_answer_for_is_not_a_refusal(self):
         """The contract disk_admit states: no answer is not evidence of a
-        full disk. It has to hold as a *return*, not only as an empty
-        string -- a failing df must not take the build with it."""
-        cp = self._bash('free=$(store_free_gb); echo "free=[$free]"\n'
-                        'disk_admit "this build" 60 && echo admitted',
-                        store=self.tmp / "no" / "such" / "path")
+        full disk. It has to hold as a *return* through the shim, not only
+        as an empty reading -- a failing df must not take the build with it."""
+        cp = bash(f'set -euo pipefail\n. "{REPO}/lib/common.sh"\n. "{REPO}/lib/resources.sh"\n'
+                  'disk_admit "this build" 60 && echo admitted',
+                  env={"XDG_STATE_HOME": str(self.tmp / "state"), "WK_STORE": str(self.tmp / "no" / "such")})
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
         self.assertIn("admitted", cp.stdout)
 
 
 class TestDiskAdmit(WkTest):
-    """disk_admit (lib/resources.sh): a build refuses before it starts when
-    the store's filesystem cannot take it, so nobody has to read `wk disk`
-    first. build_admit asks on the way through, which is what puts the check
-    on every build path -- `wk build`, `wk test`, and both image builders."""
+    """disk_admit: a build refuses before it starts when the store's
+    filesystem cannot take it, so nobody has to read `wk disk` first.
+    build_admit asks on the way through, which is what puts the check on every
+    build path -- `wk build`, `wk test`, and both image builders."""
 
     def _bash(self, script, free_gb):
         env = {"XDG_STATE_HOME": str(self.tmp / "state"),
                "WK_AVAIL_MB": "100000", "WK_CGROUP_CORES": "64",
-               "WK_BUILD_MACHINE": "testbox", "FREE_GB": str(free_gb)}
-        # store_free_gb is what df answers; stubbed so the test does not
-        # depend on the machine it runs on.
-        pre = (f'set -euo pipefail\n. "{REPO}/lib/common.sh"\n'
-               f'. "{REPO}/lib/resources.sh"\n'
-               'store_free_gb() { printf "%s" "$FREE_GB"; }\n')
-        return bash(pre + script, env=env, timeout=60)
+               "WK_BUILD_MACHINE": "testbox"}
+        # df is stubbed so the test does not depend on the machine it runs on.
+        with stub_path({"df": df_answering(free_gb)}) as binp:
+            env["PATH"] = f"{binp}:{os.environ['PATH']}"
+            return bash(f'set -euo pipefail\n. "{REPO}/lib/common.sh"\n. "{REPO}/lib/resources.sh"\n' + script,
+                        env=env, timeout=60)
 
     def test_it_refuses_when_the_disk_cannot_take_the_build(self):
         cp = self._bash('( disk_admit "this image build" 60 ) && echo admitted || echo refused', 40)
@@ -324,19 +367,33 @@ def _closure(funcs, named):
         named |= more
 
 
+# The shims whose reading cannot refuse; every other lib/resources.sh function is a reading, so a new one is
+# covered the day it is written, and TestTheExemptionsDoNotRefuse holds this list to the Python's behaviour.
+CANNOT_REFUSE = {"headless_marker", "build_record", "_res_py"}
+
+
 def readings():
-    """Every function that can refuse: the lib/resources.sh ones that die or
-    put up a barrier, whatever reaches one of those, and the target drivers'
-    wrappers over them -- `t_cores` is a reading as surely as `host_cores` is,
-    and a refusal it takes discards the same way. Derived from the files rather
-    than listed here, so a new reading is covered the day it is written."""
-    funcs = shell_functions((REPO / "lib" / "resources.sh").read_text())
-    named = _closure(funcs, {f for f, b in funcs.items()
-                             if re.search(r"\b(die|barrier|_require_reading)\b", b)})
+    """Every function that can refuse: the lib/resources.sh shims over a reading, and the target drivers'
+    wrappers over them -- `t_cores` is a reading as surely as `host_cores` is, and a refusal it takes discards
+    the same way."""
+    named = set(shell_functions((REPO / "lib" / "resources.sh").read_text())) - CANNOT_REFUSE
     out = set(named)
     for rel in WRAPPER_FILES:
         out |= _closure(shell_functions((REPO / rel).read_text()), set(named))
     return out
+
+
+class TestTheExemptionsDoNotRefuse(unittest.TestCase):
+    def test_a_deaf_machine_answers_every_exempt_verb(self):
+        verbs = {name: re.search(r"_res_py ([a-z-]+)", body).group(1)
+                 for name, body in shell_functions((REPO / "lib" / "resources.sh").read_text()).items()
+                 if name in CANNOT_REFUSE and "_res_py " in body}
+        self.assertEqual(set(verbs), CANNOT_REFUSE - {"_res_py"}, verbs)
+        args = {"build-record": ["label", "1", "1", "pid:1"]}
+        for name, verb in verbs.items():
+            with self.subTest(name=name), mock.patch("wk.machine.here", return_value=Fake()), \
+                    contextlib.redirect_stdout(io.StringIO()):
+                self.assertIn(resources.main(["--os", "linux", verb] + args.get(verb, []), env={}), (0, 1))
 
 
 def substitutions(text):
@@ -428,11 +485,10 @@ class TestEveryCallSiteTakesAReadingIntoAVariable(unittest.TestCase):
         names = readings()
         self.assertLessEqual(
             {"host_cores", "host_mem_mb", "host_load", "describe_cores",
-             "avail_mem_mb", "envelope_cores", "envelope_mem_mb",
+             "envelope_cores", "envelope_mem_mb",
              "build_jobs", "build_admit", "disk_admit"},
             names)
-        self.assertNotIn("store_free_gb", names,
-                         "store_free_gb answers nothing rather than refusing")
+        self.assertNotIn("build_record", names, "writing a record refuses nothing")
 
     def test_the_drivers_wrappers_over_a_reading_are_in_the_set(self):
         """The same rule one call away: a driver's own number ends in a
@@ -456,30 +512,24 @@ class TestEveryCallSiteTakesAReadingIntoAVariable(unittest.TestCase):
 
 
 class TestAReadingRefusalReachesItsCaller(WkTest):
-    """The other half. Bash does not inherit errexit into a command
-    substitution, so the reading envelope_cores itself takes from host_cores
-    fails without ending envelope_cores: it runs on with an empty value and
-    answers 1, 0 or a negative envelope with status 0, and no assignment at
-    the call site can tell. Every reading a reader takes therefore carries
-    `|| return $?`, and the refusal walks out through every wrapper to the
-    person who ran the command."""
+    """The other half: a composite reading refuses inside the Python, each
+    shim is one command whose status is that refusal, and it walks out through
+    every wrapper to the person who ran the command."""
 
-    # A machine that will not say how many cores or how much memory it has:
-    # nproc/awk are what a Linux reading takes, sysctl a macOS one -- deaf on
-    # both, or the fake is only deaf on the platform the suite is not running.
-    DEAF = {"nproc": "exit 1", "awk": "exit 1", "sysctl": "exit 1"}
+    # A machine that will not say how many cores it has: nproc is what a Linux
+    # reading takes, sysctl a macOS one -- deaf on both.
+    DEAF = {"nproc": "exit 1", "sysctl": "exit 1"}
 
-    COMPOSITE = ("envelope_cores", "envelope_mem_mb", "avail_mem_mb",
-                 "build_jobs", "describe_cores")
+    COMPOSITE = ("envelope_cores", "build_jobs", "describe_cores")   # the memory readings are TestEnvelope's, over a fake /proc
 
     def _res(self, script, stubs=None, env=None):
         e = {"XDG_STATE_HOME": str(self.tmp / "state"),
              "WK_STORE": str(self.tmp / "store"),
-             "WK_TEST_CGROUP": str(self.tmp / "no-such-cgroup")}
+             }
         e.update(env or {})
         body = (f'set -euo pipefail\n. "{REPO}/lib/common.sh"\n'
                 f'. "{REPO}/lib/resources.sh"\n'
-                '_cgroup_mem_max() { echo "$WK_TEST_CGROUP"; }\n' + script)
+                + script)
         with stub_path(stubs if stubs is not None else self.DEAF) as binp:
             e["PATH"] = f"{binp}:{os.environ['PATH']}"
             return bash(body, env=e)
@@ -510,8 +560,7 @@ class TestAReadingRefusalReachesItsCaller(WkTest):
         never sized from a machine that would not answer."""
         driver = (f'. "{REPO}/lib/store.sh"\n. "{REPO}/lib/target.sh"\n'
                   'load_target vm >/dev/null 2>&1\n')
-        for name in ("_vm_cpus", "_vm_mem_mb", "_base_cpus", "_base_mem_mb",
-                     "t_cores wk-test", "t_mem_mb wk-test"):
+        for name in ("_vm_cpus", "_base_cpus", "t_cores wk-test"):
             with self.subTest(wrapper=name):
                 cp = self._res(driver + f'v=$({name}); echo "SURVIVED [$v]"',
                                stubs={**self.DEAF, "tart": "echo '{}'"},

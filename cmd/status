@@ -57,16 +57,11 @@ import sys
 ROOT = os.environ.get("WK_ROOT") or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "lib"))
 
-from wk import shell, statusview  # noqa: E402
+from wk import decl, shell, statusview  # noqa: E402
 from wk.act import Refused, die, info, warn  # noqa: E402
 from wk.clock import Clock  # noqa: E402
 from wk.record import Records  # noqa: E402
 from wk.status import Walk, wait_until_idle  # noqa: E402
-
-
-def value(argv, flag):
-    i = argv.index(flag) + 1
-    return argv[i] if i < len(argv) else ""
 
 
 def holders(resource):
@@ -78,35 +73,36 @@ def holders(resource):
 
 def main(argv):
     env = os.environ
-    no_fleet = "--no-fleet" in argv
-    no_devices = "--no-devices" in argv
+    args = decl.Args(decl.Decl(__file__), argv)
+    no_fleet = args.flag("--no-fleet")
+    no_devices = args.flag("--no-devices")
     devices = not (no_fleet or no_devices)
     mode, asked = statusview.default_mode(env, sys.stdout.isatty()), False
-    if "--json" in argv:
+    if args.flag("--json"):
         mode, asked = "json", True
-    if "--text" in argv or "--cli" in argv:
+    if args.flag("--text") or args.flag("--cli"):
         mode, asked = "text", True
     html_out = ""
-    if "--html" in argv:
+    if args.value("--html") is not None:
         mode, asked = "html", True
-        html_out = value(argv, "--html")
+        html_out = args.value("--html")
         html_out = "" if html_out == "-" else html_out
-    if "--web" in argv:
+    if args.flag("--web"):
         mode, asked = "web", True
-    port = value(argv, "--port") if "--port" in argv else env.get("WK_STATUS_PORT", "0")
-    interval = value(argv, "--interval") if "--interval" in argv else env.get("WK_STATUS_INTERVAL", "20")
-    if "--holds" in argv:
-        return holders(value(argv, "--holds"))
+    port = args.value("--port") if args.value("--port") is not None else env.get("WK_STATUS_PORT", "0")
+    interval = args.value("--interval") if args.value("--interval") is not None else env.get("WK_STATUS_INTERVAL", "20")
+    if args.value("--holds") is not None:
+        return holders(args.value("--holds"))
     name = env.get("WK_NAME") or None
-    wait = "--wait" in argv
+    wait = args.flag("--wait")
     if not asked and mode == "web" and (name or wait):
         mode = "text"
     if wait:
-        timeout = int((value(argv, "--timeout") if "--timeout" in argv else env.get("WK_WAIT_TIMEOUT", "0")) or 0)
+        timeout = int((args.value("--timeout") if args.value("--timeout") is not None else env.get("WK_WAIT_TIMEOUT", "0")) or 0)
         wait_until_idle(lambda: Walk(ROOT, name=name, fleet=False, devices=False).worst_only(), timeout,
                         float(env.get("WK_WAIT_INTERVAL", "5")), Clock(), name, info, warn)
     walk = Walk(ROOT, name=name, fleet=not no_fleet, devices=devices)
-    if "--records" in argv:
+    if args.flag("--records"):
         for r in walk.records(markers=False):
             print(statusview.dumps(r))
         return walk.worst

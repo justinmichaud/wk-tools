@@ -18,7 +18,7 @@ import sys
 ROOT = os.environ.get("WK_ROOT") or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "lib"))
 
-from wk import shell, targets  # noqa: E402
+from wk import decl, shell, targets  # noqa: E402
 from wk.act import Refused, die, info, log  # noqa: E402
 from wk.record import first_error, normalised  # noqa: E402
 
@@ -69,9 +69,10 @@ def main(argv):
         target = reg.load(reg.ws_target(name))
     except LookupError as e:
         die(str(e))
-    gates = "--gates" in argv or "-g" in argv
-    follow = "--follow" in argv or "-f" in argv
-    whole = "--all" in argv or "-a" in argv
+    args = decl.Args(decl.Decl(__file__), argv)
+    gates = args.flag("--gates") or args.flag("-g")
+    follow = args.flag("--follow") or args.flag("-f")
+    whole = args.flag("--all") or args.flag("-a")
     if gates:
         r = target.exec(name, ["bash", "-c", "SRC=%s TOOLS=%s\n%s" % (shell.sh_quote(target.src(name)), shell.sh_quote(target.tools(name)), GATES)])
         sys.stdout.write(r.out)

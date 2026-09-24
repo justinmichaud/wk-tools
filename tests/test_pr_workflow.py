@@ -1,27 +1,19 @@
 """`wk pr` / `wk new --pr`: the spec parser and the mirror fetches underneath
-them (lib/store.sh's pr_parse_spec, mirror_fetch_pr, mirror_fetch_pull).
+them (lib/wk/pr.py's parse_spec, mirror_fetch and mirror_fetch_pull, and
+their bash names lib/store.sh keeps for cmd/ab).
 
-The unit tests below source lib/common.sh and lib/store.sh directly (the
-`bash -c '. lib/store.sh'` idiom cmd/selftest itself uses to lift a function
-out of a file) and run against temporary git repositories standing in for a
-fork, an upstream, and the mirror -- git accepts a plain path as a URL, so no
+The fetches run against temporary git repositories standing in for a fork,
+an upstream, and the mirror -- git accepts a plain path as a URL, so no
 network and no real WK_STORE is ever touched. WK_LOCK_DIR is pointed at a
-scratch directory too: mirror_fetch_pr/mirror_fetch_pull take the real
-'store' lock name (the same one `wk sync` takes), and without this a test run
-here would contend with a real `wk sync` on this machine, or vice versa.
-
-The end-to-end path -- a real `wk new`, then `wk pr <it> <spec>` against a
-local fork -- is not exercised here; see
-TestPrEndToEnd.test_new_then_pr_against_a_local_fork for why.
+scratch directory too: the fetches take the real 'store' lock name (the same
+one `wk sync` takes), and without this a test run here would contend with a
+real `wk sync` on this machine, or vice versa.
 
 'wk pr open' -- the fifth form, which pushes a branch to its fork and opens
 it with `gh pr create` -- is covered further down by TestPrOpenTarget and
 TestPrOpenGhArgs (pr_open_target/pr_open_gh_args, imported straight out of
-the Python cmd/pr -- they are plain module-level functions precisely so a
-test can call them directly, against a temporary repo or a stub gh, without
-running the rest of the file, which needs a real workspace) and by
-TestPrOpenRefusals (the two refusals that happen before either of those ever
-runs, through the real dispatcher).
+the Python cmd/pr) and by TestPrOpenRefusals (the two refusals that happen
+before either of those ever runs, through the real dispatcher).
 
 Run: python3 -m unittest tests.test_pr_workflow -v
 """
@@ -35,7 +27,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from tests.support import REPO, WK, bash, fake_workspace, rand_suffix, run, scratch_dir, stub_path
+from tests.support import REPO, bash, fake_workspace, rand_suffix, run, scratch_dir, stub_path
 
 PRELUDE = f'set -euo pipefail\ncd "{REPO}"\n. lib/common.sh\n. lib/store.sh\n'
 
@@ -52,13 +44,15 @@ def _load_cmd_pr():
     return m
 
 
-# lib/store.sh's real wk_remotes/wk_push_forks (shell.wk_remotes/wk_push_forks), unmodified:
-# pr_open_target never fetches or pushes over them (it only reads remote *names* it is handed
-# and URLs already configured in the test's own local-path repo), so there is nothing here for
-# a fake to stand in for, unlike TestMirrorFetch's wk_remotes override.
+# The real git.REMOTES and wk_push_forks: pr_open_target never fetches or pushes over them (it
+# only reads remote *names* and URLs already configured in the test's own local-path repo).
 CMD_PR_MODULE = _load_cmd_pr()
 
-from wk.machine import Result  # noqa: E402  -- needs CMD_PR_MODULE's sys.path.insert above
+from wk import act, pr  # noqa: E402  -- needs CMD_PR_MODULE's sys.path.insert above
+from wk.clock import Clock  # noqa: E402
+from wk.lock import Lock  # noqa: E402
+from wk.machine import Local, Result  # noqa: E402
+from wk.store import Store  # noqa: E402
 
 
 def _git(*args, cwd, check=True):
@@ -79,113 +73,113 @@ def _make_repo(dir_, branch, filename="f.txt"):
 
 
 class TestPrParseSpec(unittest.TestCase):
-    """pr_parse_spec maps the three spellings 'wk pr' accepts."""
+    """parse_spec maps the three spellings 'wk pr' accepts."""
 
     def _fields(self, spec):
-        cp = bash(PRELUDE + (
-            f'pr_parse_spec {spec!r}\n'
-            'printf "%s|%s|%s|%s|%s" "$PR_KIND" "$PR_USER" "$PR_BRANCH" "$PR_REMOTE" "$PR_N"\n'
-        ))
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        return cp.stdout.strip().split("|")
+        got = pr.parse_spec(spec)
+        return [got[k] for k in ("kind", "user", "branch", "remote", "n")]
+
+    def _refused(self, spec):
+        with contextlib.redirect_stderr(io.StringIO()) as err, self.assertRaises(act.Refused):
+            pr.parse_spec(spec)
+        return err.getvalue()
 
     def test_user_branch(self):
-        """'user:branch' parses to PR_KIND=user with PR_USER/PR_BRANCH set"""
-        kind, user, branch, remote, n = self._fields("alice:eng/frame-fix")
-        self.assertEqual((kind, user, branch, remote, n), ("user", "alice", "eng/frame-fix", "", ""))
+        """'user:branch' is a fork's branch"""
+        self.assertEqual(self._fields("alice:eng/frame-fix"), ["user", "alice", "eng/frame-fix", "", ""])
 
     def test_bare_number(self):
-        """a bare number parses to PR_KIND=pull against origin (WebKit/WebKit)"""
-        kind, user, branch, remote, n = self._fields("1234")
-        self.assertEqual((kind, user, branch, remote, n), ("pull", "", "", "origin", "1234"))
+        """a bare number is a pull request against origin (WebKit/WebKit)"""
+        self.assertEqual(self._fields("1234"), ["pull", "", "", "origin", "1234"])
 
     def test_wpe_number(self):
-        """'wpe:<n>' parses to PR_KIND=pull against the wpe remote"""
-        kind, user, branch, remote, n = self._fields("wpe:5678")
-        self.assertEqual((kind, user, branch, remote, n), ("pull", "", "", "wpe", "5678"))
+        """'wpe:<n>' is a pull request against the wpe remote"""
+        self.assertEqual(self._fields("wpe:5678"), ["pull", "", "", "wpe", "5678"])
 
     def test_wpe_non_numeric_falls_back_to_a_fork_spec(self):
         """'wpe:somebranch' is not wpe:<n> (non-digits), so it is a fork spec
         for a user literally named 'wpe' -- the same disambiguation
         <user>:<branch> already gets, not a second special case"""
-        kind, user, branch, remote, n = self._fields("wpe:somebranch")
-        self.assertEqual((kind, user, branch, remote, n), ("user", "wpe", "somebranch", "", ""))
+        self.assertEqual(self._fields("wpe:somebranch"), ["user", "wpe", "somebranch", "", ""])
 
     def test_garbage_is_refused(self):
-        """a spec with no colon and not all digits is refused by name"""
-        cp = bash(PRELUDE + 'pr_parse_spec "not-a-spec" 2>&1; echo "exit=$?"')
-        self.assertIn("not a PR spec", cp.stdout)
+        self.assertIn("not a PR spec", self._refused("not-a-spec"))
 
     def test_bad_pull_number_is_refused(self):
         """digits followed by anything else is refused rather than silently truncated"""
-        cp = bash(PRELUDE + 'pr_parse_spec "1234x" 2>&1; echo "exit=$?"')
-        self.assertIn("not a pull request number", cp.stdout)
+        self.assertIn("not a pull request number", self._refused("1234x"))
+        self.assertIn("not a pull request number", self._refused("wpe:12x"))
+
+    def test_an_empty_half_is_refused(self):
+        self.assertIn("expected <user>:<branch>", self._refused(":b"))
+
+    def test_the_bash_name_sets_the_callers_variables_and_ends_it_on_a_refusal(self):
+        """cmd/ab reads PR_KIND and the rest after calling it."""
+        cp = bash(f'cd "{REPO}"; . lib/common.sh; . lib/store.sh\npr_parse_spec wpe:5678\n'
+                  'printf "%s|%s|%s\\n" "$PR_KIND" "$PR_REMOTE" "$PR_N"\npr_parse_spec nope\necho reached\n')
+        self.assertEqual(cp.stdout.splitlines(), ["pull|wpe|5678"], cp.stderr)
+        self.assertNotEqual(cp.returncode, 0)
 
 
 class TestMirrorFetch(unittest.TestCase):
-    """mirror_fetch_pr and mirror_fetch_pull, against real (local-path) git
+    """mirror_fetch and mirror_fetch_pull, against real (local-path) git
     repositories standing in for a fork and an upstream."""
 
     def setUp(self):
         self._scratch = scratch_dir(prefix="wk-pr-test-")
         self.tmp = self._scratch.__enter__()
         self.addCleanup(self._scratch.__exit__, None, None, None)
-        self.store = self.tmp / "store"
-        self.locks = self.tmp / "locks"
-        self.store.mkdir()
-        self.locks.mkdir()
+        self.env = {"WK_STORE": str(self.tmp / "store"), "WK_LOCK_DIR": str(self.tmp / "locks"),
+                    "XDG_STATE_HOME": str(self.tmp / "state"), "WK_IN_VM": "", "HOME": str(self.tmp)}
+        self.store = Store(self.env)
+        self.here = Local()
 
-    def _env(self, extra=None):
-        e = {"WK_STORE": str(self.store), "WK_LOCK_DIR": str(self.locks),
-             "XDG_STATE_HOME": str(self.tmp / "state")}
-        if extra:
-            e.update(extra)
-        return e
+    def fetch(self, fn, *args):
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            fn(self.here, self.store, Lock(self.store, self.here, Clock()), *args)
+        return err.getvalue()
 
-    def test_mirror_fetch_pr_lands_the_ref_and_is_a_no_op_the_second_time(self):
-        """mirror_fetch_pr lands a fork branch under refs/remotes/pr/... and a
-        second call fetches no new objects"""
+    def mirror_rev(self, ref):
+        return _git("rev-parse", ref, cwd=self.store.mirror()).stdout.strip()
+
+    def test_a_fork_branch_lands_under_pr_and_the_second_fetch_is_a_no_op(self):
         fork = self.tmp / "fork"
         sha = _make_repo(fork, "eng-test")
+        err = self.fetch(pr.mirror_fetch, str(fork), "refs/heads/eng-test", "refs/remotes/pr/alice/WebKit/eng-test")
+        self.assertIn("creating bare mirror", err)
+        self.assertEqual(self.mirror_rev("refs/remotes/pr/alice/WebKit/eng-test"), sha)
+        self.assertEqual(_git("config", "gc.auto", cwd=self.store.mirror()).stdout.strip(), "0")
+        before = _git("count-objects", "-v", cwd=self.store.mirror()).stdout
+        self.assertNotIn("creating bare mirror",
+                         self.fetch(pr.mirror_fetch, str(fork), "refs/heads/eng-test", "refs/remotes/pr/alice/WebKit/eng-test"))
+        self.assertEqual(_git("count-objects", "-v", cwd=self.store.mirror()).stdout, before)
 
-        script = PRELUDE + f'''
-mirror_fetch_pr {str(fork)!r} eng-test alice/WebKit/eng-test >/dev/null
-git -C "$(wk_mirror)" rev-parse refs/remotes/pr/alice/WebKit/eng-test
-before=$(git -C "$(wk_mirror)" count-objects -v)
-mirror_fetch_pr {str(fork)!r} eng-test alice/WebKit/eng-test >/dev/null
-after=$(git -C "$(wk_mirror)" count-objects -v)
-if [ "$before" = "$after" ]; then echo NOOP; else echo "CHANGED:$before//$after"; fi
-'''
-        cp = bash(script, env=self._env())
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        lines = cp.stdout.strip().splitlines()
-        self.assertEqual(lines[0], sha, "the mirror's ref did not land at the fork's head")
-        self.assertEqual(lines[1], "NOOP", f"a second fetch was not a no-op: {lines[1]}")
-
-    def test_mirror_fetch_pull_lands_refs_pull_n_head(self):
-        """mirror_fetch_pull fetches refs/pull/<n>/head from the named
-        upstream remote into refs/remotes/pr/<remote>/<n>"""
+    def test_a_pull_request_lands_as_refs_pull_n_head(self):
         origin = self.tmp / "origin"
         sha = _make_repo(origin, "main")
         _git("update-ref", "refs/pull/7/head", sha, cwd=origin)
+        self.fetch(pr.mirror_fetch_pull, "origin", "7", (("origin", str(origin)),))
+        self.assertEqual(self.mirror_rev("refs/remotes/pr/" + pr.pull_refname("origin", "7")), sha)
 
-        # wk_remotes is redefined after sourcing store.sh, the same way a
-        # test lifts any other function -- 'origin' now means this local
-        # repo rather than the real upstream, and nothing else changes.
-        script = PRELUDE + f'''
-wk_remotes() {{ printf "origin %s\\nwpe %s\\n" {str(origin)!r} {str(origin)!r}; }}
-mirror_fetch_pull origin 7 >/dev/null
-git -C "$(wk_mirror)" rev-parse refs/remotes/pr/origin/7
-'''
-        cp = bash(script, env=self._env())
+    def test_an_unknown_remote_is_refused_by_name(self):
+        with contextlib.redirect_stderr(io.StringIO()) as err, self.assertRaises(act.Refused):
+            pr.mirror_fetch_pull(self.here, self.store, None, "nosuchremote", "1")
+        self.assertIn("no such upstream remote", err.getvalue())
+
+    def test_a_failed_fetch_is_a_refusal_naming_the_ref(self):
+        with contextlib.redirect_stderr(io.StringIO()) as err, self.assertRaises(act.Refused):
+            pr.mirror_fetch(self.here, self.store, Lock(self.store, self.here, Clock()),
+                            str(self.tmp / "nowhere"), "refs/heads/x", "refs/remotes/pr/x")
+        self.assertIn("could not fetch refs/heads/x", err.getvalue())
+
+    def test_the_bash_names_cmd_ab_calls_reach_the_same_fetch(self):
+        fork = self.tmp / "fork"
+        sha = _make_repo(fork, "b")
+        cp = bash(f'cd "{REPO}"; . lib/common.sh; . lib/store.sh\n'
+                  f'mirror_fetch_pr {str(fork)!r} b "$(wk_pr_refname u WebKit b)"\n'
+                  'git -C "$(wk_mirror)" rev-parse refs/remotes/pr/u/WebKit/b\n', env=self.env)
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
         self.assertEqual(cp.stdout.strip(), sha)
-
-    def test_mirror_fetch_pull_unknown_remote_is_refused(self):
-        """mirror_fetch_pull against a remote wk_remotes does not know is refused by name"""
-        cp = bash(PRELUDE + 'mirror_fetch_pull nosuchremote 1 2>&1; echo "exit=$?"',
-                   env=self._env())
-        self.assertIn("no such upstream remote", cp.stdout)
 
 
 class TestPrOpenTarget(unittest.TestCase):

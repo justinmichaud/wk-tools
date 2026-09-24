@@ -24,6 +24,7 @@ Run: python3 -m unittest tests.test_vm_desktop -v
 import os
 import platform
 import re
+import sys
 import unittest
 
 from tests.support import (REPO, repo_files, WkTest, assert_guest_start_converges, bash,
@@ -402,9 +403,9 @@ class TestTheWriterIsSafeToRunOnALiveGuest(WkTest):
         """`defaults -currentHost` is keyed by hardware UUID and `tart clone`
         changes it, so these cannot live only in the golden base. The `@` in
         the shared table is what marks one."""
-        quiet = (REPO / "bench" / "mac-quiet-desktop.sh").read_text()
-        self.assertIn("idletime @com.apple.screensaver idleTime", quiet)
-        self.assertIn("-currentHost", quiet)
+        table = (REPO / "bench" / "quiet" / "macos.tsv").read_text()
+        self.assertIn("setting\tidletime\t@com.apple.screensaver\tidleTime", table)
+        self.assertIn("-currentHost", (REPO / "bench" / "mac-quiet-desktop.sh").read_text())
 
     def test_both_callers_run_this_file_rather_than_a_copy(self):
         base = (REPO / "vm" / "provision-base.sh").read_text()
@@ -596,30 +597,27 @@ class TestARehearsalGuestIsNotAlsoAWorkspace(WkTest):
     place that writes it is the one place that knows not to."""
 
     def _write_marker(self, bench):
-        rc = 0 if bench else 1
-        cp = bash('\n'.join([
-            '. "$WK_ROOT/lib/common.sh"',
-            '. "$WK_ROOT/lib/resources.sh"',
-            '. "$WK_ROOT/lib/store.sh"',
-            '. "$WK_ROOT/lib/target.sh"',
-            'load_target vm >/dev/null 2>&1',
-            't_src() { echo /Users/admin/WebKit; }',
-            '_ssh() { shift; echo "SSH: $*"; case "$*" in *wk-image*) return %d ;; esac; }' % rc,
-            '_write_marker demo 10.0.0.2',
-        ]))
-        self.assertEqual(0, cp.returncode, cp.stdout + cp.stderr)
-        return cp.stdout
+        """What Vm.write_marker, the one writer, did to a guest that is (or is not) a bench install."""
+        sys.path.insert(0, str(REPO / "lib"))
+        from wk import targets
+        from wk.machine import Fake
+        g = Fake("guest")
+        g.answer(["test", "-f", "/etc/wk-image"], rc=0 if bench else 1)
+        vm = targets.Vm("vm", str(REPO), {"WK_VM_USER": "admin"}, Fake("here"))
+        self.assertTrue(vm.write_marker("demo", g))
+        return g
 
     def test_a_benchmark_install_has_the_claim_taken_off(self):
-        out = self._write_marker(bench=True)
-        self.assertIn("rm -f $HOME/.wk-workspace", out)
-        self.assertNotIn("IS a workspace", out)
+        g = self._write_marker(bench=True)
+        self.assertIn(("remove", "/Users/admin/.wk-workspace"), g.effects)
+        self.assertNotIn("/Users/admin/.wk-workspace", g.files)
 
     def test_an_ordinary_workspace_guest_still_gets_it(self):
-        out = self._write_marker(bench=False)
-        self.assertIn("IS a workspace", out)
-        self.assertIn("name=demo", out)
-        self.assertNotIn("rm -f", out)
+        g = self._write_marker(bench=False)
+        text = g.files["/Users/admin/.wk-workspace"]
+        self.assertIn("IS a workspace", text)
+        self.assertIn("name=demo", text)
+        self.assertNotIn(("remove", "/Users/admin/.wk-workspace"), g.effects)
 
 
 class TestOneRendererForEveryReport(unittest.TestCase):
@@ -637,9 +635,9 @@ class TestOneRendererForEveryReport(unittest.TestCase):
         measurement of what it left."""
         assert_guest_start_converges(self, '_report_desktop "$name"')
         # After the settle, or it reports the state the settle was fixing.
-        body = func_body(_src("targets", "vm.sh"), "_converge_guest")
-        i = body.index('_settle_desktop "$name" "$ip"')
-        self.assertIn("_report_desktop", body[i:])
+        from wk import guest
+        steps = [st[0] for st in guest.STEPS]
+        self.assertLess(steps.index("settle_desktop"), steps.index("report_desktop"))
 
     def test_the_report_is_the_probe_and_not_a_second_opinion(self):
         vm = _src("targets", "vm.sh")
