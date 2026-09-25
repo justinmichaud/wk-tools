@@ -335,7 +335,6 @@ got=$(b_system_kind /dev/mmcblk0p2)
 [ "$got" = base ] || bad="$bad rpi3-rescue=$got"
 got=$(b_system_kind /dev/mmcblk0p4)
 [ "$got" = bench ] || bad="$bad rpi3-bench=$got"
-grep -q 'b_system_kind' "{REPO}/cmd/pi" || bad="$bad wk-pi-bench-does-not-check"
 [ -z "$bad" ] || {{ echo "$bad"; exit 1; }}
 '''
         cp = bash(script)

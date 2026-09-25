@@ -28,6 +28,7 @@ from unittest import mock
 
 from tests.support import REPO, WkTest, bash, run
 from tests.test_wk_key import KeyTest
+from tests.test_wk_secrets import KEY_SH
 
 AI = (REPO / "cmd" / "ai").read_text()
 KEY = (REPO / "cmd" / "key").read_text()
@@ -54,13 +55,10 @@ TOUCHED = ("lib/store.sh", "container/firstrun.sh", "shell/bashrc")
 
 
 def secret_table():
-    """wk_agent_secrets, read out of the file that declares it: (name, store
-    file, home file, variable, kind, delivery) per row. Every test below
-    compares a reader against this rather than against a second copy of the
-    list."""
-    body = STORE.split("wk_agent_secrets() {", 1)[1]
-    body = body.split("<<'EOF'\n", 1)[1].split("EOF\n", 1)[0]
-    rows = [tuple(l.split()) for l in body.splitlines() if l.strip()]
+    """wk.secrets.AGENT_SECRETS, the one table: (name, store file, home file, variable, kind, delivery) per row. Every
+    test below compares a reader against this rather than against a second copy of the list."""
+    from wk import secrets
+    rows = [tuple(r) for r in secrets.AGENT_SECRETS]
     assert rows and all(len(r) == 6 for r in rows), rows
     assert all(r[4] in ("value", "file") for r in rows), rows
     return rows
@@ -135,7 +133,7 @@ class TestTheStoreIsByName(WkTest):
 WK_IN_VM=1
 WK_STORE={store}
 . "$WK_ROOT/lib/store.sh"
-{script}
+{KEY_SH}{script}
 ''')
 
     def test_each_name_has_its_own_file_in_the_store(self):
@@ -162,7 +160,7 @@ WK_STORE={store}
             reader = "wk_cred_read" if row[4] == "file" else "wk_agent_secret"
             with self.subTest(name=name):
                 cp = self._sh(
-                    f'printf "%s\\n" {name}-{PLACEHOLDER} | wk_cred_store {name}\n'
+                    f'printf "%s\\n" {name}-{PLACEHOLDER} | key_store {name}\n'
                     f'printf "[%s]\\n" "$({reader} {name})"', store)
                 self.assertIn(f"[{name}-{PLACEHOLDER}]", cp.stdout,
                               cp.stdout + cp.stderr)
@@ -177,7 +175,7 @@ WK_STORE={store}
             with self.subTest(name=row[0]):
                 cp = self._sh(
                     f'if wk_agent_secret_present {row[0]}; then echo yes; else echo no; fi\n'
-                    f'printf "%s\\n" x | wk_cred_store {row[0]}\n'
+                    f'printf "%s\\n" x | key_store {row[0]}\n'
                     f'if wk_agent_secret_present {row[0]}; then echo yes; else echo no; fi',
                     store)
                 self.assertEqual(["no", "yes"], cp.stdout.split(), cp.stderr)
@@ -188,7 +186,7 @@ WK_STORE={store}
         store = self._store()
         row = FILE_ROWS[0]
         cp = self._sh(
-            f'printf "one\\ntwo\\n" | wk_cred_store {row[0]}\n'
+            f'printf "one\\ntwo\\n" | key_store {row[0]}\n'
             f'printf "bytes=[%s]\\n" "$(wk_cred_read {row[0]})"', store)
         self.assertIn("bytes=[one\ntwo]", cp.stdout, cp.stdout + cp.stderr)
 
@@ -211,9 +209,9 @@ WK_STORE={store}
     def test_clearing_withdraws_one_and_leaves_the_others(self):
         store = self._store()
         cp = self._sh(
-            f'printf "%s\\n" a-{PLACEHOLDER} | wk_cred_store claude\n'
-            f'printf "%s\\n" b-{PLACEHOLDER} | wk_cred_store litellm\n'
-            'wk_cred_clear litellm\n'
+            f'printf "%s\\n" a-{PLACEHOLDER} | key_store claude\n'
+            f'printf "%s\\n" b-{PLACEHOLDER} | key_store litellm\n'
+            'key_clear litellm\n'
             'printf "claude=[%s] litellm=[%s]\\n" "$(wk_agent_secret claude)" "$(wk_agent_secret litellm)"',
 
             store)
@@ -223,7 +221,7 @@ WK_STORE={store}
     def test_a_driver_moving_wk_store_does_not_move_them(self):
         """There is one set per *machine*. targets/vm.sh points $WK_STORE at
         its own state directory, so resolving a secret against $WK_STORE would
-        send `wk vm start` looking somewhere `wk key set` never writes.
+        send `wk start` looking somewhere `wk key set` never writes.
 
         Two spellings of one directory (wk_secrets_dir, lib/store.sh): on a
         macOS host it is this device's own path (WK_HOST_SECRETS), never
@@ -335,11 +333,11 @@ class TestWkKeySet(WkTest):
     def test_the_value_is_never_an_argument(self):
         """An argument is in `ps` for everyone on the machine. The one writer
         takes it on stdin, and nothing hands it on as a parameter."""
-        self.assertNotIn("--token", (REPO / "lib" / "wk" / "key.py").read_text())
+        self.assertNotIn("--token", "".join(p.read_text() for p in sorted((REPO / "lib" / "wk" / "key").glob("*.py"))))
         # The writer is lib/secretfile.py, which takes the value on stdin and
         # is handed only the path (it refuses a path that is not a plain file
         # of this user's; see the file).
-        self.assertIn('secretfile.py" write "$p"', STORE)
+        self.assertIn('"secretfile.py"), "write", p], input=value', (REPO / "lib" / "wk" / "key" / "creds.py").read_text())
 
 
 class TestAContainerLinksEveryName(WkTest):
@@ -348,7 +346,7 @@ class TestAContainerLinksEveryName(WkTest):
     rebuild."""
 
     def test_it_loops_over_the_table(self):
-        self.assertIn('. "$1/lib/store.sh"; wk_agent_secrets', FIRSTRUN)
+        self.assertIn('python3 -m wk.secrets agent-secrets', FIRSTRUN)
         self.assertIn('ln -sfn "/secrets/$_sfile" "$HOME/$_shome"', FIRSTRUN)
 
     def test_the_loop_links_every_row(self):
@@ -608,7 +606,7 @@ class TestPiEnsure(unittest.TestCase):
         self.assertIn("npm could not install @earendil-works/pi-coding-agent in 'ws'", err)
 
     def test_it_writes_the_models_file_when_a_key_is_stored(self):
-        self.fake.answer(["bash", "-c"])
+        self.fake.answer(["python3"])
         scripts = []
         self.target.answers["> ~/.pi/agent/models.json"] = lambda argv: scripts.append(argv[-1]) or self.Result(0)
         status, err = self.pi()
@@ -633,7 +631,7 @@ class TestPiEnsure(unittest.TestCase):
 class TestDoctorReportsEveryName(WkTest):
     """`wk doctor`'s machine-local section is the checklist a reinstall works
     from, so every named credential is one line in it -- read from the table
-    (shell.local_state_paths) rather than a list of its own, which is what
+    (Doctor.paths) rather than a list of its own, which is what
     "one implementation per behaviour" means here.
 
     Each is `re-authable`: a fresh value from the provider is as good as the
@@ -645,12 +643,12 @@ class TestDoctorReportsEveryName(WkTest):
     def test_it_reads_the_table(self):
         from tests.support import clean_env
         sys.path.insert(0, str(REPO / "lib"))
-        from wk import shell
+        from wk import doctor
         text = (REPO / "lib" / "wk" / "doctor.py").read_text()
         for row in TABLE:
             with self.subTest(name=row[0]):
                 self.assertNotIn(row[1], text, f"lib/wk/doctor.py names the {row[0]} row itself")
-        paths = shell.local_state_paths(str(REPO), env=clean_env({"WK_STORE": "/scratch", "WK_IN_VM": "1"}))
+        paths = doctor.Doctor(str(REPO), env=clean_env({"WK_STORE": "/scratch", "WK_IN_VM": "1"})).paths()
         self.assertEqual(NAMES, [k[7:] for k in paths if k.startswith("secret.")])
 
     def test_it_prints_one_line_per_name_and_none_of_them_as_missing(self):

@@ -31,7 +31,6 @@ CREDCHECK = REPO / "lib" / "credcheck.py"
 
 sys.path.insert(0, str(REPO / "lib"))
 import credcheck   # noqa: E402 -- the constants a verdict names are read from it
-STORE_SH = (REPO / "lib" / "store.sh").read_text()
 
 FORKS = "wkuser/WebKit wkuser/WPEWebKit"
 PROJECTS = {"wkuser/WebKit": "WebKit/WebKit",
@@ -1165,13 +1164,10 @@ class TestOneTableForEveryCredential(_Rules):
         return cp.stdout.split()
 
     def test_every_delivered_credential_has_a_rule(self):
-        """wk_agent_secrets (lib/store.sh) is what delivers a credential into a
+        """wk.secrets.AGENT_SECRETS is what delivers a credential into a
         workspace; a row added there without a rule would be stored unchecked."""
-        body = STORE_SH.split("wk_agent_secrets() {", 1)[1]
-        body = body.split("EOF", 1)[0]
-        rows = [l.split()[0] for l in body.splitlines()
-                if l.strip() and not l.strip().startswith(("cat", "<<"))]
-        for row in rows:
+        from wk import secrets
+        for row in [r[0] for r in secrets.AGENT_SECRETS]:
             self.assertIn(row, self.names(), row)
 
     def test_the_credentials_held_beside_the_deploy_keys_have_rules_too(self):
@@ -1230,46 +1226,18 @@ class TestOneTableForEveryCredential(_Rules):
         self.assertIn("public_repo", fields["remedy"])
 
     def test_this_machine_knows_where_each_one_is_kept(self):
-        """One path table (wk_cred_path), so `wk key set`, `wk key check` and
+        """One path table (Secrets.cred_path), so `wk key set`, `wk key check` and
         `wk doctor` read the same bytes."""
-        script = ('. "%s/lib/common.sh"\n. "%s/lib/store.sh"\n'
-                  'for n in $(wk_cred_names); do\n'
-                  '  [ "$n" = deploy-key ] && continue\n'
-                  '  printf "%%s %%s\\n" "$n" "$(wk_cred_path "$n")"\n'
-                  'done\n' % (REPO, REPO))
-        cp = subprocess.run(["bash", "-c", script], capture_output=True,
-                            text=True, cwd=str(REPO))
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        for line in cp.stdout.splitlines():
-            name, _sp, path = line.partition(" ")
-            self.assertTrue(path.startswith("/"), line)
+        from wk.key.cli import Key
+        k = Key(REPO)
+        for name in k.settable():
+            with self.subTest(name=name):
+                self.assertTrue((k.path(name) or "").startswith("/"), name)
 
     def test_nothing_stored_is_a_state_and_not_a_fault(self):
         verdict, detail = self.check("litellm", path=self.tmp / "absent")
         self.assertEqual("absent", verdict, detail)
         self.assertIn("wk key set litellm", detail)
-
-    def test_a_stored_credential_is_read_the_one_way(self):
-        """A workspace can write in the agent-rw directory, so a link left
-        there pointing at the token beside the deploy keys would turn every
-        read of the login into a read of the token. wk_cred_check reads through
-        lib/secretfile.py, which refuses one."""
-        real = self.tmp / "push-keys" / "github-pat"
-        real.parent.mkdir()
-        real.write_text("github_pat_11ABC_hidden\n")
-        secrets = self.tmp / "secrets"
-        secrets.mkdir()
-        (secrets / "litellm-key").symlink_to(real)
-        script = ('. "%s/lib/common.sh"\n. "%s/lib/store.sh"\n'
-                  'wk_cred_check litellm --stored\n' % (REPO, REPO))
-        env = dict(os.environ, WK_HOST_SECRETS=str(secrets),
-                   WK_STORE=str(self.tmp))
-        cp = subprocess.run(["bash", "-c", script], capture_output=True,
-                            text=True, cwd=str(REPO), env=env)
-        self.assertNotIn("hidden", cp.stdout + cp.stderr)
-        self.assertIn("refusing to read", cp.stderr)
-        self.assertTrue(cp.stdout.startswith("bad\t"), cp.stdout)
-        self.assertIn("could not be read", cp.stdout)
 
     def test_an_unknown_name_is_refused_rather_than_admitted(self):
         cp = subprocess.run(["python3", str(CREDCHECK), "check", "nosuchthing"],

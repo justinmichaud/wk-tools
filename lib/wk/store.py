@@ -18,6 +18,10 @@ class Store:
     def home(self):
         return self.env.get("HOME") or os.path.expanduser("~")
 
+    def podman_machine(self):
+        """The podman machine a macOS host's container workspaces run in."""
+        return self.env.get("WK_MACHINE") or "wk"
+
     def state_dir(self):
         return os.path.join(self.env.get("XDG_STATE_HOME") or os.path.join(self.home(), ".local", "state"), "wk")
 
@@ -218,8 +222,7 @@ def main(argv):
         if got:
             print(got)
         return 0 if got else 1
-    many = {"list-workspaces": bases.workspaces, "unpinned-workspaces": bases.unpinned,
-            "unreferenced-bases": bases.unreferenced}
+    many = {"list-workspaces": bases.workspaces}
     if verb in many and not args:
         sys.stdout.write("".join(x + "\n" for x in many[verb]()))
         return 0
@@ -229,3 +232,25 @@ def main(argv):
 
 if __name__ == "__main__":
     sys.exit(main(sys.argv[1:]))
+
+
+def rubble(store, machine, mirror_here):
+    """A snapshot no workspace is on goes with a plain `wk gc`; the mirror and every snapshot only with --purge-mirror, and never under a workspace."""
+    from wk.rubble import du_kb, remover, row
+    bases = Bases(store, machine)
+    rows, ws = [], bases.workspaces()
+    unpinned = bases.unpinned()
+    if unpinned and [b for b in bases.ids() if b != bases.newest_complete()]:
+        rows.append(row("snapshot", "base snapshots", du_kb(machine, store.base_dir()), take=remover(machine),
+                        why="kept -- %s never recorded a base, so any snapshot may be under it: 'wk new <name>' remakes "
+                            "one, 'wk rm <name>' removes it" % " ".join(unpinned)))
+    for b in bases.unreferenced():
+        d = os.path.join(store.base_dir(), b)
+        rows.append(row("snapshot", "snapshot %s, no workspace on it" % b, du_kb(machine, d), take=remover(machine, d)))
+    paths = [p for p in [store.base_dir()] + ([store.mirror()] if mirror_here else []) if machine.isdir(p)]
+    if paths:
+        kbs = [du_kb(machine, p) for p in paths]
+        rows.append(row("mirror", "the mirror and every base snapshot" if store.mirror() in paths else "every base snapshot",
+                        None if None in kbs else sum(kbs), "--purge-mirror", remover(machine, *paths),
+                        "kept -- every workspace is overlaid on a snapshot here: 'wk rm' %s first" % " ".join(ws) if ws else ""))
+    return rows

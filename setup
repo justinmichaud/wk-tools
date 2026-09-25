@@ -153,9 +153,9 @@ unset _priv_bad _pn _pwhere _pwhat _pp
 if is_macos && [ "$STAGE" = all ]; then
     _todo=""
     if ! have tart && [ ! -x "$HOME/.local/bin/tart" ]; then
-        _todo="$_todo\n  - tart is not installed; 'wk vm' (Apple ports) is unavailable -- README.md, Setup"
+        _todo="$_todo\n  - tart is not installed; no macOS guest (Apple ports) can be made -- README.md, Setup"
     elif ! [ -x "${WK_SOFTNET_BIN:-/usr/local/bin/softnet}" ]; then
-        _todo="$_todo\n  - softnet is not installed; 'wk vm start' refuses to boot a guest: ./setup --stage softnet"
+        _todo="$_todo\n  - softnet is not installed; 'wk start <guest>' refuses to boot one: ./setup --stage softnet"
     fi
     if [ -n "$_todo" ]; then
         echo >&2

@@ -34,7 +34,7 @@ class TestRemovedOverridesStayRemoved(unittest.TestCase):
     nothing used it should not silently come back."""
 
     def test_wk_image_armhf_is_pinned_not_overridable(self):
-        self.assertNotIn("WK_IMAGE_ARMHF:-", _src("lib", "arch.sh"))
+        self.assertNotIn("WK_IMAGE_ARMHF", _src("lib", "wk", "buildconf.py"))
 
     def test_wk_detach_poll_seconds_removed(self):
         self.assertNotIn("WK_DETACH_POLL_SECONDS", _src("lib", "detach.sh"))
@@ -117,18 +117,13 @@ echo PASS
         self.assertIn("PASS", cp.stdout, cp.stdout + cp.stderr)
 
     def test_wk_session_mode_file_overrides_the_marker_file(self):
+        sys.path.insert(0, str(REPO / "lib"))
+        from wk import session
         marker = self.tmp / "session-mode"
-        cp = self.bash(
-            '''
-. "$WK_ROOT/lib/common.sh"
-[ "$(session_mode)" = none ] || { echo "absent: $(session_mode)"; exit 1; }
-printf 'gpu\\n' > "$WK_SESSION_MODE_FILE"
-[ "$(session_mode)" = gpu ] || { echo "present: $(session_mode)"; exit 1; }
-echo PASS
-''',
-            env={"WK_SESSION_MODE_FILE": str(marker)},
-        )
-        self.assertIn("PASS", cp.stdout, cp.stdout + cp.stderr)
+        seat = session.here(str(REPO), {"WK_SESSION_MODE_FILE": str(marker)})
+        self.assertEqual("none", seat.mode())
+        marker.write_text("gpu\n")
+        self.assertEqual("gpu", seat.mode())
 
     def test_wk_lock_dir_override_is_where_locks_actually_go(self):
         lockdir = self.tmp / "locks"
@@ -311,23 +306,6 @@ echo PASS
         self.assertIn("PASS", cp.stdout, cp.stdout + cp.stderr)
 
 
-class TestBootMachines(WkTest):
-    def test_wk_image_host_overrides_fleet_address_resolution(self):
-        cp = self.bash('''
-. "$WK_ROOT/lib/common.sh"
-. "$WK_ROOT/lib/reach.sh"
-. "$WK_ROOT/boot/machines.sh"
-WK_IMAGE_HOST=192.0.2.5
-NODE_NAME=testmach
-NODE_SSH=""
-NODE_BENCH_SSH=""
-NODE_MAC=""
-[ "$(image_addr)" = 192.0.2.5 ] || { echo "got $(image_addr)"; exit 1; }
-echo PASS
-''')
-        self.assertIn("PASS", cp.stdout, cp.stdout + cp.stderr)
-
-
 class TestBootMacGuest(WkTest):
     def test_wk_bench_guest_overrides_the_guest_workspace_name(self):
         cp = self.bash(
@@ -373,76 +351,59 @@ echo "$WK_STORE"
         self.assertEqual(cp.stdout.strip(), str(store), cp.stdout + cp.stderr)
 
 
-class TestTargetsVm(WkTest):
-    """One process, one big script: every top-level WK_VM_*/WK_HOST_* default
-    in targets/vm.sh is a plain `${VAR:-default}` assignment or a pure
-    function, so sourcing the file (no tart, no VM, no network) is enough to
-    prove every override reaches the variable it names. lib/wk/guest.py's own
-    are tests/test_guest.py's."""
+class TestTheGuestOverrides(unittest.TestCase):
+    """Every WK_VM_*/WK_HOST_* a guest or its base reads reaches what it names; lib/wk/guest.py's daemons' own
+    are tests/test_guest.py's, and a guest's size and display tests/test_wk_targets.py's."""
 
-    def test_vm_driver_overrides(self):
-        store = self.tmp / "vmstore"
-        cp = self.bash(
-            '''
-. "$WK_ROOT/lib/common.sh"
-WK_VM_IMAGE=custom-image:1
-WK_VM_BASE=custom-base
-WK_VM_MAX=5
-WK_VM_USER=customuser
-WK_VM_DISK_GB=111
-WK_VM_DISPLAY=800x600
-WK_HOST_FREE_WARN_GB=50
-WK_HOST_FREE_MIN_GB=10
-. "$WK_ROOT/targets/vm.sh"
+    def setUp(self):
+        from wk.machine import Fake, Result
+        self.fake = Fake("here")
+        self.fake.answer(["/t/tart", "list"], out="[]")
+        self.fake.answer(["podman", "machine", "inspect"], rc=125)
+        self.fake.answer(["sysctl", "-n", "hw.ncpu"], out="10\n")
+        self.fake.answer(["sysctl", "-n", "hw.memsize"], out="34359738368\n")
+        self.fake.answer(["df", "-Pk", "/"], out="F\n/d 1 1 104857600 1% /\n")
+        self.result = Result
 
-chk() { [ "$1" = "$2" ] || { echo "FAIL $3: got [$1] want [$2]"; exit 1; }; }
-chk "$WK_VM_IMAGE" custom-image:1 WK_VM_IMAGE
-chk "$WK_VM_BASE" custom-base WK_VM_BASE
-chk "$WK_VM_MAX" 5 WK_VM_MAX
-chk "$WK_VM_USER" customuser WK_VM_USER
-chk "$WK_VM_DISK_GB" 111 WK_VM_DISK_GB
-chk "$WK_VM_DISPLAY" 800x600 WK_VM_DISPLAY
-chk "$WK_HOST_FREE_WARN_GB" 50 WK_HOST_FREE_WARN_GB
-chk "$WK_HOST_FREE_MIN_GB" 10 WK_HOST_FREE_MIN_GB
-chk "$WK_STORE" "$WK_VM_STORE" WK_VM_STORE
+    def vm(self, **env):
+        from unittest import mock
+        from wk import targets
+        e = {"HOME": "/h", "WK_STORE": "/st", "WK_VM_STORE": "/vs", "XDG_STATE_HOME": "/h/st", **env}
+        vm = targets.Registry(str(REPO), env=e, machine=self.fake).load("vm")
+        p = mock.patch.object(targets.Vm, "tart", lambda s: "/t/tart")
+        p.start()
+        self.addCleanup(p.stop)
+        return vm
 
-WK_VM_CPUS=7;      chk "$(_vm_cpus)" 7 WK_VM_CPUS
-WK_VM_MEM_MB=2222; chk "$(_vm_mem_mb)" 2222 WK_VM_MEM_MB
-WK_VM_BASE_CPUS=3;      chk "$(_base_cpus)" 3 WK_VM_BASE_CPUS
-WK_VM_BASE_MEM_MB=4444; chk "$(_base_mem_mb)" 4444 WK_VM_BASE_MEM_MB
+    def admitted(self, mine=1024, **env):
+        import contextlib
+        import io
+        from wk import guest
+        from wk.act import Refused
+        with contextlib.redirect_stderr(io.StringIO()):
+            try:
+                guest.admit(guest.Host(self.vm(**env)), "wk-g", mine)
+                return True
+            except Refused:
+                return False
 
-# A refusal is `die`, which is a bare `exit` -- run each one in a subshell
-# so that exit ends the subshell, not this whole test script.
+    def test_each_override_reaches_what_it_names(self):
+        from wk.sysimage import guestbase
+        vm = self.vm(WK_VM_IMAGE="custom-image:1", WK_VM_BASE="custom-base", WK_VM_USER="customuser",
+                     WK_VM_BASE_CPUS="3", WK_VM_BASE_MEM_MB="4444")
+        self.assertEqual("custom-image:1", guestbase.image(vm.env))
+        self.assertEqual("custom-base", vm.base())
+        self.assertEqual("/Users/customuser/WebKit", vm.src("g"))
+        self.assertEqual(("3", "4444"), guestbase.Base(vm).sizing())
+        self.assertEqual("/vs/vm", vm.vm_dir())
 
-# WK_VM_MAX: a guest limit of 0 refuses (this host may have tart installed,
-# but 0 refuses regardless of how many are actually running).
-if ( WK_VM_MAX=0 _check_guest_limit ) >/dev/null 2>&1; then
-  echo "FAIL WK_VM_MAX: expected refusal at 0"; exit 1
-fi
-
-# WK_HOST_FREE_MIN_GB: stub the disk-free probe so this is deterministic.
-_host_free_gb() { echo 5; }
-if ( WK_HOST_FREE_MIN_GB=10 _check_host_disk ) >/dev/null 2>&1; then
-  echo "FAIL WK_HOST_FREE_MIN_GB: expected refusal at 5GB free / 10GB min"; exit 1
-fi
-_host_free_gb() { echo 999; }
-( WK_HOST_FREE_MIN_GB=10 _check_host_disk ) >/dev/null 2>&1 \\
-  || { echo "FAIL WK_HOST_FREE_MIN_GB: expected pass at 999GB free"; exit 1; }
-
-# WK_VM_SHARE: bypasses the memory-budget refusal; without it the same call
-# (an impossible allocation) refuses.
-if ( _check_memory_budget testws 99999999 ) >/dev/null 2>&1; then
-  echo "FAIL WK_VM_SHARE: expected refusal without it"; exit 1
-fi
-( WK_VM_SHARE=1 _check_memory_budget testws 99999999 ) >/dev/null 2>&1 \\
-  || { echo "FAIL WK_VM_SHARE: expected bypass with it"; exit 1; }
-
-echo PASS
-''',
-            env={"WK_VM_STORE": str(store)},
-            timeout=30,
-        )
-        self.assertIn("PASS", cp.stdout, cp.stdout + cp.stderr)
+    def test_the_limits_refuse_and_the_share_crosses_the_memory_one(self):
+        self.assertTrue(self.admitted())
+        self.assertFalse(self.admitted(WK_VM_MAX="0"))
+        self.assertFalse(self.admitted(WK_HOST_FREE_MIN_GB="200"))
+        self.assertTrue(self.admitted(WK_HOST_FREE_MIN_GB="1", WK_HOST_FREE_WARN_GB="2"))
+        self.assertFalse(self.admitted(mine=99999999))
+        self.assertTrue(self.admitted(mine=99999999, WK_VM_SHARE="1"))
 
 
 if __name__ == "__main__":

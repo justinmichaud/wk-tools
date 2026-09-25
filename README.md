@@ -22,11 +22,11 @@ Credentials required for git, git-webkit, github, claude, etc are shared or revo
 - `local` (used for routing commands only when already inside a workspace)
 
 **build machine** — a computer `wk` drives as a build target, declared once in
-`targets/hosts/<name>.conf`
+`machines/<name>.conf`
 
-**bench machine** - a board or Mac that can be booted into a system for perf testing, in `boot/machines/<name>.conf`
+**bench machine** - a board or Mac that can be booted into a system for perf testing, in `machines/<name>.conf`
 
-**bridge** - a device running pmOS connecting an ethernet port to the network, in `bridge/hosts/<name>.conf`. This is currently only used to connect my bmc to tailnet.
+**bridge** - a device running pmOS connecting an ethernet port to the network, in `machines/<name>.conf`. This is currently only used to connect my bmc to tailnet.
 
 **bench system** — the OS image on a bench machine that gets measured
 
@@ -91,7 +91,15 @@ groups:
   macOS host a `container` workspace's command is forwarded into the podman VM
   over `podman machine ssh`, and a workspace on a machine that runs `wk` for
   itself — a build box, or a peer workstation — is handed over whole, so that
-  machine's own `wk` resolves the name and does the work. `wk zed` is the one
+  machine's own `wk` resolves the name and does the work. The dispatcher
+  exports `WK_NAME`, `WK_TARGET` and `WK_CONFIG` to the command it runs. Either
+  hop carries the global flags as environment (`WK_QUIET`, `WK_FORCE`,
+  `WK_YES`, `WK_DRY_RUN`, `WK_DEBUG`), with `WK_CONFIG`, `WK_ROW_LABEL` (the
+  machine its rows name), `WK_NO_DELEGATE` (answer for itself, hand nothing
+  on) and `WK_ZED_PUBKEY` (the asking machine's zed key), and never
+  `WK_TARGET` or `WK_STORE`, which the far side resolves for itself; the
+  podman VM is also told `WK_IN_VM` and `WK_HOST_SELF`, since it is part of
+  this machine and its records name it. `wk zed` is the one
   exception, since the editor runs where you typed the command: it asks the
   machine holding the workspace for a route and opens that from here.
 - **This host's own hardware, refused inside a workspace and on a
@@ -190,18 +198,20 @@ Runs where you type it; the other path is on this machine.
 ```sh
 ./setup --stage softnet                 # once: the guest's egress filter
 wk new mac-rel --target vm              # builds the golden base the first time (hours, once)
-wk vm start mac-rel
+wk start mac-rel                        # boots it and writes its ssh alias, wk-mac-rel
 wk build mac-rel mac-release
 wk build mac-rel mac-release-pgo        # instrument, collect, rebuild: the perf build
-wk vm stop mac-rel
-wk vm ls                                # every guest; BASE says whether the base predates its inputs
-wk vm base --rebuild                    # hours; yours to run
+wk stop mac-rel
+wk doctor mac-rel                       # its base, its desktop, what is resident in it
+wk sysimage build macos-guest-base --rebuild   # hours; yours to run
+wk sysimage build macos-guest-base --rm        # erase it; asks again about the pulled image
 ```
 
 A guest is an APFS clone of one base carrying Xcode and a settled desktop.
 Everything else (the checkout, credentials, the shell) converges on every
-start. `wk vm start` prints what it found on the desktop and refuses a guest
-with anything in front of it. `wk vm check <name>` asks again.
+start. `wk start` prints what it found on the desktop and refuses a guest
+with anything in front of it; `wk doctor <name>` asks again. The base is
+stale once an input that made it changes, and `wk doctor` says so.
 
 **A build machine**
 
@@ -291,29 +301,45 @@ against it, deployed onto the booted board without a reflash:
 ```sh
 wk sysimage webkit <profile> --commit <sha> --slot base --detach   # at 2.52+ this is instrument,
                                                                    # collect on the board, rebuild
-wk pi deploy <profile> rpi3 --slot base                            # verified byte for byte
-wk pi bench rpi3 speedometer3 --slot base
-wk pi bench rpi3 speedometer3 --ab base,pr --rounds 5              # two slots, no reboot between
+wk bench deploy <lane> rpi3 --slot base                            # verified byte for byte
+wk bench run <lane> speedometer3 --system rpi3 --slot base         # run-benchmark here, the browser there
+wk bench run <lane> speedometer3 --system rpi3 --ab base,pr --rounds 5   # two slots, no reboot between
 ```
+
+A board run measures the bench system that is up: it refuses one in host
+mode, its rescue, or one a `wk boot` arming is about to replace, and its
+preflight wants a display and a pinned clock (`--force` records either
+missing). The board reaches this host's page server through an ssh reverse
+forward held for the run. An A/B prepares the board once per boot (the
+clock pin, the claim, the session) and re-reads its system and slot every
+leg. In a workspace, `wk bench deploy <board>` and `wk bench run <plan>
+--system <board>` are requests to the broker; an A/B runs on the workstation.
 
 **An A/B of a pull request, one command**
 
 ```sh
-wk ab wpe:1725 --devices rpi3-32,rpi4-32,rpi5-64 --dry-run   # every step, nothing run
-wk ab wpe:1725 --devices rpi4 --bits 32 --plan jetstream3 --rounds 8 --yes --detach
-wk ab <task> --kill
-wk ab <sha> --base <sha> --release 2.38 --devices rpi3       # A/A: the noise floor
+wk bench ab wpe:1725 --devices rpi3-32,rpi4-32,rpi5-64 --dry-run   # every step and its cost, nothing run
+wk bench ab wpe:1725 --devices rpi4 --bits 32 --plan jetstream3 --rounds 8 --yes --detach
+wk bench ab <task> --kill
+wk bench ab <sha> --base <sha> --release 2.38 --devices rpi3       # A/A: the noise floor
+wk bench ab --systems <id-a>,<id-b> --devices rpi5                  # two system images, one slot
 wk bench report <task> --html
 ```
 
 Both slots built per image, deployed, alternated on every board at once.
-The base is the merge-base with the image's branch; a base more than one
-commit behind the head is refused. An A/B is a graph (`lib/sched.py`): each
-step names what it needs, what it holds and how to tell it is done, so a
-re-run continues instead of rebuilding. One machine builds one thing at a
-time; `--build-on a,b` builds the two arms on two machines.
+The base is the merge-base with the pull request's own base branch; a base
+more than one commit behind the head is refused. An A/B is a graph
+(`lib/wk/sched.py`) run in one process: each step names what it needs, what
+it holds and how to tell it is done, so a re-run with `--task <task>`
+continues instead of rebuilding. One machine builds one thing at a time;
+`--build-on a,b` builds the two arms on two machines. Before it runs, an A/B
+states its cost: each board's legs times the median leg of that plan measured
+there before. The report compares only rounds both arms finished on one
+payload pin (the runner commit and the benchmark copy).
 
-Rounds are counterbalanced (AB, BA, ...). Every leg after a boot discards a
+Rounds are counterbalanced (AB, BA, ...). `--detect PCT` goes on past
+`--rounds` until the rounds resolve PCT per cent, up to `--max-rounds`: the
+same precision `wk bench precision` reports, asked between rounds. Every leg after a boot discards a
 settle run. The clock is pinned, not governed. A warmup round measures the
 live process: which GPU driver it mapped, whether the GPU did work, which
 JIT tiers it reached, and a profile; any of those wrong refuses the A/B.
@@ -325,17 +351,24 @@ Subtests one arm cannot run are dropped from both
 ```sh
 wk sysimage write --from <2.38 img> --disk rpi3:/dev/mmcblk0@second --profile <2.38 profile>
 wk sysimage write --from <2.52 img> --disk rpi3:/dev/mmcblk0@third  --profile <2.52 profile>
-wk boot rpi3 --system <id>              # then wk pi deploy into each
-wk pi bench rpi3 speedometer3 --ab-systems <a>,<b> --slot base --rounds 5
+wk boot rpi3 --system <id>              # then wk bench deploy into each
+wk bench run <lane> speedometer3 --system rpi3 --ab-systems <a>,<b> --slot base --rounds 5
 ```
+
+Each leg arms its arm's system where the board allows it, or from the rescue,
+and runs only once the running system's own marker names it. At the end the
+board is handed back to its rescue with its arming record cleared.
 
 **The Mac as a bench machine**
 
 ```sh
-wk boot mbp --prepare                   # this tree and the helpers onto the Mac; one password, once
+# on the Mac, once: ./setup --stage quiesce   (the helpers; one password)
 wk boot mbp --status                    # which volume the firmware default is
-wk bench mac-volume --all               # on the Mac: the WK Bench volume, installed and armed
-wk bench mac-ab mac-rel --patch <ref> --base <ref> --detect 0.3
+wk sysimage build perf-macos-tolken --all   # on the Mac: the WK Bench volume, installed and armed
+wk bench ab --devices mbp --patch <ref> --base <ref> --workspace mac-rel --detect 0.3
+wk bench ab --devices mbp --systems <staged-a>,<staged-b>   # two builds already staged
+wk bench ab --devices mbp --status     # the planted job, read over either install
+wk bench ab --devices mbp --collect    # its result onto the task, then reported
 wk bench precision <run-a> <run-b>      # what the rounds so far resolve
 ```
 
@@ -348,8 +381,9 @@ Every macOS number is from `mac-release-pgo`: an instrumented build, a
 collection through the three benchmarks, then the measured build, per arm.
 The collection is gated: a WebGL context, the GPU process on the accelerator,
 an unthrottled frame rate; then the profile is read back and judged
-(`lib/wkpgo.py`). A board's WebKit at 2.52 or later is built the same way
-(`image/pgo.sh`).
+(`lib/wk/pgo.py`). A board's WebKit at 2.52 or later is built the same way:
+`wk sysimage webkit <profile> --commit <sha> --slot <s>` instruments, collects
+with `wk bench run --collect` on the board, mixes and rebuilds.
 
 The display mode is declared (`NODE_DISPLAY`), held, and checked before the
 restart and in every leg. Brightness is driven to minimum. What is on the
@@ -387,10 +421,16 @@ end knows which machine it is, however many share its home. A conf in
 **Provision a bridge phone**
 
 ```sh
-wk bridge provision tailnet-bridge-generic   # image, card, phone, tailnet policy; prompts at the
-                                             # two hand steps: the card, and pasting the policy
-wk bridge setup tailnet-bridge-generic       # re-apply
-wk bridge status tailnet-bridge-generic
+wk sysimage build recovery-pinephone        # Jumpdrive: 'wk sysimage write' it to a card, boot the phone
+                                             # from it, and its internal storage appears on that machine
+wk sysimage disks rpi5                       # which device the phone's storage is
+wk machine setup tailnet-bridge-generic --disk rpi5:/dev/sda
+                                             # writes the bridge image there, prints the hand steps,
+                                             # waits for the phone, applies the role, prints the policy
+wk machine setup tailnet-bridge-generic      # re-apply: renders the role here, the phone applies it
+wk machine tailnet tailnet-bridge-generic    # the tailnet join alone, after setup --no-tailnet
+wk machine status tailnet-bridge-generic     # its health check; no name: every bridge
+wk machine rm tailnet-bridge-generic         # the role and its tailnet login go; postmarketOS stays
 ```
 
 **An agent in a workspace**
@@ -457,8 +497,8 @@ per guest.
 wk status                               # every workspace, task, machine and bench device
 wk doctor --all                         # this machine and every build machine
 wk disk
-wk gc                                   # reclaims by reference count; names what it will not take
-wk gc --purge-rubble                    # half-made workspaces nothing is creating
+wk gc                                   # asks once, takes what loses no work, names the rest with what takes it
+wk gc --purge-rubble                    # half-made workspaces nothing is creating, instrumented slots on a board
 wk gc --purge-mirror                    # the mirror and every snapshot; refused with a live workspace
 wk stop --tasks                         # everything running here, each by its own kill line
 ```
@@ -493,7 +533,7 @@ back by hand in a reader.
 stick. The firmware will not boot the stick, so arming stages the bench
 kernel and cmdline onto the SD with a `tryboot.txt` and reboots with the
 firmware's one-shot. The firmware clears the flag itself; nothing is put
-back. EEPROM order is `sd-first` (`wk pi boot-order rpi4`). A second system
+back. EEPROM order is `sd-first` (`wk boot rpi4 --boot-order sd-first`). A second system
 on the stick is `@second`; `wk boot rpi4 --system <id>` names one.
 
 **rpi5 — `rpi5-usb`, a workstation with a bench stick.** The NVMe is never
@@ -503,9 +543,9 @@ fallback is in place. Two systems on the stick are the firmware's own A/B: a
 static `autoboot.txt` selects the second pair under `[tryboot]`.
 
 Reading a medium the board is not booted from goes through the card helper
-(`admin/wk-card-priv`, `b_medium_read`): read-only, three file names, one
+(`admin/wk-card-priv`, the driver's `medium_read`): read-only, three file names, one
 partition number, bounded. Every system a write makes carries the helper;
-`wk pi helper <board>` installs this checkout's onto a running one.
+installing this checkout's onto a running one is `wk machine setup <board>`.
 
 **mbp — `mac-volume`.** The `WK Bench` APFS volume beside the host install.
 Apple Silicon selects a startup volume only at the keyboard, so `wk boot mbp`
@@ -540,14 +580,14 @@ From a bare board to an automated A/B. The boards differ only in the
    wk sysimage write --from <sdcard.img>    --disk rpi5:/dev/mmcblk0@second --profile wpewebkit-2.38-buildroot-rpi3-32
    ```
 4. **Boot the rescue.** Carry the card, power on; `<board>-rescue` joins the
-   tailnet. Then `wk pi helper <board>`, and on two media `wk pi boot-order
-   <board>` and the bench write from the rescue (`--disk rpi4:/dev/sda`).
+   tailnet. On two media, `wk boot <board> --boot-order <order>` and the
+   bench write from the rescue (`--disk rpi4:/dev/sda`).
    No card is carried after this.
 5. **Boot the bench system once.** `wk boot <board>`; `<board>-bench` joins;
    it hands the board back after `IMG_WATCHDOG` seconds unless `--keep`.
-6. **The A/B.** `wk ab wpe:1725 --devices rpi3 --bits 32 --dry-run`, then
+6. **The A/B.** `wk bench ab wpe:1725 --devices rpi3 --bits 32 --dry-run`, then
    without it. By hand, the same steps: `wk sysimage webkit` twice, `wk boot
-   --keep`, `wk pi deploy` twice, `wk pi bench --ab`, `wk bench report`.
+   --keep`, `wk bench deploy` twice, `wk bench run --ab`, `wk bench report`.
 
 **A buildroot configuration of your own** is an external defconfig under
 `image/buildroot/external/configs/`, named by the profile's `BR_DEFCONFIG`.

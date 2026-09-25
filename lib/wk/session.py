@@ -7,9 +7,10 @@ import sys
 
 from wk import act
 from wk.act import die, info, log, warn
-from wk.quiet import COMMON, PRIV, lib_argv, said
+from wk.quiet import PRIV, said
 
 SYS_DRM = "/sys/class/drm"
+MODE_FILE = "/run/wk-session-mode"
 UNIT = "wk-session"
 CARD = re.compile(r"^card[0-9]+$")
 OUTPUT = re.compile(r"^\s*name: ([A-Za-z][A-Za-z0-9]*-[0-9]+)$", re.M)
@@ -86,10 +87,28 @@ class Session:
         return (self.m.run(["systemctl", "is-active", unit]).out.splitlines() or [""])[0].strip()
 
     def mode(self):
-        return self.m.run(lib_argv(self.root, COMMON, "session_mode")).out.strip() or "none"
+        line = (self._text(self.env.get("WK_SESSION_MODE_FILE") or MODE_FILE).splitlines() or [""])[0]
+        return re.sub(r"[^a-z-]", "", line) or "none"
 
     def mode_warn(self):
-        sys.stderr.write(self.m.run(lib_argv(self.root, COMMON, "session_mode_warn")).err)
+        m = self.mode()
+        if m == "bmc":
+            warn("SLOW SESSION: SOFTWARE RENDERING -- the BMC display chip, no GPU at all")
+            log("  llvmpipe is not a slow GPU, it is a different measurement: MotionMark\n"
+                "  differs by ~400x. Nothing measured here means anything.\n"
+                "  measurable session again:  wk session on")
+        elif m == "off":
+            warn("SESSION IS OFF -- this socket is the screen-off placeholder, not a session")
+            log("  its outputs are modeset off on purpose and it has no head to draw on;\n"
+                "  nothing rendered into it will show up anywhere.\n"
+                "  a real session:  wk session on")
+
+    def bmc_drm_device(self):
+        try:
+            names = sorted(self.m.listdir(SYS_DRM))
+        except OSError:
+            return None
+        return next(("/dev/dri/" + n for n in names if CARD.match(n) and self.driver(n) == "ast"), None)
 
     def _sessions(self, on_seat0):
         if not self.have("loginctl"):
@@ -269,3 +288,9 @@ class Session:
             out.write("%-10s %s\n" % (key + ":", value))
         self.mode_warn()
         return 0
+
+
+def here(root, env):
+    from wk.clock import Clock
+    from wk.machine import Local
+    return Session(root, Local(), Clock(), env)

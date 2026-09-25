@@ -1,8 +1,8 @@
-"""Battery charge cap (docs/Urgent/HUMAN-battery.md): `wk bridge setup` writes
+"""Battery charge cap (docs/Urgent/HUMAN-battery.md): `wk machine setup` writes
 charge_control_end_threshold on the two bridge phones (bridge/provision.sh,
 bridge/bin/wk-bridge-battery, bridge/init.d/wk-bridge-battery) and
-`wk doctor --all` reads it back, over ssh, through `wk bridge battery
-<name>`. On this Mac there is no equivalent to set -- macOS's optimized
+`wk doctor --all` reads it back, over ssh, through wk.bridge's
+`Bridge.battery`. On this Mac there is no equivalent to set -- macOS's optimized
 charging has no CLI knob -- so `wk doctor --all` prints the honest
 `pmset -g batt` line instead.
 
@@ -16,17 +16,15 @@ verdict functions take their input as plain strings.
 
 Run: python3 -m unittest tests.test_battery -v
 """
-import re
 import subprocess
 import unittest
-from pathlib import Path
 
 from tests.support import REPO, scratch_dir
 from tests.test_doctor import MISS, OK, doctor
+from wk import bridge  # noqa: E402
 
 BATTERY_BIN = REPO / "bridge" / "bin" / "wk-bridge-battery"
 BATTERY_INIT = REPO / "bridge" / "init.d" / "wk-bridge-battery"
-CMD_BRIDGE = REPO / "cmd" / "bridge"
 PROVISION = REPO / "bridge" / "provision.sh"
 
 
@@ -35,7 +33,7 @@ class TestWkBridgeBatteryScript(unittest.TestCase):
     a scratch file via WK_BRIDGE_BATTERY_CONF), writes
     charge_control_end_threshold, and is idempotent. It runs locally on the
     phone (the openrc service invokes it directly, no ssh involved there);
-    `wk bridge setup` reaches it *through* ssh, which is what
+    `wk machine setup` reaches it *through* ssh, which is what
     TestBatteryAppliedThroughFakeSsh below drives."""
 
     def _run(self, conf_path):
@@ -138,7 +136,7 @@ exec bash -c "$last"
 
 
 class TestBatteryAppliedThroughFakeSsh(unittest.TestCase):
-    """The same script, this time reached the way `wk bridge setup` reaches
+    """The same script, this time reached the way `wk machine setup` reaches
     it: over ssh. A fake `ssh` (tests/support.py's stub_path) runs the
     command locally instead of on a phone, so this is the real write/read-back
     path with a scratch sysfs standing in for the phone's."""
@@ -169,7 +167,7 @@ class TestBatteryAppliedThroughFakeSsh(unittest.TestCase):
 
 class TestBatteryVerdict(unittest.TestCase):
     """battery_verdict (lib/wk/doctor.py): the row `wk doctor --all` prints for
-    one bridge phone, from `wk bridge battery <name>`'s key=value blob."""
+    one bridge phone, from `Bridge.battery`'s key=value blob."""
 
     def test_ok_when_current_equals_the_configured_limit(self):
         state, line, _ = doctor.battery_verdict("tailnet-bridge-generic",
@@ -184,7 +182,7 @@ class TestBatteryVerdict(unittest.TestCase):
         self.assertEqual(state, MISS)
         self.assertIn("cap reads 100", line)
         self.assertIn("want 80", line)
-        self.assertEqual("wk bridge setup tailnet-bridge-generic", remedy)
+        self.assertEqual("wk machine setup tailnet-bridge-generic", remedy)
 
     def test_miss_when_the_node_never_answered_a_current_value(self):
         state = doctor.battery_verdict("tailnet-bridge-moose-bmc",
@@ -223,7 +221,6 @@ class TestSyntax(unittest.TestCase):
 
     def test_touched_files_parse(self):
         for path, shell in (
-            (CMD_BRIDGE, "bash"),
             (PROVISION, "sh"),
             (BATTERY_BIN, "sh"),
             (BATTERY_INIT, "sh"),
@@ -239,29 +236,14 @@ class TestNoCaseNamesAPhone(unittest.TestCase):
     picked by branching on which phone this is."""
 
     def _device_names(self):
-        text = (REPO / "bridge" / "devices.sh").read_text()
-        m = re.search(r"cat <<'LIST'\n(.*?)\nLIST", text, re.S)
-        assert m, "bridge_device_list's heredoc moved"
-        return [line.split()[0] for line in m.group(1).splitlines() if line.strip()]
+        return sorted(bridge.devices(REPO))
 
     def test_no_case_on_device_name_or_br_name(self):
         provision_text = PROVISION.read_text()
-        # Anchored on the step the script announces, not on a numbered comment
-        # banner: a comment is not the structure, and slicing by one made this
-        # test demand that two banners keep existing.
-        step = re.search(
-            r'(?ms)^step "Battery charge limit.*?(?=^step ")', provision_text
-        )
-        self.assertIsNotNone(step, "the battery step is gone from bridge/provision.sh")
+        plan_text = (REPO / "lib" / "wk" / "bridge" / "plan.py").read_text()
+        self.assertIn("BR_BATTERY_NODE", provision_text, "the battery apply is gone from bridge/provision.sh")
 
-        bridge_text = CMD_BRIDGE.read_text()
-        cmd_battery = re.search(r"(?ms)^cmd_battery\(\) \{.*?^\}", bridge_text)
-        self.assertIsNotNone(cmd_battery, "cmd_battery not found in cmd/bridge")
-
-        combined = "\n".join([
-            step.group(0), cmd_battery.group(0),
-            BATTERY_BIN.read_text(), BATTERY_INIT.read_text(),
-        ])
+        combined = "\n".join([provision_text, plan_text, BATTERY_BIN.read_text(), BATTERY_INIT.read_text()])
         self.assertNotRegex(
             combined, r'case\s+"\$BR_(DEVICE|NAME|HOSTNAME)"',
             "battery code branches on which phone this is -- autodetect the sysfs "

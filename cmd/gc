@@ -1,310 +1,52 @@
-#!/usr/bin/env bash
+#!/usr/bin/env python3
 #
-# wk gc [--purge-mirror] [--purge-pmos] [--purge-builds] [--purge-rubble] -- reclaim disk
+# wk gc [--purge-mirror] [--purge-pmos] [--purge-builds] [--purge-rubble] [--purge-images] -- reclaim disk
+# wk: where=host name=none group=sources opts --purge-mirror,--purge-pmos,--purge-builds,--purge-rubble,--purge-images,--rows destructive dryrun readonly --rows
 #
-# wk: where=host name=none group=sources opts --purge-mirror,--purge-pmos,--purge-builds,--purge-rubble,--refresh-net
-# wk: destructive --purge-mirror,--purge-pmos,--purge-builds,--purge-rubble
+# Lists what wk left on this machine, in the podman VM's store and on the machines
+# it reaches, asks once, and removes what a plain run may: what loses no work --
+# unreferenced snapshots, abandoned payload seeds, ccache and tart's image cache
+# down to their budgets, dangling images, a killed selftest's workspaces. The
+# rest is named with the flag or command that takes it. 'wk disk' shows the same rows.
 #
-# Reclaims by reference count, so a plain `wk gc` never loses work: unreferenced
-# base snapshots, dangling podman images/volumes, ccache, the pmos build hosts'
-# chroots, stale benchmark payload seeds, and orphaned creation bookkeeping. The
-# mirror is never pruned: every snapshot borrows its objects. A boot image is reclaimed with the workspace
-# that built it (`wk rm`). Also runs fstrim, since the VM's disk image is sparse
-# and only the guest discarding blocks returns them to the host. `wk disk`
-# reports what any of it costs.
-#
-#   --purge-mirror   erase the master git store and every base snapshot (wk
-#                    sync refetches them); refused while any workspace exists
-#   --purge-pmos     erase the pmbootstrap chroots on the pmos build hosts
-#   --purge-builds   erase the build trees images come out of (hours to
-#                    rebuild; the next image build there refetches them)
-#   --purge-rubble   destroy the half-made workspaces nothing is creating; a
-#                    plain run names them and leaves them
-#   --refresh-net    no-op; egress is allowlisted by hostname, not address sets
+#   --purge-mirror   the mirror and every base snapshot ('wk sync' refetches);
+#                    refused while a workspace or guest exists
+#   --purge-pmos     the pmbootstrap chroots on the pmos build hosts
+#   --purge-builds   image build trees, and every finished stage on the Mac's
+#                    benchmark volume but the newest (hours to rebuild)
+#   --purge-rubble   half-made workspaces nothing is creating, and instrumented
+#                    slots left on a board
+#   --purge-images   container images no container uses ('wk new' pulls again)
+#   --rows           print the rows, tab-separated, and remove nothing
 
-set -euo pipefail
-# Not derived from $0: the container half pipes this file into `bash -s`.
-WK_ROOT="${WK_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
-. "$WK_ROOT/lib/common.sh"
-. "$WK_ROOT/lib/store.sh"
-. "$WK_ROOT/lib/target.sh"
-. "$WK_ROOT/lib/detach.sh"
-_source_if_there() { [ -f "$1" ] && . "$1"; return 0; }
-_source_if_there "$WK_ROOT/lib/image.sh"
-_source_if_there "$WK_ROOT/image/profiles.sh"
-_source_if_there "$WK_ROOT/boot/machines.sh"
-_source_if_there "$WK_ROOT/image/pmos.sh"
+import os
+import sys
 
-rm -rf "$(wk_state_dir)/targets"
+ROOT = os.environ.get("WK_ROOT") or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(ROOT, "lib"))
 
-TARGET="${WK_TARGET:-$(default_target)}"
-load_target "$TARGET"
+from wk import decl, gc, targets  # noqa: E402
+from wk.act import Refused, die  # noqa: E402
 
-# The lock `wk sync` and `wk new` hold too, or gc can delete a base between it being resolved and pinned.
-hold_lock store
 
-REFRESH_NET=""
-PURGE=""
-PURGE_PMOS=""
-PURGE_BUILDS=""
-PURGE_RUBBLE=""
-for _a in "$@"; do
-    case "$_a" in
-        --refresh-net)  REFRESH_NET=1 ;;
-        --purge-mirror) PURGE=1 ;;
-        --purge-pmos)   PURGE_PMOS=1 ;;
-        --purge-builds) PURGE_BUILDS=1 ;;
-        --purge-rubble) PURGE_RUBBLE=1 ;;
-    esac
-done
+def main(argv):
+    args = decl.Args(decl.Decl(__file__), argv)
+    purge = {"--purge-mirror": args.flag("--purge-mirror"), "--purge-pmos": args.flag("--purge-pmos"),
+             "--purge-builds": args.flag("--purge-builds"), "--purge-rubble": args.flag("--purge-rubble"),
+             "--purge-images": args.flag("--purge-images")}
+    flags = tuple(f for f, on in purge.items() if on)
+    g = gc.Gc(ROOT, targets.Registry(ROOT))
+    if args.flag("--rows"):
+        if flags:
+            die("--rows prints what 'wk gc' would take, and takes no --purge flag")
+        return g.print_rows()
+    return g.run(flags)
 
-# A creation that stopped leaves a workspace with no finished checkout in it (`wk new` is crash-only, and `wk status` says to remake rather than repair one). Destroying one is still destroying a workspace, so it is asked for; a plain run names them, which is what keeps clearing them from being something a person does by hand.
-# The guests are pulled from an OCI registry, so what tart keeps beside them is re-downloadable and trimmed to a budget the way ccache is. `--entries caches` is tart's own default: a local VM is a workspace and goes with `wk rm`.
-gc_tart_cache() {
-    have tart || return 0
-    local before after
-    before=$(du -sk "$TART_HOME/cache" 2>/dev/null | cut -f1) || before=""
-    tart prune --space-budget "$WK_TART_CACHE_GB" >/dev/null 2>&1 \
-        || { warn "tart prune failed; its image cache was not trimmed"; return 0; }
-    after=$(du -sk "$TART_HOME/cache" 2>/dev/null | cut -f1) || after=""
-    if [ -n "$before" ] && [ -n "$after" ] && [ "$before" -gt "$after" ]; then
-        changed "tart image cache trimmed to ${WK_TART_CACHE_GB} GB (freed $(( (before - after) / 1048576 )) GB)"
-    else
-        unchanged "tart image cache within ${WK_TART_CACHE_GB} GB"
-    fi
-}
 
-gc_rubble() {
-    local t n st found=""
-    for t in $(target_all 2>/dev/null); do
-        while IFS= read -r n; do
-            [ -n "$n" ] || continue
-            st=$( load_target "$t" >/dev/null 2>&1 && ws_state "$n" ) || continue
-            [ "$st" = creating ] || continue
-            ( load_target "$t" >/dev/null 2>&1 && ws_creating_now "$n" ) && continue
-            found=1
-            if [ -n "$PURGE_RUBBLE" ]; then
-                info "destroying half-made workspace '$n' on $t (--purge-rubble)"
-                WK_TARGET="$t" act "$WK_ROOT/wk" rm "$n" --yes
-            else
-                info "half-made workspace '$n' on $t, and nothing is creating it"
-            fi
-        done <<EOF
-$( load_target "$t" >/dev/null 2>&1 && t_list | cut -f1 )
-EOF
-    done
-    [ -z "$found" ] || [ -n "$PURGE_RUBBLE" ] \
-        || log "  kept -- 'wk gc --purge-rubble' destroys them"
-}
-
-# Asked once, where the person typed it: the container half (WK_IN_VM) is launched by this half after the answer.
-if [ -n "$PURGE_BUILDS" ] && [ -z "${WK_IN_VM:-}" ]; then
-    confirm "erase every image build tree (--purge-builds)? the next image build refetches them, and that takes hours" \
-        || die "aborted -- nothing was changed"
-fi
-if [ -n "$PURGE_RUBBLE" ] && [ -z "${WK_IN_VM:-}" ]; then
-    confirm "destroy every half-made workspace nothing is creating (--purge-rubble)?" \
-        || die "aborted -- nothing was changed"
-fi
-if [ -n "$PURGE" ] && [ -z "${WK_IN_VM:-}" ]; then
-    confirm "erase the mirror and every base snapshot? 'wk sync' refetches them (a full clone)" \
-        || die "aborted -- nothing was changed"
-fi
-
-gc_retired_trees() {
-    if [ -d "$WK_STORE/serve" ]; then
-        info "removing the retired serve/ tree ($(du -sh "$WK_STORE/serve" 2>/dev/null | cut -f1))"
-        rm -rf "${WK_STORE:?}/serve"
-    fi
-    return 0
-}
-
-# Never from inside the VM: it has no route to a build host.
-gc_pmos() {
-    [ -z "${WK_IN_VM:-}" ] || return 0
-    command -v pmos_build_hosts >/dev/null 2>&1 || return 0
-    local h
-    for h in $(pmos_build_hosts 2>/dev/null); do
-        ( WK_PMOS_HOST="$h"; pmos_prune ) || warn "could not prune the build cache on $h"
-        [ -n "$PURGE_PMOS" ] && pmos_purge_work "$h"
-    done
-    return 0
-}
-
-gc_build_outputs() {
-    command -v image_build_locations >/dev/null 2>&1 || return 0
-    local d sz any=""
-    for d in $(image_build_locations); do
-        [ -d "$d" ] || continue
-        sz=$(du -sh "$d" 2>/dev/null | cut -f1)
-        [ -n "$any" ] || info "build output, wherever a builder left it:"
-        any=1
-        log "  ${sz:-?}  $d"
-        if [ -n "${PURGE_BUILDS:-}" ]; then
-            info "  removing $d (--purge-builds)"
-            rm -rf "${d:?}"
-        fi
-    done
-    [ -n "$any" ] || return 0
-    [ -n "${PURGE_BUILDS:-}" ] || log "  kept -- 'wk gc --purge-builds' removes them"
-    return 0
-}
-
-gc_report_complete() {
-    info "gc complete"
-    df -h "$WK_STORE" 2>/dev/null | tail -1 || true
-
-    for d in bench cache/bench cache/bench-runner cache/images cache/yocto/sstate cache/yocto/downloads \
-             cache/yocto/buildtools cache/buildroot; do
-        [ -d "$WK_STORE/$d" ] || continue
-        du -sh "$WK_STORE/$d" 2>/dev/null | awk -v d="$d" '{printf "  %-8s %s (kept)\n", $1, d}' >&2
-    done
-}
-
-# On a Mac $WK_STORE is the VM's /var/lib/wk, meaningless out here; the VM's exit status is this one's.
-if is_macos && [ -z "${WK_IN_VM:-}" ]; then
-    info "this machine's half: the pmos build hosts"
-    gc_pmos
-    gc_build_outputs
-    gc_tart_cache
-
-    if command -v podman >/dev/null 2>&1 \
-       && [ "$(podman machine inspect "${WK_MACHINE:-wk}" --format '{{.State}}' 2>/dev/null)" = running ]; then
-        info "the container store's half, inside the podman machine"
-        _fwd=""
-        [ -n "$PURGE" ]         && _fwd="$_fwd --purge-mirror"
-        [ -n "$PURGE_PMOS" ]    && _fwd="$_fwd --purge-pmos"
-        [ -n "$PURGE_BUILDS" ]  && _fwd="$_fwd --purge-builds"
-        [ -n "$REFRESH_NET" ]   && _fwd="$_fwd --refresh-net"
-        podman machine ssh "${WK_MACHINE:-wk}" -- \
-            "$(wk_forwarded_env)WK_IN_VM=1 WK_ROOT=/opt/wk-tools WK_STORE=/var/lib/wk bash -s --$_fwd" <"$0" \
-            || exit $?
-        # After the VM's half, which refuses while a workspace still borrows the mirror's objects.
-        if [ -n "$PURGE" ]; then
-            rm -rf "$(wk_mirror)"
-            info "erased the mirror $(wk_mirror)"
-        fi
-        exit 0
-    fi
-    warn "the podman machine is not running, so the container store was not touched"
-    log  "  'wk start', then 'wk gc' again -- that half is the snapshots and every"
-    log  "  workspace's overlay, and it is the largest of them"
-    [ -z "$PURGE" ] || warn "the mirror was not erased either: whether a workspace in there still
-    borrows its objects cannot be known while the machine is stopped"
-    gc_report_complete
-    exit 0
-fi
-
-_uses_snapshots() { t_needs_base; }
-
-# A snapshot is the lower layer of a live overlay mount, and the kernel leaves an overlay whose underlying filesystem changes undefined.
-if [ -n "$PURGE" ]; then
-    _uses_snapshots || die "target '$TARGET' has no mirror or snapshots to purge: its base is
-    $([ "$WK_TARGET_KIND" = vm ] \
-        && echo "the golden guest image -- erase that with 'wk vm base --rm'" \
-        || echo "that machine's own repository -- 'wk machine rm $TARGET' offers to remove
-    the remote root, and 'wk sync --tools $TARGET' refreshes it in place")"
-
-    ws=$(list_workspaces | tr '\n' ' '); ws="${ws% }"
-    [ -z "$ws" ] || die "workspaces still exist:$ws
-    Every one of them is an overlay whose lower layer is a snapshot in here, so
-    this would delete the ground they stand on. Remove them first (wk rm <name>)
-    -- or run plain 'wk gc', which prunes only what nothing references."
-
-    # tr: macOS du right-aligns its size field, and " 0B" reads as a typo.
-    sz_b=$(du -sh "$(wk_base_dir)" 2>/dev/null | cut -f1 | tr -d ' ' || echo '?')
-    n_b=$(ls -1 "$(wk_base_dir)" 2>/dev/null | wc -l | tr -d ' ')
-    rm -rf "${WK_STORE:?}/base"
-    info "erased every base snapshot ($sz_b, $n_b of them)"
-    if mirror_is_here; then
-        sz_m=$(du -sh "$(wk_mirror)" 2>/dev/null | cut -f1 | tr -d ' ' || echo '?')
-        rm -rf "$(wk_mirror)"
-        info "erased the mirror $(wk_mirror) ($sz_m)"
-    fi
-    log  "  'wk sync' rebuilds them; 'wk new' needs a snapshot, so run it before the next workspace"
-fi
-
-unpinned=""
-if _uses_snapshots; then
-    unpinned=$(unpinned_workspaces | tr '\n' ' ')
-    unpinned="${unpinned% }"
-fi
-
-if [ -n "$unpinned" ]; then
-    warn "not pruning snapshots: workspace(s) $unpinned have no recorded base"
-    log  "  they never finished being created -- 'wk new <name>' remakes one from"
-    log  "  scratch, 'wk rm <name>' removes it; then re-run 'wk gc'"
-elif _uses_snapshots; then
-    for base in $(unreferenced_bases); do
-        info "removing unreferenced snapshot $base"
-        rm -rf "$(wk_base_dir)/$base"
-    done
-fi
-
-if [ "$WK_TARGET_KIND" = container ] && have podman; then
-    podman image prune -f >/dev/null 2>&1 || true
-    podman volume prune -f >/dev/null 2>&1 || true
-    info "pruned dangling images and volumes"
-fi
-
-if have ccache; then
-    CCACHE_DIR="$WK_STORE/cache/ccache" ccache --max-size="$WK_CCACHE_MAXSIZE" >/dev/null
-    CCACHE_DIR="$WK_STORE/cache/ccache" ccache --cleanup >/dev/null 2>&1 || true
-    info "ccache trimmed to $WK_CCACHE_MAXSIZE"
-fi
-
-if [ -n "$REFRESH_NET" ]; then
-    warn "--refresh-net does nothing: the egress policy is by hostname,
-  in container/proxy/wk-proxy.py, and needs no periodic refresh."
-    REFRESH_NET=""
-fi
-
-if [ -d "$WK_STORE/cache/bench" ]; then
-    for seed in "$WK_STORE"/cache/bench/*/; do
-        [ -d "$seed" ] || continue
-        seed="${seed%/}"
-        # Exactly twelve trailing characters: plan names contain dashes too.
-        case "$seed" in
-            *-????????????) ;;
-            *) continue ;;
-        esac
-        plan="${seed%-????????????}"
-        for other in "$plan"-????????????; do
-            [ -d "$other" ] || continue
-            [ "$other" = "$seed" ] && continue
-            if [ "$other" -nt "$seed" ]; then
-                info "removing stale benchmark payload $(basename "$seed")"
-                rm -rf "$seed"
-                break
-            fi
-        done
-    done
-fi
-
-if [ -d "$WK_STORE/cache/bench-runner" ]; then
-    newest=$(ls -1t "$WK_STORE/cache/bench-runner" 2>/dev/null | grep -v '^\.tmp-' | head -1)
-    for tree in "$WK_STORE"/cache/bench-runner/*/ "$WK_STORE"/cache/bench-runner/.tmp-*/; do
-        [ -d "$tree" ] || continue
-        tree="${tree%/}"
-        [ "$(basename "$tree")" = "$newest" ] && continue
-        info "removing runner tree $(basename "$tree") (re-exported from the mirror on demand)"
-        rm -rf "$tree"
-    done
-fi
-
-gc_creation_records
-gc_rubble
-
-gc_retired_trees
-gc_build_outputs
-gc_pmos     # ...and the build hosts' caches, on the machine that can reach them
-
-if [ -n "${WK_IN_VM:-}" ] || is_linux; then
-    if sudo -n true 2>/dev/null; then
-        sudo -n fstrim -av 2>/dev/null || warn "fstrim failed; freed space may not return to the host"
-    else
-        log "skipping fstrim (needs a password) -- run 'sudo fstrim -av' yourself to return freed space"
-    fi
-fi
-
-gc_report_complete
+if __name__ == "__main__":
+    try:
+        sys.exit(main(sys.argv[1:]))
+    except Refused as e:
+        sys.exit(e.status)
+    except KeyboardInterrupt:
+        sys.exit(130)

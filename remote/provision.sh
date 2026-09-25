@@ -33,10 +33,10 @@ write_file "$HOME/.wk-remote" 0644 <<EOF
 # wk: this machine hosts wk remote workspaces. Written by remote/provision.sh.
 #
 # It is not a workspace (there are several here) and not a workstation (it owns
-# no store, no VM and no hardware of yours), so \`wk\` reads this to know which
-# target it is the far end of -- and refuses the commands that only make sense
-# on a workstation.
-target=$TARGET
+# no store, no VM and no hardware of yours), so \`wk\` reads this to know it is
+# the far end of a target -- and refuses the commands that only make sense on
+# a workstation. Which target it is the far end of comes from machines/*.conf
+# (WK_REMOTE_HOSTNAME), the one place a machine's kind is read.
 root=$ROOT
 inputs=${WK_REMOTE_INPUTS:-}
 EOF

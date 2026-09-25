@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 #
-# wk machine setup|rm|ls|probe [<name>] -- the machines in machines/: set one up, remove it, list them, find one
-# wk: where=host name=none group=hosts takes=2 destructive setup,rm dryrun setup,rm opts --kind=,--json,--segment=,--vantage=,--no-ssh,--timeout=
-# wk: readonly ls,probe
-# wk: sub setup needs=ssh,git opts=--kind=
-# wk: sub rm needs=ssh opts=
+# wk machine setup|rm|tailnet|status|ls|probe [<name>] -- the machines in machines/: set one up, remove it, list them, find one
+# wk: where=host name=none group=hosts takes=2 destructive setup,rm dryrun setup,rm,tailnet opts --kind=,--json,--segment=,--vantage=,--no-ssh,--timeout=
+# wk: readonly ls,probe,status
+# wk: sub setup needs=ssh,git opts=--kind=,--at=,--no-tailnet,--disk=,--image=,--rebuild
+# wk: sub rm needs=ssh opts=--at=
+# wk: sub tailnet needs=ssh opts=--at=
+# wk: sub status needs=ssh opts=--at=
 # wk: sub ls takes=1 opts=--json
 # wk: sub probe opts=--json,--segment=,--vantage=,--no-ssh,--timeout=
 #
@@ -17,11 +19,24 @@
 #            no machines/<name>.conf needs --kind and writes the conf; after
 #            that the conf's KIND is the answer. It asks once, with the sizes,
 #            before removing an older wk-tools checkout or a redundant mirror.
+#            A bridge: renders its role from the conf, copies it to the phone
+#            with bridge/'s scripts and applies it (bridge/provision.sh), joins
+#            the tailnet if it is not on it, prints the policy to paste and runs
+#            the health check. Re-run it after any change to the conf.
+#            With --disk it first writes the phone's system to that disk (wk
+#            sysimage write), prints the hands-on steps, and waits up to 15
+#            minutes for the phone to answer.
+#   tailnet <name>
+#            a bridge's tailnet join and policy on their own, once the role is on it.
+#   status [<name>]
+#            a bridge's health check, read off the phone; with no name, every
+#            bridge and whether it answers, bare or provisioned.
 #   rm <name>
 #            a build machine: removes the wk-tools lines from its shell rc
 #            files, its ~/.wk-remote and its root, once no workspace is left
 #            on it; an unreachable one only loses its conf here. A peer: its
-#            conf. Asks once.
+#            conf. A bridge: everything setup left on the phone, and its tailnet
+#            login; postmarketOS stays. Asks once.
 #   ls [--json]
 #            every machine in machines/, its kind and its tailnet names.
 #   probe <name>
@@ -37,6 +52,13 @@
 #   --no-ssh           do not ask what answers; addresses and MACs only
 #   --timeout <s>      per-sweep ceiling (default 60)
 #   --json             one JSON document instead of the report
+#   --at <host>        (bridge) reach the phone at this address: a DHCP lease, not written down
+#   --no-tailnet       (bridge setup) stop after the role, before the tailnet
+#   --disk <machine>:<device>
+#                      (bridge setup) write the bridge's newest image here first: the
+#                      phone's internal storage as its service image exports it, or a card
+#   --image <path>     (bridge setup --disk) write this image instead
+#   --rebuild          (bridge setup --disk) build a fresh image first
 
 import os
 import sys
@@ -47,7 +69,7 @@ sys.path.insert(0, os.path.join(ROOT, "lib"))
 from wk import decl, machine_cmd, reach  # noqa: E402
 from wk.act import Refused, die  # noqa: E402
 
-USAGE = "usage: wk machine setup|rm <name> | ls | probe [<name>]; see wk machine -h"
+USAGE = "usage: wk machine setup|rm|tailnet <name> | status|probe [<name>] | ls; see wk machine -h"
 
 
 def main(argv):
@@ -55,8 +77,16 @@ def main(argv):
     verb, rest = (args.positionals[0], args.positionals[1:]) if args.positionals else ("", [])
     m = machine_cmd.Machines(ROOT)
     as_json = args.flag("--json")
-    if verb in ("setup", "rm") and len(rest) == 1:
-        return m.setup(rest[0], args.value("--kind")) if verb == "setup" else m.rm(rest[0])
+    at = args.value("--at")
+    if verb == "setup" and len(rest) == 1:
+        return m.setup(rest[0], args.value("--kind"), at=at, no_tailnet=args.flag("--no-tailnet"),
+                       disk=args.value("--disk"), image=args.value("--image"), rebuild=args.flag("--rebuild"))
+    if verb == "rm" and len(rest) == 1:
+        return m.rm(rest[0], at=at)
+    if verb == "tailnet" and len(rest) == 1:
+        return m.tailnet(rest[0], at=at)
+    if verb == "status" and len(rest) <= 1:
+        return m.status(rest[0] if rest else None, at=at)
     if verb == "ls" and not rest:
         return m.ls(as_json)
     if verb == "probe":

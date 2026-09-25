@@ -17,7 +17,7 @@ import subprocess
 import textwrap
 import unittest
 
-from tests.support import REPO, WkTest, scratch_dir
+from tests.support import REPO, WkTest, owed, scratch_dir
 
 HARNESS = REPO / "build" / "pgo-run-benchmark.py"
 
@@ -174,6 +174,16 @@ class TestTheClassTheFactoryUsesGetsTheAnswer(WkTest):
         cp = ask(self.root, scripts)
         self.assertNotEqual(cp.returncode, 0)
         self.assertIn("registers no osx minibrowser", cp.stdout + cp.stderr)
+
+
+class TestUpstreamCarriesWhatTheLanePatches(unittest.TestCase):
+    """`unit pgo.no_local_patch`: once upstream carries them, the harness file goes and the mixer patches nothing."""
+
+    @owed("upstream's OSXMiniDriver names no pgo_profile_output_directories, and webkitpy's locate_binary_xcrun "
+          "still runs /usr/bin/xcrun off macOS")
+    def test_the_lane_patches_nothing_upstream_owns(self):
+        self.assertFalse(HARNESS.exists())
+        self.assertNotIn("locate_binary_xcrun", (REPO / "lib" / "wk" / "pgo.py").read_text())
 
 
 if __name__ == "__main__":

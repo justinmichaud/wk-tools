@@ -1,17 +1,29 @@
 """The macOS perf build: `mac-release-pgo`, the config every macOS number is
-taken from (build/configs.sh, build/mac-pgo.sh, build/pgo-run-benchmark.py).
+taken from (build/configs.sh, build/mac-pgo.sh, lib/wk/bench/mac.py's PgoCollect,
+build/pgo-run-benchmark.py).
 
 Three phases with a benchmark run between them, so the shape of each phase --
 and the fact that the instrumented one never lands in the measured one's
-products directory -- is what these tests pin.
+products directory -- is what these tests pin; the collection itself runs
+against a Fake machine.
 
 Run: python3 -m unittest tests.test_mac_pgo -v
 """
+import contextlib
+import io
 import os
 import subprocess
+import sys
 import unittest
+from unittest import mock
 
 from tests.support import REPO, WkTest, bash, run, scratch_dir
+
+sys.path.insert(0, str(REPO / "lib"))
+from wk import pgo  # noqa: E402
+from wk.act import Refused  # noqa: E402
+from wk.bench import mac, seed  # noqa: E402
+from wk.machine import Fake, Result  # noqa: E402
 
 CONFIG = "mac-release-pgo"
 
@@ -19,7 +31,6 @@ CONFIG = "mac-release-pgo"
 def config_fields(config, os_name, kind="vm"):
     cp = bash(f'''
 . "{REPO}/lib/common.sh"
-. "{REPO}/lib/arch.sh"
 . "{REPO}/build/configs.sh"
 WK_TARGET_KIND={kind}
 config_load {config} {os_name} {kind}
@@ -157,6 +168,119 @@ class TestTheThreePhases(WkTest):
         self.assertEqual(len(order), 3)
 
 
+def fake_guest(check_rc=0, watch_rc=0, profile_rc=0, blocker="", console="admin", pyobjc=0, screen=0, browser_rc=0):
+    """The guest a collection runs in, every gate passing unless told otherwise."""
+    m = Fake("guest")
+    m.answer(["stat", "-f"], out=console + "\n")
+    m.answer(["id", "-un"], out="admin\n")
+    m.answer(["/usr/bin/python3", "-c"], rc=screen)
+    m.answer(["/usr/bin/python3", str(REPO / mac.CHECK)], rc=browser_rc)
+    m.answer(["env", "WK_WEBKIT_SCRIPTS=/src/Tools/Scripts"], rc=check_rc)
+    m.answer(["env", "PYTHONPATH=" + str(REPO / "lib")], rc=profile_rc)
+
+    def lib(argv, fake):
+        fn = argv[2].split(";")[1].split()[0]
+        return {"wk_pyobjc_have": Result(pyobjc), "screen_blocker": Result(0, blocker),
+                "screen_watch_stop": Result(watch_rc, "a Software Update pane\n" if watch_rc else "")}.get(fn, Result(0))
+    m.react(["bash", "-c"], lib)
+    return m
+
+
+def collect(m, pins=(("speedometer3", "/seed/s"), ("jetstream3", "/seed/j"), ("motionmark", "/seed/m"))):
+    c = mac.PgoCollect(REPO, m, {"HOME": "/Users/admin"}, "/src")
+    with mock.patch.object(mac.PgoCollect, "pins", lambda self: list(pins)), mock.patch.dict(os.environ), \
+            contextlib.redirect_stderr(io.StringIO()) as err, contextlib.redirect_stdout(io.StringIO()):
+        os.environ.pop("WK_DRY_RUN", None)
+        try:
+            return c.run("/src/WebKitBuild/Release-pgo-instr", "/src/WebKitBuild/Release-pgo-profile", "arm64"), err.getvalue()
+        except Refused:
+            return Refused, err.getvalue()
+
+
+def order(m):
+    """Each step the collection took, named by what it ran."""
+    out = []
+    for e in m.effects:
+        argv = e[1] if e[0] in ("run", "run_tty") else ()
+        if argv[:2] == ("bash", "-c") and "; " in argv[2]:
+            out.append(argv[2].split(";")[1].split()[0])
+        elif len(argv) > 1 and argv[1].endswith("mac-browser-check.py"):
+            out.append("browser-check")
+        elif e[0] == "run_tty":
+            out.append("collect")
+        elif argv[:1] == ("env",) and "wk.pgo" in argv:
+            out.append("profile-check")
+    return out
+
+
+class TestTheCollection(WkTest):
+    """The instrumented browser, gated before it is profiled and its profile read back after."""
+
+    def test_it_runs_in_the_one_order_that_makes_sense(self):
+        m = fake_guest()
+        rc, err = collect(m)
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(["wk_pyobjc_have", "screen_blocker", "mac_raiser_on", "browser-check", "screen_watch_start", "collect",
+                          "screen_watch_stop", "mac_raiser_off", "profile-check"],
+                         [s for s in order(m)])
+
+    def test_the_browser_is_checked_against_the_instrumented_build_and_no_display(self):
+        """A collection trains a profile rather than producing a number, so it is compared with no display."""
+        m = fake_guest()
+        collect(m)
+        check = [e[1] for e in m.effects if e[0] == "run" and len(e[1]) > 1 and e[1][1].endswith("mac-browser-check.py")][0]
+        self.assertIn("/src/WebKitBuild/Release-pgo-instr", check)
+        self.assertNotIn("--expect-display", check)
+
+    def test_a_failed_browser_check_profiles_nothing_and_lets_the_raiser_go(self):
+        m = fake_guest(browser_rc=1)
+        rc, err = collect(m)
+        self.assertIs(rc, Refused)
+        self.assertNotIn("collect", order(m))
+        self.assertEqual(order(m)[-1], "mac_raiser_off")
+
+    def test_something_drawn_over_the_collection_refuses_it(self):
+        rc, err = collect(fake_guest(watch_rc=1))
+        self.assertIs(rc, Refused)
+        self.assertIn("a Software Update pane", err)
+
+    def test_a_profile_not_to_build_against_stops_the_build(self):
+        self.assertIs(collect(fake_guest(profile_rc=1))[0], Refused)
+
+    def test_a_collection_that_failed_is_not_read_back(self):
+        m = fake_guest(check_rc=3)
+        self.assertEqual(collect(m)[0], 3)
+        self.assertNotIn("profile-check", order(m))
+
+    def test_each_benchmark_is_handed_its_pinned_copy_and_the_pins_are_kept(self):
+        m = fake_guest()
+        collect(m)
+        argv = [e[1] for e in m.effects if e[0] == "run_tty"][0]
+        self.assertIn("local-copy:/seed/j", argv)
+        self.assertEqual(m.files["/src/WebKitBuild/Release-pgo-profile/payload-pins"].splitlines()[0], "speedometer3\t/seed/s")
+        self.assertIn(("remove", "/src/WebKitBuild/Release-pgo-profile"), m.effects, "collect-pgo-profiles refuses a full directory")
+
+    def test_a_payload_it_could_not_pin_stops_the_collection(self):
+        m = fake_guest()
+        m.files["/src/Tools/Scripts/webkitpy/benchmark_runner/data/plans/speedometer3.plan"] = '{"git_repository": {"url": "u"}}'
+        c = mac.PgoCollect(REPO, m, {"HOME": "/Users/admin", "WK_STORE": "/store"}, "/src")
+        with mock.patch.object(seed.Seeder, "seed", return_value=""), contextlib.redirect_stderr(io.StringIO()) as err:
+            with self.assertRaises(Refused):
+                c.pins()
+        self.assertIn("could not pin the speedometer3 payload", err.getvalue())
+
+    def test_the_readings_travel_beside_the_products(self):
+        m = fake_guest()
+        for f in ("/Users/admin/.local/state/wk/pgo/browser-check.json", "/Users/admin/.local/state/wk/pgo/profile-check.json",
+                  "/p/payload-pins"):
+            m.files[f] = "x"
+        with mock.patch.dict(os.environ):
+            os.environ.pop("WK_DRY_RUN", None)
+            mac.PgoCollect(REPO, m, {"HOME": "/Users/admin"}, "/src").evidence("/final", "/p")
+        self.assertEqual(sorted(f for f in m.files if f.startswith("/final/")),
+                         ["/final/wk-browser-check.json", "/final/wk-payload-pins", "/final/wk-profile-check.json"])
+
+
 class TestItRefusesAThrottledCollection(WkTest):
     """Measured on a Tart guest 2026-09-06: Setup Assistant is frontmost on
     every boot, killing it takes the console session with it, and the guest's
@@ -164,51 +288,51 @@ class TestItRefusesAThrottledCollection(WkTest):
     there would look exactly like a good one."""
 
     def test_it_names_every_reason_rather_than_the_first(self):
-        text = (REPO / "build" / "mac-pgo.sh").read_text()
-        body = text[text.index("_pgo_screen_faults"):]
-        for reason in ("has nowhere to draw", "no raiser", "no main screen",
-                       "nothing this build put there"):
-            self.assertIn(reason, body)
+        faults = mac.PgoCollect(REPO, fake_guest(console="root", screen=1, blocker="Setup Assistant"), {}, "/src").faults()
+        self.assertEqual(len(faults), 3, faults)
+        self.assertIn("nowhere to draw", faults[0])
+        self.assertIn("no main screen", faults[1])
+        self.assertIn("Setup Assistant", faults[2])
 
-    def test_a_fault_stops_the_collection(self):
-        text = (REPO / "build" / "mac-pgo.sh").read_text()
-        self.assertIn("cannot present an unthrottled browser", text)
-        self.assertRegex(text, r'faults=\$\(_pgo_screen_faults')
+    def test_without_pyobjc_nothing_can_raise_the_browser(self):
+        faults = mac.PgoCollect(REPO, fake_guest(pyobjc=1), {}, "/src").faults()
+        self.assertEqual(["no pyobjc: run-benchmark cannot size the screen and no raiser can hold the browser in front"], faults)
 
-    def test_what_is_on_the_screen_is_asked_of_the_one_prober(self):
-        """screen_blocker (lib/quiet.sh) is the repo's one answer to 'what is
-        in front'; a second reading of the window server could disagree."""
-        text = (REPO / "build" / "mac-pgo.sh").read_text()
-        self.assertIn("screen_blocker", text)
-        self.assertNotIn("wk_window_probe", text)
+    def test_a_fault_stops_the_collection_before_the_raiser(self):
+        m = fake_guest(console="root")
+        rc, err = collect(m)
+        self.assertIs(rc, Refused)
+        self.assertIn("cannot present an unthrottled browser", err)
+        self.assertNotIn("mac_raiser_on", order(m))
 
 
 class TestItIsThePolicyAndNotAnOption(WkTest):
     """Every macOS number this repo quotes comes from a profile-guided build,
-    so the lanes default to it rather than offering it."""
+    so the lane defaults to it rather than offering it."""
 
-    def test_both_mac_lanes_default_to_it(self):
-        for rel in ("bench/mac-lane.sh", "bench/mac-ab.sh"):
-            text = (REPO / rel).read_text()
-            line = [l for l in text.splitlines() if l.startswith("CONFIG=")]
-            self.assertEqual(len(line), 1, f"{rel}: {line}")
-            self.assertIn(CONFIG, line[0], rel)
+    def test_the_mac_ab_defaults_to_it(self):
+        self.assertEqual(mac.AB_CONFIG, CONFIG)
 
-    def test_the_collection_weights_are_webkits_own(self):
+    def test_the_benchmarks_are_named_once_and_the_weights_are_webkits_own(self):
         """0.6 / 0.2 / 0.2 lives in Tools/Scripts/pgo-profile; naming the three
-        benchmarks is all this repo may decide, and it names them once."""
-        shared = (REPO / "build" / "pgo.sh").read_text()
-        self.assertNotIn("0.6", shared)
-        self.assertIn("PGO_BENCHMARKS=", shared)
-        lane = (REPO / "build" / "mac-pgo.sh").read_text()
-        self.assertNotIn("PGO_BENCHMARKS=", lane)
-        self.assertIn("/pgo.sh", lane)
-
-    def test_the_two_lanes_take_the_list_from_the_one_place(self):
-        for rel in ("build/mac-pgo.sh", "image/pgo.sh"):
+        benchmarks is all this repo may decide, and lib/wk/pgo.py names them."""
+        self.assertEqual(set(pgo.BENCHMARKS), {"speedometer3", "jetstream3", "motionmark"})
+        self.assertNotIn("0.6", (REPO / "build" / "mac-pgo.sh").read_text())
+        for rel in ("build/mac-pgo.sh", "lib/wk/bench/mac.py"):
             text = (REPO / rel).read_text()
-            self.assertIn("$PGO_BENCHMARKS", text, rel)
+            self.assertNotIn('"speedometer3", "jetstream3"', text, rel)
             self.assertNotIn("speedometer3 jetstream3", text, rel)
+
+    def test_the_instrumented_products_are_named_in_one_place(self):
+        """The reclaim after a stage deletes them, so a second spelling deletes the wrong directory, or nothing."""
+        self.assertNotRegex((REPO / "build" / "mac-pgo.sh").read_text(), r"[=\"]-instr|final-instr")
+        cp = run_py("pgo-instr", "/x/Release-pgo")
+        self.assertEqual(cp.stdout.strip(), "/x/Release-pgo-instr")
+
+
+def run_py(*args):
+    return subprocess.run(["python3", "-m", "wk.bench.mac"] + list(args), capture_output=True, text=True, timeout=30,
+                          env=dict(os.environ, PYTHONPATH=str(REPO / "lib")))
 
 
 class TestTheProfileReachesTheMachineThatRunsIt(WkTest):

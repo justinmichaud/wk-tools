@@ -18,6 +18,7 @@ from tests.support import REPO, bash
 sys.path.insert(0, str(REPO / "lib"))
 
 from wk import act  # noqa: E402
+from wk.boot.driver import root_priv  # noqa: E402
 from wk.boot.pi import PiTryboot  # noqa: E402
 from wk.machine import Result  # noqa: E402
 
@@ -74,9 +75,7 @@ class TestArrangement(unittest.TestCase):
         d.reboot(armed=True)
         d.reboot()
         self.assertEqual([c[1] for c in ch.calls if c[0] == "boot_priv"], [("reboot-tryboot",), ("reboot",)])
-        text = (REPO / "boot" / "machines.sh").read_text()
-        body = text[text.index("boot_priv() {"):]
-        self.assertIn('/run/systemd/reboot-param && systemctl reboot', body[:body.index("\n}\n")])
+        self.assertIn("/run/systemd/reboot-param && systemctl reboot", root_priv("reboot-tryboot")[-1])
 
     def test_identity_still_reads_off_the_bench_medium(self):
         self.assertEqual(driver()[0].boot_part(), "/dev/sda1")
@@ -112,7 +111,7 @@ class TestArming(unittest.TestCase):
         self.assertIn("not the selected system's root=PARTUUID=aa-04", refused(d.arm, "/dev/sda3"))
 
     def test_an_arm_with_no_selection_is_refused(self):
-        self.assertIn("machine_select_system", refused(driver()[0].arm, ""))
+        self.assertIn("select_system", refused(driver()[0].arm, ""))
 
     def test_a_failed_staging_names_what_has_to_answer(self):
         self.assertIn("could not stage the tryboot files on rpi4", refused(driver({"stage": Result(9)})[0].arm, "/dev/sda1"))
@@ -147,7 +146,7 @@ class TestEvidence(unittest.TestCase):
 
     def test_reprovision_puts_the_sd_first(self):
         out = driver()[0].reprovision()
-        self.assertIn("wk pi boot-order rpi4 sd-first", out)
+        self.assertIn("wk boot rpi4 --boot-order sd-first", out)
         self.assertIn("--disk <reader>:/dev/mmcblk0 --rescue", out)
         self.assertIn("--disk rpi4:/dev/sda", out)
 

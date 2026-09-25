@@ -186,19 +186,6 @@ class TestRpi5SelectsBetweenTwoSystems(unittest.TestCase):
         self.assertEqual([k for k, v in DRIVERS.items() if v.selects_by_partition], ["rpi5-usb"])
 
 
-class TestTheWatchdogIsTheSystemsFactNotTheDriversFact(unittest.TestCase):
-    """`--keep` asks the running system whether it carries the self-return watchdog, not whether its driver has a
-    self-disarm: rpi5-usb has none, and its cards carry the watchdog all the same."""
-
-    def test_keep_asks_the_machine_and_not_the_driver(self):
-        body = (REPO / "cmd" / "boot").read_text()
-        fn = body[body.index("cmd_keep()"):]
-        fn = fn[:fn.index("\ncmd_back()")]
-        self.assertIn("b_watchdog_present", fn)
-        self.assertNotIn("command -v b_self_disarm_sh", fn)
-
-
-
 class TestEveryMachineConfLoads(unittest.TestCase):
     """A conf `machine_load` cannot load is a machine that silently leaves the fleet."""
 

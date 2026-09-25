@@ -104,8 +104,7 @@ class TestTheReadingsTravelWithTheBuild(WkTest):
         self.assertEqual(cp.returncode, 0, out)
         self.assertIn("no readings under", out, out)
         self.assertIn("profile-guided build", out, out)
-        for lane in ("build/mac-pgo.sh", "image/pgo.sh"):
-            self.assertIn(lane, out, out)
+        self.assertIn("build/mac-pgo.sh", out, out)
 
     def test_the_readings_are_shown_from_beside_the_products(self):
         cp, out = self._gates(browser=GOOD_BROWSER, profile=GOOD_PROFILE,

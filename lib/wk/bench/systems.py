@@ -7,7 +7,7 @@ import os
 import plistlib
 import shlex
 
-from wk import shell
+from wk import buildconf, fleet
 from wk.act import die
 from wk.resources import Resources
 from wk.session import Session
@@ -128,7 +128,7 @@ class ContainerSystem(System):
         return "setarch $(uname -m) -R -- "
 
     def has_gpu(self, arch):
-        return shell.arch_has_gpu(self.root, self.here, arch)
+        return buildconf.arch_has_gpu(arch)
 
     def session_mode(self):
         if self.mode is None:
@@ -320,17 +320,36 @@ class GuestSystem(System):
 
 
 SYSTEMS = {"container": ContainerSystem, "vm": GuestSystem}
+NAMED_SYSTEMS = {}   # a `--system <machine>` override, keyed by that machine's NODE_DRIVER
 
 
-def for_workspace(root, reg, ws, clock):
+def _named_systems():
+    if not NAMED_SYSTEMS:
+        from wk.bench import mac
+        NAMED_SYSTEMS["mac-volume"] = mac.MacHostSystem
+    return NAMED_SYSTEMS
+
+
+def for_workspace(root, reg, ws, clock, system_name=""):
     try:
         target = reg.load(reg.ws_target(ws))
     except LookupError as e:
         die(str(e))
+    if system_name:
+        conf = fleet.Fleet(root, reg.env).load(system_name)
+        if conf and conf.get("KIND") == "board":
+            from wk.bench import board
+            return board.for_board(root, reg, ws, clock, system_name, target=target)
+        if not conf or conf.get("KIND") != "mac":
+            die("--system '%s' names no Mac or board in machines/ (wk boot --list)" % system_name)
+        cls = _named_systems().get(conf.get("NODE_DRIVER", ""))
+        if cls is None:
+            die("--system '%s' is driven by '%s', which 'wk bench run' does not measure directly.\n"
+                "    Its own lane runs from the install itself:  wk bench staged" % (system_name, conf.get("NODE_DRIVER", "")))
+        return cls(root, reg, target, ws, clock, system_name, conf)
     cls = SYSTEMS.get(target.kind)
     if cls is None:
         die("wk bench run measures a container workspace or a macOS guest; '%s' is on target '%s' (%s).\n"
-            "    A board or the Mac's bench volume is measured from its own lane (wk pi bench, wk bench mac)."
-            % (ws, target.name, target.kind))
+            "    A board or the Mac's bench volume is measured with --system <machine>." % (ws, target.name, target.kind))
     return cls(root, reg, target, ws, clock)
 

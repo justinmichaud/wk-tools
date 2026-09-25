@@ -28,9 +28,9 @@ class TestHelpTopics(unittest.TestCase):
     def test_the_lifecycle_names_every_step_from_bare_board_to_ab(self):
         out = run("help", "lifecycle").stdout
         for step in ("machines/<name>.conf", "wk sysimage build", "wk sysimage disks",
-                     "wk sysimage write", "--rescue", "@second", "wk pi boot-order",
-                     "wk boot", "--keep", "wk sysimage webkit", "wk pi deploy",
-                     "wk pi bench", "--ab", "wk bench report", "wk ab",
+                     "wk sysimage write", "--rescue", "@second", "--boot-order",
+                     "wk boot", "--keep", "wk sysimage webkit", "wk bench deploy",
+                     "wk bench run --ab", "wk bench report", "wk bench ab",
                      "setup --stage quiesce", "admin console", "wpewebkit-dirclean",
                      "S50dropbear", "wk enter", "tailscaled.log"):
             self.assertIn(step, out, f"the lifecycle section does not mention {step!r}")

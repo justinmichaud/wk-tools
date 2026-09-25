@@ -24,7 +24,7 @@ from unittest import mock
 from tests.support import REPO, WkTest, bash, clean_env
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import doctor, shell, targets, wall  # noqa: E402
+from wk import doctor, secrets, shell, targets, wall  # noqa: E402
 from wk.act import Refused  # noqa: E402
 from wk.machine import Fake, Result  # noqa: E402
 
@@ -43,10 +43,7 @@ def _load_cmd_doctor():
 DOCTOR_CMD = _load_cmd_doctor()
 
 OK, MISS, NOTE = doctor.OK, doctor.MISS, doctor.NOTE
-FORK = "wkuser/WebKit"
-SECRETS = ("claude        claude-token        .wk-agent-token             CLAUDE_CODE_OAUTH_TOKEN  value  remote\n"
-           "litellm       litellm-key         .wk-litellm-key             LITELLM_API_KEY          value  container,vm,remote\n"
-           "claude-login  .credentials.json   .claude/.credentials.json   -                        file   container,vm\n")
+FORK = secrets.FORKS[0][1]
 
 # Most specific first: the first key found in the command answers it.
 HEALTHY = [
@@ -102,11 +99,9 @@ class _Wall(unittest.TestCase):
         self.asked = []
         self.fake.react(["env"], self._exec)
         self.fake.react(["bash", "-lc"], self._exec)
-        self.fake.answer(shell.argv(str(REPO), "wk_agent_secrets")[:3], out=SECRETS)
-        self.fake.answer(shell.argv(str(REPO), "wk_push_forks")[:3], out="fork %s github-webkit\n" % FORK)
-        self.fake.answer(shell.argv(str(REPO), "agent_secret_store_remedy")[:3], out="the store's remedy")
-        self.fake.answer(shell.argv(str(REPO), '. "$WK_ROOT/lib/arch.sh"; arch_has_gpu')[:3] + ["wk", "native"])
-        self.fake.answer(shell.argv(str(REPO), '. "$WK_ROOT/lib/arch.sh"; arch_has_gpu')[:3] + ["wk", "armhf"], rc=1)
+        self.fake.answer(["python3", os.path.join(str(REPO), "lib", "secretfile.py"), "present"])
+        self.fake.answer(["python3", os.path.join(str(REPO), "lib", "secretfile.py"), "read"], out="stored-value")
+        self.fake.answer(["python3", os.path.join(str(REPO), "lib", "credcheck.py")], out="ok\tit works")
         self.reg = targets.Registry(str(REPO), env=self.env, machine=self.fake)
         self.target = self.load(self.kind)
 
@@ -418,11 +413,11 @@ class TestAgentCredential(_Wall):
         self.set("claude auth status", self.TOKEN)
         self.assertPasses(self.check("agent_credential"))
         self.set("CLAUDE_CODE_OAUTH_TOKEN:+set", "")
-        self.assertFails(self.check("agent_credential"), "no $CLAUDE_CODE_OAUTH_TOKEN", "the store's remedy")
+        self.assertFails(self.check("agent_credential"), "no $CLAUDE_CODE_OAUTH_TOKEN", "usable claude")
 
     def test_not_logged_in_names_the_targets_remedy(self):
         self.set("claude auth status", '{"loggedIn": false}')
-        self.assertFails(self.check("agent_credential"), "not logged in", "the store's remedy")
+        self.assertFails(self.check("agent_credential"), "not logged in", "usable claude-login")
 
     def test_an_unreadable_answer_is_quoted(self):
         self.set("claude auth status", "")
@@ -499,7 +494,7 @@ class TestGpu(_Wall):
         with mock.patch.object(self.target, "os", return_value="macos"):
             rows = self.check("gpu", want_gpu=True)
         self.assertPasses(rows)
-        self.assertIn("wk vm check demo", rows_text(rows))
+        self.assertIn("its desktop rows above say whether its window is covered", rows_text(rows))
 
 
 class TestTheContainersHostSide(_Wall):
@@ -581,7 +576,7 @@ class TestFromTheHost(_Wall):
         self.set("test -s", Result(1, "", ""))
         _, out = self.report()
         self.assertIn("remote control refuses to start without one", out)
-        self.assertIn("the store's remedy", out)
+        self.assertIn("usable claude-login", out)
         self.assertIn('test -s "$CLAUDE_SECURESTORAGE_CONFIG_DIR/.credentials.json"', self.asked)
 
     def test_a_stopped_workspace_fails(self):
@@ -630,8 +625,10 @@ class TestAGuest(_Wall):
         rep = doctor.Report(out)
         wall.from_host(str(REPO), self.target, "demo", self.fake, rep)
         self.assertIn("booted with WK_VM_UNFILTERED", out.getvalue())
-        self.assertIn("wk vm stop demo && wk vm start demo", out.getvalue())
+        self.assertIn("wk stop demo && wk start demo", out.getvalue())
         self.assertNotIn("github reachable", out.getvalue())
+        self.assertIn("no golden base VM 'wk-base'", out.getvalue(), "the guest's own rows are not in its doctor")
+        self.assertIn("'demo' is not running, so its desktop and its load cannot be read", out.getvalue())
 
 
 class TestFromInside(_Wall):
@@ -705,10 +702,10 @@ class TestTheDriversAnswer(_Wall):
     def test_a_guest_without_the_share_is_told_to_boot_with_it(self):
         vm = self.load("vm")
         vm.exec = self._direct
-        self.assertEqual("the store's remedy", vm.agent_secret_remedy("demo", "claude-login"))
+        self.assertIn("usable claude-login", vm.agent_secret_remedy("demo", "claude-login"))
         self.set("test -d", Result(1, "", ""))
         self.assertIn("the agent-rw share is not mounted in 'demo'", vm.agent_secret_remedy("demo", "claude-login"))
-        self.assertEqual("the store's remedy", vm.agent_secret_remedy("demo", "litellm"))
+        self.assertIn("usable litellm", vm.agent_secret_remedy("demo", "litellm"))
 
     def test_rootless_is_podmans_word(self):
         self.fake.answer(["podman", "info"], out="true\n")

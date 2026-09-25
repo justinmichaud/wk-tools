@@ -117,15 +117,10 @@ def main(argv, env=None):
     env = os.environ if env is None else env
     root = env.get("WK_ROOT") or os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     here = Local()
-    if argv[:1] == ["committed"] and len(argv) == 1:
-        why = committed(root, here)
-        if why:
-            act.warn(why)
-        return 1 if why else 0
     if argv[:1] == ["push"] and len(argv) >= 3:
         far = Ssh(argv[2], opts=argv[3:], timeout=int(env.get("WK_SSH_TIMEOUT") or 10), via=here)
         return 0 if push(root, here, far, argv[1], env) else 1
-    act.die("usage: python3 -m wk.tools committed | push <dest> <ssh destination> [ssh option]...")
+    act.die("usage: python3 -m wk.tools push <dest> <ssh destination> [ssh option]...")
 
 
 if __name__ == "__main__":

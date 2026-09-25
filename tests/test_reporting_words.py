@@ -20,7 +20,7 @@ import unittest
 from tests.support import REPO, WkTest, bash
 
 # Sourced where no cmd/* has run: build/build-in-target.sh pulls in guard.sh and
-# (for a PGO config) mac-pgo.sh, which sources lib/quiet.sh, which sources the
+# (for a PGO config) mac-pgo.sh, whose collection sources lib/quiet.sh, which sources the
 # window probe, the quiet-desktop table and the raiser.
 IN_TARGET = ("lib/quiet.sh", "lib/profiler.sh", "bench/mac-raiser.sh",
              "bench/mac-quiet-desktop.sh", "bench/mac-window-probe.sh",

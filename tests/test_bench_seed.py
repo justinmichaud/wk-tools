@@ -1,17 +1,14 @@
-"""`wk bench seed` and lib/bench.sh's seed_payload (lib/wk/bench/seed.py):
-a plan's payload fetched once per upstream commit, pinned without its .git,
-against a fake machine and a fake clock; one test drives the bash shim over
-a local repository.
+"""`wk bench seed` (lib/wk/bench/seed.py): a plan's payload fetched once per
+upstream commit, pinned without its .git, against a fake machine and a fake clock.
 
 Run: python3 -m unittest tests.test_bench_seed -v
 """
 import json
 import os
-import subprocess
 import sys
 
 from tests.killpoints import converges
-from tests.support import REPO, WkTest, bash, scratch_dir, temp_store
+from tests.support import REPO, WkTest
 from tests.test_bench_report import in_process
 
 sys.path.insert(0, str(REPO / "lib"))
@@ -231,31 +228,6 @@ class TestTheVerb(WkTest):
         with self.assertRaises(Refused):
             with in_process_ok():
                 b.seed("w", "", True)
-
-
-class TestTheBashShim(WkTest):
-    """seed_payload, as cmd/pi, build/mac-pgo.sh and the run arm call it: the
-    caller's bench_plan_read, then the Python, against a real local repository."""
-
-    def test_it_pins_a_payload_and_prints_where(self):
-        with scratch_dir() as tmp, temp_store() as store:
-            repo = tmp / "JetStream"
-            repo.mkdir()
-            (repo / "index.html").write_text("<html>")
-            git = ["git", "-C", str(repo), "-c", "user.email=t@example.com", "-c", "user.name=t"]
-            subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], check=True)
-            subprocess.run(git + ["add", "-A"], check=True)
-            subprocess.run(git + ["commit", "-q", "-m", "payload"], check=True)
-            plan = json.dumps({"git_repository": {"url": str(repo), "branch": "main"}})
-            cp = bash('. lib/common.sh; . lib/store.sh; . lib/bench.sh\n'
-                      'bench_plan_read() { printf "%s" "$PLAN"; }\n'
-                      'seed_payload jetstream3\n',
-                      env={"WK_STORE": store["WK_STORE"], "WK_LOCK_DIR": str(store["path"] / "locks"), "PLAN": plan})
-            self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-            dest = cp.stdout.strip().splitlines()[-1]
-            self.assertTrue(dest.startswith(os.path.join(store["WK_STORE"], "cache", "bench", "jetstream3-")), dest)
-            self.assertTrue(os.path.isfile(os.path.join(dest, "index.html")))
-            self.assertFalse(os.path.exists(os.path.join(dest, ".git")))
 
 
 class in_process_ok:

@@ -1,5 +1,4 @@
-"""The `Host wk-<name>` block in ~/.ssh/config.d/wk, byte for byte what
-lib/target.sh's ssh_alias_set writes and ssh_alias_remove takes out."""
+"""The `Host wk-<name>` block in ~/.ssh/config.d/wk, which the user's own ssh config includes."""
 
 import os
 

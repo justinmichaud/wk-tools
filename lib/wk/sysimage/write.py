@@ -8,10 +8,12 @@ import shlex
 import sys
 import tempfile
 
-from wk import act, fleet, images, reach, record, shell
+from wk import act, fleet, images, reach, record, tailnet
 from wk.boot import driver_class
-from wk.boot.driver import BashChannel, Driver, disk_of, kv, part
+from wk.boot.driver import Channel, disk_of, part
+from wk.kv import kv
 from wk.machine import is_macos
+from wk.store import Store
 from wk.sysimage import disk
 from wk.sysimage import ls as lsmod
 
@@ -232,7 +234,7 @@ class Write:
     def attach(self, conf):
         self.conf = conf
         cls = driver_class(conf["NODE_DRIVER"])
-        self.ch = BashChannel(self.root, conf, "none", bash_driver=cls is Driver, machine=self.machine)
+        self.ch = Channel(self.root, conf, "none", env=self.env, via=self.machine)
         self.drv = cls(self.root, conf, self.ch)
         self.disks = disk.Disks(self.ch, conf)
 
@@ -240,8 +242,7 @@ class Write:
         return self.ch.call("card_priv", *args, input=input, mutates=mutates)
 
     def piped(self, reader):
-        return BashChannel(self.root, self.conf, self.ch.channel, bash_driver=self.ch.bash_driver,
-                           machine=Piped(self.machine, reader))
+        return self.ch.through(Piped(self.machine, reader))
 
     def ssh(self, command, mutates=False):
         return self.ch.call("m_ssh", command, input="", mutates=mutates)
@@ -266,7 +267,7 @@ class Write:
             path = r.out.replace("\r", "").strip() if r.ok else ""
             if path:
                 # The lane answers in its own spelling; on a macOS workstation that is the podman VM's filesystem.
-                path = path if shell.store_is_local(self.root, self.machine) else "vm:" + path
+                path = path if Store(self.env).is_local() else "vm:" + path
                 act.info("'%s' is a configuration; its image is at %s" % (spec, path))
                 return path
             act.die("'%s' is a configuration this checkout defines, and the lane that would\n    build it holds no image:\n"
@@ -282,7 +283,7 @@ class Write:
             if not is_macos():
                 act.die("--from vm:<path> is for reading a container workspace's\n    output out of this machine's podman VM, "
                         "and this is not a macOS host. Give a\n    plain path.")
-            return ["podman", "machine", "ssh", self.env.get("WK_MACHINE") or "wk", "--", "sudo", "cat", bare(src)]
+            return ["podman", "machine", "ssh", Store(self.env).podman_machine(), "--", "sudo", "cat", bare(src)]
         if not self.machine.exists(src):
             act.die("no image at %s\n    An image lives where the workspace that built it put it (wk help). If\n"
                     "    that is inside this machine's podman VM, say so: --from vm:%s" % (src, src))
@@ -310,7 +311,7 @@ class Write:
             act.die("this image joins the tailnet on first boot, and nothing here\n    knows what name it should answer to "
                     "-- the image records no machine, so the\n    card would join under the image's own hostname and come "
                     "up unreachable by\n    its fleet name.\n    Give it one:  --machine <name>")
-        if not shell.tailnet_key_present(self.root, self.machine):
+        if not tailnet.Fleet(self.root, self.env, self.machine).key_present():
             act.die("there is no tailnet auth key on this machine, so the card this is about\n    to write would boot with no "
                     "tailnet identity -- reachable only over whatever\n    LAN it lands on, unreachable by its fleet name, "
                     "which is the state the fleet\n    rule exists to end.\n    Set one first:  wk key set tailnet")
@@ -353,7 +354,7 @@ class Write:
                         "a card that boots while the node exists joins renamed '%s-1'\n    and nothing here can find it."
                         % (name, self.c("NODE_NAME"), name, name, name))
             return
-        if not shell.tailnet_api_present(self.root, self.machine):
+        if not tailnet.Fleet(self.root, self.env, self.machine).api_present():
             if self.step("retire the stale tailnet node '%s' -- which the real write\n              refuses to do without a "
                          "stored token (wk key set tailnet-api)" % name):
                 return
@@ -368,7 +369,7 @@ class Write:
         if self.step("retire the stale tailnet node '%s' so this card can join under it" % name):
             return
         act.info("'%s' is held by a node this board is not running; retiring it so the card can join under it" % name)
-        r = shell.tailnet_retire(self.root, self.machine, name)
+        r = tailnet.Fleet(self.root, self.env, self.machine).retire(name)
         if not r.ok:
             act.die("could not retire the stale tailnet node '%s':\n%s\n    Nothing was written. A node that is online is a "
                     "running board, not a\n    leftover -- check what is answering to that name before writing this card."
@@ -434,7 +435,8 @@ class Write:
                     % (dev, name, shlex.join(reader), dev, size))
         report = r.out.replace("\r", "")
         act.log(self.indent(report.rstrip("\n")))
-        return {k: kv(report, k) for k in ("stream_bytes", "stream_sha", "boot_bytes", "boot_sha", "root_bytes", "root_sha")}
+        d = kv(report)
+        return {k: d.get(k, "") for k in ("stream_bytes", "stream_sha", "boot_bytes", "boot_sha", "root_bytes", "root_sha")}
 
     def verify(self, dev, rep):
         if self.step("read %s back and compare it with the image streamed to it" % dev):
@@ -466,7 +468,7 @@ class Write:
                     "bytes on the way out, or the\n    source is not a disk image at all." % (dev, self.indent(self.said(r))))
 
     def root_spec(self, dev):
-        return kv(self.card("root-spec", dev, mutates=False).out, "root")
+        return kv(self.card("root-spec", dev, mutates=False).out).get("root", "")
 
     def simple(self, sentence, *verb, why):
         if self.step(sentence):
@@ -643,7 +645,7 @@ class Write:
             return
         if not self.joins(dev, "joins", "joins the tailnet", "tailnet-join: yes", "tailnet-join: no"):
             return
-        keyfile = shell.tailnet_authkey(self.root, self.machine)
+        keyfile = tailnet.Fleet(self.root, self.env, self.machine).authkey()
         if not keyfile:
             act.die("the tailnet auth key present moments ago at the write preflight is\n    gone now, and %s is already "
                     "erased. Set one and retry:  wk key set tailnet" % dev)
@@ -813,7 +815,7 @@ class Write:
                     "written as built -- not a fleet board build (%s); identity marker and driving key only"
                     % (p.get("IMG_BUILDER") or "unknown profile"),
                     "auth key present -- the card joins as this board on first boot"
-                    if shell.tailnet_key_present(self.root, self.machine)
+                    if tailnet.Fleet(self.root, self.env, self.machine).key_present()
                     else "NO auth key -- the real write refuses here (wk key set tailnet)", wifi))
         if dev == self.c("NODE_DEVICE"):
             act.log("  note      %s is configured to boot from this disk (wk boot %s)" % (disk_machine, disk_machine))

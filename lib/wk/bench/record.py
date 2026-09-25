@@ -5,7 +5,9 @@ import json
 import os
 import re
 import sys
-from concurrent.futures import ThreadPoolExecutor
+
+from wk import fleetwalk
+from wk.kv import kv_file
 
 # The axes a report groups variance by, filled in for every subfield a writer left alone, so an older record and an uncontrolled one read alike.
 DEFAULT_CONFIGURATION = {"aslr": "unset", "path_len": 0, "shared_cache": None, "env_pad_bytes": 0}
@@ -126,17 +128,6 @@ def task_runs(taskdir):
     return runs
 
 
-def _kv_file(path):
-    out = {}
-    try:
-        for line in open(path):
-            k, sep, v = line.rstrip("\n").partition("=")
-            if sep:
-                out[k] = v
-    except OSError:
-        pass
-    return out
-
 
 def task_arms(doc):
     """(the two things a task compares, what to call them): a systems A/B is one slot in two images."""
@@ -191,6 +182,28 @@ def task_rounds(doc, runs):
     return out
 
 
+PINS = ("runner_sha", "local_copy")
+
+
+def paired(byround, names):
+    """(a runs, b runs, dropped): the rounds both arms finished on one payload pin -- the runner commit and the
+    benchmark copy -- and why each other round is left out, since arms on two pins measure two benchmarks."""
+    a_dirs, b_dirs, dropped = [], [], []
+    for rnd in sorted(byround):
+        arms = byround[rnd]
+        unfinished = ["%s: %s" % (n, arms[x]["state"] if x in arms else "not run") for n, x in zip(names, "ab")
+                      if arms.get(x, {}).get("state") != "ok"]
+        pins = [tuple(arms[x]["env"].get(k) or "" for k in PINS) for x in "ab"] if not unfinished else []
+        if unfinished:
+            dropped.append("round %d (%s)" % (rnd, ", ".join(unfinished)))
+        elif pins[0] != pins[1]:
+            dropped.append("round %d (payload pins differ: %s vs %s)" % (rnd, "@".join(pins[0]), "@".join(pins[1])))
+        else:
+            a_dirs.append(arms["a"]["dir"])
+            b_dirs.append(arms["b"]["dir"])
+    return a_dirs, b_dirs, dropped
+
+
 def progress_line(log):
     try:
         text = open(log, errors="replace").read()
@@ -223,7 +236,7 @@ def task_state(taskdir, running):
         for byarm in byround.values():
             if len(arm_names) == 2 and all(byarm.get(a, {}).get("state") == "ok" for a in ("a", "b")):
                 usable += 1
-    status = _kv_file(os.path.join(taskdir, "status"))
+    status = kv_file(os.path.join(taskdir, "status"))
     current = live[0] if (running and live) else None
     summary = "%d/%d runs ended, %d ok, %d failed" % (ended, planned, len(ok), len(failed))
     if rehearsed:
@@ -295,33 +308,11 @@ class Listing:
     def store_rows(self):
         return ls_rows(self.bench_dir, running_tasks(self.bench_dir, self.lock_path, self.alive), self.label)
 
-    def target_rows(self, name):
-        try:
-            target = self.reg.load(name)
-        except LookupError as e:
-            self.warn(str(e))
-            return []
-        side, _ = target.probe()
-        if side == "stopped":
-            self.warn("the machine behind target '%s' is stopped, so the tasks in its\n"
-                      "    store are not listed -- 'wk start' brings it up" % name)
-            return []
-        if side != "answering":
-            return []
-        label = name if target.kind == "remote" and not getattr(target, "is_local", True) else self.label
-        rc, out = target.wk("bench", "ls", "--continued",
-                            env=dict(self.reg.env, WK_ROW_LABEL=label, WK_NO_DELEGATE="1"), quiet=True)
-        if rc != 0:
-            self.warn("'%s' did not answer the listing, so the tasks in its store are not\n"
-                      "    here. Its wk-tools predates a listing that walks the fleet:  wk sync --tools %s" % (name, name))
-        return [l for l in out.replace("\r", "").splitlines() if l.strip()]
+    def _label(self, target, name):
+        return name if target.kind == "remote" and not getattr(target, "is_local", True) else self.label
 
     def fleet_rows(self):
-        names = self.reg.walk()
-        if not names:
-            return []
-        with ThreadPoolExecutor(max_workers=len(names)) as pool:
-            return [row for rows in pool.map(self.target_rows, names) for row in rows]
+        return fleetwalk.fleet_rows(self.reg, "bench", "tasks", self._label, self.warn)
 
     def rows(self):
         return self.store_rows() + self.fleet_rows()

@@ -154,7 +154,7 @@ class TestReadinessIsWhatSystemdIsAskedFor(unittest.TestCase):
         defs = [p for p in repo_files()
                 if p.suffix == ".py" and p.name != Path(__file__).name
                 and "def sd_notify(" in p.read_text(errors="replace")]
-        self.assertEqual([REPO / "lib" / "wknotify.py"], defs)
+        self.assertEqual([REPO / "lib" / "wk" / "notify.py"], defs)
 
     def test_every_notifying_service_imports_it_and_says_ready(self):
         for name in NOTIFYING:
@@ -162,7 +162,7 @@ class TestReadinessIsWhatSystemdIsAskedFor(unittest.TestCase):
             text = (REPO / rel).read_text()
             with self.subTest(program=rel):
                 # assertTrue, not assertIn: the haystack is a whole program.
-                self.assertTrue("from wknotify import sd_notify" in text,
+                self.assertTrue("from wk.notify import sd_notify" in text,
                                 f"{rel} does not import the one sd_notify")
                 self.assertTrue('sd_notify("READY=1")' in text,
                                 f"{rel} never tells systemd it is ready")

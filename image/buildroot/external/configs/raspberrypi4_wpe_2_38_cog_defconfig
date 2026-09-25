@@ -88,7 +88,7 @@ BR2_PACKAGE_RPI_FIRMWARE_VARIANT_PI4=y
 # rdk's cmake still claims the libWPEBackend-default.so symlink.
 BR2_PACKAGE_RPI_WIFI_FIRMWARE=y
 # wpa_supplicant, so this board can bring up WiFi from a credential seeded
-# onto the card (wk-wifi-join, image/buildroot/wifi-overlay.sh) -- this board
+# onto the card (wk-wifi-join, lib/wk/sysimage/buildroot_target.py) -- this board
 # has no cable at the bench, same as rpi3 and rpi5.
 BR2_PACKAGE_WPA_SUPPLICANT=y
 BR2_PACKAGE_WPA_SUPPLICANT_NL80211=y
@@ -107,7 +107,7 @@ BR2_PACKAGE_BROTLI=y
 BR2_PACKAGE_COG=y
 BR2_PACKAGE_COG_USE_SYSTEM_DBUS=y
 # No autostarted browser: the Pi 4 renders through one compositor session
-# that `wk pi bench` owns, and a boot-time cog would hold the GPU beside it.
+# that a board run owns, and a boot-time cog would hold the GPU beside it.
 BR2_PACKAGE_XKEYBOARD_CONFIG=y
 # The Pi 4 has no firmware GL -- the VideoCore VI runs no Khronos vchiq
 # service, so wpebackend-rdk's dispmanx backend can never render here

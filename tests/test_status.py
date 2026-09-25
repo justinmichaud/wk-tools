@@ -19,7 +19,7 @@ from tests.support import REPO, WkTest, bash
 from tests.test_wk_targets import LINUX_PROBE, SshFake
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import status, statusview, targets  # noqa: E402
+from wk import fleet, status, statusview, targets  # noqa: E402
 from wk.clock import FakeClock  # noqa: E402
 from wk.machine import Fake, Result  # noqa: E402
 from wk.resources import Resources  # noqa: E402
@@ -144,9 +144,6 @@ class TestFleetDeviceRecord(unittest.TestCase):
         self.assertEqual(rec["tailnet"], "rpi4 not a node")
         self.assertEqual(rec["conf"], "machines/rpi4.conf")
 
-    def test_a_bash_snippet_cannot_outlive_the_ceiling(self):
-        self.assertEqual(status._bash(REPO, "sleep 30", timeout=0.2).rc, status.TIMED_OUT)
-
     def test_the_mode_words(self):
         for probeable, mode, bridge, want in (("no", "", "", "unknown from here"), ("yes", "host", "", "host mode"),
                                                ("yes", "base abc", "", "base image -- not a bench system"),
@@ -198,13 +195,12 @@ class TestFleetDeviceRecord(unittest.TestCase):
         rec = status.fleet_record("rpi5", self.CONF, dict(self.ARMED_FIELDS, armed_at="garbage", armed_boot="a", boot_id="a"), 4)
         self.assertTrue(rec["armed_desync"])
 
-    def test_fleet_probe_carries_the_arming_fields_in_order(self):
-        parts = ["workstation", "yes", "host", "", "img-1", "usb", "", "t 1.2.3.4", "", "tolken",
-                 "2026-01-01T00:00:00Z", "boot-a", "boot-b"]
-        with mock.patch.object(status, "_bash", return_value=Result(0, out="\0".join(parts))):
+    def test_fleet_probe_carries_the_arming_fields(self):
+        said = dict(self.ARMED_FIELDS, armed_boot="boot-a", boot_id="boot-b")
+        with mock.patch.object(status.Local, "run", return_value=Result(0, out=json.dumps(said))) as run:
             fields = status.fleet_probe(REPO, "rpi5", 1)
-        self.assertEqual((fields["armed_by"], fields["armed_at"], fields["armed_boot"], fields["boot_id"]),
-                         ("tolken", "2026-01-01T00:00:00Z", "boot-a", "boot-b"))
+        self.assertEqual(fields, said)
+        self.assertIn("wk.boot.cli", run.call_args[0][0])
 
     def test_the_renderer_shows_the_transition_and_desyncs_a_stale_arm(self):
         rec = status.fleet_record("rpi5", self.CONF, dict(self.ARMED_FIELDS, armed_boot="before", boot_id="after"), 4)
@@ -214,7 +210,25 @@ class TestFleetDeviceRecord(unittest.TestCase):
 
 
 class TestBridgeRecord(unittest.TestCase):
-    CONF = {"BR_DEVICE": "pinephone", "BR_SEGMENT": "10.99.1.0/24", "BR_NOTE": "a phone"}
+    """`fields` is bridge/bin/wk-bridge-healthcheck's raw facts (lib/wk/bridge judges them);
+    `facts` missing from an answering, role-carrying phone means the healthcheck itself never ran
+    (no non-interactive root), told apart here from one that ran and found something wrong."""
+
+    CONF = dict({k: v("phone") if callable(v) else v for k, v in fleet.BRIDGE_DEFAULTS.items()},
+                BR_DEVICE="pinephone", BR_SEGMENT="10.99.1.0/24", BR_NOTE="a phone")
+    HEALTHY = {
+        "facts": "yes", "wifi_iface": "wlan0", "wifi_addr": "192.168.1.5/24", "wifi_power_save": "off",
+        "seg_iface_exists": "yes", "seg_carrier": "1", "seg_addr": "10.99.1.1/24", "seg_usb_speed": "480",
+        "leases_file_nonempty": "yes", "leases_ping": "",
+        "ts_backend": "Running", "ts_online": "true", "ts_tags": '["tag:bridge"]', "ts_routes": '["10.99.1.0/24"]',
+        "svc_wk-bridge-dhcp": "running", "svc_wk-bridge-nftables": "running", "svc_wk-bridge-netwatch": "running",
+        "svc_wk-bridge-usb-host": "running", "svc_sshd": "running", "svc_chrony": "running", "svc_nm": "running",
+        "svc_tailscale": "running", "nft_table": "yes", "ip_forward": "1",
+        "resolv_exists": "yes", "resolv_nameservers": "1", "resolv_first": "nameserver 1.1.1.1", "dns_resolves": "yes",
+        "clock_year": "2026", "clock_iso": "2026-09-24 00:00 UTC", "sshd_password_auth": "no",
+        "watchdog_device": "yes", "watchdog_fed": "yes", "swap_nonzram": "0", "crashed": "", "uptime": "up 1 day",
+        "battery": "",
+    }
 
     def _rec(self, fields, want="123"):
         return status.bridge_record("phone", self.CONF, want, fields, lambda n: ("", ""))
@@ -225,17 +239,19 @@ class TestBridgeRecord(unittest.TestCase):
     def test_answering_with_no_role_names_the_setup(self):
         rec = self._rec({"reachable": "yes", "role": "no"})
         self.assertEqual(rec["state"], "no bridge role")
-        self.assertIn("wk bridge setup phone", rec["notes"][0]["text"])
+        self.assertIn("wk machine setup phone", rec["notes"][0]["text"])
 
     def test_a_healthy_role_at_this_repositorys_sum_is_up(self):
-        rec = self._rec({"reachable": "yes", "role": "yes", "sum": "123", "health": "0", "healthline": "ok"})
-        self.assertEqual((rec["state"], rec["role_insync"], rec["health"]), ("up", True, "ok"))
+        rec = self._rec(dict(self.HEALTHY, reachable="yes", role="yes", sum="123"))
+        self.assertEqual((rec["state"], rec["role_insync"]), ("up", True))
+        self.assertNotIn("health", rec)
 
     def test_a_health_check_that_needs_root_is_told_apart_from_an_unhealthy_one(self):
-        rec = self._rec({"reachable": "yes", "role": "yes", "sum": "999", "health": "1", "healthline": "doas: not permitted"})
+        rec = self._rec({"reachable": "yes", "role": "yes", "sum": "999"})
         self.assertEqual((rec["state"], rec["role_insync"]), ("role installed", False))
-        rec = self._rec({"reachable": "yes", "role": "yes", "sum": "123", "health": "2", "healthline": "dhcp down"})
+        rec = self._rec(dict(self.HEALTHY, reachable="yes", role="yes", sum="123", ts_routes="none"))
         self.assertEqual(rec["state"], "unhealthy")
+        self.assertIn("no approved subnet route", rec["health"])
 
     def test_the_role_sum_is_over_the_repositorys_bridge_files(self):
         want = status.bridge_role_sum(REPO)
@@ -587,19 +603,6 @@ class TestTaskVerdictsBecomeExitCodes(TaskTest):
         rec, worst, notes = self._task(pid=4194304)
         self.assertEqual((rec["state"], worst), ("died", 4))
         self.assertIn("died without recording an exit", notes)
-
-    def test_a_live_session_is_reported_and_is_not_busy(self):
-        """An agent forward runs until stopped: counted busy, it would hold `wk status --wait` for ever."""
-        log = self.tmp / "forward.log"
-        log.write_text("forwarding\n")
-        os.utime(log, (self.clock.now() - 4000, self.clock.now() - 4000))
-        self.sh('d=$(task_begin agent-forward target ws1 "wk push off" "%s" forward)\ntask_pid "$d" 4242' % log)
-        self.answers["ws1"] = True
-        recs, worst = self.reported("ws1")
-        self.assertEqual((recs[0]["task_kind"], worst), ("agent-forward", 0))
-        self.assertIn("not busy", recs[0]["notes"][0]["text"])
-        self.answers["ws1"] = False
-        self.assertEqual(self.reported("ws1")[1], 4)
 
     def test_nothing_here_manufactures_a_state(self):
         src = inspect.getsource(status.task_records)

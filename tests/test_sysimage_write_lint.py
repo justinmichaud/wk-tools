@@ -33,8 +33,9 @@ class TestOneWifiReader(unittest.TestCase):
     def test_the_card_helper_reads_the_credential(self):
         self.assertIn(THE_READER, readers())
 
-    @owed("image/pmos.sh and image/pmos-build.sh read the build host's netplan for a phone's uplink, and "
-          "bench/mac-bench-volume.sh reads the System keychain for a bench volume's; each is a second reader")
+    @owed("lib/wk/sysimage/pmos_build.py reads the build host's netplan for a phone's uplink (its own one reader, "
+          "shared by the band check and the image seeding, but still a second one against this rule), and "
+          "lib/wk/sysimage/macvolume.py reads the System keychain for a bench volume's; each is a second reader")
     def test_nothing_else_does(self):
         self.assertEqual([p for p in readers() if p != THE_READER], [])
 

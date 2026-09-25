@@ -1,9 +1,9 @@
-"""`wk bench`'s verbs that are Python -- ls, report, compare, precision, seed -- over one registry; the rest are lib/bench-arms.sh."""
+"""`wk bench`'s verbs that are Python -- ls, report, compare, precision, seed, deploy, ab -- over one registry; the rest are lib/bench-arms.sh."""
 
 import os
 
-from wk import act, record as wkrecord, shell
-from wk.bench import record, report, seed
+from wk import act, record as wkrecord
+from wk.bench import ab, board, record, report, seed
 from wk.lock import Lock, holder_pid
 
 REPORT_USAGE = ("usage: wk bench report <task> [--html] [--text]\n"
@@ -122,9 +122,7 @@ class Bench:
         except LookupError as e:
             act.die(str(e))
         if not resolved:
-            rc = shell.run(self.root, "load_target %s >/dev/null 2>&1; wait_ready" % shell.sh_quote(tname), ws)
-            if rc != 0:
-                raise act.Refused(rc)
+            target.wait_ready(ws, self.clock)
 
         def read(path):
             r = target.exec(ws, ["cat", "%s/Tools/Scripts/%s" % (target.src(ws), path)])
@@ -134,3 +132,50 @@ class Bench:
         lock = Lock(self.reg.store, self.machine, self.clock)
         print(seed.Seeder(self.machine, lock, os.path.join(self.reg.store.artifact_dir(), "bench")).seed(plan, text))
         return 0
+
+    def deploy(self, ws, board_name, slot_name, machine=None, driver=None):
+        if not ws or not board_name:
+            act.die("usage: wk bench deploy <workspace> <board> [--slot <name>]; see wk bench -h")
+        if self.reg.in_workspace():
+            return board.request(self.root, self.reg, "stage", ["machine=" + board_name, "workspace=" + ws, "slot=" + slot_name],
+                                 "wk bench deploy %s %s --slot %s" % (ws, board_name, slot_name))
+        board.require_board(self.root, self.reg.env, board_name)
+        held, rc = board.claim(self.root, self.reg.env, board_name, "deploy %s:%s to %s" % (ws, slot_name, board_name)), 1
+        try:
+            board.for_board(self.root, self.reg, ws, self.clock, board_name, machine=machine, driver=driver).deploy_slot(slot_name)
+            rc = 0
+        except act.Refused as e:
+            rc = e.status
+            raise
+        finally:
+            if held is not None:
+                held.end(rc)
+        return 0
+
+    def ab(self, spec, o, kill):
+        return ab.run(self.root, self.reg, self.clock, spec, o, kill)
+
+    def mac(self):
+        """`bench/mac-lane.sh` is gone: it drove the same trip `bench run --system` now runs as the
+        one pipeline (boot, deploy, run, collect), from wherever this is invoked."""
+        act.die("""'wk bench mac' is gone -- it drove one bench system's whole trip (build, stage, arm,
+    reboot, run, come back) by hand; that trip is now the pipeline's own:
+
+        wk bench run <workspace> <plan> --system mbp
+
+    stages the workspace's build onto mbp, arms it, waits for the reboot into bench mode, runs the
+    plan there over ssh through its own 'wk bench staged' (5.27), collects the result, and reboots
+    back. 'wk bench ab --devices mbp' drives the unattended round trip.""")
+
+    def mac_ab(self):
+        act.die("'wk bench mac-ab' is gone -- a Mac A/B is read back where it is planted:\n"
+                "    wk bench ab --devices <mac> --preflight|--progress|--status|--collect")
+
+    def ab_summary(self, runs, root, out):
+        if not runs or not os.path.isfile(runs):
+            act.die("no run map at '%s' -- the A/B recorded nothing (--runs <runs.tsv>)" % runs)
+        return report.ab_summary(runs, root, self.clock.iso(), out)
+
+    def mac_volume(self):
+        act.die("'wk bench mac-volume' does not exist -- the benchmark install is an image, built on the Mac:\n"
+                "    wk sysimage build perf-macos-tolken [--create|--fetch|--install|--provision|--repair|--build-pkg|--all]")

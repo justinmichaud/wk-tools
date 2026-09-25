@@ -4,9 +4,10 @@ Reads the command's declaration (decl.py), refuses what it does not declare,
 resolves the workspace name and the machine holding it, and runs the command
 there: here, forwarded into the podman VM on a macOS host, or handed to the
 machine's own wk. The targets are asked through one Registry (wk.targets);
-the forwarding questions still go through shell.py into the bash library.
+what a driver has not ported still reaches into the bash library through shell.py.
 """
 
+import json
 import os
 import re
 import subprocess
@@ -17,27 +18,27 @@ from wk import completion as C
 from wk import decl as D
 from wk import act, clock, record, shell, sshalias
 from wk.machine import Local, is_macos
+from wk.store import Store
 from wk.targets import Registry
 
 ROOT = Path(os.environ.get("WK_ROOT") or Path(__file__).resolve().parents[2])
-MACHINE = os.environ.get("WK_MACHINE", "wk")
+MACHINE = Store().podman_machine()
 _registry = None
 TOMBSTONES = {
     "image": "'wk image' is renamed: wk sysimage",
     "mcp": "'wk mcp' is removed",
     "pick": "'wk pick' is removed",
     "skills": "'wk skills' is removed",
-    "notify": "'wk notify' is removed: a program calls wk_notify (lib/store.sh)",
+    "notify": "'wk notify' is removed: a program calls lib/wk/notify.py's send",
     "verify": "'wk verify' is merged into doctor: wk doctor <workspace>",
     "remotes": "'wk remotes' is merged into sync: wk sync [<workspace>] --fix",
-    "sudo": "'wk sudo' is now 'wk key sudo'",
-    "backup": "'wk backup' is now 'wk key backup'",
-    "remote": "'wk remote' is now 'wk machine setup|rm <name>'", "find": "'wk find' is now 'wk machine probe [<name>]'",
+    "sudo": "'wk sudo' is now 'wk key sudo'", "bridge": "'wk bridge' is now 'wk machine setup|status|tailnet|rm'",
+    "backup": "'wk backup' is now 'wk key backup'", "vm": "'wk vm' is gone: a guest is a workspace (--target vm), its base 'wk sysimage build macos-guest-base'",
+    "remote": "'wk remote' is now 'wk machine setup|rm <name>'", "find": "'wk find' is now 'wk machine probe [<name>]'", "pi": "'wk pi' is gone; each verb is now:\n    bench --ab A,B | --ab-systems A,B   wk bench run <ws> <plan> --system <board> --ab A,B | --ab-systems A,B\n    bench --slot <name>                 wk bench run <ws> <plan> --system <board> --slot <name>\n    bench --pgo                         wk bench run <ws> <plan> --system <board> --slot <name>-instr --collect\n    deploy                              wk bench deploy <ws> <board> --slot <name>\n    boot-order                          wk boot <board> --boot-order <usb-first|sd-first|local>\n    setup, helper                       wk machine setup <board>\n    flash                               wk sysimage write --from <path> --disk <board>:<device>",
+    "ab": "'wk ab' is now 'wk bench ab' (wk bench ab <pr-spec> --devices <a,b>; wk bench ab <task> --kill)",
 }
 GLOBALS = {"--force": "WK_FORCE", "--quiet": "WK_QUIET", "--dry-run": "WK_DRY_RUN",
            "-n": "WK_DRY_RUN", "--yes": "WK_YES", "-y": "WK_YES"}
-# Exported for the command and a forwarded child: WK_NAME, WK_TARGET, WK_CONFIG, WK_IN_VM,
-# WK_ROW_LABEL and WK_HOST_SELF (what a child's records call the machine), WK_NO_DELEGATE, WK_ZED_PUBKEY.
 
 
 class Exit(Exception):
@@ -77,40 +78,12 @@ def die(msg, status=1):
 
 # -- markers: the file that says this machine is a workspace, or a build machine
 
-def marker_field(path, key):
-    try:
-        with open(path, errors="replace") as f:
-            for line in f:
-                k, eq, v = line.rstrip("\r\n").partition("=")
-                if eq and k == key:
-                    return v
-    except OSError:
-        return ""
-    return ""
-
-
-def wk_marker():
-    return os.environ.get("WK_MARKER") or os.path.join(os.path.expanduser("~"), ".wk-workspace")
-
-
 def in_workspace():
-    return os.path.isfile(wk_marker())
+    return registry().in_workspace()
 
 
 def wk_self():
-    return marker_field(wk_marker(), "name")
-
-
-def remote_marker():
-    return os.environ.get("WK_REMOTE_MARKER") or os.path.join(os.path.expanduser("~"), ".wk-remote")
-
-
-def in_remote_host():
-    return os.path.isfile(remote_marker())
-
-
-def remote_field(key):
-    return marker_field(remote_marker(), key)
+    return registry().workspace_name()
 
 
 def _logical_cwd():
@@ -126,9 +99,9 @@ def _logical_cwd():
 
 
 def cwd_workspace():
-    if not in_remote_host():
+    if not registry().in_remote_host():
         return ""
-    root = remote_field("root")
+    root = registry().remote_marker_field("root")
     if not root:
         return ""
     cwd = _logical_cwd() + "/"
@@ -297,7 +270,7 @@ class Invocation:
         missing = []
         for n in needs.split(","):
             if n == "gh-auth":
-                ok = shell.run(str(ROOT), "gh_authenticated", env=_quiet_env()) == 0
+                ok = shell.gh_authenticated(str(ROOT), env=_quiet_env())
                 if not ok:
                     missing.append("gh-auth    gh cannot reach the GitHub API (not logged in, or the token expired): gh auth login")
             elif n == "tailnet":
@@ -305,9 +278,6 @@ class Invocation:
                                      stderr=subprocess.DEVNULL) == 0 if _which("tailscale") else False
                 if not ok:
                     missing.append("tailnet    this machine is not on the tailnet: tailscale up")
-            elif n == "tart":
-                if shell.ask(str(ROOT), "tart_bin") is None:
-                    missing.append("tart    not installed here")
             elif n == "quiesce-helper":
                 helper = "/usr/local/libexec/wk-quiesce-priv"
                 ok = os.access(helper, os.X_OK) and subprocess.call(
@@ -398,10 +368,6 @@ def completion_cmd(args):
             "  asking a machine; a command's values= list is asked of the command when\n"
             "  that list is answered on this machine.\n")
         raise Exit(0)
-    if sub == "--list-workspaces" and len(args) == 1:
-        for name in C.local_workspaces(ROOT):
-            print(name)
-        raise Exit(0)
     if sub not in C.SHELLS or len(args) != 1:
         die("usage: wk completion bash|zsh -- print a shell completion script for wk; see wk completion -h", 2)
     sys.stdout.write(C.generate(ROOT, sub, TOMBSTONES))
@@ -425,6 +391,14 @@ def where_prose(d, where):
             "workspace on macOS; that machine's own wk when it has one)")
 
 
+def destructive_prose(spec):
+    if spec == "yes":
+        return "yes -- asks before it acts; --yes answers"
+    if spec:
+        return "%s -- these ask before they act; --yes answers" % spec.replace(",", ", ")
+    return "no -- asks nothing"
+
+
 def explain(cmd, d):
     out = sys.stdout
     out.write("wk %s\n\n" % d.synopsis)
@@ -438,11 +412,11 @@ def explain(cmd, d):
     else:
         out.write("  changes things: yes -- and has no dry run yet (docs/PLAN.md)\n")
     if not d.is_readonly():
-        if d.destructive == "yes":
-            out.write("  destructive: yes -- asks before it acts; --yes answers\n")
-        elif d.destructive:
-            out.write("  destructive: %s -- these ask before they act; --yes answers\n"
-                      % d.destructive.replace(",", ", "))
+        if d.destructive:
+            out.write("  destructive: %s\n" % destructive_prose(d.destructive))
+        for verbs, spec in d.sub + d.flag:
+            if "destructive" in spec:
+                out.write("    %s: %s\n" % (verbs.replace(",", ", "), destructive_prose(spec["destructive"])))
     out.write("  runs on: %s\n" % where_prose(d, d.where))
     for verbs, spec in d.sub + d.flag:
         if "where" in spec:
@@ -516,9 +490,7 @@ def forward_to_vm(inv, cmd, args):
                 "    Nothing here starts it without a terminal asking:  wk start" % (MACHINE, cmd))
         info("starting podman machine '%s'" % MACHINE)
         subprocess.call(["podman", "machine", "start", MACHINE], stdout=sys.stderr)
-    line = shell.ask(str(ROOT), "vm_wk_cmd", cmd, *args)
-    if line is None:
-        die("vm_wk_cmd did not answer")
+    line = registry().load("container").wk_cmd([cmd, *args], os.environ)
     sys.stdout.flush()
     sys.stderr.flush()
     if _tty(0) and _tty(1):
@@ -569,8 +541,33 @@ def delegate_run(target, cmd, args):
         die("'%s' acts on a workspace on %s, which has no wk-tools of its own to\n"
             "    run it:  wk machine setup %s" % (cmd, machine, machine))
     os.environ["WK_ROW_LABEL"] = machine
-    fn = "t_wk_tty" if (_tty(0) and _tty(1)) else "t_wk"
-    shell.exec_fn(str(ROOT), 'load_target %s >/dev/null 2>&1; %s' % (shell.sh_quote(machine), fn), cmd, *args)
+    line = target.wk_cmd([cmd, *args], os.environ)
+    tty = ["-t"] if (_tty(0) and _tty(1)) else []
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os.execvp("ssh", ["ssh", *tty, *target.machine.opts, target.machine.dest, line])
+
+
+def json_merge_list(key, paths):
+    """{"<key>": [...]} merged from N files, each zero or more JSON documents concatenated with no
+    delimiter -- the shape a per-target `--json` listing (or a missing/empty file) produces."""
+    items = []
+    dec = json.JSONDecoder()
+    for path in paths:
+        try:
+            with open(path) as f:
+                text = f.read()
+        except OSError:
+            continue
+        i, n = 0, len(text)
+        while i < n:
+            while i < n and text[i] in " \t\r\n":
+                i += 1
+            if i >= n:
+                break
+            obj, i = dec.raw_decode(text, i)
+            items.extend(obj.get(key, []))
+    return {key: items}
 
 
 def bare_report(inv, cmd, args):
@@ -617,7 +614,7 @@ def bare_report(inv, cmd, args):
         log("  'wk start' to bring it up")
     if ls_json:
         files = [f.name for f in (ls_local, ls_vm) if f is not None]
-        shell.run(str(ROOT), "json_merge_list", "workspaces", *files)
+        print(json.dumps(json_merge_list("workspaces", files)))
         for f in files:
             os.unlink(f)
     raise Exit(worst)
@@ -683,16 +680,16 @@ def main(argv):
                 % (cmd, wk_self(), cmd, wk_self()))
         die("'wk %s' acts on a host, and this is workspace '%s'.\n    From the host:  wk %s%s%s"
             % (cmd, wk_self(), cmd, "".join(" " + a for a in args), globals_text))
-    if in_remote_host() and where == "host":
+    if registry().in_remote_host() and where == "host":
         die("'wk %s' acts on a workstation's own store or hardware, and this is\n"
             "    the shared build machine for target '%s'.\n"
             "    Run it on the workstation instead. What works here: ls, status, build,\n"
-            "    run, test, logs, enter." % (cmd, remote_field("target")))
-    if in_remote_host() and d.lifecycle:
+            "    run, test, logs, enter." % (cmd, registry().remote_marker_field("target")))
+    if registry().in_remote_host() and d.lifecycle:
         die("workspaces are created and destroyed from the workstation, and this is\n"
             "    the shared build machine for target '%s'.\n"
             "    Run 'wk %s' there: the workstation owns the workspace's store, and a\n"
-            "    later 'wk build' finds its target from that store." % (remote_field("target"), cmd))
+            "    later 'wk build' finds its target from that store." % (registry().remote_marker_field("target"), cmd))
 
     args = inv.argv_check()
     inv.args = args
@@ -769,7 +766,7 @@ def main(argv):
             bare_report(inv, cmd, args)
         if d.is_readonly(sub) and not _which("podman"):
             warn("podman is not installed, so there are no container workspaces to read")
-            log("  './setup' installs it; 'wk vm ls' lists the macOS guests, which do not need it")
+            log("  './setup' installs it; 'WK_TARGET=vm wk ls' lists the macOS guests, which do not need it")
             raise Exit(0)
         forward_to_vm(inv, cmd, args)
 

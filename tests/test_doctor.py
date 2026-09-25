@@ -17,12 +17,14 @@ import types
 import unittest
 from http.server import HTTPServer
 from pathlib import Path
+from unittest import mock
 
 from tests.support import NO_REGISTRY, REPO, WkTest, clean_env, stub_path
 from tests.test_credcheck import FakeAnthropic, FakeLiteLLM, RECORD, login
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk import doctor, fleet, shell  # noqa: E402
+from wk.key.cli import Key  # noqa: E402
 from wk.machine import Fake, Local, Result  # noqa: E402
 from wk.store import Store  # noqa: E402
 
@@ -34,8 +36,6 @@ WANT = {v: subprocess.run(["git", "config", "--file", str(GITCONFIG), "--get", "
                           capture_output=True, text=True).stdout.strip() for v in ("name", "email")}
 assert WANT["name"] and WANT["email"], "dotfiles/gitconfig no longer declares [user]"
 
-PATHS = {"push_held": "/cfg/push-keys", "read_pat": "/store/read-github-pat", "tailscale_api": "/cfg/tailscale-api-key",
-         "ntfy_topic": "/cfg/notify/ntfy-topic", "secret.claude": "/cfg/secrets/claude-token"}
 INSPECT = ("podman", "machine", "inspect", "wk", "--format", "{{.State}}")
 
 
@@ -47,32 +47,35 @@ def stub_shell(**over):
     """Every question a Doctor asks the bash library, answered with nothing unless the test says otherwise."""
     base = dict(gh_authenticated=lambda root, env=None: False,
                 mirror_branches=lambda root, env=None: [],
-                local_state_paths=lambda root, env=None: dict(PATHS),
-                cred_settable=lambda root, env=None: [],
-                cred_verdict=lambda root, name, env=None: "",
-                peer_workstations=lambda root, env=None: [],
-                peer_cred_verdict=lambda root, peer, name, env=None: "",
                 priv_helpers=lambda root, env=None: [],
                 priv_answers=lambda root, path, env=None: False,
-                vm_base_findings=lambda root, env=None: "",
-                in_machine=lambda root, command, env=None, quiet=False: None)
+                vm_base_findings=lambda root, env=None: "")
     base.update(over)
     return types.SimpleNamespace(**base)
 
 
+def stub_keys(peers=None, verdict=None):
+    """`wk key`'s answers (lib/wk/key/): nothing stored here, and the given peers."""
+    k = types.SimpleNamespace(settable=lambda: [], stored_verdict=lambda n: "",
+                              cred_verdict_of=verdict or (lambda p, n: ""))
+    k.resolve = peers or (lambda: types.SimpleNamespace(peers=[]))
+    return k
+
+
 def stub_mc(**over):
-    """lib/wk/machine_cmd.py's build-machine questions, answered with nothing unless the test says otherwise."""
+    """lib/wk/machine_cmd/deps.py's build-machine questions, answered with nothing unless the test says otherwise."""
     base = dict(probe=lambda target, root: "", findings=lambda root, probe, env=None, here=None: [],
                 stale=lambda target, root: None)
     base.update(over)
     return types.SimpleNamespace(**base)
 
 
-def fake_doctor(macos, sh=None, env=None, machine=None, mc=None):
+def fake_doctor(macos, sh=None, env=None, machine=None, mc=None, keys=None):
     e = {"HOME": "/h", "WK_STORE": "/store", "XDG_STATE_HOME": "/h/.local/state", "PATH": os.environ["PATH"],
          "WK_MACHINES_DIR": NO_REGISTRY}
     e.update(env or {})
-    return doctor.Doctor(str(REPO), env=e, machine=machine or Fake(), macos=macos, sh=sh or stub_shell(), mc=mc or stub_mc())
+    return doctor.Doctor(str(REPO), env=e, machine=machine or Fake(), macos=macos, sh=sh or stub_shell(), mc=mc or stub_mc(),
+                         keys=keys or stub_keys())
 
 
 def build_doctor(**over):
@@ -201,7 +204,7 @@ class TestVmGuestGitFindings(unittest.TestCase):
 
     def test_a_running_guest_that_does_not_answer_is_unknown(self):
         f = doctor.vm_guest_git_findings(StubGuests({"mac-rel": "running"}, ""), WANT)
-        self.assertEqual([(UNK, "mac-rel (tart guest): git config did not answer", "wk vm check mac-rel")], f)
+        self.assertEqual([(UNK, "mac-rel (tart guest): git config did not answer", "wk doctor mac-rel")], f)
 
     def test_an_unset_identity_names_a_start_as_the_remedy(self):
         blob = "git.name=\ngit.email=\ngit.fsmonitor=\ngit.manyfiles=\n"
@@ -319,7 +322,7 @@ class TestTheStoreOnAMacHost(unittest.TestCase):
     def test_a_stopped_machine_is_unknown_and_nothing_is_started(self):
         fake = Fake()
         fake.answer(INSPECT, 0, "stopped\n")
-        doc = fake_doctor(True, machine=fake, sh=stub_shell(in_machine=boom))
+        doc = fake_doctor(True, machine=fake, sh=stub_shell())
         rows = list(doc.workspaces_store()) + list(doc.machine_local())
         self.assertIn((UNK, "podman machine 'wk' is stopped", "wk start, then re-run wk doctor for the store checks"), rows)
         self.assertTrue(any("read-github-pat (podman VM) -- not visible while the podman machine is stopped" in r[1] for r in rows), rows)
@@ -329,7 +332,7 @@ class TestTheStoreOnAMacHost(unittest.TestCase):
         self.assertEqual({INSPECT}, set(podman), "only the state was asked")
 
     def test_no_machine_at_all_is_missing_with_the_stage_that_makes_one(self):
-        rows = list(fake_doctor(True, sh=stub_shell(in_machine=boom)).workspaces_store())
+        rows = list(fake_doctor(True, sh=stub_shell()).workspaces_store())
         self.assertEqual([(MISS, "podman machine 'wk'", "./setup --stage machine")], rows)
 
     def test_a_running_machine_is_asked_for_the_probe_and_its_git_identity(self):
@@ -337,10 +340,8 @@ class TestTheStoreOnAMacHost(unittest.TestCase):
         fake.answer(INSPECT, 0, "running\n")
         asked = []
 
-        def in_machine(root, command, env=None, quiet=False):
-            asked.append(command)
-            return FULL_STORE_BLOB.strip()
-        rows = list(fake_doctor(True, machine=fake, sh=stub_shell(in_machine=in_machine)).workspaces_store())
+        fake.react(("podman", "machine", "ssh", "wk", "--"), lambda a, f: asked.append(a[5]) or Result(0, FULL_STORE_BLOB))
+        rows = list(fake_doctor(True, machine=fake).workspaces_store())
         self.assertEqual(["WK_STORE=/var/lib/wk python3 /opt/wk-tools/cmd/doctor --probe-store"], asked)
         self.assertEqual((OK, "podman machine 'wk' running", ""), rows[0])
         self.assertTrue(any("container machine: git user.name" in r[1] for r in rows), rows)
@@ -354,7 +355,7 @@ class TestTheStoreOnAMacHost(unittest.TestCase):
 
 class TestTheCredentialsSection(unittest.TestCase):
     """Each row is one verdict of lib/credcheck.py's rules, taken through the
-    bash bridge (shell.cred_verdict) from what is in a scratch store."""
+    `wk key`'s own reading of it (Key.stored_verdict) from what is in a scratch store."""
 
     @classmethod
     def setUpClass(cls):
@@ -392,7 +393,9 @@ class TestTheCredentialsSection(unittest.TestCase):
         if online:
             env.update({"WK_ANTHROPIC_API": self.anthropic, "WK_CLAUDE_OAUTH": self.anthropic, "WK_LITELLM_API": self.litellm})
         e = clean_env(env)
-        return doctor.credentials_section(shell.cred_settable(str(REPO), env=e), lambda n: shell.cred_verdict(str(REPO), n, env=e))
+        with mock.patch.dict(os.environ, e, clear=True):   # Local's processes inherit this one's environment
+            k = Key(str(REPO), env=e, machine=Local())
+            return doctor.credentials_section(k.settable(), k.stored_verdict)
 
     LOGIN = {"agent-rw/.credentials.json": login(), "agent-rw/.claude.json": json.dumps(RECORD)}
 
@@ -497,8 +500,8 @@ class TestTheOtherWorkstationsLogins(unittest.TestCase):
 
 class TestTheFleetIsWalkedOnlyWhenAsked(unittest.TestCase):
     def _run(self, macos, everything):
-        sh = stub_shell(peer_workstations=boom, peer_cred_verdict=boom)
-        return [(title, list(rows)) for title, rows in fake_doctor(macos, sh=sh, mc=stub_mc(probe=boom, findings=boom, stale=boom)).sections(everything)]
+        return [(title, list(rows)) for title, rows in fake_doctor(macos, mc=stub_mc(probe=boom, findings=boom, stale=boom),
+                                                                   keys=stub_keys(peers=boom, verdict=boom)).sections(everything)]
 
     def test_without_all_no_machine_is_asked(self):
         for macos in (True, False):
@@ -533,11 +536,16 @@ class TestAMachineThatDoesNotAnswer(unittest.TestCase):
         self.assertEqual((OK, "provisioned from this tree's remote/provision.sh + remote/deps.sh", ""), rows[1])
 
     def test_a_bridge_phone_that_does_not_answer_is_unknown(self):
+        d = tempfile.mkdtemp(prefix="wk-test-doctor-bridges-")
+        self.addCleanup(shutil.rmtree, d)
+        for n in ("phone-a", "phone-b"):
+            with open(os.path.join(d, n + ".conf"), "w") as f:
+                f.write("KIND=bridge\nBR_DEVICE=pinephone\nBR_SEGMENT=10.9.0.0/24\nBR_ROUTER=10.9.0.1\n")
         fake = Fake()
-        fake.answer([str(REPO / "cmd" / "bridge"), "ls", "--names"], 0, "phone-a\nphone-b\n")
-        fake.answer([str(REPO / "cmd" / "bridge"), "battery", "phone-b"], 0, "percent=87\nstatus=Charging\nlimit=80\ncurrent=80\n")
-        rows = list(fake_doctor(False, machine=fake).battery())
-        self.assertEqual([(UNK, "phone-a: did not answer", "wk bridge status phone-a"),
+        fake.react(["ssh"], lambda argv, fk: Result(255, "", "No route to host") if "phone-a" in " ".join(argv)
+                   else Result(0, "percent=87\nstatus=Charging\nlimit=80\ncurrent=80\n"))
+        rows = list(fake_doctor(False, env={"WK_MACHINES_DIR": d}, machine=fake).battery())
+        self.assertEqual([(UNK, "phone-a: did not answer", "wk machine status phone-a"),
                           (OK, "phone-b: 87% Charging, capped at 80%", "")], rows)
 
 

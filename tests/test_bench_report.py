@@ -77,7 +77,7 @@ def report_means(stdout):
 
 
 def cli_env_record(path, *fields):
-    """`wkdata env-record`, the writer the bash run arms and cmd/pi call."""
+    """`wkdata env-record`, the writer the bash run arms call."""
     cp = wkdata("env-record", str(path), *fields)
     assert cp.returncode == 0, cp.stdout + cp.stderr
 
@@ -194,7 +194,7 @@ class TestReportWalkerAndStats(WkTest):
             self.assertIn("Time", cp.stdout)
 
     def test_report_reads_speedometer2_board_results(self):
-        """the shape `wk pi bench` records from the webserver patch's POST:
+        """the shape a board run records from the webserver patch's POST:
         the total Score at the suite root, declarations (metrics.Time ==
         ["Total"]) in the middle, and the numbers three levels down under
         Sync/Async. Every level becomes a row, named by its path from the

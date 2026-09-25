@@ -46,7 +46,7 @@ def resolved(spec, answer=None, local=False):
     m.dirs.add(STORE + "/ws/yocto-webkit-2.52-yocto-rpi3-32")
     m.answer((os.path.join(str(REPO), "wk"), "sysimage", "path"), *answer or (1, ""))
     w = write.Write(REPO, {"WK_ROOT": str(REPO)}, m, Store())
-    with mock.patch.object(shell, "store_is_local", lambda root, machine: local), \
+    with mock.patch("wk.store.Store.is_local", lambda st: local), \
             contextlib.redirect_stderr(io.StringIO()) as err:
         try:
             return w.resolve(spec), err.getvalue()

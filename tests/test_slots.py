@@ -1,7 +1,6 @@
 """WebKit slots: the manifest (lib/wk/slot.py, run by bash as lib/wkslot.py), the running-binary check the
-wk-board run-benchmark driver makes (bench/wk_board_driver.py), the
-in-workspace slot builder's refusals (image/buildroot-webkit.sh), and the
-`wk sysimage webkit` / `wk ab` refusals that need no workspace or board.
+wk-board run-benchmark driver makes (lib/wk/bench/board_driver.py), and the
+`wk sysimage webkit` refusals that need no workspace or board.
 
 The ELF the manifest describes is a real shared object linked here with
 gcc and a chosen --build-id, read back through readelf.
@@ -22,6 +21,9 @@ from pathlib import Path
 
 from tests.support import (REPO, WkTest, bash, podman_vm_ssh, run_here,
                            requires_podman_vm, run)
+
+sys.path.insert(0, str(REPO / "lib"))
+from wk import slot as wkslot_lib  # noqa: E402
 
 WKSLOT = REPO / "lib" / "wkslot.py"
 BUILD_ID = "3dca0e504a7438009c3eadf6113833fcc6297428"
@@ -45,15 +47,6 @@ def linker_takes_build_id():
              "-Wl,--build-id=none"],
             input="int wk_probe(void) { return 0; }\n", text=True,
             capture_output=True)
-    return cp.returncode == 0
-
-
-def have_mirror():
-    """`wk ab` resolves both of its commits in this machine's WebKit mirror
-    (wk_mirror, lib/store.sh) and refuses without one, so a test that gets
-    past the argument checks needs the mirror to be here."""
-    cp = bash('. "$WK_ROOT/lib/common.sh"; . "$WK_ROOT/lib/store.sh"; '
-              '[ -d "$(wk_mirror)" ]')
     return cp.returncode == 0
 
 
@@ -105,11 +98,12 @@ class TestManifest(WkTest):
         self.assertEqual(check.returncode, 0, check.stdout + check.stderr)
 
     def test_env_and_expect_describe_the_deployed_prefix(self):
-        env = wkslot("env", str(self.slot), "/var/wk/slots/pr/root").stdout.splitlines()
+        doc = json.loads(self.slot.read_text())
+        env = wkslot_lib.env(doc, "/var/wk/slots/pr/root")
         self.assertIn("LD_LIBRARY_PATH=/var/wk/slots/pr/root/usr/lib", env)
         self.assertIn("WEBKIT_EXEC_PATH=/var/wk/slots/pr/root/usr/libexec/wpe-webkit-1.1", env)
         self.assertIn("WEBKIT_INJECTED_BUNDLE_PATH=/var/wk/slots/pr/root/usr/lib/wpe-webkit-1.1/injected-bundle", env)
-        expect = json.loads(wkslot("expect", str(self.slot), "/var/wk/slots/pr/root").stdout)
+        expect = wkslot_lib.expect(doc, "/var/wk/slots/pr/root/")
         self.assertEqual(expect["process"], "WPEWebProcess")
         self.assertEqual(expect["exe"], "/var/wk/slots/pr/root/usr/libexec/wpe-webkit-1.1/WPEWebProcess")
         self.assertEqual(expect["lib"], "/var/wk/slots/pr/root/usr/lib/libWPEWebKit-1.1.so.0.2.9")
@@ -132,22 +126,21 @@ class TestVerified(WkTest):
     def _verified(self, lines):
         f = self.tmp / "verify.jsonl"
         f.write_text("".join(json.dumps(l) + "\n" for l in lines))
-        return wkslot("verified", str(f))
+        return wkslot_lib.verified(str(f))
 
     def test_all_ok_passes_and_counts(self):
-        cp = self._verified([{"ok": True}, {"ok": True}])
-        self.assertEqual((cp.returncode, cp.stdout.strip()), (0, "2"))
+        self.assertEqual(self._verified([{"ok": True}, {"ok": True}]), 2)
 
     def test_one_failure_fails(self):
-        self.assertNotEqual(self._verified([{"ok": True}, {"ok": False}]).returncode, 0)
+        self.assertEqual(self._verified([{"ok": True}, {"ok": False}]), 0)
 
     def test_no_evidence_is_not_verified(self):
-        self.assertNotEqual(self._verified([]).returncode, 0)
-        self.assertNotEqual(wkslot("verified", str(self.tmp / "missing")).returncode, 0)
+        self.assertEqual(self._verified([]), 0)
+        self.assertEqual(wkslot_lib.verified(str(self.tmp / "missing")), 0)
 
 
 def load_driver():
-    """bench/wk_board_driver.py imports run-benchmark's BrowserDriver; a
+    """lib/wk/bench/board_driver.py imports run-benchmark's BrowserDriver; a
     stand-in module lets the pure functions be tested without a checkout."""
     if "webkitpy.benchmark_runner.browser_driver.browser_driver" not in sys.modules:
         base = types.ModuleType("webkitpy.benchmark_runner.browser_driver.browser_driver")
@@ -162,7 +155,7 @@ def load_driver():
         sys.modules[base.__name__] = base
     import importlib.util
 
-    spec = importlib.util.spec_from_file_location("wk_board_driver", REPO / "bench" / "wk_board_driver.py")
+    spec = importlib.util.spec_from_file_location("wk_board_driver", REPO / "lib" / "wk" / "bench" / "board_driver.py")
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod
@@ -184,7 +177,7 @@ class TestBoardDriver(unittest.TestCase):
     def test_every_launch_ends_the_old_browser_and_starts_cold(self):
         """prepare_env runs before each launch: the kill, then the cache
         reset -- a second launch at a cached URL never starts the benchmark
-        (bench/wk_board_driver.py, prepare_env)."""
+        (lib/wk/bench/board_driver.py, prepare_env)."""
         env = {"WK_BOARD_SSH": "ssh board", "WK_BOARD_LAUNCH": "cog", "WK_BOARD_KILL": "killall cog",
                "WK_BOARD_RESET": "rm -rf /root/.cache/WebKitCache", "WK_BOARD_URL": "127.0.0.1:1"}
         with unittest.mock.patch.dict(os.environ, env):
@@ -217,29 +210,6 @@ class TestBoardDriver(unittest.TestCase):
         problems = self.d.judge(self.expect, {"pids": "0"})
         self.assertEqual(len(problems), 1)
         self.assertIn("no WPEWebProcess", problems[0])
-
-
-class TestSlotBuilderRefusals(WkTest):
-    """image/buildroot-webkit.sh checks its arguments before it touches a
-    tree, so these run the script for real, outside any workspace."""
-
-    SCRIPT = REPO / "image" / "buildroot-webkit.sh"
-
-    def test_parses(self):
-        self.assertEqual(bash(f'bash -n "{self.SCRIPT}"').returncode, 0)
-
-    def test_short_sha_is_refused(self):
-        cp = bash(f'"{self.SCRIPT}" --name img --commit abc123 --slot base')
-        self.assertEqual(cp.returncode, 1)
-        self.assertIn("full 40-character sha", cp.stderr)
-
-    def test_every_argument_is_required(self):
-        cp = bash(f'"{self.SCRIPT}" --commit {"a" * 40} --slot base')
-        self.assertEqual(cp.returncode, 1)
-        self.assertIn("--name is required", cp.stderr)
-
-    def test_unknown_option_is_a_usage_error(self):
-        self.assertEqual(bash(f'"{self.SCRIPT}" --bogus').returncode, 2)
 
 
 class TestSysimageWebkitRefusals(WkTest):
@@ -305,51 +275,6 @@ class TestSysimageLs(WkTest):
                       "the machine holding the store was not asked for its images")
         self.assertNotIn("has built an image", cp.stdout,
                          "this host answered for a store it cannot read")
-
-
-class TestAbRefusals(WkTest):
-    """`wk ab` refuses a malformed request before it reaches the mirror, a
-    board or GitHub."""
-
-    def test_devices_are_required(self):
-        cp = run("ab", "wpe:1725", timeout=30)
-        self.assertEqual(cp.returncode, 1, cp.stdout)
-        self.assertIn("--devices", cp.stdout)
-
-    def test_bits_are_32_or_64(self):
-        cp = run("ab", "wpe:1725", "--devices", "rpi3", "--bits", "16", timeout=30)
-        self.assertEqual(cp.returncode, 1, cp.stdout)
-        self.assertIn("--bits takes 32 or 64", cp.stdout)
-
-    def test_rounds_is_a_number(self):
-        cp = run("ab", "wpe:1725", "--devices", "rpi3", "--rounds", "many", timeout=30)
-        self.assertEqual(cp.returncode, 1, cp.stdout)
-        self.assertIn("--rounds takes a number", cp.stdout)
-
-    @unittest.skipUnless(have_mirror(), "needs this machine's WebKit mirror ('wk sync' makes one)")
-    def test_a_device_carries_its_own_width(self):
-        """rpi3-32 beside rpi5-64 in one command: the suffix, not --bits,
-        decides each device's image, so mixed widths are one run."""
-        cp = run("ab", "wpe:1725", "--devices", "rpi3-32,rpi5-64", "--release", "2.38", "--dry-run", timeout=240)
-        out = cp.stdout
-        self.assertNotIn("more than one image", out)
-        if "cannot be built yet" in out:
-            self.skipTest("the rpi5 2.38 configuration declares owed work; the width was still resolved")
-        self.assertIn("wpewebkit-2.38-buildroot-rpi3-32", out)
-        self.assertIn("wpewebkit-2.38-buildroot-rpi5-64", out)
-
-    def test_a_plan_is_a_name(self):
-        cp = run("ab", "wpe:1725", "--devices", "rpi3", "--plan", "x;y", timeout=30)
-        self.assertEqual(cp.returncode, 1, cp.stdout)
-        self.assertIn("not a plan name", cp.stdout)
-
-    def test_a_forks_branch_is_a_spec_and_names_the_release_it_needs(self):
-        """A branch is resolved in the mirror like a pull request's head
-        (tests/test_sched.py drives that end to end); what it cannot have is a
-        base branch to read the image off."""
-        cp = run("ab", "alice:eng/branch", "--devices", "rpi3", timeout=30)
-        self.assertEqual(cp.returncode, 1, cp.stdout)
-        self.assertIn("--release is required for a commit or a branch", cp.stdout)
 
 
 if __name__ == "__main__":

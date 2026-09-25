@@ -1,6 +1,9 @@
 """`wk completion bash|zsh`, generated from the declarations, never `-h` text;
 workspace names and `values=` lists are asked at TAB, of this machine only."""
 
+import os
+import sys
+
 from wk import decl as D
 from wk.targets import Registry
 
@@ -80,7 +83,7 @@ _wk_completion() {
         i=$((i + 1))
     done
     if [ "$_wk_slot" -gt 0 ] && [ "$typed" -eq $((_wk_slot - 1)) ]; then
-        words=$("$bin" completion --list-workspaces 2>/dev/null)
+        words=$(PYTHONPATH="$_wk_root/lib" python3 -m wk.completion --list-workspaces 2>/dev/null)
     elif [ "$typed" -eq "$_wk_first_arg" ]; then
         words="$_wk_subverbs"
         [ -z "$_wk_vals" ] || words="$words $(_wk_values "$bin" "$cmd" "$_wk_vals")"
@@ -118,6 +121,7 @@ def generate(root, shell_name, tombstones):
         # bashcompinit's `complete` calls compdef, which needs compinit (a stock ~/.zshrc omits it); -C reads the dumpfile as it stands.
         out.append("autoload -U +X compinit && compinit -C\n")
         out.append("autoload -U +X bashcompinit && bashcompinit\n")
+    out.append("_wk_root=%s\n" % _words([str(root)]))
     out.append("_wk_commands=%s\n" % _words(commands(root, tombstones)))
     out.append("_wk_decl() {\n    _wk_config_owner=%s; _wk_config_values=%s\n    case \"$1\" in\n"
                % (CONFIG_OWNER, owner_values or "''"))
@@ -128,3 +132,18 @@ def generate(root, shell_name, tombstones):
     out.append("        *) return 1 ;;\n    esac\n}\n")
     out.append(_FUNCTION)
     return "".join(out)
+
+
+def main(argv, env=None):
+    """`python3 -m wk.completion --list-workspaces`: the generated script's own far side."""
+    root = os.environ.get("WK_ROOT") or os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    if argv == ["--list-workspaces"]:
+        for name in local_workspaces(root, env):
+            print(name)
+        return 0
+    sys.stderr.write("usage: python3 -m wk.completion --list-workspaces\n")
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

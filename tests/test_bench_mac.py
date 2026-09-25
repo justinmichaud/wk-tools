@@ -210,7 +210,7 @@ class TestTheRecord(MacTest):
     def test_a_rehearsed_round_ends_the_task_and_is_never_usable(self):
         task = self.tmp / "task"
         brecord.task_write(str(task), ["task=t", "requested=now", "devices=benchvm=mac-release", "plans=speedometer3",
-                                       "rounds=1", "slots=a,b"], ["wk bench mac-ab"])
+                                       "rounds=1", "slots=a,b"], ["wk bench ab --devices mbp"])
         for arm in ("a", "b"):
             d = task / "runs" / arm
             d.mkdir(parents=True)
@@ -417,6 +417,10 @@ class TestTheInstallResolvesItself(MacTest):
         f = Fake()
         f.answer([mac.PYTHONS[1]], rc=0)
         self.assertEqual(mac.staged_python(f, {"WK_BENCH_PYTHON": "/broken"}), mac.PYTHONS[1])
+
+    def test_no_python_with_pyobjc_refuses(self):
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(Refused):
+            mac.staged_python(Fake(), {})
 
 
 class Target(targets.Target):

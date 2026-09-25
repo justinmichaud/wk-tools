@@ -304,6 +304,7 @@ fi
 # The machine holds this workstation's lanes, and a lane's bytes are deployed to a board over the tailnet -- so the half that can read the store has to be the half that can reach the board, or neither can. gvproxy answers a 100.x address itself (ping replies in 0.13ms and a connection to port 22 is accepted) and delivers nothing, so the machine joins as a node of its own. Its workspaces do not: they run --network none and reach the world only through the egress proxy's socket (targets/container.sh).
 _ts() { podman machine ssh "$WK_MACHINE" -- "$@"; }   # `sudo` inside: tailscaled's socket is root's
 _ts_node="$(wk_machine_name)-vm"
+# WK_PI_TAG: the tailscale tag every node in the fleet -- a board, this machine -- advertises when it joins (default tag:wk).
 _ts_tag="${WK_PI_TAG:-tag:wk}"
 
 _ts_state() { _ts sudo tailscale status --json 2>/dev/null | python3 -c '

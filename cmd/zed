@@ -23,7 +23,7 @@ import sys
 ROOT = os.environ.get("WK_ROOT") or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "lib"))
 
-from wk import decl, record, shell, targets  # noqa: E402
+from wk import decl, record, targets  # noqa: E402
 from wk.act import Refused, die, exec_into, log  # noqa: E402
 from wk.machine import Local  # noqa: E402
 from wk.workspace import require_name  # noqa: E402
@@ -147,11 +147,10 @@ def main(argv):
     host = target.ssh_host(name)
     if not host:
         die("'%s' is not running, so there is no route to it.\n"
-            "    A macOS guest needs booting first:  wk vm start %s" % (name, name))
+            "    A macOS guest needs booting first:  wk start %s" % (name, name))
 
-    # vm_login_note is the one place the guest's login password is stated.
     if target.kind == "vm":
-        shell.vm_login_note(ROOT, env=target.env)
+        target.login_note()
 
     emit(url_only, zed, "ssh://%s%s" % (host, target.src(name)))
     return 0

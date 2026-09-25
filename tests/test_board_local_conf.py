@@ -14,34 +14,40 @@ bcm2712_pull_config_set before rootfs (rpi5, 2026-09-04).
 Run: python3 -m unittest tests.test_board_local_conf -v
 """
 import re
+import sys
 import unittest
 from pathlib import Path
 
 from tests.support import REPO
 
 BOARDS = REPO / "image" / "boards"
-BUILD = REPO / "image" / "yocto-build.sh"
-DRIVER = REPO / "image" / "yocto.sh"
+sys.path.insert(0, str(REPO / "lib"))
+from wk.sysimage import yocto_target  # noqa: E402
+
+DRIVER = REPO / "lib" / "wk" / "sysimage" / "yocto.py"
+ENV = {"DL_DIR": "/cache/dl", "SSTATE_DIR": "/cache/sstate"}
+
+
+def conf(board, append):
+    a = yocto_target.parse(["--target", "rpi5-64bits-mesa", "--rm-work", "1"] + (["--board", board] if board else []))
+    return yocto_target.local_conf(a, ENV, 8, append)
 
 
 class TestTheBoardHalfIsWired(unittest.TestCase):
     def test_the_builder_takes_a_board(self):
-        self.assertIn("--board)", BUILD.read_text(),
-                      "yocto-build.sh has no --board, so no board file can be found")
+        self.assertEqual(yocto_target.parse(["--target", "t", "--board", "rpi5"]).board, "rpi5")
 
     def test_the_driver_passes_the_board_it_already_knows(self):
         """IMG_MACHINE is the board name every profile already carries."""
-        self.assertIn('--board "$IMG_MACHINE"', DRIVER.read_text())
+        self.assertIn('opt("--board", p["IMG_MACHINE"])', DRIVER.read_text())
 
     def test_the_board_file_is_appended_last(self):
         """bitbake takes the last assignment, so a board fact must land after
         the knobs above it -- and inside the block that writes local.conf."""
-        body = BUILD.read_text()
-        fn = body[body.index("configure_local_conf()"):]
-        fn = fn[:fn.index('\n    } >> "$CONF"')]
-        self.assertIn("image/boards/", fn, "the board file is not read here")
-        self.assertLess(fn.index('RM_WORK_EXCLUDE'), fn.index("image/boards/"),
+        text = conf("rpi5", 'X = "1"\n')
+        self.assertLess(text.index("RM_WORK_EXCLUDE"), text.index("image/boards/rpi5"),
                         "a board fact is appended before knobs that could override it")
+        self.assertTrue(text.rstrip("\n").endswith('X = "1"'))
 
     def test_a_board_with_nothing_to_say_appends_nothing(self):
         """Absent is the normal case: rpi3 and rpi4 need no build-time fact."""
@@ -49,10 +55,9 @@ class TestTheBoardHalfIsWired(unittest.TestCase):
             with self.subTest(board=board):
                 self.assertFalse((BOARDS / board / "local.conf.append").exists())
 
-    def test_the_read_is_guarded_on_both_the_name_and_the_file(self):
-        """An empty BOARD must not read image/boards//local.conf.append."""
-        body = BUILD.read_text()
-        self.assertIn('[ -n "${BOARD:-}" ] && [ -f "$_board_conf" ]', body)
+    def test_no_board_file_appends_nothing(self):
+        self.assertNotIn("image/boards/", conf("", None))
+        self.assertNotIn("image/boards/", conf("rpi3", None))
 
 
 class TestTheRpi5NeedsTheD0Overlay(unittest.TestCase):

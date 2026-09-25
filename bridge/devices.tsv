@@ -1,0 +1,3 @@
+# device	note	kill switches -- one row a phone a bridge runs on; the role is the same on each (lib/wk/bridge reads this)
+pinephone	PinePhone, A64	6 DIP switches under the back cover: modem, WiFi/BT, mic, speaker, cameras, headphone
+librem5	Librem 5, i.MX8M Quad	3 switches on the side: WiFi/BT, cellular, camera+mic

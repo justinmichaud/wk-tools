@@ -367,7 +367,7 @@ class TestTheGuests(PushTest):
         rc, out, err = self.push("status", macos=True)
         self.assertEqual(0, rc)
         self.assertIn("1 key(s) in the agent this host runs for them", out)
-        self.assertIn("guest demo       stopped -- not read; 'wk vm start demo' converges it", out)
+        self.assertIn("guest demo       stopped -- not read; 'wk start demo' converges it", out)
 
     def test_a_running_guest_that_reaches_it_is_on(self):
         self.w.seed()

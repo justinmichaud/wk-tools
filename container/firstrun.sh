@@ -91,7 +91,7 @@ done
 
 ln -sfn /skills "$HOME/.claude/skills"  # one mutable dir, shared by every ws
 
-_agent_secrets() { bash -c '. "$1/lib/store.sh"; wk_agent_secrets' _ "$WK_TOOLS" 2>/dev/null; }
+_agent_secrets() { PYTHONPATH="$WK_TOOLS/lib" python3 -m wk.secrets agent-secrets 2>/dev/null; }
 while read -r _sname _sfile _shome _svar _skind _sdelivery; do
     [ -n "$_sname" ] || continue
     # Taken away where it is not delivered: a token beside the login wins over it.

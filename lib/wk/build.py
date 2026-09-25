@@ -8,11 +8,12 @@ import shlex
 import subprocess
 import sys
 
-from wk import act, buildconf, job, record, shell
+from wk import act, buildconf, git, job, record, shell
 from wk.act import Refused, die, info, log, warn
 from wk.clock import Clock
 from wk.lock import Lock
 from wk.resources import Budget, Resources, parse_df
+from wk.sysimage import task as stage
 
 PID_MATCH = "*build-in-target.sh* *Tools/Scripts/build-*"   # build-in-target.sh execs the port's script; a PGO config stays in it across phases
 EXCLUSIVE = ("build", "babysit", "yocto", "buildroot")   # jobs that hold a checkout: two at once corrupt it
@@ -349,7 +350,7 @@ class Build:
 
     def checkout(self, branch):
         q = shlex.quote
-        fetch = shell.origin_branch_fetch_step(self.root, self.here, branch, self.target.mirror_dir())
+        fetch = git.origin_branch_fetch_step(branch, self.target.mirror_dir())
         script = ("cd %s && {\n    git checkout -q %s 2>/dev/null ||\n    { %s &&\n      git checkout -q %s; }; }"
                   % (q(self.target.src(self.name)), q(branch), fetch, q(branch)))
         return self.target.act_exec(self.name, ["bash", "-c", script]).ok
@@ -501,7 +502,7 @@ class Build:
                 if task is not None:
                     watcher = job.PidWatch(t, name, task, path, "build", PID_MATCH, int(self.env.get("WK_JOB_PID_TRIES") or 900))
                     watcher.start()
-                argv, cwd = t.build_argv(name, ["env"] + cfg_env + [bit] + passthru)
+                argv, cwd = t.build_argv(name, stage.in_workspace(t.tools(name), "build", ["env"] + cfg_env + [bit] + passthru))
                 rc = job.watch(argv, path, here, self.clock, self.env, cwd, self.popen)
             except job.Interrupted as e:
                 if watcher is not None:

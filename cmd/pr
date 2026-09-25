@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 #
 # wk pr [<workspace>] <user>:<branch>|<n>|wpe:<n> -- check out a PR head, from either project
-# wk: where=workspace name=optional takes=1 ready=yes group=sources
-# wk: sub open where=host name=optional@2 takes=0 opts=--draft,--web needs=gh,gh-auth
-# wk: sub rebase name=optional@2 takes=0
+# wk: where=workspace name=optional takes=1 ready=yes group=sources dryrun
+# wk: sub open where=host name=optional@2 takes=0 opts=--draft,--web needs=gh,gh-auth dryrun=
+# wk: sub rebase name=optional@2 takes=0 dryrun=
 #
 #   wk pr justinmichaud:eng/non-cocoa-fuzz-Frame-cache-evicted-or-unparsed-frames-dereferenced
 #   wk pr 1234                                 # WebKit/WebKit pull request #1234
@@ -45,9 +45,8 @@ import sys
 ROOT = os.environ.get("WK_ROOT") or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "lib"))
 
-from wk import decl, git, pr, shell, targets  # noqa: E402
+from wk import decl, git, pr, secrets, targets  # noqa: E402
 from wk.act import Refused, die, info, log, warn  # noqa: E402
-from wk.machine import Local  # noqa: E402
 from wk.targets import show  # noqa: E402
 from wk.workspace import require_name  # noqa: E402
 
@@ -91,7 +90,7 @@ def pr_open_target(src, run=_run_local, remotes=None, push_forks=None):
     _, up_url = ask("config", "--get", "remote.%s.url" % up_remote)
     up_repo = git.repo_of(up_url)
     if push_forks is None:
-        push_forks = shell.push_forks(ROOT, Local())
+        push_forks = secrets.forks()
     fork_names = {r for r, _, _ in push_forks}
     # The project's upstream, not the remote the branch happens to track: `wk pr` leaves a
     # branch tracking the fork it came from, and a pull request against that is one against yourself.

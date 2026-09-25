@@ -1,5 +1,5 @@
 """A WebKit *slot*: one built WebKit that sits beside others on a board. Its layout
-is written by image/buildroot-webkit.sh and read by cmd/pi and `wk sysimage`."""
+is written by lib/wk/sysimage/buildroot_target.py and read by lib/wk/bench/board.py and `wk sysimage`."""
 import argparse
 import hashlib
 import json
@@ -45,7 +45,7 @@ def cmd_manifest(args):
     if not files:
         sys.exit("manifest: nothing under %s" % root)
     doc["files"] = files
-    # The library that is the WebKit: what `wk pi bench` checks in the running process.
+    # The library that is the WebKit: what a board run checks in the running process.
     libs = sorted(rel for rel in files
                   if os.path.dirname(rel) == doc.get("lib_dir", "usr/lib")
                   and os.path.basename(rel).startswith("libWPEWebKit-")
@@ -66,12 +66,6 @@ def load(path):
         return json.load(f)
 
 
-def get(doc, key, default=""):
-    """One field as `get` prints it: a dict or list as JSON, anything else as str()."""
-    value = doc.get(key, default)
-    return json.dumps(value) if isinstance(value, (dict, list)) else str(value)
-
-
 def cmd_sums(args):
     doc = load(args.slot_json)
     prefix = args.prefix.rstrip("/") + "/" if args.prefix else ""
@@ -79,48 +73,33 @@ def cmd_sums(args):
         print("%s  %s%s" % (digest, prefix, rel))
 
 
-def cmd_env(args):
-    doc = load(args.slot_json)
-    p = args.prefix.rstrip("/")
-    print("LD_LIBRARY_PATH=%s/%s" % (p, doc["lib_dir"]))
-    print("WEBKIT_EXEC_PATH=%s/%s" % (p, doc["exec_dir"]))
-    print("WEBKIT_INJECTED_BUNDLE_PATH=%s/%s" % (p, doc["bundle_dir"]))
+def env(doc, prefix):
+    p = prefix.rstrip("/")
+    return ["LD_LIBRARY_PATH=%s/%s" % (p, doc["lib_dir"]), "WEBKIT_EXEC_PATH=%s/%s" % (p, doc["exec_dir"]),
+            "WEBKIT_INJECTED_BUNDLE_PATH=%s/%s" % (p, doc["bundle_dir"])]
 
 
-# Read as WK_BOARD_EXPECT by bench/wk_board_driver.py.
-def cmd_expect(args):
-    doc = load(args.slot_json)
-    p = args.prefix.rstrip("/")
-    print(json.dumps({
-        "process": "WPEWebProcess",
-        "exe": "%s/%s/WPEWebProcess" % (p, doc["exec_dir"]),
-        "lib": "%s/%s" % (p, doc["lib_file"]),
-        "lib_sha256": doc["files"][doc["lib_file"]],
-        "build_id": doc["build_id"],
-    }))
+def expect(doc, prefix):
+    """The running-binary check for a deployed slot, read as WK_BOARD_EXPECT by lib/wk/bench/board_driver.py."""
+    p = prefix.rstrip("/")
+    return {"process": "WPEWebProcess", "exe": "%s/%s/WPEWebProcess" % (p, doc["exec_dir"]), "lib": "%s/%s" % (p, doc["lib_file"]),
+            "lib_sha256": doc["files"][doc["lib_file"]], "build_id": doc["build_id"]}
 
 
-# The driver's evidence file: one JSON check per line, one line per iteration.
-def cmd_verified(args):
+def verified(path):
+    """How many running-binary checks the driver's evidence file (one JSON check per line) holds; 0 unless every one passed."""
     n = 0
     try:
-        with open(args.evidence) as f:
+        with open(path) as f:
             for line in f:
-                line = line.strip()
-                if not line:
+                if not line.strip():
                     continue
                 n += 1
                 if not json.loads(line).get("ok"):
-                    print(n)
-                    sys.exit(1)
-    except FileNotFoundError:
-        sys.exit(1)
-    print(n)
-    sys.exit(0 if n else 1)
-
-
-def cmd_get(args):
-    print(get(load(args.slot_json), args.key, args.default))
+                    return 0
+    except (OSError, ValueError):
+        return 0
+    return n
 
 
 def main(argv):
@@ -139,26 +118,6 @@ def main(argv):
     p.add_argument("slot_json")
     p.add_argument("--prefix", default="", help="directory the root was unpacked to")
     p.set_defaults(func=cmd_sums)
-
-    p = sub.add_parser("env", help="KEY=VALUE lines a browser needs to run from the slot")
-    p.add_argument("slot_json")
-    p.add_argument("prefix", help="where root/ is on the machine that runs it")
-    p.set_defaults(func=cmd_env)
-
-    p = sub.add_parser("expect", help="the running-binary check for a deployed slot, as JSON")
-    p.add_argument("slot_json")
-    p.add_argument("prefix", help="where root/ is on the machine that runs it")
-    p.set_defaults(func=cmd_expect)
-
-    p = sub.add_parser("verified", help="did every recorded running-binary check pass (exit status), and how many")
-    p.add_argument("evidence")
-    p.set_defaults(func=cmd_verified)
-
-    p = sub.add_parser("get", help="one field out of slot.json")
-    p.add_argument("slot_json")
-    p.add_argument("key")
-    p.add_argument("--default", default="")
-    p.set_defaults(func=cmd_get)
 
     args = parser.parse_args(argv)
     args.func(args)

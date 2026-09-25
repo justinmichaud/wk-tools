@@ -327,19 +327,20 @@ load_target peerbox
         self.assertTrue(any(c.startswith("tty peerws") and "force=1" in c for c in calls), calls)
 
     def test_one_implementation_builds_the_forwarded_environment(self):
-        """every hop asks lib/common.sh for it, so a flag added to one is
-        not missing from the other (CLAUDE.md, "one implementation per rule")"""
-        for path in (REPO / "lib" / "target.sh", REPO / "targets" / "remote.sh"):
-            self.assertIn("wk_forwarded_env", path.read_text(), path)
-        self.assertIn("vm_wk_cmd", (REPO / "lib" / "wk" / "dispatch.py").read_text(),
-                      "the dispatcher's VM hop builds its command elsewhere than vm_wk_cmd")
+        """the bash hop asks Target.wk_cmd through `wk-cmd` and every Python hop Target.wk_cmd, so a flag
+        added to one is not missing from another (CLAUDE.md, "one implementation per rule")"""
+        self.assertIn("wk-cmd", (REPO / "targets" / "remote.sh").read_text())
+        self.assertNotIn("wk_forwarded_env", (REPO / "targets" / "remote.sh").read_text())
+        builders = sorted(str(f.relative_to(REPO)) for f in (REPO / "lib" / "wk").rglob("*.py")
+                          if '"%s=1 "' in f.read_text(errors="replace"))
+        self.assertEqual(builders, ["lib/wk/targets.py"], "a far wk's line is Target.wk_cmd's alone")
         # The tracked tree, not a directory walk: an agent's git worktree
         # under .claude/worktrees is a second copy of every file.
         offenders = [str(f) for f in repo_files()
                      if f.parts[len(REPO.parts)] != "tests"
                      and re.search(r"WK_(FORCE|QUIET|YES|DEBUG):\+",
                                    f.read_text(errors="replace"))]
-        self.assertEqual(offenders, [str(REPO / "lib" / "common.sh")], offenders)
+        self.assertEqual(offenders, [], "no bash file spells the forwarded environment: %s" % offenders)
 
 
 if __name__ == "__main__":

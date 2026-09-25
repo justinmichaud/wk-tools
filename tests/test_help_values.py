@@ -29,10 +29,9 @@ from tests.support import REPO, bash, scratch_dir, temp_store
 # own case statement or while-loop -- belong here.
 CLOSED_SETS = {
     "push": {"action": ["on", "off", "status"]},
-    "machine": {"verb": ["setup", "rm", "ls", "probe"]},
-    "ab": {"--builder": ["buildroot", "yocto"], "--bits": ["32", "64"]},
+    "machine": {"verb": ["setup", "rm", "tailnet", "status", "ls", "probe"]},
+    "bench": {"--builder": ["buildroot", "yocto"], "--bits": ["32", "64"]},
     "completion": {"shell": ["bash", "zsh"]},
-    "bridge": {"subverb": ["ls", "provision", "setup", "tailnet", "status", "rm"]},
 }
 
 
@@ -50,7 +49,6 @@ DECLARED_VALUES = {
     "boot": "--list",
     "sysimage": "--list",
     "profile": "--list",
-    "pi": "--list",
 }
 
 

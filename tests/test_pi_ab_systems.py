@@ -1,313 +1,187 @@
-"""`wk pi bench --ab-systems` (cmd/pi): an interleaved A/B across *system
-images*, a boot per leg. What these tests pin down is the verification the
-whole mode exists for: a leg runs on the system it names -- proven from the
-marker the running system serves, never the arming record -- or it does not
-run. The boot cycle and the wrong-leg refusal run against the lifted
-functions with every remote half stubbed (a stub `wk` records the boot
-verbs; a fake clock drives the deadlines); the end-to-end proof is a real
-`wk pi bench <machine> <plan> --ab-systems <a>,<b>` against a board.
+"""`--ab-systems`'s boot per leg (lib/wk/bench/board_ab.py's AB.boot): a leg runs on the system it names -- proven from
+the marker the running system serves, never the arming record -- or it does not run. Against the fake board of
+tests/test_bench_board.py holding two systems on its stick, driven through the real rpi5 driver and `wk boot`'s own
+arming (lib/wk/boot/cli.py's Boot), with the fake clock under every wait. The whole A/B on it is
+tests/test_bench_board.py's TestTwoSystemsOnFake.
 
-Run: python3 -m unittest tests.test_pi_ab_systems -v
+Run: python3 tests/run.py -k tests.test_pi_ab_systems
 """
+import contextlib
+import io
 import os
-import re
-import subprocess
-import tempfile
+import sys
 import unittest
-from pathlib import Path
 
-REPO = Path(__file__).resolve().parent.parent
-CMD_PI = REPO / "cmd" / "pi"
+from tests.support import REPO
+from tests.test_bench_board import BOARD, BoardTest, PipelineReg
 
+sys.path.insert(0, str(REPO / "lib"))
+from wk.bench import board_ab  # noqa: E402
+from wk.boot.driver import part  # noqa: E402
+from wk.boot.pi import Rpi5Usb  # noqa: E402
+from wk.machine import Result  # noqa: E402
 
-def lift(fn):
-    text = subprocess.run(
-        ["sed", "-n", f"/^{fn}()/,/^}}/p", str(CMD_PI)],
-        capture_output=True, text=True,
-    ).stdout
-    assert text.strip(), f"could not lift {fn} from cmd/pi"
-    return text
+SYS_A, SYS_B = part("/dev/sda", 2), part("/dev/sda", 4)
 
 
-def bash(script, env=None):
-    e = dict(os.environ)
-    e.update(env or {})
-    return subprocess.run(["bash", "-c", script], capture_output=True, text=True, env=e)
+class ArmsFromBench(Rpi5Usb):
+    """A board whose arming is taken where it stands, as pi-sd's is."""
+    arm_from_bench = True
 
 
-PRELUDE = f'''
-set -uo pipefail
-. "{REPO}/lib/common.sh"
-machine=rpi3
-NODE_ROOT=/dev/mmcblk0p2
-NODE_DEVICE=/dev/mmcblk0
-_b_probe_sh='probe'
-b_system_kind() {{
-    case "$1" in
-        /dev/mmcblk0p2*) printf 'base' ;;
-        /dev/mmcblk0*)   printf 'bench' ;;
-        *)               printf 'unknown' ;;
-    esac
-}}
-'''
+class SystemBootTest(BoardTest):
+    def ab(self, driver=Rpi5Usb, running=SYS_A):
+        w = self.world()
+        w.board.write_system(part("/dev/sda", 3), "sys-b")
+        w.board.running = running
+        self.landed = []
+        reboot = w.board.reboot
+
+        def logged(tryboot=False):
+            r = reboot(tryboot)
+            if self.misroute and w.board.running == SYS_B:
+                self.misroute -= 1
+                w.board.running = SYS_A
+            self.landed.append(w.board.running)
+            return r
+        w.board.reboot, self.misroute = logged, 0
+        d = driver(REPO, w.board.conf, w.board)
+        self.w = w
+        with w.patches():
+            return board_ab.AB(str(REPO), PipelineReg(w), "ws", "jetstream3", {"system": BOARD, "ab_systems": "sys-a,sys-b"},
+                               w.clock, w.popen, driver=d)
+
+    def boot(self, ab, want):
+        err = io.StringIO()
+        with self.w.patches(), contextlib.redirect_stderr(err):
+            ok = ab.boot(want)
+        self.err = err.getvalue()
+        return ok
+
+    def armings(self):
+        return sum(1 for e in self.w.board.effects if e[:2] == ("card_priv", "autoboot"))
 
 
-PI_SYSTEM_TRIES = int(
-    re.search(r"^PI_SYSTEM_TRIES=(\d+)", (REPO / "cmd" / "pi").read_text(), re.M).group(1))
+class TestTheLegsSystem(SystemBootTest):
+    def test_a_board_already_on_the_system_boots_nothing(self):
+        ab = self.ab()
+        self.assertTrue(self.boot(ab, "sys-a"), self.err)
+        self.assertEqual(self.landed, [])
 
+    def test_a_board_that_arms_where_it_stands_is_armed_there(self):
+        """One boot, and no trip through the rescue."""
+        ab = self.ab(driver=ArmsFromBench)
+        self.assertTrue(self.boot(ab, "sys-b"), self.err)
+        self.assertEqual(self.landed, [SYS_B])
 
-class TestSystemBoot(unittest.TestCase):
-    """pi_system_boot against a scripted board: the probe answers are a
-    queue in a file (the function reads them from subshells, so a variable
-    would not carry), the clock is a file the stubbed sleep advances, and
-    the stub wk logs every boot verb."""
+    def test_a_board_that_arms_only_from_its_rescue_goes_back_to_it_first(self):
+        ab = self.ab()
+        self.assertTrue(self.boot(ab, "sys-b"), self.err)
+        self.assertEqual(self.landed, [self.w.board.conf["NODE_ROOT"], SYS_B])
+        self.assertEqual(self.armings(), 1)
 
-    def setUp(self):
-        self.tmp = Path(tempfile.mkdtemp(prefix="wk-test-absys-"))
-        self.addCleanup(lambda: subprocess.run(["rm", "-rf", str(self.tmp)]))
-        (self.tmp / "wk").write_text("#!/bin/sh\necho \"wk $*\" >> \"$WK_LOG\"\n")
-        (self.tmp / "wk").chmod(0o755)
-
-    def _boot(self, probes, want="sys-a", m_ssh_rc=0):
-        """probes: the id/rootdev pairs successive probes answer, last one
-        repeating."""
-        q = self.tmp / "probes"
-        q.write_text("\n".join(probes) + "\n")
-        clock = self.tmp / "clock"
-        clock.write_text("1000")
-        script = PRELUDE + f'''
-WK_ROOT="{self.tmp}"
-PI_SYSTEM_TRIES={PI_SYSTEM_TRIES}
-WK_LOG="{self.tmp}/wk.log"; export WK_LOG
-CLK="{clock}"
-date() {{ cat "$CLK"; }}
-sleep() {{ echo $(( $(cat "$CLK") + 60 )) > "$CLK"; }}
-Q="{q}"
-i_ssh() {{
-    case "$1" in
-        probe)
-            line=$(head -1 "$Q")
-            rest=$(tail -n +2 "$Q"); [ -n "$rest" ] && printf '%s\\n' "$rest" > "$Q"
-            printf '%s\\n' "$line" | tr ';' '\\n' ;;
-        *) echo "i_ssh: $*" >> "{self.tmp}/wk.log" ;;
-    esac
-}}
-m_ssh() {{ return {m_ssh_rc}; }}
-''' + lift("pi_system_boot") + f'''
-pi_system_boot {want}
-'''
-        cp = bash(script)
-        log = (self.tmp / "wk.log").read_text() if (self.tmp / "wk.log").exists() else ""
-        return cp, log
-
-    def test_already_on_the_wanted_system_is_a_claim_and_nothing_else(self):
-        cp, log = self._boot(["id=sys-a;rootdev=/dev/mmcblk0p6"])
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertIn("wk-keep-running", log, "the leg did not claim the board")
-        self.assertNotIn("wk boot", log, "a boot happened for a system already up")
-
-    def test_the_other_leg_is_armed_where_it_stands(self):
-        """A leg switch does not route through the rescue. The arming is a file
-        on the medium, so it is taken where the board stands and the next
-        reboot reads it -- one boot instead of two, and no wait on a rescue
-        that an arming still in force can stop from ever appearing (rpi4,
-        2026-09-01: every leg switch lost its leg to that wait)."""
-        cp, log = self._boot([
-            "id=sys-b;rootdev=/dev/mmcblk0p8",   # what answers first: the other leg
-            "id=sys-a;rootdev=/dev/mmcblk0p6",   # what answers after the arming
-        ])
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertNotIn("--back", log, "the leg switch went via the rescue")
-        self.assertIn("wk boot rpi3 --system sys-a", log)
-        self.assertIn("wk-keep-running", log)
+    def test_the_rescue_is_armed_from_directly(self):
+        ab = self.ab(running="/dev/mmcblk0p2")
+        self.assertTrue(self.boot(ab, "sys-b"), self.err)
+        self.assertEqual(self.landed, [SYS_B])
 
     def test_a_board_that_comes_up_wrong_is_armed_again(self):
-        """Convergence, which is what stops a round being dropped for a reason
-        that is not about the code under test: the board comes up as the other
-        leg twice and is re-armed each time, then lands and is claimed."""
-        # Two probes per pass: the one that decides, and the one that sees the
-        # board answer again after the reboot.
-        cp, log = self._boot([
-            "id=sys-b;rootdev=/dev/mmcblk0p8",
-            "id=sys-b;rootdev=/dev/mmcblk0p8",
-            "id=sys-b;rootdev=/dev/mmcblk0p8",
-            "id=sys-b;rootdev=/dev/mmcblk0p8",
-            "id=sys-a;rootdev=/dev/mmcblk0p6",
-        ])
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertEqual(log.count("wk boot rpi3 --system sys-a"), 2,
-                         "the second attempt did not happen:\n" + log)
-        self.assertIn("wk-keep-running", log)
-
-    def test_a_board_that_will_not_arm_from_bench_goes_back_first(self):
-        """Some boards can only be armed from their rescue: the arming is an
-        edit their privileged card helper makes, and only a rescue carries it
-        (pi-sd). `wk boot --system` refuses, so the leg goes back and the next
-        pass arms from the rescue -- neither command having to know which board
-        it is."""
-        q = self.tmp / "probes"
-        clock = self.tmp / "clock"
-        # A stub wk that refuses --system while the board is in a bench system,
-        # the way cmd/boot does, and accepts it once --back has been asked for.
-        (self.tmp / "wk").write_text(
-            "#!/bin/sh\n"
-            'echo "wk $*" >> "$WK_LOG"\n'
-            'case "$*" in\n'
-            '  *--system*) [ -f "$WK_LOG.back" ] || exit 1 ;;\n'
-            '  *--back*) : > "$WK_LOG.back" ;;\n'
-            "esac\nexit 0\n")
-        (self.tmp / "wk").chmod(0o755)
-        cp, log = self._boot([
-            "id=sys-b;rootdev=/dev/mmcblk0p8",
-            "id=sys-b;rootdev=/dev/mmcblk0p8",
-            "id=sys-a;rootdev=/dev/mmcblk0p6",
-        ])
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertIn("wk boot rpi3 --back", log, "it never went back:\n" + log)
-        self.assertLess(log.index("--back"), log.rindex("--system"),
-                        "it did not arm after going back:\n" + log)
-        self.assertIn("wk-keep-running", log)
-
-    def test_a_board_between_systems_is_waited_for_not_counted(self):
-        """A probe that answers nothing means the board is rebooting, which is
-        not a failed attempt. Counting it spends the whole budget in seconds on
-        a boot that was in progress -- which is what dropped rounds 3 to 5 of
-        rpi3's first real A/B (2026-09-01)."""
-        cp, log = self._boot([
-            ";",                                  # nothing answers: mid-reboot
-            ";",
-            "id=sys-a;rootdev=/dev/mmcblk0p6",    # ...and then it is there
-        ], m_ssh_rc=1)
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertIn("not answering yet", cp.stdout + cp.stderr)
-        self.assertNotIn("--system", log,
-                         "it armed a board that was simply still booting:\n" + log)
-        self.assertIn("wk-keep-running", log)
-
-    def test_a_board_that_never_lands_loses_the_leg_after_the_last_try(self):
-        """...and it is bounded: a board that will not take the arming loses
-        the leg rather than the run."""
-        cp, log = self._boot(["id=sys-b;rootdev=/dev/mmcblk0p8"])
-        self.assertNotEqual(cp.returncode, 0)
-        self.assertIn("the leg is lost", cp.stdout + cp.stderr)
-        self.assertEqual(log.count("wk boot rpi3 --system sys-a"), PI_SYSTEM_TRIES,
-                         "it did not try PI_SYSTEM_TRIES times:\n" + log)
+        ab = self.ab(driver=ArmsFromBench)
+        self.misroute = 2
+        self.assertTrue(self.boot(ab, "sys-b"), self.err)
+        self.assertEqual(self.landed, [SYS_A, SYS_A, SYS_B])
 
     def test_the_last_arming_is_read_before_the_leg_is_given_up(self):
-        """The passes are one more than the armings: a board that comes up
-        correctly on the final arming has won its leg, and reporting it lost
-        discards a measurement that happened.
+        """The passes are one more than the armings: a board that comes up right on the final arming has won its leg."""
+        ab = self.ab(driver=ArmsFromBench)
+        self.misroute = board_ab.SYSTEM_TRIES - 1
+        self.assertTrue(self.boot(ab, "sys-b"), self.err)
+        self.assertEqual(self.armings(), board_ab.SYSTEM_TRIES)
 
-        This is the rpi3's every leg switch (2026-09-03): the first arming is
-        accepted where the board stands but does not hold, the second is
-        refused, the trip through the rescue makes the third work -- and with
-        no pass left to look, the leg was lost while the board sat in exactly
-        the system asked for."""
-        (self.tmp / "wk").write_text(
-            "#!/bin/sh\n"
-            'echo "wk $*" >> "$WK_LOG"\n'
-            'case "$*" in\n'
-            '  *--system*)\n'
-            '     n=$(( $(cat "$WK_LOG.n" 2>/dev/null || echo 0) + 1 ))\n'
-            '     echo $n > "$WK_LOG.n"\n'
-            '     # 1st accepted (does not hold), 2nd refused, later fine.\n'
-            '     [ "$n" = 2 ] && exit 1\n'
-            '     ;;\n'
-            '  *--back*) : > "$WK_LOG.back" ;;\n'
-            "esac\nexit 0\n")
-        (self.tmp / "wk").chmod(0o755)
-        cp, log = self._boot([
-            "id=sys-b;rootdev=/dev/mmcblk0p8",     # decides: arm #1
-            "id=sys-b;rootdev=/dev/mmcblk0p8",     # did not hold: arm #2, refused -> --back
-            "id=rescue-img;rootdev=/dev/mmcblk0p2",  # on the rescue: arm #3, works
-            "id=sys-a;rootdev=/dev/mmcblk0p6",     # the pass that reads arm #3
-        ])
-        self.assertEqual(cp.returncode, 0,
-                         "the leg was given up without reading the last arming:\n"
-                         + cp.stdout + cp.stderr)
-        self.assertNotIn("the leg is lost", cp.stdout + cp.stderr)
-        self.assertLessEqual(log.count("wk boot rpi3 --system sys-a"), PI_SYSTEM_TRIES,
-                             "the armings are still bounded at PI_SYSTEM_TRIES:\n" + log)
-        self.assertIn("wk-keep-running", log)
+    def test_a_board_that_never_lands_loses_the_leg_after_the_last_try(self):
+        ab = self.ab(driver=ArmsFromBench)
+        self.misroute = 99
+        self.assertFalse(self.boot(ab, "sys-b"))
+        self.assertIn("the leg is lost", self.err)
+        self.assertEqual(self.armings(), board_ab.SYSTEM_TRIES)
 
-    def test_the_rescue_is_not_sent_back_before_arming(self):
-        """host mode (the rescue answering as base) is the state to arm
-        *from*: no --back, straight to the arming."""
-        cp, log = self._boot([
-            "id=rescue-img;rootdev=/dev/mmcblk0p2",
-            "id=sys-a;rootdev=/dev/mmcblk0p6",
-        ])
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertNotIn("--back", log)
-        self.assertIn("wk boot rpi3 --system sys-a", log)
+    def test_an_arming_that_will_not_take_is_retried_after_a_pause_and_bounded(self):
+        ab = self.ab(driver=ArmsFromBench)
+        self.w.board.stuck = True
+        self.assertFalse(self.boot(ab, "sys-b"))
+        self.assertEqual(self.w.clock.slept.count(board_ab.ARM_RETRY), board_ab.SYSTEM_TRIES)
+        self.assertEqual(self.landed, [])
 
-    def test_a_leg_that_never_comes_up_is_lost_softly_and_never_claimed(self):
-        cp, log = self._boot(["id=sys-b;rootdev=/dev/mmcblk0p8"], want="sys-a")
-        self.assertNotEqual(cp.returncode, 0)
-        self.assertIn("the leg is lost", cp.stderr)
-        # The claim would land on whatever else is answering -- it must not.
-        self.assertNotIn("wk-keep-running", log.split("wk boot rpi3 --system", 1)[-1])
+    def test_a_board_between_systems_is_waited_for_not_counted(self):
+        ab = self.ab()
+        back = self.w.clock.now() + 100
+        answer = self.w.board.answer
+        self.w.board.answer = lambda side, argv, input=None: (answer(side, argv, input) if self.w.clock.now() >= back
+                                                              else Result(255, "", "ssh: connect: no route"))
+        self.assertTrue(self.boot(ab, "sys-a"), self.err)
+        self.assertIn("not answering yet", self.err)
+        self.assertEqual((self.landed, self.armings()), ([], 0))
+        self.assertIn(board_ab.POLL, self.w.clock.slept)
+
+    def test_a_leg_that_never_comes_up_is_never_claimed(self):
+        ab = self.ab(driver=ArmsFromBench)
+        self.misroute = 99
+        self.boot(ab, "sys-b")
+        self.assertFalse(self.w.board.kept)
+
+    def test_a_dry_run_arms_nothing(self):
+        for driver, said in ((ArmsFromBench, "would arm testboard"), (Rpi5Usb, "would reboot testboard back")):
+            with self.subTest(driver=driver.__name__):
+                ab = self.ab(driver=driver)
+                os.environ["WK_DRY_RUN"] = "1"
+                try:
+                    self.assertFalse(self.boot(ab, "sys-b"))
+                finally:
+                    del os.environ["WK_DRY_RUN"]
+                self.assertIn(said, self.err)
+                self.assertEqual((self.landed, self.armings()), ([], 0))
 
 
-class TestLegVerification(unittest.TestCase):
-    def _leg(self, answered, expected, pgo=""):
-        return bash(PRELUDE + f'''
-image_addr() {{ printf 'rpi3-bench'; }}
-i_ssh() {{
-    case "$1" in
-        probe) printf 'id={answered}\\nrootdev=/dev/mmcblk0p6\\nbuilder=buildroot\\nrole=bench\\n' ;;
-        *slot.json*) printf '{{"slot": "base", "browser": "cog"}}' ;;
-        *uname*) printf '5.15.84-v7l+' ;;
-        *) printf '' ;;
-    esac
-}}
-pi_display() {{ printf 'drm:card0-HDMI-A-1'; }}
-pi_tmp() {{ PI_TMP=$(mktemp -d); }}
-pi_slot_dir() {{ printf '/var/wk/slots/%s' "$1"; }}
-pi_pin_clock() {{ printf 'performance 2400000 2400000'; }}
-wkslot() {{ python3 "{REPO}/lib/wkslot.py" "$@"; }}
-slot=base; ab=""; cores=""; PI_PGO_DIR="{pgo}"
-''' + lift("pi_check_instrumented") + lift("pi_leg_prepare") + f'''
-pi_leg_prepare "{expected}"
-echo "prepared sysid=$sysid"
-''')
+class TestTheWidth(unittest.TestCase):
+    """A system id is <profile>-<hash>, and the width is the profile's."""
 
-    def test_the_wrong_leg_is_refused_before_anything_runs(self):
-        cp = self._leg(answered="sys-b", expected="sys-a")
-        self.assertNotEqual(cp.returncode, 0)
-        self.assertIn("not the 'sys-a' this leg is for", cp.stderr)
-        self.assertNotIn("prepared", cp.stdout)
+    def test_a_system_id_reads_its_profiles_width(self):
+        self.assertEqual(board_ab.width("webkit-2.52-yocto-rpi3-32-ebb646f3bf67", os.environ), 32)
+        self.assertEqual(board_ab.width("webkit-2.52-yocto-rpi5-64-cddf63dc0d4b", os.environ), 64)
 
-    def test_the_right_leg_prepares(self):
-        cp = self._leg(answered="sys-a", expected="sys-a")
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertIn("prepared sysid=sys-a", cp.stdout)
+    def test_a_profile_name_is_its_own_width(self):
+        self.assertEqual(board_ab.width("webkit-2.52-yocto-rpi4-32", os.environ), 32)
 
-    def test_a_collection_needs_an_instrumented_slot_and_this_one_is_not(self):
-        """the slot the stub hands back names no build_config, so it is a
-        measured build -- a collection against it would write no profile."""
-        cp = self._leg(answered="sys-a", expected="sys-a", pgo="/tmp/pgo")
-        self.assertNotEqual(cp.returncode, 0)
-        self.assertIn("would write no profile", cp.stderr)
-        self.assertNotIn("prepared", cp.stdout)
+    def test_the_narrow_width_selects_the_exclusions_and_the_wide_one_none(self):
+        self.assertIn("argon2-wasm", [n for n, _ in board_ab.exclusions(str(REPO), "jetstream3", 32)])
+        self.assertEqual(board_ab.exclusions(str(REPO), "jetstream3", 64), [])
+
+    def test_every_exclusion_names_a_width_and_a_reason(self):
+        for line in (REPO / board_ab.EXCLUSIONS).read_text().splitlines():
+            if line.strip() and not line.startswith("#"):
+                plan, bits, name, why = line.split(None, 3)
+                self.assertIn(bits, ("32", "64"), name)
+                self.assertTrue(why.strip(), name)
 
 
-class TestParse(unittest.TestCase):
-    def test_ab_systems_takes_two_different_ids(self):
-        text = CMD_PI.read_text()
-        self.assertIn("--ab-systems takes two system ids", text)
-        self.assertIn("--ab-systems needs two different systems", text)
+class TestTheKeptSubtests(unittest.TestCase):
+    PLAN = {"subtests": {"": ["a-wasm", "argon2-wasm", "b", "c"]}}
 
-    def test_ab_and_ab_systems_are_mutually_exclusive(self):
-        text = CMD_PI.read_text()
-        self.assertIn("they are different comparisons", text)
+    def kept(self, drop):
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            try:
+                return board_ab.kept(self.PLAN, drop)
+            except board_ab.Refused:
+                return err.getvalue()
 
-    def test_every_leg_records_its_round_and_arm(self):
-        """the report pairs rounds by ab.round/ab.arm; the system A/B sets
-        them exactly like the slot A/B does."""
-        body = re.search(r"^pi_bench_ab_systems\(\) \{.*?^\}", CMD_PI.read_text(), re.M | re.S).group(0)
-        for piece in ("PI_AB_ROUND=", "PI_AB_ARM=a", "PI_AB_ARM=b", "PI_AB_A=", "PI_AB_B="):
-            self.assertIn(piece, body)
+    def test_the_kept_set_is_the_plan_minus_the_exclusions(self):
+        self.assertEqual(self.kept(["argon2-wasm"]), ["a-wasm", "b", "c"])
+
+    def test_a_name_the_plan_does_not_have_refuses(self):
+        self.assertIn("names no subtest", self.kept(["nope"]))
+
+    def test_excluding_everything_refuses(self):
+        self.assertIn("every subtest", self.kept(["a-wasm", "argon2-wasm", "b", "c"]))
 
 
 if __name__ == "__main__":

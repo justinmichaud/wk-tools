@@ -39,7 +39,7 @@
 #
 #   claude   Claude Code. Installed by container/firstrun.sh, and authenticated
 #            by whichever one credential the store delivers to this kind of
-#            target (wk_agent_secrets, lib/store.sh).
+#            target (AGENT_SECRETS, lib/wk/secrets.py).
 #   pi       the pi coding agent. Installed per workspace from npm on first
 #            use, and pointed at an OpenAI-compatible endpoint by its own
 #            config file; `wk key set litellm` stores the key for it.
@@ -54,10 +54,11 @@ import sys
 ROOT = os.environ.get("WK_ROOT") or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "lib"))
 
-from wk import shell, wall  # noqa: E402
+from wk import wall  # noqa: E402
 from wk.act import Refused, barrier, debug, die, info, log, warn  # noqa: E402
 from wk.doctor import Report  # noqa: E402
 from wk.machine import Local  # noqa: E402
+from wk.secrets import Secrets  # noqa: E402
 from wk.targets import Registry, show  # noqa: E402
 from wk.workspace import require_name  # noqa: E402
 
@@ -253,7 +254,7 @@ class Ai:
         `tart run`: a guest booted without it is unfiltered."""
         name, unfiltered = self.name, self.env.get("WK_VM_UNFILTERED")
         if not self.target.egress_filtered(name) and not unfiltered:
-            barrier("'%s' was booted with NO egress filter.\n    Restart it filtered:  wk vm stop %s && wk vm start %s\n"
+            barrier("'%s' was booted with NO egress filter.\n    Restart it filtered:  wk stop %s && wk start %s\n"
                     "    (WK_VM_UNFILTERED=1 is the same decision, said the older way.)" % (name, name, name))
         softnet = self.env.get("WK_SOFTNET_BIN") or "/usr/local/bin/softnet"
         if not unfiltered and self.machine.run(["test", "-x", softnet]).ok:
@@ -317,7 +318,7 @@ class Ai:
 
     def pi_models(self):
         name = self.name
-        if not shell.agent_secret_stored(self.root, self.machine, "litellm"):
+        if not Secrets(self.root, self.env, self.machine).cred_stored("litellm"):
             log("no LiteLLM key on this machine ('wk key set litellm') and no")
             log("~/.pi/agent/models.json in '%s', so pi will ask you to /login" % name)
             return

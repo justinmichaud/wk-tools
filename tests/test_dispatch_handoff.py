@@ -26,6 +26,7 @@ Run: python3 -m unittest tests.test_dispatch_handoff -v
 """
 import os
 import subprocess
+import sys
 import unittest
 
 from tests.support import REPO, WkTest, stub_path
@@ -171,12 +172,16 @@ class TestWhatIsNotToldTheTarget(unittest.TestCase):
     neither, and a lifecycle command resolves each of its own names."""
 
     def test_the_forwarded_environment_carries_no_target(self):
-        text = (REPO / "lib" / "target.sh").read_text()
-        body = text[text.index("vm_wk_cmd() {"):]
-        body = body[:body.index("\n}\n")]
-        self.assertIn("WK_IN_VM=1", body, "vm_wk_cmd builds the podman-machine command line")
-        self.assertNotIn("WK_TARGET", body,
-                         "a forwarded command is told a target it must resolve itself")
+        sys.path.insert(0, str(REPO / "lib"))
+        from wk import targets
+        from wk.machine import Fake
+        env = {"WK_TARGET": "box", "WK_STORE": "/here", "WK_ROW_LABEL": "host", "WK_YES": "1"}
+        remote = {"WK_REMOTE_LOCAL": "1", "WK_REMOTE_TOOLS": "/opt/wk-tools"}
+        for t in (targets.Container("container", str(REPO), {}, Fake()), targets.Remote("box", str(REPO), remote, Fake())):
+            with self.subTest(kind=t.kind):
+                line = t.wk_cmd(["status"], env)
+                self.assertNotIn("WK_TARGET", line, "a forwarded command is told a target it must resolve itself")
+                self.assertNotIn("WK_STORE", line, "the far side's store is its own")
 
     def test_the_export_is_on_the_running_here_path_only(self):
         lines = (REPO / "lib" / "wk" / "dispatch.py").read_text().splitlines()

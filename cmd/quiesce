@@ -22,7 +22,7 @@
 #           account of what it did.
 #
 #   What a measured Mac is permanently is written at provisioning time
-#   (`wk bench mac-volume --provision`); `status` reports both.
+#   (`wk sysimage build perf-macos-tolken --provision`); `status` reports both.
 
 import os
 import signal

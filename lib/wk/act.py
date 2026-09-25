@@ -5,7 +5,7 @@ import shlex
 import subprocess
 import sys
 
-RETRY_EXIT = 75   # lib/sched.py's RETRY_EXIT and lib/common.sh's WK_RETRY_EXIT are this number
+RETRY_EXIT = 75   # lib/common.sh's WK_RETRY_EXIT is this number; lib/wk/sched.py retries a step on it
 
 
 class Refused(Exception):

@@ -6,12 +6,15 @@ Run: python3 -m unittest tests.test_options -v
 """
 import json
 import os
-import platform
 import subprocess
+import sys
 import unittest
 from pathlib import Path
 
 from tests.support import REPO, WkTest, run, temp_store
+
+sys.path.insert(0, str(REPO / "lib"))
+from wk import dispatch  # noqa: E402
 
 
 def _clean(env):
@@ -139,7 +142,7 @@ class TestLsJson(WkTest):
         self.assertEqual(len(cp.stdout.strip().splitlines()), 1, cp.stdout)
 
     def test_json_merge_list_merges_concatenated_documents(self):
-        """json_merge_list (lib/common.sh) merges N files, each zero or more
+        """`dispatch.json_merge_list` merges N files, each zero or more
         JSON documents concatenated with no delimiter -- the shape a
         multi-process listing (or a missing/empty file) produces."""
         with temp_store() as store:
@@ -149,13 +152,9 @@ class TestLsJson(WkTest):
                 '{"workspaces": [{"name": "b"}]}{"workspaces": [{"name": "c"}]}\n'
             )
             (d / "empty.json").write_text("")
-            cp = self.bash(
-                f'. lib/common.sh\n'
-                f'json_merge_list workspaces "{d}/a.json" "{d}/b.json" '
-                f'"{d}/empty.json" "{d}/does-not-exist.json"\n'
-            )
-        self.assertEqual(cp.returncode, 0, cp.stderr)
-        doc = json.loads(cp.stdout)
+            doc = dispatch.json_merge_list("workspaces", [
+                str(d / "a.json"), str(d / "b.json"),
+                str(d / "empty.json"), str(d / "does-not-exist.json")])
         names = sorted(w["name"] for w in doc["workspaces"])
         self.assertEqual(names, ["a", "b", "c"])
 
@@ -195,28 +194,9 @@ class TestWhatStaysTheCommandsOwn(WkTest):
         self.assertIn("everything after it is the agent's, verbatim", text)
 
 
-    @unittest.skipUnless(platform.system() == "Darwin", "wk vm is macOS-only")
-    def test_vm_unknown_subverb_refused(self):
-        cp = run_impl("vm", "bogus-sub")
-        self.assertNotEqual(cp.returncode, 0)
-        self.assertIn("usage:", cp.stdout)
-
     def test_session_mirror_alias_is_documented(self):
         """--mirror (cmd/session's --bmc synonym) is named in the header,
         not just the case arm -- docs/defects 'list every valid value'."""
         text = (REPO / "cmd" / "session").read_text()
         self.assertIn("--mirror is an accepted synonym for --bmc", text)
-
-
-    def test_pi_bench_count_documented_as_iterations_per_run(self):
-        text = (REPO / "cmd" / "pi").read_text()
-        self.assertIn("iterations per run", text)
-
-    def test_pi_flash_tombstone_names_sysimage_not_an_image_store(self):
-        """there is no image store (a built image stays in the workspace
-        that built it); the tombstone used to point at one that doesn't
-        exist."""
-        text = (REPO / "cmd" / "pi").read_text()
-        self.assertIn("it lives with wk sysimage", text)
-        self.assertNotIn("it lives with the image store", text)
 

@@ -194,8 +194,6 @@ class World(Fake):
         script = argv[2]
         if "wk_push_forks" in script:
             return Result(0, FORKS)
-        if "store_is_local" in script:
-            return Result(0 if f.local_store else 1)
         return Result(127, "", "no bash answer for: %s" % script[-60:])
 
     def _sh(self, argv, f):
@@ -291,6 +289,9 @@ class SyncTest(unittest.TestCase):
             p.start()
             self.addCleanup(p.stop)
         p = mock.patch.object(targets.record, "host_name", return_value="here")
+        p.start()
+        self.addCleanup(p.stop)
+        p = mock.patch("wk.store.Store.is_local", lambda st: self.w.local_store)
         p.start()
         self.addCleanup(p.stop)
         self.w = self.make_world()

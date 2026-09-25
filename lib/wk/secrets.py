@@ -13,10 +13,23 @@ AGENT_SOCK = "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/wk/ssh-agent.sock"
 CONTAINER_SOCK = "/run/wk/ssh-agent.sock"
 PUBLIC = ("ssh_config", "github-user", "bugzilla-user")
 PUBLISHED = ("ssh_config", "github-user", "view/container/ssh_config")
+FORKS = (("fork", "justinmichaud/WebKit", "github-webkit"),
+         ("forkwpe", "justinmichaud/WPEWebKit", "github-wpe"))
+AGENT_SECRETS = (("claude", "claude-token", ".wk-agent-token", "CLAUDE_CODE_OAUTH_TOKEN", "value", "remote"),
+                 ("litellm", "litellm-key", ".wk-litellm-key", "LITELLM_API_KEY", "value", "container,vm,remote"),
+                 ("claude-login", ".credentials.json", ".claude/.credentials.json", "-", "file", "container,vm"))
 CONFIG_HEADER = """# wk: written by 'wk push on|off' (lib/wk/secrets.py). One alias per fork, because GitHub takes one deploy
 # key per repository and both forks live on github.com. The identity is a public half; the private one is
 # in an ssh-agent outside this workspace, and whether it is loaded there is what 'wk push' switches.
 """
+
+
+def forks():
+    return [list(r) for r in FORKS]
+
+
+def agent_secrets():
+    return [list(r) for r in AGENT_SECRETS]
 
 
 def first_line(text):
@@ -71,7 +84,7 @@ class Secrets:
         return os.path.join(self.held_dir(), "bugzilla-api-key")
 
     def agent_secrets(self):
-        return shell.agent_secrets(self.root, self.machine)
+        return agent_secrets()
 
     def cred_path(self, name):
         home = self.env.get("HOME") or os.path.expanduser("~")
@@ -105,8 +118,35 @@ class Secrets:
         sys.stderr.write(r.err)
         return True if r.rc == 0 else False if r.rc == 1 else None
 
+    def check_value(self, name, value, *extra):
+        """lib/credcheck.py's verdict line on `value` as <name>; a Bugzilla key is judged with its login as evidence."""
+        args = ["check", name, "--repos", "".join(r[1] + " " for r in self.forks())] + list(extra)
+        if name == "bugzilla-api-key":
+            args += ["--evidence", "login=" + (self.bugzilla_user() or "")]
+        r = self.machine.run(["python3", os.path.join(self.root, "lib", "credcheck.py")] + args, input=value)
+        sys.stderr.write(r.err)
+        return r.out.rstrip("\n")
+
+    def cred_verdict(self, name):
+        path = self.cred_path(name)
+        value = self.read(path)
+        if value is None:
+            return "bad\tthe file at %s could not be read; the refusal above says why" % path
+        return self.check_value(name, value, "--path", path)
+
+    def agent_secret_remedy(self, name):
+        """What this machine's store owes a workspace missing <name>."""
+        if not self.cred_stored(name):
+            return "this machine's store holds no %s: 'wk key set %s' puts one there" % (name, name)
+        verdict, _, detail = self.cred_verdict(name).partition("\t")
+        if verdict == "bad":
+            return ("this machine's store holds a %s no workspace can use (%s): 'wk key set %s --replace' makes a new one"
+                    % (name, detail.splitlines()[0] if detail else "", name))
+        return ("this machine's store holds a usable %s that this workspace was made without: "
+                "'wk rm' and 'wk new' remake it with one" % name)
+
     def forks(self):
-        return shell.push_forks(self.root, self.machine)
+        return forks()
 
     def github_user(self):
         return self.forks()[0][1].split("/")[0]
@@ -140,7 +180,7 @@ class Secrets:
         """A shell line on that machine: here, or in the podman VM when its store is not this process's to write."""
         if self.host_side or self.store.is_local():
             return ["sh", "-c", line]
-        return ["podman", "machine", "ssh", self.env.get("WK_MACHINE") or "wk", "--", line]
+        return ["podman", "machine", "ssh", self.store.podman_machine(), "--", line]
 
     def _ask(self, line):
         return self.machine.run(self.agent_argv(line), input="")
@@ -327,13 +367,23 @@ class Secrets:
         return self.publish_view("container")
 
 
+def rows(table):
+    return "".join("  ".join(r) + "\n" for r in table)
+
+
 def main(argv):
+    if argv in (["forks"], ["agent-secrets"]):
+        sys.stdout.write(rows(FORKS if argv[0] == "forks" else AGENT_SECRETS))
+        return 0
+    if len(argv) == 2 and argv[0] == "cred-read":
+        value = Secrets(os.environ["WK_ROOT"]).cred_read(argv[1])
+        sys.stdout.write(value or "")
+        return 1 if value is None else 0
     if not argv or argv[0] != "alias-blocks" or not 2 <= len(argv) <= 5:
-        sys.stderr.write("usage: python3 -m wk.secrets alias-blocks <dir> [<prefix> [<sock> [<proxy>]]]\n")
+        sys.stderr.write("usage: python3 -m wk.secrets forks|agent-secrets|cred-read <name>|alias-blocks <dir> [<prefix> [<sock> [<proxy>]]]\n")
         return 2
-    forks = [tuple(line.split()) for line in sys.stdin.read().splitlines() if len(line.split()) == 3]
     a = argv[1:] + [""] * (4 - len(argv[1:]))
-    sys.stdout.write(alias_blocks(forks, a[0], a[1] or "build_key_", a[2], a[3]))
+    sys.stdout.write(alias_blocks(FORKS, a[0], a[1] or "build_key_", a[2], a[3]))
     return 0
 
 

@@ -103,7 +103,7 @@ def parses_flag(path, flag):
 
 def takes_a_subverb(path):
     """Does this command take a subverb at all? From what it declares and
-    what its synopsis says -- `wk push on|off|status`, `wk vm <sub>`, or a
+    what its synopsis says -- `wk push on|off|status`, `wk bench <sub>`, or a
     `# wk: sub` line -- rather than from a `case` statement, since a command
     reads its verb wherever it likes and an internal `case "$1"` in a helper
     is not one. `wk boot <machine> [--status|--diag|...]` is not one either:
@@ -155,17 +155,14 @@ def offenders(label):
 EXPECTED = {
     "ai":         ["subverb"],
     "bench":      ["subverb"],
-    "bridge":     ["subverb"],
     "build":      ["config"],
     "key":        ["subverb"],
     "machine":    ["subverb"],
-    "pi":         ["subverb"],
     "pr":         ["subverb"],
     "push":       ["subverb"],
     "quiesce":    ["subverb"],
     "session":    ["subverb"],
     "sysimage":   ["subverb"],
-    "vm":         ["subverb"],
 }
 
 
@@ -222,11 +219,10 @@ class TestWhatIsStillParsedCommandByCommand(unittest.TestCase):
     @owed("the subverb is re-read and refused by each command, not by the dispatcher")
     def test_the_subverb_is_not_the_dispatchers(self):
         """defect: the dispatcher reads ${1:-} to apply a `sub` override and
-        leaves it in argv, so cmd/ai, cmd/bench, cmd/boot, cmd/bridge,
-        cmd/key, cmd/machine, cmd/pi, cmd/pr, cmd/push, cmd/quiesce,
-        cmd/session, cmd/sysimage and
-        cmd/vm each re-read it and each write their own refusal for an
-        unknown one"""
+        leaves it in argv, so cmd/ai, cmd/bench, cmd/boot, cmd/key,
+        cmd/machine, cmd/pr, cmd/push, cmd/quiesce,
+        cmd/session and cmd/sysimage each re-read it and each write their
+        own refusal for an unknown one"""
         self.assertEqual(offenders("subverb"), [])
 
 

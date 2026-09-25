@@ -31,8 +31,6 @@ wk_artifact_dir() { printf '%s/cache' "$(wk_record_dir)"; }
 wk_bench_dir()    { printf '%s/bench' "$(wk_record_dir)"; }   # the tasks a benchmarking command records, named here so cmd/status and cmd/doctor spell it the way lib/bench.sh does
 
 WK_CCACHE_MAXSIZE="${WK_CCACHE_MAXSIZE:-40G}"   # shared by every workspace here
-WK_TART_CACHE_GB="${WK_TART_CACHE_GB:-20}"     # tart's pulled-image cache, re-downloadable
-TART_HOME="${TART_HOME:-$HOME/.tart}"          # the guests and that cache, outside every wk directory
 
 ccache_conf_render() { printf 'max_size = %s\n' "$WK_CCACHE_MAXSIZE"; }
 ccache_conf_write() { # <path to ccache.conf>
@@ -49,41 +47,22 @@ wk_mirror() {   # one per machine, written where `wk sync` runs: a macOS host's 
     if is_macos && [ -z "${WK_IN_VM:-}" ]; then echo "$(wk_state_dir)/git/WebKit.git"
     else echo "$WK_STORE/git/WebKit.git"; fi
 }
-mirror_is_here() { [ -z "${WK_IN_VM:-}" ]; }   # 0 where the mirror is writable
 mirror_init()    { ensure_dir "$(dirname "$(wk_mirror)")"; }
-wk_base_dir() { echo "$WK_STORE/base"; }
 wk_ws_dir()   { echo "$WK_STORE/ws/$1"; }
 
-wk_push_forks() { # <remote> <owner/repo> <ssh-host-alias>
-    cat <<'EOF'
-fork     justinmichaud/WebKit      github-webkit
-forkwpe  justinmichaud/WPEWebKit   github-wpe
-EOF
-}
+wk_push_forks() { _wk_py wk.secrets forks; }   # <remote> <owner/repo> <ssh-host-alias>: lib/wk/secrets.py's FORKS
 
-# The wiring, the snapshots and the PR fetch are lib/wk/{git,store,pr}.py; these are their bash callers' names for them. A script's fork rows go in on stdin, from wk_push_forks above.
+# The wiring, the snapshots and the PR fetch are lib/wk/{git,store,pr}.py; these are their bash callers' names for them.
 _wk_py() { PYTHONPATH="$WK_ROOT/lib" WK_ROOT="$WK_ROOT" WK_STORE="$WK_STORE" WK_MIRROR_BRANCHES="${WK_MIRROR_BRANCHES:-}" python3 -m "$@"; }
 
 wk_remotes()                { _wk_py wk.git remotes; }
 wk_mirror_branches()        { _wk_py wk.git mirror-branches; }
 mirror_refresh_script()     { _wk_py wk.git mirror-refresh-script "$@"; }
-wk_wiring_script()          { wk_push_forks | _wk_py wk.git wiring-script "$@"; }
-wk_wiring_check_script()    { wk_push_forks | _wk_py wk.git wiring-check-script "$@"; }
-wk_gitwebkit_setup_script() { wk_push_forks | _wk_py wk.git gitwebkit-setup-script "$@"; }
-wk_hook_levels()            { wk_push_forks | _wk_py wk.git hook-levels; }
-pr_parse_spec()             { local _o; _o=$(_wk_py wk.pr parse-spec "$1") || exit $?; eval "$_o"; }
-pr_branch_repo()            { _wk_py wk.pr branch-repo "$@"; }
-pr_branch_repo_urls()       { _wk_py wk.pr branch-repo-urls "$@"; }
-wk_pr_refname()             { _wk_py wk.pr pr-refname "$@"; }
-wk_pull_refname()           { _wk_py wk.pr pull-refname "$@"; }
-_mirror_fetch_into()        { _wk_py wk.pr mirror-fetch "$@"; }
-mirror_fetch_pr()           { _wk_py wk.pr mirror-fetch-pr "$@"; }
-mirror_fetch_pull()         { _wk_py wk.pr mirror-fetch-pull "$@"; }
+wk_wiring_script()          { _wk_py wk.git wiring-script "$@"; }
+wk_gitwebkit_setup_script() { _wk_py wk.git gitwebkit-setup-script "$@"; }
 base_verify()               { _wk_py wk.store base-verify "$@"; }
 current_base()              { _wk_py wk.store current-base; }
 list_workspaces()           { _wk_py wk.store list-workspaces; }
-unpinned_workspaces()       { _wk_py wk.store unpinned-workspaces; }
-unreferenced_bases()        { _wk_py wk.store unreferenced-bases; }
 
 wk_claude_cli_script() {
     cat <<'EOF'
@@ -98,7 +77,7 @@ echo claude=installed
 EOF
 }
 
-wk_ssh_alias_blocks() { wk_push_forks | _wk_py wk.secrets alias-blocks "$@"; }   # <dir> [<prefix> [<agent-sock> [<ProxyCommand>]]]
+wk_ssh_alias_blocks() { _wk_py wk.secrets alias-blocks "$@"; }   # <dir> [<prefix> [<agent-sock> [<ProxyCommand>]]]
 
 wk_machine_store() { printf '%s' "${WK_STORE_DEFAULT:-$WK_STORE}"; }
 
@@ -117,20 +96,12 @@ wk_push_held_dir() { printf '%s/push-keys' "$(dirname "$(wk_secrets_dir)")"; }
 
 wk_ntfy_topic_path() { printf '%s/notify/ntfy-topic' "$(dirname "$(wk_secrets_dir)")"; }
 
-wk_push_key() { # <fork> -- read only by push_agent_load, into `ssh-add -`
-    _wk_secret_read "$(wk_push_held_dir)/build_key_$1"
-}
-
 # lib/secretfile.py holds the rule "this is a file, and it is ours": a link planted in the read-write agent-rw could publish a credential.
 _wk_secret_read() { # <path> -- absent is not an error
     python3 "$WK_ROOT/lib/secretfile.py" read "$1"
 }
 
 # The agent holding the keys and the injector's credential files: each function takes an exec function for the machine holding them, and a path as a shell word expanded there (/run/user/501 is not on macOS).
-
-push_agent_machine_pat() {
-    printf '%s' "${WK_PUSH_PAT_FILE:-${WK_STORE:-/var/lib/wk}/push-github-pat}"
-}
 
 push_agent_machine_read_pat() {
     printf '%s' "${WK_PUSH_READ_PAT_FILE:-${WK_STORE:-/var/lib/wk}/read-github-pat}"
@@ -142,42 +113,6 @@ push_agent_exec() { # <shell command line>
     else
         podman machine ssh "${WK_MACHINE:-wk}" -- "$1"
     fi
-}
-
-# `ssh-add -l` exits 1 for "no identities", 2 for "no connection".
-push_agent_ensure() { # <execfn> <sock>
-    local rc
-    rc=$("$1" "SSH_AUTH_SOCK=$2 ssh-add -l >/dev/null 2>&1; echo \$?" \
-             </dev/null 2>/dev/null | tr -dc '0-9')
-    [ "$rc" = 0 ] || [ "$rc" = 1 ]
-}
-
-push_agent_list() { # <execfn> <sock>
-    local out
-    out=$("$1" "SSH_AUTH_SOCK=$2 ssh-add -l 2>/dev/null" </dev/null 2>/dev/null) || out=""
-    printf '%s' "$out" | tr -d '\r' | grep -v 'has no identities' || true
-}
-
-push_agent_load() { # <execfn> <sock> -- one `<fork> loaded|no-key|FAILED` line each
-    local execfn="$1" sock="$2" remote key
-    for remote in $(wk_push_forks | awk 'NF {print $1}'); do
-        key=$(wk_push_key "$remote")
-        if [ -z "$key" ]; then
-            printf '%s no-key\n' "$remote"
-            continue
-        fi
-        # ssh-add refuses a key not ending in the newline `$( )` stripped.
-        if printf '%s\n' "$key" \
-            | "$execfn" "SSH_AUTH_SOCK=$sock ssh-add - >/dev/null 2>&1"; then
-            printf '%s loaded\n' "$remote"
-        else
-            printf '%s FAILED\n' "$remote"
-        fi
-    done
-}
-
-push_agent_clear() { # <execfn> <sock>
-    "$1" "SSH_AUTH_SOCK=$2 ssh-add -D >/dev/null 2>&1" </dev/null
 }
 
 wk_github_pat_path() { printf '%s/github-pat' "$(wk_push_held_dir)"; }
@@ -210,15 +145,9 @@ push_agent_cred_sync() { # <execfn> <path> <name>
     fi
 }
 
-push_agent_pat_converge_machine() { # on every start of the podman machine, as `wk vm start` does for the guests': a token stored while it was down is otherwise a 401 from every container until './setup'
+push_agent_pat_converge_machine() { # on every start of the podman machine, as a guest's `wk start` does for its injector: a token stored while it was down is otherwise a 401 from every container until './setup'
     push_agent_cred_sync push_agent_exec "$(push_agent_machine_read_pat)" github-pat \
         || warn "the injector in the podman machine did not take the read token; './setup' converges it"
-}
-
-# The copy `wk push on` handed the injector is written from the held one at the moment the switch was flipped, so one rotated or withdrawn while push is on leaves the machine spending the old one; only while it is on, because writing one into a machine whose agent holds no key would be turning push on.
-push_agent_switch_cred_converge() { # <execfn> <sock> <machine path> <name>
-    [ -n "$(push_agent_list "$1" "$2")" ] || return 0
-    push_agent_cred_sync "$1" "$3" "$4"
 }
 
 push_agent_publish_config() { # <dir> is this machine's spelling; paths inside are /secrets
@@ -336,16 +265,7 @@ $f
     done
 }
 
-# A `value` row is one line exported into its variable; a `file` row is rewritten in place, so it lives in wk_agent_rw_dir and goes only where those bytes are seen.
-# A target gets one Claude credential, never both: the token wins over a login wherever both arrive, and remote control refuses the token.
-#   <name> <file here> <file in the home> <variable> <kind> <delivery>
-wk_agent_secrets() {
-    cat <<'EOF'
-claude        claude-token        .wk-agent-token             CLAUDE_CODE_OAUTH_TOKEN  value  remote
-litellm       litellm-key         .wk-litellm-key             LITELLM_API_KEY          value  container,vm,remote
-claude-login  .credentials.json   .claude/.credentials.json   -                        file   container,vm
-EOF
-}
+wk_agent_secrets() { _wk_py wk.secrets agent-secrets; }   # <name> <file here> <file in the home> <variable> <value|file> <delivery>: lib/wk/secrets.py's AGENT_SECRETS
 
 # The Claude CLI rotates the refresh token in place, so every holder here shares these bytes and one lock.
 wk_agent_rw_dir() { printf '%s/agent-rw' "$(dirname "$(wk_secrets_dir)")"; }
@@ -394,61 +314,10 @@ wk_cred_path() { # <name> -- where this machine keeps it
     esac
 }
 
-wk_cred_names() { python3 "$WK_ROOT/lib/credcheck.py" names; }
-
-wk_cred_settable() { wk_cred_names | grep -vxF deploy-key; }
-
 wk_cred_present() { # <name> -- is there one here at all; its rule judges what it can do
     local p; p=$(wk_cred_path "$1") || return 1
     python3 "$WK_ROOT/lib/secretfile.py" present "$p"
 }
 
-wk_cred_store() { # <name> -- from stdin: an argument is visible in `ps`
-    local p; p=$(wk_cred_path "$1") || return 1
-    ensure_dir "$(dirname "$p")" 0700
-    python3 "$WK_ROOT/lib/secretfile.py" write "$p" || return 1
-    secrets_publish_view container
-}
-
-wk_cred_clear() { # <name> -- this machine holds it no longer; a file row's login takes its config home (record, lock, backups) with it
-    local p d; p=$(wk_cred_path "$1") || return 1
-    rm -f "$p"
-    if [ "$(wk_agent_secret_kind "$1")" = file ]; then
-        d=$(dirname "$p")
-        rm -rf "$d/.claude.json" "$d/.claude.json.lock" "$d/backups"
-    fi
-    secrets_publish_view container
-}
-
-wk_cred_read() { # <name> -- every byte of it, nothing when it is absent
-    _wk_secret_read "$(wk_cred_path "$1")"
-}
-
-wk_notify() { # <headline> [--detail <text>] [--tag <name>] -- to this machine's ntfy topic; 0 only when ntfy.sh took it, and a caller warns on anything else rather than ending a run
-    wk_cred_present ntfy || { warn "no ntfy topic on this machine: wk key set ntfy"; return 1; }
-    wk_cred_read ntfy | python3 "$WK_ROOT/lib/wknotify.py" publish "$@"
-}
-
-# `--stored` judges what this machine holds, else the value comes on stdin, before anything has written it.
-wk_cred_check() { # <name> [--stored] [...] -> <absent|ok|wide|bad|unverified><TAB><detail>
-    local name="$1" repos value stored=""; shift
-    repos=$(wk_push_forks | awk 'NF {printf "%s ", $2}')
-    [ "${1:-}" != --stored ] || { stored=1; shift; }
-    [ "$name" != bugzilla-api-key ] || set -- "$@" --evidence "login=$(wk_bugzilla_user 2>/dev/null || true)"
-    if [ -z "$stored" ]; then
-        python3 "$WK_ROOT/lib/credcheck.py" check "$name" --repos "$repos" "$@"
-        return
-    fi
-    if ! value=$(wk_cred_read "$name"); then
-        printf 'bad\tthe file at %s could not be read; the refusal above says why\n' \
-            "$(wk_cred_path "$name")"
-        return 0
-    fi
-    printf '%s' "$value" \
-        | python3 "$WK_ROOT/lib/credcheck.py" check "$name" \
-              --repos "$repos" --path "$(wk_cred_path "$name")" "$@"
-}
-
-wk_cred_verdict() { printf '%s' "${1%%$'\t'*}"; }
-wk_cred_detail()  { printf '%s' "${1#*$'\t'}"; }
+wk_cred_read() { WK_IN_VM="${WK_IN_VM:-}" WK_STORE_DEFAULT="${WK_STORE_DEFAULT:-}" WK_HOST_SECRETS="${WK_HOST_SECRETS:-}" _wk_py wk.secrets cred-read "$1"; }   # every byte of it, nothing when it is absent
 

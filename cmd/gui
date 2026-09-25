@@ -23,7 +23,8 @@ import sys
 ROOT = os.environ.get("WK_ROOT") or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "lib"))
 
-from wk import buildconf, decl, shell, targets  # noqa: E402
+from wk import buildconf, decl, session, shell, targets  # noqa: E402
+from wk.ldpath import LLDB_PIN_OPTS, LLDB_PRELUDE  # noqa: E402
 from wk.act import Refused, die, exec_into, info, log, warn  # noqa: E402
 from wk.machine import is_macos  # noqa: E402
 
@@ -67,12 +68,13 @@ def session_env(root):
     """The Linux GPU-session gate and, on a BMC seat, the software-rendering pins."""
     if not targets.session_socket_present(os.environ):
         die("no graphical session -- 'wk session on', or 'wk session on --bmc' to watch it over the BMC")
-    shell.session_mode_warn(root, env=os.environ)
-    if shell.session_mode(root, env=os.environ) != "bmc":
+    seat = session.here(root, os.environ)
+    seat.mode_warn()
+    if seat.mode() != "bmc":
         return ""
     run_env = ("WEBKIT_DISABLE_DMABUF_RENDERER=1 LIBGL_ALWAYS_SOFTWARE=1 GALLIUM_DRIVER=llvmpipe"
                " __EGL_VENDOR_LIBRARY_FILENAMES=/usr/share/glvnd/egl_vendor.d/50_mesa.json")
-    dev = shell.bmc_drm_device(root, env=os.environ)
+    dev = seat.bmc_drm_device()
     if dev:
         run_env += " WPE_DRM_DEVICE=%s" % dev
     else:
@@ -113,7 +115,7 @@ def main(argv):
     if is_macos() and target.kind == "container":
         die("a container workspace on a macOS host has no display, and cannot get one:\n"
             "    the podman machine has no GPU and there is no compositor to draw into.\n"
-            "    Use a macOS guest instead -- 'wk vm new <name>', then 'wk gui <name>',\n"
+            "    Use a macOS guest instead -- 'wk new <name> --target vm', then 'wk gui <name>',\n"
             "    which runs MiniBrowser on the guest's own desktop with the real GPU.")
 
     src = target.src(name)
@@ -132,7 +134,7 @@ def main(argv):
     else:
         launch_env = ("WPE_BROWSER=minibrowser " + run_env).rstrip()
         launch_cmd = "Tools/Scripts/run-minibrowser %s %s -- %s %s %s" % (cfg.port, type_flag, fs_flag, shell.sh_quote(url), extra_q)
-        ui_prefix = 'WEBKIT_MINI_BROWSER_PREFIX="$LLDB %s %s --"' % (target.lldb_opts(), shell.LLDB_PIN_OPTS)
+        ui_prefix = 'WEBKIT_MINI_BROWSER_PREFIX="$LLDB %s %s --"' % (target.lldb_opts(), LLDB_PIN_OPTS)
 
     if opts["debug"] == "":
         info("MiniBrowser (%s) in '%s' -> %s" % (config, name, url))
@@ -147,10 +149,10 @@ def main(argv):
         log("  'run' starts it; breakpoints can go in first")
         if cfg.buildsys == "xcode":
             run = ('cd %s && %s exec "$LLDB" %s %s -- %s'
-                  % (src, launch_env, target.lldb_opts(), shell.LLDB_PIN_OPTS, launch_cmd))
+                  % (src, launch_env, target.lldb_opts(), LLDB_PIN_OPTS, launch_cmd))
         else:
             run = "cd %s && %s %s exec %s" % (src, launch_env, ui_prefix, launch_cmd)
-        cmd = "%s\n%s" % (shell.lldb_prelude(ROOT), run)
+        cmd = "%s\n%s" % (LLDB_PRELUDE, run)
         argv_, cwd = target.exec_argv(name, ["bash", "-lc", cmd], tty=True)
         exec_into(argv_, cwd)
         return
@@ -166,12 +168,12 @@ def main(argv):
     log("  browser output: /tmp/wk-gui.log (in the workspace)")
     run = ("cd %s && ( sleep 2; %s %s %s >/tmp/wk-gui.log 2>&1 ) & "
           'exec "$LLDB" %s -o %s -o %s -o %s -o %s'
-          % (src, launch_env, cfg.web_process_pause_env(), launch_cmd, shell.LLDB_PIN_OPTS,
+          % (src, launch_env, cfg.web_process_pause_env(), launch_cmd, LLDB_PIN_OPTS,
              shell.sh_quote("command script import %s/container/lldb/webprocess.py" % target.tools(name)),
              shell.sh_quote("command alias follow-page wk-follow-page %s" % web_proc),
              shell.sh_quote("command alias reattach process attach --name %s --waitfor" % web_proc),
              shell.sh_quote("process attach --name %s --waitfor" % web_proc)))
-    cmd = "%s\n%s" % (shell.lldb_prelude(ROOT), run)
+    cmd = "%s\n%s" % (LLDB_PRELUDE, run)
     argv_, cwd = target.exec_argv(name, ["bash", "-lc", cmd], tty=True)
     exec_into(argv_, cwd)
 

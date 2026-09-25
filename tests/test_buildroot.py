@@ -1,5 +1,5 @@
 """The buildroot builder: lib/wk/sysimage/buildroot.py (the driving half, over a
-container workspace) and image/buildroot-build.sh (runs inside it). See
+container workspace) and lib/wk/sysimage/buildroot_target.py (runs inside it). See
 docs/PLAN.md for what this exists to close out.
 
 Four things are checked by the classes down to TestDerivedDefconfigs,
@@ -15,15 +15,9 @@ matching the four real defects found while writing this lane:
 
   freshness  the image stage's completion line has to be evidence, not an
              echo of `make`'s exit code -- `make` exits 0 on a tree that
-             decided there was nothing left to do, which would otherwise
-             print "done" over a stale sdcard.img the same way the Yocto
-             defect on moose printed "done" over a stale wic.xz
-             (tests/test_yocto_stage.py). verify_image_freshness
-             (image/buildroot-build.sh) is the same shape as
-             image/yocto-build.sh's function of the same name, lifted with
-             sed the way tests/test_yocto_stage.py and tests/test_wifi_seed.py
-             lift a function out of a shell file without sourcing the rest
-             of it.
+             decided there was nothing left to do. That check is
+             buildroot_target.py's verify_fresh, tested in
+             tests/test_buildroot_target.py.
 
   defconfig  a defconfig this repository derives has to agree with the board
              files it names: board/raspberrypi4's genimage config assembles a
@@ -51,16 +45,17 @@ points -- is tests/test_sysimage_task.py's.
 
 Run: python3 -m unittest tests.test_buildroot -v
 """
-import os
 import subprocess
+import sys
 import tempfile
-import time
 import unittest
 
-from tests.support import REPO, WkTest, run_here, scratch_dir
+from tests.support import REPO, WkTest, run_here
+
+sys.path.insert(0, str(REPO / "lib"))
+from wk.sysimage import buildroot, buildroot_target  # noqa: E402
 
 BUILDROOT_PY = REPO / "lib" / "wk" / "sysimage" / "buildroot.py"
-BUILDROOT_BUILD = REPO / "image" / "buildroot-build.sh"
 EXTERNAL_DIR = REPO / "image" / "buildroot" / "external"
 EXTERNAL_MK = EXTERNAL_DIR / "external.mk"
 DEAD_PID = "99999999"  # a pid essentially guaranteed not to exist
@@ -69,44 +64,6 @@ PROFILES = [
     "wpewebkit-2.38-buildroot-rpi3-32",
     "wpewebkit-2.38-buildroot-rpi4-32",
 ]
-
-
-def _lift(path, func):
-    """A function's body, sed'd out of a shell file -- the idiom
-    tests/test_yocto_stage.py and tests/test_wifi_seed.py both use to call
-    one function from a build script without sourcing the whole thing (most
-    of what's above/below a given function here wants a real checkout, a
-    container, or command-line arguments this test has no reason to fake)."""
-    text = subprocess.run(
-        ["sed", "-n", f"/^{func}()/,/^}}/p", str(path)],
-        capture_output=True, text=True,
-    ).stdout
-    assert text.strip(), f"could not find {func}() in {path}"
-    return text
-
-
-PRELUDE = '''
-say()  { :; }
-fail() { printf 'wk-buildroot: error: %s\\n' "$*" >&2; exit 1; }
-'''
-
-
-def _run_lifted(body, *args):
-    script = PRELUDE + body + "\n" + " ".join(args)
-    return subprocess.run(
-        ["bash", "-c", script], capture_output=True, text=True, timeout=10,
-    )
-
-
-# --------------------------------------------------------------------------- #
-# syntax -- both halves parse. Cheap, and everything below assumes it.
-# --------------------------------------------------------------------------- #
-
-class TestSyntax(unittest.TestCase):
-    def test_both_in_workspace_scripts_parse(self):
-        for f in (BUILDROOT_BUILD, REPO / "image" / "buildroot-webkit.sh"):
-            cp = subprocess.run(["bash", "-n", str(f)], capture_output=True, text=True)
-            self.assertEqual(cp.returncode, 0, f"{f}: {cp.stderr}")
 
 
 # --------------------------------------------------------------------------- #
@@ -151,86 +108,16 @@ class TestDryRun(WkTest):
             self.assertNotEqual(cp.returncode, 0, cp.stdout)
             self.assertIn("no defconfig for rpi5", cp.stdout)
 
-    def test_wifi_overlay_flag_is_wired_and_accepted(self):
-        """buildroot.py passes --overlay-wifi 1 to buildroot-build.sh
-        whenever the board has no cable (_image_wants_wifi); the flag has to
-        be one buildroot-build.sh's own arg parser actually recognises, or
-        every wifi board's real build dies in the first second on 'unknown
-        option: --overlay-wifi' before it clones anything."""
-        self.assertIn("--overlay-wifi", BUILDROOT_PY.read_text())
-        text = BUILDROOT_BUILD.read_text()
-        self.assertIn("--overlay-wifi", text)
-        self.assertIn("OVERLAY_WIFI", text)
-        # And actually used to assemble the overlay, not just parsed and
-        # dropped -- that would refuse the flag instead of silently ignoring
-        # it, which is arguably worse: a wifi board's image would build and
-        # boot with no way to join the network it needs to be reachable at
-        # all, and nothing here would have said so.
-        self.assertIn("wifi-overlay.sh", text)
-
-
-# --------------------------------------------------------------------------- #
-# the completion check: refuses a stale (or missing) artifact.
-# --------------------------------------------------------------------------- #
-
-class TestVerifyImageFreshness(WkTest):
-    def setUp(self):
-        super().setUp()
-        self.func = _lift(BUILDROOT_BUILD, "verify_image_freshness")
-
-    def test_ok_when_the_image_is_newer_than_the_build_start(self):
-        with scratch_dir() as d:
-            img = d / "sdcard.img"
-            img.write_text("fresh")
-            start = int(time.time()) - 5
-            cp = _run_lifted(self.func, "verify_image_freshness", str(img), str(start))
-            self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-
-    def test_ok_when_the_image_matches_the_start_exactly(self):
-        # >=, not >: a build fast enough to land in the same second as the
-        # recorded start must not be reported as stale.
-        with scratch_dir() as d:
-            img = d / "sdcard.img"
-            img.write_text("fresh")
-            now = int(time.time())
-            os.utime(img, (now, now))
-            cp = _run_lifted(self.func, "verify_image_freshness", str(img), str(now))
-            self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-
-    def test_refuses_a_stale_artifact(self):
-        """the defect this exists to catch: a `make` that decided there was
-        nothing to do, and an sdcard.img left over from a previous run."""
-        with scratch_dir() as d:
-            img = d / "sdcard.img"
-            img.write_text("stale")
-            yesterday = int(time.time()) - 86400
-            os.utime(img, (yesterday, yesterday))
-            start = int(time.time())
-            cp = _run_lifted(self.func, "verify_image_freshness", str(img), str(start))
-            self.assertNotEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-            self.assertIn("older", cp.stderr)
-
-    def test_refuses_a_missing_artifact(self):
-        with scratch_dir() as d:
-            img = d / "sdcard.img"
-            start = int(time.time())
-            cp = _run_lifted(self.func, "verify_image_freshness", str(img), str(start))
-            self.assertNotEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-            self.assertIn("does not exist", cp.stderr)
-
-    def test_the_build_calls_it_after_make_and_before_the_done_line(self):
-        """static: the ordering, not just the function's own behaviour --
-        a freshness check nobody calls, or one called before the build even
-        runs, guards nothing (CLAUDE.md, 'One path, not two')."""
-        text = BUILDROOT_BUILD.read_text()
-        make_at = text.rfind("FORCE_UNSAFE_CONFIGURE=1 make")
-        verify_at = text.find("verify_image_freshness \"$OUT/$IMAGE\"")
-        done_at = text.rfind("say \"stage 'image' done\"")
-        self.assertNotEqual(make_at, -1, text)
-        self.assertNotEqual(verify_at, -1, text)
-        self.assertNotEqual(done_at, -1, text)
-        self.assertLess(make_at, verify_at, "verify_image_freshness must run after the build")
-        self.assertLess(verify_at, done_at, "verify_image_freshness must run before the done line")
+    def test_the_driver_s_argv_is_one_the_target_half_parses(self):
+        """Every flag buildroot.py hands the workspace, the wifi overlay's and the pinned kernel's included."""
+        br = buildroot.Buildroot.__new__(buildroot.Buildroot)
+        br.name = PROFILES[0]
+        br.p = {"BR_TREE_URL": "u", "BR_TREE_BRANCH": "b", "BR_TREE_COMMIT": "c", "BR_DEFCONFIG": "d_defconfig",
+                "BR_EXTERNAL": "1", "BR_IMAGE": "sdcard.img", "BR_OVERLAY_TAILSCALE": "arm", "BR_KERNEL_RELEASE": "6.1"}
+        argv = br.image_argv("/opt/wk-tools", 8, True, "/cache/buildroot/dl/k.tar")
+        self.assertEqual(argv[:3], ["python3", "/opt/wk-tools/lib/wk/sysimage/buildroot_target.py", "image"])
+        a = buildroot_target.parse(argv[2:])
+        self.assertEqual((a.overlay_wifi, a.overlay_arch, a.kernel_tar, a.external, a.jobs), ("1", "arm", "/cache/buildroot/dl/k.tar", "1", "8"))
 
 
 # --------------------------------------------------------------------------- #
@@ -244,7 +131,7 @@ class TestLibffiFix(unittest.TestCase):
     sed against the vendor tree. WebPlatformForEmbedded/buildroot (the file
     it changes the behaviour of, package/python/python.mk) is not vendored
     into this repository -- it is cloned at build time by
-    image/buildroot-build.sh -- so there is no copy of that file here for a
+    buildroot_target.py -- so there is no copy of that file here for a
     patch to apply to. What is checked instead is everything that can be
     checked without it: the fix file exists, carries the exact two upstream
     appends, and is actually wired into the build."""
@@ -277,46 +164,13 @@ class TestLibffiFix(unittest.TestCase):
         self.assertTrue(desc.is_file())
         self.assertIn("name:", desc.read_text())
 
-    def test_external_mk_is_wired_into_the_build(self):
-        """BR2_EXTERNAL has to actually point here, and on every make -- not
-        just the first -- or a later invocation drops the fix silently
-        (buildroot records BR2_EXTERNAL in output/.br-external.mk and fails
-        outright if a later make omits it, which is stricter than silence,
-        but the wiring is still worth a direct check)."""
-        text = BUILDROOT_BUILD.read_text()
-        self.assertIn("BR2_EXTERNAL=/opt/wk-tools/image/buildroot/external", text)
-        # Passed to the defconfig make, the .config-resolving olddefconfig,
-        # and the real build -- the three `make` invocations in the script.
-        make_lines = [l for l in text.splitlines() if l.strip().startswith("make $BR_EXT")
-                      or "make $BR_EXT" in l]
-        self.assertGreaterEqual(len(make_lines), 2, text)
-
-    def test_patch_file_or_static_reference(self):
-        """If a literal patch file targeting a vendored copy of the file it
-        patches exists under image/buildroot/external/, it must apply
-        cleanly to that copy. WebPlatformForEmbedded/buildroot's
-        package/python/python.mk is not vendored here (the tree is cloned at
-        build time, never checked in), so this falls to the static half: the
-        fix file exists and is referenced from the build script -- checked
-        above in more detail, and repeated here as the one test named for
-        exactly what the task asked for."""
-        patches = list(EXTERNAL_DIR.rglob("*.patch"))
-        vendor_file = EXTERNAL_DIR / "package" / "python" / "python.mk"
-        if patches and vendor_file.is_file():
-            for p in patches:
-                cp = subprocess.run(
-                    ["patch", "--dry-run", "-p1", "-d", str(EXTERNAL_DIR),
-                     "-i", str(p)],
-                    capture_output=True, text=True,
-                )
-                self.assertEqual(cp.returncode, 0, f"{p} does not apply cleanly: {cp.stdout + cp.stderr}")
-        else:
-            # static: the fix exists, is a real BR2_EXTERNAL make fragment
-            # rather than a patch (there is nothing checked in here for a
-            # patch to target), and buildroot-build.sh references it.
-            self.assertTrue(EXTERNAL_MK.is_file())
-            self.assertIn("BR2_EXTERNAL=/opt/wk-tools/image/buildroot/external",
-                           BUILDROOT_BUILD.read_text())
+    def test_external_mk_is_wired_into_every_make(self):
+        """buildroot records BR2_EXTERNAL in output/.br-external.mk and fails
+        outright if a later make omits it, so it goes on every make, naming
+        this tree's external directory."""
+        self.assertEqual(buildroot_target.Build.br_ext(type("B", (), {"tools": "/opt/wk-tools"})(), True),
+                         ["BR2_EXTERNAL=/opt/wk-tools/image/buildroot/external"])
+        self.assertTrue((REPO / "image" / "buildroot" / "external" / "external.desc").is_file())
 
 
 class TestDerivedDefconfigs(unittest.TestCase):

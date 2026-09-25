@@ -3,8 +3,8 @@ lib/wk/sysimage/buildroot.py) against a Fake world: the record a stage writes an
 refusals, --detach, --stop, the watchdog, a dry run, a stage killed after any effect, the wrapper a stage
 runs under in the workspace, and the pinned fetch.
 
-Rows landed here: `unit sysimage.task_states` (the buildroot half; a silent bitbake and a wedged one are
-yocto's, 5.18), `unit record.progress_shape[sysimage]`, `unit killpoints[sysimage build]`.
+Rows landed here: `unit sysimage.task_states` (the buildroot half; yocto's is
+tests/test_yocto_stage.py), `unit record.progress_shape[sysimage]`, `unit killpoints[sysimage build]`.
 
 Run: python3 tests/run.py -k test_sysimage_task
 """
@@ -38,7 +38,7 @@ SHA = "a" * 40
 class Box(targets.Target):
     kind = "container"
 
-    def _podman(self):
+    def podman(self):
         return ["podman"]
 
     def ctr(self, ws):
@@ -198,7 +198,7 @@ class TestTheRecordAStageWrites(TaskTest):
         argv = list(w[1])
         self.assertEqual(argv[:9], ["exec", WS, "env", "PYTHONPATH=/opt/wk-tools/lib", "python3", "-m", "wk.sysimage.task",
                                     "stage", "buildroot"])
-        self.assertEqual(argv[9:12], ["--", "/opt/wk-tools/image/buildroot-build.sh", "--name"])
+        self.assertEqual(argv[9:14], ["--", "python3", "/opt/wk-tools/lib/wk/sysimage/buildroot_target.py", "image", "--name"])
         self.assertIn("--overlay-wifi", argv)
         self.assertEqual(argv[argv.index("--jobs") + 1], "8")
 
@@ -252,9 +252,12 @@ class TestWhatItBuildsWith(TaskTest):
         p = dict(self.w.profile(), BR_KERNEL_DEB_URL="https://x/k.deb", BR_KERNEL_DEB_SHA256="d" * 64, BR_KERNEL_RELEASE="6.1.0-rpi")
         self.w.answer(["sha256sum"], out="d" * 64 + "  x\n")
         self.w.answer(["curl"])
-        pin = str(REPO / "image" / "buildroot" / "kernel-pin.sh")
-        self.w.answer([pin], out=os.path.join(self.w.env["WK_STORE"], "cache", "buildroot", "dl", "wk-kernel-6.1.0-rpi.tar"))
-        with contextlib.redirect_stderr(io.StringIO()) as err:
+        dl = os.path.join(self.w.env["WK_STORE"], "cache", "buildroot", "dl")
+
+        def pin(m, deb, release, out):
+            m.act_run(["kernel_pin", deb, release, out])
+            return os.path.join(out, "wk-kernel-%s.tar" % release)
+        with contextlib.redirect_stderr(io.StringIO()) as err, mock.patch.object(buildroot, "kernel_pin", pin):
             rc = buildroot.Buildroot(self.w.reg, p, PROFILE, self.w.clock, self.w.popen).build([])
         self.assertEqual(rc, 0, err.getvalue())
         (t,) = self.w.recs().list()
@@ -262,8 +265,7 @@ class TestWhatItBuildsWith(TaskTest):
         (w,) = [e for e in self.w.effects if e[0] == "watch"]
         argv = list(w[1])
         self.assertEqual(argv[argv.index("--kernel-tar") + 1], "/cache/buildroot/dl/wk-kernel-6.1.0-rpi.tar")
-        self.assertLess(self.w.effects.index(("run", (pin, os.path.join(task.cache_dir(self.w.env), "k.deb"), "6.1.0-rpi",
-                                                      os.path.join(self.w.env["WK_STORE"], "cache", "buildroot", "dl")))),
+        self.assertLess(self.w.effects.index(("run", ("kernel_pin", os.path.join(task.cache_dir(self.w.env), "k.deb"), "6.1.0-rpi", dl))),
                         self.w.effects.index(w))
 
 
@@ -279,14 +281,17 @@ class TestTheBuilderIsTheProfiles(TaskTest):
             self.sysimage().build("wpewebkit-2.38-buildroot-rpi5-64", [])
         self.assertIn("cannot be built yet:\n\n    no defconfig for rpi5", err.getvalue())
 
-    def test_yocto_and_pmos_go_to_their_bash_arms_with_the_spec(self):
-        from wk import shell
-        with mock.patch.object(shell, "sysimage_arms") as arms:
+    def test_a_yocto_build_is_yocto_py_s_and_a_2_52_slot_the_pgo_cycle_s(self):
+        from wk import pgo
+        from wk.sysimage import yocto
+        with mock.patch.object(pgo.Cycle, "webkit", return_value=0) as cycle, \
+                mock.patch.object(yocto.Yocto, "build", return_value=0) as yb, \
+                mock.patch.object(yocto.Yocto, "webkit", return_value=0) as yw:
             self.sysimage().build("webkit-2.52-yocto-rpi5-64@moose", ["--stage", "image"])
             self.sysimage().webkit("webkit-2.52-yocto-rpi5-64", ["--slot", "base"])
-        self.assertEqual([c[0][1:] for c in arms.call_args_list],
-                         [("yocto", "webkit-2.52-yocto-rpi5-64@moose", "--stage", "image"),
-                          ("yocto-webkit", "webkit-2.52-yocto-rpi5-64", "--slot", "base")])
+            self.sysimage().webkit("wpewebkit-2.46-yocto-rpi4-64", ["--slot", "base"])
+        self.assertEqual([c[0] for c in cycle.call_args_list], [(["--slot", "base"],)])
+        self.assertEqual((yb.call_args[0], yw.call_args[0]), ((["--stage", "image"],), (["--slot", "base"],)))
 
     def test_a_fetch_or_pmos_image_takes_no_slot(self):
         with self.assertRaises(Refused), contextlib.redirect_stderr(io.StringIO()) as err:
@@ -364,7 +369,7 @@ class TestStop(TaskTest):
         t.pid(777)
         t.set("where", "target")
         self.w.pids.add(777)
-        self.w.answer(["exec", WS, "ps", "-o", "args=", "-p", "777"], out="bash /opt/wk-tools/image/buildroot-build.sh --name x\n")
+        self.w.answer(["exec", WS, "ps", "-o", "args=", "-p", "777"], out="python3 /opt/wk-tools/lib/wk/sysimage/buildroot_target.py image --name x\n")
         self.w.answer(["exec", WS, "sh", "-c"], out="778\n777\n")
         self.w.react(["exec", WS, "kill", "-TERM"], lambda a, f: (f.pids.discard(777), Result(0))[1])
         rc, err = self.build(None, "--stop")

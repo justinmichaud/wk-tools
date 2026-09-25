@@ -107,6 +107,20 @@ class TestHelpAndDeclarations(WkTest):
                 bad.append(f"{n}(empty-header)")
         self.assertEqual(bad, [], f"'wk <cmd> --explain' is not usable for: {bad}")
 
+    def test_explain_names_each_subverbs_own_destructive_override(self):
+        """`-h` prints a subverb's destructive override under the command's own line"""
+        cmd = self.tmp / "demo"
+        cmd.write_text("#!/usr/bin/env python3\n#\n# wk demo a|b|c -- a demo\n"
+                       "# wk: where=host name=none destructive a,--replace\n"
+                       "# wk: sub b destructive=\n# wk: sub c destructive=yes\n#\n#   wk demo a   does a\n")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), self.assertRaises(dispatch.Exit):
+            dispatch.explain("demo", D.Decl(cmd))
+        lines = out.getvalue().splitlines()
+        for want in ("  destructive: " + dispatch.destructive_prose("a,--replace"),
+                     "    b: " + dispatch.destructive_prose(""), "    c: " + dispatch.destructive_prose("yes")):
+            self.assertIn(want, lines)
+
     def test_unknown_command_prints_usage_and_exits_2(self):
         """an unknown command prints the usage and exits 2"""
         cp = run("nosuchcommand")
@@ -122,7 +136,7 @@ class TestHelpAndDeclarations(WkTest):
                 self.assertNotEqual(cp.returncode, 0, cp.stdout)
                 self.assertIn("'wk %s' is removed" % cmd, cp.stdout)
                 self.assertNotIn("unknown command", cp.stdout)
-        self.assertIn("wk_notify", run("notify", "x").stdout)
+        self.assertIn("wk/notify.py", run("notify", "x").stdout)
 
     def test_unknown_target_names_the_conf_to_write(self):
         """an unconfigured name is refused, and the error prints the conf to write"""
@@ -187,7 +201,7 @@ class TestWorkspaceRefusals(WkTest):
 
     def test_host_only_commands_refuse_inside_a_workspace(self):
         """host-only commands refuse inside a workspace"""
-        for c in ("gc", "vm", "pi", "session", "quiesce"):
+        for c in ("gc", "session", "quiesce"):
             with self.subTest(cmd=c):
                 with fake_workspace() as ws:
                     cp = ws.run(c)
@@ -201,17 +215,17 @@ class TestWorkspaceRefusals(WkTest):
     def test_a_host_refusal_names_the_invocation_for_outside(self):
         """the refusal prints the exact command to type on the host, arguments and all"""
         with fake_workspace() as ws:
-            cp = ws.run("pi", "boot-order", "rpi4", "--dry-run")
+            cp = ws.run("machine", "setup", "rpi4", "--dry-run")
         self.assertNotEqual(cp.returncode, 0)
-        self.assertIn("From the host:  wk pi boot-order rpi4 --dry-run", cp.stdout + cp.stderr)
+        self.assertIn("From the host:  wk machine setup rpi4 --dry-run", cp.stdout + cp.stderr)
         with fake_workspace() as ws:
             cp = ws.run("gc")
         self.assertIn("From the host:  wk gc", cp.stdout + cp.stderr)
 
-    def test_bridge_is_host_only_and_ls_starts_nothing(self):
+    def test_machine_is_host_only_and_ls_starts_nothing(self):
         """is refused inside a workspace and on a shared build machine"""
         with fake_workspace() as ws:
-            cp = ws.run("bridge", "ls")
+            cp = ws.run("machine", "ls")
         self.assertNotEqual(cp.returncode, 0, "not refused inside a workspace")
         self.assertIn(
             "acts on a host",
@@ -240,8 +254,8 @@ class TestWorkspaceRefusals(WkTest):
     def test_broker_door_is_narrow(self):
         """names the socket and the stage that opens it"""
         with fake_workspace() as ws:
-            cp = ws.run("pi", "setup", "some-host", env={"WK_BROKER_SOCKET": str(ws.tmp / "no-such-broker.sock")})
-        self.assertNotEqual(cp.returncode, 0, "'wk pi setup' was accepted inside a workspace")
+            cp = ws.run("machine", "setup", "some-host", env={"WK_BROKER_SOCKET": str(ws.tmp / "no-such-broker.sock")})
+        self.assertNotEqual(cp.returncode, 0, "'wk machine setup' was accepted inside a workspace")
         self.assertIn("acts on a host", cp.stdout + cp.stderr)
 
         with fake_workspace() as ws:
@@ -661,7 +675,7 @@ class TestHelpNamesEveryWhereOverride(WkTest):
         top = [i for i, l in enumerate(lines) if l.startswith("  runs on: ")]
         self.assertEqual(len(top), 1, lines)
         self.assertIn(self._prose(D.Decl(REPO / "cmd" / "bench"), "workspace"), lines[top[0]])
-        self.assertTrue(lines[top[0] + 1].startswith("    stage, staged, mac, "), lines)
+        self.assertTrue(lines[top[0] + 1].startswith("    seed: "), lines)
 
 
 class TestNothingBootsTheMachineToRefuse(WkTest):

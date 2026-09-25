@@ -116,50 +116,7 @@ class TestSelfDisarm(unittest.TestCase):
             self.assertEqual(img.read_bytes()[450], 0x83)
 
 
-class TestDisarmWithoutARecord(unittest.TestCase):
-    def _disarm(self, arming):
-        lift = f"eval \"$(sed -n '/^cmd_disarm()/,/^}}/p' \"{REPO}/cmd/boot\")\""
-        return bash(f'''
-. "{REPO}/lib/common.sh"
-{lift}
-MACHINE=rpi4 DRY="" BOOT_ARMING={arming}
-read_state() {{ ARMED_IMG=""; SPENT=""; }}
-b_disarm() {{ echo "b_disarm ran"; }}
-b_disarm_note() {{ :; }}
-record_clear() {{ echo "record cleared"; }}
-cmd_disarm 2>&1
-''')
-
-    def test_a_medium_armed_machine_is_disarmed_whoever_armed_it(self):
-        """wk boot <m> --disarm parks the medium even with no arming record: the byte is the arming"""
-        cp = self._disarm("medium")
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertIn("b_disarm ran", cp.stdout)
-        self.assertIn("record cleared", cp.stdout)
-
-    def test_a_one_shot_machine_with_no_record_has_nothing_to_disarm(self):
-        cp = self._disarm("one-shot")
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertIn("no arming record", cp.stdout)
-        self.assertNotIn("b_disarm ran", cp.stdout)
-
-
-class TestFleetTailnetLine(unittest.TestCase):
-    def test_reached_line_names_each_role_node(self):
-        """wk status: a bench device is reached under its rescue and bench names, not its machine name"""
-        peers = "rpi4-rescue\t100.1.1.1\tup\n"
-        cp = bash(f'''
-set -euo pipefail
-. "{REPO}/lib/common.sh"; . "{REPO}/boot/machines.sh"
-wk_tailscale_peers() {{ printf '%s' "$PEERS"; }}
-fleet_tailnet rpi4; echo
-fleet_tailnet rpi5
-''', env={"PEERS": peers, "WK_ROOT": str(REPO)})
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        lines = cp.stdout.splitlines()
-        self.assertEqual(lines[0], "rpi4-rescue 100.1.1.1 (up); rpi4-bench not a node")
-        self.assertEqual(lines[1], "rpi5 not a node; rpi5-bench not a node")
-
+class TestWithoutTailnet(unittest.TestCase):
     def test_without_tailscale_says_nothing_for_a_board_on_the_tailnet_by_role_name(self):
         """reach_without_tailnet is silent when NODE_SSH or NODE_BENCH_SSH is a node"""
         for peers in ("rpi4-rescue\t100.1.1.1\tup\n", "rpi4-bench\t100.1.1.2\tup\n"):
@@ -177,12 +134,13 @@ if __name__ == "__main__":
 
 
 class TestBootPartFollowsTheMedium(unittest.TestCase):
-    """the boot partition is on the medium the board resolves (disk_own_or_declared), not NODE_DEVICE's name:
-    with another USB disk enumerating first, the stick is sdb."""
+    """the boot partition is on the medium the board resolves (the disk model's own_or_declared), not NODE_DEVICE's
+    name: with another USB disk enumerating first, the stick is sdb."""
 
     def test_boot_part_uses_the_resolved_disk(self):
         class Ch:
             def call(self, fn, *args, **kw):
-                return Result(0, "/dev/sdb\n") if fn == "disk_own_or_declared" else Result(1)
+                lsblk = '{"blockdevices": [{"name": "/dev/sdb", "type": "disk", "rm": true, "tran": "usb"}]}'
+                return Result(0, lsblk) if fn == "m_ssh" else Result(1)
         d = PiMbr(REPO, {"NODE_NAME": "rpi4", "NODE_DEVICE": "/dev/sda"}, Ch())
         self.assertEqual(d.boot_part(), "/dev/sdb1")

@@ -1,5 +1,5 @@
 """An image workspace's commands are routed to the machine holding it: the
-dispatcher asks cmd/sysimage and cmd/pi which workspace their arguments name
+dispatcher asks cmd/sysimage which workspace their arguments name
 (`--wsname`) and which machine a spec names (`--wstarget`), and `holds` and
 `path` answer there.
 
@@ -127,42 +127,11 @@ class TestTheRoutingHooks(WkTest):
                       "--workspace", WS + "-base")
         self.assertEqual(got, WS + "-base")
 
-    def test_a_deploy_is_routed_by_the_workspace_that_built_the_slot(self):
-        got, cp = hook("pi", "--wsname", "deploy", PROFILE, "rpi5", "--slot", "base")
-        self.assertEqual(cp.returncode, 0, cp.stderr)
-        self.assertEqual(got, WS)
-
-    def test_a_deploy_names_the_machine_the_spec_names(self):
-        got, cp = hook("pi", "--wstarget", "deploy", PROFILE + "@moose", "rpi5")
-        self.assertEqual(cp.returncode, 0, cp.stderr)
-        self.assertEqual(got, "moose")
-
-    def test_a_collection_is_routed_by_the_workspace_it_writes_into(self):
-        got, cp = hook("pi", "--wsname", "bench", "rpi5", "speedometer3",
-                       "--slot", "base-instr", "--pgo", PROFILE)
-        self.assertEqual(cp.returncode, 0, cp.stderr)
-        self.assertEqual(got, WS)
-
-    def test_a_measured_run_names_no_workspace(self):
-        """It reads the slot off the board and touches no store, so it runs
-        where it was typed."""
-        got, cp = hook("pi", "--wsname", "bench", "rpi5", "speedometer3", "--slot", "base")
-        self.assertEqual(cp.returncode, 0, cp.stderr)
-        self.assertEqual(got, "")
-
-    def test_the_other_verbs_name_no_workspace(self):
-        for args in (["setup", "rpi5"], ["boot-order", "rpi5", "usb-first"], ["helper", "rpi5"]):
-            with self.subTest(verb=args[0]):
-                got, cp = hook("pi", "--wsname", *args)
-                self.assertEqual(cp.returncode, 0, cp.stderr)
-                self.assertEqual(got, "")
-
     def test_the_declarations_say_both_are_routed(self):
         """The dispatcher refuses what a command does not declare, so the
-        routing is the declaration and not a convention."""
-        text = (REPO / "cmd" / "pi").read_text()
-        self.assertIn("sub deploy where=workspace name=derived", text)
-        self.assertIn("flag --pgo where=workspace name=derived", text)
+        routing is the declaration and not a convention: a deploy, a board
+        run and a collection name their lane."""
+        self.assertIn("sub run,deploy name=required@2", (REPO / "cmd" / "bench").read_text())
 
 
 class TestADeployRunsWhereItsWorkspaceIs(WkTest):
@@ -174,37 +143,12 @@ class TestADeployRunsWhereItsWorkspaceIs(WkTest):
     that can reach the board."""
 
     def test_nothing_refuses_a_workspace_for_being_in_the_podman_machine(self):
-        for rel in ("cmd/pi", "lib/image.sh"):
-            with self.subTest(file=rel):
-                self.assertNotIn("image_lane_readable", (REPO / rel).read_text())
+        self.assertNotIn("image_lane_readable", (REPO / "lib" / "image.sh").read_text())
 
     def test_a_deploy_is_forwarded_like_any_other_workspace_command(self):
         """`forward=no` would keep it on the host half, which can reach the
         board and not read the store."""
-        self.assertNotIn("forward=no", (REPO / "cmd" / "pi").read_text())
-
-
-class TestASpecThatNamedAnotherMachine(WkTest):
-    def test_the_two_commands_ask_it_before_they_touch_the_board(self):
-        text = (REPO / "cmd" / "pi").read_text()
-        self.assertIn('image_lane_here "$spec"', text)
-        self.assertIn('image_lane_here "$PI_PGO_SPEC"', text)
-
-
-class TestACollectionNamesItsWorkspaceNotAPath(WkTest):
-    """`--pgo <profile>[@<machine>]`: the collection lands in the build
-    directory the next phase reads it back through, and which workspace that is has
-    to survive the hop to the machine holding it."""
-
-    def test_the_help_and_the_usage_name_a_profile(self):
-        text = (REPO / "cmd" / "pi").read_text()
-        self.assertIn("--pgo <profile>[@<machine>] [--workspace LANE]", text)
-        self.assertNotIn("[--pgo DIR]", text)
-
-    def test_the_workspace_option_means_nothing_without_pgo(self):
-        cp = run_here("pi", "bench", "rpi5", "speedometer3", "--workspace", WS, timeout=240)
-        self.assertNotEqual(cp.returncode, 0, cp.stdout)
-        self.assertIn("--workspace names the lane", cp.stdout)
+        self.assertNotIn("forward=no", (REPO / "cmd" / "bench").read_text())
 
 
 if __name__ == "__main__":

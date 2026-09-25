@@ -1,35 +1,34 @@
-"""The host side of the macOS A/B lane: `bench/mac-ab.sh`'s refusals and the
-boot driver (`lib/wk/boot/mac.py`) that reports the Mac from another machine.
+"""The Mac A/B's front half, `wk bench ab --devices <mac>` (lib/wk/bench/mac.py's MacAB -- preflight, build,
+stage, plant, restart), against FakeMac and the fake clock; its back half is tests/test_mac_ab_rounds.py.
 
-Neither needs a Mac to be exercised. Every decision here is a shell function
-whose one input is what the Mac answered, so each test lifts the function and
-hands it that answer; one test asks the real machine and skips without it.
+Nothing here touches a real Mac, startup disk or helper; the live rows read the real machines and change nothing.
 
-Run: python3 -m unittest tests.test_mac_ab_driver -v
+Run: python3 tests/run.py --unit -k test_mac_ab_driver
 """
+import contextlib
+import io
 import json
+import os
 import re
 import shlex
-import subprocess
+import sys
 import unittest
+from unittest import mock
 
-from tests.support import (REPO, WkTest, bash, func_body, requires_machine,
-                           scratch_dir, temp_store)
-from tests.test_mac_volume import mac_board
-from wk.machine import Result
+from tests.support import REPO, WkTest, bash, requires_machine, scratch_dir, temp_store
+from tests.test_mac_volume import BENCH_GROUP, FakeGuest, FakeMac, conf_for
 
-MACAB = REPO / "bench" / "mac-ab.sh"
-MBP = REPO / "machines" / "mbp.conf"
+sys.path.insert(0, str(REPO / "lib"))
+from wk import act, sched, targets  # noqa: E402
+from wk.act import Refused  # noqa: E402
+from wk.bench import ab, mac  # noqa: E402
+from wk.boot.mac import DRIVERS, HELPER  # noqa: E402
+from wk.clock import FakeClock  # noqa: E402
+from wk.machine import Fake, Result  # noqa: E402
 
-# Measured on tolken 2026-09-08: the firmware's boot-volume already names the
-# bench volume group, which is what makes the restart need no human.
-BENCH_GROUP = "73C12614-1130-40DF-B9B9-9CA73D10F3AA"
-HOST_GROUP = "1981BBBF-8B67-4DED-A3E5-41A2550DE0FB"
-BOOT_VOLUME = ("EF57347C-0000-AA11-AA11-00306543ECAC:"
-               "D7E4E11B-F6E7-5A4C-B4D2-C5241524E3A9:" + BENCH_GROUP)
+DIGEST = "d" * 64
 
-# Interface 1's reading on the bench install (screen=[1470,956], six of six
-# browser-check.json files from 2026-09-07) and on the host install.
+# Interface 1's reading on the bench install and on the host install (tolken, 2026-09-07).
 BENCH_DISPLAY = {"count": 1, "displays": [
     {"id": 1, "builtin": True, "main": True, "active": True, "online": True,
      "mirrored": False, "asleep": False, "points": [1470, 956]}]}
@@ -38,601 +37,683 @@ HOST_DISPLAY = {"count": 1, "displays": [
      "mirrored": False, "asleep": True, "points": [1280, 832]}]}
 
 
-def macab_func(name):
-    return func_body(MACAB.read_text(), name)
+def rendered(name, p):
+    """Each bench/onboard/mac-* file as the command it stands for, so an answer is keyed on what it does."""
+    if name == "mac-py.sh":
+        return " ".join(shlex.quote(p[k]) for k in sorted(k for k in p if k != "WK_PY"))
+    return {"mac-test.sh": lambda: "test %s %s" % (p["WK_TEST"], p["WK_PATH"]), "mac-ls.sh": lambda: "ls -1 " + p["WK_PATH"],
+            "mac-defaults.sh": lambda: "defaults read %s %s" % (p["WK_PATH"], p["WK_KEY"]), "mac-size.sh": lambda: "wc -c " + p["WK_PATH"],
+            "mac-scipy.sh": lambda: "pip install --target %s scipy" % p["WK_PATH"], "mac-mkdir.sh": lambda: "mkdir -p " + p["WK_PATH"],
+            "mac-executable.sh": lambda: "chmod 0755 " + p["WK_PATH"], "mac-platform.sh": lambda: "ioreg",
+            "mac-screensaver.sh": lambda: "defaults read %s idleTime" % p["WK_SAVER"], "mac-dnd.sh": lambda: "wk_quiet_dnd_on " + p["WK_HOME"],
+            "mac-arch.sh": lambda: "uname -m", "mac-version.sh": lambda: "PlistBuddy " + p["WK_PATH"],
+            "mac-gated.sh": lambda: "gated " + p["WK_PATH"], "mac-tail.sh": lambda: "tail -20 " + p["WK_PATH"],
+            "mac-tar.sh": lambda: "tar %s %s" % (p["WK_PATH"], p["WK_DIR"])}[name]()
 
 
-def _lift_between(text, first, last):
-    a = text.index(first)
-    return text[a:text.index(last, a)]
+class Shell:
+    """The Mac A/B's on-board files answered from `answers`, (pattern, Result or fn(cmd)) searched latest first, each
+    matched against the command the file stands for; the rest of the Mac is the fake it is mixed into."""
+
+    def sh_setup(self):
+        self.answers, self.ran = [], []
+        for pat, res in ((r"^test ", Result(0)), (r"^defaults read .*loginwindow", Result(0, "bench\n")),
+                         (r"^test -f .*com.wk.bench-firstboot.plist", Result(1)), (r"^ls -1 .*/staged", Result(0, "sid-a\nsid-b\n")),
+                         (r"--exclude", Result(0, DIGEST + "\n")), (r"^wc -c", Result(0, "  42\n")),
+                         (r"^ioreg", Result(0, '  "IOPlatformUUID" = "UUID-1"\n')), (r"^mkdir|^chmod|pip install", Result(0)),
+                         (r"^defaults read .*idleTime", Result(0, "0\n")), (r"wk_quiet_dnd_on", Result(0, "on\n")),
+                         (r"^uname -m", Result(0, "arm64\n"))):
+            self.answer(pat, res)
+
+    def answer(self, pattern, result):
+        self.answers.append((re.compile(pattern), result))
+
+    def sh(self, cmd):
+        self.ran.append(cmd)
+        for pat, got in reversed(self.answers):
+            if pat.search(cmd):
+                return got(cmd) if callable(got) else got
+        return Result(1, "", "no answer for: %s" % cmd[:80])
+
+    def ours(self, name, p):
+        return (REPO / "bench" / "onboard" / name).is_file() and name.startswith("mac-") or (
+            name == "mac-test.sh" and p["WK_PATH"] not in self.known_paths())
 
 
-_RESTARTABLE_CK = _lift_between(
-    MACAB.read_text(), "    if b_restart_ready; then", "\n    log \"\" >&2")
+class PlantMac(Shell, FakeMac):
+    """A Mac in host mode, armed and ready: every gate the preflight reads passes until a test says otherwise."""
+
+    def __init__(self, conf, env=None, clock=None, manager=None):
+        FakeMac.__init__(self, conf, env=env, clock=clock)
+        self.sh_setup()
+        self.manager = manager
+        self.firmware = "bench"
+        self.files[self.firstboot_log()] = "provisioning complete\n"
+        for pat, res in ((r"^displays$", Result(0, json.dumps(BENCH_DISPLAY))), (r"^(boot-volume|volume-group)", lambda key: self.wkmac(key))):
+            self.answer(pat, res)
+
+    def firstboot_log(self):
+        return self.vol + " - Data/private/var/log/wk-bench-firstboot.log"
+
+    def known_paths(self):
+        return {self.vol + "/System/Library/CoreServices", self.vol + " - Data", HELPER}
+
+    def wkmac(self, key):
+        words = shlex.split(key)
+        out = self.fact(words[0], words[1] if len(words) > 1 else "")
+        return Result(0 if out else 1, out + "\n" if out else "")
+
+    def script(self, name, p, input):
+        if self.ours(name, p):
+            return self.sh(rendered(name, p))
+        return FakeMac.script(self, name, p, input)
+
+    def machine(self, fn="m_ssh"):
+        return self.manager
+
+
+class PlantGuest(Shell, FakeGuest):
+    def __init__(self, conf, env=None, clock=None):
+        FakeGuest.__init__(self, conf, env=env, clock=clock)
+        self.sh_setup()
+        self.st = "running"
+        self.answer(r"^displays$", Result(0, json.dumps({"displays": [{"online": True, "points": [1280, 800]}]})))
+
+    def known_paths(self):
+        return set()
+
+    def call(self, fn, *args, input=None, mutates=False):
+        ob = args[0]
+        if self.ours(ob.name, ob.params) and self.st == "running" and self.up:
+            self.asked.append((fn, ob.name, dict(ob.params)))
+            if mutates:
+                self.effects.append((fn, ob.name))
+            return self.sh(rendered(ob.name, ob.params))
+        return FakeGuest.call(self, fn, *args, input=input, mutates=mutates)
+
+
+def here_fake():
+    """This machine: its own digest of the tree, a samply, and a notifier that is told what went out."""
+    here = Fake("here")
+    here.answer(["hostname", "-s"], out="moose\n")
+    here.answer(["python3"], out=DIGEST + "\n")
+    here.answer(["sh", "-c", 'wc -c < "$1"'], out="42\n")
+    here.notified = []
+
+    def bash_fn(argv, fake):
+        if "samply" in argv[2]:
+            return Result(0, "0.13.1\naarch64-apple-darwin\n/cache/samply\n")
+        return Result(1)
+    here.react(["bash", "-c"], bash_fn)
+    return here
+
+
+@contextlib.contextmanager
+def world(kind="mac-volume", env=None, **o):
+    """A MacAB over a fake Mac, this machine a Fake, the store a scratch directory, every prompt answered yes."""
+    with temp_store() as store, scratch_dir() as tree:
+        for part in ("bench", "boot", "lib", "machines"):
+            os.symlink(REPO / part, tree / part)
+        clock, here = FakeClock(), here_fake()
+        e = {"HOME": str(tree), "WK_STORE": store["WK_STORE"]}
+        e.update(env or {})
+        conf = conf_for(kind)
+        manager = Fake("tolken")
+        fake = PlantMac(conf, env=e, clock=clock, manager=manager) if kind == "mac-volume" else PlantGuest(conf, env=e, clock=clock)
+        fake.write_system("perf-macos-tolken-1")
+        driver = DRIVERS[kind](REPO, conf, fake)
+        reg = targets.Registry(REPO, env=e, machine=here)
+        opts = dict({"devices": "mbp" if kind == "mac-volume" else "benchvm", "systems": "sid-a,sid-b"}, **o)
+        m = mac.MacAB(tree, reg, clock, "", opts, driver=lambda root, c: driver)
+        m.fake, m.here_fake, m.manager_fake, m.store, m.clock_ = fake, here, manager, store["path"], clock
+        def sent(root, headline, *a, **k):
+            here.notified.append(headline)
+            return not getattr(here, "notify_fails", False)
+        with mock.patch.dict(os.environ, {"WK_YES": "1"}), mock.patch("wk.notify.send", side_effect=sent), \
+                mock.patch("wk.sysimage.mactailnet.Tailnet.collect", return_value=""):
+            os.environ.pop("WK_DRY_RUN", None)
+            os.environ.pop("WK_FORCE", None)
+            yield m
+
+
+def said(fn, *args):
+    """(value or Refused, stderr)."""
+    with contextlib.redirect_stderr(io.StringIO()) as err, contextlib.redirect_stdout(io.StringIO()):
+        try:
+            return fn(*args), err.getvalue()
+        except Refused:
+            return Refused, err.getvalue()
+
+
+def ready(m):
+    m.check()
+    m.resolve()
+    m.boot_wait = 600
+    return m
+
+
+def mutations(m):
+    return [e for e in m.fake.effects if e[0] in ("m_ssh", "r_ssh", "push")]
 
 
 class TestTheFirmwareDefaultIsAsserted(WkTest):
-    """A restart only starts an A/B if the firmware's own default is the bench
-    volume, so the lane asserts that rather than reporting it."""
+    """A restart only starts an A/B if the firmware's own default is the bench volume."""
 
-    def _fw(self, boot_volume, bench_grp=BENCH_GROUP, host_grp=HOST_GROUP):
-        script = """. "$WK_ROOT/lib/common.sh"
-VOLUME="WK Bench"
-mac_wkmac() {
-    case "$1" in
-        boot-volume)  printf '%%s' %s ;;
-        volume-group) case "$2" in
-                          /) printf '%%s' %s ;;
-                          *) printf '%%s' %s ;;
-                      esac ;;
-    esac
-}
-firmware_default_is_bench() {%s}
-if firmware_default_is_bench; then printf 'PASS %%s' "$FW_DETAIL"
-else printf 'FAIL %%s' "$FW_DETAIL"; fi
-""" % (shlex.quote(boot_volume), shlex.quote(host_grp),
-       shlex.quote(bench_grp), macab_func("firmware_default_is_bench"))
-        cp = bash(script)
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        return cp.stdout
+    def _fw(self, firmware=None, blank=False):
+        with world() as m:
+            ready(m)
+            if firmware:
+                m.fake.firmware = firmware
+            if blank:
+                m.fake.answer(r"^boot-volume", Result(1))
+            return m.firmware_is_bench(), m.fw_detail
 
     def test_the_bench_volume_group_as_the_default_passes(self):
-        out = self._fw(BOOT_VOLUME)
-        self.assertTrue(out.startswith("PASS"), out)
-        self.assertIn(BENCH_GROUP, out)
-        self.assertIn("no human", out)
+        ok, detail = self._fw()
+        self.assertTrue(ok, detail)
+        self.assertIn(BENCH_GROUP, detail)
 
     def test_the_host_install_as_the_default_fails(self):
-        out = self._fw("EF57347C-0000-AA11-AA11-00306543ECAC:x:" + HOST_GROUP)
-        self.assertTrue(out.startswith("FAIL"), out)
-        self.assertIn("the host install", out)
+        ok, detail = self._fw("host")
+        self.assertFalse(ok)
+        self.assertIn("the host install", detail)
 
     def test_a_default_matching_neither_install_fails(self):
-        out = self._fw("a:b:11111111-2222-3333-4444-555555555555")
-        self.assertTrue(out.startswith("FAIL"), out)
-        self.assertIn("neither install", out)
+        with world() as m:
+            ready(m)
+            m.fake.answer(r"^boot-volume", Result(0, "a:b:11111111-2222-3333-4444-555555555555\n"))
+            self.assertFalse(m.firmware_is_bench())
+            self.assertIn("neither install", m.fw_detail)
 
     def test_an_unreadable_boot_volume_fails(self):
-        out = self._fw("")
-        self.assertTrue(out.startswith("FAIL"), out)
-        self.assertIn("no boot-volume", out)
-
-    def test_the_failure_names_both_remedies(self):
-        text = MACAB.read_text()
-        block = text[text.index('ck no "firmware default"'):text.index('log "" >&2')]
-        self.assertIn("wk boot $MACHINE", block)
-        self.assertIn("startup manager", block)
-        self.assertIn("--plant", block)
-
-    def test_it_is_a_check_and_not_a_note(self):
-        """A `log` line about the firmware would leave the lane restarting a
-        machine that comes straight back to host mode."""
-        text = MACAB.read_text()
-        self.assertIn('ck yes "firmware default"', text)
-        self.assertNotIn("Reported, never asserted", text)
-
-    @requires_machine("tolken")
-    def test_the_real_firmware_default_on_tolken_names_one_of_its_installs(self):
-        """Which of the two it names is a transient -- `wk boot mbp` arms the
-        bench volume and the hand-back at the end of a job blesses the host
-        install back -- so what is invariant is that the reading resolves to an
-        install on that disk at all, which is what preflight compares against."""
-        def wkmac(*args):
-            cp = subprocess.run(
-                ["ssh", "-o", "BatchMode=yes", "tolken",
-                 "cd ~/Development/wk-tools && python3 lib/wkmac.py " + " ".join(args)],
-                capture_output=True, text=True, timeout=60)
-            return cp.stdout.strip()
-
-        # The volume is only a volume from host mode: in bench mode it *is* the
-        # root and is not mounted under /Volumes at all, so there is nothing to
-        # ask about and the reading would compare a group against nothing.
-        bench = wkmac("volume-group", "'/Volumes/WK Bench'")
-        if not bench:
-            self.skipTest("tolken answers in bench mode, where 'WK Bench' is /")
-        host = wkmac("volume-group", "/")
-        self.assertIn(wkmac("boot-volume").rsplit(":", 1)[-1], (bench, host))
+        ok, detail = self._fw(blank=True)
+        self.assertFalse(ok)
+        self.assertIn("no boot-volume", detail)
 
 
-class TestOnlyTheBuiltInDisplay(WkTest):
-    """An external monitor changes the compositing, the refresh rate and which
-    GPU the window lands on, and MotionMark's score is the area it draws."""
+class TestOnlyTheDeclaredDisplay(WkTest):
+    """An external monitor changes the compositing, the refresh rate and which GPU the window lands on, and
+    MotionMark's score is the area it draws."""
 
-    def _check(self, answer):
-        script = """. "$WK_ROOT/lib/common.sh"
-MACHINE=fakemac
-b_display() { printf 'builtin 1470x956'; }
-mac_wkmac() { printf '%%s' %s; }
-mac_display_check() {%s}
-if mac_display_check; then printf 'PASS %%s' "$DISPLAY_READ"
-else printf 'FAIL %%s' "$DISPLAY_READ"; fi
-""" % (shlex.quote(answer), macab_func("mac_display_check"))
-        cp = bash(script)
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        return cp.stdout
+    def v(self, doc, want="builtin"):
+        return mac.display_verdict(doc if isinstance(doc, str) else json.dumps(doc), want)
 
     def test_the_measured_reading_passes(self):
-        out = self._check(json.dumps(BENCH_DISPLAY))
-        self.assertTrue(out.startswith("PASS"), out)
-        self.assertIn("builtin 1470x956", out)
+        ok, detail = self.v(BENCH_DISPLAY)
+        self.assertTrue(ok)
+        self.assertIn("builtin 1470x956", detail)
 
     def test_the_host_installs_own_reading_passes_too(self):
-        """The mode differs between the two installs; what this asks is the
-        count and which panel, not the mode."""
-        out = self._check(json.dumps(HOST_DISPLAY))
-        self.assertTrue(out.startswith("PASS"), out)
-        self.assertIn("builtin 1280x832", out)
+        """The mode differs between the two installs; what this asks is the count and which panel."""
+        self.assertTrue(self.v(HOST_DISPLAY)[0])
 
     def test_two_online_displays_fail(self):
-        doc = {"count": 2, "displays": [
-            dict(BENCH_DISPLAY["displays"][0]),
-            {"id": 2, "builtin": False, "online": True, "points": [3840, 2160]}]}
-        out = self._check(json.dumps(doc))
-        self.assertTrue(out.startswith("FAIL"), out)
-        self.assertIn("2 online display(s)", out)
-        self.assertIn("external 3840x2160", out)
+        doc = {"displays": [BENCH_DISPLAY["displays"][0], {"builtin": False, "online": True, "points": [3840, 2160]}]}
+        ok, detail = self.v(doc)
+        self.assertFalse(ok)
+        self.assertIn("2 online display(s)", detail)
+        self.assertIn("external 3840x2160", detail)
 
-    def test_a_display_that_is_not_the_built_in_panel_fails(self):
-        doc = {"count": 1, "displays": [
-            {"id": 7, "builtin": False, "online": True, "points": [2560, 1440]}]}
-        out = self._check(json.dumps(doc))
-        self.assertTrue(out.startswith("FAIL"), out)
-        self.assertIn("not the builtin panel this machine declares", out)
+    def test_a_display_that_is_not_the_declared_kind_fails(self):
+        ok, detail = self.v({"displays": [{"builtin": False, "online": True, "points": [2560, 1440]}]})
+        self.assertFalse(ok)
+        self.assertIn("not the builtin panel", detail)
 
-    def test_no_display_at_all_fails(self):
-        out = self._check(json.dumps({"count": 0, "displays": []}))
-        self.assertTrue(out.startswith("FAIL"), out)
-        self.assertIn("0 online display(s)", out)
+    def test_a_guest_is_measured_on_the_paravirtual_panel_it_declares(self):
+        self.assertTrue(self.v({"displays": [{"online": True, "points": [1280, 800]}]}, "external")[0])
 
-    def test_an_offline_display_is_not_counted_as_one(self):
-        doc = {"count": 2, "displays": [
-            dict(BENCH_DISPLAY["displays"][0]),
-            {"id": 2, "builtin": False, "online": False, "points": [3840, 2160]}]}
-        out = self._check(json.dumps(doc))
-        self.assertTrue(out.startswith("PASS"), out)
+    def test_no_display_and_an_offline_one(self):
+        self.assertIn("0 online display(s)", self.v({"displays": []})[1])
+        doc = {"displays": [BENCH_DISPLAY["displays"][0], {"builtin": False, "online": False}]}
+        self.assertTrue(self.v(doc)[0])
 
     def test_a_reading_that_could_not_be_taken_fails(self):
-        self.assertTrue(self._check("").startswith("FAIL"))
-        self.assertIn("did not print JSON", self._check("not json at all"))
-
-    def test_the_preflight_check_refuses_rather_than_warns(self):
-        text = MACAB.read_text()
-        self.assertIn('ck no "one display"', text)
-        block = _lift_between(text, 'ck no "one display"', "firmware_default_is_bench")
-        self.assertIn("no", block.lower())
-        self.assertIn("--force crosses it", block)
-
-    def test_force_does_not_cross_the_check_before_the_restart(self):
-        """The second reading is seconds before the transition, and there is
-        no number to save by crossing it."""
-        script = """. "$WK_ROOT/lib/common.sh"
-DRY=""; GO=restart; FORCE=1; WK_FORCE=1; export WK_FORCE
-MACHINE=fakemac; VOLUME="WK Bench"
-mac_display_check() { DISPLAY_READ="2 online display(s)"; return 1; }
-mac_boottime() { printf 1 ; }
-mac_sh() { printf 'THE MACHINE WAS TOLD\\n'; }
-phase_go() {%s}
-phase_go
-""" % macab_func("phase_go")
-        cp = bash(script)
-        self.assertNotEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertNotIn("THE MACHINE WAS TOLD", cp.stdout + cp.stderr)
-        self.assertIn("2 online display(s)", cp.stdout + cp.stderr)
-
-    def test_the_restart_is_reported_as_needing_nobody(self):
-        body = macab_func("phase_go")
-        self.assertIn("firmware default", body)
-        self.assertIn("nobody has to be at the keyboard", body)
+        self.assertIn("answered nothing", self.v("")[1])
+        self.assertIn("did not print JSON", self.v("not json")[1])
 
 
 class TestThePinnedDisplayIsConfig(WkTest):
-    """The expectation is one line of `machines/<machine>.conf`, and a
-    plant without it would let two runs at different resolutions compare."""
-
     def test_mbp_declares_the_bench_installs_measured_mode(self):
-        cp = bash('. "$WK_ROOT/lib/common.sh"; . "$WK_ROOT/boot/machines.sh"\n'
-                  'machine_load mbp && printf "%s" "$NODE_DISPLAY"')
-        # 1280x832 at scale 2 is exactly the 2560x1664 panel: no frame is
-        # rendered larger than the panel and downsampled.
-        self.assertEqual(cp.stdout, "builtin 1280x832", cp.stdout + cp.stderr)
+        """1280x832 at scale 2 is exactly the 2560x1664 panel: no frame is rendered larger and downsampled."""
+        self.assertEqual(conf_for("mac-volume")["NODE_DISPLAY"], "builtin 1280x832")
 
-    def _plant(self, node_display):
-        """A machine conf of the test's own, whose NODE_SSH does not resolve:
-        preflight fails on the first reading and --dry-run carries on to the
-        plant, which is the refusal under test."""
-        with scratch_dir() as tmp:
-            (tmp / "fakemac.conf").write_text(
-                'NODE_SSH="wk-test-no-such-host.invalid"\n'
-                "KIND=mac\nNODE_DRIVER=mac-volume\n"
-                "NODE_ROLE=workstation\n"
-                "NODE_OS=any\n"
-                'NODE_VOLUME="WK Bench"\n'
-                + node_display +
-                'NODE_NOTE="a machine conf that exists only for this test"\n')
-            cp = bash(
-                '"$WK_ROOT/bench/mac-ab.sh" --machine fakemac --dry-run 2>&1',
-                env={"WK_MACHINES_DIR": str(tmp), "WK_SSH_TIMEOUT": "1"},
-                timeout=120)
-            return cp
-
-    def test_a_machine_conf_with_no_node_display_refuses_the_plant(self):
-        cp = self._plant("")
-        self.assertNotEqual(cp.returncode, 0, cp.stdout)
-        self.assertIn("declares no display", cp.stdout)
-        self.assertIn("fakemac.conf", cp.stdout)
-
-    def test_a_pinned_mode_gets_past_that_refusal(self):
-        cp = self._plant('NODE_DISPLAY="builtin 1470x956"\n')
-        self.assertNotEqual(cp.returncode, 0, cp.stdout)
-        self.assertNotIn("NODE_DISPLAY", cp.stdout)
-        self.assertIn("nothing on fakemac is readable right now", cp.stdout)
+    def test_a_machine_that_declares_no_display_refuses_the_plant(self):
+        with world() as m:
+            ready(m)
+            m.d.conf["NODE_DISPLAY"] = ""
+            m.create_task("20260908T000000Z")
+            got, err = said(m.plant)
+        self.assertIs(got, Refused)
+        self.assertIn("declares no display", err)
+        self.assertIn("machines/mbp.conf", err)
 
 
-def job_writer():
-    """The python block phase_plant writes job.json with."""
-    text = MACAB.read_text()
-    m = re.search(r"python3 - <<'PYEOF' > \"\$task_dir/job.json\"\n(.*?)\nPYEOF\n",
-                  text, re.S)
-    assert m, "phase_plant no longer writes job.json through a python heredoc"
-    return m.group(1)
+class TestPreflight(WkTest):
+    """Every check is something that, if wrong, is discovered after the reboot where nothing can report it."""
+
+    def pf(self, m, setup=lambda m: None):
+        ready(m)
+        setup(m)
+        n, err = said(m.preflight)
+        return n, err
+
+    def test_a_ready_mac_is_clean_and_changes_nothing(self):
+        with world() as m:
+            n, err = self.pf(m)
+            self.assertEqual(n, 0, err)
+            self.assertEqual(mutations(m), [])
+        self.assertIn("preflight clean", err)
+
+    def test_an_unreachable_mac_stops_at_the_first_row(self):
+        with world() as m:
+            m.fake.up = False
+            n, err = self.pf(m)
+        self.assertEqual(n, 1)
+        self.assertIn("nothing else was checked", err)
+
+    def test_bench_mode_is_refused_since_the_arms_are_on_the_host_install(self):
+        with world() as m:
+            m.fake.enter_bench()
+            n, err = self.pf(m)
+        self.assertGreaterEqual(n, 1)
+        self.assertIn("BENCH mode", err)
+
+    def test_an_unprovisioned_volume_fails_and_names_the_repair(self):
+        with world() as m:
+            n, err = self.pf(m, lambda m: m.fake.files.update({m.fake.firstboot_log(): ""}))
+        self.assertEqual(n, 1, err)
+        self.assertIn("wk sysimage build perf-macos-tolken --repair", err)
+
+    def test_a_mac_it_cannot_restart_names_machine_setup(self):
+        with world() as m:
+            m.fake.helper = None
+            n, err = self.pf(m)
+        self.assertEqual(n, 1, err)
+        self.assertIn("wk machine setup mbp", err)
+        self.assertIn("planted and", err)
+
+    def test_nothing_staged_fails_unless_patch_will_stage(self):
+        empty = lambda m: m.fake.answer(r"^ls -1 .*/staged", Result(0, ""))   # noqa: E731
+        with world() as m:
+            self.assertEqual(self.pf(m, empty)[0], 1)
+        with world(systems="", patch="HEAD", workspace="mac-rel") as m:
+            self.assertEqual(self.pf(m, empty)[0], 0)
+
+    def test_a_second_display_fails_and_no_force_crosses_it(self):
+        with world() as m:
+            two = {"displays": [BENCH_DISPLAY["displays"][0], {"online": True, "points": [3840, 2160]}]}
+            n, err = self.pf(m, lambda m: m.fake.answer(r"^displays$", Result(0, json.dumps(two))))
+        self.assertEqual(n, 1)
+        self.assertIn("No --force crosses it", err)
+
+    def test_a_guest_needs_its_marker_and_has_no_firmware_to_ask(self):
+        with world("mac-guest") as m:
+            n, err = self.pf(m)
+            self.assertEqual(n, 0, err)
+            self.assertIn("enters bench mode", err)
+        with world("mac-guest") as m:
+            m.fake.marked = False
+            n, err = self.pf(m)
+            self.assertIn("carries no /etc/wk-image", err)
 
 
-def write_job(**env):
-    fields = {"WK_JOB_PLANS": "jetstream3 motionmark", "WK_JOB_ROUNDS": "5",
-              "WK_JOB_MAX_ROUNDS": "40", "WK_JOB_DETECT": "0.3",
-              "WK_JOB_TIMEOUT": "1800", "WK_JOB_SETTLE": "90",
-              "WK_JOB_A": "arm-a", "WK_JOB_B": "arm-b",
-              "WK_JOB_TOOLS": "/var/wk/wk-tools", "WK_JOB_BY": "moose",
-              "WK_JOB_STAMP": "20260908T000000Z"}
-    fields.update(env)
-    cp = subprocess.run(["python3", "-c", job_writer()], env=fields,
-                        capture_output=True, text=True, timeout=30)
-    assert cp.returncode == 0, cp.stderr
-    return json.loads(cp.stdout)
+class TestItSharesTheBoardABsRefusals(WkTest):
+    def refused(self, spec="", **o):
+        with world(**o) as m:
+            m.spec = spec
+            got, err = said(m.check)
+        self.assertIs(got, Refused, err)
+        return err
+
+    def test_the_two_arms_are_two_different_staged_builds(self):
+        self.assertIn("two different arms", self.refused(systems="sid-a,sid-a"))
+
+    def test_a_change_to_resolve_in_the_mirror_is_not_a_macs_arm(self):
+        self.assertIn("staged builds", self.refused(spec="wpe:1725"))
+
+    def test_a_board_only_option_is_refused(self):
+        self.assertIn("--slot is a board A/B's", self.refused(slot="a"))
+
+    def test_the_plan_refusals_are_the_board_ones(self):
+        self.assertIn("--rounds takes a number", self.refused(rounds="0"))
+        self.assertIn("is not a plan name", self.refused(plans=["a b"]))
+
+    def test_the_ceiling_is_not_below_the_floor(self):
+        self.assertIn("below --rounds", self.refused(rounds="9", max_rounds="4"))
+
+    def test_patch_builds_in_a_workspace_and_excludes_systems(self):
+        self.assertIn("--workspace <ws>", self.refused(systems="", patch="HEAD"))
+        self.assertIn("One or the other", self.refused(patch="HEAD", workspace="mac-rel"))
+
+    def test_a_board_is_refused_a_macs_option(self):
+        with temp_store() as store:
+            reg = targets.Registry(REPO, env={"WK_STORE": store["WK_STORE"], "HOME": "/nonexistent"}, machine=Fake())
+            got, err = said(ab.run, REPO, reg, FakeClock(), "", {"devices": "rpi5", "systems": "a,b", "patch": "x"})
+        self.assertIs(got, Refused)
+        self.assertIn("--patch is a Mac A/B's", err)
 
 
-class TestTheCountDefault(WkTest):
-    """Every leg of a run with count=1 warns that no p-value can be computed
-    for it, so the default is two iterations per leg."""
+class TestThePlant(WkTest):
+    """Recorded before the Mac is touched, then everything the run needs written onto the volume while it is
+    merely mounted, each write judged by reading it back."""
 
-    def test_the_scripts_default_is_two(self):
-        line = [l for l in MACAB.read_text().splitlines() if l.startswith("COUNT=")]
-        self.assertEqual(line, ["COUNT=2"], line)
+    def plant(self, m, setup=lambda m: None):
+        ready(m)
+        setup(m)
+        m.create_task(m.clock.stamp())
+        return said(m.plant)
 
-    def test_the_default_reaches_job_json(self):
-        self.assertEqual(write_job(WK_JOB_COUNT="2")["count"], "2")
+    def job(self, m):
+        return json.loads(m.here_fake.files[os.path.join(m.taskdir, "job.json")])
 
-    def test_the_help_block_says_what_it_costs(self):
-        head = "\n".join(MACAB.read_text().splitlines()[:30])
-        self.assertIn("--count", head)
-        self.assertIn("p-value", head)
-        self.assertIn("--detect", head)
+    def test_the_job_carries_the_plan_the_arms_and_the_declared_display(self):
+        with world(rehearse=True) as m:
+            got, err = self.plant(m)
+            self.assertIsNone(got, err)
+            job = self.job(m)
+        self.assertEqual(job["plans"], ["jetstream3", "speedometer3", "motionmark"])
+        self.assertEqual((job["rounds"], job["max_rounds"], job["detect_pct"], job["count"]), (5, 40, 0.3, "2"))
+        self.assertEqual([a["id"] for a in job["arms"]], ["sid-a", "sid-b"])
+        self.assertEqual(job["display"], "builtin 1280x832")
+        self.assertEqual(job["rehearsal"], "1")
 
-
-class TestTheJobCarriesTheDisplay(WkTest):
-    def test_the_pinned_display_reaches_job_json(self):
-        job = write_job(WK_JOB_DISPLAY="builtin 1470x956")
-        self.assertEqual(job["display"], "builtin 1470x956")
-
-    def test_the_plant_passes_the_machines_own_declaration_and_nothing_else(self):
-        """Read once through the driver (b_display), so a machine whose mode is
-        not in its conf -- a guest's, which its target declares -- reaches the
-        job the same way."""
-        body = macab_func("phase_plant")
-        self.assertIn("declared=$(b_display)", body)
-        self.assertIn('WK_JOB_DISPLAY="$declared"', body)
-        self.assertNotIn("$NODE_DISPLAY", body)
-
-
-class TestTheRunIsVisibleWhereRunsAreListed(WkTest):
-    """`wk status` lists $WK_STORE/bench/*/task.json, so the plant records a
-    real task there rather than a side-file of its own."""
-
-    def test_the_side_file_is_gone(self):
-        self.assertNotIn("mac-ab-job.json", MACAB.read_text())
-
-    def test_the_job_lives_under_the_task(self):
-        body = macab_func("phase_plant")
-        self.assertIn('> "$task_dir/job.json"', body)
-        self.assertIn('put_file "$task_dir/job.json"', body)
-
-    def test_the_plant_records_a_task_through_bench_task_new(self):
-        body = macab_func("phase_plant")
-        self.assertIn("bench_task_new", body)
+    def test_the_job_carries_no_force(self):
+        """Crossing a preflight barrier must not reach each leg's own quiet-machine gate."""
+        with world(env={"WK_FORCE": "1"}) as m:
+            self.plant(m)
+            job = self.job(m)
+        self.assertNotIn("force", job)
+        self.assertEqual(job["rehearsal"], "")
 
     def test_the_task_it_writes_is_one_wk_status_can_read(self):
-        """The same call phase_plant makes, against the real store machinery:
-        what `wk status` prints comes from `wkdata task-status`."""
-        fields = re.search(r'bench_task_new "\$task" (.*?)--command',
-                           macab_func("phase_plant"), re.S).group(1)
-        self.assertIn("devices=", fields)
-        self.assertIn("plans=", fields)
-        self.assertIn("slots=", fields)
-        self.assertIn("rounds=", fields)
-        with temp_store() as store:
-            script = """. "$WK_ROOT/lib/common.sh"
-. "$WK_ROOT/lib/store.sh"
-. "$WK_ROOT/lib/bench.sh"
-MACHINE=mbp; CONFIG=mac-release-pgo; PLANS="jetstream3 motionmark"
-ROUNDS=5; A_ID=arm-a; B_ID=arm-b
-task=20260908T000000Z-mbp-mac-ab
-bench_task_new "$task" %s--command "wk bench mac-ab"
-python3 "$WK_ROOT/lib/wkdata.py" task-status "$WK_STORE/bench/20260908T000000Z-mbp-mac-ab"
-""" % fields
-            cp = bash(script, env={"WK_STORE": store["WK_STORE"]})
-            self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-            self.assertIn("subject=arm-a vs arm-b", cp.stdout)
-            self.assertIn("mbp", cp.stdout)
-            self.assertIn("planned=20", cp.stdout)
+        with world() as m:
+            self.plant(m)
+            import subprocess
+            cp = subprocess.run(["python3", str(REPO / "lib" / "wkdata.py"), "task-status", m.taskdir],
+                                capture_output=True, text=True, timeout=30)
+        self.assertIn("subject=sid-a vs sid-b", cp.stdout, cp.stderr)
+        self.assertIn("mbp", cp.stdout)
 
-    def test_no_progress_field_is_stored(self):
-        body = macab_func("phase_plant")
-        self.assertNotIn("progress", body)
+    def test_an_arm_that_is_not_staged_is_refused_before_anything_lands(self):
+        with world(systems="sid-a,sid-x") as m:
+            got, err = self.plant(m)
+            self.assertIs(got, Refused)
+            self.assertEqual(mutations(m), [])
+        self.assertIn("no staged build 'sid-x'", err)
 
-    def test_collect_records_the_outcome_onto_the_same_task(self):
-        body = macab_func("phase_collect")
-        self.assertIn('bench_task_dir "$stamp-$MACHINE-mac-ab"', body)
-        self.assertIn('autorun.state', body)
-        self.assertIn("collect_runs_into_task", body)
+    def test_the_tree_is_verified_file_for_file(self):
+        with world() as m:
+            got, err = self.plant(m, lambda m: m.fake.answer(r"wk-tools'? --exclude", Result(0, "e" * 64 + "\n")))
+        self.assertIs(got, Refused)
+        self.assertIn("what landed is not this tree", err)
 
-    def _collect(self, tsv):
-        """The volume, as a local directory: every command the collect sends
-        is a `cat` or a `tar` of a path, so the stub is the same shell without
-        the ssh. The result directories are the volume's own, env.json and
-        all, which is why they are copied rather than composed."""
-        with temp_store() as store, scratch_dir() as vol:
-            for rid in ("r0", "r1", "r2", "r3"):
-                d = vol / "results" / rid
-                d.mkdir(parents=True)
-                (d / "env.json").write_text(json.dumps(
-                    {"plan": "jetstream3", "workspace": "wk-bench",
-                     "config": "mac-release-pgo", "wall_time_s": "60"}))
-                (d / "result.json").write_text('{"debugOutput": []}')
-            runs = vol / "ab" / "20260908T000000Z" / "runs.tsv"
-            runs.parent.mkdir(parents=True)
-            runs.write_text(tsv)
-            task = store["path"] / "bench" / "20260908T000000Z-mbp-mac-ab"
-            (task / "runs").mkdir(parents=True)
-            script = """. "$WK_ROOT/lib/common.sh"
-. "$WK_ROOT/lib/store.sh"
-. "$WK_ROOT/lib/bench.sh"
-MACHINE=mbp
-mac() { bash -c "$1"; }
-collect_runs_into_task() {%s}
-collect_runs_into_task %s %s %s
-""" % (macab_func("collect_runs_into_task"), shlex.quote(str(task)),
-       shlex.quote(str(vol)), shlex.quote(str(runs)))
-            cp = bash(script, env={"WK_STORE": store["WK_STORE"]})
-            self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-            recorded = {}
-            for d in sorted((task / "runs").iterdir()):
-                recorded[d.name] = json.loads((d / "env.json").read_text())
-            return recorded, cp.stdout + cp.stderr
+    def test_both_digests_leave_out_the_same_names(self):
+        with world() as m:
+            self.plant(m)
+            remote = [c for c in m.fake.ran if re.search(r"wk-tools'? --exclude", c)][0]
+            here = [e[1] for e in m.here_fake.effects if e[0] == "run" and e[1][0] == "python3"][0]
+            pushed = [e[1] for e in m.fake.effects if e[0] == "tar"][0]
+        for name in mac.PUT_SKIP:
+            self.assertIn("--exclude %s" % name, remote)
+            self.assertIn(name, here)
+            self.assertFalse([n for n in pushed if name in n], pushed)
 
-    def test_each_clean_leg_lands_as_a_run_paired_with_its_round_and_arm(self):
-        recorded, out = self._collect(
-            "0\tA\tsid-a\tr0\tclean\tjetstream3\n"
-            "1\tA\tsid-a\tr1\tclean\tjetstream3\n"
-            "1\tB\tsid-b\tr2\tclean\tjetstream3\n")
-        self.assertEqual(sorted(recorded), ["r1", "r2"], out)
-        self.assertEqual(recorded["r1"]["machine"], "mbp")
-        self.assertEqual(recorded["r1"]["ab"], {"round": "1", "arm": "a", "staged": "sid-a"})
-        self.assertEqual(recorded["r2"]["ab"]["arm"], "b")
-        self.assertEqual(recorded["r1"]["plan"], "jetstream3")
+    def test_a_file_that_landed_short_is_refused(self):
+        with world() as m:
+            got, err = self.plant(m, lambda m: m.fake.answer(r"^wc -c .*job.json", Result(0, "7\n")))
+        self.assertIs(got, Refused)
+        self.assertIn("could not write the job", err)
 
-    def test_the_warmup_round_is_not_recorded(self):
-        recorded, out = self._collect("0\tA\tsid-a\tr0\tclean\tjetstream3\n"
-                                      "1\tA\tsid-a\tr1\tclean\tjetstream3\n")
-        self.assertNotIn("r0", recorded, out)
+    def test_a_screensaver_it_cannot_turn_off_is_refused_unless_forced(self):
+        idle = lambda m: m.fake.answer(r"^defaults read .*idleTime", Result(0, "300\n"))   # noqa: E731
+        with world() as m:
+            got, err = self.plant(m, idle)
+        self.assertIs(got, Refused)
+        self.assertIn("To plant anyway:  --force", err)
+        with world(env={"WK_FORCE": "1"}) as m:
+            got, err = self.plant(m, idle)
+        self.assertIsNone(got, err)
+        self.assertIn("the screen may lock", err)
 
-    def test_a_contaminated_leg_is_not_recorded(self):
-        """The lane refuses to compare a leg a software-update scan ran
-        across, so the store does not carry it either."""
-        recorded, out = self._collect("1\tA\tsid-a\tr1\tscanned\tjetstream3\n"
-                                      "1\tB\tsid-b\tr2\tclean\tjetstream3\n")
-        self.assertEqual(sorted(recorded), ["r2"], out)
+    def test_do_not_disturb_is_read_back(self):
+        with world() as m:
+            got, err = self.plant(m, lambda m: m.fake.answer(r"wk_quiet_dnd_on", Result(0, "off\n")))
+        self.assertIs(got, Refused)
+        self.assertIn("Do Not Disturb", err)
 
-    def test_nothing_clean_says_so_and_records_nothing(self):
-        recorded, out = self._collect("0\tA\tsid-a\tr0\tclean\tjetstream3\n")
-        self.assertEqual(recorded, {})
-        self.assertIn("no clean leg after the warmup round", out)
+    def test_the_agent_runs_the_tree_the_plant_verified(self):
+        with world() as m:
+            self.plant(m)
+            plist = m.here_fake.files[os.path.join(m.taskdir, mac.AGENT + ".plist")]
+        self.assertIn("/var/wk/wk-tools/lib/wk/bench/autorun.py", plist)
+        self.assertNotIn("KeepAlive", plist)
+
+    def test_a_tree_with_no_autorun_is_refused(self):
+        with world() as m:
+            got, err = self.plant(m, lambda m: m.fake.answer(r"^test -r .*lib/wk/bench/autorun.py", Result(1)))
+        self.assertIs(got, Refused)
+        self.assertIn("carries no lib/wk/bench/autorun.py", err)
+
+    def test_the_autorun_state_is_reset_to_this_job(self):
+        with world() as m:
+            self.plant(m)
+            state = m.here_fake.files[os.path.join(m.taskdir, "planted.state")]
+        self.assertIn("phase=planted\njob_stamp=", state)
+        self.assertIn("attempts=0", state)
 
 
-class TestTheDriverAnswersFromAnotherMachine(WkTest):
-    """Every board's driver probes over the tailnet from anywhere; this one
-    reports `unknown from here` only if it refuses to try."""
+class TestTheWholeTrip(WkTest):
+    def go(self, m):
+        return said(m.go)
 
-    PRE = """. "$WK_ROOT/lib/common.sh"
-. "$WK_ROOT/lib/store.sh"
-. "$WK_ROOT/boot/machines.sh"
-NODE_NAME=mbp
-NODE_SSH=fakemac
-NODE_VOLUME="WK Bench"
-NODE_DISPLAY="builtin 1470x956"
-NODE_BENCH_SSH=fakemac-bench
-. "$WK_ROOT/boot/mac-volume.sh"
-"""
+    def test_a_dry_run_changes_nothing_and_names_the_gate_it_did_not_evaluate(self):
+        with world() as m, mock.patch.dict(os.environ, {"WK_DRY_RUN": "1"}):
+            rc, err = self.go(m)
+            self.assertEqual(rc, 0, err)
+            self.assertEqual(mutations(m), [])
+            self.assertFalse(os.path.exists(m.taskdir))
+        self.assertIn("dry run -- nothing on mbp was changed", err)
+        self.assertIn("wk bench staged --gates", err)
 
-    def _driver(self, script, env=None):
-        return bash(self.PRE + script, env=env)
+    def test_a_failed_preflight_is_a_barrier_that_force_crosses(self):
+        with world() as m:
+            m.fake.firmware = "host"
+            got, err = self.go(m)
+            self.assertIs(got, Refused)
+            self.assertEqual(mutations(m), [])
+        self.assertIn("--force proceeds anyway", err)
+        with world(env={"WK_FORCE": "1"}, plant=True) as m:
+            os.environ["WK_FORCE"] = "1"
+            m.fake.firmware = "host"
+            rc, err = self.go(m)
+        act._forced.clear()
+        self.assertEqual(rc, 0, err)
+        self.assertIn("FORCED past a barrier", err)
 
-    def test_it_is_probeable_off_the_mac(self):
-        cp = self._driver('if b_probeable; then echo YES; else echo NO; fi')
-        self.assertEqual(cp.stdout.strip(), "YES", cp.stdout + cp.stderr)
+    def test_plant_restarts_nothing(self):
+        with world(plant=True) as m:
+            rc, err = self.go(m)
+            self.assertEqual(rc, 0, err)
+            self.assertEqual(m.fake.boots, 1)
+        self.assertIn("planted and not started", err)
 
-    def test_nothing_about_the_mac_is_stored_between_reads(self):
-        """Every fact above is recomputed; the only file the driver keeps is
-        the record of a person's arming."""
-        text = (REPO / "lib" / "wk" / "boot" / "mac.py").read_text()
-        self.assertNotIn("cache", text.lower())
-        self.assertEqual(1, text.count('lead=("mac-record.sh",)'))
+    def test_it_restarts_through_the_helper_and_sees_the_bench_install_answer(self):
+        with world() as m:
+            rc, err = self.go(m)
+            self.assertEqual(rc, 0, err)
+            self.assertEqual([p.get("WK_VERB") for fn, n, p in m.fake.asked if n == "mac-priv.sh" and p.get("WK_VERB") == "reboot"], ["reboot"])
+            self.assertEqual(m.fake.running, "bench")
+            self.assertEqual(len(m.here_fake.notified), 1, "the plant, and nothing about a run that is going as asked")
+        self.assertIn("answers in BENCH mode", err)
 
+    def test_the_display_is_asked_again_before_the_restart_and_force_does_not_cross_it(self):
+        with world(env={"WK_FORCE": "1"}) as m:
+            ready(m)
+            m.fake.answer(r"^displays$", Result(0, json.dumps({"displays": []})))
+            got, err = said(m.restart)
+            self.assertIs(got, Refused)
+            self.assertEqual(m.fake.boots, 1)
+        self.assertIn("0 online display(s)", err)
 
+    def test_a_restart_the_helper_did_not_make_is_refused(self):
+        with world() as m:
+            ready(m)
+            m.fake.said["reboot"] = (0, "")
+            got, err = said(m.restart)
+        self.assertIs(got, Refused)
+        self.assertIn("still answering", err)
 
-class TestTheMeasuredInstallIsReachedOnItsOwnNode(WkTest):
-    """Two installs, two tailnet nodes. The benchmark one answers as
-    NODE_BENCH_SSH while it measures and needs no password, where the host
-    install stops for one at boot -- so a finished run used to be unreadable
-    from the moment the hand-back rebooted until the host install was back,
-    while the install holding it answered on the tailnet throughout."""
+    def test_a_guests_restart_is_its_stop_and_start(self):
+        with world("mac-guest") as m:
+            rc, err = self.go(m)
+            self.assertEqual(rc, 0, err)
+            self.assertEqual([e for e in m.fake.effects if e in (("stop",), ("start",))], [("stop",), ("start",)])
+        self.assertIn("answers in BENCH mode", err)
 
-    PRE = """. "$WK_ROOT/lib/common.sh"
-. "$WK_ROOT/lib/store.sh"
-. "$WK_ROOT/boot/machines.sh"
-NODE_NAME=mbp
-NODE_SSH=fakemac
-NODE_BENCH_SSH=fakemac-bench
-NODE_VOLUME="WK Bench"
-. "$WK_ROOT/boot/mac-volume.sh"
-"""
-
-
-    def _ssh_line(self, script="", env=None):
-        """i_ssh (boot/machines.sh) with `ssh` stubbed: the command line the
-        bench channel actually builds for this driver."""
-        cp = bash(self.PRE + script
-                  + 'ssh() { printf "%s\\n" "$*"; }\ni_ssh true\n', env=env)
-        return cp.stdout.strip()
-
-    def test_the_destination_is_the_ssh_config_alias_and_not_an_address(self):
-        """dotfiles/ssh/config declares that install by name -- user `bench`,
-        its own pinned host key under the alias -- so the name is the whole
-        address and nothing resolves it to one."""
-        self.assertTrue(self._ssh_line().endswith("fakemac-bench true"),
-                        self._ssh_line())
-
-    def test_it_neither_forces_root_nor_unpins_the_host_key(self):
-        """`-l root` and an unpinned key are a written Pi image's shape: that
-        system regenerates its host key on every write and has no other login.
-        A personalised macOS install has one stable key and a `bench` account."""
-        line = self._ssh_line()
-        self.assertNotIn("-l root", line)
-        self.assertNotIn("StrictHostKeyChecking", line)
-
-    def test_wk_mac_bench_ssh_moves_the_destination(self):
-        line = self._ssh_line(env={"WK_MAC_BENCH_SSH": "somewhere-else"})
-        self.assertIn("somewhere-else", line)
-        self.assertNotIn("fakemac-bench", line)
-
-    def test_the_staging_root_and_the_home_answer_on_that_channel(self):
-        cp = bash(self.PRE + 'MODE_CHANNEL=bench\n'
-                  'printf "%s %s" "$(b_bench_root)" "$(b_bench_home)"')
-        self.assertEqual("/var/wk /Users/bench", cp.stdout, cp.stdout + cp.stderr)
-
-    def test_the_lane_reads_through_the_channel_and_probes_before_it_does(self):
-        text = MACAB.read_text()
-        self.assertIn("mac() {\n    r_ssh \"$@\"\n}", text)
-        self.assertRegex(text, r"load_driver \"\$NODE_DRIVER\"[^\n]*\n\nb_probe",
-                         "the lane reads before it knows which install answered")
-
-    def test_the_lane_asks_the_probe_rather_than_re_reading_the_marker(self):
-        """One reading of which mode it is in, and it is the one that chose the
-        channel every other reading travels on. The volume's *own* marker, read
-        from host mode at a /Volumes path, is a different question and stays."""
-        self.assertNotIn("/etc/wk-image 2>/dev/null", MACAB.read_text())
-
-    def test_no_refusal_is_left_that_names_bench_mode_as_unreadable(self):
-        for fn in ("bench_root", "phase_status", "phase_collect"):
-            with self.subTest(fn=fn):
-                body = func_body(MACAB.read_text(), fn)
-                self.assertNotIn("once the machine returns", body)
-                self.assertNotIn("host-mode verb", body)
+    def test_it_is_not_driven_from_the_mac_it_reboots(self):
+        with world() as m:
+            m.fake.here = lambda: True
+            got, err = self.go(m)
+        self.assertIs(got, Refused)
+        self.assertIn("cannot be driven from mbp", err)
 
 
-def driver_root(channel):
-    """The staging root lib/wk/boot/mac.py resolves for mbp on `channel`, off a FakeMac."""
-    fake, d = mac_board("mac-volume")
-    if channel == "bench":
-        fake.enter_bench()
-    d.probe()
-    return d.bench_root()
+class TestTheWaitReadsBothNodes(WkTest):
+    """Bench mode is a positive reading: the install answers as its own node while it measures."""
+
+    def wait(self, m, same_boot=False):
+        ready(m)
+        m.boot_before = m.d.boot_id() if same_boot else "1"
+        return said(m.wait)
+
+    def test_a_bench_answer_is_the_run(self):
+        with world() as m:
+            m.fake.enter_bench()
+            self.assertEqual(self.wait(m)[0], "bench")
+
+    def test_a_host_answer_on_a_new_boot_is_the_way_back(self):
+        with world() as m:
+            self.assertEqual(self.wait(m)[0], "host")
+
+    def test_a_host_answer_on_the_same_boot_never_rebooted(self):
+        with world() as m:
+            self.assertEqual(self.wait(m, same_boot=True)[0], "noreboot")
+
+    def test_silence_on_both_nodes_is_bounded_by_the_clock(self):
+        with world() as m:
+            m.fake.up = False
+            got, err = self.wait(m)
+            self.assertEqual(got, "silent")
+            self.assertLessEqual(sum(m.clock_.slept), 45 + 600 + 20 + 40)
+        self.assertIn("neither node", err)
 
 
-class TestCollectReadsARunFromBenchMode(WkTest):
-    """`--collect` with the Mac still in bench mode. The whole of phase_collect
-    runs against a stand-in for that install: the staging root is what the
-    driver (lib/wk/boot/mac.py) resolves on that channel of a FakeMac, and the
-    stub rewrites that prefix onto a directory here -- so both channels read
-    one tree through one code path and the only difference is the prefix,
-    which is the claim."""
+class TestAFailedNotifyCostsNothing(WkTest):
+    def test_a_failing_notify_warns_and_carries_on(self):
+        with world() as m:
+            m.here_fake.notify_fails = True
+            got, err = said(m.notify, "a headline", "a detail")
+        self.assertIsNone(got)
+        self.assertIn("could not send the notification 'a headline'", err)
 
-    #  <scratch>/WK Bench - Data/private/var/wk  is the volume as host mode
-    #  reaches it, and  /var/wk  is the same bytes as the install itself does.
-    def _collect(self, channel, tsv):
-        with temp_store() as store, scratch_dir() as tmp:
-            data = tmp / "WK Bench - Data"
-            vol = data / "private" / "var" / "wk"
-            for rid in ("r1", "r2"):
-                d = vol / "results" / rid
-                d.mkdir(parents=True)
-                (d / "env.json").write_text(json.dumps(
-                    {"plan": "speedometer3", "workspace": "wk-bench",
-                     "config": "mac-release-pgo", "wall_time_s": "60"}))
-            (vol / "autorun.state").write_text(
-                "job_stamp=20260908T000000Z\nphase=done\noutcome=ran\n")
-            runs = vol / "ab" / "20260908T000000Z" / "runs.tsv"
-            runs.parent.mkdir(parents=True)
-            runs.write_text(tsv)
-            task = store["path"] / "bench" / "20260908T000000Z-mbp-mac-ab"
-            (task / "runs").mkdir(parents=True)
-            script = """set -euo pipefail
-. "$WK_ROOT/lib/common.sh"
-. "$WK_ROOT/lib/store.sh"
-. "$WK_ROOT/lib/bench.sh"
-. "$WK_ROOT/boot/machines.sh"
-NODE_NAME=mbp
-NODE_SSH=fakemac
-NODE_BENCH_SSH=fakemac-bench
-NODE_VOLUME="WK Bench"
-MACHINE=mbp
-VOLUME="WK Bench"
-MODE_CHANNEL=%s
-MODE="bench perf-macos-tolken-2026-08"
-BROOT=""
-ROOT=%s
-VOL=%s
-b_bench_root() { printf '%%s' "$ROOT"; }
-# ssh joins its arguments into one remote command line, and this is that shell.
-r_ssh() {
-    local c="$*"
-    bash -c "${c//"$ROOT"/"$VOL"}"
-}
-bench_root() {%s}
-mac() {%s}
-mac_sh() { mac bash -lc "$(sh_quote "$*")"; }
-bwk() {%s}
-collect_runs_into_task() {%s}
-phase_collect() {%s}
-phase_collect
-""" % (channel, shlex.quote(driver_root(channel)), shlex.quote(str(vol)),
-       macab_func("bench_root"), macab_func("mac"), macab_func("bwk"),
-       macab_func("collect_runs_into_task"), macab_func("phase_collect"))
-            cp = bash(script, env={"WK_STORE": store["WK_STORE"]})
-            recorded = sorted(d.name for d in (task / "runs").iterdir())
-            return cp, recorded, cp.stdout + cp.stderr
+    def test_the_ways_back_are_notified_and_silence_is_not(self):
+        with world() as m:
+            ready(m)
+            for came in ("host", "noreboot", "silent", "bench"):
+                said(m.outcome, came)
+            self.assertEqual(len(m.here_fake.notified), 2)
 
-    TSV = ("0\tA\tsid-a\tr0\tclean\tspeedometer3\n"
-           "1\tA\tsid-a\tr1\tclean\tspeedometer3\n"
-           "1\tB\tsid-b\tr2\tclean\tspeedometer3\n")
 
-    def test_the_result_is_read_with_the_mac_still_in_bench_mode(self):
-        cp, recorded, out = self._collect("bench", self.TSV)
-        self.assertEqual(cp.returncode, 0, out)
-        self.assertEqual(recorded, ["r1", "r2"], out)
+class TestTheArmsAreBuiltInTheWorkspace(WkTest):
+    """--patch: the baseline and the patched tree are built and staged in the guest, each reclaimed once staged."""
 
-    def test_the_same_collect_off_the_volume_in_host_mode_records_the_same_legs(self):
-        """One implementation, two channels."""
-        cp, recorded, out = self._collect("host", self.TSV)
-        self.assertEqual(cp.returncode, 0, out)
-        self.assertEqual(recorded, ["r1", "r2"], out)
-        self.assertIn("private/var/wk", out)
+    def build(self, patch="refs/heads/pr", setup=lambda m: None, **o):
+        with world(systems="", patch=patch, workspace="mac-rel", **o) as m:
+            mgr = m.manager_fake
+            mgr.answer(["test", "-x"], rc=0)
+            mgr.answer(["sh", "-c"], out="/seed/payload\n")
+            mgr.dirs.add("/seed/payload")
+            mgr.answer(["ssh"], out="/Users/admin/WebKit\n")
+            m.here_fake.answer(["sh", "-c", sched.LOGGED], rc=0)
+            ready(m)
+            m.create_task("20260908T000000Z")
+            setup(m)
+            steps, rwk = [], m.rwk
 
-    def test_the_summary_failing_over_there_does_not_lose_the_result(self):
-        """`wk bench ab-summary` runs from the planted tree on the measured
-        install; a stand-in has none, and the numbers are still recorded."""
-        cp, recorded, out = self._collect("bench", self.TSV)
-        self.assertIn("summary could not be produced", out)
-        self.assertEqual(recorded, ["r1", "r2"], out)
+            def recorded(*words, logged=""):
+                steps.append(words[1] if words[:1] == ("bench",) else words[0])
+                return rwk(*words, logged=logged)
+            m.rwk = recorded
+            m.staged_ids = lambda root: ["sid-new-a", "sid-new-b"][:steps.count("stage")]
+            got, err = said(m.build_ab)
+            return m, got, err, steps
+
+    def guest_scripts(self, m):
+        return [guest_script(e[1][-1]) for e in m.manager_fake.effects if e[0] == "run" and e[1][0] == "ssh"]
+
+    def test_both_arms_are_built_staged_and_reclaimed_in_order(self):
+        m, got, err, steps = self.build()
+        self.assertIsNone(got, err)
+        self.assertEqual((m.a, m.b), ("sid-new-a", "sid-new-b"))
+        self.assertEqual(steps, ["start", "build", "seed", "seed", "seed", "stage", "build", "seed", "seed", "seed", "stage", "stop"])
+        self.assertIn("reclaimed baseline", err)
+        self.assertTrue([s for s in self.guest_scripts(m) if "rm -rf" in s and "Release-pgo-instr" in s])
+
+    def test_a_diff_travels_inside_the_guest_script(self):
+        """The guest's /tmp is not the manager's, so the patch crosses in the script that applies it."""
+        with scratch_dir() as tmp:
+            (tmp / "x.diff").write_text("--- a\n+++ b\n")
+            m, got, err, _ = self.build(patch=str(tmp / "x.diff"))
+        self.assertIsNone(got, err)
+        self.assertTrue([s for s in self.guest_scripts(m) if "base64 -d > /tmp/wk-ab.patch; git -C /Users/admin/WebKit apply" in s])
+
+    def test_an_unpinnable_payload_stages_nothing_unless_told(self):
+        def unpinned(m):
+            m.manager_fake.answer(["sh", "-c"], out="\n")
+        m, got, err, steps = self.build(setup=unpinned)
+        self.assertIs(got, Refused)
+        self.assertNotIn("stage", steps)
+        self.assertIn("--allow-network-fetch", err)
+        self.assertIsNone(self.build(setup=unpinned, allow_network_fetch=True)[1])
+
+    def test_a_patch_that_does_not_apply_puts_the_tree_back(self):
+        def failing(m):
+            m.manager_fake.react(["ssh"], lambda argv, f: Result(1 if "checkout -q refs/heads/pr" in guest_script(argv[-1]) else 0,
+                                                                 "/Users/admin/WebKit\n"))
+        m, got, err, steps = self.build(setup=failing)
+        self.assertIs(got, Refused)
+        self.assertIn("the tree has been put back", err)
+        self.assertEqual(steps.count("stage"), 1)
+        self.assertIn("checkout -q -f", self.guest_scripts(m)[-1])
+
+
+def guest_script(inner):
+    import base64
+    return base64.b64decode(inner.split()[2]).decode()
+
+
+class TestTheLiveRows(unittest.TestCase):
+    """Read-only, as `requires_machine` is: the preflight of each machine the Mac A/B plants on, which changes nothing.
+    The end-to-end halves -- building, staging and measuring a real `mac-release-pgo` pair on mbp and the rehearsal
+    on benchvm -- spend hours of those machines, and are the live tier's to run."""
+
+    def preflight(self, machine):
+        reg = targets.Registry(REPO, machine=None)
+        m = mac.MacAB(REPO, reg, FakeClock(), "", {"devices": machine})
+        m.resolve()
+        n, err = said(m.preflight)
+        self.assertIsInstance(n, int, err)
+        self.assertIn("preflight for an unattended A/B on %s" % machine, err)
+
+    @requires_machine("tolken")
+    def test_ab_pgo_pair_mbp(self):
+        """`live ab.pgo_pair[mbp]`, its read-only half."""
+        self.preflight("mbp")
+
+    @requires_machine("benchvm")
+    def test_bench_rehearsal_benchvm(self):
+        """`live bench.rehearsal[benchvm]`, its read-only half."""
+        self.preflight("benchvm")
 
 
 class TestStatusCarriesTheLegs(WkTest):
@@ -723,420 +804,35 @@ class TestStatusCarriesTheLegs(WkTest):
             cp = bash('python3 "$WK_ROOT/lib/wkdata.py" ab-legs %s' % shlex.quote(str(root)))
             self.assertIn("warmup captures: speedometer3-A.json.gz", cp.stdout)
 
-    def test_status_asks_for_them_through_the_one_sender(self):
-        body = func_body(MACAB.read_text(), "phase_status")
-        self.assertIn("mac_py wkdata.py ab-legs", body)
-        self.assertIn('mac_wkmac() { mac_py wkmac.py "$@"; }', MACAB.read_text())
 
-
-class TestTheWaitReadsBothNodes(WkTest):
-    """Bench mode is a positive reading now, not the absence of one: the
-    install answers as its own node while it measures."""
-
-    def _wait(self, probe):
-        script = ('. "$WK_ROOT/lib/common.sh"\n'
-                  'sleep() { :; }\n'
-                  'BOOT_BEFORE=1786800000\n'
-                  'b_boot_id() { printf "%s" "${BOOT_NOW:-1786900000}"; }\n'
-                  + probe
-                  + 'MACHINE=mbp\nphase_wait() {%s}\nphase_wait 1\n'   # the limit is wall-clock time, and `sleep` is stubbed out above
-                  % func_body(MACAB.read_text(), "phase_wait"))
-        return bash(script)
-
-    def test_a_bench_answer_is_reported_as_the_run(self):
-        cp = self._wait('b_probe() { MODE="bench perf-x"; MODE_CHANNEL=bench; }\n')
-        self.assertEqual("bench", cp.stdout, cp.stdout + cp.stderr)
-        self.assertIn("BENCH mode (perf-x)", cp.stderr)
-
-    def test_a_host_answer_on_a_new_boot_is_the_way_back(self):
-        cp = self._wait('b_probe() { MODE=host; MODE_CHANNEL=host; }\n')
-        self.assertEqual("host", cp.stdout, cp.stdout + cp.stderr)
-
-    def test_a_host_answer_on_the_same_boot_never_rebooted(self):
-        cp = self._wait('b_probe() { MODE=host; MODE_CHANNEL=host; }\n'
-                        'BOOT_NOW=1786800000\n')
-        self.assertEqual("noreboot", cp.stdout, cp.stdout + cp.stderr)
-
-    def test_the_same_boot_is_asked_only_of_the_host_install(self):
-        """In bench mode `kern.boottime` is another install's, so comparing it
-        with the one taken before the restart says nothing."""
-        cp = self._wait('b_probe() { MODE="bench perf-x"; MODE_CHANNEL=bench; }\n'
-                        'BOOT_NOW=1786800000\n')
-        self.assertEqual("bench", cp.stdout, cp.stdout + cp.stderr)
-
-    def test_silence_on_both_nodes_is_bounded_and_says_so(self):
-        cp = self._wait('b_probe() { MODE=unreachable; MODE_CHANNEL=none; }\n')
-        self.assertEqual("silent", cp.stdout, cp.stdout + cp.stderr)
-        self.assertIn("neither node", cp.stderr)
-
-
-class TestHowAMachineGetsBackIsTheDriversAnswer(WkTest):
-    """A one-shot is spent by the boot that took it, so a plain reboot returns
-    the board. A firmware default is sticky: the Mac's next boot enters
-    whatever the evidence above says it names, and what hands the machine back
-    is the job it was armed for. Telling an operator to reboot a Mac in bench
-    mode contradicts the `firmware_default=` line printed directly above it."""
-
-    def _status_tail(self, arming):
-        return bash('. "$WK_ROOT/lib/common.sh"\n'
-                    'MACHINE=mbp\nBOOT_ARMING=%s\nMODE="bench perf-x"\n'
-                    'BOOTED=now\nARMED_IMG=""\nNODE_ROOT=""\n'
-                    'read_state() { :; }\nb_evidence() { echo "firmware_default=x"; }\n'
-                    'machine_quiet_siblings() { printf "0 0"; }\n'
-                    'cmd_status() {%s}\ncmd_status\n'
-                    % (arming, func_body((REPO / "cmd" / "boot").read_text(), "cmd_status")))
-
-    def test_a_sticky_firmware_default_is_not_undone_by_a_reboot(self):
-        out = self._status_tail("command").stderr
-        self.assertIn("hands the machine back when it ends", out)
-        self.assertNotIn("a plain reboot returns it to host mode", out)
-
-    def test_a_spent_one_shot_still_says_a_reboot_returns_it(self):
-        out = self._status_tail("one-shot").stderr
-        self.assertIn("a plain reboot returns it to host mode", out)
-
-    def _arm_tail(self, extra):
-        return bash('. "$WK_ROOT/lib/common.sh"\n'
-                    'MACHINE=mbp\nIMAGE="WK Bench"\nARM_WATCHDOG=600\n' + extra
-                    + 'log "  ---"\n')
-
-    def test_the_arm_epilogue_offers_no_watchdog_where_none_is_written(self):
-        """`--keep` cancels a self-return watchdog, and what says whether one
-        was written is ARM_WATCHDOG -- this arming's own record. Not the
-        driver's self-disarm: cmd/sysimage stages the watchdog onto every
-        fleet card, including boards whose driver has no self-disarm at all,
-        and keying on the driver told rpi5 it had none while its watchdog
-        rebooted it mid-run (2026-09-10)."""
-        text = (REPO / "cmd" / "boot").read_text()
-        body = func_body(text, "cmd_arm")
-        self.assertIn('if [ -n "$ARM_WATCHDOG" ]; then', body)
-        self.assertNotIn("command -v b_self_disarm_sh", body)
-        self.assertNotIn("/boot/firmware/wk-diag.txt", text,
-                         "a medium-specific path where the driver has a verb")
-
-
-class TestTheWatchdogBelongsToTheSystemThatCarriesIt(WkTest):
-    """`wk boot <m> --keep` cancels a self-return watchdog, and whether the
-    running system carries one is asked of that system (b_watchdog_present),
-    not of its driver. A Mac's benchmark install carries none: what ends its
-    run is the job it is running."""
-
-    def _keep(self, extra):
-        return bash('. "$WK_ROOT/lib/common.sh"\n'
-                    'MACHINE=mbp\nDRY=\nread_state() { :; }\n'
-                    'r_sudo() { echo TOUCHED; }\n' + extra
-                    + 'cmd_keep() {%s}\ncmd_keep\n'
-                    % func_body((REPO / "cmd" / "boot").read_text(), "cmd_keep"))
-
-    def test_a_system_carrying_no_watchdog_has_nothing_to_claim(self):
-        cp = self._keep('MODE="bench perf-x"\nb_watchdog_present() { return 1; }\n')
-        self.assertNotEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertIn("no self-return watchdog", cp.stderr)
-        self.assertNotIn("TOUCHED", cp.stdout)
-
-    def test_a_system_that_carries_one_is_claimed(self):
-        cp = self._keep('MODE="bench perf-x"\nb_watchdog_present() { return 0; }\n')
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertIn("TOUCHED", cp.stdout)
-
-    def test_the_system_is_not_asked_in_host_mode(self):
-        cp = self._keep("MODE=host\nb_watchdog_present() { return 0; }\n")
-        self.assertNotEqual(cp.returncode, 0)
-        self.assertIn("not in bench mode", cp.stderr)
-
-
-class TestTheRestartIsTheOneImplementation(WkTest):
-    """A graceful restart is declined by any application that will not quit --
-    measured 2026-09-08, with a console user logged in and osascript automation
-    working -- so an unattended lane uses the boot driver's helper reboot, which
-    no application can refuse, and refuses up front where that is not installed."""
-
-    def test_phase_go_restarts_through_the_boot_driver(self):
-        body = macab_func("phase_go")
-        self.assertIn("b_reboot", body)
-
-    def test_phase_go_hand_rolls_no_restart_of_its_own(self):
-        body = macab_func("phase_go")
-        for spelling in ("aevtrrst", "shutdown -r", "shutdown $flag"):
-            self.assertNotIn(spelling, body, spelling)
-
-    def test_the_driver_is_loaded_so_b_reboot_exists(self):
-        self.assertIn('load_driver "$NODE_DRIVER"', MACAB.read_text())
-
-    def test_the_helper_reboot_is_asked_for_through_one_reader(self):
-        """b_reboot answers from the Mac and from another machine, so the lane
-        and `wk boot` restart it the same way. `mv_priv` is the one spelling of
-        asking the helper, and it goes through `m_ssh`, the one reader."""
-        fake, d = mac_board("mac-volume")
-        d.probe()
-        d.reboot()
-        asks = [(fn, p.get("WK_VERB")) for fn, name, p in fake.asked if name == "mac-priv.sh"]
-        self.assertEqual(asks, [("m_ssh", "reboot")])
-        self.assertTrue(fake.on_rescue() and fake.boots == 2, "the helper's reboot did not happen")
-        onboard = [f.name for f in (REPO / "boot" / "onboard").iterdir() if "sudo -n" in f.read_text()]
-        self.assertEqual(sorted(onboard), ["mac-own.sh", "mac-priv.sh"], "the helper is asked from one file")
-
-    def test_preflight_refuses_a_mac_it_cannot_restart(self):
-        for ready, want in ((0, "ok"), (1, "FAIL")):
-            with self.subTest(ready=ready):
-                cp = bash(
-                    '. "$WK_ROOT/lib/common.sh"\n'
-                    'PF_FAIL=0\n'
-                    'ck() {%s}\n'
-                    'b_restart_ready() { return %d; }\n'
-                    'b_restart_detail() { printf "no boot helper on tolken"; }\n'
-                    'MACHINE=mbp\n'
-                    '%s\n'
-                    'echo "PF_FAIL=$PF_FAIL"'
-                    % (macab_func("ck"), ready, _RESTARTABLE_CK))
-                out = cp.stdout + cp.stderr
-                self.assertIn("restartable", out, out)
-                self.assertIn("PF_FAIL=%d" % (0 if ready == 0 else 1), out, out)
-                if want == "FAIL":
-                    # A wk command, not an incantation to run over there by hand.
-                    self.assertIn("wk boot mbp --prepare", out, out)
-                    self.assertNotIn("./setup --stage quiesce", out, out)
-                    self.assertIn("planted and correct", out, out)
-
-
-class TestTheTwoMachinesAreNamedApart(WkTest):
-    """The machine being measured and the machine that *manages* it are one
-    machine for a Mac booting its own second volume and two for a guest, whose
-    manager is the Mac running it. The lane had one variable for both -- an ssh
-    destination that was also every message's label -- so a driver whose target
-    has no ssh destination at all could not start."""
-
-    def test_the_lane_names_no_ssh_destination_of_its_own(self):
-        text = MACAB.read_text()
-        self.assertNotIn("$HOST", text)
-        self.assertNotIn("mac_ssh ", text, "boot/machines.sh's by-destination ssh")
-
-    def test_a_machine_with_no_ssh_destination_is_not_refused_up_front(self):
-        """benchvm sets no NODE_SSH: a tart guest's address is in no ssh config
-        and changes every boot, which is why its driver defines its own m_ssh."""
-        text = MACAB.read_text()
-        self.assertNotIn("sets no NODE_SSH", text)
-        cp = bash('"$WK_ROOT/bench/mac-ab.sh" --machine benchvm --dry-run 2>&1',
-                  env={"WK_SSH_TIMEOUT": "1"}, timeout=180)
-        out = cp.stdout + cp.stderr
-        self.assertIn("preflight for an unattended A/B on benchvm", out)
-        self.assertNotIn("NODE_SSH", out)
-
-    def test_the_measured_machine_is_reached_through_the_one_reader(self):
-        """r_ssh, so the reader follows whichever install answered: the lane
-        must own no ssh of its own and must not pin itself to host mode."""
-        text = MACAB.read_text()
-        self.assertIn("mac() {\n    r_ssh \"$@\"\n}", text)
-        self.assertNotIn("m_ssh ", text, "a host-mode-only read of the measured machine")
-
-    def test_the_manager_is_reached_through_the_drivers_hook(self):
-        text = MACAB.read_text()
-        self.assertIn('mgr() { b_manage "$@"; }', text)
-        # The three things that belong to the manager and not to the measured
-        # machine: its wk-tools, the builds it runs, and the patch they apply.
-        self.assertIn("mgr_sh \"cd $(sh_quote \"$(mgr_tools)\") && ./wk $*\"", text)
-        self.assertIn("mgr_sh \"ssh -o BatchMode=yes", func_body(text, "guest_sh"))
-        self.assertIn('mgr "cat > /tmp/wk-ab.patch"', text)
-
-    def test_each_driver_answers_both_halves(self):
-        for rel, hooks in (
-                ("boot/mac-volume.sh", ("b_manage", "b_manage_name", "b_manage_tools",
-                                        "b_manage_prepare", "b_bench_home",
-                                        "b_bench_put", "b_bench_put_file",
-                                        "b_restart_ready", "b_restart_detail")),
-                ("boot/mac-guest.sh", ("b_manage", "b_manage_name", "b_manage_tools",
-                                       "b_manage_prepare", "b_bench_home",
-                                       "b_bench_put", "b_bench_put_file",
-                                       "b_restart_ready", "b_restart_detail", "b_display"))):
-            # the driver's shim, or boot/machines.sh's, which asks the same class
-            text = (REPO / rel).read_text() + (REPO / "boot" / "machines.sh").read_text()
-            for hook in hooks:
-                with self.subTest(driver=rel, hook=hook):
-                    self.assertIn(f"\n{hook}() {{", "\n" + text)
-
-
-
-class TestStagingIsTheDriversAndVerifiedHere(WkTest):
-    """`wk bench stage` already delivers through b_bench_put / b_bench_put_file.
-    A second delivery in the lane is a second thing to keep in step, and it was
-    the one that had to know how a volume's path escapes."""
-
-    def test_the_lane_delivers_through_the_driver_and_owns_no_transport(self):
-        text = MACAB.read_text()
-        self.assertIn("b_bench_put_file \"$1\" \"$2\"", func_body(text, "put_file"))
-        self.assertIn('b_bench_put "$src" "$dst"', func_body(text, "put_tree"))
-        for verb in ("tar -cf -", "rsync ", "scp "):
-            for fn in ("put_file", "put_tree"):
-                self.assertNotIn(verb, func_body(text, fn),
-                                 f"{fn} carries a transport of its own ({verb})")
-
-    def test_what_landed_is_still_judged_here(self):
-        """A transport that wrote nothing exits 0, and a tree stale in one file
-        looks right until the reboot, where nothing can report it."""
-        self.assertIn("wc -c <", func_body(MACAB.read_text(), "put_file"))
-        self.assertIn("treehash.py", func_body(MACAB.read_text(), "put_tree"))
-
-
-
-class TestTheMeasuredHomeIsTheDrivers(WkTest):
-    """It was derived from the volume's own path, which is a volume driver's
-    fact and no other's."""
-
-    def test_the_lane_derives_no_path_of_its_own(self):
-        body = func_body(MACAB.read_text(), "bench_home")
-        self.assertIn("b_bench_home", body)
-        self.assertNotIn("Users/bench", body)
-
-
-
-class TestAFailedNotifyCostsNothing(WkTest):
-    """A notification that did not go out must not cost a measurement."""
-
-    def _notify(self, notify_exit):
-        script = """. "$WK_ROOT/lib/common.sh"
-wk_notify() { echo 'wk-notify: no ntfy topic on this machine' >&2; return %d; }
-notify() {%s}
-notify "a headline" "a detail"
-printf 'rc=%%s' "$?"
-""" % (notify_exit, macab_func("notify"))
-        return bash(script)
-
-    def test_a_failing_notify_returns_zero_and_warns(self):
-        cp = self._notify(1)
-        self.assertIn("rc=0", cp.stdout, cp.stdout + cp.stderr)
-        self.assertIn("could not send the notification", cp.stdout + cp.stderr)
-
-    def test_a_notify_that_worked_says_nothing(self):
-        cp = self._notify(0)
-        self.assertIn("rc=0", cp.stdout)
-        self.assertNotIn("could not send", cp.stdout + cp.stderr)
-
-    def test_no_call_site_treats_it_as_fatal(self):
-        text = MACAB.read_text()
-        for line in text.splitlines():
-            if line.strip().startswith("notify "):
-                self.assertNotIn("|| die", line)
-                self.assertNotIn("|| exit", line)
-
-    def test_it_is_called_only_at_the_moments_the_driver_knows(self):
-        """Silence is the expected end -- the bench install powers the machine
-        off -- so nothing is notified about it: it cannot tell "finished and
-        powered off" from "still measuring". What is notified is the plant and
-        the two ways the transition can fail visibly."""
-        text = MACAB.read_text()
-        calls = [l.strip() for l in text.splitlines() if l.strip().startswith('notify "')]
-        self.assertEqual(len(calls), 3, calls)
-        self.assertTrue(any("planted" in c for c in calls))
-        self.assertTrue(any("came back to host mode" in c for c in calls))
-        self.assertTrue(any("never rebooted" in c for c in calls))
-        self.assertFalse(any("gone silent" in c for c in calls), calls)
-
-class TestThePlantedTreeIsVerifiedWhole(WkTest):
-    """A sentinel is not a verification. The plant used to check one file's byte
-    count, so a tree stale in any other file landed looking right and behaved as
-    an older lane -- discovered after the reboot, in bench mode, where nothing
-    can report it."""
-
-    def test_the_probe_file_check_is_gone(self):
-        body = func_body(MACAB.read_text(), "put_tree")
-        self.assertNotIn("probe", body)
-        self.assertIn("treehash.py", body)
-
-    def test_the_exclusions_actually_exclude(self):
-        """Word splitting does not remove quotes: `--exclude '.git'` names a
-        file that does not exist, and the transport carries the history it was
-        meant to leave behind -- while the two digests still match, because the
-        one on the far side is built for a shell, which does remove them."""
-        with scratch_dir() as tmp:
-            src, dst = tmp / "src", tmp / "dst"
-            (src / ".git").mkdir(parents=True)
-            (src / ".git" / "HEAD").write_text("ref: refs/heads/main\n")
-            (src / "__pycache__").mkdir()
-            (src / "__pycache__" / "x.pyc").write_text("x")
-            (src / "wk").write_text("#!/bin/sh\n")
-            dst.mkdir()
-            cp = bash('. "$WK_ROOT/lib/common.sh"; . "$WK_ROOT/lib/store.sh"\n'
-                      '. "$WK_ROOT/lib/bench.sh"\n'
-                      '# shellcheck disable=SC2046\n'
-                      f'tar -cf - $(bench_put_excludes) -C {shlex.quote(str(src))} . '
-                      f'| tar -xf - -C {shlex.quote(str(dst))}\n',
-                      env={"WK_STORE": str(tmp / "store")})
-            self.assertEqual(0, cp.returncode, cp.stdout + cp.stderr)
-            landed = sorted(p.name for p in dst.iterdir())
-            self.assertEqual(["wk"], landed,
-                             f"the excluded names crossed anyway: {landed}")
-
-    def test_the_exclusion_list_holds_no_metacharacter(self):
-        """What makes the unquoted list above safe, checked rather than said."""
-        cp = bash('. "$WK_ROOT/lib/common.sh"; . "$WK_ROOT/lib/store.sh"\n'
-                  '. "$WK_ROOT/lib/bench.sh"; printf "%s" "$BENCH_PUT_SKIP"')
-        names = cp.stdout.split()
-        self.assertTrue(names, cp.stdout + cp.stderr)
-        for name in names:
-            self.assertRegex(name, r"^[A-Za-z0-9_.-]+$", name)
-
-    def test_both_sides_exclude_the_same_names(self):
-        """One list, read twice. Two lists is two file sets and two digests of
-        different things, which reads as a corrupted tree on every plant."""
-        text = MACAB.read_text()
-        self.assertIn("BENCH_PUT_SKIP=", (REPO / "lib" / "bench.sh").read_text())
-        body = func_body(text, "put_tree")
-        self.assertEqual(1, body.count("$BENCH_PUT_SKIP"),
-                         "the far side's list is the driver's own, from the same variable")
-        for driver in ("mac-volume", "mac-guest"):
-            self.assertIn('${BENCH_PUT_SKIP:?', (REPO / "boot" / ("%s.sh" % driver)).read_text())
-
-    def test_the_local_arguments_are_an_array_and_not_a_split_string(self):
-        """`sh_quote .git` is `'.git'` with the quotes in it: word-split without
-        quote removal, the local side excludes a name no file has and hashes a
-        different file set than the far side, whose shell does remove them."""
-        body = func_body(MACAB.read_text(), "put_tree")
-        self.assertIn('local_args+=(--exclude "$x")', body)
-        self.assertIn('"${local_args[@]}"', body)
-
-
-class TestOneReaderOfTheBootTime(WkTest):
-    """"Did it actually reboot" is decided by kern.boottime, and the driver had
-    a second copy of that reading whose pattern was anchored on `sec = ` alone.
-    `.*sec *= *` matches greedily to the last one in
-    `{ sec = 1788835009, usec = 104495 }`, so that copy answered 104495 -- the
-    microseconds -- and the test for "the same boot as before" compared those."""
-
-    SYSCTL = "{ sec = 1788835009, usec = 104495 } Mon Sep  7 20:36:49 2026"
-
-    def test_the_driver_has_no_reader_of_its_own(self):
-        text = MACAB.read_text()
-        # The die message still names kern.boottime as its evidence, which is
-        # what the operator has to know; what must be gone is the reading.
-        self.assertNotIn("sysctl", text)
-        self.assertNotIn("mac_boottime", text)
-        self.assertIn("BOOT_BEFORE=$(b_boot_id)", text)
-
-    def test_the_one_reader_answers_seconds_and_not_microseconds(self):
-        """The brace is what makes it the seconds: bracketed, the pattern cannot
-        slide onto `usec`."""
-        fake, d = mac_board("mac-volume")
-        d.probe()
-        fake.script = lambda name, p, input: Result(0, self.SYSCTL + "\n")
-        self.assertEqual("1788835009", d.boot_id())
-
-    def test_the_pattern_the_driver_retired_answered_the_microseconds(self):
-        """The discriminating half: without this the test above passes against
-        either pattern on a machine whose usec happens to be long."""
-        cp = bash("printf '%s\\n' " + repr(self.SYSCTL).replace("'", '"')
-                  + " | sed -n 's/.*sec *= *\\([0-9]*\\).*/\\1/p'\n")
-        self.assertEqual("104495", cp.stdout.strip(), cp.stdout + cp.stderr)
-
-
-class ForceCrossesBarriersAndNothingElse(WkTest):
-    """One flag, one meaning. It used to reach job.json, where the autorun
-    turned it into `--force` on every leg -- so crossing a preflight barrier
-    silently disabled each leg's own quiet-machine gate."""
-
-    def test_the_job_carries_no_force(self):
-        text = MACAB.read_text()
-        self.assertNotIn("WK_JOB_FORCE", text)
-        self.assertNotIn('"force"', text)
+class TestTheDriverAnswersFromAnotherMachine(WkTest):
+    """Every board's driver probes over the tailnet from anywhere; this one
+    reports `unknown from here` only if it refuses to try."""
+
+    PRE = """. "$WK_ROOT/lib/common.sh"
+. "$WK_ROOT/lib/store.sh"
+. "$WK_ROOT/boot/machines.sh"
+NODE_NAME=mbp
+NODE_SSH=fakemac
+NODE_VOLUME="WK Bench"
+NODE_DISPLAY="builtin 1470x956"
+NODE_BENCH_SSH=fakemac-bench
+. "$WK_ROOT/boot/mac-volume.sh"
+"""
+
+    def _driver(self, script, env=None):
+        return bash(self.PRE + script, env=env)
+
+    def test_it_is_probeable_off_the_mac(self):
+        cp = self._driver('if b_probeable; then echo YES; else echo NO; fi')
+        self.assertEqual(cp.stdout.strip(), "YES", cp.stdout + cp.stderr)
+
+    def test_nothing_about_the_mac_is_stored_between_reads(self):
+        """Every fact above is recomputed; the only file the driver keeps is
+        the record of a person's arming."""
+        text = (REPO / "lib" / "wk" / "boot" / "mac.py").read_text()
+        self.assertNotIn("cache", text.lower())
+        self.assertEqual(1, text.count('lead=("mac-record.sh",)'))
 
 
 if __name__ == "__main__":

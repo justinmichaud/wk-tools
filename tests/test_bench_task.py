@@ -1,9 +1,9 @@
-"""Benchmark *tasks*: the unit `wk ab`, `wk pi bench` and `wk bench` produce
+"""Benchmark *tasks*: the unit `wk ab` and `wk bench` produce
 and `wk bench ls`, `wk bench report` and `wk status` speak in
 (lib/wk/bench/record.py; `wk bench`'s verbs in lib/wk/bench/cli.py).
 
 A synthetic task -- task.json plus runs whose env.json carries the round and
-arm `wk pi bench --ab` records -- read in-process against a scratch store and
+arm `wk bench run --ab` records -- read in-process against a scratch store and
 a fake registry: no board, no workspace, no machine asked. The fleet walk is
 driven through fake targets; two tests go through ./wk to hold the
 declaration (`ls` runs here, reads this store and starts nothing).
@@ -11,6 +11,7 @@ declaration (`ls` runs here, reads this store and starts nothing).
 Run: python3 -m unittest tests.test_bench_task -v
 """
 import json
+import os
 import subprocess
 import sys
 import unittest
@@ -508,33 +509,6 @@ class TestThroughWk(WkTest):
             else:
                 self.assertIn("is macOS bench mode", cp.stdout)
 
-    def test_pi_bench_refuses_an_unknown_task_before_any_board(self):
-        with temp_store() as store:
-            (store["path"] / "bench").mkdir()
-            cp = run("pi", "bench", "not-a-real-machine", "speedometer3", "--task", "nosuch",
-                     env={"WK_STORE": store["WK_STORE"]}, timeout=30)
-            self.assertNotEqual(cp.returncode, 0)
-            self.assertIn("no such task 'nosuch'", cp.stdout)
-            self.assertNotIn("no such machine", cp.stdout, "the task is checked before the board is looked up")
-
-    def test_ab_refuses_an_unknown_task(self):
-        with temp_store() as store:
-            (store["path"] / "bench").mkdir()
-            cp = run("ab", "wpe:1725", "--devices", "rpi3", "--task", "nosuch",
-                     env={"WK_STORE": store["WK_STORE"]}, timeout=30)
-            self.assertNotEqual(cp.returncode, 0)
-            self.assertIn("no such task 'nosuch'", cp.stdout)
-
-    def test_ab_timeout_is_seconds(self):
-        cp = run("ab", "wpe:1725", "--devices", "rpi3", "--timeout", "soon", timeout=30)
-        self.assertEqual(cp.returncode, 1, cp.stdout)
-        self.assertIn("--timeout takes seconds", cp.stdout)
-
-    def test_ab_detach_and_dry_run_exclude_each_other(self):
-        cp = run("ab", "wpe:1725", "--devices", "rpi3", "--dry-run", "--detach", timeout=30)
-        self.assertEqual(cp.returncode, 1, cp.stdout)
-        self.assertIn("nothing to detach", cp.stdout)
-
 
 class TestReadingTasksStartsNothing(WkTest):
     """`wk bench ls` walks the fleet from where it is typed and reads a store
@@ -571,7 +545,7 @@ class TestArtifactsLandWhereTheMachineCanReadThem(WkTest):
     downloaded profiler, a long-running command's task record, a bench task's
     directory. On a Linux host that is the store; on a macOS workstation the
     store is the podman VM's, root-owned and unwritable from this side, so they
-    go in this machine's own state directory instead. `wk ab` and `wk pi bench`
+    go in this machine's own state directory instead. `wk ab` and `wk bench run --ab`
     are host commands that record a task, and neither could run at all while
     the answer was the store (measured 2026-09-16: `mkdir /var/lib/wk/bench` is
     Permission denied)."""
@@ -593,13 +567,12 @@ class TestArtifactsLandWhereTheMachineCanReadThem(WkTest):
 echo "RECORD=$(wk_record_dir)"
 echo "ARTIFACT=$(wk_artifact_dir)"
 echo "BENCH=$BENCH_DIR"
-echo "SEED=$SEED_DIR"
-echo "RUNNER=$RUNNER_DIR"
 echo "SAMPLY=$(samply_store_dir aarch64-apple-darwin)"
 ''', env=env)
         assert cp.returncode == 0, cp.stdout + cp.stderr
         out = dict(l.split("=", 1) for l in cp.stdout.strip().splitlines())
         out["TASK"] = str(task_record.Records(env=clean_env(env)).root)   # what lib/task.sh writes through
+        out["SEED"] = os.path.join(Store(clean_env(env)).artifact_dir(), "bench")   # where wk.bench.seed pins a payload
         return out
 
     def test_a_writable_store_keeps_them(self):
@@ -610,7 +583,6 @@ echo "SAMPLY=$(samply_store_dir aarch64-apple-darwin)"
             self.assertEqual(f["BENCH"], f"{tmp}/bench")
             self.assertEqual(f["TASK"], f"{tmp}/task")
             self.assertEqual(f["SEED"], f"{tmp}/cache/bench")
-            self.assertEqual(f["RUNNER"], f"{tmp}/cache/bench-runner")
             self.assertTrue(f["SAMPLY"].startswith(f"{tmp}/cache/samply/"), f["SAMPLY"])
 
     @unittest.skipUnless(sys.platform == "darwin",
@@ -649,7 +621,7 @@ ensure_dir "$(bench_task_dir probe)/runs" >/dev/null && echo MADE
         is where the macOS lane broke."""
         with scratch_dir() as tmp:
             f = self._dir(tmp, {"XDG_STATE_HOME": str(tmp / "state")})
-            for key in ("ARTIFACT", "BENCH", "TASK", "SEED", "RUNNER", "SAMPLY"):
+            for key in ("ARTIFACT", "BENCH", "TASK", "SEED", "SAMPLY"):
                 self.assertTrue(f[key].startswith(f['RECORD'] + "/"),
                                 f"{key}={f[key]} is not under {f['RECORD']}")
 

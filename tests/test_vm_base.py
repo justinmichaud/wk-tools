@@ -1,685 +1,657 @@
-"""Building the golden macOS base.
+"""The golden macOS base, `wk sysimage build macos-guest-base`, against a fake host whose tart keeps one VM's state
+and whose ssh answers as the guest would: built once, sealed only on a clear screen, stale when its inputs move,
+crash-only, and erased on two separate questions. The base is the one artifact whose mistakes every clone inherits.
 
-`wk vm base --rebuild` is hours -- an image pull, Xcode's first launch --
-and the completion marker is written after all of it. Anything fatal in the late steps therefore leaves a fully provisioned
-base with no marker, which the next run deletes as rubble (_ensure_base), so
-what is knowable up front is checked up front and the marker records what
-the base actually got.
-
-The password is not one of those steps: macOS Tahoe 26.4 refuses the
-only change form the account itself can run, so the guest keeps the password
-its image ships and every command that hands a guest over states it.
-
-Hermetic: the driver's own functions are run against a stub `tart` and stubbed
-helpers -- no VM, no guest, no ssh.
-
-Run: python3 -m unittest tests.test_vm_base -v
+Run: python3 tests/run.py --unit -k test_vm_base
 """
+import contextlib
+import functools
+import importlib.util
 import inspect
+import io
+import json
 import os
 import platform
 import shutil
 import subprocess
 import sys
+import tempfile
 import unittest
+from unittest import mock
 
-from tests.support import (REPO, WkTest, assert_guest_start_converges, bash,
-                           func_body, stub_path)
+from tests.killpoints import converges
+from tests.support import REPO, assert_guest_start_converges, live_selected
 
+sys.path.insert(0, str(REPO / "lib"))
+from wk import act, guest, targets, tools  # noqa: E402
+from wk.act import Refused  # noqa: E402
+from wk.clock import FakeClock  # noqa: E402
+from wk.machine import Fake, Local, Result  # noqa: E402
+from wk.store import Store  # noqa: E402
+from wk.sysimage import cli, guestbase  # noqa: E402
+
+TART = "/t/tart"
+IP = "192.168.64.7"
 PROVISION = REPO / "vm" / "provision-base.sh"
-VM = REPO / "targets" / "vm.sh"
-
-# A base that exists and is stopped; every other tart verb succeeds.
-TART = '''#!/bin/sh
-case "$1" in
-  list) echo '[{"Name":"wk-base","Source":"local","State":"stopped"}]' ;;
-  *)    exit 0 ;;
-esac
-'''
-
-# The driver, loaded against a scratch store: what every case below starts from.
-DRIVER = '''
-. "$WK_ROOT/lib/common.sh"
-. "$WK_ROOT/lib/resources.sh"
-. "$WK_ROOT/lib/store.sh"
-. "$WK_ROOT/lib/target.sh"
-load_target vm >/dev/null 2>&1
-'''
+CLEAR = "Notification Center:21:1280x800@0,0;Terminal:0:863x499@40,51;"
+PANE = "Setup Assistant:0:800x600;Terminal:0:863x499;"
 
 
-class TestDeletingAVMReapsWhatRanIt(WkTest):
-    """`tart delete` frees the disk and leaves the `tart run` process, which
-    goes on holding one of macOS's few Virtualization framework slots. Two of
-    those, left by interrupted builds, made a base build die in base.run.log
-    with "The number of VMs exceeds the system limit" (measured 2026-09-04)."""
-
-    def _run(self, script, leak=True):
-        d = self.tmp
-        (d / "bin").mkdir(exist_ok=True)
-        # A stand-in for the runner: it matches `_vm_runners`' pattern and
-        # sleeps until killed, so the reap is measured rather than asserted.
-        runner = d / "bin" / "tart"
-        # `sleep`, not `exec sleep`: exec replaces the command line the
-        # reaper matches on, which is the thing under test.
-        runner.write_text('#!/bin/sh\ncase "$1" in run) sleep 20 ;; '
-                          'list) echo \'[]\' ;; *) exit 0 ;; esac\n')
-        runner.chmod(0o755)
-        pre = ""
-        if leak:
-            # >/dev/null 2>&1: a background process holding the captured pipe
-            # keeps this bash's own reader open, and the test waits on it.
-            pre = (f'"{runner}" run --no-graphics wk-demo >/dev/null 2>&1 & disown\n'
-                   'sleep 0.3\n')
-        return bash(f'{DRIVER}\ntart_bin() {{ printf %s "{runner}"; }}\n'
-                    f'{pre}{script}')
-
-    def test_the_runner_is_reaped_with_the_vm(self):
-        cp = self._run('before=$(_vm_runners wk-demo | wc -l | tr -d " ")\n'
-                       '_vm_delete wk-demo >/dev/null 2>&1\n'
-                       'after=$(_vm_runners wk-demo | wc -l | tr -d " ")\n'
-                       'echo "before=$before after=$after"')
-        self.assertIn("before=1 after=0", cp.stdout, cp.stdout + cp.stderr)
-
-    def test_a_runner_for_another_vm_is_left_alone(self):
-        """`wk-demo` must not match `wk-demo2`: the pattern anchors on the
-        whole final argument."""
-        cp = self._run('_vm_delete wk-demo2 >/dev/null 2>&1\n'
-                       'echo "still=$(_vm_runners wk-demo | wc -l | tr -d " ")"')
-        self.assertIn("still=1", cp.stdout, cp.stdout + cp.stderr)
-
-    def test_no_runner_is_not_an_error(self):
-        cp = self._run('_vm_delete wk-demo >/dev/null 2>&1; echo "rc=$?"',
-                       leak=False)
-        self.assertIn("rc=0", cp.stdout, cp.stdout + cp.stderr)
-
-    def test_every_delete_in_the_tree_goes_through_it(self):
-        """One implementation, or a path that leaks a runner survives."""
-        for f in (VM, REPO / "cmd" / "vm"):
-            with self.subTest(file=f.name):
-                bare = [l for l in f.read_text().splitlines()
-                        if "_tart delete" in l and "_vm_delete" not in l]
-                self.assertEqual(1 if f is VM else 0, len(bare), bare)
+@functools.lru_cache(maxsize=None)
+def _bench(argv):
+    """This tree's bench libraries, run for real: a reading of them is a pure function of its arguments."""
+    return Local().run(list(argv))
 
 
-@unittest.skipUnless(platform.system() == "Darwin",
-                     "the unblocker imports pyobjc's ApplicationServices, which is a "
-                     "macOS framework -- the rule is that a test needing a machine "
-                     "skips by name when it is absent")
-class TestSetupAssistantIsDrivenOverAccessibility(WkTest):
-    """No preference the guest can write stops Setup Assistant drawing: measured
-    2026-09-09 on a clone carrying every DidSee key its own binary reads plus
-    ~/.skipbuddy, Buddy still launched and still drew its AutoUpdate pane. So it
-    is driven, over the Accessibility API, which answers a plain ssh session
-    because the guest runs with SIP disabled.
+class BaseWorld(Fake):
+    """One Mac: tart holding at most `wk-base` (in `state`), and a guest behind ssh that says what `sa` and `screen` say."""
 
-    Elements are chosen by AXIdentifier, never by where they draw: the panes put
-    "Only Download Automatically" and "Restart" where a coordinate sweep would
-    land, and answering one of those takes a guest down."""
+    def __init__(self, base):
+        super().__init__("here")
+        self.env = {"HOME": base + "/home", "WK_STORE": base + "/store", "WK_VM_STORE": base + "/vmstore",
+                    "XDG_STATE_HOME": base + "/state", "WK_MACHINES_DIR": base + "/registry", "PATH": os.environ["PATH"]}
+        self.state, self.disk, self.cached, self.sa, self.screen, self.prov_rc = "absent", 140, True, ["0"], CLEAR, "0"
+        self.guest_cmds, self.dirty = [], False
+        self.react([TART, "list"], self._list)
+        self.react([TART, "get"], lambda a, f: Result(0, json.dumps({"CPU": 4, "Memory": 8192, "Disk": f.disk})))
+        self.react([TART, "clone"], lambda a, f: f._to("stopped", disk=140))
+        self.react([TART, "delete"], lambda a, f: f._to("absent"))
+        self.react([TART, "stop"], lambda a, f: f._to("stopped" if f.state != "absent" else "absent"))
+        self.react([TART, "set"], self._set)
+        self.react([TART, "pull"], lambda a, f: f._cache())
+        self.answer([TART, "ip"], out=IP + "\n")
+        self.answer([TART, "prune"])
+        self.answer([TART, "exec"])
+        self.answer(["sysctl", "-n", "hw.ncpu"], out="10\n")
+        self.answer(["sysctl", "-n", "hw.memsize"], out="34359738368\n")
+        self.answer(["podman", "machine", "inspect"], rc=125)
+        self.answer(["df", "-Pk", "/"], out="Filesystem 1024-blocks Used Available Capacity Mounted\n/dev/d 1 1 524288000 1% /\n")
+        self.answer(["pgrep"], rc=1)
+        self.answer(["find"])
+        self.answer(["chmod"])
+        self.answer(["du", "-sh"], out="162G\t/x\n")
+        self.react(["git", "-C"], lambda a, f: Result(0, " M wk\n" if f.dirty and "status" in a else ""))
+        self.react(["ssh-keygen"], self._keygen)
+        self.react(["bash", "-c"], lambda a, f: _bench(tuple(a)))
+        self.react(["ssh"], self._guest)
 
-    def _unblock(self):
-        import importlib.util
-        spec = importlib.util.spec_from_file_location(
-            "wk_unblock", REPO / "vm" / "desktop-unblock.py")
-        mod = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(mod)
-        return mod
+    def _to(self, state, disk=None):
+        self.state = state
+        if disk is not None:
+            self.disk = disk
+        return Result(0)
 
-    def _pick(self, pairs):
-        mod = self._unblock()
-        return mod._pick([(i, t, object()) for i, t in pairs])[0]
+    def _cache(self):
+        self.cached = True
+        return Result(0)
 
-    def test_a_confirmation_sheet_outranks_the_pane_behind_it(self):
-        """Declining the account pane opens a Skip/Don't Skip sheet over it. The
-        sheet has to be answered first or the press lands on the dead pane."""
-        self.assertEqual("action-button-1", self._pick([
-            ("Next Button", "Continue"), ("action-button-1", "Skip"),
-            ("action-button-2", "Don’t Skip")]))
+    def _list(self, argv, _):
+        if "oci" in argv:
+            return Result(0, json.dumps([{"Name": guestbase.IMAGE}] if self.cached else []))
+        vms = [] if self.state == "absent" else [{"Name": "wk-base", "Source": "local", "State": self.state}]
+        return Result(0, json.dumps(vms))
 
-    def test_the_decline_is_never_the_dont_skip_button(self):
-        """Both sit in the same sheet and only their identifiers tell them
-        apart; pressing Don't Skip walks straight back into the pane."""
-        self.assertNotEqual("action-button-2", self._pick([
-            ("action-button-2", "Don’t Skip"), ("action-button-1", "Skip")]))
+    def _set(self, argv, _):
+        if "--disk-size" in argv:
+            self.disk = int(argv[argv.index("--disk-size") + 1])
+        return Result(0)
 
-    def test_the_account_pane_is_declined_through_its_own_menu_item(self):
-        """Its Continue never enables -- measured, AXEnabled False -- so the way
-        past is the alternate button's popup and the decline inside it."""
-        self.assertEqual("userDeclinediCloud", self._pick([
-            ("Alternate Button", "Other Sign-In Options"),
-            ("userDeclinediCloud", "Sign in Later in Settings")]))
+    def _keygen(self, argv, _):
+        key = argv[argv.index("-f") + 1]
+        self._set_file(key, "PRIVATE\n")
+        self._set_file(key + ".pub", "ssh-ed25519 AAAA wk-vm\n")
+        return Result(0)
 
-    def test_an_ordinary_pane_takes_its_primary_button(self):
-        self.assertEqual("Next Button", self._pick([
-            ("Next Button", "Continue"),
-            ("Alternate Button", "Only Download Automatically")]))
+    def spawn(self, argv, log):
+        pid = super().spawn(argv, log)
+        if pid and "run" in argv:
+            self.state = "running"
+        return pid
 
-    def test_the_flow_is_never_walked_backwards(self):
-        self.assertIsNone(self._pick([("Previous Button", "Back")]))
+    def _guest(self, argv, _):
+        cmd = argv[-1]
+        self.guest_cmds.append(cmd)
+        if "Setup Assistant.app" in cmd:
+            return Result(0, (self.sa.pop(0) if len(self.sa) > 1 else self.sa[0]) + "\n")
+        if guestbase.PRC in cmd and cmd.startswith("sh -c") and "cat" in cmd and "nohup" not in cmd:
+            return Result(0, self.prov_rc + "\n")
+        if "wc -c" in cmd:
+            return Result(0, "12\n")
+        if cmd.startswith("cat ") and guestbase.PLOG in cmd:
+            return Result(0, "==> base provisioning complete\n")
+        if cmd == "bash -s":
+            return Result(0, "windows=%s\n" % self.screen)
+        return Result(0)
 
-    def test_a_pane_offering_nothing_is_not_guessed_at(self):
-        """Every control is disabled while a pane settles the last answer. A
-        press picked out of that reading lands on whatever happens to be there."""
-        self.assertIsNone(self._pick([("", "")]))
 
-    def test_a_guest_that_goes_quiet_is_not_driven(self):
-        body = func_body(VM.read_text(), "_unblock_desktop")
-        self.assertIn("_setup_assistant_state", body)
+class BaseTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="wk-test-vm-base-")
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        for p in (mock.patch.object(Store, "macos_host", new_callable=mock.PropertyMock, return_value=True),
+                  mock.patch.object(targets.Vm, "tart", lambda s: TART),
+                  mock.patch.object(tools, "push", lambda *a: True),
+                  mock.patch.dict(os.environ, {}, clear=False)):
+            p.start()
+            self.addCleanup(p.stop)
+        for var in ("WK_DRY_RUN", "WK_YES", "WK_CONFIRMED", "WK_DESTRUCTIVE"):
+            os.environ.pop(var, None)
+        self.w = BaseWorld(self.tmp)
+        self.clock = FakeClock()
 
-    def test_the_base_is_driven_before_it_is_judged(self):
-        body = func_body(VM.read_text(), "_provision_base")
-        self.assertLess(body.index("_unblock_desktop"), body.index("_check_base_screen"))
+    def base(self):
+        vm = targets.Registry(str(REPO), env=self.w.env, machine=self.w).load("vm")
+        return guestbase.Base(vm, self.clock)
 
-    def test_the_desktop_is_settled_again_after_the_flow(self):
-        """Driving it turns diagnostic submission on; re-settling afterwards is
-        what keeps that out of every clone."""
-        body = func_body(VM.read_text(), "_provision_base")
-        self.assertLess(body.index("_unblock_desktop"), body.index("_settle_desktop"))
-        self.assertIn("AutoSubmit", (REPO / "bench" / "mac-quiet-desktop.sh").read_text())
+    def build(self, *rest, answers=None):
+        """(exit or Refused status, stderr); `answers` are the replies to each prompt, in order."""
+        prompts, replies = [], list(answers or [])
 
-    def test_the_base_is_judged_on_the_screen_a_login_brings_up(self):
-        """A pane that was only dismissed comes back at the next login, so the
-        screen the flow leaves behind proves nothing."""
-        body = func_body(VM.read_text(), "_provision_base")
-        i = body.index("rebooting the base")
-        self.assertLess(body.index("_unblock_desktop"), i)
-        self.assertLess(i, body.index("_check_base_screen"))
+        def confirm(prompt, stdin=None):
+            prompts.append(prompt)
+            ok = replies.pop(0) if replies else False
+            if ok:
+                os.environ["WK_CONFIRMED"] = "1"
+            return ok
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err), mock.patch.object(act, "confirm", confirm):
+            try:
+                rc = self.base().build(list(rest))
+            except Refused as e:
+                rc = e.status
+        self.prompts = prompts
+        return rc, err.getvalue()
 
-    def test_a_base_is_never_sealed_behind_a_pane(self):
-        body = func_body(VM.read_text(), "_check_base_screen")
-        self.assertIn("die", body)
-        self.assertNotIn("warn", body)
+    def marker(self):
+        return self.w.files.get(os.path.join(self.w.env["WK_VM_STORE"], "vm", "base.ready"), "")
+
+    def tart_acts(self):
+        return [e[1][1:3] for e in self.w.effects if e[0] == "run" and e[1][0] == TART and e[1][1] not in ("list", "get", "ip")]
+
+
+class TestTheBaseIsBuiltOnce(BaseTest):
+    def test_from_nothing_it_is_cloned_grown_provisioned_rebooted_and_sealed_with_its_inputs(self):
+        self.w.cached = False
+        rc, err = self.build()
+        self.assertEqual(0, rc, err)
+        self.assertEqual("stopped", self.w.state)
+        self.assertEqual(320, self.w.disk)
+        self.assertIn(("pull", guestbase.IMAGE), self.tart_acts())
+        self.assertIn(("clone", guestbase.IMAGE), self.tart_acts())
+        self.assertIn("inputs=%s\n" % guestbase.inputs_hash(str(REPO), self.w.env), self.marker())
+        self.assertIn("image=%s\n" % guestbase.IMAGE, self.marker())
+        self.assertIn("golden base 'wk-base' is ready", err)
+
+    def test_a_sealed_base_is_left_alone(self):
+        self.build()
+        self.w.effects = []
+        rc, err = self.build()
+        self.assertEqual(0, rc, err)
+        self.assertEqual([], self.tart_acts())
+
+    def test_a_base_that_never_finished_is_rubble_and_is_made_again(self):
+        self.w.state = "stopped"
+        rc, err = self.build()
+        self.assertEqual(0, rc, err)
+        self.assertIn("never finished", err)
+        self.assertEqual([("stop", "wk-base"), ("delete", "wk-base")], self.tart_acts()[:2])
+        self.assertTrue(self.marker())
+
+    def test_the_base_boots_one_way_only_with_the_open_network(self):
+        """Booting it once each way changes its subnet, and `tart ip` answers with the lease from before."""
+        self.build()
+        runs = [e[1] for e in self.w.effects if e[0] == "spawn"]
+        self.assertEqual([(TART, "run", "--no-graphics", "wk-base")] * 2, runs)
+
+    def test_provisioning_is_detached_and_polled(self):
+        self.build()
+        started = [c for c in self.w.guest_cmds if "nohup" in c]
+        self.assertEqual(1, len(started))
+        self.assertIn("vm/provision-base.sh", started[0])
+        self.assertTrue([c for c in self.w.guest_cmds if "wc -c" in c], "nothing polled the detached log")
+
+    def test_a_failed_provisioning_names_its_log_and_the_rerun(self):
+        self.w.prov_rc = "3"
+        rc, err = self.build()
+        self.assertEqual(1, rc)
+        self.assertIn("base provisioning failed (rc=3)", err)
+        self.assertIn("base-provision.log", err)
+        self.assertIn("--refresh", err)
+        self.assertEqual("", self.marker())
+
+    def test_killpoints_vm_base(self):
+        """`unit killpoints[vm base]`: killed after any effect, a re-run ends in the same sealed base."""
+        def world():
+            w = BaseWorld(self.tmp)
+            return type("W", (), {"fake": w})
+
+        def run_once(w):
+            self.w = w.fake
+            self.build()
+
+        def final(w):
+            return w.fake.state, w.fake.disk, [l for l in self.marker().splitlines() if not l.startswith("finished=")]
+        converges(self, world, run_once, final, max_effects=80)
+
+    def test_a_dry_run_clones_nothing_and_boots_nothing(self):
+        os.environ["WK_DRY_RUN"] = "1"
+        rc, err = self.build()
+        self.assertEqual(0, rc, err)
+        self.assertEqual("absent", self.w.state)
+        self.assertEqual({}, {p: t for p, t in self.w.files.items() if "/locks/" not in p})
+        self.assertIn("would run: %s clone %s wk-base" % (TART, guestbase.IMAGE), err)
+        self.assertEqual([], [e for e in self.w.effects if e[0] == "spawn"])
+
+
+class TestItIsSealedOnlyOnAClearScreen(BaseTest):
+    def test_setup_assistant_is_driven_off_before_the_reboot_that_judges_it(self):
+        self.w.sa = ["1", "0"]
+        rc, err = self.build()
+        self.assertEqual(0, rc, err)
+        drove = next(i for i, c in enumerate(self.w.guest_cmds) if c == "/usr/bin/python3 -")
+        stops = [i for i, e in enumerate(self.w.effects) if e[0] == "run" and e[1][:2] == (TART, "stop")]
+        self.assertTrue(stops)
+        self.assertIn("driving Setup Assistant off the screen", err)
+        self.assertLess(drove, len(self.w.guest_cmds))
 
     def test_a_pane_that_comes_back_at_the_next_login_is_not_sealed(self):
-        """The one reading that proves the flow finished. A base sealed on the
-        screen the flow left behind is how every clone inherited a pane."""
-        cp = bash('''
-. "$WK_ROOT/lib/common.sh"
-. "$WK_ROOT/lib/resources.sh"
-. "$WK_ROOT/lib/store.sh"
-. "$WK_ROOT/lib/target.sh"
-load_target vm >/dev/null 2>&1
-WK_VM_LOGIN_SETTLE=6
-_setup_assistant_state() { echo up; }
-_wait_login_settled 1.2.3.4 && echo "SEALED" || echo "REFUSED"
-''')
-        self.assertIn("REFUSED", cp.stdout, cp.stdout + cp.stderr)
+        self.w.sa = ["0", "0", "1"]
+        rc, err = self.build()
+        self.assertEqual(1, rc)
+        self.assertIn("came back at 'wk-base''s next login", err)
+        self.assertEqual("", self.marker())
 
-    def test_a_login_that_stays_clear_seals(self):
-        cp = bash('''
-. "$WK_ROOT/lib/common.sh"
-. "$WK_ROOT/lib/resources.sh"
-. "$WK_ROOT/lib/store.sh"
-. "$WK_ROOT/lib/target.sh"
-load_target vm >/dev/null 2>&1
-WK_VM_LOGIN_SETTLE=6
-_setup_assistant_state() { echo gone; }
-_wait_login_settled 1.2.3.4 && echo "SEALED" || echo "REFUSED"
-''')
-        self.assertIn("SEALED", cp.stdout, cp.stdout + cp.stderr)
+    def test_a_login_that_stays_clear_is_watched_for_the_settle(self):
+        self.build()
+        self.assertEqual(guestbase.LOGIN_SETTLE // 3, self.clock.slept.count(3))
 
-    def test_the_base_is_watched_across_the_login_before_it_is_judged(self):
-        body = func_body(VM.read_text(), "_provision_base")
-        self.assertLess(body.index("_wait_login_settled"), body.index("_check_base_screen"))
+    def test_a_pane_on_screen_is_named_and_the_base_is_not_sealed(self):
+        self.w.screen = PANE
+        rc, err = self.build()
+        self.assertEqual(1, rc)
+        named = err.split("nothing wk put there:")[1].split("\n")[0]
+        self.assertIn("Setup Assistant:0:800x600", named)
+        self.assertNotIn("Terminal", named)
+        self.assertEqual("", self.marker())
 
-    def test_the_base_boots_one_way_only(self):
-        """Measured 2026-09-09: the proof-reboot went through `_boot`, which
-        applies softnet, while provisioning boots the base open. The subnet
-        changed, `tart ip` answered with the lease from before it, and the
-        rebuild died at 90 minutes ssh-ing an address nothing was on."""
-        body = func_body(VM.read_text(), "_provision_base")
-        self.assertNotIn("_boot ", body)
-        self.assertEqual(2, body.count("_start_base"), body)
-
-    def test_the_base_is_never_booted_behind_the_egress_filter(self):
-        """Its account pane needs Apple's servers and its provisioning needs
-        PyPI and a WebKit clone; a workspace is the thing that gets the filter."""
-        self.assertNotIn("_softnet_flags", func_body(VM.read_text(), "_start_base"))
-
-    def test_a_reboot_that_never_answers_is_not_read_as_a_clear_screen(self):
-        body = func_body(VM.read_text(), "_provision_base")
-        self.assertLess(body.index("_wait_ssh"), body.index("_wait_login_settled"))
-
-    def test_a_clone_keeps_the_base_s_serial(self):
-        """The measured cause of the whole thing. A changed serial is a new
-        machine to macOS, so Buddy runs again -- and a clone is the one guest
-        that cannot answer it, its account pane needing Apple's servers that
-        the egress filter refuses. A/B on one clone of a sealed base, 2026-09-09:
-        without --random-serial the desktop is clear, and flipping only that
-        flag brings the pane back."""
-        run = [l for l in func_body(VM.read_text(), "t_create").splitlines()
-               if not l.lstrip().startswith("#")]
-        self.assertNotIn("--random-serial", "\n".join(run))
-
-    def test_a_clone_still_gets_its_own_mac(self):
-        """Two guests on one network need distinct MACs, and the A/B above
-        shows the MAC is not what moves the pane."""
-        run = [l for l in func_body(VM.read_text(), "t_create").splitlines()
-               if not l.lstrip().startswith("#")]
-        self.assertIn("--random-mac", "\n".join(run))
-
-    def test_the_rfb_console_client_is_gone(self):
-        """One implementation per behaviour: the coordinate clicker it drove is
-        what AXIdentifier replaced."""
-        self.assertFalse((REPO / "vm" / "console-keys.py").exists())
-        self.assertNotIn("vnc", VM.read_text().lower())
-
-class TestTheBaseIsAskedWhatIsOnItsScreen(WkTest):
-    """A pane on the base's screen is a pane on every guest cloned from it, and
-    no preference a guest writes takes it away (docs/defects lists what was
-    tried). So provisioning asks once, at the end, where somebody is already
-    waiting on a build -- and it must not end the build to do it: every command
-    in this driver runs under `set -euo pipefail`, so an unanswered base would
-    otherwise abort the last step after the hours, saying nothing."""
-
-    def _check(self, ssh_body):
-        return bash(f'''
-. "$WK_ROOT/lib/common.sh"
-. "$WK_ROOT/lib/resources.sh"
-. "$WK_ROOT/lib/store.sh"
-. "$WK_ROOT/lib/target.sh"
-load_target vm >/dev/null 2>&1
-_ssh() {{ {ssh_body}; }}
-_check_base_screen 1.2.3.4 2>&1
-echo "rc=$?"
-''')
-
-    def test_a_base_that_does_not_answer_is_not_sealed(self):
-        """An unread screen is not a clear one, and the base is the one artifact
-        whose mistakes every clone inherits."""
-        cp = self._check("return 1")
-        self.assertNotIn("rc=0", cp.stdout, cp.stdout + cp.stderr)
-        self.assertIn("could not ask", cp.stdout)
-
-    def test_a_clear_screen_says_so(self):
-        cp = self._check('cat >/dev/null; echo "windows=Terminal:0:800x600;"')
-        self.assertIn("rc=0", cp.stdout, cp.stdout + cp.stderr)
-        self.assertIn("screen is clear", cp.stdout)
-
-    def test_a_pane_is_named_and_the_base_is_not_sealed_behind_it(self):
-        cp = self._check('cat >/dev/null; echo "windows=Setup Assistant:0:800x600;Terminal:0:800x600;"')
-        self.assertNotIn("rc=0", cp.stdout, cp.stdout + cp.stderr)
-        self.assertIn("Setup Assistant:0:800x600", cp.stdout)
-        self.assertNotIn("Terminal", cp.stdout.split("nothing wk put there:")[1])
-
-    def test_provisioning_asks_before_it_seals_the_base(self):
-        """After the check the base is stopped and marked ready; a clone taken
-        from it carries whatever was on that screen."""
-        body = func_body(VM.read_text(), "_provision_base")
-        self.assertIn("_check_base_screen", body)
-        self.assertLess(body.index("_check_base_screen"), body.index("_base_mark_ready"))
+    def test_a_screen_that_cannot_be_read_is_not_sealed(self):
+        self.w.screen = "?"
+        rc, err = self.build()
+        self.assertEqual(1, rc)
+        self.assertIn("could not ask 'wk-base' what is on its screen", err)
 
 
-class TestTheVMLimitCountsEveryVMOnTheHost(WkTest):
-    """Virtualization.framework has one limit for the whole host, and the
-    podman machine that carries the container workspaces spends a slot of it.
-    Counting only `tart list` let a third VM be started and refused: the loser
-    said "The number of VMs exceeds the system limit" in its own run log and
-    nowhere a person looks (measured 2026-09-04)."""
+class TestItsStalenessIsRecomputed(BaseTest):
+    def test_a_base_without_a_record_reads_stale(self):
+        self.w.state = "stopped"
+        self.assertEqual("provisioned before this record existed", self.base().stale())
 
-    def _count(self, tart_running, podman_state, trailer=""):
-        vms = ",".join('{"Name":"wk-g%d","Source":"local","State":"running"}' % i
-                       for i in range(tart_running))
-        tart = "case \"$1\" in list) echo '[%s]' ;; *) exit 0 ;; esac\n" % vms
-        podman = 'echo %s\n' % podman_state
-        with stub_path({"tart": tart, "podman": podman}) as binp:
-            return bash(f'{DRIVER}\necho "n=$(_running_count)"\n'
-                        f'{trailer}\n_check_guest_limit 2>&1 || true',
-                        env={"PATH": f"{binp}:/usr/bin:/bin",
-                             "WK_VM_MAX": "2"})
+    def test_a_sealed_base_matches_until_an_input_moves(self):
+        self.build()
+        self.assertEqual("", self.base().stale())
+        self.assertIn("golden base 'wk-base' matches its provisioning inputs", self.base().findings())
+        self.w.env["WK_VM_IMAGE"] = "ghcr.io/x@sha256:0"
+        self.assertIn("WK_VM_IMAGE", self.base().stale())
+        self.assertIn("--rebuild", self.base().findings())
 
-    def test_a_running_podman_machine_is_one_of_the_two(self):
-        cp = self._count(1, "running")
-        self.assertIn("n=2", cp.stdout, cp.stdout + cp.stderr)
+    def test_an_edited_provisioning_script_makes_every_base_before_it_stale(self):
+        root = os.path.join(self.tmp, "tree")
+        for rel in guestbase.INPUTS:
+            os.makedirs(os.path.dirname(os.path.join(root, rel)), exist_ok=True)
+            shutil.copy(REPO / rel, os.path.join(root, rel))
+        before = guestbase.inputs_hash(root, self.w.env)
+        self.assertEqual(guestbase.inputs_hash(str(REPO), self.w.env), before)
+        with open(os.path.join(root, "vm", "desktop.sh"), "a") as f:
+            f.write("\n# one more line\n")
+        self.assertNotEqual(before, guestbase.inputs_hash(root, self.w.env))
 
-    def test_a_stopped_podman_machine_is_not_counted(self):
-        cp = self._count(1, "stopped")
-        self.assertIn("n=1", cp.stdout, cp.stdout + cp.stderr)
+    def test_the_record_holds_no_password(self):
+        """A short digest over public files and a trivial password is a password a reader could recover."""
+        self.build()
+        self.assertNotIn("password", self.marker().lower())
 
-    def test_counting_succeeds_when_the_podman_machine_is_down(self):
-        """The count is taken under `set -euo pipefail` by every caller. A
-        stopped machine that leaves a 1 behind ends `wk vm new` right after the
-        staleness warning, having created nothing and having said nothing."""
-        cp = self._count(1, "stopped", trailer='_running_vms >/dev/null; echo "vms_rc=$?"\n'
-                                                '_running_count >/dev/null; echo "count_rc=$?"')
-        self.assertIn("vms_rc=0", cp.stdout, cp.stdout + cp.stderr)
-        self.assertIn("count_rc=0", cp.stdout, cp.stdout + cp.stderr)
+    def test_the_inputs_are_the_base_scripts_and_nothing_a_start_converges(self):
+        self.assertNotIn("vm/shell-rc.sh", guestbase.INPUTS)
+        for rel in guestbase.INPUTS:
+            self.assertTrue((REPO / rel).is_file(), rel)
 
-    def test_the_refusal_names_what_is_holding_the_slots(self):
-        """A refusal that says '2 VM(s) are already running' while `wk vm ls`
-        shows one is a refusal nobody can act on."""
-        cp = self._count(1, "running")
-        out = cp.stdout + cp.stderr
-        self.assertIn("g0", out, out)
-        self.assertIn("podman machine", out, out)
-        self.assertIn("podman machine stop", out, out)
+    def test_no_base_and_an_unfinished_one_each_name_their_remedy(self):
+        self.assertIn("no golden base VM 'wk-base'", self.base().findings())
+        self.w.state = "stopped"
+        self.assertIn("--refresh", self.base().findings())
+
+
+class TestTheDestructiveModes(BaseTest):
+    def test_a_dirty_tree_is_refused_before_the_base_is_touched(self):
+        self.build()
+        self.w.dirty, self.w.effects = True, []
+        rc, err = self.build("--rebuild", answers=[True])
+        self.assertEqual(1, rc)
+        self.assertIn("Nothing has been deleted", err)
+        self.assertEqual([], self.prompts, "the prompt came before the check it would waste")
+        self.assertEqual([], self.tart_acts())
+
+    def test_a_declined_rebuild_changes_nothing(self):
+        self.build()
+        self.w.effects = []
+        rc, _ = self.build("--rebuild", answers=[False])
+        self.assertEqual(1, rc)
+        self.assertEqual([], self.tart_acts())
+        self.assertTrue(self.marker())
+
+    def test_vm_base_rm_asks_twice(self):
+        """`unit vm.base_rm_asks_twice`: the base, then separately the pulled image, which is re-downloadable."""
+        self.build()
+        self.w.dirs.add(os.path.join(self.w.env["HOME"], ".tart", "cache"))
+        self.w._set_file(os.path.join(self.w.env["HOME"], ".tart", "cache", "OCIs", "x"), "")
+        rc, err = self.build("--rm", answers=[True, False])
+        self.assertEqual(0, rc, err)
+        self.assertEqual(2, len(self.prompts), self.prompts)
+        self.assertIn("rebuilding it is hours", self.prompts[0])
+        self.assertIn("re-downloadable", self.prompts[1])
+        self.assertEqual("absent", self.w.state)
+        self.assertEqual("", self.marker())
+        self.assertNotIn(("prune", "--space-budget"), self.tart_acts())
+        self.assertIn("kept:", err)
+        self.build()
+        rc, _ = self.build("--rm", answers=[True, True])
+        self.assertIn(("prune", "--space-budget"), self.tart_acts())
+
+    def test_declining_the_first_question_erases_nothing(self):
+        self.build()
+        self.w.effects = []
+        rc, _ = self.build("--rm", answers=[False])
+        self.assertEqual(1, rc)
+        self.assertEqual("stopped", self.w.state)
+        self.assertEqual([], self.tart_acts())
+
+    def test_erasing_or_refreshing_nothing_is_refused(self):
+        self.assertEqual(1, self.build("--rm")[0])
+        self.assertIn("no golden base yet", self.build("--refresh")[1])
+
+    def test_one_mode_at_a_time_and_only_on_a_mac(self):
+        self.assertIn("one of them", self.build("--rm", "--rebuild")[1])
+        with mock.patch.object(Store, "macos_host", new_callable=mock.PropertyMock, return_value=False):
+            self.assertIn("needs a macOS host", self.build()[1])
+
+
+class TestTheBuilderConforms(BaseTest):
+    def test_sysimage_builders_conform_guest(self):
+        """`unit sysimage.builders_conform[guest]`: a profile names the builder, the command routes it, the rest of
+        argv reaches it, and it runs on the host that holds the guests."""
+        self.assertIn("guest", cli.BUILDERS)
+        seen = []
+        reg = targets.Registry(str(REPO), env=self.w.env, machine=self.w)
+        with mock.patch.object(guestbase.Base, "build", lambda b, rest: seen.append((b.name, rest)) or 0):
+            self.assertEqual(0, cli.Sysimage(reg, self.clock).build(guest.BASE_PROFILE, ["--refresh"]))
+        self.assertEqual([("wk-base", ["--refresh"])], seen)
+        self.assertEqual("host", cli.where(["build", guest.BASE_PROFILE, "--rm"], self.w.env))
+        header = (REPO / "cmd" / "sysimage").read_text()
+        self.assertIn("--rebuild,--rm", header.split("# wk: destructive ", 1)[1].split("\n")[0])
+
+    def out(self, fn, *a):
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = fn(*a)
+        return rc, buf.getvalue()
+
+    def test_path_and_holds_reach_the_sealed_base_marker(self):
+        """`unit sysimage.builders_conform[guest]`, the read half: unbuilt answers nothing, sealed answers the marker."""
+        reg = targets.Registry(str(REPO), env=self.w.env, machine=self.w)
+        s = cli.Sysimage(reg, self.clock)
+        self.assertEqual(self.out(s.path, guest.BASE_PROFILE, None), (1, ""))
+        self.assertEqual(self.out(s.holds, guest.BASE_PROFILE, None, None, None, None, False)[1], "no\n")
+        self.build()
+        self.assertEqual(self.out(s.path, guest.BASE_PROFILE, None), (0, self.base().marker() + "\n"))
+        self.assertEqual(self.out(s.holds, guest.BASE_PROFILE, None, None, None, None, False)[1], "yes\n")
+
+    def test_ls_lists_it_only_once_sealed(self):
+        """`unit sysimage.builders_conform[guest]`: `ls` has no workspace to anchor a placeholder row at,
+        so the profile is silent until `builder_outputs` finds the sealed marker."""
+        reg = targets.Registry(str(REPO), env=self.w.env, machine=self.w)
+        s = cli.Sysimage(reg, self.clock)
+        self.assertNotIn(guest.BASE_PROFILE, self.out(lambda: s.ls(False))[1])
+        self.build()
+        _rc, out = self.out(lambda: s.ls(False))
+        line = next(l for l in out.splitlines() if l.startswith(guest.BASE_PROFILE))
+        self.assertEqual(line.split()[:4], [guest.BASE_PROFILE, "-", "guest", "ready"])
+        self.assertIn("    " + self.base().marker(), out)
+
+
+class TestAGuestIsAdmittedOnlyWhereItFits(BaseTest):
+    """Virtualization.framework has one limit for the whole host, and the podman machine spends a slot of it."""
+
+    def admit(self, mine=8192):
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            try:
+                guest.admit(guest.Host(self.base().vm, self.clock), "wk-demo", mine)
+                return 0, err.getvalue()
+            except Refused as e:
+                return e.status, err.getvalue()
+
+    def test_a_running_podman_machine_is_one_of_the_two_and_is_named(self):
+        self.w.state = "running"
+        self.w.answer(["podman", "machine", "inspect"], out="running\n")
+        rc, err = self.admit()
+        self.assertEqual(1, rc)
+        self.assertIn("2 VM(s) are already running", err)
+        self.assertIn("podman machine wk", err)
+        self.assertIn("podman machine stop wk", err)
 
     def test_one_guest_alone_is_let_through(self):
-        cp = self._count(1, "stopped")
-        self.assertNotIn("already running on this host", cp.stdout + cp.stderr)
+        self.w.state = "running"
+        self.assertEqual(0, self.admit()[0])
+
+    def test_an_idle_podman_machine_is_stopped_and_a_busy_one_is_not(self):
+        self.w.answer(["podman", "machine", "inspect", "wk", "--format", "{{.State}}"], out="running\n")
+        self.w.answer(["podman", "machine", "inspect", "wk", "--format", "{{.Resources.Memory}}"], out="16384\n")
+        self.w.answer(["podman", "machine", "ssh"], out="3\n")
+        rc, err = self.admit(mine=12000)
+        self.assertEqual(1, rc)
+        self.assertNotIn(("run", ("podman", "machine", "stop", "wk")), self.w.effects)
+        self.assertIn("not enough memory", err)
+        self.w.answer(["podman", "machine", "ssh"], rc=255)
+        self.assertEqual(1, self.admit(mine=12000)[0], "an unreadable answer is busy")
+        self.w.answer(["podman", "machine", "ssh"], out="0\n")
+        state = ["podman", "machine", "inspect", "wk", "--format", "{{.State}}"]
+        self.w.react(["podman", "machine", "stop"], lambda a, f: (f.answer(state, out="stopped\n"), Result(0))[1])
+        rc, err = self.admit(mine=12000)
+        self.assertEqual(0, rc, err)
+        self.assertIn("stopping the idle podman machine", err)
+
+    def test_a_host_nearly_out_of_disk_is_refused(self):
+        self.w.answer(["df", "-Pk", "/"], out="F\n/dev/d 1 1 10485760 1% /\n")
+        rc, err = self.admit()
+        self.assertEqual(1, rc)
+        self.assertIn("only 10 GB free on the host", err)
 
 
-class TestProvisioningOutlivesItsConnection(WkTest):
-    """The base's first act is cloning all of WebKit, which is over an hour.
-    Run in the foreground it dies with the ssh session (measured 2026-09-04:
-    "Read from remote host: Connection reset by peer" took the clone with it),
-    so it is detached and polled."""
+class TestWhatTheBaseCarries(unittest.TestCase):
+    """A base is rebuilt for a new image and for nothing else: what depends on this tree, a credential or the host is
+    made at a guest's first start, or mounted in, and converged on every start."""
 
-    def test_provisioning_is_detached_and_waited_for(self):
-        body = func_body(VM.read_text(), "_provision_base")
-        self.assertIn("detach_remote _base_ssh", body)
-        self.assertIn("detach_wait_remote _base_ssh", body)
-        self.assertNotIn('_ssh "$ip" "env WK_VM_DISPLAY', body,
-                         "provisioning is back on a foreground ssh")
-
-    def test_its_log_is_fetched_and_named_in_the_failure(self):
-        body = func_body(VM.read_text(), "_provision_base")
-        self.assertIn("base-provision.log", body)
-        self.assertIn("wk vm base --refresh", body)
-
-
-class TestAnIdlePodmanMachineIsNotAReasonToRefuse(WkTest):
-    """It holds the whole envelope whether or not anything runs in it, and a
-    stop costs nothing a workspace notices. Anything actually running in there
-    is named instead -- stopping a machine underneath a build is the mistake
-    this guards."""
-
-    def test_the_check_stops_it_only_when_nothing_runs_in_it(self):
-        body = func_body(VM.read_text(), "_check_memory_budget")
-        self.assertIn("_podman_containers_running", body)
-        self.assertLess(body.index("_podman_containers_running"),
-                        body.index("podman machine stop"),
-                        "the machine is stopped before anything asks what is in it")
-
-    def test_an_unreadable_answer_counts_as_busy(self):
-        """A machine that will not say what it holds is not one to stop."""
-        body = func_body(VM.read_text(), "_podman_containers_running")
-        self.assertIn("|| echo 1", body)
-
-
-class TestADirtyTreeIsRefusedBeforeTheBaseIsDestroyed(WkTest):
-    """A base is given a commit (tools_committed, lib/tools.sh), so a dirty
-    tree cannot provision one. Asked before the delete: measured, refusing
-    afterwards costs a `tart delete`, a clone, a 140GB -> 320GB grow and a boot
-    to reach a verdict that is local and free."""
-
-    CMD = REPO / "cmd" / "vm"
-
-    def test_the_refusal_precedes_every_destructive_step(self):
-        arm = self.CMD.read_text().split("--rebuild)", 1)[1].split("--rm)", 1)[0]
-        self.assertIn("tools_committed", arm)
-        self.assertLess(arm.index("tools_committed"), arm.index("_vm_delete"),
-                        "the base is deleted before the tree is checked")
-        self.assertLess(arm.index("tools_committed"), arm.index("confirm "),
-                        "the prompt comes before the check it would waste")
-
-    def test_it_says_nothing_was_deleted(self):
-        arm = self.CMD.read_text().split("--rebuild)", 1)[1].split("--rm)", 1)[0]
-        self.assertIn("Nothing has been deleted", arm)
-
-
-class TestTheGuestKeepsTheImagesPassword(WkTest):
-    """Measured on macOS Tahoe 26.4: the only form the account itself can run,
-    `sysadminctl -oldPassword`, exits 0 having changed nothing. So the password
-    is not changed at all, and one variable names it."""
-
-    def test_provisioning_attempts_no_password_change(self):
-        """Code, not prose: the comment above the variable names the very flag
-        that is not used, and explains why."""
-        code = "\n".join(l for l in PROVISION.read_text().splitlines()
-                         if not l.lstrip().startswith("#"))
-        self.assertNotIn("-newPassword", code)
-        self.assertNotIn("-oldPassword", code)
-        self.assertNotIn("_set_password", code)
-
-    def test_the_password_defaults_to_the_one_the_image_ships(self):
-        for path in (PROVISION, REPO / "targets" / "vm.sh"):
-            src = path.read_text()
-            self.assertIn('WK_VM_PASSWORD="${WK_VM_PASSWORD:-admin}"', src, path.name)
-
-    def test_one_variable_names_it(self):
-        """A second name for the same fact is a thing that can disagree. Built
-        rather than written out, so this file is not its own only match."""
-        gone = "WK_VM_IMAGE" + "_PASSWORD"
-        out = subprocess.run(["git", "grep", "-l", gone],
-                             cwd=REPO, capture_output=True, text=True).stdout
-        self.assertEqual("", out.strip(), f"{gone} survives in: {out}")
-
-
-class TestEveryHandoverStatesTheLogin(WkTest):
-    """`wk start <guest>` said nothing about the login before this: it goes
-    through a start that did not state it, while `wk vm start` stated it in
-    the command instead. One exit in lib/wk/guest.py's start is what makes both say it."""
-
-    def test_a_start_states_the_login_on_its_one_exit(self):
-        sys.path.insert(0, str(REPO / "lib"))
-        from wk import guest
-        body = inspect.getsource(guest.start)
-        self.assertEqual(1, body.count("vm_login_note"), body)
-        # A second return would be a path that skips the note.
-        self.assertEqual(1, body.count("return "), body)
-
-    def test_the_note_is_not_restated_by_the_command_that_starts_a_guest(self):
-        """cmd/vm's start arm calls that start, so a call of its own prints it
-        twice."""
-        src = (REPO / "cmd" / "vm").read_text()
-        arm = src.split("\nstart)", 1)[1].split("\nstop)", 1)[0]
-        self.assertNotIn("vm_login_note", arm, arm)
-
-    def test_the_attach_paths_state_it_themselves(self):
-        """`wk zed` and `wk vm enter` never start a guest -- they attach to a
-        guest that is already up -- so each states it directly."""
-        self.assertIn("vm_login_note", (REPO / "cmd" / "zed").read_text())
-        enter = (REPO / "cmd" / "vm").read_text().split("\nenter)", 1)[1]
-        self.assertIn("vm_login_note", enter.split("\nsync)", 1)[0])
-
-
-class TestTheGuestReadsTheHostsMirror(WkTest):
-    """The one copy of WebKit's history on a Mac is the host's mirror
-    (wk_mirror, lib/store.sh); a guest mounts that directory read-only as a
-    share and clones its checkout `--shared` off it, so the base carries no
-    mirror and a guest is as current as the host's last `wk sync`."""
-
-    def test_provisioning_makes_no_mirror(self):
+    def test_provisioning_makes_no_checkout_mirror_or_tool(self):
         text = PROVISION.read_text()
-        for word in ("mirror_refresh_script", "WK_VM_MIRROR", "github.com"):
+        for word in ("git clone", "mirror_refresh_script", "wk_wiring_script", "wk_gitwebkit_setup_script",
+                     "claude.ai/install.sh", "wk_claude_cli_script", "include.path", "shell-rc.sh", ".claude",
+                     "WK_VM_MIRROR", "github.com", "wk-seed", "rsync"):
             with self.subTest(word=word):
-                self.assertNotIn(word, text, f"vm/provision-base.sh still puts {word!r} in the base")
-        self.assertNotIn("WK_VM_MIRROR=", VM.read_text(), "targets/vm.sh still hands provisioning a mirror path")
-
-    def test_the_guest_is_booted_with_the_mirror_share_read_only(self):
-        sys.path.insert(0, str(REPO / "lib"))
-        from wk import guest
-        self.assertIn('"--dir=%s:%s:ro" % (vm.mirror_share, os.path.dirname(vm.store.mirror()))', inspect.getsource(guest.boot))
-
-    def test_a_guest_is_not_made_on_a_machine_with_no_mirror(self):
-        """The refusal is at creation, before a base is built or cloned: a
-        guest with nothing to clone its checkout from is rubble."""
-        with stub_path({"tart": TART}) as binp:
-            cp = bash(DRIVER + f'''
-_vm_state()    {{ echo absent; }}
-_ensure_base() {{ echo ENSURED; }}
-wk_mirror()    {{ echo {str(self.tmp / "nowhere" / "WebKit.git")!r}; }}
-t_create demo
-''', env={"WK_VM_STORE": str(self.tmp / "store"), "PATH": f"{binp}:{os.environ['PATH']}"})
-        out = cp.stdout + cp.stderr
-        self.assertNotEqual(cp.returncode, 0, out)
-        self.assertIn("no WebKit mirror on this machine", out)
-        self.assertIn("wk sync", out)
-        self.assertNotIn("ENSURED", out)
-
-    def test_the_checkout_shares_the_mirrors_objects(self):
-        """--shared, so the history is stored once, on the host."""
-        self.assertIn("git clone --quiet --shared", func_body(VM.read_text(), "_write_checkout"))
-
-    def test_nothing_is_seeded_from_the_host_by_copy(self):
-        """One path to a checkout: the mirror. A seed rsynced off the host is a
-        second one, and a second copy of the history."""
-        for path in (PROVISION, VM):
-            with self.subTest(file=path.name):
-                self.assertNotIn("wk-seed", path.read_text())
-                self.assertNotIn("WK_HOST_WEBKIT", path.read_text())
-                self.assertNotIn("rsync", func_body(path.read_text(), "_write_checkout") if path is VM else path.read_text())
-
-
-class TestGitWebkitSetupHasAnIdentityToRead(unittest.TestCase):
-    """`git-webkit setup --defaults` asks for a user email when none is in
-    reach, and its stdin is /dev/null, so the setup dies on EOF and the
-    marker `wk doctor` reads is never written. The include that carries the
-    identity therefore precedes the setup wherever it runs unattended."""
-
-    def _order(self, text, who):
-        include = text.index("include.path")
-        setup = text.index("wk_gitwebkit_setup_script")
-        self.assertLess(include, setup,
-                        f"{who} runs git-webkit setup before the git identity is configured")
-
-    def test_a_guests_first_start(self):
-        self._order(func_body(VM.read_text(), "_write_checkout"), "_write_checkout")
-
-    def test_a_containers_first_start(self):
-        self._order((REPO / "container" / "firstrun.sh").read_text(), "container/firstrun.sh")
-
-    def test_the_identity_is_the_one_dotfile(self):
-        for path in (VM, REPO / "container" / "firstrun.sh"):
-            with self.subTest(file=path.name):
-                self.assertIn("dotfiles/gitconfig", path.read_text())
-
-
-class TestTheBaseCarriesOnlyWhatChangesWithTheImage(unittest.TestCase):
-    """A base is rebuilt for a new image, and for nothing else. What depends
-    on this tree, on a credential or on the host -- the checkout, its remotes,
-    git-webkit setup, the Claude CLI, the shell, the mirror it clones from --
-    is made in the guest at its first start or mounted in, and converged on
-    every start, so neither a rotated token nor an edited script nor a stale
-    mirror asks for hours of rebuild."""
-
-    BAKED_NOWHERE = ("git clone", "mirror_refresh_script", "wk_wiring_script",
-                     "wk_gitwebkit_setup_script", "claude.ai/install.sh",
-                     "wk_claude_cli_script", "include.path", "shell-rc.sh", ".claude")
-
-    def test_provisioning_makes_no_checkout_and_installs_no_tool(self):
-        text = PROVISION.read_text()
-        for word in self.BAKED_NOWHERE:
-            with self.subTest(word=word):
-                self.assertNotIn(word, text, f"vm/provision-base.sh bakes {word!r} into the base")
+                self.assertNotIn(word, text)
 
     def test_the_guest_gets_them_on_every_start(self):
         assert_guest_start_converges(self, '_write_checkout "$name" "$ip"')
         assert_guest_start_converges(self, '_install_claude_cli "$name" "$ip"')
 
-    def test_the_base_inputs_are_the_base_scripts_only(self):
-        text = VM.read_text()
-        self.assertNotIn("shell-rc.sh", func_body(text, "_base_inputs_hash"))
-        self.assertNotIn("shell-rc.sh", func_body(text, "vm_base_stale"))
-
     def test_one_installer_script_for_container_and_guest(self):
         self.assertIn("wk_claude_cli_script", (REPO / "container" / "firstrun.sh").read_text())
-        self.assertIn("wk_claude_cli_script", func_body(VM.read_text(), "_install_claude_cli"))
-        for rel in ("container/firstrun.sh", "targets/vm.sh", "vm/provision-base.sh"):
-            self.assertNotIn("claude.ai/install.sh", (REPO / rel).read_text(),
-                             f"{rel} carries its own Claude CLI installer")
+        self.assertIn("wk_claude_cli_script", inspect.getsource(guest.Guest.install_claude_cli))
+        for rel in ("container/firstrun.sh", "lib/wk/guest.py", "vm/provision-base.sh"):
+            self.assertNotIn("claude.ai/install.sh", (REPO / rel).read_text(), rel)
+
+    def test_the_guest_keeps_the_images_password_and_one_name_holds_it(self):
+        """`sysadminctl -oldPassword`, the only form the account itself can run, exits 0 having changed nothing."""
+        code = "\n".join(l for l in PROVISION.read_text().splitlines() if not l.lstrip().startswith("#"))
+        for word in ("-newPassword", "-oldPassword"):
+            self.assertNotIn(word, code)
+        self.assertIn('WK_VM_PASSWORD="${WK_VM_PASSWORD:-admin}"', PROVISION.read_text())
+        self.assertEqual("admin", guest.PASSWORD)
+        gone = "WK_VM_IMAGE" + "_PASSWORD"
+        self.assertEqual("", subprocess.run(["git", "grep", "-l", gone], cwd=REPO, capture_output=True, text=True).stdout)
+
+    def test_every_tart_delete_goes_through_the_one_that_reaps_its_runner(self):
+        for rel in ("lib/wk/targets.py", "lib/wk/sysimage/guestbase.py", "lib/wk/guest.py"):
+            text = (REPO / rel).read_text()
+            with self.subTest(file=rel):
+                self.assertEqual(1 if rel.endswith("targets.py") else 0, text.count('"delete", v]') + text.count('"delete"]'))
+
+    def test_the_login_is_stated_on_a_starts_one_exit_and_by_each_attach(self):
+        body = inspect.getsource(guest.start)
+        self.assertEqual(1, body.count("login_note("), body)
+        self.assertEqual(1, body.count("return "), body)
+        self.assertIn("login_note()", (REPO / "cmd" / "zed").read_text())
+        self.assertIn("login_note()", inspect.getsource(targets.Vm.enter_argv))
 
 
-# `ssh`: the guest as a directory. The remote command is the last argument and
-# the script arrives on stdin; /Users/admin and the mirror share are rewritten
-# to the scratch guest in both, and the command runs with HOME there, so the
-# real git runs.
-FAKE_SSH_GUEST = '''
-for a in "$@"; do last="$a"; done
-rw="s|/Users/admin|$WK_TEST_GUEST|g; s|/Volumes/My Shared Files/mirror|$WK_TEST_GUEST/share|g"
-cmd=$(printf '%s' "$last" | sed "$rw")
-sed "$rw" | HOME="$WK_TEST_GUEST" sh -c "$cmd"
-'''
+# `ssh` to the guest as a directory here: /Users/admin and the mirror share are rewritten to a scratch guest, and the
+# command runs with HOME there, so the real git runs.
+class LocalGuest(Local):
+    def __init__(self, home):
+        self.home = home
 
-# What the checkout needs of WebKit: `git-webkit setup --defaults`, which here
-# records each call and writes the marker the real one writes.
+    def _map(self, text):
+        return text.replace("/Volumes/My Shared Files/mirror", self.home + "/share").replace("/Users/admin", self.home)
+
+    def run(self, argv, input=None, timeout=None):
+        env = dict(os.environ, HOME=self.home)
+        cp = subprocess.run([self._map(a) for a in argv], input=self._map(input or ""), capture_output=True, text=True,
+                            env=env, timeout=timeout)
+        return Result(cp.returncode, cp.stdout, cp.stderr)
+
+
 FAKE_GIT_WEBKIT = '''#!/bin/sh
 echo "$*" >> "$HOME/git-webkit.calls"
 case "$1" in
     setup)         [ "$2" = --defaults ] || exit 2; git config webkitscmpy.setup true ;;
-    install-hooks) ;;   # re-asserted on every start, whatever setup did
+    install-hooks) ;;
     *)             exit 2 ;;
 esac
 '''
 
 
-class TestTheCheckoutIsMadeAtFirstStart(WkTest):
-    """`_write_checkout` against a scratch guest with a bare mirror on its
-    share: the first start clones from it, wires it and runs setup; the next
-    start finds all three done and changes nothing."""
+class TestTheCheckoutIsMadeAtFirstStart(unittest.TestCase):
+    """The first start clones --shared off the mirror on the share, wires it and runs setup; the next finds all three
+    done and changes nothing."""
 
     def setUp(self):
-        super().setUp()
-        self.guest = self.tmp / "guest"
-        (self.guest / "wk-tools").mkdir(parents=True)
-        (self.guest / "share").mkdir()
-        self.mirror = self.guest / "share" / "WebKit.git"
-        src = self.tmp / "seed"
-        (src / "Tools" / "Scripts").mkdir(parents=True)
-        gw = src / "Tools" / "Scripts" / "git-webkit"
-        gw.write_text(FAKE_GIT_WEBKIT)
-        gw.chmod(0o755)
-        env = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
-               "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
-        for cmd in (["git", "init", "-q", "-b", "main"], ["git", "add", "."],
-                    ["git", "commit", "-q", "-m", "seed"]):
+        self.tmp = tempfile.mkdtemp(prefix="wk-test-checkout-")
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.guest = os.path.join(self.tmp, "guest")
+        os.makedirs(os.path.join(self.guest, "share"))
+        self.mirror = os.path.join(self.guest, "share", "WebKit.git")
+        src = os.path.join(self.tmp, "seed")
+        os.makedirs(os.path.join(src, "Tools", "Scripts"))
+        gw = os.path.join(src, "Tools", "Scripts", "git-webkit")
+        with open(gw, "w") as f:
+            f.write(FAKE_GIT_WEBKIT)
+        os.chmod(gw, 0o755)
+        env = dict(os.environ, GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@t", GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@t")
+        for cmd in (["git", "init", "-q", "-b", "main"], ["git", "add", "."], ["git", "commit", "-q", "-m", "seed"]):
             subprocess.run(cmd, cwd=src, env=env, check=True)
-        subprocess.run(["git", "clone", "-q", "--bare", str(src), str(self.mirror)], check=True)
+        subprocess.run(["git", "clone", "-q", "--bare", src, self.mirror], check=True)
+        p = mock.patch.object(Store, "macos_host", new_callable=mock.PropertyMock, return_value=True)
+        p.start()
+        self.addCleanup(p.stop)
 
-    def _start(self):
-        with stub_path({"ssh": FAKE_SSH_GUEST, "tart": TART}) as binp:
-            env = {
-                "PATH": f"{binp}:{os.environ['PATH']}",
-                "WK_TEST_GUEST": str(self.guest),
-                "WK_VM_STORE": str(self.tmp / "vmstore"),
-                "WK_LOCK_DIR": str(self.tmp / "locks"),
-                "XDG_STATE_HOME": str(self.tmp / "state"),
-                "WK_STORE": str(self.tmp / "store"),
-            }
-            return bash(DRIVER + "_write_checkout demo 1.2.3.4\n", env=env, timeout=120)
+    def start(self):
+        env = {"HOME": self.tmp + "/home", "WK_VM_STORE": self.tmp + "/vmstore", "WK_STORE": self.tmp + "/store",
+               "XDG_STATE_HOME": self.tmp + "/state", "WK_MACHINES_DIR": self.tmp + "/registry", "PATH": os.environ["PATH"],
+               "WK_MIRROR_BRANCHES": "main"}
+        vm = targets.Registry(str(REPO), env=env, machine=Local()).load("vm")
+        g = guest.Guest(guest.Host(vm, FakeClock()), "demo", IP)
+        g.m = LocalGuest(self.guest)
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            ok = g.write_checkout()
+        return ok, err.getvalue()
 
-    def _config(self, key):
-        return subprocess.run(["git", "-C", str(self.guest / "WebKit"), "config", "--get-all", key],
+    def config(self, key):
+        return subprocess.run(["git", "-C", os.path.join(self.guest, "WebKit"), "config", "--get-all", key],
                               capture_output=True, text=True).stdout.split()
 
     def test_the_first_start_clones_wires_and_sets_up(self):
-        cp = self._start()
-        out = cp.stdout + cp.stderr
-        self.assertEqual(cp.returncode, 0, out)
-        self.assertIn("checkout made from its mirror in", out)
-        self.assertIn("git-webkit is set up in demo", out)
-        self.assertEqual(self._config("webkitscmpy.setup"), ["true"])
-        self.assertEqual(self._config("remote.origin.url"), ["https://github.com/WebKit/WebKit.git"])
-        self.assertIn("https://github.com/WebKit/WebKit.git", self._config(f"url.{self.mirror}.insteadOf"),
-                      "fetches do not read the mirror")
-        self.assertIn("dotfiles/gitconfig", (self.guest / ".gitconfig").read_text())
-        self.assertTrue((self.guest / "WebKit" / ".git" / "objects" / "info" / "alternates").exists(),
+        ok, err = self.start()
+        self.assertTrue(ok, err)
+        self.assertIn("checkout made from its mirror in", err)
+        self.assertIn("git-webkit is set up in demo", err)
+        self.assertEqual(["true"], self.config("webkitscmpy.setup"))
+        self.assertEqual(["https://github.com/WebKit/WebKit.git"], self.config("remote.origin.url"))
+        with open(os.path.join(self.guest, ".gitconfig")) as f:
+            self.assertIn("dotfiles/gitconfig", f.read(), "the identity include precedes the setup that reads it")
+        self.assertTrue(os.path.exists(os.path.join(self.guest, "WebKit", ".git", "objects", "info", "alternates")),
                         "the clone copied the history rather than sharing the mirror's")
 
     def test_the_next_start_finds_it_done(self):
-        self._start()
-        cp = self._start()
-        out = cp.stdout + cp.stderr
-        self.assertEqual(cp.returncode, 0, out)
-        self.assertNotIn("made from its mirror", out)
-        self.assertNotIn("git-webkit is set up", out)
-        calls = (self.guest / "git-webkit.calls").read_text().splitlines()
-        self.assertEqual([c for c in calls if c.startswith("setup")], ["setup --defaults"],
-                         "setup ran again on a set-up checkout")
-        self.assertEqual(len([c for c in calls if c.startswith("install-hooks")]), 2,
-                         "the hooks are re-asserted on every start (lib/store.sh)")
+        self.start()
+        ok, err = self.start()
+        self.assertTrue(ok, err)
+        self.assertNotIn("made from its mirror", err)
+        with open(os.path.join(self.guest, "git-webkit.calls")) as f:
+            calls = f.read().splitlines()
+        self.assertEqual(["setup --defaults"], [c for c in calls if c.startswith("setup")])
 
     def test_no_mirror_is_a_failure_that_names_both_remedies(self):
-        """The share is mounted at boot and the mirror is made by `wk sync`;
-        either can be the one missing."""
         shutil.rmtree(self.mirror)
-        cp = self._start()
-        out = cp.stdout + cp.stderr
-        self.assertNotEqual(cp.returncode, 0)
-        self.assertIn("checkout=no-mirror", out)
-        self.assertIn("wk vm start", out)
-        self.assertIn("wk sync", out)
-        self.assertFalse((self.guest / "WebKit").exists())
+        ok, err = self.start()
+        self.assertFalse(ok)
+        self.assertIn("checkout=no-mirror", err)
+        self.assertIn("wk start", err)
+        self.assertIn("wk sync", err)
+        self.assertFalse(os.path.exists(os.path.join(self.guest, "WebKit")))
+
+
+@unittest.skipUnless(platform.system() == "Darwin", "the unblocker imports pyobjc's ApplicationServices, a macOS framework")
+class TestSetupAssistantIsDrivenByIdentifier(unittest.TestCase):
+    """Elements are chosen by AXIdentifier, never by where they draw: a coordinate lands on "Restart"."""
+
+    def pick(self, pairs):
+        spec = importlib.util.spec_from_file_location("wk_unblock", REPO / "vm" / "desktop-unblock.py")
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod._pick([(i, t, object()) for i, t in pairs])[0]
+
+    def test_a_confirmation_sheet_outranks_the_pane_behind_it(self):
+        self.assertEqual("action-button-1", self.pick([("Next Button", "Continue"), ("action-button-1", "Skip"),
+                                                       ("action-button-2", "Don’t Skip")]))
+
+    def test_the_account_pane_is_declined_through_its_own_menu_item(self):
+        self.assertEqual("userDeclinediCloud", self.pick([("Alternate Button", "Other Sign-In Options"),
+                                                          ("userDeclinediCloud", "Sign in Later in Settings")]))
+
+    def test_an_ordinary_pane_takes_its_primary_button(self):
+        self.assertEqual("Next Button", self.pick([("Next Button", "Continue"), ("Alternate Button", "Only Download Automatically")]))
+
+    def test_the_flow_is_never_walked_backwards_nor_guessed_at(self):
+        self.assertIsNone(self.pick([("Previous Button", "Back")]))
+        self.assertIsNone(self.pick([("", "")]))
+
+
+class TestTheLiveBase(unittest.TestCase):
+    wk_tier = "live"
+
+    def test_vm_base_matches_pin(self):
+        """`live vm.base_matches_pin`: the base on this Mac was sealed from the pinned image and its current inputs."""
+        if not live_selected() or sys.platform != "darwin":
+            self.skipTest("live tier not selected, or not a macOS host")
+        vm = targets.Registry(str(REPO)).load("vm")
+        if not vm.tart():
+            self.skipTest("tart is not installed here")
+        base = guestbase.Base(vm)
+        if not base.exists():
+            self.skipTest("no golden base on this Mac")
+        self.assertEqual("", base.stale())
+        self.assertEqual(guestbase.image(vm.env), base.field("image"))
+
 
 if __name__ == "__main__":
     unittest.main()

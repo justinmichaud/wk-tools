@@ -39,6 +39,7 @@ from unittest import mock
 from tests.support import func_body
 from tests.support import assert_guest_start_converges, guest_step, REPO, WkTest, bash, stub_path
 from tests.test_pi_agent import FILE_ROWS, TABLE, VALUE_ROWS, store_path
+from tests.test_wk_secrets import KEY_SH
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk import guest, targets  # noqa: E402
@@ -180,7 +181,7 @@ class TestTheStoreIsTheOnePlace(WkTest):
 . "$WK_ROOT/lib/common.sh"
 WK_STORE={store}
 . "$WK_ROOT/lib/store.sh"
-{script}
+{KEY_SH}{script}
 ''', env={"WK_HOST_SECRETS": str(store / "secrets")})
 
     def test_absent_reads_as_nothing_and_is_not_an_error(self):
@@ -191,21 +192,21 @@ WK_STORE={store}
     def test_stored_then_read_back(self):
         store = self._store()
         cp = self._sh(
-            f'printf "%s\\n" {PLACEHOLDER} | wk_cred_store claude\n'
+            f'printf "%s\\n" {PLACEHOLDER} | key_store claude\n'
             'printf "[%s]\\n" "$(wk_agent_secret claude)"',
             store)
         self.assertIn(f"[{PLACEHOLDER}]", cp.stdout, cp.stdout + cp.stderr)
 
     def test_it_is_written_unreadable_to_anyone_else(self):
         store = self._store()
-        self._sh(f'printf "%s\\n" {PLACEHOLDER} | wk_cred_store claude', store)
+        self._sh(f'printf "%s\\n" {PLACEHOLDER} | key_store claude', store)
         mode = (store / "secrets" / "claude-token").stat().st_mode & 0o777
         self.assertEqual(mode, 0o600, oct(mode))
 
     def test_a_driver_moving_wk_store_does_not_move_the_token(self):
         """There is one token per *machine*. targets/vm.sh points $WK_STORE at
         its own state directory, so resolving the token against $WK_STORE would
-        send `wk vm start` looking somewhere `wk key set claude` never writes --
+        send `wk start` looking somewhere `wk key set claude` never writes --
         and find nothing, silently, in the command that most needs it.
 
         Two spellings of one directory, and neither follows a driver: on a
@@ -253,8 +254,8 @@ printf "store=%s path=%s\\n" "$WK_STORE" "$(wk_agent_secret_path claude)"
     def test_clearing_withdraws_it(self):
         store = self._store()
         cp = self._sh(
-            f'printf "%s\\n" {PLACEHOLDER} | wk_cred_store claude\n'
-            'wk_cred_clear claude\n'
+            f'printf "%s\\n" {PLACEHOLDER} | key_store claude\n'
+            'key_clear claude\n'
             'printf "[%s]\\n" "$(wk_agent_secret claude)"',
             store)
         self.assertIn("[]", cp.stdout, cp.stdout + cp.stderr)
@@ -342,7 +343,7 @@ class TestEveryTargetDeliversIt(unittest.TestCase):
         it."""
         text = (REPO / "container" / "firstrun.sh").read_text()
         self.assertIn('ln -sfn "/secrets/$_sfile"', text)
-        self.assertIn("claude-token", (REPO / "lib" / "store.sh").read_text())
+        self.assertIn("claude-token", (REPO / "lib" / "wk" / "secrets.py").read_text())
 
     def test_a_guest_is_written_on_every_start(self):
         """t_start has two arms -- a guest already running is converged, one
@@ -360,17 +361,18 @@ class TestEveryTargetDeliversIt(unittest.TestCase):
         and injector, never a secret file."""
         text = (REPO / "lib" / "store.sh").read_text()
         self.assertEqual(1, text.count("_wk_secret_read() {"))
-        for fn in ("_wk_secret_read", "wk_cred_store", "wk_cred_present",
-                   "wk_cred_clear", "wk_push_key"):
+        for fn in ("_wk_secret_read", "wk_cred_present"):
             with self.subTest(no_hop_in=fn):
                 self.assertNotIn("podman machine ssh", func_body(text, fn))
+        for p in sorted((REPO / "lib" / "wk" / "key").glob("*.py")):
+            with self.subTest(no_hop_in=p.name):
+                self.assertNotIn("podman machine ssh", p.read_text())
         self.assertEqual(1, text.count("podman machine ssh"))
         self.assertIn("podman machine ssh", func_body(text, "push_agent_exec"))
-        for caller in ("wk_push_key", "wk_agent_secret"):
+        for caller in ("wk_agent_secret",):
             with self.subTest(caller=caller):
                 self.assertIn("_wk_secret_read", func_body(text, caller))
-        for caller, where in (("wk_push_key", "wk_push_held_dir"),
-                              ("wk_agent_secret_path", "wk_secrets_dir")):
+        for caller, where in (("wk_agent_secret_path", "wk_secrets_dir"),):
             with self.subTest(dir_of=caller):
                 self.assertIn(where, func_body(text, caller))
 
@@ -380,13 +382,13 @@ class TestEveryTargetDeliversIt(unittest.TestCase):
         for f in ("container/firstrun.sh", "lib/wk/guest.py"):
             text = (REPO / f).read_text()
             with self.subTest(script=f):
-                self.assertRegex(text, r"(wk_|\.)agent_secrets\b")
+                self.assertRegex(text, r"(wk_|\.|wk\.secrets )agent[_-]secrets\b")
                 self.assertNotIn(".wk-agent-token", text)
 
     def test_the_token_is_never_an_argument(self):
         """An argument is in `ps` for everyone on the machine. Every writer
         takes it on stdin instead."""
-        for f in ("lib/wk/key.py", "lib/wk/machine_cmd.py", "lib/store.sh", "lib/wk/guest.py"):
+        for f in [str(p.relative_to(REPO)) for p in sorted((REPO / "lib" / "wk" / "key").glob("*.py"))] + ["lib/wk/machine_cmd/build.py", "lib/store.sh", "lib/wk/guest.py"]:
             text = (REPO / f).read_text()
             with self.subTest(script=f):
                 self.assertNotIn("--token", text)
@@ -400,7 +402,7 @@ class TestEveryTargetDeliversIt(unittest.TestCase):
         """`ssh -n` gives the far side /dev/null, so a value piped into it lands
         as an empty file while the command reports success. The credential is
         the run's `input`. Driven by TestABuildBoxGetsThemAtSetup below; this is the shape."""
-        text = (REPO / "lib" / "wk" / "machine_cmd.py").read_text()
+        text = (REPO / "lib" / "wk" / "machine_cmd" / "build.py").read_text()
         self.assertIn('act_run(["sh", "-c", "umask 077 && cat > %s" % dest], input=value + "\\n")', text)
 
     def test_the_old_credentials_file_is_gone(self):
@@ -572,7 +574,7 @@ class TestAGuestGetsThemOnStart(_Delivery):
 
 
 class TestABuildBoxGetsThemAtSetup(_Delivery):
-    """`wk machine setup`'s credential step (lib/wk/machine_cmd.py), run against a fake ssh.
+    """`wk machine setup`'s credential step (lib/wk/machine_cmd/build.py), run against a fake ssh.
 
     The measured defect this holds shut: a value handed to `ssh -n` -- stdin
     from /dev/null -- landed as an EMPTY file while the command still reported
@@ -676,23 +678,22 @@ class TestAGuestMountsTheShare(_Delivery):
     credential in the base would be in every clone's image."""
 
     def test_the_guest_boots_with_the_share_and_the_base_without(self):
-        vm = (REPO / "targets" / "vm.sh").read_text()
+        from wk.sysimage import guestbase
         self.assertIn('"--dir=%s:%s" % (vm.agent_rw_share, agent_rw)', inspect.getsource(guest.boot))
         self.assertIn("agent_rw_dir()", inspect.getsource(guest.boot))
-        self.assertNotIn("--dir", func_body(vm, "_start_base"))
+        self.assertNotIn("--dir", inspect.getsource(guestbase.Base.start))
 
     def test_the_rc_is_told_where_the_share_is_by_the_driver(self):
         """One authority for the guest path: the driver names the share and
         hands the rc the directory, and the rc refuses to guess one."""
-        vm = (REPO / "targets" / "vm.sh").read_text()
-        self.assertIn("_agent_rw_guest_dir", func_body(vm, "_write_shell_rc"))
+        self.assertIn("self.vm.agent_rw_dir()", inspect.getsource(guest.Guest.write_shell_rc))
         home = self.tmp / "rc-home"
         home.mkdir()
         cp = subprocess.run(["bash", str(REPO / "vm" / "shell-rc.sh"), str(REPO)],
                             env={"HOME": str(home), "PATH": os.environ["PATH"]},
                             capture_output=True, text=True, timeout=60)
         self.assertNotEqual(0, cp.returncode)
-        self.assertIn("targets/vm.sh", cp.stderr)
+        self.assertIn("lib/wk/guest.py", cp.stderr)
         self.assertFalse((home / ".zshrc").exists(), "it wrote an rc with no directory to name")
 
     def test_a_guest_wired_to_log_in_for_itself_is_rewired(self):
@@ -733,7 +734,7 @@ class TestAGuestMountsTheShare(_Delivery):
         cp = self._write(self._store(), self._wired_home(mounted=False))
         self.assertEqual(0, cp.returncode, cp.stdout + cp.stderr)
         self.assertIn("not mounted in demo", cp.stderr)
-        self.assertIn("wk vm start demo", cp.stderr)
+        self.assertIn("wk start demo", cp.stderr)
 
     def test_a_start_with_the_share_is_quiet(self):
         cp = self._write(self._store(), self._wired_home(mounted=True))
@@ -783,7 +784,7 @@ class TestAGuestIsNeverGivenACopyOfTheFileRow(_Delivery):
                 self.assertIn("stdin=0", line, line)
 
     def test_a_copy_an_older_start_left_behind_is_taken_away(self):
-        """Unconditional, so a guest converges on the next `wk vm start`
+        """Unconditional, so a guest converges on the next `wk start`
         rather than keeping a credential nothing here can revoke."""
         home = self._home()
         for row in FILE_ROWS:
@@ -938,7 +939,7 @@ class TestWhoIsAskedWhetherAWorkspaceCanAuthenticate(_Delivery):
         cp = self._ask(self._store(), self._guest(mounted=False),
                        "remedy", FILE_ROWS[0][0])
         self.assertIn("not mounted", cp.stdout, cp.stdout + cp.stderr)
-        self.assertIn("wk vm start demo", cp.stdout, cp.stdout)
+        self.assertIn("wk start demo", cp.stdout, cp.stdout)
         self.assertNotIn("wk key set", cp.stdout, cp.stdout)
 
     def test_a_value_rows_remedy_is_this_machines_store(self):

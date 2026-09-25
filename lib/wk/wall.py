@@ -6,7 +6,7 @@ import os
 import re
 from concurrent.futures import ThreadPoolExecutor
 
-from wk import shell
+from wk import buildconf, secrets
 from wk.act import die
 from wk.doctor import MISS, miss, note, ok
 
@@ -65,14 +65,13 @@ def run_at_once(checks):
 
 
 class Wall:
-    def __init__(self, root, target, ws, machine, push_on=0, want_gpu=False, sh=shell):
+    def __init__(self, root, target, ws, machine, push_on=0, want_gpu=False):
         self.root = root
         self.target = target
         self.ws = ws
         self.machine = machine
         self.push_on = push_on
         self.want_gpu = want_gpu
-        self.sh = sh
 
     def inside(self, cmd):
         """The container exec path appends \\r, which every numeric probe would then test as "2\\r"."""
@@ -177,7 +176,7 @@ class Wall:
 
     def secrets_view(self):
         rows, kept = [], []
-        for row in self.sh.agent_secrets(self.root, self.machine):
+        for row in secrets.agent_secrets():
             if self.target.kind in row[5].split(","):
                 continue
             path = ("/agent-rw/" if row[4] == "file" else "/secrets/") + row[1]
@@ -212,7 +211,7 @@ class Wall:
         return [miss("%d identity/identities reach this workspace, and the host does not say push is on" % n, "wk push off")]
 
     def push_here(self):
-        alias = next((r[2] for r in self.sh.push_forks(self.root, self.machine)), "")
+        alias = next((r[2] for r in secrets.forks()), "")
         sock = next((l.split()[1] for l in self.machine.run(["ssh", "-G", alias]).out.splitlines()
                      if l.split()[:1] == ["identityagent"] and len(l.split()) > 1), "")
         ident = 0
@@ -247,7 +246,7 @@ class Wall:
 
     def github_write(self):
         """An empty body names no branch, so 422 is the authenticated answer and no pull request is created."""
-        fork = next((r[1] for r in self.sh.push_forks(self.root, self.machine)), "")
+        fork = next((r[1] for r in secrets.forks()), "")
         pulls = "https://api.github.com/repos/%s/pulls" % fork
         code = self.inside(http(pulls, "-X POST -d '{}' "))
         if self.push_on != 1:
@@ -273,7 +272,7 @@ class Wall:
         """`claude auth status` is local (measured 2026-09-10: loggedIn for a token Anthropic has never seen)."""
         rows = []
         login = any(r[0] == "claude-login" and self.target.kind in r[5].split(",")
-                    for r in self.sh.agent_secrets(self.root, self.machine))
+                    for r in secrets.agent_secrets())
         secret, want = ("claude-login", "claude.ai") if login else ("claude", "oauth_token")
         token = self.inside('printf %s "${CLAUDE_CODE_OAUTH_TOKEN:+set}"')
         if login and token == "set":
@@ -348,14 +347,14 @@ class Wall:
     def gpu(self):
         """gpu-probe.sh exits 0 hardware, 1 software only, 2 no EGL, 3 build failed."""
         arch = self.target.arch(self.ws)
-        if not self.sh.arch_has_gpu(self.root, self.machine, arch):
+        if not buildconf.arch_has_gpu(arch):
             rows = [note("no GPU: an %s workspace gets none (the NVIDIA userspace is aarch64-only)" % arch)]
             if self.want_gpu:
                 rows.append(miss("--gpu on an %s workspace, which cannot have one" % arch, "a native workspace"))
             return rows
         if self.target.os() == "macos":
             return [note("a guest's GPU is Virtualization.framework's, reached through Metal, and this probe is EGL: what a benchmark "
-                         "in there gets is measured by the benchmark, and 'wk vm check %s' says whether its window is covered" % self.ws)]
+                         "in there gets is measured by the benchmark, and its desktop rows above say whether its window is covered")]
         r = self.target.exec(self.ws, ["bash", "-lc", os.path.join(self.target.tools(self.ws), "container", "gpu", "gpu-probe.sh")])
         rows = [note(l) for l in (r.out + r.err).replace("\r", "").splitlines()]
         if r.rc == 0:
@@ -438,7 +437,7 @@ def push_switch(root, machine):
                   "is measured below and compared to nothing" % rc)
 
 
-def from_host(root, target, ws, machine, rep, want_gpu=False, sh=shell):
+def from_host(root, target, ws, machine, rep, want_gpu=False):
     """Out of the parallel pass: the push switch, which two checks read, and the write probe, which cleans up after itself."""
     if target.kind == "remote":
         die("'wk doctor %s' proves a sandbox holds, and a remote target has none:\n"
@@ -459,18 +458,20 @@ def from_host(root, target, ws, machine, rep, want_gpu=False, sh=shell):
     rows.append(note(said))
     if target.kind == "vm" and not target.egress_filtered(ws):
         rows.append(miss("this guest was booted with WK_VM_UNFILTERED, so it has the open network",
-                         "wk vm stop %s && wk vm start %s   (without that variable)" % (ws, ws)))
+                         "wk stop %s && wk start %s   (without that variable)" % (ws, ws)))
+    if target.kind == "vm":
+        rows += target.check_rows(ws)
     rep.rows(rows)
-    wall = Wall(root, target, ws, machine, push_on, want_gpu, sh)
+    wall = Wall(root, target, ws, machine, push_on, want_gpu)
     for _, found in run_at_once(wall.from_host()):
         rep.rows(found)
     if target.kind == "container":
         rep.rows(wall.rootless_proxy())
 
 
-def from_inside(root, target, ws, machine, rep, sh=shell):
+def from_inside(root, target, ws, machine, rep):
     """`wk doctor` in a workspace: every row into `rep`, and whether an agent in here could publish."""
-    results = run_at_once(Wall(root, target, ws, machine, 0, False, sh).from_inside())
+    results = run_at_once(Wall(root, target, ws, machine, 0, False).from_inside())
     for _, found in results:
         rep.rows(found)
     return any(r[0] == MISS for name, found in results if name in PUBLISHING for r in found)

@@ -5,9 +5,6 @@ and follows its record; the driver does everything that changes anything,
 under the workspace lock, stepping its record as it goes. Under --dry-run the
 front runs the driver inline against the recorder, so nothing is made or
 waited for and the plan cannot differ from the run.
-
-The bash helpers not yet ported are `lib/wk/shell.py`'s, run on the machine
-this command runs on, so a Fake answers them in a unit test.
 """
 
 import json
@@ -16,7 +13,7 @@ import re
 import subprocess
 import sys
 
-from wk import act, job, record, shell, sshalias
+from wk import act, buildconf, job, record, shell, sshalias
 from wk.act import Refused, die, info, log, warn
 from wk.machine import Killed
 from wk.pr import checkout as pr_checkout, parse_spec
@@ -103,7 +100,7 @@ def new_front(reg, records, name, opts):
     pr = opts.get("pr")
     if pr is not None and not pr:
         die("--pr needs a spec: <user>:<branch>, <n>, or wpe:<n>")
-    arch = shell.arch_canon(root, here, opts.get("arch") or "native")
+    arch = buildconf.arch_canon(opts.get("arch") or "native")
     tname = opts.get("target") or reg.default()
     try:
         target = reg.load(tname)
@@ -186,7 +183,7 @@ def new_hints(target, name, arch):
         log("  %s: native 32-bit, no GPU. 'wk bench' will run CPU-class plans" % arch)
         log("  in here and refuse GPU-class ones.")
     if target.kind == "vm":
-        log("  wk vm start %s       boot it (its ssh alias is written then)" % name)
+        log("  wk start %s       boot it (its ssh alias is written then)" % name)
         log("  wk zed %s            the checkout, in Zed (once it is up)" % name)
         log("  wk build %s mac-release" % name)
     elif target.kind == "remote":
@@ -524,3 +521,40 @@ def rm_all(reg, records):
         if cp is not None:
             worst = max(worst, cp.returncode)
     return worst
+
+
+SELFTEST_PREFIX = "wk-test-"
+
+
+def rubble(listed, stored, here, root, selftest_live, clock):
+    """`listed`: the targets whose environments this process lists; `stored`: those whose store it reads."""
+    from wk.rubble import remover, row
+    rows = []
+
+    def rm(t, n):
+        return lambda: here.act_run(["env", "WK_TARGET=%s" % t.name, wk_of(root), "rm", n, "--yes"]).ok
+
+    def names(t):
+        try:
+            dirs = here.listdir(os.path.dirname(t.store.ws_dir("x"))) if t in stored else []
+        except OSError:
+            dirs = []
+        return sorted(set(dirs) | {n for n, _ in t.list()})
+
+    for t in stored:
+        recs = record.of_target(t, clock, here)
+        for task in recs.list():
+            n = task.field("name")
+            if task.field("kind") != "new" or task.alive(None) or any(here.isdir(s.store.ws_dir(n)) for s in stored):
+                continue
+            rows.append(row("creation-record", "creation record of '%s' on %s, its workspace gone" % (n, t.name), None,
+                            take=remover(here, str(task.path), t.create_log(n))))
+        for n in names(t):
+            if not n.startswith(SELFTEST_PREFIX) and creation_state(t, recs, n) == "creating" and not t.creating_now(n):
+                rows.append(row("half-made", "workspace '%s' on %s, half-made and nothing creating it" % (n, t.name), None,
+                                "--purge-rubble", rm(t, n)))
+    for t in listed:
+        for n in (n for n in names(t) if n.startswith(SELFTEST_PREFIX)):
+            rows.append(row("selftest-ws", "workspace '%s' on %s, left by a selftest" % (n, t.name), None, take=rm(t, n),
+                            why="kept -- the live 'wk selftest' running here made it" if selftest_live else ""))
+    return rows

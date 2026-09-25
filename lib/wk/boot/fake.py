@@ -1,18 +1,49 @@
-"""A board in memory, answering a driver's Channel: its media, a firmware one-shot and a clock. `firmware` is how
-each arrangement picks the next boot; `stuck` makes every arming write land nowhere, as an older helper does."""
+"""A board in memory behind the real Channel: its host and bench systems are two Fake machines answering the argv the
+Channel sends -- an on-board file under `sh -c`, a helper verb -- from its media, a firmware one-shot, its bootloader
+EEPROM and a clock. `firmware` is how each arrangement picks the next boot; `stuck` makes every arming write land
+nowhere, as an older helper does."""
 
+import hashlib
+import os
 import re
 
-from wk.boot.driver import disk_of, kv, part
+from wk.boot.driver import BOOT_PRIV, CARD_PRIV, Channel, Onboard, disk_of, part, root_priv
 from wk.clock import FakeClock
-from wk.machine import Result
+from wk.kv import kv
+from wk.machine import Fake, Result
+
+ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+PARAMS = re.compile(r"^((?:[A-Z_][A-Z0-9_]*=[^;]*; )*)")
 
 
-class FakeBoard:
+class Side(Fake):
+    """One of the board's two systems as ssh reaches it: it answers only while it is the one running."""
+
+    def __init__(self, board, name):
+        super().__init__(name)
+        self.board = board
+
+    def run(self, argv, input=None, timeout=None):
+        self.record_run(argv)
+        return self.board.answer(self.name, list(argv), input)
+
+    def copy_in(self, src, dest):
+        super().copy_in(src, dest)
+        if dest in self.files:
+            self.board.bootfs[dest] = self.files[dest]
+
+    def write(self, path, text):
+        super().write(path, text)
+        if path in self.files:
+            self.board.bootfs[path] = text.encode()
+
+
+class FakeBoard(Channel):
     def __init__(self, conf, clock=None):
-        self.conf = dict(conf)
+        super().__init__(ROOT, dict(conf), "none", env={})
         self.clock = clock or FakeClock()
-        self.channel = "none"
+        self.sides = {"m_ssh": Side(self, "host"), "i_ssh": Side(self, "bench")}
+        self.onboard = {Onboard(ROOT, n).text(): n for n in os.listdir(os.path.join(ROOT, "boot", "onboard"))}
         self.fat = {}
         self.roots = {self.conf["NODE_ROOT"]: {"id": "", "role": "rescue"}}
         self.running = self.conf["NODE_ROOT"]
@@ -24,6 +55,10 @@ class FakeBoard:
         self.stuck = False
         self.up = True
         self.effects = []
+        self.kept = False
+        self.eeprom = "BOOT_ORDER=0xf41\n"
+        self.eeprom_tool, self.vc, self.soc = True, True, "raspberrypi,4-model-b\nbrcm,bcm2711\n"
+        self.bootfs = {}
 
     # -- laying out media
     def rescue(self, ident, role="rescue"):
@@ -48,11 +83,11 @@ class FakeBoard:
         drv, dev, sd = self.conf.get("NODE_DRIVER"), self.conf.get("NODE_DEVICE", ""), self.fat.get(self.sd(), {})
         if drv == "pi-sd":
             m = re.search(r"(?m)^os_prefix=(\w+)/", sd.get("config.txt", ""))
-            return kv(sd.get(m.group(1) + "/cmdline.txt", "").replace(" ", "\n"), "root") if m else None
+            return kv(sd.get(m.group(1) + "/cmdline.txt", "").replace(" ", "\n")).get("root", "") if m else None
         if drv == "pi-tryboot":
-            return kv(sd.get("second/cmdline.txt", "").replace(" ", "\n"), "root") if "tryboot.txt" in sd else None
+            return kv(sd.get("second/cmdline.txt", "").replace(" ", "\n")).get("root", "") if "tryboot.txt" in sd else None
         if drv == "rpi5-usb" and self.one_shot and self.one_shot.endswith("4"):
-            pair = kv(self.fat.get(part(dev, 1), {}).get("autoboot.txt", ""), "boot_partition") or "1"
+            pair = kv(self.fat.get(part(dev, 1), {}).get("autoboot.txt", "")).get("boot_partition", "") or "1"
             return part(dev, int(pair) + 1)
         if drv == "pi-mbr" and self.mbr.get(dev) == "0c":
             return part(dev, 2)
@@ -72,33 +107,38 @@ class FakeBoard:
             self.run_onboard(failsafe, {"WK_SD": self.sd()})
         return Result(0)
 
-    # -- the Channel
+    # -- the Channel: every call is the real one, over the two sides
     def on_rescue(self):
         return self.running == self.conf["NODE_ROOT"]
+
+    def machine(self, fn):
+        return self.sides[fn]
 
     def call(self, fn, *args, input=None, mutates=False):
         if mutates:
             self.effects.append((fn,) + tuple(getattr(a, "name", a) for a in args))
-        if fn in ("m_ssh", "i_ssh"):
-            if not self.up or self.on_rescue() != (fn == "m_ssh"):
-                return Result(255, "", "ssh: connect: no route")
-            return self.script(args[0], input)
-        if fn in ("r_ssh", "r_sudo"):
-            return self.call({"host": "m_ssh", "bench": "i_ssh"}.get(self.channel, "none"), *args, input=input)
-        if fn == "card_priv":
-            return self.card(*args)
-        if fn == "boot_priv":
-            return self.priv(*args)
-        if fn in ("boot_priv_require", "disk_unmount"):
-            return Result(0)
-        if fn == "disk_own_or_declared":
-            return Result(0, self.conf.get("NODE_DEVICE", ""))
-        return Result(1, "", "%s: not reachable" % fn)
+        return super().call(fn, *args, input=input, mutates=mutates)
 
-    def script(self, ob, input):
-        if ob == "true":
-            return Result(0)
-        return self.run_onboard(ob.name, ob.params, input)
+    def answer(self, side, argv, input=None):
+        if not self.up or self.on_rescue() != (side == "host"):
+            return Result(255, "", "ssh: connect: no route")
+        argv = argv[2:] if argv[:2] == ["sudo", "-n"] else argv
+        if argv[:1] == [CARD_PRIV]:
+            return self.card(*argv[1:])
+        if argv[:1] == [BOOT_PRIV]:
+            return self.priv(*argv[1:])
+        if argv[:1] == ["vcmailbox"]:
+            return self.priv("order", argv[-1])
+        for verb in ("reboot", "reboot-tryboot"):
+            if argv == root_priv(verb):
+                return self.priv(verb)
+        if argv[:2] == ["sh", "-c"]:
+            head = PARAMS.match(argv[2]).group(1)
+            name = self.onboard.get(argv[2][len(head):])
+            params = dict(w.split("=", 1) for w in head.split("; ") if w)
+            if name:
+                return self.run_onboard(name, params, input)
+        return Result(127, "", "%s: no answer on this board" % " ".join(argv))
 
     def run_onboard(self, name, p, input=None):
         sys_ = self.roots[self.running]
@@ -118,6 +158,11 @@ class FakeBoard:
             return Result(0, "yes\n" if p["WK_DEV"] in self.fat else "no\n")
         if name == "medium-read.sh":
             return Result(0, self.fat.get(p["WK_PART"], {}).get(p["WK_NAME"], ""))
+        if name == "keep.sh":
+            self.kept = True
+            return Result(0)
+        if name == "eeprom.sh":
+            return self.eeprom_do(p, input)
         if name == "eeprom-order.sh":
             return Result(0, "eeprom_boot_order=0xf41\n")
         if name == "pimbr-type.sh":
@@ -142,6 +187,21 @@ class FakeBoard:
             return self.record_do(name, input)
         return Result(127, "", "%s: not an on-board script this board knows" % name)
 
+    def eeprom_do(self, p, input):
+        do, tool = p["WK_DO"], self.eeprom_tool
+        answers = {"has-config": Result(0 if tool else 1), "has-vc": Result(0 if self.vc else 1),
+                   "read": Result(0, self.eeprom) if tool else Result(127, "", "rpi-eeprom-config: not found"),
+                   "vc-read": Result(0, self.eeprom if self.vc else ""), "soc": Result(0, self.soc),
+                   "bootfs": Result(0, "/boot\n"), "sync": Result(0)}
+        if do == "apply" and tool and not self.stuck:
+            self.eeprom = input
+        if do == "clear":
+            self.bootfs.clear()
+        if do == "sum":
+            data = self.bootfs.get(p["WK_PATH"])
+            return Result(0, hashlib.sha256(data).hexdigest() + "\n") if data is not None else Result(1)
+        return answers.get(do, Result(0 if tool else 127))
+
     def tryboot_drop(self, sd):
         for k in [k for k in sd if k == "tryboot.txt" or k.startswith("second/")]:
             del sd[k]
@@ -164,9 +224,9 @@ class FakeBoard:
         if do == "staged":
             return Result(0, "yes\n" if "tryboot.txt" in sd and "second/cmdline.txt" in sd else "no\n")
         if do == "staged-root":
-            return Result(0, "root=%s\n" % kv(sd.get("second/cmdline.txt", "").replace(" ", "\n"), "root"))
+            return Result(0, "root=%s\n" % kv(sd.get("second/cmdline.txt", "").replace(" ", "\n")).get("root", ""))
         running = "root=%s" % self.running
-        staged = "root=%s" % kv(sd.get("second/cmdline.txt", "").replace(" ", "\n"), "root")
+        staged = "root=%s" % kv(sd.get("second/cmdline.txt", "").replace(" ", "\n")).get("root", "")
         return Result(0, "staging\n" if running == staged else "sd-config\n" if self.on_rescue() else "unknown\n")
 
     def record_do(self, name, input):
@@ -180,6 +240,8 @@ class FakeBoard:
         if verb == "boot-read":
             p = part(args[0], args[1])
             return Result(0, self.fat[p].get(args[2], "")) if p in self.fat else Result(1, "", "no such partition")
+        if verb == "unmount":
+            return Result(0)
         if verb == "autoboot":
             if not self.stuck:
                 self.fat.setdefault(part(args[0], 1), {})["autoboot.txt"] = "[all]\nboot_partition=%s\n" % args[1]

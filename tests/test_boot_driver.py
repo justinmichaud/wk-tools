@@ -15,10 +15,11 @@ sys.path.insert(0, str(REPO / "lib"))
 
 from wk import act, fleet  # noqa: E402
 from wk.boot import driver_class  # noqa: E402
-from wk.boot.driver import Driver, Onboard, interface, part  # noqa: E402
+from wk.boot.driver import Channel, Driver, Onboard, interface, part  # noqa: E402
 from wk.boot.fake import FakeBoard  # noqa: E402
-from wk.boot import drivers  # noqa: E402
-from tests.test_mac_volume import FAKES, MacConformance, mac_board  # noqa: E402
+from wk.boot import drivers, open_driver  # noqa: E402
+from wk.machine import Fake  # noqa: E402
+from tests.test_mac_volume import FAKES, MacConformance, mac_board, conf_for as mac_conf  # noqa: E402
 
 DRIVERS = drivers()
 
@@ -84,7 +85,7 @@ class Conformance:
         self.assertIs(driver_class(self.kind), cls)
 
     def test_the_shim_defines_exactly_the_functions_the_class_has(self):
-        """a caller asks `command -v b_disarm` / `b_self_disarm_sh` / `b_medium_selects_by_partition`."""
+        """a caller asks `command -v b_disarm` / `b_self_disarm_sh`."""
         cls = DRIVERS[self.kind]
         text = (REPO / "boot" / ("%s.sh" % self.kind)).read_text()
         defined = set(re.findall(r"(?m)^(\w+)\(\)", text))
@@ -93,9 +94,24 @@ class Conformance:
             want |= {"b_disarm", "b_disarm_note"}
         if cls.failsafe:
             want.add("b_self_disarm_sh")
-        if cls.selects_by_partition:
-            want.add("b_medium_selects_by_partition")
         self.assertEqual(defined, want)
+
+    def test_the_production_transport_is_machines_and_no_bash(self):
+        """machine.conformance[<kind>] over wk.machine.Fake: the driver as `wk boot` builds it reaches its machine
+        through Machine.run alone -- ssh, or the vm target for a guest -- and never through a shell library."""
+        via = Fake()
+        conf = conf_for(self.kind) if self.kind not in FAKES else mac_conf(self.kind)
+        d = open_driver(REPO, conf, env={"HOME": "/nonexistent", "WK_MACHINES_DIR": str(REPO / "machines")}, via=via)
+        for verb in ("probe", "media", "evidence", "reprovision", "record_read", "booted_at"):
+            quiet(getattr(d, verb))
+        ran = [e[1] for e in via.effects if e[0] in ("run", "run_tty")]
+        if self.kind == "mac-guest":
+            self.assertIs(d.ch.vm().machine, via, "a guest is reached through the vm target, over the same machine")
+        else:
+            self.assertTrue(ran, "the driver reached nothing")
+        for argv in ran:
+            self.assertNotIn(argv[0], ("bash", "env"), argv)
+            self.assertFalse([w for w in argv if "machines.sh" in w or "boot_bridge" in w], argv)
 
     def test_the_probe_names_the_channel_that_answered(self):
         fake, d = board(self.kind)
@@ -141,6 +157,7 @@ class Conformance:
         self.assertIn("image=sys-a", fake.record)
         self.assertIn("armed_boot_id=boot-1", fake.record)
         self.assertIn("armed_at=", fake.record)
+        d.probe()
         d.reboot()
         d.probe()
         _, err = quiet(d.armed_barrier, "writing now")
@@ -242,6 +259,59 @@ class TestArmingExact(unittest.TestCase):
         self.assertIn("        a  (on /dev/sda1)", err)
 
 
+class TestChannel(unittest.TestCase):
+    """lib/wk/boot/driver.py's Channel: which Machine each call lands on, and as whom."""
+
+    PEERS = '{"Peer": {"a": {"DNSName": "rpi5-bench.ts.net.", "TailscaleIPs": ["100.64.0.5"], "Online": true},' \
+            ' "b": {"DNSName": "rpi5.ts.net.", "TailscaleIPs": ["100.64.0.4"], "Online": %s}}}'
+
+    def channel(self, role="workstation", channel="host", online="true", env=None, host="elsewhere"):
+        via = Fake()
+        via.answer(("tailscale",), out=self.PEERS % online)
+        via.answer(("hostname", "-s"), out=host + "\n")
+        via.answer(("ssh",), out="ok\n")
+        conf = {"NODE_NAME": "rpi5", "NODE_SSH": "rpi5", "NODE_BENCH_SSH": "rpi5-bench", "NODE_ROLE": role}
+        return Channel(REPO, conf, channel, env=env or {}, via=via), via
+
+    def sent(self, via):
+        return [e[1] for e in via.effects if e[1][0] in ("ssh", "sh")]
+
+    def test_the_bench_system_is_root_at_its_tailnet_address_unpinned(self):
+        ch, via = self.channel(channel="bench")
+        ch.call("r_ssh", Onboard(REPO, "boot-id.sh"))
+        (argv,) = self.sent(via)
+        self.assertEqual(argv[argv.index("-l") + 1], "root")
+        self.assertIn("StrictHostKeyChecking=no", argv)
+        self.assertEqual(argv[-2:], ("100.64.0.5", "sh -c 'cat /proc/sys/kernel/random/boot_id'"))
+
+    def test_a_workstation_in_host_mode_is_its_person_by_name(self):
+        ch, via = self.channel()
+        ch.call("m_ssh", Onboard(REPO, "boot-id.sh"))
+        (argv,) = self.sent(via)
+        self.assertNotIn("-l", argv)
+        self.assertEqual(argv[-2], "rpi5")
+
+    def test_an_address_given_for_the_image_wins(self):
+        ch, _ = self.channel(env={"WK_IMAGE_HOST": "192.0.2.9"})
+        self.assertEqual(ch.image_addr(), "192.0.2.9")
+
+    def test_a_node_the_tailnet_calls_offline_is_not_dialled(self):
+        ch, via = self.channel(online="false")
+        r, _ = quiet(ch.call, "m_ssh", Onboard(REPO, "boot-id.sh"))
+        self.assertEqual(r.rc, 255)
+        self.assertEqual(self.sent(via), [])
+
+    def test_standing_on_the_machine_runs_it_here(self):
+        ch, via = self.channel(host="RPI5")
+        ch.call("m_ssh", Onboard(REPO, "boot-id.sh"))
+        self.assertEqual(self.sent(via), [("sh", "-c", "cat /proc/sys/kernel/random/boot_id")])
+
+    def test_no_channel_reaches_nothing(self):
+        ch, via = self.channel(channel="none")
+        self.assertEqual(ch.call("card_priv", "status").rc, 1)
+        self.assertEqual(self.sent(via), [])
+
+
 class TestOnboard(unittest.TestCase):
     def test_every_file_parses_as_posix_sh(self):
         for f in sorted(ONBOARD.iterdir()):
@@ -293,12 +363,6 @@ class TestShims(unittest.TestCase):
         cp = self.sh("rpi3", 'b_system_kind /dev/mmcblk0p2; b_system_kind /dev/mmcblk0p4; b_system_kind /dev/sda2; '
                              'printf "%s" "$_b_probe_sh" | head -1')
         self.assertEqual(cp.stdout.split(), ["base", "bench", "unknown", "cat", "/etc/wk-image", "2>/dev/null"], cp.stderr)
-
-    def test_a_refusal_ends_the_calling_script(self):
-        cp = self.sh("rpi3", 'b_arm; echo "MUST NOT"')
-        self.assertNotEqual(cp.returncode, 0)
-        self.assertNotIn("MUST NOT", cp.stdout)
-        self.assertIn("selected boot partition", cp.stderr)
 
 
 if __name__ == "__main__":

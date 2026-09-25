@@ -17,7 +17,7 @@ from pathlib import Path
 from tests.support import REPO, bash
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import job, record  # noqa: E402
+from wk import job, record, shell  # noqa: E402
 from wk.clock import FakeClock  # noqa: E402
 from wk.machine import Fake, Result  # noqa: E402
 
@@ -161,13 +161,13 @@ class TestAStopThroughTheCallersTarget(Scratch):
         state = self.tmp / "state"
         subprocess.run(["bash", "-c", 'X=from-the-caller; t_exec() { shift; echo "$X $*"; }; '
                         '{ declare -p; declare -f; } > "%s" 2>/dev/null' % state], check=True)
-        r = record.CallerShell(str(state)).exec("ws", ["ps", "-o", "args="])
+        r = shell.CallerShell(str(state)).exec("ws", ["ps", "-o", "args="])
         self.assertEqual("from-the-caller ps -o args=\n", r.out)
 
     def test_a_workspace_that_does_not_answer_in_time_is_unanswered(self):
         state = self.tmp / "state"
         subprocess.run(["bash", "-c", 't_exec() { sleep 30; }; declare -f > "%s"' % state], check=True)
-        self.assertIsNone(record.CallerShell(str(state)).ask("ws", 1, 0.5))
+        self.assertIsNone(shell.CallerShell(str(state)).ask("ws", 1, 0.5))
 
 
 class TestTheLockedRun(Scratch):

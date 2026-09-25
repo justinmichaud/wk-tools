@@ -1,4 +1,4 @@
-"""A PR head taken into a checkout or into the mirror (`wk ab`), and a branch pointed at its fork: git argv through a target's exec."""
+"""A PR head taken into a checkout or into the mirror (`wk bench ab`), and a branch pointed at its fork: git argv through a target's exec."""
 
 import os
 import re
@@ -6,13 +6,12 @@ import sys
 
 from wk import act, git
 from wk.act import die, info, log, warn
-from wk.shell import sh_quote
 
 DIGITS = re.compile(r"^[0-9]+$")
+PLANNED_COMMIT = "0" * 40
 
 
 def parse_spec(spec):
-    """{kind, user, branch, remote, n}: `<user>:<branch>`, `<n>` (WebKit/WebKit) or `wpe:<n>`."""
     out = dict(kind="", user="", branch="", remote="", n="")
     if spec[:1].isdigit():
         if not DIGITS.match(spec):
@@ -49,8 +48,7 @@ def branch_repos(machine, user, branch, remotes=git.REMOTES):
     return out
 
 
-# Written as config, never `git branch -u`: git maps the tracking ref back through a non-origin remote's
-# `+refs/remotes/<r>/*` refspec, answers with the tracking ref itself, and `git push` then refuses (measured, git 2.43).
+# Written as config, never `git branch -u`: git maps the tracking ref back through a non-origin remote's `+refs/remotes/<r>/*` refspec, answers with the tracking ref itself, and `git push` then refuses (measured, git 2.43).
 def track(src, remote, branch):
     return [["git", "-C", src, "config", "branch.%s.remote" % branch, remote],
             ["git", "-C", src, "config", "branch.%s.merge" % branch, "refs/heads/" + branch]]
@@ -179,7 +177,7 @@ def pull_refname(remote, n):
 
 
 def mirror_fetch(here, store, lock, src, srcspec, dest):
-    """One ref from `src` into this machine's mirror, made on first use, under the store lock; a dry run fetches too, to plan from."""
+    """One ref from `src` into this machine's mirror, made on first use, under the store lock."""
     if store.env.get("WK_IN_VM"):
         die("the mirror in here is the host's, mounted read-only; run this on the host")
     mirror = store.mirror()
@@ -187,10 +185,10 @@ def mirror_fetch(here, store, lock, src, srcspec, dest):
     with lock.held("store"):
         if not here.isdir(mirror):
             info("creating bare mirror (first run: this clones all of WebKit)")
-            if not (here.run(["git", "init", "--bare", "-q", mirror]).ok
-                    and here.run(["git", "-C", mirror, "config", "gc.auto", "0"]).ok):
+            if not (here.act_run(["git", "init", "--bare", "-q", mirror]).ok
+                    and here.act_run(["git", "-C", mirror, "config", "gc.auto", "0"]).ok):
                 die("could not make the mirror at %s" % mirror)
-        r = here.run(["git", "-C", mirror, "fetch", "--quiet", src, "+%s:%s" % (srcspec, dest)])
+        r = here.act_run(["git", "-C", mirror, "fetch", "--quiet", src, "+%s:%s" % (srcspec, dest)])
         if not r.ok:
             sys.stderr.write(r.err)
             die("could not fetch %s from %s into the mirror" % (srcspec, src), r.rc)
@@ -203,35 +201,18 @@ def mirror_fetch_pull(here, store, lock, remote, n, remotes=git.REMOTES):
     mirror_fetch(here, store, lock, url, "refs/pull/%s/head" % n, "refs/remotes/pr/" + pull_refname(remote, n))
 
 
-def main(argv):
-    from wk.clock import Clock
-    from wk.lock import Lock
-    from wk.machine import Local
-    from wk.store import Store
-    verb, a = (argv[0] if argv else ""), argv[1:]
-    here, store = Local(), Store()
-
-    def fetch(*args):
-        return lambda: mirror_fetch(here, store, Lock(store, here, Clock()), *args)
-    verbs = {
-        "parse-spec": (1, lambda: sys.stdout.write("".join("PR_%s=%s\n" % (k.upper(), sh_quote(v)) for k, v in sorted(parse_spec(a[0]).items())))),
-        "branch-repo": (2, lambda: sys.stdout.write("".join("%s %s %s\n" % f for f in branch_repos(here, *a)))),
-        "branch-repo-urls": (1, lambda: sys.stdout.write("".join(u + "\n" for u in branch_repo_urls(a[0])))),
-        "pr-refname": (3, lambda: sys.stdout.write(pr_refname(*a))),
-        "pull-refname": (2, lambda: sys.stdout.write(pull_refname(*a))),
-        "mirror-fetch": (3, lambda: fetch(*a)()),
-        "mirror-fetch-pr": (3, lambda: fetch(a[0], "refs/heads/" + a[1], "refs/remotes/pr/" + a[2])()),
-        "mirror-fetch-pull": (2, lambda: mirror_fetch_pull(here, store, Lock(store, here, Clock()), *a)),
-    }
-    if verb not in verbs or len(a) != verbs[verb][0]:
-        sys.stderr.write("usage: python3 -m wk.pr %s\n" % "|".join(sorted(verbs)))
-        return 2
-    try:
-        verbs[verb][1]()
-    except act.Refused as e:
-        return e.status
-    return 0
+def mirror_rev(machine, mirror, ref):
+    r = machine.run(["git", "-C", mirror, "rev-parse", "--verify", "--quiet", ref + "^{commit}"])
+    return r.out.strip() if r.ok else ""
 
 
-if __name__ == "__main__":
-    sys.exit(main(sys.argv[1:]))
+def resolved_or_planned(machine, mirror, dest, what, fetch):
+    """A dry run is the recorder: it answers `dest` from the mirror already there, or plans `fetch` unrun."""
+    if act.dry_run():
+        sha = mirror_rev(machine, mirror, dest)
+        if sha:
+            return sha
+        log("would fetch %s into the mirror" % what)
+        return PLANNED_COMMIT
+    fetch()
+    return mirror_rev(machine, mirror, dest)

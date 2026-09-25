@@ -2,9 +2,9 @@
 #
 # wk sysimage <sub> [args] -- build and manage bootable systems
 #
-# wk: where=host name=none values=--list group=hosts takes=1 opts --list dryrun build,webkit,write
+# wk: where=host name=none values=--list group=hosts takes=1 opts --list dryrun build,webkit,write outside
 # wk: readonly ls,disks,holds,path,--list
-# wk: destructive write
+# wk: destructive write,--install,--all,--rebuild,--rm
 # wk: flag --list takes=0
 # wk: sub ls,list where=dynamic opts=--continued
 # wk: sub build,webkit,holds,path where=dynamic name=derived
@@ -37,18 +37,28 @@
 #                                --tailnet|--no-tailnet and --stage
 #                                <layers|fetch|image|toolchain|webkit|pgo-mix>
 #                                (default image; pgo-mix takes --slot, and mixes
-#                                what 'wk pi bench --pgo' collected for it);
+#                                what 'wk bench run --collect' collected for it);
 #                                buildroot takes --workspace, --detach,
 #                                --stop; pmos takes --detach and --resume and
 #                                builds on a Linux aarch64 machine over ssh;
-#                                fetch takes no options.
+#                                fetch takes no options. mac-volume runs on the
+#                                Mac and takes one of --create, --fetch
+#                                [--version <v>], --install (erases the volume
+#                                and reboots), --provision (in bench mode),
+#                                --repair, --build-pkg or --all, and with none
+#                                reports the volume's state. guest (the golden
+#                                macOS base every vm workspace is cloned from)
+#                                builds it if missing; --refresh re-provisions it
+#                                in place, --rebuild deletes and rebuilds it, and
+#                                --rm erases it and asks again about the pulled
+#                                image cache. Guests already cloned are unaffected
 #                                WK_BUILDROOT_BASE=<image> builds the buildroot
 #                                workspace on another host image than ubuntu:22.04
 #   webkit <profile> --commit <sha> --slot <name> [--detach]
 #                                build one WebKit commit into a named slot
 #                                beside the image, the way its builder builds
 #                                WebKit. A board carries any number of slots and
-#                                'wk pi bench --ab' alternates two of them with
+#                                'wk bench run --ab' alternates two of them with
 #                                no reflash and no reboot.
 #                                On a yocto profile at release 2.52 or later this
 #                                is a profile-guided build and takes three
@@ -75,7 +85,7 @@
 #                                `no` when it does not. Routed to the
 #                                lane like build and webkit, so a step asks the
 #                                machine that would do the work rather than
-#                                this one (lib/sched.py's done predicate)
+#                                this one (lib/wk/sched.py's done predicate)
 #   path <profile>               the path of the image that lane built, as the
 #                                machine holding the lane spells it, and
 #                                nothing (exit 1) when it has none. What
@@ -122,7 +132,7 @@ import sys
 ROOT = os.environ.get("WK_ROOT") or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "lib"))
 
-from wk import act, decl, images, shell, targets  # noqa: E402
+from wk import decl, images, shell, targets  # noqa: E402
 from wk.act import Refused  # noqa: E402
 from wk.clock import Clock  # noqa: E402
 from wk.machine import Local  # noqa: E402
@@ -141,9 +151,6 @@ def main(argv):
     if hook in HOOKS:
         print(HOOKS[hook](rest, reg))
         return 0
-    if reg.in_workspace():
-        act.die("'wk sysimage' acts on a host and its hardware, and this is\n"
-                "    workspace '%s'. Run it on the workstation instead." % targets.read_conf(reg.marker_path()).get("name", ""))
     args = decl.Args(decl.Decl(__file__), argv)
     spec = args.positionals[1] if len(args.positionals) > 1 else ""
     s = cli.Sysimage(reg, Clock())

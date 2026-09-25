@@ -131,7 +131,7 @@ rewritten file resumes a running process mid-word. Check `wk status` first.
   `dotfiles/ssh/config` or in code. The two things that cannot hold a tailnet
   identity — moose's BMC (through its bridge phone) and Igalia's build boxes
   (through the company gateway) — are the only ssh-config entries. A board the
-  tailnet cannot name is found by enumeration (`reach_enumerate`, lib/reach.sh),
+  tailnet cannot name is found by enumeration (`find_mac`, lib/wk/reach.py),
   and what it finds is not written down. There is no mDNS.
 
 ## What a bench lane optimises for, in this order

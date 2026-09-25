@@ -142,7 +142,7 @@ class TestOneRecordPerKind(WkTest):
 
     def test_a_run_that_is_still_alive_is_not_superseded(self):
         """Superseding a live record would hide the run a guard reads it for:
-        image/yocto.sh refuses a second cooker by finding the first's record."""
+        the yocto builder refuses a second cooker by finding the first's record."""
         out = self._sh(
             'd=$(task_begin yocto here ws1 "k" /l layers fetch)\n'
             'task_pid "$d" $$\n'

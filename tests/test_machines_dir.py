@@ -132,7 +132,9 @@ class TestTheReader(FleetTest):
         self.conf("br", "KIND=bridge\nBR_SEGMENT=10.0.0.0/24\nBR_CARD=x\n")
         self.conf("br", "BR_CARD=rpi5:/dev/sdb\n", self.local)
         self.conf("mine", "KIND=bridge\nBR_SEGMENT=10.1.0.0/24\n", self.local)
-        self.assertEqual(self.fleet.load("br"), {"KIND": "bridge", "BR_SEGMENT": "10.0.0.0/24", "BR_CARD": "rpi5:/dev/sdb"})
+        loaded = self.fleet.load("br")
+        self.assertEqual({k: loaded[k] for k in ("KIND", "BR_SEGMENT", "BR_CARD")},
+                         {"KIND": "bridge", "BR_SEGMENT": "10.0.0.0/24", "BR_CARD": "rpi5:/dev/sdb"})
         self.assertEqual(self.fleet.names(("bridge",)), ["br", "mine"])
         self.assertEqual(self.fleet.path("br"), str(self.dir / "br.conf"))
         self.assertEqual(self.fleet.path("mine"), str(self.local / "mine.conf"))

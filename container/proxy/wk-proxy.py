@@ -11,7 +11,7 @@ import time
 
 sys.path.insert(0, os.path.join(
     os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "lib"))
-from wknotify import sd_notify  # noqa: E402
+from wk.notify import sd_notify  # noqa: E402
 
 DENIED_HOSTS = {
     "uploads.github.com": "GitHub's upload API is refused: nothing in a workspace may publish",
@@ -75,7 +75,7 @@ ALLOWED_HOSTS = {
     "whatsapp.com": (80, 443),
     "baidu.com": (80, 443),
 
-    # SANDBOX AUDIT (bitbake's yocto fetch, image/yocto-build.sh): source-code hosts only, still by hostname, BLOCKED_NETS unchanged -- no name here is a route onto the LAN or the tailnet; it lets a workspace fetch distribution tarballs.
+    # SANDBOX AUDIT (bitbake's yocto fetch, lib/wk/sysimage/yocto_target.py): source-code hosts only, still by hostname, BLOCKED_NETS unchanged -- no name here is a route onto the LAN or the tailnet; it lets a workspace fetch distribution tarballs.
     "yoctoproject.org": (80, 443),
     "openembedded.org": (80, 443),
     "googlesource.com": (443,),

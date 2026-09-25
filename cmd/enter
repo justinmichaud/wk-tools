@@ -16,7 +16,7 @@ import sys
 ROOT = os.environ.get("WK_ROOT") or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "lib"))
 
-from wk import decl, shell, targets  # noqa: E402
+from wk import decl, session, targets  # noqa: E402
 from wk.act import Refused, die, exec_into, log, warn  # noqa: E402
 from wk.machine import is_linux  # noqa: E402
 
@@ -26,7 +26,7 @@ def session_display_warning(env):
         warn("no benchmark session running; GPU-accelerated tests fall back to software rendering")
         log("  start one with:  wk session on")
     else:
-        shell.session_mode_warn(ROOT, env=env)
+        session.here(ROOT, env).mode_warn()
 
 
 def parse(argv):

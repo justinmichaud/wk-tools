@@ -36,7 +36,7 @@ from pathlib import Path
 from tests.support import REPO, bash, scratch_dir
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import sync, targets, workspace  # noqa: E402
+from wk import git, secrets, sync, targets, workspace  # noqa: E402
 from wk.clock import Clock  # noqa: E402
 
 # The stand-in origin below carries `main` and nothing else, so the branch list
@@ -46,6 +46,11 @@ from wk.clock import Clock  # noqa: E402
 PIN = 'export WK_MIRROR_BRANCHES=main\n'
 
 STORE_FUNCS = f'set -euo pipefail\ncd "{REPO}"\n{PIN}. lib/common.sh\n. lib/store.sh\n'
+
+
+def _forks():
+    """secrets.FORKS, the fork table's one home, as (remote, repo, alias) tuples."""
+    return list(secrets.FORKS)
 
 # Nothing here may reach github.com: the wiring points the four remotes at
 # their real URLs and rewrites them to a local mirror, so a fetch that ignored
@@ -123,31 +128,21 @@ class MirrorFixture(unittest.TestCase):
         reg = targets.Registry(REPO, env=dict(os.environ, WK_MIRROR_BRANCHES="main"))
         return sync.Sync(reg, Clock(), None, "here").snapshot_checkout(str(tree), branch)
 
-    def store_funcs(self, branches=None):
-        """STORE_FUNCS with another branch list pinned: what this checkout
-        declares (image/configs) is what a wiring asks origin for."""
-        if branches is None:
-            return STORE_FUNCS
-        return STORE_FUNCS.replace(PIN, f'export WK_MIRROR_BRANCHES={branches!r}\n')
-
     def wire(self, tree, mirror=None, branches=None):
-        """lib/store.sh's wk_wiring_script -- the one authority every target
+        """lib/wk/git.py's wiring_script -- the one authority every target
         wires from -- run for real against this fixture's mirror."""
         m = str(self.mirror if mirror is None else mirror)
-        cp = bash(self.store_funcs(branches) + f'wk_wiring_script {str(tree)!r} {m!r}')
-        assert cp.returncode == 0, cp.stdout + cp.stderr
-        out = subprocess.run(["sh", "-c", cp.stdout], cwd=str(tree),
+        script = git.wiring_script(str(tree), m, _forks(), (branches or "main").split())
+        out = subprocess.run(["sh", "-c", script], cwd=str(tree),
                              capture_output=True, text=True)
         assert out.returncode == 0, out.stdout + out.stderr
-        return cp.stdout
+        return script
 
     def check(self, tree, mirror=None, branches=None):
-        """wk_wiring_check_script, the other half of the wiring, run for real."""
+        """wiring_check_script, the other half of the wiring, run for real."""
         m = str(self.mirror if mirror is None else mirror)
-        cp = bash(self.store_funcs(branches)
-                  + f'wk_wiring_check_script {str(tree)!r} {m!r} skip-env')
-        assert cp.returncode == 0, cp.stdout + cp.stderr
-        return subprocess.run(["sh", "-c", cp.stdout], cwd=str(tree),
+        script = git.wiring_check_script(str(tree), m, _forks(), (branches or "main").split(), skip_env=True)
+        return subprocess.run(["sh", "-c", script], cwd=str(tree),
                               capture_output=True, text=True)
 
     def config(self, tree, *args):
@@ -511,9 +506,8 @@ class TestTheStaleRewritesTheWiringClearsFirst(MirrorFixture):
         _git("config", "--local", "url.git@old-alias:x/y.git.pushInsteadOf",
              "git@github.com:x/y.git", cwd=tree)
 
-        cp = bash(STORE_FUNCS + f'wk_wiring_script {str(tree)!r} {str(self.mirror)!r}')
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        run = subprocess.run(["sh", "-c", cp.stdout], cwd=str(tree), env=env,
+        script = git.wiring_script(str(tree), str(self.mirror), _forks(), ["main"])
+        run = subprocess.run(["sh", "-c", script], cwd=str(tree), env=env,
                              capture_output=True, text=True)
         self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
 
@@ -751,9 +745,7 @@ class TestTheAliasIsResolvedByTheResolver(MirrorFixture):
     """
 
     def aliases(self):
-        cp = bash(STORE_FUNCS + "wk_push_forks | awk 'NF {print $3}'")
-        assert cp.returncode == 0, cp.stdout + cp.stderr
-        return cp.stdout.split()
+        return [alias for _, _, alias in _forks()]
 
     def ssh_config(self, name, body):
         p = self.tmp / name
@@ -763,10 +755,8 @@ class TestTheAliasIsResolvedByTheResolver(MirrorFixture):
 
     def resolved(self, tree, config):
         _git("config", "core.sshCommand", f"ssh -F {config}", cwd=tree)
-        cp = bash(STORE_FUNCS
-                  + f'wk_wiring_check_script {str(tree)!r} {str(self.mirror)!r}')
-        assert cp.returncode == 0, cp.stdout + cp.stderr
-        return subprocess.run(["sh", "-c", cp.stdout], cwd=str(tree),
+        script = git.wiring_check_script(str(tree), str(self.mirror), _forks(), ["main"])
+        return subprocess.run(["sh", "-c", script], cwd=str(tree),
                               capture_output=True, text=True)
 
     def test_a_config_that_only_includes_the_host_blocks_resolves(self):
@@ -791,11 +781,9 @@ class TestTheAliasIsResolvedByTheResolver(MirrorFixture):
     def test_the_check_reads_no_ssh_config_file_of_its_own(self):
         """One resolver, and it is ssh's: a second reader of the file is what
         cannot see an Include."""
-        cp = bash(STORE_FUNCS
-                  + f'wk_wiring_check_script /nowhere {str(self.mirror)!r}')
-        self.assertEqual(0, cp.returncode, cp.stdout + cp.stderr)
-        self.assertNotIn(".ssh/config", cp.stdout)
-        self.assertIn("ssh -G", cp.stdout)
+        script = git.wiring_check_script("/nowhere", str(self.mirror), _forks(), ["main"])
+        self.assertNotIn(".ssh/config", script)
+        self.assertIn("ssh -G", script)
 
 
 if __name__ == "__main__":

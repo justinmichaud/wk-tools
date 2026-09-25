@@ -1,6 +1,5 @@
 #!/bin/sh
-# One-shot health report for a tailnet bridge, read-only, exit 0 when everything essential is up. What `wk bridge status` runs.
-# Never write `cmd | grep -q ...` here: grep -q exits at the first match, which SIGPIPEs the producer and turns a successful check into a reported failure. Capture the value and compare it.
+# Raw key=value facts for a tailnet bridge; the phone has no python3, so lib/wk/bridge judges them.
 set -u
 
 name=unknown
@@ -14,281 +13,159 @@ camera=off
 leasefile=/var/lib/misc/dnsmasq.leases
 [ -f /etc/wk-bridge.conf ] && . /etc/wk-bridge.conf
 
-fail=0
-ok()   { printf '  \033[1;32mOK\033[0m    %s\n' "$*"; }
-bad()  { printf '  \033[1;31mFAIL\033[0m  %s\n' "$*"; fail=1; }
-note() { printf '        %s\n' "$*"; }
-hdr()  { printf '\n\033[1;36m%s\033[0m\n' "$*"; }
+f() { printf '%s=%s\n' "$1" "$2"; }
 
-svc() {
-    local n
-    for n in "$@"; do
-        if [ -x "/etc/init.d/$n" ]; then
-            printf '%s' "$n"
-            return 0
-        fi
-    done
-    return 1
-}
+# First line out, so its presence tells "ran, then blank" from "never started" (bridge_record's `facts` check).
+f facts yes
+f name "$name"
+f device "$device"
+f segment "$segment"
+f egress "$egress"
+f camera "$camera"
 
-printf '\033[1m%s\033[0m (%s)\n' "$name" "$device"
-
-hdr "Uplink"
 wifi=$(nmcli -t -f DEVICE,TYPE device status 2>/dev/null | awk -F: '$2 == "wifi" { print $1; exit }')
 [ -n "$wifi" ] || wifi=wlan0
-# `-o`, not `-br`: BusyBox ip, which is what pmOS ships, has no brief mode and exits 1 with a usage message, reading back empty against a perfectly good lease.
-addr=$(ip -4 -o addr show dev "$wifi" 2>/dev/null | awk '{print $4; exit}')
-if [ -n "$addr" ]; then ok "$wifi $addr"; else bad "$wifi has no IPv4 address"; fi
-note "$(iw dev "$wifi" link 2>/dev/null | awk '/SSID|signal/ { $1 = $1; print }' | tr '\n' ' ')"
-ps=$(iw dev "$wifi" get power_save 2>/dev/null | awk '{print $3}')
-if [ "$ps" = off ]; then ok "wifi power save off"; else bad "wifi power save is ON ($ps) -- causes dropped links"; fi
+f wifi_iface "$wifi"
+# `-o`, not `-br`: BusyBox ip has no brief mode and exits 1 with a usage message, reading back empty against a good lease.
+f wifi_addr "$(ip -4 -o addr show dev "$wifi" 2>/dev/null | awk '{print $4; exit}')"
+f wifi_ssid "$(iw dev "$wifi" link 2>/dev/null | awk -F: '/SSID/ { sub(/^ /, "", $2); print $2; exit }')"
+f wifi_signal "$(iw dev "$wifi" link 2>/dev/null | awk '/signal:/ { print $2; exit }')"
+f wifi_power_save "$(iw dev "$wifi" get power_save 2>/dev/null | awk '{print $3}')"
 
-hdr "Segment ${segment:-?}"
 if ip -o link show "$iface" >/dev/null 2>&1; then
-    ok "$iface $(ip -4 -o addr show "$iface" 2>/dev/null | awk '{print $4; exit}')"
-    if [ "$(cat "/sys/class/net/$iface/carrier" 2>/dev/null)" = 1 ]; then
-        ok "cable connected"
-        # A segment can be perfectly up and forty times too slow if the NIC fell to the companion OHCI controller (wk-bridge-usb-host recovers that); the bus speed is what makes it visible.
-        nicdev=$(readlink -f "/sys/class/net/$iface/device" 2>/dev/null)
-        nicspeed=$(cat "${nicdev%/*}/speed" 2>/dev/null)
-        case "$nicspeed" in
-            "") ;;
-            480|5000|10000|20000) ok "USB $nicspeed Mbit/s" ;;
-            *) bad "USB $nicspeed Mbit/s -- the NIC is on a full-speed controller"
-               note "wk-bridge-usb-host rebinds the EHCI companion to recover 480;"
-               note "  netwatch runs it every pass, so this should clear itself." ;;
-        esac
-    else
-        bad "no carrier on $iface -- check the cable"
-    fi
+    f seg_iface_exists yes
+    f seg_addr "$(ip -4 -o addr show "$iface" 2>/dev/null | awk '{print $4; exit}')"
+    f seg_carrier "$(cat "/sys/class/net/$iface/carrier" 2>/dev/null)"
+    nicdev=$(readlink -f "/sys/class/net/$iface/device" 2>/dev/null)
+    f seg_usb_speed "$(cat "${nicdev%/*}/speed" 2>/dev/null)"
 else
-    bad "$iface missing -- nothing on the segment"
-    role=$(cat /sys/class/typec/port0/data_role 2>/dev/null)
-    # `usbN` are the controllers' own root hubs and are always there; a `N-M` directory with an idVendor is something that answered an enumeration.
+    f seg_iface_exists no
+    f seg_typec_role "$(cat /sys/class/typec/port0/data_role 2>/dev/null)"
     downstream=""
     for d in /sys/bus/usb/devices/*-*; do
         [ -f "$d/idVendor" ] || continue
-        downstream="$downstream $(cat "$d/idVendor"):$(cat "$d/idProduct") $(cat "$d/product" 2>/dev/null)"
+        downstream="$downstream$(cat "$d/idVendor"):$(cat "$d/idProduct" 2>/dev/null) $(cat "$d/product" 2>/dev/null),"
     done
+    f seg_downstream "$downstream"
     found=""
     for n in /sys/class/net/*; do
         nn=$(basename "$n")
         case "$nn" in lo|wlan*|tailscale*|dummy*|usb*|"$iface") continue ;; esac
         [ -e "$n/device/subsystem" ] || continue
         case "$(readlink -f "$n/device/subsystem")" in
-            */usb) found="$found $nn($(cat "$n/address" 2>/dev/null))" ;;
+            */usb) found="$found$nn($(cat "$n/address" 2>/dev/null))," ;;
         esac
     done
-    # Interface class 02 (communications) and 0a (CDC data) are what an ethernet adapter presents; ff is the vendor-specific one the ASIX and Realtek parts use.
+    f seg_renamed_candidates "$found"
+    # 02 (communications) and 0a (CDC data) are an ethernet adapter's classes; ff is ASIX/Realtek's vendor-specific one.
     unclaimed=""
     for i in /sys/bus/usb/devices/*-*/*:*; do
         [ -f "$i/bInterfaceClass" ] || continue
         [ -e "$i/driver" ] && continue
         case "$(cat "$i/bInterfaceClass" 2>/dev/null)" in
-            02|0a|ff) unclaimed="$unclaimed $(basename "$i")" ;;
+            02|0a|ff) unclaimed="$unclaimed$(basename "$i")," ;;
         esac
     done
-
-    if [ -n "$found" ]; then
-        note "the adapter is here and working --$found -- it is just not called"
-        note "  $iface. The udev rename is written from the adapter's own MAC, so"
-        note "  a setup run with no adapter plugged in wrote no rule for this one."
-        note "  Fix: wk bridge setup <name> (it renames it in place; no re-plug)."
-    elif [ -n "$unclaimed" ]; then
-        note "something on the bus looks like a network adapter and has no driver"
-        note "  bound to it (interface$unclaimed). That is a missing kernel"
-        note "  module, not a missing dock -- check dmesg for the vendor/product"
-        note "  and which driver should claim it."
-    else
-        case "$role" in
-            *"[host]"*)
-                if [ -n "$downstream" ]; then
-                    note "not a host-mode fault: the port is in host mode and the bus"
-                    note "  enumerated$downstream -- no network adapter among it."
-                    if [ "$device" = pinephone ]; then
-                        note "  A dock's NIC behind its USB3 hub can never appear: this"
-                        note "  phone's port is USB 2.0 only (A64 has no SuperSpeed at"
-                        note "  all). Use a USB 2.0 adapter -- the PinePhone's own"
-                        note "  dock works (CoreChips 0fe6:9900, driven by cdc_ether)."
-                    fi
-                else
-                    note "the port is in host mode and nothing enumerated at all:"
-                    note "  the dock's own power, or the cable."
-                fi
-                ;;
-            *)  note "the port is not in host mode (${role:-no typec port}) --"
-                note "  run wk-bridge-usb-host. A dock that will not swap data role"
-                note "  is hardware; powering it before connecting it is the thing"
-                note "  worth trying."
-                ;;
-        esac
-    fi
-fi
-note "typec data_role: $(cat /sys/class/typec/port0/data_role 2>/dev/null)"
-
-if [ -s "$leasefile" ]; then
-    ok "DHCP leases:"
-    sed 's/^/          /' "$leasefile"
-else
-    note "no lease recorded ($leasefile is empty). Not a fault on its own:"
-    note "  these leases are infinite, so a client that already has an address"
-    note "  re-uses it without asking again. The reachability check below is"
-    note "  what says whether anything is actually there."
+    f seg_unclaimed "$unclaimed"
 fi
 
+if [ -s "$leasefile" ]; then f leases_file_nonempty yes; else f leases_file_nonempty no; fi
+
+pinged=""
 for l in $leases; do
     ip=$(printf '%s' "$l" | cut -d, -f2)
     nm=$(printf '%s' "$l" | cut -d, -f3)
     [ -n "$ip" ] || continue
     if ping -c 2 -W 2 "$ip" >/dev/null 2>&1; then
-        ok "$ip (${nm:-reserved}) responds"
+        pinged="$pinged$ip,${nm:-},up;"
     else
-        bad "$ip (${nm:-reserved}) unreachable"
+        pinged="$pinged$ip,${nm:-},down;"
     fi
 done
+f leases_ping "$pinged"
 
-hdr "Tailnet"
 st=$(tailscale status --json --peers=false 2>/dev/null) || st=""
-backend=$(printf '%s' "$st" | jq -r '.BackendState // "none"' 2>/dev/null)
-if [ "$backend" = Running ]; then ok "tailscaled running"; else bad "tailscale backend is $backend"; fi
-online=$(printf '%s' "$st" | jq -r '.Self.Online // false' 2>/dev/null)
-if [ "$online" = true ]; then ok "online"; else bad "reported offline"; fi
-tags=$(printf '%s' "$st" | jq -rc '.Self.Tags // "none"' 2>/dev/null)
-# An untagged node works today and its key expires in 180 days; a tagged node never key-expires.
-if [ "$tags" != none ]; then ok "tags $tags"; else bad "UNTAGGED -- the node key will expire"; fi
-routes=$(printf '%s' "$st" | jq -rc '.Self.PrimaryRoutes // "none"' 2>/dev/null)
-if [ "$routes" != none ]; then
-    ok "routes $routes"
-    case "$routes" in
-        *"$segment"*) ;;
-        *) bad "$segment is advertised but not approved -- nothing behind this bridge is reachable" ;;
-    esac
-else
-    bad "no approved subnet route -- nothing behind this bridge is reachable"
-fi
+f ts_backend "$(printf '%s' "$st" | jq -r '.BackendState // "none"' 2>/dev/null)"
+f ts_online "$(printf '%s' "$st" | jq -r '.Self.Online // false' 2>/dev/null)"
+f ts_tags "$(printf '%s' "$st" | jq -rc '.Self.Tags // "none"' 2>/dev/null)"
+f ts_routes "$(printf '%s' "$st" | jq -rc '.Self.PrimaryRoutes // "none"' 2>/dev/null)"
 
-hdr "Services"
+svc() {
+    local n
+    for n in "$@"; do
+        [ -x "/etc/init.d/$n" ] && { printf '%s' "$n"; return 0; }
+    done
+    return 1
+}
+svcstate() {
+    local s
+    s=$(svc "$@") || { printf missing; return 0; }
+    if rc-service "$s" status >/dev/null 2>&1; then printf running; else printf stopped; fi
+}
 for s in wk-bridge-dhcp wk-bridge-nftables wk-bridge-netwatch wk-bridge-usb-host; do
-    if rc-service "$s" status >/dev/null 2>&1; then ok "$s"; else bad "$s is not running"; fi
+    f "svc_$s" "$(svcstate "$s")"
 done
-for pair in "sshd:sshd" "chronyd:chronyd chrony" "networkmanager:networkmanager NetworkManager" "tailscale:tailscale tailscaled"; do
-    want=${pair%%:*}
-    if s=$(svc ${pair#*:}); then
-        if rc-service "$s" status >/dev/null 2>&1; then ok "$s"; else bad "$s is not running"; fi
-    else
-        bad "$want is not installed"
-    fi
-done
-if nft list table inet wkbridge >/dev/null 2>&1; then ok "nftables table loaded"; else bad "nftables table inet wkbridge missing"; fi
+f svc_sshd "$(svcstate sshd)"
+f svc_chrony "$(svcstate chronyd chrony)"
+f svc_nm "$(svcstate networkmanager NetworkManager)"
+f svc_tailscale "$(svcstate tailscale tailscaled)"
 
-hdr "Routing"
-fwd=$(cat /proc/sys/net/ipv4/ip_forward 2>/dev/null)
-if [ "$fwd" = 1 ]; then ok "ipv4 forwarding on"; else bad "ipv4 forwarding is off"; fi
-case "$egress" in
-    nat)
-        if nft list table inet wkbridge 2>/dev/null | grep masquerade >/dev/null 2>&1; then
-            ok "egress: NAT to the uplink"
-        else
-            bad "egress is declared nat but no masquerade rule is loaded"
-        fi
-        ;;
-    *) ok "egress: none (nothing behind this bridge reaches the internet)" ;;
-esac
+if nft list table inet wkbridge >/dev/null 2>&1; then
+    f nft_table yes
+    if nft list table inet wkbridge 2>/dev/null | grep -q masquerade; then f nft_masquerade yes; else f nft_masquerade no; fi
+else
+    f nft_table no
+fi
 
-# No DNS and a clock at 1970 both look like "no internet" while ping and routing are perfect, and both stop `tailscale up` dead.
-hdr "Name resolution and time"
+f ip_forward "$(cat /proc/sys/net/ipv4/ip_forward 2>/dev/null)"
+
 if [ -f /etc/resolv.conf ]; then
-    ns=$(grep -c '^nameserver' /etc/resolv.conf 2>/dev/null)
-    case "$(grep '^nameserver' /etc/resolv.conf 2>/dev/null | head -1)" in
-        *127.0.0.53*)
-            bad "resolv.conf points at 127.0.0.53 -- a systemd-resolved stub, and there is no systemd-resolved here"
-            note "every lookup fails while routing works. NetworkManager should own this file." ;;
-        '') bad "resolv.conf lists no nameserver" ;;
-        *)  if [ "${ns:-0}" -gt 0 ]; then ok "resolv.conf: $ns nameserver(s)"; else bad "resolv.conf lists no nameserver"; fi ;;
-    esac
+    f resolv_exists yes
+    f resolv_nameservers "$(grep -c '^nameserver' /etc/resolv.conf 2>/dev/null)"
+    f resolv_first "$(grep '^nameserver' /etc/resolv.conf 2>/dev/null | head -1)"
 else
-    bad "no /etc/resolv.conf at all"
+    f resolv_exists no
 fi
-if nslookup login.tailscale.com >/dev/null 2>&1; then
-    ok "DNS resolves"
-else
-    bad "DNS does not resolve -- tailscale cannot reach its coordination server"
-fi
+if nslookup login.tailscale.com >/dev/null 2>&1; then f dns_resolves yes; else f dns_resolves no; fi
 
-year=$(date -u +%Y)
-if [ "${year:-1970}" -ge 2024 ] 2>/dev/null; then
-    ok "clock sane ($(date -u '+%Y-%m-%d %H:%M UTC'))"
-else
-    bad "clock is $year -- every TLS check fails, so tailscale cannot log in"
-    note "chrony needs 'makestep 1.0 -1' on a device with no RTC"
-fi
+f clock_year "$(date -u +%Y)"
+f clock_iso "$(date -u '+%Y-%m-%d %H:%M UTC')"
 
-hdr "Hardening"
-pwauth=$(sshd -T 2>/dev/null | awk '/^passwordauthentication/ { print $2; exit }')
-if [ "$pwauth" = no ]; then ok "SSH password auth disabled"; else bad "SSH password auth is ENABLED ($pwauth)"; fi
+f sshd_password_auth "$(sshd -T 2>/dev/null | awk '/^passwordauthentication/ { print $2; exit }')"
+
 if [ -e /dev/watchdog ]; then
-    if rc-service wk-bridge-watchdog status >/dev/null 2>&1; then
-        ok "hardware watchdog fed"
-    else
-        bad "/dev/watchdog exists but nothing is feeding it -- a hang stays hung"
-    fi
+    f watchdog_device yes
+    if rc-service wk-bridge-watchdog status >/dev/null 2>&1; then f watchdog_fed yes; else f watchdog_fed no; fi
 else
-    bad "no /dev/watchdog -- a kernel hang needs a person at the phone"
+    f watchdog_device no
     wdt=$(ls -d /proc/device-tree/*/watchdog@* 2>/dev/null | head -1)
     if [ -n "$wdt" ]; then
-        note "the hardware is there and the device tree declares it:"
-        note "  $(basename "$wdt") ($(tr '\000' ' ' < "$wdt/compatible" 2>/dev/null))"
-        note "  so this is the kernel, not the phone -- either it has no driver"
-        note "  for that node, or the driver is a module nobody loaded."
-        note "  'wk bridge setup' loads it by the device's own modalias, so try"
-        note "  that first. If it still does not appear, this kernel was built"
-        note "  without the driver: image/profiles.sh carries the kconfig delta"
-        note "  that turns it on (PMO_KCONFIG), and a phone flashed before that"
-        note "  landed needs a reflash to get it."
-        note "  Until then the netwatch ladder is the only recovery, and it"
-        note "  cannot see a kernel that has stopped scheduling."
-    else
-        note "no watchdog node in the device tree either, so there is nothing"
-        note "  to drive: recovery is the netwatch ladder and a person."
-    fi
-fi
-# Swap on eMMC wears out the only storage the phone has. /proc/swaps, since --show is util-linux's flag and busybox's swapon would report "no swap" on a phone that is swapping.
-nonzram=$(awk 'NR > 1 && $1 !~ /zram/ { c++ } END { print c + 0 }' /proc/swaps 2>/dev/null)
-if [ "${nonzram:-0}" -eq 0 ]; then ok "swap is zram only"; else bad "swap on a non-zram device (eMMC wear)"; fi
-
-if [ "$camera" != off ]; then
-    hdr "Camera"
-    if [ -e /dev/video0 ]; then
-        if rc-service wk-bridge-camera status >/dev/null 2>&1; then
-            ok "streaming (see 'wk bridge status' for the URL)"
-        else
-            bad "a capture device exists but the stream is not running"
-        fi
-    else
-        note "no capture device -- the camera kill switch is off, so nothing streams"
+        f watchdog_dt_node "$(basename "$wdt")"
+        f watchdog_dt_compatible "$(tr '\000' ' ' < "$wdt/compatible" 2>/dev/null)"
     fi
 fi
 
-hdr "System"
-# OpenRC marks a service crashed when its process is gone while the service is marked started, which is the normal end state of the two one-shots pmOS ships.
-crashed=$(rc-status --crashed 2>/dev/null | sed '/^$/d' \
-          | grep -vxE 'kill-pbsplash|postmarketos-tweakd')
-if [ -z "$crashed" ]; then
-    ok "no crashed services (ignoring pmOS one-shots kill-pbsplash, postmarketos-tweakd)"
+# /proc/swaps, not `swapon --show`: that flag is util-linux's, and busybox's swapon misreports it.
+f swap_nonzram "$(awk 'NR > 1 && $1 !~ /zram/ { c++ } END { print c + 0 }' /proc/swaps 2>/dev/null)"
+
+if [ -e /dev/video0 ]; then
+    f camera_device yes
+    if rc-service wk-bridge-camera status >/dev/null 2>&1; then f camera_streaming yes; else f camera_streaming no; fi
 else
-    bad "crashed: $(printf '%s' "$crashed" | tr '\n' ' ')"
+    f camera_device no
 fi
-note "uptime $(uptime | sed 's/^ *//')"
+
+# kill-pbsplash and postmarketos-tweakd are one-shots OpenRC always marks crashed once they exit.
+crashed=$(rc-status --crashed 2>/dev/null | sed '/^$/d' | grep -vxE 'kill-pbsplash|postmarketos-tweakd')
+f crashed "$(printf '%s' "$crashed" | tr '\n' ',')"
+f uptime "$(uptime | sed 's/^ *//')"
+
+battery=""
 for b in /sys/class/power_supply/*/capacity; do
     [ -f "$b" ] || continue
     d=$(dirname "$b")
-    note "battery $(cat "$b")% $(cat "$d/status" 2>/dev/null) ($(basename "$d"))"
+    battery="$battery$(basename "$d"),$(cat "$b"),$(cat "$d/status" 2>/dev/null);"
 done
+f battery "$battery"
 
-echo
-if [ "$fail" -eq 0 ]; then
-    printf '\033[1;32mAll checks passed.\033[0m\n'
-else
-    printf '\033[1;31mProblems found -- see FAIL lines above, and wk help.\033[0m\n'
-fi
-exit "$fail"
+exit 0

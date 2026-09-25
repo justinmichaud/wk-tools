@@ -14,7 +14,7 @@ SRC_URI = "file://wk-card-priv file://check-boot-files.py"
 
 S = "${WORKDIR}"
 
-# Where lib/boot/disk.sh looks for it (CARD_PRIV), on every machine alike.
+# Where lib/wk/boot/driver.py looks for it, on every machine alike.
 CARD_PRIV_DIR = "/usr/local/libexec"
 
 # Every external command the helper runs (grep it: findmnt, lsblk, sfdisk,

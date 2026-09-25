@@ -4,10 +4,8 @@ actual container workspace and kill its detached driver mid-creation
 (`wk new --no-wait` prints the driver's own pid, running inside the podman
 VM once `wk`'s forwarding execs the whole command there -- see
 lib/target.sh's forward_to_vm; killing it there is what
-support.podman_vm_ssh is for). A third case -- the orphaned creation record
-that `wk gc` reaps once its driver is dead and no workspace exists anywhere
--- has no seam to exercise in isolation (see the skipped test below) and is
-left for whoever adds one. The records-are-claims case (a `running` record
+support.podman_vm_ssh is for). What `wk gc` reaps after one is
+tests/test_owed_gc.py's. The records-are-claims case (a `running` record
 whose log or pid says otherwise) is tests/test_build_liveness.py's, and
 `./setup` needs no hardware either: its home-scoped stages are driven for real
 against a scratch HOME, killed with SIGKILL at several points, and re-run.
@@ -24,7 +22,6 @@ import unittest
 from tests.support import (
     REPO,
     WkTest,
-    bash,
     podman_vm_ssh,
     rand_suffix,
     requires_podman_vm,
@@ -171,137 +168,6 @@ class TestWkRmOfRubble(WkTest):
 
         ls = run("ls")
         self.assertNotIn(self.name, ls.stdout, f"'wk rm' left '{self.name}' behind: {ls.stdout}")
-
-
-def _gc_rubble_body():
-    """gc_rubble, lifted out of cmd/gc -- the function is the seam."""
-    text = (REPO / "cmd" / "gc").read_text()
-    start = text.index("gc_rubble() {")
-    end = text.index("\n}\n", start) + 3
-    return text[start:end]
-
-
-func_body = _gc_rubble_body()
-
-
-class TestGcNamesAndClearsRubble(unittest.TestCase):
-    """A creation that stopped leaves a workspace with no finished checkout in
-    it, and clearing those must not be something a person does by hand: a plain
-    `wk gc` names each one, `--purge-rubble` destroys them through `wk rm` --
-    the one removal path -- and neither touches a workspace still being made.
-
-    `gc_rubble` (cmd/gc) is driven directly against stubbed targets, the
-    TestGcReapsDeadCreationRecord idiom above."""
-
-    def _run(self, purge):
-        script = f'''
-set -euo pipefail
-. "{REPO}/lib/common.sh"
-WK_ROOT="{REPO}"
-PURGE_RUBBLE="{purge}"
-target_all() {{ echo fake; }}
-load_target() {{ :; }}
-t_list() {{ printf 'halfmade\\nbeingmade\\nfinished\\n'; }}
-ws_state() {{ case "$1" in finished) echo ready ;; *) echo creating ;; esac; }}
-ws_creating_now() {{ [ "$1" = beingmade ]; }}
-act() {{ echo "ACT: $*"; }}
-{func_body}
-gc_rubble
-'''
-        return bash(script)
-
-    def test_a_plain_run_names_each_one_and_removes_nothing(self):
-        cp = self._run("")
-        out = cp.stdout + cp.stderr
-        self.assertEqual(cp.returncode, 0, out)
-        self.assertIn("halfmade", out, "a plain gc said nothing about the rubble")
-        self.assertIn("--purge-rubble", out, "it did not name what clears them")
-        self.assertNotIn("ACT:", out, "a plain gc destroyed a workspace")
-
-    def test_purge_rubble_destroys_them_through_wk_rm(self):
-        cp = self._run("1")
-        out = cp.stdout + cp.stderr
-        self.assertEqual(cp.returncode, 0, out)
-        self.assertIn("rm halfmade --yes", out,
-                      "it did not go through the one removal path")
-
-    def test_a_workspace_still_being_made_is_left_alone(self):
-        for purge in ("", "1"):
-            with self.subTest(purge=purge):
-                out = self._run(purge).stdout + self._run(purge).stderr
-                self.assertNotIn("beingmade", out,
-                                 "gc touched a workspace that is still being created")
-
-    def test_a_finished_workspace_is_not_rubble(self):
-        out = self._run("1").stdout + self._run("1").stderr
-        self.assertNotIn("finished", out, "gc took a workspace that was fully made")
-
-
-class TestGcReapsDeadCreationRecord(unittest.TestCase):
-    """cmd/gc's orphaned-creation-record reaping is a callable seam
-    (gc_creation_records, lib/target.sh, next to ws_target), so
-    this drives it directly against a fake WK_STORE and a stubbed
-    target_all/load_target -- the way test_state.py's TestWsStateWords
-    drives ws_state -- rather than the real shared store cmd/gc otherwise
-    unconditionally pipes itself into on macOS (cmd/gc's podman-VM half)."""
-
-    def test_gc_reaps_a_dead_creation_record(self):
-        with scratch_dir(prefix="wk-test-gc-creation-") as tmp:
-            store = tmp / "store"
-            (store / "ws").mkdir(parents=True)
-            (store / "log").mkdir()   # detach_run makes it in a real run
-            script = f'''
-set -euo pipefail
-. "{REPO}/lib/common.sh"
-. "{REPO}/lib/store.sh"
-. "{REPO}/lib/target.sh"
-. "{REPO}/lib/task.sh"
-WK_STORE="{store}"; export WK_STORE
-
-# One fake target whose store is this same WK_STORE (load_target is a
-# no-op): enough for gc_creation_records to walk without touching the real
-# container/vm drivers.
-target_all() {{ echo fake; }}
-load_target() {{ :; }}
-
-# dead: a pid nothing answers to, and no workspace directory anywhere -- reaped.
-d=$(task_begin new here dead "wk new dead --kill" "$(ws_create_log dead)" checking create)
-task_pid "$d" 4194304
-: > "$(ws_create_log dead)"
-
-# alive: this very process's own pid -- kept, though its workspace directory
-# does not exist yet.
-d=$(task_begin new here alive "wk new alive --kill" "$(ws_create_log alive)" checking create)
-task_pid "$d" $$
-: > "$(ws_create_log alive)"
-
-# found: a dead pid, but a workspace directory exists on the (fake) target
-# -- kept.
-d=$(task_begin new here found "wk new found --kill" "$(ws_create_log found)" checking create)
-task_pid "$d" 4194304
-: > "$(ws_create_log found)"
-mkdir -p "$WK_STORE/ws/found"
-
-gc_creation_records
-
-for n in dead alive found; do
-    if [ -n "$(task_find new "$n")" ]; then echo "$n:kept"; else echo "$n:reaped"; fi
-done
-'''
-            cp = bash(script)
-            self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-            want = "dead:reaped\nalive:kept\nfound:kept"
-            self.assertEqual(
-                cp.stdout.strip().splitlines()[-3:], want.split("\n"),
-                f"got:\n{cp.stdout}\nwant:\n{want}\nstderr:\n{cp.stderr}",
-            )
-
-            # The log beside a reaped record goes with it; a kept record's
-            # log is untouched.
-            logs = store / "log"
-            self.assertFalse((logs / "new-dead.log").exists(), "the reaped record's log survived")
-            self.assertTrue((logs / "new-alive.log").exists(), "a live record's log was removed")
-            self.assertTrue((logs / "new-found.log").exists(), "a kept record's log was removed")
 
 
 class TestRmTakesTheWorkspacesRecordsWithIt(unittest.TestCase):

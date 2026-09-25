@@ -161,7 +161,8 @@ class TestConfFieldSets(unittest.TestCase):
             )
 
     def test_bridge_hosts_field_set(self):
-        known = loader_fields((REPO / "cmd" / "bridge", "BR_"))
+        known = loader_fields(*[(p, "BR_") for p in sorted((REPO / "lib" / "wk" / "bridge").glob("*.py"))],
+                              (REPO / "lib" / "wk" / "fleet.py", "BR_"))
         files = conf_files("machines", ("bridge",))
         self.assertTrue(files, "no bridge in machines/")
         sets = {p.name: assigned_fields(p) - {"KIND"} for p in files}
@@ -182,7 +183,7 @@ class TestConfFieldSets(unittest.TestCase):
         # which otherwise survives in this set only as prose in remote.sh.
         known = loader_fields(
             (REPO / "targets" / "remote.sh", "WK_"),
-            (REPO / "lib" / "wk" / "machine_cmd.py", "WK_"),
+            *((p, "WK_") for p in sorted((REPO / "lib" / "wk" / "machine_cmd").glob("*.py"))),
             (REPO / "lib" / "wk" / "targets.py", "WK_"),
             (REPO / "lib" / "wk" / "build.py", "WK_"),
             (REPO / "lib" / "wk" / "buildconf.py", "WK_"),
@@ -217,13 +218,13 @@ class TestConfFieldSets(unittest.TestCase):
         # presence as "not buildable yet", so it is set only on the configs
         # that need something the others in the same group already have.
         # BR_KERNEL_*: a profile whose board will not boot the kernel its
-        # tree builds declares one instead (image/buildroot/kernel-pin.sh).
+        # tree builds declares one instead (lib/wk/sysimage/buildroot.py kernel_pin).
         # That is a fact about one board, the way CFG_NEEDS is a fact about
         # one configuration -- the other configs in the group are not missing
         # anything, and setting the fields empty on all of them would claim
         # they had a kernel question to answer.
         # YOC_PORT_TARGET_FROM/YOC_MACHINE: a profile whose branch has no
-        # section for its cross-target derives one (image/yocto/port-target.py).
+        # section for its cross-target derives one (lib/wk/sysimage/yocto_target.py).
         # YOC_MULTILIB/YOC_MULTILIB_TUNE: a profile whose userspace width is
         # not its machine's builds that width as a multilib variant. Both are
         # facts about one configuration, like CFG_NEEDS -- a branch that has

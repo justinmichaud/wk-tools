@@ -476,11 +476,10 @@ load_target vm >/dev/null 2>&1
 echo "tart=$(command -v tart || echo none)"
 echo "state=$(_vm_state wk-nosuch)"
 echo "info=$(t_info nosuchws)"
-echo "running=$(_running_count)"
 echo "list=[$(t_list)]"
 ws_on_target vm nosuchws && echo "on_target=yes" || echo "on_target=no"
 '''
         cp = bash(script, env={"HOME": str(home), "PATH": "/usr/bin:/bin"})
         self.assertEqual(cp.returncode, 0, f"the vm driver failed with no tart: {cp.stdout + cp.stderr}")
-        want = "tart=none\nstate=absent\ninfo=absent\nrunning=0\nlist=[]\non_target=no"
+        want = "tart=none\nstate=absent\ninfo=absent\nlist=[]\non_target=no"
         self.assertEqual(cp.stdout.strip(), want, f"got:\n{cp.stdout}\nwant:\n{want}")

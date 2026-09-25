@@ -1,5 +1,5 @@
-"""`wk sysimage write` (lib/wk/sysimage/write.py) against a card machine faked at its Machine: the real BashChannel's
-argv is answered by a card model, so every helper verb, the stream and the unit archive are what the command sends.
+"""`wk sysimage write` (lib/wk/sysimage/write.py) against a card machine faked at its Machine: the real Channel's
+ssh argv is answered by a card model, so every helper verb, the stream and the unit archive are what the command sends.
 Closes `unit sysimage.write_identity` and `unit killpoints[sysimage write]`; `live sysimage.write[<board>]` and
 `live sysimage.card_verbs[rpi5]` skip by name. No real disk, helper or credential is touched.
 
@@ -24,7 +24,7 @@ from tests.support import REPO, requires_machine
 
 sys.path.insert(0, str(REPO / "lib"))
 
-from wk import act, reach, shell  # noqa: E402
+from wk import act, reach, shell, tailnet  # noqa: E402
 from wk.machine import Fake, Result  # noqa: E402
 from wk.sysimage import write  # noqa: E402
 
@@ -57,6 +57,13 @@ class Card:
         return s
 
 
+def sent(remote):
+    """What the Channel asked of the card machine, as (fn, args): a command under `sh -c`, or a card helper verb."""
+    words = shlex.split(remote)
+    words = words[2:] if words[:2] == ["sudo", "-n"] else words
+    return ("card_priv", *words[1:]) if words[0] == write.CARD_PRIV else ("m_ssh", words[2])
+
+
 class World:
     def __init__(self, card=None, joins=True, udisks=True, peers=(("other", "100.1.1.1", "up"),), dev="/dev/sdX"):
         self.card, self.joins, self.udisks, self.peers, self.dev = card or Card(), joins, udisks, list(peers), dev
@@ -64,7 +71,7 @@ class World:
         self.fake = Fake("reader")
         self.fake.files.update({IMAGE: "the image's own bytes\n", KEY: "ssh-ed25519 AAAAtest t@x\n", AUTHKEY: "tskey-auth-a-b"})
         self.initial = set(self.fake.files)
-        self.fake.react(("env",), lambda argv, f: self.answer(argv[argv.index("wk") + 1:]))
+        self.fake.react(("ssh",), lambda argv, f: self.answer(sent(argv[-1])))
         self.fake.react(("bash", "-o", "pipefail", "-c"), lambda argv, f: self.piped(argv[4]))
         self.fake.answer(("git",), out="abc1234\n")
         self.calls = []
@@ -72,7 +79,7 @@ class World:
     def piped(self, command):
         words = shlex.split(command)
         reader, rest = words[:words.index("|")], words[words.index("|") + 1:]
-        tail = rest[rest.index("wk") + 1:]
+        tail = sent(rest[-1])
         if reader[0] == "tar":
             seed = reader[reader.index("-C") + 1]
             self.card.units = tuple(sorted(p[len(seed) + 1:] for p in self.fake.files if p.startswith(seed + "/")))
@@ -90,10 +97,7 @@ class World:
         self.calls.append(tuple(tail))
         fn, args = tail[0], tail[1:]
         c = self.card
-        if fn == "disk_unmount":
-            c.mounted = False
-            return Result(0)
-        if fn in ("m_ssh", "r_ssh"):
+        if fn == "m_ssh":
             cmd = args[0]
             if self.armed and ("WK_RECORD" in cmd or "boot_id" in cmd):
                 return Result(0, "image=sys-a\narmed_boot_id=b1\n" if "WK_RECORD" in cmd else "b1\n")
@@ -106,6 +110,9 @@ class World:
             return Result(0)
         verb, rest = args[0], args[1:]
         dec = lambda s: base64.b64decode(s).decode()  # noqa: E731
+        if verb == "unmount":
+            c.mounted = False
+            return Result(0)
         if verb == "status":
             return Result(0, "wk-card-priv: ok\nsecond=yes\nthird=yes\ntailnet-keep=yes\n")
         if verb == "check":
@@ -178,17 +185,17 @@ class WriteTest(unittest.TestCase):
         for v in OS_ENV:
             os.environ.pop(v, None)
         os.environ.update(WK_YES="1", WK_DESTRUCTIVE="1")
-        for name, value in (("tailnet_key_present", True), ("tailnet_api_present", False)):
-            p = mock.patch.object(shell, name, lambda root, machine, v=value: v)
+        for name, value in (("key_present", True), ("api_present", False)):
+            p = mock.patch.object(tailnet.Fleet, name, lambda fl, v=value: v)
             p.start()
             self.addCleanup(p.stop)
         self.retired = []
         p = mock.patch.object(reach.Reach, "peers", lambda r: self.w.peers)
         p.start()
         self.addCleanup(p.stop)
-        for name, fn in (("tailnet_authkey", lambda root, machine: AUTHKEY),
-                         ("tailnet_retire", lambda root, machine, n: self.retired.append(n) or Result(0, "retired\n"))):
-            p = mock.patch.object(shell, name, fn)
+        for name, fn in (("authkey", lambda fl: AUTHKEY),
+                         ("retire", lambda fl, n: self.retired.append(n) or Result(0, "retired\n"))):
+            p = mock.patch.object(tailnet.Fleet, name, fn)
             p.start()
             self.addCleanup(p.stop)
         self.w = World()
@@ -228,7 +235,7 @@ class TestTheWholeWrite(WriteTest):
     def test_an_automounted_card_is_unmounted_before_the_helper_is_asked(self):
         self.assertIsNone(self.w.run(), self.w.err)
         calls = [c[:2] for c in self.w.calls]
-        self.assertLess(calls.index(("disk_unmount", "/dev/sdX")), calls.index(("card_priv", "check")))
+        self.assertLess(calls.index(("card_priv", "unmount")), calls.index(("card_priv", "check")))
 
     def test_an_image_the_checkout_does_not_know_gets_the_marker_and_key_only(self):
         e = self.w.run(profile="", mach="rpi5", src=IMAGE)
@@ -293,7 +300,7 @@ class TestTheBenchNode(WriteTest):
         w.card.node = "rpi5-bench's node"
         self.assertIsNone(w.run(), w.err)
         verbs = [c[1] if c[0] == "card_priv" else c[0] for c in w.calls]
-        self.assertLess(verbs.index("disk_unmount"), verbs.index("tailnet-save"), "read off a card still mounted")
+        self.assertLess(verbs.index("unmount"), verbs.index("tailnet-save"), "read off a card still mounted")
         self.assertLess(verbs.index("tailnet-save"), verbs.index("verify"), "saved after the card was erased")
         self.assertLess(verbs.index("parts"), verbs.index("tailnet-restore"))
         self.assertLess(verbs.index("tailnet-restore"), verbs.index("tailnet"))
@@ -363,7 +370,7 @@ class TestIdentity(WriteTest):
 
     def test_an_identity_that_did_not_take_is_refused(self):
         w = World()
-        w.fake.react(("env",), lambda argv, f: Result(0) if "identity" in argv else w.answer(argv[argv.index("wk") + 1:]))
+        w.fake.react(("ssh",), lambda argv, f: Result(0) if sent(argv[-1])[1:2] == ("identity",) else w.answer(sent(argv[-1])))
         self.assertIsInstance(w.run(), act.Refused)
         self.assertIn("did not take the new identity", w.err)
 
@@ -401,8 +408,8 @@ class TestTheStream(WriteTest):
 
     def test_a_decompressor_the_card_machine_lacks_is_refused_by_name(self):
         self.w.fake.files["/imgs/x.wic.zst"] = "compressed"
-        self.w.fake.react(("env",), lambda argv, f: Result(1) if "command -v zstd >/dev/null" in argv
-                          else self.w.answer(argv[argv.index("wk") + 1:]))
+        self.w.fake.react(("ssh",), lambda argv, f: Result(1) if sent(argv[-1]) == ("m_ssh", "command -v zstd >/dev/null")
+                          else self.w.answer(sent(argv[-1])))
         self.assertIsInstance(self.w.run(src="/imgs/x.wic.zst"), act.Refused)
         self.assertIn("rpi5 has no zstd", self.w.err)
         self.assertIsNone(self.w.card.data)
@@ -427,7 +434,7 @@ class Channel:
     """A card machine at the Channel, for the steps asked one at a time."""
 
     def __init__(self, **answers):
-        self.answers, self.calls, self.channel, self.bash_driver = answers, [], "host", False
+        self.answers, self.calls, self.channel = answers, [], "host"
 
     def call(self, fn, *args, input=None, mutates=False):
         self.calls.append((fn,) + args)

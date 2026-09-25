@@ -30,10 +30,19 @@ from wk.machine import Fake, Result  # noqa: E402
 ROOT = str(REPO)
 SECRETFILE = os.path.join(ROOT, "lib", "secretfile.py")
 CONTRIBUTORS = os.path.join(ROOT, "lib", "contributors.py")
-FORKS = [["fork", "justinmichaud/WebKit", "github-webkit"], ["forkwpe", "justinmichaud/WPEWebKit", "github-wpe"]]
-AGENT_SECRETS = [["claude", "claude-token", ".wk-agent-token", "CLAUDE_CODE_OAUTH_TOKEN", "value", "remote"],
-                 ["litellm", "litellm-key", ".wk-litellm-key", "LITELLM_API_KEY", "value", "container,vm,remote"],
-                 ["claude-login", ".credentials.json", ".claude/.credentials.json", "-", "file", "container,vm"]]
+FORKS = secrets.forks()
+AGENT_SECRETS = secrets.agent_secrets()
+# Bash lifting a stored credential: `key_store <name>` takes the value on stdin, `key_clear <name>` withdraws it, both
+# through cli.Key, the one writer.
+KEY_SH = """_key() { WK_STORE="$WK_STORE" WK_STORE_DEFAULT="${WK_STORE_DEFAULT:-}" WK_IN_VM="${WK_IN_VM:-}" PYTHONPATH="$WK_ROOT/lib" python3 -c 'import sys
+from wk.key.cli import Key
+k = Key(sys.argv[1])
+if sys.argv[2] == "clear":
+    sys.exit(k.clear(sys.argv[3]))
+sys.exit(0 if k.store(sys.argv[3], sys.stdin.read().rstrip("\\n")) else 1)' "$WK_ROOT" "$@"; }
+key_store() { _key store "$1"; }
+key_clear() { _key clear "$1" </dev/null; }
+"""
 SOCK = "/agent.sock"
 
 
@@ -179,11 +188,6 @@ class SecretsTest(unittest.TestCase):
         for v in ("WK_DRY_RUN", "WK_YES", "WK_FORCE", "WK_QUIET", "WK_DESTRUCTIVE", "WK_CONFIRMED", "WK_IN_VM"):
             os.environ.pop(v, None)
         self.addCleanup(act._forced.clear)
-        for name, fn in (("push_forks", lambda root, m: [list(f) for f in FORKS]),
-                         ("agent_secrets", lambda root, m: [list(r) for r in AGENT_SECRETS])):
-            q = mock.patch.object(shell, name, fn)
-            q.start()
-            self.addCleanup(q.stop)
         self.w = World(self.tmp)
 
     def refused(self, fn, *args):
@@ -222,6 +226,35 @@ class TestWhereThingsAre(SecretsTest):
         self.assertEqual(["sh", "-c", "true"], s.agent_argv("true"))
         with mock.patch.object(s.store, "is_local", return_value=False):
             self.assertEqual(["podman", "machine", "ssh", "wk-test", "--", "true"], s.agent_argv("true"))
+
+
+class TestAStoredCredentialIsReadTheOneWay(SecretsTest):
+    """A workspace can write in the agent-rw directory, so a link left there
+    pointing at the token beside the deploy keys would turn every read of the
+    login into a read of the token; cred_verdict/cred_stored read through
+    lib/secretfile.py (Secrets.read), which refuses one."""
+
+    def _refuse(self, name, verb, out=""):
+        path = self.w.sec().cred_path(name)
+        self.w.react(["python3", os.path.join(ROOT, "lib", "secretfile.py"), verb, path],
+                     lambda a, f: Result(2, out, "wk: refusing to read %s: it is not a regular file.\n" % path))
+        return path
+
+    def test_a_refused_read_is_bad_and_carries_none_of_its_own_bytes(self):
+        """secretfile.py refuses before it reads a byte, so its stdout on a
+        refusal is nothing to trust; Secrets.read discards it on any non-zero
+        exit, whatever a broken reader put there."""
+        path = self._refuse("litellm", "read", out="a-broken-reader-leaked-this\n")
+        verdict, err = quiet(self.w.sec().cred_verdict, "litellm")
+        self.assertEqual("bad\tthe file at %s could not be read; the refusal above says why" % path, verdict)
+        self.assertNotIn("leaked", verdict)
+        self.assertIn("refusing to read", err)
+
+    def test_cred_stored_answers_none_for_the_same_refusal(self):
+        self._refuse("litellm", "present")
+        stored, err = quiet(self.w.sec().cred_stored, "litellm")
+        self.assertIsNone(stored)
+        self.assertIn("refusing to read", err)
 
 
 class TestTheAgent(SecretsTest):

@@ -1,10 +1,10 @@
-"""The upstreams, and the scripts wiring a checkout or a mirror to them; a fork row is `wk_push_forks`' (lib/store.sh)."""
+"""The upstreams, and the scripts wiring a checkout or a mirror to them; a fork row is lib/wk/secrets.py's FORKS."""
 
 import os
 import re
 import sys
 
-from wk import images
+from wk import images, secrets
 from wk.shell import sh_quote as q
 
 REMOTES = (
@@ -251,10 +251,6 @@ def origin_branch_fetch_step(branch, mirror):
             % (q(mirror), q(mirror), q("refs/heads/" + branch), q(mirror), q("+refs/heads/%s:refs/remotes/origin/%s" % (branch, branch)), net))
 
 
-def _forks_in():
-    return [tuple(line.split()) for line in sys.stdin.read().splitlines() if len(line.split()) == 3]
-
-
 def main(argv):
     verb, a = (argv[0] if argv else ""), argv[1:]
     branches = mirror_branches()
@@ -262,10 +258,8 @@ def main(argv):
         "remotes": ((0, 0), lambda: "".join("%-8s %s\n" % r for r in REMOTES)),
         "mirror-branches": ((0, 0), lambda: " ".join(branches) + "\n"),
         "mirror-refresh-script": ((1, 1), lambda: mirror_refresh_script(a[0], branches)),
-        "wiring-script": ((2, 5), lambda: wiring_script(a[0], a[1], _forks_in(), branches, *a[2:5])),
-        "wiring-check-script": ((2, 3), lambda: wiring_check_script(a[0], a[1], _forks_in(), branches, *a[2:3])),
-        "gitwebkit-setup-script": ((1, 1), lambda: gitwebkit_setup_script(a[0], _forks_in())),
-        "hook-levels": ((0, 0), lambda: hook_levels(_forks_in())),
+        "wiring-script": ((2, 5), lambda: wiring_script(a[0], a[1], secrets.FORKS, branches, *a[2:5])),
+        "gitwebkit-setup-script": ((1, 1), lambda: gitwebkit_setup_script(a[0], secrets.FORKS)),
     }
     if verb not in verbs or not verbs[verb][0][0] <= len(a) <= verbs[verb][0][1]:
         sys.stderr.write("usage: python3 -m wk.git %s\n" % "|".join(sorted(verbs)))

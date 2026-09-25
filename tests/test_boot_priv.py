@@ -131,7 +131,7 @@ class TestTheGrantIsNarrow(WkTest):
     def test_the_detach_is_one_every_machine_it_runs_on_ships(self):
         """`setsid` is util-linux and macOS does not ship it, so with it this
         verb printed "rebooting in 3s" and rebooted nothing on every Mac -- and
-        exited 0 doing it, which is why `wk bench mac-ab` verifies the restart
+        exited 0 doing it, which is why `wk bench ab --devices <mac>` verifies the restart
         against kern.boottime rather than trusting the helper. `nohup` is POSIX
         and is on both. Measured on tolken, macOS 26.6.2: `command -v setsid`
         answers nothing, `command -v nohup` answers /usr/bin/nohup."""
@@ -435,10 +435,19 @@ class TestTheDrivingEndAsksForTheOperationNotThePrivilege(unittest.TestCase):
         self.assertNotIn("boot_priv order", calls)
 
     def test_the_refusal_names_the_remedy(self):
-        body = (REPO / "boot" / "machines.sh").read_text()
-        fn = body[body.index("boot_priv_require()"):]
-        fn = fn[:fn.index("\n}\n")]
-        self.assertIn("./setup --stage quiesce", fn)
+        import contextlib
+        import io
+        import sys
+        sys.path.insert(0, str(REPO / "lib"))
+        from wk import act
+        from wk.boot.driver import Channel
+        from wk.machine import Fake
+        via = Fake()
+        via.answer(("ssh",), rc=1, err="sudo: a password is required")
+        ch = Channel(REPO, {"NODE_NAME": "rpi5", "NODE_SSH": "rpi5", "NODE_ROLE": "workstation"}, "host", env={}, via=via)
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            self.assertRaises(act.Refused, ch.call, "boot_priv_require")
+        self.assertIn("./setup --stage quiesce", err.getvalue())
 
     def test_setup_installs_it_with_its_own_sudoers_rule(self):
         """One installer for all three, so the boot helper's name and the name of its

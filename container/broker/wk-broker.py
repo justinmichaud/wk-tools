@@ -15,7 +15,7 @@ import time
 
 sys.path.insert(0, os.path.join(
     os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "lib"))
-from wknotify import sd_notify  # noqa: E402
+from wk.notify import sd_notify  # noqa: E402
 
 WK_ROOT = os.environ.get(
     "WK_ROOT", os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -40,7 +40,7 @@ NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 MAX_REQUEST_BYTES = 8192
 MAX_CONNECTIONS = 32
-RUN_TIMEOUT = 6 * 3600                 # `wk pi bench --ab` on a Raspberry Pi 3
+RUN_TIMEOUT = 6 * 3600                 # an A/B on a Raspberry Pi 3
 
 
 def log(msg):
@@ -336,7 +336,7 @@ def build_stage(args):
         "workspace", args.get("workspace"),
         "name the workspace whose build should go on the board",
     )
-    argv = [os.path.join(WK_ROOT, "wk"), "pi", "deploy", ws, m["name"]]
+    argv = [os.path.join(WK_ROOT, "wk"), "bench", "deploy", ws, m["name"]]
     slot = want_slot(args)
     if slot:
         argv += ["--slot", slot]
@@ -346,7 +346,11 @@ def build_stage(args):
 def build_run(args):
     m = want_bench_device(args)
     plan = want_plan(args)
-    argv = [os.path.join(WK_ROOT, "wk"), "pi", "bench", m["name"], plan]
+    ws = want_name(
+        "workspace", args.get("workspace"),
+        "name the workspace the run is recorded for (the lane whose slot is on the board)",
+    )
+    argv = [os.path.join(WK_ROOT, "wk"), "bench", "run", ws, plan, "--system", m["name"]]
     slot = want_slot(args)
     if slot:
         argv += ["--slot", slot]

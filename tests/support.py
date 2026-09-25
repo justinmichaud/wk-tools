@@ -289,14 +289,11 @@ def rand_suffix(n=6):
 
 
 def repo_files():
-    """Every tracked file, as absolute paths.
+    """Every file git does not ignore, tracked or not, as absolute paths: what a commit would hold.
 
-    `git ls-files`, not a directory walk: an audit that counts how many times
-    something is defined "in the tree" must not count a build directory, a
-    scratch file, or an agent's git worktree -- Claude Code puts one under
-    .claude/worktrees, which doubles every file in the repository and fails
-    six of these audits at once."""
-    out = subprocess.run(["git", "-C", str(REPO), "ls-files", "-z"],
+    `git ls-files`, not a directory walk, so a build directory, a scratch file or an
+    agent's worktree under the ignored .claude/ is never counted."""
+    out = subprocess.run(["git", "-C", str(REPO), "ls-files", "-z", "--cached", "--others", "--exclude-standard"],
                          capture_output=True, text=True, check=True).stdout
     return [REPO / name for name in out.split("\0")
             if name and (REPO / name).is_file()]

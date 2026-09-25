@@ -57,7 +57,7 @@ import sys
 ROOT = os.environ.get("WK_ROOT") or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "lib"))
 
-from wk import decl, shell, statusview  # noqa: E402
+from wk import decl, statusview, targets  # noqa: E402
 from wk.act import Refused, die, info, warn  # noqa: E402
 from wk.clock import Clock  # noqa: E402
 from wk.record import Records  # noqa: E402
@@ -65,7 +65,8 @@ from wk.status import Walk, wait_until_idle  # noqa: E402
 
 
 def holders(resource):
-    records = Records(ask_target=lambda n, pid, cap: shell.target_pid_alive(ROOT, n, pid, cap))
+    reg = targets.Registry(ROOT)
+    records = Records(ask_target=lambda n, pid, cap: reg.load(reg.ws_target(n)).pid_alive(n, pid, cap))
     for row in records.holders(resource):
         print("\t".join(row))
     return 0

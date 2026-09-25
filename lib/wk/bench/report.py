@@ -754,7 +754,7 @@ def render_html(report, title="wk bench report"):
     )
 
 
-# The warmup round's evidence, and the judgement on it. What counts as a problem within one arm is decided where it is measured (bench/wk_board_driver.py) and recorded in the file; this adds only what needs both arms side by side.
+# The warmup round's evidence, and the judgement on it. What counts as a problem within one arm is decided where it is measured (lib/wk/bench/board_driver.py) and recorded in the file; this adds only what needs both arms side by side.
 def warmup_load(taskdir, device):
     out = {}
     for arm in ("a", "b"):
@@ -870,25 +870,22 @@ def _headline_scores(dirs):
     return scores, empty
 
 
-def precision(a_spec, b_spec, target, out=None):
-    """The stopping rule's verdict as key=value lines: how fine a difference the rounds so far resolve, against `target` percent."""
-    out = out or sys.stdout
-    a, a_empty = _headline_scores(split_paths(a_spec))
-    b, b_empty = _headline_scores(split_paths(b_spec))
+def precision_lines(a_dirs, b_dirs, target, warn=None):
+    """The stopping rule's verdict as key=value lines: how fine a difference these rounds resolve, against `target`
+    percent. ValueError names a side with no scores."""
+    a, a_empty = _headline_scores(a_dirs)
+    b, b_empty = _headline_scores(b_dirs)
     for scores, empty, side in ((a, a_empty, "A"), (b, b_empty, "B")):
-        if scores:
-            for line in empty:
-                print("warning: side %s: %s" % (side, line), file=sys.stderr)
-        else:
-            sys.exit("ab-precision: no scores on side %s:\n%s" % (
-                side, "\n".join("  " + l for l in empty)
-                or "  no run directories given"))
+        if not scores:
+            raise ValueError("no scores on side %s:\n%s" % (side, "\n".join("  " + l for l in empty) or "  no run directories given"))
+        for line in empty:
+            (warn or (lambda m: print(m, file=sys.stderr)))("warning: side %s: %s" % (side, line))
     mde = mde_pct(a, b)
     mean_a, mean_b = sum(a) / len(a), sum(b) / len(b)
     delta = (mean_b - mean_a) / mean_a * 100.0 if mean_a else None
     p = welch_p(a, b)
     # The half-width scales as 1/sqrt(n), so the rounds still owed at this spread is what the operator wants to know before committing the machine.
-    need = "%d" % math.ceil(len(a) * (mde / target) ** 2) if mde is not None and mde > target else ""
+    need = "%d" % math.ceil(len(a) * (mde / target) ** 2) if mde is not None and target and mde > target else ""
     lines = ["n_a=%d" % len(a), "n_b=%d" % len(b), "mean_a=%.4f" % mean_a, "mean_b=%.4f" % mean_b,
              "delta_pct=%s" % ("%.4f" % delta if delta is not None else ""),
              "mde_pct=%s" % ("%.4f" % mde if mde is not None else ""),
@@ -900,7 +897,99 @@ def precision(a_spec, b_spec, target, out=None):
     for side, vals, mean in (("a", a, mean_a), ("b", b, mean_b)):
         lines.append("sd_%s_pct=%s" % (side, "%.4f" % (_sd(vals) / mean * 100.0) if mean else ""))
     lines.append("delta_vs_mde=%s" % ("%.1f" % (mde / abs(delta)) if mde and delta else ""))
-    out.write("\n".join(lines) + "\n")
+    return lines
+
+
+def resolved(a_dirs, b_dirs, target):
+    """--detect's stopping rule, asked between rounds on every system: these rounds resolve `target` percent."""
+    try:
+        return "met=yes" in precision_lines(a_dirs, b_dirs, target, warn=lambda m: None)
+    except (ValueError, SystemExit):
+        return False
+
+
+def precision(a_spec, b_spec, target, out=None):
+    try:
+        lines = precision_lines(split_paths(a_spec), split_paths(b_spec), target)
+    except ValueError as e:
+        sys.exit("ab-precision: %s" % e)
+    (out or sys.stdout).write("\n".join(lines) + "\n")
+
+
+def map_row(line):
+    """One line of runs.tsv, the autorun's record of which result is which round, arm and plan:
+    (round, label, staged, run, clean, plan)."""
+    r = (line.rstrip("\n").split("\t") + [""] * 6)[:6]
+    return tuple(r[:5]) + (r[5] or "unnamed",)
+
+
+def runs_map(path):
+    with open(path) as f:
+        return [map_row(l) for l in f if l.strip()]
+
+
+def ab_summary(runs, root, now, out_path="", out=None):
+    """A Mac A/B's verdict off its run map, per plan: precision, then arm A against arm B. The warmup round is left out;
+    a leg a software-update scan ran across is kept and named."""
+    out = out or sys.stdout
+    rows = runs_map(runs)
+    sink = open(out_path, "w") if out_path else None
+
+    def emit(line=""):
+        out.write(line + "\n")
+        if sink:
+            sink.write(line + "\n")
+
+    try:
+        labels = list(dict.fromkeys(r[1] for r in rows))
+        emit("A/B summary -- %s" % now)
+        emit("run map: %s" % runs)
+        emit()
+        scanned = ["    round %s arm %s" % (r[0], r[1]) for r in rows if r[4] == "scanned"]
+        if scanned:
+            for line in ["  WARNING: a software-update scan ran during these arms:"] + scanned + [
+                    "  Their numbers are included below. Treat a difference that depends on", "  them as unproven.", ""]:
+                emit(line)
+        if len(labels) < 2:
+            emit("only one arm ('%s') -- nothing to compare. Its runs are listed above." % (labels or [""])[0])
+            return 0
+        a, b = labels[:2]
+        if len(labels) > 2:
+            emit("note: %d arms; comparing '%s' against '%s' only" % (len(labels), a, b))
+        if {r[2] for r in rows if r[1] == a} & {r[2] for r in rows if r[1] == b}:
+            for line in ("  both arms ran the SAME staged build. This is an A/A control: what it",
+                         "  measures is the noise floor of this lane, not a difference between",
+                         "  builds. A significant result here means the lane is not yet quiet",
+                         "  enough to trust a real A/B at that magnitude.", ""):
+                emit(line)
+        for plan in dict.fromkeys(r[5] for r in rows):
+            dirs = {l: [os.path.join(root, "results", r[3]) for r in rows if r[5] == plan and r[1] == l and r[0] != "0"] for l in labels}
+            emit("================ %s ================" % plan)
+            for l in labels:
+                emit("  arm %s: %d run(s)" % (l, len(dirs[l])))
+            emit("  precision:")
+            try:
+                for line in precision_lines(dirs[a], dirs[b], 0.3, warn=lambda m: emit("    " + m)):
+                    emit("    " + line)
+            except (ValueError, SystemExit) as e:
+                emit("    ab-precision: %s" % e)
+            emit("    mde_pct is the smallest difference these rounds resolve; below it,")
+            emit("    'not significant' means 'under this threshold', not 'absent'.")
+            emit()
+            emit("  comparing arm %s against arm %s" % (a, b))
+            if dirs[a] and dirs[b]:
+                report = build_report(dirs[a], dirs[b])
+                if out_path:
+                    html = "%s-%s.html" % (os.path.splitext(out_path)[0], plan)
+                    _write_html(html, report, "A/B summary: %s" % plan)
+                    emit("wrote %s" % html)
+                for line in render_text(report).splitlines():
+                    emit(line)
+            emit()
+        return 0
+    finally:
+        if sink:
+            sink.close()
 
 
 def split_paths(spec):
@@ -941,17 +1030,7 @@ def task_report(taskdir, running, html=False, text=False, out=None):
             out.write("  %s  %s\n" % (r["state"], r["dir"]))
         return
     for (device, plan), byround in sorted(record.task_rounds(doc, st["runs"]).items()):
-        a_dirs, b_dirs, dropped = [], [], []
-        for rnd in sorted(byround):
-            arms = byround[rnd]
-            if all(arms.get(x, {}).get("state") == "ok" for x in ("a", "b")):
-                a_dirs.append(arms["a"]["dir"])
-                b_dirs.append(arms["b"]["dir"])
-            else:
-                why = ", ".join("%s: %s" % (arm_names[0] if x == "a" else arm_names[1],
-                                            arms[x]["state"] if x in arms else "not run")
-                                for x in ("a", "b") if arms.get(x, {}).get("state") != "ok")
-                dropped.append("round %d (%s)" % (rnd, why))
+        a_dirs, b_dirs, dropped = record.paired(byround, arm_names)
         header = ["%s on %s" % (plan, device),
                   "A = %s %s, B = %s %s" % (arm_kind, arm_names[0], arm_kind, arm_names[1]),
                   "rounds: %d usable of %d attempted (%d planned)%s" % (

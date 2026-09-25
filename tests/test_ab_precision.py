@@ -6,7 +6,7 @@ A macOS A/B is told what difference it has to be able to see -- 0.3% by
 default -- and keeps alternating until the rounds it has resolve that. These
 tests pin the arithmetic against hand computation, the headline score against
 the three shapes run-benchmark writes, and the CLI the autorun calls
-(bench/mac-bench-autorun.sh's plan_resolves).
+(lib/wk/bench/autorun.py's plan_resolves).
 
 Run: python3 -m unittest tests.test_ab_precision -v
 """
@@ -357,7 +357,7 @@ class TestTheCommand(WkTest):
             self.assertEqual(f["rounds_needed"], "")
 
     def test_two_arms_scoring_identically_still_report_a_verdict(self):
-        """The A/A control mac-ab-summary.sh warns about: with no spread at all
+        """The A/A control the A/B summary warns about: with no spread at all
         Welch has no p-value, and a traceback after met=yes exits non-zero,
         which the autorun reads as "this plan does not resolve yet"."""
         with scratch_dir() as tmp:

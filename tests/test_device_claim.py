@@ -10,7 +10,7 @@ live by construction, and liveness is asked of the process table at read time.
 that same read as a read-only CLI surface, and `record.fleet_holders` asks the
 podman machine's store and every peer workstation through its own wk.
 `record.hold` is the barrier the commands that touch a board take first (`wk
-pi bench`, `wk pi deploy`, `wk boot`, through lib/task.sh's device_hold): it
+bench run --system`, `wk bench deploy`, `wk boot`, lib/task.sh's device_hold): it
 names the machine, the task and the command that stops it, and `--force`
 crosses it and records that it did.
 
@@ -183,10 +183,10 @@ class TestTheFleetIsAsked(unittest.TestCase):
         self.assertEqual([("?", "moose", "unknown", "unreachable over ssh")], rows)
 
     def stores(self, local, targets, peers=("moose",)):
-        with mock.patch("wk.shell.store_is_local", return_value=local), \
-                mock.patch("wk.shell.peer_workstations", return_value=list(peers)), \
+        with mock.patch("wk.store.Store.is_local", return_value=local), \
                 mock.patch("wk.targets.Registry") as reg:
             reg.return_value.load.side_effect = lambda name: targets[name]
+            reg.return_value.peer_workstations.return_value = list(peers)
             return [(name, ask("device:rpi5")) for name, ask in record.fleet_stores(str(REPO), {}, Fake())]
 
     def test_a_peer_is_asked_through_its_own_wk(self):
@@ -276,7 +276,7 @@ class TestTheBarrier(unittest.TestCase):
         self.assertEqual([t.id], self.tasks())
 
     def test_one_drivers_own_claim_passes_down_to_what_it_runs(self):
-        """`wk pi bench --ab-systems` runs `wk boot` for each leg: a claim
+        """`wk bench run --ab-systems` arms and boots for each leg: a claim
         that refused its own holder would deadlock the board's own driver."""
         t, _ = self.hold(rows=[ROW], env={"WK_DEVICE_HELD": "device:rpi5"})
         self.assertIsNone(t)
@@ -383,21 +383,24 @@ class TestTheCommandsTakeIt(ClaimTest):
         self.assertIn("bench fakeboard/speedometer3", out)
         self.assertIn("kill %d" % pid, out)
 
-    def test_pi_bench_refuses(self):
+    def test_bench_deploy_takes_it_where_the_lane_is(self):
+        """A deploy is routed to the machine holding the lane (the dispatcher's
+        `where=workspace`), so the claim is taken there and not here -- which is
+        why that machine's store is one fleet_holders asks. Driven in-process
+        (lib/wk/bench/cli.py's Bench.deploy), the refusal the routing would
+        reach; a board run's claim is tests/test_bench_board.py's."""
+        from wk import targets
+        from wk.bench import cli
+        from wk.clock import Clock
+        from wk.machine import Local
         pid = self.held()
-        self.assert_refused(
-            self.run_wk("pi", "bench", "fakeboard", "speedometer3", env=self.env), pid)
-
-    def test_pi_deploy_takes_it_where_the_lane_is(self):
-        """A deploy is routed to the machine holding the lane (`name=derived`,
-        the dispatcher), so the claim is taken there and not here -- which is
-        why that machine's store is one fleet_holders asks. Driven with a lane
-        this machine holds, so the routing leaves it here and the refusal is
-        the one this test can see."""
-        pid = self.held()
-        self.assert_refused(
-            self.run_wk("pi", "deploy", "webkit-2.52-yocto-rpi5-64", "fakeboard",
-                        "--slot", "a", env={**self.env, "WK_IN_VM": "1"}), pid)
+        err = io.StringIO()
+        with mock.patch.dict(os.environ, self.env), contextlib.redirect_stderr(err), self.assertRaises(act.Refused):
+            cli.Bench(str(REPO), targets.Registry(REPO, env=dict(os.environ), machine=Local()), Clock()).deploy(
+                "webkit-2.52-yocto-rpi5-64", "fakeboard", "a")
+        out = err.getvalue()
+        self.assertIn("bench fakeboard/speedometer3", out)
+        self.assertIn("kill %d" % pid, out)
 
     def test_boot_refuses(self):
         pid = self.held()
@@ -421,33 +424,6 @@ class TestTheCommandsTakeIt(ClaimTest):
         cp = self.run_wk("boot", "fakeboard", "--dry-run", env=self.env)
         self.assertIn("no boot driver", cp.stdout + cp.stderr)
         self.assertEqual([], self.tasks())
-
-    def test_the_two_refusals_say_different_true_things(self):
-        """The lock is this machine's own serialization and refuses by naming
-        the pid holding it here; the claim is the board's, and names the
-        machine and the task holding it anywhere."""
-        ready = self.tmp / "locked"
-        holder = subprocess.Popen(
-            ["bash", "-c",
-             '. "%s/lib/common.sh"; hold_lock pi-bench-fakeboard -w 5 || exit 1; '
-             'touch %s; sleep 60' % (REPO, shlex.quote(str(ready)))],
-            env=clean_env({"WK_STORE": str(self.store)}),
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        self.addCleanup(holder.wait)
-        self.addCleanup(holder.kill)
-        for _ in range(100):
-            if ready.exists():
-                break
-            time.sleep(0.1)
-        self.assertTrue(ready.exists(), "the test's own lock holder never started")
-
-        cp = self.run_wk("pi", "bench", "fakeboard", "speedometer3", env=self.env)
-        out = cp.stdout + cp.stderr
-        self.assertNotEqual(0, cp.returncode, out)
-        self.assertIn("pi-bench-fakeboard lock", out)
-        self.assertIn("pid %d" % holder.pid, out)
-        self.assertNotIn("fleet resource", out)
-
 
 if __name__ == "__main__":
     unittest.main()

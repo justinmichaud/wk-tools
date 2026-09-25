@@ -15,7 +15,7 @@ A bare `wk status` also walks this host's bench-device fleet
 (`report_fleet_devices`, cmd/status): WK_MACHINES_DIR (read by
 lib/wk/fleet.py alone) points that walk at a directory of faked
 `machines/*.conf`-shaped confs instead of the real fleet, and the same
-stub `ssh` answers every board's probe too -- `m_ssh`/`i_ssh`
+stub `ssh` answers every board's probe too -- `m_ssh`
 (boot/machines.sh) shell out to `ssh` by name, the same as targets/remote.sh
 does. Driving the real fleet for real from a test hung past two minutes in
 this environment (measured, then killed); this is what replaces that.
@@ -117,7 +117,7 @@ class TestFleetWalkBareFormMultiMachine(WkTest):
     def test_bare_status_renders_every_faked_machines_block(self):
         # WK_MACHINES_DIR (lib/wk/fleet.py) fakes the fleet without
         # touching machines/*.conf; WK_TARGET=remote (with the stub ssh
-        # every boot driver's m_ssh/i_ssh also shells out through, since it
+        # every boot driver's m_ssh also shells out through, since it
         # calls `ssh` by name) keeps the *workspace target* walk to one
         # fast, fake target instead of every real machine in
         # machines/*.conf -- the thing that hung past 120s before.
@@ -198,14 +198,14 @@ class TestAnOfflineFleetMemberIsRefusedBeforeTheDial(WkTest):
     ConnectTimeout learning it. The coordinator's answer is read first, once
     per process (wk_tailscale_peers), and the refusal names the board."""
 
-    def _m_ssh(self, node, bench=""):
+    def _m_ssh(self, node):
         with stub_path({"tailscale": _TAILSCALE_STATUS, "ssh": _HANGING_SSH}) as binp:
             script = f'''
 set -euo pipefail
 . "$WK_ROOT/lib/common.sh"
 . "$WK_ROOT/boot/machines.sh"
-NODE_NAME=board NODE_SSH={node} NODE_BENCH_SSH="{bench}" NODE_ROLE=workstation
-rc=0; {"i_ssh" if bench else "m_ssh"} true || rc=$?
+NODE_NAME=board NODE_SSH={node} NODE_ROLE=workstation
+rc=0; m_ssh true || rc=$?
 echo "rc=$rc"
 '''
             return bash(script, env={"PATH": f"{binp}:{os.environ.get('PATH', '/usr/bin:/bin')}"},
@@ -216,11 +216,6 @@ echo "rc=$rc"
         self.assertIn("rc=255", cp.stdout, cp.stdout + cp.stderr)
         self.assertIn("downboard", cp.stderr, cp.stderr)
         self.assertIn("offline", cp.stderr, cp.stderr)
-
-    def test_the_bench_channel_asks_the_same_question(self):
-        cp = self._m_ssh("upboard", bench="downboard")
-        self.assertIn("rc=255", cp.stdout, cp.stdout + cp.stderr)
-        self.assertIn("downboard", cp.stderr, cp.stderr)
 
     def test_a_peer_the_tailnet_says_is_up_is_still_dialled(self):
         with stub_path({"tailscale": _TAILSCALE_STATUS, "ssh": "#!/bin/sh\necho dialled\n"}) as binp:

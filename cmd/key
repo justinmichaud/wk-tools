@@ -88,7 +88,7 @@
 #                       tailnet-api   the tailnet API token a workstation
 #                                     retires a stale fleet node with; never
 #                                     written to a card
-#                       ntfy          the ntfy.sh topic wk_notify (lib/store.sh) publishes to
+#                       ntfy          the ntfy.sh topic lib/wk/notify.py publishes to
 #                                     to, so the fleet can tell you it wants
 #                                     you. Minted here, never invented: the
 #                                     topic name is the whole credential, so it
@@ -150,7 +150,7 @@
 #
 # One key per fork, the same on every workstation and shared by every workspace:
 # GitHub deploy keys are scoped to a single repository and refuse the same key on
-# a second one, so a compromised workspace can push to the forks in wk_push_forks
+# a second one, so a compromised workspace can push to the forks in secrets.FORKS
 # and nowhere else. The one key per fork is registered once and held on every
 # workstation. Which key that is, and which of every other credential the fleet
 # holds, is decided by evidence taken at that moment rather than by where one
@@ -184,7 +184,7 @@
 #                            `adopt`. Never the claude.ai login: that one is
 #                            made per machine and never copied
 #
-# <fork> is one of wk_push_forks' short names (lib/store.sh).
+# <fork> is one of the short names in lib/wk/secrets.py's FORKS.
 #
 # Every credential is put to a rule before it is stored, and to the same rule
 # again whenever one is reported (`wk key check`, `wk doctor`): the rules are
@@ -209,7 +209,8 @@ import sys
 ROOT = os.environ.get("WK_ROOT") or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "lib"))
 
-from wk import backup, decl, key, sudo  # noqa: E402
+from wk import backup, decl, sudo  # noqa: E402
+from wk.key import cli  # noqa: E402
 from wk.act import Refused  # noqa: E402
 from wk.machine import Local, is_macos  # noqa: E402
 from wk.targets import Registry  # noqa: E402
@@ -224,7 +225,7 @@ def main(argv, env=None, reg=None, machine=None, macos=None):
                          reg or Registry(ROOT, os.environ if env is None else env, Local()), env=env)
     if verb == "backup":
         return backup.main(ROOT, args.flag("--candidates"), machine or Local(), is_macos() if macos is None else macos)
-    return key.main(ROOT, verb, words[1] if len(words) > 1 else "", rotate=args.flag("--rotate"),
+    return cli.main(ROOT, verb, words[1] if len(words) > 1 else "", rotate=args.flag("--rotate"),
                     replace=args.flag("--replace"), paste=args.flag("--paste"))
 
 

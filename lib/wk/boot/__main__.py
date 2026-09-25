@@ -1,23 +1,17 @@
-"""python3 -m wk.boot <driver> <verb> [args]: one verb of a boot driver over this process's NODE_*, MODE, MODE_CHANNEL,
-ARM_SYS_PART (boot/machines.sh's shims). A refusal exits 1; a predicate verb answers by its exit status."""
+"""python3 -m wk.boot <driver> <verb> [args]: one verb of a boot driver over this process's NODE_*, MODE, MODE_CHANNEL
+(boot/machines.sh's shims). A refusal exits 1; a predicate verb answers by its exit status."""
 
 import os
 import shlex
 import sys
 
 from wk import act
-from wk.boot import driver_class
-from wk.boot.driver import BashChannel, Driver
+from wk.boot import open_driver
 
 
 def build(name, env, root):
-    cls = driver_class(name)
     conf = {k: v for k, v in env.items() if k.startswith("NODE_")}
-    ch = BashChannel(root, conf, env.get("MODE_CHANNEL") or "none",
-                     bash_driver=cls is Driver and bool(conf.get("NODE_DRIVER")))
-    d = cls(root, conf, ch, mode=env.get("MODE", ""))
-    d.armed_part = env.get("ARM_SYS_PART", "")
-    return d
+    return open_driver(root, conf, env=env, channel=env.get("MODE_CHANNEL") or "none", mode=env.get("MODE", ""), name=name)
 
 
 def say(text):
@@ -49,24 +43,15 @@ VERBS = {
     "probeable": lambda d, a: pred(d.probeable()),
     "system-kind": lambda d, a: say(d.system_kind(a[0] if a else "")),
     "boot-id": lambda d, a: say(d.boot_id()),
-    "booted-at": lambda d, a: say(d.booted_at()),
     "display": lambda d, a: say(d.display()) if d.display() else 1,
-    "watchdog-present": lambda d, a: pred(d.watchdog_present()),
     "systems": lambda d, a: systems(d),
-    "select": lambda d, a: say("%s %s" % d.select_system(a[0] if a else "")),
-    "diag": lambda d, a: say(d.diag()),
-    "arm": lambda d, a: d.arm(d.armed_part, a[0] if a else ""),
-    "reboot": lambda d, a: d.reboot(armed="--armed" in a),
+    "reboot": lambda d, a: d.reboot(),
     "disarm": lambda d, a: d.disarm(),
     "disarm-note": lambda d, a: say(d.disarm_note()),
     "self-disarm": lambda d, a: say(d.self_disarm_sh()) if d.failsafe else 1,
-    "selects-by-partition": lambda d, a: pred(d.selects_by_partition),
     "media": lambda d, a: say(d.media()),
-    "evidence": lambda d, a: say(d.evidence()),
-    "reprovision": lambda d, a: say(d.reprovision()),
     "record-write": lambda d, a: d.record_write(*(list(a) + ["", "", "", ""])[:4]),
     "record-read": lambda d, a: say(d.record_read().rstrip("\n")),
-    "record-clear": lambda d, a: d.record_clear(),
     "barrier": lambda d, a: d.armed_barrier(a[0] if a else "") or 0,
 }
 

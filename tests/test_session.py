@@ -60,10 +60,6 @@ class World(Fake):
                    lambda a, f: Result(0, "".join("%s 1000 u seat0 tty2\n" % s[0] for s in self.sessions)))
         self.react(("loginctl", "show-session"), self.show)
         self.react(("env", "WAYLAND_DISPLAY=" + SOCKET, "wayland-info"), self.wayland_info)
-        self.react(quiet.lib_argv(ROOT, quiet.COMMON, "session_mode"),
-                   lambda a, f: Result(0, self.files.get(MODE_FILE, "none")))
-        self.react(quiet.lib_argv(ROOT, quiet.COMMON, "session_mode_warn"),
-                   lambda a, f: Result(0, "", "warning: SLOW SESSION\n" if self.files.get(MODE_FILE) == "bmc" else ""))
 
     def card(self, card, driver, conns):
         self.dirs.update({DRM, "%s/%s" % (DRM, card)})

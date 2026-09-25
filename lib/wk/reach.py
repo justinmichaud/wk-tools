@@ -9,6 +9,7 @@ import sys
 import threading
 
 from wk import fleet
+from wk.kv import kv
 from wk.machine import Local, Ssh
 
 APP_CLI = "/Applications/Tailscale.app/Contents/MacOS/Tailscale"   # the App Store build
@@ -159,10 +160,14 @@ class Reach:
             return None
         return parse_neigh(r.out, cidr)
 
+    def swept(self):
+        for seg in self.segments_local():
+            yield seg, self.sweep(seg)
+
     def find_mac(self, mac):
         mac = (mac or "").lower()
-        for seg in self.segments_local() if mac else ():
-            hit = next((ip for ip, m, _s in self.sweep(seg) or () if m == mac), None)
+        for seg, rows in self.swept() if mac else ():
+            hit = next((ip for ip, m, _s in rows or () if m == mac), None)
             if hit:
                 return "%s  (found by sweeping %s -- not stored)" % (hit, seg)
         return ""
@@ -187,22 +192,12 @@ echo "host=$(hostname 2>/dev/null)"
 command -v tailscale >/dev/null 2>&1 && echo "tailscale=yes" || echo "tailscale=no"
 [ -e /etc/wk/rescue ] && echo "marker=rescue" || echo "marker=none"
 """
-# Each image brings its own host key, so an address is asked without pinning one.
 UNPINNED = ["-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null", "-o", "LogLevel=ERROR"]
 # Not a database: the prefixes the Raspberry Pi Foundation owns, and the one the phones' USB adapters synthesise.
 OUI = {"b8:27:eb": "Raspberry Pi (pre-4)", "d8:3a:dd": "Raspberry Pi", "dc:a6:32": "Raspberry Pi",
        "e4:5f:01": "Raspberry Pi", "2c:cf:67": "Raspberry Pi", "00:00:00": "synthesised (USB adapter, no EEPROM)"}
 HIT_KEYS = ("ip", "mac", "state", "machine", "vendor", "lease", "bridge", "hostname", "tailnet_peer", "wk_image_id",
             "wk_role", "wk_profile", "wk_builder", "tailscale", "marker", "uname")
-
-
-def kv(text):
-    out = {}
-    for line in text.splitlines():
-        k, eq, v = line.partition("=")
-        if eq and k not in out:
-            out[k] = v
-    return out
 
 
 class Survey:
@@ -322,13 +317,8 @@ def main(argv, env=None, stdin=None, out=None):
         out.write(r.offline(args[0]))
     elif verb == "without-tailnet" and len(args) == 1:
         out.write(r.without_tailnet(args[0]))
-    elif verb == "enumerate" and len(args) == 1:
-        found = r.find_mac(args[0])
-        out.write(found)
-        return 0 if found else 1
     else:
-        sys.stderr.write("usage: python3 -m wk.reach peers | tailnet|offline|without-tailnet <name> (peers on stdin)"
-                         " | enumerate <mac>\n")
+        sys.stderr.write("usage: python3 -m wk.reach peers | tailnet|offline|without-tailnet <name> (peers on stdin)\n")
         return 2
     return 0
 

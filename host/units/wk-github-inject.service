@@ -6,7 +6,7 @@ RequiresMountsFor=@WK_ROOT@
 
 [Service]
 # Ready is "the socket is bound", which only the program knows, so it says
-# so (sd_notify, lib/wknotify.py) and the start job waits for it. Type=simple
+# so (sd_notify, lib/wk/notify.py) and the start job waits for it. Type=simple
 # would report a service that execs and dies a moment later as started.
 Type=notify
 NotifyAccess=all

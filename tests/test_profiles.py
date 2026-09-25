@@ -18,7 +18,7 @@ ENV = {"WK_ROOT": str(REPO)}
 EXTERNAL_CONFIGS = REPO / "image" / "buildroot" / "external" / "configs"
 OWN_FILES = [REPO / "lib" / "image.sh", REPO / "image" / "profiles.sh", REPO / "lib" / "wk" / "images.py"] \
     + sorted((REPO / "image" / "configs").glob("*.conf"))
-SHIMS = {"image_lane_ws", "image_lane_profile", "image_lane_arg", "image_lane_machine", "image_lane_here"}
+SHIMS = set()
 OC = "webkit-2.52-yocto-rpi5-64-oc"
 STOCK = "webkit-2.52-yocto-rpi5-64"
 CLOCKS = re.compile(r"(?m)^\s*(arm_freq|over_voltage)\w*=")
@@ -61,15 +61,13 @@ class TestProfilesAreData(unittest.TestCase):
                     self.assertIn(p["IMG_MACHINE"], boards)
                 elif p["IMG_BUILDER"] == "pmos":
                     self.assertIn(p["PMO_BRIDGE"], bridges)
+                elif p["IMG_BUILDER"] == "mac-volume":
+                    self.assertEqual(fleet.kind(p["IMG_MACHINE"]), "mac")
+                elif p["IMG_BUILDER"] == "guest":
+                    self.assertEqual("", p["IMG_MACHINE"], "the guest base is no board's")
                 else:
                     self.assertEqual(p["IMG_BUILDER"], "fetch")
                     self.assertIn(p["FET_DEVICE"], phones)
-
-    @owed("image/pgo.sh's image_pgo_machine finds the collection board by NODE_PROFILE, so "
-          "webkit-2.52-yocto-rpi4-32 and the -oc profile have none; 5.26 reads IMG_MACHINE")
-    def test_a_profile_guided_profile_collects_on_its_own_board(self):
-        body = re.search(r"(?ms)^image_pgo_machine\(\).*?^\}", (REPO / "image" / "pgo.sh").read_text()).group(0)
-        self.assertNotIn("NODE_PROFILE", body)
 
     def test_a_buildroot_defconfig_is_the_repos_or_the_profile_says_what_it_needs(self):
         for n, p in profiles().items():
@@ -87,7 +85,7 @@ class TestProfilesAreData(unittest.TestCase):
             with self.subTest(profile=n):
                 self.assertIn(sum(bool(p[k]) for k in keys), (0, 3))
 
-    @owed("a pinned-kernel profile's defconfig still sets BR2_LINUX_KERNEL=y, and image/buildroot-build.sh "
+    @owed("a pinned-kernel profile's defconfig still sets BR2_LINUX_KERNEL=y, and lib/wk/sysimage/buildroot_target.py "
           "reads the DTS name from that build; 5.17 owns both")
     def test_a_pinned_kernel_builds_none(self):
         for n, p in profiles().items():
@@ -103,8 +101,7 @@ class TestProfilesAreData(unittest.TestCase):
 
 
 class TestVocabulary(unittest.TestCase):
-    """An image's workspace is `image_ws`; the word "lane" survives only as a
-    shim name an unported caller still uses."""
+    """An image's workspace is `image_ws`, never a "lane"."""
     wk_tier = "lint"
 
     def test_no_file_here_says_lane(self):
@@ -112,14 +109,6 @@ class TestVocabulary(unittest.TestCase):
             with self.subTest(file=path.name):
                 self.assertNotRegex(path.read_text(), r"(?i)\blanes?\b")
                 self.assertLessEqual(set(re.findall(r"\w*lane\w*", path.read_text())), SHIMS)
-
-    def test_each_shim_still_has_a_caller(self):
-        for shim in SHIMS:
-            with self.subTest(shim=shim):
-                callers = [p for d in ("cmd", "image", "lib", "boot", "bench") for p in (REPO / d).rglob("*")
-                           if p.is_file() and p.name != "image.sh" and "__pycache__" not in p.parts
-                           and shim in p.read_text(errors="replace")]
-                self.assertTrue(callers, "%s has no caller left: delete it" % shim)
 
 
 class TestSysimage(unittest.TestCase):
@@ -130,7 +119,7 @@ class TestSysimage(unittest.TestCase):
         self.assertEqual(same(oc), same(stock), "the -oc profile is the same image as the stock one")
         spec = REPO / "image" / OC / "config.txt.append"
         self.assertEqual(set(CLOCKS.findall(spec.read_text())), {"arm_freq", "over_voltage"})
-        for path in [REPO / "image" / STOCK / "config.txt.append", REPO / "boot" / "rpi-eeprom.sh"] \
+        for path in [REPO / "image" / STOCK / "config.txt.append", REPO / "lib" / "wk" / "boot" / "eeprom.py"] \
                 + sorted((REPO / "image" / "boards" / "rpi5").iterdir()):
             if path.is_file():
                 with self.subTest(file=str(path.relative_to(REPO))):
@@ -138,8 +127,6 @@ class TestSysimage(unittest.TestCase):
         text = write.config_add(REPO, oc)
         self.assertLess(text.index("os_check=0"), text.index("arm_freq=2800"))
 
-    @owed("host/linux/rpi5/rpi5-setup.sh still writes arm_freq and over_voltage_delta into the "
-          "workstation's config.txt; the stability half stays in ./setup and the overclock leaves it")
     def test_setup_carries_no_overclock(self):
         self.assertIsNone(CLOCKS.search(setting_lines(REPO / "host" / "linux" / "rpi5" / "rpi5-setup.sh")))
 

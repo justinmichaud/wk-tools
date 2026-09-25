@@ -108,12 +108,6 @@ class TestTheGuardIsInOnePlace(WkTest):
         self.assertIn('local _me="${BASHPID:-$$}:$1"', text)
         self.assertNotIn("$(_wk_pid)", text)
 
-    def test_no_command_keeps_a_guard_of_its_own(self):
-        """A second copy can drift into permitting what the first refuses."""
-        for rel in ("cmd/ab", "image/pgo.sh", "cmd/pi"):
-            with self.subTest(file=rel):
-                self.assertNotIn("BASHPID", (REPO / rel).read_text())
-
 
 if __name__ == "__main__":
     unittest.main()

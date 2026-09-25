@@ -22,27 +22,24 @@
 # `du` counts allocated blocks, so a sparse guest disk costs what it has
 # written; APFS clones share blocks, so the total is an upper bound.
 #
-# Erasing is elsewhere -- `wk gc`, `wk gc --purge-mirror`, `wk vm base --rm`,
+# Erasing is elsewhere -- `wk gc`, `wk gc --purge-mirror`, `wk sysimage build macos-guest-base --rm`,
 # `wk rm` -- named per row.
 
 import glob
 import os
-import subprocess
 import sys
 
 ROOT = os.environ.get("WK_ROOT") or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "lib"))
 
-from wk import decl, record, shell, targets  # noqa: E402
+from wk import decl, gc, record, rubble, targets  # noqa: E402
 from wk.act import info, log  # noqa: E402
 from wk.machine import Local  # noqa: E402
 from wk.store import Store  # noqa: E402
-from wk.sysimage import task  # noqa: E402
+from wk.sysimage import guestbase, task  # noqa: E402
 
-MACHINE = os.environ.get("WK_MACHINE", "wk")
 HOME = os.environ.get("HOME", os.path.expanduser("~"))
 DATA = os.environ.get("XDG_DATA_HOME") or os.path.join(HOME, ".local", "share")
-TART_HOME = os.environ.get("TART_HOME") or os.path.join(HOME, ".tart")
 here = Local()
 
 
@@ -145,7 +142,7 @@ def workspace_report(reg, rep):
 
 
 def main(argv):
-    args = decl.Args(decl.Decl(__file__), argv)
+    args = decl.Args(decl.Decl(os.path.join(ROOT, "cmd", "disk")), argv)   # ROOT's copy: --probe-store arrives on stdin
     store = Store()
     if args.flag("--probe-store"):
         sys.stdout.write(probe_store(store))
@@ -158,11 +155,13 @@ def main(argv):
         workspace_report(reg, rep)
         return 0
     if macos_host:
+        ctr = reg.load("container")
+        vm_name = store.podman_machine()
         rep.section("the podman VM (container workspaces)")
         mdir = os.path.join(DATA, "containers", "podman", "machine")
-        images = glob.glob(os.path.join(mdir, "*", MACHINE + "-*.raw")) + glob.glob(os.path.join(mdir, "*", MACHINE + ".raw"))
+        images = glob.glob(os.path.join(mdir, "*", vm_name + "-*.raw")) + glob.glob(os.path.join(mdir, "*", vm_name + ".raw"))
         for f in images:
-            ceiling = here.run(["podman", "machine", "inspect", MACHINE, "--format", "{{.Resources.DiskSize}}"]).out.strip() or "?"
+            ceiling = here.run(["podman", "machine", "inspect", vm_name, "--format", "{{.Resources.DiskSize}}"]).out.strip() or "?"
             rep.row(kb(f), "disk image", "sparse, %s GB ceiling; grows, never shrinks" % ceiling)
         if not images:
             rep.unknown("disk image", "not found under %s" % mdir)
@@ -171,13 +170,12 @@ def main(argv):
             if k > 0:
                 rep.row(k, "downloaded machine image", "re-downloadable")
         rep.section("the container store, inside that image (already counted above)")
-        if targets.Registry(ROOT).load("container").machine_state() == "running":
-            with open(__file__, "rb") as me:   # this file, not the VM's copy, which is only as new as `wk sync --tools container`
-                cp = subprocess.run(["podman", "machine", "ssh", MACHINE, "--",
-                                     "WK_ROOT=/opt/wk-tools WK_STORE=/var/lib/wk python3 - --probe-store"],
-                                    stdin=me, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
-            if cp.stdout.strip():
-                rep.render(cp.stdout, add=False)
+        if ctr.machine_state() == "running":
+            with open(__file__) as me:   # this file, not the VM's copy, which is only as new as `wk sync --tools container`
+                cp = here.run(["podman", "machine", "ssh", vm_name, "--",
+                               "WK_ROOT=/opt/wk-tools WK_STORE=/var/lib/wk python3 - --probe-store"], input=me.read())
+            if cp.out.strip():
+                rep.render(cp.out, add=False)
             else:
                 rep.unknown("the store inside the VM", "the VM answered nothing; its tooling may be missing: wk sync --tools container")
         else:
@@ -185,22 +183,23 @@ def main(argv):
     else:
         rep.section("the store (%s)" % store.root())
         rep.render(probe_store(store), add=True)
-    if macos_host and os.path.isdir(TART_HOME):
-        rep.section("macOS guests (vm target, %s)" % TART_HOME)
-        base = os.environ.get("WK_VM_BASE") or "wk-base"
-        for d in sorted(glob.glob(os.path.join(TART_HOME, "vms", "*"))):
+    tart_home = guestbase.tart_home(os.environ)
+    if macos_host and os.path.isdir(tart_home):
+        rep.section("macOS guests (vm target, %s)" % tart_home)
+        base = reg.load("vm").base() if reg.vm_listed() else None
+        for d in sorted(glob.glob(os.path.join(tart_home, "vms", "*"))):
             if not os.path.isdir(d):
                 continue
             v = os.path.basename(d)
             if v == base:
-                rep.row(kb(d), "golden base '%s'" % v, "the expensive one: wk vm base --rm")
+                rep.row(kb(d), "golden base '%s'" % v, "every guest clones it")
             elif v.startswith("wk-"):
                 rep.row(kb(d), "guest '%s'" % v[3:], "wk rm %s" % v[3:])
             else:
                 rep.row(kb(d), "guest '%s'" % v, "not wk's")
-        k = kb(os.path.join(TART_HOME, "cache"))
-        if k > 0:
-            rep.row(k, "pulled image cache", "re-downloadable; wk gc trims it to %s GB" % (os.environ.get("WK_TART_CACHE_GB") or "20"))
+        cache = os.path.join(tart_home, "cache")
+        if os.path.isdir(cache):
+            rep.row(kb(cache), "tart's pulled-image cache", "wk gc trims it")
     rep.section("this host")
     if os.path.isdir(store.state_dir()):
         rep.row(kb(store.state_dir()), "host-side state", "logs, keys, remote build status")
@@ -210,24 +209,10 @@ def main(argv):
             if k > 0:
                 rep.note(k, "fetched base images", "inside the row above; a re-fetchable input, kept by wk gc")
     rep.row(kb(ROOT), "wk-tools checkout", ROOT)
-    if not os.environ.get("WK_IN_VM") and not reg.remote_marker_field("target"):
-        rows = shell.ask(ROOT, '. "$WK_ROOT/lib/image.sh"; . "$WK_ROOT/image/profiles.sh"; . "$WK_ROOT/image/pmos.sh"; '
-                               'for h in $(pmos_build_hosts); do pmos_cache_probe "$h"; done; :') or ""
-        if rows.strip():
-            rep.section("pmos build hosts (not this machine, not in the total)")
-            for line in rows.splitlines():
-                parts = line.split("\t")
-                if len(parts) < 2 or not parts[0]:
-                    continue
-                if parts[0] == "??":
-                    rep.unknown(parts[1], parts[2] if len(parts) > 2 else "")
-                else:
-                    rep.note(int(parts[0]), parts[1], parts[2] if len(parts) > 2 else "")
     rep.section("total")
     sys.stderr.write("  %7s  %s\n" % (human(rep.total), "wk's storage on this machine"))
     if rep.noted:
-        log("           parenthesised rows are not in the total: they are inside a row")
-        log("           above, or on another machine (the build-host section)")
+        log("           parenthesised rows are not in the total: they are inside a row above")
     if os.uname().sysname == "Darwin":
         log("           du counts allocated blocks; APFS clones share them, so this is")
         log("           an upper bound -- df below is the filesystem's own answer")
@@ -238,7 +223,9 @@ def main(argv):
     df = here.run(["df", "-h", store.root() if os.path.isdir(store.root()) else HOME])
     sys.stderr.write("".join("  " + l + "\n" for l in df.out.splitlines()))
     log("")
-    log("  What to erase, and how:  wk help")
+    rep.section("what 'wk gc' reclaims or names (inside the rows above, or on another machine)")
+    for r in sorted(gc.Gc(ROOT, reg).rows(), key=lambda r: r.kind):
+        sys.stderr.write(rubble.line(r, (), "a plain 'wk gc' takes it") + "\n")
     return 0
 
 

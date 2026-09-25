@@ -28,7 +28,7 @@ from tests.support import REPO, WkTest, clean_env, stub_path
 from tests.test_credcheck import CLASSIC, FINE, POLICY, FakeGitHub
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import key  # noqa: E402
+from wk.key import cli  # noqa: E402
 
 KEY = REPO / "cmd" / "key"
 
@@ -182,7 +182,7 @@ class TestStoringOne(_PatRun):
         """An argument is in `ps` for everyone on the machine, so the value
         goes down a pipe into the one writer (lib/secretfile.py, through
         Key.store) -- never handed to a command."""
-        text = inspect.getsource(key.Key.store)
+        text = inspect.getsource(cli.Key.store)
         self.assertIn("input=value", text)
         self.assertNotIn("value]", text)
 
@@ -458,7 +458,7 @@ class TestATokenGitHubRefusesIsReplaced(_PatRun):
 class TestTheMachineTakesTheTokenOnEveryStart(unittest.TestCase):
     """A token that arrives while the podman machine is down cannot be
     delivered into it; both paths that bring the machine up converge the
-    injector's copy through the one function, as `wk vm start` does for the
+    injector's copy through the one function, as `wk start` does for the
     guests' (targets/vm.sh)."""
 
     def test_both_start_paths_converge_through_the_one_function(self):

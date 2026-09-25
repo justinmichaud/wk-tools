@@ -66,7 +66,7 @@ SRC_URI:remove = "file://0001-configure-Prune-PIE-flags.patch \
 #
 # Dropping it is safe *here* because that portability is something this setup
 # deliberately does not rely on: SSTATE_DIR is namespaced per build-host image
-# (image/yocto-build.sh), so sstate is never handed to a different host in the
+# (lib/wk/sysimage/yocto_target.py), so sstate is never handed to a different host in the
 # first place. If that ever changes, this line has to be reconsidered before the
 # namespacing is removed.
 #

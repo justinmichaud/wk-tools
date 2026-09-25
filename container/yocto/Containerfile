@@ -37,7 +37,7 @@
 # The cost, and it is the real one: this image is not the WebKit SDK, so it
 # carries only what a Yocto build and WebKit's own driving scripts need. It is
 # not a workspace to develop WebKit in; `wk new` on it exists to build images.
-# Built by image/yocto.sh, tagged localhost/wk-yocto-host:<the ubuntu tag>.
+# Built by lib/wk/sysimage/yocto.py, tagged localhost/wk-yocto-host:<the ubuntu tag>.
 
 ARG BASE=ubuntu:24.04
 FROM ${BASE}

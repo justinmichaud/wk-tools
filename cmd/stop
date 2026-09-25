@@ -30,11 +30,12 @@ import sys
 ROOT = os.environ.get("WK_ROOT") or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "lib"))
 
-from wk import act, decl, record, shell, status, targets  # noqa: E402
+from wk import act, decl, record, status, targets  # noqa: E402
 from wk.act import Refused, confirm, die, info, log, warn  # noqa: E402
 from wk.machine import is_macos  # noqa: E402
+from wk.store import Store  # noqa: E402
 
-MACHINE = os.environ.get("WK_MACHINE", "wk")
+MACHINE = Store().podman_machine()
 
 
 def here():
@@ -116,12 +117,12 @@ def stop_everything(reg, keep_vm):
         if state != "running":
             info("machine '%s' is already %s -- nothing to do" % (MACHINE, state))
             return 0
-    running = shell.in_machine(ROOT, 'podman ps --filter "name=^wk-" --format "{{.Names}}"') or ""
-    names = running.split()
+    ctr = reg.load("container")
+    names = ctr.machine.run(ctr.podman() + ["ps", "--filter", "name=^wk-", "--format", "{{.Names}}"], input="").out.split()
     if names:
         for n in names:
             sys.stderr.write("  stopping %s\n" % n)
-        shell.in_machine(ROOT, 'podman stop --time 30 $(podman ps --filter "name=^wk-" --format "{{.Names}}" | tr "\\n" " ") >/dev/null')
+        ctr.machine.act_run(ctr.podman() + ["stop", "--time", "30"] + names, input="")
         info("stopped %d container(s)" % len(names))
     else:
         info("no running containers")
@@ -145,7 +146,7 @@ def main(argv):
         if tasks:
             if keep_vm:
                 die("'--keep-vm' is about the podman machine, which 'wk stop --tasks' leaves alone")
-            records = record.Records(ask_target=lambda n, pid, cap: shell.target_pid_alive(ROOT, n, pid, cap))
+            records = record.Records(ask_target=lambda n, pid, cap: reg.load(reg.ws_target(n)).pid_alive(n, pid, cap))
             return stop_tasks_everywhere(reg, records) if everywhere else stop_tasks_here(records)
         if name:
             return stop_workspace(reg, name)

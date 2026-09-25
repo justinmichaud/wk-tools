@@ -1,10 +1,6 @@
 #!/usr/bin/env bash
 BROWSER="${BROWSER:-flatpak-chromium}"   # flatpak-chromium | vivaldi | brave | none
 REMOVE_FIREFOX="${REMOVE_FIREFOX:-yes}"  # yes | no
-# 2900 passes stress-ng torture but hard-locks in real use; +50mV pins VDD_CORE at its cap.
-ARM_FREQ="${ARM_FREQ:-2800}"             # 2800 = stable; 2900 hard-locks in real use
-V3D_FREQ="${V3D_FREQ:-1200}"             # 960 stock; 1000 current; 1200 ran earlier — re-test w/ glmark2 before raising
-OVER_VOLTAGE_DELTA="${OVER_VOLTAGE_DELTA:-50000}"  # µV; 50mV = at the ~1.0V core cap; higher adds no real voltage
 # NUMA is firmware-driven: with SDRAM_BANKLOW set the bootloader banks the SDRAM
 # and appends the optimal numa=fake=N when numa_policy is on the cmdline.
 NUMA_FAKE="${NUMA_FAKE:-auto}"            # auto = let the bootloader pick optimal N; a number forces numa=fake=N; 0/off disables
@@ -23,10 +19,11 @@ CFG=/boot/firmware/config.txt; [ -f "$CFG" ] || CFG=/boot/config.txt
 
 ensure_pi5_line(){ # $1 = exact line
   grep -qxF "$1" "$CFG" && return 0
-  sudo sed -i "/^arm_freq=/i $1" "$CFG"; ok "added: $1"
+  sudo sed -i "/^\[pi5\]\$/a $1" "$CFG"; ok "added: $1"
 }
 
-log "1  Overclock / PCIe / GPU / fan in $CFG"
+# arm_freq/v3d_freq/over_voltage_delta belong to the -oc image profile, not this script.
+log "1  PCIe / GPU overlay in $CFG"
 if [ -f "$CFG" ]; then
   if ! grep -q "rpi5-tune" "$CFG"; then
     sudo cp -a "$CFG" "$CFG.bak-$(date +%Y%m%d-%H%M%S)"
@@ -35,8 +32,6 @@ if [ -f "$CFG" ]; then
 # --- Performance tuning (rpi5-tune) ---
 [pi5]
 dtparam=pciex1_gen=3
-arm_freq=$ARM_FREQ
-v3d_freq=$V3D_FREQ
 [all]
 EOF
     ok "appended tuning block"
@@ -44,10 +39,6 @@ EOF
     skip "tuning block present; topping up individual lines"
   fi
   ensure_pi5_line "dtparam=pciex1_gen=3"
-  grep -q '^v3d_freq=' "$CFG" || sudo sed -i "/^arm_freq=/i v3d_freq=$V3D_FREQ" "$CFG"
-  sudo sed -i "s/^v3d_freq=.*/v3d_freq=$V3D_FREQ/" "$CFG"; ok "v3d_freq=$V3D_FREQ"
-  sudo sed -i "s/^arm_freq=.*/arm_freq=$ARM_FREQ/" "$CFG"; ok "arm_freq=$ARM_FREQ"
-  if [ "$OVER_VOLTAGE_DELTA" != "0" ]; then ensure_pi5_line "over_voltage_delta=$OVER_VOLTAGE_DELTA"; fi
   # CMA rides the [all] overlay line already there: dtoverlay accumulates, so a second vc4-kms-v3d line applies the overlay twice, and [pi3+]/[pi02] carry their own cma-128 for a 512MB board.
   if ! grep -qE '^dtoverlay=vc4-kms-v3d([,[:space:]]|$)' "$CFG"; then
     skip "no dtoverlay=vc4-kms-v3d line to carry cma-$CMA_MB"
@@ -496,5 +487,5 @@ if [ -f "$HERE/id_ed25519" ]; then
   ok "installed id_ed25519 -> ~/.ssh ($(ssh-keygen -lf ~/.ssh/id_ed25519.pub 2>/dev/null | awk '{print $2}'))"
 else skip "no id_ed25519 in $HERE — skipping"; fi
 
-log "DONE — reboot to apply overclock/PCIe/fan/fstab:  sudo reboot"
-echo "   Validate 2.8GHz stability after reboot:  sudo bash \"$(dirname "$0")/rpi5-stress.sh\""
+log "DONE — reboot to apply PCIe/fan/fstab:  sudo reboot"
+echo "   Stress-test the board after reboot:  sudo bash \"$(dirname "$0")/rpi5-stress.sh\""

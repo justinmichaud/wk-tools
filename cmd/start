@@ -7,8 +7,8 @@
 # into the podman VM. macOS guests are listed rather than started.
 #
 #   wk start                 the podman machine, then every container
-#   wk start <workspace>     only that workspace's environment; for a macOS
-#                            guest this is `wk vm start <workspace>`
+#   wk start <workspace>     only that workspace's environment: a macOS guest
+#                            is booted, converged and given its ssh alias
 
 import os
 import subprocess
@@ -17,11 +17,11 @@ import sys
 ROOT = os.environ.get("WK_ROOT") or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "lib"))
 
-from wk import act, secrets, shell, targets  # noqa: E402
+from wk import act, secrets, targets  # noqa: E402
 from wk.act import Refused, die, info, log  # noqa: E402
+from wk.store import Store  # noqa: E402
 
-MACHINE = os.environ.get("WK_MACHINE", "wk")
-STOPPED = 'podman ps -a --filter "name=^wk-" --filter "status=exited" --filter "status=created" --format "{{.Names}}"'
+MACHINE = Store().podman_machine()
 
 
 def here():
@@ -30,8 +30,6 @@ def here():
 
 def start_workspace(reg, name):
     target = reg.load(reg.ws_target(name))
-    if target.kind == "vm":
-        os.execv(os.path.join(ROOT, "wk"), [os.path.join(ROOT, "wk"), "vm", "start", name])
     if target.info(name) == "absent":
         die("no such workspace: %s" % name)
     return 0 if target.start(name) else 1
@@ -48,11 +46,13 @@ def start_everything(reg):
         else:
             act.debug("ok: machine already running")
     secrets.Secrets(ROOT).pat_converge_machine()
-    stopped = (shell.in_machine(ROOT, STOPPED) or "").split()
+    ctr = reg.load("container")
+    stopped = ctr.machine.run(ctr.podman() + ["ps", "-a", "--filter", "name=^wk-", "--filter", "status=exited",
+                                              "--filter", "status=created", "--format", "{{.Names}}"], input="").out.split()
     if stopped:
         for n in stopped:
             sys.stderr.write("  starting %s\n" % n)
-        shell.in_machine(ROOT, "podman start $(%s | tr \"\\n\" \" \") >/dev/null" % STOPPED)
+        ctr.machine.act_run(ctr.podman() + ["start"] + stopped, input="")
         info("started %d container(s)" % len(stopped))
     else:
         info("no stopped containers")
@@ -63,7 +63,7 @@ def start_everything(reg):
         except LookupError:
             guests = []
         if guests:
-            log("macOS VM(s) not started (they compete with the machine for memory): %s\n  wk vm start <name>" % " ".join(guests))
+            log("macOS VM(s) not started (they compete with the machine for memory): %s\n  wk start <name>" % " ".join(guests))
     log("status (information only)")
     subprocess.call([os.path.join(ROOT, "wk"), "status", "--no-fleet"])
     return 0

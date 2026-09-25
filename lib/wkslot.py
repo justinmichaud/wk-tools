@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""The path bash callers (lib/bench.sh, image/*.sh, cmd/pi) run the slot CLI by; it is lib/wk/slot.py."""
+"""The path bash callers (lib/bench.sh, image/*.sh) run the slot CLI by; it is lib/wk/slot.py."""
 import os
 import sys
 

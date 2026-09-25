@@ -450,5 +450,47 @@ class TestSsh(MachineTest):
             m.copy_tree_out("/remote/tree", "/local/tree")
 
 
+class TestForward(MachineTest):
+    """`forward(port)`: the far side's 127.0.0.1:<port> is this host's for exactly as long as the context is held."""
+
+    def test_ssh_holds_one_reverse_forward_and_kills_it_on_the_way_out(self):
+        via = machine.Fake("here")
+        m = machine.Ssh("box.example", opts=["-l", "root"], timeout=3, via=via)
+        with m.forward(4567, "/tmp/tunnel.log") as pid:
+            self.assertIn(pid, via.pids)
+        ((kind, argv, log),) = [e for e in via.effects if e[0] == "spawn"]
+        self.assertEqual((argv[:3], argv[-4:], log), (("ssh", "-l", "root"), ("-N", "-R", "127.0.0.1:4567:127.0.0.1:4567", "box.example"),
+                                                      "/tmp/tunnel.log"))
+        self.assertIn("ExitOnForwardFailure=yes", argv)
+        self.assertIn(("kill", pid, int(signal.SIGTERM)), via.effects)
+        self.assertNotIn(pid, via.pids)
+
+    def test_a_dry_run_opens_nothing_and_says_so(self):
+        os.environ["WK_DRY_RUN"] = "1"
+        m = machine.Ssh("box.example", timeout=3)
+
+        def held():
+            with m.forward(4567) as pid:
+                return pid
+        pid, err = self.stderr(held)
+        self.assertEqual(pid, 0)
+        self.assertIn("would start: ssh", err)
+        self.assertIn("-R 127.0.0.1:4567:127.0.0.1:4567", err)
+
+    def test_the_fake_holds_a_pid_while_the_forward_is_held(self):
+        f = machine.Fake()
+        with f.forward(4567) as pid:
+            self.assertIn(pid, f.pids)
+        self.assertNotIn(pid, f.pids)
+        self.assertEqual(f.effects, [("forward", 4567)])
+
+    def test_a_holder_that_raises_still_closes_the_forward(self):
+        f = machine.Fake()
+        with self.assertRaises(RuntimeError):
+            with f.forward(4567):
+                raise RuntimeError("the run died")
+        self.assertEqual(f.pids, set())
+
+
 if __name__ == "__main__":
     unittest.main()

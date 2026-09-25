@@ -1,5 +1,5 @@
 """What a shared build machine needs, and the one root command that installs it
-(remote/deps.sh's table, remote/probe.sh, lib/wk/machine_cmd.py's Deps).
+(remote/deps.sh's table, remote/probe.sh, lib/wk/machine_cmd/deps.py's Deps).
 
 wk installs nothing on a build box -- provisioning never takes root
 (remote/provision.sh) -- so the whole of the help it can give is naming the
@@ -23,7 +23,7 @@ from pathlib import Path
 from tests.support import REPO, WkTest, bash
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import machine_cmd  # noqa: E402
+from wk.machine_cmd import deps as machine_deps  # noqa: E402
 
 DEPS = REPO / "remote" / "deps.sh"
 PROBE = REPO / "remote" / "probe.sh"
@@ -97,12 +97,12 @@ def store_with(**values):
 
 def findings(probe, env=None):
     env = env if env is not None else store_with(**{"claude-token": TOKEN, "litellm-key": LITELLM})
-    return machine_cmd.Deps(REPO, env=dict(os.environ, **env)).findings(probe)
+    return machine_deps.Deps(REPO, env=dict(os.environ, **env)).findings(probe)
 
 
 class TestTheList(WkTest):
     def test_every_dep_is_tool_need_and_a_reason(self):
-        rows = machine_cmd.deps(REPO)
+        rows = machine_deps.deps(REPO)
         self.assertTrue(rows)
         for row in rows:
             self.assertEqual(len(row), 3, row)
@@ -118,7 +118,7 @@ class TestTheList(WkTest):
     def test_the_machine_reads_the_same_table(self):
         """remote/probe.sh, on the machine, asks deps.sh's own function for the list the Python parses."""
         cp = self.bash(f'. "{DEPS}"\nwk_remote_deps\n')
-        self.assertEqual([tuple(l.split(None, 2)) for l in cp.stdout.strip().splitlines()], machine_cmd.deps(REPO))
+        self.assertEqual([tuple(l.split(None, 2)) for l in cp.stdout.strip().splitlines()], machine_deps.deps(REPO))
 
     def test_a_derivative_resolves_to_its_parent_family(self):
         """ID first, then ID_LIKE -- so Mint, Raspberry Pi OS and Rocky resolve
@@ -140,19 +140,19 @@ class TestTheList(WkTest):
                 self.assertEqual(cp.stdout.strip(), want)
 
     def test_the_package_name_is_the_tool_unless_it_differs(self):
-        self.assertEqual([machine_cmd.package("ninja", "debian"), machine_cmd.package("ccache", "debian"),
-                          machine_cmd.package("ninja", "fedora")], ["ninja-build", "ccache", "ninja-build"])
+        self.assertEqual([machine_deps.package("ninja", "debian"), machine_deps.package("ccache", "debian"),
+                          machine_deps.package("ninja", "fedora")], ["ninja-build", "ccache", "ninja-build"])
 
     def test_one_command_installs_the_whole_set(self):
-        self.assertEqual(machine_cmd.install_cmd("debian", ["ccache", "zsh"]),
+        self.assertEqual(machine_deps.install_cmd("debian", ["ccache", "zsh"]),
                          "sudo apt-get update && sudo apt-get install -y ccache zsh")
-        self.assertEqual(machine_cmd.install_cmd("fedora", ["ccache"]), "sudo dnf install -y ccache")
-        self.assertEqual(machine_cmd.install_cmd("arch", ["ccache"]), "sudo pacman -S --needed ccache")
-        self.assertIsNone(machine_cmd.install_cmd("unknown", ["ccache"]),
+        self.assertEqual(machine_deps.install_cmd("fedora", ["ccache"]), "sudo dnf install -y ccache")
+        self.assertEqual(machine_deps.install_cmd("arch", ["ccache"]), "sudo pacman -S --needed ccache")
+        self.assertIsNone(machine_deps.install_cmd("unknown", ["ccache"]),
                           "an unknown package manager got a command invented for it")
 
     def test_nothing_to_install_is_not_a_command(self):
-        self.assertIsNone(machine_cmd.install_cmd("debian", []))
+        self.assertIsNone(machine_deps.install_cmd("debian", []))
 
 
 class TestTheFindings(WkTest):
@@ -262,7 +262,7 @@ class TestTheProbeItself(WkTest):
             self.assertIn(want, keys, cp.stdout)
         # One line per declared tool, present or not, so a reader never has to
         # know the list to notice one missing.
-        for t in (row[0] for row in machine_cmd.deps(REPO)):
+        for t in (row[0] for row in machine_deps.deps(REPO)):
             self.assertIn(f"tool.{t}", keys, f"the probe said nothing about {t}")
 
     def test_it_sources_nothing(self):

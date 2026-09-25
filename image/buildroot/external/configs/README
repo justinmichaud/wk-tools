@@ -69,7 +69,7 @@ depends on a BR2_PACKAGE_HAS_LIBGBM machinery this 2020.02 base does not
 have, so kconfig drops it). Hence the block in the defconfig: wpebackend-fdo,
 cog's wayland platform, mesa's v3d GL, weston on DRM, the vc4-kms-v3d
 overlay via the post-image script, and python3 for the uinput seat shim
-`wk pi bench` starts (the same one the yocto images use). wpebackend-rdk is
+a board run starts (the same one the yocto images use). wpebackend-rdk is
 explicitly off: one backend per image, and the one that cannot work here
 would otherwise still be the one libwpe dlopens as default.
 

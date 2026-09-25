@@ -268,6 +268,11 @@ class Local(Machine):
             raise OSError(cp.stderr.decode(errors="replace").strip() or "rsync failed")
 
 
+def far_side_start(cmd, out_path, tail):
+    """The far-side start line: `cmd` detached, its output in `out_path`, ending in `tail` (a pid, or a disown)."""
+    return "nohup %s > %s 2>&1 < /dev/null & %s" % (cmd, shlex.quote(out_path), tail)
+
+
 class Ssh(Machine):
     """A host over ssh, each call one bounded non-interactive round trip run by `via` (this host)."""
 
@@ -277,9 +282,12 @@ class Ssh(Machine):
         self.opts = list(opts or []) + ["-o", "BatchMode=yes", "-o", "ConnectTimeout=%d" % timeout]
         self.via = via or Local()
 
+    def argv(self, remote, tty=False):
+        return ["ssh"] + (["-t"] if tty else []) + self.opts + [self.dest, remote]
+
     def _ssh(self, remote, input=None, timeout=None):
         # An empty stdin, not the caller's: ssh drinks whatever it is handed.
-        return self.via.run(["ssh", *self.opts, self.dest, remote], input="" if input is None else input, timeout=timeout)
+        return self.via.run(self.argv(remote), input="" if input is None else input, timeout=timeout)
 
     def run(self, argv, input=None, timeout=None):
         return self._ssh(" ".join(shlex.quote(a) for a in argv), input=input, timeout=timeout)
@@ -288,7 +296,7 @@ class Ssh(Machine):
         remote = " ".join(shlex.quote(a) for a in argv)
         if cwd:
             remote = "cd %s && %s" % (shlex.quote(cwd), remote)
-        return self.via.run_tty(["ssh", "-t", *self.opts, self.dest, remote], timeout=timeout)
+        return self.via.run_tty(self.argv(remote, tty=True), timeout=timeout)
 
     def read(self, path):
         r = self._ssh("cat %s" % shlex.quote(path))
@@ -354,7 +362,7 @@ class Ssh(Machine):
         return self._ssh("kill -%d %d" % (sig, pid)).ok
 
     def spawn(self, argv, log):
-        line = "nohup %s > %s 2>&1 < /dev/null & echo $!" % (" ".join(shlex.quote(a) for a in argv), shlex.quote(log))
+        line = far_side_start(" ".join(shlex.quote(a) for a in argv), log, "echo $!")
         if act.dry_run():
             sys.stderr.write("would start on %s: %s\n" % (self.dest, line))
             return 0
@@ -362,6 +370,21 @@ class Ssh(Machine):
         if not r.ok or not r.out.strip().isdigit():
             raise OSError(r.err.strip() or "no pid came back")
         return int(r.out.strip())
+
+    def forward(self, port, log=os.devnull):
+        """A context holding `ssh -R`: the far side's 127.0.0.1:<port> is this host's while it is held; it yields the ssh's pid, 0 in a dry run."""
+        from contextlib import contextmanager
+
+        @contextmanager
+        def held():
+            pid = self.via.spawn(["ssh", *self.opts, "-o", "ExitOnForwardFailure=yes", "-N", "-R",
+                                  "127.0.0.1:%d:127.0.0.1:%d" % (port, port), self.dest], log)
+            try:
+                yield pid
+            finally:
+                if pid:
+                    self.via.kill(pid)
+        return held()
 
     # scp/rsync, run by `via` (this host) reaching `self.dest`: a byte pipe
     # through this Machine's own `run` would corrupt binary data both ways.
@@ -573,6 +596,23 @@ class Fake(Machine):
         self.pids.add(self.next_pid)
         self.files.setdefault(log, "")
         return self.next_pid
+
+    def forward(self, port, log=os.devnull):
+        from contextlib import contextmanager
+
+        @contextmanager
+        def held():
+            self.effect(("forward", port))
+            pid = 0
+            if not act.dry_run():
+                self.next_pid += 1
+                pid = self.next_pid
+                self.pids.add(pid)
+            try:
+                yield pid
+            finally:
+                self.pids.discard(pid)
+        return held()
 
     # A real file on disk crosses into this fake host's in-memory files, and back.
     def copy_in(self, src, dest):

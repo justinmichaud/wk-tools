@@ -32,7 +32,7 @@ printf 'frontapp=%s\n' "$([ -z "$_front" ] || lsappinfo info -only bundleID "$_f
     | sed -n 's/.*"CFBundleIdentifier"="\([^"]*\)".*/\1/p')"
 wk_window_probe
 
-# The one panel the reading above cannot see: SecurityAgent draws a modal authentication sheet without ever becoming the frontmost *application* (bench/mac-bench-autorun.sh dismisses it for the same reason).
+# The one panel the reading above cannot see: SecurityAgent draws a modal authentication sheet without ever becoming the frontmost *application* (lib/wk/bench/autorun.py dismisses it for the same reason).
 printf 'securityagent=%s\n' "$(pgrep -x SecurityAgent >/dev/null 2>&1 && echo up || echo down)"
 
 printf 'user=%s\n' "$(id -un)"

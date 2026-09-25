@@ -5,9 +5,12 @@ renderer prints the rows and counts the misses."""
 import os
 import re
 
-from wk import fleet, machine_cmd, record, shell, targets
+from wk import bridge, fleet, git, record, secrets, shell, targets
+from wk.key.cli import Key
+from wk.kv import kv
 from wk.machine import Local
-from wk.status import kv, machine_confs
+from wk.machine_cmd import deps as machine_deps
+from wk.status import machine_confs
 from wk.store import Store
 
 OK, MISS, UNK, NOTE = "ok", "miss", "unk", "note"
@@ -178,7 +181,7 @@ def vm_guest_git_findings(target, want):
         r = target.exec(name, ["sh", "-c", GIT_PROBE])
         blob = r.out if r.ok else ""
         if not blob.strip():
-            rows.append(unk("%s (tart guest): git config did not answer" % name, "wk vm check %s" % name))
+            rows.append(unk("%s (tart guest): git config did not answer" % name, "wk doctor %s" % name))
             continue
         rows += git_config_findings("%s (tart guest)" % name, blob, "wk start %s (the include is written on every start)" % name, want)
     return rows
@@ -232,7 +235,7 @@ def report_store(out, gitremedy, fork_key, macos, want):
     rows.append(check("fork push key", "wk key deploy  (needs gh auth)", fork_key))
     rows.append(check("shared skills seeded", "./setup --stage vmtools" if macos else "./setup --stage machine", f.get("skills") == "ok"))
     rows.append(check("egress proxy running", "./setup --stage sdk, then systemctl --user status wk-proxy", f.get("proxy") == "ok"))
-    rows.append(check("pi-hosts populated", "wk pi setup rpi5 / rpi4  (skip if no Pi devices)", f.get("pihosts") == "ok"))
+    rows.append(check("pi-hosts populated", "wk machine setup rpi5 / rpi4  (skip if no Pi devices)", f.get("pihosts") == "ok"))
     rows.append(check("fleet-request broker reachable from workspaces",
                       "./setup --stage broker  (macOS: it also publishes the socket into the VM)", f.get("broker") == "ok"))
     if gitremedy:
@@ -247,7 +250,7 @@ def battery_verdict(name, blob):
     pct, st, limit, cur = f.get("percent") or "?", f.get("status") or "?", f.get("limit", ""), f.get("current", "")
     if cur and cur != "?" and cur == limit:
         return ok("%s: %s%% %s, capped at %s%%" % (name, pct, st, cur))
-    return miss("%s: %s%% %s, cap reads %s (want %s)" % (name, pct, st, cur or "?", limit or "?"), "wk bridge setup %s" % name)
+    return miss("%s: %s%% %s, cap reads %s (want %s)" % (name, pct, st, cur or "?", limit or "?"), "wk machine setup %s" % name)
 
 
 def mac_battery_line(out):
@@ -261,7 +264,7 @@ def mac_battery_line(out):
 class Doctor:
     """This machine's checks; `sh` answers what the bash library still holds (lib/wk/shell.py)."""
 
-    def __init__(self, root, env=None, machine=None, macos=None, sh=shell, mc=machine_cmd):
+    def __init__(self, root, env=None, machine=None, macos=None, sh=shell, mc=machine_deps, keys=None):
         self.root = root
         self.env = os.environ if env is None else env
         self.machine = machine or Local()
@@ -274,6 +277,7 @@ class Doctor:
         self.reg = targets.Registry(root, self.env, self.machine)
         self.container = self.reg.load("container")
         self._paths = None
+        self._keys = keys
 
     def have(self, name):
         return self.machine.run(["which", name]).ok
@@ -293,22 +297,32 @@ class Doctor:
 
     def paths(self):
         if self._paths is None:
-            self._paths = self.sh.local_state_paths(self.root, env=self.env)
+            sec = secrets.Secrets(self.root, self.env, self.machine)
+            self._paths = {"push_held": self.store.push_held_dir(), "read_pat": sec.machine_read_pat(),
+                           "tailscale_api": sec.cred_path("tailnet-api"), "ntfy_topic": self.store.ntfy_topic_path()}
+            self._paths.update(("secret." + r[0], sec.cred_path(r[0])) for r in secrets.agent_secrets())
         return self._paths
+
+    def keys(self):
+        """`wk key`'s own answers: the credentials here, and each peer's through its `wk key verdict`."""
+        if self._keys is None:
+            self._keys = Key(self.root, self.env, self.machine, reg=self.reg)
+        return self._keys
 
     def podman_state(self):
         return self.container.machine_state()
 
     def in_vm(self, command):
-        return self.sh.in_machine(self.root, command, env=self.env, quiet=True)
+        """Its stdout, None when it failed."""
+        r = self.machine.run(["podman", "machine", "ssh", self.container.podman_machine(), "--", command], input="")
+        return r.out.strip() if r.ok else None
 
     def probe_store(self):
-        return probe_store(self.store, self.machine, self.sh.mirror_branches(self.root, env=self.env), self.env)
+        return probe_store(self.store, self.machine, git.mirror_branches(self.env), self.env)
 
     def sections(self, everything):
         yield "host tools", self.host_tools()
-        yield "credentials", credentials_section(self.sh.cred_settable(self.root, env=self.env),
-                                                 lambda n: self.sh.cred_verdict(self.root, n, env=self.env))
+        yield "credentials", credentials_section(self.keys().settable(), self.keys().stored_verdict)
         yield "root access", self.root_access()
         yield "config (./setup owns these)", self.config()
         yield "machine-local state (everything a rebuild cannot get from this repo)", self.machine_local()
@@ -321,8 +335,7 @@ class Doctor:
         if not everything:
             return
         yield "claude.ai login on the other workstations (each its own)", fleet_logins_section(
-            self.sh.peer_workstations(self.root, env=self.env),
-            lambda p: self.sh.peer_cred_verdict(self.root, p, "claude-login", env=self.env))
+            self.keys().resolve().peers, lambda p: self.keys().cred_verdict_of(p, "claude-login"))
         for t in self.reg.all():
             if t != "container" and self.reg.kind(t) == "remote":
                 yield "build machine: %s" % t, self.build_machine(t)
@@ -402,7 +415,7 @@ class Doctor:
         yield self.local_state(p["tailscale_api"], "re-authable",
                                "wk key set tailnet-api asks for one; only this machine holds it, and only writes that must retire a stale node need it")
         yield self.local_state(p["ntfy_topic"], "re-authable",
-                               "wk key set ntfy mints the ntfy.sh topic wk_notify (lib/store.sh) publishes to; only this machine holds it, "
+                               "wk key set ntfy mints the ntfy.sh topic lib/wk/notify.py publishes to; only this machine holds it, "
                                "and a new one is one subscription away")
         yield self.local_state(os.path.join(store.state_dir(), "broker"), "regenerable",
                                "request records (argv, log, status) the fleet-request broker writes; the next request makes new ones")
@@ -451,17 +464,17 @@ class Doctor:
             return
         state = self.podman_state()
         if state == "absent":
-            yield miss("podman machine '%s'" % self.container.machine_name(), "./setup --stage machine")
+            yield miss("podman machine '%s'" % self.container.podman_machine(), "./setup --stage machine")
             return
         if state != "running":
-            yield unk("podman machine '%s' is stopped" % self.container.machine_name(), "wk start, then re-run wk doctor for the store checks")
+            yield unk("podman machine '%s' is stopped" % self.container.podman_machine(), "wk start, then re-run wk doctor for the store checks")
             return
-        yield ok("podman machine '%s' running" % self.container.machine_name())
+        yield ok("podman machine '%s' running" % self.container.podman_machine())
         out = self.in_vm("WK_STORE=/var/lib/wk python3 /opt/wk-tools/cmd/doctor --probe-store")
         if not out:
             yield unk("store inside the VM", "/opt/wk-tools missing in the VM? run ./setup --stage sdk")
             return
-        yield from report_store(out, "podman machine ssh %s -- git config --global include.path /opt/wk-tools/dotfiles/gitconfig" % self.container.machine_name(),
+        yield from report_store(out, "podman machine ssh %s -- git config --global include.path /opt/wk-tools/dotfiles/gitconfig" % self.container.podman_machine(),
                                 fork_key, True, self.want())
 
     def privileged_helpers(self):
@@ -489,11 +502,8 @@ class Doctor:
         softnet = self.env.get("WK_SOFTNET_BIN") or "/usr/local/bin/softnet"
         yield check("softnet installed SUID root", "./setup --stage softnet  (interactive sudo)",
                     self.machine.run(["test", "-x", softnet, "-a", "-u", softnet]).ok)
-        base = self.sh.vm_base_findings(self.root, env=self.env)
-        if base:
-            yield from findings(base, "wk vm ls")
-        else:
-            yield unk("golden base VM: the vm driver did not answer", "wk vm ls")
+        from wk.sysimage import guestbase
+        yield from findings(guestbase.Base(vm).findings())
         yield from vm_guest_git_findings(vm, self.want())
 
     def build_machine(self, t):
@@ -503,7 +513,7 @@ class Doctor:
             yield unk("%s did not answer" % t, "ssh %s true  -- then re-run; nothing was changed" % t)
             return
         rows = self.mc.findings(self.root, probe, self.env, self.machine)
-        yield from findings(machine_cmd.findings_text(rows), "see 'wk machine setup %s'" % t)
+        yield from findings(machine_deps.findings_text(rows), "see 'wk machine setup %s'" % t)
         why = self.mc.stale(target, self.root)
         if why:
             yield miss("provisioning on %s predates its inputs: %s" % (t, why), "wk machine setup %s" % t)
@@ -511,14 +521,14 @@ class Doctor:
             yield ok("provisioned from this tree's remote/provision.sh + remote/deps.sh")
 
     def battery(self):
-        bridge = os.path.join(self.root, "cmd", "bridge")
-        names = self.machine.run([bridge, "ls", "--names"])
-        for name in names.out.split() if names.ok else []:
-            blob = self.machine.run([bridge, "battery", name])
-            if not (blob.ok and blob.out.strip()):
-                yield unk("%s: did not answer" % name, "wk bridge status %s" % name)
+        phones = bridge.Bridge(self.root, self.env, self.machine)
+        for name in phones.names():
+            try:
+                blob = phones.battery(name)
+            except bridge.Unreachable:
+                yield unk("%s: did not answer" % name, "wk machine status %s" % name)
                 continue
-            yield battery_verdict(name, blob.out)
+            yield battery_verdict(name, blob)
         if self.macos:
             line = mac_battery_line(self.machine.run(["pmset", "-g", "batt"]).out)
             if line:

@@ -1,14 +1,17 @@
 """The boot-driver interface: how a machine is put into its bench system for one boot, and read back, over a Channel."""
 
+import copy
 import os
 import re
-import shlex
 import time
 
-from wk import act, record as wkrecord, shell
-from wk.machine import Local
+from wk import act, reach as wkreach, record as wkrecord
+from wk.kv import kv
+from wk.machine import Local, Result, Ssh
 
 RECORD = "/var/lib/wk/boot/armed"
+BOOT_PRIV = "/usr/local/libexec/wk-boot-priv"
+CARD_PRIV = "/usr/local/libexec/wk-card-priv"
 SLOTS = ("first", "second", "third")
 SAFE = re.compile(r"^[A-Za-z0-9_./:@+-]*$")
 
@@ -24,14 +27,6 @@ def disk_of(p):
 
 def partno(p):
     return re.search(r"(\d+)$", p).group(1) if re.search(r"\d$", p) else ""
-
-
-def kv(text, key):
-    for line in (text or "").splitlines():
-        k, sep, v = line.partition("=")
-        if sep and k == key:
-            return v.rstrip("\r")
-    return ""
 
 
 class Onboard:
@@ -52,23 +47,131 @@ class Onboard:
         return "".join("%s=%s; " % kv for kv in sorted(self.params.items())) + body
 
 
-class BashChannel:
-    """The answering system through boot/machines.sh's transport (m_ssh, i_ssh, r_ssh, r_sudo, boot_priv, card_priv)."""
+class Channel:
+    """A board's host mode on NODE_SSH and its bench system at its found address, each a Machine; the helpers too."""
 
-    def __init__(self, root, conf, channel="none", bash_driver=False, machine=None):
-        self.root, self.conf, self.channel, self.bash_driver = str(root), conf, channel, bash_driver
-        self.machine = machine or Local()
+    def __init__(self, root, conf, channel="none", env=None, via=None):
+        self.root, self.conf, self.channel = str(root), conf, channel
+        self.env = os.environ if env is None else env
+        self.via = via or Local()
+        self._here = self._reach = None
 
-    def call(self, fn, *args, input=None, mutates=False):
-        words = [("sh -c " + shlex.quote(a.text())) if isinstance(a, Onboard) else a for a in args]
-        env = ["%s=%s" % (k, v) for k, v in sorted(self.conf.items()) if k.startswith("NODE_")]
-        argv = ["env", *env, "MODE_CHANNEL=" + self.channel] + shell.argv(
-            self.root, '. "%s/boot/machines.sh"; boot_bridge' % self.root,
-            *(["--driver"] if self.bash_driver else []), fn, *words)
-        r = (self.machine.act_run if mutates else self.machine.run)(argv, input=input)
+    def c(self, key):
+        return self.conf.get(key, "")
+
+    def reach(self):
+        if self._reach is None:
+            self._reach = wkreach.Reach(self.via, self.env)
+        return self._reach
+
+    def here(self):
+        """Standing on NODE_SSH, by `hostname -s`: a machine drives itself only from its own keyboard."""
+        if self._here is None:
+            self._here = bool(self.c("NODE_SSH")) and wkrecord.host_name(self.via) == self.c("NODE_SSH").lower()
+        return self._here
+
+    def bench_name(self):
+        return self.c("NODE_BENCH_SSH") or self.c("NODE_SSH") or self.c("NODE_NAME")
+
+    def image_addr(self):
+        if self.env.get("WK_IMAGE_HOST"):
+            return self.env["WK_IMAGE_HOST"]
+        peer = self.reach().peer(self.bench_name())
+        if peer and peer[1]:
+            return peer[1]
+        found = self.reach().find_mac(self.c("NODE_MAC")) if self.c("NODE_MAC") else ""
+        return found.split()[0] if found else self.c("NODE_SSH") or self.c("NODE_NAME")
+
+    def opts(self, fn):
+        """Root on a bench system whatever the role, a person on a workstation's host mode; host keys are never pinned."""
+        return ["-l", "root"] + wkreach.UNPINNED if fn == "i_ssh" or self.c("NODE_ROLE") == "bench-device" else []
+
+    def machine(self, fn):
+        if fn == "m_ssh" and self.here():
+            return self.via
+        name = self.c("NODE_SSH") if fn == "m_ssh" else self.bench_name()
+        if not name:
+            return Result(255, "", "%s: no ssh destination" % fn)
+        why = self.reach().offline(name)
+        if why:
+            act.warn(why)
+            return Result(255, "", why)
+        dest = self.c("NODE_SSH") if fn == "m_ssh" else self.image_addr()
+        return Ssh(dest, opts=self.opts(fn), timeout=wkreach.ssh_timeout(self.env), via=self.via)
+
+    def through(self, via):
+        self.here()
+        self.reach()
+        ch = copy.copy(self)
+        ch.via = via
+        return ch
+
+    def fn_of(self, channel):
+        return {"host": "m_ssh", "bench": "i_ssh"}.get(channel, "")
+
+    def is_root(self):
+        """Privilege follows the channel that answered: a bench system is root, a bench-device's host mode its rescue."""
+        return self.channel == "bench" or self.c("NODE_ROLE") == "bench-device"
+
+    def run(self, fn, argv, input=None, mutates=False):
+        m = self.machine(fn) if fn else Result(1, "", "no channel answered")
+        if isinstance(m, Result):
+            return m
+        r = (m.act_run if mutates else m.run)(argv, input=input)
         if mutates and r.err:
             act.log(r.err.rstrip("\n"))
         return r
+
+    def sudo(self, argv, input=None, mutates=False):
+        return self.run(self.fn_of(self.channel), argv if self.is_root() else ["sudo", "-n"] + argv, input=input, mutates=mutates)
+
+    def boot_priv(self, verb, *args, mutates=False):
+        if not self.is_root():
+            return self.sudo([BOOT_PRIV, verb, *args], mutates=mutates)
+        if verb == "status":
+            return Result(0)
+        return self.run(self.fn_of(self.channel), root_priv(verb, *args), mutates=mutates)
+
+    def boot_priv_require(self):
+        if self.is_root() or self.boot_priv("status").ok:
+            return Result(0)
+        act.die("%s cannot be armed: its boot helper is missing, or its sudoers\n    rule is not in force. A workstation is "
+                "driven as a person and wk takes no\n    passwordless sudo on one beyond its named helpers, so there is "
+                "deliberately\n    no second way in.\n    What fails:  sudo -n %s status\n    The remedy, from a terminal on %s:  "
+                "./setup --stage quiesce" % (self.c("NODE_NAME"), BOOT_PRIV, self.c("NODE_NAME")))
+
+    def disk_unmount(self, dev):
+        if self.sudo([CARD_PRIV, "unmount", dev], mutates=True).ok:
+            return Result(0)
+        held = self.run("m_ssh", ["lsblk", "-lno", "NAME,MOUNTPOINT", dev]).out
+        act.die("could not unmount what is on %s on %s.\n    Something is using it:\n%s" % (dev, self.c("NODE_NAME"), "\n".join(
+            "    /dev/%s at %s" % tuple(l.split(None, 1)) for l in held.replace("\r", "").splitlines() if len(l.split()) > 1)))
+
+    def call(self, fn, *args, input=None, mutates=False):
+        if fn in ("m_ssh", "i_ssh", "r_ssh", "r_sudo"):
+            argv = ["sh", "-c", args[0].text() if isinstance(args[0], Onboard) else args[0]]
+            if fn == "r_sudo":
+                return self.sudo(argv, input=input, mutates=mutates)
+            return self.run(self.fn_of(self.channel) if fn == "r_ssh" else fn, argv, input=input, mutates=mutates)
+        if fn == "card_priv":
+            return self.sudo([CARD_PRIV, *args], input=input, mutates=mutates)
+        if fn == "boot_priv":
+            return self.boot_priv(*args, mutates=mutates)
+        if fn == "boot_priv_require":
+            return self.boot_priv_require()
+        if fn == "disk_unmount":
+            return self.disk_unmount(*args)
+        if fn == "image_addr":
+            return Result(0, self.image_addr())
+        raise ValueError("no transport call '%s'" % fn)
+
+
+def root_priv(verb, *args):
+    """What the boot helper does, run as root where there is no helper; `nohup`, since macOS ships no `setsid`."""
+    if verb == "order":
+        return ["vcmailbox", "0x0003808b", "4", "4", args[0]]
+    tail = {"reboot": "reboot", "reboot-tryboot": "printf \"0 tryboot\" > /run/systemd/reboot-param && systemctl reboot"}[verb]
+    return ["sh", "-c", "nohup sh -c '%s' </dev/null >/dev/null 2>&1 &" % ("sleep 3; " + tail)]
 
 
 class Driver:
@@ -83,6 +186,10 @@ class Driver:
 
     def __init__(self, root, conf, ch, mode=""):
         self.root, self.conf, self.ch, self.mode = str(root), conf, ch, mode
+
+    @staticmethod
+    def transport(root, conf, channel="none", env=None, via=None):
+        return Channel(root, conf, channel, env=env, via=via)
 
     def c(self, key):
         return self.conf.get(key, "")
@@ -118,13 +225,14 @@ class Driver:
                 self.ch.channel, self.mode = "none", "unreachable"
                 return self.mode
             self.ch.channel = "bench"
-        ident = kv(r.out, "id")
+        d = kv(r.out)
+        ident = d.get("id", "")
         if not ident:
             self.mode = "host"
             return self.mode
-        kind = self.system_kind(kv(r.out, "rootdev"))
+        kind = self.system_kind(d.get("rootdev", ""))
         if kind == "unknown":
-            kind = "base" if kv(r.out, "role") == "rescue" else "bench"
+            kind = "base" if d.get("role", "") == "rescue" else "bench"
         self.mode = "%s %s" % (kind, ident)
         return self.mode
 
@@ -309,7 +417,8 @@ class Driver:
         if mode != "host":
             return
         rec = self.record_read()
-        image, armed_boot = kv(rec, "image"), kv(rec, "armed_boot_id")
+        d = kv(rec)
+        image, armed_boot = d.get("image", ""), d.get("armed_boot_id", "")
         if not image:
             return
         now = self.boot_id()

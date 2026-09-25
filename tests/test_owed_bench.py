@@ -1,72 +1,78 @@
-"""Two `--dry-run` plans owed (docs/PLAN.md):
+"""One `--dry-run` plan still owed (docs/PLAN.md):
 
-  - `wk bench mac <ws> --dry-run` on a fresh lane (no state file yet) prints
-    the whole plan rather than dying on `set -o pipefail` reading a state
-    file that does not exist yet, or on a failed preflight (bench/mac-lane.sh)
   - `wk sysimage write --dry-run` prints its plan from a Mac, where GNU-only
-    tools (`stat -c`, `numfmt`) are not on $PATH
+    tools (`stat -c`, `numfmt`) are not on $PATH; it self-skips elsewhere by
+    name rather than faking a platform it is not on.
 
-Both run on macOS only (needs is_macos / a fake machine's mac-guest driver);
-both self-skip elsewhere by name rather than faking a platform they are not on.
+The mac class closes here too: `wk bench mac` (bench/mac-lane.sh) is retired,
+and the trip it drove by hand is `wk bench run --system mbp`, the pipeline's
+own (lib/wk/bench/mac.py's `MacHostSystem`/`HostRun`) -- real everywhere,
+with no macOS gate, no state file and no fork of a script that no longer
+exists. `tests/test_bench_pipeline.py` proves the pipeline itself, against a
+fake Mac; this file proves only that the old verb points at it.
 
 Run: python3 -m unittest tests.test_owed_bench -v
 """
+import contextlib
+import io
 import os
 import platform
+import sys
 import unittest
 
-from tests.support import (REPO, TAILSCALE_KNOWS_NOTHING, WkTest, rand_suffix, run,
-                           scratch_dir, stub_path)
+from tests.support import (REPO, TAILSCALE_KNOWS_NOTHING, WkTest, rand_suffix, requires_machine,
+                           run, scratch_dir, stub_path)
+
+sys.path.insert(0, str(REPO / "lib"))
+from wk import targets  # noqa: E402
+from wk.act import Refused  # noqa: E402
+from wk.bench import cli  # noqa: E402
+from wk.clock import Clock  # noqa: E402
+from wk.machine import Fake  # noqa: E402
 
 
 def _is_macos():
     return platform.system() == "Darwin"
 
 
-@unittest.skipUnless(_is_macos(), "wk bench mac and a plain sysimage write are macOS-only paths")
-class TestBenchMacDryRunOnAFreshLane(WkTest):
-    """benchvm (machines/benchvm.conf, driver mac-guest) has no
-    NODE_SSH of its own -- its bench mode is reached through a host, so
-    --host stands in for one here. `ssh` is stubbed to refuse everything
-    (an always-unreachable host), which fails preflight; --dry-run must
-    show the plan anyway rather than dying, and must not touch the lane's
-    state file while doing it (a dry run's own rule: state_set no-ops under
-    DRY, so a real run afterwards does not think a phase a dry run never
-    did already happened)."""
+class TestBenchMacIsATombstone(unittest.TestCase):
+    """`wk bench mac` drove one bench system's whole trip by hand; the tombstone in
+    `lib/wk/bench/cli.py` names the pipeline invocation that now runs it, `wk bench run --system
+    mbp`, rather than a sequence of commands to re-derive from the retired `bench/mac-lane.sh`."""
 
-    _SSH_REFUSES = "#!/bin/sh\nexit 255\n"
+    def refused(self):
+        err = io.StringIO()
+        with self.assertRaises(Refused) as cm, contextlib.redirect_stderr(err):
+            cli.Bench(REPO, targets.Registry(REPO, env={}, machine=Fake()), Clock()).mac()
+        self.assertEqual(cm.exception.status, 1)
+        return err.getvalue()
 
-    def test_a_fresh_lane_prints_the_whole_plan_and_touches_no_state(self):
-        with stub_path({"ssh": self._SSH_REFUSES}) as binp, scratch_dir() as state:
-            cp = run(
-                "bench", "mac", "fakews", "--machine", "benchvm",
-                "--host", "faketesthost.invalid", "--dry-run",
-                env={"PATH": f"{binp}:{os.environ['PATH']}",
-                     "XDG_STATE_HOME": str(state)},
-            )
-            state_has_anything = any(state.rglob("*"))
-        out = cp.stdout
-        self.assertEqual(cp.returncode, 0, out)
-        self.assertIn("showing the plan anyway because this is --dry-run", out, out)
-        want = [
-            "build: mac-release-pgo in the macOS guest",
-            "would run [host]",
-            "arm: recording the intent",
-            "would wait up to",
-            "stage: the products into the running guest",
-            "run:",
-            "collect: listing the result inside the guest",
-            "back: stopping the guest",
-            "lane complete:",
-        ]
-        at = -1
-        for step in want:
-            here = out.find(step)
-            self.assertNotEqual(here, -1, f"the dry run never says {step!r}:\n{out}")
-            self.assertGreater(here, at, f"{step!r} is reported out of order:\n{out}")
-            at = here
-        self.assertFalse(state_has_anything,
-                          f"a dry run wrote lane state under {state}: {list(state.rglob('*'))}")
+    def test_it_names_the_pipeline_invocation(self):
+        out = self.refused()
+        self.assertIn("wk bench run <workspace> <plan> --system mbp", out, out)
+        self.assertIn("wk bench ab --devices mbp", out, out)
+
+    def test_the_dispatcher_routes_it_to_the_same_tombstone(self):
+        """`wk bench mac`, through the dispatcher: it dies the tombstone's own words, not the
+        'no such file' a fork of the deleted script would have printed."""
+        cp = run("bench", "mac", "fakews", "--plan", "speedometer3")
+        self.assertNotEqual(cp.returncode, 0)
+        self.assertIn("'wk bench mac' is gone", cp.stdout)
+        self.assertNotIn("No such file or directory", cp.stdout)
+
+
+class TestBenchReachesTheRealMbp(unittest.TestCase):
+    """Read-only, as `requires_machine` is: what `wk bench mac` used to drive over ssh -- stage a
+    build, arm and reboot mbp into bench mode, run a plan there, quiesce and screen-watch it, come
+    back -- is the owed half of `live bench[mbp]` and `live bench.first_run_after_stage[mbp]`
+    (docs/PLAN.md). Which workspace and plan to spend that machine's time staging and running is a
+    decision for whoever runs the live tier next; this only confirms the machine the tombstone
+    above names is real and answers, before anything stages or reboots it."""
+
+    @requires_machine("tolken")
+    def test_wk_boot_reaches_mbp(self):
+        cp = run("boot", "mbp", "--status")
+        self.assertIn(cp.returncode, (0, 2, 3), cp.stdout)
 
 
 @unittest.skipUnless(_is_macos(), "the GNU-tool risk this guards against is specific to a macOS driver")

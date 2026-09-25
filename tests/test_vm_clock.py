@@ -31,10 +31,6 @@ from wk.machine import Local  # noqa: E402
 from wk.store import Store  # noqa: E402
 
 
-def _src(*parts):
-    return REPO.joinpath(*parts).read_text()
-
-
 # Both clocks the function compares are pinned by this one fake, each half
 # reaching it with its own FAKE_EPOCH: the skew asserted below is then
 # arithmetic rather than the difference between two reads of a moving clock,
@@ -136,31 +132,11 @@ class TestStartSetsTheClock(unittest.TestCase):
         steps = [s[0] for s in guest.STEPS]
         self.assertEqual(steps.index("set_guest_clock") + 1, steps.index("set_guest_egress"))
 
-    def test_the_base_builds_call_reaches_the_same_code(self):
-        """targets/vm.sh's `_set_guest_clock` is lib/wk/guest.py's, over the guest's own ssh."""
-        from tests.support import bash, stub_path
-        ssh = 'for a in "$@"; do last="$a"; done\nPATH="$FAKE_GUEST_PATH" sh -c "$last"\n'
-        with stub_path({"ssh": ssh}) as binp:
-            d = binp / "guest"
-            d.mkdir()
-            for name, body in (("date", FAKE_DATE), ("sudo", FAKE_SUDO)):
-                (d / name).write_text(body)
-                (d / name).chmod(0o755)
-            log = binp / "sudo.log"
-            cp = bash('. "$WK_ROOT/lib/common.sh"; . "$WK_ROOT/lib/store.sh"; . "$WK_ROOT/lib/target.sh"\n'
-                      'load_target vm >/dev/null 2>&1\n_set_guest_clock wk-base 10.0.0.2',
-                      env={"PATH": "%s:%s" % (binp, os.environ["PATH"]), "FAKE_GUEST_PATH": "%s:%s" % (d, os.environ["PATH"]),
-                           "FAKE_EPOCH": "1000", "SUDO_LOG": str(log), "WK_VM_STORE": str(binp / "vmstore")})
-            self.assertEqual(0, cp.returncode, cp.stdout + cp.stderr)
-            self.assertIn("wk-base's clock was", cp.stderr)
-            self.assertIn("-n date -u ", log.read_text())
-
-    def test_the_base_build_sets_the_clock_before_provisioning(self):
-        vm = _src("targets", "vm.sh")
-        clock = vm.index('_set_guest_clock "$WK_VM_BASE" "$ip"')
-        prov = vm.index("provisioning the base VM")
-        self.assertLess(clock, prov)
-        self.assertIn('_set_guest_clock() { _guest_py clock "$@"; }', vm)
+    def test_the_base_build_sets_the_clock_through_the_same_step_before_provisioning(self):
+        import inspect
+        from wk.sysimage import guestbase
+        body = inspect.getsource(guestbase.Base.provision)
+        self.assertLess(body.index(".set_guest_clock()"), body.index("self.run_provisioning(g)"))
 
 
 if __name__ == "__main__":

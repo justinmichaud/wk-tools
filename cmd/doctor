@@ -130,7 +130,7 @@ def main(argv, env=None, reg=None):
     warn("%d item(s) missing -- each line above names its fix; the order that" % rep.missing)
     log("works from bare metal: ./setup -> the interactive stages it lists ->")
     log("gh auth login -> claude setup-token and claude auth login -> wk key setup")
-    log("-> wk sync -> (optional) wk pi setup, wk vm base. See README.md.")
+    log("-> wk sync -> (optional) wk machine setup <board>, wk sysimage build macos-guest-base. See README.md.")
     return rep.exit_status()
 
 

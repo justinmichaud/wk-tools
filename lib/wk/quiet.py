@@ -160,14 +160,14 @@ class Quiesce:
         probe = self._findings("wk_quiet_desktop_probe")
         bad = self.render(self._findings("wk_quiet_cpu_findings", probe))
         if self.bench:
-            bad += self.render(self._findings("wk_quiet_desktop_findings", probe, "wk bench mac-volume --provision")
+            bad += self.render(self._findings("wk_quiet_desktop_findings", probe, "wk sysimage build perf-macos-tolken --provision")
                                + self._findings("wk_quiet_daemons_findings", probe, "wk quiesce on"))
         bad += self._timemachine() + self._updates()
         if self.bench:
             if self.m.run(self._lib(HOSTS, "wk_bench_hosts_present", "/etc/hosts")).ok:
                 log("  hosts:      update endpoints denied")
             else:
-                warn("  hosts:      NOT denied -- wk bench mac-volume --provision")
+                warn("  hosts:      NOT denied -- wk sysimage build perf-macos-tolken --provision")
                 bad += 1
         return bad
 

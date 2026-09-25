@@ -62,7 +62,7 @@ BR2_PACKAGE_RPI_FIRMWARE=y
 BR2_PACKAGE_RPI_FIRMWARE_INSTALL_VCDBG=y
 BR2_PACKAGE_RPI_WIFI_FIRMWARE=y
 # wpa_supplicant, so this board can bring up WiFi from a credential seeded
-# onto the card (wk-wifi-join, image/buildroot/wifi-overlay.sh): the fork's
+# onto the card (wk-wifi-join, lib/wk/sysimage/buildroot_target.py): the fork's
 # defconfig ships the Pi 3's WiFi firmware and nothing to drive it, and this
 # board has no cable at the bench.
 BR2_PACKAGE_WPA_SUPPLICANT=y

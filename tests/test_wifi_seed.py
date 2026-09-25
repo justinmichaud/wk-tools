@@ -26,7 +26,7 @@ from unittest import mock
 from tests.support import FLEET_ENV, REPO, WkTest, bash, requires_machine, run, run_here
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import act, fleet, images, shell  # noqa: E402
+from wk import act, fleet, images, shell, tailnet  # noqa: E402
 from wk.machine import Local, Result  # noqa: E402
 from wk.sysimage import write  # noqa: E402
 
@@ -305,7 +305,7 @@ class Channel:
     """The disk machine's card helper at the Channel, answering one verb."""
 
     def __init__(self, **answers):
-        self.answers, self.calls, self.channel, self.bash_driver = answers, [], "host", False
+        self.answers, self.calls, self.channel = answers, [], "host"
 
     def call(self, fn, *args, input=None, mutates=False):
         self.calls.append((fn,) + args)
@@ -313,7 +313,7 @@ class Channel:
 
 
 def writer(**answers):
-    w = write.Write(REPO, FLEET_ENV, Local(), None)
+    w = write.Write(REPO, dict(os.environ, **FLEET_ENV), Local(), None)
     w.conf, w.ch = {"NODE_NAME": "stub-disk-machine", "NODE_SSH": "stub-disk-machine"}, Channel(**answers)
     return w
 
@@ -337,7 +337,7 @@ class TestImageWantsWifi(WkTest):
                                "mbp": False, "benchvm": False, "bogus": False, "": False})
 
     def test_the_bash_callers_ask_the_same_rule(self):
-        """image/yocto.sh asks boot/disk.sh's _image_wants_wifi, one line over the Python."""
+        """A bash caller asks boot/disk.sh's _image_wants_wifi, one line over the Python."""
         cp = bash(f'. "{REPO}/lib/common.sh"; . "{REPO}/boot/disk.sh"; _image_wants_wifi rpi3 && echo Y; '
                   '_image_wants_wifi mbp || echo N', env=FLEET_ENV)
         self.assertEqual(cp.stdout.split(), ["Y", "N"], cp.stderr)
@@ -419,7 +419,7 @@ class TestSysimageWriteDryRun(WkTest):
         # it would do, with no workspace, ssh or reachable board.
         for profile, want in [
             ("wpewebkit-2.46-yocto-rpi3-32", "wk-wifi-join in the image (meta-wk-wifi)"),
-            ("wpewebkit-2.46-buildroot-rpi3-32", "wk-wifi-join (image/buildroot/wifi-overlay.sh)"),
+            ("wpewebkit-2.46-buildroot-rpi3-32", "wk-wifi-join (lib/wk/sysimage/buildroot_target.py)"),
         ]:
             with self.subTest(profile=profile), tempfile.TemporaryDirectory() as store:
                 cp = run_here("sysimage", "build", profile, "--dry-run", env={"WK_STORE": store})
@@ -439,10 +439,9 @@ def _name_preflight(name, tmp, peers_json="{}", role="bench", machine="rpi3", en
     stub.mkdir(exist_ok=True)
     (stub / "tailscale").write_text(f"#!/bin/sh\ncat <<'EOF'\n{peers_json}\nEOF\n")
     (stub / "tailscale").chmod(0o755)
-    w = writer()
     over = {"PATH": f"{stub}:{os.environ['PATH']}", "WK_TS_API_SECRET": str(tmp / "none")}
     with mock.patch.dict(os.environ, dict(over, **(env or {}))):
-        return refusal(w.name_preflight, name, role, machine)
+        return refusal(writer().name_preflight, name, role, machine)
 
 
 class TestTailnetNameCollision(WkTest):
@@ -515,8 +514,8 @@ class TestTailnetNameCollision(WkTest):
 
     def test_a_stored_token_retires_the_stale_node(self):
         retired = []
-        with mock.patch.object(shell, "tailnet_api_present", lambda root, m: True), \
-                mock.patch.object(shell, "tailnet_retire", lambda root, m, n: retired.append(n) or Result(0, "retired\n")):
+        with mock.patch.object(tailnet.Fleet, "api_present", lambda fl: True), \
+                mock.patch.object(tailnet.Fleet, "retire", lambda fl, n: retired.append(n) or Result(0, "retired\n")):
             self.assertIsNone(_name_preflight("rpi4", self.tmp, self.PEERS))
         self.assertEqual(retired, ["rpi4"])
 
@@ -554,7 +553,7 @@ class TestTailnetKeyPreflight(WkTest):
 # --------------------------------------------------------------------------- #
 # wk-tailnet-join (image/yocto/meta-wk-tailnet/recipes-network/tailscale/files
 # -- byte-identical on the buildroot side, installed by
-# image/buildroot/tailnet-overlay.sh) -- run against relocated paths and a
+# lib/wk/sysimage/buildroot_target.py) -- run against relocated paths and a
 # stub tailscale, since the real paths are /etc/wk and /usr/bin/tailscale and
 # this is not the image.
 # --------------------------------------------------------------------------- #

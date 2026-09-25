@@ -1,408 +1,102 @@
-#!/usr/bin/env bash
+#!/usr/bin/env python3
 #
 # wk boot <machine> [options] -- put a machine into bench mode for one boot, then back
 #
-# wk: where=host name=none values=--list group=hosts broker * takes=1 dryrun
-# wk: opts --status,--prepare,--diag,--keep,--back,--disarm,--system=,--image=,--list
+# wk: where=host name=none values=--list group=hosts broker * takes=1 dryrun destructive --boot-order
+# wk: opts --status,--prepare,--diag,--keep,--back,--disarm,--system=,--boot-order=,--image=,--list
 # wk: readonly --status,--diag
 #
 #   wk boot <machine> [--system <id>]              arm the one-shot and reboot
 #   wk boot <machine> --status                     what mode it is in, and why
-#   wk boot <machine> --prepare                    put this tree and the privileged
-#                                                  helpers on it, so nothing here has
-#                                                  to be typed over there again
 #   wk boot <machine> --keep                       cancel the self-return watchdog
 #   wk boot <machine> --back                       reboot back to host mode
 #   wk boot <machine> --disarm                     cancel an arming not yet spent
 #   wk boot <machine> --diag                       the bench system's own account
 #                                                  of its last boot, read offline
+#   wk boot <board> --boot-order <order>           write a Pi's EEPROM boot order:
+#                                                  usb-first, sd-first, or local
+#                                                  (the local disks, no network);
+#                                                  asks once, and names the undo
 #   wk boot --list                                 the machines that have drivers
 #
 # This is a mode transition, not a reboot: arming leaves a record of intent, and
 # this command reads that record back against the evidence. The record is kept on
 # the machine it describes, next to the boot mechanism, and nowhere else.
 
-set -euo pipefail
-WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-. "$WK_ROOT/lib/common.sh"
-. "$WK_ROOT/lib/store.sh"
-. "$WK_ROOT/lib/image.sh"
-. "$WK_ROOT/image/profiles.sh"
-. "$WK_ROOT/lib/reach.sh"
-. "$WK_ROOT/boot/machines.sh"
-. "$WK_ROOT/lib/target.sh"
-. "$WK_ROOT/lib/task.sh"
+import os
+import signal
+import sys
 
-# This acts on a physical machine the sandbox cannot reach, so a sandboxed invocation becomes a request over the one socket a workspace can see.
-. "$WK_ROOT/lib/broker.sh"
+ROOT = os.environ.get("WK_ROOT") or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(ROOT, "lib"))
 
-MACHINE=""; ACTION=arm; IMAGE=""; DRY="${WK_DRY_RUN:-}"
-while [ $# -gt 0 ]; do
-    case "$1" in
-        --list)    machine_list; exit 0 ;;
-        --status)  ACTION=status ;;
-        --prepare) ACTION=prepare ;;
-        --diag)    ACTION=diag ;;
-        --keep)    ACTION=keep ;;
-        --back)    ACTION=back ;;
-        --disarm)  ACTION=disarm ;;
-        --system)  IMAGE="${2:-}"; shift ;;
-        --system=*) IMAGE="${1#*=}" ;;
-        --image|--image=*) die "renamed: --system <id> (a bootable artifact is a system, never bare
-    'image' -- wk help architecture)" ;;
-        *)  MACHINE="$1" ;;
-    esac
-    shift
-done
-[ -n "$MACHINE" ] || die "usage: wk boot <machine> [options]; see wk boot -h"
+from wk import decl  # noqa: E402
+from wk.act import Refused, die  # noqa: E402
+from wk.boot import cli, eeprom, pi  # noqa: E402
+from wk.targets import Registry  # noqa: E402
 
-# Everything below reaches hardware; only the action word and the machine name cross the socket. --keep is requestable, or the self-return watchdog would cut a long run.
-if in_workspace; then
-    broker_present || broker_no_route "'wk boot'" "wk boot $MACHINE"
-    _rc=0
-    case "$ACTION" in
-        arm)    broker_call arm     machine="$MACHINE" \
-                    ${IMAGE:+system="$IMAGE"} ${DRY:+dry_run=1} || _rc=$? ;;
-        status) broker_call status  machine="$MACHINE" || _rc=$? ;;
-        keep)   broker_call keep    machine="$MACHINE" ${DRY:+dry_run=1} || _rc=$? ;;
-        back)   broker_call release machine="$MACHINE" ${DRY:+dry_run=1} || _rc=$? ;;
-        disarm) broker_call disarm  machine="$MACHINE" ${DRY:+dry_run=1} || _rc=$? ;;
-        diag)   die "'wk boot $MACHINE --diag' mounts that machine's boot partition on the
-    workstation to read the system's own account of its last boot. That is a
-    disk read, not a mode transition, and it is not in the request broker's
-    vocabulary -- a workspace has no business mounting a filesystem out there.
-    Run it on the workstation:  wk boot $MACHINE --diag" ;;
-    esac
-    exit "$_rc"
-fi
+USAGE = "usage: wk boot <machine> [options]; see wk boot -h"
 
-machine_load "$MACHINE" || die "unknown machine '$MACHINE' (wk boot --list)"
 
-case "$ACTION" in arm|back) device_hold "$MACHINE" boot "$MACHINE" "kill $$" "" "$ACTION $MACHINE" ;; esac   # the two actions that move the board out from under whatever is measuring on it, wherever that is driven from; before the driver loads, since a fleet claim needs no hardware
+def interrupted(signum, frame):
+    raise KeyboardInterrupt
 
-load_driver "$NODE_DRIVER"
 
-# Probing a machine its driver cannot reach reads the *driving* host's marker and answers confidently about the wrong computer; `b_probeable` is where a driver declares which it is.
-if ! b_probeable; then
-    _hostos=linux; is_macos && _hostos=macos
-    if [ "$NODE_OS" != any ] && [ "$NODE_OS" != "$_hostos" ]; then
-        die "$MACHINE is driven from a $NODE_OS host only (os=$NODE_OS in
-    machines/$MACHINE.conf) and this is a $_hostos host -- run this over there."
-    fi
-    die "the '$NODE_DRIVER' driver cannot reach $MACHINE from here, so nothing about it
-    can be read (b_probeable). This host is the one machines/$MACHINE.conf
-    names (os=$NODE_OS), so what is missing is on this host rather than the machine:
-    'wk doctor' names it -- a machine driven as a local guest needs tart and the
-    guest itself."
-fi
+def parse(argv):
+    args = decl.Args(decl.Decl(__file__), argv)
+    if args.value("--image") is not None:
+        die("renamed: --system <id> (a bootable artifact is a system, never bare\n    'image' -- wk help architecture)")
+    asked = (("status", args.flag("--status")), ("diag", args.flag("--diag")), ("keep", args.flag("--keep")),
+             ("back", args.flag("--back")), ("disarm", args.flag("--disarm")), ("prepare", args.flag("--prepare")),
+             ("boot-order", args.value("--boot-order") is not None))
+    chosen = [a for a, on in asked if on]
+    if len(chosen) > 1 or len(args.positionals) > 1:
+        die(USAGE)
+    return args, (chosen[0] if chosen else "arm")
 
-read_state() {
-    b_probe
-    BOOTED=$(b_booted_at)
-    BOOT_ID=$(b_boot_id)
-    RECORD=$(record_read)
-    ARMED_AT=$(kv_get armed_at <<<"$RECORD")
-    ARMED_IMG=$(kv_get image <<<"$RECORD")
-    ARMED_BY=$(kv_get armed_by <<<"$RECORD")
-    ARMED_BOOT=$(kv_get armed_boot_id <<<"$RECORD")
 
-    # Decided by boot id, not by clocks: host and machine can disagree about the time without either clock being wrong.
-    SPENT=no
-    if [ -n "$ARMED_BOOT" ] && [ -n "$BOOT_ID" ]; then
-        if [ "$ARMED_BOOT" != "$BOOT_ID" ]; then SPENT=yes; fi
-    elif [ -n "$ARMED_AT" ] && [ -n "$BOOTED" ]; then
-        local a b
-        a=$(utc_to_epoch "$ARMED_AT")
-        b=$(utc_to_epoch "$BOOTED")
-        if [ "$b" -gt "$a" ]; then SPENT=yes; fi
-    fi
-    # Explicit: the last statement above can be a false test, and under `set -e` an implicit non-zero return would fire when nothing was armed.
-    return 0
-}
-
-cmd_status() {
-    read_state
-    case "$MODE" in
-        unreachable)
-            log "$MACHINE: unreachable over ssh in host mode"
-            b_evidence 2>/dev/null | sed 's/^/  /' || true
-            if [ -n "$ARMED_IMG" ]; then
-                log "  the record says it was armed for system $ARMED_IMG"
-            elif [ -n "${NODE_BRIDGE:-}" ]; then
-                # This board is reached across a phone's USB ethernet, and when that adapter is absent every board on the cable goes silent at once.
-                log "  no arming record could be read either -- but this machine is behind"
-                log "  $NODE_BRIDGE, so rule the segment out before the board:"
-                log "      wk bridge status $NODE_BRIDGE"
-            else
-                log "  no arming record could be read either, so this is a plain outage"
-                log "  or the machine is in a bench system that answers somewhere else."
-                _quiet=$(machine_quiet_siblings "$MACHINE" "${NODE_NET:-}" "${NODE_BRIDGE:-}")
-                if [ "${_quiet% *}" -gt 0 ] && [ "${_quiet% *}" = "${_quiet#* }" ]; then
-                    log "  but every other ${NODE_NET:-fleet} device is quiet as well (${_quiet#* } of ${_quiet#* }),"
-                    log "  so rule the network out before the board -- one of them may be a"
-                    log "  machine nobody has touched, which no board fault explains."
-                fi
-            fi
-            return 3 ;;
-        bench*)
-            log "$MACHINE: bench mode -- system ${MODE#bench } (booted $BOOTED)"
-            b_evidence 2>/dev/null | sed 's/^/  /' || true
-            # A one-shot is spent by the boot that took it, so the next reboot lands in host mode. A firmware default is sticky and the evidence above says which install it names, so what returns this machine is the job it was armed for.
-            if [ "${BOOT_ARMING:-one-shot}" = command ]; then
-                log "  the firmware default above is what the next boot enters; the job it was"
-                log "  armed for hands the machine back when it ends."
-            else
-                log "  a plain reboot returns it to host mode: wk boot $MACHINE --back"
-            fi
-            return 0 ;;
-        base*)
-            log "$MACHINE: base image -- system ${MODE#base } on $NODE_ROOT (booted $BOOTED)"
-            b_evidence 2>/dev/null | sed 's/^/  /' || true
-            log "  this is the fallback helper, not a bench system. To measure something,"
-            log "  arm a system on $NODE_DEVICE:  wk boot $MACHINE --system <id>"
-            return 0 ;;
-    esac
-
-    log "$MACHINE: ${NODE_ROLE:-workstation}, host mode (booted $BOOTED)"
-    b_evidence | sed 's/^/  /'
-
-    [ -n "$ARMED_IMG" ] || return 0
-
-    if [ "$SPENT" = yes ]; then
-        log "  a spent arming record remains (system $ARMED_IMG, armed by $ARMED_BY at $ARMED_AT)"
-        log "  it was consumed by the boot at $BOOTED; clear it with: wk boot $MACHINE --disarm"
+def main(argv):
+    args, action = parse(argv)
+    if args.flag("--list"):
+        print(cli.listing(ROOT, os.environ))
         return 0
-    fi
+    if not args.positionals:
+        die(USAGE)
+    name = args.positionals[0]
+    if action == "prepare":
+        die("'wk boot %s --prepare' is now 'wk machine setup %s': it pushes this tree there and\n"
+            "    installs the privileged helpers (one sudo prompt, from a terminal)." % (name, name))
+    if Registry(ROOT).in_workspace():
+        return cli.broker(ROOT, name, action, args.value("--system") or "", os.environ)
+    conf = cli.load_conf(ROOT, name, os.environ)
+    if conf is None:
+        die("unknown machine '%s' (wk boot --list)" % name)
+    for sig in (signal.SIGTERM, signal.SIGHUP):
+        signal.signal(sig, interrupted)
+    held = cli.hold(ROOT, name, action, os.environ) if action in ("arm", "back") else None
+    rc = 1
+    try:
+        boot = cli.Boot(ROOT, conf, cli.driver_for(ROOT, conf))
+        boot.gate()
+        if action == "boot-order":
+            if conf["NODE_DRIVER"] not in pi.DRIVERS:
+                die("%s is not a Raspberry Pi (its driver is %s), so it has no EEPROM boot order" % (name, conf["NODE_DRIVER"]))
+            rc = eeprom.BootOrder(boot.d).run(args.value("--boot-order"))
+        else:
+            rc = boot.arm(args.value("--system") or "") if action == "arm" else getattr(boot, action)()
+    except Refused as e:
+        rc = e.status
+        raise
+    finally:
+        if held is not None:
+            held.end(rc)
+    return rc
 
-    if [ "${BOOT_ARMING:-one-shot}" = command ]; then
-        warn "$MACHINE is ARMED for '$ARMED_IMG' (by $ARMED_BY at $ARMED_AT)"
-        log  "  the firmware was told, so a plain reboot enters bench mode."
-        log  "  cancel with: wk boot $MACHINE --disarm"
-        return 0
-    fi
-    if [ "${BOOT_ARMING:-one-shot}" = hands-on ]; then
-        warn "$MACHINE is ARMED for '$ARMED_IMG' (by $ARMED_BY at $ARMED_AT) and waiting for a person"
-        log  "  nothing will move it on its own: the mode is chosen at the startup"
-        log  "  manager. 'wk boot $MACHINE' prints the ritual again."
-        log  "  cancel with: wk boot $MACHINE --disarm"
-        return 2
-    fi
-    warn "$MACHINE is ARMED to reboot into system $ARMED_IMG (by $ARMED_BY at $ARMED_AT)"
-    log  "  it is still in host mode, so the one-shot has not been spent."
-    log  "  do not start work on it: the next reboot leaves host mode."
-    log  "  cancel with: wk boot $MACHINE --disarm"
-    return 2
-}
 
-cmd_diag() {
-    b_probe
-    case "$MODE" in
-        host) ;;
-        *) die "$MACHINE is in '$MODE'. The diagnostics dump is read off the
-    bench system's boot device from host mode -- ask the bench system
-    directly, or 'wk boot $MACHINE --back' first." ;;
-    esac
-    b_diag
-}
-
-cmd_keep() {
-    read_state
-    case "$MODE" in
-        bench*) ;;
-        *) die "$MACHINE is not in bench mode right now ($MODE), so there is no
-    watchdog to cancel." ;;
-    esac
-    b_watchdog_present || die "$MACHINE's bench system carries no self-return watchdog, so there is nothing
-    to claim: what ends its run is the job itself. 'wk boot $MACHINE --status'
-    says what it is doing."
-    [ -n "$DRY" ] && { log "would create /run/wk-keep-running on $MACHINE"; return 0; }
-    r_sudo 'touch /run/wk-keep-running'
-    info "$MACHINE claimed: the self-return watchdog will not reboot it"
-    warn "nothing will hand this machine back on its own now -- 'wk boot $MACHINE --back' does"
-}
-
-cmd_back() {
-    read_state
-    case "$MODE" in
-        unreachable) die "$MACHINE is not answering, so nothing here can reboot it.
-    The one-shot is spent by any boot, so a power cycle returns it." ;;
-    esac
-    [ -n "$DRY" ] && { log "would reboot $MACHINE back to host mode and clear the record"; return 0; }
-    # Cleared first: the record lives on the host install's root, where the machine is going, and clearing it afterwards would race the boot.
-    case "$MODE" in host) record_clear ;; esac
-    b_reboot
-    info "$MACHINE is rebooting; the one-shot is spent, so it lands in host mode"
-}
-
-cmd_disarm() {
-    read_state
-    # A medium-armed machine's arming is the byte on the medium, whoever wrote it.
-    if [ -z "$ARMED_IMG" ] && [ "${BOOT_ARMING:-one-shot}" != medium ]; then
-        log "$MACHINE has no arming record"; return 0
-    fi
-    if [ -n "$DRY" ]; then
-        log "would disarm $MACHINE (its normal boot order, or its medium parked) and clear the record"
-        return 0
-    fi
-    # Re-arming with the EEPROM's own order is how a one-shot is cancelled: there is no "clear" tag and the register is write-only.
-    if [ "${BOOT_ARMING:-one-shot}" = one-shot ]; then
-        [ "$SPENT" = yes ] || b_arm "$BOOT_ORDER_NORMAL"
-    elif command -v b_disarm >/dev/null 2>&1; then
-        b_disarm
-    fi
-    record_clear
-    info "$MACHINE disarmed; its next reboot is a normal one"
-    command -v b_disarm_note >/dev/null 2>&1 && b_disarm_note
-    return 0
-}
-
-cmd_arm() {
-    read_state
-
-    case "$MODE" in
-        unreachable)
-            # Arming a guest *is* starting it (lib/wk/boot/mac.py starts it through the vm target), so "unreachable" is the normal state to arm from.
-            [ "${BOOT_ARMING:-}" = guest ] || die "$MACHINE is not reachable over ssh in host mode.
-    Arming is an ssh command, so there is nothing to arm from here." ;;
-        bench*)
-            # A board whose arming is a file on its medium can be re-armed where it stands; the other models arm a write-only register.
-            [ "${B_ARM_FROM_BENCH:-no}" = yes ] \
-                || die "$MACHINE is already in bench mode (system ${MODE#bench }).
-    Arming it is an edit only its rescue can make, so it goes back first:
-        wk boot $MACHINE --back" ;;
-    esac
-
-    case "${BOOT_ARMING:-one-shot}" in
-    hands-on|command)
-        [ -n "$IMAGE" ] || IMAGE="${NODE_VOLUME:-}"
-        [ -n "$IMAGE" ] || die "$MACHINE has no benchmark volume configured (NODE_VOLUME)" ;;
-    guest)
-        [ -n "$IMAGE" ] || IMAGE="${NODE_GUEST:-}"
-        [ -n "$IMAGE" ] || die "$MACHINE has no guest configured (NODE_GUEST)" ;;
-    # Matched against the medium's own enumeration (b_systems), or the boot falls through to host mode and looks like a firmware failure.
-    *)
-        local sel
-        sel=$(machine_select_system "$IMAGE")
-        ARM_SYS_PART=${sel%% *}
-        IMAGE=${sel##* } ;;
-    esac
-
-    ARM_WATCHDOG=""
-    case "${BOOT_ARMING:-one-shot}" in one-shot|medium)
-        image_profile_load "$NODE_PROFILE" >/dev/null 2>&1 && ARM_WATCHDOG="$IMG_WATCHDOG"
-    ;; esac
-
-    if [ -n "$DRY" ]; then
-        if [ "${BOOT_ARMING:-one-shot}" = guest ]; then
-            cat >&2 <<EOF
-would arm $MACHINE
-  guest        $IMAGE ($( ( load_target vm >/dev/null 2>&1; _vm_state "$(_vm "$IMAGE")" ) 2>/dev/null || echo unknown ))
-  boot order   nothing in firmware; arming a guest is starting it
-  record       none; the guest either answers with a marker or it does not
-  then         start the guest and wait for its marker. Nothing reboots this
-               machine -- the rehearsal is a VM, which is the whole point.
-EOF
-        elif [ "${BOOT_ARMING:-one-shot}" = command ]; then
-            cat >&2 <<EOF
-would arm $MACHINE
-  volume       $IMAGE $(mac_volume_present 2>/dev/null && echo "(attached)" || echo "(NOT attached -- arming would refuse)")
-  boot order   the firmware's own boot-volume, through the privileged helper
-  record       $NODE_RECORD
-  then         prove the way back, tell the firmware, read it back, and reboot.
-               Now: $(mac_firmware_default 2>/dev/null || echo "not readable from here")
-EOF
-        elif [ "${BOOT_ARMING:-one-shot}" = hands-on ]; then
-            cat >&2 <<EOF
-would arm $MACHINE
-  volume       $IMAGE $(mac_volume_present 2>/dev/null && echo "(attached)" || echo "(NOT attached -- arming would refuse)")
-  boot order   nothing in firmware; the selection is a person's, twice
-  record       $NODE_RECORD
-  then         print the ritual and stop. Nothing reboots this machine: the
-               mode it is going to is chosen at the startup manager.
-EOF
-        else
-            cat >&2 <<EOF
-would arm $MACHINE
-  system       $IMAGE (verified present on $NODE_DEVICE)
-  boot order   $([ "${BOOT_ARMING:-one-shot}" = medium ] \
-                  && echo "untouched; the arming is $NODE_DEVICE's own boot partition" \
-                  || echo "$BOOT_ORDER_IMAGE (one-shot; the normal order $BOOT_ORDER_NORMAL is untouched)")
-  record       $NODE_RECORD on $MACHINE
-  then         reboot, and the image's watchdog returns it in
-               ${ARM_WATCHDOG:-?}s unless claimed
-EOF
-        fi
-        log "dry run -- nothing was armed."
-        return 0
-    fi
-
-    info "arming $MACHINE for system $IMAGE"
-    if [ "${BOOT_ARMING:-one-shot}" = hands-on ]; then
-        # Checks (b_arm) before the record, the opposite order to the one-shot below: a firmware call can half-happen, so its record goes in first;
-        b_arm
-        record_write "$IMAGE" "$NODE_PROFILE" "${NODE_VOLUME:-}" ""
-        info "$MACHINE is armed on paper: the record says the next mode is bench ('$IMAGE')"
-        log  "  it is still in host mode until somebody boots it -- 'wk boot $MACHINE --status'"
-        log  "  says so, and 'wk boot $MACHINE --disarm' forgets the intent."
-        return 0
-    fi
-    if [ "${BOOT_ARMING:-one-shot}" = guest ]; then
-        b_arm
-        info "$MACHINE is in bench mode: guest '$IMAGE' is running and carries its marker"
-        log  "  'wk boot $MACHINE --back' stops it -- for a guest, leaving the role"
-        log  "  is leaving the machine, so there is nothing to hand back afterwards."
-        return 0
-    fi
-    if [ "${BOOT_ARMING:-one-shot}" = one-shot ]; then
-        record_write "$IMAGE" "$NODE_PROFILE" "$NODE_DEVICE" "$BOOT_ORDER_IMAGE"
-        b_arm "$BOOT_ORDER_IMAGE"
-    elif [ "${BOOT_ARMING:-one-shot}" = command ]; then
-        b_arm  # before the record, as hands-on above: a bless is one nvram write, not a medium that can half-happen
-        record_write "$IMAGE" "$NODE_PROFILE" "${NODE_VOLUME:-}" ""
-    elif [ "${BOOT_ARMING:-one-shot}" = medium ]; then
-        # The record is a claim with evidence behind it: b_evidence reads the stick, so a record that disagrees with the medium is visibly wrong.
-        record_write "$IMAGE" "$NODE_PROFILE" "$NODE_DEVICE" ""
-        b_arm
-    fi
-    b_reboot
-
-    info "$MACHINE is rebooting into system $IMAGE"
-    # ARM_WATCHDOG is what this arming actually wrote, which is the honest predicate: the medium's watchdog comes from the image (cmd/sysimage stages it on every fleet write), not from whether this driver happens to have a self-disarm of its own.
-    if [ -n "$ARM_WATCHDOG" ]; then
-        log  "  it returns by itself in ${ARM_WATCHDOG}s unless claimed:"
-        log  "    wk boot $MACHINE --keep     claim it"
-        log  "    wk boot $MACHINE --back     hand it back now"
-    else
-        log  "  nothing on this side returns it: the job it was armed for does, when it ends."
-        log  "    wk boot $MACHINE --status   what it is doing, over its own node"
-    fi
-    log  "  if it never appears, its own account of that boot says why: wk boot $MACHINE --diag"
-}
-
-cmd_prepare() {
-    [ -n "${NODE_SSH:-}" ] || die "$MACHINE (machines/$MACHINE.conf) sets no NODE_SSH,
-    so there is nowhere to put anything. A machine wk reaches only by its own medium
-    has nothing to prepare."
-    if [ -n "$DRY" ]; then
-        log "would push this tree, as a commit, to $NODE_SSH:$(machine_tools_dir) and run"
-        log "  ./setup --stage quiesce there (one password prompt, in your terminal)"
-        return 0
-    fi
-    machine_prepare "$NODE_SSH" || die "$MACHINE is not prepared, and nothing was armed."
-    if mv_reboot_ready 2>/dev/null; then
-        info "$MACHINE is prepared: the boot helper answers sudo -n, so wk restarts it itself"
-    else
-        warn "the helper did not answer sudo -n afterwards -- 'sudo -l' on $NODE_SSH shows
-    whether something later in the include order re-imposes a password over it."
-    fi
-}
-
-case "$ACTION" in
-    arm)     cmd_arm ;;
-    status)  cmd_status ;;
-    keep)    cmd_keep ;;
-    back)    cmd_back ;;
-    disarm)  cmd_disarm ;;
-    diag)    cmd_diag ;;
-    prepare) cmd_prepare ;;
-esac
+if __name__ == "__main__":
+    try:
+        sys.exit(main(sys.argv[1:]))
+    except Refused as e:
+        sys.exit(e.status)
+    except KeyboardInterrupt:
+        sys.exit(130)

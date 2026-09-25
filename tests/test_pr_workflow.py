@@ -1,6 +1,5 @@
 """`wk pr` / `wk new --pr`: the spec parser and the mirror fetches underneath
-them (lib/wk/pr.py's parse_spec, mirror_fetch and mirror_fetch_pull, and
-their bash names lib/store.sh keeps for cmd/ab).
+them (lib/wk/pr.py's parse_spec, mirror_fetch and mirror_fetch_pull).
 
 The fetches run against temporary git repositories standing in for a fork,
 an upstream, and the mirror -- git accepts a plain path as a URL, so no
@@ -27,7 +26,8 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from tests.support import REPO, bash, fake_workspace, rand_suffix, run, scratch_dir, stub_path
+from tests.killpoints import converges
+from tests.support import REPO, fake_workspace, rand_suffix, run, scratch_dir, stub_path
 
 PRELUDE = f'set -euo pipefail\ncd "{REPO}"\n. lib/common.sh\n. lib/store.sh\n'
 
@@ -48,10 +48,10 @@ def _load_cmd_pr():
 # only reads remote *names* and URLs already configured in the test's own local-path repo).
 CMD_PR_MODULE = _load_cmd_pr()
 
-from wk import act, pr  # noqa: E402  -- needs CMD_PR_MODULE's sys.path.insert above
+from wk import act, decl, git, pr, targets  # noqa: E402  -- needs CMD_PR_MODULE's sys.path.insert above
 from wk.clock import Clock  # noqa: E402
 from wk.lock import Lock  # noqa: E402
-from wk.machine import Local, Result  # noqa: E402
+from wk.machine import Fake, Local, Result  # noqa: E402
 from wk.store import Store  # noqa: E402
 
 
@@ -70,6 +70,290 @@ def _make_repo(dir_, branch, filename="f.txt"):
     _git("-c", "user.email=t@example.com", "-c", "user.name=Test",
          "commit", "-q", "-m", "init", cwd=dir_)
     return _git("rev-parse", "HEAD", cwd=dir_).stdout.strip()
+
+
+class GitWorld(Fake):
+    """`killpoints[pr]`: a git+gh model behind pr.checkout/pr_rebase/pr_open,
+    just real enough that a kill can land between any two of their mutations
+    and a rerun has real state to converge from -- not a real git process,
+    since what is under test is `wk pr`'s own recovery, not git's."""
+
+    def __init__(self):
+        super().__init__("host")
+        self.local = {}            # branch -> sha
+        self.remotes = {}          # name -> url
+        self.remote_refs = {}      # (remote, branch) -> sha
+        self.fetch_shas = {}       # src_ref (or "origin/main") -> sha a fetch brings in
+        self.head = None
+        self.dirty = 0
+        self.upstream = {}         # branch -> {"remote": r, "merge": ref}
+        self.pushed = set()        # (fork, branch)
+        self.opened = 0
+        self.target = SimTarget(self)
+
+    @property
+    def fake(self):
+        return self
+
+    def _resolve(self, ref):
+        if ref.startswith("refs/remotes/"):
+            _, _, remote, branch = ref.split("/", 3)
+            return self.remote_refs.get((remote, branch), "")
+        return ref
+
+    def _fetch(self, sub):
+        self.effect(("fetch",) + tuple(sub))
+        last = sub[-1]
+        if last == "origin" or last.startswith("+refs/heads/*:refs/remotes/"):
+            self.remote_refs[("origin", "main")] = self.fetch_shas["origin/main"]
+            return Result(0)
+        src_ref, _, dest = last.partition(":")
+        _, _, remote, branch = dest.split("/", 3)
+        self.remote_refs[(remote, branch)] = self.fetch_shas[src_ref]
+        return Result(0)
+
+    def git(self, sub):
+        """One `git -C <src>` subcommand, as pr.checkout/pr_rebase/pr_open shape it:
+        a read answers from state, a write goes through `effect()` first."""
+        if sub[:2] == ["status", "--porcelain"]:
+            return Result(0, "M x\n" * self.dirty)
+        if sub[:3] == ["rev-parse", "--verify", "--quiet"]:
+            b = sub[3][len("refs/heads/"):]
+            sha = self.local.get(b, "")
+            return Result(0, sha + "\n") if sha else Result(1)
+        if sub[:2] == ["config", "--get-regexp"]:
+            lines = ["remote.%s.url %s" % (n, u) for n, u in self.remotes.items()]
+            return Result(0, "\n".join(lines))
+        if sub[:2] == ["remote", "add"]:
+            _, name, url = sub[1:]
+            self.effect(("remote-add", name))
+            self.remotes[name] = url
+            return Result(0)
+        if sub[:2] == ["remote", "set-url"]:
+            _, name, url = sub[1:]
+            self.effect(("remote-set-url", name))
+            self.remotes[name] = url
+            return Result(0)
+        if sub[0] == "fetch":
+            return self._fetch(sub)
+        if sub[:2] == ["rev-list", "--count"]:
+            return Result(0, "0\n")
+        if sub[:3] == ["show-ref", "--verify", "--quiet"]:
+            b = sub[3][len("refs/heads/"):]
+            return Result(0) if b in self.local else Result(1)
+        if sub[:2] == ["checkout", "--quiet"] and len(sub) > 2 and sub[2] == "-b":
+            branch, start = sub[3], sub[4]
+            self.effect(("checkout-b", branch))
+            self.local[branch] = self._resolve(start)
+            self.head = branch
+            return Result(0)
+        if sub[:2] == ["checkout", "--quiet"]:
+            branch = sub[2]
+            self.effect(("checkout", branch))
+            self.head = branch
+            return Result(0)
+        if sub[:3] == ["reset", "--hard", "--quiet"]:
+            start = sub[3]
+            self.effect(("reset", self.head))
+            self.local[self.head] = self._resolve(start)
+            return Result(0)
+        if sub[:3] == ["branch", "--quiet", "--unset-upstream"]:
+            branch = sub[3]
+            self.effect(("unset-upstream", branch))
+            self.upstream.pop(branch, None)
+            return Result(0)
+        if sub[0] == "config" and sub[1].startswith("branch."):
+            key, value = sub[1], sub[2]
+            branch, field = key.split(".")[1], key.rsplit(".", 1)[1]
+            self.effect(("config", key))
+            self.upstream.setdefault(branch, {})[field] = value
+            return Result(0)
+        if sub[0] == "config" and sub[1] == "--get" and sub[2].startswith("remote."):
+            name = sub[2][len("remote."):-len(".url")]
+            url = self.remotes.get(name)
+            return Result(0, url + "\n") if url else Result(1)
+        if sub[0] == "symbolic-ref":
+            return Result(0, self.head + "\n") if self.head else Result(1)
+        if sub[0] == "rev-parse" and sub[1] == "--abbrev-ref":
+            up = self.upstream.get(self.head)
+            return Result(0, "%s/%s\n" % (up["remote"], up["merge"][len("refs/heads/"):])) if up else Result(1)
+        if sub[0] == "push":
+            fork, branch = sub[2], sub[3]
+            self.effect(("push", fork, branch))
+            self.pushed.add((fork, branch))
+            self.remote_refs[(fork, branch)] = self.local.get(branch, "")
+            return Result(0)
+        if sub[0] == "rebase":
+            remote, branch = sub[1].split("/", 1)
+            sha = self.remote_refs.get((remote, branch))
+            self.effect(("rebase", self.head))
+            self.local[self.head] = sha
+            return Result(0)
+        if sub[:2] == ["--no-pager", "log"]:
+            return Result(0, "abc1234 message\n")
+        raise AssertionError("GitWorld: unhandled git subcommand: %r" % (sub,))
+
+
+class SimTarget(targets.Target):
+    """A workspace whose checkout is a GitWorld: `src`/`mirror_dir`/`exec` are
+    pr.py's whole contract with a target, so this is the smallest thing that
+    satisfies it."""
+
+    def __init__(self, world, src="/src/WebKit", mirror=""):
+        super().__init__("ws", REPO, {}, world)
+        self.world = world
+        self._src = src
+        self._mirror = mirror
+
+    def src(self, ws):
+        return self._src
+
+    def mirror_dir(self):
+        return self._mirror
+
+    def exec(self, ws, argv, tty=False, timeout=None):
+        if argv[:2] == ["test", "-d"]:
+            return Result(0 if argv[2] in self.world.dirs else 1)
+        assert argv[:2] == ["git", "-C"], argv
+        return self.world.git(argv[3:])
+
+
+class RecordingTarget(SimTarget):
+    """Every act_exec call, wet or dry -- act_exec's own dry-run gate decides
+    whether `exec` (and so a GitWorld mutation) ever runs, so this is the one
+    place a dry run's plan and a wet run's argv are the same list to compare."""
+
+    def __init__(self, world, **kw):
+        super().__init__(world, **kw)
+        self.mutations = []
+
+    def act_exec(self, ws, argv):
+        self.mutations.append(tuple(argv))
+        return super().act_exec(ws, argv)
+
+
+class TestPrCheckoutKillPoints(unittest.TestCase):
+    """`killpoints[pr]`: pr.checkout onto a fork's branch -- the path that adds
+    a remote -- killed after any effect and rerun converging. The add is its
+    own fire-and-forget act_exec precisely so a kill between it and the url
+    fix-up cannot strand a half-wired remote: `_source`'s own config read
+    finds the remote either way and skips re-adding it."""
+
+    URL = "https://github.com/alice/WebKit.git"
+    WPE_URL = "https://github.com/alice/WPEWebKit.git"
+
+    def make_world(self):
+        w = GitWorld()
+        w.answer(["git", "ls-remote", git.direct_url(self.URL), "refs/heads/eng/x"], out="b" * 40 + "\trefs/heads/eng/x\n")
+        w.answer(["git", "ls-remote", git.direct_url(self.WPE_URL), "refs/heads/eng/x"], out="")
+        w.fetch_shas = {"refs/heads/eng/x": "b" * 40}
+        return w
+
+    def run_once(self, w):
+        with contextlib.redirect_stderr(io.StringIO()):
+            pr.checkout(w.target, w, "ws", "alice:eng/x")
+
+    def state(self, w):
+        return (dict(w.remotes), dict(w.local), w.head, {b: dict(v) for b, v in w.upstream.items()})
+
+    def test_a_checkout_killed_after_any_effect_and_rerun_converges(self):
+        converges(self, self.make_world, self.run_once, self.state)
+
+
+class TestPrRebaseKillPoints(unittest.TestCase):
+    """`killpoints[pr]`: pr_rebase's fetch and rebase, killed after either and
+    rerun converging on the same rebased tip."""
+
+    def make_world(self):
+        w = GitWorld()
+        w.local = {"eng/y": "d" * 40}
+        w.head = "eng/y"
+        w.fetch_shas = {"origin/main": "c" * 40}
+        return w
+
+    def run_once(self, w):
+        with contextlib.redirect_stderr(io.StringIO()):
+            CMD_PR_MODULE.pr_rebase(w.target, "ws")
+
+    def state(self, w):
+        return dict(w.local)
+
+    def test_a_rebase_killed_after_any_effect_and_rerun_converges(self):
+        converges(self, self.make_world, self.run_once, self.state)
+
+
+class TestPrOpenKillPoints(unittest.TestCase):
+    """`killpoints[pr]`: 'wk pr open's push and the `gh pr create` after it,
+    killed after either and rerun converging -- a second push is a
+    fast-forward no-op and a second `gh pr create` a harmless retry with
+    GitHub, neither a half-made thing `wk` owns the recovery of."""
+
+    def make_world(self):
+        return GitWorld()
+
+    def run_once(self, w):
+        def fake_run(argv, **kw):
+            if argv[:1] == ["gh"]:
+                w.effect(("gh",) + tuple(argv))
+                w.opened += 1
+            return subprocess.CompletedProcess(argv, 0)
+        with mock.patch.object(CMD_PR_MODULE, "pr_open_target",
+                               return_value=("WebKit/WebKit", "alice:eng/x", "fork", "eng/x")), \
+                mock.patch.object(CMD_PR_MODULE.subprocess, "run", fake_run), \
+                contextlib.redirect_stderr(io.StringIO()):
+            CMD_PR_MODULE.pr_open(w.target, "ws", False, False)
+
+    def state(self, w):
+        return (set(w.pushed), w.opened > 0)
+
+    def test_an_open_killed_after_any_effect_and_rerun_converges(self):
+        converges(self, self.make_world, self.run_once, self.state)
+
+
+class TestPrCheckoutDryRunEqualsWetRun(unittest.TestCase):
+    """cmd/pr declares 'dryrun' for the plain checkout form because every
+    mutation in pr.checkout goes through Target.act_exec -- the one place
+    --dry-run intercepts it -- so a dry run's plan is the wet run's argv
+    list, in order, and a dry run touches no state. 'rebase' and 'open' stay
+    undeclared: their mutations run through plain exec (pr_rebase's fetch and
+    rebase, pr_open's push and `gh pr create`), so nothing would stop them."""
+
+    URL = "https://github.com/alice/WebKit.git"
+    WPE_URL = "https://github.com/alice/WPEWebKit.git"
+
+    def _world(self):
+        w = GitWorld()
+        w.answer(["git", "ls-remote", git.direct_url(self.URL), "refs/heads/eng/x"], out="b" * 40 + "\trefs/heads/eng/x\n")
+        w.answer(["git", "ls-remote", git.direct_url(self.WPE_URL), "refs/heads/eng/x"], out="")
+        w.fetch_shas = {"refs/heads/eng/x": "b" * 40}
+        return w, RecordingTarget(w)
+
+    def _state(self, w):
+        return (dict(w.remotes), dict(w.local), w.head, {b: dict(v) for b, v in w.upstream.items()})
+
+    def test_a_dry_run_is_the_wet_runs_plan_and_touches_nothing(self):
+        wet_world, wet_target = self._world()
+        with contextlib.redirect_stderr(io.StringIO()):
+            pr.checkout(wet_target, wet_world, "ws", "alice:eng/x")
+
+        dry_world, dry_target = self._world()
+        before = self._state(dry_world)
+        with mock.patch.dict(os.environ, {"WK_DRY_RUN": "1"}), contextlib.redirect_stderr(io.StringIO()):
+            pr.checkout(dry_target, dry_world, "ws", "alice:eng/x")
+
+        self.assertEqual(dry_target.mutations, wet_target.mutations)
+        self.assertGreaterEqual(len(dry_target.mutations), 6)
+        self.assertEqual(self._state(dry_world), before)
+
+    def test_the_declaration_only_covers_the_path_that_honours_it(self):
+        """rebase/open's mutations bypass act_exec (plain Target.exec), so the
+        decl's per-sub override must turn dryrun back off for both -- the
+        invariant CLAUDE.md holds cmd/pr to: declare it only where every path
+        honours it."""
+        d = decl.Decl(CMD_PR)
+        self.assertTrue(d.honours_dryrun(["some-workspace", "42"]))
+        self.assertFalse(d.honours_dryrun(["rebase", "some-workspace"]))
+        self.assertFalse(d.honours_dryrun(["open", "some-workspace"]))
 
 
 class TestPrParseSpec(unittest.TestCase):
@@ -112,13 +396,6 @@ class TestPrParseSpec(unittest.TestCase):
 
     def test_an_empty_half_is_refused(self):
         self.assertIn("expected <user>:<branch>", self._refused(":b"))
-
-    def test_the_bash_name_sets_the_callers_variables_and_ends_it_on_a_refusal(self):
-        """cmd/ab reads PR_KIND and the rest after calling it."""
-        cp = bash(f'cd "{REPO}"; . lib/common.sh; . lib/store.sh\npr_parse_spec wpe:5678\n'
-                  'printf "%s|%s|%s\\n" "$PR_KIND" "$PR_REMOTE" "$PR_N"\npr_parse_spec nope\necho reached\n')
-        self.assertEqual(cp.stdout.splitlines(), ["pull|wpe|5678"], cp.stderr)
-        self.assertNotEqual(cp.returncode, 0)
 
 
 class TestMirrorFetch(unittest.TestCase):
@@ -172,14 +449,48 @@ class TestMirrorFetch(unittest.TestCase):
                             str(self.tmp / "nowhere"), "refs/heads/x", "refs/remotes/pr/x")
         self.assertIn("could not fetch refs/heads/x", err.getvalue())
 
-    def test_the_bash_names_cmd_ab_calls_reach_the_same_fetch(self):
-        fork = self.tmp / "fork"
-        sha = _make_repo(fork, "b")
-        cp = bash(f'cd "{REPO}"; . lib/common.sh; . lib/store.sh\n'
-                  f'mirror_fetch_pr {str(fork)!r} b "$(wk_pr_refname u WebKit b)"\n'
-                  'git -C "$(wk_mirror)" rev-parse refs/remotes/pr/u/WebKit/b\n', env=self.env)
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertEqual(cp.stdout.strip(), sha)
+
+class TestMirrorFetchIsARecorderUnderADryRun(unittest.TestCase):
+    """dispatch.dry_run_is_the_recorder: mirror_fetch's git init/config/fetch all run through
+    act_run, so a dry run leaves the mirror untouched even if a caller reaches this directly;
+    resolved_or_planned is the one place that decides whether to, and never calls it under one."""
+
+    def setUp(self):
+        self._scratch = scratch_dir(prefix="wk-pr-dryrun-")
+        self.tmp = self._scratch.__enter__()
+        self.addCleanup(self._scratch.__exit__, None, None, None)
+        self.env = {"WK_STORE": str(self.tmp / "store"), "WK_LOCK_DIR": str(self.tmp / "locks"),
+                    "XDG_STATE_HOME": str(self.tmp / "state"), "WK_IN_VM": "", "HOME": str(self.tmp)}
+        self.store = Store(self.env)
+        self.here = Fake("here")
+        p = mock.patch.dict(os.environ, {"WK_DRY_RUN": "1"})
+        p.start()
+        self.addCleanup(p.stop)
+
+    def test_mirror_fetch_runs_no_git_under_a_dry_run(self):
+        with contextlib.redirect_stderr(io.StringIO()):
+            pr.mirror_fetch(self.here, self.store, Lock(self.store, self.here, Clock()),
+                            "https://example/x.git", "refs/heads/b", "refs/remotes/pr/b")
+        self.assertEqual([e for e in self.here.effects if e[0] == "run"], [])
+
+    def test_resolved_or_planned_answers_from_the_mirror_already_there(self):
+        mirror = self.store.mirror()
+        self.here.dirs.add(mirror)
+        sha = "c" * 40
+        self.here.answer(["git", "-C", mirror, "rev-parse", "--verify", "--quiet", "refs/x^{commit}"], out=sha + "\n")
+        called = []
+        got = pr.resolved_or_planned(self.here, mirror, "refs/x", "x", lambda: called.append(1))
+        self.assertEqual((got, called), (sha, []))
+
+    def test_resolved_or_planned_plans_a_fetch_it_has_not_made_yet(self):
+        mirror = self.store.mirror()
+        self.here.dirs.add(mirror)
+        self.here.answer(["git", "-C", mirror, "rev-parse", "--verify", "--quiet"], rc=1)
+        called = []
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            got = pr.resolved_or_planned(self.here, mirror, "refs/x", "x from y", lambda: called.append(1))
+        self.assertEqual((got, called), (pr.PLANNED_COMMIT, []))
+        self.assertIn("would fetch x from y into the mirror", err.getvalue())
 
 
 class TestPrOpenTarget(unittest.TestCase):
@@ -467,8 +778,8 @@ class TestPrOpenRefusals(unittest.TestCase):
     def test_refuses_when_the_stored_token_is_dead(self):
         """`gh auth status` exits 0 for an account whose token has expired
         or been revoked -- it answers "is an account configured", not "can
-        this machine call the API" -- so gh_authenticated asks the API
-        instead (lib/common.sh), and the refusal comes before the command
+        this machine call the API" -- so gh_authenticated (lib/wk/shell.py)
+        asks the API instead, and the refusal comes before the command
         starts rather than part-way through its own report."""
         with stub_path({
             "gh": '#!/bin/sh\ncase "$1 $2" in\n'

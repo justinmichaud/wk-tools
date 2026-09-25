@@ -72,15 +72,17 @@ class TestMachineArmedBarrier(unittest.TestCase):
 
 class TestEveryMutatingPathCallsTheBarrier(unittest.TestCase):
     """Static check: `machine_armed_barrier` is called, in command position
-    (not just mentioned in a comment), from `wk pi deploy` and
-    `wk pi boot-order`. A grep, not an execution: the point is that nobody
-    can delete the call and leave the docstring believing it is still there.
-    `wk sysimage write` is tests/test_sysimage_write.py's
-    test_a_board_armed_for_a_one_shot_boot_is_not_written_under."""
+    (not just mentioned in a comment), from `wk bench deploy` and a board run. A grep, not an
+    execution: the point is that nobody can delete the call and leave the
+    docstring believing it is still there. `wk sysimage write` is
+    tests/test_sysimage_write.py's
+    test_a_board_armed_for_a_one_shot_boot_is_not_written_under, and `wk boot
+    --boot-order` tests/test_boot_cmd.py's."""
 
     # A call is a bare invocation or one gated by a `[ ... ] &&`/`if` guard --
     # never inside a `#` comment line.
     _CALL = re.compile(r'(?:^\s*|&&\s*|;\s*)machine_armed_barrier\b')
+    _PY_CALL = re.compile(r'\.armed_barrier\(')
 
     @staticmethod
     def _live_lines(text):
@@ -90,23 +92,26 @@ class TestEveryMutatingPathCallsTheBarrier(unittest.TestCase):
                 continue
             yield line
 
-    def _calls_in(self, path):
+    def _calls_in(self, path, pattern=None):
         text = (REPO / path).read_text()
-        return [l for l in self._live_lines(text) if self._CALL.search(l)]
+        pattern = pattern or self._CALL
+        return [l for l in self._live_lines(text) if pattern.search(l)]
 
-    def test_pi_deploy_and_boot_order_each_call_it(self):
-        calls = self._calls_in("cmd/pi")
-        self.assertGreaterEqual(
-            len(calls), 2,
-            f"cmd/pi should call machine_armed_barrier from both cmd_deploy and "
-            f"cmd_boot_order; found {len(calls)} live call(s): {calls}",
-        )
+    def test_wk_bench_deploy_and_a_board_run_call_it(self):
+        """lib/wk/bench/board.py's one call, which deploy_slot and boot() both make; each refusal is
+        tests/test_bench_board.py's."""
+        text = (REPO / "lib" / "wk" / "bench" / "board.py").read_text()
+        calls = self._calls_in("lib/wk/bench/board.py", self._PY_CALL)
+        self.assertEqual(len(calls), 1, "lib/wk/bench/board.py asks armed_barrier from more than one place")
+        for fn in ("def deploy_slot(", "def boot("):
+            body = text[text.index(fn):text.index("\n    def ", text.index(fn) + 1)]
+            self.assertIn("self.barrier(", body, "%s does not ask the barrier" % fn)
 
     def test_defined_once_in_boot_machines(self):
         # One implementation per rule (CLAUDE.md): a second definition
         # elsewhere would be a second, driftable copy of the same refusal.
         hits = 0
-        for path in ("boot/machines.sh", "lib/sysimage-arms.sh", "cmd/pi", "cmd/boot", "cmd/status"):
+        for path in ("boot/machines.sh", "lib/sysimage-arms.sh", "cmd/status"):
             text = (REPO / path).read_text()
             hits += len(re.findall(r'^machine_armed_barrier\s*\(\)\s*\{', text, re.MULTILINE))
         self.assertEqual(hits, 1, "machine_armed_barrier should be defined exactly once")

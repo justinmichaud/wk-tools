@@ -1,16 +1,18 @@
 """`wk sysimage`'s verbs -- ls, holds, path, write, --list, build and webkit's dispatch on the builder, and the rm
-and flash tombstones -- and the questions the dispatcher asks before it routes one. The yocto and pmos builders
-and `disks` are lib/sysimage-arms.sh."""
+and flash tombstones -- and the questions the dispatcher asks before it routes one. A 2.52+ yocto profile's PGO
+cycle is lib/wk/pgo.py, and `disks` lib/sysimage-arms.sh."""
 
 import re
 
-from wk import act, build, fleet, images, record, shell
-from wk.sysimage import buildroot, disk, task, write as writemod
+from wk import act, build, fleet, images, pgo, record, shell
+from wk.sysimage import buildroot, disk, pmos, task, write as writemod
 from wk.sysimage import ls as lsmod
+from wk.sysimage import guestbase, macvolume
+from wk.sysimage import yocto
 
 SHA = re.compile(r"^[0-9a-f]{40}$")
 UNKNOWN = "unknown profile '%s'.\n    'wk sysimage --list' has every configuration."
-BUILDERS = ("yocto", "buildroot", "pmos", "fetch")
+BUILDERS = ("yocto", "buildroot", "pmos", "fetch", "mac-volume", "guest")
 
 
 def lane(argv, env=None):
@@ -58,8 +60,12 @@ class Sysimage:
         except (LookupError, images.ConfError):
             act.die(UNKNOWN % name)
 
-    def image_path(self, ws):
-        found = lsmod.outputs(self.machine, self.reg.store, ws)
+    def builder_outputs(self, p):
+        return lsmod.builder_outputs(self.reg, self.clock, p)
+
+    def image_path(self, ws, p=None):
+        host = self.builder_outputs(p) if p is not None else None
+        found = host if host is not None else (lsmod.outputs(self.machine, self.reg.store, ws) if ws else [])
         return found[0] if found else None
 
     def buildable(self, spec):
@@ -71,8 +77,8 @@ class Sysimage:
         if not p["IMG_BUILDER"]:
             act.die("profile '%s' names no builder.\n    Every profile declares IMG_BUILDER and there is no default (wk help)." % name)
         if p["IMG_BUILDER"] not in BUILDERS:
-            act.die("profile '%s' names builder '%s', which does not exist.\n    There are four: %s."
-                    % (name, p["IMG_BUILDER"], ", ".join(BUILDERS)))
+            act.die("profile '%s' names builder '%s', which does not exist.\n    There are %d: %s."
+                    % (name, p["IMG_BUILDER"], len(BUILDERS), ", ".join(BUILDERS)))
         return p
 
     def build(self, spec, rest):
@@ -81,8 +87,16 @@ class Sysimage:
         p = self.buildable(spec)
         if p["IMG_BUILDER"] == "fetch":
             return task.Fetch(self.machine, p, self.env).build(rest)
+        if p["IMG_BUILDER"] == "mac-volume":
+            return macvolume.MacVolume(self.machine, p, self.env, self.clock).build(rest)
+        if p["IMG_BUILDER"] == "guest":
+            return guestbase.Base(self.reg.load("vm"), self.clock).build(rest)
         if p["IMG_BUILDER"] == "buildroot":
             return buildroot.Buildroot(self.reg, p, spec, self.clock).build(rest)
+        if p["IMG_BUILDER"] == "yocto":
+            return yocto.Yocto(self.reg, p, spec, self.clock).build(rest)
+        if p["IMG_BUILDER"] == "pmos":
+            return pmos.Pmos(self.reg, p, spec, self.clock).build(rest)
         return shell.sysimage_arms(self.reg.root, p["IMG_BUILDER"], spec, *rest)
 
     def webkit(self, spec, rest):
@@ -91,14 +105,16 @@ class Sysimage:
         p = self.profile(spec)
         if p["IMG_BUILDER"] == "buildroot":
             return buildroot.Buildroot(self.reg, p, spec, self.clock).webkit(rest)
+        if p["IMG_BUILDER"] == "yocto" and images.pgo_wanted("yocto", p["CFG_RELEASE"]):
+            return pgo.Cycle(self.reg, p, spec, self.clock).webkit(rest)
         if p["IMG_BUILDER"] == "yocto":
-            return shell.sysimage_arms(self.reg.root, "yocto-webkit", spec, *rest)
+            return yocto.Yocto(self.reg, p, spec, self.clock).webkit(rest)
         act.die("'%s' is built by %s, and only a buildroot or yocto image takes WebKit slots"
                 % (p["IMG_PROFILE"], p["IMG_BUILDER"] or "no builder"))
 
     def ls(self, continued):
         here = record.machine_name(self.env)
-        rows = lsmod.Listing(self.reg, self.env.get("WK_ROW_LABEL", ""), here, self.building).rows()
+        rows = lsmod.Listing(self.reg, self.env.get("WK_ROW_LABEL", ""), here, self.building, clock=self.clock).rows()
         if rows:
             if not continued:
                 print(lsmod.ROW % lsmod.HEADER)
@@ -121,7 +137,7 @@ class Sysimage:
         return 0
 
     def holds(self, spec, ws, slot, commit, config, toolchain):
-        """A step's done predicate, asked of the machine holding the workspace (lib/sched.py). The verdict is
+        """A step's done predicate, asked of the machine holding the workspace (lib/wk/sched.py). The verdict is
         on stdout: a readonly command forwarded to a stopped podman machine exits 0 having said so."""
         if not spec:
             act.die("usage: wk sysimage holds <profile> [--toolchain|--slot <name> --commit <sha>]; see wk sysimage -h")
@@ -145,7 +161,7 @@ class Sysimage:
                 act.die("usage: wk sysimage holds %s --slot <name> --commit <sha>\n"
                         "    --commit and --config ask about a slot, so they need --slot; without one\n"
                         "    the question is whether the image itself is built." % name)
-            return self.say(bool(ws) and self.image_path(ws) is not None)
+            return self.say(self.image_path(ws, p) is not None)
         if not SHA.match(commit or ""):
             act.die("usage: wk sysimage holds %s --slot %s --commit <sha>\n"
                     "    --commit takes the full 40-digit sha the slot would hold, got '%s'" % (name, slot, commit or ""))
@@ -161,8 +177,9 @@ class Sysimage:
     def path(self, spec, ws):
         if not spec:
             act.die("usage: wk sysimage path <profile>; see wk sysimage -h")
-        ws = ws or images.image_ws(self.profile(spec)["IMG_PROFILE"], self.env)
-        found = self.image_path(ws) if ws else None
+        p = self.profile(spec)
+        ws = ws or images.image_ws(p["IMG_PROFILE"], self.env)
+        found = self.image_path(ws, p)
         if found is None:
             return 1
         print(found)

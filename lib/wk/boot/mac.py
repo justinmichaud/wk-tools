@@ -5,24 +5,25 @@ import glob
 import os
 import re
 import shlex
-import sys
 import tempfile
 import time
 
-from wk import act, reach, record as wkrecord
-from wk.boot.driver import BashChannel, Driver, Onboard
+from wk import act, guest, reach, record as wkrecord
+from wk.boot.driver import Driver, Onboard
 from wk.machine import Local, Result, Ssh, is_macos
 from wk.store import Store
 
 HELPER = "/usr/local/libexec/wk-boot-priv"
 RECORD_SHOWN = "${XDG_STATE_HOME:-$HOME/.local/state}/wk/boot-armed"
 BENCH_ROOT = "/var/wk"
-GUEST_DISPLAY = "1280x800"           # targets/vm.sh's WK_VM_DISPLAY default, the mode a guest is built with
+TOOLS = "Development/wk-tools"
 BOOTTIME = re.compile(r"\{ *sec *= *(\d+)")   # `{ sec = 1786800736, usec = 451078 }`: anchored on the brace, or usec matches
 
 
 class Script(Onboard):
     """A boot/onboard/mac-* file led by its parameters, each shell-quoted, and by `lead`'s files verbatim."""
+
+    where = os.path.join("boot", "onboard")
 
     def __init__(self, root, name, lead=(), **params):
         self.root, self.name, self.params, self.lead = str(root), name, params, tuple(lead)
@@ -30,7 +31,7 @@ class Script(Onboard):
     def text(self):
         body = []
         for name in self.lead + (self.name,):
-            with open(os.path.join(self.root, "boot", "onboard", name)) as f:
+            with open(os.path.join(self.root, self.where, name)) as f:
                 body.append(f.read().rstrip("\n"))
         return "".join("%s=%s; " % (k, shlex.quote(str(v))) for k, v in sorted(self.params.items())) + "\n".join(body)
 
@@ -96,15 +97,15 @@ class Channel:
 class GuestChannel:
     """A guest through the vm target: its address changes every boot and is in no ssh config."""
 
-    def __init__(self, root, conf, env=None, channel="none", vm=None):
+    def __init__(self, root, conf, env=None, channel="none", vm=None, via=None):
         self.root, self.conf, self.env, self.channel = str(root), conf, os.environ if env is None else env, channel
         self.ws = self.env.get("WK_BENCH_GUEST") or "wk-bench"
-        self._vm = vm
+        self._vm, self.via = vm, via
 
     def vm(self):
         if self._vm is None:
             from wk.targets import Registry
-            self._vm = Registry(self.root, self.env).load("vm")
+            self._vm = Registry(self.root, self.env, machine=self.via).load("vm")
         return self._vm
 
     def call(self, fn, *args, input=None, mutates=False):
@@ -134,7 +135,7 @@ class GuestChannel:
         return self.vm().exec_argv(self.ws, ["sh", "-c", cmd])[0]
 
     def display(self):
-        return self.vm().env.get("WK_VM_DISPLAY") or GUEST_DISPLAY
+        return guest.display(self.vm().env)
 
     def probeable(self):
         return is_macos() and bool(self.vm().tart())
@@ -144,11 +145,6 @@ class MacDriver(Driver):
     measures = True
     bench_channel = "bench"
     shims = ()
-
-    def __init__(self, root, conf, ch, mode=""):
-        if isinstance(ch, BashChannel):
-            ch = self.channel_for(root, conf, ch.channel)
-        super().__init__(root, conf, ch, mode)
 
     def ob(self, name, lead=(), **params):
         return Script(self.root, name, lead=lead, **params)
@@ -222,9 +218,6 @@ class MacDriver(Driver):
     def own(self, dest):
         return 0
 
-    def manage_argv(self, cmd):
-        return self.ch.exec_argv(cmd)
-
 
 class MacVolume(MacDriver):
     """Only the boot helper blesses the install the firmware boots next; --setBoot is sticky, so the bench job hands back."""
@@ -232,13 +225,11 @@ class MacVolume(MacDriver):
     name = "mac-volume"
     arming = "command"
     disarms = True
-    shims = ("b_disarm", "b_disarm_note", "b_bench_root", "b_bench_home", "b_bench_put",
-             "b_bench_put_file", "b_manage", "b_manage_name", "b_manage_tools", "b_manage_prepare", "b_restart_ready",
-             "b_restart_detail", "mv_reboot_ready", "mac_volume_present", "mac_firmware_default", "image_addr",
-             "i_ssh_opts", "_wk_mac")
+    shims = ("b_disarm", "b_disarm_note")
 
-    def channel_for(self, root, conf, channel):
-        return Channel(conf, channel=channel, root=root)
+    @staticmethod
+    def transport(root, conf, channel="none", env=None, via=None):
+        return Channel(conf, env=env, channel=channel, via=via, root=root)
 
     def facts(self):
         return dict(super().facts(), NODE_RECORD=RECORD_SHOWN, BOOT_HELPER=HELPER)
@@ -311,7 +302,7 @@ class MacVolume(MacDriver):
         return "%s (matches neither install on this disk)" % grp
 
     def planted(self):
-        """`wk bench mac-ab` names each plant's task after the UTC stamp it was planted at, so the newest sorts last."""
+        """`wk bench ab --devices <mac>` names each plant's task after the UTC stamp it was planted at, so the newest sorts last."""
         bench = Store(self.ch.env).bench_dir()
         tasks = [d for d in sorted(glob.glob(os.path.join(bench, "*-%s-mac-ab" % self.who()))) if os.path.isfile(os.path.join(d, "job.json"))]
         if not tasks:
@@ -346,8 +337,8 @@ class MacVolume(MacDriver):
         return "%s: neither %s nor %s answers, so this Mac is between its two installs or off" % (what, self.c("NODE_SSH"), self.bench_name())
 
     def reprovision(self):
-        return ("wk bench mac-volume --create\n    a second APFS volume in its own container, on the Mac\n"
-                "wk bench mac-volume --install\nwk bench mac-volume --provision\nhold the power button and pick the volume\n"
+        return ("wk sysimage build perf-macos-tolken --create\n    a second APFS volume in its own container, on the Mac\n"
+                "wk sysimage build perf-macos-tolken --install\nwk sysimage build perf-macos-tolken --provision\nhold the power button and pick the volume\n"
                 "    by command: wk boot %s, which proves the way back before it arms" % self.who())
 
     def systems(self):
@@ -416,7 +407,7 @@ class MacVolume(MacDriver):
         if not ok:
             act.die("%s's firmware still names the benchmark volume, and this could not set it back:\n%s\n"
                     "    Nothing was cleared: the record stays until the firmware names this install again.\n"
-                    "    The remedy:  wk boot %s --prepare   installs the helper if it is missing or old, then\n"
+                    "    The remedy:  wk machine setup %s   installs the helper if it is missing or old, then\n"
                     "                 wk boot %s --disarm    once more; by hand, System Settings -> General ->\n"
                     "                 Startup Disk on the Mac picks the host install."
                     % (self.who(), said or "  (nothing -- %s did not answer)" % self.c("NODE_SSH"), self.who(), self.who()))
@@ -430,12 +421,12 @@ class MacVolume(MacDriver):
             act.die("%s answers as its benchmark install, which carries no boot helper --\n"
                     "    only the host install does, and it is down. What ends a run there is the job\n"
                     "    itself, which blesses this install back and reboots into it.\n"
-                    "    Read it meanwhile:  wk bench mac-ab --status" % self.who())
+                    "    Read it meanwhile:  wk bench ab --devices %s --status" % (self.who(), self.who()))
         if self.priv("reboot")[0]:
             return 0
         act.die("could not restart %s. The helper takes no password and is not\n"
                 "    installed there; plain sudo wants one, and an unattended transition has no\n"
-                "    terminal to answer it on. One command installs it:  wk boot %s --prepare" % (self.who(), self.who()))
+                "    terminal to answer it on. One command installs it:  wk machine setup %s" % (self.who(), self.who()))
 
     def record(self, name, input=None, mutates=False):
         return self.ch.call("m_ssh", self.ob(name, lead=("mac-record.sh",)), input=input, mutates=mutates)
@@ -459,8 +450,14 @@ class MacVolume(MacDriver):
     def bench_local(self):
         return self.ch.here()
 
-    def manage_name(self):
-        return self.c("NODE_SSH")
+    def manager(self):
+        m = self.ch.machine()
+        if m is None:
+            act.die("%s (machines/%s.conf) sets no NODE_SSH, so nothing can reach its host install" % (self.who(), self.who()))
+        return m
+
+    def manager_tools(self, m):
+        return TOOLS if m.run(["test", "-x", TOOLS + "/wk"]).ok else None
 
 
 class MacGuest(MacDriver):
@@ -470,11 +467,11 @@ class MacGuest(MacDriver):
     arming = "guest"
     measures = False
     bench_channel = "host"
-    shims = ("b_bench_root", "b_bench_home", "b_bench_put", "b_bench_put_file", "b_manage",
-             "b_manage_name", "b_manage_tools", "b_manage_prepare", "b_restart_ready", "b_restart_detail", "m_ssh", "_wk_mac")
+    shims = ()
 
-    def channel_for(self, root, conf, channel):
-        return GuestChannel(root, conf, channel=channel)
+    @staticmethod
+    def transport(root, conf, channel="none", env=None, via=None):
+        return GuestChannel(root, conf, env=env, channel=channel, via=via)
 
     def guest(self):
         return self.ch.ws
@@ -502,7 +499,7 @@ class MacGuest(MacDriver):
         st = self.ch.state()
         if st == "absent":
             act.die("%s has no guest '%s'.\n    Make one from the golden base and mark it as a benchmark install:\n"
-                    "        wk vm new %s && wk vm start %s\n        then, in it:  sudo tee /etc/wk-image <<<'id=%s'"
+                    "        wk new %s --target vm && wk start %s\n        then, in it:  sudo tee /etc/wk-image <<<'id=%s'"
                     % (name, g, g, g, self.c("NODE_PROFILE") or "perf-macos-benchvm"))
         if st != "running":
             act.info("starting guest '%s'" % g)
@@ -536,7 +533,7 @@ class MacGuest(MacDriver):
         return "a Tart guest, %s (%s); no physical media" % (self.guest(), self.ch.state() or "unknown")
 
     def reprovision(self):
-        return ("wk vm base\n    the golden guest every vm workspace is cloned from\nwk vm new %s\nwk bench stage <ws> --to %s"
+        return ("wk sysimage build macos-guest-base\n    the golden guest every vm workspace is cloned from\nwk new %s --target vm\nwk bench stage <ws> --to %s"
                 % (self.who(), self.who()))
 
     def own(self, dest):
@@ -561,46 +558,13 @@ class MacGuest(MacDriver):
     def bench_local(self):
         return False
 
-    def manage_argv(self, cmd):
+    def manager(self):
         """tart runs on the macOS host and nowhere else, so the machine managing the guest is this one."""
-        return ["bash", "-c", cmd]
+        return self.ch.via or Local()
 
-    def manage_name(self):
-        return "this machine"
+    def manager_tools(self, m):
+        return self.root
 
 
 DRIVERS = {d.name: d for d in (MacVolume, MacGuest)}
 
-
-def say(text):
-    if text is None:
-        return 1
-    print(text)
-    return 0
-
-
-VERBS = {
-    "bench-root": lambda d, a: say(d.bench_root()),
-    "bench-home": lambda d, a: say(d.bench_home()),
-    "bench-put": lambda d, a: d.bench_put(*a),
-    "bench-put-file": lambda d, a: d.bench_put_file(a[0], a[1]),
-    "manage": lambda d, a: act.exec_into(d.manage_argv(" ".join(a))),
-    "exec": lambda d, a: act.exec_into(d.ch.exec_argv(" ".join(a))),
-    "manage-name": lambda d, a: say(d.manage_name()),
-    "restart-ready": lambda d, a: 0 if d.restart_ready() else 1,
-    "restart-detail": lambda d, a: say(d.restart_detail()),
-    "volume-present": lambda d, a: 0 if d.volume_present() else 1,
-    "firmware-default": lambda d, a: say(d.firmware_default()),
-}
-
-
-def main(argv, env=None):
-    """python3 -m wk.boot.mac <driver> <verb>: boot/machines.sh's verbs and the Mac's own, for boot/mac-*.sh."""
-    from wk.boot import __main__ as boot
-    boot.VERBS.update(VERBS)
-    return boot.main(argv, env)
-
-
-if __name__ == "__main__":
-    from wk.boot.mac import main as run
-    sys.exit(run(sys.argv[1:]))

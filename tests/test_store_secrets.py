@@ -19,6 +19,7 @@ import sys
 import unittest
 
 from tests.support import REPO, WkTest, bash, stub_path
+from tests.test_wk_secrets import KEY_SH
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk import guest  # noqa: E402
@@ -83,7 +84,7 @@ class _Here(WkTest):
 
     def sh(self, script, env=None):
         with stub_path({"podman": FAKE_PODMAN}) as binp:
-            cp = bash('. "$WK_ROOT/lib/common.sh"\n. "$WK_ROOT/lib/store.sh"\n' + script,
+            cp = bash('. "$WK_ROOT/lib/common.sh"\n. "$WK_ROOT/lib/store.sh"\n' + KEY_SH + script,
                       env=self.env({**(env or {}),
                                     "PATH": f"{binp}:{os.environ['PATH']}"}))
         return cp
@@ -92,9 +93,9 @@ class _Here(WkTest):
 class TestTheStoreFunctionsReadAndWriteHere(_Here):
     def test_store_read_and_clear_round_trip(self):
         cp = self.sh(
-            f'printf "%s\\n" {PLACEHOLDER} | wk_cred_store claude\n'
+            f'printf "%s\\n" {PLACEHOLDER} | key_store claude\n'
             'printf "stored=[%s]\\n" "$(wk_agent_secret claude)"\n'
-            'wk_cred_clear claude\n'
+            'key_clear claude\n'
             'printf "cleared=[%s]\\n" "$(wk_agent_secret claude)"\n')
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
         self.assertIn(f"stored=[{PLACEHOLDER}]", cp.stdout)
@@ -116,10 +117,10 @@ class TestTheStoreFunctionsReadAndWriteHere(_Here):
         held = self.secrets.parent / "push-keys"
         held.mkdir(parents=True)
         (held / "build_key_fork").write_text(f"{PLACEHOLDER}-fork\n")
-        cp = self.sh('printf "[%s]\\n" "$(wk_push_key fork)"')
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertIn(f"[{PLACEHOLDER}-fork]", cp.stdout)
-        self.assertFalse(self.witness.exists(), cp.stderr)
+        from wk.machine import Local
+        from wk.secrets import Secrets
+        sec = Secrets(REPO, self.env(), Local())
+        self.assertEqual(f"{PLACEHOLDER}-fork\n", sec.read(sec.push_key_path("fork")))
 
     def test_the_github_token_is_beside_the_private_halves(self):
         """It publishes, so it is in the directory nothing mounts and not in
@@ -218,7 +219,7 @@ class TestNothingButAFileIsReadOrWrittenThroughAgentRw(_Here):
 
         ln -sfn ../push-keys/github-pat /agent-rw/.credentials.json
 
-    and every host-side read of that name becomes a read of the token (`wk vm
+    and every host-side read of that name becomes a read of the token (`wk
     start` copies what it reads into a guest) and every host-side write becomes
     a write through the link, so `wk key set claude-login` would overwrite it.
     A hard link does the same without being a symlink.
@@ -254,8 +255,8 @@ class TestNothingButAFileIsReadOrWrittenThroughAgentRw(_Here):
                 f'wk_agent_secret {self.NAME}',
             "wk_agent_secret_present":
                 f'wk_agent_secret_present {self.NAME}',
-            "wk_cred_store":
-                f'printf "%s\\n" replacement | wk_cred_store {self.NAME}',
+            "key_store":
+                f'printf "%s\\n" replacement | key_store {self.NAME}',
         }
 
     def test_the_row_really_does_live_in_the_writable_directory(self):
@@ -303,7 +304,7 @@ class TestNothingButAFileIsReadOrWrittenThroughAgentRw(_Here):
         """The refusal is about what a workspace could put there, and the
         ordinary path is untouched: the credential still round-trips."""
         doc = "{-a-: 1}"
-        cp = self.sh(f'printf "%s" "{doc}" | wk_cred_store {self.NAME}\n'
+        cp = self.sh(f'printf "%s" "{doc}" | key_store {self.NAME}\n'
                      f'if wk_agent_secret_present {self.NAME}; then echo present; fi\n'
                      f'printf "bytes=[%s]\\n" "$(wk_cred_read {self.NAME})"')
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)

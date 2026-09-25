@@ -192,6 +192,11 @@ class TestOneBuilderPerTarget(unittest.TestCase):
             def exec(ws, argv, timeout=None):
                 asked.append((ws, tuple(argv), timeout))
                 return types.SimpleNamespace(rc={1: 0, 2: 1}.get(int(argv[-1]), 124))
+
+            @staticmethod
+            def pid_alive(ws, pid, cap=None):
+                r = T.exec(ws, ["kill", "-0", str(pid)], timeout=cap)
+                return True if r.rc == 0 else False if r.rc == 1 else None
         ask = record.of_target(T).ask_target
         self.assertEqual([ask("ws", 1, 5), ask("ws", 2, 5), ask("ws", 3, 5)], [True, False, None])
         self.assertEqual(asked[0], ("ws", ("kill", "-0", "1"), 5))

@@ -24,8 +24,8 @@ password, key-based).
 **From inside a workspace this may not work at all, and that is the sandbox, not a fault.** A
 workspace reaches a board only if its address is in `$WK_STORE/pi-hosts`, which `wk pi setup`
 writes — and the rpi3 has not been provisioned. Do not go hunting for the address, do not scan the
-LAN: say the board is not reachable from here and let the host drive it (`wk pi deploy`,
-`wk pi bench`).
+LAN: say the board is not reachable from here and let the host drive it (`wk bench deploy`,
+`wk bench run --system rpi3`).
 
 Quick connectivity + state check:
 ```
@@ -48,9 +48,9 @@ If `/WebKit` isn't mounted: `sudo mkdir -p /WebKit && sudo mount /dev/sda1 /WebK
 
 ### Where a wk-deployed WebKit is
 
-`wk pi deploy <image-profile|yocto-workspace> rpi3 --slot <name>` puts a WebKit at
+`wk bench deploy <lane> rpi3 --slot <name>` puts a WebKit at
 `/var/wk/slots/<name>/root/` (usr/lib, usr/libexec/wpe-webkit-*, ...) with a
-`slot.json` beside it naming the commit and the build-id; `wk pi bench` runs
+`slot.json` beside it naming the commit and the build-id; `wk bench run <lane> <plan> --system rpi3` runs
 run-benchmark on the workstation and launches the board's own `cog` from that
 slot over ssh, with `LD_LIBRARY_PATH`, `WEBKIT_EXEC_PATH` and
 `WEBKIT_INJECTED_BUNDLE_PATH` pointing into it. Prefer those commands; the

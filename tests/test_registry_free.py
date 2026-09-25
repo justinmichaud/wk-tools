@@ -3,8 +3,8 @@ target a workspace lives on from evidence -- a stat per configured target
 against its own store, or, before that store exists, the task record `wk
 new` writes as its first act into that store, trusted only while the process
 writing it is alive -- never from a workspace->target registry, because there is no
-longer one to consult. `wk completion --list-workspaces` derives the same
-way, walking the stores this machine can see. Each docstring is the phrase
+longer one to consult. The completion script's workspace list derives the
+same way, walking the stores this machine can see. Each docstring is the phrase
 of the behaviour it checks.
 
 There is no hit/miss pair to test any more: a registry is a cache that can
@@ -21,6 +21,7 @@ import tempfile
 import unittest
 
 from tests.support import REPO, WkTest, bash, rand_suffix, run
+from wk import completion
 
 _SOURCES = f'''
 . "{REPO}/lib/common.sh"
@@ -120,13 +121,11 @@ class TestTargetAllReadsTheMachineRegistry(WkTest):
 
 class TestCompletionListsTheStore(WkTest):
     def test_completion_list_workspaces_lists_fake_store_workspace(self):
-        """`wk completion --list-workspaces` lists the fake store's workspace"""
+        """the completion script's workspace list holds the fake store's workspace"""
         with tempfile.TemporaryDirectory(prefix="wk-registry-free-") as tmp:
             name = f"demo-{rand_suffix()}"
             os.makedirs(os.path.join(tmp, "ws", name))
-            cp = run("completion", "--list-workspaces", env={"WK_STORE": tmp})
-            self.assertEqual(cp.returncode, 0, cp.stdout)
-            self.assertIn(name, cp.stdout.splitlines())
+            self.assertIn(name, completion.local_workspaces(str(REPO), {"WK_STORE": tmp}))
 
 
 if __name__ == "__main__":

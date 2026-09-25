@@ -1,0 +1,8 @@
+echo "kernel=$(uname -r)"
+echo "arch=$(uname -m)"
+echo "throttled=$(cat /sys/devices/platform/soc/soc:firmware/get_throttled 2>/dev/null)"
+command -v taskset >/dev/null 2>&1 && echo "taskset=yes"
+command -v weston >/dev/null 2>&1 && echo "weston=yes"
+command -v systemctl >/dev/null 2>&1 && echo "systemd=yes"
+command -v sysprof-cli >/dev/null 2>&1 && echo "sysprof=yes"
+echo "paranoid=$(cat /proc/sys/kernel/perf_event_paranoid 2>/dev/null)"

@@ -166,7 +166,7 @@ class TestSysimageRmIsATombstone(unittest.TestCase):
 
 
 # A stub ssh that never executes the remote script it is handed -- for
-# 'wk boot's b_medium_read (boot/machines.sh), which on a workstation asks the
+# 'wk boot's medium_read (lib/wk/boot/driver.py), which on a workstation asks the
 # card helper to read `wk-image.id` off a boot partition of the medium. There
 # is no such device here, so letting the real call through would only fail
 # differently on whatever this test happens to run on. Instead: recognise the
@@ -175,7 +175,7 @@ class TestSysimageRmIsATombstone(unittest.TestCase):
 # tests/test_disk_logic.py uses for a stubbed sfdisk.
 #
 # The helper is addressed by a partition *number*, so the call reads
-# `boot-read '/dev/sda' '1'` rather than naming /dev/sda1.
+# `boot-read /dev/sda 1` rather than naming /dev/sda1.
 #
 # rpi5-usb enumerates two candidate partitions (1 and 3: an A/B pair --
 # boot/rpi5-usb.sh), but a board with one system written holds it only on the
@@ -185,7 +185,7 @@ class TestSysimageRmIsATombstone(unittest.TestCase):
 # so only partition 1 answers.
 _SSH_STUB = '''#!/bin/sh
 case "$*" in
-  *boot-read*"'/dev/sda' '1'"*wk-image.id*) echo "{fake_id}" ;;
+  *"boot-read /dev/sda 1 wk-image.id"*) echo "{fake_id}" ;;
   *wk-image.id*) : ;;
   *) : ;;
 esac
@@ -306,8 +306,8 @@ class TestScanFindsWhatTheBuildersLeave(unittest.TestCase):
             self.assertEqual(self._scan(d), [])
 
     def test_an_image_workspace_with_no_image_gets_a_placeholder(self):
-        """A yocto rebuild deletes build/image (clear_stale_image_copies,
-        image/yocto-build.sh) and repopulates it at the end, so for hours the
+        """A yocto rebuild deletes build/image (copies_aside,
+        lib/wk/sysimage/yocto_target.py) and repopulates it at the end, so for hours the
         workspace holds nothing -- empty, or with the image directory made
         fresh and not yet written."""
         with scratch_dir() as d:

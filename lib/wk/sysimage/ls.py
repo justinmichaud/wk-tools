@@ -1,19 +1,19 @@
-"""The images a workspace holds, found as each builder's outputs on every read, and
-`wk sysimage ls` over this store and every machine that answers for one of its own."""
+"""The images a workspace holds, found as each builder's outputs on every read; `wk sysimage ls` walks every machine that answers for a store of its own."""
 
 import fnmatch
 import os
 import time
 from collections import namedtuple
-from concurrent.futures import ThreadPoolExecutor
 
-from wk import act, images, slot
+from wk import act, fleetwalk, images, slot
+from wk.clock import Clock
 
 Image = namedtuple("Image", "builder ws path")   # path None: an image workspace holding none right now
 
 ROW = "%-40s %-8s %-10s %-10s %-9s %-8s %s"
 HEADER = ("WORKSPACE", "BOARD", "WHERE", "BUILDER", "STATE", "SIZE", "BUILT")
 PGO_USE = "wpe-cross-pgo-use"
+HOST_BUILDERS = ("mac-volume", "guest")
 
 
 class Builder:
@@ -70,6 +70,26 @@ def outputs(machine, store, ws):
     return [p for b in BUILDERS for p in b.outputs(machine, store.ws_dir(ws))]
 
 
+def host_profiles(env):
+    for name in images.names(env):
+        p = images.quiet_load(name, env)
+        if p and p["IMG_BUILDER"] in HOST_BUILDERS:
+            yield p
+
+
+def builder_outputs(reg, clock, p):
+    """A host builder's marker, read off reg.machine/reg.env, the one path holds and path also ask."""
+    from wk.sysimage import guestbase, macvolume
+    try:
+        if p["IMG_BUILDER"] == "mac-volume":
+            return macvolume.MacVolume(reg.machine, p, reg.env, clock).outputs()
+        if p["IMG_BUILDER"] == "guest":
+            return guestbase.Base(reg.load("vm"), clock).outputs()
+    except LookupError:
+        return []
+    return None
+
+
 def stamp(path):
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(os.stat(path).st_mtime))
 
@@ -103,9 +123,9 @@ def slot_is(ws, name, commit, config, env):
         doc = slot.load(os.path.join(d, "slot.json")) if d else None
     except (OSError, ValueError):
         return False
-    if doc is None or slot.get(doc, "commit") != commit:
+    if doc is None or doc.get("commit") != commit:
         return False
-    return config is None or slot.get(doc, "build_config") == config
+    return config is None or doc.get("build_config") == config
 
 
 def slot_holds(ws, name, commit, env):
@@ -119,8 +139,9 @@ def slot_holds(ws, name, commit, env):
 class Listing:
     """This store's images, then each target whose machine answers for a store of its own, through its own wk."""
 
-    def __init__(self, reg, label, here_label, building, warn=act.warn):
+    def __init__(self, reg, label, here_label, building, warn=act.warn, clock=None):
         self.reg, self.label, self.here_label, self.building, self.warn = reg, label, here_label, building, warn
+        self.clock = clock or Clock()
 
     def image_rows(self, image):
         ws, env = image.ws, self.reg.env
@@ -142,40 +163,26 @@ class Listing:
                 out.append("    a build is running here -- these bytes are the previous image; 'wk logs %s' follows it" % ws)
         for d, doc in slot_docs(ws, env):
             out.append("    slot %-12s %s  %s  built %s  (%s)" % (
-                slot.get(doc, "slot"), slot.get(doc, "commit")[:12], slot.get(doc, "build_config", "?"),
-                slot.get(doc, "built_at"), d))
+                doc.get("slot", ""), doc.get("commit", "")[:12], doc.get("build_config", "?"),
+                doc.get("built_at", ""), d))
         return out + (["    " + note] if note else [])
 
+    def host_rows(self):
+        rows = []
+        for p in host_profiles(self.reg.env):
+            found = builder_outputs(self.reg, self.clock, p) or []
+            if not found:
+                continue
+            name, builder, board = p["IMG_PROFILE"], p["IMG_BUILDER"], p["IMG_MACHINE"] or "-"
+            rows.append(ROW % (name, board, self.label, builder, "ready", "-", "-"))
+            rows.append("    " + found[0])
+        return rows
+
     def store_rows(self):
-        return [row for image in scan(self.reg.machine, self.reg.store) for row in self.image_rows(image)]
+        return [row for image in scan(self.reg.machine, self.reg.store) for row in self.image_rows(image)] + self.host_rows()
 
-    def target_rows(self, name):
-        try:
-            target = self.reg.load(name)
-        except LookupError as e:
-            self.warn(str(e))
-            return []
-        side, _ = target.probe()
-        if side == "stopped":
-            self.warn("the machine behind target '%s' is stopped, so the images in its\n"
-                      "    store are not listed -- 'wk start' brings it up" % name)
-            return []
-        if side != "answering":
-            return []
-        label = self.here_label if target.is_here() else name
-        rc, out = target.wk("sysimage", "ls", "--continued",
-                            env=dict(self.reg.env, WK_ROW_LABEL=label, WK_NO_DELEGATE="1"), quiet=True)
-        if rc != 0:
-            self.warn("'%s' did not answer the listing, so the images in its store are not\n"
-                      "    here. Its wk-tools predates a listing that walks the fleet:  wk sync --tools %s" % (name, name))
-        return [l for l in out.replace("\r", "").splitlines() if l.strip()]
-
-    def fleet_rows(self):
-        names = self.reg.walk()
-        if not names:
-            return []
-        with ThreadPoolExecutor(max_workers=len(names)) as pool:
-            return [row for rows in pool.map(self.target_rows, names) for row in rows]
+    def _label(self, target, name):
+        return self.here_label if target.is_here() else name
 
     def rows(self):
-        return self.store_rows() + self.fleet_rows()
+        return self.store_rows() + fleetwalk.fleet_rows(self.reg, "sysimage", "images", self._label, self.warn)

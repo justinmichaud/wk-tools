@@ -69,6 +69,30 @@ def names():
     return list(CONFIGS)
 
 
+ARCHES = ("native", "armhf")
+ARCH_NAMES = {"": "native", "native": "native", "host": "native", "arm64": "native", "aarch64": "native", "64": "native",
+              "armhf": "armhf", "arm32": "armhf", "armv7": "armhf", "arm": "armhf", "32": "armhf"}
+# Pinned, arm64 with armhf multiarch: `wkdev-create --arch` would hand podman the aarch64 image with --arch=arm.
+IMAGE_ARMHF = "ghcr.io/igalia/wkdev-sdk:24.04_arm32"
+
+
+def arch_canon(arch):
+    if arch in ARCH_NAMES:
+        return ARCH_NAMES[arch]
+    if arch in ("riscv64", "riscv"):
+        act.die("riscv64 is a cross-build target, not a workspace architecture:\n"
+                "    this machine cannot execute riscv64 natively, so it needs a sysroot.\n"
+                "    See docs/Nice to have/HANDOFF-cross-compile.md; 'wk build --sysroot' is where it will go.")
+    act.die("unknown architecture '%s' (one of: %s)\n"
+            "    A workspace's --arch is what it runs *natively*. To build for something\n"
+            "    this machine cannot execute, that is a cross build -- see\n"
+            "    docs/Nice to have/HANDOFF-cross-compile.md." % (arch, " ".join(ARCHES)))
+
+
+def arch_has_gpu(arch):
+    return (arch or "native") != "armhf"
+
+
 def arch_label(arch):
     return "" if arch in ("", "native") else arch
 

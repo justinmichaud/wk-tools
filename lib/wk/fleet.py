@@ -9,6 +9,8 @@ import sys
 KINDS = ("build", "peer", "board", "mac", "guest", "bridge")
 TARGET_KINDS = ("build", "peer")
 BENCH_KINDS = ("board", "mac", "guest")
+BRIDGE_DEFAULTS = {"BR_SSH": lambda n: n, "BR_HOSTNAME": lambda n: n, "BR_TAG": "tag:bridge", "BR_IF": "lan0",
+                   "BR_EGRESS": "none", "BR_CAMERA": "off", "BR_USER": "user", "BR_BATTERY_LIMIT": "80"}
 USAGE = "usage: python3 -m wk.fleet load <name> [--kind K]... | list [--kind K]... | get <name> <KEY> | path <name> | self"
 KEY = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)=(.*)$")
 
@@ -90,6 +92,10 @@ class Fleet:
             raise ConfError("%s: KIND=%s is not one of %s" % (files[0], kind or "(unset)", ", ".join(KINDS)))
         if kind == "mac" and self.env.get("WK_BENCH_VOLUME"):
             conf["NODE_VOLUME"] = self.env["WK_BENCH_VOLUME"]
+        if kind == "bridge":
+            for k, v in BRIDGE_DEFAULTS.items():
+                if not conf.get(k):
+                    conf[k] = v(name) if callable(v) else v
         return conf
 
     def kind(self, name):

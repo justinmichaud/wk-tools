@@ -20,7 +20,7 @@ from tests.support import REPO, bash, requires_machine, scratch_dir
 
 sys.path.insert(0, str(REPO / "lib"))
 
-from wk import act, fleet  # noqa: E402
+from wk import act, fleet, guest  # noqa: E402
 from wk.boot import __main__ as boot_main  # noqa: E402
 from wk.boot import mac  # noqa: E402
 from wk.boot.mac import DRIVERS, HELPER, Channel, Script  # noqa: E402
@@ -74,7 +74,7 @@ class FakeMac:
         self.reboot()
 
     def leave_bench(self):
-        """The bench install's own job ending (bench/mac-bench-autorun.sh leave_bench): the host blessed back, a reboot."""
+        """The bench install's own job ending (lib/wk/bench/autorun.py's leave): the host blessed back, a reboot."""
         self.firmware = "host"
         self.reboot()
 
@@ -221,7 +221,7 @@ class FakeGuest:
         return ["ssh", "admin@192.0.2.9", "bash -lc " + cmd]
 
     def display(self):
-        return self.env.get("WK_VM_DISPLAY") or mac.GUEST_DISPLAY
+        return guest.display(self.env)
 
     def probeable(self):
         return self.tart
@@ -273,12 +273,10 @@ class MacConformance:
     kind = None
 
     def test_the_shim_defines_exactly_the_functions_the_class_has(self):
-        """a bench caller asks `command -v b_bench_put` / `b_bench_root` as a board caller asks for b_disarm."""
+        """a bash caller asks `command -v b_disarm` of a Mac as of a board."""
         cls = DRIVERS[self.kind]
         text = (REPO / "boot" / ("%s.sh" % self.kind)).read_text()
         self.assertEqual(set(re.findall(r"(?m)^(\w+)\(\)", text)), set(cls.shims))
-        for verb in re.findall(r"_wk_mac ([\w-]+)", text):
-            self.assertIn(verb, dict(boot_main.VERBS, **mac.VERBS), verb)
         for verb in re.findall(r"_wk_boot %s ([\w-]+)" % self.kind, text):
             self.assertIn(verb, boot_main.VERBS, verb)
 
@@ -460,7 +458,7 @@ class TestReturn(unittest.TestCase):
         d.probe()
         got, err = quiet(d.disarm)
         self.assertIs(got, act.Refused)
-        for remedy in ("wk boot mbp --prepare", "wk boot mbp --disarm", "Startup Disk"):
+        for remedy in ("wk machine setup mbp", "wk boot mbp --disarm", "Startup Disk"):
             self.assertIn(remedy, err)
 
     def test_the_restart_is_ready_only_when_the_helper_names_its_detach(self):
@@ -679,32 +677,14 @@ class TestChannel(unittest.TestCase):
 
 
 class TestTheShim(unittest.TestCase):
-    """boot/mac-volume.sh over a shell's NODE_*: what bench/mac-ab.sh and cmd/boot read."""
+    """boot/mac-volume.sh over a shell's NODE_*: what cmd/boot asks."""
 
     PRE = ('. "$WK_ROOT/lib/common.sh"; . "$WK_ROOT/lib/store.sh"; . "$WK_ROOT/lib/bench.sh"; . "$WK_ROOT/boot/machines.sh"\nNODE_NAME=mbp NODE_SSH=fakemac '
            'NODE_BENCH_SSH=fakemac-bench NODE_VOLUME="WK Bench" NODE_DRIVER=mac-volume\n. "$WK_ROOT/boot/mac-volume.sh"\n')
 
     def test_the_facts_and_a_verb_that_reaches_no_machine(self):
-        cp = bash(self.PRE + 'MODE_CHANNEL=bench\necho "$BOOT_ARMING|$BOOT_HELPER|$(b_bench_root)|$(b_bench_home)"')
-        self.assertEqual(cp.stdout.strip(), "command|%s|/var/wk|/Users/bench" % HELPER, cp.stderr)
-
-    def test_the_bench_channel_is_the_alias_for_boot_machines_sh_r_ssh(self):
-        cp = bash(self.PRE + 'ssh() { printf "%s\\n" "$*"; }\ni_ssh true\n', env={"WK_MAC_BENCH_SSH": "somewhere-else"})
-        self.assertTrue(cp.stdout.strip().endswith("somewhere-else true"), cp.stdout + cp.stderr)
-        self.assertNotIn("-l root", cp.stdout)
-
-    def test_a_put_carries_lib_bench_sh_s_one_list_of_what_it_skips(self):
-        text = (REPO / "boot" / "mac-volume.sh").read_text()
-        self.assertIn('bench-put "$1" "$2" ${BENCH_PUT_SKIP:?', text)
-        cp = bash('. "$WK_ROOT/lib/common.sh"; . "$WK_ROOT/boot/machines.sh"\nNODE_VOLUME="WK Bench"\n'
-                  '. "$WK_ROOT/boot/mac-volume.sh"\nb_bench_put /tmp /var/wk; echo "MUST NOT"')
-        self.assertIn("lib/bench.sh sets it", cp.stderr)
-        self.assertNotIn("MUST NOT", cp.stdout)
-
-    def test_a_refusal_reaches_the_caller(self):
-        cp = bash(self.PRE + 'MODE_CHANNEL=bench\nif b_bench_put /tmp /var/wk; then echo PUT; fi')
-        self.assertNotIn("PUT", cp.stdout)
-        self.assertIn("running measurement", cp.stderr)
+        cp = bash(self.PRE + 'MODE_CHANNEL=bench\necho "$BOOT_ARMING|$BOOT_HELPER"')
+        self.assertEqual(cp.stdout.strip(), "command|%s" % HELPER, cp.stderr)
 
 
 class TestOnTheRealMac(unittest.TestCase):

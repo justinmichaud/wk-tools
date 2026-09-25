@@ -34,18 +34,6 @@ ZED = str(REPO / "cmd" / "zed")
 CHECKOUT = "branch=main\nupstream=origin/main\nbehind=0\nhead=abc1234\n"
 
 
-def _bash_defaults():
-    def arch(argv):
-        a = argv[-1]
-        if a in ("", "native", "arm64"):
-            return Result(0, "native\n")
-        if a in ("armhf", "arm"):
-            return Result(0, "armhf\n")
-        return Result(1, "", "error: unknown architecture '%s' (one of: native armhf)\n" % a)
-
-    return {"arch_canon": arch}
-
-
 class World(Fake):
     """This host with one container target: podman answers from `containers`, wkdev-create stands in for
     firstrun by writing the ready marker, the bridged bash functions answer from `bash`, a record
@@ -62,7 +50,7 @@ class World(Fake):
         self.far = (True, "")
         self.probe = "yes"
         self.checkout = Result(0, CHECKOUT)
-        self.bash = _bash_defaults()
+        self.bash = {}
         self.dirs.add(self.env["WK_LOCK_DIR"])
         self.answer(["hostname"], out="here\n")
         self.answer(["sdk-refresh"])
@@ -301,7 +289,7 @@ class ContainerWorld(World):
         self.answer(["install", "-m"])
         self.answer(["nproc"], out="8\n")
         self.files["/proc/meminfo"] = "MemTotal:       33554432 kB\n"
-        self.bash["arch_has_gpu"] = Result(1)
+        self.bash["gpu_flags"] = Result(0, "")
         self.effects = []
 
     def _sdk(self, argv, f):
@@ -539,7 +527,7 @@ class TestNewFrontTail(WorkspaceTest):
     def test_the_vm_and_armhf_hints(self):
         w = self.make_world(kinds={"fakebox": "vm"})
         _, err = self.stderr(lambda: self.front(w))
-        self.assertIn("wk vm start ws       boot it", err)
+        self.assertIn("wk start ws       boot it", err)
         w = self.make_world()
         _, err = self.stderr(lambda: self.front(w, arch="armhf"))
         self.assertIn("workspace 'ws' ready (armhf)", err)

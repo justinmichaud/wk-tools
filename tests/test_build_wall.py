@@ -26,9 +26,10 @@ import re
 import shutil
 import subprocess
 import unittest
+import unittest.mock
 from pathlib import Path
 
-from tests.support import REPO, WkTest, owed
+from tests.support import REPO, WkTest
 
 BIN = REPO / "container" / "bin"
 WALL = BIN / "wk-build-wall"
@@ -181,13 +182,16 @@ class TestWkOwnBuildPassesThrough(WallTest):
 
     def test_every_builder_declares_itself(self):
         """One rule, and every builder is held to it: an agent's CLAUDECODE
-        reaches all of them, so each has to say it is wk's own build. The
-        yocto one did not, and its slot build was refused (2026-09-03)."""
-        for rel in ("build/build-in-target.sh", "image/buildroot-build.sh",
-                    "image/buildroot-webkit.sh", "image/yocto-build.sh"):
-            with self.subTest(builder=rel):
-                self.assertIn("export WK_BUILD=1", (REPO / rel).read_text(),
-                              f"{rel} does not declare itself to the wall")
+        reaches all of them, so each has to say it is wk's own build. Every
+        builder runs under task.stage_main, which sets it."""
+        import sys
+        sys.path.insert(0, str(REPO / "lib"))
+        from wk.sysimage import task
+        seen = {}
+        with unittest.mock.patch("os.execvpe", lambda f, argv, env: seen.update(env)), \
+                unittest.mock.patch("sys.stderr"):
+            task.stage_main("build", ["true"], environ={"PATH": "/usr/bin", "CLAUDECODE": "1"})
+        self.assertEqual(seen.get("WK_BUILD"), "1")
 
 
 class TestBitbakeGetsTheRealTools(WkTest):
@@ -199,20 +203,16 @@ class TestBitbakeGetsTheRealTools(WkTest):
     do_compile died on exactly this (2026-09-03)."""
 
     def test_the_yocto_build_takes_the_wall_off_path(self):
-        text = (REPO / "image" / "yocto-build.sh").read_text()
-        self.assertIn("_strip_wall_from_path", text,
-                      "the yocto build leaves container/bin on PATH, so "
-                      "tmp/hosttools captures the wall")
+        """It runs as a task.Stage, under the wrapper that strips PATH (task.stage_main)."""
+        driver = (REPO / "lib" / "wk" / "sysimage" / "yocto.py").read_text()
+        self.assertEqual(driver.count("st.run("), 1, "the yocto stage does not run as a task.Stage")
+        self.assertNotIn("exec_argv(", driver, "a yocto stage reaches the workspace around the wrapper")
 
     def _stripped(self, path):
-        fn = re.search(r"(?ms)^_strip_wall_from_path\(\) \{.*?^\}",
-                       (REPO / "image" / "yocto-build.sh").read_text())
-        self.assertIsNotNone(fn, "_strip_wall_from_path is not defined")
-        cp = subprocess.run(
-            ["bash", "-c", fn.group(0) + "\n_strip_wall_from_path"],
-            env={"PATH": path}, capture_output=True, text=True, timeout=60)
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        return cp.stdout
+        import sys
+        sys.path.insert(0, str(REPO / "lib"))
+        from wk.sysimage import task
+        return task.off_wall(path)
 
     def test_it_strips_the_wall_and_keeps_everything_else(self):
         """Both trees -- a person's clone and the one `wk` pushed are routinely
@@ -280,13 +280,8 @@ class TestNoBuilderRecordsTheWall(unittest.TestCase):
                                        "/opt/wk-tools/container/bin/ws:/usr/bin:/bin:/opt/container/binaries"),
                          "/usr/local/bin:/usr/bin:/bin:/opt/container/binaries")
 
-    def test_the_yocto_build_strips_it_itself(self):
-        self.assertRegex((REPO / "image" / "yocto-build.sh").read_text(), r"(?m)^PATH=\$\(_strip_wall_from_path\)$")
-
-    @owed("build/build-in-target.sh runs cmake with the wall ahead of the real tools on PATH, past it only on "
-          "WK_BUILD; `wk build`'s far argv (lib/wk/build.py) goes through task.in_workspace once that file's owner ports it")
     def test_wk_build_runs_under_the_wrapper(self):
-        self.assertIn("task.in_workspace(", (REPO / "lib" / "wk" / "build.py").read_text())
+        self.assertIn("stage.in_workspace(", self._fn(REPO / "lib" / "wk" / "build.py", "run"))
 
 
 class TestOneFileUnderEveryName(WallTest):

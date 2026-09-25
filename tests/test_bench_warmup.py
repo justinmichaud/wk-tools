@@ -5,7 +5,7 @@ Round 0 of every A/B is a leg per arm that is thrown away. It exists because a
 measured round records only what the run *claimed* -- `gpu_renderer=gl` is set
 the moment weston reports an output, and nothing checks which mesa driver the
 web process resolved to, how wide it is, or whether it JITted at all. The
-warmup leg reads those off the live process (bench/wk_board_driver.py) and
+warmup leg reads those off the live process (lib/wk/bench/board_driver.py) and
 carries a profile.
 
 Unit tests only: the probe's raw board output is a fixture, so no board.
@@ -25,7 +25,7 @@ from tests.support import REPO, WkTest
 from tests.test_slots import load_driver
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk.bench import report  # noqa: E402
+from wk.bench import board, report  # noqa: E402
 
 WKDATA = REPO / "lib" / "wkdata.py"
 
@@ -39,6 +39,11 @@ def tmpdir(case):
 def wkdata(*args):
     return subprocess.run(["python3", str(WKDATA), *args], cwd=str(REPO),
                           capture_output=True, text=True, timeout=30)
+
+
+def warmup_check(a, b, same_width=False):
+    """What the A/B's warmup gate (lib/wk/bench/board_ab.py) is told refuses it, one reason per line."""
+    return "\n".join(report.warmup_check(str(a), str(b), same_width))
 
 
 # A 32-bit ARM web process on the v3d hardware driver with the JIT warm, as the
@@ -165,11 +170,10 @@ class TestArtifactsOfOneLegDoNotCollide(WkTest):
     (2026-09-05, task 20260905T200814Z)."""
 
     def test_the_two_paths_are_never_the_same(self):
-        body = (REPO / "cmd" / "pi").read_text()
-        self.assertIn("$machine-$PI_AB_ARM.evidence.json", body)
-        self.assertIn("$machine-$PI_AB_ARM.profile.$(pi_profile_ext)", body)
-        self.assertNotIn('WK_BOARD_WARMUP="${warmdir:+$warmdir/$machine-$PI_AB_ARM.json}"',
-                         body)
+        s = board.BoardSystem(str(REPO), types.SimpleNamespace(machine=None), None, "", None, "rpi5", None)
+        leg = types.SimpleNamespace(out="/b/t/runs/r", o={"arm": "a"})
+        self.assertEqual(s.warm_file(leg, "evidence.json"), "/b/t/warmup/rpi5-a.evidence.json")
+        self.assertNotEqual(s.warm_file(leg, "evidence.json"), s.warm_file(leg, "profile.json"))
 
     def test_a_json_file_that_is_not_evidence_is_refused(self):
         d = tmpdir(self)
@@ -177,10 +181,9 @@ class TestArtifactsOfOneLegDoNotCollide(WkTest):
         (d / "a.json").write_text(json.dumps({"meta": {"interval": 1.0}, "threads": []}))
         (d / "b.json").write_text(json.dumps(
             {"elf": {"bits": 64}, "gl": {}, "jit": {}, "problems": []}))
-        cp = wkdata("warmup-check", str(d / "a.json"), str(d / "b.json"))
-        self.assertEqual(cp.returncode, 1)
-        self.assertIn("is not warmup evidence", cp.stdout)
-        self.assertIn("elf/gl/jit/problems", cp.stdout)
+        problems = warmup_check(d / "a.json", d / "b.json")
+        self.assertIn("is not warmup evidence", problems)
+        self.assertIn("elf/gl/jit/problems", problems)
 
 
 class TestGpuClaimMatchesWhatTheDriverCanSay(WkTest):
@@ -267,33 +270,25 @@ class TestWarmupCheck(WkTest):
 
     def test_two_good_arms_pass(self):
         d = self.arms(self.record(), self.record())
-        cp = wkdata("warmup-check", str(d / "a.json"), str(d / "b.json"))
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertEqual(warmup_check(d / "a.json", d / "b.json"), "")
 
     def test_a_missing_arm_refuses(self):
         d = tmpdir(self)
         (d / "a.json").write_text(json.dumps(self.record()))
-        cp = wkdata("warmup-check", str(d / "a.json"), str(d / "b.json"))
-        self.assertEqual(cp.returncode, 1)
-        self.assertIn("arm B produced no warmup evidence", cp.stdout)
+        self.assertIn("arm B produced no warmup evidence", warmup_check(d / "a.json", d / "b.json"))
 
     def test_different_renderers_refuse(self):
         d = self.arms(self.record(), self.record(driver="/usr/lib/dri/swrast_dri.so",
                                                  software=True))
-        cp = wkdata("warmup-check", str(d / "a.json"), str(d / "b.json"))
-        self.assertEqual(cp.returncode, 1)
-        self.assertIn("different drivers", cp.stdout)
+        self.assertIn("different drivers", warmup_check(d / "a.json", d / "b.json"))
 
     def test_widths_may_differ_across_two_images(self):
         d = self.arms(self.record(bits=64), self.record(bits=32))
-        cp = wkdata("warmup-check", str(d / "a.json"), str(d / "b.json"))
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertEqual(warmup_check(d / "a.json", d / "b.json"), "")
 
     def test_widths_may_not_differ_across_two_slots_of_one_image(self):
         d = self.arms(self.record(bits=64), self.record(bits=32))
-        cp = wkdata("warmup-check", str(d / "a.json"), str(d / "b.json"), "--same-width")
-        self.assertEqual(cp.returncode, 1)
-        self.assertIn("64-bit and 32-bit", cp.stdout)
+        self.assertIn("64-bit and 32-bit", warmup_check(d / "a.json", d / "b.json", same_width=True))
 
 
 class TestWarmupEvidenceIsPerBoard(WkTest):
@@ -344,42 +339,7 @@ class TestWarmupNeverEntersTheStatistics(WkTest):
 
 
 class TestSubtestExclusions(WkTest):
-    """One arm that cannot run a subtest disqualifies it for both arms: JSC
-    disables wasm SIMD below 64-bit outright (Options.cpp, `#if !CPU(X86_64)
-    && !CPU(ARM64)`), so a SIMD-built module cannot run on a 32-bit engine."""
-
-    PLAN = json.dumps({"subtests": {"": ["a-wasm", "argon2-wasm", "b", "c"]}})
-
-    def resolve(self, exclude):
-        return subprocess.run(
-            ["python3", str(WKDATA), "subtests", "--exclude", exclude],
-            input=self.PLAN, cwd=str(REPO), capture_output=True, text=True, timeout=15)
-
-    def test_the_kept_set_is_the_plan_minus_the_exclusions(self):
-        cp = self.resolve("argon2-wasm")
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertEqual(cp.stdout.split(), ["a-wasm", "b", "c"])
-
-    def test_excluding_nothing_keeps_everything(self):
-        self.assertEqual(self.resolve("").stdout.split(), ["a-wasm", "argon2-wasm", "b", "c"])
-
-    def test_a_name_the_plan_does_not_have_refuses(self):
-        cp = self.resolve("nope")
-        self.assertEqual(cp.returncode, 1)
-        self.assertIn("names no subtest", cp.stdout + cp.stderr)
-
-    def test_excluding_everything_refuses(self):
-        cp = self.resolve("a-wasm,argon2-wasm,b,c")
-        self.assertEqual(cp.returncode, 1)
-
-    def test_the_declared_rows_name_real_jetstream3_subtests_and_a_reason(self):
-        rows = [l.split(None, 3) for l in
-                (REPO / "bench" / "subtest-exclusions.conf").read_text().splitlines()
-                if l.strip() and not l.startswith("#")]
-        self.assertTrue(rows)
-        for plan, bits, name, why in rows:
-            self.assertIn(bits, ("32", "64"), name)
-            self.assertTrue(why.strip(), "%s carries no reason" % name)
+    """A subtest dropped from both arms says so in the report; which are dropped is tests/test_pi_ab_systems.py's."""
 
     def test_an_excluded_run_says_so_in_the_report(self):
         cp = subprocess.run(
@@ -429,23 +389,9 @@ class TestRunOrderAndSettling(WkTest):
         lines = self.wkd().order_lines(a, b)
         self.assertIn("5.0 position", lines[0])
 
-    def test_every_reboot_gets_a_discarded_settle_run(self):
-        leg = subprocess.run(
-            ["bash", "-c", 'sed -n "/^pi_system_leg/,/^}/p" "$1/cmd/pi"', "_", str(REPO)],
-            capture_output=True, text=True, timeout=15).stdout
-        self.assertIn("PI_SETTLE=1", leg)
-        self.assertEqual(leg.count("pi_bench_once"), 2,
-                         "a booted leg runs one discarded run then the measured one")
-
-    def test_the_ab_loops_lead_with_each_arm_in_turn(self):
-        body = (REPO / "cmd" / "pi").read_text()
-        self.assertEqual(body.count("i % 2"), 2,
-                         "both --ab and --ab-systems counterbalance their rounds")
-
     def test_the_clock_is_pinned_not_merely_governed(self):
-        body = (REPO / "cmd" / "pi").read_text()
-        self.assertIn("scaling_min_freq", body)
-        self.assertIn("dvfs_pinned", body)
+        self.assertIn("scaling_min_freq", (REPO / "bench" / "onboard" / "pin-clock.sh").read_text())
+        self.assertIn("host.dvfs_pinned=", (REPO / "lib" / "wk" / "bench" / "board.py").read_text())
 
 
 class TestScoreAgainstItsOwnSubtests(WkTest):
@@ -499,20 +445,12 @@ class TestProfilerChoice(WkTest):
         self.assertEqual(self.resolve("x86_64", "no").stdout.split()[0], "samply")
 
     def test_the_arch_asked_about_is_the_userspace_not_the_kernel(self):
-        """A lib32 image reports aarch64 from `uname -m` and has no 64-bit
-        loader; resolving on that staged a samply the board could not exec
-        (2026-09-05, rpi5-32: "cannot execute: required file not found")."""
-        probe = subprocess.run(
-            ["bash", "-c",
-             'grep -c "uname -m" "$1/cmd/pi" || true', "_", str(REPO)],
-            capture_output=True, text=True, timeout=15)
-        stage = subprocess.run(
-            ["bash", "-c",
-             'sed -n "/^pi_profiler_stage/,/^}/p" "$1/cmd/pi"', "_", str(REPO)],
-            capture_output=True, text=True, timeout=15)
-        self.assertNotIn("uname -m", stage.stdout,
-                         "the profiler is resolved from the kernel arch again")
-        self.assertIn("pi_userspace_arch", stage.stdout)
+        """A lib32 image reports aarch64 from `uname -m` and has no 64-bit loader, so the
+        profiler is chosen from the measured library's own ELF header."""
+        text = (REPO / "lib" / "wk" / "bench" / "board.py").read_text()
+        stage = text[text.index("    def profiler_stage("):text.index("    def launch(")]
+        self.assertNotIn("uname", stage, "the profiler is resolved from the kernel arch again")
+        self.assertIn("elf_arch(", stage)
 
     def test_armv7_falls_to_the_image_sysprof(self):
         cp = self.resolve("armv7l", "yes")
@@ -527,12 +465,6 @@ class TestProfilerChoice(WkTest):
 
 
 
-def pi_fn(name):
-    text = (REPO / "cmd" / "pi").read_text()
-    start = text.index(chr(10) + name + "() {")
-    return text[start:text.index(chr(10) + "}", start)]
-
-
 class TestTheJitTierProbeIsOptIn(unittest.TestCase):
     """The tier counts come from JSC_report*CompileTimes, which dump a JS
     function signature from the compiler thread -- and that SIGSEGVs the JIT
@@ -541,16 +473,13 @@ class TestTheJitTierProbeIsOptIn(unittest.TestCase):
     probe is asked for, and its absence is a note rather than a fault."""
 
     def test_the_options_are_only_set_when_asked(self):
-        launch = pi_fn("pi_launch_cmd")
-        self.assertIn("JSC_reportDFGCompileTimes=1", launch)
-        self.assertIn('[ -z "$PI_JIT_TIERS" ]', launch)
+        s = board.BoardSystem(str(REPO), types.SimpleNamespace(machine=None), None, "", None, "rpi5", None)
+        s.doc = {"browser": "cog", "lib_dir": "usr/lib", "exec_dir": "usr/libexec", "bundle_dir": "usr/lib/b"}
 
-    def test_the_flag_exists_and_is_explained(self):
-        text = (REPO / "cmd" / "pi").read_text()
-        self.assertIn("--jit-tiers) PI_JIT_TIERS=1", text)
-        self.assertIn("--jit-tiers]", text)
-        head = "\n".join(text.splitlines()[:60])
-        self.assertIn("--jit-tiers", head)
+        def launch(**o):
+            return s.launch(types.SimpleNamespace(slot="a", cores="", o=o))
+        self.assertIn("JSC_reportDFGCompileTimes=1", launch(warmup="1", jit_tiers="1"))
+        self.assertNotIn("JSC_reportDFGCompileTimes=1", launch(warmup="1"))
 
     def test_not_probed_is_a_note_and_not_a_problem(self):
         record = {"elf": {"bits": 64}, "gl": {"mapped": ["x_dri.so"], "render_nodes": ["/dev/dri/renderD128"]},

@@ -1,15 +1,10 @@
-"""A benchmark's payload, fetched once per upstream commit and pinned; `python3 -m wk.bench.seed` is lib/bench.sh's seed_payload."""
+"""A benchmark's payload, fetched once per upstream commit and pinned."""
 
 import json
 import os
 import re
-import sys
 
 from wk import act
-from wk.clock import Clock
-from wk.lock import Lock
-from wk.machine import Local
-from wk.store import Store
 
 PLANS = "webkitpy/benchmark_runner/data/plans"
 SEED_WAIT = 3600
@@ -96,17 +91,25 @@ class Seeder:
         return dest
 
 
-def main(argv):
-    if len(argv) != 2:
-        sys.stderr.write("usage: python3 -m wk.bench.seed <seed dir> <plan>  (the plan's JSON on stdin)\n")
-        return 2
-    machine = Local()
-    try:
-        print(Seeder(machine, Lock(Store(), machine, Clock()), argv[0]).seed(argv[1], sys.stdin.read()))
-    except act.Refused as e:
-        return e.status
-    return 0
-
-
-if __name__ == "__main__":
-    sys.exit(main(sys.argv[1:]))
+def rubble(machine, lock, seed_dir):
+    """A `.tmp-` assembly nobody holds the lock of, and a payload a newer seed of its plan supersedes."""
+    from wk.rubble import du_kb, remover, row
+    if not machine.isdir(seed_dir):
+        return []
+    rows, seen = [], set()
+    for n in machine.listdir(seed_dir):
+        if not n.startswith(".tmp-"):
+            continue
+        pid = lock.holder_pid("bench-seed-" + n[len(".tmp-"):])
+        if pid is None or not machine.alive(pid):
+            d = os.path.join(seed_dir, n)
+            rows.append(row("seed", "abandoned payload seed %s" % n, du_kb(machine, d), take=remover(machine, d)))
+    for n in machine.run(["ls", "-1t", seed_dir]).out.split():
+        m = re.match(r"^(.+)-[0-9a-f]{12}$", n)
+        if not m:
+            continue
+        if m.group(1) in seen:
+            d = os.path.join(seed_dir, n)
+            rows.append(row("payload", "superseded %s payload %s" % (m.group(1), n), du_kb(machine, d), take=remover(machine, d)))
+        seen.add(m.group(1))
+    return rows

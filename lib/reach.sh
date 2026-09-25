@@ -6,6 +6,5 @@ reach_tailnet() { wk_tailscale_peers | _reach_py tailnet "$1"; }
 REACH_WHY=""
 reach_offline() { wk_tailscale_peers >/dev/null; REACH_WHY=$(wk_tailscale_peers | _reach_py offline "$1"); [ -n "$REACH_WHY" ]; }
 reach_without_tailnet() { wk_tailscale_peers | _reach_py without-tailnet "$1"; }
-reach_enumerate() { _reach_py enumerate "${1:-}"; }   # <mac>
 # A fresh host key is generated on every image write, so pinning warns of a man-in-the-middle; with known-hosts at /dev/null ssh announces a new key every connection, hence LogLevel=ERROR.
 _unpinned_host_key_opts() { printf '%s' "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR"; }

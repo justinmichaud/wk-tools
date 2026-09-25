@@ -1,5 +1,4 @@
-# Target driver: podman container on the webkit-container-sdk -- rootless, --userns
-# keep-id, --network none, so egress is only through the proxy's unix socket.
+# Target driver: podman container on the webkit-container-sdk -- rootless, --userns keep-id, --network none, so egress is only through the proxy's unix socket.
 
 if [ -n "${WK_IN_VM:-}" ]; then
     WK_SDK="${WK_SDK:-/opt/webkit-container-sdk}"
@@ -74,7 +73,6 @@ t_spawn() {
         >/dev/null
 }
 
-# From macOS the store and the containers are the podman machine's, so the machine answers for them in its own words.
 t_far_side() {
     if [ -n "${WK_IN_VM:-}" ] || ! is_macos; then echo none
     elif [ "$(_machine_state "${WK_MACHINE:-wk}")" = running ]; then echo answering
@@ -82,7 +80,6 @@ t_far_side() {
     fi
 }
 t_has_wk() { [ "$(t_far_side)" = answering ]; }
-t_wk()     { _in_machine "$(vm_wk_cmd "$@")"; }
 
 # From macOS the rootless connection is named explicitly: the default there is rootful.
 _hpodman() {
@@ -91,22 +88,6 @@ _hpodman() {
     else
         podman -c "${WK_MACHINE:-wk}" "$@"
     fi
-}
-
-WK_SDK_REPO="ghcr.io/igalia/wkdev-sdk"
-
-t_sdk_local() {
-    local img created
-    img=$(_hpodman images --format '{{.Repository}}:{{.Tag}}' 2>/dev/null \
-          | grep "^$WK_SDK_REPO:" | head -1) || img=""
-    [ -n "$img" ] || return 1
-    created=$(_hpodman image inspect "$img" --format '{{.Created}}' 2>/dev/null | cut -c1-10)
-    printf 'image=%s\ncreated=%s\n' "$img" "$created"
-}
-
-t_sdk_upstream() {
-    _hpodman search --list-tags "$WK_SDK_REPO" --limit 100 2>/dev/null \
-        | awk 'NR > 1 {print $2}'
 }
 
 _ctr_user() {

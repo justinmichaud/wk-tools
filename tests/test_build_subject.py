@@ -76,20 +76,6 @@ class TestABuildSaysWhatItIsOf(WkTest):
 
 
 class TestTheRecordCarriesIt(WkTest):
-    def test_the_yocto_build_records_a_subject_on_its_task(self):
-        spawn = func_body((REPO / "image" / "yocto.sh").read_text(), "yocto_spawn")
-        self.assertIn('task_set "$YOCTO_TASK" subject "$subject"', spawn)
-
-    def test_it_is_computed_where_the_facts_are(self):
-        text = (REPO / "image" / "yocto.sh").read_text()
-        self.assertIn(
-            '"$(image_build_subject "$ws" "$stage" "$slot" "$commit" "$cross_config")"', text)
-
-    def test_the_ab_records_what_it_measures(self):
-        """`wk status` names a running A/B by its task, which says when it was
-        requested and not what it is comparing."""
-        self.assertIn('task_set "$AB_TASK" subject', (REPO / "cmd" / "ab").read_text())
-
     def test_status_emits_it(self):
         self.assertIn('r.opt("subject", t.field("subject"))', (REPO / "lib" / "wk" / "status.py").read_text())
 

@@ -1,7 +1,8 @@
 """The Pi arrangements: how each board is armed for one boot of the system on its bench medium."""
 
 from wk import act
-from wk.boot.driver import Driver, disk_of, kv, part, partno
+from wk.boot.driver import Driver, disk_of, part, partno
+from wk.kv import kv
 
 
 class PiSd(Driver):
@@ -32,7 +33,7 @@ class PiSd(Driver):
 
     def arm(self, p, order=""):
         if not p:
-            act.die("arming needs the selected boot partition (machine_select_system, cmd/boot)")
+            act.die("arming needs the selected boot partition (select_system, wk boot)")
         slot = self.slot(p)
         addr = "%s@%s" % (self.c("NODE_DEVICE"), slot)
         state = self.state(addr)
@@ -114,13 +115,13 @@ class PiTryboot(Driver):
 
     def arm(self, p, order=""):
         if not p:
-            act.die("arming needs the selected boot partition (machine_select_system, cmd/boot)")
+            act.die("arming needs the selected boot partition (select_system, wk boot)")
         if not self.tryboot("stage", mutates=True, WK_SRC=p, WK_DTB=self.c("NODE_DTB")).ok:
             act.die("could not stage the tryboot files on %s.\n    Arming copies the selected system's kernel out of %s's boot\n"
                     "    partition onto the SD, so the board has to answer -- as its rescue or as a\n"
                     "    bench system, either will do -- and both media have to be readable there." % (self.c("NODE_NAME"), self.c("NODE_DEVICE")))
-        want = kv((self.medium_read(p, "cmdline.txt") or "").replace(" ", "\n"), "root")
-        staged = kv(self.tryboot("staged-root").out, "root")
+        want = kv((self.medium_read(p, "cmdline.txt") or "").replace(" ", "\n")).get("root", "")
+        staged = kv(self.tryboot("staged-root").out).get("root", "")
         if not want or staged != want:
             act.die("the staging on %s's SD boots root=%s, not the selected system's root=%s (on %s),\n"
                     "    so the board would measure another system under this one's name." % (self.c("NODE_NAME"), staged or "?", want or "?", p))
@@ -163,7 +164,7 @@ class PiTryboot(Driver):
         return ("wk sysimage build %s\n    in a workspace; hours\n"
                 "wk sysimage write --from <path> --disk <reader>:%s --rescue --profile %s\n"
                 "    the SD card -- the system this board falls back to, and the firmware's boot medium\n"
-                "wk pi boot-order %s sd-first\n"
+                "wk boot %s --boot-order sd-first\n"
                 "    the SD first: the bench medium is mounted by the kernel, never firmware-booted\n"
                 "wk sysimage write --from <path> --disk %s:%s --profile <bench profile>\n"
                 "    the bench system's root medium, written from the rescue\n"
@@ -229,7 +230,7 @@ class Rpi5Usb(Driver):
             return "booted %s -- a wk system on the medium that is never armed (%s)" % (self.c("NODE_ROOT") or "its base medium", mode[5:])
         if mode != "host":
             return "USB stick %s: state unknown (board unreachable)" % dev
-        order = kv(self.evidence(), "eeprom_boot_order")
+        order = kv(self.evidence()).get("eeprom_boot_order", "")
         return "USB stick %s holds %s; NVMe workstation untouched%s" % (
             dev, self.device_image() or "no wk system (wk sysimage write puts one there)", " (eeprom %s)" % order if order else "")
 
@@ -255,12 +256,13 @@ class PiMbr(Driver):
     ARMED, DISARMED = "0c", "83"
 
     def dev(self):
-        r = self.ch.call("disk_own_or_declared")
-        if not (r.ok and r.out.strip()):
+        from wk.sysimage.disk import Disks   # the disk model is sysimage's; this is its one reader in boot
+        got = Disks(self.ch, self.conf).own_or_declared()
+        if not got:
             act.die("cannot tell which disk on %s is its bench medium.\n    Its conf says %s, and the board does not agree or could not be\n"
                     "    asked. Refusing to write a partition type byte to a disk chosen by name:\n"
                     "    on this board that byte decides whether it comes back at all." % (self.c("NODE_NAME"), self.c("NODE_DEVICE") or "nothing"))
-        return r.out.strip()
+        return got
 
     @staticmethod
     def word(dev):
@@ -334,10 +336,11 @@ class PiMbr(Driver):
         dev, name, rescue = self.c("NODE_DEVICE"), self.c("NODE_NAME"), self.rescue_disk()
         return ("wk sysimage build %s\n    in a workspace; hours\n"
                 "wk sysimage write <id> --disk <reader>:%s --rescue\n    the %s -- the system this board falls back to\n"
-                "wk pi boot-order %s\n    the %s first, the rescue behind it\n"
+                "wk boot %s --boot-order %s\n    the %s first, the rescue behind it\n"
                 "wk sysimage write <id> --disk %s:%s\n    the %s -- the system it is measured on\n"
                 "wk boot %s\n    one shot; it reverts by itself"
-                % (self.c("NODE_PROFILE"), rescue, self.word(rescue), name, self.word(dev), name, dev, self.word(dev), name))
+                % (self.c("NODE_PROFILE"), rescue, self.word(rescue), name, "sd-first" if dev.startswith("/dev/mm") else "usb-first",
+                   self.word(dev), name, dev, self.word(dev), name))
 
 
 DRIVERS = {d.name: d for d in (PiSd, PiTryboot, Rpi5Usb, PiMbr)}

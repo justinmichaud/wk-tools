@@ -4,18 +4,14 @@ writes. Liveness is asked of the process table at read time, never stored."""
 
 import os
 import re
-import signal
-import subprocess
 import sys
 from pathlib import Path
 
 from wk import act, store
 from wk.clock import Clock
-from wk.machine import TIMED_OUT, Result, here
+from wk.machine import here
 
 RUNNING = ("starting", "running", "silent", "unanswered")
-# Kinds that run until stopped: alive is their idle state, never busy.
-SESSIONS = ("agent-forward",)
 ERROR = re.compile(r"(^FAILED:|^error:|: error:|: fatal error:|ninja: build stopped|No such file or directory)")
 NOT_ERROR = re.compile(r"Performing Test|-- Failed|check for working|(^|[: ])warning:")
 PROGRESS = (re.compile(r"\[[0-9]+/[0-9]+\]"),
@@ -242,16 +238,9 @@ class Task:
         return self.verdict(how) in RUNNING
 
 
-def _answer(r):
-    """`kill -0`'s status as an answer: alive, gone, or None where the workspace did not say."""
-    return True if r.rc == 0 else False if r.rc == 1 else None
-
-
 def of_target(target, clock=None, machine=None, env=None):
     """`target`'s records; a pid in a workspace is asked there, None where the workspace does not answer in time."""
-    def ask(ws, pid, cap):
-        return _answer(target.exec(ws, ["kill", "-0", str(pid)], timeout=cap))
-    return Records(target.store.record_dir(), clock=clock, ask_target=ask, env=target.env if env is None else env,
+    return Records(target.store.record_dir(), clock=clock, ask_target=target.pid_alive, env=target.env if env is None else env,
                    machine=machine)
 
 
@@ -396,45 +385,6 @@ class Records:
         return st
 
 
-class CallerShell:
-    """A bash caller's own `t_exec`, re-entered from the shell state its shim dumped (lib/detach.sh's _caller_shell)."""
-
-    def __init__(self, state):
-        self.state = state
-
-    def call(self, fn, args, timeout=None, quiet=False):
-        argv = ["bash", "-c", '. "$0" 2>/dev/null; %s "$@"' % fn, self.state] + [str(a) for a in args]
-        p = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                             stderr=subprocess.DEVNULL if quiet else None, text=True, start_new_session=True)
-        try:
-            out, _ = p.communicate(timeout=timeout)
-        except subprocess.TimeoutExpired:
-            os.killpg(p.pid, signal.SIGKILL)
-            p.communicate()
-            return Result(TIMED_OUT)
-        return Result(p.returncode, out)
-
-    def exec(self, ws, argv, timeout=None):
-        return self.call("t_exec", [ws] + list(argv), timeout, quiet=True)
-
-    def act_exec(self, ws, argv):
-        if act.dry_run():
-            sys.stderr.write("would run in %s: %s\n" % (ws, " ".join(argv)))
-            return Result(0)
-        return self.exec(ws, argv)
-
-    def task_put(self, ws, task):
-        self.call("t_task_put", [ws, str(task.path)])
-
-    def ask(self, ws, pid, cap):
-        return _answer(self.exec(ws, ["kill", "-0", str(pid)], timeout=cap))
-
-
-def caller_shell(env):
-    state = env.get("WK_CALLER_SHELL")
-    return CallerShell(state) if state else None
-
-
 def fleet_holders(resource, records, stores):
     """This store's live holders of `resource`, then every other store's; one that could not be asked is a row
     of its own (`unknown`), since an unread machine is not a free board."""
@@ -450,7 +400,7 @@ def fleet_holders(resource, records, stores):
 
 def fleet_stores(root, env, machine):
     """(name, ask) for the podman machine's store where this one is not it, and for each peer through its own wk."""
-    from wk import shell, status
+    from wk import status
     from wk.targets import Registry
     reg = Registry(root, env, machine)
 
@@ -468,10 +418,10 @@ def fleet_stores(root, env, machine):
         return ask
 
     stores = []
-    if not shell.store_is_local(root, machine):
+    if not store.Store(env).is_local():
         stores.append(("%s's podman machine" % machine_name(env, machine),
                        lambda r: holds(reg.load("container"), r, "it did not answer: wk start, or wk sync --tools")))
-    return stores + [(p, peer(p)) for p in shell.peer_workstations(root, env=env)]
+    return stores + [(p, peer(p)) for p in reg.peer_workstations()]
 
 
 def hold(records, fleet, machine, kind, name, kill, log, plan, pid, env):
@@ -512,15 +462,14 @@ def _out(text):
 
 def main(argv, env=None):
     """The record for a bash caller (lib/task.sh): `python3 -m wk.record <verb> ...`."""
+    from wk.shell import caller_shell
     env = os.environ if env is None else env
     shell_ = caller_shell(env)
     records = Records(env=env, ask_target=shell_.ask if shell_ else None)
     verb, a = argv[0], argv[1:]
     task = (lambda: records._task(a[0])) if a else None
     try:
-        if verb == "stamp":
-            _out(records.clock.stamp())
-        elif verb == "field":
+        if verb == "field":
             v = task().field(a[1])
             _out(v + "\n" if v else "")
         elif verb == "begin":

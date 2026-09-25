@@ -15,7 +15,7 @@ import urllib.parse
 
 sys.path.insert(0, os.path.join(
     os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "lib"))
-from wknotify import sd_notify  # noqa: E402
+from wk.notify import sd_notify  # noqa: E402
 
 GITHUB = "api.github.com"
 BUGZILLA = "bugs.webkit.org"

@@ -6,6 +6,7 @@ Run: python3 tests/run.py --unit -k test_disk_logic
 import contextlib
 import io
 import os
+import shlex
 import sys
 import unittest
 from unittest import mock
@@ -15,7 +16,7 @@ from tests.support import REPO, bash
 sys.path.insert(0, str(REPO / "lib"))
 
 from wk import act  # noqa: E402
-from wk.boot.driver import BashChannel  # noqa: E402
+from wk.boot.driver import CARD_PRIV, Channel  # noqa: E402
 from wk.machine import Fake, Result  # noqa: E402
 from wk.sysimage import disk  # noqa: E402
 
@@ -201,22 +202,17 @@ class TestListing(unittest.TestCase):
 
 
 class TestChannel(unittest.TestCase):
-    def test_reads_and_the_helper_go_through_the_bash_transport(self):
-        """BashChannel runs `boot_bridge <fn>`: m_ssh for lsblk and card_priv for the helper, on the conf's machine."""
-        seen = []
-
-        def answer(argv, fake):
-            tail = argv[argv.index("wk") + 1:]
-            seen.append(tail)
-            return Result(0, LSBLK_234) if tail[0] == "m_ssh" else Result(0, "marker: none\n")
+    def test_reads_and_the_helper_go_over_ssh_to_the_conf_machine(self):
+        """lsblk under `sh -c` and the card helper under `sudo -n`, both on NODE_SSH, and no bash in between."""
         m = Fake()
-        m.react(("env",), answer)
+        m.react(("ssh",), lambda argv, f: Result(0, LSBLK_234 if "lsblk" in argv[-1] else "marker: none\n"))
         conf = {"NODE_NAME": "rpi4", "NODE_SSH": "rpi4", "NODE_DEVICE": "/dev/sdc"}
-        d = disk.Disks(BashChannel(REPO, conf, "host", machine=m), conf)
+        d = disk.Disks(Channel(REPO, conf, "host", env={}, via=m), conf)
         self.assertEqual(d.for_machine("rpi4"), "")
-        self.assertEqual(seen[0], ["m_ssh", disk.LSBLK])
-        self.assertIn(["card_priv", "whose", "/dev/sdc"], seen)
-        self.assertTrue(all("NODE_SSH=rpi4" in r[1] and "MODE_CHANNEL=host" in r[1] for r in m.effects))
+        sent = [e[1] for e in m.effects if e[1][0] == "ssh"]
+        self.assertEqual(sent[0][-2:], ("rpi4", "sh -c %s" % shlex.quote(disk.LSBLK)))
+        self.assertIn(("rpi4", "sudo -n %s whose /dev/sdc" % CARD_PRIV), [e[-2:] for e in sent])
+        self.assertFalse([e for e in m.effects if e[1][0] in ("bash", "env")])
 
 
 class TestShims(unittest.TestCase):

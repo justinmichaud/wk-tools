@@ -12,6 +12,7 @@ import threading
 
 from wk import act
 from wk.act import die, info, log, warn
+from wk.machine import far_side_start
 from wk.record import progress_line
 
 TOOLS = {"cc1", "cc1plus", "lto1", "clang", "clang++", "gcc", "g++", "cc", "c++", "ld", "ld-classic", "ld64",
@@ -82,9 +83,11 @@ def build_processes(machine):
     return sorted(rows, reverse=True)
 
 
-def stall_report(machine, path, idle):
+def stall_report(machine, path, idle, verdict="silent", named=""):
     procs = build_processes(machine)
-    if procs:
+    if verdict == "wedged":
+        warn("wedged: the log has named %s for %ds -- giving up and killing the job" % (named, idle))
+    elif procs:
         warn("no output for %ds, and this machine is running %d compiler/linker process(es) -- a full-LTO link is silent for minutes at a time"
              % (idle, len(procs)))
         log("  busiest:       %s at %s%% CPU" % (procs[0][1], ("%g" % procs[0][0])))
@@ -111,15 +114,15 @@ def stall_report(machine, path, idle):
     log("  tail: %s" % (tail[-1][:100] if tail else ""))
 
 
-def watch(argv, path, machine, clock, env=None, cwd=None, popen=subprocess.Popen):
-    """The job's status, or 124 once it was silent past WK_ABORT_SECONDS and killed."""
+def watch(argv, path, machine, clock, env=None, cwd=None, popen=subprocess.Popen, abort=None, wedge=None):
+    """The job's status, or 124 once its watchdog killed it (watch_pid)."""
     if act.dry_run():
         sys.stderr.write("would run: %s\n" % " ".join(shlex.quote(a) for a in argv))
         return 0
     with open(path, "wb") as out:
         p = popen(argv, stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT, cwd=cwd)
     try:
-        if watch_pid(p.poll, p.pid, path, machine, clock, env):
+        if watch_pid(p.poll, p.pid, path, machine, clock, env, abort, wedge):
             p.wait()
             return 124
         return p.returncode
@@ -131,13 +134,15 @@ def watch(argv, path, machine, clock, env=None, cwd=None, popen=subprocess.Popen
         raise
 
 
-def watch_pid(ended, pid, path, machine, clock, env=None):
-    """Polls until `ended()` is not None; True once the log was silent past WK_ABORT_SECONDS and the job killed."""
+def watch_pid(ended, pid, path, machine, clock, env=None, abort=None, wedge=None):
+    """Until `ended()`; the verdict it killed on: "silent" past `abort` s (0 never), or "wedged" once `wedge`'s
+    (beats, names) saw `names(path)` give one task for that many heartbeats in which the log grew."""
     env = os.environ if env is None else env
     poll, stall = _seconds(env, "WK_POLL_SECONDS", 15), _seconds(env, "WK_STALL_SECONDS", 300)
-    abort, beat = _seconds(env, "WK_ABORT_SECONDS", ABORT_SECONDS), _seconds(env, "WK_HEARTBEAT_SECONDS", 300)
+    beat = _seconds(env, "WK_HEARTBEAT_SECONDS", 300)
+    abort = _seconds(env, "WK_ABORT_SECONDS", ABORT_SECONDS) if abort is None else abort
     start = last_change = last_beat = clock.now()
-    last_size, warned = 0, False
+    last_size, warned, named, same = 0, False, "", 0
     while ended() is None:
         for _ in range(poll):
             clock.sleep(1)
@@ -147,21 +152,32 @@ def watch_pid(ended, pid, path, machine, clock, env=None):
         if size != last_size:
             last_size, last_change, warned = size, now, False
         idle = int(now - last_change)
-        if idle >= abort:
+        if abort and idle >= abort:
             warn("no output for %ds -- giving up and killing the job" % idle)
             stall_report(machine, path, idle)
-            kill_tree(machine, pid, sig.SIGTERM)
-            clock.sleep(5)
-            kill_tree(machine, pid, sig.SIGKILL)
-            return True
+            return _give_up(machine, clock, pid, "silent")
         if idle >= stall and not warned:
             stall_report(machine, path, idle)
-            log("  will abort if still silent at %ds" % abort)
+            log("  will abort if still silent at %ds" % abort if abort else "  not stopping it: silence is not a failure here")
             warned = True
         if now - last_beat >= beat:
             log("  ... %s (%dm elapsed)" % (progress_line(path) or "running", (now - start) // 60))
+            if wedge and last_change > last_beat:
+                now_named = wedge[1](path)
+                same = same + 1 if now_named and now_named == named else 0
+                named = now_named
+                if same >= wedge[0]:
+                    stall_report(machine, path, int(same * beat), "wedged", named)
+                    return _give_up(machine, clock, pid, "wedged")
             last_beat = now
     return False
+
+
+def _give_up(machine, clock, pid, verdict):
+    kill_tree(machine, pid, sig.SIGTERM)
+    clock.sleep(5)
+    kill_tree(machine, pid, sig.SIGKILL)
+    return verdict
 
 
 def detach(machine, argv, log_path):
@@ -172,8 +188,8 @@ def detach(machine, argv, log_path):
 
 def remote_line(argv, log_path, rc):
     """nohup outlives the closing session's SIGHUP and disown its job table; not every far side has setsid."""
-    inner = "( %s ) > %s 2>&1; echo $? > %s" % (" ".join(shlex.quote(a) for a in argv), shlex.quote(log_path), shlex.quote(rc))
-    return "rm -f %s; nohup bash -c %s >/dev/null 2>&1 </dev/null & disown" % (shlex.quote(rc), shlex.quote(inner))
+    inner = "( %s ); echo $? > %s" % (" ".join(shlex.quote(a) for a in argv), shlex.quote(rc))
+    return "rm -f %s; %s" % (shlex.quote(rc), far_side_start("bash -c %s" % shlex.quote(inner), log_path, "disown"))
 
 
 def wait_remote(ask, log_path, rc, clock, interval=30, stream=False, timeout=0, abort_re="", env=None):
@@ -354,7 +370,8 @@ def main(argv, env=None):
     """The job for a bash caller (lib/watchdog.sh, lib/detach.sh): `python3 -m wk.job <verb> ...`."""
     from wk.clock import Clock
     from wk.machine import here
-    from wk.record import Records, Task, caller_shell
+    from wk.record import Records, Task
+    from wk.shell import caller_shell
     env = os.environ if env is None else env
     verb, a = argv[0], argv[1:]
     machine, clock, shell = here(), Clock(), caller_shell(env)

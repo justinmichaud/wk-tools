@@ -13,6 +13,8 @@ import threading
 import time
 import webbrowser
 
+from wk.resources import workspace_marker_path
+
 MARKERS = ("plan", "flush")
 
 
@@ -23,7 +25,7 @@ def default_mode(env, isatty):
         return env["WK_STATUS_VIEW"]
     if not isatty or env.get("CI") or env.get("NO_COLOR"):
         return "text"
-    if os.path.isfile(env.get("WK_MARKER") or os.path.join(env.get("HOME", ""), ".wk-workspace")):
+    if os.path.isfile(workspace_marker_path(env)):
         return "text"
     if (env.get("SSH_CONNECTION") or env.get("SSH_TTY")) and not env.get("DISPLAY"):
         return "text"
@@ -528,7 +530,7 @@ def render_fleet_and_bridges(doc, colour):
                 roles.append(("a rescue system", "wk sysimage write <id> --disk <machine>:<device> --rescue"))
                 roles.append(("a bench system", "wk sysimage write <id> --disk <machine>:<device>"))
             if doc.get("bridges"):
-                roles.append(("a tailnet bridge", "wk bridge provision <name>"))
+                roles.append(("a tailnet bridge", "wk machine setup <name> --disk <machine>:<device>"))
             if any(f.get("role") == "workstation" for f in fleet):
                 roles.append(("a workstation", "./setup"))
             if roles:
@@ -551,7 +553,7 @@ def render_fleet_and_bridges(doc, colour):
                 wr.kv("health", b["health"], pad)
             if "role_insync" in b:
                 wr.kv("role", paint("this repository's", "good", colour) if b["role_insync"]
-                      else paint("older than this repository -- wk bridge setup %s" % b.get("name", ""), "bad", colour), pad)
+                      else paint("older than this repository -- wk machine setup %s" % b.get("name", ""), "bad", colour), pad)
             wr.meta(b, pad)
             if b.get("note"):
                 out.append(pad + paint(b["note"], "dim", colour))
@@ -767,6 +769,7 @@ PAGE = """<!doctype html>
   .dev .dm { margin:.3rem 0; }
   .dev .media { color:var(--faint); font-size:.82em; white-space:normal; }
   .armed { margin-top:.4rem; color:var(--busy); font-weight:600; font-size:.85em; }
+  .armed.bad { color:var(--bad); }
 
   footer { position:fixed; right:1rem; bottom:.75rem; color:var(--dim); font-size:.8rem;
            background:var(--card); border:1px solid var(--line);
@@ -989,7 +992,7 @@ function render(doc) {
         const cls = needs ? "attention" : busy ? "working" : "";
         parts.push(`<tr class="${cls}">
           <td class="name">${ESC(w.name)}</td>
-          <td>${chip(w.state)}</td>
+          <td>${chip(w.disagree ? `disagree (${w.disagree[0]} vs ${w.disagree[1]})` : w.state)}</td>
           <td title="${ESC(w.branch || "")}">${ESC(branch)}</td>
           <td>${ESC(w.base || "?")}</td>
           <td class="${work.length ? "busy" : "idle"}">${ESC(workTxt)}</td>
@@ -1032,7 +1035,9 @@ function render(doc) {
         <div class="dn">${ESC(f.machine)} <span class="dr">${ESC(f.role || "")}</span></div>
         <div class="dm">${chip(f.mode)}</div>
         <div class="media">${ESC(f.media || "")}</div>` +
-        (f.armed ? `<div class="armed">armed for ${ESC(f.armed)} — wk boot ${ESC(f.machine)} --status</div>` : "") +
+        (f.armed ? `<div class="armed${f.armed_desync ? " bad" : ""}">${f.armed_desync ? "desync -- " : ""}armed for ${ESC(f.armed)}` +
+          (f.armed_by ? ` by ${ESC(f.armed_by)}` : "") + (f.armed_at ? ` since ${ESC(f.armed_at)}` : "") +
+          (f.armed_desync ? ", and the record was never cleared" : "") + ` — wk boot ${ESC(f.machine)} --status</div>` : "") +
         meta(f) + `</div>`);
     }
     parts.push(`</div></section>`);
@@ -1047,7 +1052,7 @@ function render(doc) {
       // command attached to it, so it is a chip and not a sentence to find.
       const role = b.role_insync === undefined ? ""
         : b.role_insync ? chip("this repository's", "good")
-        : chip("older — wk bridge setup " + b.name, "bad");
+        : chip("older — wk machine setup " + b.name, "bad");
       parts.push(`<tr><td class="name">${ESC(b.name)}</td><td>${ESC(b.device)}</td><td>${ESC(b.segment)}</td>
         <td>${chip(b.state || "?")}</td><td class="wide">${role}</td>
         <td class="wide dim">${ESC(b.health || "")}</td></tr>`);

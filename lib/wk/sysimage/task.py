@@ -1,12 +1,13 @@
 """An image build's stage as a task with `wk build`'s record, detach, watchdog and stop, done when its log carries
 the stage script's own marker whatever its exit status says; and the pinned download a builder fetches."""
 
+import hashlib
 import os
 import re
 import subprocess
 import sys
 
-from wk import act, build, job
+from wk import act, build, images, job
 from wk.act import Refused, die, info, log, warn
 from wk.buildconf import DISK_GB
 from wk.lock import Lock
@@ -117,6 +118,7 @@ class Stage:
         self.ws_dir = target.store.ws_dir(ws)
         self.log = os.path.join(self.ws_dir, "home", "%s-%s.log" % (kind, stage))
         self.label = kind
+        self.watchdog = {}   # job.watch's abort and wedge, where a builder's silence is not a failure
 
     def refuse_busy(self):
         busy = build.busy_reason(self.target, self.recs, self.ws)
@@ -139,7 +141,7 @@ class Stage:
         running = budget.running(build.holder_alive(self.reg))
         return budget, running, build_jobs(Resources(self.here, env), budget, running)
 
-    def admit(self, budget, running, jobs):
+    def admit(self, budget, running, jobs, need_gb=None, what=None):
         """The workspace's lock, refused rather than queued, then its jobs and this machine's budget."""
         lock = Lock(self.target.store, self.here, self.clock)
         holder = lock.holder_pid("ws-" + self.ws)
@@ -150,7 +152,8 @@ class Stage:
         try:
             self.refuse_busy()
             store = self.env.get("WK_STORE") or self.env.get("HOME", "")
-            budget.disk_admit("the %s build" % self.stage, int(self.env.get("WK_BUILD_DISK_GB") or DISK_GB), budget.free_gb(store),
+            need = int(self.env.get("WK_BUILD_DISK_GB") or DISK_GB) if need_gb is None else need_gb
+            budget.disk_admit(what or "the %s build" % self.stage, need, budget.free_gb(store),
                               "%s's filesystem" % store)
             budget.admit("the %s build" % self.stage, jobs, running)
         except Refused:
@@ -170,15 +173,15 @@ class Stage:
         task.step(n)
         self.target.task_put(self.ws, task)
 
-    def run(self, task, budget, jobs, argv, pattern):
-        budget.record("wk sysimage %s %s" % (self.stage, self.ws), jobs, jobs * MB_PER_JOB, "pid:%d" % os.getpid())
+    def run(self, task, budget, jobs, argv, pattern, mb=None):
+        budget.record("wk sysimage %s %s" % (self.stage, self.ws), jobs, jobs * MB_PER_JOB if mb is None else mb, "pid:%d" % os.getpid())
         log("  log: %s" % self.log)
         log("  stop: %s" % self.kill)
         watcher = job.PidWatch(self.target, self.ws, task, self.log, self.label, pattern, int(self.env.get("WK_JOB_PID_TRIES") or 900))
         watcher.start()
         try:
             cmd, cwd = self.target.build_argv(self.ws, in_workspace(self.target.tools(self.ws), self.label, argv))
-            rc = job.watch(cmd, self.log, self.here, self.clock, self.env, cwd, self.popen)
+            rc = job.watch(cmd, self.log, self.here, self.clock, self.env, cwd, self.popen, **self.watchdog)
         except job.Interrupted as e:
             watcher.stop()
             warn("interrupted -- stopping the %s build in '%s'" % (self.stage, self.ws))
@@ -210,7 +213,7 @@ class Stage:
             raise Refused(rc or 1)
         if rc == 124:
             end("stalled")
-            die("the %s build in '%s' stalled: killed after its log was silent past its watchdog.\n    log: %s"
+            die("the %s build in '%s' stalled: its watchdog killed it, and says why above.\n    log: %s"
                 % (self.stage, self.ws, self.log))
         end(rc or 1)
         tail = [l for l in text.replace("\r", "\n").split("\n") if l][-TAIL_LINES:]
@@ -226,8 +229,62 @@ class Stage:
         return 0
 
 
+class ContainerBuilder:
+    """A builder in a container workspace made from its own host image; a subclass is its data and its stages."""
+
+    KIND = TITLE = SPEC = BASE_IMAGE = BASE_VAR = ""
+    NEEDS = NOT_HERE = IMAGE_NOTE = SURVIVES = ""
+
+    def __init__(self, reg, profile, spec, clock, popen=subprocess.Popen):
+        self.reg, self.p, self.spec, self.clock, self.popen = reg, profile, spec, clock, popen
+        self.name = profile["IMG_PROFILE"]
+        self.here, self.env, self.root = reg.machine, reg.env, str(reg.root)
+        self.store = Store(self.env)
+
+    def target(self):
+        try:
+            t = self.reg.load(self.env.get("WK_TARGET") or self.reg.default())
+        except LookupError as e:
+            die(str(e))
+        if t.kind != "container":
+            die("%s, and target '%s' is a %s one.\n    %s" % (self.NEEDS, t.name, t.kind, self.NOT_HERE % {"spec": self.name}))
+        return t
+
+    def host_image(self):
+        """(base, tag): tagged by a digest of SPEC, so an edited spec is a new image."""
+        base = self.env.get(self.BASE_VAR) or self.BASE_IMAGE
+        with open(os.path.join(self.root, self.SPEC), "rb") as f:
+            digest = hashlib.sha256(f.read()).hexdigest()[:8]
+        return base, "localhost/wk-%s-host:%s-%s" % (self.KIND, base.rsplit(":", 1)[-1], digest)
+
+    def ws_flag(self, ws):
+        return "" if ws == images.image_ws(self.name, self.env) else " --workspace " + ws
+
+    def ensure_ws(self, target, ws, base, tag):
+        """The image first, so an edited Containerfile changes the wanted tag on every run."""
+        podman = target.podman()
+        if self.here.run(podman + ["image", "exists", tag]).ok:
+            act.debug("workspace image %s already built" % tag)
+        else:
+            info("building the %s workspace image %s (one layer on %s)" % (self.TITLE, tag, base))
+            log(self.IMAGE_NOTE % {"spec": self.SPEC})
+            spec = os.path.join(self.root, self.SPEC)
+            if not self.here.run_tty(podman + ["build", "--build-arg", "BASE=" + base, "-t", tag, "-f", spec, os.path.dirname(spec)]).ok:
+                die("could not build %s.\n    This runs on the host, where there is a network; if apt or the pull failed,\n"
+                    "    that is a host-side problem and not the workspace boundary." % tag)
+        if target.info(ws) == "absent":
+            info("creating workspace '%s' for the %s build" % (ws, self.TITLE))
+            if not self.here.run_tty(["env", "WK_SDK_IMAGE=" + tag, os.path.join(self.root, "wk"), "new", ws, "--target", target.name]).ok:
+                die("could not create workspace '%s'" % ws)
+            return
+        was = self.here.run(podman + ["container", "inspect", target.ctr(ws), "--format", "{{.ImageName}}"])
+        if was.ok and was.out.strip() and was.out.strip() != tag:
+            die("workspace '%s' was made from %s, and the spec now wants\n    %s. A container cannot be moved between images, "
+                "so this build\n    would use host packages %s no longer describes.\n    Remake it -- %s:\n"
+                "        wk rm %s && wk sysimage build %s" % (ws, was.out.strip(), tag, self.SPEC, self.SURVIVES, ws, self.spec))
+
+
 def stage_main(label, argv, environ=None):
-    """In the workspace: `argv` exec'd off the wall with WK_BUILD=1, after announcing the pid it keeps."""
     env = dict(os.environ if environ is None else environ)
     env["PATH"] = off_wall(env.get("PATH", ""))
     env["WK_BUILD"] = "1"
@@ -236,19 +293,13 @@ def stage_main(label, argv, environ=None):
     os.execvpe(argv[0], argv, env)
 
 
-def main(argv, env=None):
-    from wk.machine import here
-    env = os.environ if env is None else env
+def main(argv):
     verb, a = (argv[0], argv[1:]) if argv else ("", [])
     try:
         if verb == "stage" and len(a) > 2 and a[1] == "--":
             stage_main(a[0], a[2:])
-        elif verb == "cache-dir":
-            print(cache_dir(env))
-        elif verb == "fetch" and len(a) == 2:
-            print(fetch_base(here(), a[0], a[1], env))
         else:
-            die("usage: python3 -m wk.sysimage.task stage <label> -- <argv> | cache-dir | fetch <url> <sha256>", 2)
+            die("usage: python3 -m wk.sysimage.task stage <label> -- <argv>", 2)
     except Refused as e:
         return e.status
     return 0

@@ -1,5 +1,6 @@
-"""Getting a machine ready is a command, not a paste (boot/machines.sh,
-cmd/boot --prepare), and it runs the command on the machine the conf names.
+"""Getting a machine ready is a command, not a paste (`wk machine setup <mac>`,
+lib/wk/machine_cmd/mac.py's setup_mac, which the Mac A/B's preflight names when it
+finds a Mac it cannot restart), and it runs the command on the machine the conf names.
 
 A machine wk drives needs two things on it before `wk boot` can arm it or the
 Mac lane can restart it: this tree, and the privileged helpers admin/install.sh
@@ -16,43 +17,23 @@ directory in a scratch tree.
 
 Run: python3 -m unittest tests.test_machine_prepare -v
 """
+import contextlib
+import io
 import os
 from pathlib import Path
-import pty
 import subprocess
 import sys
 import unittest
+from unittest import mock
 
-from tests.support import REPO, WkTest, bash, func_body, scratch_dir, stub_path
+from tests.support import REPO, WkTest, bash, scratch_dir, stub_path
 
+sys.path.insert(0, str(REPO / "lib"))
+from wk import act, machine_cmd  # noqa: E402
+from wk.machine import Fake, Local  # noqa: E402
 
-def _lift_between(text, first, last):
-    a = text.index(first)
-    return text[a:text.index(last, a)]
-
-
-def macab_func(name):
-    return func_body(MACAB.read_text(), name)
-
-
-def pty_bash(script, timeout=60):
-    """bash with a terminal on stdin, for the one branch whose condition is
-    having one. Output comes back merged, as it does from a terminal."""
-    primary, secondary = pty.openpty()
-    try:
-        cp = subprocess.run(
-            ["bash", "-c", script], cwd=str(REPO),
-            env=dict(os.environ, WK_ROOT=str(REPO)), stdin=secondary,
-            capture_output=True, text=True, timeout=timeout)
-    finally:
-        os.close(primary)
-        os.close(secondary)
-    return cp
 
 MACHINES = REPO / "boot" / "machines.sh"
-BOOT = REPO / "cmd" / "boot"
-MACAB = REPO / "bench" / "mac-ab.sh"
-DRIVER = REPO / "boot" / "mac-volume.sh"
 
 LIB = '. "$WK_ROOT/lib/common.sh"; . "$WK_ROOT/boot/machines.sh"\n'
 
@@ -64,26 +45,23 @@ class TheToolsPathIsDeclared(WkTest):
     a measurement. Measured 2026-09-08."""
 
     def test_one_path_and_it_is_the_remote_tools_convention(self):
-        cp = bash(LIB + 'machine_tools_dir')
-        self.assertEqual("Development/wk-tools", cp.stdout.strip())
+        from wk.boot import mac
+        self.assertEqual("Development/wk-tools", mac.TOOLS)
 
-    def test_the_driver_reads_that_path_and_searches_for_nothing(self):
-        """It is the driver that answers where the tree is, because the machine
-        that holds it is the one *managing* the target and not always the one
-        being measured -- a guest's manager is the Mac running it."""
-        body = func_body(DRIVER.read_text(), "b_manage_tools")
-        self.assertIn("machine_tools_dir", body)
-        self.assertNotIn("~/wk-tools", body)
-        self.assertNotIn("for d in", body)
-
-    def test_the_lane_asks_the_driver_and_reads_no_path_of_its_own(self):
-        body = func_body(MACAB.read_text(), "mgr_tools")
-        self.assertIn("b_manage_tools", body)
-        self.assertNotIn("machine_tools_dir", body)
+    def test_the_driver_answers_where_the_tree_is_and_searches_for_nothing(self):
+        """The machine that holds it is the one *managing* the target and not
+        always the one being measured -- a guest's manager is the Mac running it."""
+        from wk.boot.mac import MacVolume
+        m = Fake("tolken")
+        m.answer(["test", "-x", "Development/wk-tools/wk"], rc=0)
+        d = MacVolume(str(REPO), {"NODE_NAME": "mbp", "NODE_SSH": "tolken"}, None)
+        self.assertEqual("Development/wk-tools", d.manager_tools(m))
+        self.assertEqual([e[1] for e in m.effects], [("test", "-x", "Development/wk-tools/wk")])
 
     def test_an_absent_tree_names_the_command_that_puts_one_there(self):
-        body = func_body(MACAB.read_text(), "mgr_tools")
-        self.assertIn("--prepare", body)
+        import inspect
+        from wk.bench import mac
+        self.assertIn("wk machine setup", inspect.getsource(mac.MacAB.manager))
 
 
 def git(cwd, *args):
@@ -109,8 +87,8 @@ cp "$src" "${last#*:}"
 
 
 class PreparingPushesACommitAndStopsAtTheSudo(WkTest):
-    """A machine is given a *commit*, never a file copy (`tools_push`,
-    lib/tools.sh -- the fleet's one deploy). What lands there is a checkout at
+    """A machine is given a *commit*, never a file copy (`tools.push`,
+    lib/wk/tools.py -- the fleet's one deploy). What lands there is a checkout at
     this tree's HEAD, so nothing over there is content that exists only over
     there and a later `git pull` has nothing of anyone's to replace. An rsync
     of the working tree had that backwards: it pushed uncommitted work into a
@@ -120,7 +98,10 @@ class PreparingPushesACommitAndStopsAtTheSudo(WkTest):
     The deploy needs nothing privileged, so it happens either way. Installing a
     NOPASSWD rule authenticates once, and nothing can bootstrap that from a
     session with no terminal -- so that is where it stops, having left the
-    checkout in place, and it says which command finishes the job."""
+    checkout in place, and it says which command finishes the job.
+
+    Real `Ssh`/`Local` machines, over stubbed ssh/scp on PATH: setup_mac's own
+    behaviour is under test, not a Fake standing in for the transport."""
 
     def _prepare(self, dirty=False):
         home = self.tmp / "home"
@@ -136,21 +117,24 @@ class PreparingPushesACommitAndStopsAtTheSudo(WkTest):
             (src / "wk").write_text("#!/bin/sh\necho uncommitted\n")
         self.far = home / "Development" / "wk-tools"
         log = self.tmp / "ssh.argv"
-        with stub_path({"ssh": FAR_SSH % log, "scp": FAR_SCP}) as path:
-            cp = subprocess.run(
-                ["bash", "-c", LIB + f"WK_ROOT={src}\nNODE_NAME=mbp\n"
-                 'machine_prepare tolken || echo "rc=$?"'],
-                env=dict(os.environ,
-                         PATH="%s:%s" % (path, os.environ["PATH"]),
-                         WK_ROOT=str(REPO), HOME=str(home)),
-                capture_output=True, text=True, stdin=subprocess.DEVNULL)
+        env = {"PATH": "", "HOME": str(home)}
+        with stub_path({"ssh": FAR_SSH % log, "scp": FAR_SCP, "tailscale": "#!/bin/sh\necho '{}'\n"}) as path:
+            env["PATH"] = "%s:%s" % (path, os.environ["PATH"])
+            err = io.StringIO()
+            with mock.patch.dict(os.environ, env), \
+                 contextlib.redirect_stderr(err), contextlib.redirect_stdout(io.StringIO()):
+                try:
+                    rc = machine_cmd.Machines(str(src), env=dict(os.environ), here=Local()) \
+                        .setup_mac("mbp", {"KIND": "mac", "NODE_SSH": "tolken"})
+                except act.Refused as e:
+                    rc = e.status
         asked = log.read_text() if log.exists() else ""
-        return cp, cp.stdout + cp.stderr, asked
+        return rc, err.getvalue(), asked
 
     def test_it_stops_at_the_sudo_and_names_what_finishes_it(self):
-        cp, out, _ = self._prepare()
-        self.assertIn("rc=1", out, out)
-        self.assertIn("wk boot mbp --prepare", out, out)
+        rc, out, _ = self._prepare()
+        self.assertEqual(rc, 1, out)
+        self.assertIn("./setup --stage quiesce", out, out)
         self.assertIn("sudoers.d", out, out)
 
     def test_the_commit_lands_anyway_as_a_checkout_at_this_head(self):
@@ -164,10 +148,10 @@ class PreparingPushesACommitAndStopsAtTheSudo(WkTest):
 
     def test_an_uncommitted_tree_is_refused_by_name_and_nothing_is_pushed(self):
         """The decision this end makes: a machine takes a commit, so the
-        working tree here is committed first. `tools_committed` says so and
+        working tree here is committed first. `wk.tools.committed` says so and
         names the two commands, the same refusal `wk sync --tools` makes."""
-        cp, out, _ = self._prepare(dirty=True)
-        self.assertIn("rc=1", out, out)
+        rc, out, _ = self._prepare(dirty=True)
+        self.assertEqual(rc, 1, out)
         self.assertIn("uncommitted changes", out, out)
         self.assertIn("git -C", out, out)
         self.assertFalse(self.far.exists(), f"{self.far} was written anyway")
@@ -177,91 +161,22 @@ class PreparingPushesACommitAndStopsAtTheSudo(WkTest):
         self.assertNotIn("setup --stage quiesce", asked, asked)
 
     def test_the_deploy_is_the_fleets_one_deploy_and_not_a_second_one(self):
-        body = func_body(MACHINES.read_text(), "machine_prepare")
-        self.assertIn("tools_push", body)
+        import inspect
+        body = inspect.getsource(machine_cmd.Machines.setup_mac)
+        self.assertIn("tools.push", body)
         self.assertNotIn("rsync", body)
 
 
-class PreflightPreparesAMacItCannotRestart(WkTest):
-    """`wk bench mac-ab`'s preflight runs the prepare itself when it finds a Mac
-    it cannot restart and has a terminal to answer the one sudo on. Since the
-    deploy is a commit, an uncommitted tree here surfaces `tools_committed`'s
-    refusal *inside* the preflight -- which then reports the machine as still
-    not restartable, rather than reporting it prepared."""
+class TheVerbMoved(WkTest):
+    def test_boot_prepare_names_machine_setup(self):
+        cp = bash('exec "$WK_ROOT/cmd/boot" mbp --prepare')
+        self.assertEqual(cp.returncode, 1, cp.stdout + cp.stderr)
+        self.assertIn("wk machine setup mbp", cp.stderr)
 
-    BLOCK = _lift_between(MACAB.read_text(),
-                          '    if ! b_restart_ready && [ -t 0 ]',
-                          '\n    log "" >&2')
-
-    def _preflight(self, prepare_rc, ready_after):
-        # On a pty, because "has a terminal to answer the one sudo on" is the
-        # condition under test and `[ -t 0 ]` is what asks it.
-        return pty_bash(
-            '. "$WK_ROOT/lib/common.sh"\n'
-            'PF_FAIL=0; DRY=""; MACHINE=mbp\n'
-            'ck() {%s}\n'
-            '_n=0\n'
-            'b_restart_ready() { _n=$((_n + 1)); [ "$_n" -gt 1 ] && return %d; return 1; }\n'
-            'b_restart_detail() { printf "no boot helper on tolken, and plain sudo there wants a password"; }\n'
-            'b_manage_prepare() { warn "wk-tools here has uncommitted changes, so there is no'
-            ' commit to put on a machine."; return %d; }\n'
-            '%s\n'
-            'echo "PF_FAIL=$PF_FAIL"'
-            % (macab_func("ck"), 0 if ready_after else 1, prepare_rc, self.BLOCK))
-
-    def test_a_dirty_tree_surfaces_the_commit_first_refusal_inside_preflight(self):
-        cp = self._preflight(prepare_rc=1, ready_after=False)
-        out = cp.stdout + cp.stderr
-        self.assertIn("cannot be restarted unattended yet -- preparing it now", out)
-        self.assertIn("uncommitted changes", out)
-        self.assertIn("restartable", out)
-        self.assertIn("PF_FAIL=1", out, out)
-
-    def test_a_prepare_that_worked_leaves_the_check_passing(self):
-        """The discriminating half: the prepare is run for its effect, so a
-        preflight that reported `restartable no` either way would be reporting
-        a record and not the machine."""
-        cp = self._preflight(prepare_rc=0, ready_after=True)
-        out = cp.stdout + cp.stderr
-        self.assertIn("PF_FAIL=0", out, out)
-        self.assertIn("this lane restarts mbp itself", out)
-
-    def test_a_failed_prepare_does_not_end_the_preflight(self):
-        """The rest of preflight is what the operator needs to see, and a
-        machine that cannot be restarted is a barrier and not a stop."""
-        self.assertIn("b_manage_prepare || true", self.BLOCK)
-
-
-class TheVerbIsWiredIn(WkTest):
-    def test_boot_has_a_prepare_action(self):
-        text = BOOT.read_text()
-        self.assertIn("--prepare) ACTION=prepare", text)
-        self.assertIn("prepare) cmd_prepare", text)
-
-    def test_its_help_block_names_it(self):
-        """The leading block is what `wk boot -h` prints (explain_cmd)."""
-        cp = bash('exec "$WK_ROOT/wk" boot -h')
-        self.assertIn("--prepare", cp.stdout + cp.stderr)
-
-    def test_a_machine_with_no_ssh_destination_has_nothing_to_prepare(self):
-        body = func_body(BOOT.read_text(), "cmd_prepare")
-        self.assertIn("NODE_SSH", body)
-        self.assertIn("nothing to prepare", body)
-
-    def test_the_dry_run_reaches_no_machine(self):
-        with scratch_dir() as tmp:
-            with stub_path({
-                "ssh":   '#!/bin/sh\necho "$@" >> %s/ssh.argv\n' % tmp,
-                "rsync": '#!/bin/sh\necho "$@" >> %s/rsync.argv\n' % tmp,
-            }) as path:
-                cp = bash('WK_DRY_RUN=1 exec "$WK_ROOT/cmd/boot" mbp --prepare',
-                          env={"PATH": "%s:%s" % (path, os.environ["PATH"])})
-            out = cp.stdout + cp.stderr
-            # What it says it would do has to be what it does: it pushes a
-            # commit now, and "sync" was the rsync this no longer runs.
-            self.assertIn("would push this tree, as a commit", out, out)
-            self.assertNotIn("would sync", out, out)
-            self.assertFalse((tmp / "rsync.argv").exists(), "a dry run synced")
+    def test_machine_setup_prepares_a_mac(self):
+        """5.13: `wk machine setup mbp` pushes this tree and installs the privileged helpers."""
+        cp = bash('WK_DRY_RUN=1 exec "$WK_ROOT/cmd/machine" setup mbp')
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
 
 
 class TheHostOsGateAsksWhetherTheDriverCanReachIt(WkTest):
@@ -304,17 +219,12 @@ class TheHostOsGateAsksWhetherTheDriverCanReachIt(WkTest):
         self.assertNotIn("run this over there", out,
                          "this is over there: a macOS host and a macOS-only machine")
 
-    def test_the_gate_rests_on_the_drivers_own_declaration(self):
-        text = BOOT.read_text()
-        self.assertIn("if ! b_probeable; then", text)
-        self.assertNotIn("_os_bound", text)
-
 
 class TheCommandRunsOnTheMachineTheConfNames(WkTest):
     """One way to run a command on a machine (`m_ssh`, boot/machines.sh), and
     the test for running it here rather than over ssh is standing on that
     machine: `hostname -s` against the destination the conf names, the same
-    comparison bench/mac-ab.sh makes before refusing to reboot the machine it
+    comparison lib/wk/bench/mac.py's MacAB makes before refusing to reboot the machine it
     is driven from.
 
     Nothing a conf declares can answer it -- whether a machine "drives itself"
@@ -378,11 +288,11 @@ class TheCommandRunsOnTheMachineTheConfNames(WkTest):
         (macOS 26.6.2): `command -v setsid` answers nothing, `command -v
         nohup` answers /usr/bin/nohup. A reboot that quietly does nothing
         exits 0, so the string is read here rather than trusted over there."""
+        sys.path.insert(0, str(REPO / "lib"))
+        from wk.boot.driver import root_priv
         for verb in ("reboot", "reboot-tryboot"):
             with self.subTest(verb=verb):
-                _, asked = self._m_ssh(
-                    'NODE_SSH=othermach\nNODE_ROLE=bench-device\n'
-                    'MODE_CHANNEL=host\nboot_priv %s' % verb)
+                asked = " ".join(root_priv(verb))
                 self.assertIn("nohup ", asked, asked)
                 self.assertNotIn("setsid", asked, asked)
 

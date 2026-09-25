@@ -93,12 +93,8 @@ def _raw_read_sites():
 # The raw (non-confirm()) `read -r`/`read -p` sites outside lib/common.sh, and
 # why each is not a competing yes/no implementation.
 EXPECTED_SAFE_RAW_READS = {
-    ("cmd/bridge", 'read -r _reply || die "aborted -- nothing further was changed"'):
-        "pause(): waits for Enter before a manual step with no alternative -- explicitly not confirm() (see the comment above it), since there is nothing to answer no to",
     ("admin/wk-card-priv", 'read -r type tran <<EOF'):
         "reads two fields from a heredoc, not a terminal",
-    ("image/yocto.sh", "read -r stage_jobs stage_mb <<EOF"):
-        "reads the stage's job count and memory budget from a heredoc, not a terminal",
 }
 
 
@@ -144,15 +140,8 @@ DESTRUCTIVE_WORD_RE = re.compile(
 # confirm() site(s) that guard something genuinely destructive but where
 # DESTRUCTIVE_WORD_RE finds nothing in the ~10 lines leading into the
 # prompt -- the hazard is stated further up the file, past this check's
-# window. A name, not a fix: none of these files are in the set this task
-# may edit.
-DESTRUCTIVE_WORDING_TOO_FAR = {
-    ("bench/mac-bench-volume.sh",
-     'confirm "start the install onto \'$VOLUME\' now?" || { log "nothing done"; return 0; }'):
-        "installing macOS overwrites the target volume; the hazard "
-        "(\"NEXT IS THE PART THAT ... REBOOTS THIS MACHINE\") is stated "
-        "~50 lines above the confirm, past the ~10-line window this check reads",
-}
+# window.
+DESTRUCTIVE_WORDING_TOO_FAR = {}
 
 
 def _confirm_context(path, lineno, before=10):

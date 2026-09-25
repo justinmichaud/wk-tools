@@ -24,11 +24,12 @@ import sys
 import unittest
 from unittest import mock
 
-from tests.support import REPO, WkTest, bash, rand_suffix, run, stub_path
+from tests.support import REPO, WkTest, rand_suffix, run, stub_path
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk import decl as D  # noqa: E402
 from wk import dispatch  # noqa: E402
+from wk import images  # noqa: E402
 
 SYSIMAGE = REPO / "cmd" / "sysimage"
 
@@ -189,9 +190,8 @@ exit 0
                      "--workspace", self.lane, "--detach", env=env)
         sent = self.log.read_text()
         self.assertEqual(cp.returncode, 0, cp.stdout)
-        # sh_quote's spelling, which is how the far side is handed a word.
         self.assertIn(
-            f"'sysimage' 'build' '{self.profile}' '--workspace' '{self.lane}' '--detach'",
+            f"sysimage build {self.profile} --workspace {self.lane} --detach",
             sent)
 
     def test_the_spec_names_the_machine_with_no_target_set(self):
@@ -205,7 +205,7 @@ exit 0
                      "--workspace", self.lane, "--detach", env=env)
         sent = self.log.read_text()
         self.assertEqual(cp.returncode, 0, cp.stdout)
-        self.assertIn(f"'sysimage' 'build' '{self.profile}@fakebox'", sent,
+        self.assertIn(f"sysimage build {self.profile}@fakebox", sent,
                       f"not delegated to fakebox: {sent!r}")
 
     def test_a_lane_that_does_not_exist_yet_is_not_refused(self):
@@ -219,7 +219,7 @@ exit 0
         out = cp.stdout + cp.stderr
         self.assertNotEqual(cp.returncode, 0, out)
         self.assertNotIn("no such workspace", out)
-        self.assertIn("this target is 'vm'", out)
+        self.assertIn("target 'vm' is a vm one", out)
 
 
 class TestTheLaneSpec(unittest.TestCase):
@@ -228,20 +228,13 @@ class TestTheLaneSpec(unittest.TestCase):
     half never reaches the builder -- it is the dispatcher's target answer
     (`--wstarget`), and what is built is the profile."""
 
-    def _src(self, snippet):
-        return bash(f'. "{REPO}/lib/sysimage-arms.sh" functions\n{snippet}\n')
-
     def test_the_machine_half_is_split_off_the_profile(self):
-        cp = self._src('image_spec_profile webkit-2.52-yocto-rpi5-64@moose; echo; '
-                       'image_spec_machine webkit-2.52-yocto-rpi5-64@moose')
-        self.assertEqual(cp.stdout.split(), ["webkit-2.52-yocto-rpi5-64", "moose"],
-                         cp.stdout + cp.stderr)
+        spec = "webkit-2.52-yocto-rpi5-64@moose"
+        self.assertEqual((images.spec_profile(spec), images.spec_machine(spec)), ("webkit-2.52-yocto-rpi5-64", "moose"))
 
     def test_a_profile_without_one_names_no_machine(self):
-        cp = self._src('image_spec_profile webkit-2.52-yocto-rpi5-64; echo; '
-                       'echo "[$(image_spec_machine webkit-2.52-yocto-rpi5-64)]"')
-        self.assertEqual(cp.stdout.split(), ["webkit-2.52-yocto-rpi5-64", "[]"],
-                         cp.stdout + cp.stderr)
+        spec = "webkit-2.52-yocto-rpi5-64"
+        self.assertEqual((images.spec_profile(spec), images.spec_machine(spec)), (spec, ""))
 
     def test_the_lane_name_is_the_same_either_way(self):
         """The workspace is named for the profile, so a machine half does not
@@ -269,25 +262,15 @@ class TestTheLaneSpec(unittest.TestCase):
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
         self.assertEqual(out, "", f"a lane-less profile answered a target: {out!r}")
 
-    def test_this_machine_resolves_to_its_own_default_target(self):
-        """Named with this machine's own name, the lane is a local one: the
-        answer is the target its workspaces live on, not the hostname."""
-        cp = self._src('wk_machine_name() { echo here; }\n'
-                       'default_target() { echo container; }\n'
-                       'image_spec_target here')
-        self.assertEqual(cp.stdout.strip(), "container", cp.stdout + cp.stderr)
-
 
 class TestTheProfileBehindALane(unittest.TestCase):
-    """`image_lane_profile` (lib/image.sh): a lane is named <builder>-<profile>
+    """`images.ws_profile`: a lane is named <builder>-<profile>
     and may carry an arm's suffix of its own, so the profile is recovered by
     matching the configurations this checkout defines rather than by stripping
     a prefix."""
 
     def _profile_of(self, ws):
-        cp = bash(f'. "{REPO}/lib/sysimage-arms.sh" functions\n'
-                  f'image_lane_profile {ws} || echo "REFUSED"\n')
-        return cp.stdout.strip()
+        return images.ws_profile(ws) or "REFUSED"
 
     def test_a_plain_lane_names_its_profile(self):
         self.assertEqual(self._profile_of("yocto-webkit-2.52-yocto-rpi5-64"),

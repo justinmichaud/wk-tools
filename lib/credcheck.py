@@ -57,8 +57,6 @@ Rule = collections.namedtuple(
 
 FIELDS = tuple(f for f in Rule._fields if f not in ("check", "mint"))
 
-WKNOTIFY = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                        "wknotify.py")
 
 TAILSCALE_KEYS = "https://login.tailscale.com/admin/settings/keys"
 LITELLM_API = _api_base("WK_LITELLM_API", "https://ai.igalia.com")
@@ -765,9 +763,9 @@ def _tailnet_api(value, repos, path, evidence):
         return OK, ("an API access token; whether the tailnet still accepts it "
                     "is asked as soon as it is stored.")
     probe = subprocess.run(
-        [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                      "tailnet.py"), "check"],
-        env=dict(os.environ, WK_TS_API_SECRET_FILE=path),
+        [sys.executable, "-m", "wk.tailnet", "check"],
+        env=dict(os.environ, WK_TS_API_SECRET_FILE=path,
+                 PYTHONPATH=os.path.dirname(os.path.abspath(__file__))),
         capture_output=True, text=True)
     detail = (probe.stdout + probe.stderr).strip().splitlines()
     detail = detail[-1] if detail else "no answer"
@@ -826,26 +824,20 @@ def _deploy_key(value, repos, path, evidence):
 
 
 def _ntfy_mint():
-    return subprocess.run([sys.executable, WKNOTIFY, "mint"],
-                          capture_output=True, text=True,
-                          check=True).stdout.strip()
+    from wk import notify
+    return notify.mint()
 
 
 def _ntfy_topic(value, repos, path, evidence):
-    topic = value.strip()
-    if not topic:
-        return BAD, "there is nothing there."
-    probe = subprocess.run([sys.executable, WKNOTIFY, "check"],
-                           input=topic, capture_output=True, text=True)
-    detail = (probe.stdout + probe.stderr).strip().splitlines()
-    detail = detail[-1] if detail else "no answer"
-    if probe.returncode == 0:
+    from wk import notify
+    code, detail = notify.check(value.strip())
+    if code == 0:
         return OK, ("%s\n    It is never written to a card and no workspace "
                     "holds it: a notification a person acts on must not be "
                     "forgeable from inside one." % detail)
-    if probe.returncode == 3:
+    if code == 3:
         return WIDE, detail
-    if probe.returncode == 6:
+    if code == 6:
         return UNVERIFIED, "could not ask ntfy.sh: %s" % detail
     return BAD, detail
 
@@ -935,7 +927,7 @@ RULES = collections.OrderedDict((
         store_with="wk key set tailnet",
         check=_tailnet_authkey)),
     ("tailnet-api", Rule(
-        spent_by="lib/tailnet.py -- retiring the offline fleet node whose name "
+        spent_by="lib/wk/tailnet.py -- retiring the offline fleet node whose name "
                  "a new card needs",
         needs="list and delete devices on this tailnet",
         forbids="be written to a card or reach a workspace: it administers "
@@ -947,7 +939,7 @@ RULES = collections.OrderedDict((
         store_with="wk key set tailnet-api",
         check=_tailnet_api)),
     ("deploy-key", Rule(
-        spent_by="lib/store.sh push_agent_load -- loaded into the ssh-agent a "
+        spent_by="lib/wk/secrets.py agent_load -- loaded into the ssh-agent a "
                  "workspace reaches while `wk push` is on",
         needs="push to exactly one fork",
         forbids="reach any other repository, or be read-only",
@@ -957,8 +949,7 @@ RULES = collections.OrderedDict((
         store_with="wk key deploy",
         check=_deploy_key)),
     ("ntfy", Rule(
-        spent_by="lib/wknotify.py -- the topic wk_notify (lib/store.sh) publishes a "
-                 "headline to",
+        spent_by="lib/wk/notify.py -- the topic `send` publishes a headline to",
         needs="publish a notification a person sees",
         forbids="be a name someone could arrive at by guessing: the topic is "
                 "the whole credential, so anyone holding it reads every "

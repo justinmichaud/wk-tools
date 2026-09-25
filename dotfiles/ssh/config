@@ -54,13 +54,13 @@ Host moosebmc
   ProxyJump librem5-oob
 
 # Both bridge phones roam between two APs on one SSID, and a roam stalls TCP long enough to kill an idle session while the phone itself never wavered -- ServerAliveInterval below is the fix.
-Host tailnet-bridge-generic tailnet-bridge-generic.local
+Host tailnet-bridge-generic
   HostKeyAlias tailnet-bridge-generic
 
-Host tailnet-bridge-moose-bmc tailnet-bridge-moose-bmc.local
+Host tailnet-bridge-moose-bmc
   HostKeyAlias tailnet-bridge-moose-bmc
 
-Host tailnet-bridge-generic tailnet-bridge-generic.local tailnet-bridge-moose-bmc tailnet-bridge-moose-bmc.local
+Host tailnet-bridge-generic tailnet-bridge-moose-bmc
   User user
   ServerAliveInterval 15
   ServerAliveCountMax 4

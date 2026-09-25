@@ -1,6 +1,6 @@
 """A buildroot image whose kernel is declared rather than built
 (BR_KERNEL_DEB_URL in image/configs/<profile>.conf, prepared by
-image/buildroot/kernel-pin.sh).
+lib/wk/sysimage/buildroot.py's kernel_pin on the driving machine).
 
 The rpi4's kernel is pinned because the one buildroot builds from the
 release-pinned tree never reaches userspace on that board, measured by
@@ -12,20 +12,36 @@ tailnet.
 
 Run: python3 -m unittest tests.test_kernel_pin -v
 """
-import os
+import contextlib
+import io
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 
-REPO = Path(__file__).resolve().parent.parent
-PIN = REPO / "image" / "buildroot" / "kernel-pin.sh"
+from tests.support import REPO
+
+sys.path.insert(0, str(REPO / "lib"))
+from wk.act import Refused  # noqa: E402
+from wk.machine import Fake, Result, here  # noqa: E402
+from wk.sysimage import buildroot  # noqa: E402
 
 
-def run(*args):
-    return subprocess.run([str(PIN), *[str(a) for a in args]],
-                          capture_output=True, text=True)
+class Ran:
+    def __init__(self, returncode, stdout, stderr):
+        self.returncode, self.stdout, self.stderr = returncode, stdout, stderr
+
+
+def run(deb, release, out, machine=None):
+    """kernel_pin as a process would report it: the tarball on stdout, the refusal on stderr."""
+    with contextlib.redirect_stderr(io.StringIO()) as err:
+        try:
+            got = buildroot.kernel_pin(machine or here(), str(deb), release, str(out))
+        except Refused as e:
+            return Ran(e.status, "", err.getvalue())
+    return Ran(0, got, err.getvalue())
 
 
 class TestPrepare(unittest.TestCase):
@@ -147,23 +163,70 @@ class TestWiring(unittest.TestCase):
         self.assertIn("is not pinned", text)
 
     def test_the_kernel_is_prepared_where_depmod_is(self):
-        """the build image has dpkg-deb and xz but no kmod; preparing in the
-        build would mean adding a tool to a container to run a command the
-        driving machine already has."""
-        self.assertIn("kernel-pin.sh", (REPO / "lib" / "wk" / "sysimage" / "buildroot.py").read_text())
-        build = (REPO / "image" / "buildroot-build.sh").read_text()
-        self.assertNotIn("depmod", build, "the build image has no depmod")
+        """the build image has dpkg-deb and xz but no kmod, so the in-workspace
+        half only unpacks what the driving machine prepared."""
+        self.assertNotIn("depmod", (REPO / "lib" / "wk" / "sysimage" / "buildroot_target.py").read_text())
 
-    def test_the_pinned_boot_files_go_in_before_the_card_is_assembled(self):
-        """buildroot's own hook, ahead of the board script that runs genimage
-        -- not an edit of output/ behind the build's back."""
-        build = (REPO / "image" / "buildroot-build.sh").read_text()
-        self.assertIn('BR2_ROOTFS_POST_IMAGE_SCRIPT=\\"$WK_POST_IMAGE $POST_IMAGE_ORIG\\"', build)
 
-    def test_the_modules_go_in_as_an_overlay(self):
-        build = (REPO / "image" / "buildroot-build.sh").read_text()
-        self.assertIn("KERNEL_OVERLAY", build)
-        self.assertIn('OVERLAY="${OVERLAY:+$OVERLAY }$KERNEL_OVERLAY"', build)
+class TestPrepareOnTheFake(unittest.TestCase):
+    """The refusals and the reuse, on any host: the Fake answers as dpkg-deb, depmod and od would."""
+
+    R = "9.9.9"
+    DEB, OUT = "/cache/k.deb", "/cache/dl"
+    TAR = OUT + "/wk-kernel-9.9.9.tar"
+
+    def world(self, magic="016f2818", modules=True, dep="kernel/brcmfmac.ko:\n"):
+        w = Fake("here")
+        x = self.TAR + ".work/x"
+        tree = self.TAR + ".work/tree"
+        w.answer(["sh", "-c"], out="")
+        w.answer(["sha256sum", self.DEB], out="ab  k.deb\n")
+        w.answer(["od"], out=" %s\n" % magic)
+        for p in (["cp"], ["find"], ["tar"], ["mv"]):
+            w.answer(p)
+
+        def unpack(argv, f):
+            f._set_file(x + "/boot/vmlinuz-" + self.R, "")
+            f._set_file(x + "/usr/lib/linux-image-%s/bcm2711-rpi-4-b.dtb" % self.R, "")
+            if modules:
+                f.dirs.add(x + "/lib/modules/" + self.R)
+            return Result(0)
+        w.react(["dpkg-deb", "-x"], unpack)
+        w.react(["depmod"], lambda a, f: (f._set_file(tree + "/lib/modules/%s/modules.dep" % self.R, dep), Result(0))[-1])
+        return w
+
+    def test_a_prepared_tree_is_packed_and_stamped(self):
+        w = self.world()
+        cp = run(self.DEB, self.R, self.OUT, w)
+        self.assertEqual((cp.returncode, cp.stdout), (0, self.TAR), cp.stderr)
+        self.assertEqual(w.files[self.TAR + ".from"], "ab")
+        self.assertNotIn(self.TAR + ".work", w.dirs)
+
+    def test_an_unchanged_package_is_not_prepared_again(self):
+        w = self.world()
+        w.files.update({self.TAR: "", self.TAR + ".from": "ab"})
+        cp = run(self.DEB, self.R, self.OUT, w)
+        self.assertEqual(cp.stdout, self.TAR)
+        self.assertFalse([e for e in w.effects if e[0] == "run" and e[1][0] == "dpkg-deb"])
+
+    def test_a_kernel_that_is_not_a_32_bit_zimage_is_refused(self):
+        cp = run(self.DEB, self.R, self.OUT, self.world(magic="00000000"))
+        self.assertNotEqual(cp.returncode, 0)
+        self.assertIn("not a 32-bit ARM zImage", cp.stderr)
+
+    def test_a_package_without_modules_is_refused(self):
+        cp = run(self.DEB, self.R, self.OUT, self.world(modules=False))
+        self.assertIn("no modules", cp.stderr)
+
+    def test_a_modules_dep_that_still_names_xz_is_refused(self):
+        cp = run(self.DEB, self.R, self.OUT, self.world(dep="kernel/brcmfmac.ko.xz:\n"))
+        self.assertIn("still names .xz", cp.stderr)
+
+    def test_a_missing_tool_is_named(self):
+        w = self.world()
+        w.answer(["sh", "-c"], out="depmod\n")
+        cp = run(self.DEB, self.R, self.OUT, w)
+        self.assertIn("depmod", cp.stderr)
 
 
 if __name__ == "__main__":

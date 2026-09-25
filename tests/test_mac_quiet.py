@@ -1,5 +1,5 @@
 """Tests for bench/mac-quiet-hosts.sh -- the /etc/hosts software-update
-denial block shared by mac-bench-volume.sh's do_provision and
+denial block shared by lib/wk/sysimage/macvolume.py's provision and
 mac-bench-firstboot.sh, its list read from bench/quiet/macos-hosts.txt.
 
 Hardware-free: every test drives the shared shell functions against a
@@ -19,7 +19,7 @@ from tests.support import bash, func_body
 REPO = Path(__file__).resolve().parent.parent
 QUIET_HOSTS = REPO / "bench" / "mac-quiet-hosts.sh"
 FIRSTBOOT = REPO / "bench" / "mac-bench-firstboot.sh"
-VOLUME_SH = REPO / "bench" / "mac-bench-volume.sh"
+VOLUME_PY = REPO / "lib" / "wk" / "sysimage" / "macvolume.py"
 
 # The markers the script itself writes into /etc/hosts, read from it: a second
 # copy here would let the two drift and the test would still pass.
@@ -207,17 +207,10 @@ class NoSecondWriterTest(unittest.TestCase):
         self.assertIn("quiet-hosts.sh", text, "firstboot does not source the shared file")
         self.assertIn("wk_bench_hosts_apply", text)
 
-    def test_do_provision_invokes_shared_function(self):
-        text = VOLUME_SH.read_text()
-        self.assertIn("mac-quiet-hosts.sh", text, "do_provision does not source the shared file")
+    def test_provision_invokes_shared_function(self):
+        text = VOLUME_PY.read_text()
         self.assertIn("wk_bench_hosts_apply", text)
-        # Both writers of a benchmark install -- the provisioning package and
-        # the re-arm onto one already installed -- read one payload table, so
-        # neither can be given a file the other is not.
-        payload = (REPO / "bench" / "mac-bench-payload.sh").read_text()
-        self.assertIn("wk-bench-quiet-hosts.sh", func_body(payload, "bench_payload_files"))
-        for writer in ("do_build_pkg", "do_repair"):
-            self.assertIn("stage_payload", func_body(text, writer), writer)
+        self.assertIn('"usr/local/libexec/wk-bench-quiet-hosts.sh"', text)
 
     def test_the_denial_can_be_lifted_and_put_back(self):
         """A benchmark install has to fetch the Command Line Tools once, and
@@ -282,7 +275,7 @@ class TestNothingUnattendedNeedsAPerson(unittest.TestCase):
 
     UNATTENDED = (
         REPO / "bench" / "mac-bench-firstboot.sh",
-        REPO / "bench" / "mac-bench-autorun.sh",
+        REPO / "lib" / "wk" / "bench" / "autorun.py",
     )
 
     def test_no_unattended_path_installs_a_package_or_a_tunnel(self):
@@ -294,21 +287,12 @@ class TestNothingUnattendedNeedsAPerson(unittest.TestCase):
                                  f"{path.name} runs `{command}` with nobody in the room")
 
     def test_the_payload_is_never_given_the_key_or_the_package(self):
-        """The only mention left is the tombstone that deletes them."""
-        text = (REPO / "bench" / "mac-bench-volume.sh").read_text()
+        """The only mention left is the tombstone that deletes them (tests/test_mac_tailnet.py)."""
+        text = VOLUME_PY.read_text()
         self.assertNotIn("wk_tailscale_authkey", text)
-        for line in text.splitlines():
-            if "tailscale-authkey" not in line and "Tailscale-macos.pkg" not in line:
-                continue
-            self.assertTrue(line.lstrip().startswith(("#", "for f in", "stale=", "log ")),
-                            f"the payload is still given it: {line.strip()}")
-
-    def test_a_repair_clears_what_an_earlier_one_staged(self):
-        """Crash-only: --repair converges on the declared payload, so a volume
-        staged before this carries no key and no installer either."""
-        text = (REPO / "bench" / "mac-bench-volume.sh").read_text()
-        self.assertIn("for f in tailscale-authkey Tailscale-macos.pkg; do", text)
-        self.assertIn('sudo rm -f "$stale"', text)
+        named = [l for l in text.splitlines() if "Tailscale-macos.pkg" in l]
+        self.assertEqual(len(named), 1)
+        self.assertTrue(named[0].startswith("STALE = "), named)
 
     def test_the_setup_stage_that_fed_it_is_gone(self):
         self.assertFalse((REPO / "host" / "macos" / "benchkey.sh").exists())
@@ -466,8 +450,13 @@ class TestBothLegPathsWatchTheScreen(unittest.TestCase):
         """The staged leg is the pipeline's browser run (lib/wk/bench/mac.py), not a second one."""
         text = (REPO / "lib" / "wk" / "bench" / "mac.py").read_text()
         self.assertIn("class StagedRun(pipeline.Run):", text)
-        self.assertNotIn("def run_browser", text)
-        self.assertNotIn("screen_watch", text)
+        self.assertNotIn("screen_watch", text[:text.index("class PgoCollect")], "a PGO collection is watched; a leg is the pipeline's")
+        # The host side's browser leg is the install's `wk bench staged` over ssh, never a run-benchmark of its own.
+        host = text[text.index("class HostRun(pipeline.Run):"):]
+        host = host[:host.index("\ndef ")]
+        self.assertEqual(1, text.count("def run_browser"))
+        self.assertIn("def run_browser(self, leg):\n        return self.run_remote(leg)", host)
+        self.assertNotIn("run-benchmark", host)
 
     def test_what_drew_fails_the_leg_unless_forced(self):
         """Once, for every leg: `wk bench run` and the staged leg are one pipeline."""

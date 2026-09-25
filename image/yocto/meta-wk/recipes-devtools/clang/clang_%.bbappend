@@ -8,7 +8,7 @@
 # build and badly wrong at the ends: with one recipe left, a -j4 PARALLEL_MAKE
 # leaves 76 of 80 cores idle for hours.
 #
-# image/yocto-build.sh raises PARALLEL_MAKE for this recipe to fix that. What
+# lib/wk/sysimage/yocto_target.py raises PARALLEL_MAKE for this recipe to fix that. What
 # makes raising it *safe* is this file, and the two halves are deliberately not
 # in one place: the -j is a property of the machine doing the building, and this
 # is a property of how LLVM builds, true on every machine.

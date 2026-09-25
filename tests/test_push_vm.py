@@ -162,19 +162,13 @@ def _store(tmp, keys=()):
     return d
 
 
-def _forward_record(vmstore, name="demo"):
-    """The newest agent-forward task record (lib/task.sh) for <name>, or None.
-    `wk push on` writes one per guest whose tunnel it starts, into the vm
-    target's own store, and it stays open for as long as the tunnel carries
-    that guest's push."""
-    found = sorted((pathlib.Path(vmstore) / "task").glob("agent-forward-%s-*" % name))
-    return found[-1] if found else None
+def _forward_pidfile(vmstore, name="demo"):
+    """`wk push on` starts one tunnel per guest, a daemon whose pidfile is in the vm target's own store."""
+    return pathlib.Path(vmstore) / "vm" / ("%s.agent-forward.pid" % name)
 
 
 def _kill_forward(vmstore, name="demo"):
-    rec = _forward_record(vmstore, name)
-    if rec is not None:
-        _kill_pidfile(rec / "pid")
+    _kill_pidfile(_forward_pidfile(vmstore, name))
 
 
 def _kill_pidfile(path):
@@ -463,8 +457,7 @@ class TestTheGuestHalfOfTheSwitch(WkTest):
         return cp
 
     def _forward_is_up(self, vmstore, name="demo"):
-        rec = _forward_record(vmstore, name)
-        return rec is not None and not (rec / "exit").exists()
+        return _forward_pidfile(vmstore, name).exists()
 
     @unittest.skipUnless(os.uname().sysname == "Darwin",
                          "guests are a macOS-host thing (tart)")
@@ -510,7 +503,6 @@ class TestTheGuestHalfOfTheSwitch(WkTest):
                                 stderr=subprocess.STDOUT).stdout
         self.assertIn("no identities", listed)
         self.assertFalse(self._forward_is_up(vmstore), cp.stdout)
-        self.assertEqual((_forward_record(vmstore) / "exit").read_text().strip(), "stopped")
 
     @unittest.skipUnless(os.uname().sysname == "Darwin",
                          "guests are a macOS-host thing (tart)")
@@ -746,7 +738,7 @@ class TestTheInjectorReadinessProbeAnswersOnThisPlatform(WkTest):
 class TestTheGuestsInjectorGetsTheStandingReadToken(WkTest):
     """The injector a guest talks to runs on this host, so its standing read
     token is a file here. Reading is open whatever position `wk push` is in, so
-    every `wk vm start` converges that file from what this host holds -- and
+    every `wk start` converges that file from what this host holds -- and
     `wk push on|off` never touches it."""
 
     def _start_inject(self, vmstore, pat=None):

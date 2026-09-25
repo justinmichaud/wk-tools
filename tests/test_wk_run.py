@@ -109,7 +109,6 @@ class TestLldbGetsAPty(unittest.TestCase):
         reg.load.return_value = target
         with mock.patch.object(RUN.targets, "Registry", return_value=reg), \
                 mock.patch.object(RUN, "exec_into"), \
-                mock.patch.object(RUN.shell, "lldb_prelude", return_value=""), \
                 mock.patch.dict(os.environ, {"WK_NAME": "ws"}):
             RUN.main(["--config", "gtk-release"] + argv)
         return target.exec_argv.call_args

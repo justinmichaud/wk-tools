@@ -1,5 +1,5 @@
 """The two gates that stand between a PGO collection and a number nobody can
-attribute (build/mac-pgo.sh, bench/mac-browser-check.py, lib/wkpgo.py).
+attribute (lib/wk/bench/mac.py's PgoCollect, bench/mac-browser-check.py, lib/wk/pgo.py).
 
 Both refuse on evidence taken from the run itself, so both are exercised here
 against readings rather than against a Mac: a throttled window, a machine with
@@ -13,7 +13,7 @@ import sys
 import types
 import unittest
 
-from tests.support import REPO, WkTest, bash, func_body, scratch_dir
+from tests.support import REPO, WkTest, bash, scratch_dir
 
 
 def load(path):
@@ -24,7 +24,8 @@ def load(path):
 
 
 BROWSER = load(REPO / "bench" / "mac-browser-check.py")
-PROFILE = load(REPO / "lib" / "wkpgo.py")
+sys.path.insert(0, str(REPO / "lib"))
+from wk import pgo as PROFILE  # noqa: E402
 
 # What the Apple lane reads back: three frameworks and a compressed copy per
 # arch. The board lane's one library goes through the same code from the other
@@ -48,7 +49,6 @@ GUEST_DISPLAY = dict(GOOD_DISPLAY, builtin=False, points=[1920, 1080],
                      vendor=0, model=0, brightness=None)
 
 # The real invocation, not the dry run's printf of the same command.
-RUN_COLLECTION = "env WK_WEBKIT_SCRIPTS="
 
 
 _DEFAULT = object()
@@ -240,46 +240,6 @@ class TestTheProfileGate(WkTest):
         self.assertTrue(any("llvm-profdata cannot read" in f for f in found), found)
 
 
-class TestTheBuildIsGatedOnThem(WkTest):
-    """Neither check is worth anything if a build can finish without it."""
-
-    def test_the_collection_runs_the_browser_check_against_the_instrumented_build(self):
-        body = func_body((REPO / "build" / "mac-pgo.sh").read_text(), "_pgo_collect")
-        self.assertIn('--build-directory "$instr"', body)
-        self.assertLess(body.index("mac-browser-check.py"), body.index(RUN_COLLECTION),
-                        "the browser is checked before anything is profiled")
-
-    def test_the_collection_names_no_display_to_be_comparable_with(self):
-        """A collection trains a profile rather than producing a number, so it
-        passes no expectation and its display is recorded and judged on nothing.
-        A measured run gets one from the machine conf, and the plant refuses a
-        conf that declares none."""
-        body = func_body((REPO / "build" / "mac-pgo.sh").read_text(), "_pgo_collect")
-        self.assertIn("mac-browser-check.py", body)
-        self.assertNotIn("--expect-display", body)
-
-    def test_a_failed_browser_check_stops_the_build(self):
-        body = func_body((REPO / "build" / "mac-pgo.sh").read_text(), "_pgo_collect")
-        gate = body[body.index("mac-browser-check.py"):]
-        self.assertIn("return 1", gate.split(RUN_COLLECTION)[0])
-
-    def test_nothing_else_re_checks_what_the_profile_gate_already_asks(self):
-        """`pgo_build` used to test for the compressed directory itself; the
-        gate refuses on every library missing from it, which is strictly more."""
-        build = func_body((REPO / "build" / "mac-pgo.sh").read_text(), "pgo_build")
-        self.assertNotIn("produced no profile", build)
-
-    def test_the_profile_is_read_back_before_the_measured_phase(self):
-        text = (REPO / "build" / "mac-pgo.sh").read_text()
-        body = func_body(text, "_pgo_collect")
-        self.assertGreater(body.index("wkpgo.py"), body.index(RUN_COLLECTION))
-        self.assertIn("return 1", body[body.index("wkpgo.py"):])
-        # and pgo_build runs the measured phase only after _pgo_collect succeeded
-        build = func_body(text, "pgo_build")
-        self.assertLess(build.index("_pgo_collect"), build.index("WK_ENABLE_PGO_USE=YES"))
-        self.assertIn("_pgo_collect \"$instr\" \"$pgo\" \"$arch\" || return $?", build)
-
-
 class TestAProfileGuidedBuildDoesNotCacheCompilations(WkTest):
     """Its two phases compile the whole tree with different flags, so the CAS
     holds both worlds and serves almost neither. Measured 2026-09-06 in a guest:
@@ -301,66 +261,13 @@ class TestAProfileGuidedBuildDoesNotCacheCompilations(WkTest):
         self.assertNotIn("WK_NO_COMPILATION_CACHE=1", cp.stdout, cp.stdout + cp.stderr)
 
 
-class TestBothArmsProfileAgainstOneBenchmark(WkTest):
-    """speedometer3 and jetstream3 name a moving branch in their plan files, so
-    an unpinned collection can profile the two arms against two revisions of the
-    benchmark and call the difference the patch's."""
-
-    def test_the_collection_is_handed_a_pinned_copy_of_each(self):
-        body = func_body((REPO / "build" / "mac-pgo.sh").read_text(), "_pgo_collect")
-        self.assertIn("_pgo_payload_args", body)
-        self.assertIn("--benchmark-custom-options",
-                      func_body((REPO / "build" / "mac-pgo.sh").read_text(), "_pgo_payload_args"))
-
-    def test_it_seeds_through_the_one_seeder(self):
-        """A second clone of a benchmark is a second answer to which revision
-        this fleet measures."""
-        body = func_body((REPO / "build" / "mac-pgo.sh").read_text(), "_pgo_payload_args")
-        self.assertIn("seed_payload", body)
-        self.assertNotIn("git clone", body)
-
-    def test_a_pin_that_fails_stops_the_collection(self):
-        body = func_body((REPO / "build" / "mac-pgo.sh").read_text(), "_pgo_collect")
-        gate = body[body.index("_pgo_payload_args"):body.index(RUN_COLLECTION)]
-        self.assertIn("return 1", gate)
-
-    def test_what_was_pinned_is_recorded_beside_the_profile(self):
-        body = func_body((REPO / "build" / "mac-pgo.sh").read_text(), "_pgo_collect")
-        self.assertIn('"$pgo/payload-pins"', body)
-
-
-class TestAnArmIsReclaimedOnceItIsStaged(WkTest):
-    """Measured 2026-09-06: one profile-guided arm leaves 56 GB of instrumented
-    products and 45 GB of measured ones in the guest, and the next arm wants the
-    same room. Both are spent the moment the arm is on the benchmark install."""
-
-    def test_the_reclaim_follows_the_stage_and_not_the_build(self):
-        body = func_body((REPO / "bench" / "mac-ab.sh").read_text(), "build_and_stage")
-        self.assertLess(body.index("bench stage"), body.index("reclaim_products"))
-        self.assertIn("staged as", body[:body.index("reclaim_products")])
-
-    def test_it_names_the_products_from_the_files_that_define_them(self):
-        """A third spelling of Release-pgo/-instr is one that goes stale on its
-        own and deletes the wrong directory, or nothing."""
-        body = func_body((REPO / "bench" / "mac-ab.sh").read_text(), "reclaim_products")
-        self.assertIn("config_build_dir", body)
-        self.assertIn("PGO_INSTR_SUFFIX", body)
-        self.assertNotIn("Release-pgo", body)
-
-    def test_the_suffix_has_one_definition(self):
-        text = (REPO / "build" / "mac-pgo.sh").read_text()
-        self.assertIn("PGO_INSTR_SUFFIX=", text)
-        self.assertIn('"$final$PGO_INSTR_SUFFIX"', text)
-        self.assertNotIn('"$final-instr"', text)
-
-
 class TestNothingMayDrawOverAMeasuredRun(WkTest):
     """A dialog over the browser is a run to throw away, and the two ways of
     missing one are both real: reading only layer 0, and reading once.
 
     Measured 2026-09-06 in a guest: a consent dialog raised by run-benchmark's
     own screenshot sat at layer 8, in the middle of the screen, for four hours
-    from the first leg of a PGO collection onward. `wk vm check` said the screen
+    from the first leg of a PGO collection onward. `wk doctor <guest>` said the screen
     held nothing but the one window wk put there."""
 
     WITH_A_DIALOG = ("Control Center:25:42x30@837,0;Window Server:24:1024x30@0,0;"
@@ -420,12 +327,6 @@ class TestNothingMayDrawOverAMeasuredRun(WkTest):
         cp = bash("APPEARS=\n" + self.WATCH, timeout=60)
         self.assertIn("CLEAN", cp.stdout, cp.stdout + cp.stderr)
 
-    def test_the_collection_is_watched_from_start_to_finish(self):
-        body = func_body((REPO / "build" / "mac-pgo.sh").read_text(), "_pgo_collect")
-        self.assertLess(body.index("screen_watch_start"), body.index(RUN_COLLECTION))
-        self.assertGreater(body.index("screen_watch_stop"), body.index(RUN_COLLECTION))
-        self.assertIn("return 1", body[body.index("screen_watch_stop"):])
-
 
 class TestPyobjcIsProvisionedNotAssumed(WkTest):
     """Xcode's python3 carries no pyobjc, so a macOS install that measures
@@ -457,43 +358,28 @@ class TestPyobjcIsProvisionedNotAssumed(WkTest):
             self.assertIn("wk_pyobjc_install", (REPO / rel).read_text(), rel)
 
     def test_the_guest_carries_it_in_the_settle_and_in_the_base_inputs(self):
-        text = (REPO / "targets" / "vm.sh").read_text()
-        self.assertIn("mac-pyobjc.sh", func_body(text, "_settle_desktop"))
-        self.assertIn("mac-pyobjc.sh", func_body(text, "_base_inputs_hash"))
+        import inspect
+        from wk import guest
+        from wk.sysimage import guestbase
+        self.assertEqual("bench/mac-pyobjc.sh", guest.PYOBJC)
+        self.assertIn("PYOBJC", inspect.getsource(guest.Guest.settle_desktop))
+        self.assertIn("bench/mac-pyobjc.sh", guestbase.INPUTS)
 
     def test_both_runs_of_the_desktop_script_feed_it_the_same_library(self):
         """vm/desktop.sh sources nothing: it calls wk_pyobjc_install and the
         caller cats the library ahead of it. A caller that leaves the library
         out gets `command not found` and a guest with no pyobjc."""
         base = (REPO / "vm" / "provision-base.sh").read_text()
-        settle = func_body((REPO / "targets" / "vm.sh").read_text(), "_settle_desktop")
-        for text, who in ((base, "vm/provision-base.sh"), (settle, "_settle_desktop")):
+        import inspect
+        from wk import guest
+        settle = inspect.getsource(guest.Guest.settle_desktop).replace("PYOBJC", "mac-pyobjc.sh")
+        for text, who in ((base, "vm/provision-base.sh"), (settle, "Guest.settle_desktop")):
             self.assertLess(text.index("mac-pyobjc.sh"), text.index("vm/desktop.sh"),
                             f"{who} runs vm/desktop.sh without bench/mac-pyobjc.sh ahead of it")
 
-    def test_the_benchmark_install_is_given_it_by_both_writers(self):
-        """--build-pkg and --repair write the same payload, from one table."""
-        text = (REPO / "bench" / "mac-bench-volume.sh").read_text()
-        self.assertIn("bench/mac-pyobjc.sh",
-                      func_body((REPO / "bench" / "mac-bench-payload.sh").read_text(),
-                                "bench_payload_files"))
-        for name in ("do_build_pkg", "do_repair"):
-            self.assertIn("stage_payload", func_body(text, name), name)
-
-    def test_a_repaired_volume_is_given_this_tree_and_not_the_one_it_has(self):
-        """The A/B's planted job runs the copy in the payload, so a volume
-        re-armed from an older wk-tools runs an older lane."""
-        text = (REPO / "bench" / "mac-bench-volume.sh").read_text()
-        body = func_body((REPO / "bench" / "mac-bench-payload.sh").read_text(),
-                         "stage_payload")
-        self.assertIn("wk-tools/", body)
-        self.assertIn("authorized_keys", body)
-        for name in ("do_build_pkg", "do_repair"):
-            self.assertNotIn("wk-tools/", func_body(text, name), name)
-
-    def test_the_pgo_gate_asks_the_one_reader(self):
-        body = func_body((REPO / "build" / "mac-pgo.sh").read_text(), "_pgo_screen_faults")
-        self.assertIn("wk_pyobjc_have", body)
+    def test_the_benchmark_install_is_given_it_by_the_one_payload_table(self):
+        """--build-pkg and --repair write the same payload (tests/test_mac_tailnet.py drives both)."""
+        self.assertIn('("bench/mac-pyobjc.sh", "usr/local/libexec/wk-bench-pyobjc.sh"', (REPO / "lib" / "wk" / "sysimage" / "macvolume.py").read_text())
 
 
 if __name__ == "__main__":

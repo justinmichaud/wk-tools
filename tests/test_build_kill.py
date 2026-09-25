@@ -33,7 +33,7 @@ import time
 import unittest
 from pathlib import Path
 
-from tests.support import REPO, WkTest, bash, fake_workspace, glob_bait, rand_suffix, run
+from tests.support import REPO, WkTest, bash, fake_workspace, rand_suffix, run
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk import build, job  # noqa: E402
@@ -331,11 +331,7 @@ class TestThePatternsCoverEveryShapeTheJobTakes(WkTest):
         self.fail(f"no PID_MATCH source known for {label} in {path}")
 
     def _matches(self, args, want):
-        with glob_bait(want) as cwd:
-            cp = bash(PRELUDE + "match_any %s %s && echo MATCH || echo NOPE"
-                      % (shlex.quote(args), shlex.quote(want)), timeout=30, cwd=str(cwd))
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        return cp.stdout.strip().splitlines()[-1] == "MATCH"
+        return job.match_any(args, want)
 
     def test_a_builds_two_shapes_both_match_and_nothing_else_does(self):
         want = self._declared("lib/wk/build.py", "build")
@@ -358,12 +354,10 @@ class TestThePatternsCoverEveryShapeTheJobTakes(WkTest):
     def test_the_image_builds_wrapper_matches_and_a_bare_bitbake_does_not(self):
         """The adopted pid is the wrapper the driver spawned, not a bitbake it
         started: a bare bitbake in the same PID namespace is another job."""
-        m = re.search(r"job_pid_adopt [^\n]*?'(\*[^'\n]*)'",
-                      (REPO / "image" / "yocto.sh").read_text())
-        self.assertIsNotNone(m, "no job_pid_adopt in image/yocto.sh")
+        from wk.sysimage import yocto
         self.assertTrue(self._matches(
-            "/opt/wk-tools/image/yocto-build.sh --target rpi5 --stage image", m.group(1)))
-        self.assertFalse(self._matches("bitbake core-image-weston", m.group(1)))
+            "python3 /opt/wk-tools/lib/wk/sysimage/yocto_target.py --target rpi5 --stage image", yocto.PATTERN))
+        self.assertFalse(self._matches("bitbake core-image-weston", yocto.PATTERN))
 
 
 class TestASecondBuildIsRefusedAtOnceAndNamesTheRemedy(WkTest):

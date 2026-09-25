@@ -17,7 +17,7 @@ import types
 import unittest
 import unittest.mock
 
-from tests.support import REPO, WkTest, owed, requires_machine, scratch_dir
+from tests.support import NO_REGISTRY, REPO, WkTest, owed, requires_machine, scratch_dir
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk import act, images, record  # noqa: E402
@@ -51,7 +51,9 @@ class FakeRegistry:
     """What cli.Sysimage and ls.Listing ask of targets.Registry."""
 
     def __init__(self, store_dir, targets=(), machine=None, env=None):
-        self.env = dict(env or {}, WK_STORE=str(store_dir))
+        # A blind fleet unless a test names its own: host_profiles()'s mac-volume check reads
+        # machines/<IMG_MACHINE>.conf through this env, and this repo's real one names a real Mac's real volume.
+        self.env = dict({"WK_MACHINES_DIR": NO_REGISTRY}, **(env or {}), WK_STORE=str(store_dir))
         self.env.pop("WK_ROW_LABEL", None)
         self.store = Store(self.env)
         self.machine = machine or Local()
@@ -128,10 +130,30 @@ class TestTheBuildersConform(unittest.TestCase):
         self.assertEqual(ls.scan(f, Store({"WK_STORE": "/st"})),
                          [ls.Image("yocto", YWS, "/st/ws/%s/build/CrossToolChains/t/build/image/a.wic.xz" % YWS)])
 
-    @owed("pmos and fetch images are left on the host or the pmos build host, which no read reaches yet (5.17, 5.20)")
+    def test_the_mac_volume_finds_what_it_leaves_and_nothing_beside_it(self):
+        """`sysimage.builders_conform[mac-volume]`: built is an installed volume carrying the board's marker."""
+        from wk.sysimage import macvolume
+        f = Fake()
+        v = macvolume.MacVolume(f, images.load("perf-macos-tolken"), {"HOME": "/nonexistent"}, root=REPO)
+        f._set_file("/Volumes/%s/etc/wk-image" % v.volume, "id=x\n")
+        self.assertEqual(v.outputs(), [], "a marker on a volume with no macOS on it")
+        f._set_file("/Volumes/%s/System/Library/CoreServices/SystemVersion.plist" % v.volume, "")
+        self.assertEqual(v.outputs(), ["/Volumes/%s/etc/wk-image" % v.volume])
+        self.assertIn("mac-volume", cli.BUILDERS)
+
     def test_every_builder_a_profile_names_has_outputs(self):
+        """mac-volume and guest have no workspace, so their marker is read through `ls.builder_outputs`
+        (5.32, 5.34) -- `cli.Sysimage.builder_outputs`'s one implementation -- rather than
+        `ls.BUILDERS`'s workspace globs. pmos and fetch stay owed below."""
         named = {images.load(n)["IMG_BUILDER"] for n in images.names()}
-        self.assertLessEqual(named, {b.kind for b in ls.BUILDERS})
+        reachable = {b.kind for b in ls.BUILDERS} | set(ls.HOST_BUILDERS)
+        self.assertLessEqual(named - {"pmos", "fetch"}, reachable)
+
+    @owed("pmos and fetch images are left on the host or the pmos build host, which no read reaches yet (5.17, 5.20)")
+    def test_pmos_and_fetch_images_have_no_reader_yet(self):
+        named = {images.load(n)["IMG_BUILDER"] for n in images.names()}
+        reachable = {b.kind for b in ls.BUILDERS} | set(ls.HOST_BUILDERS)
+        self.assertLessEqual(named, reachable)
 
 
 class TestTheListing(WkTest):
@@ -315,6 +337,50 @@ class TestPath(WkTest):
             self.assertEqual(ran(s.path, YOCTO, None).out, "%s\n" % p)
             self.assertEqual(ran(s.path, "bridge-pinephone", None).rc, 1, "a host-built profile has no workspace")
             self.assertIn("usage: wk sysimage path", ran(s.path, "", None).err)
+
+
+class TestPathAndHoldsReachTheMacVolumeMarker(WkTest):
+    """`unit sysimage.builders_conform[mac-volume]`: a builder with no workspace still answers `path` and `holds`,
+    read straight off the machine it builds on."""
+
+    def volume(self, f, env):
+        from wk.sysimage import macvolume
+        return macvolume.MacVolume(f, images.load("perf-macos-tolken"), env)
+
+    def test_path_is_the_marker_once_installed(self):
+        with scratch_dir() as d:
+            f = Fake()
+            s = sysimage(d, machine=f)
+            v = self.volume(f, s.reg.env)
+            self.assertEqual(ran(s.path, "perf-macos-tolken", None).rc, 1)
+            f._set_file(v.s + "/System/Library/CoreServices/SystemVersion.plist", "")
+            f._set_file(v.s + "/etc/wk-image", "id=x\n")
+            self.assertEqual(ran(s.path, "perf-macos-tolken", None).out, "%s/etc/wk-image\n" % v.s)
+
+    def test_ls_lists_it_only_once_installed(self):
+        """`unit sysimage.builders_conform[mac-volume]`: `ls` has no workspace to anchor a placeholder row at,
+        so the profile is silent until `builder_outputs` finds its marker."""
+        with scratch_dir() as d:
+            f = Fake()
+            s = sysimage(d, machine=f)
+            v = self.volume(f, s.reg.env)
+            self.assertNotIn("perf-macos-tolken", ran(s.ls, False).out)
+            f._set_file(v.s + "/System/Library/CoreServices/SystemVersion.plist", "")
+            f._set_file(v.s + "/etc/wk-image", "id=x\n")
+            cp = ran(s.ls, False)
+        line = next(l for l in cp.out.splitlines() if l.startswith("perf-macos-tolken"))
+        self.assertEqual(line.split()[:5], ["perf-macos-tolken", "mbp", "mac-volume", "ready", "-"])
+        self.assertIn("    " + v.s + "/etc/wk-image", cp.out)
+
+    def test_holds_the_image_answers_yes_once_installed(self):
+        with scratch_dir() as d:
+            f = Fake()
+            s = sysimage(d, machine=f)
+            v = self.volume(f, s.reg.env)
+            self.assertEqual(ran(s.holds, "perf-macos-tolken", None, None, None, None, False).out, "no\n")
+            f._set_file(v.s + "/System/Library/CoreServices/SystemVersion.plist", "")
+            f._set_file(v.s + "/etc/wk-image", "id=x\n")
+            self.assertEqual(ran(s.holds, "perf-macos-tolken", None, None, None, None, False).out, "yes\n")
 
 
 class TestTheRoutingAnswers(unittest.TestCase):

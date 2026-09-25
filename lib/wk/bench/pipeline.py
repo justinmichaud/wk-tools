@@ -1,6 +1,5 @@
 """`wk bench run`: one plan on one System -- the refusals, the preflight, the pinned payload, the task and
-its progress record, the watched run, the collect and the verdict. `python3 -m wk.bench.pipeline` answers
-lib/bench.sh's bench_configuration_args."""
+its progress record, the watched run, the collect and the verdict."""
 
 import json
 import os
@@ -25,6 +24,7 @@ STALL_SECONDS, ABORT_SECONDS = "900", "5400"
 MAX_LOAD = 4
 SCORE = re.compile(r"^(Score|Total|.*Score:)", re.I)
 QUIET = "lib/quiet.sh"
+AB_ONLY = ("rounds", "task", "exclude_subtests", "no_warmup_profile", "jit_tiers")
 
 
 def bench_class(plan):
@@ -138,10 +138,16 @@ class Run:
         self.env.setdefault("WK_ABORT_SECONDS", ABORT_SECONDS)
         self.here, self.ws, self.target = reg.machine, system.ws, system.target
         self.bench_dir = reg.store.bench_dir()
-        self.recs = progress.of_target(self.target, clock, self.here, env=dict(self.target.env, WK_ABORT_SECONDS=self.env["WK_ABORT_SECONDS"]))
+        self.recs = self.records(clock)
         self.lock = Lock(reg.store, self.here, clock)
         self.task, self.dry_fails = None, 0
         self.kill_cmd = "wk bench run%s --kill" % ("" if reg.in_workspace() else " " + self.ws)
+
+    def records(self, clock):
+        return progress.of_target(self.target, clock, self.here, env=dict(self.target.env, WK_ABORT_SECONDS=self.env["WK_ABORT_SECONDS"]))
+
+    def put(self):
+        self.target.task_put(self.ws, self.task)
 
     def stop(self):
         rc = job.stop(self.target, self.recs, self.ws, "bench", self.here, self.clock, self.env)
@@ -169,7 +175,7 @@ class Run:
                 % (plan, name, self.ws))
         if leg.klass == "gpu" and not s.has_gpu(leg.arch):
             die("%s is gpu-class and '%s' is an %s workspace, which has no GPU.\n    cpu-class plans (jetstream3, octane, kraken, sunspider) do run in here,\n"
-                "    with either a browser or a JSCOnly config. For a 32-bit rendering number\n    boot a bench system on the board and use `wk pi bench`." % (plan, self.ws, leg.arch))
+                "    with either a browser or a JSCOnly config. For a 32-bit rendering number\n    measure a board:  wk bench run %s %s --system <board>" % (plan, self.ws, leg.arch, self.ws, plan))
         if leg.runner == "browser":
             leg.browser = leg.browser or s.default_browser(leg.cfg)
         if leg.software:
@@ -267,12 +273,12 @@ class Run:
     def step(self, n):
         if self.task is not None:
             self.task.step(n)
-            self.target.task_put(self.ws, self.task)
+            self.put()
 
     def end(self, word):
         if self.task is not None:
             self.task.end(word)
-            self.target.task_put(self.ws, self.task)
+            self.put()
         self.lock.release_all()
 
     def watched(self, argv, cwd, path):
@@ -411,27 +417,42 @@ class Run:
         raise Refused(rc)
 
 
+def _run_class(system):
+    """A `--system <mac>` run is driven over ssh through that install's own `wk bench staged` (lib/wk/bench/mac.py), a
+    `--system <board>` run is run-benchmark here driving the board's browser (lib/wk/bench/board.py); every other
+    system runs run-benchmark or the jsc shell directly, through the base `Run`."""
+    from wk.bench import board, mac
+    if isinstance(system, board.BoardSystem):
+        return board.BoardRun
+    return mac.HostRun if isinstance(system, mac.MacHostSystem) else Run
+
+
 def run(root, reg, words, o, kill, clock, popen=subprocess.Popen):
     """`wk bench run <ws> <plan>`: the dispatcher resolved the workspace (WK_NAME) and dropped it from `words`."""
     ws, plan = reg.env.get("WK_NAME", ""), (words[0] if words else "")
     if not ws or not (plan or kill):
         die("usage: wk bench run <workspace> <plan> [options]; see wk bench -h")
-    r = Run(root, reg, systems.for_workspace(root, reg, ws, clock), clock, reg.env, popen)
+    ab = not kill and (o.get("ab") or o.get("ab_systems"))
+    alone = [k for k in AB_ONLY if o.get(k)] if not ab else []
+    if alone:
+        die("--%s belongs to an A/B on a board (--ab or --ab-systems)" % alone[0].replace("_", "-"))
+    if o.get("system") and reg.in_workspace() and (ab or o.get("collect")):
+        die("an A/B or a collection on a board is not a request a workspace can make; run it on the workstation:\n"
+            "    wk bench run %s %s --system %s ..." % (ws, plan, o["system"]))
+    if ab:
+        from wk.bench import board_ab
+        return board_ab.run(root, reg, ws, plan, o, clock, popen)
+    if o.get("system") and reg.in_workspace():
+        from wk.bench import board
+        return board.request(root, reg, "run", ["machine=" + o["system"], "workspace=" + ws, "plan=" + plan, "slot=" + (o.get("slot") or ""),
+                                                "count=" + (o.get("count") or "")], "wk bench run %s %s --system %s" % (ws, plan, o["system"]))
+    system = systems.for_workspace(root, reg, ws, clock, o.get("system") or "")
+    if o.get("collect") and system.kind != "board":
+        die("--collect takes a PGO profile from a board's instrumented slot: --system <board> --slot <name>-instr")
+    r = _run_class(system)(root, reg, system, clock, reg.env, popen)
     if kill:
         return r.stop()
     if not act.dry_run():
         os.makedirs(r.bench_dir, exist_ok=True)
     return r.go(plan, o)
 
-
-def main(argv):
-    """`configuration`, for cmd/pi's bench_configuration_args."""
-    if argv != ["configuration"]:
-        sys.stderr.write("usage: python3 -m wk.bench.pipeline configuration\n")
-        return 2
-    print("\n".join(configuration_fields(os.environ)))
-    return 0
-
-
-if __name__ == "__main__":
-    sys.exit(main(sys.argv[1:]))

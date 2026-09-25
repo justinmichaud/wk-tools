@@ -1,5 +1,4 @@
-"""Putting wk-tools on a machine (lib/wk/tools.py, each driver's `sync_tools`, and the bash shims in lib/tools.sh
-and lib/target.sh).
+"""Putting wk-tools on a machine (lib/wk/tools.py, each driver's `sync_tools`, and the bash shim in lib/target.sh).
 
 The rule under test: a machine is given a *commit*, never a file copy. The copy over there is a real checkout whose
 HEAD is this tree's HEAD, converged from whatever was there before -- nothing, a directory an older tooling copied
@@ -22,7 +21,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from tests.support import REPO, bash, stub_path
+from tests.support import REPO
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk import guest, targets, tools  # noqa: E402
@@ -285,31 +284,20 @@ class EachKind(unittest.TestCase):
         self.assertIn("/Users/admin/.wk-workspace", runs[-1][-1], "the marker the pushed tooling reads was not rewritten")
 
 
-class TestTheBashShims(ToolsPushCase):
-    """The bash callers reach the one push: `tools_committed` for cmd/vm, `tools_push` for boot/machines.sh,
-    `t_sync_tools` for cmd/vm and cmd/remote."""
-
-    def test_tools_committed_refuses_a_dirty_tree_by_name(self):
-        (self.src / "wk").write_text("edited\n")
-        cp = bash('. "%s/lib/tools.sh"\nWK_ROOT=%s tools_committed' % (REPO, self.src))
-        self.assertNotEqual(cp.returncode, 0)
-        self.assertIn("uncommitted changes", cp.stderr)
-
-    def test_tools_push_goes_over_plain_ssh_to_its_last_argument(self):
-        log = self.tmp / "ssh.argv"
-        stubs = {"ssh": 'for a in "$@"; do last="$a"; done\necho "$last" >> %s\nexec sh -c "$last"\n' % log,
-                 "scp": 'for a in "$@"; do src="$last"; last="$a"; done\ncp "$src" "${last#*:}"\n'}
-        with stub_path(stubs) as binp:
-            cp = bash('. "%s/lib/tools.sh"\nWK_ROOT=%s tools_push %s mac_ssh tolken' % (REPO, self.src, self.far),
-                      env={"PATH": "%s:%s" % (binp, os.environ["PATH"]), "HOME": str(self.tmp / "home")})
-        self.assertEqual(cp.returncode, 0, cp.stderr)
-        self.assertEqual(self.far_head(), self.sha)
+class TestTheBashShim(ToolsPushCase):
+    """One push for every kind: lib/target.sh's `t_sync_tools` is the only bash caller left, and it asks
+    the Python. `boot/machines.sh`'s own push went with `machine_prepare` (`wk machine setup mbp`,
+    lib/wk/machine_cmd/mac.py, calls `tools.push` directly), so the bash `tools_push` shim it once sourced
+    has no caller left."""
 
     def test_no_driver_pushes_of_its_own(self):
-        """One push for every kind: lib/target.sh's t_sync_tools asks the Python, and no driver overrides it."""
         for f in (REMOTE, VM, REPO / "targets" / "container.sh", REPO / "targets" / "local.sh"):
             self.assertNotIn("\nt_sync_tools()", f.read_text(), f)
         self.assertIn('t_sync_tools()    { _ws_py sync-tools "$WK_TARGET" "$1"; }', (REPO / "lib" / "target.sh").read_text())
+
+    def test_lib_tools_sh_is_gone(self):
+        self.assertFalse((REPO / "lib" / "tools.sh").exists(), "the bash push shim has no caller left")
+        self.assertNotIn("tools_push", (REPO / "boot" / "machines.sh").read_text())
 
 
 class TestNoFileCopyLeft(unittest.TestCase):

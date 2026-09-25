@@ -1,4 +1,4 @@
-# The watched run and the job stop for a bash caller, each function one call into lib/wk/job.py; cmd/bench and cmd/pi raise WK_STALL_SECONDS/WK_ABORT_SECONDS before sourcing this.
+# The watched run and the job stop for a bash caller, each function one call into lib/wk/job.py; cmd/bench raises WK_STALL_SECONDS/WK_ABORT_SECONDS before sourcing this.
 
 command -v _job_py    >/dev/null 2>&1 || . "$WK_ROOT/lib/detach.sh"
 command -v task_field >/dev/null 2>&1 || . "$WK_ROOT/lib/task.sh"

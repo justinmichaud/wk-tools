@@ -1,24 +1,32 @@
-"""The script a macOS benchmark install runs by itself (bench/mac-bench-autorun.sh)
+"""The script a macOS benchmark install runs by itself (lib/wk/bench/autorun.py)
 and the readings it judges the install by (bench/mac-quiet-desktop.sh).
 
 It runs with nobody in the room and no network, so anything it cannot decide
 by itself it cannot ask about: a reading that hangs hangs the experiment, a
 refusal nobody reads has to power the machine off, and a run that ends any way
-at all has to leave its verdict on the volume. Every function and every
-decision here is exercised without a Mac.
+at all has to leave its verdict on the volume. The autorun runs here against
+the fake machine and the fake clock.
 
-Run: python3 -m unittest tests.test_mac_autorun -v
+Run: python3 tests/run.py --unit -k autorun
 """
+import contextlib
+import io
 import json
-import shlex
+import os
 import re
 import subprocess
+import sys
 import time
 import unittest
 
-from tests.support import REPO, WkTest, func_body, scratch_dir
+from tests.support import REPO, WkTest, scratch_dir
 
-AUTORUN = REPO / "bench" / "mac-bench-autorun.sh"
+sys.path.insert(0, str(REPO / "lib"))
+from wk.bench import autorun, mac  # noqa: E402
+from wk.clock import FakeClock  # noqa: E402
+from wk.kv import kv  # noqa: E402
+from wk.machine import Fake, Killed, Result  # noqa: E402
+
 QUIET = REPO / "bench" / "mac-quiet-desktop.sh"
 NOISE = REPO / "lib" / "quiet.sh"
 
@@ -170,761 +178,577 @@ class TestATimedOutReadingIsUnknownAndNotAFault(WkTest):
         self.assertEqual(["wrong"], [f[0] for f in found], found)
 
 
-class TestTheMachineEndsUpOff(WkTest):
-    """The bench volume is the firmware default, so a reboot lands back on it
-    and starts the agent again. Every way this script can end ends with the
-    machine powered off."""
-
-    def _leave(self, host="/Volumes/Macintosh HD", group="HOSTGRP", firmware=None):
-        """`leave_bench` with the firmware, the host install and sudo all faked.
-        `firmware` is what `wkmac.py boot-volume` answers after the bless --
-        None means the bless took."""
-        with scratch_dir() as tmp:
-            calls = tmp / "sudo"
-            answers = "HOSTGRP:%s" % (group if firmware is None else firmware)
-            hostfn = ('host_install() { printf %s; }\n' % (shlex.quote(host))
-                      if host else 'host_install() { return 1; }\n')
-            cp = sh(f'set -euo pipefail\n_left=""\nSTATE={tmp}/state\nTOOLS={tmp}\n'
-                    f'hold_for_a_reader() {{ :; }}\n'   # its own tests below
-                    f'say() {{ printf "%s\\n" "$*"; }}\n'
-                    f'state_set() {{ printf "state %s=%s\\n" "$1" "$2"; }}\n'
-                    f'sudo() {{ printf "%s\\n" "$*" >> {calls}; }}\n'
-                    f'{hostfn}'
-                    # wkmac.py stands in for both readings: the group of the host
-                    # install, and what the firmware names after the bless.
-                    f'python3() {{ case "$*" in *volume-group*) printf %s {shlex.quote(group)} ;;'
-                    f' *boot-volume*) printf %s {shlex.quote(answers)} ;; esac; }}\n'
-                    f'leave_bench() {{{func_body(AUTORUN.read_text(), "leave_bench")}}}\n'
-                    f'leave_bench "the reason"\nleave_bench "a second reason"\n')
-            return cp.stdout + cp.stderr, calls.read_text() if calls.exists() else ""
-
-    def test_a_bless_that_took_hands_the_machine_back(self):
-        """The only human step should be a login, so it reboots into host mode
-        rather than halting and waiting for a power button."""
-        out, calls = self._leave()
-        self.assertIn("-n /sbin/reboot", calls, out)
-        self.assertNotIn("/sbin/halt", calls, out)
-        self.assertIn("comes up in host mode", out)
-
-    def test_it_blesses_before_it_reads_the_firmware_back(self):
-        out, calls = self._leave()
-        lines = calls.splitlines()
-        self.assertTrue(lines[0].startswith("-n bless --mount"), lines)
-        self.assertIn("--setBoot", lines[0])
-
-    def test_a_bless_that_did_not_take_halts_instead(self):
-        """This volume is the firmware default: rebooting with it still default
-        lands back here and measures again, so a reboot is taken only once the
-        firmware reads back as the host install."""
-        out, calls = self._leave(firmware="STILL-THE-BENCH-VOLUME")
-        self.assertIn("-n /sbin/halt", calls, out)
-        self.assertNotIn("/sbin/reboot", calls, out)
-        self.assertIn("would land back here", out)
-
-    def test_no_host_install_to_hand_back_to_halts(self):
-        out, calls = self._leave(host="")
-        self.assertIn("-n /sbin/halt", calls, out)
-        self.assertNotIn("/sbin/reboot", calls, out)
-        self.assertIn("nothing to hand back to", out)
-
-    def test_the_host_install_is_the_one_with_no_bench_marker(self):
-        """The mirror of wk-boot-priv's gate, and exactly one: two candidates is
-        not a machine this may guess about."""
-        body = func_body(AUTORUN.read_text(), "host_install")
-        self.assertIn('[ -f "$v/etc/wk-image" ] && continue', body)
-        self.assertIn('[ "$n" -eq 1 ] || return 1', body)
-        self.assertIn("stat -f %d", body)
-
-    def test_the_first_reason_is_the_one_recorded(self):
-        """A trap runs after whatever already decided to leave, and the second
-        caller must not turn one departure into two. Counted in transitions,
-        not sudo calls: handing the machine back is a bless and then a reboot."""
-        out, calls = self._leave()
-        self.assertIn("the reason", out)
-        self.assertNotIn("a second reason", out)
-        leaving = [l for l in calls.splitlines()
-                   if "/sbin/reboot" in l or "/sbin/halt" in l]
-        self.assertEqual(1, len(leaving), calls)
-
-    def test_every_reboot_is_guarded_against_landing_back_here(self):
-        """This volume is the firmware default, so a reboot lands back here and
-        measures again unless something changed first. Exactly two paths reboot,
-        and each is guarded by a different thing being true: the display-mode
-        write, bounded by the state it records, and the hand-back, taken only
-        once the firmware reads back as naming the host install. The reboot the
-        first-boot daemon schedules is what cancel_pending_reboot cancels."""
-        text = AUTORUN.read_text()
-        code = [l for l in text.splitlines() if not l.lstrip().startswith("#")]
-        self.assertEqual(2, len([l for l in code if "/sbin/reboot" in l]), code)
-        mode = func_body(text, "converge_display_mode")
-        back = func_body(text, "leave_bench")
-        self.assertIn("/sbin/reboot", mode)
-        self.assertIn("/sbin/reboot", back)
-        # The mode path's guard is its record; the hand-back's is the read-back.
-        self.assertIn('state_get mode_declared', mode)
-        self.assertIn('[ "$grp" = "$want" ]', back)
-        self.assertIn("/sbin/halt", back)
-        block = text[text.index("converge_display_mode() {"):
-                     text.index("converge_display_mode\n")]
-        self.assertIn('[ "$(state_get mode_declared)" = "$want" ]', block)
-        self.assertIn('state_set mode_declared "$want"', block)
-        self.assertIn('state_set attempts "$((ATTEMPTS - 1))"', block)
-        # The bounded arm leaves rather than looping.
-        self.assertIn('leave_bench "the declared display mode cannot be set"', block)
-        self.assertLess(block.index("leave_bench \"the declared display mode cannot be set\""),
-                        block.index('state_set mode_declared'), block)
-        self.assertNotIn("leave_bench reboot", text)
-        self.assertNotIn("leave_bench halt", text)
-
-    def test_every_call_names_one_reason(self):
-        """`leave_bench <why>`: one behaviour, so no caller chooses one."""
-        calls = re.findall(r"^\s*leave_bench (.*)$", AUTORUN.read_text(), re.M)
-        self.assertTrue(calls)
-        for call in calls:
-            with self.subTest(call=call):
-                self.assertRegex(call, r'^"[^"]+"$')
-
-    def test_the_finished_job_powers_off_rather_than_staying_up(self):
-        """A finished A/B on a machine that stays up is a machine nothing can
-        reach: this install has no network at all."""
-        text = AUTORUN.read_text()
-        self.assertNotIn("booted_is_default", text)
-        self.assertNotIn("stayed-up", text)
-        self.assertTrue(text.rstrip().endswith('leave_bench "job finished"'),
-                        text.rstrip()[-200:])
-
-    def test_host_mode_is_the_one_exit_that_touches_nothing(self):
-        """The same agent file can be left on the host install, where
-        /etc/wk-image is absent -- and powering that off is powering off the
-        machine the maintainer is using."""
-        text = AUTORUN.read_text()
-        block = text[text.index("if [ ! -f /etc/wk-image ]"):]
-        block = block[:block.index("\nfi\n")]
-        self.assertIn("remove_agent", block)
-        self.assertNotIn("leave_bench", block)
 
 
-class TestTheWatchdogLeavesAVerdict(WkTest):
-    """A watchdog firing is not a reason to throw the measurement away: the
-    run that hung had sixteen rounds of real numbers on the volume and no
-    summary.txt, because only the clean path ever summarised."""
-
-    def _fire(self, phase="", stall="10"):
-        text = AUTORUN.read_text()
-        cp = sh(f'set -euo pipefail\nSTALL={stall}\nLOG=/dev/null\n'
-                f'sleep() {{ :; }}\n'
-                f'date() {{ printf 1000; }}\n'
-                f'stat() {{ printf 0; }}\n'
-                f'say() {{ printf "%s\\n" "$*"; }}\n'
-                f'state_get() {{ printf "%s" {phase!r}; }}\n'
-                f'state_set() {{ printf "state %s=%s\\n" "$1" "$2"; }}\n'
-                f'summarise() {{ printf "SUMMARISED\\n"; }}\n'
-                f'leave_bench() {{ printf "OFF: %s\\n" "$1"; }}\n'
-                f'watchdog() {{{func_body(text, "watchdog")}}}\n'
-                f'watchdog; printf "RET=%s\\n" "$?"\n')
-        return cp, cp.stdout + cp.stderr
-
-    def test_it_summarises_the_rounds_that_did_land_and_then_powers_off(self):
-        cp, out = self._fire()
-        self.assertEqual(0, cp.returncode, out)
-        self.assertIn("WATCHDOG FIRED", out)
-        self.assertIn("SUMMARISED", out)
-        self.assertIn("OFF: ", out)
-        self.assertIn("RET=0", out)
-
-    def test_the_state_is_advanced_before_the_summary(self):
-        """A power cut inside the summary must not let the next boot repeat
-        the attempt."""
-        _, out = self._fire()
-        lines = out.splitlines()
-        self.assertLess(lines.index("state phase=done"), lines.index("SUMMARISED"), out)
-        self.assertLess(lines.index("state outcome=watchdog"), lines.index("SUMMARISED"), out)
-        self.assertLess(lines.index("SUMMARISED"),
-                        [i for i, l in enumerate(lines) if l.startswith("OFF: ")][0], out)
-
-    def test_a_finished_job_retires_it_without_a_second_summary(self):
-        cp, out = self._fire(phase="done")
-        self.assertEqual("RET=0\n", out, out)
-
-    def test_one_summary_step_serves_both_endings(self):
-        """Two copies could summarise into different files, or one of them
-        could stop being run."""
-        text = AUTORUN.read_text()
-        self.assertEqual(1, text.count("summarise() {"))
-        self.assertEqual(1, text.count('"$TOOLS/wk" bench ab-summary'))
-        self.assertEqual(2, len(re.findall(r"^\s*summarise\s*(?:#.*)?$", text, re.M)))
-
-    def test_the_clean_ending_advances_the_state_before_it_summarises_too(self):
-        text = AUTORUN.read_text()
-        tail = text[text.index('say "leaving the machine quiesced'):]
-        self.assertLess(tail.index("state_set phase done"), tail.index("\nsummarise\n"), tail)
-
-    def test_it_is_armed_with_somewhere_to_write_the_verdict(self):
-        """The summary goes into $RUNS, so the run map has to exist before the
-        watchdog that can call it."""
-        text = AUTORUN.read_text()
-        self.assertLess(text.index('RUNS="$WK_AB_ROOT/ab/'), text.index("watchdog() {"))
-        self.assertLess(text.index("summarise() {"), text.index("watchdog() {"))
-        self.assertLess(text.index("\nwatchdog &"), text.index('say "warmup round'))
-
-    def test_the_watchdog_and_its_summary_are_defined_before_it_is_armed(self):
-        """`watchdog &` before `watchdog() {` is "command not found" in a
-        subshell: the boot goes on with no watchdog at all and $! still sets
-        WATCHDOG, so nothing says so (measured, job 20260909T132948Z)."""
-        text = AUTORUN.read_text()
-        for define in ('RUNS="$WK_AB_ROOT/ab/', "summarise() {", "watchdog() {"):
-            with self.subTest(defined=define):
-                self.assertLess(text.index(define), text.index("\nwatchdog &"))
-
-    def test_it_is_armed_before_every_step_that_can_block(self):
-        """Joining a tailnet, writing a display mode, quiescing and launching a
-        browser all wait on the system for as long as it takes. A boot that
-        reaches one of those with neither the watchdog nor the hand-back trap
-        armed is a machine left in bench mode with nothing able to report it and
-        no way back -- which is what an install whose Wi-Fi never came up did,
-        sitting in `tailscale up` with no deadline (measured 2026-09-09)."""
-        text = AUTORUN.read_text()
-        armed = text.index("\nwatchdog &")
-        trap = text.index("\ntrap 'kill \"$WATCHDOG\"")
-        self.assertLess(armed, trap, "the trap is armed with the watchdog")
-        for step in ("\nconverge_self\n", "\nhold_auto_brightness ", "\nrefuse_wrong_displays\n",
-                     "\nconverge_display_mode\n", '"$TOOLS/wk" quiesce on',
-                     "\ndim_display\n", "\nrefuse_throttled_browser\n"):
-            with self.subTest(step=step.strip()):
-                self.assertLess(trap, text.index(step))
-
-    def test_the_two_exits_that_want_the_machine_up_say_so(self):
-        """The trap hands the machine back, so the branches whose whole point is
-        a reboot of their own have to be able to opt out: the first-boot daemon's
-        provisioning, and the display-mode write that needs one boot to take."""
-        text = AUTORUN.read_text()
-        self.assertIn('[ -n "$_stay" ] || leave_bench', text)
-        self.assertEqual(2, len([l for l in text.splitlines()
-                                 if l.strip().startswith("_stay=1")]), text)
-        mode = text[text.index("converge_display_mode() {"):]
-        self.assertLess(mode.index("_stay=1"), mode.index("/sbin/reboot"),
-                        "the stay is set before the reboot, not after")
-
-    def test_the_join_cannot_wait_forever(self):
-        """`tailscale up` without --timeout waits for the backend to reach
-        Running for as long as that takes."""
-        text = (REPO / "bench" / "mac-tailnet.sh").read_text()
-        self.assertRegex(text, r"tailscale\" up --timeout=\d+s ")
+ROOT = "/var/wk"
+TOOLS = ROOT + "/wk-tools"
+HOME = "/Users/bench"
+AGENT = HOME + "/Library/LaunchAgents/com.wk.bench-ab.plist"
+STATE = ROOT + "/autorun.state"
+RUNS = ROOT + "/ab/S1"
+HOST = "/Volumes/Macintosh HD"
+WKMAC = ["python3", TOOLS + "/" + mac.WKMAC]
+CHECK = ["/usr/bin/python3", TOOLS + "/" + mac.CHECK]
+WK = ["env", "WK_STORE=" + ROOT, TOOLS + "/wk"]
+OK_ROWS = "ok\tApp Nap cannot throttle a backgrounded browser\t\n"
+WRONG_ROWS = "wrong\tnot so: the screen does not lock (askforpassword reads '1')\tfix\n"
+HALT = ("sudo", "-n", "/sbin/halt")
+REBOOT = ("sudo", "-n", "/sbin/reboot")
 
 
-class TestTheStoppingRuleIsGivenRunDirectories(WkTest):
-    """`wk bench report` and `wk bench precision` name run directories; the
-    stopping rule reads the same rows through the same convention."""
-
-    def _arm_results(self, plan, label):
-        with scratch_dir() as tmp:
-            (tmp / "runs.tsv").write_text(
-                "1\tA\tsid-a\tr1\tclean\tjetstream3\n"
-                "1\tB\tsid-b\tr2\tclean\tjetstream3\n"
-                "2\tA\tsid-a\tr3\tclean\tjetstream3\n"
-                "1\tA\tsid-a\tr4\tclean\tmotionmark\n"
-                "2\tB\tsid-b\tr5\tscanned\tjetstream3\n")
-            body = func_body(AUTORUN.read_text(), "arm_results")
-            return sh(f'WK_AB_ROOT=/var/wk\nRUNS={tmp}\n'
-                      f'arm_results() {{{body}}}\narm_results {plan} {label}').stdout
-
-    def test_it_emits_directories_and_not_files_inside_them(self):
-        self.assertEqual("/var/wk/results/r1,/var/wk/results/r3",
-                         self._arm_results("jetstream3", "A"))
-
-    def test_nothing_appends_a_file_name_anywhere_on_the_way(self):
-        self.assertNotIn("result.json", AUTORUN.read_text())
-
-    def test_a_contaminated_round_still_reaches_nothing(self):
-        """A software-update scan across an arm is a number to drop, and the
-        rule must not be talked into stopping by one."""
-        self.assertEqual("/var/wk/results/r2", self._arm_results("jetstream3", "B"))
+def lib(rel, fn):
+    return ["bash", "-c", '. "$0"; %s "$@"' % fn, TOOLS + "/" + rel]
 
 
-class TestTheDisplayIsPinnedByTheJob(WkTest):
-    """Two runs at different resolutions are two different measurements, and
-    nothing downstream reads the screen they were taken at."""
-
-    def _refuse(self, expect):
-        text = AUTORUN.read_text()
-        cp = sh(f'set -euo pipefail\nDISPLAY_EXPECT={expect!r}\n'
-                f'say() {{ printf "%s\\n" "$*"; }}\n'
-                f'state_set() {{ printf "state %s=%s\\n" "$1" "$2"; }}\n'
-                f'remove_agent() {{ printf "AGENT REMOVED\\n"; }}\n'
-                f'leave_bench() {{ printf "OFF: %s\\n" "$1"; }}\n'
-                f'refuse_unpinned_display() {{{func_body(text, "refuse_unpinned_display")}}}\n'
-                f'refuse_unpinned_display\nprintf "RAN THE ROUNDS\\n"\n')
-        return cp.stdout + cp.stderr
-
-    def test_a_job_that_pins_no_display_measures_nothing(self):
-        out = self._refuse("")
-        self.assertNotIn("RAN THE ROUNDS", out, "it measured at an unknown screen:\n" + out)
-        self.assertIn("OFF: ", out)
-        self.assertIn("NODE_DISPLAY", out, out)
-        self.assertIn("state phase=done", out, out)
-
-    def test_a_job_that_pins_one_runs_on(self):
-        out = self._refuse("builtin 1470x956")
-        self.assertIn("RAN THE ROUNDS", out, out)
-        self.assertNotIn("OFF: ", out)
-
-    def test_the_expectation_comes_out_of_the_job(self):
-        self.assertIn("DISPLAY_EXPECT=$(jf display)", AUTORUN.read_text())
-
-    def test_it_is_read_before_anything_is_measured(self):
-        text = AUTORUN.read_text()
-        self.assertLess(text.index("\nrefuse_unpinned_display\n"),
-                        text.index('say "settling for'))
+def job(**over):
+    d = {"plans": ["jetstream3"], "rounds": 2, "max_rounds": 4, "detect_pct": 0.3, "timeout": 1800, "count": "",
+         "display": "builtin 1512x982", "settle": 90, "n_arms": 2, "rehearsal": "", "aslr": "", "env_pad": "",
+         "path_pad": "", "shared_cache": "",
+         "arms": [{"label": "A", "id": "sa", "browser_args": ""}, {"label": "B", "id": "sb", "browser_args": ""}]}
+    d.update(over)
+    return d
 
 
-class TestTheBrowserCheckIsToldWhatToExpect(WkTest):
-    def _check(self, expect="builtin 1470x956", passes=True):
-        text = AUTORUN.read_text()
-        with scratch_dir() as tmp:
-            root = tmp / "var-wk"
-            (root / "staged" / "sid-a" / "WebKitBuild" / "Release").mkdir(parents=True)
-            runs = root / "ab" / "stamp"
-            runs.mkdir(parents=True)
-            argv = tmp / "argv"
-            checker = tmp / "tools" / "bench" / "mac-browser-check.py"
-            checker.parent.mkdir(parents=True)
-            checker.write_text(
-                "import sys, pathlib\n"
-                f"pathlib.Path({str(argv)!r}).write_text('\\n'.join(sys.argv[1:]))\n"
-                f"raise SystemExit({0 if passes else 1})\n")
-            cp = sh(f'set -euo pipefail\n'
-                    f'WK_AB_ROOT={root}; RUNS={runs}; TOOLS={tmp}/tools; LOG=/dev/null\n'
-                    f'DISPLAY_EXPECT={expect!r}\n'
-                    f'say() {{ printf "%s\\n" "$*"; }}\n'
-                    f'jf() {{ printf sid-a; }}\n'
-                    f'leave_bench() {{ printf "OFF: %s\\n" "$1"; }}\n'
-                    f'refuse_throttled_browser() {{'
-                    f'{func_body(text, "refuse_throttled_browser")}}}\n'
-                    f'refuse_throttled_browser\nprintf "RAN THE ROUNDS\\n"\n')
-            got = argv.read_text().splitlines() if argv.exists() else []
-            return cp.stdout + cp.stderr, got
+class World:
+    """A planted bench install: marker, job, state, agent, a staged arm A, one host install to hand back to."""
 
-    def test_the_pinned_display_reaches_the_check(self):
-        out, argv = self._check()
-        self.assertIn("RAN THE ROUNDS", out, out)
-        self.assertIn("--expect-display", argv, argv)
-        self.assertEqual("builtin 1470x956", argv[argv.index("--expect-display") + 1], argv)
+    def __init__(self, job_doc=None, env=None):
+        self.fake, self.clock, self.out = Fake("bench"), FakeClock(), io.StringIO()
+        self.env = dict({"HOME": HOME, "WK_AB_ROOT": ROOT}, **(env or {}))
+        self.armed, self.results, self.stamp = [], 0, "one"
+        f = self.fake
+        f._set_file(mac.MARKER, "id=perf-macos-tolken\n")
+        if job_doc is not False:
+            f._set_file(ROOT + "/job.json", json.dumps(job() if job_doc is None else job_doc))
+        f._set_file(STATE, "phase=planted\njob_stamp=S1\nattempts=0\n")
+        f._set_file(AGENT, "<plist/>")
+        for rel in ("wk", "bench/" + "mac-quiet-desktop.sh", "lib/quiet.sh"):
+            f._set_file(TOOLS + "/" + rel, "")
+        f._set_file(HOST + "/System/Library/CoreServices/SystemVersion.plist", "")
+        for d in (ROOT + "/staged/sa/WebKitBuild/Release", ROOT + "/results", "/var/folders/T"):
+            while d != "/":
+                f.dirs.add(d)
+                d = os.path.dirname(d)
+        answers = {("sysctl",): "{ sec = 1757000000, usec = 0 } Thu", ("stat", "-f", "%d", "/"): "1",
+                   ("stat", "-f", "%d"): "2", tuple(WKMAC + ["brightness"]): "0.0", tuple(WKMAC + ["auto-brightness"]): "off",
+                   tuple(WKMAC + ["display-mode"]): "1512x982", tuple(WKMAC + ["volume-group"]): "HOSTGRP",
+                   tuple(WKMAC + ["boot-volume"]): "AAA:HOSTGRP", tuple(CHECK + ["--displays-only"]): "displays=built-in",
+                   ("getconf",): "/var/folders/T", tuple(lib("lib/quiet.sh", "screen_blocker")): "",
+                   tuple(lib(autorun.DESKTOP, "wk_quiet_desktop_probe")): "askforpassword=0\n",
+                   tuple(lib(autorun.DESKTOP, "wk_quiet_desktop_findings")): OK_ROWS,
+                   ("/usr/bin/python3", TOOLS + "/lib/wkdata.py"): "met=yes\n"}
+        for prefix, out in answers.items():
+            f.answer(list(prefix), out=out)
+        for prefix in (("test",), ("sudo", "-n"), ("sync",), tuple(CHECK + ["--build-directory"]), ("env",)):
+            f.answer(list(prefix))
+        f.answer(["pgrep"], rc=1)
+        f.answer(["sudo", "-n", "launchctl", "print"], rc=1)
+        f.react(["/usr/bin/plutil"], lambda a, f: Result(0, '  "LastFullCheckDate" => %s\n' % self.stamp))
+        f.react(WK + ["bench", "staged"], self.staged)
+        f.react(["env", "WK_STORE=" + ROOT, "WK_BENCH_ASLR=off"], self.staged)
 
-    def test_the_reading_still_travels_with_the_experiment(self):
-        _, argv = self._check()
-        self.assertIn("--json", argv, argv)
-        self.assertIn("--build-directory", argv, argv)
+    def staged(self, argv, fake):
+        if "staged" not in argv:
+            return Result(0)
+        self.results += 1
+        fake.dirs.add("%s/results/r%03d" % (ROOT, self.results))
+        return Result(0)
 
-    def test_a_display_the_check_refuses_powers_the_machine_off(self):
-        """The one refusal carries the new fault too: a second monitor, a
-        mirrored panel or an unpinned mode is measured by that script."""
-        out, _ = self._check(passes=False)
-        self.assertNotIn("RAN THE ROUNDS", out, "it measured anyway:\n" + out)
-        self.assertIn("OFF: ", out)
+    def autorun(self):
+        return autorun.Autorun(self.fake, self.clock, self.env, tools=TOOLS, out=self.out,
+                               thread=lambda target, daemon: type("T", (), {"start": lambda s: self.armed.append(target)})())
 
+    def run(self):
+        with contextlib.redirect_stderr(io.StringIO()) as self.err:
+            return self.autorun().run()
 
-class TestTheDisplayIsLeftAtMinimumBrightness(WkTest):
-    def _dim(self, rc=0, value="0.0"):
-        text = AUTORUN.read_text()
-        with scratch_dir() as tmp:
-            args = tmp / "args"
-            cp = sh(f'set -euo pipefail\nTOOLS={tmp}/tools\n'
-                    f'say() {{ printf "%s\\n" "$*"; }}\n'
-                    f'leave_bench() {{ printf "OFF: %s\\n" "$1"; }}\n'
-                    f'python3() {{ printf "%s\\n" "$*" >> {args}; printf {value!r}; '
-                    f'return {rc}; }}\n'
-                    f'dim_display() {{{func_body(text, "dim_display")}}}\n'
-                    f'dim_display\nprintf "RAN THE ROUNDS\\n"\n')
-            return cp.stdout + cp.stderr, args.read_text() if args.exists() else ""
+    def state(self):
+        return kv(self.fake.files.get(STATE, ""))
 
-    def test_it_asks_for_the_minimum_through_the_one_interface(self):
-        out, args = self._dim()
-        self.assertIn("lib/wkmac.py brightness --set 0", args, args)
-        self.assertIn("RAN THE ROUNDS", out, out)
+    def runs(self):
+        return self.fake.files.get(RUNS + "/runs.tsv", "")
 
-    def test_the_value_it_reached_is_logged(self):
-        out, _ = self._dim(value="0.0")
-        self.assertIn("0.0", out, out)
+    def calls(self, kind="run"):
+        return [e[1] for e in self.fake.effects if e[0] == kind]
 
-    def test_a_display_that_will_not_dim_measures_nothing(self):
-        """The read-back is what makes this a refusal rather than a wish: a
-        set that did not take exits nonzero."""
-        out, _ = self._dim(rc=1, value="")
-        self.assertNotIn("RAN THE ROUNDS", out, "it measured at whatever the panel was:\n" + out)
-        self.assertIn("OFF: ", out)
+    def legs(self):
+        return [a for a in self.calls("run_tty") if a[0] == "env" and TOOLS + "/wk" in a and "staged" in a]
 
-    def test_nothing_restores_it_afterwards(self):
-        text = AUTORUN.read_text()
-        self.assertEqual(1, len(re.findall(r"brightness --set", text)), text)
-        self.assertLess(text.index("\ndim_display\n"),
-                        text.index("\nrefuse_throttled_browser\n"))
+    def arm_ids(self):
+        return [a[a.index("--id") + 1] for a in self.legs()]
+
+    def power(self):
+        return [a for a in self.calls() if a in (HALT, REBOOT)]
+
+    def log(self):
+        return self.out.getvalue()
 
 
-class TestTheCountEveryLegAsksFor(WkTest):
-    """Every leg of the run that hung warned "count=1: no p-value can be
-    computed": its p-values were across rounds only, and the within-run
-    statistics were given up for nothing."""
+class TestTheJobRuns(unittest.TestCase):
+    def test_a_planted_job_measures_and_hands_the_machine_back(self):
+        w = World()
+        self.assertEqual(0, w.run(), w.log())
+        s = w.state()
+        self.assertEqual(("done", "resolved-at-round-2", "1"), (s["phase"], s["outcome"], s["attempts"]))
+        self.assertEqual([REBOOT], w.power())
+        self.assertIn(AGENT, w.fake.files, "a finished job's next boot removes the agent, not this one")
 
-    def _count(self, doc):
-        text = AUTORUN.read_text()
-        line = [l for l in text.splitlines() if l.startswith("COUNT=")]
-        self.assertEqual(1, len(line), line)
-        with scratch_dir() as tmp:
-            job = tmp / "job.json"
-            job.write_text(json.dumps(doc))
-            return sh(f'set -euo pipefail\nJOB={job}\n'
-                      f'jf() {{{func_body(text, "jf")}}}\n'
-                      f'{line[0]}\nprintf "%s" "$COUNT"\n').stdout
+    def test_the_arms_are_counterbalanced_after_a_warmup_of_each(self):
+        w = World()
+        w.run()
+        self.assertEqual(["sa", "sb", "sa", "sb", "sb", "sa"], w.arm_ids())
+
+    def test_the_warmup_is_profiled_and_never_compared(self):
+        w = World()
+        w.run()
+        profiled = [a[a.index("--profile") + 1] for a in w.legs() if "--profile" in a]
+        self.assertEqual([RUNS + "/warmup/jetstream3-A.json.gz", RUNS + "/warmup/jetstream3-B.json.gz"], profiled)
+        rows = [l.split("\t") for l in w.runs().splitlines()]
+        self.assertEqual(["1", "1", "2", "2"], [r[0] for r in rows])
+        self.assertEqual({"clean"}, {r[4] for r in rows})
+
+    def test_the_stopping_rule_is_given_each_arms_clean_run_directories(self):
+        w = World()
+        w.run()
+        ask = [a for a in w.calls() if "ab-precision" in a][0]
+        self.assertEqual("%s/results/r003,%s/results/r006" % (ROOT, ROOT), ask[ask.index("--a") + 1])
+        self.assertEqual("0.3", ask[ask.index("--target") + 1])
+
+    def test_detect_zero_runs_exactly_the_rounds_asked_for(self):
+        for zero in (0, 0.0, "0"):
+            w = World(job(detect_pct=zero, rounds=3))
+            w.run()
+            self.assertEqual(2 + 3 * 2, len(w.legs()), zero)
+            self.assertEqual("rounds-done", w.state()["outcome"])
+            self.assertFalse([a for a in w.calls() if "ab-precision" in a])
+
+    def test_a_target_it_cannot_reach_stops_at_the_ceiling(self):
+        w = World()
+        w.fake.answer(["/usr/bin/python3", TOOLS + "/lib/wkdata.py"], out="met=no\n")
+        w.run()
+        self.assertEqual(("hit-max-rounds", "4"), (w.state()["outcome"], w.state()["rounds_done"]))
+
+    def test_a_scanned_arm_is_kept_and_left_out_of_the_comparison(self):
+        w = World()
+
+        def scanning(argv, fake):
+            if w.results == 3:
+                w.stamp = "two"
+            return w.staged(argv, fake)
+        w.fake.react(WK + ["bench", "staged"], scanning)
+        w.run()
+        self.assertIn("\tscanned\t", w.runs())
+        ask = [a for a in w.calls() if "ab-precision" in a][0]
+        self.assertNotIn("r004", ask[ask.index("--b") + 1])
+
+    def test_every_arm_failing_stops_after_the_first_round(self):
+        w = World()
+        w.fake.answer(WK + ["bench", "staged"], rc=3)
+        w.run()
+        self.assertEqual("all-failed-round-1", w.state()["outcome"])
+        self.assertEqual("3", w.state()["fail_jetstream3_A_1"])
+        self.assertEqual(4, len(w.legs()))
+
+    def test_each_leg_carries_the_jobs_display_count_and_variance(self):
+        w = World(job(count="3", aslr="off", arms=[{"label": "A", "id": "sa", "browser_args": "--x"},
+                                                  {"label": "B", "id": "sb"}]))
+        w.run()
+        leg = w.legs()[-1]
+        self.assertEqual(["env", "WK_STORE=" + ROOT, "WK_BENCH_ASLR=off"], list(leg[:3]))
+        self.assertEqual("builtin 1512x982", leg[leg.index("--expect-display") + 1])
+        self.assertEqual("3", leg[leg.index("--count") + 1])
+        self.assertIn("--x", w.legs()[0])
+        self.assertNotIn("--force", leg)
 
     def test_a_job_that_names_no_count_measures_two_runs(self):
-        self.assertEqual("2", self._count({"plans": ["jetstream3"]}))
+        w = World()
+        w.run()
+        self.assertEqual({"2"}, {a[a.index("--count") + 1] for a in w.legs()})
 
-    def test_the_empty_string_the_driver_writes_is_no_count(self):
-        self.assertEqual("2", self._count({"count": ""}))
+    def test_only_a_rehearsal_forces_a_leg(self):
+        w = World(job(rehearsal="1"))
+        w.run()
+        self.assertTrue(all("--force" in a for a in w.legs()))
 
-    def test_a_job_that_names_one_keeps_it(self):
-        self.assertEqual("4", self._count({"count": 4}))
+    def test_every_leg_re_pauses_the_daemons_first(self):
+        w = World()
+        w.run()
+        pause = ("sudo", "-n") + tuple(lib(autorun.DESKTOP, "wk_quiet_daemons_pause"))
+        tty = w.calls("run_tty")
+        self.assertTrue(all(tty[tty.index(leg) - 1] == pause for leg in w.legs()))
 
-    def test_every_leg_passes_the_count_it_settled_on(self):
-        body = func_body(AUTORUN.read_text(), "leg")
-        self.assertIn('set -- "$@" --count "$COUNT"', body)
-        self.assertNotIn('[ -n "$COUNT" ]', body)
+    def test_the_state_is_done_before_the_summary_runs(self):
+        w = World()
+        seen = []
+        w.fake.react(WK + ["bench", "ab-summary"], lambda a, f: seen.append(w.state()["phase"]) or Result(0))
+        w.run()
+        self.assertEqual(["done"], seen)
+
+    def test_the_install_converges_itself_before_the_display_gates(self):
+        w = World()
+        w.fake.dirs.add(ROOT + "/tailnet")
+        w.run()
+        tty = [a for a in w.calls("run_tty")]
+        py = ("sudo", "-n", "env", "PYTHONPATH=%s/lib" % TOOLS, "python3", "-m")
+        self.assertEqual([py + ("wk.sysimage.macvolume", "stage-payload", "/"),
+                          py + ("wk.sysimage.mactailnet", "install", "/", ROOT + "/tailnet"),
+                          ("sudo", "-n", TOOLS + "/bench/mac-tailnet.sh", "join")], tty[:3])
+
+    def test_the_software_update_scanner_is_stopped(self):
+        w = World()
+        w.run()
+        for svc in autorun.UPDATERS:
+            self.assertIn(("sudo", "-n", "launchctl", "bootout", svc), w.calls())
+
+    def test_a_window_in_front_is_closed_but_setup_assistant_is_left(self):
+        w = World()
+        w.fake.answer(lib("lib/quiet.sh", "screen_blocker"), out="Setup Assistant,Feedback Assistant\n")
+        w.run()
+        self.assertIn(("sudo", "-n", "pkill", "-f", "Feedback Assistant.app"), w.calls())
+        self.assertNotIn(("sudo", "-n", "pkill", "-f", "Setup Assistant.app"), w.calls())
+
+    def test_a_modal_authentication_panel_is_killed(self):
+        w = World()
+        w.fake.answer(["pgrep", "-x", "SecurityAgent"])
+        w.run()
+        self.assertIn(("sudo", "-n", "killall", "-9", "SecurityAgent"), w.calls())
 
 
-class TestProvisionedMeansTheSettingsThemselves(WkTest):
-    """`wk bench staged` measures the settings provisioning applies before
-    every leg, so a volume that drifted afterwards read as provisioned here
-    and was then refused leg by leg, unobservably, on a machine with no
-    network. One probe, one judge, one finding, up front."""
+class TestTheSettle(unittest.TestCase):
+    def test_it_settles_for_the_jobs_time_once_the_phase_is_running(self):
+        w = World(job(settle=37))
+        slept = []
+        w.clock.sleep = lambda s: slept.append((s, w.state().get("phase")))
+        w.run()
+        self.assertIn((37, "running"), slept)
 
-    OK = "ok\tApp Nap cannot throttle a backgrounded browser\t\n"
-    WRONG = "wrong\tnot so: the screen does not lock (askforpassword reads '1')\tfix\n"
+    def test_it_waits_for_the_per_user_temp_directory(self):
+        w = World()
+        answers = iter(["", ""])
+        w.fake.react(["getconf"], lambda a, f: Result(0, next(answers, "/var/folders/T")))
+        w.run()
+        self.assertEqual(2, w.clock.slept.count(autorun.TEMP_POLL))
+        self.assertIn("temp: /var/folders/T", w.log())
 
-    def _refuse(self, findings=OK, running=False, table=True):
-        text = AUTORUN.read_text()
-        with scratch_dir() as tmp:
-            quiet = tmp / "quiet.sh"
-            if table:
-                quiet.write_text(
-                    "wk_quiet_desktop_probe() { printf 'askforpassword=1\\n'; }\n"
-                    "wk_quiet_desktop_findings() { cat <<'ROWS'\n"
-                    + findings + "ROWS\n}\n")
-            cp = sh(f'set -euo pipefail\nQUIET_DESKTOP={quiet}\n'
-                    f'FB_PLIST={tmp}/plist; FB_SELF={tmp}/self\n'
-                    f'say() {{ printf "%s\\n" "$*"; }}\n'
-                    f'leave_bench() {{ printf "OFF: %s\\n" "$1"; }}\n'
-                    f'pgrep() {{ return {0 if running else 1}; }}\n'
-                    f'refuse_unprovisioned() {{'
-                    f'{func_body(text, "refuse_unprovisioned")}}}\n'
-                    f'refuse_unprovisioned\nprintf "RAN THE ROUNDS\\n"\n')
-            return cp, cp.stdout + cp.stderr
 
-    def test_a_volume_whose_settings_are_a_measured_macs_is_measured_on(self):
-        cp, out = self._refuse()
-        self.assertEqual(0, cp.returncode, out)
-        self.assertIn("RAN THE ROUNDS", out, out)
-        self.assertNotIn("OFF: ", out)
+class TestTheMachineEndsUpOff(unittest.TestCase):
+    def leave(self, w):
+        a = w.autorun()
+        with contextlib.redirect_stderr(io.StringIO()):
+            a.leave("the reason")
+            a.leave("a second reason")
+        return w
 
-    def test_a_setting_that_drifted_refuses_the_whole_job_once(self):
-        cp, out = self._refuse(findings=self.OK + self.WRONG)
-        self.assertEqual(0, cp.returncode, out)
-        self.assertNotIn("RAN THE ROUNDS", out, "every leg would be refused instead:\n" + out)
-        self.assertIn("the screen does not lock", out, out)
-        self.assertIn("mac-volume --repair", out, out)
-        self.assertIn("OFF: ", out)
+    def test_a_bless_that_took_hands_the_machine_back(self):
+        w = self.leave(World())
+        self.assertIn(("sudo", "-n", "bless", "--mount", HOST, "--setBoot"), w.calls())
+        self.assertEqual([REBOOT], w.power())
+
+    def test_a_bless_that_did_not_take_halts_instead(self):
+        w = World()
+        w.fake.answer(WKMAC + ["boot-volume"], out="AAA:BENCHGRP")
+        self.assertEqual([HALT], self.leave(w).power())
+
+    def test_no_host_install_to_hand_back_to_halts(self):
+        w = World()
+        w.fake._drop("/Volumes")
+        self.assertEqual([HALT], self.leave(w).power())
+
+    def test_a_volume_carrying_the_bench_marker_is_not_the_host_install(self):
+        w = World()
+        w.fake._set_file(HOST + mac.MARKER, "id=x\n")
+        self.assertEqual([HALT], self.leave(w).power())
+
+    def test_two_host_installs_are_not_one_to_hand_back_to(self):
+        w = World()
+        w.fake._set_file("/Volumes/Other/System/Library/CoreServices/SystemVersion.plist", "")
+        self.assertEqual([HALT], self.leave(w).power())
+
+    def test_the_first_reason_is_the_one_recorded(self):
+        w = self.leave(World())
+        self.assertIn("the reason", w.log())
+        self.assertNotIn("a second reason", w.log())
+
+    def test_host_mode_is_the_one_exit_that_touches_nothing_but_the_agent(self):
+        w = World()
+        w.fake._drop(mac.MARKER)
+        w.run()
+        self.assertEqual([], w.power())
+        self.assertNotIn(AGENT, w.fake.files)
+        self.assertEqual([("remove", AGENT)], [e for e in w.fake.effects if e[0] in ("write", "remove")])
+
+    def test_an_unexpected_failure_after_arming_still_leaves(self):
+        w = World()
+        w.fake.react(["getconf"], lambda a, f: 1 / 0)
+        with self.assertRaises(ZeroDivisionError):
+            w.run()
+        self.assertEqual([REBOOT], w.power())
+
+
+class TestTheRefusals(unittest.TestCase):
+    def refused(self, w, rc=0):
+        self.assertEqual(rc, w.run(), w.log())
+        self.assertEqual([], w.legs())
+        self.assertEqual(1, len(w.power()), w.power())
+        return w
+
+    def test_no_job_removes_the_agent_and_powers_off(self):
+        w = self.refused(World(job_doc=False))
+        self.assertNotIn(AGENT, w.fake.files)
+
+    def test_a_finished_job_booting_again_retires_the_agent(self):
+        w = World()
+        w.fake._set_file(STATE, "phase=done\nattempts=1\n")
+        w = self.refused(w)
+        self.assertNotIn(AGENT, w.fake.files)
+        self.assertEqual("1", w.state()["attempts"])
+
+    def test_the_fourth_attempt_abandons_the_job(self):
+        w = World()
+        w.fake._set_file(STATE, "phase=running\nattempts=3\n")
+        self.assertEqual(("done", "abandoned"), (self.refused(w).state()["phase"], w.state()["outcome"]))
 
     def test_it_stands_aside_while_provisioning_is_running(self):
-        """A daemon in flight is not a volume that drifted: it applies the
-        settings and reboots, and this agent starts again on that boot. Its own
-        function, because it has to run before defuse_firstboot while the
-        judgment has to run after `wk quiesce on`."""
-        text = AUTORUN.read_text()
-        cp = sh('set -euo pipefail\n'
-                'say() { printf "%s\\n" "$*"; }\n'
-                'leave_bench() { printf "OFF: %s\\n" "$1"; }\n'
-                'pgrep() { return 0; }\n'
-                '_stay=""\n'
-                'stand_aside_if_provisioning() {'
-                + func_body(text, "stand_aside_if_provisioning") + '}\n'
-                'stand_aside_if_provisioning\nprintf "WENT ON\\n"\n')
-        out = cp.stdout + cp.stderr
-        self.assertEqual(0, cp.returncode, out)
-        self.assertIn("standing aside", out, out)
-        self.assertNotIn("WENT ON", out, out)
-        self.assertNotIn("OFF: ", out, "it powered off a volume mid-provisioning:\n" + out)
+        w = World()
+        w.fake.answer(["pgrep", "-f", "wk-bench-firstboot"])
+        self.assertEqual(0, w.run())
+        self.assertEqual([], w.power())
+        self.assertEqual([], [e for e in w.fake.effects if e[0] in ("write", "remove")])
 
-    def test_a_daemon_that_is_not_running_does_not_stand_aside(self):
-        cp = sh('set -euo pipefail\n'
-                'say() { printf "%s\\n" "$*"; }\n'
-                'pgrep() { return 1; }\n'
-                '_stay=""\n'
-                'stand_aside_if_provisioning() {'
-                + func_body(AUTORUN.read_text(), "stand_aside_if_provisioning") + '}\n'
-                'stand_aside_if_provisioning\nprintf "WENT ON\\n"\n')
-        self.assertIn("WENT ON", cp.stdout + cp.stderr, cp.stdout + cp.stderr)
+    def test_a_first_boot_daemon_that_outlived_provisioning_is_defused(self):
+        w = World()
+        w.fake._set_file(autorun.FB_PLIST, "")
+        w.run()
+        self.assertIn(("sudo", "-n", "rm", "-f", autorun.FB_PLIST, autorun.FB_SELF), w.calls())
 
-    def test_a_volume_with_no_table_to_be_judged_by_measures_nothing(self):
-        cp, out = self._refuse(table=False)
-        self.assertNotIn("RAN THE ROUNDS", out, out)
-        self.assertIn("OFF: ", out)
+    def test_a_reboot_someone_else_scheduled_is_cancelled(self):
+        w = World()
+        w.fake.answer(["pgrep", "-x", "shutdown"])
+        w.run()
+        self.assertIn(("sudo", "-n", "pkill", "-x", "shutdown"), w.calls())
 
-    def test_it_asks_the_probe_every_leg_asks(self):
-        text = AUTORUN.read_text()
-        self.assertIn('QUIET_DESKTOP="$TOOLS/bench/mac-quiet-desktop.sh"', text)
-        body = func_body(text, "refuse_unprovisioned")
-        self.assertIn("wk_quiet_desktop_probe", body)
-        self.assertIn("wk_quiet_desktop_findings", body)
+    def test_a_display_that_will_not_dim_measures_nothing(self):
+        w = World()
+        w.fake.answer(WKMAC + ["brightness"], rc=1, out="0.4")
+        self.refused(w)
 
-    def test_no_second_definition_of_provisioned_is_left(self):
-        """A log line saying provisioning once finished is not the question:
-        what a leg refuses is what the machine reads now."""
-        text = AUTORUN.read_text()
-        self.assertNotIn("provisioning complete", text)
-        self.assertNotIn("fb_provisioned", text)
+    def test_a_job_that_pins_no_display_measures_nothing(self):
+        w = self.refused(World(job(display="")))
+        self.assertEqual("no-display-expectation", w.state()["outcome"])
+        self.assertNotIn(AGENT, w.fake.files)
 
-    def test_a_machine_that_is_not_a_measured_mac_is_refused_by_the_real_table(self):
-        """The whole path -- source, probe, judge, report -- against
-        bench/mac-quiet-desktop.sh itself. Nothing this test runs on has a
-        measured Mac's settings."""
-        text = AUTORUN.read_text()
-        cp = sh(f'set -euo pipefail\nQUIET_DESKTOP={str(QUIET)!r}\n'
-                f'FB_PLIST=/nonexistent; FB_SELF=/nonexistent\n'
-                f'say() {{ printf "%s\\n" "$*"; }}\n'
-                f'leave_bench() {{ printf "OFF: %s\\n" "$1"; }}\n'
-                f'pgrep() {{ return 1; }}\n'
-                f'refuse_unprovisioned() {{'
-                f'{func_body(text, "refuse_unprovisioned")}}}\n'
-                f'refuse_unprovisioned\nprintf "RAN THE ROUNDS\\n"\n')
-        out = cp.stdout + cp.stderr
-        self.assertNotIn("RAN THE ROUNDS", out, out)
-        self.assertIn("OFF: ", out)
-        self.assertIn("not set up as a measured Mac", out, out)
+    def test_ambient_light_that_will_not_let_go_spends_no_attempt(self):
+        w = World()
+        w.fake.answer(WKMAC + ["auto-brightness"], out="on")
+        self.assertEqual("0", self.refused(w).state()["attempts"])
 
-class ADaemonThatCameBackIsPausedAgainBeforeEachLeg(WkTest):
-    """macOS restarts the daemons the lane holds stopped, on demand. One that
-    came back between the quiesce and a leg fails that leg on the gate
-    `wk bench staged` asks -- XProtect did, and took all four legs of job
-    20260909T154515Z with it, each in two seconds."""
-
-    def test_every_leg_re_pauses_first(self):
-        body = func_body(AUTORUN.read_text(), "leg")
-        self.assertIn("repause_daemons", body)
-        self.assertLess(body.index("repause_daemons"), body.index("bench staged"))
-
-    def test_it_is_the_quiesces_own_function_and_not_a_second_one(self):
-        body = func_body(AUTORUN.read_text(), "repause_daemons")
-        self.assertIn("wk_quiet_daemons_pause", body)
-        self.assertIn("$QUIET_DESKTOP", body)
-
-    def test_a_pause_that_failed_does_not_skip_the_leg(self):
-        """The gate judges what the pause left, so a daemon that cannot be
-        paused refuses the leg there and says which -- this must not become a
-        second place that decides."""
-        body = func_body(AUTORUN.read_text(), "repause_daemons")
-        self.assertIn("WARNING", body)
-        self.assertNotIn("leave_bench", body)
-        self.assertNotIn("return 1", body)
-
-
-class TheAgentRunsTheTreeThePlantVerified(WkTest):
-    """The plant verifies the whole tree onto the volume file for file. A second
-    copy of the autorun under `bin/` was a second thing to keep in step, and it
-    stopped being in step the moment anything pushed the tree without
-    re-planting -- the volume then ran an older lane than it was told it had."""
-
-    def test_the_agent_points_at_the_planted_tree(self):
-        text = (REPO / "bench" / "mac-ab.sh").read_text()
-        self.assertIn("/var/wk/wk-tools/bench/mac-bench-autorun.sh", text)
-        self.assertNotIn("/var/wk/bin/mac-bench-autorun.sh", text)
-
-    def test_no_second_copy_is_installed(self):
-        text = (REPO / "bench" / "mac-ab.sh").read_text()
-        self.assertNotIn('put_file "$WK_ROOT/bench/mac-bench-autorun.sh"', text)
-
-    def test_the_plant_refuses_a_tree_with_no_autorun_in_it(self):
-        text = (REPO / "bench" / "mac-ab.sh").read_text()
-        self.assertIn("carries no executable bench/mac-bench-autorun.sh", text)
-
-
-class ThePanelGoesDownBeforeAnythingThatCanStall(WkTest):
-    """The panel is a load on the package under measurement, and a panel left
-    lit is a panel being spent. It stayed at 0.85 for tens of minutes on
-    2026-09-09 because the dim ran after the quiesce, and the quiesce was
-    deadlocked."""
-
-    def test_it_is_dimmed_before_the_join_the_mode_the_quiesce_and_the_browser(self):
-        text = AUTORUN.read_text()
-        dim = text.index("\ndim_display\n")
-        for later in ("\nconverge_self\n", "\nhold_auto_brightness ",
-                      "\nconverge_display_mode\n", '"$TOOLS/wk" quiesce on',
-                      "\nrefuse_throttled_browser\n"):
-            with self.subTest(after=later.strip()):
-                self.assertLess(dim, text.index(later))
-
-    def test_it_is_dimmed_once_and_nothing_later_raises_it(self):
-        text = AUTORUN.read_text()
-        self.assertEqual(1, len([l for l in text.splitlines() if l.strip() == "dim_display"]))
-        after = text[text.index("\ndim_display\n") + 1:]
-        self.assertNotIn("brightness --set", after.replace("brightness --set 0", ""))
-
-    def test_it_is_armed_after_the_watchdog_so_a_refusal_can_report(self):
-        text = AUTORUN.read_text()
-        self.assertLess(text.index("\nwatchdog &"), text.index("\ndim_display\n"))
-
-
-class ANumberlessBootIsHeldWhereItCanBeRead(WkTest):
-    """Booting this Mac into *host* mode needs a password typed at the machine
-    and booting the benchmark volume does not, so handing back is exactly what
-    makes a refusal unreadable: three boots refused in their first minute and
-    each cost a trip to the keyboard to find out why (2026-09-09). A boot that
-    produced no number holds the machine, reachable, for a bounded window
-    first."""
-
-    def _leave(self, runs=None, had_job="1", hold="7"):
-        text = AUTORUN.read_text()
-        return sh(f'set -euo pipefail\n'
-                  f'_had_job={had_job!r}\nRUNS={runs or "/nonexistent"}\n'
-                  f'BENCH_HOLD={hold}\nLOG=/dev/null\nWK_AB_ROOT=/nonexistent\n'
-                  f'say() {{ printf "%s\\n" "$*"; }}\n'
-                  f'sleep() {{ printf "SLEPT %s\\n" "$1"; }}\n'
-                  f'hold_for_a_reader() {{{func_body(text, "hold_for_a_reader")}}}\n'
-                  f'hold_for_a_reader\n')
-
-    def test_a_boot_with_no_runs_is_held(self):
-        out = self._leave().stdout
-        self.assertIn("no number came out of this boot", out, out)
-        self.assertIn("SLEPT 7", out, out)
-
-    def test_a_boot_whose_legs_landed_hands_back_at_once(self):
-        with scratch_dir() as tmp:
-            (tmp / "runs.tsv").write_text("1\tA\tsid\trid\tclean\tjetstream3\n")
-            out = self._leave(runs=str(tmp)).stdout
-        self.assertNotIn("SLEPT", out, out)
-
-    def test_a_boot_that_never_reached_the_job_is_not_held(self):
-        """No job, or one already finished: nothing about this boot is a
-        refusal to read, and a fifteen-minute hold would be for nothing."""
-        out = self._leave(had_job="").stdout
-        self.assertNotIn("SLEPT", out, out)
-
-    def test_the_hold_is_the_first_thing_leave_bench_does(self):
-        """After the bless it is too late: the machine is already going."""
-        body = func_body(AUTORUN.read_text(), "leave_bench")
-        self.assertLess(body.index("hold_for_a_reader"), body.index("host_install"))
-
-    def test_it_can_be_turned_off(self):
-        self.assertNotIn("SLEPT", self._leave(hold="0").stdout)
-        self.assertIn('BENCH_HOLD="${WK_MAC_BENCH_HOLD:-', AUTORUN.read_text())
-
-
-class AmbientLightIsHeldRatherThanDeclined(WkTest):
-    """A brightness the sensor can raise again is a load that varies, and the
-    display gate refuses a run under it. macOS does expose the control -- the
-    names are `DisplayServicesEnableAmbientLightCompensation` and
-    `DisplayServicesAmbientLightCompensationEnabled`, read off `dyld_info
-    -exports` on tolken (26.6.2, `Mac16,12`) -- so the lane holds the setting
-    and only declines a machine where holding it fails."""
-
-    def test_it_is_held_before_the_gate_that_judges_it(self):
-        text = AUTORUN.read_text()
-        self.assertLess(text.index("\nhold_auto_brightness "),
-                        text.index("\nrefuse_wrong_displays\n"))
+    def test_ambient_light_is_judged_by_its_reading_and_not_by_the_write(self):
+        w = World()
+        w.fake.answer(WKMAC + ["auto-brightness", "--off"], out="off")
+        w.fake.answer(WKMAC + ["auto-brightness"], out="on")
+        self.refused(w)
 
     def test_a_panel_with_no_sensor_is_not_a_refusal(self):
-        """A guest's paravirtual panel has none, and "no sensor to hold" is not
-        "under ambient-light control"."""
-        text = AUTORUN.read_text()
-        cp = sh('set -euo pipefail\nTOOLS=/nonexistent\nATTEMPTS=1\n'
-                'say() { printf "%s\\n" "$*"; }\n'
-                'state_set() { :; }\n'
-                'leave_bench() { printf "OFF: %s\\n" "$1"; }\n'
-                'python3() { printf "none\\n"; }\n'
-                'hold_auto_brightness() {' + func_body(text, "hold_auto_brightness") + '}\n'
-                'hold_auto_brightness; printf "WENT ON\\n"\n')
-        out = cp.stdout + cp.stderr
-        self.assertIn("no sensor to hold", out, out)
-        self.assertIn("WENT ON", out, out)
-        self.assertNotIn("OFF: ", out, out)
+        w = World()
+        w.fake.answer(WKMAC + ["auto-brightness"], out="none")
+        w.run()
+        self.assertTrue(w.legs())
 
-    def test_a_panel_that_will_not_let_go_hands_the_machine_back(self):
-        text = AUTORUN.read_text()
-        cp = sh('set -euo pipefail\nTOOLS=/nonexistent\nATTEMPTS=1\n'
-                'say() { printf "%s\\n" "$*"; }\n'
-                'state_set() { printf "state %s=%s\\n" "$1" "$2"; }\n'
-                'leave_bench() { printf "OFF: %s\\n" "$1"; }\n'
-                'python3() { printf "on\\n"; return 1; }\n'
-                'hold_auto_brightness() {' + func_body(text, "hold_auto_brightness") + '}\n'
-                'hold_auto_brightness; printf "WENT ON\\n"\n')
-        out = cp.stdout + cp.stderr
-        self.assertNotIn("WENT ON", out, "it measured under ambient-light control:\n" + out)
-        self.assertIn("OFF: ", out, out)
-        self.assertIn("state attempts=0", out, "a boot that measured nothing spent an attempt")
+    def test_a_wrong_display_spends_no_attempt_and_writes_no_mode(self):
+        w = World()
+        w.fake.answer(CHECK + ["--displays-only"], rc=1, out="displays=2 online")
+        w = self.refused(w)
+        self.assertEqual("0", w.state()["attempts"])
+        self.assertFalse([a for a in w.calls() if "--declare" in a])
 
-    def test_it_reads_back_and_does_not_trust_the_write(self):
-        body = func_body(AUTORUN.read_text(), "hold_auto_brightness")
-        self.assertIn("auto-brightness --off", body)
-        self.assertIn("read back", body)
+    def test_a_mode_that_is_not_the_declared_one_is_written_and_the_boot_repeated(self):
+        w = World()
+        w.fake.answer(WKMAC + ["display-mode"], out="1800x1169")
+        self.assertEqual(0, w.run())
+        self.assertIn(("sudo", "-n") + tuple(WKMAC) + ("display-mode", "--declare", "1512x982"), w.calls())
+        self.assertEqual([REBOOT], w.power())
+        self.assertNotIn(("sudo", "-n", "bless", "--mount", HOST, "--setBoot"), w.calls())
+        self.assertEqual(("0", "1512x982"), (w.state()["attempts"], w.state()["mode_declared"]))
 
+    def test_a_mode_write_that_did_not_take_is_refused_the_second_time(self):
+        w = World()
+        w.fake.answer(WKMAC + ["display-mode"], out="1800x1169")
+        w.fake._set_file(STATE, "phase=planted\njob_stamp=S1\nattempts=0\nmode_declared=1512x982\n")
+        self.assertEqual("display-mode-unsettable", self.refused(w).state()["outcome"])
 
-class TheVolumeIsJudgedAfterTheQuiesceThatWritesIt(WkTest):
-    """`defaults write` for a protected domain does not survive this account's
-    session starting, so `wk quiesce on` writes the user half again where it can
-    take (cmd/quiesce says so, measured 2026-09-07). Judging those rows before
-    it refuses a volume on rows the same boot is about to set -- which is what
-    job 20260909T042343Z did, three seconds into its login, with the machine
-    handed back before a single leg ran."""
+    def test_a_mode_the_configuration_will_not_take_is_refused(self):
+        w = World()
+        w.fake.answer(WKMAC + ["display-mode"], out="1800x1169")
+        w.fake.answer(["sudo", "-n"] + WKMAC, rc=1)
+        self.assertEqual("display-mode-unwritable", self.refused(w).state()["outcome"])
 
-    def test_the_judgment_comes_after_the_quiesce(self):
-        text = AUTORUN.read_text()
-        self.assertLess(text.index('"$TOOLS/wk" quiesce on'),
-                        text.index("\nrefuse_unprovisioned\n"))
+    def test_a_setting_that_drifted_refuses_the_whole_job_once_after_the_quiesce(self):
+        w = World()
+        w.fake.answer(lib(autorun.DESKTOP, "wk_quiet_desktop_findings"), out=OK_ROWS + WRONG_ROWS)
+        w = self.refused(w)
+        self.assertIn("not so: the screen does not lock", w.log())
+        self.assertIn("wk sysimage build perf-macos-tolken --repair", w.log())
+        order = [e[1][:len(WK) + 1] for e in w.fake.effects if e[0] in ("run", "run_tty")]
+        self.assertLess(order.index(tuple(WK) + ("quiesce",)), order.index(tuple(lib(autorun.DESKTOP, "wk_quiet_desktop_probe"))[:4]))
 
-    def test_standing_aside_still_comes_before_the_daemon_is_defused(self):
-        """The other half of the old function: defusing the first-boot daemon
-        while it is provisioning is what the stand-aside exists to prevent, so
-        it cannot move to after the quiesce with the judgment."""
-        text = AUTORUN.read_text()
-        self.assertLess(text.index("\nstand_aside_if_provisioning\n"),
-                        text.index("\ndefuse_firstboot\n"))
-        self.assertLess(text.index("\ndefuse_firstboot\n"),
-                        text.index('"$TOOLS/wk" quiesce on'))
+    def test_a_volume_with_no_table_to_be_judged_by_measures_nothing(self):
+        w = World()
+        w.fake._drop(TOOLS + "/" + autorun.DESKTOP)
+        self.refused(w)
 
-    def test_each_half_asks_one_question(self):
-        text = AUTORUN.read_text()
-        aside = func_body(text, "stand_aside_if_provisioning")
-        self.assertIn("wk-bench-firstboot", aside)
-        self.assertNotIn("wk_quiet_desktop_findings", aside)
-        judge = func_body(text, "refuse_unprovisioned")
-        self.assertIn("wk_quiet_desktop_findings", judge)
-        self.assertNotIn("pgrep -f wk-bench-firstboot", judge)
+    def test_a_throttled_browser_stops_the_job_before_round_one(self):
+        w = World()
+        w.fake.answer(CHECK + ["--build-directory"], rc=1)
+        w = self.refused(w)
+        check = [a for a in w.calls("run_tty") if "--build-directory" in a][0]
+        self.assertEqual(ROOT + "/staged/sa/WebKitBuild/Release", check[check.index("--build-directory") + 1])
+        self.assertEqual(RUNS + "/browser-check.json", check[check.index("--json") + 1])
+
+    def test_an_arm_with_no_products_is_not_measured_around(self):
+        w = World()
+        w.fake._drop(ROOT + "/staged")
+        self.refused(w)
+
+    def test_a_tree_with_no_wk_is_the_one_failing_exit(self):
+        w = World()
+        w.fake._drop(TOOLS + "/wk")
+        self.assertEqual("no-wk-tools", self.refused(w, rc=1).state()["outcome"])
 
 
-class NoLegIsForcedExceptByARehearsal(WkTest):
-    """`--force` at plant time crosses the driver's own barriers. It must not
-    reach a leg: `wk bench staged` judges each leg's settings, and a forced leg
-    records a number from a machine that is not a measured Mac's. What forces a
-    leg is a field of its own, asked for by name -- `--rehearse`, for a machine
-    that cannot pass those gates and is proving the path rather than a number."""
+class TestANumberlessBootIsHeld(unittest.TestCase):
+    def test_a_boot_with_no_runs_is_held_for_a_reader(self):
+        w = World(env={"WK_MAC_BENCH_HOLD": "120"})
+        w.fake.answer(CHECK + ["--build-directory"], rc=1)
+        w.run()
+        self.assertIn(120, w.clock.slept)
+        self.assertIn("tail -120 %s/autorun.log" % ROOT, w.log())
 
-    def test_it_reads_no_force_out_of_the_job(self):
-        self.assertNotIn("jf force", AUTORUN.read_text())
+    def test_a_boot_whose_legs_landed_hands_back_at_once(self):
+        w = World(env={"WK_MAC_BENCH_HOLD": "120"})
+        w.run()
+        self.assertNotIn(120, w.clock.slept)
 
-    def test_the_only_force_a_leg_gets_comes_from_the_rehearsal_field(self):
-        text = AUTORUN.read_text()
-        # The code half of each line: a comment naming the flag is prose about
-        # the rule, not a leg that gets it.
-        forcing = [l for l in text.splitlines() if '--force' in l.split("#", 1)[0]]
-        self.assertEqual(['    [ -z "$REHEARSAL" ] || set -- "$@" --force'], forcing, forcing)
-        self.assertIn('REHEARSAL=$(jf rehearsal)', text)
+    def test_a_boot_that_never_reached_the_job_is_not_held(self):
+        w = World(job_doc=False, env={"WK_MAC_BENCH_HOLD": "120"})
+        w.run()
+        self.assertNotIn(120, w.clock.slept)
 
-    def test_the_plant_sets_that_field_from_its_own_flag_and_not_from_force(self):
-        text = (REPO / "bench" / "mac-ab.sh").read_text()
-        self.assertIn("--rehearse) REHEARSE=1; shift ;;", text)
-        self.assertIn('WK_JOB_REHEARSAL="$REHEARSE"', text)
-        for line in text.splitlines():
-            if "REHEARSE=1" in line:
-                self.assertIn("--rehearse", line,
-                              "nothing but --rehearse may set it")
+    def test_it_can_be_turned_off(self):
+        w = World(env={"WK_MAC_BENCH_HOLD": "0"})
+        w.fake.answer(CHECK + ["--build-directory"], rc=1)
+        w.run()
+        self.assertEqual([REBOOT], w.power())
+        self.assertNotIn("Holding", w.log())
+
+
+class TestTheWatchdog(unittest.TestCase):
+    def watch(self, w, mtime):
+        a = w.autorun()
+        a.stall, a.runs = 1000, RUNS
+        w.fake.react(["stat", "-f", "%m"], lambda argv, f: Result(0, str(mtime(a))))
+        with contextlib.redirect_stderr(io.StringIO()):
+            a.watchdog()
+        return a
+
+    def test_silence_past_the_bound_summarises_and_powers_off(self):
+        w = World()
+        self.watch(w, lambda a: int(w.clock.now()) - 1001)
+        self.assertEqual(("done", "watchdog"), (w.state()["phase"], w.state()["outcome"]))
+        self.assertTrue([a for a in w.calls("run_tty") if "ab-summary" in a])
+        self.assertEqual(1, len(w.power()))
+
+    def test_a_log_still_being_written_is_left_running_until_the_job_is_done(self):
+        w = World()
+
+        def fresh(a):
+            if len(w.clock.slept) == 3:
+                w.fake._set_file(STATE, "phase=done\n")
+            return int(w.clock.now()) - 10
+        self.watch(w, fresh)
+        self.assertEqual([autorun.WATCH_POLL] * 4, w.clock.slept)
+        self.assertEqual([], w.power())
+
+    def test_its_bound_is_the_leg_timeout_and_a_grace(self):
+        w = World(job(timeout=600))
+        w.run()
+        self.assertIn("watchdog: %ds of silence" % (600 + autorun.STALL_GRACE), w.log())
+
+    def test_it_is_armed_before_the_panel_is_touched(self):
+        w = World()
+        order = []
+        w.fake.react(WKMAC + ["brightness"], lambda a, f: order.append(len(w.armed)) or Result(0, "0.0"))
+        w.run()
+        self.assertEqual([1], order)
+
+
+class TestAKilledRunResumes(unittest.TestCase):
+    """A kill is a power cut: the next boot starts the agent again and the job still ends done, off, with no warmup row compared."""
+
+    def test_a_run_killed_after_any_effect_finishes_on_the_next_boot(self):
+        for n in range(400):
+            w = World()
+            w.fake.stop_after = n
+            try:
+                w.run()
+            except Killed:
+                pass
+            else:
+                return
+            w.fake.stop_after = None
+            w.fake.effects = []
+            w.run()
+            with self.subTest(killed_after=n):
+                self.assertEqual("done", w.state().get("phase"))
+                self.assertEqual(1, len(w.power()))
+                self.assertFalse([l for l in w.runs().splitlines() if l.startswith("0\t")])
+        self.fail("the run made more than 400 effects")
+
+    def test_a_resumed_run_counts_its_attempt(self):
+        w = World()
+        w.fake._set_file(STATE, "phase=running\njob_stamp=S1\nattempts=1\n")
+        w.run()
+        self.assertEqual("2", w.state()["attempts"])
+
+
+class TestDryRun(unittest.TestCase):
+    def setUp(self):
+        os.environ["WK_DRY_RUN"] = "1"
+        self.addCleanup(os.environ.pop, "WK_DRY_RUN", None)
+
+    def test_a_dry_run_changes_nothing_and_names_the_power_off(self):
+        w = World()
+        files, dirs = dict(w.fake.files), set(w.fake.dirs)
+        w.run()
+        self.assertEqual((files, dirs), (w.fake.files, w.fake.dirs))
+        self.assertEqual([], w.calls("run_tty"))
+        self.assertRegex(w.err.getvalue(), r"would run[^:\n]*: sudo -n /sbin/reboot\n")
+        self.assertIn("would run: env WK_STORE=/var/wk %s/wk bench staged" % TOOLS, w.err.getvalue())
+
+
+class TestTheOverrides(unittest.TestCase):
+    def test_wk_ab_root_moves_every_path(self):
+        a = autorun.Autorun(Fake(), FakeClock(), {"WK_AB_ROOT": "/tmp/wk-selftest-ab"}, tools=TOOLS)
+        self.assertEqual(("/tmp/wk-selftest-ab/job.json", "/tmp/wk-selftest-ab/autorun.state", "/tmp/wk-selftest-ab/autorun.log"),
+                         (a.job_path, a.state_path, a.log_path))
+
+    def test_it_defaults_to_the_bench_root(self):
+        self.assertEqual(mac.BENCH_ROOT, autorun.Autorun(Fake(), FakeClock(), {}, tools=TOOLS).root)
+
+    def test_it_takes_no_arguments(self):
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(2, autorun.main(["--now"]))
+
+
+class TestTheAgentRunsThisFile(unittest.TestCase):
+    def test_the_agent_starts_this_module_in_the_planted_tree(self):
+        self.assertEqual(mac.BENCH_ROOT + "/wk-tools/lib/wk/bench/autorun.py", mac.AUTORUN)
+        self.assertTrue((REPO / "lib" / "wk" / "bench" / "autorun.py").is_file())
+        self.assertIn("<string>/usr/bin/python3</string>", mac.PLIST)
+
+    def test_the_join_cannot_wait_forever(self):
+        """`tailscale up` without --timeout waits for the backend to reach Running for as long as that takes."""
+        text = (REPO / "bench" / "mac-tailnet.sh").read_text()
+        self.assertRegex(text, r"tailscale\" up --timeout=\d+s ")
 
 
 if __name__ == "__main__":

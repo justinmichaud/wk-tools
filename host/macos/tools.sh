@@ -50,9 +50,9 @@ fi
 if tart_bin >/dev/null; then
     unchanged "tart present (macOS VM target available)"
 elif [ -d "$HOME/.tart" ]; then
-    warn "~/.tart exists but tart is not on PATH -- 'wk vm' will not work"
+    warn "~/.tart exists but tart is not on PATH -- no macOS guest will work"
 else
-    debug "tart not installed; 'wk vm' unavailable (see README.md, Setup)"
+    debug "tart not installed; no macOS guests (see README.md, Setup)"
 fi
 
 unset _missing

@@ -1,8 +1,8 @@
 """Coverage for the WK_* overrides read (with a default) in this agent's
-files: cmd/new, cmd/pi, cmd/pr, cmd/profile, cmd/push,
+files: cmd/new, cmd/pr, cmd/profile, cmd/push,
 cmd/quiesce, cmd/remote, cmd/rm, cmd/run, cmd/selftest,
 cmd/session, cmd/start, cmd/status, cmd/stop, cmd/key sudo, cmd/sync,
-cmd/test, cmd/version, cmd/vm, cmd/zed, the `wk` dispatcher, and
+cmd/test, cmd/version, cmd/zed, the `wk` dispatcher, and
 `setup` (docs/PLAN.md's "every WK_* override ... documented
 ... and covered by a test, or removed").
 
@@ -26,7 +26,6 @@ from pathlib import Path
 
 from tests.support import REPO, WkTest, bash
 
-CMD_PI = REPO / "cmd" / "pi"
 CMD_STATUS = REPO / "cmd" / "status"
 WK = REPO / "wk"
 SETUP = REPO / "setup"
@@ -61,11 +60,11 @@ def _grep_line(path, pattern):
 
 
 class TestDispatcherProtocolDocumented(unittest.TestCase):
-    """The dispatcher-set plumbing names are documented once, in the `wk`
-    header, per CLAUDE.md ("Nothing is ad-hoc ... documented once")."""
+    """The dispatcher-set plumbing names are documented once, in README.md's forwarding rule,
+    per CLAUDE.md ("Nothing is ad-hoc ... documented once")."""
 
-    def test_wk_header_names_every_dispatcher_set_variable(self):
-        header = "\n".join((REPO / "lib" / "wk" / "dispatch.py").read_text().splitlines()[:40])
+    def test_readme_names_every_dispatcher_set_variable(self):
+        header = (REPO / "README.md").read_text()
         names = [
             "WK_NAME", "WK_IN_VM", "WK_ROW_LABEL", "WK_HOST_SELF",
             "WK_NO_DELEGATE", "WK_QUIET", "WK_FORCE",
@@ -86,31 +85,6 @@ class TestNewTimeout(WkTest):
                              capture_output=True, text=True, timeout=10)
         for var in ("WK_NEW_TIMEOUT", "WK_READY_TIMEOUT", "WK_KILL_WAIT"):
             self.assertIn(var, cp.stdout + cp.stderr)
-
-
-class TestPiTag(unittest.TestCase):
-    """WK_PI_TAG (cmd/pi -h): the tailscale tag 'wk pi setup' advertises."""
-
-    def test_h_documents_it(self):
-        cp = subprocess.run([str(WK), "pi", "-h"], cwd=str(REPO),
-                             capture_output=True, text=True, timeout=10)
-        self.assertIn("WK_PI_TAG", cp.stdout + cp.stderr)
-
-    def test_override_changes_the_tag(self):
-        stmt = _grep_line(CMD_PI, 'TAG="\\${WK_PI_TAG').strip()
-        self.assertTrue(stmt.startswith("TAG="), stmt)
-
-        default = subprocess.run(
-            ["bash", "-c", f'{stmt}; printf "%s" "$TAG"'],
-            capture_output=True, text=True, env={},
-        ).stdout
-        self.assertEqual(default, "tag:wk")
-
-        overridden = subprocess.run(
-            ["bash", "-c", f'{stmt}; printf "%s" "$TAG"'],
-            capture_output=True, text=True, env={"WK_PI_TAG": "tag:custom"},
-        ).stdout
-        self.assertEqual(overridden, "tag:custom")
 
 
 class TestQuiesceSettleSeconds(WkTest):
@@ -148,7 +122,7 @@ class TestStatusBridgeTimeout(unittest.TestCase):
     def test_a_wedged_ssh_cannot_outlive_the_ceiling(self):
         import sys
         sys.path.insert(0, str(REPO / "lib"))
-        from wk import status
+        from wk import kv, status
         with tempfile.TemporaryDirectory(prefix="wk-test-bridge-") as tmp:
             stub = Path(tmp) / "ssh"
             stub.write_text("#!/bin/sh\nsleep 30\n")
@@ -157,7 +131,7 @@ class TestStatusBridgeTimeout(unittest.TestCase):
             with unittest.mock.patch.dict(os.environ, env):
                 out = status.bridge_ssh("testphone", status.BRIDGE_PROBE, True, 1, 1)
         self.assertEqual(out, "")
-        rec = status.bridge_record("testphone", {}, "wantsum", status.kv(out), lambda n: ("", ""))
+        rec = status.bridge_record("testphone", {}, "wantsum", kv.kv(out), lambda n: ("", ""))
         self.assertEqual(rec["state"], "unreachable")
 
 class TestStatusWait(unittest.TestCase):

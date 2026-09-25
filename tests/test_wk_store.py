@@ -21,7 +21,6 @@ PAIRS = (
     ("root", "printf %s \"$WK_STORE\""),
     ("record_dir", "wk_record_dir"),
     ("mirror", "wk_mirror"),
-    ("base_dir", "wk_base_dir"),
     ("secrets_dir", "wk_secrets_dir"),
     ("agent_rw_dir", "wk_agent_rw_dir"),
     ("bench_dir", "wk_bench_dir"),
@@ -149,8 +148,8 @@ class TestBases(unittest.TestCase):
         os.makedirs(tmp + "/ws/a")
         os.makedirs(tmp + "/base/1/WebKit")
         cp = bash('. "$WK_ROOT/lib/common.sh"; . "$WK_ROOT/lib/store.sh"; WK_STORE=%s\n'
-                  'list_workspaces; unpinned_workspaces; base_verify 1 || echo refused' % tmp)
-        self.assertEqual(cp.stdout.splitlines()[:2], ["a", "a"], cp.stderr)
+                  'list_workspaces; base_verify 1 || echo refused' % tmp)
+        self.assertEqual(cp.stdout.splitlines()[:1], ["a"], cp.stderr)
         self.assertIn("never finished publishing", cp.stdout)
         self.assertEqual(cp.stdout.splitlines()[-1], "refused")
 

@@ -1,5 +1,5 @@
 """wk-tools' own identity across machines (cmd/version, the peer arm of
-lib/wk/targets.py's Remote.sync, lib/tools.sh's tools_committed): the commit, plus
+lib/wk/targets.py's Remote.sync, lib/wk/tools.py's committed): the commit, plus
 `+dirty` for a *tracked* modification -- never a hash of file contents.
 
 Two checkouts of one commit that differ only in untracked or ignored files
@@ -159,16 +159,10 @@ class TestUntrackedNonIgnoredFileIsNotDirty(TwoClonesCase):
         va = version(self.a)
         self.assertEqual(va["dirty"], "no", va)
 
-    def test_tools_committed_accepts_it(self):
+    def test_the_commit_a_machine_is_given_accepts_it(self):
+        from wk import tools
         (self.a / "new.sh").write_text("not added yet\n")
-        cp = bash(
-            f'WK_ROOT={REPO}\n'
-            '. "$WK_ROOT/lib/common.sh"\n'
-            '. "$WK_ROOT/lib/tools.sh"\n'
-            f'WK_ROOT={self.a}\n'
-            'tools_committed\n'
-        )
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertEqual("", tools.committed(str(self.a), Local()))
 
 
 class TestNoTreeHashMachinery(unittest.TestCase):
@@ -198,7 +192,7 @@ class TestNoTreeHashMachinery(unittest.TestCase):
 
     def test_cmd_versions_own_sha256_machinery_is_gone(self):
         """cmd/version no longer names a SHA256 program at all -- not the
-        bare `sha256sum`/`shasum` commands, which lib/image.sh, cmd/pi and
+        bare `sha256sum`/`shasum` commands, which lib/image.sh and
         the macOS host scripts still use for unrelated integrity checks
         (a downloaded image, a written card, an SDK patch), but the two
         names cmd/version itself defined to pick one."""

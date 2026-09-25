@@ -3,7 +3,7 @@
 set -euo pipefail
 
 TOOLS="${1:-${WK_TOOLS_DIR:-$HOME/wk-tools}}"
-AGENT_RW="${2:?vm/shell-rc.sh: the directory the agent-rw share is mounted at (targets/vm.sh)}"
+AGENT_RW="${2:?vm/shell-rc.sh: the directory the agent-rw share is mounted at (lib/wk/guest.py)}"
 [ -f "$TOOLS/shell/bashrc" ] || {
     echo "vm/shell-rc.sh: no shell/bashrc under $TOOLS" >&2
     exit 1

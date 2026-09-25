@@ -243,7 +243,7 @@ class TestTheBashShim(unittest.TestCase):
     """build/configs.sh's config_load hands a bash caller exactly the Python fields."""
 
     def _bash(self, name, os, kind="container", env=None):
-        # Only cmd/bench and bench/mac-ab.sh still call bash accessors, and only these four.
+        # Only cmd/bench still calls bash accessors, and only these four.
         return bash('. "%s/build/configs.sh"\nconfig_load %s %s %s || echo UNKNOWN\n'
                     'printf "%%s|" "$CFG_BUILDSYS" "$CFG_PORT" "$CFG_ARGS" "$CFG_CMAKE" "$CFG_PGO" "$(config_build_dir /s)" '
                     '"$(config_jsc_path /s)" "$(config_run_dir /s)" "$(config_run_var)" "$WK_MB_PER_JOB"\n'

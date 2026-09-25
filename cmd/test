@@ -29,7 +29,8 @@ import sys
 ROOT = os.environ.get("WK_ROOT") or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "lib"))
 
-from wk import buildconf, decl, job, record, shell, targets  # noqa: E402
+from wk import buildconf, decl, job, record, session, targets  # noqa: E402
+from wk.ldpath import LLDB_PIN_OPTS, LLDB_PRELUDE  # noqa: E402
 from wk.act import Refused, die, dry_run, info, log, warn  # noqa: E402
 from wk.build import records_of, size_for  # noqa: E402
 from wk.clock import Clock  # noqa: E402
@@ -154,7 +155,7 @@ def main(argv, reg=None, clock=None, popen=None):
         render_env, render_desc = "", "GPU"
         info("using the real GPU (requires /dev/dri in the workspace)")
         # /dev/dri being there is not the whole story: a BMC or software seat's display path is not the GPU's.
-        shell.session_mode_warn(ROOT, env=reg.env)
+        session.here(ROOT, reg.env).mode_warn()
     else:
         render_env = "LIBGL_ALWAYS_SOFTWARE=1 GALLIUM_DRIVER=llvmpipe WEBKIT_DISABLE_DMABUF_RENDERER=1"
         render_desc = "software rendering"
@@ -201,7 +202,7 @@ def main(argv, reg=None, clock=None, popen=None):
         log("  suite:     %s (%s)" % (opts["suite"], config))
         log("  would run: bash -lc %s" % shlex.quote(cmd))
         if opts.get("lldb"):
-            log("  in front of: lldb %s -o 'process attach --name %s --waitfor'" % (shell.LLDB_PIN_OPTS, attach))
+            log("  in front of: lldb %s -o 'process attach --name %s --waitfor'" % (LLDB_PIN_OPTS, attach))
         return 0
 
     if not target.sync_tools(name):
@@ -213,7 +214,7 @@ def main(argv, reg=None, clock=None, popen=None):
         log("  it attaches as that process starts; 'continue' runs the test")
         log("  test output: /tmp/wk-test-lldb.log (in the workspace)")
         script = ("%s\n( sleep 2; %s >/tmp/wk-test-lldb.log 2>&1 ) &\nexec \"$LLDB\" %s -o %s"
-                  % (shell.lldb_prelude(ROOT), cmd, shell.LLDB_PIN_OPTS,
+                  % (LLDB_PRELUDE, cmd, LLDB_PIN_OPTS,
                      shlex.quote("process attach --name %s --waitfor" % attach)))
         target.exec_tty(name, ["bash", "-lc", script])
         return 0

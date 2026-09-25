@@ -12,13 +12,12 @@ _task_py() {
 
 _task_shell() { if declare -F t_exec >/dev/null; then _caller_shell "$@"; else "$@"; fi; }   # a record in a workspace is asked through the target this shell loaded
 
-task_stamp()      { _task_py stamp; }
 task_field()      { _task_py field "$@"; }
 task_begin()      { _task_shell _task_py begin --pid "$$" --argv "$(ps -o args= -p $$ 2>/dev/null | tr -d '\n')" "$@"; }   # [--holds <resource>] <kind> <here|target> <name> <kill-cmd> <log> <plan step>...
 task_pid()        { _task_py pid "$@"; }          # <dir> <pid> [machine]
 task_set()        { _task_py set "$@"; }          # <dir> <field> <value>
 task_step_state() { _task_py step-state "$@"; }   # <dir> <1-based index> <running|done|failed|skipped|pending>
-task_step_event() { _task_py step-event "$@"; }   # <dir> <1-based index> <lib/sched.py event>
+task_step_event() { _task_py step-event "$@"; }   # <dir> <1-based index> <lib/wk/sched.py event>
 task_step()       { _task_py step "$@"; }         # <dir> <1-based index>
 task_step_named() { _task_py step-named "$@"; }   # <dir> <plan step>
 task_step_now()   { _task_py step-now "$@"; }
@@ -31,7 +30,7 @@ task_list()       { _task_py list; }
 
 device_release() { [ -z "${WK_DEVICE_TASK:-}" ] || task_end "$WK_DEVICE_TASK" "${WK_EXIT_STATUS:-0}"; WK_DEVICE_TASK=""; return 0; }
 
-device_hold() { # <machine> <kind> <name> <kill-cmd> <log> <plan step>... -- exported, so what this driver runs inherits it: `wk pi bench --ab-systems` runs `wk boot` per leg
+device_hold() { # <machine> <kind> <name> <kill-cmd> <log> <plan step>... -- exported, so what this driver runs inherits it
     WK_DEVICE_TASK=$(_task_py hold --pid "$$" --argv "$(ps -o args= -p $$ 2>/dev/null | tr -d '\n')" "$@") || exit $?
     [ -n "$WK_DEVICE_TASK" ] || return 0
     WK_DEVICE_HELD="device:$1"; export WK_DEVICE_HELD

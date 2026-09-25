@@ -6,9 +6,9 @@ import os
 import sys
 from concurrent.futures import ThreadPoolExecutor
 
-from wk import act, git, pr, shell
+from wk import act, git, pr, secrets, shell
 from wk.act import Refused, debug, die, info, log, warn
-from wk.store import Bases
+from wk.store import Bases, Store
 
 SCOPE_FLAGS = ("--all", "--tools", "--target", "--machine", "--mirror")
 FETCH_JOBS = 16
@@ -66,7 +66,7 @@ class Sync:
 
     def forks(self):
         if self._forks is None:
-            self._forks = shell.push_forks(self.root, self.here)
+            self._forks = secrets.forks()
         return self._forks
 
     # -- the scope
@@ -159,7 +159,7 @@ class Sync:
 
     def sync_store_of(self, name):
         target = self.load(name)
-        if target.needs_base and not shell.store_is_local(self.root, self.here):
+        if target.needs_base and not Store(self.env).is_local():
             return self.sync_in_vm(target)
         rc = 0
         if target.needs_base:

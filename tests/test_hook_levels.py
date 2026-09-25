@@ -1,33 +1,34 @@
-"""The pre-push hook's remote classification (lib/store.sh).
+"""The pre-push hook's remote classification (git.hook_levels, lib/wk/git.py).
 
 WebKit's Tools/Scripts/hooks/pre-push decides whether a commit is safe to push
 publically from the URL `git remote -v` reports for the remote carrying it.
 That is the rewritten URL, so a wired checkout shows the hook a bare mirror
 path (which does not parse as a remote) and a no-push sentinel (which parses,
 and as the push line wins over the fetch URL). Either way origin classifies as
-uncategorized and the hook refuses every commit on main. wk_hook_levels names
+uncategorized and the hook refuses every commit on main. git.hook_levels names
 those rewritten forms for `git-webkit install-hooks --level`.
 
 Run: python3 -m unittest tests.test_hook_levels -v
 """
 import re
+import sys
 import unittest
 
-from tests.support import REPO, WkTest, bash
+from tests.support import REPO, WkTest
+
+sys.path.insert(0, str(REPO / "lib"))
+from wk import git, secrets  # noqa: E402
 
 
-def _levels(extra=""):
-    """wk_hook_levels' flag list, as {key: level}."""
-    cp = bash(f'''
-set -euo pipefail
-. "{REPO}/lib/common.sh"
-. "{REPO}/lib/store.sh"
-{extra}
-wk_hook_levels
-''')
-    assert cp.returncode == 0, f"wk_hook_levels failed: {cp.stdout}\n{cp.stderr}"
+def _forks(extra=()):
+    """secrets.FORKS, the fork table's one home, with `extra` rows in its place when given."""
+    return list(extra) or list(secrets.FORKS)
+
+
+def _levels(extra=()):
+    """git.hook_levels' flag list, as {key: level}."""
     out = {}
-    for key, value in re.findall(r"--level (\S+)=(\d+)", cp.stdout):
+    for key, value in re.findall(r"--level (\S+)=(\d+)", git.hook_levels(_forks(extra))):
         out[key] = int(value)
     return out
 
@@ -40,19 +41,12 @@ class TestHookLevels(WkTest):
     def test_each_fork_is_named_by_the_ssh_alias_it_pushes_through(self):
         """a fork's push URL is rewritten to its alias (wk_push_rewrite_config), so github.com is not what the hook sees"""
         levels = _levels()
-        cp = bash(f'. "{REPO}/lib/common.sh"; . "{REPO}/lib/store.sh"; wk_push_forks')
-        for line in cp.stdout.split("\n"):
-            parts = line.split()
-            if not parts:
-                continue
-            _, repo, alias = parts
+        for _, repo, alias in _forks():
             self.assertEqual(levels.get(f"{alias}:{repo}"), 0, f"{alias}:{repo} unnamed")
 
     def test_the_list_is_derived_from_the_forks_not_written_out(self):
-        """a fork added to wk_push_forks is classified without touching wk_hook_levels"""
-        levels = _levels(
-            'wk_push_forks() { echo "extra  someone/WebKit  github-extra"; }'
-        )
+        """a fork added to secrets.FORKS is classified without touching hook_levels"""
+        levels = _levels([("extra", "someone/WebKit", "github-extra")])
         self.assertEqual(levels.get("github-extra:someone/WebKit"), 0)
 
     def test_every_level_is_public(self):
@@ -64,14 +58,7 @@ class TestHookLevels(WkTest):
 
 class TestSetupScriptInstallsThem(WkTest):
     def _script(self):
-        cp = bash(f'''
-set -euo pipefail
-. "{REPO}/lib/common.sh"
-. "{REPO}/lib/store.sh"
-wk_gitwebkit_setup_script /src/WebKit
-''')
-        self.assertEqual(cp.returncode, 0, cp.stderr)
-        return cp.stdout
+        return git.gitwebkit_setup_script("/src/WebKit", _forks())
 
     def test_install_hooks_runs_with_the_levels(self):
         script = self._script()

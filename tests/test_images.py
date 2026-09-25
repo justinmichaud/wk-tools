@@ -202,20 +202,6 @@ class TestWhichMachineHoldsIt(unittest.TestCase):
     def test_the_scheduler_serialises_by_machine_alone(self):
         self.assertEqual(images.build_resource("moose"), "machine:moose")
 
-    def test_a_spec_naming_another_machine_is_refused_with_the_setup(self):
-        with self.assertRaises(act.Refused), contextlib.redirect_stderr(io.StringIO()):
-            images.refuse_elsewhere(PROFILE + "@elsewhere", "here")
-        images.refuse_elsewhere(PROFILE + "@here", "here")
-        images.refuse_elsewhere(PROFILE, "here")
-
-
-class TestTheDonePredicate(unittest.TestCase):
-    def test_it_is_a_wk_command_routed_like_the_build(self):
-        self.assertEqual(images.holds_predicate(PROFILE + "@moose", WS, ("--slot", "base")),
-                         '[ "$(wk sysimage holds %s@moose --workspace %s --slot base)" = yes ]' % (PROFILE, WS))
-        self.assertEqual(images.holds_predicate(PROFILE, WS, ()),
-                         '[ "$(wk sysimage holds %s --workspace %s)" = yes ]' % (PROFILE, WS))
-
 
 class TestNames(unittest.TestCase):
     def test_a_slot_name_is_a_directory_name_here_and_on_the_board(self):
@@ -256,13 +242,6 @@ class TestTheShims(WkTest):
         self.assertNotEqual(cp.returncode, 0)
         self.assertNotIn("reached", cp.stdout)
         self.assertIn("webkit-2.52-yocto-rpi5-64", cp.stderr)
-
-    def test_the_machine_shim_asks_for_the_target_only_when_the_spec_names_none(self):
-        libs = "".join('. "%s/%s"\n' % (REPO, f) for f in ("lib/common.sh", "lib/store.sh", "lib/target.sh", "lib/image.sh"))
-        cp = bash(libs + "ws_target() { echo asked >&2; echo elsewhere; }\nwk_machine_name() { echo here; }\n"
-                  "image_lane_machine %s moose; echo; image_lane_machine %s ''" % (WS, WS))
-        self.assertEqual(cp.stdout.split(), ["moose", "elsewhere"], cp.stderr)
-        self.assertEqual(cp.stderr.count("asked"), 1, cp.stderr)
 
 
 if __name__ == "__main__":

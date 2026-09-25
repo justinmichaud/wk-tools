@@ -4,7 +4,7 @@
 # it: the tree exists to carry build fixes against the pinned buildroot
 # (external.mk), not to add packages. Everything this repo installs into an
 # image arrives through BR2_ROOTFS_OVERLAY instead
-# (image/buildroot/tailnet-overlay.sh), which is the mechanism for files rather
+# (lib/wk/sysimage/buildroot_target.py), which is the mechanism for files rather
 # than for recipes.
 #
 # When a package does become necessary, it goes in package/<name>/ beside this

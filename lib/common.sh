@@ -55,11 +55,6 @@ require() {
     have "$1" || die "${2:-$1 is required but not installed}"
 }
 
-# `gh auth status` exits 0 for a configured account whose token has expired.
-gh_authenticated() {
-    have gh && gh api user >/dev/null 2>&1
-}
-
 wk_ssh_timeout() { printf '%s' "${WK_SSH_TIMEOUT:-10}"; }
 
 WK_DISPATCH_VARS="WK_NAME WK_TARGET WK_TARGET_KIND WK_ROOT WK_FORCE WK_QUIET WK_DRY_RUN WK_DESTRUCTIVE WK_CONFIRMED WK_ROW_LABEL WK_HOST_SELF WK_IN_VM"
@@ -138,42 +133,6 @@ file_mode() { # octal permission bits alone, no leading zero (`700`)
     stat -c %a "$1" 2>/dev/null || stat -f %Lp "$1" 2>/dev/null || echo ""
 }
 
-human_bytes() {
-    awk -v b="${1:-0}" 'BEGIN {
-        split("B K M G T P", u, " ")
-        v = b; i = 1
-        while (v >= 1024 && i < 6) { v /= 1024; i++ }
-        if (i > 1 && v < 10) printf "%.1f%s\n", v, u[i]
-        else                 printf "%.0f%s\n", v, u[i]
-    }'
-}
-
-json_merge_list() { # <key> <file...> -- merge {"<key>": [...]} over undelimited docs
-    local key="$1"; shift
-    require python3 "python3 merges 'wk ls --json'; it ships with macOS and every distribution here"
-    python3 -c '
-import json, sys
-key = sys.argv[1]
-items = []
-for path in sys.argv[2:]:
-    try:
-        with open(path) as f:
-            text = f.read()
-    except OSError:
-        continue
-    dec = json.JSONDecoder()
-    i, n = 0, len(text)
-    while i < n:
-        while i < n and text[i] in " \t\r\n":
-            i += 1
-        if i >= n:
-            break
-        obj, i = dec.raw_decode(text, i)
-        items.extend(obj.get(key, []))
-print(json.dumps({key: items}))
-' "$key" "$@"
-}
-
 kv_get() { # <key> -- one value from KEY=VALUE stdin, split on the first "=" only
     awk -F= -v k="$1" '$1 == k { sub(/^[^=]*=/, ""); sub(/\r$/, ""); print; exit }'
 }
@@ -191,7 +150,7 @@ WK_BENCH_ACCOUNT="${WK_BENCH_USER:-bench}"
 # macOS keeps the hostname's capitalisation; ssh aliases, confs and lock paths are lower (lib/wk/record.py's host_name).
 wk_host_name() { { hostname -s 2>/dev/null || true; } | tr '[:upper:]' '[:lower:]'; }
 
-wk_machine_name() {   # in the VM: the workstation that forwarded (vm_wk_cmd), the VM being that machine's container target and not one of its own -- its `localhost` hostname would put a machine nobody can act on in every listing
+wk_machine_name() {   # in the VM: the workstation that forwarded (Target.wk_cmd), the VM being that machine's container target and not one of its own -- its `localhost` hostname would put a machine nobody can act on in every listing
     if [ -n "${WK_IN_VM:-}" ] && [ -n "${WK_ROW_LABEL:-}" ]; then
         printf '%s\n' "$WK_ROW_LABEL"
         return 0
@@ -231,35 +190,6 @@ sh_quote() { # ssh joins its arguments and hands them to a remote shell
     printf '%s' "$out"
 }
 
-# An older `wk` across a hop ignores an unknown variable, dies on a flag.
-# The only place a variable is a `case` pattern. The patterns arrive as words of one string because a task record holds one value, and `read -a` splits that string where `for p in $list` would also pathname-expand each word against the cwd -- inside a WebKit checkout, `*Tools/Scripts/build-*` becomes the filenames it names.
-match_any() { # <string> <glob patterns, space-separated> -- 0 when one matches
-    local s="$1" p
-    local -a pats=()
-    read -ra pats <<< "$2"
-    for p in ${pats[@]+"${pats[@]}"}; do
-        case "$s" in $p) return 0 ;; esac
-    done
-    return 1
-}
-
-wk_forwarded_env() {
-    printf '%s' "${WK_DEBUG:+WK_DEBUG=1 }${WK_QUIET:+WK_QUIET=1 }${WK_YES:+WK_YES=1 }${WK_FORCE:+WK_FORCE=1 }${WK_DRY_RUN:+WK_DRY_RUN=1 }"
-}
-
-# A candidate is run, not found: the wkdev image's /opt/swift/usr/bin lldb comes first on PATH and links libxml2.so.2, while the image ships libxml2.so.16.
-lldb_prelude() {
-    cat <<'EOF'
-LLDB=""
-for _c in lldb $(ls /usr/bin/lldb-[0-9]* 2>/dev/null | sort -Vr); do
-    command -v "$_c" >/dev/null 2>&1 || continue
-    "$_c" --version >/dev/null 2>&1 && { LLDB="$_c"; break; }
-done
-[ -n "$LLDB" ] || { printf 'error: no lldb here that will start -- `lldb` resolves to %s\n' \
-    "$(command -v lldb || echo 'nothing')" >&2; exit 127; }
-EOF
-}
-
 confirm() {
     local prompt="$1"
     if [ -n "${WK_DRY_RUN:-}" ]; then
@@ -295,97 +225,9 @@ act() { # <cmd...>
 
 wk_tailscale_authkey_path() { printf '%s' "${WK_TS_AUTHKEY:-$HOME/.config/wk/tailscale-authkey}"; }
 
-wk_tailscale_key_reject() { # <key> -- prints why it is not the credential wanted
-    wk_cred_reject tailnet "${1:-}"
-}
-
-wk_cred_reject() { # <rule name> <value> -- exit 0 if accepted, else print why
-    local line
-    line=$(printf '%s' "$2" | python3 "$WK_ROOT/lib/credcheck.py" check "$1")
-    case "$line" in
-        bad*) printf '%s' "${line#*$'\t'}"; return 1 ;;
-    esac
-    return 0
-}
-
-# Whether a key can be had, not one in hand: a preflight and a report ask this, and a reading may not mint a credential as a side effect. Either a stored key is usable, or this machine can mint one.
-wk_tailscale_authkey_present() {
-    local p; p=$(wk_tailscale_authkey_path)
-    { [ -s "$p" ] && wk_tailscale_key_reject "$(head -1 "$p" 2>/dev/null)" >/dev/null; } \
-        || wk_tailscale_api_present
-}
-
 wk_tailscale_api_path() { printf '%s' "${WK_TS_API_SECRET:-$HOME/.config/wk/tailscale-api-key}"; }
 
-wk_tailscale_api_reject() { # <key> -- here an *auth* key is the wrong one
-    wk_cred_reject tailnet-api "${1:-}"
-}
-
-wk_tailscale_api_present() { # presence only; whether the tailnet accepts it is a request
-    local p; p=$(wk_tailscale_api_path)
-    [ -s "$p" ] || return 1
-    wk_tailscale_api_reject "$(head -1 "$p" 2>/dev/null)" >/dev/null
-}
-
-wk_tailnet_retire() { # <name>
-    WK_TS_API_SECRET_FILE="$(wk_tailscale_api_path)" \
-        python3 "$WK_ROOT/lib/tailnet.py" retire "$1"
-}
-
-wk_tailscale_key_id() { # <key> -- tskey-auth-<id>-<secret>
-    printf '%s' "$1" | cut -d- -f3
-}
-
-wk_tailscale_key_live() { # <key file> -- the tailnet is asked, a key carrying no expiry a reader can see. Exit 2 is the only answer worth acting on: 6 is "could not ask", and a network that is down is not evidence against a key
-    local rc=0
-    WK_TS_API_SECRET_FILE="$(wk_tailscale_api_path)" \
-        python3 "$WK_ROOT/lib/tailnet.py" key-live \
-            "$(wk_tailscale_key_id "$(head -1 "$1" 2>/dev/null)")" >/dev/null 2>&1 || rc=$?
-    [ "$rc" != 2 ]
-}
-
-wk_tailscale_authkey_mint() { # <key file> -- a stored key expires, and a fleet that finds that out at a board's first boot has lost the board, so the machine that can administer the tailnet mints its own. One that holds no API credential uses the key it was handed: minting is a power, not a fallback, and one machine here has it
-    local tag="${WK_PI_TAG:-tag:wk}" tmp why
-    tmp="$1.new.$$"
-    ( umask 077; WK_TS_API_SECRET_FILE="$(wk_tailscale_api_path)" \
-        python3 "$WK_ROOT/lib/tailnet.py" key-mint "$tag" > "$tmp" ) || {
-        rm -f "$tmp"
-        warn "the tailnet minted no auth key for $tag (above). An API credential that
-  may not grant that tag fails exactly here:
-      wk key set tailnet-api     replace the credential that mints
-      wk key set tailnet         store a key by hand instead"
-        return 1
-    }
-    if ! why=$(wk_tailscale_key_reject "$(head -1 "$tmp" 2>/dev/null)"); then
-        rm -f "$tmp"
-        warn "the tailnet returned something that is not an auth key: $why"
-        return 1
-    fi
-    mv "$tmp" "$1" || { rm -f "$tmp"; return 1; }
-    info "minted a tailnet auth key for $tag (reusable, 90 days) -- $1"
-    return 0
-}
-
-# The file to read the key out of, never a prompt: `wk key set` is the one command that asks for a credential, so a write that finds none refuses.
-wk_tailscale_authkey() {
-    local p why
-    p=$(wk_tailscale_authkey_path)
-    if [ -s "$p" ] && why=$(wk_tailscale_key_reject "$(head -1 "$p" 2>/dev/null)") \
-       && { ! wk_tailscale_api_present || wk_tailscale_key_live "$p"; }; then
-        printf '%s' "$p"; return 0
-    fi
-    if wk_tailscale_api_present; then
-        wk_tailscale_authkey_mint "$p" || return 1
-        printf '%s' "$p"; return 0
-    fi
-    if [ ! -s "$p" ]; then
-        warn "no tailnet auth key on this machine ($p) -- store one: wk key set tailnet"
-        return 1
-    fi
-    warn "$p is not usable: $why"
-    warn "  Leaving it in place rather than deleting it -- check it and re-run."
-    return 1
-}
+wk_tailscale_authkey() { PYTHONPATH="$WK_ROOT/lib" WK_ROOT="$WK_ROOT" python3 -m wk.tailnet authkey; }
 
 # bash keeps only the last `trap ... EXIT`, so handlers register here instead, each one named `<pid>:<function>`. The pid is not decoration: a subshell inherits both the list and the trap, and anything registering a cleanup of its own in there re-arms the trap and would run the *parent's* handlers when the subshell ends -- which deleted cmd/ab's step file halfway through its own graph (measured 2026-09-16, bash 5.2, inside `$(ws_target ...)`). A handler runs in the process that asked for it and in no other, and reads the exit status from WK_EXIT_STATUS.
 _WK_ATEXIT=""
@@ -476,7 +318,7 @@ _forced_summary() {
     printf '%s\n' "$_WK_FORCED" >&2
 }
 
-WK_RETRY_EXIT=75   # lib/sched.py's RETRY_EXIT is the same number; tests/test_resources.py holds the two to it
+WK_RETRY_EXIT=75   # lib/wk/act.py's RETRY_EXIT is the same number; tests/test_resources.py holds the two to it
 
 barrier() { # [--retry] <message...> -- refuse, or warn loudly and continue under --force; --retry when another step ending is what changes the answer
     local status=1
@@ -679,18 +521,6 @@ with_lock() { # <resource> [-w seconds] [-s] -- cmd...   the scoped form
     ( _WK_LOCK_HELD=""; hold_lock "$res" $args; "$@" )
 }
 
-bmc_drm_device() {
-    local d c drv
-    for d in /sys/class/drm/card[0-9]*; do
-        [ -d "$d" ] || continue
-        c=$(basename "$d")
-        case "$c" in *-*) continue ;; esac
-        drv=$(readlink -f "$d/device/driver" 2>/dev/null) || continue
-        [ "$(basename "$drv" 2>/dev/null)" = ast ] && { echo "/dev/dri/$c"; return 0; }
-    done
-    return 1
-}
-
 # GNU and BSD date share no syntax here (`date -u -d @0` fails on macOS).
 epoch_to_utc() {
     date -u -d "@$1" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
@@ -724,31 +554,3 @@ WK_IMAGE_MARKER="${WK_IMAGE_MARKER:-/etc/wk-image}"
 
 wk_image_id() { kv_field "$WK_IMAGE_MARKER" id 2>/dev/null || true; }   # the bench system's own id, or empty in host mode
 
-# The compositor's start modes are indistinguishable at the Wayland socket, and only one of them makes a meaningful number.
-WK_SESSION_MODE_FILE="${WK_SESSION_MODE_FILE:-/run/wk-session-mode}"
-
-session_mode() { # gpu | bmc | off | none
-    local m=""
-    [ -r "$WK_SESSION_MODE_FILE" ] && m=$(head -1 "$WK_SESSION_MODE_FILE" 2>/dev/null | tr -dc 'a-z-')
-    printf '%s' "${m:-none}"
-}
-
-session_mode_warn() {
-    case "$(session_mode)" in
-        bmc)
-            warn "SLOW SESSION: SOFTWARE RENDERING -- the BMC display chip, no GPU at all"
-            log  "  llvmpipe is not a slow GPU, it is a different measurement: MotionMark"
-            log  "  differs by ~400x. Nothing measured here means anything."
-            log  "  measurable session again:  wk session on"
-            return 1
-            ;;
-        off)
-            warn "SESSION IS OFF -- this socket is the screen-off placeholder, not a session"
-            log  "  its outputs are modeset off on purpose and it has no head to draw on;"
-            log  "  nothing rendered into it will show up anywhere."
-            log  "  a real session:  wk session on"
-            return 1
-            ;;
-    esac
-    return 0
-}

@@ -11,16 +11,19 @@ import shlex
 import stat
 import sys
 
-from wk import act, fleet, guest, record, secrets, shell, sshalias, tools
+from wk import act, buildconf, fleet, git, guest, record, secrets, shell, sshalias, tools
 from wk.machine import TIMED_OUT, Local, Result, Ssh
 from wk.resources import Resources, workspace_marker_path
 from wk.store import Store
 
 BUILTIN = ("container", "vm", "remote", "local")
+SDK_REPO = "ghcr.io/igalia/wkdev-sdk"
 READY_MARKER = ".wk-ready"
 FIRSTRUN_MARKER = ".wk-firstrun-complete"   # TODO: drop once no pre-marker workspace is left
 STATES_NOT_THERE = ("absent", "creating", "broken", "unreachable")
 READY_TIMEOUT = 300
+WK_FLAGS = ("WK_DEBUG", "WK_QUIET", "WK_YES", "WK_FORCE", "WK_DRY_RUN", "WK_NO_DELEGATE")
+WK_CARRIED = ("WK_ROW_LABEL", "WK_CONFIG", "WK_ZED_PUBKEY")
 GUEST_MIRROR = "/Volumes/My Shared Files/mirror/WebKit.git"   # where macOS automounts the tart share `mirror`
 PROXY = "http://127.0.0.1:3128"
 NO_PROXY = "localhost,127.0.0.1,::1"
@@ -174,6 +177,9 @@ class Registry:
     def in_workspace(self):
         return os.path.isfile(self.marker_path())
 
+    def workspace_name(self):
+        return read_conf(self.marker_path()).get("name", "")
+
     def remote_marker_path(self):
         return self.env.get("WK_REMOTE_MARKER") or os.path.join(self.env.get("HOME", os.path.expanduser("~")), ".wk-remote")
 
@@ -217,6 +223,18 @@ class Registry:
 
     def here(self):
         return [t for t in self.all() if t not in self.machines()]
+
+    def peer_workstations(self):
+        """The peers whose own wk answers, each asked once."""
+        out = []
+        for name in self.machines():
+            try:
+                t = self.load(name)
+            except LookupError:
+                continue
+            if getattr(t, "peer", False) and t.has_wk():
+                out.append(name)
+        return out
 
     def walk(self):
         """The targets a listing covers: WK_TARGET's, this workspace's, the ones here when another wk asked, else all."""
@@ -401,6 +419,11 @@ class Target:
     def exec(self, ws, argv, tty=False, timeout=None):
         raise NotImplementedError
 
+    def pid_alive(self, ws, pid, cap=None):
+        """True, False or None (no answer within cap seconds) for a pid inside the workspace -- the one "is it alive in the target" answer."""
+        r = self.exec(ws, ["kill", "-0", str(pid)], timeout=cap)
+        return True if r.rc == 0 else False if r.rc == 1 else None
+
     def far_side(self):
         return "none"
 
@@ -411,7 +434,7 @@ class Target:
         return None
 
     def _agent_secret(self, secret):
-        return next(r for r in shell.agent_secrets(self.root, self.machine) if r[0] == secret)
+        return next(r for r in secrets.agent_secrets() if r[0] == secret)
 
     def _agent_secret_file(self, secret):
         """Where the workspace holds it, as login-shell text: the rc names CLAUDE_SECURESTORAGE_CONFIG_DIR, where a `file` row's own tool rewrites it."""
@@ -424,7 +447,7 @@ class Target:
         return self.exec(ws, ["bash", "-lc", "test -s %s" % self._agent_secret_file(secret)]).ok
 
     def agent_secret_remedy(self, ws, secret):
-        return shell.agent_secret_store_remedy(self.root, self.machine, secret)
+        return secrets.Secrets(self.root, self.env, self.machine).agent_secret_remedy(secret)
 
     def is_here(self):
         """Whether the machine behind this target is the one running this process."""
@@ -444,6 +467,16 @@ class Target:
     def wk(self, *args, env=None, quiet=False):
         """(status, output) of the far side's own wk."""
         return 1, ""
+
+    def podman_machine(self):
+        return self.store.podman_machine()
+
+    def wk_cmd(self, args, env):
+        """The far side's own wk as one shell line; flags travel as environment, since an older wk there refuses an unknown one."""
+        pre, wk, env = self.wk_far(env)
+        pre += "".join("%s=1 " % v for v in WK_FLAGS if env.get(v))
+        pre += "".join("%s=%s " % (v, shlex.quote(env[v])) for v in WK_CARRIED if env.get(v))
+        return "%s%s %s" % (pre, shlex.quote(wk), " ".join(shlex.quote(a) for a in args))
 
     def branch(self, ws):
         if self.info(ws) in STATES_NOT_THERE:
@@ -663,19 +696,17 @@ def show(r):
     sys.stderr.write(r.out + r.err)
 
 
-def arch_image(root, arch):
-    if arch == "armhf":
-        return read_conf(os.path.join(root, "lib", "arch.sh")).get("WK_IMAGE_ARMHF", "")
-    return ""
+def arch_image(arch):
+    return buildconf.IMAGE_ARMHF if arch == "armhf" else ""
 
 
 class Container(Target):
     kind = "container"
     dir_first = True
 
-    def _podman(self):
+    def podman(self):
         if os.uname().sysname == "Darwin" and not self.env.get("WK_IN_VM"):
-            return ["podman", "-c", self.env.get("WK_MACHINE", "wk")]
+            return ["podman", "-c", self.podman_machine()]
         return ["podman"]
 
     def ctr(self, ws):
@@ -688,7 +719,7 @@ class Container(Target):
         return "/run/wk/ssh-agent.sock"
 
     def rootless(self):
-        r = self.machine.run(self._podman() + ["info", "--format", "{{.Host.Security.Rootless}}"])
+        r = self.machine.run(self.podman() + ["info", "--format", "{{.Host.Security.Rootless}}"])
         return r.out.strip() if r.ok else "unknown"
 
     def user(self):
@@ -716,6 +747,21 @@ class Container(Target):
         return ["env", "WKDEV_SDK=%s" % self.sdk(), "WKDEV_CONTAINER_UID=%d" % os.getuid(), "WKDEV_CONTAINER_GID=%d" % os.getgid(),
                 "WKDEV_CONTAINER_USER=%s" % self.user(), "WKDEV_CONTAINER_SHELL=/bin/bash"]
 
+    def sdk_local(self):
+        """The pulled SDK image and its pull date, or None with none pulled; sdk_upstream's registry tags, or None past `timeout`."""
+        r = self.machine.run(self.podman() + ["images", "--format", "{{.Repository}}:{{.Tag}}"])
+        img = next((l for l in r.out.splitlines() if l.startswith(SDK_REPO + ":")), None) if r.ok else None
+        if not img:
+            return None
+        c = self.machine.run(self.podman() + ["image", "inspect", img, "--format", "{{.Created}}"])
+        return {"image": img, "created": c.out.strip()[:10] if c.ok else ""}
+
+    def sdk_upstream(self, timeout=None):
+        r = self.machine.run(self.podman() + ["search", "--list-tags", SDK_REPO, "--limit", "100"], timeout=timeout)
+        if not r.ok:
+            return None
+        return [parts[1] for parts in (line.split() for line in r.out.splitlines()[1:]) if len(parts) > 1]
+
     def arch(self, ws):
         path = os.path.join(self.store.ws_dir(ws), "arch")
         try:
@@ -724,7 +770,7 @@ class Container(Target):
             return "native"
 
     def list(self):
-        r = self.machine.run(self._podman() + ["ps", "-a", "--filter", "name=^wk-", "--format", "{{.Names}}\t{{.Status}}"])
+        r = self.machine.run(self.podman() + ["ps", "-a", "--filter", "name=^wk-", "--format", "{{.Names}}\t{{.Status}}"])
         rows = []
         for line in r.out.splitlines():
             name, _, status = line.partition("\t")
@@ -737,7 +783,7 @@ class Container(Target):
         return self.machine.exists(os.path.join(home, READY_MARKER)) or self.machine.exists(os.path.join(home, FIRSTRUN_MARKER))
 
     def info(self, ws):
-        r = self.machine.run(self._podman() + ["inspect", self.ctr(ws), "--format", "{{.State.Status}}"])
+        r = self.machine.run(self.podman() + ["inspect", self.ctr(ws), "--format", "{{.State.Status}}"])
         st = r.out.strip() if r.ok else "absent"
         if not st or st == "absent":
             return "absent"
@@ -772,13 +818,10 @@ class Container(Target):
     def is_here(self):
         return bool(self.env.get("WK_IN_VM")) or os.uname().sysname != "Darwin"
 
-    def machine_name(self):
-        return self.env.get("WK_MACHINE", "wk")
-
     def machine_state(self):
         """running | stopped | absent | ...: podman's own word for the machine, asked once per Container."""
         if not hasattr(self, "_machine_state"):
-            r = self.machine.run(["podman", "machine", "inspect", self.machine_name(), "--format", "{{.State}}"])
+            r = self.machine.run(["podman", "machine", "inspect", self.podman_machine(), "--format", "{{.State}}"])
             self._machine_state = r.out.strip() if r.ok else "absent"
         return self._machine_state
 
@@ -790,21 +833,21 @@ class Container(Target):
     def has_wk(self):
         return self.far_side() == "answering"
 
+    def wk_far(self, env):
+        """The VM is part of this machine, so its records name this host as itself."""
+        return "WK_IN_VM=1 WK_HOST_SELF=1 ", "/opt/wk-tools/wk", dict(env, WK_ROW_LABEL=env.get("WK_ROW_LABEL") or record.machine_name(env, self.machine))
+
     def wk(self, *args, env=None, quiet=False):
-        """(status, output) of the podman VM's wk, whose command line is lib/target.sh's vm_wk_cmd."""
         env = os.environ if env is None else env
-        line = shell.ask(self.root, "vm_wk_cmd", *args, env=env, quiet=True)
-        if line is None:
-            return 1, ""
-        r = self.machine.run(["podman", "machine", "ssh", self.machine_name(), "--", line + ("" if quiet else " 2>&1")], input="")
+        r = self.machine.run(["podman", "machine", "ssh", self.podman_machine(), "--", self.wk_cmd(args, env) + ("" if quiet else " 2>&1")], input="")
         return r.rc, r.out
 
     def start(self, ws):
-        r = self.machine.act_run(self._podman() + ["start", self.ctr(ws)])
+        r = self.machine.act_run(self.podman() + ["start", self.ctr(ws)])
         return r.ok
 
     def stop(self, ws):
-        r = self.machine.act_run(self._podman() + ["stop", "--time", "30", self.ctr(ws)])
+        r = self.machine.act_run(self.podman() + ["stop", "--time", "30", self.ctr(ws)])
         return r.ok
 
     def tools_src(self):
@@ -824,7 +867,7 @@ class Container(Target):
         return self.env.get("WK_CCACHE_MAXSIZE") or "40G"
 
     def exists(self, ws):
-        return self.machine.run(self._podman() + ["container", "exists", self.ctr(ws)]).ok
+        return self.machine.run(self.podman() + ["container", "exists", self.ctr(ws)]).ok
 
     def store_init(self):
         root = self.store.root()
@@ -861,7 +904,7 @@ class Container(Target):
         for v in ("no_proxy", "NO_PROXY"):
             flags += ["--env", "%s=%s" % (v, NO_PROXY)]
         flags += ["--env", "WAYLAND_DISPLAY=/run/wk/display/wayland-0"]
-        if shell.arch_has_gpu(self.root, self.machine, arch):
+        if buildconf.arch_has_gpu(arch):
             flags += shell.gpu_flags(self.root, self.machine)
         return flags
 
@@ -893,7 +936,7 @@ class Container(Target):
         argv = self.sdk_env() + [os.path.join(self.sdk(), "scripts", "host-only", "wkdev-create"), "--network", "none", "--isolated"]
         if arch != "native":
             argv += ["--arch", "arm"]
-        image = self.env.get("WK_SDK_IMAGE") or arch_image(self.root, arch)
+        image = self.env.get("WK_SDK_IMAGE") or arch_image(arch)
         if image:
             argv += ["--image", image]
         return argv + ["--name", self.ctr(ws), "--shell", "/bin/bash", "--user", u, "--group", u,
@@ -933,7 +976,7 @@ class Container(Target):
                 break
             clock.sleep(1)
         act.warn("initialisation did not complete; last output from the container:")
-        r = self.machine.run(self._podman() + ["logs", self.ctr(ws)])
+        r = self.machine.run(self.podman() + ["logs", self.ctr(ws)])
         for line in [l for l in (r.out + r.err).splitlines() if l.strip()][-8:]:
             sys.stderr.write("    %s\n" % line)
         return False
@@ -941,7 +984,7 @@ class Container(Target):
     def destroy(self, ws):
         c, ws_dir = self.ctr(ws), self.store.ws_dir(ws)
         if self.exists(ws):
-            self.machine.act_run(self._podman() + ["rm", "-f", c])
+            self.machine.act_run(self.podman() + ["rm", "-f", c])
             act.info("removed container %s" % c)
         if not self.machine.isdir(ws_dir):
             return
@@ -954,7 +997,7 @@ class Container(Target):
 
     def _ctr_user(self, ws):
         """podman's own word for the container's user, its `WorkingDir`; None when it does not know the container."""
-        r = self.machine.run(self._podman() + ["inspect", self.ctr(ws), "--format", "{{.Config.WorkingDir}}"])
+        r = self.machine.run(self.podman() + ["inspect", self.ctr(ws), "--format", "{{.Config.WorkingDir}}"])
         home = r.out.strip() if r.ok else ""
         if home.startswith("/home/") and len(home) > len("/home/"):
             return home[len("/home/"):]
@@ -969,12 +1012,12 @@ class Container(Target):
                                   "/usr/bin/env", "USER=%s" % self.user(), "/bin/bash", "--login"], None)
 
     def pull(self, ws, src, dest):
-        r = self.machine.act_run(self._podman() + ["cp", "%s:%s" % (self.ctr(ws), src), dest])
+        r = self.machine.act_run(self.podman() + ["cp", "%s:%s" % (self.ctr(ws), src), dest])
         if not r.ok:
             raise OSError(r.err.strip() or "podman cp failed")
 
     def push(self, ws, src, dest):
-        r = self.machine.act_run(self._podman() + ["cp", src, "%s:%s" % (self.ctr(ws), dest)])
+        r = self.machine.act_run(self.podman() + ["cp", src, "%s:%s" % (self.ctr(ws), dest)])
         if not r.ok:
             raise OSError(r.err.strip() or "podman cp failed")
 
@@ -984,7 +1027,7 @@ class Container(Target):
                     "inside the workspace first" % " ".join(exclude))
         self.machine.remove(dest)
         self.machine.mkdir(dest)
-        r = self.machine.act_run(self._podman() + ["cp", "%s:%s/." % (self.ctr(ws), src), dest])
+        r = self.machine.act_run(self.podman() + ["cp", "%s:%s/." % (self.ctr(ws), src), dest])
         if not r.ok:
             raise OSError(r.err.strip() or "podman cp failed")
 
@@ -992,11 +1035,11 @@ class Container(Target):
         u = self._ctr_user(ws)
         if u is None:
             act.die("workspace '%s' has no container to reach (podman does not know it)" % ws)
-        r = self.machine.act_run(self._podman() + ["exec", "--user", u, self.ctr(ws), "/bin/sh", "-c",
+        r = self.machine.act_run(self.podman() + ["exec", "--user", u, self.ctr(ws), "/bin/sh", "-c",
                                                     "rm -rf %s && mkdir -p %s" % (shell.sh_quote(dest), shell.sh_quote(dest))])
         if not r.ok:
             raise OSError(r.err.strip() or "could not clear %s" % dest)
-        r = self.machine.act_run(self._podman() + ["cp", src + "/.", "%s:%s" % (self.ctr(ws), dest)])
+        r = self.machine.act_run(self.podman() + ["cp", src + "/.", "%s:%s" % (self.ctr(ws), dest)])
         if not r.ok:
             raise OSError(r.err.strip() or "podman cp failed")
 
@@ -1004,7 +1047,7 @@ class Container(Target):
         u = self._ctr_user(ws)
         if u is None:
             act.die("workspace '%s' has no container to reach (podman does not know it)" % ws)
-        r = self.machine.run(self._podman() + ["exec", "--user", u, self.ctr(ws), "/bin/sh", "-c", path_kind_probe(path)])
+        r = self.machine.run(self.podman() + ["exec", "--user", u, self.ctr(ws), "/bin/sh", "-c", path_kind_probe(path)])
         return path_kind_result(r)
 
     def ssh_user(self, ws):
@@ -1023,12 +1066,12 @@ class Container(Target):
                     "    if it is stopped. (An editor reaches a container over podman from here: the\n"
                     "    workspace has no network interface, so there is no other route in.)" % ws)
         h = "/home/%s" % u
-        if not self.machine.run(self._podman() + ["exec", c, "test", "-x", "/usr/sbin/sshd"]).ok:
+        if not self.machine.run(self.podman() + ["exec", c, "test", "-x", "/usr/sbin/sshd"]).ok:
             act.info("installing openssh-server in '%s' (once per workspace; Zed needs an sshd to talk to)" % ws)
-            r = self.machine.act_run(self._podman() + ["exec", c, "/opt/wk-tools/container/proxy/ensure-bridge.sh", "/bin/sh", "-c",
+            r = self.machine.act_run(self.podman() + ["exec", c, "/opt/wk-tools/container/proxy/ensure-bridge.sh", "/bin/sh", "-c",
                                                         "apt-get update -qq && apt-get install -y -qq --no-install-recommends openssh-server"])
             show(r)
-            if not r.ok or not self.machine.run(self._podman() + ["exec", c, "test", "-x", "/usr/sbin/sshd"]).ok:
+            if not r.ok or not self.machine.run(self.podman() + ["exec", c, "test", "-x", "/usr/sbin/sshd"]).ok:
                 act.die("could not install openssh-server in '%s', and Zed needs that one package.\n"
                         "    A refused fetch is logged by the egress proxy as 'DENY <host>:<port>' -- it\n"
                         "    runs as the wk-proxy user service on the machine that holds the containers\n"
@@ -1040,14 +1083,14 @@ class Container(Target):
                   "    ssh-keygen -q -t ed25519 -N '' -C 'wk-%(ws)s host key' -f '%(h)s/.wk-ssh/ssh_host_ed25519_key'\n"
                   "touch '%(h)s/.ssh/authorized_keys'\n"
                   "chmod 0600 '%(h)s/.ssh/authorized_keys'") % {"h": h, "ws": ws}
-        r = self.machine.act_run(self._podman() + ["exec", "--user", u, c, "/bin/sh", "-c", script])
+        r = self.machine.act_run(self.podman() + ["exec", "--user", u, c, "/bin/sh", "-c", script])
         if not r.ok:
             act.die("could not prepare the ssh identity in '%s'" % ws)
         pub = zed_key_pub(self.machine, self.env)
         if pub is None:
             act.die("could not create this machine's zed key")
-        if not self.machine.run(self._podman() + ["exec", "--user", u, c, "grep", "-qsF", pub, "%s/.ssh/authorized_keys" % h]).ok:
-            r = self.machine.act_run(self._podman() + ["exec", "-i", "--user", u, c, "/bin/sh", "-c",
+        if not self.machine.run(self.podman() + ["exec", "--user", u, c, "grep", "-qsF", pub, "%s/.ssh/authorized_keys" % h]).ok:
+            r = self.machine.act_run(self.podman() + ["exec", "-i", "--user", u, c, "/bin/sh", "-c",
                                                         "cat >> '%s/.ssh/authorized_keys'" % h], input=pub + "\n")
             if not r.ok:
                 act.die("could not authorise the editor's key in '%s'" % ws)
@@ -1094,14 +1137,39 @@ class Vm(Target):
         return "macos"
 
     def build_size(self, ws):
-        cores, mem = shell.target_size(self.root, self.machine, self.name, ws)
-        return cores, mem, None
+        return self.cores(ws), self.mem_mb(ws), None
+
+    def configured(self, v, key):
+        r = self.machine.run([self.tart_or_die(), "get", v, "--format", "json"])
+        try:
+            got = json.loads(r.out).get(key) if r.ok else None
+        except ValueError:
+            got = None
+        return int(got) if isinstance(got, (int, float)) or (isinstance(got, str) and got.isdigit()) else None
+
+    def cores(self, ws):
+        c = self.configured(self.vm(ws), "CPU")
+        return c if c is not None else int(self.env.get("WK_VM_CPUS") or Resources(self.machine, self.env, "macos").envelope_cores())
+
+    def mem_mb(self, ws):
+        m = self.configured(self.vm(ws), "Memory")
+        return m if m is not None else int(self.env.get("WK_VM_MEM_MB") or Resources(self.machine, self.env, "macos").envelope_mem_mb())
+
+    def agent_rw_dir(self):
+        return "/Volumes/My Shared Files/" + self.agent_rw_share
+
+    def login_note(self):
+        guest.login_note(self.env)
+
+    def check_rows(self, ws):
+        return guest.check_rows(self, ws)
 
     def vm_store(self):
         return Store(self.env).vm_store()
 
     def vm_dir(self):
-        return os.path.join(self.store.root(), "vm")
+        """Where the guests' daemons and keys live, even where the vm store is the container's and lists no guest."""
+        return os.path.join(self.env.get("WK_VM_STORE") or Store(self.env).record_dir(), "vm")
 
     def key(self):
         return os.path.join(self.vm_dir(), "id_ed25519")
@@ -1114,12 +1182,12 @@ class Vm(Target):
 
     def agent_secret_remedy(self, ws, secret):
         if self._agent_secret(secret)[4] == "file" and not self.exec(ws, ["bash", "-lc", 'test -d "$CLAUDE_SECURESTORAGE_CONFIG_DIR"']).ok:
-            return ("the %s share is not mounted in '%s': 'wk vm stop %s', then 'wk vm start %s' boots it with the share"
+            return ("the %s share is not mounted in '%s': 'wk stop %s', then 'wk start %s' boots it with the share"
                     % (self.agent_rw_share, ws, ws, ws))
         return super().agent_secret_remedy(ws, secret)
 
     def base(self):
-        return self.env.get("WK_VM_BASE") or "wk-base"
+        return guest.base_name(self.env)
 
     def tart(self):
         """lib/common.sh's tart_bin, the one locator every reader of "is tart here" asks."""
@@ -1147,8 +1215,11 @@ class Vm(Target):
                 rows.append((n[3:], v.get("State", "")))
         return rows
 
+    def state_of(self, v):
+        return next((x.get("State", "absent") for x in self._vms() if x.get("Name") == v), "absent")
+
     def vm_state(self, ws):
-        return next((v.get("State", "absent") for v in self._vms() if v.get("Name") == self.vm(ws)), "absent")
+        return self.state_of(self.vm(ws))
 
     def created(self, ws):
         return self.machine.exists(os.path.join(self.store.ws_dir(ws), READY_MARKER))
@@ -1168,7 +1239,7 @@ class Vm(Target):
     def exec(self, ws, argv, tty=False, timeout=None):
         ip = self.ip(ws)
         if not ip:
-            return Result(1, "", "'%s' is not running (wk vm start %s)" % (ws, ws))
+            return Result(1, "", "'%s' is not running (wk start %s)" % (ws, ws))
         cmd = " ".join(shlex.quote(a) for a in argv)
         return self.machine.run(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=%s" % self.env.get("WK_SSH_TIMEOUT", "10"),
                                  "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null", "-o", "LogLevel=ERROR",
@@ -1191,13 +1262,14 @@ class Vm(Target):
     def _guest_ssh_or_die(self, ws):
         m = self._guest_ssh(ws)
         if m is None:
-            act.die("'%s' is not running (wk vm start %s)" % (ws, ws))
+            act.die("'%s' is not running (wk start %s)" % (ws, ws))
         return m
 
     def enter_argv(self, ws):
         ip = self.ip(ws)
         if not ip:
-            act.die("'%s' is not running (wk vm start %s)" % (ws, ws))
+            act.die("'%s' is not running (wk start %s)" % (ws, ws))
+        self.login_note()
         opts = ["-o", "BatchMode=yes", "-o", "ConnectTimeout=%s" % self.env.get("WK_SSH_TIMEOUT", "10")] + self._guest_ssh_opts()
         return (["ssh", "-t"] + opts + ["%s@%s" % (self.user(), ip),
                 "cd %s 2>/dev/null; exec $SHELL -l" % shell.sh_quote(self.src(ws))], None)
@@ -1205,7 +1277,7 @@ class Vm(Target):
     def exec_argv(self, ws, argv, tty=False):
         ip = self.ip(ws)
         if not ip:
-            act.die("'%s' is not running (wk vm start %s)" % (ws, ws))
+            act.die("'%s' is not running (wk start %s)" % (ws, ws))
         opts = ["-o", "BatchMode=yes", "-o", "ConnectTimeout=%s" % self.env.get("WK_SSH_TIMEOUT", "10")] + self._guest_ssh_opts()
         cmd = " ".join(shlex.quote(a) for a in argv)
         return (["ssh"] + (["-t"] if tty else []) + opts + ["%s@%s" % (self.user(), ip), "bash -lc %s" % shlex.quote(cmd)], None)
@@ -1268,7 +1340,11 @@ class Vm(Target):
         return True
 
     def start(self, ws):
-        return bool(guest.start(self, ws))
+        ip = guest.start(self, ws)
+        sshalias.alias_set(self.machine, self.env, ws, ip, self.user(), self.key())
+        act.info("%s is up at %s (ssh alias wk-%s)" % (ws, ip, ws))
+        act.log("  wk build %s mac-release\n  zed ssh://wk-%s%s" % (ws, ws, self.src(ws)))
+        return True
 
     def tart_or_die(self):
         bin = self.tart()
@@ -1286,12 +1362,33 @@ class Vm(Target):
         self.machine.mkdir(os.path.join(self.store.root(), "ws"))
         self.ensure_dir_mode(self.vm_dir(), "0700")
 
+    def podman_running(self):
+        r = self.machine.run(["podman", "machine", "inspect", self.podman_machine(), "--format", "{{.State}}"])
+        return r.ok and r.out.strip() == "running"
+
+    def podman_mem_mb(self):
+        if not self.podman_running():
+            return 0
+        r = self.machine.run(["podman", "machine", "inspect", self.podman_machine(), "--format", "{{.Resources.Memory}}"])
+        return int(r.out.strip()) if r.ok and r.out.strip().isdigit() else 0
+
+    def podman_containers(self):
+        """An unreadable answer counts as busy: stopping a machine underneath something is the mistake this guards."""
+        if not self.podman_running():
+            return 0
+        r = self.machine.run(["podman", "machine", "ssh", self.podman_machine(), "--", "podman ps -q | grep -c . || true"])
+        n = re.sub(r"[^0-9]", "", r.out) if r.ok else ""
+        return int(n) if n else 1
+
+    def committed_mem_mb(self, skip):
+        return sum(self.configured(v["Name"], "Memory") or 0 for v in self._vms()
+                   if v.get("State") == "running" and v.get("Name") != skip)
+
     def running_vms(self):
         """Every VM on this host, the podman machine included: Virtualization.framework counts them against one limit."""
         names = [v["Name"][3:] for v in self._vms() if v.get("State") == "running" and str(v.get("Name", "")).startswith("wk-")]
-        r = self.machine.run(["podman", "machine", "inspect", self.env.get("WK_MACHINE", "wk"), "--format", "{{.State}}"])
-        if r.ok and r.out.strip() == "running":
-            names.append("podman machine %s" % self.env.get("WK_MACHINE", "wk"))
+        if self.podman_running():
+            names.append("podman machine %s" % self.podman_machine())
         return names
 
     def create(self, ws, base=None, arch="native"):
@@ -1300,16 +1397,18 @@ class Vm(Target):
             act.die("workspace '%s' already exists" % ws)
         if not self.machine.isdir(mirror):
             act.die("no WebKit mirror on this machine for '%s' to clone its checkout from\n    (%s does not exist):  wk sync    makes it" % (ws, mirror))
-        rc = shell.vm_ensure_base(self.root, self.env)
-        if rc:
-            raise act.Refused(rc)
-        why = shell.vm_base_stale(self.root, self.env)
+        from wk.sysimage import guestbase
+        base = guestbase.Base(self)
+        with base.host.lock().held("guest-base"):
+            base.ensure()
+        why = base.stale()
         if why and self.env.get("WK_VM_FORCE"):
             act.warn("WK_VM_FORCE=1 -- '%s' is cloned from a base that\n  predates its own provisioning inputs: %s" % (ws, why))
         elif why:
             act.die("'%s' predates its own provisioning inputs: %s.\n  '%s' would be a clone of it, carrying the desktop settings of the day it\n"
                     "  was sealed -- which is how a guest comes up behind Setup Assistant, where\n  nothing in the guest can clear it:\n"
-                    "      wk vm base --rebuild     hours; existing guests are unaffected\n  WK_VM_FORCE=1 clones it anyway." % (self.base(), why, ws))
+                    "      %s --rebuild     hours; existing guests are unaffected\n  WK_VM_FORCE=1 clones it anyway."
+                    % (self.base(), why, ws, guest.BASE_BUILD))
         running = self.running_vms()
         if len(running) >= int(self.env.get("WK_VM_MAX") or 2):
             act.warn("%d VM(s) already running on this host; you will have to stop one before starting '%s':\n%s"
@@ -1320,7 +1419,7 @@ class Vm(Target):
         mem = self.env.get("WK_VM_MEM_MB") or str(res.envelope_mem_mb())
         tart = self.tart_or_die()
         for argv in ([tart, "clone", self.base(), v],
-                     [tart, "set", v, "--cpu", cpus, "--memory", mem, "--random-mac", "--display", self.env.get("WK_VM_DISPLAY") or "1280x800", "--display-refit"]):
+                     [tart, "set", v, "--cpu", cpus, "--memory", mem, "--random-mac", "--display", guest.display(self.env), "--display-refit"]):
             r = self.machine.act_run(argv)
             show(r)
             if not r.ok:
@@ -1332,23 +1431,27 @@ class Vm(Target):
         r = self.machine.run(["pgrep", "-f", "tart run .*[[:space:]]%s$" % v])
         return [int(p) for p in r.out.split() if p.isdigit()] if r.ok else []
 
+    def delete_vm(self, v):
+        """The one delete: `tart delete` leaves the `tart run` alive, holding a VM slot the next guest needs."""
+        tart = self.tart_or_die()
+        self.machine.act_run([tart, "stop", v])
+        r = self.machine.act_run([tart, "delete", v])
+        for pid in self.runners(v):
+            self.machine.kill(pid)
+        left = " ".join(str(p) for p in self.runners(v))
+        if left:
+            act.warn("a 'tart run' for '%s' is still alive (pid %s) and holds a\n    VM slot the next guest needs:  kill -9 %s" % (v, left, left))
+        show(r)
+        if not r.ok:
+            act.die("tart delete %s failed (exit %d); what it said is above" % (v, r.rc), r.rc)
+        act.info("deleted VM %s" % v)
+
     def destroy(self, ws):
         v, ws_dir = self.vm(ws), self.store.ws_dir(ws)
         if v == self.base():
-            act.die("refusing to delete the golden base (wk vm base --rebuild)")
+            act.die("refusing to delete the golden base (%s --rm)" % guest.BASE_BUILD)
         if self.vm_state(ws) != "absent":
-            tart = self.tart_or_die()
-            self.machine.act_run([tart, "stop", v])
-            r = self.machine.act_run([tart, "delete", v])
-            for pid in self.runners(v):   # `tart delete` leaves the `tart run` alive, holding a VM slot
-                self.machine.kill(pid)
-            left = " ".join(str(p) for p in self.runners(v))
-            if left:
-                act.warn("a 'tart run' for '%s' is still alive (pid %s) and holds a\n    VM slot the next guest needs:  kill -9 %s" % (v, left, left))
-            show(r)
-            if not r.ok:
-                act.die("tart delete %s failed (exit %d); what it said is above" % (v, r.rc), r.rc)
-            act.info("deleted VM %s" % v)
+            self.delete_vm(v)
         if self.machine.isdir(ws_dir):
             self.machine.remove(ws_dir)
             act.info("removed %s" % ws_dir)
@@ -1363,7 +1466,7 @@ class LocalWorkspace(Target):
     def __init__(self, name, root, env, machine):
         super().__init__(name, root, env, machine)
         self._store = Store(dict(env, WK_STORE=env.get("WK_LOCAL_STORE") or Store(env).state_dir()))
-        marker = read_conf(env.get("WK_MARKER") or os.path.join(env.get("HOME", os.path.expanduser("~")), ".wk-workspace"))
+        marker = read_conf(workspace_marker_path(env))
         self.ws_name = marker.get("name", "")
         self.ws_src = marker.get("src", "")
         self.ws_arch = marker.get("arch", "") or "native"
@@ -1444,7 +1547,11 @@ class Remote(Target):
         marker = read_conf(env.get("WK_REMOTE_MARKER") or os.path.join(env.get("HOME", os.path.expanduser("~")), ".wk-remote"))
         self.host = env.get("WK_REMOTE_HOST") or (name if name != "remote" else "")
         self.peer = bool(env.get("WK_REMOTE_PEER"))
-        self.is_local = bool(env.get("WK_REMOTE_LOCAL")) or marker.get("target") == name
+        try:
+            here_target = Registry(root, env, machine).self_target()
+        except LookupError:
+            here_target = ""
+        self.is_local = bool(env.get("WK_REMOTE_LOCAL")) or (bool(here_target) and here_target == name)
         self.needs_base = self.is_local
         root_there = env.get("WK_REMOTE_ROOT") or (marker.get("root", "") if self.is_local else "")
         if self.is_local and root_there:
@@ -1736,13 +1843,8 @@ class Remote(Target):
             return False
         return self.peer or self.has_wk()
 
-    def wk_cmd(self, args, env):
-        """The far machine's own wk; the flags travel as environment, since an unknown argument is fatal on an old copy of wk over there."""
-        pre = "".join("%s=1 " % v for v in ("WK_DEBUG", "WK_QUIET", "WK_YES", "WK_FORCE", "WK_DRY_RUN") if env.get(v))
-        for v in ("WK_ROW_LABEL", "WK_NO_DELEGATE", "WK_ZED_PUBKEY"):
-            if env.get(v):
-                pre += "%s=%s " % (v, "1" if v == "WK_NO_DELEGATE" else shlex.quote(env[v]))
-        return "cd $HOME && %s%s %s" % (pre, shlex.quote(self.tools("") + "/wk"), " ".join(shlex.quote(a) for a in args))
+    def wk_far(self, env):
+        return "cd $HOME && ", self.tools("") + "/wk", env
 
     def wk(self, *args, env=None, quiet=False):
         env = os.environ if env is None else env
@@ -1780,15 +1882,20 @@ class Remote(Target):
             return "shared", self.reference(), ssh_config
         return "mirror", self.mirror_dir(), ssh_config
 
+    def _forks(self):
+        return [tuple(r) for r in secrets.forks()]
+
     def _wire(self, src):
         n, u, c = self.wiring_args()
-        if not self._sh_act(shell.wiring_script(self.root, src, self.mirror_dir(), n, u, c, env=self.env)).ok:
+        script = git.wiring_script(src, self.mirror_dir(), self._forks(), git.mirror_branches(self.env), n, u, c)
+        if not self._sh_act(script).ok:
             act.warn("could not wire the remotes in %s" % src)
 
     def _mirror_update(self, root):
         act.info("updating the WebKit mirror on %s (first run clones it)" % self.label())
+        script = git.mirror_refresh_script(self.mirror_dir(), git.mirror_branches(self.env))
         r = self._sh_act("set -e\n mkdir -p %s %s\n %s" % (shlex.quote(root + "/ws"), shlex.quote(root + "/cache/ccache"),
-                                                          shell.mirror_refresh_script(self.root, self.mirror_dir(), env=self.env)))
+                                                          script))
         for line in r.out.splitlines():
             f = line.split()
             if len(f) == 3 and f[0] == "mirror-fetch":
@@ -1990,11 +2097,17 @@ def _int(s):
 def main(argv, env=None):
     from wk.clock import Clock
     env = os.environ if env is None else env
+    root = env.get("WK_ROOT") or os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    if argv[:1] == ["wk-cmd"] and len(argv) > 1:
+        try:
+            print(Registry(root, env).load(argv[1]).wk_cmd(argv[2:], env))
+            return 0
+        except LookupError as e:
+            act.die(str(e))
     arity = {"state": (2,), "ready": (2, 3), "creating-now": (2,), "needs-base": (1,), "sync-tools": (2,)}
     if not argv or len(argv) - 1 not in arity.get(argv[0], ()):
         act.die("usage: python3 -m wk.targets state|creating-now|sync-tools <target> <ws> | ready <target> <ws> [seconds]"
-                " | needs-base <target>")
-    root = env.get("WK_ROOT") or os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+                " | needs-base <target> | wk-cmd <target> [args...]")
     try:
         t = Registry(root, env).load(argv[1])
         ws = argv[2] if len(argv) > 2 else ""

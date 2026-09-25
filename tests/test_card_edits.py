@@ -660,7 +660,7 @@ class TestDryRunIsTheSameSteps(unittest.TestCase):
              ("eject", DEV))
 
     class Refuse:
-        channel, bash_driver = "host", False
+        channel = "host"
 
         def call(self, *a, **kw):
             raise AssertionError("the card was asked under --dry-run: %r" % (a,))

@@ -1,56 +1,27 @@
-"""The plan as a graph, and the one scheduler that runs it.
+"""The plan as a graph, and the one scheduler that runs it (lib/wk/sched.py).
 
-`wk ab` no longer holds its plan as a list of command strings re-parsed by
-prefix: it declares steps -- an id, one command, the machine it runs on, what
-it needs, what it holds exclusively, and how to ask whether it is already done
--- and lib/sched.py schedules them. The graph and its scheduling are Python
-(CLAUDE.md: structured data is not handled in bash), so the half that decides
-what runs when is driven here against fake steps that run no command at all,
-and the half that runs shell is driven against `true`, `false` and files in a
-scratch directory.
+A step is an id, the machine it runs on, what it needs, what it holds exclusively, how to ask whether it is already
+done, and what it runs. The half that decides what runs when is driven against steps that run nothing; a `wk` command step against the
+Fake machine.
+`wk bench ab`'s own graph is tests/test_ab_plan.py's.
 
-The `wk ab` end is driven as a real dry run against a mirror, a fleet and a
-GitHub of this test's own: a scratch git repository, machine confs under
-WK_MACHINES_DIR, and a `git` on PATH that rewrites every github.com URL to
-that repository. Nothing here reaches a board, a network or a build.
-
-Run: python3 -m unittest tests.test_sched -v
+Run: python3 tests/run.py -k test_sched
 """
-import contextlib
-import importlib.util
-import os
-import shutil
-import subprocess
+import sys
 import threading
 import unittest
 
-from tests.support import REPO, WkTest, bash, run, scratch_dir, stub_path
+from tests.support import REPO
 
-SHA = "d" * 40
-
-
-def _load_sched():
-    """By path, under a name of its own: `sched` is a stdlib module."""
-    spec = importlib.util.spec_from_file_location("wk_sched", REPO / "lib" / "sched.py")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
-sched = _load_sched()
-
-
-def step(id, machine="m", needs="", holds="", done="", command="true"):
-    return sched.Step(id, machine, needs, holds, done, command)
-
-
-def records(*rows):
-    return "".join("\t".join(r) + "\n" for r in rows)
+sys.path.insert(0, str(REPO / "lib"))
+from wk import sched  # noqa: E402
+from wk.act import RETRY_EXIT, Refused  # noqa: E402
+from wk.machine import Fake  # noqa: E402
 
 
 class FakeRuns:
-    """A runner that runs nothing: it records what was asked, how many steps
-    were in flight at once, and which pairs overlapped."""
+    """A runner that runs nothing: it records what was asked, how many steps were in flight at once, and which
+    pairs overlapped."""
 
     def __init__(self, codes=None, block=()):
         self.codes = dict(codes or {})
@@ -60,744 +31,211 @@ class FakeRuns:
         self.lock = threading.Lock()
         self.gate = threading.Event()
 
-    def __call__(self, step):
+    def __call__(self, sid):
         with self.lock:
-            self.started.append(step.id)
-            self.live.add(step.id)
+            self.started.append(sid)
+            self.live.add(sid)
             self.peak = max(self.peak, len(self.live))
-            for other in self.live:
-                if other != step.id:
-                    self.together.add(frozenset((step.id, other)))
-        if step.id in self.block:
+            self.together |= {frozenset((sid, o)) for o in self.live if o != sid}
+        if sid in self.block:
             self.gate.wait(10)
         with self.lock:
-            self.live.discard(step.id)
-        code = self.codes.get(step.id, 0)
-        if isinstance(code, list):
-            code = code.pop(0) if code else 0
-        return code
+            self.live.discard(sid)
+        code = self.codes.get(sid, 0)
+        return (code.pop(0) if code else 0) if isinstance(code, list) else code
 
     def overlapped(self, a, b):
         return frozenset((a, b)) in self.together
 
 
-class TestTheRecords(WkTest):
+def step(sid, needs="", holds="", done=None, runs=None):
+    runs = runs or FakeRuns()
+    return sched.Step(sid, "m", needs, holds, done, lambda: runs(sid), command="run " + sid)
+
+
+def steps(runs, *specs, done=()):
+    """(id, needs, holds) each; a step in `done` declares a predicate answering yes, every other one none."""
+    return [step(i, n, h, (lambda: True) if i in done else None, runs) for i, n, h in specs]
+
+
+class TestTheGraphIsChecked(unittest.TestCase):
     """A malformed graph is refused before anything runs, naming the step."""
 
-    def refusal(self, text):
-        with self.assertRaises(SystemExit) as caught:
-            sched.parse_steps(text)
-        return str(caught.exception)
+    def refused(self, graph):
+        with self.assertRaises(Refused):
+            sched.validate(graph)
 
-    def test_a_record_is_six_fields(self):
-        self.assertIn("has 4 fields, not 6", self.refusal("a\tm\t\tx\n"))
-
-    def test_a_step_needing_one_nothing_declares_is_named(self):
-        msg = self.refusal(records(("a", "m", "ghost", "", "", "true")))
-        self.assertIn("'a' needs 'ghost'", msg)
+    def test_a_step_needing_one_nothing_declares_is_refused(self):
+        self.refused([step("a", "ghost")])
 
     def test_an_id_names_one_step(self):
-        msg = self.refusal(records(("a", "m", "", "", "", "true"),
-                                   ("a", "m", "", "", "", "true")))
-        self.assertIn("declared 2 times", msg)
+        self.refused([step("a"), step("a")])
 
-    def test_a_step_with_no_command_is_refused(self):
-        self.assertIn("declares no command", self.refusal(records(("a", "m", "", "", "", ""))))
+    def test_a_step_with_nothing_to_run_is_refused(self):
+        self.refused([sched.Step("a", "m")])
 
-    def test_steps_that_need_each_other_are_refused_by_name(self):
-        msg = self.refusal(records(("a", "m", "b", "", "", "true"),
-                                   ("b", "m", "a", "", "", "true")))
-        self.assertIn("need each other", msg)
-        self.assertIn("a -> b -> a", msg)
+    def test_steps_that_need_each_other_are_refused(self):
+        self.refused([step("a", "b"), step("b", "a")])
 
-    def test_needs_and_holds_are_read_as_lists(self):
-        steps = sched.parse_steps(records(("a", "m", "", "", "", "true"),
-                                          ("b", "m", "", "", "", "true"),
-                                          ("c", "m", "a,b", "lane:x,device:d", "", "true")))
-        self.assertEqual(steps[2].needs, ("a", "b"))
-        self.assertEqual(steps[2].holds, ("lane:x", "device:d"))
+    def test_needs_and_holds_are_lists(self):
+        s = step("c", "a,b", "lane:x device:d")
+        self.assertEqual((s.needs, s.holds), (("a", "b"), ("lane:x", "device:d")))
 
 
-class TestWhatRunsAtOnce(WkTest):
-    def waves(self, steps, done=()):
-        return [[s.id for s in wave] for wave in sched.waves(steps, done)]
+class TestWhatRunsAtOnce(unittest.TestCase):
+    def waves(self, graph, done=()):
+        return [[s.id for s in wave] for wave in sched.waves(graph, done)]
 
     def test_independent_steps_are_one_wave(self):
         self.assertEqual(self.waves([step("a"), step("b")]), [["a", "b"]])
 
     def test_a_need_is_a_later_wave(self):
-        self.assertEqual(self.waves([step("a"), step("b", needs="a")]), [["a"], ["b"]])
+        self.assertEqual(self.waves([step("a"), step("b", "a")]), [["a"], ["b"]])
 
     def test_one_resource_is_one_step_at_a_time(self):
-        self.assertEqual(self.waves([step("a", holds="lane:x"), step("b", holds="lane:x")]),
-                         [["a"], ["b"]])
+        self.assertEqual(self.waves([step("a", holds="lane:x"), step("b", holds="lane:x")]), [["a"], ["b"]])
 
     def test_a_board_and_a_lane_interleave(self):
-        """The shape the A/B wants: while one arm is deployed to the board the
-        other arm is still building in the lane."""
-        steps = [step("build-a", holds="lane:x"),
-                 step("build-b", holds="lane:x"),
-                 step("deploy-a", needs="build-a", holds="device:d")]
-        self.assertEqual(self.waves(steps), [["build-a"], ["build-b", "deploy-a"]])
+        """While one arm is deployed to the board the other arm is still building in the lane."""
+        graph = [step("build-a", holds="lane:x"), step("build-b", holds="lane:x"), step("deploy-a", "build-a", "device:d")]
+        self.assertEqual(self.waves(graph), [["build-a"], ["build-b", "deploy-a"]])
 
-    def test_a_step_already_done_is_not_in_any_wave(self):
-        self.assertEqual(self.waves([step("a"), step("b", needs="a")], done={"a"}), [["b"]])
+    def test_a_step_already_done_is_in_no_wave(self):
+        self.assertEqual(self.waves([step("a"), step("b", "a")], done={"a"}), [["b"]])
 
 
-class TestWhatIsWorthRunning(WkTest):
-    """A step exists to produce something. When the thing it feeds is already
-    there, it is not run again -- which is what makes a profile-guided cycle
-    re-runnable without collecting on the board a second time."""
-
-    def needed(self, steps, done=()):
-        return sorted(sched.needed(steps, done))
+class TestWhatIsWorthRunning(unittest.TestCase):
+    """A step exists to produce something: when what it feeds is already there it is not run again, which is what
+    makes a profile-guided cycle re-runnable without collecting on the board a second time."""
 
     def test_a_phase_whose_result_is_already_there_is_not_run(self):
-        steps = [step("instr"), step("collect", needs="instr"),
-                 step("slot", needs="collect", done="true")]
-        self.assertEqual(self.needed(steps, {"slot"}), [])
+        graph = [step("instr"), step("collect", "instr"), step("slot", "collect")]
+        self.assertEqual(sched.needed(graph, {"slot"}), set())
 
     def test_the_phases_of_an_unfinished_one_all_are(self):
-        steps = [step("instr"), step("collect", needs="instr"),
-                 step("slot", needs="collect", done="true")]
-        self.assertEqual(self.needed(steps), ["collect", "instr", "slot"])
+        graph = [step("instr"), step("collect", "instr"), step("slot", "collect")]
+        self.assertEqual(sched.needed(graph), {"instr", "collect", "slot"})
 
     def test_a_step_something_unfinished_still_needs_stays(self):
-        """The slot is built, so its build does not run again -- but what
-        deploys it has not, and still needs it."""
-        steps = [step("slot", done="true"), step("deploy", needs="slot")]
-        self.assertEqual(self.needed(steps, {"slot"}), ["deploy"])
+        self.assertEqual(sched.needed([step("slot"), step("deploy", "slot")], {"slot"}), {"deploy"})
 
     def test_the_scheduler_runs_none_of_a_pruned_branch(self):
         runs = FakeRuns()
-        steps = [step("instr"), step("collect", needs="instr"),
-                 step("slot", needs="collect", done="true"), step("deploy", needs="slot")]
-        s = sched.Scheduler(steps, runs, lambda step: step.id == "slot")
+        graph = steps(runs, ("instr", "", ""), ("collect", "instr", ""), ("slot", "collect", ""), ("deploy", "slot", ""), done={"slot"})
+        s = sched.Scheduler(graph)
         self.assertEqual(s.run_all(), 0)
         self.assertEqual(runs.started, ["deploy"])
         self.assertEqual([x.id for x in s.unneeded], ["instr", "collect"])
 
 
-class TestTheScheduler(WkTest):
-    """Against steps that run nothing: what starts, what waits, what is never
-    run at all, and what a failure or a refusal does to the rest."""
+class TestTheScheduler(unittest.TestCase):
+    """What starts, what waits, what is never run at all, and what a failure or a refusal does to the rest."""
 
-    def sched(self, steps, runs, done=(), retry_exit=sched.RETRY_EXIT):
-        s = sched.Scheduler(steps, runs, lambda step: step.id in done, retry_exit=retry_exit)
+    def run_all(self, graph):
+        s = sched.Scheduler(graph)
         return s, s.run_all()
+
+    def in_background(self, s, until):
+        thread = threading.Thread(target=s.run_all)
+        thread.start()
+        for _ in range(200):
+            if until():
+                break
+            threading.Event().wait(0.01)
+        return thread
 
     def test_everything_ready_starts_at_once(self):
         runs = FakeRuns(block=("a", "b"))
-        steps = [step("a"), step("b")]
-        s = sched.Scheduler(steps, runs, lambda step: False)
-        thread = threading.Thread(target=s.run_all)
-        thread.start()
-        for _ in range(100):
-            if runs.peak >= 2:
-                break
-            threading.Event().wait(0.02)
+        t = self.in_background(sched.Scheduler(steps(runs, ("a", "", ""), ("b", "", ""))), lambda: runs.peak >= 2)
         runs.gate.set()
-        thread.join(20)
-        self.assertEqual(runs.peak, 2, "the two independent steps did not run at once")
+        t.join(20)
+        self.assertEqual(runs.peak, 2)
 
     def test_a_held_resource_keeps_two_steps_apart(self):
         runs = FakeRuns()
-        s, rc = self.sched([step("a", holds="lane:x"), step("b", holds="lane:x")], runs)
-        self.assertEqual(rc, 0)
-        self.assertFalse(runs.overlapped("a", "b"), "both held lane:x")
-        self.assertEqual(sorted(runs.started), ["a", "b"])
+        _, rc = self.run_all(steps(runs, ("a", "", "lane:x"), ("b", "", "lane:x")))
+        self.assertEqual((rc, runs.overlapped("a", "b"), sorted(runs.started)), (0, False, ["a", "b"]))
 
     def test_a_step_that_answers_done_is_never_run(self):
         runs = FakeRuns()
-        steps = [step("a", done="true"), step("b", needs="a")]
-        s, rc = self.sched(steps, runs, done={"a"})
-        self.assertEqual(rc, 0)
-        self.assertEqual(runs.started, ["b"], "the done step ran anyway")
-        self.assertEqual([x.id for x in s.already], ["a"])
+        s, rc = self.run_all(steps(runs, ("a", "", ""), ("b", "a", ""), done={"a"}))
+        self.assertEqual((rc, runs.started, [x.id for x in s.already]), (0, ["b"], ["a"]))
 
     def test_the_predicates_are_asked_all_at_once(self):
-        """Each is routed to the machine holding the lane it asks about, and on
-        a macOS workstation that is a forwarded call into the podman machine --
-        0.8-1.1s each against a lane that exists (measured 2026-09-17), five
-        per board. Asked in turn, the plan's own cost grew with the graph."""
-        import threading as _t
-        gate, peak, at = _t.Event(), [0], [0]
-        guard = _t.Lock()
+        """A question forwarded into the podman machine costs about a second, five per board."""
+        gate, seen, guard = threading.Event(), [0, 0], threading.Lock()
 
-        def is_done(step):
+        def done():
             with guard:
-                at[0] += 1
-                peak[0] = max(peak[0], at[0])
+                seen[0] += 1
+                seen[1] = max(seen)
             gate.wait(10)
             with guard:
-                at[0] -= 1
+                seen[0] -= 1
             return False
 
-        steps = [step("a", done="true"), step("b", done="true"),
-                 step("c", done="true")]
-        s = sched.Scheduler(steps, FakeRuns(), is_done)
-        thread = _t.Thread(target=s.run_all)
-        thread.start()
-        for _ in range(200):
-            if peak[0] >= 3:
-                break
-            _t.Event().wait(0.02)
+        graph = [step(i, done=done) for i in "abc"]
+        t = self.in_background(sched.Scheduler(graph), lambda: seen[1] >= 3)
         gate.set()
-        thread.join(30)
-        self.assertEqual(peak[0], 3, "the done-predicates were asked one at a time")
+        t.join(30)
+        self.assertEqual(seen[1], 3)
 
-    def test_a_predicate_is_only_asked_of_a_step_that_declares_one(self):
+    def test_a_predicate_is_asked_only_of_a_step_that_declares_one(self):
         asked = []
-
-        def is_done(step):
-            asked.append(step.id)
-            return False
-
-        s = sched.Scheduler([step("a"), step("b", done="false")], FakeRuns(), is_done)
-        s.run_all()
+        sched.Scheduler([step("a"), step("b", done=lambda: asked.append("b"))]).run_all()
         self.assertEqual(asked, ["b"])
 
     def test_a_failure_stops_what_needed_it_and_nothing_else(self):
         runs = FakeRuns(codes={"a": 3})
-        steps = [step("a"), step("b", needs="a"), step("c")]
-        s, rc = self.sched(steps, runs)
-        self.assertEqual(rc, 1)
-        self.assertEqual([x.id for x, _ in s.failed], ["a"])
-        self.assertEqual([x.id for x in s.skipped], ["b"])
-        self.assertIn("c", runs.started, "an independent step was abandoned over another's failure")
+        s, rc = self.run_all(steps(runs, ("a", "", ""), ("b", "a", ""), ("c", "", "")))
+        self.assertEqual((rc, [x.id for x, _ in s.failed], [x.id for x in s.skipped]), (1, ["a"], ["b"]))
+        self.assertIn("c", runs.started)
 
     def test_a_refusal_is_not_now_and_the_step_keeps_its_place(self):
-        """A machine's own admission control refuses a build that will not fit
-        beside the ones running; that is not a failure, and the step is tried
+        """A machine's admission control refuses a build that will not fit beside the ones running; the step is tried
         again once something else ends."""
-        runs = FakeRuns(codes={"b": [sched.RETRY_EXIT, 0]}, block=("a",))
-        steps = [step("a"), step("b")]
-        s = sched.Scheduler(steps, runs, lambda step: False)
-        thread = threading.Thread(target=s.run_all)
-        thread.start()
-        for _ in range(200):
-            if runs.started.count("b") == 1:
-                break
-            threading.Event().wait(0.02)
+        runs = FakeRuns(codes={"b": [RETRY_EXIT, 0]}, block=("a",))
+        s = sched.Scheduler(steps(runs, ("a", "", ""), ("b", "", "")))
+        t = self.in_background(s, lambda: runs.started.count("b") == 1)
         runs.gate.set()
-        thread.join(20)
-        self.assertEqual(runs.started.count("b"), 2, "the refused step was not tried again")
-        self.assertEqual([x.id for x in s.ran], ["a", "b"] if s.ran[0].id == "a" else ["b", "a"])
-        self.assertEqual(s.failed, [])
+        t.join(20)
+        self.assertEqual((runs.started.count("b"), sorted(x.id for x in s.ran), s.failed), (2, ["a", "b"], []))
 
     def test_a_refusal_with_nothing_left_running_ends_the_run(self):
-        """Nothing is running that could free what the step wants, so it is
-        left rather than retried forever, and the run says so."""
-        runs = FakeRuns(codes={"a": sched.RETRY_EXIT})
-        s, rc = self.sched([step("a")], runs)
-        self.assertEqual(rc, 1)
-        self.assertEqual([x.id for x in s.left], ["a"])
-        self.assertEqual(runs.started, ["a"])
+        runs = FakeRuns(codes={"a": RETRY_EXIT})
+        s, rc = self.run_all(steps(runs, ("a", "", "")))
+        self.assertEqual((rc, [x.id for x in s.left], runs.started), (1, ["a"], ["a"]))
 
-    def test_a_whole_graph_that_works_exits_zero(self):
-        runs = FakeRuns()
-        steps = [step("a"), step("b", needs="a"), step("c", needs="a,b")]
-        s, rc = self.sched(steps, runs)
-        self.assertEqual(rc, 0)
-        self.assertEqual(runs.started, ["a", "b", "c"])
+    def test_the_announcements_follow_each_step(self):
+        heard = []
+        runs = FakeRuns(codes={"a": 1})
+        sched.Scheduler(steps(runs, ("a", "", ""), ("b", "a", "")), lambda event, s, rc=0: heard.append((s.id, event))).run_all()
+        self.assertEqual(heard, [("a", "start"), ("a", "failed"), ("b", "skipped")])
 
 
-class TestThroughTheShell(WkTest):
-    """The other half: the commands and predicates are shell, run in a shell
-    that sources the preludes named."""
+class TestAWkCommandStep(unittest.TestCase):
+    """`wk_step` and `wk_yes`: a step that is the `wk` command a person types, and a done() that asks one."""
 
-    def sched_py(self, mode, text, *args):
-        return subprocess.run(
-            ["python3", str(REPO / "lib" / "sched.py"), mode, *args],
-            input=text, capture_output=True, text=True, timeout=120)
+    def test_the_command_runs_through_the_machine_appending_to_its_log(self):
+        f = Fake("here")
+        f.answer(["sh", "-c", sched.LOGGED], rc=3)
+        s = sched.wk_step(f, "/t/wk", lambda st: "/logs/" + st.id, "a", "m", (), ("device:b",), None, ["bench", "deploy", "l", "b"])
+        self.assertEqual((s.command, s.holds, s.run()), ("wk bench deploy l b", ("device:b",), 3))
+        self.assertEqual(f.effects, [("run", ("sh", "-c", sched.LOGGED, "sh", "/logs/a", "/t/wk", "bench", "deploy", "l", "b"))])
 
-    def test_run_runs_every_command_and_reports_the_order(self):
-        with scratch_dir() as tmp:
-            text = records(
-                ("a", "m", "", "r", "", "touch %s/a" % tmp),
-                ("b", "m", "a", "r", "", "touch %s/b" % tmp))
-            cp = self.sched_py("run", text)
-            self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-            self.assertTrue((tmp / "a").exists() and (tmp / "b").exists())
-            self.assertIn("[1/2] a", cp.stderr)
+    def test_a_target_is_named_in_the_command_and_the_environment(self):
+        f = Fake("here")
+        f.answer(["sh", "-c", sched.LOGGED])
+        s = sched.wk_step(f, "/t/wk", lambda st: "/l", "a", "m", (), (), None, ["x"], "moose")
+        s.run()
+        self.assertEqual(s.command, "WK_TARGET=moose wk x")
+        self.assertEqual(f.effects[0][1][5:8], ("env", "WK_TARGET=moose", "/t/wk"))
 
-    def test_a_done_predicate_that_answers_yes_keeps_the_command_from_running(self):
-        with scratch_dir() as tmp:
-            text = records(("a", "m", "", "", "true", "touch %s/ran" % tmp))
-            cp = self.sched_py("run", text)
-            self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-            self.assertFalse((tmp / "ran").exists(), "a done step ran")
-            self.assertIn("already done", cp.stderr)
-
-    def test_a_failing_command_fails_the_run_and_names_what_did_not_run(self):
-        text = records(("a", "m", "", "", "", "exit 4"),
-                       ("b", "m", "a", "", "", "true"))
-        cp = self.sched_py("run", text)
-        self.assertEqual(cp.returncode, 1, cp.stdout + cp.stderr)
-        self.assertIn("failed: a (exit 4)", cp.stderr)
-        self.assertIn("not run: b", cp.stderr)
-
-    def test_a_prelude_is_sourced_before_every_command(self):
-        with scratch_dir() as tmp:
-            (tmp / "prelude.sh").write_text("greet() { echo hello > %s/said; }\n" % tmp)
-            cp = self.sched_py("run", records(("a", "m", "", "", "", "greet")),
-                               "--prelude", str(tmp / "prelude.sh"))
-            self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-            self.assertEqual((tmp / "said").read_text().strip(), "hello")
-
-    def test_one_log_per_resource_so_a_boards_work_reads_in_order(self):
-        with scratch_dir() as tmp:
-            text = records(("deploy", "m", "", "device:rpi4", "", "echo deployed"),
-                           ("bench", "m", "deploy", "device:rpi4", "", "echo benched"),
-                           ("report", "m", "bench", "", "", "echo reported"))
-            cp = self.sched_py("run", text, "--log-dir", str(tmp))
-            self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-            self.assertEqual((tmp / "rpi4.log").read_text(), "deployed\nbenched\n")
-            self.assertEqual((tmp / "report.log").read_text(), "reported\n")
-
-    def test_the_on_event_hook_is_told_each_steps_place_and_turn(self):
-        """What keeps one task record in step with a graph: every step's own
-        state reaches the record, so two of them running at once read as two
-        (lib/task.sh, `wk status`)."""
-        with scratch_dir() as tmp:
-            text = records(("a", "m", "", "", "", "true"), ("b", "m", "a", "", "", "true"))
-            cp = self.sched_py("run", text, "--on-event",
-                               "echo {step} {id} {event} >> %s/steps" % tmp)
-            self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-            self.assertEqual((tmp / "steps").read_text(),
-                             "1 a start\n1 a ok\n2 b start\n2 b ok\n")
-
-    def test_a_failed_step_and_the_one_it_feeds_both_reach_the_record(self):
-        """A reader is told which step failed and which never ran, rather than
-        being left to infer it from a line number that stopped moving."""
-        with scratch_dir() as tmp:
-            text = records(("a", "m", "", "", "", "false"), ("b", "m", "a", "", "", "true"))
-            cp = self.sched_py("run", text, "--on-event",
-                               "echo {id} {event} >> %s/steps" % tmp)
-            self.assertNotEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-            self.assertEqual((tmp / "steps").read_text(),
-                             "a start\na failed\nb skipped\n")
-
-    def test_the_flat_plan_is_the_commands_in_schedule_order(self):
-        text = records(("b", "m", "a", "", "", "second"), ("a", "m", "", "", "", "first"))
-        cp = self.sched_py("steps", text)
-        self.assertEqual(cp.stdout.split(), ["first", "second"])
-
-    def test_plan_says_which_steps_are_done_and_which_are_not_needed(self):
-        text = records(("instr", "m", "", "", "false", "true"),
-                       ("slot", "m", "instr", "", "true", "true"))
-        cp = self.sched_py("plan", text)
-        rows = {l.split()[0]: l for l in cp.stdout.splitlines() if "[" in l}
-        self.assertIn("[already done]", rows["slot"])
-        self.assertIn("[not needed]", rows["instr"])
-        self.assertIn("nothing: every step is already done", cp.stdout)
-
-    def test_plan_prints_the_graph_and_the_schedule_and_runs_nothing(self):
-        with scratch_dir() as tmp:
-            text = records(("a", "moose", "", "lane:x", "", "touch %s/ran" % tmp),
-                           ("b", "moose", "a", "lane:x", "", "true"))
-            cp = self.sched_py("plan", text)
-            self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-            self.assertFalse((tmp / "ran").exists(), "plan ran a command")
-            self.assertIn("on moose", cp.stdout)
-            self.assertIn("holds lane:x", cp.stdout)
-            self.assertIn("1. a", cp.stdout)
-            self.assertIn("2. b", cp.stdout)
-
-
-class TestTheBashSide(WkTest):
-    """lib/sched.sh: bash declares steps and calls the scheduler. It parses
-    nothing."""
-
-    def sh(self, script, **kw):
-        return bash('. "%s/lib/sched.sh"\n%s' % (REPO, script), **kw)
-
-    def test_a_step_is_one_record_of_six_fields(self):
-        with scratch_dir() as tmp:
-            cp = self.sh('sched_begin %s/steps\n'
-                         'sched_step id m "a,b" "lane:x" "true" "wk sysimage build p"\n'
-                         % tmp)
-            self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-            self.assertEqual((tmp / "steps").read_text().split("\t"),
-                             ["id", "m", "a,b", "lane:x", "true", "wk sysimage build p\n"])
-
-    def test_a_step_declared_with_no_graph_open_is_refused(self):
-        cp = self.sh('sched_step a m "" "" "" "true"')
-        self.assertNotEqual(cp.returncode, 0)
-        self.assertIn("no graph is open", cp.stdout + cp.stderr)
-
-    def test_a_steps_command_is_the_command_a_person_types(self):
-        """`wk` in a step is this checkout's, so what the plan prints is what
-        runs."""
-        with scratch_dir() as tmp:
-            cp = self.sh('sched_begin %s/steps\n'
-                         'sched_step v m "" "" "" "wk sysimage --list"\n'
-                         'sched_run --log-dir %s\n' % (tmp, tmp))
-            self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-            self.assertIn("wpewebkit-2.38-buildroot-rpi3-32", (tmp / "v.log").read_text())
-
-    def test_the_plan_goes_where_a_dry_runs_reporting_goes(self):
-        with scratch_dir() as tmp:
-            cp = self.sh('sched_begin %s/steps\n'
-                         'sched_step a m "" "" "" "true"\n'
-                         'sched_plan\n' % tmp)
-            self.assertEqual(cp.returncode, 0, cp.stderr)
-            self.assertIn("graph -- 1 step", cp.stderr)
-            self.assertEqual(cp.stdout, "")
-
-
-GIT_STUB = '''#!/usr/bin/env python3
-import os, re, sys
-real = os.environ["WK_TEST_REAL_GIT"]
-fake = os.environ["WK_TEST_FAKE_GITHUB"]
-args = [re.sub(r"^https://github\\.com/[^/]+/([A-Za-z]+)(\\.git)?$",
-               fake + r"/\\1.git", a) for a in sys.argv[1:]]
-os.execv(real, ["git"] + args)
-'''
-
-MACHINE_CONF = '''KIND=board
-NODE_SSH=fakeboard-%(name)s
-NODE_DRIVER=no-such-driver
-NODE_DEVICE=/dev/null
-NODE_PROFILE=%(profile)s
-NODE_ROLE=bench-device
-NODE_NOTE="a board that is not there"
-'''
-
-# One branch only WebKit carries, and two both do: which fork repository has a
-# branch is the question `wk ab <owner>:<branch>` answers before it fetches.
-FAKE_BRANCHES = {"WebKit": ("webkitglib/2.52", "wpe-2.38", "feature-x"),
-                 "WPEWebKit": ("webkitglib/2.52", "wpe-2.38")}
-
-
-# `gh pr view <n> --json baseRefName`: the one GitHub question cmd/ab asks
-# about a pull request, since the branch a PR was written against is not in
-# the head its ref carries.
-GH_STUB = '''#!/bin/sh
-case "$1 $2" in
-"api user") echo '{"login":"t"}' ;;
-"pr view")  echo "$WK_TEST_PR_BASE" ;;
-*)          exit 0 ;;
-esac
-'''
-
-
-@contextlib.contextmanager
-def ab_env(boards, registry=(), pull=None):
-    """A mirror, a fleet and a GitHub of this test's own. `boards` is
-    {device: profile}; the fake GitHub is two repositories of one commit, and
-    the stub `git` rewrites every github.com URL to them, so a fetch, an
-    ls-remote and the merge-base all answer offline. `registry` names build
-    machines for --build-on: each is a remote target driven without ssh
-    (WK_REMOTE_LOCAL, targets/remote.sh), so naming one reaches nothing."""
-    with scratch_dir(prefix="wk-test-ab-") as tmp:
-        state, store, machines = tmp / "state", tmp / "store", tmp / "machines"
-        (state / "wk" / "git").mkdir(parents=True)
-        store.mkdir()
-        machines.mkdir()
-        for name, profile in boards.items():
-            (machines / ("%s.conf" % name)).write_text(
-                MACHINE_CONF % {"name": name, "profile": profile})
-        git = shutil.which("git")
-
-        def g(*args, cwd=tmp):
-            return subprocess.run([git, *args], cwd=str(cwd), check=True,
-                                  capture_output=True, text=True).stdout.strip()
-
-        src = tmp / "src"
-        src.mkdir()
-        g("init", "-q", cwd=src)
-        g("-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q",
-          "--allow-empty", "-m", "the base commit", cwd=src)
-        head = g("rev-parse", "HEAD", cwd=src)
-        github = tmp / "github"
-        github.mkdir()
-        for repo, branches in FAKE_BRANCHES.items():
-            path = github / ("%s.git" % repo)
-            g("init", "-q", "--bare", str(path))
-            for branch in branches:
-                g("push", "-q", str(path), "HEAD:refs/heads/%s" % branch, cwd=src)
-        # A pull request written against one branch while another carries the
-        # image: its base branch moves on by a commit, and its head is one
-        # commit on top of that.
-        pr_head = ""
-        if pull:
-            for msg, ref in (("the branch moved on",
-                              "refs/heads/%s" % pull["base"]),
-                             ("the change under measurement",
-                              "refs/pull/%s/head" % pull["n"])):
-                g("-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q",
-                  "--allow-empty", "-m", msg, cwd=src)
-                g("push", "-qf", str(github / "WebKit.git"), "HEAD:%s" % ref,
-                  cwd=src)
-            pr_head = g("rev-parse", "HEAD", cwd=src)
-            g("checkout", "-q", head, cwd=src)
-        mirror = state / "wk" / "git" / "WebKit.git"
-        g("init", "-q", "--bare", str(mirror))
-        for name, repo in (("origin", "WebKit"), ("fork", "WebKit"),
-                           ("wpe", "WPEWebKit"), ("forkwpe", "WPEWebKit")):
-            g("-C", str(mirror), "fetch", "-q", str(github / ("%s.git" % repo)),
-              "+refs/heads/*:refs/remotes/%s/*" % name)
-        for name in registry:
-            (machines / ("%s.conf" % name)).write_text(
-                "KIND=build\nWK_TARGET_KIND=remote\nWK_REMOTE_LOCAL=1\n"
-                f"WK_REMOTE_ROOT={tmp / name}\nWK_REMOTE_STORE={tmp / name / 'store'}\n")
-        stubs = {"git": GIT_STUB}
-        if pull:
-            stubs["gh"] = GH_STUB
-        with stub_path(stubs) as binp:
-            yield {
-                "head": head,
-                "pr_head": pr_head,
-                "env": {"XDG_STATE_HOME": str(state), "WK_STORE": str(store),
-                        "WK_TEST_PR_BASE": (pull or {}).get("base", ""),
-                        "WK_MACHINES_DIR": str(machines),
-                        "WK_TEST_REAL_GIT": git, "WK_TEST_FAKE_GITHUB": str(github),
-                        "PATH": "%s:%s" % (binp, os.environ["PATH"])},
-            }
-
-
-def step_lines(out):
-    """The `<id>  [state]  on <machine>...` lines of the graph, by id."""
-    rows = {}
-    for line in out.splitlines():
-        if "[to run]" in line or "[already done]" in line:
-            rows[line.split()[0]] = line.strip()
-    return rows
-
-
-def wave_lines(out):
-    waves = []
-    for line in out.splitlines():
-        stripped = line.strip()
-        if stripped[:1].isdigit() and ". " in stripped:
-            waves.append([w.strip() for w in stripped.split(". ", 1)[1].split(",")])
-    return waves
-
-
-class TestTheAbGraph(WkTest):
-    """`wk ab --dry-run` prints the graph and the schedule, and runs nothing."""
-
-    def dry_run(self, spec, *args, boards=None, registry=(), **kw):
-        with ab_env(boards or {"rpi3": "wpewebkit-2.38-buildroot-rpi3-32"},
-                    registry=registry) as env:
-            spec = env["head"] if spec == "HEAD" else spec
-            cp = run("ab", spec, "--dry-run", *args, env=env["env"], timeout=240, **kw)
-            return cp, env
-
-    def test_the_steps_declare_what_they_need_and_what_they_hold(self):
-        cp, _ = self.dry_run("HEAD", "--release", "2.38", "--devices", "rpi3")
-        self.assertEqual(cp.returncode, 0, cp.stdout)
-        rows = step_lines(cp.stdout)
-        lane = "buildroot-wpewebkit-2.38-buildroot-rpi3-32"
-        image = [k for k in rows if k.startswith("image:%s@" % lane)]
-        self.assertEqual(len(image), 1, sorted(rows))
-        self.assertIn("holds machine:", rows[image[0]])
-        self.assertIn("needs %s" % image[0], rows["slot:%s:base" % lane])
-        self.assertIn("holds device:rpi3", rows["deploy:rpi3:base"])
-        self.assertIn("needs deploy:rpi3:base deploy:rpi3:pr", rows["bench:rpi3:speedometer3"])
-        self.assertIn("needs bench:rpi3:speedometer3", rows["report"])
-
-    def test_a_build_is_serialised_by_the_machine_it_runs_on(self):
-        """One machine builds one thing at a time, whichever lane it is for."""
-        cp, _ = self.dry_run("HEAD", "--release", "2.38", "--devices", "rpi3")
-        holds = [w.split("holds ")[1].split(",")[0].strip()
-                 for k, w in step_lines(cp.stdout).items()
-                 if (k.startswith("slot:") or k.startswith("image:")) and "holds " in w]
-        self.assertTrue(holds, cp.stdout)
-        for h in holds:
-            self.assertTrue(h.startswith("machine:"), h)
-
-    def test_the_second_arm_builds_while_the_first_is_on_the_board(self):
-        """What the old plan could not do: its order was every build in turn,
-        then every board."""
-        cp, _ = self.dry_run("HEAD", "--release", "2.38", "--devices", "rpi3")
-        lane = "buildroot-wpewebkit-2.38-buildroot-rpi3-32"
-        together = [w for w in wave_lines(cp.stdout)
-                    if "deploy:rpi3:base" in w and "slot:%s:pr" % lane in w]
-        self.assertTrue(together, cp.stdout)
-
-    def test_a_profile_guided_arm_is_the_cycles_phases_not_one_build(self):
-        """The lane declares them (image/pgo.sh), so one arm's collection on
-        the board and the other arm's instrumented build are separate steps and
-        run at once."""
-        cp, _ = self.dry_run("HEAD", "--release", "2.52", "--builder", "yocto",
-                             "--devices", "rpi5-64",
-                             boards={"rpi5": "webkit-2.52-yocto-rpi5-64"})
-        self.assertEqual(cp.returncode, 0, cp.stdout)
-        lane = "yocto-webkit-2.52-yocto-rpi5-64"
-        rows = step_lines(cp.stdout)
-        self.assertIn("holds machine:", rows["instr:%s:base" % lane])
-        self.assertIn("holds device:rpi5", rows["collect:rpi5:base:speedometer3"])
-        together = [w for w in wave_lines(cp.stdout)
-                    if "deploy:rpi5:base-instr" in w and "instr:%s:pr" % lane in w]
-        self.assertTrue(together, cp.stdout)
-
-    def test_a_yocto_lane_builds_its_cross_toolchain_as_a_step_of_its_own(self):
-        """The webkit stage books one cross compile's working set, and the
-        nativesdk stack does not fit in it: one such build peaked 15406 MB
-        against a 15360 MB book and the memory watchdog killed it at bitbake
-        task 7658 of 13213 (measured 2026-09-17), while the toolchain stage
-        books the machine envelope. So the SDK is a step, before anything
-        that cross-builds WebKit."""
-        cp, _ = self.dry_run("HEAD", "--release", "2.52", "--builder", "yocto",
-                             "--devices", "rpi5-64",
-                             boards={"rpi5": "webkit-2.52-yocto-rpi5-64"})
-        self.assertEqual(cp.returncode, 0, cp.stdout)
-        lane = "yocto-webkit-2.52-yocto-rpi5-64"
-        rows = step_lines(cp.stdout)
-        sdk = [k for k in rows if k.startswith("toolchain:%s@" % lane)]
-        self.assertEqual(len(sdk), 1, sorted(rows))
-        image = [k for k in rows if k.startswith("image:%s@" % lane)]
-        self.assertIn("needs %s" % image[0], rows[sdk[0]])
-        self.assertIn("holds machine:", rows[sdk[0]])
-        for arm in ("base", "pr"):
-            self.assertIn("needs %s" % sdk[0], rows["instr:%s:%s" % (lane, arm)])
-
-    def test_the_toolchain_step_is_asked_of_the_lane_that_would_build_it(self):
-        cp, _ = self.dry_run("HEAD", "--release", "2.52", "--builder", "yocto",
-                             "--devices", "rpi5-64",
-                             boards={"rpi5": "webkit-2.52-yocto-rpi5-64"})
-        self.assertIn("wk sysimage build webkit-2.52-yocto-rpi5-64 "
-                      "--workspace yocto-webkit-2.52-yocto-rpi5-64 "
-                      "--stage toolchain", cp.stdout)
-
-    def test_a_board_with_two_builders_at_one_release_asks_for_the_builder(self):
-        """What tells the matches apart is what to ask for. rpi5 at 2.52 has a
-        buildroot image and a yocto one, both 64-bit, and the refusal offered
-        `--devices rpi5-32 or rpi5-64` -- the width that had just been given."""
-        cp, _ = self.dry_run("HEAD", "--release", "2.52", "--devices", "rpi5-64",
-                             boards={"rpi5": "webkit-2.52-yocto-rpi5-64"})
-        self.assertNotEqual(cp.returncode, 0, cp.stdout)
-        self.assertIn("--builder buildroot or yocto", cp.stdout)
-        self.assertNotIn("rpi5-64 or rpi5-64", cp.stdout)
-
-    def test_a_board_with_two_widths_at_one_release_asks_for_the_width(self):
-        cp, _ = self.dry_run("HEAD", "--release", "2.52", "--builder", "yocto",
-                             "--devices", "rpi4",
-                             boards={"rpi4": "webkit-2.52-yocto-rpi4-64"})
-        self.assertNotEqual(cp.returncode, 0, cp.stdout)
-        self.assertIn("--devices rpi4-32 or rpi4-64", cp.stdout)
-
-    def test_a_pull_requests_base_comes_off_its_own_base_branch(self):
-        """Not the image's branch: a PR against main measured on a 2.52 image
-        had 15374 commits between its head and the merge-base with
-        webkitglib/2.52, so the one-commit barrier refused every such run and
-        each one needed --base by hand (measured 2026-09-17). The release says
-        which image to measure on; the PR's base branch says where the change
-        begins."""
-        with ab_env({"rpi5": "webkit-2.52-yocto-rpi5-64"},
-                    pull={"n": 990, "base": "feature-x"}) as env:
-            cp = run("ab", "990", "--dry-run", "--release", "2.52",
-                     "--builder", "yocto", "--devices", "rpi5-64",
-                     env=env["env"], timeout=240)
-        self.assertEqual(cp.returncode, 0, cp.stdout)
-        self.assertIn("origin/feature-x (guessed)", cp.stdout)
-        self.assertIn("1 commit(s) ahead of it", cp.stdout)
-
-    def test_a_buildroot_lane_has_no_toolchain_step(self):
-        """buildroot builds its toolchain inside its one build, so there is
-        no separate SDK for a step to wait on."""
-        cp, _ = self.dry_run("HEAD", "--release", "2.38", "--devices", "rpi3")
-        self.assertEqual(cp.returncode, 0, cp.stdout)
-        self.assertFalse([k for k in step_lines(cp.stdout)
-                          if k.startswith("toolchain:")], cp.stdout)
-
-    def test_two_boards_on_one_machine_build_in_turn(self):
-        """Two lanes, two pipelines -- and one machine, so the builds of the
-        two do not overlap however much of the graph does."""
-        cp, _ = self.dry_run("HEAD", "--release", "2.52", "--builder", "yocto",
-                             "--devices", "rpi4-64,rpi5-64",
-                             boards={"rpi4": "webkit-2.52-yocto-rpi4-64",
-                                     "rpi5": "webkit-2.52-yocto-rpi5-64"})
-        self.assertEqual(cp.returncode, 0, cp.stdout)
-        for wave in wave_lines(cp.stdout):
-            builds = [s for s in wave
-                      if s.split(":")[0] in ("image", "toolchain", "instr",
-                                             "mix", "slot")]
-            self.assertLessEqual(len(builds), 1, wave)
-        rows = step_lines(cp.stdout)
-        for board in ("rpi4", "rpi5"):
-            self.assertTrue(
-                any(k.startswith("image:yocto-webkit-2.52-yocto-%s-64@" % board)
-                    for k in rows), sorted(rows))
-
-    def test_build_on_puts_each_arm_on_its_own_machine(self):
-        """Two machines are what makes the two arms build at once: each arm's
-        steps run on its own machine, holding it, so neither waits for the
-        other's build."""
-        cp, _ = self.dry_run("HEAD", "--release", "2.52", "--builder", "yocto",
-                             "--devices", "rpi5-64", "--build-on", "one,two",
-                             boards={"rpi5": "webkit-2.52-yocto-rpi5-64"},
-                             registry=("one", "two"))
-        self.assertEqual(cp.returncode, 0, cp.stdout)
-        rows = step_lines(cp.stdout)
-        lane = "yocto-webkit-2.52-yocto-rpi5-64"
-        self.assertIn("image:%s@one" % lane, rows)
-        self.assertIn("image:%s@two" % lane, rows)
-        self.assertIn("on one", rows["instr:%s:base" % lane])
-        self.assertIn("on two", rows["instr:%s:pr" % lane])
-        self.assertIn("holds machine:one", rows["instr:%s:base" % lane])
-        self.assertIn("holds machine:two", rows["instr:%s:pr" % lane])
-        self.assertEqual(sorted(wave_lines(cp.stdout)[0]),
-                         ["image:%s@one" % lane, "image:%s@two" % lane])
-
-    def test_one_machine_named_for_both_arms_builds_them_in_turn(self):
-        cp, _ = self.dry_run("HEAD", "--release", "2.52", "--builder", "yocto",
-                             "--devices", "rpi5-64", "--build-on", "one",
-                             boards={"rpi5": "webkit-2.52-yocto-rpi5-64"},
-                             registry=("one",))
-        self.assertEqual(cp.returncode, 0, cp.stdout)
-        for wave in wave_lines(cp.stdout):
-            builds = [s for s in wave
-                      if s.split(":")[0] in ("image", "toolchain", "instr",
-                                             "mix", "slot")]
-            self.assertLessEqual(len(builds), 1, wave)
-
-    def test_a_dry_run_creates_no_task_and_runs_nothing(self):
-        cp, env = self.dry_run("HEAD", "--release", "2.38", "--devices", "rpi3")
-        self.assertIn("dry run -- nothing was built or run", cp.stdout)
-        self.assertFalse(os.path.isdir(os.path.join(env["env"]["WK_STORE"], "bench")))
-
-
-class TestABranchIsASpec(WkTest):
-    """`wk ab <owner>:<branch>`: the branch's head is resolved in the mirror
-    the way a pull request's is, so nothing has to be turned into a sha by
-    hand first."""
-
-    def ab(self, *args, boards=None):
-        with ab_env(boards or {"rpi3": "wpewebkit-2.38-buildroot-rpi3-32"}) as env:
-            cp = run("ab", *args, env=env["env"], timeout=240)
-            return cp, env
-
-    def test_a_forks_branch_is_measured(self):
-        cp, env = self.ab("alice:feature-x", "--release", "2.38",
-                          "--devices", "rpi3", "--dry-run")
-        self.assertEqual(cp.returncode, 0, cp.stdout)
-        self.assertIn("branch of alice/", cp.stdout)
-        self.assertIn(env["head"][:12], cp.stdout)
-        self.assertIn("--commit %s --slot pr" % env["head"], cp.stdout)
-
-    def test_a_branch_needs_the_release_named(self):
-        """Only a pull request has a base branch to read the image off."""
-        cp, _ = self.ab("alice:feature-x", "--devices", "rpi3", "--dry-run")
-        self.assertEqual(cp.returncode, 1, cp.stdout)
-        self.assertIn("--release is required for a commit or a branch", cp.stdout)
-
-    def test_a_branch_no_repository_of_that_user_has_is_refused_by_name(self):
-        cp, _ = self.ab("alice:no-such-branch", "--release", "2.38",
-                        "--devices", "rpi3", "--dry-run")
-        self.assertEqual(cp.returncode, 1, cp.stdout)
-        self.assertIn("no branch 'no-such-branch' under 'alice'", cp.stdout)
-        self.assertIn("https://github.com/alice/WebKit.git", cp.stdout)
-
-    def test_a_branch_two_of_the_users_repositories_carry_is_refused(self):
-        """WebKit and WPEWebKit are different projects, and a name in both says
-        nothing about which one is meant."""
-        cp, _ = self.ab("alice:wpe-2.38", "--release", "2.38",
-                        "--devices", "rpi3", "--dry-run")
-        self.assertEqual(cp.returncode, 1, cp.stdout)
-        self.assertIn("more than one of alice's repositories", cp.stdout)
+    def test_the_verdict_is_the_last_line(self):
+        f = Fake("here")
+        f.answer(["wk", "yes"], out="the machine is stopped\nyes\n")
+        f.answer(["wk", "no"], out="yes\nno\n")
+        self.assertEqual((sched.wk_yes(f, ["wk", "yes"])(), sched.wk_yes(f, ["wk", "no"])()), (True, False))
 
 
 if __name__ == "__main__":

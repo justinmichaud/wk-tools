@@ -20,10 +20,10 @@ from tests.support import REPO, WkTest, bash, stub_path
 from tests.test_credcheck import FINE, login
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import key  # noqa: E402
+from wk.key import cli  # noqa: E402
 
 KEY = REPO / "cmd" / "key"
-KEY_PY = REPO / "lib" / "wk" / "key.py"
+KEY_PY = "".join(p.read_text() for p in sorted((REPO / "lib" / "wk" / "key").glob("*.py")))
 
 # A `podman` that fails loudly if anything calls it: what this file is mostly
 # about is that nothing does.
@@ -148,7 +148,7 @@ class TestTheKeysAreReadFromHere(_KeyRun):
 
     def test_nothing_here_reaches_the_podman_machine(self):
         """the hop is gone, not merely unused"""
-        text = KEY.read_text() + KEY_PY.read_text()
+        text = KEY.read_text() + KEY_PY
         for gone in ("podman machine ssh", "IN_VM_SSH", "in_vm "):
             with self.subTest(gone=gone):
                 self.assertNotIn(gone, text)
@@ -159,8 +159,8 @@ class TestEnsureIsOneImplementation(WkTest):
         """`wk key deploy` walks the machines and asks each to make its
         missing keys; for this one that is `ensure` itself, not a second copy
         of ssh-keygen"""
-        self.assertIn("self.ensure()", inspect.getsource(key.Key.converge_forks))
-        self.assertEqual(1, KEY_PY.read_text().count('"-t", "ed25519"'))
+        self.assertIn("self.ensure()", inspect.getsource(cli.Key.converge_forks))
+        self.assertEqual(1, KEY_PY.count('"-t", "ed25519"'))
 
 
 # `gh` marking when it starts and when it ends, so a test can see whether two
@@ -280,7 +280,7 @@ class TestCheckAsksAboutEveryCredential(_KeyRun):
         """A private half is always in the directory nothing mounts, so its
         path says nothing about `wk push`; a guard on that path would make
         every key report the switch instead of GitHub's answer."""
-        self.assertNotIn("push is off", KEY_PY.read_text())
+        self.assertNotIn("push is off", KEY_PY)
 
 
 # A `gh` that refuses every call: `setup` and `deploy` must not reach GitHub
@@ -337,7 +337,7 @@ class TestSetupDoesWhateverIsMissing(_KeyRun):
         table still gets its turn and the report still comes out."""
         cp, _secrets = self.setup_run()
         self.assertIn("Re-run interactively", cp.stderr)
-        self.assertIn(key.Key(REPO).settable()[-1], cp.stdout)
+        self.assertIn(cli.Key(REPO).settable()[-1], cp.stdout)
 
     def test_it_makes_the_push_keys_on_the_way(self):
         cp, secrets = self.setup_run()
@@ -404,8 +404,8 @@ class TestTheTopicIsMintedNotAsked(_KeyRun):
     the mint -- a phone has to be pointed at it once -- and `wk key show`, which
     is how a second phone, or one reinstalled, reaches the topic already minted
     instead of a fresh one that leaves the first phone silent. Every other
-    reader reports on the stored one without printing it (lib/wknotify.py's
-    _out)."""
+    reader reports on the stored one without printing it (lib/wk/notify.py's
+    hidden)."""
 
     SHARED = "a-topic-minted-on-the-first-machine"
 
@@ -659,7 +659,7 @@ class TestTheOldNamesSayWhatReplacedThem(_KeyRun):
 
 
 class TestTheTailnetKeyScope(WkTest):
-    """wk_tailscale_key_reject (lib/common.sh): tailscale spells three very
+    """The tailnet rule (lib/credcheck.py, asked through lib/wk/tailnet.py's `usable`): tailscale spells three very
     different powers with one prefix. An auth key enrolls a node; an API access
     token administers the tailnet; an OAuth client secret mints tokens of its
     own. All three start `tskey-`, and this key is copied onto every card
@@ -668,11 +668,9 @@ class TestTheTailnetKeyScope(WkTest):
     claimed."""
 
     def _reject(self, key):
-        cp = self.bash(f'. "{REPO}/lib/common.sh"\n'
-                       f'if why=$(wk_tailscale_key_reject {key!r}); then echo ACCEPTED\n'
-                       f'else printf "REJECTED: %s\\n" "$why"; fi\n')
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        return cp.stdout
+        from wk import tailnet
+        ok, why = tailnet.usable("tailnet", key)
+        return "ACCEPTED" if ok else "REJECTED: %s" % why
 
     def test_an_auth_key_is_accepted(self):
         self.assertIn("ACCEPTED", self._reject("tskey-auth-k123CNTRL-abcdef"))
@@ -707,11 +705,11 @@ class TestTheTailnetKeyScope(WkTest):
                              ("nonsense", False)):
             path = self.tmp / f"key-{present}-{key[:10]}"
             path.write_text(key + "\n")
-            cp = self.bash(f'. "{REPO}/lib/common.sh"\n'
-                           f'wk_tailscale_authkey_present && echo YES || echo NO\n',
-                           env={"WK_TS_AUTHKEY": str(path)})
+            from tests.support import clean_env
+            from wk import tailnet
+            env = clean_env({"WK_TS_AUTHKEY": str(path), "WK_TS_API_SECRET": str(self.tmp / "no-api")})
             with self.subTest(key=key):
-                self.assertIn("YES" if present else "NO", cp.stdout)
+                self.assertEqual(present, tailnet.Fleet(str(REPO), env).key_present())
 
     def test_the_card_helper_refuses_the_broad_ones_too(self):
         """The rule lives where the privilege is as well: admin/wk-card-priv
@@ -739,7 +737,7 @@ class TestABareKeyChangesNothing(_KeyRun):
             self.assertNotIn(word, bare.stdout + bare.stderr)
 
     def arm(self, verb):
-        return inspect.getsource(getattr(key.Key, verb))
+        return inspect.getsource(getattr(cli.Key, verb))
 
     def test_nothing_is_elected_taken_or_written_before_the_question(self):
         """Every arm that can overwrite another workstation, or revoke a key on
@@ -747,7 +745,7 @@ class TestABareKeyChangesNothing(_KeyRun):
         inside converge_forks and the credential walk, after the question.
         The declined run itself is driven against a peer in
         tests/test_key_shared.py and tests/test_wk_key.py."""
-        self.assertIn("rotate_keys", inspect.getsource(key.Key.converge_forks))
+        self.assertIn("rotate_keys", inspect.getsource(cli.Key.converge_forks))
         for verb in ("setup", "deploy"):
             with self.subTest(verb=verb):
                 arm = self.arm(verb)
@@ -810,15 +808,14 @@ class TestAnAuthKeyIsMintedNotOnlyHanded(WkTest):
     def test_asking_whether_a_key_is_available_mints_nothing(self):
         """`wk sysimage write`'s preflight and its report both ask this, and a
         reading may not make a credential as a side effect."""
-        cp = bash(self.LIB + 'wk_tailscale_authkey_present && echo YES || echo NO\n',
-                  env=self._env(api=self._api_key()))
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertIn("YES", cp.stdout, "a machine that can mint has a key available")
-        self.assertNotIn("minted", cp.stdout + cp.stderr)
+        from tests.support import clean_env
+        from wk import tailnet
+        self.assertTrue(tailnet.Fleet(str(REPO), clean_env(self._env(api=self._api_key()))).key_present(),
+                        "a machine that can mint has a key available")
         self.assertFalse((self.tmp / "no-such-key").exists(),
                          "a presence check wrote a key file")
 
     def test_with_neither_a_key_nor_the_power_to_mint_none_is_available(self):
-        cp = bash(self.LIB + 'wk_tailscale_authkey_present && echo YES || echo NO\n',
-                  env=self._env())
-        self.assertIn("NO", cp.stdout, cp.stdout + cp.stderr)
+        from tests.support import clean_env
+        from wk import tailnet
+        self.assertFalse(tailnet.Fleet(str(REPO), clean_env(self._env())).key_present())

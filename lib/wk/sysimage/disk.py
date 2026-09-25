@@ -7,9 +7,9 @@ import sys
 from collections import namedtuple
 
 from wk import act
-from wk.boot.driver import BashChannel, disk_of, kv, part, partno
+from wk.boot.driver import CARD_PRIV, Channel, disk_of, part, partno
+from wk.kv import kv
 
-CARD_PRIV = "/usr/local/libexec/wk-card-priv"
 LSBLK = "lsblk -J -p -o NAME,SIZE,TRAN,RM,TYPE,MODEL,LABEL"
 BOOTED = "is a disk this machine is running from"
 TRANSPORTS = (("/dev/sd", "usb"), ("/dev/mmcblk", "mmc"), ("/dev/nvme", "nvme"))
@@ -85,7 +85,7 @@ class Disks:
         if dev not in self._whose:
             r = self.card("whose", dev)
             text = r.out + r.err
-            self._whose[dev] = (kv(text, "machine"), BOOTED in text)
+            self._whose[dev] = (kv(text).get("machine", ""), BOOTED in text)
         return self._whose[dev]
 
     def resolve_own(self):
@@ -165,7 +165,7 @@ class Disks:
 
 def _disks(env, root):
     conf = {k: v for k, v in env.items() if k.startswith("NODE_")}
-    return Disks(BashChannel(root, conf, env.get("MODE_CHANNEL") or "none"), conf)
+    return Disks(Channel(root, conf, env.get("MODE_CHANNEL") or "none", env=env), conf)
 
 
 def _say(text):
@@ -175,7 +175,6 @@ def _say(text):
 
 
 VERBS = {
-    "candidates": lambda d, a: _say("\n".join(line(x) for x in d().candidates())),
     "tran": lambda d, a: _say(tran_of_name(a[0])),
     "own-or-declared": lambda d, a: _say(d().own_or_declared()),
     "list": lambda d, a: _say(d().listing()),

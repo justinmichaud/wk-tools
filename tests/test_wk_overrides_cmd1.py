@@ -1,4 +1,4 @@
-"""WK_* override coverage for cmd/bench, cmd/bridge and cmd/build (the
+"""WK_* override coverage for cmd/bench, cmd/machine and cmd/build (the
 docs/PLAN.md item: "every WK_* override read with a default is
 documented where the user meets it and covered by a test, or removed").
 
@@ -15,13 +15,12 @@ import re
 import sys
 import unittest
 
-from tests.support import REPO, WkTest, bash, fake_workspace, run, scratch_dir
+from tests.support import REPO, WkTest, bash, fake_workspace, run
 from tests.test_bench_pipeline import BenchTest, World
 
 from wk.act import Refused  # noqa: E402
 
 BENCH = REPO / "lib" / "bench-arms.sh"
-BRIDGE = REPO / "cmd" / "bridge"
 BUILD_PY = REPO / "lib" / "wk" / "build.py"
 
 
@@ -80,53 +79,10 @@ class TestBenchRunKnobs(BenchTest):
         self.assertNotIn("setarch", self.w.watched[0][-1])
 
 
-class TestBridgeAuthkey(WkTest):
-    """cmd/bridge: WK_BRIDGE_AUTHKEY is the scriptable escape hatch for an
-    otherwise hands-only step (pasting a tailnet auth key), and takes
-    precedence over the fleet's own key file."""
-
-    def _snippet(self):
-        return _lift_range(
-            BRIDGE,
-            'if [ -n "${WK_BRIDGE_AUTHKEY:-}" ]; then',
-            "fi",
-            end_exact=True,
-        )
-
-    def test_env_var_wins_and_the_fleet_key_is_not_even_consulted(self):
-        snippet = self._snippet()
-        cp = bash(
-            'log() { :; }\n'
-            'wk_tailscale_authkey() { echo CALLED >&2; return 1; }\n'
-            'authkey=""; keyfile=""; BR_NAME=probe\n'
-            f'{snippet}\n'
-            'echo "$authkey"',
-            env={"WK_BRIDGE_AUTHKEY": "secret-from-env"},
-        )
-        self.assertEqual(cp.stdout.strip(), "secret-from-env", cp.stdout + cp.stderr)
-        self.assertNotIn("CALLED", cp.stderr, "the fleet key lookup ran despite the override")
-
-    def test_unset_falls_back_to_the_fleet_key(self):
-        with scratch_dir(prefix="wk-test-bridge-authkey-") as d:
-            keyfile = d / "key"
-            keyfile.write_text("fleet-key-value\n")
-            snippet = self._snippet()
-            cp = bash(
-                'log() { :; }\n'
-                f'wk_tailscale_authkey() {{ echo {keyfile}; }}\n'
-                'authkey=""; keyfile=""; BR_NAME=probe\n'
-                f'{snippet}\n'
-                'echo "$authkey"',
-            )
-            self.assertEqual(cp.stdout.strip(), "fleet-key-value", cp.stdout + cp.stderr)
-
-
 class TestTheWorkspaceLockIsRefusedNotWaitedOut(WkTest):
     """`wk build` refuses a second build in a workspace at once and names
-    `wk build <ws> --kill`: an hour on a lock names no remedy. The one caller
-    that still waits is image/yocto.sh's stage build, whose stages queue
-    behind each other by design, at a fixed hour rather than a knob no
-    command documents.
+    `wk build <ws> --kill`: an hour on a lock names no remedy. An image stage
+    refuses the same way (lib/wk/sysimage/task.py's Stage.admit).
     """
 
     def test_build_asks_for_the_lock_with_no_wait_at_all(self):
@@ -141,12 +97,6 @@ class TestTheWorkspaceLockIsRefusedNotWaitedOut(WkTest):
         refusal = refusal[:refusal.index("lock.hold(")]
         self.assertIn("already building", refusal)
         self.assertIn("self.kill", refusal)
-
-    def test_a_yocto_stage_still_waits_for_the_stage_ahead_of_it(self):
-        yocto = (REPO / "image" / "yocto.sh").read_text()
-        self.assertIn('hold_lock "ws-$ws" -w 3600', yocto)
-        self.assertNotIn("WK_BUILD_LOCK_WAIT", yocto,
-                         "an environment knob no -h documents is not a knob")
 
 
 class TestBuildBabysitDefaults(WkTest):
@@ -234,10 +184,6 @@ class TestHeaderDocumentsTheKnobsThisModuleTests(unittest.TestCase):
             "WK_BABYSIT_MODEL", "WK_BABYSIT_ATTEMPTS", "WK_MEM_INTERVAL",
         ):
             self.assertIn(name, cp.stdout, f"{name} missing from `wk build -h`")
-
-    def test_bridge_header_names_its_tunable(self):
-        cp = run("bridge", "-h")
-        self.assertIn("WK_BRIDGE_AUTHKEY", cp.stdout)
 
 
 if __name__ == "__main__":

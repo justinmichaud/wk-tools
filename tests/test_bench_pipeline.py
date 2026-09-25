@@ -2,7 +2,7 @@
 each system through boot, deploy, run and collect, the refusals, the record a run writes, a dry run as the
 recorder, and a run killed after any effect.
 
-Rows landed here: `unit bench.pipeline_conformance[container|guest]`, `unit record.progress_shape[bench]`,
+Rows landed here: `unit bench.pipeline_conformance[container|guest|board]`, `unit record.progress_shape[bench]`,
 `unit dispatch.dry_run_is_the_recorder[bench]`, `unit killpoints[bench]`.
 
 Run: python3 tests/run.py -k test_bench_pipeline
@@ -23,11 +23,13 @@ from tests.killpoints import converges
 from tests.support import REPO
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import decl, record, shell, targets  # noqa: E402
+from tests.test_bench_mac import Drv  # noqa: E402
+from tests.test_mac_volume import FakeMac  # noqa: E402
+from wk import act, decl, fleet, record, shell, targets  # noqa: E402
 from wk.act import Refused  # noqa: E402
-from wk.bench import pipeline, record as brecord, systems  # noqa: E402
+from wk.bench import mac, pipeline, record as brecord, systems  # noqa: E402
 from wk.clock import FakeClock  # noqa: E402
-from wk.machine import Fake  # noqa: E402
+from wk.machine import Fake, Killed, Result  # noqa: E402
 from wk.quiet import lib_argv  # noqa: E402
 
 SHA = "0123456789abcdef0123456789abcdef01234567"
@@ -122,11 +124,10 @@ class World(Fake):
                             (["lscpu"], "Model name:   Test CPU\n"), (["nvidia-smi"], "550.1\n"), (["findmnt"], "/dev/nvme0n1p2\n"),
                             (["lsblk"], json.dumps({"blockdevices": [{"name": "nvme0n1p2", "type": "part"},
                                                                      {"name": "nvme0n1", "type": "disk", "rota": False, "tran": "nvme", "model": "Fast"}]})),
-                            (lib_argv(str(REPO), "lib/common.sh", "session_mode")[:3], "gpu\n"),
-                            (shell.argv(str(REPO), '. "$WK_ROOT/lib/arch.sh"; arch_has_gpu', "native")[:3], ""),
                             (lib_argv(str(REPO), pipeline.QUIET, "screen_watch_start")[:3], ""),
                             (lib_argv(str(REPO), pipeline.QUIET, "screen_watch_stop")[:3], "")):
             self.answer(prefix, out=out)
+        self.files["/run/wk-session-mode"] = "gpu\n"
         self.watched = []
 
     def act_run(self, argv, **kw):
@@ -234,6 +235,17 @@ class TestConformance(BenchTest):
                 env = self.env_json(w)
                 self.assertEqual((env["bench_host"], env["config"], env["plan"], env["webkit_sha"]), (host, config, plan, SHA))
                 self.assertTrue((self.run_dir(w) / "result.json").is_file(), err)
+
+    def test_a_board_runs_the_one_pipeline_into_the_one_record(self):
+        """`bench.pipeline_conformance[board]`: `--system <board>` through the same run arm, boot to collect."""
+        from tests.test_bench_board import BoardWorld
+        w = BoardWorld(self.tmp)
+        self.assertEqual(w.invoke(), 0, w.err)
+        self.assertIn("BENCH OK  jetstream3", w.err)
+        self.assertEqual(w.state(), ("complete", 1, "0"))
+        env = w.env_json()
+        self.assertEqual((env["bench_host"], env["config"], env["plan"], env["webkit_sha"]), ("image", "buildroot-rpi5-64", "jetstream3", SHA))
+        self.assertTrue((w.run_dir() / "result.json").is_file(), w.err)
 
     def test_a_guest_run_is_collected_from_the_guest_through_its_copy(self):
         w = World(self.tmp, "vm")
@@ -400,13 +412,6 @@ class TestKnobs(BenchTest):
         self.run_(extra={"WK_BENCH_ASLR": "off"})
         self.assertIn("exec setarch $(uname -m) -R -- ", self.w.watched[0][-1])
 
-    def test_cmd_pi_asks_the_same_configuration(self):
-        out = io.StringIO()
-        os.environ["WK_BENCH_ENV_PAD"] = "8"
-        with contextlib.redirect_stdout(out):
-            pipeline.main(["configuration"])
-        self.assertEqual(out.getvalue(), "configuration.env_pad_bytes=8\n")
-
 
 class TestRootDevice(unittest.TestCase):
     def test_a_linux_disk_names_its_bus_rotation_and_trim(self):
@@ -467,6 +472,206 @@ class TestKillPoints(BenchTest):
         for kind in ("container", "vm"):
             with self.subTest(kind=kind):
                 converges(self, lambda: World(self.tmp, kind), run_once, World.state)
+
+
+MBP_CONF = ('KIND=mac\nNODE_SSH="tolken"\nNODE_BENCH_SSH="tolken-bench"\nNODE_DRIVER=mac-volume\n'
+            'NODE_VOLUME="WK Bench"\nNODE_PROFILE=perf-macos-tolken\n')
+
+
+class MacBenchTarget(BenchTarget):
+    """A macOS VM workspace with a build already present -- `needs_base` is a golden-base concern
+    `Stage.run()`'s `wait_ready` does not need to re-ask of a fake that is already 'running'; `Stage`
+    is the only caller that pulls a whole tree out of it, so the pull is an effect here, as it is on
+    5.27's own `Target` double (tests/test_bench_mac.py) -- nothing stages a real build tree."""
+    needs_base = False
+
+    def pull_dir(self, ws, src, dest, exclude=()):
+        self.machine.effect(("copy_tree_out", src, dest) + tuple(exclude))
+
+
+class MacReg(Reg):
+    """`Stage.run()` re-resolves the workspace target through the registry, not through the `System`
+    it was handed, so this is the one place a `--system mbp` run's target comes from."""
+
+    def load(self, name):
+        return MacBenchTarget(name, self.root, dict(self.env), self.world, self.world.kind)
+
+
+class MacWorld(Fake):
+    """The driving machine for `wk bench run <ws> <plan> --system mbp`: its own store, a macOS
+    workspace target to stage from, and a fake Mac (5.12's `FakeMac`, over its own `Channel`
+    protocol) it reaches to arm, run over ssh and bring back. `wk bench staged` on the install is
+    not re-simulated (5.27 already tests it): the ssh invocation is answered directly, the way any
+    remote command is faked here."""
+
+    RESULT_ID = "20260924T000000Z-speedometer3-ws"
+
+    def __init__(self, tmp):
+        super().__init__("here")
+        self.fake, self.kind, self.rc = self, "vm", 0
+        self.tmp = Path(tempfile.mkdtemp(dir=str(tmp)))
+        machines = self.tmp / "machines"
+        machines.mkdir()
+        (machines / "mbp.conf").write_text(MBP_CONF)
+        self.env = {"HOME": str(self.tmp / "home"), "WK_STORE": str(self.tmp / "store"), "WK_LOCK_DIR": str(self.tmp / "locks"),
+                    "XDG_STATE_HOME": str(self.tmp / "state"), "WK_NAME": "ws", "WK_MACHINES_DIR": str(machines),
+                    "WK_MAC_BENCH_TOOLS": "/tools", "WK_POLL_SECONDS": "1", "WK_JOB_PID_TRIES": "0"}
+        self.clock = FakeClock()
+        self.home = "/var/wk"
+        conf = dict(fleet.Fleet(str(REPO), self.env).load("mbp"), NODE_NAME="mbp")
+        self.mac = FakeMac(conf, env=self.env, clock=self.clock)
+        self.mac.write_system(conf["NODE_PROFILE"])   # the bench install's own /etc/wk-image id, read back by mac-probe.sh
+        for prefix, out in ((["exec", "ws", "test"], ""), (["exec", "ws", "git"], SHA + "\n"),
+                            (["exec", "ws", "cat"], PLAN_JSON), ([str(REPO / "cmd" / "version")], "sha=abc\ndirty=no\n"),
+                            (["git", "ls-remote"], SHA + "\trefs/heads/main\n"), (["rsync"], "")):
+            self.answer(prefix, out=out)
+        # Pinned already, so the seed step neither clones for real nor differs between a wet and a dry run.
+        self.seed_dest = os.path.join(self.env["WK_STORE"], "cache", "bench", "speedometer3-" + SHA[:12])
+        self.dirs.add(self.seed_dest)
+        self.dirs.add(os.path.join(self.seed_dest, ".wk-seeded"))
+        self.watched = []
+
+    def act_run(self, argv, **kw):
+        self.effects.append(("act", tuple(argv)))
+        return super().act_run(argv, **kw)
+
+    def run(self, argv, input=None, timeout=None):
+        if argv[:1] == ["ssh"]:
+            self.record_run(argv)
+            return self._ssh_answer(argv[-1])
+        if argv[:1] == ["scp"]:
+            self.record_run(argv)
+            return Result(0)
+        return super().run(argv, input=input, timeout=timeout)
+
+    def _ssh_answer(self, cmd):
+        if "test -x /tools/wk" in cmd:
+            return Result(0, "/tools\n")
+        if cmd == "test -d %s" % (self.home + "/results"):
+            return Result(0)
+        if cmd == "ls -1A %s" % (self.home + "/results"):
+            return Result(0, self.RESULT_ID + "\n")
+        return Result(127, "", "MacWorld: no answer for: %s" % cmd)
+
+    def popen(self, argv, stdin=None, stdout=None, stderr=None, cwd=None):
+        self.watched.append(list(argv))
+        if "wk bench staged" in argv[-1]:
+            stdout.write(("wk: bench pid 77\nBENCH OK  speedometer3 -> %s/results/%s/result.json\n"
+                          % (self.home, self.RESULT_ID)).encode())
+        return Proc(self.rc)
+
+    def system(self, target_kind="vm"):
+        self.kind = target_kind
+        target = MacBenchTarget("ws", str(REPO), dict(self.env), self, target_kind)
+        reg = MacReg(self)
+        conf = dict(fleet.Fleet(str(REPO), self.env).load("mbp"), NODE_NAME="mbp")
+        return mac.MacHostSystem(str(REPO), reg, target, "ws", self.clock, "mbp", conf,
+                                  channel_factory=lambda conf, env, ch, via, root: self.mac,
+                                  stage_driver=lambda root, conf: Drv(self, False))
+
+    def go(self, plan="speedometer3", config="mac-release", popen=None):
+        system = self.system()
+        r = mac.HostRun(str(REPO), system.reg, system, self.clock, self.env, popen or self.popen)
+        return r.go(plan, {"config": config})
+
+    def bench_dir(self):
+        return Path(self.env["WK_STORE"]) / "bench"
+
+    def tasks(self):
+        return brecord.tasks(str(self.bench_dir()))
+
+    def recs(self):
+        return record.Records(self.env["WK_STORE"], clock=self.clock, env=self.env, machine=self)
+
+
+class MacHostTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="wk-bench-mac-host-"))
+        self.addCleanup(lambda: __import__("shutil").rmtree(self.tmp, True))
+        self._env = dict(os.environ)
+        for v in ("WK_DRY_RUN", "WK_FORCE"):
+            os.environ.pop(v, None)
+        self.addCleanup(lambda: (os.environ.clear(), os.environ.update(self._env)))
+        self.w = MacWorld(self.tmp)
+
+    def run_dir(self, w=None):
+        w = w or self.w
+        (task,) = w.tasks()
+        (run,) = os.listdir(w.bench_dir() / task / "runs")
+        return w.bench_dir() / task / "runs" / run
+
+
+class TestMacHostConformance(MacHostTest):
+    def test_the_pipeline_runs_boot_deploy_run_and_collect_into_the_one_record(self):
+        """`bench.pipeline_conformance[mac-volume]`: staged, armed, run over ssh, collected, and left in
+        bench mode -- the fake Mac's own driver (5.11/5.12) refuses to bless itself back from there,
+        which the fleet install faces too (only the host install carries the boot helper)."""
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            rc = self.w.go()
+        out = err.getvalue()
+        self.assertEqual(rc, 0, out)
+        self.assertIn("BENCH OK", out)
+        self.assertEqual(self.w.mac.running, "bench", "arm() put it in bench mode")
+        self.assertIn("cannot bless itself back", out)
+        (copy,) = [e for e in self.w.effects if e[0] == "run" and e[1][:1] == ("scp",)]
+        self.assertTrue(copy[1][-2].endswith(self.w.RESULT_ID + "/result.json"), copy)
+        env = json.loads((self.run_dir() / "env.json").read_text())
+        self.assertEqual(env["remote"]["run"], self.w.RESULT_ID)
+
+
+class TestMacHostRecord(MacHostTest):
+    def test_a_run_writes_the_one_progress_record(self):
+        """`record.progress_shape[bench]`: the same task record a container or guest run writes."""
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.w.go()
+        (t,) = self.w.recs().list()
+        self.assertEqual((t.field("kind"), t.field("where"), t.field("name")), ("bench", "here", "ws"))
+        self.assertEqual(t.steps(), [(1, "done"), (2, "done"), (3, "running")])
+
+
+class TestMacHostDryRun(MacHostTest):
+    def test_the_plan_is_the_runs_mutations(self):
+        """`dispatch.dry_run_is_the_recorder[bench]`, `--system mbp`: the dry run's mutations are the
+        wet run's (5.27's own `Stage` dry-run parity), and it never arms or reboots the real machine
+        -- `Boot.arm()`'s own dry-run branch returns before either bless call reaches it."""
+        def mutations(w):
+            locks = w.env["WK_LOCK_DIR"]
+            return [e for e in w.effects if e[0] in ("act", "write", "mkdir", "remove", "bench_put", "bench_put_file")
+                    and not (isinstance(e[1], str) and e[1].startswith(locks))]
+        wet, dry = MacWorld(self.tmp), MacWorld(self.tmp)
+        with contextlib.redirect_stderr(io.StringIO()):
+            wet.go()
+        os.environ["WK_DRY_RUN"] = "1"
+        try:
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                rc = dry.go()
+        finally:
+            del os.environ["WK_DRY_RUN"]
+        out = err.getvalue()
+        strip = [[tuple(str(x).replace(str(w.tmp), "") for x in e) for e in mutations(w)] for w in (wet, dry)]
+        self.assertEqual(strip[0], strip[1])
+        self.assertIn("dry run -- nothing was benchmarked", out)
+        self.assertEqual(dry.mac.running, "host", "a dry run must not arm or reboot the real machine")
+        self.assertEqual((dry.tasks(), dry.recs().list()), ([], []))
+
+
+class TestMacHostKillPoints(MacHostTest):
+    def test_a_run_killed_while_staging_and_rerun_converges(self):
+        """`killpoints[bench]`, `--system mbp`'s own new caller of 5.27's crash-only `Stage`: every
+        effect up to the reboot converges on a rerun, from a fresh world, the same as any other kill
+        point in this tree. A kill after the machine is told to reboot is not resumable this way --
+        `Boot.arm()` refuses an already-armed machine by design (only `wk boot mbp --back` undoes an
+        arming), so nothing past that point is exercised here; a person, not a rerun, notices it."""
+        def run_once(w):
+            w.clock.t += 1
+            with contextlib.redirect_stderr(io.StringIO()):
+                w.go()
+        probe = MacWorld(self.tmp)
+        run_once(probe)
+        cleanup = [i for i, e in enumerate(probe.effects) if e[0] == "remove" and "/bench-stage/" in e[1] and not e[1].endswith(".stage.json")]
+        converges(self, lambda: MacWorld(self.tmp), run_once, lambda w: w.mac.running, max_effects=cleanup[-1] + 1)
 
 
 if __name__ == "__main__":

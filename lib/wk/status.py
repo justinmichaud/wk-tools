@@ -5,6 +5,7 @@ boot drivers and the reach probes are still bash and are asked through
 lib/target.sh's libraries."""
 
 import calendar
+import json
 import math
 import os
 import re
@@ -17,16 +18,16 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import secretfile
-import wkdata
-from wk import fleet, reach, record, shell, statusview, targets
+from wk import bridge, fleet, reach, record, secrets, shell, statusview, targets
+from wk.bench import record as bench_record
 from wk.clock import Clock
 from wk.lock import holder_pid
 from wk.machine import TIMED_OUT, Local
 from wk.act import Refused
 from wk.resources import Resources
+from wk.kv import ANSI, kv, kv_file
 from wk.store import Bases, Store
 
-ANSI = re.compile(r"\x1b\[[0-9;]*m")
 ENDED_AS_ASKED = ("ok", "cancelled", "stopped", "refused")
 METHOD = {"container": "container", "vm": "macOS guest"}
 RANK = {"container": 0, "vm": 1, "local": 2}
@@ -50,36 +51,6 @@ printf 'behind=%s\nahead=%s\n' "${1:-}" "${2:-}"
 printf 'wsbase=%s\n' "${_b:-?}"
 '''
 
-FLEET_PROBE = r'''set +e
-export WK_SSH_TIMEOUT="${WK_FLEET_TIMEOUT:-4}"
-. "$WK_ROOT/lib/image.sh"
-. "$WK_ROOT/image/profiles.sh"
-. "$WK_ROOT/boot/machines.sh"
-machine_load "$1" || exit 0
-load_driver "$NODE_DRIVER" 2>/dev/null || exit 0
-armed=""; armed_by=""; armed_at=""; armed_boot=""; boot_id=""; probeable=yes
-if b_probeable 2>/dev/null; then
-    b_probe 2>/dev/null
-    if [ "${MODE:-}" = host ]; then
-        _rec=$(record_read 2>/dev/null)
-        armed=$(kv_get image <<<"$_rec")
-        armed_by=$(kv_get armed_by <<<"$_rec")
-        armed_at=$(kv_get armed_at <<<"$_rec")
-        armed_boot=$(kv_get armed_boot_id <<<"$_rec")
-        boot_id=$(b_boot_id 2>/dev/null)
-    fi
-else
-    MODE=""; probeable=no
-fi
-media=$(b_media 2>/dev/null || printf 'unknown')
-if [ -z "${NODE_PROFILE:-}" ]; then
-    reprov="missing NODE_PROFILE in machines/$1.conf -- nothing to compose a recipe from"
-else
-    reprov=$(b_reprovision 2>/dev/null || true)
-fi
-printf '%s\0' "${NODE_ROLE:-workstation}" "$probeable" "${MODE:-}" "${NODE_BRIDGE:-}" "$armed" "$media" "$reprov" \
-    "$(fleet_tailnet "$1")" "$(reach_without_tailnet "$1")" "$armed_by" "$armed_at" "$armed_boot" "$boot_id"
-'''
 
 BRIDGE_PROBE = r'''
 printf "reachable=yes\n"
@@ -88,14 +59,12 @@ if [ -x /usr/local/sbin/wk-bridge-healthcheck ]; then
     printf "sum=%s\n" "$(cat $(ls /usr/local/sbin/wk-bridge-* 2>/dev/null | sort) \
         $(ls /etc/init.d/wk-bridge-* 2>/dev/null | sort) 2>/dev/null | cksum | cut -d" " -f1)"
     if [ "$(id -u)" = 0 ]; then
-        _h=$(/usr/local/sbin/wk-bridge-healthcheck 2>&1); _rc=$?
+        /usr/local/sbin/wk-bridge-healthcheck 2>&1 || true
     elif command -v doas >/dev/null 2>&1; then
-        _h=$(doas -n /usr/local/sbin/wk-bridge-healthcheck 2>&1); _rc=$?
+        doas -n /usr/local/sbin/wk-bridge-healthcheck 2>&1 || true
     else
-        _h=$(sudo -n /usr/local/sbin/wk-bridge-healthcheck 2>&1); _rc=$?
+        sudo -n /usr/local/sbin/wk-bridge-healthcheck 2>&1 || true
     fi
-    printf "health=%s\n" "$_rc"
-    printf "healthline=%s\n" "$(printf "%s" "$_h" | grep -v "^[[:space:]]*$" | tail -1)"
 else
     printf "role=no\n"
 fi'''
@@ -106,7 +75,6 @@ def clean(text):
 
 
 def bump(worst, code):
-    """The walk's exit code only rises; anything outside 0-4 reads as 4."""
     try:
         code = int(str(code).strip())
     except ValueError:
@@ -114,23 +82,6 @@ def bump(worst, code):
     if code < 0 or code > 4:
         code = 4
     return max(worst, code)
-
-
-def kv(text):
-    out = {}
-    for line in clean(text).splitlines():
-        k, eq, v = line.partition("=")
-        if eq and k not in out:
-            out[k] = v
-    return out
-
-
-def kv_file(path):
-    try:
-        with open(path, errors="replace") as f:
-            return kv(f.read())
-    except OSError:
-        return {}
 
 
 class Rec:
@@ -165,11 +116,6 @@ class Rec:
         return d
 
 
-def _bash(root, snippet, *args, timeout=None):
-    """The snippet after the bash libraries, with `args` as its positionals."""
-    return Local().run(["bash", "-c", shell.prelude(root) + snippet + "\n", "wk", *args], input="", timeout=timeout)
-
-
 def sha_matches(a, b):
     """`git rev-parse --short` picks its own length per repository, so one abbreviation can be a prefix of the other."""
     return bool(a and b and (a.startswith(b) or b.startswith(a)))
@@ -179,7 +125,7 @@ def far_side_reason(target, side, why):
     if side == "unreachable":
         return "unreachable over ssh" + (": %s" % why if why else "")
     if side == "stopped":
-        return "the podman machine '%s' is stopped -- 'wk start' brings it up" % target.env.get("WK_MACHINE", "wk")
+        return "the podman machine '%s' is stopped -- 'wk start' brings it up" % target.podman_machine()
     if side == "no-wk":
         return "no wk-tools there yet -- 'wk machine setup %s'" % target.name
     return "not a machine of its own"
@@ -211,7 +157,7 @@ def sdk_newest(local, tags):
 
 
 def sdk_record(machine, local, tags, cap):
-    """`local` is t_sdk_local's image= and created=; `tags` the registry's list, None when it did not answer in `cap`."""
+    """`local` is Container.sdk_local's image= and created=; `tags` the registry's list, None when it did not answer in `cap`."""
     image = local.get("image", "")
     if not image:
         return None
@@ -273,9 +219,7 @@ def task_records(records, only=None, clock=None):
         age = record.log_age(log, clock)
         abort = t.field("abort_after")
         shown_age = "?" if age is None else str(age)
-        if kind in record.SESSIONS and st in ("starting", "running", "silent"):
-            r.note("alive: a session, open until it is stopped, so not busy")
-        elif st == "silent":
+        if st == "silent":
             r.opt("log_age", shown_age if age is not None else "")
             if age is not None and abort.isdigit() and age > int(abort):
                 r.warn("silent for %ss, past the %ss this %s recorded as its watchdog's deadline" % (age, abort, kind))
@@ -514,7 +458,7 @@ def quiesce_record(qdir, machine):
 
 
 def bench_records(store, machine, alive):
-    """Every running benchmark task, else the newest, its state recomputed from its runs (lib/wkdata.py)."""
+    """Every running benchmark task, else the newest, its state recomputed from its runs (lib/wk/bench/record.py)."""
     bdir = store.bench_dir()
     if not os.path.isdir(bdir):
         return []
@@ -524,30 +468,30 @@ def bench_records(store, machine, alive):
     for t in running or tasks[-1:]:
         path = os.path.join(bdir, t)
         try:
-            st = wkdata.task_state(path, t in running)
+            st = bench_record.task_state(path, t in running)
         except Exception:
             continue
         r = Rec("bench", machine=machine, task=t, path=path, state=st["state"], summary=st["summary"],
-                subject=wkdata._subject_line(st["doc"]))
+                subject=bench_record.subject_line(st["doc"]))
         if st["state"] == "incomplete":
             r.warn("task %s stopped before every planned run ended -- wk bench report %s says what is there" % (t, t))
         out.append(r.done())
     return out
 
 
-def fleet_probe(root, name, cap):
-    """The board's boot driver asked under a ceiling: None when it did not answer in `cap` seconds."""
-    r = _bash(root, FLEET_PROBE, name, timeout=cap)
+def fleet_probe(root, name, cap, env=None):
+    """The board's boot driver (wk.boot.cli fleet-probe) asked under a ceiling: None when it did not answer in `cap` seconds."""
+    env = os.environ if env is None else env
+    r = Local().run(["env", "PYTHONPATH=" + os.path.join(str(root), "lib"), "WK_SSH_TIMEOUT=" + env.get("WK_FLEET_TIMEOUT", "4"),
+                     sys.executable, "-m", "wk.boot.cli", "fleet-probe", name], input="", timeout=cap)
     if r.rc == TIMED_OUT:
         return None
     if not r.ok:
         return {"error": (r.err.strip().splitlines() or ["exit %d" % r.rc])[-1]}
-    parts = r.out.split("\0")
-    if len(parts) < 13:
-        return {}
-    keys = ("role", "probeable", "mode", "bridge", "armed", "media", "reprovision", "tailnet", "direct",
-            "armed_by", "armed_at", "armed_boot", "boot_id")
-    return dict(zip(keys, parts))
+    try:
+        return json.loads(r.out)
+    except ValueError:
+        return {"error": "the probe answered no JSON"}
 
 
 def armed_desync(fields, clock):
@@ -597,7 +541,7 @@ def fleet_record(name, conf, fields, cap, reach=None, clock=None):
 
 
 def self_role(root, machine):
-    """This machine's own declared role; workstation is FLEET_PROBE's own default (`${NODE_ROLE:-workstation}`)."""
+    """This machine's own declared role; workstation is the fleet probe's own default (wk.boot.cli.CONF_DEFAULTS)."""
     try:
         conf = fleet.Fleet(root).load(machine) or {}
     except fleet.ConfError:
@@ -655,32 +599,36 @@ def bridge_ssh(name, script, as_root, connect_timeout, cap):
 
 
 def bridge_record(name, conf, want, fields, reach):
-    r = Rec("bridge", name=name, device=conf.get("BR_DEVICE") or "?", segment=conf.get("BR_SEGMENT") or "?")
-    r.opt("note", conf.get("BR_NOTE"))
+    """`fields` is the phone's raw facts (bridge/bin/wk-bridge-healthcheck), judged here -- the
+    phone has no python3 to do it in."""
+    bc = bridge.BridgeConf(name, conf)
+    r = Rec("bridge", name=name, device=bc.device, segment=bc.segment)
+    r.opt("note", bc.note)
     r.set("conf", "machines/%s.conf" % name)
     tailnet, direct = reach(name)
     r.opt("tailnet", tailnet)
     r.opt("direct", direct)
-    line = fields.get("healthline", "")
     if fields.get("reachable") != "yes":
         r.set("state", "unreachable")
     elif fields.get("role") != "yes":
         r.set("state", "no bridge role")
-        r.warn("it answers, and nothing on it is a bridge -- 'wk bridge setup %s' provisions it" % name)
+        r.warn("it answers, and nothing on it is a bridge -- 'wk machine setup %s' provisions it" % name)
     else:
-        if fields.get("health") == "0":
-            r.set("state", "up")
-        elif any(w in line for w in ("doas", "sudo", "not permitted", "Authentication required")):
-            r.set("state", "role installed")
-            r.warn("its health check needs root and this end has no\n      non-interactive route to it -- "
-                   "'wk bridge status %s' can bootstrap one" % name)
-        else:
-            r.set("state", "unhealthy")
-        r.opt("health", line)
         insync = bool(fields.get("sum")) and fields.get("sum") == want
         r.raw("role_insync", insync)
+        if fields.get("facts") != "yes":
+            r.set("state", "role installed")
+            r.warn("its health check needs root and this end has no\n      non-interactive route to it -- "
+                   "'wk machine setup %s' gives it one, once, interactively" % name)
+        else:
+            report = bridge.judge(fields, bc)
+            if report.failed:
+                r.set("state", "unhealthy")
+                r.opt("health", next((text for level, text in report.rows if level == "bad"), ""))
+            else:
+                r.set("state", "up")
         if not insync:
-            r.warn("the role on it is not this repository's -- 'wk bridge setup %s' re-provisions it" % name)
+            r.warn("the role on it is not this repository's -- 'wk machine setup %s' re-provisions it" % name)
     return r.done()
 
 
@@ -897,9 +845,8 @@ class Walk:
             return self.bases[target.name]
 
     def remake_hint(self, target, ws):
-        far = self.reg.remote_marker_field("target")
-        if far:
-            return "from the workstation:  wk new %s --target %s" % (ws, far)
+        if self.reg.in_remote_host():
+            return "from the workstation:  wk new %s --target %s" % (ws, self.reg.self_target())
         return "wk new %s --target %s" % (ws, target.name)
 
     def workspace(self, target, gm, method, ws, records):
@@ -1024,17 +971,15 @@ class Walk:
         out = []
         out.append(disk_record(store, m, self.in_vm, len(Bases(store, Local()).unreferenced())))
         if target.kind == "container":
-            local = kv(_bash(self.root, "load_target container >/dev/null 2>&1; t_sdk_local").out)
-            if local.get("image"):
+            local = target.sdk_local()
+            if local:
                 cap = int(self.env.get("WK_FLEET_TIMEOUT", "4"))
-                up = _bash(self.root, "load_target container >/dev/null 2>&1; t_sdk_upstream", timeout=cap)
-                tags = [l.strip() for l in up.out.splitlines() if l.strip()] if up.ok and up.out.strip() else None
-                out.append(sdk_record(m, local, tags, cap))
+                out.append(sdk_record(m, local, target.sdk_upstream(timeout=cap), cap))
         if not self.in_vm:
             out.append(broker_record(store, m, alive))
         out += service_records(self.root, m)
         out += lock_records(store, m, alive)
-        forks = [l.split()[0] for l in _bash(self.root, "wk_push_forks").out.splitlines() if l.split()]
+        forks = [r[0] for r in secrets.forks()]
         out.append(push_record(store, m, forks, self.in_vm))
         out.append(capacity_here(m, "the podman VM" if self.in_vm else "", Resources(Local(), self.env)))
         out.append(quiesce_record(quiesce_dir(store), m))

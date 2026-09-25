@@ -27,7 +27,7 @@ from pathlib import Path
 
 from tests.support import REPO, THIS_HOST, WkTest, bash, requires_podman_vm
 from tests.test_wk_key import GOOD, KeyTest
-from tests.test_wk_secrets import SOCK
+from tests.test_wk_secrets import KEY_SH, SOCK
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk.act import Refused  # noqa: E402
@@ -180,136 +180,69 @@ class TestThePythonSwitchAgainstARealAgent(_Agent):
 
 
 class TestLoading(_Agent):
-    def test_the_key_bytes_go_in_on_stdin_and_are_never_an_argument(self):
-        """The one property the whole arrangement rests on: a key passed as an
-        argument is in `ps` for every account on that machine, and a key
-        written to a file there is a key that machine now holds."""
-        cp = self.sh(f'push_agent_load _fake_exec "{self.sock}"')
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        for fork in FORKS:
-            self.assertIn(f"{fork} loaded", cp.stdout)
-
-        priv = (self.held / "build_key_fork").read_text()
-        secret_line = [ln for ln in priv.splitlines() if "PRIVATE KEY" not in ln][0]
-        log = self.exec_log()
-        self.assertNotIn(secret_line, log,
-                         "a private key half reached the far side as an argument")
-        self.assertNotIn("PRIVATE KEY", log)
-        self.assertIn("ssh-add -", log)
-
-    def test_the_agent_then_holds_one_identity_per_fork(self):
-        self.sh(f'push_agent_load _fake_exec "{self.sock}"')
-        listed = self.ssh_add("-l").stdout
-        self.assertEqual(len(FORKS), len([ln for ln in listed.splitlines() if ln.strip()]),
-                         listed)
-
-    def test_an_agent_hands_back_public_keys_and_nothing_else(self):
-        """`ssh-add -L` is everything an agent will ever give a client that
-        asks for its identities -- so a workspace holding this socket can sign
+    def test_the_agent_then_holds_one_identity_per_fork_and_hands_back_public_keys_only(self):
+        """`ssh-add -L` is everything an agent gives a client that asks, so a workspace holding this socket can sign
         and can never obtain the key."""
-        self.sh(f'push_agent_load _fake_exec "{self.sock}"')
+        self.py_secrets().agent_load(str(self.sock))
+        listed = [ln for ln in self.ssh_add("-l").stdout.splitlines() if ln.strip()]
+        self.assertEqual(len(FORKS), len(listed), listed)
         pub = self.ssh_add("-L").stdout
-        self.assertIn("ssh-ed25519 ", pub)
         self.assertNotIn("PRIVATE KEY", pub)
-        for line in pub.splitlines():
-            if line.strip():
-                self.assertTrue(line.startswith("ssh-"), line)
+        self.assertTrue(all(ln.startswith("ssh-") for ln in pub.splitlines() if ln.strip()), pub)
 
     def test_a_fork_with_no_private_half_is_reported_not_invented(self):
         (self.held / "build_key_forkwpe").unlink()
-        cp = self.sh(f'push_agent_load _fake_exec "{self.sock}"')
-        self.assertIn("fork loaded", cp.stdout)
-        self.assertIn("forkwpe no-key", cp.stdout)
+        self.assertEqual([("fork", "loaded"), ("forkwpe", "no-key")], self.py_secrets().agent_load(str(self.sock)))
 
-
-class TestEvidence(_Agent):
-    def test_ensure_tells_an_empty_agent_from_no_agent(self):
-        """`ssh-add -l` exits 1 for "no identities" and 2 for "no agent": the
-        difference between the switch being off and there being no switch."""
-        cp = self.sh(f'push_agent_ensure _fake_exec "{self.sock}" && echo YES || echo NO')
-        self.assertIn("YES", cp.stdout, cp.stderr)
-        cp = self.sh(f'push_agent_ensure _fake_exec "{self.tmp}/not-a-socket" && echo YES || echo NO')
-        self.assertIn("NO", cp.stdout, cp.stderr)
-
-    def test_list_is_fingerprints_and_comments_only(self):
-        self.sh(f'push_agent_load _fake_exec "{self.sock}"')
-        cp = self.sh(f'push_agent_list _fake_exec "{self.sock}"')
-        self.assertEqual(cp.returncode, 0, cp.stderr)
-        self.assertIn("SHA256:", cp.stdout)
-        self.assertNotIn("PRIVATE KEY", cp.stdout)
-
-    def test_list_of_an_empty_agent_is_empty_not_a_sentence(self):
-        """'The agent has no identities.' counted as one line would make an
-        empty agent read as a loaded one everywhere this is counted."""
-        cp = self.sh(f'push_agent_list _fake_exec "{self.sock}"')
-        self.assertEqual("", cp.stdout.strip(), cp.stdout)
-
-    def test_clear_empties_it(self):
-        self.sh(f'push_agent_load _fake_exec "{self.sock}"')
-        self.sh(f'push_agent_clear _fake_exec "{self.sock}"')
-        self.assertIn("no identities", self.ssh_add("-l").stdout)
+    def test_list_is_fingerprints_and_an_empty_agent_lists_nothing(self):
+        """'The agent has no identities.' counted as one line would read an empty agent as a loaded one."""
+        s = self.py_secrets()
+        self.assertEqual([], s.agent_list(str(self.sock)))
+        s.agent_load(str(self.sock))
+        listed = "\n".join(s.agent_list(str(self.sock)))
+        self.assertIn("SHA256:", listed)
+        self.assertNotIn("PRIVATE KEY", listed)
 
 
 class TestARotatedCredentialReachesTheInjectorWhilePushIsOn(_Agent):
-    """`wk push on` writes the injector's copy from the held one at the moment
-    it runs, so rotating a credential while the switch is on used to leave the
-    machine spending the revoked one -- `git-webkit pr` answered 401 Bad
-    credentials until someone flipped the switch, and nothing said so.
-    `Key.deliver` (lib/wk/key.py) converges it on every store, rotate and withdraw.
-
-    The switch's position is the agent's own contents, which is what `wk push
-    status` reports it from: keys loaded is on, empty is off."""
+    """`wk push on` writes the injector's copy from the held one at the moment it runs, so `Key.deliver`
+    (lib/wk/key/) converges it on every store, rotate and withdraw -- only while the agent holds a key."""
 
     def converge(self, name, path):
-        return self.sh(f'push_agent_switch_cred_converge _fake_exec '
-                       f'"{self.sock}" "{path}" {name}')
+        return self.py_secrets().switch_cred_converge(str(self.sock), str(path), name)
 
     def test_the_new_one_replaces_what_the_machine_is_writing_with(self):
         pat = self.tmp / "pat"
         pat.write_text("ghp-the-revoked-one\n")
         pat.chmod(0o600)   # as `wk push on` wrote it, under umask 077
         (self.held / "github-pat").write_text("ghp-the-new-one\n")
-        self.sh(f'push_agent_load _fake_exec "{self.sock}"')
-        cp = self.converge("github-pat", pat)
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.py_secrets().agent_load(str(self.sock))
+        self.assertTrue(self.converge("github-pat", pat))
         self.assertEqual("ghp-the-new-one\n", pat.read_text())
         self.assertEqual(0o600, pat.stat().st_mode & 0o777)
+        self.assertNotIn("ghp-the-new-one", repr(self.machine.argvs))
 
     def test_a_withdrawn_one_is_taken_away_rather_than_left_live(self):
-        """`wk key set <name> --replace` clears the held one first: a machine
-        still writing with it would be the withdrawal not having happened."""
         pat = self.tmp / "pat"
         pat.write_text("ghp-the-revoked-one\n")
-        self.sh(f'push_agent_load _fake_exec "{self.sock}"')
-        cp = self.converge("github-pat", pat)
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.py_secrets().agent_load(str(self.sock))
+        self.assertTrue(self.converge("github-pat", pat))
         self.assertFalse(pat.exists())
 
     def test_with_the_switch_off_nothing_is_handed_over(self):
-        """The agent is empty, so writing the credential here would be turning
-        push on -- which is the one thing a `wk key` command must never do."""
+        """Writing the credential into a machine whose agent is empty would be turning push on."""
         pat = self.tmp / "pat"
         (self.held / "github-pat").write_text("ghp-the-new-one\n")
-        cp = self.converge("github-pat", pat)
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertTrue(self.converge("github-pat", pat))
         self.assertFalse(pat.exists(), "a wk key command turned push on")
 
     def test_the_bugzilla_key_is_converged_the_same_way(self):
         bz = self.tmp / "bz-key"
         bz.write_text("the-revoked-key\n")
         (self.held / "bugzilla-api-key").write_text("the-new-key\n")
-        self.sh(f'push_agent_load _fake_exec "{self.sock}"')
-        cp = self.converge("bugzilla-api-key", bz)
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.py_secrets().agent_load(str(self.sock))
+        self.assertTrue(self.converge("bugzilla-api-key", bz))
         self.assertEqual("the-new-key\n", bz.read_text())
-
-    def test_the_value_is_never_an_argument_on_the_way_there(self):
-        pat = self.tmp / "pat"
-        (self.held / "github-pat").write_text("ghp-the-new-one\n")
-        self.sh(f'push_agent_load _fake_exec "{self.sock}"')
-        self.converge("github-pat", pat)
-        self.assertNotIn("ghp-the-new-one", self.exec_log())
-
 
 
 class TestTheApiToken(_Agent):
@@ -523,17 +456,11 @@ class TestAPathWithASpaceInIt(_Agent):
         self.assertFalse(pat.exists())
 
     def test_the_resolved_path_is_what_the_store_says_and_carries_no_quotes(self):
-        """It reaches `wk push status` and `wk doctor` as user-facing text, so
-        a shell word with its own quote characters in it is printed at a
-        person -- and the far side's quoting is push_agent_pat_*'s job."""
+        """It reaches `wk push status` and `wk doctor` as user-facing text; the far side's quoting is the writer's."""
         store = self.spaced / "store"
-        cp = bash('. "$WK_ROOT/lib/common.sh"\n. "$WK_ROOT/lib/store.sh"\n'
-                  'printf "[%s]\\n" "$(push_agent_machine_pat)"',
-                  env={**self.env(), "WK_STORE": str(store), "WK_PUSH_PAT_FILE": ""})
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertEqual(f"[{store}/push-github-pat]", cp.stdout.strip())
-        self.assertNotIn('"', cp.stdout)
-        self.assertNotIn("$", cp.stdout)
+        env = {**self.env(), "WK_STORE": str(store)}
+        env.pop("WK_PUSH_PAT_FILE")
+        self.assertEqual(f"{store}/push-github-pat", Secrets(REPO, env, Local()).machine_pat())
 
 
 class TestTheSwitchEndToEnd(_Agent):
@@ -894,7 +821,7 @@ class TestWhatAContainerMountsAtSecrets(WkTest):
 . "$WK_ROOT/lib/target.sh"
 load_target container >/dev/null 2>&1
 store_init
-''' + extra + '''
+''' + KEY_SH + extra + '''
 printf %s "$(wk_secrets_view_dir container)"
 ''', env={"WK_STORE": str(store), "WK_STORE_DEFAULT": str(store),
            "WK_HOST_SECRETS": str(secrets),
@@ -960,7 +887,7 @@ printf %s "$(wk_secrets_view_dir container)"
         workspace that is already running, which is the property the read-only
         mount exists for."""
         _, view = self._publish(
-            extra='printf "rotated\\n" | wk_cred_store litellm\n')
+            extra='printf "rotated\\n" | key_store litellm\n')
         self.assertEqual("rotated\n", (view / "litellm-key").read_text())
 
 

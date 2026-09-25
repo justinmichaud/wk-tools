@@ -4,7 +4,7 @@ tart ships as a signed .app (it needs the virtualization entitlement) and is
 reached through ~/.local/bin, which a non-interactive ssh session's PATH does
 not carry -- and driving this fleet's Mac from another machine is exactly a
 non-interactive ssh session. So every reader of "is tart here" has to give the
-same answer as the one that runs it, or `wk vm` refuses a command it could
+same answer as the one that runs it, or a guest command refuses what it could
 have run.
 
 Run: python3 -m unittest tests.test_tart_locator -v
@@ -13,7 +13,7 @@ import os
 import stat
 import unittest
 
-from tests.support import REPO, WkTest, bash, run, scratch_dir
+from tests.support import REPO, WkTest, bash, scratch_dir
 
 
 def locate(home, path_dirs=""):
@@ -66,10 +66,9 @@ class TestTheLocator(WkTest):
 
 class TestEveryReaderAsksIt(WkTest):
     """A second spelling of "is tart here" is a command that refuses work it
-    could do: the dispatcher's gate ran `command -v` while the vm target ran
-    the bundle, so `wk vm start` over ssh was refused with tart installed."""
+    could do: a `command -v` refuses a guest start over ssh with tart installed."""
 
-    READERS = ("lib/wk/dispatch.py", "lib/wk/targets.py", "targets/vm.sh",
+    READERS = ("lib/wk/targets.py", "targets/vm.sh",
                "host/macos/tools.sh", "host/macos/softnet.sh")
 
     def test_no_reader_spells_it_for_itself(self):
@@ -80,18 +79,6 @@ class TestEveryReaderAsksIt(WkTest):
             self.assertNotIn('".local", "bin", "tart"', text, rel)
             self.assertNotIn('which("tart")', text, rel)
             self.assertIn("tart_bin", text, rel)
-
-    def test_the_dispatcher_gate_is_the_locator(self):
-        """`needs tart` on cmd/vm is what refuses; it must not fall to the
-        generic `command -v` arm: a bundle off the PATH, which only the
-        locator finds, is enough to pass the gate."""
-        with scratch_dir() as home:
-            env = {"HOME": str(home), "PATH": "/usr/bin:/bin"}
-            cp = run("vm", "ls", env=env)
-            self.assertIn("tart    not installed here", cp.stdout, cp.stdout)
-            plant(home, ".local/share/tart/tart.app/Contents/MacOS/tart")
-            cp = run("vm", "ls", env=env)
-            self.assertNotIn("not installed here", cp.stdout, cp.stdout)
 
 
 if __name__ == "__main__":

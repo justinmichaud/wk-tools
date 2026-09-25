@@ -13,7 +13,7 @@ this file measures the tables and every caller.
 The `defaults`, `launchctl`, `mdutil`, `pmset`, `pgrep` and `killall` calls run
 against stubs on PATH: what is under test is which settings are asked for and
 how, not what macOS does with them -- that is measured on a real guest by
-`wk vm check`.
+`wk doctor <guest>`.
 
 Run: python3 -m unittest tests.test_mac_quiet_desktop -v
 """
@@ -28,8 +28,8 @@ QUIET = REPO / "bench" / "mac-quiet-desktop.sh"
 TABLE = REPO / "bench" / "quiet" / "macos.tsv"
 DESKTOP = REPO / "vm" / "desktop.sh"
 FIRSTBOOT = REPO / "bench" / "mac-bench-firstboot.sh"
-VOLUME = REPO / "bench" / "mac-bench-volume.sh"
-VM_DRIVER = REPO / "targets" / "vm.sh"
+VOLUME = REPO / "lib" / "wk" / "sysimage" / "macvolume.py"
+VM_DRIVER = REPO / "lib" / "wk" / "guest.py"
 
 # Every call lands in one log, so a test reads what was asked for in order.
 STUB = '#!/bin/sh\nprintf \'%s %s\\n\' "$(basename "$0")" "$*" >> "$WK_TEST_CALLS"\nexit 0\n'
@@ -246,7 +246,7 @@ class TestApplyingIt(WkTest):
                 self.assertIn(f"write {domain.lstrip('@')} {key} -{type_} {value}", calls)
 
     def test_a_row_already_right_is_not_written_again(self):
-        """`wk vm start` settles a running guest's desktop on every start, so
+        """`wk start` settles a running guest's desktop on every start, so
         the second pass has to be silent: Finder and the Dock are restarted
         only when a setting actually moved."""
         store = self.tmp / "defaults"
@@ -484,62 +484,6 @@ class TestTheProbe(WkTest):
         for row in _rows("daemons"):
             with self.subTest(daemon=row[1]):
                 self.assertIn(got[row[0]], ("running", "stopped", "absent"))
-
-
-class TestOnePayloadWriterForBothSides(WkTest):
-    """The benchmark install stages itself -- it has passwordless root over its
-    own paths and neither a network nor credentials -- so the writer has to be
-    reachable from there as well as from the host install. It is a
-    sourced-never-run file for the same reason mac-quiet-desktop.sh is:
-    mac-bench-volume.sh dispatches on source."""
-
-    PAYLOAD = REPO / "bench" / "mac-bench-payload.sh"
-    AUTORUN = REPO / "bench" / "mac-bench-autorun.sh"
-
-    def test_sourcing_it_runs_nothing(self):
-        cp = bash('. %r\necho SOURCED\n' % str(self.PAYLOAD),
-                  env={"PATH": "/usr/bin:/bin"})
-        self.assertEqual(0, cp.returncode, cp.stdout + cp.stderr)
-        self.assertIn("SOURCED", cp.stdout)
-
-    def test_the_volume_writer_dispatches_on_source_so_it_is_not_the_include(self):
-        """The reason this file exists: `case "${ACTION:---report}"` at the
-        bottom of mac-bench-volume.sh runs a report on a bare source, so the
-        autorun cannot source it to reach the writer."""
-        volume = (REPO / "bench" / "mac-bench-volume.sh").read_text()
-        self.assertIn('case "${ACTION:---report}"', volume)
-        body = func_body(self.AUTORUN.read_text(), "converge_self")
-        code = [l for l in body.splitlines() if not l.lstrip().startswith("#")]
-        self.assertTrue([l for l in code if "mac-bench-payload.sh" in l], code)
-        self.assertEqual([], [l for l in code if "mac-bench-volume.sh" in l], code)
-
-    def test_both_sides_read_the_one_writer(self):
-        volume = (REPO / "bench" / "mac-bench-volume.sh").read_text()
-        self.assertIn("mac-bench-payload.sh", volume)
-        self.assertIn("stage_payload", volume)
-        self.assertNotIn("bench_payload_files() {", volume)
-
-    def test_it_writes_every_row_against_a_root_of_the_tests_own(self):
-        """Driven the way converge_self drives it: the caller supplies `run`."""
-        root = self.tmp / "root"
-        root.mkdir()
-        cp = bash('set -e\nWK_ROOT=%r\n. "$WK_ROOT/lib/common.sh" >/dev/null 2>&1\n'
-                  'run() { "$@"; }\n. "$WK_ROOT/bench/mac-bench-payload.sh"\n'
-                  'stage_payload %r\n' % (str(REPO), str(root)))
-        self.assertEqual(0, cp.returncode, cp.stdout + cp.stderr)
-        rows = [l.split() for l in bash('. %r\nbench_payload_files\n'
-                                        % str(self.PAYLOAD)).stdout.splitlines() if l.strip()]
-        self.assertTrue(rows)
-        for _src, dest, _mode in rows:
-            with self.subTest(dest=dest):
-                self.assertTrue((root / dest).is_file(), dest)
-        self.assertTrue((root / "usr/local/share/wk-bench/wk-tools/wk").is_file())
-
-    def test_the_tailnet_payload_is_not_in_it(self):
-        """Collecting it needs a network the benchmark install has not got, and
-        installing it needs root the host install would have to be asked for --
-        so each side does its own half."""
-        self.assertNotIn("mac-tailnet", self.PAYLOAD.read_text())
 
 
 class TestDoNotDisturb(WkTest):
@@ -812,26 +756,25 @@ class TestBothKindsOfMeasuredMacGetIt(unittest.TestCase):
             self.assertIn(fn, line[0])
 
     def test_the_probe_is_sent_it_too(self):
+        import inspect
+        from wk import guest
         self.assertIn("wk_quiet_desktop_probe", (REPO / "vm" / "desktop-probe.sh").read_text())
-        driver = VM_DRIVER.read_text()
-        body = driver[driver.index("vm_desktop_probe() {"):]
-        self.assertIn("wk_quiet_desktop_script", body[:body.index("\n}\n")])
+        self.assertIn("quiet_script(", inspect.getsource(guest.desktop_probe))
 
     def test_the_guest_report_judges_it_through_the_shared_findings(self):
-        """`wk vm check` and a bench-mode preflight read the same table the same
-        way, or a guest is called settled on a row a bench install fails."""
-        driver = VM_DRIVER.read_text()
-        body = driver[driver.index("vm_desktop_findings() {"):]
-        body = body[:body.index("\n}\n")]
-        self.assertIn("wk_quiet_desktop_findings", body)
-        self.assertIn("wk_quiet_cpu_findings", body)
+        """`wk doctor <guest>` and a bench-mode preflight read the same table the
+        same way, or a guest is called settled on a row a bench install fails."""
+        import inspect
+        from wk import guest
+        self.assertIn("wk_quiet_desktop_findings", guest.READINGS)
+        self.assertIn("wk_quiet_cpu_findings", guest.READINGS)
+        self.assertIn("READINGS", inspect.getsource(guest.Desktop))
         self.assertIn("wk_quiet_desktop_findings", (REPO / "lib" / "wk" / "quiet.py").read_text())
 
     def test_a_bench_install_gets_the_file_and_runs_it(self):
         # The payload table, wherever it is read from: one file now, so both the
         # host writer and the benchmark install's own convergence lay it down.
-        self.assertIn("wk-bench-quiet-desktop.sh",
-                      (REPO / "bench" / "mac-bench-payload.sh").read_text(),
+        self.assertIn("wk-bench-quiet-desktop.sh", VOLUME.read_text(),
                       "nothing installs it into the image")
         first = FIRSTBOOT.read_text()
         self.assertIn("wk_quiet_desktop_system", first)

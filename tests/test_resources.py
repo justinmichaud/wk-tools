@@ -22,30 +22,14 @@ from unittest import mock
 from tests.support import REPO, WkTest, bash, shell_files, stub_path
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import resources  # noqa: E402
+from wk import resources, targets  # noqa: E402
 from wk.act import Refused  # noqa: E402
 from wk.machine import Fake, Local  # noqa: E402
+from wk.sysimage import guestbase, yocto  # noqa: E402
 
-YOCTO = REPO / "image" / "yocto.sh"
+from wk.act import RETRY_EXIT  # noqa: E402
 
-# From the scheduler that reads it, never copied here.
-RETRY_EXIT = int(re.search(r"^RETRY_EXIT = (\d+)",
-                           (REPO / "lib" / "sched.py").read_text(), re.M).group(1))
-
-
-def _lift(func):
-    """One function's body, sed'd out of image/yocto.sh: sourcing that file
-    pulls in the cross configs, the task records and the watchdog, none of
-    which this rule depends on (the tests/test_yocto_stage.py idiom)."""
-    text = subprocess.run(["sed", "-n", f"/^{func}()/,/^}}/p", str(YOCTO)],
-                          capture_output=True, text=True).stdout
-    assert text.strip(), f"could not find {func}() in {YOCTO}"
-    return text
-
-
-# Read from the file that declares it, never copied here.
-MB_PER_JOB = int(re.search(r"^YOCTO_WEBKIT_MB_PER_JOB=(\d+)",
-                           YOCTO.read_text(), re.M).group(1))
+MB_PER_JOB = yocto.WEBKIT_MB_PER_JOB
 
 
 def df_answering(free_gb):
@@ -101,7 +85,7 @@ echo "status=$st"
                       "the refusal does not name what is already building")
         self.assertIn("--force proceeds anyway", cp.stdout + cp.stderr)
         # The refusal a scheduled step comes back to: another build ending is
-        # what changes the answer, so lib/sched.py puts the step back in the queue.
+        # what changes the answer, so lib/wk/sched.py puts the step back in the queue.
         self.assertIn(f"status={RETRY_EXIT}", cp.stdout)
 
     def test_nothing_building_is_admitted(self):
@@ -252,7 +236,7 @@ class TestDiskAdmit(WkTest):
         self.assertIn("admitted", cp.stdout)
 
     def test_a_slot_build_is_not_charged_the_whole_image_s_figure(self):
-        # image/yocto.sh sizes per stage: the webkit stage is one cmake tree
+        # the yocto builder sizes per stage: the webkit stage is one cmake tree
         # against a toolchain already on disk, not a whole distribution. A
         # disk that can hold several slot builds must not refuse one.
         cp = self._bash('disk_admit "this WebKit cross build" "$WK_BUILD_DISK_GB" && echo admitted', 30)
@@ -268,19 +252,14 @@ class TestDiskAdmit(WkTest):
 
 
 class TestImageStageBudget(WkTest):
-    """yocto_stage_budget (image/yocto.sh): what a stage puts on the books is
+    """yocto.stage_budget (lib/wk/sysimage/yocto.py): what a stage puts on the books is
     what it uses -- a bitbake stage is the machine, a cross WebKit build is its
     own job count, the mix is one job. It sizes the job count and the memory
     watchdog's budget; whether a build may start at all is one per machine
     (build_admit), whatever it books."""
 
     def _budget(self, stage, machine_jobs=79, machine_mb=113000, webkit_jobs=8):
-        cp = bash(f'set -euo pipefail\n{_lift("yocto_stage_budget")}\n'
-                  f'YOCTO_WEBKIT_MB_PER_JOB={MB_PER_JOB}\n'
-                  f'yocto_stage_budget {stage} {machine_jobs} {machine_mb} {webkit_jobs}')
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        jobs, mb = cp.stdout.split()
-        return int(jobs), int(mb)
+        return yocto.stage_budget(stage, machine_jobs, machine_mb, webkit_jobs)
 
     def test_a_bitbake_stage_books_the_machine(self):
         for stage in ("layers", "fetch", "image", "toolchain"):
@@ -492,12 +471,12 @@ class TestEveryCallSiteTakesAReadingIntoAVariable(unittest.TestCase):
 
     def test_the_drivers_wrappers_over_a_reading_are_in_the_set(self):
         """The same rule one call away: a driver's own number ends in a
-        reading, so interpolating it discards the same refusal. The dynamic
-        half of this pair is TestAReadingRefusalReachesItsCaller's
+        reading, so interpolating it discards the same refusal. The vm
+        driver's own overridable numbers (_vm_cpus, _base_cpus and friends)
+        are Python now (Vm.cores/mem_mb, guestbase.Base.sizing) -- the
+        dynamic half of this pair is TestAReadingRefusalReachesItsCaller's
         test_it_walks_out_through_the_target_drivers_wrappers."""
-        self.assertLessEqual({"t_cores", "t_mem_mb", "t_load",
-                              "_vm_cpus", "_vm_mem_mb", "_base_cpus", "_base_mem_mb"},
-                             readings())
+        self.assertLessEqual({"t_cores", "t_mem_mb", "t_load"}, readings())
 
     def test_a_condition_that_tests_the_assignment_is_not_flagged(self):
         """`if v=$(reading); then` keeps the refusal: the status is the
@@ -554,30 +533,39 @@ class TestAReadingRefusalReachesItsCaller(WkTest):
                 self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
                 self.assertRegex(cp.stdout, r"ANSWERED \[[0-9]")
 
+    def _guest(self, env=None):
+        """A vm target with tart present but never configured (`Vm.configured` answers None), so
+        `Vm.cores`/`mem_mb` and `guestbase.Base.sizing` fall to WK_VM_* or the host reading -- the
+        Python successors of _vm_cpus/_vm_mem_mb/_base_cpus/_base_mem_mb."""
+        p = mock.patch.object(targets.Vm, "tart", lambda s: "/t/tart")
+        p.start()
+        self.addCleanup(p.stop)
+        fake = Fake("here")
+        vm = targets.Vm("vm", str(REPO), dict(env or {}), fake)
+        return vm, guestbase.Base(vm), fake
+
     def test_it_walks_out_through_the_target_drivers_wrappers(self):
-        """The vm driver's overridable numbers (_vm_cpus, _base_mem_mb, and
-        t_cores/t_mem_mb over them) end in a reading, so a workspace is
-        never sized from a machine that would not answer."""
-        driver = (f'. "{REPO}/lib/store.sh"\n. "{REPO}/lib/target.sh"\n'
-                  'load_target vm >/dev/null 2>&1\n')
-        for name in ("_vm_cpus", "_base_cpus", "t_cores wk-test"):
-            with self.subTest(wrapper=name):
-                cp = self._res(driver + f'v=$({name}); echo "SURVIVED [$v]"',
-                               stubs={**self.DEAF, "tart": "echo '{}'"},
-                               env={"WK_ROOT": str(REPO)})
-                self.assertNotEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-                self.assertNotIn("SURVIVED", cp.stdout)
+        """The vm driver's overridable numbers end in a reading, so a
+        workspace is never sized from a machine that would not answer."""
+        vm, base, fake = self._guest()
+        with self.assertRaises(Refused):
+            vm.cores("g")
+        with self.assertRaises(Refused):
+            vm.mem_mb("g")
+        with self.assertRaises(Refused):
+            base.sizing()
 
     def test_an_override_answers_without_asking_the_machine(self):
-        """WK_VM_CPUS and friends are a person's choice, so they stand on a
-        machine whose own reading is unavailable."""
-        cp = self._res(f'. "{REPO}/lib/store.sh"\n. "{REPO}/lib/target.sh"\n'
-                       'load_target vm >/dev/null 2>&1\n'
-                       'printf "%s %s\\n" "$(_vm_cpus)" "$(_base_mem_mb)"',
-                       env={"WK_ROOT": str(REPO), "WK_VM_CPUS": "7",
-                            "WK_VM_BASE_MEM_MB": "4444"})
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertEqual("7 4444", cp.stdout.strip())
+        """WK_VM_CPUS and WK_VM_BASE_MEM_MB are a person's choice, so they
+        stand on a machine whose own reading is unavailable."""
+        vm, _, fake = self._guest({"WK_VM_CPUS": "7"})
+        self.assertEqual(vm.cores("g"), 7)
+        self.assertNotIn(("run", ("sysctl", "-n", "hw.ncpu")), fake.effects)
+
+        _, base, fake2 = self._guest({"WK_VM_BASE_MEM_MB": "4444"})
+        fake2.answer(["sysctl", "-n", "hw.ncpu"], out="20\n")   # the un-overridden half of the pair still reads
+        self.assertEqual(base.sizing()[1], "4444")
+        self.assertNotIn(("run", ("sysctl", "-n", "hw.memsize")), fake2.effects)
 
 
 if __name__ == "__main__":

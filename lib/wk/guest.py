@@ -1,22 +1,26 @@
-"""A macOS guest's start, stop and convergence, and the host daemons every guest shares: the egress proxy, the
-credential injector behind it, and the ssh-agent a guest's push reaches. A pidfile is a lock, never a record."""
+"""A macOS guest's start, stop and convergence, what its desktop and its load say about it, and the host daemons every
+guest shares: the egress proxy, the credential injector behind it, and the ssh-agent a guest's push reaches. A pidfile
+is a lock, never a record."""
 
 import os
+import re
+import shlex
 import signal
 import sys
 import time
 
-from wk import act, record, secrets, shell, tools
-from wk.act import Refused, debug, die, info, warn
+from wk import act, git, secrets, shell, tools
+from wk.act import Refused, debug, die, info, log, warn
 from wk.clock import Clock
 from wk.lock import Lock
+from wk.store import Store
 
 SUBNET = "192.168.2"   # Softnet's own network, not vmnet's 192.168.64
 PROXY_PORT = "3128"
 SOFTNET = "/usr/local/bin/softnet"
 CLOCK_SKEW = "30"      # not zero: the reading is taken over ssh, so a round trip is in every compare
 BOOT_WAIT = 180
-FORWARD = "agent-forward"
+FORWARD_WAIT = 4
 
 # An `nc -z -U` answers 1 for a served socket on macOS, so the connect is made in python.
 SOCKET_ANSWERS = """import socket, sys
@@ -98,6 +102,52 @@ sudo -n networksetup -setproxybypassdomains "$svc" localhost 127.0.0.1
 """
 
 DEPLOY_HEADER = "# wk: written by lib/wk/guest.py on every start. Whether the agent these name\n# holds a key at all is 'wk push'.\n"
+PASSWORD = "admin"
+DISPLAY = "1280x800"
+BASE = "wk-base"
+BASE_PROFILE = "macos-guest-base"
+BASE_BUILD = "wk sysimage build " + BASE_PROFILE
+RESTART = "wk stop <name> && wk start <name>"
+REBUILD = BASE_BUILD + " --rebuild, then re-create this guest"
+SHELLS_WARN, MEM_FREE_WARN_PCT, SWAP_WARN_MB = 12, 15, 1024   # twelve shells measured as nothing wrong; macOS pages below 15% free
+HOST_FREE_WARN_GB, HOST_FREE_MIN_GB = 80, 25
+DISK_GB = 320
+SA_COUNT = "pgrep -f 'Setup Assistant.app/Contents/MacOS' | grep -c . || true"   # macOS pgrep has no -c
+QUIET, WINDOWS, PYOBJC = "bench/mac-quiet-desktop.sh", "bench/mac-window-probe.sh", "bench/mac-pyobjc.sh"
+LLDB_HEADER = "# wk: written by lib/wk/guest.py. See wk run --lldb, wk gui --lldb.\n"
+CLAUDE_CONFIG = """[ -d "$1/claude" ] || exit 1
+mkdir -p "$HOME/.claude"
+for f in settings.json hooks CLAUDE.md skills; do ln -sfn "$1/claude/$f" "$HOME/.claude/$f"; done
+"""
+
+CHECKOUT = """set -u
+git config --global --replace-all include.path "$WK_TOOLS/dotfiles/gitconfig"
+if [ -d "$WK_SRC/.git" ]; then
+    echo checkout=present
+elif [ ! -d "$WK_MIRROR" ]; then
+    echo "checkout=no-mirror: $WK_MIRROR is not there. The share is mounted at boot, so"
+    echo "  'wk stop <name>', then 'wk start <name>' -- or the host has no mirror yet: wk sync"
+    exit 1
+elif git clone --quiet --shared --branch main "$WK_MIRROR" "$WK_SRC"; then
+    echo checkout=cloned
+else
+    echo checkout=clone-failed; exit 1
+fi
+[ ! -r "$HOME/.wk-egress" ] || . "$HOME/.wk-egress"
+"""
+
+READINGS = """. "$0/%s"; . "$0/%s"; . "$0/%s"
+printf 'pin=%%s\\n' "$WK_PYOBJC_VERSION"
+[ -z "$3" ] || printf 'unexpected=%%s\\n' "$(wk_window_unexpected "$3")"
+{ wk_quiet_desktop_findings "$1" "$2"; wk_quiet_cpu_findings "$1" "$2"; } | sed 's/^/row=/'
+""" % (QUIET, WINDOWS, PYOBJC)
+
+LOAD_FAMILIES = (
+    ("shell", r"(^|/)(-?zsh|bash|sh|dash|tcsh|fish|login)$"),
+    ("editor remote server", r"(zed-remote-server|\.zed_server/|\.vscode-server/)"),
+    ("agent", r"(^|/)claude$|/claude/versions/"),
+    ("ssh session", r"(^|/)sshd(-session)?$"),
+)
 
 
 class Host:
@@ -275,47 +325,40 @@ class Host:
         warn("the guests' ssh-agent did not start, so no guest can push;\n  see %s" % self.path("ssh-agent.log"))
         return False
 
-    def records(self):
-        return record.Records(self.vm.store.record_dir(), clock=self.clock, env=self.env, machine=self.machine)
-
     def lock(self):
         if self._lock is None:
             self._lock = Lock(self.vm.store, self.machine, self.clock)
         return self._lock
 
+    def forward_pidfile(self, ws):
+        return self.path(ws + ".agent-forward.pid")
+
     def forward_start(self, ws, guest):
+        """`wk push off` ends it whoever started it: it clears the agent, and a converge with none stops this."""
         with self.lock().held("vm-agent-forward-" + ws):
-            recs = self.records()
-            t = recs.find(FORWARD, ws)
-            if t is not None and t.alive():
+            pidfile = self.forward_pidfile(ws)
+            if self.daemon_pid(pidfile) is not None:
                 return True
-            if not guest.act_run(["rm", "-f", self.vm.agent_sock()]).ok:
+            sock = self.vm.agent_sock()
+            if not guest.act_run(["rm", "-f", sock]).ok:
                 return False
-            argv = ["ssh", *guest.opts, "-N", "-R", "%s:%s" % (self.vm.agent_sock(), self.agent_sock()), guest.dest]
+            argv = ["ssh", *guest.opts, "-N", "-R", "%s:%s" % (sock, self.agent_sock()), guest.dest]
             log = self.path(ws + ".agent-forward.log")
-            if act.dry_run():
-                self.machine.spawn(argv, log)
+            pid = self.spawn(argv, log, pidfile)
+            if act.dry_run() or self.clock.wait_until(lambda: guest.run(["test", "-S", sock]).ok, FORWARD_WAIT, 0.2):
                 return True
-            # `wk push off` ends it whoever started it: it clears the agent, and a converge with none stops this.
-            t = recs.begin(FORWARD, "here", ws, "wk push off", log, ["start forward", "verify"])
-            t.step_named("start forward")
-            t.pid(self.machine.spawn(argv, log))
-            t.step_named("verify")
-            self.clock.sleep(0.5)
-            if t.alive():
-                return True
-            t.end("failed")
+            self.machine.kill(pid)
+            self.machine.remove(pidfile)
+            warn("the agent forward into '%s' did not come up, so it cannot push;\n  see %s" % (ws, log))
             return False
 
     def forward_stop(self, ws):
         with self.lock().held("vm-agent-forward-" + ws):
-            t = self.records().find(FORWARD, ws)
-            if t is None:
-                return
-            pid = t.field("pid")
-            if pid.isdigit():
-                self.machine.kill(int(pid))
-            t.end("stopped")
+            pidfile = self.forward_pidfile(ws)
+            pid = self.daemon_pid(pidfile)
+            if pid is not None:
+                self.machine.kill(pid)
+            self.machine.remove(pidfile)
 
 
 # In order; a failed step is named and passed over, except the last, whose refusal is the start's.
@@ -332,7 +375,7 @@ STEPS = (
     ("write_agent_secrets", warn, "could not write the agent credentials into {ws}; an agent in there will ask you to log in"),
     ("write_deploy_keys", warn, "could not write {ws}'s ssh config and public key halves; a push from in there is refused ('wk push status')"),
     ("agent_converge_guest", warn, "could not converge {ws}'s ssh-agent forward; 'wk push status' says what it can reach"),
-    ("settle_desktop", warn, "could not settle {ws}'s desktop; 'wk vm check {ws}' says what is in front of the window"),
+    ("settle_desktop", warn, "could not settle {ws}'s desktop; 'wk doctor {ws}' says what is in front of the window"),
     ("report_desktop", None, ""),
 )
 
@@ -352,8 +395,9 @@ class Guest:
                 raise Refused(1)
             level(why.format(ws=self.ws))
 
-    def _bash(self, fn):
-        return shell.guest_step(self.host.root, fn, self.ws, self.ip, env=dict(self.host.env))
+    def _said(self, r):
+        sys.stderr.write(r.err.replace("\r", ""))
+        return r.ok
 
     def guest_tools_push(self):
         return tools.push(self.host.root, self.host.machine, self.m, self.vm.tools(self.ws), self.host.env)
@@ -362,25 +406,66 @@ class Guest:
         return self.vm.write_marker(self.ws, self.m)
 
     def write_shell_rc(self):
-        return self._bash("_write_shell_rc")
+        return self._said(self.m.act_run(["bash", "-s", self.vm.tools(self.ws), self.vm.agent_rw_dir()],
+                                         input=tree(self.host.root, "vm/shell-rc.sh")))
 
     def write_lldbinit(self):
-        return self._bash("_write_lldbinit")
+        text = LLDB_HEADER + "command script import %s/Tools/lldb/lldb_webkit.py\n" % self.vm.src(self.ws) \
+            + tree(self.host.root, "dotfiles/lldbinit")
+        return self._said(self.m.act_run(["sh", "-c", 'cat > "$HOME/.lldbinit"'], input=text))
 
     def write_checkout(self):
-        return self._bash("_write_checkout")
+        src, mirror, forks = self.vm.src(self.ws), self.vm.mirror_dir(), self.secrets.forks()
+        script = CHECKOUT + git.wiring_script(src, mirror, forks, git.mirror_branches(self.host.env)) \
+            + git.gitwebkit_setup_script(src, forks)
+        t0 = self.host.clock.now()
+        r = self.m.act_run(["env", "WK_SRC=" + src, "WK_MIRROR=" + mirror, "WK_TOOLS=" + self.vm.tools(self.ws), "bash", "-s"],
+                           input=script)
+        out = (r.out + r.err).replace("\r", "")
+        if "checkout=cloned" in out:
+            info("%s's WebKit checkout made from its mirror in %ds" % (self.ws, self.host.clock.now() - t0))
+        if "setup=ok" in out:
+            info("git-webkit is set up in %s" % self.ws)
+        if not r.ok:
+            sys.stderr.write("".join("    %s\n" % l for l in out.splitlines()[-5:]))
+        return r.ok
 
     def install_claude_cli(self):
-        return self._bash("_install_claude_cli")
+        script = self.host.machine.run(shell.argv(self.host.root, "wk_claude_cli_script"))
+        if not script.ok:
+            return False
+        r = self.m.act_run(["sh", "-s"], input=script.out)
+        if r.ok and "claude=installed" in r.out:
+            info("Claude CLI installed in %s" % self.ws)
+        return r.ok
 
     def write_claude_config(self):
-        return self._bash("_write_claude_config")
+        return self._said(self.m.act_run(["sh", "-c", CLAUDE_CONFIG, "sh", self.vm.tools(self.ws)]))
 
     def settle_desktop(self):
-        return self._bash("_settle_desktop")
+        """The password is the script's own first line: as an argument it would be in `ps` on both machines."""
+        script = "WK_VM_PASSWORD=%s\n" % shlex.quote(password(self.host.env)) + quiet_script(self.host.root, self.host.machine) \
+            + tree(self.host.root, PYOBJC, "vm/desktop.sh")
+        return self._said(self.m.act_run(["bash", "-s"], input=script))
 
     def report_desktop(self):
-        return self._bash("_report_desktop")
+        probe = desktop_probe(self.host.root, self.host.machine, self.m)
+        if not probe:
+            return True
+        info("the guest's desktop, as it is now ('wk doctor %s' asks again):" % self.ws)
+        d = Desktop(self.host.root, self.host.machine, probe)
+        render(d.findings().replace("<name>", self.ws))
+        blocked = d.blockers()
+        if not blocked:
+            return True
+        lines = "".join("      %s\n" % b for b in blocked)
+        if self.host.env.get("WK_VM_FORCE"):
+            warn("WK_VM_FORCE=1 -- '%s' is handed over with this in front of its desktop:\n%s" % (self.ws, lines))
+            return True
+        die("'%s' is not usable: something is in front of its desktop.\n%s    A clone cannot clear this itself -- Setup "
+            "Assistant's account pane needs\n    Apple's servers, and a guest's egress filter refuses them. It is cleared\n"
+            "    once, on the base every guest is cloned from:\n      %s --rebuild     hours; then re-create this guest\n"
+            "    WK_VM_FORCE=1 hands the guest over anyway." % (self.ws, lines, BASE_BUILD))
 
     def set_guest_clock(self):
         """Idempotent by measurement: a guest within WK_VM_CLOCK_SKEW costs no sudo."""
@@ -415,7 +500,7 @@ class Guest:
                 if not self.m.act_run(["sh", "-c", 'rm -f "$HOME/$1" && bash -lc \'test -d "$CLAUDE_SECURESTORAGE_CONFIG_DIR"\'',
                                        "sh", home_path]).ok:
                     warn("the %s share is not mounted in %s, so it has no claude.ai login:\n"
-                         "    'wk vm stop %s', then 'wk vm start %s' boots it with the share"
+                         "    'wk stop %s', then 'wk start %s' boots it with the share"
                          % (self.vm.agent_rw_share, self.ws, self.ws, self.ws))
                 continue
             here = self.secrets.cred_stored(name) if "vm" in delivery.split(",") else False
@@ -460,6 +545,15 @@ class Guest:
         return self.m.act_run(["rm", "-f", self.vm.agent_sock()]).ok
 
 
+def display(env):
+    return env.get("WK_VM_DISPLAY") or DISPLAY
+
+
+def base_name(env):
+    """The golden base every guest is cloned from."""
+    return env.get("WK_VM_BASE") or BASE
+
+
 def runlog_tail(machine, path):
     """The only place a `tart run` says why it died ("The number of VMs exceeds the system limit")."""
     try:
@@ -469,6 +563,320 @@ def runlog_tail(machine, path):
     if not lines:
         return "    nothing -- %s is empty" % path
     return "\n".join("      " + line for line in lines[-5:]) + "\n    (%s)" % path
+
+
+def tree(root, *rels):
+    out = []
+    for rel in rels:
+        with open(os.path.join(str(root), rel), errors="replace") as f:
+            out.append(f.read())
+    return "".join(out)
+
+
+def password(env):
+    return env.get("WK_VM_PASSWORD") or PASSWORD
+
+
+def login_note(env):
+    log("  the guest's own window logs in as %s / %s" % (env.get("WK_VM_USER") or "admin", password(env)))
+    log("  (wk itself uses an ssh key; this is for a prompt on the screen)")
+    log("  wk doctor <name>     what is in front of that window, and what is piling up in it")
+
+
+def bench(root, machine, script, *args):
+    r = machine.run(["bash", "-c", script, str(root), *args])
+    return r.out if r.ok else ""
+
+
+def quiet_script(root, machine):
+    return bench(root, machine, '. "$0/%s"; wk_quiet_desktop_script' % QUIET)
+
+
+def unexpected(root, machine, windows):
+    return bench(root, machine, '. "$0/%s"; wk_window_unexpected "$1"' % WINDOWS, windows).strip()
+
+
+def window_reading(root, machine, g):
+    r = g.run(["bash", "-s"], input=quiet_script(root, machine) + tree(root, WINDOWS) + "wk_window_probe\n")
+    return value(r.out.replace("\r", ""), "windows") if r.ok else ""
+
+
+def desktop_probe(root, machine, g):
+    """Streamed, never the guest's own wk-tools: it answers about a guest whose copy is older than this tree."""
+    r = g.run(["bash", "-s"], input=quiet_script(root, machine) + tree(root, WINDOWS, PYOBJC, "vm/desktop-probe.sh"))
+    return r.out.replace("\r", "") if r.ok else ""
+
+
+def load_probe(root, g):
+    r = g.run(["bash", "-s"], input=tree(root, "vm/load-probe.sh"))
+    return r.out.replace("\r", "") if r.ok else ""
+
+
+def value(probe, key):
+    got = [l[len(key) + 1:] for l in probe.splitlines() if l.startswith(key + "=")]
+    return got[-1] if got else ""
+
+
+def row(state, what, remedy=""):
+    return "%s\t%s\t%s\n" % (state, what, remedy)
+
+
+def render(text):
+    from wk import doctor
+    doctor.Report(sys.stderr).rows(doctor.findings(text))
+
+
+class Desktop:
+
+    def __init__(self, root, machine, probe):
+        self.probe = probe
+        windows = self.v("windows")
+        lib = bench(root, machine, READINGS, probe, RESTART, "" if windows in ("", "?") else windows)
+        self.pin = value(lib, "pin")
+        self.uninvited = value(lib, "unexpected").rstrip(";")
+        self.quiet = "".join(l[4:] + "\n" for l in lib.splitlines() if l.startswith("row="))
+
+    def v(self, key):
+        return value(self.probe, key)
+
+    def blockers(self):
+        out = ["a window nothing here put there: " + self.uninvited] if self.uninvited else []
+        if self.v("securityagent") == "up":
+            out.append("an authentication sheet (SecurityAgent) is up")
+        if self.v("console_user") in ("root", "", "?"):
+            out.append("nobody is logged in at the window, so there is no desktop")
+        if self.v("screenlock") == "on":
+            out.append("the screen lock is on, so the guest comes up asking for a password")
+        return out
+
+    def findings(self):
+        v, out = self.v, []
+        cu = v("console_user")
+        out.append(row("wrong", "nobody is logged in at the window (console user '%s') -- there is no desktop to draw on" % cu,
+                       RESTART + "  (auto-login logs it back in; the account is a base setting)")
+                   if cu in ("root", "", "?") else row("ok", "logged in at the window as " + cu))
+        py = v("pyobjc")
+        if py and py == self.pin:
+            out.append(row("ok", "pyobjc %s: a browser can be driven and held in front here" % py))
+        elif py in ("", "?"):
+            out.append(row("wrong", "no pyobjc: run-benchmark cannot size the screen and nothing can keep MiniBrowser frontmost, "
+                           "so a benchmark here measures a throttled browser", RESTART + "  (the settle installs it)"))
+        else:
+            out.append(row("wrong", "pyobjc here is %s and this fleet measures with %s" % (py, self.pin), RESTART))
+        lock = v("screenlock")
+        out.append(row("ok", "screen lock off") if lock == "off" else
+                   row("wrong", "the screen lock is on, so this guest comes up asking for a password", REBUILD
+                       + "  -- vm/desktop.sh leaves the lock alone unless the account's password is the one wk set") if lock == "on"
+                   else row("note", "screen lock could not be read (sysadminctl needs passwordless sudo in there)"))
+        out.append(self.quiet)
+        pending = v("setupassistant_pending")
+        out.append(row("wrong", "Setup Assistant will put a modal pane on the desktop: " + pending, REBUILD) if pending
+                   else row("ok", "Setup Assistant already clicked through"))
+        out += self.updates()
+        out.append(self.screen())
+        out.append(row("note", "%s has the focus" % v("frontapp"),
+                       "an unfocused window is a throttled window: a benchmark measured behind one measures the throttle"))
+        # SecurityAgent is up for a moment at every login, and this is read seconds after one.
+        out.append(row("ok", "no authentication sheet is up") if v("securityagent") == "down" else
+                   row("note", "SecurityAgent is up, which the frontmost-application reading above cannot see. Every login has "
+                       "one for a moment", "wk doctor <name>  -- still up means something in there is waiting for a password"))
+        out.append(row("note", "the guest's own window logs in as %s" % v("user"),
+                       "wk itself uses an ssh key; 'wk start' and 'wk enter' state that account's password"))
+        return "".join(out)
+
+    def updates(self):
+        v, out = self.v, []
+        auto = v("update_autoinstall_system")
+        out.append(row("ok", "macOS updates will not install themselves") if auto == "0" else
+                   row("note", "the guest did not answer about Software Update, so whether it installs one under a build is "
+                       "unknown", RESTART + "  -- a start re-runs this probe") if auto == "" else
+                   row("wrong", "macOS updates are set to install themselves in there (AutomaticallyInstallMacOSUpdates=%s), "
+                       "which reboots the guest -- mid-build, if that is when one lands" % auto, REBUILD))
+        dl = v("update_download_system")
+        if dl == "0":
+            out.append(row("ok", "no update downloads itself in there"))
+        elif dl:
+            out.append(row("wrong", "updates download themselves in there (AutomaticDownload=%s), which takes the host's disk "
+                           "and the guest's bandwidth mid-build" % dl, REBUILD))
+        check, down = v("update_check"), v("update_download")
+        out.append(row("ok", "Software Update offers off in the login account too") if (check, down) == ("0", "0") else
+                   row("note", "the account's own Software Update settings read check=%s, download=%s -- what System Settings "
+                       "shows at that window, not what softwareupdated obeys" % (check, down), REBUILD))
+        # Buddy shows its "what is new in macOS" pane whenever these keys do not name the running system.
+        os_v, seen = v("os_product"), v("setupassistant_seen_product")
+        out.append(row("note", "the guest did not say which macOS it runs, so Setup Assistant's 'what is new in macOS' pane "
+                       "cannot be judged from here", RESTART + "  -- a start re-runs this probe") if os_v in ("", "?") else
+                   row("ok", "Setup Assistant has already seen macOS " + os_v) if seen == os_v else
+                   row("wrong", "Setup Assistant will show its 'what is new in macOS' pane (it last saw %s, this guest runs %s)"
+                       % (seen, os_v), REBUILD))
+        return out
+
+    def screen(self):
+        w = self.v("windows")
+        if w in ("", "?"):
+            return row("note", "the window server was not asked what is on that screen (no compiler in there to build the "
+                       "probe with)", RESTART + "  -- a start builds and runs it again")
+        if self.uninvited:
+            return row("wrong", "on that screen right now, and nothing wk runs put it there: " + self.uninvited,
+                       "it comes back on every boot and no setting a guest can write stops it: clear it on the base, once -- "
+                       + REBUILD)
+        return row("ok", "nothing on that screen but %d window(s) wk put there" % sum(":0:" in e for e in w.split(";")))
+
+
+def load_findings(probe, env):
+    shells_warn = int(env.get("WK_VM_SHELLS_WARN") or SHELLS_WARN)
+    free_warn = int(env.get("WK_VM_MEM_FREE_WARN_PCT") or MEM_FREE_WARN_PCT)
+    swap_warn = int(env.get("WK_VM_SWAP_WARN_MB") or SWAP_WARN_MB)
+    procs, vals, groups, out = [], {}, {}, []
+    for line in probe.splitlines():
+        key, _, val = line.partition("=")
+        if key == "proc":
+            rss, _, comm = val.strip().partition(" ")
+            if rss.isdigit():
+                procs.append((int(rss), comm.strip()))
+        elif key:
+            vals[key] = val.strip()
+    for rss, comm in procs:
+        fam = next((f for f, pat in LOAD_FAMILIES if re.search(pat, comm)), None)
+        if fam:
+            n, kb = groups.get(fam, (0, 0))
+            groups[fam] = (n + 1, kb + rss)
+    shells, shell_kb = groups.get("shell", (0, 0))
+    if shells > shells_warn:
+        holders = ["%d %s process(es)" % (groups[f][0], f) for f in ("editor remote server", "agent", "ssh session") if f in groups]
+        out.append(row("wrong", "%d shells are resident in there, holding %d MB%s" % (
+            shells, shell_kb // 1024, (" -- alongside " + ", ".join(holders)) if holders else ""),
+            RESTART + " takes them all with it; closing the editor window does not, since its remote server outlives it"))
+    else:
+        out.append(row("ok", "%d shells resident (%d MB)" % (shells, shell_kb // 1024)))
+    n, kb = groups.get("editor remote server", (0, 0))
+    if n:
+        out.append(row("note", "an editor remote server is running in there: %d process(es), %d MB" % (n, kb // 1024),
+                       "it outlives the editor window, and every terminal pane in it leaves a shell behind; a guest restart "
+                       "is what clears both"))
+    n, kb = groups.get("agent", (0, 0))
+    if n:
+        out.append(row("note", "%d agent process(es) in there, %d MB" % (n, kb // 1024),
+                       "each `wk ai claude` session in a guest is one of these"))
+    free, total = vals.get("mem_free_pct", ""), vals.get("mem_total_mb", "?")
+    if not free.isdigit():
+        out.append(row("note", "memory pressure could not be read in there (memory_pressure said nothing)"))
+    elif int(free) < free_warn:
+        top = ", ".join("%s (%d MB)" % (c.rsplit("/", 1)[-1], r // 1024) for r, c in sorted(procs, reverse=True)[:3])
+        out.append(row("wrong", "%s%% of the %s MB in that guest is free, and macOS calls that pressure: the biggest resident "
+                       "processes are %s" % (free, total, top),
+                       RESTART + "; a build in there is otherwise paging, and every number it produces is about the paging"))
+    else:
+        out.append(row("ok", "%s%% of the %s MB in that guest is free" % (free, total)))
+    m = re.search(r"used = ([0-9.]+)M", vals.get("swapusage", ""))   # sysctl vm.swapusage, raw
+    if m and float(m.group(1)) > swap_warn:
+        out.append(row("note", "the guest is using %d MB of swap" % float(m.group(1)),
+                       "it holds a fixed allocation, so this is the guest paging inside itself: a build here is slower "
+                       "than its numbers say"))
+    return "".join(out)
+
+
+def check_rows(vm, ws):
+    from wk import doctor
+    from wk.sysimage import guestbase
+    rows = doctor.findings(guestbase.Base(vm).findings())
+    ip = vm.ip(ws)
+    if not ip:
+        return rows + [doctor.unk("'%s' is not running, so its desktop and its load cannot be read" % ws, "wk start %s" % ws)]
+    g = vm.guest_at(ip)
+    probe = desktop_probe(vm.root, vm.machine, g)
+    rows += doctor.findings(Desktop(vm.root, vm.machine, probe).findings().replace("<name>", ws)) if probe else \
+        [doctor.unk("'%s' did not answer the desktop probe" % ws, "wk doctor %s  -- again, once it is reachable" % ws)]
+    load = load_probe(vm.root, g)
+    rows += doctor.findings(load_findings(load, vm.env).replace("<name>", ws)) if load else \
+        [doctor.unk("'%s' did not answer the load probe, so what is resident in there is unknown" % ws, "wk doctor %s" % ws)]
+    return rows
+
+
+def setup_assistant(g):
+    r = g.run(["sh", "-c", SA_COUNT])
+    n = r.out.replace("\r", "").strip() if r.ok else ""
+    return "unreachable" if not n else "gone" if n == "0" else "up"
+
+
+def unblock_desktop(root, g):
+    """Driven over the Accessibility API, which answers a plain ssh session because the guest runs with SIP disabled:
+    no preference the guest can write stops the pane (vm/desktop.sh)."""
+    if setup_assistant(g) != "up":
+        return True
+    info("driving Setup Assistant off the screen over the Accessibility API")
+    r = g.act_run(["/usr/bin/python3", "-"], input=tree(root, "vm/desktop-unblock.py"))
+    sys.stderr.write((r.out + r.err).replace("\r", ""))
+    return r.ok and setup_assistant(g) == "gone"
+
+
+def running_rows(vm):
+    return "".join("      %s\n" % n for n in vm.running_vms())
+
+
+def admit(host, name, mine):
+    """Virtualization.framework counts every VM on the host, the podman machine too, against one limit."""
+    vm, env = host.vm, host.env
+    running, most = vm.running_vms(), int(env.get("WK_VM_MAX") or 2)
+    if len(running) >= most:
+        die("%d VM(s) are already running on this host:\n%s    Virtualization.framework permits %d and refuses the next one "
+            "with\n    VZErrorDomain code 6, in that guest's run log and nowhere else. Free a slot\n    with 'wk stop <name>', "
+            "or with 'podman machine stop %s' -- that machine\n    carries the container workspaces, which survive it being down."
+            % (len(running), running_rows(vm), most, vm.podman_machine()))
+    memory_budget(host, name, mine)
+    host_disk(host)
+
+
+def memory_budget(host, name, mine):
+    """Everything holding memory holds all of it, busy or not, so this refuses rather than letting a link find out."""
+    from wk.resources import Resources
+    vm, env = host.vm, host.env
+    res = Resources(host.machine, env, "macos")
+    budget, guests, pod = res.envelope_mem_mb(), vm.committed_mem_mb(name), vm.podman_mem_mb()
+    if mine + pod + guests <= budget:
+        return
+    # An idle podman machine holds the whole envelope; `wk` starts it again on the next container command.
+    if pod and vm.podman_containers() == 0 and mine + guests <= budget:
+        info("stopping the idle podman machine to free %dMB for '%s'" % (pod, name))
+        host.machine.act_run(["podman", "machine", "stop", vm.podman_machine()])
+        pod = vm.podman_mem_mb()
+        if not pod:
+            return
+        warn("the podman machine did not stop; '%s' may not fit" % name)
+    if mine + pod + guests <= budget:
+        return
+    if env.get("WK_VM_SHARE"):
+        warn("'%s' (%dMB) on top of %dMB podman + %dMB of running guests exceeds the %dMB envelope -- continuing because "
+             "WK_VM_SHARE is set" % (name, mine, pod, guests, budget))
+        return
+    spare = budget - pod - guests
+    advice = ("      WK_VM_MEM_MB=%d, then retry\n          run it in the %dMB that is actually free" % (spare, spare)
+              if spare >= 4096 else "      (only %dMB is unspoken for, which is not enough to build in --\n       freeing one "
+              "of the above is the realistic option)" % spare)
+    rows = ("      %-26s %6d MB   running\n" % ("podman machine '%s'" % vm.podman_machine(), pod) if pod else "") \
+        + ("      %-26s %6d MB   running\n" % ("other macOS guest(s)", guests) if guests else "") \
+        + "      %-26s %6d MB   requested\n" % ("macOS VM '%s'" % name, mine) \
+        + "      %-26s %6d MB   (%d MB total, %d MB kept for the desktop)\n" % ("host envelope", budget, res.host_mem_mb(),
+                                                                               res.reserve_mb())
+    die("not enough memory to start '%s'.\n%s\n      podman machine stop %s\n          free the whole envelope (workspaces "
+        "and their state survive)\n      wk stop <name>\n          free a running guest\n%s\n      WK_VM_SHARE=1, then retry\n"
+        "          proceed anyway" % (name, rows, vm.podman_machine(), advice))
+
+
+def host_disk(host):
+    """A guest's disk is sparse: every byte it writes comes from here, and running out fails a build as an I/O error."""
+    from wk.resources import Budget
+    free = Budget(host.machine, host.env).free_gb("/")
+    if free is None:
+        return
+    if free < int(host.env.get("WK_HOST_FREE_MIN_GB") or HOST_FREE_MIN_GB):
+        die("only %d GB free on the host.\n    A macOS guest believes it has a %d GB disk, but every byte it writes has to "
+            "come\n    from here, and a build that runs out fails as an I/O error naming nothing useful.\n\n"
+            "      wk ls                        what exists\n      wk rm <name>                 reclaim a workspace\n"
+            "      tart prune --space-budget 0  drop the OCI image cache" % (free, int(host.env.get("WK_VM_DISK_GB") or DISK_GB)))
+    if free < int(host.env.get("WK_HOST_FREE_WARN_GB") or HOST_FREE_WARN_GB):
+        warn("%d GB free on the host -- a Release build tree is ~39 GB and a Debug one ~78 GB, so this may not be enough "
+             "to finish" % free)
 
 
 def boot(host, ws, wait=BOOT_WAIT):
@@ -510,15 +918,13 @@ def start(vm, ws, clock=None):
         if state == "running":
             ip = vm.ip(ws)
             if not ip:
-                die("'%s' is running but tart gives it no address yet; 'wk vm start %s' again in a moment" % (ws, ws))
+                die("'%s' is running but tart gives it no address yet; 'wk start %s' again in a moment" % (ws, ws))
             host.start_proxy()
         else:
-            rc = shell.guest_admit(vm.root, ws, env=dict(vm.env))
-            if rc:
-                raise Refused(rc)
+            admit(host, vm.vm(ws), vm.mem_mb(ws))
             ip = boot(host, ws)
         Guest(host, ws, ip).converge()
-    shell.vm_login_note(vm.root, env=dict(vm.env))
+    login_note(vm.env)
     return ip
 
 
@@ -549,8 +955,9 @@ def _guests(root, machine, env):
 
 
 def pat_converge(root, env, machine):
-    vm = _guests(root, machine, env)
-    return vm is None or Host(vm).pat_converge()
+    """The guests' injector serves every guest on a macOS host, wherever the vm target's store is."""
+    vm = _vm(root, machine, env)
+    return not Store(vm.env).macos_host or Host(vm).pat_converge()
 
 
 def vm_push_keys_converge(root, machine, action, env=None):
@@ -624,26 +1031,3 @@ def vm_push_keys_state(root, machine, env=None):
             rows.append((g, "running", ""))
     return rows
 
-
-def main(argv, env=None):
-    """cmd/vm's `start <ws>` (prints its address) and `stop <ws>`, and the base build's `clock <name> <ip>`."""
-    env = os.environ if env is None else env
-    verbs = {"start": 1, "stop": 1, "clock": 2}
-    if not argv or verbs.get(argv[0]) != len(argv) - 1:
-        sys.stderr.write("usage: python3 -m wk.guest start|stop <ws> | clock <name> <ip>\n")
-        return 2
-    vm = _vm(os.environ.get("WK_ROOT") or os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
-             None, env)
-    if argv[0] == "start":
-        print(start(vm, argv[1]))
-        return 0
-    if argv[0] == "stop":
-        return 0 if stop(vm, argv[1]) else 1
-    return 0 if Guest(Host(vm), argv[1], argv[2]).set_guest_clock() else 1
-
-
-if __name__ == "__main__":
-    try:
-        sys.exit(main(sys.argv[1:]))
-    except Refused as e:
-        sys.exit(e.status)

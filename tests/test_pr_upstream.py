@@ -15,7 +15,7 @@ git's own exit status 0.
 without the `.git` the rewrite is keyed on -- and `pr.ls_remote` and
 `pr.checkout`'s fetch both go through it. `pr.branch_repos` is the one
 implementation of "which of this fork's repositories carries this branch",
-shared by `wk pr <user>:<branch>` and `wk ab <user>:<branch>`.
+shared by `wk pr <user>:<branch>` and `wk bench ab <user>:<branch>`.
 
 Everything runs against local bare repositories standing in for the upstreams
 and for the mirror -- git takes a path as a URL, so no network is touched, and
@@ -204,10 +204,6 @@ class TestBranchRepos(unittest.TestCase):
 
     def test_the_refusals_name_every_repository_that_was_asked(self):
         self.assertEqual(pr.branch_repo_urls("justinmichaud"), [f"{GITHUB}/WebKit.git", f"{GITHUB}/WPEWebKit.git"])
-
-    def test_the_bash_names_cmd_ab_calls_answer_the_same(self):
-        cp = bash('. "$WK_ROOT/lib/common.sh"; . "$WK_ROOT/lib/store.sh"; pr_branch_repo_urls justinmichaud')
-        self.assertEqual(cp.stdout.split(), pr.branch_repo_urls("justinmichaud"), cp.stderr)
 
 
 class TestGitSyncFork(Wired):

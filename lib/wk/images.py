@@ -242,7 +242,7 @@ def slot_dir(ws, slot, env=None):
 
 
 def toolchain_holds(ws, cross_target, env=None):
-    """cross-toolchain-helper's own test of an installed SDK, which image/yocto-build.sh reads too."""
+    """cross-toolchain-helper's own test of an installed SDK, which lib/wk/sysimage/yocto_target.py reads too."""
     d = os.path.join(Store(env).ws_dir(ws), "build", "CrossToolChains", cross_target, "build", "toolchain")
     if not os.path.isfile(os.path.join(d, ".toolchain_path_configured")):
         return False
@@ -278,20 +278,6 @@ def ws_machine(named, target, here):
 def build_resource(machine):
     """One machine builds one image at a time, whichever workspace it is for."""
     return "machine:" + machine
-
-
-def holds_predicate(spec, ws, rest):
-    return '[ "$(wk sysimage holds %s --workspace %s%s)" = yes ]' % (spec, ws, "".join(" " + r for r in rest))
-
-
-def refuse_elsewhere(spec, here):
-    """Still running here with another machine in the spec means nothing there answered for a store of its own."""
-    on = spec_machine(spec)
-    if on and on != here:
-        act.die("""'%s' names machine '%s' and this is %s. The command was not
-    handed over, so nothing there answered for a store of its own:
-        wk machine setup %s
-    'wk status' names the machines this fleet has.""" % (spec, on, here, on))
 
 
 CONFIG_WORDS = {
@@ -345,28 +331,10 @@ def _maybe(value):
 VERBS = {   # verb: (least, most) arguments, most None for any
     "load": ((1, 1), _load_verb),
     "names": ((0, 0), lambda: _say("".join(n + "\n" for n in names()))),
-    "list": ((0, 0), lambda: _say(listing())),
-    "conf-path": ((1, 1), lambda n: _say(conf_path(n))),
     "origin-branches": ((0, 0), lambda: _say("".join(b + "\n" for b in origin_branches()))),
-    "pgo-wanted": ((2, 2), lambda b, r: _flag(pgo_wanted(b, r))),
-    "spec-profile": ((1, 1), lambda s: _say(spec_profile(s))),
-    "spec-machine": ((1, 1), lambda s: _say(spec_machine(s))),
-    "spec-target": ((3, 3), lambda m, h, d: _say(spec_target(m, h, d))),
-    "ws": ((1, 1), lambda s: _say(image_ws(s))),
-    "ws-profile": ((1, 1), lambda w: _maybe(ws_profile(w))),
-    "ws-arg": ((0, None), lambda *a: _say(ws_arg(list(a)))),
-    "ws-machine": ((3, 3), lambda n, t, h: _say(ws_machine(n, t, h))),
-    "ws-here": ((2, 2), lambda s, h: refuse_elsewhere(s, h) or 0),
     "slot-dir": ((2, 2), lambda w, s: _maybe(slot_dir(w, s))),
     "toolchain-holds": ((2, 2), lambda w, t: _flag(toolchain_holds(w, t))),
-    "pgo-dir": ((2, 2), lambda w, s: _say(pgo_dir(w, s))),
-    "pgo-dir-in": ((1, 1), lambda s: _say(pgo_dir_in(s))),
-    "instr-slot": ((1, 1), lambda s: _say(instr_slot(s))),
-    "measured-slot": ((1, 1), lambda s: _say(measured_slot(s))),
-    "build-resource": ((1, 1), lambda m: _say(build_resource(m))),
-    "holds-predicate": ((2, None), lambda s, w, *r: _say(holds_predicate(s, w, r))),
     "build-subject": ((5, 5), lambda *a: _say(build_subject(*a))),
-    "check-slot-name": ((1, 1), lambda s: check_slot_name(s) or 0),
 }
 
 

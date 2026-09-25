@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Structured-data operations the bash half of `wk bench` still calls: a plan's class, a cpu list, a Mac A/B's legs, and the record, report and stopping rule of lib/wk/bench as a CLI. Stdlib only, for whatever python3 a macOS host or a bare-metal board has."""
+"""Structured-data operations the bash half of `wk bench` still calls: a Mac A/B's legs, and the record, report and stopping rule of lib/wk/bench as a CLI. Stdlib only, for whatever python3 a macOS host or a bare-metal board has."""
 
 import argparse
 import json
@@ -9,19 +9,10 @@ import sys
 
 
 def _bench():
-    """lib/wk/bench, imported on use: bench/mac-ab.sh pipes this file to a Mac's `python3 -` for ab-legs, with no lib/ beside it."""
+    """lib/wk/bench, imported on use: lib/wk/bench/mac.py hands this file to a Mac's `python3 -c` for ab-legs, with no lib/ beside it."""
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     from wk.bench import record, report
     return record, report
-
-
-# TODO: lib/wk/status.py imports wk.bench.record for task_state and subject_line, and these two go.
-def task_state(taskdir, running):
-    return _bench()[0].task_state(taskdir, running)
-
-
-def _subject_line(doc):
-    return _bench()[0].subject_line(doc)
 
 
 def _load(path):
@@ -36,26 +27,6 @@ def cmd_get(args):
     record = _bench()[0]
     value = record.get_nested(record.load(args.file), args.key)
     print(value if value is not None else args.default)
-
-
-def _pipeline():
-    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-    from wk.bench import pipeline
-    return pipeline
-
-
-def cmd_bench_class(args):
-    print(_pipeline().bench_class(args.plan))
-
-
-def cmd_cores_valid(args):
-    sys.exit(0 if _pipeline().cores_valid(args.set) else 1)
-
-
-def cmd_cores_wrap(args):
-    if not _pipeline().cores_valid(args.set):
-        sys.exit("cores-wrap: not a valid cpu list: %s" % args.set)
-    sys.stdout.write("taskset -c %s " % args.set)
 
 
 def _state_lines(path):
@@ -89,7 +60,7 @@ def cmd_ab_legs(args):
     plans = job.get("plans") or []
     arms = job.get("arms") or []
     rounds = int(job.get("rounds") or 0)
-    # The warmup round runs the first plan only, one leg per arm (mac-bench-autorun.sh).
+    # The warmup round runs the first plan only, one leg per arm (lib/wk/bench/autorun.py).
     planned = len(arms) + rounds * len(plans) * len(arms)
     done = sum(1 for k in state if k.startswith("ok_"))
     print("%d of %d planned -- warmup %d, then %d round(s) x %d plan(s) x %d arm(s)"
@@ -146,24 +117,8 @@ def cmd_ab_legs(args):
         caps = []
     if caps:
         print("warmup captures: %s" % ", ".join(caps))
-    else:  # the round exists to carry a profile the measured rounds cannot take, so an empty directory is the whole round wasted
+    else:
         print("warmup captures: none in %s" % warmup)
-
-
-def cmd_subtests(args):
-    """The plan's own subtests minus the exclusions, so both arms of an A/B cover the same set."""
-    plan = json.load(sys.stdin)
-    listed = []
-    for group in (plan.get("subtests") or {}).values():
-        listed.extend(group)
-    drop = {x for x in (args.exclude or "").split(",") if x}
-    unknown = drop - set(listed)
-    if unknown:
-        sys.exit("subtests: %s names no subtest of this plan" % ", ".join(sorted(unknown)))
-    keep = [s for s in listed if s not in drop]
-    if not keep:
-        sys.exit("subtests: every subtest of this plan is excluded")
-    print(" ".join(keep))
 
 
 def cmd_env_record(args):
@@ -177,13 +132,6 @@ def cmd_task_write(args):
 def cmd_task_status(args):
     record = _bench()[0]
     print("\n".join(record.status_lines(record.task_state(args.dir, args.running))))
-
-
-def cmd_warmup_check(args):
-    problems = _bench()[1].warmup_check(args.a, args.b, args.same_width)
-    for line in problems:
-        print(line)
-    sys.exit(1 if problems else 0)
 
 
 def cmd_ab_precision(args):
@@ -211,34 +159,11 @@ def main(argv):
     p.add_argument("--running", action="store_true", help="the task's lock is held")
     p.set_defaults(func=cmd_task_status)
 
-    p = sub.add_parser("warmup-check", help="judge a warmup round's two arms; exit 1 and print why if they refuse the A/B")
-    p.add_argument("a")
-    p.add_argument("b")
-    p.add_argument("--same-width", action="store_true",
-                   help="the two arms are meant to be the same word size (a slot A/B, not an image one)")
-    p.set_defaults(func=cmd_warmup_check)
-
-    p = sub.add_parser("cores-valid", help="exit 0 if <set> is a valid taskset -c cpu list, 1 otherwise")
-    p.add_argument("set")
-    p.set_defaults(func=cmd_cores_valid)
-
-    p = sub.add_parser("cores-wrap", help="print the 'taskset -c <set> ' prefix for a valid cpu list")
-    p.add_argument("set")
-    p.set_defaults(func=cmd_cores_wrap)
-
     p = sub.add_parser("ab-precision", help="how fine a difference the rounds so far resolve, and whether that meets --target")
     p.add_argument("--a", required=True, help="comma-separated run directories for arm A")
     p.add_argument("--b", required=True, help="comma-separated run directories for arm B")
     p.add_argument("--target", type=float, default=0.3, help="the effect the A/B has to be able to detect, in percent (default 0.3)")
     p.set_defaults(func=cmd_ab_precision)
-
-    p = sub.add_parser("subtests", help="the plan's subtests minus --exclude, read from stdin")
-    p.add_argument("--exclude", default="", help="comma-separated subtests to drop")
-    p.set_defaults(func=cmd_subtests)
-
-    p = sub.add_parser("bench-class", help="cpu or gpu -- what a plan measures")
-    p.add_argument("plan")
-    p.set_defaults(func=cmd_bench_class)
 
     p = sub.add_parser("env-record", help="write a run's env.json")
     p.add_argument("out")

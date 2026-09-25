@@ -15,7 +15,7 @@ sys.path.insert(0, str(REPO / "lib"))
 
 from wk import act  # noqa: E402
 from wk.boot.mac import GuestChannel, Script  # noqa: E402
-from wk.machine import Result  # noqa: E402
+from wk.machine import Local, Result  # noqa: E402
 
 
 def guest(**state):
@@ -42,7 +42,7 @@ class TestArming(unittest.TestCase):
         fake, d = guest(st="absent")
         got, err = quiet(d.arm)
         self.assertIs(got, act.Refused)
-        self.assertIn("wk vm new wk-bench", err)
+        self.assertIn("wk new wk-bench --target vm", err)
         self.assertEqual(fake.effects, [])
 
     def test_a_stopped_guest_is_started(self):
@@ -81,9 +81,9 @@ class TestWhatItReports(unittest.TestCase):
         self.assertIn("managed on the macOS host", d.media())
 
     def test_its_manager_is_this_machine(self):
-        _, d = guest()
-        self.assertEqual(d.manage_argv("true"), ["bash", "-c", "true"])
-        self.assertEqual(d.manage_name(), "this machine")
+        _, d = guest(via=None)
+        self.assertIsInstance(d.manager(), Local)
+        self.assertEqual(d.manager_tools(d.manager()), str(REPO))
         self.assertTrue(d.restart_ready())
 
 
@@ -141,9 +141,9 @@ class TestGuestChannel(unittest.TestCase):
 
 class TestTheShim(unittest.TestCase):
     def test_sourced_alone_it_still_names_the_guest(self):
-        cp = bash('. "$WK_ROOT/lib/common.sh"\n. "$WK_ROOT/boot/mac-guest.sh"\necho "$NODE_GUEST|$BOOT_ARMING|$(b_bench_root)"',
+        cp = bash('. "$WK_ROOT/lib/common.sh"\n. "$WK_ROOT/boot/mac-guest.sh"\necho "$NODE_GUEST|$BOOT_ARMING"',
                   env={"WK_BENCH_GUEST": "my-custom-guest"})
-        self.assertEqual(cp.stdout.strip(), "my-custom-guest|guest|/var/wk", cp.stderr)
+        self.assertEqual(cp.stdout.strip(), "my-custom-guest|guest", cp.stderr)
 
 
 if __name__ == "__main__":

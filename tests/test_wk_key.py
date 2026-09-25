@@ -1,4 +1,4 @@
-"""lib/wk/key.py against a fake machine: the election across workstations, the deploy keys GitHub holds, `wk key
+"""lib/wk/key/ against a fake machine: the election across workstations, the deploy keys GitHub holds, `wk key
 check` per machine, a run killed after any effect, and a dry run that is the wet run's plan.
 
 The fake is tests/test_wk_secrets.py's machine plus a toy rulebook in lib/credcheck.py's place, a GitHub that keeps
@@ -17,7 +17,8 @@ from unittest import mock
 from tests.killpoints import converges
 from tests.test_wk_secrets import ROOT, SECRETFILE, SecretsTest, World
 
-from wk import decl, dispatch, key  # noqa: E402
+from wk import act, decl, dispatch  # noqa: E402
+from wk.key import cli, common  # noqa: E402
 from wk.act import Refused  # noqa: E402
 from wk.machine import Result  # noqa: E402
 
@@ -64,7 +65,7 @@ class Peer:
         return sorted(self.creds.items()), sorted(self.keys.items()), self.login
 
     def verdict(self, name):
-        if name == key.LOGIN:
+        if name == common.LOGIN:
             return self.login
         v = self.creds.get(name, "")
         return judge(name, v, "path", {}) + ("\n    fingerprint: fp-%s" % v if v else "")
@@ -191,7 +192,7 @@ class KeyWorld(World):
         if "contains" in jq:
             b64 = jq.split('"')[1]
             return Result(0, "false\n" if any(b64 in k for k in keys.values()) else "")
-        return Result(0, "".join(i + "\n" for i, k in keys.items() if key.TITLE in jq))
+        return Result(0, "".join(i + "\n" for i, k in keys.items() if common.TITLE in jq))
 
     def _sh(self, argv, f):
         line = argv[2]
@@ -212,7 +213,7 @@ class KeyWorld(World):
             return Result(0, "Hi justinmichaud/WebKit!\n") if arg in p.keys else Result(1, "no key\n")
         if verb == "give":
             return Result(0, p.keys.get(arg) or p.creds.get(arg, ""))
-        if verb == "adopt" and arg == key.LOGIN:
+        if verb == "adopt" and arg == common.LOGIN:
             p.login = LOGIN_OK
             return Result(0, LOGIN_OK + "\n")
         if verb == "adopt":
@@ -231,7 +232,7 @@ class KeyTest(SecretsTest):
 
     def key(self, w=None, rotate=False, tty=False, typed="", boxes=()):
         w = w or self.w
-        return key.Key(ROOT, env=w.env, machine=w, reg=FakeRegistry(w, boxes), sec=w.sec(), tty=lambda: tty,
+        return cli.Key(ROOT, env=w.env, machine=w, reg=FakeRegistry(w, boxes), sec=w.sec(), tty=lambda: tty,
                        prompt=lambda *a: typed or None, out=io.StringIO(), rotate=rotate)
 
     def run_verb(self, verb, w=None, **kw):
@@ -330,10 +331,19 @@ class TestRegisterPerMachine(KeyTest):
         self.run_verb("deploy")
         adds = [e[1] for e in w.effects if e[0] == "act" and e[1][:2] == ("gh", "api") and "-f" in e[1]]
         self.assertEqual(sorted("repos/%s/keys" % r for r in REPOS.values()), sorted(a[2] for a in adds))
-        self.assertTrue(all("title=" + key.TITLE in a for a in adds))
+        self.assertTrue(all("title=" + common.TITLE in a for a in adds))
         n = len(w.effects)
         self.run_verb("deploy")
         self.assertFalse([e for e in w.effects[n:] if e[0] == "act" and e[1][:2] == ("gh", "api")])
+
+    def test_a_refused_key_ensure_fails_the_forks_and_registers_none(self):
+        k = self.key(self.world())
+        registered = []
+        k.ensure = lambda: act.die("no key could be made")
+        k.fleet_fork = lambda fork, repo: registered.append(fork) or True
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertFalse(k.converge_forks())
+        self.assertEqual([], registered)
 
     def test_rotate_removes_the_old_key_from_github_and_mints_a_fresh_one(self):
         w = self.world()
@@ -350,7 +360,7 @@ class TestRegisterPerMachine(KeyTest):
         here, peer = out.split("  here:\n")[1].split("  peerbox:\n")
         for repo in REPOS.values():
             self.assertRegex(here, r"ok\s+%s\s+pushes to" % repo)
-            self.assertRegex(peer, r"ok\s+%s\s+%s" % (repo, key.SAME_AS_HERE))
+            self.assertRegex(peer, r"ok\s+%s\s+%s" % (repo, common.SAME_AS_HERE))
 
     def test_a_peer_that_did_not_answer_reads_differently_from_one_holding_no_key(self):
         self.provisioned(Peer("empty"), Peer("gone", answers=False))

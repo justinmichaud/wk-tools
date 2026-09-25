@@ -330,14 +330,9 @@ t_far_side() {
     fi
 }
 
-# The flags travel as environment, not arguments: an unknown argument is fatal on an old copy of wk over there.
+# Target.wk_cmd (lib/wk/targets.py), which spells the same far-side line for every target kind.
 _remote_wk_cmd() {
-    printf 'cd $HOME && %s%s%s%s%s %s' \
-        "$(wk_forwarded_env)" \
-        "${WK_ROW_LABEL:+WK_ROW_LABEL=$(sh_quote "${WK_ROW_LABEL:-}") }" \
-        "${WK_NO_DELEGATE:+WK_NO_DELEGATE=1 }" \
-        "${WK_ZED_PUBKEY:+WK_ZED_PUBKEY=$(sh_quote "${WK_ZED_PUBKEY:-}") }" \
-        "$(sh_quote "$(t_tools '')/wk")" "$(sh_quote "$@")"
+    _ws_py wk-cmd "$WK_TARGET" "$@"
 }
 
 t_wk() {

@@ -58,6 +58,7 @@ class TestTheDriverSelectsByAutoboot(unittest.TestCase):
         fake, d = self.board()
         d.arm("/dev/sda3", d.order_image)
         d.reboot(armed=True)
+        d.probe()
         d.reboot()
         self.assertEqual([e for e in fake.effects if e[0] in ("boot_priv", "reboot")],
                          [("boot_priv", "order", "0xf64"), ("boot_priv", "reboot"), ("reboot", False),

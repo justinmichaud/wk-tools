@@ -27,6 +27,7 @@ import os
 import pty
 import shutil
 import subprocess
+import sys
 import unittest
 
 import threading
@@ -231,7 +232,7 @@ class TestItLogsInWhereTheContainersRead(_Login):
         """A copy would be a second holder of one refresh token; the login is
         made rather than captured, so no Keychain item and no ~/.claude file
         is anywhere in this command."""
-        key = (REPO / "lib" / "wk" / "key.py").read_text()
+        key = "".join(p.read_text() for p in sorted((REPO / "lib" / "wk" / "key").glob("*.py")))
         self.assertNotIn("find-generic-password", key)
         self.assertNotIn(".claude/.credentials.json", key)
         self.assertNotIn("HOME", key)
@@ -396,16 +397,16 @@ class TestVerdictIsWhatAnotherWorkstationAsks(_Login):
 class TestTheRemedyReadsTheStore(_Login):
     """`wk doctor <ws>` and `wk ai claude` name the remedy when a workspace has no
     login, and it is derived from what this machine's store holds
-    (agent_secret_store_remedy, lib/target.sh): nothing, one no workspace can
-    use, or a usable one the workspace was made without."""
+    (Secrets.agent_secret_remedy, lib/wk/secrets.py): nothing, one no
+    workspace can use, or a usable one the workspace was made without."""
 
     def remedy(self):
+        sys.path.insert(0, str(REPO / "lib"))
+        from wk import secrets
+        from wk.machine import Local
         with stub_path({"claude": FAKE_CLAUDE}) as binp:
             env = self._env(binp)
-        cp = self.bash(". lib/common.sh; . lib/store.sh; . lib/target.sh; "
-                       "agent_secret_store_remedy claude-login", env=env)
-        self.assertEqual(0, cp.returncode, cp.stderr)
-        return cp.stdout
+        return secrets.Secrets(str(REPO), _clean_env(env), Local()).agent_secret_remedy("claude-login")
 
     def test_nothing_stored_names_the_command_that_stores_one(self):
         out = self.remedy()
@@ -545,7 +546,7 @@ class TestReplace(_Login):
 class TestNothingElseLearnedTheShape(unittest.TestCase):
     """One place decides what a usable login is, and one place makes one."""
 
-    KEY = (REPO / "lib" / "wk" / "key.py").read_text()
+    KEY = "".join(p.read_text() for p in sorted((REPO / "lib" / "wk" / "key").glob("*.py")))
 
     def test_the_check_is_in_one_function(self):
         """What a usable login is, is one row of lib/credcheck.py -- the same

@@ -376,7 +376,7 @@ class Push:
     def guest_rows(self):
         for g, state, forks in guest.vm_push_keys_state(ROOT, self.sec.machine) if self.sec.macos else []:
             if state != "running":
-                self.out.write("guest %-10s %s\n" % (g, "%s -- not read; 'wk vm start %s' converges it" % (state, g)))
+                self.out.write("guest %-10s %s\n" % (g, "%s -- not read; 'wk start %s' converges it" % (state, g)))
             elif forks:
                 self.guest_live = True
                 self.out.write("guest %-10s %s\n" % (g, forks))

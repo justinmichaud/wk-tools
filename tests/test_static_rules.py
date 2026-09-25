@@ -12,7 +12,7 @@ import sys
 import unittest
 from pathlib import Path
 
-from tests.support import REPO, WK, WkTest, bash, func_body, shell_files
+from tests.support import REPO, WK, WkTest, bash, func_body, owed, shell_files
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk import images  # noqa: E402
@@ -82,6 +82,29 @@ class TestParsing(WkTest):
             if not re.match(r"^\d+:\s*#", line.split(":", 1)[1] if ":" in line else ""):
                 hits.append(f"{WK}:{line}")
         self.assertEqual(hits, [], f"flock is still called here: {hits}")
+
+    @owed("structured data is not handled in bash (docs/PLAN.md 5.39 step 2's done condition): "
+          "bridge/bin/wk-bridge-healthcheck, bridge/bin/wk-bridge-netwatch and bridge/provision.sh call "
+          "jq; claude/hooks/webkit-jsc-skill-reminder.sh and claude/install.sh call jq to read/edit a hook's "
+          "settings.json; bench/mac-quiet-desktop.sh, admin/wk-card-priv, host/macos/machine.sh, "
+          "targets/vm.sh and targets/remote.sh run \\`python3 -c\\` inline with \\`import json\\`")
+    def test_no_bash_file_parses_json(self):
+        """no bash file under the tree parses JSON: no \\`jq\\`, no inline \\`python3 -c ... import json\\`, no \\`sed\\` over a JSON blob"""
+        # static
+        jq_call = re.compile(r"(?<![\w-])jq(?![\w-])")
+        py_json = re.compile(r"python3\s+-c\s+.*import\s+json")
+        sed_json = re.compile(r"(?<![\w-])sed\b[^\n]*[{}][^\n]*\bjson\b", re.IGNORECASE)
+        hits = []
+        for f in shell_files():
+            try:
+                text = f.read_text(errors="replace")
+            except OSError:
+                continue
+            for pat in (jq_call, py_json, sed_json):
+                if pat.search(text):
+                    hits.append(str(f.relative_to(REPO)))
+                    break
+        self.assertEqual(sorted(set(hits)), [])
 
 
 class TestSudoHygiene(WkTest):
@@ -185,12 +208,6 @@ listed=$(machine_list | awk '{{print $1}}' | sort)
 
 
 class TestBridgeDeclarations(WkTest):
-    def test_bridge_reach_is_capped(self):
-        """reaching the phone cannot hang: a ceiling over the ssh and a connect timeout under it"""
-        body = func_body((REPO / "cmd" / "bridge").read_text(), "_reaches")
-        self.assertRegex(body, r"capped \d+ ssh ")
-        self.assertIn("ConnectTimeout=", body)
-
     def test_bridge_kconfig_delta_is_declarable(self):
         """a kernel config delta names an aport and well-formed options"""
         script = f'''
@@ -212,44 +229,6 @@ done
         cp = bash(script)
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
 
-    def test_bridge_rm_is_inverse_of_provision(self):
-        """`wk bridge rm` removes every path bridge/provision.sh writes"""
-        cp = subprocess.run(
-            ["grep", "-oE", r'write_file "?/[^" ]+', str(REPO / "bridge" / "provision.sh")],
-            capture_output=True, text=True,
-        )
-        written = set()
-        for line in cp.stdout.splitlines():
-            p = line.split(None, 1)[1].lstrip('"')
-            written.add(p)
-        init_d = REPO / "bridge" / "init.d"
-        if init_d.is_dir():
-            for f in init_d.iterdir():
-                written.add(f"/etc/init.d/{f.name}")
-        written = {p.replace("$BR_IF", "*") for p in written if "wk-bridge" in p}
-        self.assertTrue(written, "no wk-bridge paths found in bridge/")
-
-        # The same awk logic chk_bridge_rm_is_inverse uses: everything between
-        # the `rsh "$PRIV sh -s" <<...` line and the bare "EOF" that ends it.
-        lines = (REPO / "cmd" / "bridge").read_text(errors="replace").splitlines()
-        body_lines = []
-        on = False
-        for line in lines:
-            if on:
-                if line == "EOF":
-                    break
-                body_lines.append(line)
-            elif 'rsh "$PRIV sh -s" <<' in line:
-                on = True
-        self.assertTrue(body_lines, "cmd_rm's deprovisioning script did not parse out of cmd/bridge")
-        body = "\n".join(body_lines)
-        removed = set(re.findall(r"/[a-zA-Z0-9_./$*-]+", body))
-        removed = {p.replace("$s", "wk-bridge-*") for p in removed}
-
-        import fnmatch
-        missing = [p for p in written if not any(fnmatch.fnmatchcase(p, tok) for tok in removed)]
-        self.assertEqual(missing, [], f"written by provision.sh, never removed by 'wk bridge rm': {missing}")
-
     def test_bridge_image_carries_role_packages(self):
         """the image carries every package the role requires"""
         # static
@@ -270,11 +249,13 @@ class TestTailnetHygiene(WkTest):
         # static
         bad = []
         # Not the Mac volume: no macOS install can join unattended, so it has
-        # no key to resolve (tests/test_mac_quiet.py holds it to that).
-        for f in ("cmd/pi", "cmd/bridge"):
+        # no key to resolve (tests/test_mac_quiet.py holds it to that). Not a
+        # board either: `wk sysimage write` puts the key on the card and the
+        # image's own wk-tailnet-join reads it there, never wk.
+        for f, needle in (("lib/wk/bridge/role.py", "tailnet.Fleet("),):
             text = (REPO / f).read_text(errors="replace")
-            if "wk_tailscale_authkey" not in text:
-                bad.append(f"{f} joins the tailnet without resolving the key through wk_tailscale_authkey")
+            if needle not in text:
+                bad.append(f"{f} joins the tailnet without resolving the key through wk.tailnet.Fleet")
         cp = subprocess.run(
             ["grep", "-rn", "-E", r"read -r[s]* *[A-Za-z_]*[Aa][Uu][Tt][Hh]",
              str(REPO / "cmd"), str(REPO / "bench"), str(REPO / "bridge"),
@@ -289,7 +270,7 @@ class TestTailnetHygiene(WkTest):
         """puts the key on a command line"""
         # static
         cp = subprocess.run(
-            ["grep", "-rn", "-e", r"--auth-\{0,1\}key",
+            ["grep", "-rnI", "-e", r"--auth-\{0,1\}key",
              str(REPO / "cmd"), str(REPO / "bench"), str(REPO / "bridge"),
              str(REPO / "boot"), str(REPO / "image"), str(REPO / "lib")],
             capture_output=True, text=True,
@@ -311,9 +292,9 @@ class TestTailnetHygiene(WkTest):
         layer = REPO / "image" / "yocto" / "meta-wk-tailnet"
         if not (layer / "conf" / "layer.conf").exists():
             bad.append(f"no layer at {layer}")
-        ycb = (REPO / "image" / "yocto-build.sh").read_text(errors="replace")
+        ycb = (REPO / "lib" / "wk" / "sysimage" / "yocto_target.py").read_text(errors="replace")
         if "meta-wk-tailnet" not in ycb:
-            bad.append("image/yocto-build.sh does not add the layer to bblayers")
+            bad.append("lib/wk/sysimage/yocto_target.py does not add the layer to bblayers")
         if 'IMAGE_INSTALL:append = " tailscale"' not in ycb:
             bad.append("nothing puts tailscale in IMAGE_INSTALL")
         proxy = (REPO / "container" / "proxy" / "wk-proxy.py").read_text(errors="replace")
@@ -338,16 +319,11 @@ class TestTailnetHygiene(WkTest):
         recipe = (REPO / "image/yocto/meta-wk-tailnet/recipes-network/tailscale/tailscale.bb").read_text(errors="replace")
         if "require .*tailscale-release.inc" not in recipe and not re.search(r"require .*tailscale-release\.inc", recipe):
             bad.append("the recipe does not require the release .inc")
-        cmd_pi = (REPO / "cmd" / "pi").read_text(errors="replace")
-        if "tailscale-release.inc" not in cmd_pi:
-            bad.append("cmd/pi does not read the release .inc")
-        overlay = (REPO / "image/buildroot/tailnet-overlay.sh").read_text(errors="replace")
+        overlay = (REPO / "lib/wk/sysimage/buildroot_target.py").read_text(errors="replace")
         if "tailscale-release.inc" not in overlay:
             bad.append("the buildroot overlay does not read the release .inc")
         if "meta-wk-tailnet/recipes-network/tailscale/files/wk-tailnet-join" not in overlay:
             bad.append("the buildroot overlay ships its own copy of wk-tailnet-join")
-        if re.search(r'(?m)^TS_VERSION="\$\{TS_VERSION:-[0-9]', cmd_pi):
-            bad.append("cmd/pi still carries a literal tailscale version")
         self.assertEqual(bad, [], "; ".join(bad))
 
     def test_no_authkey_in_an_image(self):
@@ -385,23 +361,11 @@ class TestBuildLocations(WkTest):
     def test_gc_searches_every_build_location(self):
         """every builder's output has somewhere"""
         # static
+        from wk import gc
+        from wk.store import Store
         builders = {images.load(n)["IMG_BUILDER"] for n in images.names()}
-        image_lib = (REPO / "lib" / "image.sh").read_text(errors="replace")
-        m = re.search(r"(?ms)^image_build_locations\(\).*?^\}", image_lib)
-        self.assertIsNotNone(m, "image_build_locations not found in lib/image.sh")
-        declared = set()
-        for line in m.group(0).splitlines():
-            dm = re.search(r"#\s*builder:\s*(.*)", line)
-            if dm:
-                for tok in dm.group(1).split(","):
-                    tok = tok.strip().split()[0] if tok.strip() else ""
-                    if tok:
-                        declared.add(tok)
-        bad = [f"IMG_BUILDER={b} has no entry in image_build_locations" for b in builders if b and b not in declared]
-        gc = (REPO / "cmd" / "gc").read_text(errors="replace")
-        if "image_build_locations" not in gc:
-            bad.append("wk gc does not read image_build_locations")
-        self.assertEqual(bad, [], "; ".join(bad))
+        declared = set(gc.build_outputs(Store({"WK_STORE": "/s"}), {"WK_STORE": "/s"}))
+        self.assertEqual(sorted(b for b in builders if b and b not in declared), [])
 
     def test_buildroot_external_exists(self):
         """\\`image/buildroot/external/\\` is **written**"""

@@ -1,14 +1,11 @@
-"""The buildroot builder's driving half; image/buildroot-{build,webkit}.sh run from the workspace's own copy of
+"""The buildroot builder's driving half; lib/wk/sysimage/buildroot_target.py runs from the workspace's own copy of
 this tree, so the halves cannot skew. The tree is a fork: the release-pinned `cog` defconfigs exist nowhere else.
 TODO: whether the rpi3 defconfig compiles wpa_supplicant at all is unverified."""
 
-import hashlib
 import os
-import subprocess
 
 from wk import act, fleet, images, slot
 from wk.act import die, info, log
-from wk.store import Store
 from wk.sysimage import task
 from wk.sysimage.write import wants_wifi
 
@@ -16,80 +13,85 @@ BASE_IMAGE = "docker.io/library/ubuntu:22.04"   # the host the wiki recipe was d
 SPEC = os.path.join("container", "buildroot", "Containerfile")
 IMAGE_JOBS = 16    # 2009-era tarballs are where broken parallel rules live
 WEBKIT_JOBS = 64   # WebKit links large; capped where the link steps stop gaining
-PATTERN = "*image/buildroot-*.sh*"
+PATTERN = "*buildroot_target.py*"
 DL_IN_WS = "/cache/buildroot/dl"
 SHA_LEN = 40
 BUILD_USAGE = "usage: wk sysimage build %s [--dry-run|--workspace <name>|--detach|--stop]"
 WEBKIT_USAGE = "usage: wk sysimage webkit <profile> --commit <sha> --slot <name> [--detach] [--dry-run]"
+ZIMAGE_MAGIC = "016f2818"   # at offset 36 of a 32-bit ARM zImage
+PIN_TOOLS = ("dpkg-deb", "xz", "depmod", "tar")
 
 
-class Buildroot:
-    def __init__(self, reg, profile, spec, clock, popen=subprocess.Popen):
-        self.reg, self.p, self.spec, self.clock, self.popen = reg, profile, spec, clock, popen
-        self.name = profile["IMG_PROFILE"]
-        self.here, self.env, self.root = reg.machine, reg.env, str(reg.root)
-        self.store = Store(self.env)
+def kernel_pin(m, deb, release, out):
+    """BusyBox modprobe cannot load a .ko.xz, so the modules are decompressed and depmod re-run."""
+    missing = m.run(["sh", "-c", 'for t in "$@"; do command -v "$t" >/dev/null || echo "$t"; done', "sh"] + list(PIN_TOOLS)).out.split()
+    if missing:
+        die("preparing a pinned kernel needs %s, and this machine has none of it" % " ".join(missing))
+    tarball = os.path.join(out, "wk-kernel-%s.tar" % release)
+    stamp, want = tarball + ".from", task.sha256(m, deb)
+    if m.exists(tarball) and m.exists(stamp) and m.read(stamp).strip() == want:
+        act.debug("pinned kernel %s already prepared" % release)
+        return tarball
+    work = tarball + ".work"
+    m.remove(work)
+    m.mkdir(work)
 
-    def target(self):
-        try:
-            t = self.reg.load(self.env.get("WK_TARGET") or self.reg.default())
-        except LookupError as e:
-            die(str(e))
-        if t.kind != "container":
-            die("a buildroot image builds in a container workspace, and target '%s' is a %s one.\n"
-                "    Build it on a machine whose container target holds it:  wk sysimage build %s@<machine>" % (t.name, t.kind, self.name))
-        return t
+    def ok(argv, why):
+        r = m.act_run(argv)
+        if not r.ok:
+            die("%s\n    %s" % (why, r.err.strip()))
 
-    def host_image(self):
-        """(base, tag): tagged with a digest of the Containerfile, so an edited spec is a new image."""
-        base = self.env.get("WK_BUILDROOT_BASE") or BASE_IMAGE
-        with open(os.path.join(self.root, SPEC), "rb") as f:
-            digest = hashlib.sha256(f.read()).hexdigest()[:8]
-        return base, "localhost/wk-buildroot-host:%s-%s" % (base.rsplit(":", 1)[-1], digest)
+    x, tree = os.path.join(work, "x"), os.path.join(work, "tree")
+    ok(["dpkg-deb", "-x", deb, x], "could not unpack %s" % deb)
+    k, dtbs, mods = (os.path.join(x, "boot", "vmlinuz-" + release), os.path.join(x, "usr", "lib", "linux-image-" + release),
+                     os.path.join(x, "lib", "modules", release))
+    for path, what in ((k, "no boot/vmlinuz-" + release), (dtbs, "no device trees for " + release), (mods, "no modules for " + release)):
+        if not m.exists(path):
+            die("%s carries %s" % (deb, what))
+    magic = m.run(["od", "-An", "-tx4", "-j36", "-N4", k]).out.replace(" ", "").strip()
+    if magic != ZIMAGE_MAGIC:
+        die("%s is not a 32-bit ARM zImage (magic %s)" % (k, magic or "unreadable"))
+    for d in ("boot", "lib/modules", "dtb"):
+        m.mkdir(os.path.join(tree, d))
+    ok(["cp", k, os.path.join(tree, "boot", "zImage")], "could not stage the kernel")
+    ok(["cp", "-a", mods, os.path.join(tree, "lib", "modules") + "/"], "could not stage the modules")
+    ok(["find", os.path.join(tree, "lib", "modules", release), "-name", "*.ko.xz", "-exec", "xz", "-d", "{}", "+"],
+       "could not decompress the modules")
+    ok(["depmod", "-b", tree, release], "depmod failed over %s" % release)
+    if ".ko.xz" in m.read(os.path.join(tree, "lib", "modules", release, "modules.dep")):
+        die("modules.dep still names .xz modules after depmod")
+    blobs = [os.path.join(dtbs, n) for n in m.listdir(dtbs) if n.endswith(".dtb")]
+    if blobs:
+        ok(["cp"] + blobs + [os.path.join(tree, "dtb") + "/"], "could not stage the device trees")
+    if m.isdir(os.path.join(dtbs, "overlays")):
+        ok(["cp", "-a", os.path.join(dtbs, "overlays"), os.path.join(tree, "dtb", "overlays")], "could not stage the overlays")
+    ok(["tar", "-C", tree, "-cf", tarball + ".new", "."], "could not pack %s" % tarball)
+    ok(["mv", "-f", tarball + ".new", tarball], "could not keep %s" % tarball)
+    m.write(stamp, want)
+    m.remove(work)
+    return tarball
+
+
+class Buildroot(task.ContainerBuilder):
+    KIND, TITLE, SPEC, BASE_IMAGE, BASE_VAR = "buildroot", "buildroot", SPEC, BASE_IMAGE, "WK_BUILDROOT_BASE"
+    NEEDS = "a buildroot image builds in a container workspace"
+    NOT_HERE = "Build it on a machine whose container target holds it:  wk sysimage build %(spec)s@<machine>"
+    IMAGE_NOTE = "  22.04 is the host the wiki recipe was driven on; a 2020 buildroot\n  does not survive a much newer one (%(spec)s)."
+    SURVIVES = "the buildroot downloads are in the store and survive"
 
     def cache(self, what):
         return os.path.join(self.store.root(), "cache", "buildroot", what)
 
     def kill_cmd(self, ws):
-        default = ws == images.image_ws(self.name, self.env)
-        return "wk sysimage build %s%s --stop" % (self.spec, "" if default else " --workspace " + ws)
+        return "wk sysimage build %s%s --stop" % (self.spec, self.ws_flag(ws))
 
     def stage(self, target, ws, stage):
         return task.Stage(self.reg, target, ws, "buildroot", stage, self.kill_cmd(ws), self.clock, self.popen)
 
-    def ensure_ws(self, target, ws, base, tag):
-        """The image first, so an edited Containerfile changes the wanted tag on every run."""
-        podman = target._podman()
-        if self.here.run(podman + ["image", "exists", tag]).ok:
-            act.debug("workspace image %s already built" % tag)
-        else:
-            info("building the buildroot workspace image %s (one layer on %s)" % (tag, base))
-            log("  22.04 is the host the wiki recipe was driven on; a 2020 buildroot")
-            log("  does not survive a much newer one (%s)." % SPEC)
-            spec = os.path.join(self.root, SPEC)
-            if not self.here.run_tty(podman + ["build", "--build-arg", "BASE=" + base, "-t", tag, "-f", spec, os.path.dirname(spec)]).ok:
-                die("could not build %s.\n    This runs on the host, where there is a network; if apt or the pull failed,\n"
-                    "    that is a host-side problem and not the workspace boundary." % tag)
-        if target.info(ws) == "absent":
-            info("creating workspace '%s' for the buildroot build" % ws)
-            if not self.here.run_tty(["env", "WK_SDK_IMAGE=" + tag, os.path.join(self.root, "wk"), "new", ws, "--target", target.name]).ok:
-                die("could not create workspace '%s'" % ws)
-            return
-        was = self.here.run(podman + ["container", "inspect", target.ctr(ws), "--format", "{{.ImageName}}"])
-        if was.ok and was.out.strip() and was.out.strip() != tag:
-            die("workspace '%s' was made from %s, and the spec now wants\n    %s. A container cannot be moved between images, so this build\n"
-                "    would use host packages %s no longer\n    describes. Remake it -- the buildroot downloads are in the store and\n"
-                "    survive:\n        wk rm %s && wk sysimage build %s" % (ws, was.out.strip(), tag, SPEC, ws, self.spec))
-
     def kernel(self):
         """Fetched and prepared here, where the network and depmod are; its path in the download cache both sides share."""
         fetched = task.fetch_base(self.here, self.p["BR_KERNEL_DEB_URL"], self.p["BR_KERNEL_DEB_SHA256"], self.env)
-        self.here.mkdir(self.cache("dl"))
-        r = self.here.act_run([os.path.join(self.root, "image", "buildroot", "kernel-pin.sh"), fetched,
-                               self.p["BR_KERNEL_RELEASE"], self.cache("dl")])
-        if not r.ok:
-            die("could not prepare the pinned kernel %s\n    %s" % (self.p["BR_KERNEL_RELEASE"], r.err.strip()))
-        return DL_IN_WS + "/" + os.path.basename(r.out.strip())
+        return DL_IN_WS + "/" + os.path.basename(kernel_pin(self.here, fetched, self.p["BR_KERNEL_RELEASE"], self.cache("dl")))
 
     def image_argv(self, tools, jobs, wifi, kernel_tar):
         p = self.p
@@ -97,7 +99,7 @@ class Buildroot:
         def opt(flag, value):
             return [flag, value] if value else []
 
-        return ([tools + "/image/buildroot-build.sh", "--name", self.name, "--tree-url", p["BR_TREE_URL"]]
+        return (["python3", tools + "/lib/wk/sysimage/buildroot_target.py", "image", "--name", self.name, "--tree-url", p["BR_TREE_URL"]]
                 + opt("--tree-branch", p["BR_TREE_BRANCH"]) + opt("--tree-commit", p["BR_TREE_COMMIT"])
                 + ["--defconfig", p["BR_DEFCONFIG"], "--external", p["BR_EXTERNAL"] or "0"] + opt("--image", p["BR_IMAGE"])
                 + ["--jobs", str(jobs)] + opt("--overlay-arch", p["BR_OVERLAY_TAILSCALE"]) + opt("--overlay-wifi", "1" if wifi else "")
@@ -173,7 +175,7 @@ class Buildroot:
         log("  host image   %s + %s" % (base, SPEC))
         log("  jobs         -j%d (memory-sized at %d MB/job)" % (jobs, task.MB_PER_JOB))
         log("  overlay      %s" % (p["BR_OVERLAY_TAILSCALE"] or "none -- this image would join no tailnet"))
-        log("  wifi overlay %s" % ("wk-wifi-join (image/buildroot/wifi-overlay.sh); the card carries the credential" if wifi
+        log("  wifi overlay %s" % ("wk-wifi-join (lib/wk/sysimage/buildroot_target.py); the card carries the credential" if wifi
                                   else "none -- %s has a cable" % machine))
         log("  kernel       %s" % kernel)
         log("  DL_DIR       %s (%s) -- BR2_DL_DIR in the container" % (dl, self.du(dl)))
@@ -183,7 +185,7 @@ class Buildroot:
         return 0
 
     def webkit(self, rest):
-        """One commit built with the image's own wpewebkit package, so `wk pi bench --ab` alternates two with no reflash."""
+        """One commit built with the image's own wpewebkit package, so `wk bench run --ab` alternates two with no reflash."""
         o = task.options(rest, ("--detach", "--dry-run"), ("--workspace", "--commit", "--slot"), WEBKIT_USAGE)
         commit, name = o.get("--commit") or "", o.get("--slot") or ""
         if not commit or not name:
@@ -217,7 +219,7 @@ class Buildroot:
                 die("pushing wk-tools into '%s' failed -- the reason is above" % ws)
             st.step(t, 2)
             info("building WebKit %s into slot '%s' of %s in '%s' (tens of minutes; --detach returns instead)" % (commit[:12], name, self.name, ws))
-            st.run(t, budget, jobs, [target.tools(ws) + "/image/buildroot-webkit.sh", "--name", self.name, "--commit", commit,
+            st.run(t, budget, jobs, ["python3", target.tools(ws) + "/lib/wk/sysimage/buildroot_target.py", "webkit", "--name", self.name, "--commit", commit,
                                      "--slot", name, "--jobs", str(jobs)], PATTERN)
         finally:
             lock.release_all()
@@ -225,7 +227,7 @@ class Buildroot:
             die("the build reported done but left no %s/slot.json" % slotdir)
         info("slot '%s' of %s holds %s" % (name, self.name, commit[:12]))
         log("  %s" % slotdir)
-        log("  next:  wk pi deploy %s <machine> --slot %s" % (self.name, name))
+        log("  next:  wk bench deploy %s <board> --slot %s" % (ws, name))
         return 0
 
     def webkit_report(self, target, st, ws, commit, name, image, slotdir):

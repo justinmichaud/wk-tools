@@ -2,8 +2,8 @@
 daemons, the agent forwards and the guests' half of `wk push`.
 
 Nothing here starts a guest: tart, softnet and ssh are answers on a Fake (tests/test_wk_secrets.py's World, which
-is also an ssh-agent and a filesystem), the bash steps a start still streams in through targets/vm.sh are recorded
-rather than run, and time is a FakeClock.
+is also an ssh-agent and a filesystem), the steps that stream a script into the guest are recorded rather than run
+(tests/test_vm_base.py and tests/test_vm_desktop.py run them), and time is a FakeClock.
 
 Run: python3 tests/run.py --unit -k test_guest
 """
@@ -20,7 +20,7 @@ from tests.support import REPO, live_selected
 from tests.test_wk_secrets import SECRETFILE, SecretsTest, World, quiet
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import guest, shell, targets, tools  # noqa: E402
+from wk import guest, targets, tools  # noqa: E402
 from wk.act import Refused  # noqa: E402
 from wk.clock import FakeClock  # noqa: E402
 from wk.machine import Killed, Result  # noqa: E402
@@ -45,6 +45,7 @@ class GuestWorld(World):
         self.react([TART, "list"], lambda a, f: Result(0, json.dumps([{"Name": "wk-demo", "State": f.state, "Source": "local"},
                                                                       {"Name": "wk-base", "State": "stopped", "Source": "local"}])))
         self.answer([TART, "ip"], out=IP + "\n")
+        self.answer([TART, "get"], out='{"CPU": 4, "Memory": 8192}')
         self.answer([TART, "stop"])
         self.react(["ssh"], self._guest)
         self.react(["ifconfig"], lambda a, f: Result(0, "\tinet %s netmask 0xffffff00\n" % ADDR if f.bridge else "\tinet 10.0.0.2\n"))
@@ -88,6 +89,8 @@ class GuestWorld(World):
             self._set_file(next(a.split("=", 1)[1] for a in argv if a.startswith("WK_INJECT_SOCK=")), "")
         elif "ssh-agent" in argv[0]:
             self.agents[argv[argv.index("-a") + 1]] = set()
+        elif "-R" in argv:
+            self.guest_sock = True
         return pid
 
     def spawned(self, word):
@@ -100,15 +103,20 @@ class GuestTest(SecretsTest):
         self.w = GuestWorld(self.tmp)
         self.steps, self.step_ok, self.admit_rc, self.notes = [], {}, 0, []
 
-        def step(root, fn, name, ip, env=None):
-            self.steps.append(fn)
-            return self.step_ok.get(fn, True)
+        def step(fn):
+            def run(_guest):
+                self.steps.append(fn)
+                return self.step_ok.get(fn, True)
+            return run
+
+        def admit(host, name, mine):
+            if self.admit_rc:
+                raise Refused(self.admit_rc)
         for obj, name, fn in ((Store, "macos_host", mock.PropertyMock(return_value=True)),
                               (targets.Vm, "tart", lambda s: TART),
-                              (shell, "guest_step", step),
-                              (shell, "guest_admit", lambda root, name, env=None: self.admit_rc),
-                              (shell, "vm_login_note", lambda root, env=None: self.notes.append(1)),
-                              (tools, "push", lambda *a: True)):
+                              (guest, "admit", admit),
+                              (guest, "login_note", lambda env: self.notes.append(1)),
+                              (tools, "push", lambda *a: True)) + tuple((guest.Guest, fn, step(fn)) for fn in BASH_STEPS):
             p = mock.patch.object(obj, name, new_callable=lambda fn=fn: fn) if isinstance(fn, mock.PropertyMock) \
                 else mock.patch.object(obj, name, fn)
             p.start()
@@ -134,7 +142,7 @@ class GuestTest(SecretsTest):
         """`resource`'s lock, held by `pid` (alive where it is in the fake's process table)."""
         path = self.vm.store.lock_path(resource)
         self.w.mkdir_now(os.path.dirname(path))
-        self.w.symlink("pid=%d tok=beef at=2026-09-24T00:00:00Z cmd=wk vm start" % pid, path)
+        self.w.symlink("pid=%d tok=beef at=2026-09-24T00:00:00Z cmd=wk start" % pid, path)
         return path
 
 
@@ -168,7 +176,7 @@ class TestBothArms(GuestTest):
         ip, err = self.run_start()
         self.assertEqual(IP, ip, err)
         self.assertEqual([], self.w.spawned("run"), "a running guest was booted again")
-        self.assertEqual(["_" + s for s in BASH_STEPS], self.steps)
+        self.assertEqual(BASH_STEPS, self.steps)
         self.assertEqual([1], self.notes, "the login is stated once, on the one exit")
 
     def test_a_stopped_guest_is_admitted_then_booted_filtered_with_both_shares(self):
@@ -225,13 +233,13 @@ class TestBothArms(GuestTest):
         self.assertIn("ssh never answered", err)
 
     def test_a_failed_step_is_named_and_the_start_goes_on(self):
-        self.step_ok["_write_shell_rc"] = False
+        self.step_ok["write_shell_rc"] = False
         ip, err = self.run_start()
         self.assertEqual(IP, ip)
         self.assertIn("could not wire demo's shell", err)
 
     def test_a_refused_desktop_refuses_the_start(self):
-        self.step_ok["_report_desktop"] = False
+        self.step_ok["report_desktop"] = False
         ip, _ = self.run_start()
         self.assertIsNone(ip)
 
@@ -322,30 +330,6 @@ class TestTheOverrides(GuestTest):
         self.assertEqual([], quiet(self.host(WK_VM_UNFILTERED="1").softnet_flags)[0])
 
 
-class TestTheEntryPoints(GuestTest):
-    """cmd/vm's and targets/vm.sh's names for a start, a stop and the base build's clock."""
-
-    def main(self, *argv):
-        with mock.patch.object(guest, "_vm", lambda root, machine, env: self.vm):
-            return quiet(guest.main, list(argv), self.w.env)
-
-    def test_start_prints_the_address_and_stop_its_verdict(self):
-        with mock.patch.object(guest, "start", lambda vm, ws: IP), contextlib.redirect_stdout(io.StringIO()) as out:
-            self.assertEqual(0, self.main("start", "demo")[0])
-        self.assertEqual(IP + "\n", out.getvalue())
-        with mock.patch.object(guest, "stop", lambda vm, ws: False):
-            self.assertEqual(1, self.main("stop", "demo")[0])
-
-    def test_the_clock_is_set_on_the_address_it_is_given(self):
-        self.assertEqual(0, self.main("clock", "wk-base", "10.0.0.9")[0])
-        self.assertTrue([c for c, _ in self.w.guest_cmds if "WK_NOW_EPOCH" in c])
-
-    def test_anything_else_is_the_usage(self):
-        rc, err = self.main("start")
-        self.assertEqual(2, rc)
-        self.assertIn("usage: python3 -m wk.guest", err)
-
-
 class TestTheDaemons(GuestTest):
     def host(self):
         return guest.Host(self.vm, self.clock)
@@ -432,16 +416,14 @@ class TestTheDaemons(GuestTest):
 
 
 class TestTheForward(GuestTest):
-    """`wk push on`, `wk vm start` and a second `wk push on` all start one guest's forward; the tunnel is its task
-    record, open while it carries that guest's push, and `wk push off` is what ends it whoever started it."""
+    """`wk push on`, `wk start` and a second `wk push on` all start one guest's forward; the tunnel is a pidfile'd
+    daemon, up once the guest's end of it serves, and `wk push off` is what ends it whoever started it."""
 
     def setUp(self):
         super().setUp()
         self.h = guest.Host(self.vm, self.clock)
         self.g = self.vm.guest_at(IP)
-
-    def record(self):
-        return self.h.records().find(guest.FORWARD, "demo")
+        self.pidfile = self.h.forward_pidfile("demo")
 
     def test_a_second_start_while_one_is_alive_is_a_no_op(self):
         self.assertTrue(self.h.forward_start("demo", self.g))
@@ -449,23 +431,23 @@ class TestTheForward(GuestTest):
         forwards = self.w.spawned(" -N ")
         self.assertEqual(1, len(forwards), forwards)
         self.assertIn("/Users/admin/.wk-ssh-agent.sock:%s/ssh-agent.sock" % self.vmdir, forwards[0])
-        self.assertEqual("", self.record().field("exit"))
-        self.assertEqual("wk push off", self.record().field("kill"))
+        self.assertIn(int(self.w.files[self.pidfile]), self.w.pids)
 
-    def test_a_failed_start_ends_its_own_record(self):
+    def test_a_forward_whose_guest_end_never_serves_is_stopped(self):
         spawn = self.w.spawn
 
-        def dies(argv, log):
+        def never_serves(argv, log):
             pid = spawn(argv, log)
-            self.w.pids.discard(pid)
+            self.w.guest_sock = False
             return pid
-        with mock.patch.object(self.w, "spawn", dies):
-            self.assertFalse(self.h.forward_start("demo", self.g))
-        self.assertEqual("failed", self.record().field("exit"))
+        with mock.patch.object(self.w, "spawn", never_serves):
+            self.assertFalse(quiet(self.h.forward_start, "demo", self.g)[0])
+        (pid,) = [e[1] for e in self.w.effects if e[0] == "kill"]
+        self.assertNotIn(self.pidfile, self.w.files)
+        self.assertGreaterEqual(sum(self.clock.slept), guest.FORWARD_WAIT)
 
-    def test_a_record_whose_pid_is_gone_is_started_again(self):
-        t = self.h.records().begin(guest.FORWARD, "here", "demo", "wk push off", "/nolog", ["start forward", "verify"])
-        t.pid(4194304)
+    def test_a_pidfile_whose_pid_is_gone_is_started_again(self):
+        self.w._set_file(self.pidfile, "4194304\n")
         self.assertTrue(self.h.forward_start("demo", self.g))
         self.assertEqual(1, len(self.w.spawned(" -N ")))
 
@@ -480,17 +462,17 @@ class TestTheForward(GuestTest):
 
     def test_stopping_a_guest_ends_its_forward_first(self):
         self.h.forward_start("demo", self.g)
-        pid = int(self.record().field("pid"))
+        pid = int(self.w.files[self.pidfile])
         quiet(guest.stop, self.vm, "demo", self.clock)
         kill = self.w.effects.index(("kill", pid, 15))
         self.assertLess(kill, self.w.effects.index(("act", (TART, "stop", "wk-demo"))))
-        self.assertEqual("stopped", self.record().field("exit"))
+        self.assertNotIn(self.pidfile, self.w.files)
 
     def test_a_converge_with_an_empty_agent_ends_the_forward(self):
         self.h.forward_start("demo", self.g)
         g = guest.Guest(self.h, "demo", IP)
         self.assertTrue(quiet(g.agent_converge_guest)[0])
-        self.assertEqual("stopped", self.record().field("exit"))
+        self.assertNotIn(self.pidfile, self.w.files)
         self.assertIn(("rm -f /Users/admin/.wk-ssh-agent.sock", ""), self.w.guest_cmds)
 
 

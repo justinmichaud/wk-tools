@@ -26,9 +26,10 @@ from concurrent.futures import ThreadPoolExecutor
 ROOT = os.environ.get("WK_ROOT") or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "lib"))
 
-from wk import decl, shell, targets  # noqa: E402
+from wk import decl, targets  # noqa: E402
 from wk.act import Refused, die, log  # noqa: E402
 from wk.machine import Local  # noqa: E402
+from wk.store import Bases  # noqa: E402
 
 FORMAT = "%-20s %-18s %-10s %-8s %-20s %-8s %8s"
 
@@ -82,11 +83,11 @@ def footer(reg, names):
             print()
             spaced = True
         prefix = "%s: " % name if multi else ""
-        cur = shell.ask(ROOT, "load_target %s >/dev/null 2>&1; current_base" % shell.sh_quote(name)) or "none"
-        log("%scurrent base: %s" % (prefix, cur))
-        unref = shell.ask(ROOT, "load_target %s >/dev/null 2>&1; unreferenced_bases | wc -l" % shell.sh_quote(name)) or "0"
-        if int(unref.strip() or 0) > 0:
-            log("%s%s unreferenced snapshot(s) reclaimable with 'wk gc'" % (prefix, unref.strip()))
+        bases = Bases(target.store, target.store_machine)
+        log("%scurrent base: %s" % (prefix, bases.current() or "none"))
+        unref = len(bases.unreferenced())
+        if unref > 0:
+            log("%s%s unreferenced snapshot(s) reclaimable with 'wk gc'" % (prefix, unref))
 
 
 def main(argv):
@@ -124,8 +125,8 @@ def main(argv):
         print(json.dumps({"workspaces": items}))
         return 0
     if not found and not more_follows and (not continued or empty_so_far):
-        if reg.remote_marker_field("target"):
-            log("(no workspaces here -- from the workstation: wk new <name> --target %s)" % reg.remote_marker_field("target"))
+        if reg.in_remote_host():
+            log("(no workspaces here -- from the workstation: wk new <name> --target %s)" % reg.self_target())
         else:
             log("(no workspaces -- 'wk new <name>' to create one)")
     if label:

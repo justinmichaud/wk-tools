@@ -680,7 +680,7 @@ class TestPiSdDriver(unittest.TestCase):
         fake, d = self.board("/dev/mmcblk0p5", "/dev/mmcblk0p7")
         d.arm("/dev/mmcblk0p7")
         self.assertEqual(self.arms(fake), ["/dev/mmcblk0@third"])
-        self.assertIn("machine_select_system", self.refused(d.arm, ""))
+        self.assertIn("select_system", self.refused(d.arm, ""))
 
     def test_arm_skips_only_when_armed_for_the_same_system(self):
         """armed for the other system is not armed for this one: the arm re-stages rather than trusting a yes."""

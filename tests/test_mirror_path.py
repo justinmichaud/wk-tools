@@ -321,7 +321,7 @@ class TestABranchIsTakenFromTheMirrorFirst(MirrorFixture):
 
     def test_both_callers_use_it(self):
         text = (REPO / "lib" / "wk" / "build.py").read_text()
-        self.assertIn("shell.origin_branch_fetch_step(", text)
+        self.assertIn("git.origin_branch_fetch_step(", text)
         self.assertNotIn("git fetch -q origin", text)
 
 
@@ -329,7 +329,7 @@ class TestWhatTheMirrorCarries(WkTest):
     """mirror_branches (lib/wk/git.py) is what origin is narrowed to, and
     the narrowing is the point: WebKit/WebKit advertises 924 heads. A lane
     reads its release branch from the mirror and from nowhere else
-    (image/yocto.sh), so the list is main plus the branch of every image
+    (lib/wk/sysimage/yocto.py), so the list is main plus the branch of every image
     configuration this checkout defines on origin -- derived from the
     configurations, never a second list to keep in step with them."""
 
@@ -397,18 +397,12 @@ class TestTheCommandsAskTheDriver(unittest.TestCase):
         self.assertIn("self.target.mirror_dir()", (REPO / "lib" / "wk" / "build.py").read_text(),
                       "wk build fetches without asking the driver")
 
-    # t_spawn (targets/container.sh) execs these directly, with no WK_ROOT and
-    # no lib/target.sh sourced, so there is no t_mirror_dir for them to ask:
-    # they read the path the container driver put in the environment.
-    CONTAINER_ONLY = ("image/buildroot-webkit.sh", "image/yocto-build.sh")
-
-    def test_the_container_only_scripts_read_the_drivers_answer_from_the_environment(self):
-        for rel in self.CONTAINER_ONLY:
-            text = (REPO / rel).read_text()
+    def test_the_in_workspace_builders_read_the_drivers_answer_from_the_environment(self):
+        for rel in ("yocto_target.py", "buildroot_target.py"):
+            text = (REPO / "lib" / "wk" / "sysimage" / rel).read_text()
             with self.subTest(file=rel):
-                self.assertIn("${WK_MIRROR:?", text, f"{rel} does not require WK_MIRROR")
-                self.assertNotIn("/mirror/WebKit.git", text, f"{rel} spells a mirror path of its own")
-                self.assertIn("no t_mirror_dir to ask", text)
+                self.assertIn('self.env.get("WK_MIRROR")', text)
+                self.assertNotIn("/mirror/WebKit.git", text)
 
     def test_each_mirror_path_is_spelled_in_exactly_one_place(self):
         """A driver *answers* for a mirror; it does not spell one. Two of the
@@ -442,7 +436,7 @@ class TestTheCommandsAskTheDriver(unittest.TestCase):
 
 
 class TestOneMirrorPerMachine(WkTest):
-    """wk_mirror and mirror_is_here (lib/store.sh): a machine keeps one mirror,
+    """wk_mirror (lib/store.sh): a machine keeps one mirror,
     written where `wk sync` runs. On a macOS host that is the host's own state
     directory, which the podman VM mounts read-only at its store's git/ and
     every tart guest mounts as a share; in the VM the same bytes are read
@@ -461,16 +455,12 @@ class TestOneMirrorPerMachine(WkTest):
     def test_a_macos_host_keeps_it_in_its_own_state_directory(self):
         self.assertEqual(self._ask("wk_mirror", macos=True),
                          f"{self.tmp}/state/wk/git/WebKit.git")
-        self.assertEqual(self._ask("mirror_is_here && echo here || echo elsewhere", macos=True), "here")
 
     def test_the_podman_vm_reads_the_hosts_under_its_store(self):
         self.assertEqual(self._ask("wk_mirror", macos=True, in_vm=True), "/var/lib/wk/git/WebKit.git")
-        self.assertEqual(self._ask("mirror_is_here && echo here || echo elsewhere", macos=True, in_vm=True),
-                         "elsewhere")
 
     def test_a_linux_machine_keeps_it_in_its_store(self):
         self.assertEqual(self._ask("wk_mirror", macos=False), "/var/lib/wk/git/WebKit.git")
-        self.assertEqual(self._ask("mirror_is_here && echo here || echo elsewhere", macos=False), "here")
 
     def test_nothing_fetches_into_the_mirror_from_the_podman_vm(self):
         """A pull request head is fetched into the mirror (`wk ab`), and the
